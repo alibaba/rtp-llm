@@ -139,7 +139,7 @@ def load_gpu_nic_affinity():
     except Exception as e:
         logging.info(f"get gpu nic affinity failed, load {json_path} failed, exception is {e}")
         return False
-    
+
 def clear_jit_filelock():
     # check whether exists jit dir
     if os.path.exists("deep_gemm_runtime"):
@@ -147,19 +147,22 @@ def clear_jit_filelock():
         for file in files:
             os.remove(file)
 
-def start_backend_server(global_controller: ConcurrencyController, py_env_configs: PyEnvConfigs):
+def start_backend_server(global_controller: ConcurrencyController):
     setproctitle("maga_ft_backend_server")
     os.makedirs('logs', exist_ok=True)
     load_gpu_nic_affinity()
 
     clear_jit_filelock()
 
+    ## collect all args and envs.
+    py_env_configs = PyEnvConfigs()
+    py_env_configs.update_from_env()
     # TODO(xinfei.sxf) fix this
     if int(os.environ.get('VIT_SEPARATION', 0)) == 1:
         return vit_start_server()
 
     if not torch.cuda.is_available():
-        return local_rank_start(global_controller)
+        return local_rank_start(global_controller, py_env_configs)
 
     if g_parallel_info.world_size % torch.cuda.device_count() != 0 and g_parallel_info.world_size > torch.cuda.device_count():
         raise Exception(f'result: {g_parallel_info.world_size % torch.cuda.device_count()} \

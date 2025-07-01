@@ -1,7 +1,7 @@
 import logging
 from enum import Enum
 from typing import Dict, Any, Union
-from rtp_llm.distribute.worker_info import g_parallel_info, g_frontend_server_info
+from rtp_llm.distribute.worker_info import g_parallel_info
 
 class AccMetrics(Enum):
     CANCEL_QPS_METRIC = "py_rtp_cancal_qps_metric"

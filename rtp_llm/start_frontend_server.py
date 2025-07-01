@@ -17,7 +17,11 @@ from rtp_llm.server.frontend_app import FrontendApp
 from rtp_llm.distribute.worker_info import FrontendServerInfo
 from rtp_llm.utils.concurrency_controller import ConcurrencyController, init_controller, set_global_controller
 
-def start_frontend_server(server_id: int, global_controller: ConcurrencyController, py_env_configs: PyEnvConfigs):
+def start_frontend_server(server_id: int, global_controller: ConcurrencyController):
+    ## collect all args and envs.
+    py_env_configs = PyEnvConfigs()
+    py_env_configs.update_from_env()
+    py_env_configs.server_config.fronted_server_id = server_id
     setproctitle(f"maga_ft_frontend_server_{server_id}")
     app = None
     g_frontend_server_info = FrontendServerInfo(py_env_configs.server_config.fronted_server_id)

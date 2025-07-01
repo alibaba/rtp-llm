@@ -1,4 +1,5 @@
-from rtp_llm.ops import ConcurrencyConfig, DeviceResourceConfig, FMHAConfig, HWKernelConfig, KVCacheConfig, MiscellaneousConfig, ModelSpecificConfig, ParallelismDistributedConfig, ProfilingDebugLoggingConfig, ServiceDiscoveryConfig, SchedulerConfig, MoeConfig, SamplerConfig, SpeculativeExecutionConfig, CacheStoreConfig, BatchDecodeSchedulerConfig, FIFOSchedulerConfig
+from rtp_llm.ops import ParallelismDistributedConfig, ConcurrencyConfig, ProfilingDebugLoggingConfig, DeviceResourceConfig, FMHAConfig, HWKernelConfig, KVCacheConfig, MiscellaneousConfig, ModelSpecificConfig, MoeConfig, ServiceDiscoveryConfig, SchedulerConfig, BatchDecodeSchedulerConfig, FIFOSchedulerConfig, CacheStoreConfig, SamplerConfig, SpeculativeExecutionConfig, ArpcConfig
+
 from typing import Optional
 import os
 

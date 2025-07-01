@@ -100,7 +100,8 @@ class GptInitModelParameters:
         "num_nodes",
         "use_qk_norm",
         "enable_merge_w13",
-        "quant_config"
+        "quant_config",
+        "py_env_configs"
     }
 
     # copy from rtp_llm/ops/libth_transformer.pyi for python intelligence
@@ -279,6 +280,7 @@ class GptInitModelParameters:
     scheduler_config: SchedulerConfig
     service_discovery_config: ServiceDiscoveryConfig
     speculative_decoding_config: SpeculativeExecutionConfig
+    py_env_configs: PyEnvConfigs
 
     def __init__(self,
                  head_num: int,

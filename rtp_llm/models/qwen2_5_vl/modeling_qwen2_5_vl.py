@@ -407,7 +407,7 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
             spatial_merge_size=config.spatial_merge_size,
         )
         self.gradient_checkpointing = False
-    
+
     def get_dtype(self) -> torch.dtype:
         return self.blocks[0].mlp.up_proj.weight.dtype
 

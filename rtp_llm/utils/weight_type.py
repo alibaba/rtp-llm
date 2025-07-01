@@ -28,7 +28,7 @@ def get_weight_type_from_env(py_env_configs: PyEnvConfigs) -> WEIGHT_TYPE:
         weight_type = WEIGHT_TYPE.from_str(weight_type_str)
         return weight_type
     else:
-        int8_mode = int(env_param.get("INT8_MODE", "0"))
+        int8_mode = py_env_configs.quantization_config.int8_mode
         if int8_mode == 1:
             return WEIGHT_TYPE.INT8
         return WEIGHT_TYPE.FP16

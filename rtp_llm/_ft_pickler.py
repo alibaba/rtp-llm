@@ -52,13 +52,13 @@ class Placeholder():
 
         def append(self, _):
             pass
-        
+
         def appends(self, _):
             pass
-        
+
         def update(self, _):
             pass
-        
+
 class Unpickler:
     def __init__(self, file: str, *, encoding: str = "bytes"):
         self.encoding = encoding
@@ -67,7 +67,7 @@ class Unpickler:
         self.memo: Dict[int, Any] = {}
         self.rc = _get_allowed_globals()
         self.rc['placeholder'] = Placeholder
-        
+
     def load(self):
         """Read a pickled object representation from the open file.
 
@@ -244,6 +244,6 @@ class Unpickler:
 
     def persistent_load(self, pid: Any):
         raise UnpicklingError("unsupported persistent id encountered")
-        
+
 def load(file: str, *, encoding: str = "ASCII"):
     return Unpickler(file, encoding=encoding).load()

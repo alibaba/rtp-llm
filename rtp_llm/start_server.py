@@ -9,8 +9,9 @@ import requests
 import signal
 import multiprocessing
 from typing import Generator, Union, Any, Dict, List
-from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.config.py_config_modules import PyEnvConfigs, ServerConfig
 from rtp_llm.metrics import kmonitor
+from rtp_llm.ops import ProfilingDebugLoggingConfig
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), '..'))
 
@@ -34,16 +35,20 @@ def check_server_health(server_port):
         logging.debug(f"health check is not ready, {str(e)}")
         return False
 
-def start_backend_server_impl(global_controller, py_env_configs: PyEnvConfigs):
+def start_backend_server_impl(global_controller):
+    profiling_debug_config = ProfilingDebugLoggingConfig()
+    profiling_debug_config.update_from_env()
     # only for debug
-    if py_env_configs.profiling_debug_config.debug_load_server:
+    if profiling_debug_config.debug_load_server:
         start_backend_server(global_controller)
         os._exit(-1)
-    backend_process = multiprocessing.Process(target=start_backend_server, args=(global_controller, py_env_configs), name="backend_server")
+    backend_process = multiprocessing.Process(target=start_backend_server, args=(global_controller, ), name="backend_server")
     backend_process.start()
 
     retry_interval_seconds = 5
-    start_port = py_env_configs.server_config.start_port
+    server_config = ServerConfig()
+    server_config.update_from_env()
+    start_port = server_config.start_port
     backend_server_port = WorkerInfo.backend_server_port_offset(0, start_port)
     while True:
         if not backend_process.is_alive():
@@ -62,8 +67,10 @@ def start_backend_server_impl(global_controller, py_env_configs: PyEnvConfigs):
 
     return backend_process
 
-def start_frontend_server_impl(global_controller, backend_process,  py_env_configs: PyEnvConfigs):
-    frontend_server_count = py_env_configs.server_config.fronted_server_count
+def start_frontend_server_impl(global_controller, backend_process):
+    server_config = ServerConfig()
+    server_config.update_from_env()
+    frontend_server_count = server_config.fronted_server_count
     if frontend_server_count < 1:
         logging.info("frontend server's count is {frontend_server_count}, this may be a mistake")
 
@@ -71,14 +78,13 @@ def start_frontend_server_impl(global_controller, backend_process,  py_env_confi
 
     for i in range(frontend_server_count) :
         kmonitor.frontend_server_id = i
-        py_env_configs.server_config.fronted_server_id = i
         process = multiprocessing.Process(target=start_frontend_server,
-                args=(i, global_controller, py_env_configs), name=f"frontend_server_{i}")
+                args=(i, global_controller), name=f"frontend_server_{i}")
         frontend_processes.append(process)
         process.start()
 
     retry_interval_seconds = 5
-    start_port = py_env_configs.server_config.start_port
+    start_port = server_config.start_port
     while True:
         if not all(proc.is_alive() for proc in frontend_processes):
             monitor_and_release_process(backend_process, frontend_processes)
@@ -110,16 +116,13 @@ def main():
     backend_process = None
     frontend_process = None
 
-    ## collect all args and envs.
-    py_env_configs = PyEnvConfigs()
-    py_env_configs.update_from_env()
     try:
         logging.info("start backend server")
-        backend_process = start_backend_server_impl(global_controller, py_env_configs)
+        backend_process = start_backend_server_impl(global_controller)
         logging.info(f"backend server process = {backend_process}")
 
         logging.info("start frontend server")
-        frontend_process = start_frontend_server_impl(global_controller, backend_process, py_env_configs)
+        frontend_process = start_frontend_server_impl(global_controller, backend_process)
         logging.info(f"frontend server process = {frontend_process}")
 
         logging.info(f"后端RPC 服务监听的ip为 0.0.0.0，ip/ip段可自定义为所需范围")
