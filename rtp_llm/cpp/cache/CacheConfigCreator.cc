@@ -41,7 +41,7 @@ size_t CacheConfigCreator::getDefaultRuntimeMemorySize(const rtp_llm::GptInitPar
     auto reserve_runtime_mem_bytes = params.reserve_runtime_mem_mb_ * 1024 * 1024;
     RTP_LLM_LOG_INFO("GptInitParameter has reserve_runtime_mem_mb_=%ld", params.reserve_runtime_mem_mb_);
 
-    const auto minimal_runtime_bytes = 256L * 1024 * 1024 * std::min(4, (int)params.tp_size_);
+    const auto minimal_runtime_bytes = 256L * 1024 * 1024 * std::max(4, 8 / (int)params.tp_size_);
     if (reserve_runtime_mem_bytes < minimal_runtime_bytes) {
         reserve_runtime_mem_bytes = minimal_runtime_bytes;
         RTP_LLM_LOG_INFO("tp_size %d needs at least %d MiB memory for runtime by default, "
