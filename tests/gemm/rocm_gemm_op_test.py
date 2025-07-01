@@ -139,10 +139,10 @@ class TestGemmOp(unittest.TestCase):
     def test_uneven_blocks(self):
         """测试非对齐分块"""
         shapes = [
-            (127, 256, 128), 
-            (385, 512, 256),
             (511, 1024, 256),
-            (511, 1024, 896)
+            (511, 1024, 896),
+            (127, 256, 128),
+            (385, 512, 256)
         ]
         for m, k, n in shapes:
             # 创建测试数据
