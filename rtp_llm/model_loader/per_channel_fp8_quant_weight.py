@@ -2,7 +2,7 @@ import copy
 import functools
 import torch
 from typing import Any, List, Union, Dict
-from rtp_llm.config.quant_config import QuantizationConfig, Fp8PerChannelQuantConfig
+from rtp_llm.config.quant_config import QuantizationConfig, Fp8PerChannelCompressedQuantConfig
 from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, MoeAtomicWeight
 from rtp_llm.model_loader.weight_module import AtomicWeight, CompositeWeight, QuantWeight, WeightModule
@@ -83,7 +83,7 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
 
     @classmethod
     def support(cls, quant_config: QuantizationConfig, src_weight_info: WeightModule) -> bool:
-        if not quant_config.is_quanted() or not isinstance(quant_config, Fp8PerChannelQuantConfig):
+        if not quant_config.is_quanted() or not isinstance(quant_config, Fp8PerChannelCompressedQuantConfig):
             return False
         name = src_weight_info.name
         return name in cls.w8a8_weight_list

@@ -107,7 +107,7 @@ void QuantAlgo::setQuantAlgo(const std::string &quant_method, int64_t bits, int6
         quant_method_ = FP8Quant;
         weight_bits_ = 8;
 	    group_size_ = group_size;
-    } else if (quant_method == "compressed-tensors") {
+    } else if (quant_method == "fp8-perchannel-compressed-tensors") {
         quant_method_ = FP8PTPC;
         weight_bits_ = 8;
     } else {
