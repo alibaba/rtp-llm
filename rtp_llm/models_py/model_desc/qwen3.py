@@ -12,6 +12,9 @@ from rtp_llm.models_py.modules.attention import AttentionKwargs
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.utils.model_weight import W
 
+from rtp_llm.models_py.model_desc.module_base import GptModelBase
+from rtp_llm.ops import PyModelInputs, PyModelOutputs, PyAttentionInputs
+
 try:
     from rtp_llm.ops import FlashInferOp
 except ImportError:
@@ -59,15 +62,18 @@ class Qwen3Attention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        **kwargs: Unpack[AttentionKwargs],
+        k_cache_base: Optional[torch.Tensor] = None,
+        v_cache_base: Optional[torch.Tensor] = None,
+        attention_inputs: Optional[PyAttentionInputs] = None,
     ) -> torch.Tensor:
         input_shape = hidden_states.shape[:-1]
         qkv = self.qkv_proj(hidden_states)
         # TODO: need qk norm if have
 
         attn_output = torch.empty_like(hidden_states)
-        # kwargs.get
-        self.flash_infer.forward(qkv, attn_output, kwargs['k_cache'][self.layer_idx], kwargs['v_cache'][self.layer_idx], kwargs['attn_params'])
+        k_cache = k_cache_base[self.layer_idx] if k_cache_base is not None else None
+        v_cache = v_cache_base[self.layer_idx] if v_cache_base is not None else None
+        self.flash_infer.forward(qkv, attn_output, k_cache, v_cache, attention_inputs)
 
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
@@ -84,7 +90,9 @@ class Qwen3DecoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        **kwargs: Unpack[AttentionKwargs],
+        k_cache_base: Optional[torch.Tensor] = None,
+        v_cache_base: Optional[torch.Tensor] = None,
+        attention_inputs: Optional[PyAttentionInputs] = None,
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
@@ -92,7 +100,9 @@ class Qwen3DecoderLayer(nn.Module):
         # Self Attention
         hidden_states = self.self_attn(
             hidden_states=hidden_states,
-            **kwargs
+            k_cache_base=k_cache_base,
+            v_cache_base=v_cache_base,
+            attention_inputs=attention_inputs,
         )
         hidden_states = residual + hidden_states
 
@@ -104,11 +114,9 @@ class Qwen3DecoderLayer(nn.Module):
 
         return hidden_states
 
-class Qwen3Model(nn.Module):
+class Qwen3Model(GptModelBase):
     def __init__(self, config: GptInitModelParameters, weights: ModelWeights):
-        super().__init__()
-        self.layer_num = config.layer_num
-        self.vocab_size = config.vocab_size
+        super().__init__(config, weights)
 
         self.embed_tokens = Embedding(weights.get_global_weight(W.embedding))
         self.layers = nn.ModuleList(
@@ -117,25 +125,24 @@ class Qwen3Model(nn.Module):
         self.norm = RMSNorm(weights.get_global_weight(W.final_ln_gamma), eps=config.layernorm_eps)
         self.lm_head = Linear(weights.get_global_weight(W.lm_head))
 
-        # Initialize weights and apply final processing
-        # self.post_init()
+    def forward(self, inputs: PyModelInputs) -> PyModelOutputs:
+        input_ids: torch.Tensor = inputs.input_ids
 
-    def forward(
-        self,
-        input_ids: Optional[torch.LongTensor] = None,
-        **flash_attn_kwargs: Unpack[AttentionKwargs],
-    ) -> torch.Tensor:
         inputs_embeds = self.embed_tokens(input_ids)
 
         hidden_states = inputs_embeds
 
+        attention_inputs: PyAttentionInputs = inputs.attention_inputs
+
         for decoder_layer in self.layers[: self.layer_num]:
             hidden_states = decoder_layer(
                 hidden_states,
-                **flash_attn_kwargs,
+                self.k_cache_base,
+                self.v_cache_base,
+                attention_inputs,
             )
 
-        return hidden_states
+        return PyModelOutputs(hidden_states)
 
 __all__ = [
     "Qwen3Model",

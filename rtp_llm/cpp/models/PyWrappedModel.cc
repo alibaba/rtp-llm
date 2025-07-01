@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <iostream>
 
+using namespace torch_ext;
 
 namespace rtp_llm {
 
@@ -42,16 +43,20 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
 
         torch::Tensor token_ids = Buffer2torchTensor(inputs.combo_tokens).cuda();
 
-        // py::dict kwargs = py::dict("attn_params"=attention_common_inputs);
-        py::kwargs kwargs;
-        kwargs["k_cache"] = k_cache_base_tensor_;
-        kwargs["v_cache"] = v_cache_base_tensor_;
-        kwargs["attn_params"] = attention_common_inputs;
-        // py::object py_outputs_obj = py_forward_method(token_ids, k_cache, v_cache, attention_common_inputs); //
+        PyAttentionInputs attention_inputs;
+        attention_inputs.prefill_flash_infer_attn = attention_common_inputs.prefill_flash_infer_attn;
+        attention_inputs.decode_flash_infer_attn = attention_common_inputs.decode_flash_infer_attn;
 
-        py::object py_outputs_obj = py_forward_method(token_ids, **kwargs);
+        auto py_model_inputs = PyModelInputs({
+            token_ids,
+            attention_inputs
+        });
 
-        auto hidden_states_tensor = convertPyObjectToTensor(py_outputs_obj);
+        py::object py_outputs_obj = py_forward_method(py_model_inputs);
+
+        // Cast the Python object to PyModelOutputs and extract hidden states
+        auto py_model_outputs = py_outputs_obj.cast<PyModelOutputs>();
+        auto hidden_states_tensor = py_model_outputs.hidden_states;
         auto hidden_states = torchTensor2Buffer(hidden_states_tensor);
 
         RTP_LLM_LOG_INFO("Python object instance forward method called successfully.");

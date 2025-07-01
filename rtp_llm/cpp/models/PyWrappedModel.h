@@ -7,6 +7,7 @@
 #include <pybind11/embed.h>
 
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "rtp_llm/models_py/bindings/OpDefs.h"
 
 namespace py = pybind11;
 
@@ -48,7 +49,18 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params, py::obje
         throw std::runtime_error("PyWrappedModel constructor: Python instance is null or none.");
     }
 
-    RTP_LLM_LOG_INFO("PyWrappedModel initialized with a pre-existing Python object instance.");
+    auto py_initialize_method = py_instance_.attr("initialize");
+    torch_ext::PyModelInitResources init_resources;
+    init_resources.k_cache_base = k_cache_base_tensor_;
+    init_resources.v_cache_base = v_cache_base_tensor_;
+    auto py_init_result = py_initialize_method(init_resources);
+    auto py_init_success = py_init_result.cast<bool>();
+
+    if (!py_init_success) {
+        throw std::runtime_error("PyWrappedModel constructor: Python model initialization failed.");
+    }
+
+    RTP_LLM_LOG_INFO("PyWrappedModel initialized done.");
 }
 
 }  // namespace rtp_llm

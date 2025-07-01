@@ -2,11 +2,25 @@ load("//:def.bzl", "copts", "cuda_copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_library(
+    name = "op_defs",
+    hdrs = [
+        "OpDefs.h",
+    ],
+    srcs = [
+        "OpDefs.cc",
+    ],
+    deps = torch_deps(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "register_ops_hdr",
     hdrs = [
         "RegisterOps.h",
     ],
-    deps = torch_deps(),
+    deps = torch_deps() + [
+        ":op_defs",
+    ],
     visibility = ["//visibility:public"],
 )
 

@@ -76,7 +76,15 @@ try:
     from libth_transformer import GptInitParameter, RtpEmbeddingOp, RtpLLMOp, SpecialTokens, LoadBalanceInfo, EngineScheduleInfo, QuantAlgo, SpecialTokens, MlaOpsType, EplbMode, EplbConfig
     from libth_transformer import MultimodalInput as MultimodalInputCpp
     from libth_transformer import get_device, DeviceType, DeviceExporter
-    from libth_transformer import ConcurrencyConfig, DeviceResourceConfig, FMHAConfig, HWKernelConfig, KVCacheConfig, MiscellaneousConfig, ModelSpecificConfig, ParallelismDistributedConfig, ProfilingDebugLoggingConfig, ServiceDiscoveryConfig, SchedulerConfig, MoeConfig, SamplerConfig, SpeculativeExecutionConfig, CacheStoreConfig, BatchDecodeSchedulerConfig, FIFOSchedulerConfig, ArpcConfig, FlashInferOp
+    from libth_transformer import ConcurrencyConfig, DeviceResourceConfig, FMHAConfig, HWKernelConfig, KVCacheConfig, MiscellaneousConfig, ModelSpecificConfig, ParallelismDistributedConfig, ProfilingDebugLoggingConfig, ServiceDiscoveryConfig, SchedulerConfig, MoeConfig, SamplerConfig, SpeculativeExecutionConfig, CacheStoreConfig, BatchDecodeSchedulerConfig, FIFOSchedulerConfig, ArpcConfig
+    from libth_transformer import PyModelInputs, PyModelOutputs, PyAttentionInputs, PyModelInitResources
 except BaseException as e:
     import traceback
     logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
+
+
+# import cuda specific ops
+try:
+    from libth_transformer import FlashInferOp
+except ImportError as e:
+    logging.info(f"import ops exception: {e}, traceback: {traceback.format_exc()}")

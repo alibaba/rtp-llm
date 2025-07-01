@@ -15,6 +15,7 @@ cc_library(
     copts = cuda_copts(),
     deps = torch_deps() + [
         "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
+        "//rtp_llm/models_py/bindings:op_defs",
     ],
 )
 

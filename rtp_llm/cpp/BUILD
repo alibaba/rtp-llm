@@ -190,6 +190,7 @@ cc_library(
         ":utils",
         ":cache",
         "//rtp_llm/cpp/devices:devices_base",
+        "//rtp_llm/models_py/bindings:op_defs"
     ] + select({
         "@//:using_cuda": [],
         "@//:using_rocm": [

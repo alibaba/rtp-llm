@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 
 #include "rtp_llm/models_py/bindings/RegisterOps.h"
+#include "rtp_llm/models_py/bindings/OpDefs.h"
 
 using namespace rtp_llm;
 
@@ -42,6 +43,7 @@ PYBIND11_MODULE(libth_transformer, m) {
     registerRtpEmbeddingOp(m);
     registerEmbeddingHandler(m);
     registerDeviceOps(m);
+    registerPyOpDefs(m);
     registerPyModuleOps(m);
 }
 

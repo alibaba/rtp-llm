@@ -4,20 +4,18 @@
 #include "rtp_llm/cpp/devices/cuda_impl/CudaFlashInfer.h"
 #include "rtp_llm/cpp/devices/OpData.h"
 
+using namespace torch_ext;
+
 namespace rtp_llm {
 
 FlashInferOp::FlashInferOp(const GptInitParameter& gpt_init_parameter): configs(gpt_init_parameter), rope_config(gpt_init_parameter.getRopeConfig()) {}
 
-void FlashInferOp::forward(torch::Tensor input, torch::Tensor output, torch::Tensor k_cache, torch::Tensor v_cache, py::object attn_params) {
-    // std::unique_ptr<FlashInferAttnParams> params;
-    assert(!attn_params.is_none());
-    // const FlashInferAttnParams& params = attn_params.cast<FlashInferAttnParams>();
-    const AttentionCommonInputs& attn_param = attn_params.cast<AttentionCommonInputs>();
+void FlashInferOp::forward(torch::Tensor input, torch::Tensor output, torch::Tensor k_cache, torch::Tensor v_cache, PyAttentionInputs attn_params) {
     FlashInferAttnParams* params;
-    if (attn_param.prefill_flash_infer_attn) {
-        params = (FlashInferAttnParams*)attn_param.prefill_flash_infer_attn.get();
+    if (attn_params.prefill_flash_infer_attn) {
+        params = (FlashInferAttnParams*)attn_params.prefill_flash_infer_attn.get();
     } else {
-        params = (FlashInferAttnParams*)attn_param.decode_flash_infer_attn.get();
+        params = (FlashInferAttnParams*)attn_params.decode_flash_infer_attn.get();
     }
     assert(params);
 

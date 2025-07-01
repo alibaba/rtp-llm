@@ -691,3 +691,24 @@ def create_linear_softmax_handler(gpt_init_params: GptInitParameter) -> Embeddin
     ...
 def get_device() -> DeviceExporter:
     ...
+
+class PyModelInitResources:
+    k_cache_base: torch.Tensor
+    v_cache_base: torch.Tensor
+
+class PyAttentionInputs:
+    def get_prefill_flash_infer_attn(self) -> typing.Any:
+        pass
+
+    def get_decode_flash_infer_attn(self) -> typing.Any:
+        pass
+
+class PyModelInputs:
+    input_ids: torch.Tensor
+    attention_inputs: PyAttentionInputs
+
+class PyModelOutputs:
+    hidden_states: torch.Tensor
+
+    def __init__(self, hidden_states: torch.Tensor) -> None:
+        ...
