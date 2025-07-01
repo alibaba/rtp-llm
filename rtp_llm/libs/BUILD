@@ -5,7 +5,7 @@ copy_all_so()
 
 genrule(
     name = "aiter_copy",
-    srcs = ["@aiter//:cpp_libraries"],
+    srcs = ["@aiter//:cpp_libraries","@composable_kernel_archive//:ck_fmha_rmsnorm2d_libraries"],
     outs = [
         "libmodule_aiter_enum.so",
         "libmodule_custom_all_reduce.so",
