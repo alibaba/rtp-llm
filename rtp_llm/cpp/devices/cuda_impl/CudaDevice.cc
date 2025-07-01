@@ -664,12 +664,14 @@ MemoryStatus CudaDevice::getDeviceMemoryStatus() {
 }
 
 void CudaDevice::maskLogits(Buffer &logits, const Buffer &mask) {
+    size_t batch_size = logits.shape()[0];
+    size_t vocab_size = logits.shape()[1];
     if (logits.type() == DataType::TYPE_FP32) {
-        invokeMaskLogits<float>((float*)(logits.data()), (const uint8_t*) mask.data(), logits.size(), stream_);
+        invokeMaskLogits<float>((float*)(logits.data()), (const uint8_t*) mask.data(), batch_size, vocab_size, stream_);
     } else if (logits.type() == DataType::TYPE_FP16) {
-        invokeMaskLogits<half>((half*)(logits.data()), (const uint8_t*) mask.data(), logits.size(), stream_);
+        invokeMaskLogits<half>((half*)(logits.data()), (const uint8_t*) mask.data(), batch_size, vocab_size, stream_);
     } else if (logits.type() == DataType::TYPE_BF16) {
-        invokeMaskLogits<__nv_bfloat16>((__nv_bfloat16*)(logits.data()), (const uint8_t*) mask.data(), logits.size(), stream_);
+        invokeMaskLogits<__nv_bfloat16>((__nv_bfloat16*)(logits.data()), (const uint8_t*) mask.data(), batch_size, vocab_size, stream_);
     } else {
         throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }

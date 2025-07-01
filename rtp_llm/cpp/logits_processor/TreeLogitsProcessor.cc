@@ -13,19 +13,31 @@ TreeLogitsProcessor::TreeLogitsProcessor(
       tree_infos_(tree_infos) {}
     
 void TreeLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) {
-    RTP_LLM_CHECK(size() == finish_idx - start_idx);
-
+    auto batch_size = size();
+    RTP_LLM_CHECK(batch_size == finish_idx - start_idx);
+    bool need_process = false;
+    std::vector<std::vector<size_t>> batch_candidate_token_ids(batch_size);
+    
     for (size_t i = 0; i < size(); ++i) {
         auto& info = tree_infos_[i];
-        if (!info.in_tree_mode) continue;
-        
+        if (!info.in_tree_mode) {
+            continue;
+        }
         const auto& candidate_token_ids = info.dfa_ptr->getCandidateTokenIds();
-        if (candidate_token_ids.empty()) continue;
-
-        auto logits = inputs.logits->index(i + start_idx);
-        auto vocab_mask = generateVocabMask(logits->shape(), candidate_token_ids);
-        maskLogits(logits, vocab_mask);
+        batch_candidate_token_ids[i] = candidate_token_ids;
+        if (candidate_token_ids.size() > 0) {
+            need_process = true;
+        }
     }
+    // If no beams need processing, return early
+    if (!need_process) {
+        return;
+    }
+    
+    auto batch_logits = inputs.logits->slice(start_idx, batch_size);
+    size_t vocab_size = batch_logits->shape()[1];
+    auto batch_vocab_mask = generateVocabMask(batch_size, vocab_size, batch_candidate_token_ids);
+    maskLogits(batch_logits, batch_vocab_mask);
 }
 
 void TreeLogitsProcessor::beamSearchLogitProcessorUpdate(const std::vector<int>& beam_idx_vec) {

@@ -44,9 +44,7 @@ TEST_F(CudaMaskLogitsOpTest, testMaskLogits) {
         },  rtp_llm::AllocationType::DEVICE);
 
         printBufferData(*logits, "MYDEBUG_BEFORE_MASK_LOGITS");
-        for (size_t i = 0; i < batch_size; i++) {
-            device_->maskLogits(*logits->index(i), *vocab_mask->index(i));
-        }
+        device_->maskLogits(*logits, *vocab_mask);
         printBufferData(*logits, "MYDEBUG_AFTER_MASK_LOGITS");
 
         auto logits_hosts = getBufferValues<float>(*logits);
@@ -78,9 +76,7 @@ TEST_F(CudaMaskLogitsOpTest, testMaskLogits) {
         },  rtp_llm::AllocationType::DEVICE);
 
         printBufferData(*logits, "MYDEBUG_BEFORE_MASK_LOGITS");
-        for (size_t i = 0; i < batch_size; i++) {
-            device_->maskLogits(*logits->index(i), *vocab_mask->index(i));
-        }
+        device_->maskLogits(*logits, *vocab_mask);
         printBufferData(*logits, "MYDEBUG_AFTER_MASK_LOGITS");
 
         auto logits_hosts = getBufferValues<half>(*logits);
@@ -110,9 +106,7 @@ TEST_F(CudaMaskLogitsOpTest, testMaskLogits) {
         },  rtp_llm::AllocationType::DEVICE);
 
         printBufferData(*logits, "MYDEBUG_BEFORE_MASK_LOGITS");
-        for (size_t i = 0; i < batch_size; i++) {
-            device_->maskLogits(*logits->index(i), *vocab_mask->index(i));
-        }
+        device_->maskLogits(*logits, *vocab_mask);
         printBufferData(*logits, "MYDEBUG_AFTER_MASK_LOGITS");
 
         auto logits_hosts = getBufferValues<__nv_bfloat16>(*logits);

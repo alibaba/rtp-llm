@@ -133,17 +133,23 @@ TEST_F(TreeLogitsProcessorTest, testGenerateVocabMask) {
     size_t max_length = 1024;
     BaseLogitsProcessorPtr processor = builder.generateLogitsProcessor(true, batch_size, file_path);
     SamplerInputs sampler_inputs = builder.allocate({batch_size, vocab_size, max_length}, {processor}, {batch_size});
-    rtp_llm::BufferPtr vocab_mask = processor->generateVocabMask(sampler_inputs.logits->index(0)->shape(), {2, 3, 4});
+    std::vector<std::vector<size_t>> batch_candidate_token_ids = {{}, {1}, {2, 3, 4}, {1, 3, 5}};
+    rtp_llm::BufferPtr vocab_mask = processor->generateVocabMask(batch_size, vocab_size, batch_candidate_token_ids);
 
-    std::vector<int32_t> expect_vocab_mask(vocab_size, 1);
-    expect_vocab_mask[2] = 0;
-    expect_vocab_mask[3] = 0;
-    expect_vocab_mask[4] = 0;
+    std::vector<std::vector<int32_t> > expect_vocab_mask(batch_size, std::vector<int32_t>(vocab_size, 1));
+    expect_vocab_mask[1][1] = 0;
+    expect_vocab_mask[2][2] = 0;
+    expect_vocab_mask[2][3] = 0;
+    expect_vocab_mask[2][4] = 0;
+    expect_vocab_mask[3][1] = 0;
+    expect_vocab_mask[3][3] = 0;
+    expect_vocab_mask[3][5] = 0;
     
     auto vocab_mask_hosts = getBufferValues<uint8_t>(*vocab_mask);
-
-    for (size_t i = 0; i < vocab_mask_hosts.size(); i++) {
-        ASSERT_TRUE(vocab_mask_hosts[i] == expect_vocab_mask[i]);
+    for (size_t i = 0; i < batch_size; i++) {
+        for (size_t j = 0; j < vocab_size; j++) {
+            ASSERT_TRUE(vocab_mask_hosts[i * vocab_size + j] == expect_vocab_mask[i][j]);
+        }
     }
 }
 

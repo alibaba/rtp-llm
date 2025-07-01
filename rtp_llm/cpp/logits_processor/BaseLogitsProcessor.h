@@ -20,8 +20,8 @@ public:
     virtual void beamSearchLogitProcessorUpdate(const std::vector<int>& beam_idx_vec) = 0;
     virtual void updateLogitProcessorStatus(const rtp_llm::BufferPtr& new_tokens, int32_t num_new_tokens) = 0;
     void memFill(const rtp_llm::BufferPtr& new_tokens_logits, size_t vocab_size, size_t index);
-    void maskLogits(const rtp_llm::BufferPtr& new_tokens_logits, const rtp_llm::BufferPtr& vocab_mask);
-    rtp_llm::BufferPtr generateVocabMask(const std::vector<size_t>& dshape, const std::vector<size_t>& candidate_token_ids);
+    void maskLogits(const rtp_llm::BufferPtr& new_token_logits, const rtp_llm::BufferPtr& vocab_mask);
+    rtp_llm::BufferPtr generateVocabMask(size_t batch_size, size_t vocab_size, const std::vector<std::vector<size_t>>& batch_candidate_token_ids);
 
 protected:
     rtp_llm::DeviceBase* device_;
