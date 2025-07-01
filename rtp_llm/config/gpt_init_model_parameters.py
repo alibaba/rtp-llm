@@ -1036,28 +1036,28 @@ class GptInitModelParameters:
                 f"decode_use_async_load_cache: {self.decode_use_async_load_cache}"
             )
 
-            self.decode_entrance = bool(int(os.environ.get('DECODE_ENTRANCE', 1)))
+            self.decode_entrance = bool(int(os.environ.get('DECODE_ENTRANCE', 0)))
             logging.info(f'decode_entrance: {self.decode_entrance}')
 
-        if (not self.decode_entrance and self.role_type in [RoleType.PREFILL]) or (self.decode_entrance and self.role_type in [RoleType.DECODE]):
-            self.pd_sep_enable_fallback = bool(
-                int(os.environ.get("PD_SEP_ENABLE_FALLBACK", 0))
-            )
-            logging.info(f"pd_sep_enable_fallback: {self.pd_sep_enable_fallback}")
-            self.load_balance_policy_name = os.environ.get(
-                "LOAD_BALANCE_POLICY_NAME", "RR"
-            )
-            logging.info(f"load_balance_policy_name: {self.load_balance_policy_name}")
-            policy_list = ["RR", "WRR"]
-            if not self.load_balance_policy_name in policy_list:
-                raise Exception(
-                    f"load_balance_policy_name {self.load_balance_policy_name} "
-                    f"is not right, it must in {policy_list}"
+            if (not self.decode_entrance and self.role_type in [RoleType.PREFILL]) or (self.decode_entrance and self.role_type in [RoleType.DECODE]):
+                self.pd_sep_enable_fallback = bool(
+                    int(os.environ.get("PD_SEP_ENABLE_FALLBACK", 0))
                 )
-            self.sync_status_interval_ms = int(
-                os.environ.get("SYNC_STATUS_INTERVAL_MS", 50)
-            )
-            logging.info(f"sync_status_interval_ms: {self.sync_status_interval_ms}")
+                logging.info(f"pd_sep_enable_fallback: {self.pd_sep_enable_fallback}")
+                self.load_balance_policy_name = os.environ.get(
+                    "LOAD_BALANCE_POLICY_NAME", "RR"
+                )
+                logging.info(f"load_balance_policy_name: {self.load_balance_policy_name}")
+                policy_list = ["RR", "WRR"]
+                if not self.load_balance_policy_name in policy_list:
+                    raise Exception(
+                        f"load_balance_policy_name {self.load_balance_policy_name} "
+                        f"is not right, it must in {policy_list}"
+                    )
+                self.sync_status_interval_ms = int(
+                    os.environ.get("SYNC_STATUS_INTERVAL_MS", 50)
+                )
+                logging.info(f"sync_status_interval_ms: {self.sync_status_interval_ms}")
             
 
 

@@ -33,13 +33,6 @@ bool LockedBlockBufferManager::lock(const std::vector<std::shared_ptr<BlockBuffe
             int64_t check_end_addr   = check_start_addr + block->len;
 
             if (check_end_addr <= start_addr || end_addr <= check_start_addr) {
-                RTP_LLM_LOG_DEBUG(
-                    "locked block buffer manager find locked block %s, but has no conflict locked block %p %d, to lock block %p %d",
-                    block->key.c_str(),
-                    locked_block.block->addr.get(),
-                    locked_block.block->len,
-                    block->addr.get(),
-                    block->len);
                 continue;
             }
             no_confict = false;

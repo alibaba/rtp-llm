@@ -73,7 +73,7 @@ bool DecodeRpcServerNew::initLoadBalancer() {
     if (maga_init_params_.gpt_init_parameter.load_balance_policy_name_ == "RR") {
         load_balancer_.reset(new RRLoadBalancer);
     } else {
-        load_balancer_.reset(new WRRLoadBalancer);
+        load_balancer_.reset(new WRRLoadBalancer(maga_init_params_.gpt_init_parameter.cache_store_config));
     }
 
     RTP_LLM_CHECK_WITH_INFO(load_balancer_->init(init_params), "load_balancer init failed");

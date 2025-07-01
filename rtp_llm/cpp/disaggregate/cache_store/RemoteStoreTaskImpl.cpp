@@ -123,7 +123,6 @@ RemoteStoreTaskImpl::makeAvailableRequest(const std::vector<std::shared_ptr<Bloc
             transfer_request->buffer_pairs[key] = iter->second;
             loading_buffers_[key]               = iter->second;
             to_load_buffers_.erase(iter);
-            //RTP_LLM_LOG_INFO("remote store task %s found local key %s", request_->request_id.c_str(), key.c_str());
         }
     }
 
@@ -166,7 +165,6 @@ void RemoteStoreTaskImpl::notifyRequestDone(const std::map<std::string, std::str
             }
             done_buffers_[local_key] = iter->second;
             loading_buffers_.erase(iter);
-            RTP_LLM_LOG_DEBUG("TMP notify request done, keys %s - %s", local_key.c_str(), remote_key.c_str());
         }
 
         if (!success) {
@@ -179,10 +177,6 @@ void RemoteStoreTaskImpl::notifyRequestDone(const std::map<std::string, std::str
                                 request_->request_id.c_str());
         } else {
             done_ = done_buffers_.size() == expect_done_buffer_count_;
-            RTP_LLM_LOG_DEBUG("remote store task notify request done, all %d of %d task done, success %d",
-                              done_buffers_.size(),
-                              expect_done_buffer_count_,
-                              success);
         }
     }
     if (done_) {
