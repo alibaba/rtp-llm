@@ -171,7 +171,7 @@ def jit_deps():
 
 def select_py_bindings():
     return select({
-        "//conditions:using_cuda12": [
+        "//:using_cuda12": [
             "//rtp_llm/models_py/bindings/cuda:cuda_bindings_register"
         ],
         "//conditions:default": [

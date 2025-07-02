@@ -128,6 +128,7 @@ cc_library(
         "@//:using_cuda": [
             "//rtp_llm/cpp/cuda:allocator_torch",
         ],
+        "//conditions:default": [],
     }) + select_py_bindings(),
     copts = copts(),
     alwayslink = True,
