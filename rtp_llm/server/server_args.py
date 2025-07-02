@@ -867,6 +867,18 @@ def setup_args():
         help="是否禁用PDL"
     )
 
+    ##############################################################################################################
+    # 3FS 配置
+    ##############################################################################################################
+    threefs_group = parser.add_argument_group('3FS')
+    threefs_group.add_argument(
+        '--enable_3fs',
+        env_name="ENABLE_3FS",
+        type=str2bool,
+        default=False,
+        help="是否启用 3FS 管理 KVCache"
+    )
+
     parser.parse_args()
 
     parser.print_env_mappings()

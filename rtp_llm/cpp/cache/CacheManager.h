@@ -16,8 +16,12 @@
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "kmonitor/client/MetricsReporter.h"
 
-
 namespace rtp_llm {
+
+namespace threefs {
+class ThreeFSCacheManager;
+}  // namespace threefs
+using namespace rtp_llm::threefs;
 
 struct KVCacheInfo {
     size_t available_kv_cache;
@@ -97,9 +101,11 @@ public:
     };
 
 public:
-    CacheManager(const CacheConfig& config, rtp_llm::DeviceBase* device,
-                 bool warmup = false,
-                 const kmonitor::MetricsReporterPtr metrics_reporter = nullptr);
+    CacheManager(const CacheConfig&                 config,
+                 rtp_llm::DeviceBase*               device,
+                 bool                               warmup           = false,
+                 const kmonitor::MetricsReporterPtr metrics_reporter = nullptr,
+                 const GptInitParameter&            params           = GptInitParameter{});
     ~CacheManager();
 
     const CacheConfig&     cacheConfig() const;
@@ -131,6 +137,13 @@ public:
                             rtp_llm::BufferPtr target_block_offset);
 
     void                                    regUserMr();
+
+    bool getCacheFrom3FSForRank(const std::vector<int64_t>& cache_keys,
+                                const std::vector<int32_t>& block_indices,
+                                int64_t                     request_id) const;
+    bool putCacheTo3FSForRank(const std::vector<int64_t>& cache_keys,
+                              const std::vector<int32_t>& block_indices,
+                              int64_t                     request_id) const;
 
 protected:
     const BlockCache&                       blockCache() const;
@@ -167,6 +180,15 @@ protected:
 
     void reportMetricsLoop();
 
+private:
+#ifdef ENABLE_3FS
+    bool                    init3FS();
+    BlockCache::MatchResult matchIn3FS(const std::vector<int64_t>& cache_keys, int64_t request_id);
+    bool                    putCacheTo3FSForAllRank(const std::vector<int64_t>& cache_keys,
+                                          const std::vector<int32_t>& block_indices,
+                                          int64_t                     request_id) const;
+#endif
+
 protected:
     CacheConfig     config_;
     int             seq_size_per_block_;
@@ -189,6 +211,11 @@ protected:
     int64_t mr_cost_time_ms_    = 0;
 
     std::mutex mutex_;
+
+    // for 3fs
+    const GptInitParameter               params_;
+    bool                                 enable_3fs_{false};
+    std::shared_ptr<ThreeFSCacheManager> threefs_cache_manager_;
 };
 
 typedef std::shared_ptr<CacheManager> CacheManagerPtr;

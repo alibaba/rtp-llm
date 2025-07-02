@@ -139,6 +139,9 @@ build:arm --copt=-Wno-array-bounds # aios
 build:arm --copt=-Wno-unused-result # grpc
 build:arm --copt=-Wno-array-parameter # boringssl
 
+# 3fs
+build:3fs --copt="-DENABLE_3FS=1"
+
 build:debug --copt -g --copt -O0 --copt -U_FORTIFY_SOURCE
 build:trace --copt="-DCUTLASS_DEBUG_TRACE_LEVEL=1"
 

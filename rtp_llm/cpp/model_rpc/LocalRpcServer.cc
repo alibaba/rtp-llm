@@ -155,4 +155,66 @@ size_t LocalRpcServer::onflightRequestNum() {
     return onflight_requests_;
 }
 
+::grpc::Status LocalRpcServer::RemoteGetCache(::grpc::ServerContext*              context,
+                                              const ::BroadcastGetCacheRequestPB* request,
+                                              ::BroadcastGetCacheResponsePB*      response) {
+    RTP_LLM_LOG_DEBUG("receive get cache rpc request from client: %s, request: [%s]",
+                      context->peer().c_str(),
+                      request->DebugString().c_str());
+
+    const int64_t request_id = request->request_id();
+    if (!engine_) {
+        RTP_LLM_LOG_WARNING("get cache failed, receive get cache rpc request but engine is null, request: %ld",
+                            request_id);
+        return grpc::Status(grpc::StatusCode::INTERNAL, "engine is null");
+    }
+
+    auto cache_manager = engine_->getCacheManager();
+    if (!cache_manager) {
+        RTP_LLM_LOG_WARNING("get cache failed, receive get cache rpc request but cache manager is null, request: %ld",
+                            request_id);
+        return grpc::Status(grpc::StatusCode::INTERNAL, "cache manager is null");
+    }
+
+    std::vector<int64_t> cache_keys(request->cache_keys().begin(), request->cache_keys().end());
+    std::vector<int32_t> block_ids(request->block_ids().begin(), request->block_ids().end());
+    if (!cache_manager->getCacheFrom3FSForRank(cache_keys, block_ids, request_id)) {
+        RTP_LLM_LOG_DEBUG("get cache failed, receive get cache rpc request but get cache failed, request: [%s]",
+                          request->ShortDebugString().c_str());
+        return grpc::Status(grpc::StatusCode::INTERNAL, "cache manager get cache failed");
+    }
+    return grpc::Status::OK;
+}
+
+::grpc::Status LocalRpcServer::RemotePutCache(::grpc::ServerContext*              context,
+                                              const ::BroadcastPutCacheRequestPB* request,
+                                              ::BroadcastPutCacheResponsePB*      response) {
+    RTP_LLM_LOG_DEBUG("receive put cache rpc request from client: %s, request: [%s]",
+                      context->peer().c_str(),
+                      request->DebugString().c_str());
+
+    const int64_t request_id = request->request_id();
+    if (!engine_) {
+        RTP_LLM_LOG_WARNING("put cache failed, receive put cache rpc request but engine is null, request: %ld",
+                            request_id);
+        return grpc::Status(grpc::StatusCode::INTERNAL, "engine is null");
+    }
+
+    auto cache_manager = engine_->getCacheManager();
+    if (!cache_manager) {
+        RTP_LLM_LOG_WARNING("put cache failed, receive put cache rpc request but cache manager is null, request: %ld",
+                            request_id);
+        return grpc::Status(grpc::StatusCode::INTERNAL, "cache manager is null");
+    }
+
+    std::vector<int64_t> cache_keys(request->cache_keys().begin(), request->cache_keys().end());
+    std::vector<int32_t> block_ids(request->block_ids().begin(), request->block_ids().end());
+    if (!cache_manager->putCacheTo3FSForRank(cache_keys, block_ids, request_id)) {
+        RTP_LLM_LOG_DEBUG("put cache failed, receive put cache rpc request but put cache failed, request: [%s]",
+                          request->ShortDebugString().c_str());
+        return grpc::Status(grpc::StatusCode::INTERNAL, "cache manager put cache failed");
+    }
+    return grpc::Status::OK;
+}
+
 }  // namespace rtp_llm

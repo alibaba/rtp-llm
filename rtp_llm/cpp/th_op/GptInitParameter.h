@@ -244,6 +244,7 @@ public:
 
 
     std::string model_name_ = "";
+    bool        enable_3fs_{false};
 
     //multi machine
     std::vector<std::string> worker_addrs_;

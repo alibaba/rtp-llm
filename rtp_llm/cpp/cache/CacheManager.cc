@@ -17,19 +17,24 @@
 #include <cuda_fp8.h>
 #endif
 
-using namespace std;
+#ifdef ENABLE_3FS
+#include "rtp_llm/cpp/cache/ThreeFSCacheManager.h"
+#endif
 
+using namespace std;
 
 namespace rtp_llm {
 
 CacheManager::CacheManager(const CacheConfig&                 config,
-                           rtp_llm::DeviceBase*                    device,
+                           rtp_llm::DeviceBase*               device,
                            bool                               warmup,
-                           const kmonitor::MetricsReporterPtr metrics_reporter):
+                           const kmonitor::MetricsReporterPtr metrics_reporter,
+                           const GptInitParameter&            params):
     config_(config),
     seq_size_per_block_(config.seq_size_per_block),
     device_(device),
-    metrics_reporter_(metrics_reporter) {
+    metrics_reporter_(metrics_reporter),
+    params_(params) {
     RTP_LLM_LOG_INFO("cache config: %s", config.debugString().c_str());
 
     if (warmup) {
@@ -43,6 +48,13 @@ CacheManager::CacheManager(const CacheConfig&                 config,
             metrics_reporter_thread_ = std::thread(&CacheManager::reportMetricsLoop, this);
         }
     }
+
+#ifdef ENABLE_3FS
+    if (params_.enable_3fs_) {
+        enable_3fs_ = init3FS();
+    }
+    RTP_LLM_LOG_INFO("enable 3fs: %d", enable_3fs_);
+#endif
 }
 
 void CacheManager::regUserMr() {
@@ -324,10 +336,9 @@ CacheManager::MatchInfo CacheManager::mallocWithCache(const AdvancedMallocInfo& 
     auto match_info = matchImpl(malloc_info);
     auto match_cost_time_us = currentTimeUs() - match_begin_time_us;
     if (match_info.loss.empty() && malloc_info.need_loss) {
+        free(match_info.cache_blocks);
         return {0, {}, {}};
     }
-    block_ref_counter_.incrementRefCounter(match_info.cache_blocks);
-    incrQueryRefCounter(match_info.cache_blocks);
     if (metrics_reporter_) {
         RtpLLMCacheReuseMetricsCollector collector;
         collector.kv_cache_reuse_length = match_info.reuse_length;
@@ -338,7 +349,25 @@ CacheManager::MatchInfo CacheManager::mallocWithCache(const AdvancedMallocInfo& 
 }
 
 CacheManager::MatchInfo CacheManager::matchImpl(const AdvancedMallocInfo& malloc_info) {
+    // match in gpu
     auto match_result = block_cache_.match(malloc_info.cache_keys);
+    incrRefCounter(match_result.block_indices);
+
+#ifdef ENABLE_3FS
+    // match in 3fs if cache keys not fully matched
+    if (enable_3fs_ && match_result.matched_len < malloc_info.cache_keys.size()) {
+        std::vector<int64_t> need_match_cache_keys(malloc_info.cache_keys.begin() + match_result.matched_len,
+                                                   malloc_info.cache_keys.end());
+        const auto           threefs_match_result = matchIn3FS(need_match_cache_keys, malloc_info.request_id);
+        if (threefs_match_result.matched_len != 0) {
+            match_result.matched_len += threefs_match_result.matched_len;
+            match_result.block_indices.insert(match_result.block_indices.end(),
+                                              threefs_match_result.block_indices.begin(),
+                                              threefs_match_result.block_indices.end());
+        }
+    }
+#endif
+
     int cache_block_num = match_result.block_indices.size();
     int reuse_block_num = std::min(match_result.matched_len, static_cast<size_t>((malloc_info.token_ids.size()) - 1) / config_.seq_size_per_block);
     // common length must large than reuse_length, when need calculate loss
@@ -353,6 +382,11 @@ CacheManager::MatchInfo CacheManager::matchImpl(const AdvancedMallocInfo& malloc
         }
     }
     reuse_block_num = reuse_length / config_.seq_size_per_block;
+    if (reuse_block_num < cache_block_num) {
+        std::vector<int> need_decref_blocks(match_result.block_indices.begin() + reuse_block_num,
+                                            match_result.block_indices.end());
+        free(need_decref_blocks);
+    }
 
     RTP_LLM_CHECK_WITH_INFO((reuse_block_num <= cache_block_num),
                        "reuse block nums[%d] is less than need block nums[%d]",
@@ -485,6 +519,11 @@ void CacheManager::insertIntoCache(FreeInfo& free_info) {
                         free_info.loss : std::vector<float>{free_info.loss.begin(), free_info.loss.begin() + token_len},
                         free_info.is_resident};
         std::vector<int> indices = block_cache_.put(item);
+#ifdef ENABLE_3FS
+        if (enable_3fs_) {
+            putCacheTo3FSForAllRank(item.cache_key, item.block_indices, free_info.request_id);
+        }
+#endif
         freeImpl(indices);
         freeImpl(std::vector<int>(free_info.block_indices.begin() + block_len, free_info.block_indices.end()));
     } else {
@@ -673,5 +712,94 @@ void CacheManager::beamSearchKvUpdate(rtp_llm::BufferPtr src_block_offset,
     }
 };
 
+#ifdef ENABLE_3FS
+bool CacheManager::init3FS() {
+    auto threefs_cache_manager = std::make_shared<ThreeFSCacheManager>(
+        kv_cache_.k_blocks, kv_cache_.v_blocks, config_, params_, metrics_reporter_);
+    if (!threefs_cache_manager->init()) {
+        RTP_LLM_LOG_WARNING("3fs init failed, 3fs cache manager init failed");
+        return false;
+    }
+    threefs_cache_manager_ = threefs_cache_manager;
+    return true;
+}
+
+BlockCache::MatchResult CacheManager::matchIn3FS(const std::vector<int64_t>& cache_keys, int64_t request_id) {
+    BlockCache::MatchResult match_result;
+    match_result.matched_len = 0;
+
+    if (cache_keys.empty()) {
+        return match_result;
+    }
+    if (!threefs_cache_manager_) {
+        RTP_LLM_LOG_WARNING("match in 3fs failed, 3fs cache manager is nullptr");
+        return match_result;
+    }
+
+    auto matched_len = threefs_cache_manager_->matchCache(cache_keys);
+    if (matched_len <= 0) {
+        return match_result;
+    }
+
+    auto [success, resource] = malloc(SimpleMallocInfo(-1, matched_len, true));
+    if (!success) {
+        RTP_LLM_LOG_WARNING(
+            "prefix matched in 3fs but free block index not enough, matched len: %d, free block index len: %lu",
+            matched_len,
+            freeBlockNums());
+        return match_result;
+    }
+
+    std::vector<int64_t> matched_cache_keys(cache_keys.begin(), cache_keys.begin() + matched_len);
+    const auto           input_len = static_cast<int32_t>(cache_keys.size());
+    if (!threefs_cache_manager_->getCacheForAllRank(matched_cache_keys, resource.block_id, input_len, request_id)) {
+        free(resource.block_id);
+        return match_result;
+    }
+
+    match_result.matched_len   = matched_len;
+    match_result.block_indices = resource.block_id;
+    return match_result;
+}
+
+bool CacheManager::putCacheTo3FSForAllRank(const std::vector<int64_t>& cache_keys,
+                                           const std::vector<int32_t>& block_indices,
+                                           int64_t                     request_id) const {
+    if (!threefs_cache_manager_) {
+        RTP_LLM_LOG_WARNING("put cache to 3fs failed, 3fs cache manager is nullptr");
+        return false;
+    }
+    return threefs_cache_manager_->putCacheForAllRank(cache_keys, block_indices, request_id);
+}
+#endif
+
+bool CacheManager::getCacheFrom3FSForRank(const std::vector<int64_t>& cache_keys,
+                                          const std::vector<int32_t>& block_indices,
+                                          int64_t                     request_id) const {
+#ifdef ENABLE_3FS
+    if (!threefs_cache_manager_) {
+        RTP_LLM_LOG_WARNING("get cache from 3fs for rank failed, 3fs cache manager is nullptr, request: %ld",
+                            request_id);
+        return false;
+    }
+    return threefs_cache_manager_->getCacheForRank(cache_keys, block_indices, request_id);
+#else
+    return false;
+#endif
+}
+
+bool CacheManager::putCacheTo3FSForRank(const std::vector<int64_t>& cache_keys,
+                                        const std::vector<int32_t>& block_indices,
+                                        int64_t                     request_id) const {
+#ifdef ENABLE_3FS
+    if (!threefs_cache_manager_) {
+        RTP_LLM_LOG_WARNING("put cache to 3fs for rank failed, 3fs cache manager is nullptr, request: %ld", request_id);
+        return false;
+    }
+    return threefs_cache_manager_->putCacheForRank(cache_keys, block_indices, request_id);
+#else
+    return false;
+#endif
+}
 
 }  // namespace rtp_llm

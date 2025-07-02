@@ -176,7 +176,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
     auto result = CacheConfigCreator::createConfig(params_, warm_up_result);
     RTP_LLM_LOG_INFO("create cache manager with block nums %d, block size %ld KB",
                 result.block_nums, result.block_size / 1024);
-    resource_context_.cache_manager = make_shared<CacheManager>(result, device_, false, metrics_reporter_);
+    resource_context_.cache_manager = make_shared<CacheManager>(result, device_, false, metrics_reporter_, params_);
 }
 
 absl::Status NormalEngine::initSystemPrompt() {

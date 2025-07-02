@@ -28,6 +28,14 @@ public:
                                     const GenerateInputPB*                 request,
                                     grpc::ServerWriter<GenerateOutputsPB>* writer);
 
+    ::grpc::Status RemoteGetCache(::grpc::ServerContext*              context,
+                                  const ::BroadcastGetCacheRequestPB* request,
+                                  ::BroadcastGetCacheResponsePB*      response);
+
+    ::grpc::Status RemotePutCache(::grpc::ServerContext*              context,
+                                  const ::BroadcastPutCacheRequestPB* request,
+                                  ::BroadcastPutCacheResponsePB*      response);
+
     LoadBalanceInfo getLoadBalanceInfo();
 
     void addLora(const std::string& adapter_name,

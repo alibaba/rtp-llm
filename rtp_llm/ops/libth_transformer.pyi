@@ -392,6 +392,7 @@ class GptInitParameter:
     worker_grpc_addrs: list[str]
     worker_port_offset: int
     world_size: int
+    enable_3fs: bool
     def __init__(self, head_num: int, size_per_head: int, num_layers: int, max_seq_len: int, vocab_size: int, hidden_size: int) -> None:
         ...
     def insertMultiTaskPromptTokens(self, task_id: str, tokens_id: list[int]) -> None:

@@ -65,6 +65,7 @@ class ModelFactory:
             raise Exception(f"model type {model_config.model_type} not registered!")
         model_cls = _model_factory[model_config.model_type]
         config: GptInitModelParameters = model_cls.create_config(model_config)
+        config.model_name = model_cls.__name__
         model = model_cls.from_config(config)
         dump_model_to_table(ModelFactory.model_config_json(model_cls, model_config, config))
         return model

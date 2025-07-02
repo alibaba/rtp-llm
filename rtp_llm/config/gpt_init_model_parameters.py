@@ -259,6 +259,7 @@ class GptInitModelParameters:
     worker_port_offset: int
     world_size: int
     quant_config: QuantizationConfig
+    enable_3fs: bool
 
     batch_decode_scheduler_config: BatchDecodeSchedulerConfig
     cache_store_config: CacheStoreConfig
@@ -835,6 +836,9 @@ class GptInitModelParameters:
 
         logging.info(f"use stop_words_str_list [{self.special_tokens.stop_words_str_list }]," \
                         f" stop_words_id_list [{self.special_tokens.stop_words_id_list}]")
+        
+        self.enable_3fs = bool(int(os.environ.get('ENABLE_3FS', 0)))
+        logging.info(f'enable 3fs: {self.enable_3fs}')
 
     def _load_quant_config_from_ckpt(self, ckpt_path: str) -> Optional[QuantizationConfig]:
         quant_config_path = os.path.join(ckpt_path, 'smoothquant.ini')

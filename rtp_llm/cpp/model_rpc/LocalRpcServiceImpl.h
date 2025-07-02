@@ -28,6 +28,18 @@ public:
         return local_server_->GenerateStreamCall(context, request, writer);
     }
 
+    ::grpc::Status RemoteGetCache(::grpc::ServerContext*              context,
+                                  const ::BroadcastGetCacheRequestPB* request,
+                                  ::BroadcastGetCacheResponsePB*      response) override {
+        return local_server_->RemoteGetCache(context, request, response);
+    }
+
+    ::grpc::Status RemotePutCache(::grpc::ServerContext*              context,
+                                  const ::BroadcastPutCacheRequestPB* request,
+                                  ::BroadcastPutCacheResponsePB*      response) override {
+        return local_server_->RemotePutCache(context, request, response);
+    }
+
     LoadBalanceInfo getLoadBalanceInfo() {
         return local_server_->getLoadBalanceInfo();
     }

@@ -80,6 +80,8 @@ public:
         return false;
     }
 
+    std::shared_ptr<CacheManager> getCacheManager() const;
+
 protected:
     rtp_llm::DeviceBase*                      device_;
     ResourceContext                      resource_context_;
