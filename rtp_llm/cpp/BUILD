@@ -168,14 +168,23 @@ cc_library(
         "cache/CacheConfig.h",
         "cache/CacheManager.h",
         "cache/KVCacheResource.h",
+        "cache/DistStorage.h",
+        "cache/DistStorageLocalMem.h",
+        "cache/DistStorageManager.h",
+        "cache/DistKvCachePlanner.h",
+        "cache/DistKvCache.h",
+        "cache/DistStorage3FSFile.h",
+            "cache/ThreeFSCudaUtil.h",
+            "cache/DistStorage3FS.h",
+            "cache/ThreeFSMempool.h",
     ] + select({
         ":enable_3fs": [
             "model_rpc/RPCPool.h",
             "cache/ThreeFSBlockCache.h",
             "cache/ThreeFSCacheManager.h",
+            "cache/ThreeFSMempool.h",
             "cache/ThreeFSCudaUtil.h",
             "cache/ThreeFSFile.h",
-            "cache/ThreeFSMempool.h",
             "cache/ThreeFSMetrics.h",
         ],
         "//conditions:default": [],
@@ -186,6 +195,13 @@ cc_library(
         "cache/CacheConfigCreator.cc",
         "cache/CacheManager.cc",
         "cache/KVCacheResource.cc",
+        "cache/DistStorageLocalMem.cc",
+        "cache/DistStorageManager.cc",
+        "cache/DistKvCachePlanner.cc",
+        "cache/DistKvCache.cc",
+        "cache/DistStorage3FSFile.cc",
+            "cache/DistStorage3FS.cc",
+            "cache/ThreeFSMempool.cc",
     ] + select({
         ":enable_3fs": [
             "cache/ThreeFSBlockCache.cc",
@@ -199,12 +215,14 @@ cc_library(
         ":utils",
         ":metrics",
         ":dataclass",
+        ":model_rpc_pool",
         "//:gpt_init_params",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "//rtp_llm/cpp/devices:devices_base",
         "//rtp_llm/cpp/devices:device_utils",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store",
+            "//3rdparty/3fs:hf3fs",
     ] + select({
         ":enable_3fs": [
             "//3rdparty/3fs:hf3fs",
@@ -480,9 +498,18 @@ cc_library(
 )
 
 cc_library(
+    name = "model_rpc_pool",
+    srcs = [],
+    hdrs = ["model_rpc/RPCPool.h"],
+    deps = [
+        "//rtp_llm/cpp/proto:model_rpc_service_cc_proto",
+    ]
+)
+
+cc_library(
     name = "model_rpc_server",
     srcs =  glob(["model_rpc/*.cc"]),
-    hdrs =  glob(["model_rpc/*.h"]),
+    hdrs =  glob(["model_rpc/*.h"], exclude = ["RPCPool.h"]),
     deps = [
         ":embedding_arpc_deps",
         "//rtp_llm/cpp/devices:devices_base",
@@ -491,6 +518,7 @@ cc_library(
         "//rtp_llm/cpp:normal_engine",
         "//rtp_llm/cpp/embedding_engine:embedding_engine",
         "//rtp_llm/cpp:speculative_engine",
+        "//rtp_llm/cpp:model_rpc_pool",
         "//rtp_llm/cpp:multimodal_processor",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store",
         "//rtp_llm/cpp/disaggregate/load_balancer:load_balancer",

@@ -1,0 +1,61 @@
+#pragma once
+
+#include "rtp_llm/cpp/cache/DistStorage.h"
+#include "rtp_llm/cpp/cache/DistStorage3FSFile.h"
+#include "rtp_llm/cpp/cache/ThreeFSCudaUtil.h"
+
+namespace rtp_llm {
+
+class DistStorage3FS: public DistStorage {
+public:
+    DistStorage3FS(const kmonitor::MetricsReporterPtr& metrics_reporter);
+    virtual ~DistStorage3FS();
+
+    bool init(const DistStorage3FSInitParams& init_params);
+
+    bool lookup(const DistStorage::Item& item) override;
+    bool get(const DistStorage::Item& item) override;
+    bool put(const DistStorage::Item& item) override;
+    bool del(const DistStorage::Item& item) override;
+
+private:
+    std::shared_ptr<threefs::DistStorage3FSFile> getFile(const DistStorage::Item& item);
+    void                                         removeFile(const DistStorage::Item& item);
+
+    bool initIovHandle(threefs::ThreeFSIovHandle& handle, size_t iov_block_size, size_t iov_size);
+    void releaseIovHandle(threefs::ThreeFSIovHandle& handle);
+    void removeOldIov() const;
+
+    struct hf3fs_iov* createIov(const std::string& mountpoint, size_t iov_size, size_t iov_block_size) const;
+    void              releaseIov(struct hf3fs_iov* iov) const;
+
+private:
+    kmonitor::MetricsReporterPtr metrics_reporter_;
+
+    DistStorage3FSInitParams init_params_;
+
+    std::shared_ptr<threefs::ThreeFSCudaUtil> cuda_util_;
+
+    // for read & write
+    threefs::ThreeFSIovHandle read_iov_handle_;
+    threefs::ThreeFSIovHandle write_iov_handle_;
+
+    // for 3fs async write
+    std::shared_ptr<autil::LockFreeThreadPool> write_thread_pool_;
+
+    // TODO change to LRUMap, avoid exceed max handler num
+    const uint32_t                                                                kMaxFileNum = 1000;
+    std::unordered_map<std::string, std::shared_ptr<threefs::DistStorage3FSFile>> file_map_;
+    std::shared_mutex                                                             file_map_mutex_;
+
+    // for metric
+    std::atomic<bool> stop_report_metrics_{false};
+    std::thread       report_metrics_thread_;
+
+    const size_t kDefaultReadIovSize{1ULL << 32};        // 4GB
+    const size_t kDefaultReadIovBlockSize{0};            // 0
+    const size_t kDefaultWriteIovSize{1ULL << 32};       // 4GB
+    const size_t kDefaultWriteIovBlockSize{1ULL << 20};  // 1MB
+};
+
+}  // namespace rtp_llm

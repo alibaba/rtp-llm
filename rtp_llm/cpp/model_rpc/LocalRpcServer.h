@@ -29,13 +29,9 @@ public:
                                             const GenerateInputPB*                 request,
                                             grpc::ServerWriter<GenerateOutputsPB>* writer);
 
-    ::grpc::Status RemoteGetCache(::grpc::ServerContext*              context,
-                                  const ::BroadcastGetCacheRequestPB* request,
-                                  ::BroadcastGetCacheResponsePB*      response);
-
-    ::grpc::Status RemotePutCache(::grpc::ServerContext*              context,
-                                  const ::BroadcastPutCacheRequestPB* request,
-                                  ::BroadcastPutCacheResponsePB*      response);
+    ::grpc::Status DistKvCache(::grpc::ServerContext*              context,
+                                  const ::DistKvCacheRequestPB* request,
+                                  ::DistKvCacheResponsePB*      response);
 
     LoadBalanceInfo getLoadBalanceInfo(int64_t latest_version);
 

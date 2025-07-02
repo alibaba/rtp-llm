@@ -206,9 +206,9 @@ EngineScheduleInfo LocalRpcServer::getEngineScheduleInfo(int64_t latest_finised_
     return grpc::Status::OK;
 }
 
-::grpc::Status LocalRpcServer::RemotePutCache(::grpc::ServerContext*              context,
-                                              const ::BroadcastPutCacheRequestPB* request,
-                                              ::BroadcastPutCacheResponsePB*      response) {
+::grpc::Status LocalRpcServer::DistKvCache(::grpc::ServerContext*              context,
+                                              const ::DistKvCacheRequestPB* request,
+                                              ::DistKvCacheResponsePB*      response) {
     RTP_LLM_LOG_DEBUG("receive put cache rpc request from client: %s, request: [%s]",
                       context->peer().c_str(),
                       request->DebugString().c_str());
