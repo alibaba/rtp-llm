@@ -1,7 +1,7 @@
 from __future__ import annotations
 import torch
 import typing
-__all__ = ['ArpcConfig', 'BatchDecodeSchedulerConfig', 'CacheStoreConfig', 'ConcurrencyConfig', 'DeviceExporter', 'DeviceResourceConfig', 'DeviceType', 'EmbeddingHandlerOp', 'EngineScheduleInfo', 'EngineTaskInfo', 'EplbConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'GptInitParameter', 'HWKernelConfig', 'KVCacheConfig', 'LoadBalanceInfo', 'MiscellaneousConfig', 'MlaOpsType', 'ModelSpecificConfig', 'MoeConfig', 'MultimodalInput', 'ParallelismDistributedConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'RoleSpecialTokens', 'RtpEmbeddingOp', 'RtpLLMOp', 'SamplerConfig', 'SchedulerConfig', 'ServiceDiscoveryConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'create_linear_softmax_handler', 'get_device']
+__all__ = ['ArpcConfig', 'AttentionCommonInputs', 'BatchDecodeSchedulerConfig', 'CacheStoreConfig', 'ConcurrencyConfig', 'DeviceExporter', 'DeviceResourceConfig', 'DeviceType', 'EmbeddingHandlerOp', 'EngineScheduleInfo', 'EngineTaskInfo', 'EplbConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FlashInferOp', 'GptInitParameter', 'HWKernelConfig', 'KVCacheConfig', 'LoadBalanceInfo', 'MiscellaneousConfig', 'MlaOpsType', 'ModelSpecificConfig', 'MoeConfig', 'MultimodalInput', 'ParallelismDistributedConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'RoleSpecialTokens', 'RtpEmbeddingOp', 'RtpLLMOp', 'SamplerConfig', 'SchedulerConfig', 'ServiceDiscoveryConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'create_linear_softmax_handler', 'get_device']
 class ArpcConfig:
     ioThreadNum: int
     queueNum: int
@@ -9,6 +9,9 @@ class ArpcConfig:
     def __init__(self, threadNum: int = 10, queueNum: int = 50, ioThreadNum: int = 2) -> None:
         ...
     def to_string(self) -> str:
+        ...
+class AttentionCommonInputs:
+    def __init__(self) -> None:
         ...
 class BatchDecodeSchedulerConfig:
     batch_decode_scheduler_batch_size: int
@@ -218,6 +221,11 @@ class FMHAConfig:
     def to_string(self) -> str:
         ...
     def update_from_env(self) -> None:
+        ...
+class FlashInferOp:
+    def __init__(self, gpt_init_parameter: GptInitParameter) -> None:
+        ...
+    def forward(self, input: torch.Tensor, output: torch.Tensor, k_cache: torch.Tensor, v_cache: torch.Tensor, attn_params: typing.Any) -> None:
         ...
 class GptInitParameter:
     activation_type: str
@@ -504,8 +512,8 @@ class MlaOpsType:
     def value(self) -> int:
         ...
 class ModelSpecificConfig:
-    max_lora_model_size: int
     load_python_model: bool
+    max_lora_model_size: int
     def __init__(self, max_lora_model_size: int = -1, load_python_model: bool = False) -> None:
         ...
     def to_string(self) -> str:
@@ -566,8 +574,9 @@ class ProfilingDebugLoggingConfig:
     py_inference_log_response: bool
     rtp_llm_trace_malloc_stack: bool
     rtp_llm_trace_memory: bool
+    test_layer_num: int
     torch_cuda_profiler_dir: str
-    def __init__(self, ft_nvtx: bool = False, py_inference_log_response: bool = False, rtp_llm_trace_memory: bool = False, rtp_llm_trace_malloc_stack: bool = False, enable_device_perf: bool = False, ft_core_dump_on_exception: bool = False, ft_alog_conf_path: str = '', log_level: str = 'INFO', gen_timeline_sync: bool = False, torch_cuda_profiler_dir: str = '') -> None:
+    def __init__(self, ft_nvtx: bool = False, py_inference_log_response: bool = False, rtp_llm_trace_memory: bool = False, rtp_llm_trace_malloc_stack: bool = False, enable_device_perf: bool = False, ft_core_dump_on_exception: bool = False, ft_alog_conf_path: str = '', log_level: str = 'INFO', gen_timeline_sync: bool = False, torch_cuda_profiler_dir: str = '', log_path: str = 'logs', log_file_backup_count: int = 16, nccl_debug_file: str = '', debug_load_server: bool = False, hack_layer_num: int = 0, test_layer_num: int = 0, debug_start_fake_process: bool = False) -> None:
         ...
     def to_string(self) -> str:
         ...
@@ -693,16 +702,6 @@ class SpeculativeExecutionConfig:
     sp_model_type: str
     sp_type: str
     tree_decode_config: str
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
-<<<<<<< HEAD
-    gen_num_per_cycle: int
-    force_stream_sample: bool
-    force_score_context_attention: bool
->>>>>>> finish py_env_configs
-=======
->>>>>>> finish ServerConfig
     def __init__(self, sp_model_type: str = '', sp_type: str = '', sp_min_token_match: int = 2, sp_max_token_match: int = 2, tree_decode_config: str = '', gen_num_per_cycle: int = 1, force_stream_sample: bool = False, force_score_context_attention: bool = True) -> None:
         ...
     def to_string(self) -> str:
