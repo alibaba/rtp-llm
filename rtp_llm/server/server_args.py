@@ -385,7 +385,7 @@ def setup_args():
     profile_debug_logging_group.add_argument(
         '--gen_timeline_sync',
         env_name="GEN_TIMELINE_SYNC",
-        type=bool,
+        type=str2bool,
         default=False,
         help="是否开启收集Timeline信息用于性能分析"
     )
@@ -396,6 +396,58 @@ def setup_args():
         default="",
         help="指定开启Torch的Profile时对应的生成目录"
     )
+
+    profile_debug_logging_group.add_argument(
+        '--log_path',
+        env_name="LOG_PATH",
+        type=str,
+        default="logs",
+        help='日志路径'
+    )
+    profile_debug_logging_group.add_argument(
+        '--log_file_backup_count',
+        env_name="LOG_FILE_BACKUP_COUNT",
+        type=int,
+        default=16,
+        help='日志文件备份数量'
+    )
+
+    profile_debug_logging_group.add_argument(
+        '--nccl_debug_file',
+        env_name="NCCL_DEBUG_FILE",
+        type=str,
+        default=None,
+        help='NCCL调试文件路径'
+    )
+    profile_debug_logging_group.add_argument(
+        '--debug_load_server',
+        env_name="DEBUG_LOAD_SERVER",
+        type=str2bool,
+        default=False,
+        help='开启加载服务的调试模式'
+    )
+    profile_debug_logging_group.add_argument(
+        '--hack_layer_num',
+        env_name="HACK_LAYER_NUM",
+        type=int,
+        default=0,
+        help='截断使用的模型层数'
+    )
+    profile_debug_logging_group.add_argument(
+        '--test_layer_num',
+        env_name="TEST_LAYER_NUM",
+        type=int,
+        default=None,
+        help='测试用的模型层数数量'
+    )
+    profile_debug_logging_group.add_argument(
+        '--debug_start_fake_process',
+        env_name="DEBUG_START_FAKE_PROCESS",
+        type=str2bool,
+        default=None,
+        help='开启启动Fake进程的Debug模式'
+    )
+
     ##############################################################################################################
     # 硬件/Kernel 特定优化
     ##############################################################################################################
@@ -670,6 +722,27 @@ def setup_args():
         default="",
         help="Tree decode的配置文件名，定义了从前缀词到候选Token的映射。"
     )
+    speculative_decoding_group.add_argument(
+        '--sp_act_type',
+        env_name="SP_ACT_TYPE",
+        type=str,
+        default=None,
+        help='小模型的计算使用的类型'
+    )
+    speculative_decoding_group.add_argument(
+        '--sp_quantization',
+        env_name="SP_QUANTIZATION",
+        type=str,
+        default=None,
+        help=''
+    )
+    speculative_decoding_group.add_argument(
+        '--sp_checkpoint_path',
+        env_name="SP_CHECKPOINT_PATH",
+        type=str,
+        default=None,
+        help=''
+    )
 
     speculative_decoding_group.add_argument(
         '--gen_num_per_cycle',
@@ -682,7 +755,7 @@ def setup_args():
     speculative_decoding_group.add_argument(
         '--force_stream_sample',
         env_name="FORCE_STREAM_SAMPLE",
-        type=bool,
+        type=str2bool,
         default=False,
         help="投机采样强制使用流式采样"
     )
@@ -690,7 +763,7 @@ def setup_args():
     speculative_decoding_group.add_argument(
         '--force_score_context_attention',
         env_name="FORCE_SCORE_CONTEXT_ATTENTION",
-        type=bool,
+        type=str2bool,
         default=True,
         help="投机采样强制score阶段使用context attention"
     )
@@ -836,6 +909,488 @@ def setup_args():
         help='当 USE_BATCH_DECODE_SCHEDULER 为 True 时，decode 阶段单次处理迭代中将组合在一起的请求数量。增加此值可以提高系统的整体 throughput，但代价是单个请求的 latency 可能会增加。减小此值可以降低 latency，但可能无法充分利用硬件资源。约束：整数 > 0。仅当 USE_BATCH_DECODE_SCHEDULER 为 True 时有效。'
     )
 
+    ##############################################################################################################
+    # Gang Configuration
+    ##############################################################################################################
+    gang_group = parser.add_argument_group('Gang Configuration')
+    gang_group.add_argument(
+        '--fake_gang_env',
+        env_name="FAKE_GANG_ENV",
+        type=str2bool,
+        default=False,
+        help='在多机启动时的fake行为'
+    )
+    gang_group.add_argument(
+        '--gang_annocation_path',
+        env_name="GANG_ANNOCATION_PATH",
+        type=str,
+        default="/etc/podinfo/annotations",
+        help='GANG信息的路径'
+    )
+    gang_group.add_argument(
+        '--gang_config_string',
+        env_name="GANG_CONFIG_STRING",
+        type=str,
+        default=None,
+        help='GAG信息的字符串表达'
+    )
+    gang_group.add_argument(
+        '--zone_name',
+        env_name="ZONE_NAME",
+        type=str,
+        default="",
+        help='角色名'
+    )
+    gang_group.add_argument(
+        '--distribute_config_file',
+        env_name="DISTRIBUTE_CONFIG_FILE",
+        type=str,
+        default=None,
+        help='分布式的配置文件路径'
+    )
+    gang_group.add_argument(
+        '--dist_barrier_timeout',
+        env_name="DIST_BARRIER_TIMEOUT",
+        type=int,
+        default=45,
+        help='心跳检测的超时时间'
+    )
+    gang_group.add_argument(
+        '--gang_sleep_time',
+        env_name="GANG_SLEEP_TIME",
+        type=int,
+        default=10,
+        help='心跳检测的间隔时间'
+    )
+    gang_group.add_argument(
+        '--gang_timeout_min',
+        env_name="GANG_TIMEOUT_MIN",
+        type=int,
+        default=30,
+        help='心跳超时的最小时间'
+    )
+
+    ##############################################################################################################
+    # Vit Configuration
+    ##############################################################################################################
+    vit_group = parser.add_argument_group('Vit Configuration')
+    vit_group.add_argument(
+        '--vit_separation',
+        env_name="VIT_SEPARATION",
+        type=int,
+        default=0,
+        help='VIT是否和主进程进行分离'
+    )
+    vit_group.add_argument(
+        '--vit_trt',
+        env_name="VIT_TRT",
+        type=int,
+        default=0,
+        help='VIT是否使用TRT库'
+    )
+    vit_group.add_argument(
+        '--trt_cache_enabled',
+        env_name="TRT_CACHE_ENABLED",
+        type=int,
+        default=0,
+        help='是否使用TRT_CACHE'
+    )
+    vit_group.add_argument(
+        '--trt_cache_path',
+        env_name="TRT_CACHE_PATH",
+        type=str,
+        default=os.path.join(os.getcwd(), "trt_cache"),
+        help='TRT_CACHE路径'
+    )
+    vit_group.add_argument(
+        '--download_headers',
+        env_name="DOWNLOAD_HEADERS",
+        type=str,
+        default='',
+        help='是否需要下载headers'
+    )
+    vit_group.add_argument(
+        '--mm_cache_item_num',
+        env_name="MM_CACHE_ITEM_NUM",
+        type=int,
+        default=10,
+        help='多模态开启的Cache的大小'
+    )
+
+    ##############################################################################################################
+    # Server Configuration
+    ##############################################################################################################
+    server_group = parser.add_argument_group('Server Configuration')
+    server_group.add_argument(
+        '--frontend_server_count',
+        env_name="FRONTEND_SERVER_COUNT",
+        type=int,
+        default=4,
+        help='前端服务器启动进程数量'
+    )
+    server_group.add_argument(
+        '--start_port',
+        env_name="START_PORT",
+        type=int,
+        default=8088,
+        help='服务启动端口'
+    )
+    server_group.add_argument(
+        '--timeout_keep_alive',
+        env_name="TIMEOUT_KEEP_ALIVE",
+        type=int,
+        default=5,
+        help='健康检查的超时时间'
+    )
+    server_group.add_argument(
+        '--frontend_server_id',
+        env_name="FRONTEND_SERVER_ID",
+        type=int,
+        default=0,
+        help='前端服务器序号'
+    )
+
+    ##############################################################################################################
+    # Generate Configuration
+    ##############################################################################################################
+    generate_group = parser.add_argument_group('Generate Configuration')
+    generate_group.add_argument(
+        '--think_end_tag',
+        env_name="THINK_END_TAG",
+        type=str,
+        default="<think>\\n\\n",
+        help='深度思考模式的结束标签'
+    )
+    generate_group.add_argument(
+        '--think_end_token_id',
+        env_name="THINK_END_TOKEN_ID",
+        type=int,
+        default=-1,
+        help='深度思考模式的结束标签的 TOKEN_ID'
+    )
+    generate_group.add_argument(
+        '--think_mode',
+        env_name="THINK_MODE",
+        type=int,
+        default=0,
+        help='深度思考模式是否开启'
+    )
+    generate_group.add_argument(
+        '--force_stop_words',
+        env_name="FORCE_STOP_WORDS",
+        type=str2bool,
+        default=False,
+        help='是否开启使用环境变量强制指定模型的STOP WORDS'
+    )
+    generate_group.add_argument(
+        '--stop_words_list',
+        env_name="STOP_WORDS_LIST",
+        type=str,
+        default=None,
+        help='STOP_WORDS的TokenID列表'
+    )
+    generate_group.add_argument(
+        '--stop_words_str',
+        env_name="STOP_WORDS_STR",
+        type=str,
+        default=None,
+        help='STOP_WORDS的string明文'
+    )
+    generate_group.add_argument(
+        '--think_start_tag',
+        env_name="THINK_START_TAG",
+        type=str,
+        default="<think>\\n",
+        help='深度思考模式的起始标签'
+    )
+    generate_group.add_argument(
+        '--generation_config_path',
+        env_name="GENERATION_CONFIG_PATH",
+        type=str,
+        default=None,
+        help='生成配置路径'
+    )
+
+    ##############################################################################################################
+    # Quantization Configuration
+    ##############################################################################################################
+    quantization_group = parser.add_argument_group('Quantization Configuration')
+    quantization_group.add_argument(
+        '--int8_mode',
+        env_name="INT8_MODE",
+        type=int,
+        default=0,
+        help='权重类型是否使用int8模式'
+    )
+    quantization_group.add_argument(
+        '--quantization',
+        env_name="QUANTIZATION",
+        type=str,
+        default=None,
+        help=''
+    )
+
+    ##############################################################################################################
+    # PD Separation Configuration
+    ##############################################################################################################
+    # todo
+
+    ##############################################################################################################
+    # Sparse Configuration
+    ##############################################################################################################
+    sparse_group = parser.add_argument_group('Sparse Configuration')
+    sparse_group.add_argument(
+        '--sparse_config_file',
+        env_name="SPARSE_CONFIG_FILE",
+        type=str,
+        default=None,
+        help='稀疏模型的配置文件路径'
+    )
+
+    ##############################################################################################################
+    # Engine Configuration
+    ##############################################################################################################
+    engine_group = parser.add_argument_group('Engine Configuration')
+    engine_group.add_argument(
+        '--warm_up',
+        env_name="WARM_UP",
+        type=int,
+        default=1,
+        help='在服务启动时是否开启预热'
+    )
+    engine_group.add_argument(
+        '--warm_up_with_loss',
+        env_name="WARM_UP_WITH_LOSS",
+        type=int,
+        default=0,
+        help='在服务启动时是否开启损失去预热'
+    )
+    engine_group.add_argument(
+        '--max_seq_len',
+        env_name="MAX_SEQ_LEN",
+        type=int,
+        default=0,
+        help='输入输出的最大长度'
+    )
+
+    ##############################################################################################################
+    # Embedding Configuration
+    ##############################################################################################################
+    embedding_group = parser.add_argument_group('Embedding Configuration')
+    embedding_group.add_argument(
+        '--embedding_model',
+        env_name="EMBEDDING_MODEL",
+        type=int,
+        default=0,
+        help='嵌入模型的具体类型'
+    )
+
+    ##############################################################################################################
+    # Worker Configuration
+    ##############################################################################################################
+    worker_group = parser.add_argument_group('Worker Configuration')
+    worker_group.add_argument(
+        '--worker_info_port_num',
+        env_name="WORKER_INFO_PORT_NUM",
+        type=int,
+        default=7,
+        help='worker的总的端口的数量'
+    )
+
+    ##############################################################################################################
+    # Model Configuration
+    ##############################################################################################################
+    model_group = parser.add_argument_group('Model Configuration')
+    model_group.add_argument(
+        '--extra_data_path',
+        env_name="EXTRA_DATA_PATH",
+        type=str,
+        default=None,
+        help='额外的数据路径'
+    )
+    model_group.add_argument(
+        '--local_extra_data_path',
+        env_name="LOCAL_EXTRA_DATA_PATH",
+        type=str,
+        default=None,
+        help='本地额外数据路径'
+    )
+    model_group.add_argument(
+        '--tokenizer_path',
+        env_name="TOKENIZER_PATH",
+        type=str,
+        default=None,
+        help='分词器的路径'
+    )
+    model_group.add_argument(
+        '--act_type',
+        env_name="ACT_TYPE",
+        type=str,
+        default='FP16',
+        help='计算使用的数据类型'
+    )
+    model_group.add_argument(
+        '--use_float32',
+        env_name="USE_FLOAT32",
+        type=str2bool,
+        default=False,
+        help='是否使用FP32'
+    )
+    model_group.add_argument(
+        '--original_checkpoint_path',
+        env_name="ORIGINAL_CHECKPOINT_PATH",
+        type=str,
+        default=None,
+        help='原始的checkpoint的路径'
+    )
+    model_group.add_argument(
+        '--mla_ops_type',
+        env_name="MLA_OPS_TYPE",
+        type=str,
+        default='AUTO',
+        help='Multi Latent Attention的操作类型'
+    )
+    model_group.add_argument(
+        '--parallel_batch',
+        env_name="PARALLEL_BATCH",
+        type=int,
+        default=0,
+        help='Batch推理时采用串行还是并行'
+    )
+    model_group.add_argument(
+        '--ft_plugin_path',
+        env_name="FT_PLUGIN_PATH",
+        type=str,
+        default=None,
+        help='插件路径'
+    )
+    model_group.add_argument(
+        '--weight_type',
+        env_name="WEIGHT_TYPE",
+        type=str,
+        default=None,
+        help='模型权重类型'
+    )
+    model_group.add_argument(
+        '--task_type',
+        env_name="TASK_TYPE",
+        type=str,
+        default=None,
+        help='任务类型'
+    )
+    model_group.add_argument(
+        '--model_type',
+        env_name="MODEL_TYPE",
+        type=str,
+        default=None,
+        help='模型类型'
+    )
+    model_group.add_argument(
+        '--checkpoint_path',
+        env_name="CHECKPOINT_PATH",
+        type=str,
+        default=None,
+        help='Checkpoint路径'
+    )
+    model_group.add_argument(
+        '--oss_endpoint',
+        env_name="OSS_ENDPOINT",
+        type=str,
+        default=None,
+        help='OSS端点'
+    )
+    model_group.add_argument(
+        '--ptuning_path',
+        env_name="PTUNING_PATH",
+        type=str,
+        default=None,
+        help='PTuning路径'
+    )
+
+    ##############################################################################################################
+    # Lora Configuration
+    ##############################################################################################################
+    lora_group = parser.add_argument_group('Lora Configuration')
+    lora_group.add_argument(
+        '--lora_info',
+        env_name="LORA_INFO",
+        type=str,
+        default='{}',
+        help='Lora的信息'
+    )
+    lora_group.add_argument(
+        '--merge_lora',
+        env_name="MERGE_LORA",
+        type=str2bool,
+        default=True,
+        help='Lora合并'
+    )
+
+    ##############################################################################################################
+    # Load Configuration
+    ##############################################################################################################
+    load_group = parser.add_argument_group('Load Configuration')
+    load_group.add_argument(
+        '--phy2log_path',
+        env_name="PHY2LOG_PATH",
+        type=str,
+        default="",
+        help='python日志输出路径'
+    )
+    load_group.add_argument(
+        '--converter_num_per_gpu',
+        env_name="CONVERTER_NUM_PER_GPU",
+        type=int,
+        default=4,
+        help='每个GPU做多少个转化'
+    )
+    load_group.add_argument(
+        '--tokenizers_parallelism',
+        env_name="TOKENIZERS_PARALLELISM",
+        type=str2bool,
+        default=False,
+        help='分词器并行度'
+    )
+    load_group.add_argument(
+        '--load_ckpt_num_process',
+        env_name="LOAD_CKPT_NUM_PROCESS",
+        type=int,
+        default=0,
+        help='加载Checkpoint的进程数量'
+    )
+
+    ##############################################################################################################
+    # Render Configuration
+    ##############################################################################################################
+    render_group = parser.add_argument_group('Render Configuration')
+    render_group.add_argument(
+        '--model_template_type',
+        env_name="MODEL_TEMPLATE_TYPE",
+        type=str,
+        default=None,
+        help='模型的模版类型'
+    )
+    render_group.add_argument(
+        '--default_chat_template_key',
+        env_name="DEFAULT_CHAT_TEMPLATE_KEY",
+        type=str,
+        default='default',
+        help='OpenAI的chat模型键'
+    )
+    render_group.add_argument(
+        '--default_tool_use_template_key',
+        env_name="DEFAULT_TOOL_USE_TEMPLATE_KEY",
+        type=str,
+        default='tool_use',
+        help='默认工具使用的模板的key'
+    )
+    render_group.add_argument(
+        '--llava_chat_template',
+        env_name="LLAVA_CHAT_TEMPLATE",
+        type=str,
+        default='',
+        help='LLava模型的会话模板'
+    )
 
     ##############################################################################################################
     # Miscellaneous 配置
@@ -869,7 +1424,7 @@ def setup_args():
     misc_group.add_argument(
         '--disable_pdl',
         env_name="DISABLE_PDL",
-        type=bool,
+        type=str2bool,
         default=False,
         help="是否禁用PDL"
     )

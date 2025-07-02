@@ -121,7 +121,7 @@ class ServerArgsDefaultTest(TestCase):
         self.assertEqual(env.get("SP_MIN_TOKEN_MATCH"), "2")
         self.assertEqual(env.get("SP_MAX_TOKEN_MATCH"), "2")
         self.assertEqual(env.get("TREE_DECODE_CONFIG"), "")
-        self.assertEqual(env.get("GEN_NUM_PER_CIRCLE"), "1") # Note: gen_num_per_cycle overwrites gen_num_per_circle
+        self.assertEqual(env.get("GEN_NUM_PER_CIRCLE"), "1")
         self.assertIsNone(env.get("SP_ACT_TYPE"))
         self.assertIsNone(env.get("SP_QUANTIZATION"))
         self.assertIsNone(env.get("SP_CHECKPOINT_PATH"))
