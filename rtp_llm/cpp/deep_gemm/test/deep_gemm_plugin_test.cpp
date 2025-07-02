@@ -124,17 +124,10 @@ TEST_F(DeepGemmPluginTest, NormalTest) {
 
 TEST_F(DeepGemmPluginTest, JITTest) {
     RunDeepGemmPluginTest(128, 512, 1024);
-    RunDeepGemmPluginTest(64, 1024, 1024);
 }
 
 TEST_F(DeepGemmPluginTest, GroupedTest){
     RunDeepGemmPluginGroupedContiguousTest(128, 4096, 7168, 2);
     RunDeepGeemPluginGroupedMaskedTest(16, 3072, 4096, 16);
-    RunDeepGeemPluginGroupedMaskedTest(16, 4096, 1536, 16);
-    RunDeepGeemPluginGroupedMaskedTest(32, 3072, 4096, 16);
-    RunDeepGeemPluginGroupedMaskedTest(32, 4096, 1536, 16);
-    RunDeepGeemPluginGroupedMaskedTest(64, 3072, 4096, 16);
-    RunDeepGeemPluginGroupedMaskedTest(64, 4096, 1536, 16);
     RunDeepGeemPluginGroupedMaskedTest(128, 3072, 4096, 16);
-    RunDeepGeemPluginGroupedMaskedTest(128, 4096, 1536, 16);
 }

@@ -190,7 +190,7 @@ runDeepGemmFunc JIT::compileAndLoadKernel(uint32_t n,
     filesystem::create_directories(dir_path);
     const string params_str = "_" + to_string(n) + "_" + to_string(k) + "_" + to_string(bm) + "_" + to_string(bn) + "_" + to_string(bk) + "_" + to_string(num_groups) + "_" + to_string(num_stages) + "_" + to_string(num_tma_multicast) + "_" + to_string(uint32_t(gemm_type)) + "_" + to_string(uint32_t(swap_ab));
 
-    JITFilelock lock(string(dir_path) + "/deepgemm" + params_str + "_lock", 120);
+    JITFilelock lock(string(dir_path) + "/deepgemm" + params_str + "_lock", 600);
 
     string cu_filename = dir_path.string() + "/deepgemm" + params_str + ".cu";
     string so_name = dir_path.string() + "/libdeepgemm" + params_str + ".so";

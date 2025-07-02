@@ -13,6 +13,7 @@ from typing import Generator, Union, Any, Dict, List
 from setproctitle import setproctitle
 import torch
 import signal
+import glob
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), '..'))
@@ -137,11 +138,20 @@ def load_gpu_nic_affinity():
     except Exception as e:
         logging.info(f"get gpu nic affinity failed, load {json_path} failed, exception is {e}")
         return False
+    
+def clear_jit_filelock():
+    # check whether exists jit dir
+    if os.path.exists("deep_gemm_runtime"):
+        files = glob.glob('./deep_gemm_runtime/**/*_lock', recursive=True)
+        for file in files:
+            os.remove(file)
 
 def start_backend_server(global_controller: ConcurrencyController):
     setproctitle("maga_ft_backend_server")
     os.makedirs('logs', exist_ok=True)
     load_gpu_nic_affinity()
+
+    clear_jit_filelock()
 
     # TODO(xinfei.sxf) fix this
     if int(os.environ.get('VIT_SEPARATION', 0)) == 1:
