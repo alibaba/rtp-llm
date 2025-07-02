@@ -216,11 +216,32 @@ message RemoteFinishRequestPB {
     int64 request_id = 1;
 }
 
+message BroadcastGetCacheRequestPB {
+    int64 request_id = 1;
+    repeated int64 cache_keys = 2;
+    repeated int32 block_ids = 3;
+}
+
+message BroadcastGetCacheResponsePB {}
+
+message BroadcastPutCacheRequestPB {
+    int64 request_id = 1;
+    repeated int64 cache_keys = 2;
+    repeated int32 block_ids = 3;
+}
+
+message BroadcastPutCacheResponsePB {}
+
 service RpcService {
     rpc GenerateStreamCall(GenerateInputPB) returns (stream GenerateOutputsPB);
     rpc RemoteLoad(BroadcastLoadRequestPB) returns (BroadcastLoadResponsePB);
     rpc RemoteGenerate(stream GenerateRequestPB) returns (stream GenerateOutputsPB);
     rpc RemoteFinish(RemoteFinishRequestPB) returns (EmptyPB);
+    
+    // load cache from 3fs to gpu, for each rank
+    rpc RemoteGetCache(BroadcastGetCacheRequestPB) returns (BroadcastGetCacheResponsePB);
+    // offload cache from gpu to 3fs, for each rank
+    rpc RemotePutCache(BroadcastPutCacheRequestPB) returns (BroadcastPutCacheResponsePB);
 }
 
 service MultimodalRpcService {

@@ -8,6 +8,10 @@ requirement([
     "grpcio"
 ])
 
+config_setting(
+    name = "enable_3fs",
+    values = {"copt": "-DENABLE_3FS=1"},
+)
 
 embedding_arpc_deps()
 # load("//bazel:tf_proto.bzl", "tf_proto_library")
@@ -156,12 +160,41 @@ cc_library(
 
 cc_library(
     name = "cache",
-    hdrs = glob([
-        "cache/*.h",
-    ]),
-    srcs = glob([
-        "cache/*.cc",
-    ]),
+    hdrs = [
+        "cache/BatchKVCacheResource.h",
+        "cache/BlockCache.h",
+        "cache/BlockRefCounter.h",
+        "cache/CacheConfigCreator.h",
+        "cache/CacheConfig.h",
+        "cache/CacheManager.h",
+        "cache/KVCacheResource.h",
+    ] + select({
+        ":enable_3fs": [ 
+            "model_rpc/RPCPool.h",
+            "cache/ThreeFSBlockCache.h",
+            "cache/ThreeFSCacheManager.h",
+            "cache/ThreeFSCudaUtil.h",
+            "cache/ThreeFSFile.h",
+            "cache/ThreeFSMempool.h",
+            "cache/ThreeFSMetrics.h",
+        ],
+        "//conditions:default": [],
+    }),
+    srcs = [
+        "cache/BatchKVCacheResource.cc",
+        "cache/BlockCache.cc",
+        "cache/CacheConfigCreator.cc",
+        "cache/CacheManager.cc",
+        "cache/KVCacheResource.cc",
+    ] + select({
+        ":enable_3fs": [ 
+            "cache/ThreeFSBlockCache.cc",
+            "cache/ThreeFSCacheManager.cc",
+            "cache/ThreeFSFile.cc",
+            "cache/ThreeFSMempool.cc",
+        ],
+        "//conditions:default": [],
+    }),
     deps = torch_deps() + [
         ":utils",
         ":metrics",
@@ -172,7 +205,12 @@ cc_library(
         "//rtp_llm/cpp/devices:devices_base",
         "//rtp_llm/cpp/devices:device_utils",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store",
-    ],
+    ] + select({
+        ":enable_3fs": [ 
+            "//3rdparty/3fs:hf3fs",
+        ],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
 )
 
