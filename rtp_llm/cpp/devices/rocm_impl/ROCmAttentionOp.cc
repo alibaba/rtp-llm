@@ -571,7 +571,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
         check_cuda_error();
       } else {
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(
-            datatype, invokeAddFusedQKVBiasTranspose, q_output->data(),
+            datatype, invokeAddFusedQKVBiasTranspose, nullptr, q_output->data(),
             k_output->data(), v_output->data(), &prefix_prompt_param,
             params.input.data(), nullptr,
             params.common.position_ids
@@ -586,8 +586,8 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
             params.common.cu_seqlens->data<int>(), batch_size, seq_len,
             token_num, head_num, kv_head_num, size_per_head,
             params.configs.rope_config, params.configs.use_logn_attn,
-            scale_out_ptr, int8_mode, false, store_qkv, store_q, store_kv,
-            store_cache, stream_);
+            scale_out_ptr, int8_mode, false, store_qkv, false, store_q,
+            store_kv, store_cache, stream_);
         check_cuda_error();
       }
       writeCacheStore(params);

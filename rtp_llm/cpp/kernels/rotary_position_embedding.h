@@ -650,19 +650,25 @@ __device__ __inline__ void normal_rope_with_cache(vector_t&     x,
                                                   const int     tidx,
                                                   const int     dim,
                                                   const float2& coef,
-                                                  const int     offset = 0)
+                                                  const bool work)
 {
-    reinterpret_cast<vector_t*>(smem)[tidx] = x;
+    if (work) {
+        reinterpret_cast<vector_t*>(smem)[tidx] = x;
+    }
 
     __syncthreads();
 
-    RotaryHalfRead(x, smem, tidx, dim / 2);
-    x = rotary_embedding_transform(x, coef);
-    RotaryHalfWrite(x, smem, tidx, dim / 2);
+    if (work) {
+        RotaryHalfRead(x, smem, tidx, dim / 2);
+        x = rotary_embedding_transform(x, coef);
+        RotaryHalfWrite(x, smem, tidx, dim / 2);
+    }
 
     __syncthreads();
 
-    x = reinterpret_cast<vector_t*>(smem)[tidx];
+    if (work) {
+        x = reinterpret_cast<vector_t*>(smem)[tidx];
+    }
 }
 
 template<typename RopeInit, typename scalar_t, typename vector_t>

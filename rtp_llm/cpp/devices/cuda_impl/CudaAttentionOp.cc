@@ -26,6 +26,66 @@ using namespace rtp_llm;
 
 namespace rtp_llm {
 
+BufferPtr genNormalCosSin(CudaDevice* device, int rope_dim, int rope_theta, float rope_scale, int max_position_embeddings) {
+    auto inv_freq = 1.0 / torch::pow(rope_theta, torch::arange(0, rope_dim, 2, torch::kInt64).to(torch::kFloat32) / rope_dim);
+    auto t = torch::arange(max_position_embeddings, torch::kInt64).to(torch::kFloat32);
+    t.div_(rope_scale);
+    auto freqs = torch::outer(t, inv_freq);
+    auto cos = freqs.cos().to(torch::kFloat32);
+    auto sin = freqs.sin().to(torch::kFloat32);
+    auto cos_sin = torch::stack({cos, sin}, 0).permute({1, 2, 0}).reshape({cos.size(0), -1}).contiguous();
+
+    BufferPtr cos_sin_d = device->allocateBuffer({DataType::TYPE_FP32,
+                                                 {static_cast<size_t>(rope_dim * max_position_embeddings)},
+                                                 AllocationType::DEVICE},
+                                                 {"cos_sin_d"});
+    check_cuda_value(cudaMemcpyAsync(cos_sin_d->data(),
+                                     cos_sin.data_ptr(),
+                                     rope_dim * max_position_embeddings * sizeof(float),
+                                     cudaMemcpyHostToDevice,
+                                     device->getStream()));
+    check_cuda_value(cudaStreamSynchronize(device->getStream()));
+
+    return cos_sin_d;
+}
+
+/**
+ * @brief Get the Rope Cos Sin object, TODO: move to python
+ * 
+ * @param device 
+ * @param rope_style 
+ * @param rope_dim 
+ * @param rope_theta 
+ * @param rope_scale 
+ * @param max_position_embeddings 
+ * @return BufferPtr 
+ */
+BufferPtr getRopeCosSin(CudaDevice* device,
+                        RopeStyle rope_style,
+                        int rope_dim,
+                        int rope_theta,
+                        float rope_scale,
+                        int max_position_embeddings = 128000) {
+    RTP_LLM_LOG_INFO("rope: style = %d, dim = %d, theta = %d, scale = %f, max_position_embeddings = %d",
+                     rope_style, rope_dim, rope_theta, rope_scale, max_position_embeddings);
+    BufferPtr cos_sin = nullptr;
+
+    switch (rope_style) {
+        case RopeStyle::No:
+            break;
+
+        case RopeStyle::Base:
+            cos_sin = genNormalCosSin(device, rope_dim, rope_theta, rope_scale, max_position_embeddings);
+            break;
+
+        default:
+            RTP_LLM_LOG_ERROR("unsupported rope_style = ", rope_style);
+            break;
+    }
+
+    return cos_sin;
+}
+
 ParamsPtr CudaDevice::prepareTrtAttn(const AttentionConfigs& configs,
                                      const BufferPtr &k_cache,
                                      const BufferPtr &kv_cache_block_id,
@@ -102,18 +162,6 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
         auto trt_attn = ((TRTAttn*)params.common.prefill_trt_attn.get());
         kv_block_array = trt_attn->kv_block_array;
         TRTAttn::setKvCache(kv_block_array, *params.common.kv_cache);
-
-        if (fmha_type_ == FMHAType::FLASH_INFER || fmha_type_ == FMHAType::XQA) {
-            bool use_xqa = fmha_type_ == FMHAType::XQA;
-            FlashInferAttnParams* flash_infer = (FlashInferAttnParams*)params.common.prefill_flash_infer_attn.get();
-            RTP_LLM_CHECK(flash_infer && flash_infer->plan.numel() > 0);
-            BufferPtr f16_out;
-            if (use_fp8_fmha_) {
-                f16_out = allocateBuffer({params.input.type(), params.output.shape(), AllocationType::DEVICE}, {"f16_out"});
-            }
-            flash_infer->run(params, f16_out, [this]() { computeInsertedMoE(); }, reinterpret_cast<int64_t>(stream_), use_xqa, &kv_block_array, this);
-            return;
-        }
     }
 
     auto datatype       = params.input.type();
@@ -125,6 +173,12 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
     auto head_num       = params.configs.head_num;
     auto kv_head_num    = params.configs.kv_head_num;
     auto size_per_head  = params.configs.size_per_head;
+
+    // for flashinfer
+    auto q_no_transpose_output = allocateBuffer({params.input.type(),
+                                                {token_num, head_num, size_per_head},
+                                                AllocationType::DEVICE},
+                                                {"q_no_transpose_output"});
 
     auto q_output = allocateBuffer({params.input.type(),
                                     {batch_size, head_num, seq_len, size_per_head},
@@ -192,15 +246,17 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
                                     && !params.configs.fuse_qkv_add_bias && fmha_type_ != FMHAType::NONE);
     RTP_LLM_LOG_DEBUG("skip_add_bias_transpose: %d", skip_add_bias_transpose);
     if (!skip_add_bias_transpose) {
-        bool store_qkv   = fmha_type_ != FMHAType::PAGED_TRT_V2 && fmha_type_ != FMHAType::NONE;
-        bool store_q     = fmha_type_ == FMHAType::PAGED_TRT_V2 || fmha_type_ == FMHAType::NONE;
-        bool store_kv    = fmha_type_ == FMHAType::NONE;
+        bool store_qkv            = fmha_type_ != FMHAType::PAGED_TRT_V2 && fmha_type_ != FMHAType::NONE;
+        bool store_q_no_transpose = fmha_type_ == FMHAType::FLASH_INFER;
+        bool store_q              = fmha_type_ == FMHAType::PAGED_TRT_V2 || fmha_type_ == FMHAType::NONE;
+        bool store_kv             = fmha_type_ == FMHAType::NONE;
         // if use mla cache, no need to store cache
         bool store_cache = params.common.kv_cache.has_value();
 
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(
             datatype,
             invokeAddFusedQKVBiasTranspose,
+            q_no_transpose_output->data(),
             q_output->data(),
             k_output->data(),
             v_output->data(),
@@ -223,6 +279,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
             0, // int8_mode,
             fmha_type_ == FMHAType::PAGED_TRT_V2,
             store_qkv,
+            store_q_no_transpose,
             store_q,
             store_kv,
             store_cache,
@@ -249,7 +306,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
     }
 
     computeInsertedMoE();
-    prefillAttention(params, kv_block_array, q_output, k_output, v_output, qkv_buf_fp8);
+    prefillAttention(params, kv_block_array, q_no_transpose_output, q_output, k_output, v_output, qkv_buf_fp8);
 }
 
 template<typename T>
@@ -262,7 +319,6 @@ void selfAttentionwrapper(const AttentionModuleParams params,
                           float* partial_max,
                           int* block_counter,
                           KVBlockArray kv_block_array,
-                          std::function<void()> moe_insertion_callback,
                           cudaStream_t stream,
                           CudaDevice *device)
 {
@@ -304,7 +360,7 @@ void selfAttentionwrapper(const AttentionModuleParams params,
     if (params.weights.static_scale_reciprocal_weight) {
         attention_output_orig_quant_scale = params.weights.static_scale_reciprocal_weight->kernel->data<float>();
     }
-    moe_insertion_callback();
+
     fusedQKV_masked_attention_dispatch<T, KVBlockArray>(
             qkv_buf_ptr,
             bias_ptr,
@@ -365,34 +421,30 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
     BufferPtr partial_max = nullptr;
     BufferPtr block_counter = nullptr;
 
-    size_t batch_size     = params.common.decoder_batch_size;
-    size_t local_head_num = params.configs.head_num;
-    size_t size_per_head  = params.configs.size_per_head;
+    size_t batch_size        = params.common.decoder_batch_size;
+    size_t local_head_num    = params.configs.head_num;
+    size_t local_kv_head_num = params.configs.kv_head_num;
+    size_t size_per_head     = params.configs.size_per_head;
 
     RUNTIME_ASSERT_OP_ARG(params.common.kv_cache, "kv cache can not be null for decoder self-attention");
     auto trt_attn = ((TRTAttn*)params.common.decode_trt_attn.get());
     auto kv_block_array = trt_attn->kv_block_array;
     TRTAttn::setKvCache(kv_block_array, *params.common.kv_cache);
 
-#ifdef USING_CUDA12
-    size_t local_kv_head_num = params.configs.kv_head_num;
-    size_t local_tokens_per_block = params.configs.tokens_per_block;
-    if (use_xqa && supportXqa(params.input.type(),
-                              params.output.type(),
-                              params.common.kv_cache->k_cache_buffer->type(),
-                              local_head_num / local_kv_head_num,
-                              size_per_head,
-                              local_tokens_per_block)) {
-
-        auto q_output = allocateBuffer({params.input.type(),
-                                       {batch_size, local_head_num, size_per_head},
-                                       AllocationType::DEVICE},
-                                       {"q_output"});
+    BufferPtr q_output;
+    auto flash_infer = (FlashInferAttnParams*)params.common.decode_flash_infer_attn.get();
+    bool use_flashinfer = flash_infer && flash_infer->plan.numel() > 0;
+    if (use_xqa || use_flashinfer) {
+        q_output = allocateBuffer({params.input.type(),
+                                  {batch_size, local_head_num, size_per_head},
+                                  AllocationType::DEVICE},
+                                  {"q_output"});
 
         static BufferPtr cos_sin_cache = getRopeCosSin(this,
                                                        params.configs.rope_config.style,
                                                        params.configs.rope_config.dim,
-                                                       params.configs.rope_config.base);
+                                                       params.configs.rope_config.base,
+                                                       params.configs.rope_config.scale);
 
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(params.input.type(),
                                          invokeDecodeAddFusedQKVBiasTranspose,
@@ -402,8 +454,8 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
                                          kv_block_array,
                                          params.input.data(),
                                          params.common.sequence_lengths->data<int>(),
-                                         params.weights.qkv_weight->bias->data(),
-                                         cos_sin_cache->data<float>(),
+                                         params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias ? params.weights.qkv_weight->bias->data() : nullptr,
+                                         cos_sin_cache ? cos_sin_cache->data<float>() : nullptr,
                                          batch_size,
                                          local_head_num,
                                          local_kv_head_num,
@@ -414,6 +466,20 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
                                          false, // store_kv,
                                          true, // store_cache,
                                          stream_);
+
+        check_cuda_error();
+    }
+
+    computeInsertedMoE();
+
+#ifdef USING_CUDA12
+    size_t local_tokens_per_block = params.configs.tokens_per_block;
+    if (use_xqa && supportXqa(params.input.type(),
+                              params.output.type(),
+                              params.common.kv_cache->k_cache_buffer->type(),
+                              local_head_num / local_kv_head_num,
+                              size_per_head,
+                              local_tokens_per_block)) {
 
         runXqa(q_output->data(),
                params.output.data(),
@@ -432,13 +498,12 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
     }
 #endif
 
-    auto flash_infer = (FlashInferAttnParams*)params.common.decode_flash_infer_attn.get();
-    if (flash_infer && flash_infer->plan.numel() > 0) {
+    if (use_flashinfer) {
         BufferPtr f16_out;
         if (use_fp8_fmha_) {
             f16_out = allocateBuffer({params.input.type(), params.output.shape(), AllocationType::DEVICE}, {"f16_out"});
         }
-        flash_infer->run(params, f16_out, [this](){computeInsertedMoE();}, reinterpret_cast<int64_t>(stream_));
+        flash_infer->run(params, q_output, f16_out, reinterpret_cast<int64_t>(stream_));
         return;
     }
 
@@ -481,9 +546,6 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
                                      partial_max_data,
                                      block_counter_data,
                                      kv_block_array,
-                                     [this]() {
-                                         computeInsertedMoE();
-                                     },
                                      stream_,
                                      this);
 }

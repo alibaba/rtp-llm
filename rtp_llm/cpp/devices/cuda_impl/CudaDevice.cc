@@ -396,11 +396,7 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
         bool paged_kv_fmha =
             params.diff_qkv_len && params.k_cache && (params.configs.kv_cache_dtype == KvCacheDataType::BASE);
         if (output.prefill_flash_infer_attn != nullptr && !params.configs.use_mla) {
-            if (use_fp8_fmha_ && init_params_.fmha_config.enable_xqa) {
-                fmha_type_ = FMHAType::XQA;
-            } else {
-                fmha_type_ = FMHAType::FLASH_INFER;
-            }
+            fmha_type_ = FMHAType::FLASH_INFER;
         } else if (paged_kv_fmha) {
             if (use_trtv2_fmha_paged && cufmha_runner_->trtV2FmhaPagedSupport()) {
                 fmha_type_ = FMHAType::PAGED_TRT_V2;

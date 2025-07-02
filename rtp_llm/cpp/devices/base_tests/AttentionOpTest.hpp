@@ -683,13 +683,15 @@ void AttentionOpTest::flashinferPrefillOpTest(size_t        batch_size,
     std::vector<int> prefix_lengths(batch_size);
     std::vector<int> kv_seq_lengths(batch_size);
     std::vector<int> sequence_lengths;
-    std::vector<int> cu_seqlens(batch_size + 1);
+    std::vector<int> cu_seqlens(batch_size + 1, 0);
     for (int i = 0; i < batch_size; i++) {
         input_lengths[i]  = seq_len;
         prefix_lengths[i] = kv_seq_len;
         kv_seq_lengths[i] = kv_seq_len + seq_len;
-        cu_seqlens[i + 1] = seq_len * i;
+        cu_seqlens[i + 1] = seq_len * (i + 1);
     }
+    std::vector<int> positions(batch_size, kv_seq_len);
+
     auto   input_lengths_host  = torch::from_blob((void*)input_lengths.data(), {(int)batch_size}, int_tensor_options);
     auto   prefix_lengths_host = torch::from_blob((void*)prefix_lengths.data(), {(int)batch_size}, int_tensor_options);
     auto   cu_seqlens_host     = torch::from_blob((void*)cu_seqlens.data(), {(int)batch_size + 1}, int_tensor_options);
@@ -728,13 +730,21 @@ void AttentionOpTest::flashinferPrefillOpTest(size_t        batch_size,
             .reshape({1, (int)batch_size, 2, (int)padding_kv_seq_len, (int)num_key_value_heads * (int)head_dim})
             .to(torch::kBFloat16);
     auto kvcache_pad_fp8 = kvcache_pad.to(torch::kFloat8_e4m3fn);
+
+    auto token_num = batch_size * seq_len;
+    auto padding_offset_host = torch::zeros({(int)token_num}, int_tensor_options);
+    auto position_ids_host = torch::from_blob((void*)positions.data(), {(int)batch_size}, int_tensor_options);
     auto attention_mask_host =
         torch::zeros({(int)batch_size, (int)seq_len, (int)kv_seq_len + (int)seq_len}, tensor_options);
+
     auto attention_mask_device   = createDeviceBuffer<float>(attention_mask_host);
     auto qkv_states_device       = createDeviceBuffer<__nv_bfloat16>(qkv_states_host);
     auto query_states_device     = createDeviceBuffer<__nv_bfloat16>(query_states_host);
     auto sequence_lengths_device = createDeviceBuffer<int>(sequence_lengths_host);
     auto input_lengths_device    = createDeviceBuffer<int>(input_lengths_host);
+    auto cu_seqlens_device       = createDeviceBuffer<int>(cu_seqlens_host);
+    auto padding_offset_device   = createDeviceBuffer<int>(padding_offset_host);
+    auto position_ids_device     = createDeviceBuffer<int>(position_ids_host);
     auto rope_config             = RopeConfig({RopeStyle::No, (int)head_dim, 10000, 1, 2048, 1, 1});
     // cache manager need one block for preserve and every seq need one block for preserve.
     auto                 block_num = 2 * batch_size * ((kv_seq_len + tokens_per_block - 1) / tokens_per_block + 1) + 1;
@@ -769,11 +779,15 @@ void AttentionOpTest::flashinferPrefillOpTest(size_t        batch_size,
     auto             layer_v_cache_buffer   = kv_cache_buffer.v_blocks->index(0);
     common_inputs.kv_cache                  = KvCacheInfo(
         {(int)kv_cache_buffer.k_blocks->shape()[0], kv_cache_block_id, layer_k_cache_buffer, layer_v_cache_buffer});
+    common_inputs.cu_seqlens = cu_seqlens_device;
+    common_inputs.padding_offset = padding_offset_device;
+    common_inputs.position_ids = position_ids_device;
+    common_inputs.attention_mask = attention_mask_device;
     common_inputs.context_batch_size  = batch_size;
     common_inputs.context_max_seq_len = seq_len;
     common_inputs.decoder_batch_size  = 0;
     common_inputs.decoder_max_seq_len = 0;
-    common_inputs.max_prefix_length   = kv_seq_len;
+    common_inputs.max_prefix_length   = 0;
     common_inputs.decode_flash_infer_attn.swap(prep_output.decode_flash_infer_attn);
     common_inputs.prefill_flash_infer_attn.swap(prep_output.prefill_flash_infer_attn);
     common_inputs.prefill_trt_attn.swap(prep_output.prefill_trt_attn);
@@ -781,7 +795,6 @@ void AttentionOpTest::flashinferPrefillOpTest(size_t        batch_size,
     auto buffer_nullptr         = BufferPtr(nullptr);
     auto attention_weight       = AttentionLayerWeights();
     attention_weight.qkv_weight = make_shared<const DenseWeights>(DenseWeights(buffer_nullptr));
-    auto token_num              = batch_size * seq_len;
     auto qkv_output = device->allocateBuffer({query_states_device->type(), {token_num, num_heads, head_dim}});
     device->contextAttention(
         {0, *qkv_states_device, *qkv_output, common_inputs, attention_weight, attention_config, qscheme});
@@ -832,12 +845,12 @@ void AttentionOpTest::xqaPrefillOpTest(size_t        batch_size,
     std::vector<int> prefix_lengths(batch_size);
     std::vector<int> kv_seq_lengths(batch_size);
     std::vector<int> sequence_lengths;
-    std::vector<int> cu_seqlens(batch_size + 1);
+    std::vector<int> cu_seqlens(batch_size + 1, 0);
     for (int i = 0; i < batch_size; i++) {
         input_lengths[i]  = seq_len;
         prefix_lengths[i] = kv_seq_len;
         kv_seq_lengths[i] = kv_seq_len + seq_len;
-        cu_seqlens[i + 1] = seq_len * i;
+        cu_seqlens[i + 1] = seq_len * (i + 1);
     }
     auto   input_lengths_host  = torch::from_blob((void*)input_lengths.data(), {(int)batch_size}, int_tensor_options);
     auto   prefix_lengths_host = torch::from_blob((void*)prefix_lengths.data(), {(int)batch_size}, int_tensor_options);

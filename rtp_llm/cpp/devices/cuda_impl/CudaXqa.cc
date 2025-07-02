@@ -6,47 +6,6 @@ using namespace rtp_llm;
 
 namespace rtp_llm {
 
-BufferPtr genNormalCosSin(CudaDevice* device, int rope_dim, int rope_theta, int max_position_embeddings) {
-    auto inv_freq = 1.0 / torch::pow(rope_theta, torch::arange(0, rope_dim, 2, torch::kInt64).to(torch::kFloat32) / rope_dim);
-    auto t = torch::arange(max_position_embeddings, torch::kInt64).to(torch::kFloat32);
-    auto freqs = torch::outer(t, inv_freq);
-    auto cos = freqs.cos().to(torch::kFloat32);
-    auto sin = freqs.sin().to(torch::kFloat32);
-    auto cos_sin = torch::stack({cos, sin}, 0).permute({1, 2, 0}).reshape({cos.size(0), -1}).contiguous();
-
-    BufferPtr cos_sin_d = device->allocateBuffer({DataType::TYPE_FP32,
-                                                 {static_cast<size_t>(rope_dim * max_position_embeddings)},
-                                                 AllocationType::DEVICE},
-                                                 {"cos_sin_d"});
-    check_cuda_value(cudaMemcpyAsync(cos_sin_d->data(),
-                                     cos_sin.data_ptr(),
-                                     rope_dim * max_position_embeddings * sizeof(float),
-                                     cudaMemcpyHostToDevice,
-                                     device->getStream()));
-    check_cuda_value(cudaStreamSynchronize(device->getStream()));
-
-    return cos_sin_d;
-}
-
-BufferPtr getRopeCosSin(CudaDevice* device, RopeStyle rope_style, int rope_dim, int rope_theta, int max_position_embeddings) {
-    BufferPtr cos_sin = nullptr;
-
-    switch (rope_style) {
-        case RopeStyle::No:
-            break;
-
-        case RopeStyle::Base:
-            cos_sin = genNormalCosSin(device, rope_dim, rope_theta, max_position_embeddings);
-            break;
-
-        default:
-            RTP_LLM_LOG_ERROR("unsupported rope_style = ", rope_style);
-            break;
-    }
-
-    return cos_sin;
-}
-
 BufferPtr getKVCacheScale(CudaDevice* device) {
     float scale = 1.;
     BufferPtr kv_cache_scale = device->allocateBuffer({DataType::TYPE_FP32, {1}, AllocationType::DEVICE}, {"kv_cache_scale"});

@@ -64,12 +64,9 @@ public:
                              DataType                         dtype,
                              bool                             skip_no_prefix = true);
     void run(const AttentionModuleParams& params,
-             const BufferPtr &fp16_out,
-             std::function<void()> moe_insertion_callback,
-             int64_t stream,
-             bool use_xqa = false,
-             KVBlockArray* kv_block_array = nullptr,
-             CudaDevice* device = nullptr);
+             const BufferPtr& input_q,
+             const BufferPtr& fp16_out,
+             int64_t stream);
 private:
     static std::tuple<BufferPtr, std::vector<torch::Tensor>> allocateManyBuffer(
             CudaDevice *device,

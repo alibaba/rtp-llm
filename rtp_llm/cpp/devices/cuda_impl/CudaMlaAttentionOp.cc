@@ -233,6 +233,7 @@ AttentionModuleOutput CudaDevice::mlaContextAttention(const MlaAttentionModulePa
         nullptr,
         nullptr,
         nullptr,
+        nullptr,
         nullptr);
     auto qkv_output_reshaped = padded_qkv_output_t->reshape({token_num, params.configs.head_num, size_per_head});
     auto sliced_buffer = slice({qkv_output_reshaped, -1, 0, (int64_t)v_head_dim});

@@ -8,11 +8,13 @@
 #include "rtp_llm/cpp/kernels/kv_cache/kv_cache_utils.h"
 #include "rtp_llm/cpp/devices/DeviceData.h"
 #include "3rdparty/flashinfer/flashinfer.h"
+#include "rtp_llm/cpp/devices/cuda_impl/CudaFlashInfer.h"
 
 namespace rtp_llm {
 
 void CudaDevice::prefillAttention(const AttentionModuleParams& params,
                                   KVBlockArray                 kv_block_array,
+                                  const BufferPtr&             q_no_transpose_output,
                                   const BufferPtr&             q_output,
                                   const BufferPtr&             k_output,
                                   const BufferPtr&             v_output,
@@ -36,6 +38,17 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
         cudaMemsetAsync(tiled_counter_ptr->data(), 0, sizeof(uint32_t), stream);
     }
     switch (fmha_type) {
+        case FMHAType::FLASH_INFER: {
+            RTP_LLM_CHECK_WITH_INFO(q_no_transpose_output != nullptr, "q_no_transpose_output must be provided for flashinfer");
+            FlashInferAttnParams* flash_infer = (FlashInferAttnParams*)params.common.prefill_flash_infer_attn.get();
+            RTP_LLM_CHECK(flash_infer && flash_infer->plan.numel() > 0);
+            BufferPtr f16_out;
+            if (use_fp8_fmha_) {
+                f16_out = allocateBuffer({params.input.type(), params.output.shape(), AllocationType::DEVICE}, {"f16_out"});
+            }
+            flash_infer->run(params, q_no_transpose_output, f16_out, reinterpret_cast<int64_t>(stream));
+            break;
+        }
         case FMHAType::PAGED_TRT_V2: {
             RTP_LLM_CHECK_WITH_INFO(q_output != nullptr, "q_output must be provided for paged trt v2 fmha");
             cufmha_runner->runTrtV2FmhaPaged(q_output->data(),

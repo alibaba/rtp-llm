@@ -128,7 +128,8 @@ void invokeSplitQKV(T*           q_buf,
                     cudaStream_t stream);
 
 template<typename T>
-void invokeAddFusedQKVBiasTranspose(T*                               q_buf,
+void invokeAddFusedQKVBiasTranspose(T*                               q_no_transpose_buf,
+                                    T*                               q_buf,
                                     T*                               k_buf,
                                     T*                               v_buf,
                                     PrefixPromptBatchWeightsParam*   param,
@@ -150,6 +151,7 @@ void invokeAddFusedQKVBiasTranspose(T*                               q_buf,
                                     const int                        int8_mode,
                                     const bool                       use_paged_fmha,
                                     const bool                       store_qkv,
+                                    const bool                       store_q_no_transpose,
                                     const bool                       store_q,
                                     const bool                       store_kv,
                                     const bool                       store_cache,

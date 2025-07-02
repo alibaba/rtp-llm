@@ -231,6 +231,7 @@ protected:
 
     void prefillAttention(const AttentionModuleParams& params,
                           KVBlockArray                 kv_block_array,
+                          const BufferPtr&             q_no_transpose_output, // for flashinfer
                           const BufferPtr&             q_output,
                           const BufferPtr&             k_output,
                           const BufferPtr&             v_output,

@@ -64,20 +64,4 @@ void runXqa(void* input,
             size_t max_batch_size = 1024,
             uint32_t beam_width = beamWidth);
 
-/**
- * @brief Get the Rope Cos Sin object, TODO: move to python
- * 
- * @param device 
- * @param rope_style 
- * @param rope_dim 
- * @param rope_theta 
- * @param max_position_embeddings 
- * @return BufferPtr 
- */
-BufferPtr getRopeCosSin(CudaDevice* device,
-                        RopeStyle rope_style = RopeStyle::Base,
-                        int rope_dim = 128,
-                        int rope_theta = 1000000,
-                        int max_position_embeddings = 128000);
-
 }

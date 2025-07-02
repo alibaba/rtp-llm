@@ -243,6 +243,11 @@ void UnfusedAttentionTest::prefillAddFusedQKVBiasTransposeTest(size_t batch_size
     PrefixPromptBatchWeightsParam prefix_prompt_param;
     prefix_prompt_param.kv_block_array = trt_attn->kv_block_array;
 
+    auto q_no_transpose_output = device->allocateBuffer({params.input.type(),
+                                                        {token_num, num_heads, head_dim},
+                                                        AllocationType::DEVICE},
+                                                        {"q_no_transpose_output"});
+
     auto q_output = device->allocateBuffer({params.input.type(),
                                            {batch_size, num_heads, seq_len, head_dim},
                                            AllocationType::DEVICE},
@@ -270,6 +275,7 @@ void UnfusedAttentionTest::prefillAddFusedQKVBiasTransposeTest(size_t batch_size
     int int8_mode = 0;
     bool use_paged_fmha = false;
     bool store_qkv = false;
+    bool store_q_no_transpose = false;
 
     if (is_perf) {
         bool store_q = true;
@@ -284,6 +290,7 @@ void UnfusedAttentionTest::prefillAddFusedQKVBiasTransposeTest(size_t batch_size
         for (int i = 0; i < 3; ++i) {
             DISPATCH_CUDA_FUNCTION_DATA_TYPE(params.input.type(),
                                              invokeAddFusedQKVBiasTranspose,
+                                             q_no_transpose_output->data(),
                                              q_output->data(),
                                              k_output->data(),
                                              v_output->data(),
@@ -306,6 +313,7 @@ void UnfusedAttentionTest::prefillAddFusedQKVBiasTransposeTest(size_t batch_size
                                              int8_mode,
                                              use_paged_fmha,
                                              store_qkv,
+                                             store_q_no_transpose,
                                              store_q,
                                              store_kv,
                                              store_cache,
@@ -321,6 +329,7 @@ void UnfusedAttentionTest::prefillAddFusedQKVBiasTransposeTest(size_t batch_size
         for (int i = 0; i < iters; ++i) {
             DISPATCH_CUDA_FUNCTION_DATA_TYPE(params.input.type(),
                                              invokeAddFusedQKVBiasTranspose,
+                                             q_no_transpose_output->data(),
                                              q_output->data(),
                                              k_output->data(),
                                              v_output->data(),
@@ -343,6 +352,7 @@ void UnfusedAttentionTest::prefillAddFusedQKVBiasTransposeTest(size_t batch_size
                                              int8_mode,
                                              use_paged_fmha,
                                              store_qkv,
+                                             store_q_no_transpose,
                                              store_q,
                                              store_kv,
                                              store_cache,
@@ -368,6 +378,7 @@ void UnfusedAttentionTest::prefillAddFusedQKVBiasTransposeTest(size_t batch_size
 
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(params.input.type(),
                                          invokeAddFusedQKVBiasTranspose,
+                                         q_no_transpose_output->data(),
                                          q_output->data(),
                                          k_output->data(),
                                          v_output->data(),
@@ -390,6 +401,7 @@ void UnfusedAttentionTest::prefillAddFusedQKVBiasTransposeTest(size_t batch_size
                                          int8_mode,
                                          use_paged_fmha,
                                          store_qkv,
+                                         store_q_no_transpose,
                                          store_q,
                                          store_kv,
                                          store_cache,
@@ -478,7 +490,7 @@ void UnfusedAttentionTest::decodeAddFusedQKVBiasTransposeTest(size_t batch_size,
     auto cu_seqlens_host = torch::from_blob((void*)cu_seqlens.data(), {(int)batch_size + 1}, int_tensor_options);
 
     auto token_num = batch_size * seq_len;
-    auto position_ids_host = torch::from_blob((void*)positions.data(), {(int)batch_size}, int_tensor_options);;
+    auto position_ids_host = torch::from_blob((void*)positions.data(), {(int)batch_size}, int_tensor_options);
     auto attention_mask_host = torch::zeros({(int)batch_size, (int)seq_len, (int)kv_seq_len + (int)seq_len}, tensor_options);
 
     auto qkv_states_device       = createDeviceBuffer<__nv_bfloat16>(qkv_states_host);

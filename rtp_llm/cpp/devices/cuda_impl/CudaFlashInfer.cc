@@ -445,103 +445,15 @@ ParamsPtr FlashInferAttnParams::prepare(rtp_llm::DeviceBase*             device,
 
 void FlashInferAttnParams::run(
         const AttentionModuleParams& params,
-        const BufferPtr &f16_out,
-        std::function<void()> moe_insertion_callback,
-        int64_t stream,
-        bool use_xqa,
-        KVBlockArray* kv_block_array,
-        CudaDevice* device)
+        const BufferPtr& input_q,
+        const BufferPtr& f16_out,
+        int64_t stream)
 {
-    const int local_head_num = params.configs.head_num;
-    const int local_head_num_kv = params.configs.kv_head_num;
     const int size_per_head = params.configs.size_per_head;
 
-    if (params.weights.qkv_weight->bias) {
-        at::Tensor qkv_input = Buffer2torchTensor(params.input, false);
-        qkv_input.add_(Buffer2torchTensor(params.weights.qkv_weight->bias, false));
-    }
-
-    const int bs = params.input.shape()[0];
-    const vector<int64_t> strides = {(local_head_num + 2 * local_head_num_kv) * size_per_head, size_per_head, 1};
-    const auto cuda_option = torch::dtype(dataTypeToTorchType(params.input.type())).device(torch::DeviceType::CUDA).requires_grad(false);
-    auto q = torch::from_blob(params.input.data(),
-                              {bs, local_head_num, size_per_head},
-                              strides, cuda_option);
-    auto append_k = torch::from_blob(params.input.dataWithOffset(local_head_num * size_per_head),
-                                     {bs, local_head_num_kv, size_per_head},
-                                     strides, cuda_option);
-
-    if (params.configs.rope_config.style == RopeStyle::Base) {
-        apply_rope_pos_ids(q,
-                        append_k,
-                        q,
-                        append_k,
-                        positions_d,
-                        params.configs.rope_config.dim,
-                        false,
-                        params.configs.rope_config.scale,
-                        params.configs.rope_config.base,
-                        stream);
-        check_cuda_error();
-    }
-
-    auto append_v = torch::from_blob(params.input.dataWithOffset((local_head_num + local_head_num_kv) * size_per_head),
-                                     {bs, local_head_num_kv, size_per_head},
-                                     strides, cuda_option);
-
+    auto q = Buffer2torchTensor(input_q, false);
     auto k_cache = Buffer2torchTensor(params.common.kv_cache->k_cache_buffer, false);
     auto v_cache = Buffer2torchTensor(params.common.kv_cache->v_cache_buffer, false);
-
-    // Note: skip_append_kv_cache is only used for unit test
-    if (!params.configs.skip_append_kv_cache) {
-        if (append_k.type() != k_cache.type()) {
-            append_k = append_k.to(k_cache.type());
-            append_v = append_v.to(k_cache.type());
-        }
-        append_paged_kv_cache(append_k,
-                            append_v,
-                            batch_indice_d,
-                            positions_d,
-                            k_cache,
-                            v_cache,
-                            page_indice_d,
-                            page_indptr_d,
-                            paged_kv_last_page_len_d,
-                            1,
-                            stream);
-    }
-
-    moe_insertion_callback();
-
-    check_cuda_error();
-
-#ifdef USING_CUDA12
-    if (use_xqa
-        && supportXqa(params.input.type(),
-                      params.output.type(),
-                      params.common.kv_cache->k_cache_buffer->type(),
-                      local_head_num / local_head_num_kv,
-                      size_per_head,
-                      params.configs.tokens_per_block)) {
-        auto q_c = q.contiguous();
-        RTP_LLM_LOG_DEBUG("prefill xqa");
-        runXqa(q_c.data_ptr(),
-            params.output.data(),
-            local_head_num,
-            local_head_num_kv,
-            size_per_head,
-            params.common.context_batch_size,
-            max_kv_len,
-            params.configs.tokens_per_block,
-            kv_block_array->mPrimaryPoolPtr,
-            reinterpret_cast<int32_t*>(const_cast<KVCacheIndex*>(kv_block_array->data)),
-            reinterpret_cast<uint32_t*>(kvlen_d.data_ptr()),
-            device,
-            max_q_len,
-            qo_indptr_d.data_ptr());
-        return;
-    }
-#endif
 
     auto softmax_scale = (1.0f / sqrtf(size_per_head * 1.0f)) * params.configs.softmax_extra_scale;
     at::Tensor out;
