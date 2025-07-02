@@ -1,13 +1,12 @@
 load("//:def.bzl", "copts", "cuda_copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 
-
 cc_library(
     name = "cuda_bindings",
     srcs = glob([
         "*.cc",
     ], exclude = [
-        "RegisterOps.cc",
+        "RegisterCudaOps.cc",
     ]),
     hdrs = glob([
         "*.h",
@@ -19,10 +18,11 @@ cc_library(
     ],
 )
 
+# These bindings are to be reused by ppu bindings.
 cc_library(
-    name = "cuda_register",
-    srcs = [
-        "RegisterOps.cc",
+    name = "cuda_bindings_base",
+    hdrs = [
+        "RegisterBaseBindings.hpp",
     ],
     copts = copts(),
     deps = [
@@ -30,4 +30,19 @@ cc_library(
         ":cuda_bindings",
     ],
     visibility = ["//visibility:public"],
+    alwayslink = 1,
+)
+
+cc_library(
+    name = "cuda_bindings_register",
+    srcs = [
+        "RegisterCudaOps.cc",
+    ],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/models_py/bindings:register_ops_hdr",
+        ":cuda_bindings_base",
+    ],
+    visibility = ["//visibility:public"],
+    alwayslink = 1,
 )

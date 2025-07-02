@@ -82,9 +82,3 @@ except BaseException as e:
     import traceback
     logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
 
-
-# import cuda specific ops
-try:
-    from libth_transformer import FlashInferOp
-except ImportError as e:
-    logging.info(f"import ops exception: {e}, traceback: {traceback.format_exc()}")

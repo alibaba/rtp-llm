@@ -130,11 +130,6 @@ void FlashInferOp::forward(torch::Tensor input, torch::Tensor output, torch::Ten
     // }
 }
 
-void register_attn_params(pybind11::module& m) {
-    pybind11::class_<AttentionCommonInputs>(m, "AttentionCommonInputs")
-        .def(pybind11::init<>());
-}
-
 
 void registerFlashInferOp(const py::module& m) {
     pybind11::class_<FlashInferOp>(m, "FlashInferOp")

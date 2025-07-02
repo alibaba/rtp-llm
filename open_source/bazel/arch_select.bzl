@@ -168,3 +168,13 @@ def internal_deps():
 
 def jit_deps():
     return ["//rtp_llm/cpp/deep_gemm:jit_includes", ]
+
+def select_py_bindings():
+    return select({
+        "//conditions:using_cuda12": [
+            "//rtp_llm/models_py/bindings/cuda:cuda_bindings_register"
+        ],
+        "//conditions:default": [
+            "//rtp_llm/models_py/bindings:dummy_register",
+        ],
+    })

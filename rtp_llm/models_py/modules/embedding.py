@@ -4,6 +4,8 @@ from torch import dtype as _dtype
 from typing import Optional
 from torch.nn import functional as F
 
+from libth_transformer import rtp_llm_ops
+
 class EmbeddingTorch(nn.Module):
     def __init__(self, weight: torch.Tensor):
         super().__init__()
@@ -23,6 +25,6 @@ class Embedding(nn.Module):
         tokens = input.size(0)
         hidden_size = self.weight.size(-1)
         output = torch.empty((tokens, hidden_size), dtype=self.weight.dtype, device=input.device)
-        torch.ops.rtp_llm_ops.embedding(output, input, self.weight.data, 0)
+        rtp_llm_ops.embedding(output, input, self.weight.data, 0)
         return output
 

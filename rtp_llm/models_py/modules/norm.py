@@ -1,7 +1,8 @@
 import torch
 from torch import nn
 from typing import Optional, Dict, TypedDict, Tuple, Any
-# from rtp_llm.ops import rmsnorm
+
+from libth_transformer import rtp_llm_ops
 
 class BaseNorm(nn.Module):
     def __init__(self, weight: torch.Tensor, eps: float = 1e-6):
@@ -29,7 +30,7 @@ class RMSNorm(BaseNorm):
 
     def forward(self, hidden_states: torch.Tensor):
         output = torch.empty_like(hidden_states)
-        torch.ops.rtp_llm_ops.rmsnorm(output, hidden_states, self.weight.data, self.variance_epsilon, 0)
+        rtp_llm_ops.rmsnorm(output, hidden_states, self.weight.data, self.variance_epsilon, 0)
         return output
 
 class BaseResNorm(nn.Module):
@@ -48,7 +49,7 @@ class RMSResNormTorch(BaseResNorm):
     def forward(self, hidden_states: torch.Tensor, residual: torch.Tensor):
         hidden_states = hidden_states + residual
         output = torch.empty_like(hidden_states)
-        torch.ops.rtp_llm_ops.rmsnorm(output, hidden_states, self.weight.data, self.variance_epsilon, 0)
+        rtp_llm_ops.rmsnorm(output, hidden_states, self.weight.data, self.variance_epsilon, 0)
         return output
 
 class RMSResNorm(BaseResNorm):
@@ -56,7 +57,7 @@ class RMSResNorm(BaseResNorm):
         super().__init__(weight, eps)
 
     def forward(self, hidden_states: torch.Tensor, residual: torch.Tensor):
-        torch.ops.rtp_llm_ops.fused_add_rmsnorm(hidden_states, residual, self.weight.data, self.variance_epsilon, 0)
+        rtp_llm_ops.fused_add_rmsnorm(hidden_states, residual, self.weight.data, self.variance_epsilon, 0)
         return hidden_states
 
 class QKRMSNorm(nn.Module):
@@ -113,7 +114,7 @@ class FusedQKRMSNorm(nn.Module):
 
     def forward(self, hidden_states):
         m, n = hidden_states.shape
-        torch.ops.rtp_llm_ops.fused_qk_rmsnorm(hidden_states, self.q_weight, self.k_weight, self.eps, self.head_num, self.kv_head_num, m, n, self.size_per_head, 0)
+        rtp_llm_ops.fused_qk_rmsnorm(hidden_states, self.q_weight, self.k_weight, self.eps, self.head_num, self.kv_head_num, m, n, self.size_per_head, 0)
         return hidden_states
 
 class BaseLayerNorm(torch.nn.Module):
@@ -142,7 +143,7 @@ class LayerNorm(BaseLayerNorm):
         super().__init__(weight, beta, eps)
     def forward(self, hidden_states: torch.Tensor):
         output = torch.empty_like(hidden_states)
-        torch.ops.rtp_llm_ops.layernorm(output, hidden_states, self.weight.data, self.beta, self.variance_epsilon, 0)
+        rtp_llm_ops.layernorm(output, hidden_states, self.weight.data, self.beta, self.variance_epsilon, 0)
         return output
 
 class BaseAddBiasResLayerNorm(torch.nn.Module):
@@ -171,5 +172,5 @@ class AddBiasResLayerNorm(BaseAddBiasResLayerNorm):
     def __init__(self, weight: torch.Tensor, beta: torch.Tensor, eps: float = 1e-6):
         super().__init__(weight, beta, eps)
     def forward(self, hidden_states: torch.Tensor, residual: torch.Tensor, bias: torch.Tensor):
-        torch.ops.rtp_llm_ops.fused_add_layernorm(hidden_states, residual, bias, self.weight.data, self.beta, self.variance_epsilon, 0)
+        rtp_llm_ops.fused_add_layernorm(hidden_states, residual, bias, self.weight.data, self.beta, self.variance_epsilon, 0)
         return hidden_states

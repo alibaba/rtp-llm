@@ -1,5 +1,5 @@
 load("//:def.bzl", "copts", "cuda_copts")
-load("//bazel:arch_select.bzl", "torch_deps", "flashinfer_deps")
+load("//bazel:arch_select.bzl", "torch_deps", "flashinfer_deps", "select_py_bindings")
 flashinfer_deps()
 
 config_setting(
@@ -127,12 +127,8 @@ cc_library(
     ] + select({
         "@//:using_cuda": [
             "//rtp_llm/cpp/cuda:allocator_torch",
-            "//rtp_llm/models_py/bindings/cuda:cuda_register",
         ],
-        "//conditions:default": [
-            "//rtp_llm/models_py/bindings:dummy_register",
-        ],
-    }),
+    }) + select_py_bindings(),
     copts = copts(),
     alwayslink = True,
     visibility = ["//visibility:public"],

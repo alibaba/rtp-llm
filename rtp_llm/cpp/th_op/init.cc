@@ -44,7 +44,9 @@ PYBIND11_MODULE(libth_transformer, m) {
     registerEmbeddingHandler(m);
     registerDeviceOps(m);
     registerPyOpDefs(m);
-    registerPyModuleOps(m);
+
+    py::module rtp_ops_m = m.def_submodule("rtp_llm_ops", "rtp llm custom ops");
+    registerPyModuleOps(rtp_ops_m);
 }
 
 }  // namespace torch_ext

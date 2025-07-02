@@ -16,7 +16,7 @@ from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.ops import PyModelInputs, PyModelOutputs, PyAttentionInputs
 
 try:
-    from rtp_llm.ops import FlashInferOp
+    from libth_transformer.rtp_llm_ops import FlashInferOp
 except ImportError:
     logging.info("FlashInferOp not available, using fallback implementation.")
 
