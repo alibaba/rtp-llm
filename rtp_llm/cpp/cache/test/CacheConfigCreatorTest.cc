@@ -18,7 +18,7 @@ namespace rtp_llm {
 
 class CacheConfigCreatorTest: public DeviceTestBase {
     void SetUp() override {
-        device_reserve_memory_size_ = 300L * 1024 * 1024;
+        device_reserve_memory_size_ = 2092L * 1024 * 1024;
         DeviceTestBase::SetUp();
     }
 
