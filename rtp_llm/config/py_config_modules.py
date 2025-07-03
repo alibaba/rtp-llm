@@ -450,6 +450,7 @@ class PyEnvConfigs:
         self.engine_config.update_from_env()
         self.embedding_config.update_from_env()
         self.worker_config.update_from_env()
+        ## in gpt model parameters, we should update it from g_parallel_info
         self.parallelism_distributed_config.update_from_env()
 
 ## some configs are from static method or global method, etc, we collect them in `StaticConfig`, but in-none-static methods,

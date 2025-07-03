@@ -16,7 +16,7 @@ from rtp_llm.ops import GptInitParameter, QuantAlgo, SpecialTokens, MlaOpsType, 
 from rtp_llm.ops import ConcurrencyConfig, DeviceResourceConfig, FMHAConfig, HWKernelConfig, KVCacheConfig, MiscellaneousConfig, ModelSpecificConfig, MoeConfig, ParallelismDistributedConfig, ProfilingDebugLoggingConfig, ServiceDiscoveryConfig, SchedulerConfig, BatchDecodeSchedulerConfig, FIFOSchedulerConfig, CacheStoreConfig, SamplerConfig, SpeculativeExecutionConfig, ArpcConfig
 from rtp_llm.utils.gemm_utils.cutlass_config import load_cutlass_gemm_config
 from rtp_llm.config.quant_config import QuantizationConfig, Fp8BlockWiseQuantConfig, Fp8PerChannelCompressedQuantConfig, preset_quant_config
-from rtp_llm.config.py_config_modules import PyEnvConfigs, get_env_bool, get_env_int, get_env_str
+from rtp_llm.config.py_config_modules import PyEnvConfigs, StaticConfig, get_env_bool, get_env_int, get_env_str
 updated_params: Set[str] = set()
 
 def get_pad_size(size: int , align_size: int):
@@ -351,6 +351,7 @@ class GptInitModelParameters:
         self.py_env_configs = PyEnvConfigs()
         self.py_env_configs.update_from_env()
         self.py_env_configs.parallelism_distributed_config = self.gpt_init_params.parallelism_distributed_config
+        StaticConfig.parallelism_distributed_config = self.gpt_init_params.parallelism_distributed_config
 
         for k, v in kwargs.items():
             setattr(self, k, v)

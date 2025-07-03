@@ -1,7 +1,7 @@
 import gc
 import logging
 import os
-from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.config.py_config_modules import PyEnvConfigs, StaticConfig
 import torch
 from collections import OrderedDict
 import safetensors
@@ -30,7 +30,7 @@ class ModelLoader:
                  misc_weights_info: Optional[CustomAtomicWeight],
                  compute_dtype: torch.dtype,
                  database: BaseDatabase,
-                 py_env_configs: PyEnvConfigs
+                 py_env_configs: PyEnvConfigs = StaticConfig
                  ):
         self._task_type = task_type
         self._weights_info = weights_info
@@ -363,5 +363,4 @@ def get_model_loader(task_type: TaskType,
     if weights_info._head_num_kv % weights_info.tp_size != 0 and weights_info._head_num_kv != 1:
         raise Exception('invalid tp_size %d for config.head_num_kv %d' \
                         % (weights_info.tp_size, weights_info._head_num_kv))
-    py_env_configs = PyEnvConfigs()
-    return ModelLoader(task_type, weights_info, misc_weights_info, compute_dtype, database, py_env_configs)
+    return ModelLoader(task_type, weights_info, misc_weights_info, compute_dtype, database)
