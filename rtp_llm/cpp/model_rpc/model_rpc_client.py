@@ -29,6 +29,10 @@ from rtp_llm.utils.multimodal_util import maybe_hash_url
 
 MAX_GRPC_TIMEOUT_SECONDS = 3600
 
+class StreamState:
+    def __init__(self):
+        self.cached_logits_dict = {}
+
 def trans_input(input_py: GenerateInput):
     input_pb = GenerateInputPB()
     input_pb.request_id = input_py.request_id
@@ -107,11 +111,11 @@ def trans_multimodal_input(input_py: GenerateInput, input_pb: GenerateInputPB, g
         mm_preprocess_config_pb.max_frames = mm_input.config.max_frames
         input_pb.multimodal_inputs.append(mm_input_pb)
 
-
-def trans_output(input_py: GenerateInput, outputs_pb: GenerateOutputsPB) -> GenerateOutputs:
+def trans_output(input_py: GenerateInput, outputs_pb: GenerateOutputsPB, stream_state: StreamState) -> GenerateOutputs:
     logging.debug("outputs_pb = " +  str(outputs_pb))
+    logits_index = input_py.generate_config.logits_index
     outputs_py = GenerateOutputs()
-    for output_pb in outputs_pb.generate_outputs:
+    for i, output_pb in enumerate(outputs_pb.generate_outputs):
         output_py = GenerateOutput()
         output_py.finished = output_pb.finished
         output_py.aux_info = AuxInfo(cost_time=output_pb.aux_info.cost_time_us / 1000.0,
@@ -145,10 +149,14 @@ def trans_output(input_py: GenerateInput, outputs_pb: GenerateOutputsPB) -> Gene
             output_py.logits = trans_tensor(output_pb.logits)
         if output_pb.HasField('all_probs'):
             output_py.all_probs = trans_tensor(output_pb.all_probs)
+        if logits_index is not None and output_pb.HasField('logits') and output_pb.aux_info.output_len == logits_index:
+            stream_state.cached_logits_dict[i] = output_py.logits
+            
+        if output_py.finished and i in stream_state.cached_logits_dict:
+            output_py.logits = stream_state.cached_logits_dict[i]
         outputs_py.generate_outputs.append(output_py)
 
     return outputs_py
-
 
 class ModelRpcClient(object):
 
@@ -186,6 +194,7 @@ class ModelRpcClient(object):
         input_py.generate_config.timeout_ms = (int)(grpc_timeout_seconds * 1000)
         input_pb = trans_input(input_py)
         response_iterator = None
+        stream_state = StreamState()
         try:
             async with grpc.aio.insecure_channel(self._addresses[input_py.request_id % len(self._addresses)]) as channel:
                 stub = RpcServiceStub(channel)
@@ -194,7 +203,7 @@ class ModelRpcClient(object):
                 count = 0
                 async for response in response_iterator.__aiter__():
                     count += 1
-                    yield trans_output(input_py, response)
+                    yield trans_output(input_py, response, stream_state)
         except grpc.RpcError as e:
             # TODO(xinfei.sxf) 非流式的请求无法取消了
             if response_iterator:

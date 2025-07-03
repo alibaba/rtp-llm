@@ -49,6 +49,7 @@ class GenerateConfig(BaseModel):
     # calculate_loss style: 0 for not calculate; 1 for sum; 2 for each token
     calculate_loss: int = 0
     return_logits: bool = False
+    logits_index: Optional[int] = None
     return_incremental: bool = False
     return_hidden_states: bool = False
     hidden_states_cut_dim: int = 0

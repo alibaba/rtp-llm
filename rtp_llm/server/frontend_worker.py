@@ -271,6 +271,7 @@ class FrontendWorker():
         aux_info = None
         output_ids = None
         input_ids = None
+        logits = None
         async for response in all_responses:
             complete_response = complete_response + response.response
             if response.finished:
@@ -281,10 +282,13 @@ class FrontendWorker():
                 output_ids = response.output_ids
             if response.input_ids:
                 input_ids = response.input_ids
+            if response.logits:
+                logits = response.logits
         return PipelineResponse(
             response=complete_response,
             finished=finished,
             aux_info=aux_info,
             output_ids=output_ids,
-            input_ids=input_ids
+            input_ids=input_ids,
+            logits=logits
         )
