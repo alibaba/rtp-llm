@@ -24,6 +24,13 @@ py_library(
 )
 
 py_library(
+    name = "modules_rocm",
+    srcs = glob([
+        "modules/rocm/*.py",
+    ]),
+)
+
+py_library(
     name = "models",
     srcs = glob([
         "model_desc/*.py",
@@ -35,6 +42,9 @@ py_library(
     ] + select({
         "@//:using_cuda12": [
             ":modules_cuda"
+        ],
+        "@//:using_rocm": [
+            ":modules_rocm"
         ],
         "//conditions:default": [],
     }),

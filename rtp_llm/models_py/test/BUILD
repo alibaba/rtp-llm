@@ -17,6 +17,20 @@ py_test (
 )
 
 py_test (
+    name = "rocm_norm_test",
+    srcs = ["rocm_norm_test.py"],
+    deps = [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm:config",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/model_test/test_util:test_util"
+    ],
+    env = test_envs,
+    tags = ["rocm"],
+    exec_properties = {'gpu':'MI308X'},
+)
+
+py_test (
     name = "rmsresnorm_test",
     srcs = ["rmsresnorm_test.py"],
     deps = [
