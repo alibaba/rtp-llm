@@ -79,7 +79,8 @@ void DeterministicExecutor::SpEditTokenSelector(const GenerateStreamPtr&        
         for (size_t match_len = begin_match_len; match_len >= min_token_match_len_; match_len--) {
 
             std::vector<int> latest_tokens(max_latest_tokens.end() - match_len, max_latest_tokens.end());
-            for (size_t i = sp_edit_search_index - match_len; i + match_len < advice_token_num - 1; i++) {
+            size_t begin_index = sp_edit_search_index < match_len ? 0 : sp_edit_search_index - match_len;
+            for (size_t i = begin_index; i + match_len < advice_token_num - 1; i++) {
                 size_t j = 0;
                 for (; j < match_len; j++) {
                     if (latest_tokens[j] != advice_token_ids[i + j]) {

@@ -38,10 +38,16 @@ absl::Status MTPExecutor::propose(const std::list<GenerateStreamPtr>& streams, b
 
     for (size_t i = 0; i < propose_step_; i++) {
         if (i > 0) {
+            // remove stopped/finished stream
+            propose_streams.remove_if([](const GenerateStreamPtr& stream) {
+                return stream->stoppedWithoutLock() || stream->finishedWithoutLock();
+            });
+
             for (auto& stream : propose_streams) {
                 auto mtp_stream = std::static_pointer_cast<MTPStream>(stream);
                 mtp_stream->shiftRightOneToken(*stream);
             }
+           
         }
         RETURN_IF_STATUS_ERROR(mtp_executors_[i]->process(propose_streams));
     }

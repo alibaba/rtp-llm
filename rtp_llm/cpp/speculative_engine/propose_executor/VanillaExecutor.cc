@@ -36,6 +36,10 @@ absl::Status VanillaExecutor::propose(const std::list<GenerateStreamPtr>& stream
     }
 
     for (size_t i = 0; i < propose_step_; i++) {
+    // remove stopped/finished stream
+    propose_streams.remove_if([](const GenerateStreamPtr& stream) {
+        return stream->stoppedWithoutLock() || stream->finishedWithoutLock();
+    });
         RETURN_IF_STATUS_ERROR(normal_executor_.process(propose_streams));
     }
 
