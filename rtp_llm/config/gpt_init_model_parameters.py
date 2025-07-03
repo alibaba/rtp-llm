@@ -563,6 +563,9 @@ class GptInitModelParameters:
             ioThreadNum=get_env_int("ARPC_IO_THREAD_NUM", 2),
         )
 
+        # 3FS
+        self.gpt_init_params.enable_3fs = get_env_bool("ENABLE_3FS", False)
+
     def update_config_with_sparse_config(self, ckpt_path: str):
         sparse_config_file = None
         sparse_config = None
@@ -836,9 +839,6 @@ class GptInitModelParameters:
 
         logging.info(f"use stop_words_str_list [{self.special_tokens.stop_words_str_list }]," \
                         f" stop_words_id_list [{self.special_tokens.stop_words_id_list}]")
-        
-        self.enable_3fs = bool(int(os.environ.get('ENABLE_3FS', 0)))
-        logging.info(f'enable 3fs: {self.enable_3fs}')
 
     def _load_quant_config_from_ckpt(self, ckpt_path: str) -> Optional[QuantizationConfig]:
         quant_config_path = os.path.join(ckpt_path, 'smoothquant.ini')
