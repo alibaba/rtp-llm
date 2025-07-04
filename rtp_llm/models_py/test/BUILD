@@ -40,6 +40,67 @@ py_test (
         "//rtp_llm:testlib",
         "//rtp_llm/test/model_test/test_util:test_util"
     ],
+    timeout = "eternal",
+    env = test_envs,
+    tags = ["rocm"],
+    exec_properties = {'gpu':'MI308X'},
+)
+
+py_test (
+    name = "rocm_fused_add_layernorm_test",
+    srcs = ["rocm_fused_add_layernorm_test.py"],
+    deps = [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm:config",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/model_test/test_util:test_util"
+    ],
+    timeout = "eternal",
+    env = test_envs,
+    tags = ["rocm"],
+    exec_properties = {'gpu':'MI308X'},
+)
+
+py_test (
+    name = "rocm_general_layer_norm_test",
+    srcs = ["rocm_general_layer_norm_test.py"],
+    deps = [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm:config",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/model_test/test_util:test_util"
+    ],
+    timeout = "eternal",
+    env = test_envs,
+    tags = ["rocm"],
+    exec_properties = {'gpu':'MI308X'},
+)
+
+py_test (
+    name = "rocm_embedding_test",
+    srcs = ["rocm_embedding_test.py"],
+    deps = [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm:config",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/model_test/test_util:test_util"
+    ],
+    timeout = "eternal",
+    env = test_envs,
+    tags = ["rocm"],
+    exec_properties = {'gpu':'MI308X'},
+)
+
+py_test (
+    name = "rocm_fusedqkrmsnorm_test",
+    srcs = ["rocm_fusedqkrmsnorm_test.py"],
+    deps = [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm:config",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/model_test/test_util:test_util"
+    ],
+    timeout = "eternal",
     env = test_envs,
     tags = ["rocm"],
     exec_properties = {'gpu':'MI308X'},

@@ -1,5 +1,23 @@
-#include "rtp_llm/models_py/bindings/cuda/FusedQKRmsNorm.h"
+#include <torch/extension.h>  
+#include <ATen/ATen.h>   
+#include "rtp_llm/models_py/bindings/common/FusedQKRmsNorm.h"
+#include "rtp_llm/models_py/bindings/common/Torch_ext.h"   
+#include <vector>
+#include <cstdint>
+#include <iostream>
+#include <type_traits>
+#if USING_CUDA
 #include <ATen/cuda/CUDAContext.h>
+#endif
+#if USING_ROCM
+#include <hip/hip_runtime.h>
+#include "rtp_llm/cpp/devices/rocm_impl/ROCmDevice.h"
+#endif
+using namespace std;
+namespace th = torch;
+using namespace rtp_llm;
+namespace rtp_llm {
+
 void FusedQKRMSNorm(at::Tensor&   input,
                     at::Tensor&   q_gamma,
                     at::Tensor&   k_gamma,
@@ -18,20 +36,17 @@ void FusedQKRMSNorm(at::Tensor&   input,
     CHECK_DIM(2, input);    // input: (batch_size, hidden_size)
     CHECK_DIM(1, q_gamma);  // weight: (hidden_size)
     CHECK_DIM(1, k_gamma);  // weight: (hidden_size)
+#if USING_ROCM
+    hipStream_t stream = at::hip::getCurrentHIPStream().stream();
+#endif
+#if USING_CUDA
     cudaStream_t stream = at::cuda::getCurrentCUDAStream(at::cuda::current_device()).stream();
+#endif
     DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FP16(input.scalar_type(), c_type, [&] {
-        rtp_llm::invokeFusedQkRmsNorm(static_cast<c_type*>(input.data_ptr()),
-                                      static_cast<c_type*>(q_gamma.data_ptr()),
-                                      static_cast<c_type*>(nullptr),
-                                      static_cast<c_type*>(k_gamma.data_ptr()),
-                                      static_cast<c_type*>(nullptr),
-                                      float(layernorm_eps),
-                                      q_group_num,
-                                      k_group_num,
-                                      m,
-                                      n,
-                                      norm_size,
-                                      stream);
+        invokeFusedQkRmsNorm(
+            static_cast<c_type*>(input.data_ptr()), static_cast<c_type*>(q_gamma.data_ptr()), static_cast<c_type*>(nullptr), static_cast<c_type*>(k_gamma.data_ptr()),
+            static_cast<c_type*>(nullptr), float(layernorm_eps), q_group_num, k_group_num, m, n, norm_size, stream);
         return true;
     });
+}
 }

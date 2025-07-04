@@ -1,8 +1,8 @@
 import itertools
-from unittest import SkipTest, TestCase, main
-
-import torch
+from unittest import TestCase, main, SkipTest
+from rtp_llm.models_py.modules import RMSNorm, RMSNormTorch
 from torch import dtype as _dtype
+import torch
 
 from rtp_llm.models_py.modules import RMSNorm, RMSNormTorch
 

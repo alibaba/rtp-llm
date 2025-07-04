@@ -1,32 +1,27 @@
 import torch
 import itertools
 from unittest import TestCase, main, SkipTest
-from rtp_llm.models_py.modules.rocm.norm import AddBiasResLayerNormROCmTorch, AddBiasResLayerNorm
+from rtp_llm.models_py.modules.rocm.norm import LayerNormTorch, LayerNorm
 from torch import dtype as _dtype
-
+from torch.profiler import profile, ProfilerActivity, record_function
 
 class LayerNormTest(TestCase):
     DTYPES = [torch.half, torch.bfloat16]
-    NUM_TOKENS = [48, 78, 512, 4096]
-    HIDDEN_SIZES = [64, 88, 768]
-
+    NUM_TOKENS = [7, 83, 4096]
+    HIDDEN_SIZES = [768, 769, 770, 771, 5120, 5124, 5125, 5126, 8192, 8199]
     def setUp(self) -> None:
         if not torch.cuda.is_available():
             raise SkipTest("CUDA is not available")
         torch.set_default_device("cuda")
-
-    def _run_res_layernorm_test(self, num_tokens: int, hidden_size: int, dtype: _dtype):
+    def _run_layernorm_test(self, num_tokens: int, hidden_size: int, dtype: _dtype):
         torch.manual_seed(0)
         w = torch.randn(hidden_size, dtype=dtype)
         beta = torch.randn(hidden_size, dtype=dtype)
-        res_layernorm = AddBiasResLayerNorm(w, beta)
-        res_layernorm_torch = AddBiasResLayerNormROCmTorch(w, beta)
+        layernorm = LayerNorm(w, beta)
+        layernorm_torch = LayerNormTorch(w, beta)
         x = torch.randn(num_tokens, hidden_size, dtype=dtype)
-        bias = torch.randn(hidden_size, dtype=dtype)
-        residual = torch.randn(hidden_size, dtype=dtype)
-        self.assertTrue(torch.allclose(res_layernorm_torch(x, residual, bias), res_layernorm(x, residual, bias), atol=1e-2, rtol=1e-2))
-
-    def test_res_layernorm(self):
+        self.assertTrue(torch.allclose(layernorm_torch(x), layernorm(x), atol=1e-2, rtol=1e-2))
+    def test_layernorm(self):
         for params in itertools.product(
                 self.NUM_TOKENS,
                 self.HIDDEN_SIZES,
@@ -37,8 +32,6 @@ class LayerNormTest(TestCase):
                     hidden_size=params[1],
                     dtype=params[2]
             ):
-                self._run_res_layernorm_test(*params)
-
-
+                self._run_layernorm_test(*params)
 if __name__ == '__main__':
     main()
