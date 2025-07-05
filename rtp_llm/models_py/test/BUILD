@@ -98,3 +98,31 @@ py_test (
     env = test_envs,
     exec_properties = {'gpu':'A10'},
 )
+
+py_test (
+    name = "select_topk_op_test",
+    srcs = ["select_topk_op_test.py"],
+    deps = [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm:config",
+        "//rtp_llm:utils",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/model_test/test_util:test_util"
+    ],
+    env = test_envs,
+    exec_properties = {'gpu':'H20'},
+)
+ 
+py_test (
+    name = "fused_moe_op_test",
+    srcs = ["fused_moe_op_test.py"],
+    deps = [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm:config",
+        "//rtp_llm:utils",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/model_test/test_util:test_util"
+    ],
+    env = test_envs,
+    exec_properties = {'gpu':'H20'},
+)
