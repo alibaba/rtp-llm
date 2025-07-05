@@ -64,7 +64,8 @@ class StaticPerTensorFp8Weight(CompositeWeight, QuantWeight):
         W.attn_o_w,
         W.ffn_w1,
         W.ffn_w3,
-        W.ffn_w2
+        W.ffn_w2,
+        W.ffn_w13
     ]
     FP8_SCALE_MAP = {
         W.attn_qkv_w : W.attn_qkv_s,
@@ -346,7 +347,7 @@ class LoadQuantStaticPerTensorFp8Weight(StaticPerTensorFp8Weight):
         W.ffn_w1: (W.ffn_s1, None, None),
         W.ffn_w3: (W.ffn_s3, W.post_ln_static_quant, W.post_ln_static_quant_reciprocal),
         W.ffn_w2: (W.ffn_s2, W.ffn_intermediate_weight2_static_quant, W.ffn_intermediate_weight2_static_quant_reciprocal),
-        W.ffn_w13: (W.ffn_s13, None, None)
+        W.ffn_w13: (W.ffn_s13, W.post_ln_static_quant, W.post_ln_static_quant_reciprocal)
     }
 
     fp8_vision_ffn_weights_maps = {
