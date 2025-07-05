@@ -22,13 +22,14 @@ class WEIGHT_TYPE(Enum):
     def to_str(self) -> str:
         return self.value[0]
 
-def get_weight_type_from_env(py_env_configs: PyEnvConfigs) -> WEIGHT_TYPE:
-    weight_type_str = py_env_configs.model_config.weight_type
+## reserve `env_param`, because input param from the invoker is various (os.environ or api req).
+def get_weight_type_from_env(env_param: Dict[str, str]) -> WEIGHT_TYPE:
+    weight_type_str = env_param.get("WEIGHT_TYPE", None)
     if weight_type_str:
         weight_type = WEIGHT_TYPE.from_str(weight_type_str)
         return weight_type
     else:
-        int8_mode = py_env_configs.quantization_config.int8_mode
+        int8_mode = int(env_param.get("INT8_MODE", "0"))
         if int8_mode == 1:
             return WEIGHT_TYPE.INT8
         return WEIGHT_TYPE.FP16

@@ -178,7 +178,7 @@ class ServerArgsDefaultTest(TestCase):
         self.assertEqual(env.get("FRONTEND_SERVER_ID"), "0")
 
         # 20. Generate Configuration
-        self.assertEqual(env.get("THINK_END_TAG"), "<think>\\n\\n")
+        self.assertEqual(env.get("THINK_END_TAG"), "</think>\n\n")
         self.assertEqual(env.get("THINK_END_TOKEN_ID"), "-1")
         self.assertEqual(env.get("THINK_MODE"), "0")
         self.assertEqual(env.get("FORCE_STOP_WORDS"), "0")

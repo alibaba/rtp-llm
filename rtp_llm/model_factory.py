@@ -159,7 +159,7 @@ class ModelFactory:
 
         logging.info(f"load model from tokenizer_path: {tokenizer_path}, ckpt_path: {ckpt_path}, lora_infos: {lora_infos}, ptuning_path: {ptuning_path}")
 
-        weight_type: WEIGHT_TYPE = get_weight_type_from_env(StaticConfig)
+        weight_type: WEIGHT_TYPE = get_weight_type_from_env(os.environ)
         act_type = weight_type if weight_type in [ WEIGHT_TYPE.FP16, WEIGHT_TYPE.BF16] else WEIGHT_TYPE.FP16
         # TODO(xinfei.sxf) fix this
         ACT_TYPE = "ACT_TYPE"

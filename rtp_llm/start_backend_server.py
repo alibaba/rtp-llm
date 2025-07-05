@@ -154,15 +154,12 @@ def start_backend_server(global_controller: ConcurrencyController):
     setproctitle("maga_ft_backend_server")
     os.makedirs('logs', exist_ok=True)
     load_gpu_nic_affinity()
-<<<<<<< HEAD
 
     clear_jit_filelock()
 
     ## collect all args and envs.
     py_env_configs = PyEnvConfigs()
     py_env_configs.update_from_env()
-=======
->>>>>>> fix pickle
     # TODO(xinfei.sxf) fix this
     if int(os.environ.get('VIT_SEPARATION', 0)) == 1:
         return vit_start_server()

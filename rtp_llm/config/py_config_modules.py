@@ -243,7 +243,7 @@ class VitConfig:
 
 class GenerateConfig:
     def __init__(self):
-        self.think_end_tag: str = "<think>\n\n"
+        self.think_end_tag: str = "</think>\n\n"
         self.think_end_token_id: int = -1
         self.think_mode: int = 0
         self.force_stop_words: bool = False

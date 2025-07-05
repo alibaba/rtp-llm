@@ -1058,7 +1058,7 @@ def setup_args():
         '--think_end_tag',
         env_name="THINK_END_TAG",
         type=str,
-        default="<think>\\n\\n",
+        default="</think>\n\n",
         help='深度思考模式的结束标签'
     )
     generate_group.add_argument(
