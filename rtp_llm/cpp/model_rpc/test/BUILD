@@ -15,6 +15,9 @@ py_test (
         "//rtp_llm:testlib",
         "//rtp_llm/test/model_test/test_util:test_util",
     ],
+    data = [
+        "//:th_transformer"
+    ],
     exec_properties = {'gpu':'A10'},
 )
 

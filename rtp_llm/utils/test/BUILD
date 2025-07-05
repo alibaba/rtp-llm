@@ -79,4 +79,7 @@ py_test(
         "//rtp_llm:pyOpenSSL",
         "//rtp_llm:config_ops"
     ],
+    data = [
+        "//:th_transformer"
+    ]
 )
