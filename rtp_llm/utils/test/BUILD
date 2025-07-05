@@ -76,6 +76,7 @@ py_test(
         "//rtp_llm:pynvml",
         "//rtp_llm:Pillow",
         "//rtp_llm:oss2",
-        "//rtp_llm:pyOpenSSL"
+        "//rtp_llm:pyOpenSSL",
+        "//rtp_llm:config_ops"
     ],
 )

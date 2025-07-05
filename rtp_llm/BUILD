@@ -235,6 +235,14 @@ py_library(
 )
 
 py_library(
+    name = "config_ops",
+    deps = [
+        ":config",
+        ":ops"
+    ],
+)
+
+py_library(
     name = "structure",
     srcs = glob([
         "structure/*.py",

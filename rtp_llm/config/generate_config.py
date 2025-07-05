@@ -82,7 +82,7 @@ class GenerateConfig(BaseModel):
 
     # 是否允许tool_call专用的标签如<tool_call>作为content传出, 优化tool_call失败时的用户体验
     tool_call_message_extract_strategy: str = "default" # default/skip_on_failure
-    
+
     global_request_id: int = -1
 
     def gen_hash_value(self):
@@ -131,7 +131,7 @@ class GenerateConfig(BaseModel):
         # 这里假设外部传进来的stop_word_list和stop_word_str都不包含batch维度
         self.stop_words_list += special_tokens.stop_words_id_list
         self.stop_words_str += special_tokens.stop_words_str_list
-        
+
     def add_thinking_params(self, tokenizer):
         end_think_token_id = int(os.environ.get("THINK_END_TOKEN_ID", "-1"))
         self.end_think_token_ids = [end_think_token_id] if end_think_token_id != -1 else []
@@ -143,7 +143,7 @@ class GenerateConfig(BaseModel):
                 tokenized_result: List[int] = tokenizer.encode(think_end_tag)
             self.end_think_token_ids = tokenized_result
         self.in_think_mode = bool(int(os.environ.get("THINK_MODE", 0))) and len(self.end_think_token_ids) >= 0
-    
+
     def add_stop_ids_from_str(self, tokenizer):
         ids_list = []
         for word in self.stop_words_str:
@@ -159,7 +159,7 @@ class GenerateConfig(BaseModel):
                 return
             else:
                 ids_list.append(tokenizer.encode(word))
-        
+
         # remove duplicate element
         for item in ids_list:
             if item not in self.stop_words_list:

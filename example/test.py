@@ -3,6 +3,7 @@ import json
 import asyncio
 import logging
 
+from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.pipeline import Pipeline
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
@@ -13,11 +14,11 @@ from rtp_llm.test.utils.port_util import PortsContext
 async def main():
     with PortsContext(None, 1) as ports:
         start_port = ports[0]
-        os.environ['START_PORT'] = str(start_port)
+        StaticConfig.server_config.start_port = start_port
         update_master_info('127.0.0.1', start_port)
         g_worker_info.reload()
-        os.environ["MODEL_TYPE"] = os.environ.get("MODEL_TYPE", "qwen_2")
-        os.environ["CHECKPOINT_PATH"] = os.environ.get("CHECKPOINT_PATH", "Qwen/Qwen2-0.5B-Instruct")
+        StaticConfig.model_config.model_type = "qwen_2"
+        StaticConfig.model_config.checkpoint_path = "Qwen/Qwen2-0.5B-Instruct"
         os.environ["DEVICE_RESERVE_MEMORY_BYTES"] = str(3 * 1024 * 1024 * 1024)
         model_config = ModelFactory.create_normal_model_config()
         model = ModelFactory.from_huggingface(model_config.ckpt_path, model_config=model_config)

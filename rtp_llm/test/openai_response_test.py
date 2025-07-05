@@ -395,6 +395,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
 
     def test_chatglm_stop_word(self):
         os.environ["MODEL_TYPE"] = "chatglm3"
+        self.model.config.py_env_configs.model_config.model_type =  "chatglm3"
         tokenizer = ChatGLMTokenizer.from_pretrained(
             "rtp_llm/test/tokenizer_test/testdata/chatglm3_tokenizer",
             encode_special_tokens=True)
@@ -410,7 +411,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         tokenizer = QWenTokenizer(f"{self.test_data_path}/qwen_7b/tokenizer/qwen.tiktoken")
         self.model.tokenizer = tokenizer
         self.endpoint = OpenaiEndpoint(self.model.config, self.model.tokenizer, None)
-        
+
         test_ids = [35946, 73670, 73670, 73670, 73675, 35946, 37029, 37029, 37029]
         render_params = RendererParams(
             model_type="qwen",
@@ -448,7 +449,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         self.assertEqual(
             json.loads(response.usage.completion_tokens_details.model_dump_json()),
             {
-                'audio_tokens': None, 
+                'audio_tokens': None,
                 'reasoning_tokens': 5
             }
         )
@@ -461,7 +462,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         tokenizer = QWenTokenizer(f"{self.test_data_path}/qwen_7b/tokenizer/qwen.tiktoken")
         self.model.tokenizer = tokenizer
         self.endpoint = OpenaiEndpoint(self.model.config, self.model.tokenizer, None)
-        
+
         test_ids = [35946, 73670, 73670, 73670, 73675, 35946, 37029, 37029, 37029]
         render_params = RendererParams(
             model_type="qwen",
@@ -499,12 +500,12 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         self.assertEqual(
             json.loads(response.usage.completion_tokens_details.model_dump_json()),
             {
-                'audio_tokens': None, 
+                'audio_tokens': None,
                 'reasoning_tokens': 5
             }
         )
-        
-    async def test_think_label_real_situation_union(self):     
+
+    async def test_think_label_real_situation_union(self):
         custom_renderer.THINK_MODE = 1
         custom_renderer.THINK_START_TAG = '<think>\n'
         custom_renderer.THINK_END_TAG = '</think>\n'
@@ -512,7 +513,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         tokenizer = AutoTokenizer.from_pretrained(f"{self.test_data_path}/deepseek_r1_qwen_14b_tokenizer")
         self.model.tokenizer = tokenizer
         self.endpoint = OpenaiEndpoint(self.model.config, self.model.tokenizer, None)
-        
+
         test_ids = [151648, 198, 73670, 73670, 73670, 151649, 271, 37029, 37029, 37029]
         render_params = RendererParams(
             model_type="qwen",
@@ -551,12 +552,12 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         self.assertEqual(
             json.loads(response.usage.completion_tokens_details.model_dump_json()),
             {
-                'audio_tokens': None, 
+                'audio_tokens': None,
                 'reasoning_tokens': 6
             }
         )
-        
-    async def test_escape(self):     
+
+    async def test_escape(self):
         think_start_tag = '<think>\n'
         self.assertEqual(think_start_tag, think_start_tag.encode('utf-8').decode('unicode_escape'))
         think_end_tag = '</think>\n\n'

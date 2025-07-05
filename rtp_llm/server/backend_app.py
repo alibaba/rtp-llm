@@ -6,7 +6,7 @@ import logging
 import logging.config
 from functools import cached_property
 from typing_extensions import override
-from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.config.py_config_modules import PyEnvConfigs, StaticConfig
 import uvicorn
 from uvicorn import Server, Config
 import asyncio
@@ -57,7 +57,7 @@ class GracefulShutdownServer(Server):
         await super().shutdown(sockets)
 
 class BackendApp(object):
-    def __init__(self, py_env_configs: PyEnvConfigs):
+    def __init__(self, py_env_configs: PyEnvConfigs = StaticConfig):
         self.py_env_configs = py_env_configs
         self.backend_server = BackendServer(py_env_configs)
 

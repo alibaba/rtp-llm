@@ -1,4 +1,5 @@
 import os
+from rtp_llm.config.py_config_modules import StaticConfig
 import torch
 import logging
 from unittest import TestCase, main
@@ -742,7 +743,7 @@ get_current_weather: Get the current weather in a given location. 输入参数�
         assert (ids == expected_ids)
 
     def test_llava(self):
-        os.environ["CHECKPOINT_PATH"] = "llava-v1.5"
+        StaticConfig.model_config.checkpoint_path = "llava-v1.5"
         tokenizer = LlavaTokenizer(
             tokenzier_path = f"{self.test_data_path}/model_test/fake_test/testdata/llava/tokenizer/",
             mm_use_im_patch_token = False,

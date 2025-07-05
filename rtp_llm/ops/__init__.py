@@ -10,7 +10,24 @@ parent_dir = os.path.dirname(current_dir)
 libs_path = os.path.join(parent_dir, "libs")
 SO_NAME = 'libth_transformer.so'
 
+#for py test
+def find_bazel_bin_so(current_dir: str):
+    # 递归向上查找 bazel-out 目录
+    p = pathlib.Path(current_dir).resolve()
+    while p != p.parent:
+        if (p / "bazel-out").exists():
+            # 找到 bazel-out，拼出 bazel-bin 路径
+            bazel_bin = p / "bazel-out" / "k8-opt" / "bin"
+            for root, _, files in os.walk(bazel_bin):
+                if SO_NAME in files:
+                    return root
+            break
+        p = p.parent
+    return None
+
 def find_th_transformer(current_dir: str):
+    if not os.path.exists(current_dir):
+        return None
     dir_path = pathlib.Path(current_dir)
     for file in dir_path.iterdir():
         if file.is_file() and file.name == SO_NAME:
@@ -31,7 +48,9 @@ def find_th_transformer(current_dir: str):
                     for file in subsubdir.iterdir():
                         if file.is_file() and file.name == SO_NAME:
                             return os.path.join(os.path.join(current_dir, subdir.name), subsubdir.name)
-    raise Exception(f"failed to find {SO_NAME} in {current_dir}")
+
+    return None
+
 
 so_path = os.path.join(libs_path)
 if not os.path.exists(os.path.join(so_path, SO_NAME)):
@@ -39,6 +58,11 @@ if not os.path.exists(os.path.join(so_path, SO_NAME)):
     # for debug useage, read in bazel-bin and bazel-bin's subdir
     bazel_bin_dir = os.path.join(parent_dir, "../bazel-bin")
     so_path = find_th_transformer(bazel_bin_dir)
+    if so_path is None:
+        logging.info(f"failed to find {SO_NAME} in {bazel_bin_dir}, maybe it's a py_test, try to find again")
+        so_path = find_bazel_bin_so(current_dir)
+    if so_path is None:
+        raise Exception(f"failed to find {SO_NAME} in {current_dir} in `find_bazel_bin_so()`")
 logging.info(f"so path: {so_path}")
 sys.path.append(so_path)
 # load intel xft lib

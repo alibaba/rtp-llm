@@ -13,10 +13,10 @@ py_test (
     deps = [
         "//rtp_llm/cpp:model_rpc_client",
         "//rtp_llm:testlib",
-        "//rtp_llm/test/model_test/test_util:test_util"
+        "//rtp_llm/test/model_test/test_util:test_util",
     ],
     exec_properties = {'gpu':'A10'},
-) 
+)
 
 test_deps = [
     "//rtp_llm/cpp/devices/testing:device_test_utils",
