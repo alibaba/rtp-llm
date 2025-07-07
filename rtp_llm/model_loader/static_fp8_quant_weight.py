@@ -303,9 +303,9 @@ class StaticPerTensorFp8Weight(CompositeWeight, QuantWeight):
         weights = src_weight.weights
         ffn_w_name = src_weight.name
         assert weights[0].name.endswith(W_SUFFIX)
-        assert ffn_w_name in [W.ffn_w1, W.ffn_w2, W.ffn_w3, W.moe_w1, W.moe_w2]
+        assert ffn_w_name in [W.ffn_w13, W.ffn_w2, W.moe_w1, W.moe_w2]
 
-        if ffn_w_name in [W.ffn_w1, W.ffn_w2, W.ffn_w3]:
+        if ffn_w_name in [W.ffn_w2]:
             assert len(weights) == 1
         w_name = weights[0].name[: -len(W_SUFFIX)]
         w: str = None
@@ -347,7 +347,7 @@ class StaticPerTensorFp8Weight(CompositeWeight, QuantWeight):
                 None,
             ]
         elif ffn_w_name == W.ffn_w13:
-            w, b, s = (W.ffn_w13, W.ffn_b13, W.ffn_s13)
+            w, _, s = (W.ffn_w13, W.ffn_b13, W.ffn_s13)
             w1_name = weights[0].name[: -len(W_SUFFIX)]
             w3_name = weights[1].name[: -len(W_SUFFIX)]
 
@@ -367,7 +367,7 @@ class StaticPerTensorFp8Weight(CompositeWeight, QuantWeight):
                 ),
                 create_w8a8_fp8_weight(
                     src_weight,
-                    b,
+                    s,
                     [
                         CkptWeightInfo(w1_name + self.qs_suffix, identity),
                         CkptWeightInfo(w3_name + self.qs_suffix, identity),

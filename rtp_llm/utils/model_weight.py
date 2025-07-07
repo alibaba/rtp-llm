@@ -815,6 +815,11 @@ def transpose_w13(ts: List[torch.Tensor]):
     return torch.concat([w1, w3], dim=-1).contiguous()
 
 
+def transpose_w13_2(ts: List[torch.Tensor]):
+    w1 = transpose([ts[0]])
+    w3 = transpose([ts[1]])
+    return torch.concat([w1, w3], dim=0).contiguous()
+
 def concat_w13(ts: List[torch.Tensor]):
     return torch.concat(ts, dim=-1).contiguous()
 

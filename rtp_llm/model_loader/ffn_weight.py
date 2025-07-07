@@ -24,7 +24,6 @@ class FfnConfig(BaseModel):
     inter_padding_size: int = -1
     is_moe: bool = False
     need_post_ln: bool = False
-    enable_merge_w13: bool = False
     need_ffn_act_scale: bool = False
 
 
@@ -226,15 +225,11 @@ class FfnWeight(CompositeWeight):
         self.name = W.ffn
         sub_weight_dict = {sub_weight.name: sub_weight for sub_weight in sub_weights}
         self.config = config
-        if self.config.enable_merge_w13 and (
-            W.ffn_w1 in sub_weight_dict and W.ffn_w3 in sub_weight_dict
-        ):
+        if  W.ffn_w1 in sub_weight_dict and W.ffn_w3 in sub_weight_dict:
             self.origin_w1 = sub_weight_dict[W.ffn_w1]
             self.origin_w3 = sub_weight_dict[W.ffn_w3]
             sub_weight_dict = fix_merge_w13(sub_weight_dict)
-        if self.config.enable_merge_w13 and (
-            W.ffn_b1 in sub_weight_dict and W.ffn_b3 in sub_weight_dict
-        ):
+        if W.ffn_b1 in sub_weight_dict and W.ffn_b3 in sub_weight_dict:
             self.origin_b1 = sub_weight_dict[W.ffn_b1]
             self.origin_b3 = sub_weight_dict[W.ffn_b3]
             sub_weight_dict = fix_merge_b13(sub_weight_dict)
@@ -279,7 +274,6 @@ class MoeConfig(BaseModel):
     inter_padding_size: int = -1
     routed_scaling_factor: float = 1.0
     weight_stack: bool = False
-    enable_merge_w13: bool = False
 
 
 class MoeAtomicWeight(AtomicWeight):
@@ -423,15 +417,11 @@ class MoeWithSharedWeight(CompositeWeight):
         kwargs["name"] = W.moe
         sub_weight_dict = {sub_weight.name: sub_weight for sub_weight in sub_weights}
 
-        if self.config.enable_merge_w13 and (
-            W.ffn_w1 in sub_weight_dict and W.ffn_w3 in sub_weight_dict
-        ):
+        if W.ffn_w1 in sub_weight_dict and W.ffn_w3 in sub_weight_dict:
             self.origin_w1 = sub_weight_dict[W.ffn_w1]
             self.origin_w3 = sub_weight_dict[W.ffn_w3]
             sub_weight_dict = fix_merge_w13(sub_weight_dict)
-        if self.config.enable_merge_w13 and (
-            W.ffn_b1 in sub_weight_dict and W.ffn_b3 in sub_weight_dict
-        ):
+        if W.ffn_b1 in sub_weight_dict and W.ffn_b3 in sub_weight_dict:
             self.origin_b1 = sub_weight_dict[W.ffn_b1]
             self.origin_b3 = sub_weight_dict[W.ffn_b3]
             sub_weight_dict = fix_merge_b13(sub_weight_dict)

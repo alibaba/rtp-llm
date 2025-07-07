@@ -130,6 +130,9 @@ class ModelDeployWeightInfo:
         W.ffn_w3: "transformer.layers.{i}.mlp.gate.weight",
         W.ffn_b3: "transformer.layers.{i}.mlp.gate.bias",
         W.ffn_s3: "transformer.layers.{i}.mlp.gate.weights_scaling_factor",
+        W.ffn_w13 : ['transformer.layers.{i}.mlp.fc.weight', 'transformer.layers.{i}.mlp.gate.weight'],
+        W.ffn_b13 : ['transformer.layers.{i}.mlp.fc.bias', 'transformer.layers.{i}.mlp.gate.bias'],
+        W.ffn_s13 : ['transformer.layers.{i}.mlp.fc.weights_scaling_factor', 'transformer.layers.{i}.mlp.gate.weights_scaling_factor'],
         W.post_ln_gamma: "transformer.layers.{i}.post_layernorm.weight",
         W.post_ln_beta: "transformer.layers.{i}.post_layernorm.bias",
     }
@@ -171,7 +174,6 @@ class ModelDeployWeightInfo:
         self.moe_n_group_ = config.moe_n_group
         self.enable_eplb_ = config.enable_eplb
         self.phy_exp_num_ = config.phy_exp_num
-        self.enable_merge_w13_ = config.enable_merge_w13
         self.moe_k_ = config.gpt_init_params.moe_k
         self.moe_layer_index_ = config.gpt_init_params.moe_layer_index
         self.moe_style_ = config.gpt_init_params.moe_style
@@ -240,9 +242,8 @@ class ModelDeployWeightInfo:
             logging.info("fix weight style")
             weight_info = self._fix_weight_style_layer_weight(weight_info)
 
-        if self.enable_merge_w13_:
-            logging.info("fix merge_w13")
-            weight_info = self._fix_merge_w1_w3(weight_info)
+        logging.info("fix merge_w13")
+        weight_info = self._fix_merge_w1_w3(weight_info)
 
         if self.attn_config.use_fp8_kv_cache:
             weight_info = self._add_attention_output_static_quant_reciprocal(
@@ -285,6 +286,9 @@ class ModelDeployWeightInfo:
                         logging.error(
                             f"{weight.name} have many weight, maybe cause bug {weight.weights}"
                         )
+                    elif weight.name in [W.ffn_w13, W.ffn_b13, W.ffn_s13]:
+                        weight.weights[0].name = name_map[weight.name][0]
+                        weight.weights[1].name = name_map[weight.name][1]
                     elif len(weight.weights) >= 2:
                         raise ValueError(
                             f"{weight.name} should have only one or zero weight, {weight.weights}"
@@ -306,10 +310,7 @@ class ModelDeployWeightInfo:
         for weights in origin_weight_info.layer_weights:
             ffn_weight = [weight for weight in weights if weight.name == W.ffn]
             assert len(ffn_weight) == 1
-            if (
-                ffn_weight[0].w1 is not None
-                and self.weight_style == WeightStyle.TRT_ENGINE
-            ):
+            if (ffn_weight[0].w1 is not None or ffn_weight[0].w13 is not None) and self.weight_style == WeightStyle.TRT_ENGINE:
                 m2 = self.TRT_ENGINE_LAYER_WEIGHT_MAP2
             elif self.weight_style == WeightStyle.TRT_ENGINE:
                 m2 = self.TRT_ENGINE_LAYER_WEIGHT_MAP
@@ -356,7 +357,6 @@ class ModelDeployWeightInfo:
     def _fix_merge_w1_w3(self, origin_weight_info: ModelWeightInfo):
         def __update_weight_config(weight: WeightModule):
             if isinstance(weight, FfnWeight) or isinstance(weight, MoeWithSharedWeight):
-                weight.config.enable_merge_w13 = True
                 logging.info(f"src_weights: {weight}")
                 params = weight.extract_params(weight.__class__, weight, None)
                 return weight.__class__(**params)
@@ -545,7 +545,6 @@ class ModelDeployWeightInfo:
             expert_num=self.expert_num_,
             enable_eplb=self.enable_eplb_,
             phy_exp_num=self.phy_exp_num_,
-            enable_merge_w13=self.enable_merge_w13_,
             tp_size=self.tp_size,
             tp_rank=self.tp_rank,
             ep_size=self.ep_size,

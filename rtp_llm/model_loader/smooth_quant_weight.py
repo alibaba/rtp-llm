@@ -30,7 +30,7 @@ from rtp_llm.utils.model_weight import (
     stack_,
     stack_moe_w1,
     transpose,
-    transpose_w13,
+    transpose_w13_2,
 )
 
 QW_SUFFIX = ".qweight"
@@ -82,7 +82,9 @@ class SmoothQuantWeightInfo(CompositeWeight, QuantWeight):
         kernel: AtomicWeight = None
         scale: Optional[AtomicWeight] = None
         smoother: Optional[AtomicWeight] = None
-        logging.debug(f"SmoothQuantWeightInfo : {self.qs_suffix}, {self.qw_suffix}")
+        logging.debug(
+            f"SmoothQuantWeightInfo : {self.qs_suffix}, {self.qw_suffix}, {src_weight_info.name}"
+        )
 
         if src_weight_info.name == W.attn_qkv_w:
             (kernel, scale, smoother) = self._get_qkv_quant_weight_info(src_weight_info)
@@ -240,9 +242,9 @@ class SmoothQuantWeightInfo(CompositeWeight, QuantWeight):
         assert weights[0].name.endswith(
             W_SUFFIX
         ), f"{weights[0].name} not endswith {W_SUFFIX}"
-        assert ffn_w_name in [W.ffn_w1, W.ffn_w2, W.ffn_w3, W.moe_w1, W.moe_w2]
+        assert ffn_w_name in [W.ffn_w13, W.ffn_w2, W.moe_w1, W.moe_w2]
 
-        if ffn_w_name in [W.ffn_w1, W.ffn_w2, W.ffn_w3]:
+        if ffn_w_name in [W.ffn_w2]:
             assert len(weights) == 1
         w_name = weights[0].name[: -len(W_SUFFIX)]
 
@@ -311,7 +313,7 @@ class SmoothQuantWeightInfo(CompositeWeight, QuantWeight):
                 ),
             ]
         elif ffn_w_name == W.ffn_w13:
-            w, b, s = (W.ffn_w13, W.ffn_b13, W.ffn_s13)
+            w, _, s = (W.ffn_w13, W.ffn_b13, W.ffn_s13)
             w1_name = weights[0].name[: -len(W_SUFFIX)]
             w3_name = weights[1].name[: -len(W_SUFFIX)]
             return [
@@ -319,25 +321,25 @@ class SmoothQuantWeightInfo(CompositeWeight, QuantWeight):
                     src_weight,
                     w,
                     [
-                        CkptWeightInfo(w1_name + QW_SUFFIX, identity),
-                        CkptWeightInfo(w3_name + QW_SUFFIX, identity),
+                        CkptWeightInfo(w1_name + self.qw_suffix, identity),
+                        CkptWeightInfo(w3_name + self.qw_suffix, identity),
                     ],
-                    transpose_w13,
+                    transpose_w13_2,
                     data_type=torch.int8,
                     config=src_weight.config,
                 ),
+                None,
                 create_w8a8_int8_weight(
                     src_weight,
-                    b,
+                    s,
                     [
-                        CkptWeightInfo(w1_name + B_SUFFIX, identity),
-                        CkptWeightInfo(w3_name + B_SUFFIX, identity),
+                        CkptWeightInfo(w1_name + self.qs_suffix, identity),
+                        CkptWeightInfo(w3_name + self.qs_suffix, identity),
                     ],
                     concat_w13,
                     data_type=torch.float32,
                     config=src_weight.config,
-                ),
-                None,
+                )
             ]
         else:
             if ffn_w_name == W.ffn_w1:
@@ -511,12 +513,17 @@ class TrtEngineSmoothQuantWeightInfo(SmoothQuantWeightInfo):
         weights = src_weight.weights
         ffn_w_name = src_weight.name
         assert weights[0].name.endswith(W_SUFFIX)
-        assert ffn_w_name in [W.ffn_w1, W.ffn_w2, W.ffn_w3, W.moe_w1, W.moe_w2]
+        assert ffn_w_name in [
+            W.ffn_w13,
+            W.ffn_w2,
+            W.moe_w1,
+            W.moe_w2,
+        ]
         inter_padding_size = src_weight.config.inter_padding_size
         is_gated_activation = src_weight.config.is_gated_activation
         is_moe = src_weight.config.is_moe
 
-        if ffn_w_name in [W.ffn_w1, W.ffn_w2, W.ffn_w3]:
+        if ffn_w_name in [W.ffn_w2]:
             assert len(weights) == 1
         w_name = weights[0].name[: -len(W_SUFFIX)]
 
@@ -585,7 +592,7 @@ class TrtEngineSmoothQuantWeightInfo(SmoothQuantWeightInfo):
                 ),
             ]
         elif ffn_w_name == W.ffn_w13:
-            w, b, s = (W.ffn_w13, W.ffn_b13, W.ffn_s13)
+            w, _, s = (W.ffn_w13, W.ffn_b13, W.ffn_s13)
             w1_name = weights[0].name[: -len(W_SUFFIX)]
             w3_name = weights[1].name[: -len(W_SUFFIX)]
             return [
@@ -596,13 +603,14 @@ class TrtEngineSmoothQuantWeightInfo(SmoothQuantWeightInfo):
                         CkptWeightInfo(w1_name + self.qw_suffix, identity),
                         CkptWeightInfo(w3_name + self.qw_suffix, identity),
                     ],
-                    transpose_w13,
+                    transpose_w13_2,
                     data_type=torch.int8,
                     config=src_weight.config,
                 ),
+                None,
                 create_w8a8_int8_weight(
                     src_weight,
-                    b,
+                    s,
                     [
                         CkptWeightInfo(w1_name + self.qs_suffix, identity),
                         CkptWeightInfo(w3_name + self.qs_suffix, identity),
@@ -610,8 +618,7 @@ class TrtEngineSmoothQuantWeightInfo(SmoothQuantWeightInfo):
                     concat_w13,
                     data_type=torch.float32,
                     config=src_weight.config,
-                ),
-                None,
+                )
             ]
         else:
             if ffn_w_name == W.ffn_w1:

@@ -233,7 +233,6 @@ class GptInitModelParameters:
         "is_mtp",
         "num_nodes",
         "use_qk_norm",
-        "enable_merge_w13",
         "quant_config",
         "py_env_configs",
     }
@@ -477,7 +476,6 @@ class GptInitModelParameters:
 
         self.is_mtp = False
         self.use_qk_norm = False
-        self.enable_merge_w13 = False
         self.quant_config = None
         self.role_type = RoleType.PDFUSION
 
@@ -906,9 +904,8 @@ class GptInitModelParameters:
         self.phy_exp_num = (
             self.py_env_configs.py_eplb_config.redundant_expert + self.expert_num
         )
-        self.enable_merge_w13 = self.hw_kernel_config.enable_merge_w13
         logging.info(
-            f"phy_exp_num: {self.phy_exp_num}, use merge w13: {self.enable_merge_w13}"
+            f"phy_exp_num: {self.phy_exp_num}"
         )
 
         if gang_info is not None:

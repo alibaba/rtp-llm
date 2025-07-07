@@ -29,7 +29,6 @@ class LoadConfig(BaseModel):
     expert_num: int
     enable_eplb: bool
     phy_exp_num: int
-    enable_merge_w13: bool
 
     tp_size: int
     tp_rank: int

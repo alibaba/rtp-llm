@@ -23,7 +23,7 @@ except ImportError:
         "SelectTopkOp/FusedMoEOp not available, using fallback implementation."
     )
 
-from rtp_llm.models_py.modules.mlp import DenseMLP
+from rtp_llm.models_py.modules.mlp import FusedSiluActDenseMLP
 from rtp_llm.models_py.modules.norm import RMSNorm
 from rtp_llm.models_py.utils.debug import set_trace_on_tty
 
@@ -101,7 +101,7 @@ class TBStars2MoEDecoderLayer(nn.Module):
         self.add_shared_expert = config.moe_style == 2
 
         if self.add_shared_expert:
-            self.shared_mlp = DenseMLP(config, weights)
+            self.shared_mlp = FusedSiluActDenseMLP(config, weights)
 
         self.input_layernorm = RMSNorm(
             weights[W.pre_ln_gamma], eps=config.layernorm_eps

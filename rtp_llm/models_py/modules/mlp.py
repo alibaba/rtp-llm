@@ -37,14 +37,7 @@ class FusedSiluActDenseMLP(nn.Module):
         assert (
             config.activation_type == "SiGLU"
         ), "FusedSiluActDenseMLP only supports SiGLU activation"
-
-        gate_proj_bias = weights.get(W.ffn_b1, None)
-        up_proj_bias = weights.get(W.ffn_b3, None)
-        gate_up_proj_bias = None
-        if gate_proj_bias is not None and up_proj_bias is not None:
-            gate_up_proj_bias = torch.cat([gate_proj_bias, up_proj_bias], dim=-1)
-        gate_up_proj_weight = torch.cat([weights[W.ffn_w1], weights[W.ffn_w3]], dim=-1)
-        self.gate_up_proj = Linear(gate_up_proj_weight, gate_up_proj_bias)
+        self.gate_up_proj = Linear(weights[W.ffn_w13], weights.get(W.ffn_b13, None))
         self.down_proj = Linear(weights[W.ffn_w2], weights.get(W.ffn_b2, None))
 
     def forward(self, x: torch.Tensor):

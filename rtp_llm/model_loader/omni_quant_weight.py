@@ -24,7 +24,7 @@ from rtp_llm.utils.model_weight import (
     stack_,
     stack_moe_w1,
     transpose,
-    transpose_w13,
+    transpose_w13_2,
 )
 
 QW_SUFFIX = ".qweight"
@@ -128,9 +128,9 @@ def get_ffn_quant_weight_info(
     weights = src_weight.weights
     ffn_w_name = src_weight.name
     assert weights[0].name.endswith(W_SUFFIX)
-    assert ffn_w_name in [W.ffn_w1, W.ffn_w2, W.ffn_w3, W.moe_w1, W.moe_w2]
+    assert ffn_w_name in [W.ffn_w13, W.ffn_w2, W.moe_w1, W.moe_w2]
 
-    if ffn_w_name in [W.ffn_w1, W.ffn_w2, W.ffn_w3]:
+    if ffn_w_name in [W.ffn_w2]:
         assert len(weights) == 1
     w_name = weights[0].name[: -len(W_SUFFIX)]
 
@@ -204,7 +204,7 @@ def get_ffn_quant_weight_info(
                     CkptWeightInfo(w1_name + QW_SUFFIX, identity),
                     CkptWeightInfo(w3_name + QW_SUFFIX, identity),
                 ],
-                transpose_w13,
+                transpose_w13_2,
                 data_type=torch.int8,
                 config=src_weight.config,
             ),
@@ -276,6 +276,7 @@ class OmniQuantWeightInfo(CompositeWeight, QuantWeight):
         W.ffn_w1,
         W.ffn_w3,
         W.ffn_w2,
+        W.ffn_w13,
         W.post_ln_gamma,
     ]
 

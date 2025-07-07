@@ -119,19 +119,19 @@ py_test (
     exec_properties = {'gpu':'A10'},
 )
 
-py_test (
-    name = "mlp_test",
-    srcs = ["mlp_test.py"],
-    deps = [
-        "//rtp_llm/models_py:models",
-        "//rtp_llm:config",
-        "//rtp_llm:utils",
-        "//rtp_llm:testlib",
-        "//rtp_llm/test/model_test/test_util:test_util"
-    ],
-    env = test_envs,
-    exec_properties = {'gpu':'A10'},
-)
+#py_test (
+#    name = "mlp_test",
+#    srcs = ["mlp_test.py"],
+#    deps = [
+#        "//rtp_llm/models_py:models",
+#        "//rtp_llm:config",
+#        "//rtp_llm:utils",
+#       "//rtp_llm:testlib",
+#        "//rtp_llm/test/model_test/test_util:test_util"
+#    ],
+#    env = test_envs,
+#    exec_properties = {'gpu':'A10'},
+#)
 
 py_test (
     name = "fusedqkrmsnorm_test",

@@ -650,7 +650,7 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
         const size_t attn_rs_hidden         = layer0.self_attention_weights.output_weight->kernel->shape()[1];
         const size_t ffn_rs_hidden          = layer0.ffn_weights.down_weight->kernel->shape()[1];
         const size_t attn_ag_hidden         = layer0.self_attention_weights.qkv_weight->kernel->shape()[0];
-        const size_t ffn_ag_hidden          = layer0.ffn_weights.gate_weight->kernel->shape()[0];
+        const size_t ffn_ag_hidden          = layer0.ffn_weights.gate_up_weight->kernel->shape()[0];
         DataType     rs_output_type         = hidden->type();
         DataType     ag_input_type          = attn_dtype;
         bool         enable_per_token_scale = description_.act_qscheme == QScheme::Qint8PerToken;

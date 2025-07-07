@@ -12,7 +12,7 @@ from rtp_llm.models_py.modules.attention import CausalAttention
 from rtp_llm.models_py.modules.embedding import Embedding
 from rtp_llm.models_py.modules.fmha import FMHAImplBase
 from rtp_llm.models_py.modules.linear import Linear
-from rtp_llm.models_py.modules.mlp import DenseMLP
+from rtp_llm.models_py.modules.mlp import FusedSiluActDenseMLP
 from rtp_llm.models_py.modules.norm import FusedQKRMSNorm, RMSNorm
 from rtp_llm.models_py.utils.debug import set_trace_on_tty
 from rtp_llm.ops import KVCache, PyAttentionInputs, PyModelInputs, PyModelOutputs
@@ -64,7 +64,7 @@ class Qwen3DecoderLayer(nn.Module):
     ):
         super().__init__()
         self.self_attn = Qwen3Attention(config, weights)
-        self.mlp = DenseMLP(config, weights)
+        self.mlp = FusedSiluActDenseMLP(config, weights)
         self.input_layernorm = RMSNorm(
             weights[W.pre_ln_gamma], eps=config.layernorm_eps
         )

@@ -299,9 +299,9 @@ class PerTensorInt8QuantWeight(CompositeWeight, QuantWeight):
         weights = src_weight.weights
         ffn_w_name = src_weight.name
         assert weights[0].name.endswith(W_SUFFIX)
-        assert ffn_w_name in [W.ffn_w1, W.ffn_w2, W.ffn_w3, W.moe_w1, W.moe_w2]
+        assert ffn_w_name in [W.ffn_w13, W.ffn_w2, W.moe_w1, W.moe_w2, W.ffn_w3]
 
-        if ffn_w_name in [W.ffn_w1, W.ffn_w2, W.ffn_w3]:
+        if ffn_w_name in [W.ffn_w2]:
             assert len(weights) == 1
         w_name = weights[0].name[: -len(W_SUFFIX)]
         w: str = None
