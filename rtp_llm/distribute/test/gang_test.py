@@ -6,6 +6,7 @@ import signal
 import logging
 import unittest
 import requests
+from rtp_llm.config.py_config_modules import StaticConfig
 import torch
 from unittest import mock
 from threading import Thread
@@ -154,6 +155,7 @@ class GangTest(unittest.TestCase):
         torch_device_count.return_value = 2
         g_parallel_info.reload()
         procs: List[Process] = list()
+        StaticConfig.update_from_env()
         procs = main()
 
         try:
@@ -231,6 +233,7 @@ class GangTest(unittest.TestCase):
         torch_device_count.return_value = 2
         g_parallel_info.reload()
         procs: List[Process] = list()
+        StaticConfig.update_from_env()
         procs = main()
 
         try:
@@ -278,6 +281,7 @@ class GangTest(unittest.TestCase):
         torch_device_count.return_value = 2
         g_parallel_info.reload()
         procs: List[Process] = list()
+        StaticConfig.update_from_env()
         procs = main()
 
         try:
