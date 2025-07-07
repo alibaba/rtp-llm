@@ -842,6 +842,29 @@ def setup_args():
         help="指定 WRR 负载均衡器使用的排序因子。`0` 表示基于 KV_CACHE 使用情况排序，`1` 表示基于正在处理的请求数 (ONFLIGHT_REQUESTS) 排序。"
     )
 
+    cache_store_group.add_argument(
+        '--cache_store_thread_count',
+        env_name="CACHE_STORE_THREAD_COUNT",
+        type=int,
+        default=16,
+        help="为 cache store 线程池设置线程数量。"
+    )
+
+    cache_store_group.add_argument(
+        '--cache_store_rdma_connect_timeout_ms',
+        env_name="CACHE_STORE_RDMA_CONNECT_TIMEOUT_MS",
+        type=int,
+        default=250,
+        help="为 cache store RDMA 连接设置超时时间，单位为毫秒。"
+    )
+
+    cache_store_group.add_argument(
+        '--cache_store_rdma_qp_count_per_connection',
+        env_name="CACHE_STORE_RDMA_QP_COUNT_PER_CONNECTION",
+        type=int,
+        default=2,
+        help="为 cache store RDMA 连接设置每个连接的底层QP数量。"
+    )
 
     ##############################################################################################################
     # 调度器配置

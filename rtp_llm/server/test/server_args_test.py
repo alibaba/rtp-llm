@@ -381,6 +381,9 @@ class ServerArgsSetTest(TestCase):
             "--cache_store_rdma_mode", "True",
             "--wrr_available_ratio", "95",
             "--rank_factor", "1",
+            "--cache_store_thread_count", "8",
+            "--cache_store_rdma_connect_timeout_ms", "500",
+            "--cache_store_rdma_qp_count_per_connection", "8",
 
             # 14. 调度器配置
             "--use_batch_decode_scheduler", "True",
@@ -616,6 +619,9 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env["CACHE_STORE_RDMA_MODE"], "1")
         self.assertEqual(env["WRR_AVAILABLE_RATIO"], "95")
         self.assertEqual(env["RANK_FACTOR"], "1")
+        self.assertEqual(env["CACHE_STORE_THREAD_COUNT"], "8")
+        self.assertEqual(env["CACHE_STORE_RDMA_CONNECT_TIMEOUT_MS"], "500")
+        self.assertEqual(env["CACHE_STORE_RDMA_QP_COUNT_PER_CONNECTION"], "8")
 
         # 14. 调度器配置
         self.assertEqual(env["USE_BATCH_DECODE_SCHEDULER"], "1")

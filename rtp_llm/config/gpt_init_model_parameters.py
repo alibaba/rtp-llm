@@ -409,6 +409,9 @@ class GptInitModelParameters:
             cache_store_rdma_mode=get_env_bool("CACHE_STORE_RDMA_MODE", False),
             wrr_available_ratio=get_env_int("WRR_AVAILABLE_RATIO", 80),
             rank_factor=get_env_int("RANK_FACTOR", 0),
+            thread_count=get_env_int("CACHE_STORE_THREAD_COUNT", 16),
+            rdma_connect_timeout_ms=get_env_int("CACHE_STORE_RDMA_CONNECT_TIMEOUT_MS", 250),
+            rdma_qp_count_per_connection=get_env_int("CACHE_STORE_RDMA_QP_COUNT_PER_CONNECTION", 2),
         )
 
         # ConcurrencyConfig

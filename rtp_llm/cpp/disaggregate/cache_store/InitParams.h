@@ -15,6 +15,9 @@ struct MessagerInitParams {
     uint32_t rdma_server_port         = 0;
     uint32_t rdma_io_thread_count     = 1;
     uint32_t rdma_worker_thread_count = 2;
+
+    int rdma_connect_timeout_ms{250};
+    int rdma_qp_count_per_connection{2};
 };
 
 class CacheStoreInitParams {
@@ -28,6 +31,9 @@ public:
     void*    stream{nullptr};
     bool     rdma_mode{true};
     uint32_t rdma_listen_port{0};
+
+    int rdma_connect_timeout_ms{250};
+    int rdma_qp_count_per_connection{2};
 
     bool enable_metric{true};
 

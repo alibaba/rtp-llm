@@ -49,6 +49,8 @@ bool NormalCacheStore::init(const CacheStoreInitParams& params) {
     MessagerInitParams messager_init_params;
     messager_init_params.server_port      = params.listen_port;
     messager_init_params.rdma_server_port = params.rdma_listen_port;
+    messager_init_params.rdma_connect_timeout_ms = params.rdma_connect_timeout_ms;
+    messager_init_params.rdma_qp_count_per_connection = params.rdma_qp_count_per_connection;
     if (!messager_->init(messager_init_params)) {
         RTP_LLM_LOG_ERROR("normal cache store init failed : init messager failed");
         return false;
@@ -61,7 +63,7 @@ bool NormalCacheStore::init(const CacheStoreInitParams& params) {
         return false;
     }
 
-    RTP_LLM_LOG_INFO("normal cache store init done");
+    RTP_LLM_LOG_INFO("normal cache store init done, thread pool thread count is %d", params.thread_count);
     return true;
 }
 
