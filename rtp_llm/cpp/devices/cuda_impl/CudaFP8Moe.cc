@@ -109,7 +109,7 @@ FfnLayerOutput CudaDevice::moeFfnFp8(const FfnLayerParams& params, const MoeGate
     printBufferData(*expert_first_token_offset, "expert_first_token_offset");
     check_cuda_error();
 
-    if (token_num == 1) {
+    if (token_num == 1 && moe_conf.ep_size == 1) {
         size_t padding_size = pad_to_multiple_of_128(token_num);
         size_t total_padding_num = padding_size * top_k;
 
