@@ -25,3 +25,6 @@ RUN rpm -i http://mirrors.aliyun.com/epel/7/x86_64/Packages/p/patchelf-0.12-1.el
 
 RUN echo "%sdev ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers && \
     groupadd sdev
+
+# for pre-commit
+RUN /opt/conda310/bin/python3 -m pip install pre-commit && ln -s /opt/conda310/bin/pre-commit /usr/local/bin/pre-commit
