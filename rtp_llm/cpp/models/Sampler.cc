@@ -102,7 +102,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
             RTP_LLM_LOG_DEBUG("current_beam_size is %d", current_beam_size);
             RTP_LLM_LOG_DEBUG("current_beam_batch is %d", beam_batch_size);
             RTP_LLM_CHECK_WITH_INFO((sample_batch_size % current_beam_size == 0),
-                "sample_batch_size[%d] must devide by current_beam_size[%d]");
+                "sample_batch_size[%d] must devide by current_beam_size[%d]", sample_batch_size, current_beam_size);
             auto beam_search_sequence_lengths = inputs.beam_search_sequence_lengths->view(from_batch_idx, sample_batch_size);
             auto beam_index = inputs.beam_index->view(from_batch_idx, sample_batch_size);
             auto org_sample_logits_shape = sample_logits.shape();
