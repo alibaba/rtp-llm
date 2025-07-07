@@ -8,23 +8,26 @@ ErrorInfo PrefillGenerateContextNew::init(const std::shared_ptr<EngineBase>& eng
 
     generate_input                                        = QueryConverter::transQuery(&request->input());
     generate_input->generate_config->pd_separation        = true;
-    if (engine->isMTPEagle()) {
-        generate_input->generate_config->force_disable_sp_run = false;
-    } else {
-        generate_input->generate_config->force_disable_sp_run = true;
-    }
+    generate_input->generate_config->force_disable_sp_run = true;
+
+    // TODO: support MTP
+    // if (engine->isMTPEagle()) {
+    //     generate_input->generate_config->force_disable_sp_run = false;
+    // } else {
+    //     generate_input->generate_config->force_disable_sp_run = true;
+    // }
 
     stream_            = engine->makeStream(generate_input);
     request_timeout_ms = stream_->getTimeoutMs();
 
     auto status = stream_->initKVBlock(0);
     if (!status.ok()) {
-        RTP_LLM_LOG_WARNING("request [%s] init kv block failed, malloc kv cache block failed");
+        RTP_LLM_LOG_WARNING("request [%s] init kv block failed, malloc kv cache block failed", request_key.c_str());
         error_info = ErrorInfo(ErrorCode::MALLOC_FAILED, "malloc kv cache block failed at decode node");
         return error_info;
     }
 
-    RTP_LLM_LOG_INFO("request [%s] prepare generate context done", request_key.c_str());
+    RTP_LLM_LOG_DEBUG("request [%s] prepare generate context done", request_key.c_str());
     return ErrorInfo::OkStatus();
 }
 

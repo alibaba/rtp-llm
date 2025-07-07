@@ -56,9 +56,8 @@ message CacheLoadResponse {
 message CacheTransferInfo {
     optional uint32 partition_count = 1; 
     optional uint32 partition_id = 2;
-
-    repeated string local_keys = 5;
-    repeated string remote_keys = 6;
+    repeated string local_keys = 3;
+    repeated string remote_keys = 4;
 }
 
 message CacheTransferRequest {

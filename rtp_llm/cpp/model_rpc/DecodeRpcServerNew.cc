@@ -86,7 +86,7 @@ grpc::Status DecodeRpcServerNew::GenerateStreamCall(grpc::ServerContext*        
                                                     grpc::ServerWriter<GenerateOutputsPB>* response_writer) {
     DecodeGenerateContextNew decode_context(server_context, request, response_writer, metrics_reporter_, meta_);
 
-    RTP_LLM_LOG_INFO("request [%s] start generate", decode_context.request_key.c_str());
+    RTP_LLM_LOG_DEBUG("request [%s] start generate", decode_context.request_key.c_str());
 
     decode_context.error_info = decode_context.init(engine_);
     if (!decode_context.error_info.ok()) {
@@ -104,25 +104,25 @@ grpc::Status DecodeRpcServerNew::GenerateStreamCall(grpc::ServerContext*        
 
     auto ret                                   = localGenerate(decode_context);
     decode_context.local_generate_done_time_us = currentTimeUs();
-    RTP_LLM_LOG_INFO("request [%s] generate done", decode_context.request_key.c_str());
+    RTP_LLM_LOG_DEBUG("request [%s] generate done", decode_context.request_key.c_str());
     return ret;
 }
 
 ErrorInfo DecodeRpcServerNew::loadCacheFromPrefill(DecodeGenerateContextNew& decode_context) {
-    RTP_LLM_LOG_INFO("request [%s] start to load cache from prefill", decode_context.request_key.c_str());
+    RTP_LLM_LOG_DEBUG("request [%s] start to load cache from prefill", decode_context.request_key.c_str());
 
     makeRemoteGenerateRequest(decode_context);
-    RTP_LLM_LOG_INFO("request [%s] make remote generate request done, request is %s", decode_context.request_key.c_str(), decode_context.remote_generate_request.ShortDebugString().c_str());
+    RTP_LLM_LOG_DEBUG("request [%s] make remote generate request done, request is %s", decode_context.request_key.c_str(), decode_context.remote_generate_request.ShortDebugString().c_str());
 
     auto ret = callPrefill(decode_context);
     if (!ret.ok()) {
         RTP_LLM_LOG_WARNING("request [%s] call prefill failed, err: %s", decode_context.request_key.c_str(), ret.ToString().c_str());
         return ret;
     }
-    RTP_LLM_LOG_INFO("request [%s] call prefill done, response is %s", decode_context.request_key.c_str(), decode_context.remote_generate_response.ShortDebugString().c_str());
+    RTP_LLM_LOG_DEBUG("request [%s] call prefill done, response is %s", decode_context.request_key.c_str(), decode_context.remote_generate_response.ShortDebugString().c_str());
 
     decode_context.load_cache_from_prefill_done_time_us = currentTimeUs();
-    RTP_LLM_LOG_INFO("request [%s] load cache from prefill done", decode_context.request_key.c_str());
+    RTP_LLM_LOG_DEBUG("request [%s] load cache from prefill done", decode_context.request_key.c_str());
     return ErrorInfo::OkStatus();
 }
 
@@ -147,12 +147,12 @@ void DecodeRpcServerNew::makeRemoteGenerateRequest(DecodeGenerateContextNew& dec
     // reuse block no need sent back from prefill
     request.set_reuse_block_size(generate_stream->reuseBlockSize());
 
-    if (engine_->isMTPEagle()) {
-        std::string mtp_hidden_states_key = "mtp_hidden_states_key-" + decode_context.request_id;
-        request.set_mtp_hidden_states_key(mtp_hidden_states_key);
-        // TODO: MTP register to cache store;
-        // resource_.cache_store->registeBuffer(mtp_hidden_states_key, generate_stream->returnEmptyHiddenStates());
-    }
+    // if (engine_->isMTPEagle()) {
+    //     std::string mtp_hidden_states_key = "mtp_hidden_states_key-" + decode_context.request_id;
+    //     request.set_mtp_hidden_states_key(mtp_hidden_states_key);
+    //     // TODO: MTP register to cache store;
+    //     // resource_.cache_store->registeBuffer(mtp_hidden_states_key, generate_stream->returnEmptyHiddenStates());
+    // }
 
     request.set_use_mla(engine_->resourceContext().cache_manager->cacheConfig().use_mla);
     request.set_layer_num(maga_init_params_.gpt_init_parameter.num_layers_);
@@ -160,7 +160,7 @@ void DecodeRpcServerNew::makeRemoteGenerateRequest(DecodeGenerateContextNew& dec
 }
 
 ErrorInfo DecodeRpcServerNew::callPrefill(DecodeGenerateContextNew& decode_context) {
-    RTP_LLM_LOG_INFO("request [%s] start to call prefill", decode_context.request_key.c_str());
+    RTP_LLM_LOG_DEBUG("request [%s] start to call prefill", decode_context.request_key.c_str());
 
     auto host = load_balancer_->chooseHost(prefill_cluster_name_,
                                            decode_context.request->generate_config().global_request_id());
@@ -209,12 +209,10 @@ ErrorInfo DecodeRpcServerNew::callPrefill(DecodeGenerateContextNew& decode_conte
     auto block_ids = decode_context.getStream()->kvCache().blocks(0);
     for (auto block_id : block_ids) {
        auto [k_buffer, v_buffer] = engine_->resourceContext().cache_manager->getKVBlockValue(block_id); 
-       printBufferData_(*k_buffer, "decode-k_buffer-"+std::to_string(block_id));
-       printBufferData_(*v_buffer, "decode-v_buffer-"+std::to_string(block_id));
     }
     
     decode_context.load_cache_from_prefill_done_time_us = currentTimeUs();
-    RTP_LLM_LOG_INFO("request [%s] call prefill done", decode_context.request_key.c_str());
+    RTP_LLM_LOG_DEBUG("request [%s] call prefill done", decode_context.request_key.c_str());
     return ErrorInfo::OkStatus();
 }
 
@@ -235,7 +233,7 @@ grpc::Status DecodeRpcServerNew::localGenerate(DecodeGenerateContextNew& decode_
                                                    decode_context.response_writer,
                                                    decode_context.getStream());
 
-    RTP_LLM_LOG_INFO("request [%s] local generate done", decode_context.request_key.c_str());
+    RTP_LLM_LOG_DEBUG("request [%s] local generate done", decode_context.request_key.c_str());
     return decode_context.error_status;
 }
 

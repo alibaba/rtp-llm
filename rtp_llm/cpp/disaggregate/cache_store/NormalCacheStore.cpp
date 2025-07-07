@@ -223,7 +223,7 @@ NormalCacheStore::submitRemoteStoreTask(const std::shared_ptr<RemoteStoreRequest
     auto&                               tasks = remote_store_tasks_[request->request_id];
     tasks.push_back(task);
 
-    RTP_LLM_LOG_INFO("normal cache store submit remote store task, request id is %s, request is %s",
+    RTP_LLM_LOG_DEBUG("normal cache store submit remote store task, request id is %s, request is %s",
                      request->request_id.c_str(),
                      request->toString().c_str());
 

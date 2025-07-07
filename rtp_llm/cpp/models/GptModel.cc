@@ -1679,7 +1679,6 @@ void tpSyncModelInputs(GptModelInputs& inputs, rtp_llm::DeviceBase* device) {
                 inputs.cache_keys = device->allocateBuffer(
                     {rtp_llm::DataType::TYPE_INT64, {context_batch_size, max_blocks}, rtp_llm::AllocationType::HOST});
             }
-            RTP_LLM_LOG_INFO("allocate kv cache bloc id");
         }
         inputs.request_id = device->allocateBuffer(
             {rtp_llm::DataType::TYPE_INT64, {context_batch_size}, rtp_llm::AllocationType::HOST});

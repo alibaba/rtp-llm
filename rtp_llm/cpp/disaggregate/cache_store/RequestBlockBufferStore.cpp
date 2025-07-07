@@ -40,7 +40,7 @@ bool RequestBlockBufferStore::setRequestBlockBuffer(const std::shared_ptr<Reques
             return false;
         }
         valid_blocks.push_back(valid_block);
-        RTP_LLM_LOG_INFO("set request block buffer success to make valid block, request id %s, block id is %s",
+        RTP_LLM_LOG_DEBUG("set request block buffer success to make valid block, request id %s, block id is %s",
                           request_block_buffer->getRequestId().c_str(), block->key.c_str());
     }
     store_request_block_buffer->addBlocks(valid_blocks);

@@ -53,7 +53,7 @@ protected:
     CacheLoadResponse*                                    response_;
     std::shared_ptr<CacheStoreServerLoadMetricsCollector> collector_;
     MockCacheLoadServiceClosure*                          done_{nullptr};
-    std::shared_ptr<TimerManager>                   timer_manager_;
+    std::shared_ptr<TimerManager>                         timer_manager_;
 
     std::shared_ptr<TcpCacheStoreServiceImplContext> context_;
 

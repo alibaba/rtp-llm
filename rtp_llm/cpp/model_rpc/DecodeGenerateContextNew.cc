@@ -10,7 +10,7 @@ DecodeGenerateContextNew::~DecodeGenerateContextNew() {
 }
 
 ErrorInfo DecodeGenerateContextNew::init(const std::shared_ptr<EngineBase>& engine) {
-    RTP_LLM_LOG_INFO("request [%s] start to prepare generate context", request_key.c_str());
+    RTP_LLM_LOG_DEBUG("request [%s] start to prepare generate context", request_key.c_str());
 
     generate_input                                        = QueryConverter::transQuery(request);
 
@@ -19,13 +19,13 @@ ErrorInfo DecodeGenerateContextNew::init(const std::shared_ptr<EngineBase>& engi
 
     auto status = stream_->initKVBlock(0);
     if (!status.ok()) {
-        RTP_LLM_LOG_WARNING("request [%s] init kv block failed, malloc kv cache block failed");
+        RTP_LLM_LOG_WARNING("request [%s] init kv block failed, malloc kv cache block failed", request_key.c_str());
         error_info = ErrorInfo(ErrorCode::MALLOC_FAILED, "malloc kv cache block failed at decode node");
         return error_info;
     }
 
     prepare_generate_context_done_time_us = currentTimeUs();
-    RTP_LLM_LOG_INFO("request [%s] prepare generate context done", request_key.c_str());
+    RTP_LLM_LOG_DEBUG("request [%s] prepare generate context done", request_key.c_str());
     return ErrorInfo::OkStatus();
 }
 

@@ -67,7 +67,8 @@ grpc::Status PrefillRpcServerNew::RemoteGenerateNew(grpc::ServerContext*        
     //        engine_->getDevice()->getDeviceProperties().tp_rank == 0 &&
     //        !request->mtp_hidden_states_key.empty()) {
     //}
-    RTP_LLM_LOG_INFO("request [%s] RemoteGenerateNew success, response is %s",
+
+    RTP_LLM_LOG_DEBUG("request [%s] RemoteGenerateNew success, response is %s",
                      prefill_context.request_key.c_str(),
                      response->ShortDebugString().c_str());
     return grpc::Status::OK;
@@ -108,8 +109,7 @@ bool PrefillRpcServerNew::validRequest(PrefillGenerateContextNew& prefill_contex
 
     if (request->use_mla() != maga_init_params_.gpt_init_parameter.use_mla_) {
         RTP_LLM_LOG_WARNING("request [%s] request is invalid, mla config not match",
-                            prefill_context.request_key.c_str(),
-                            request->ShortDebugString().c_str());
+                            prefill_context.request_key.c_str());
         return false;
     }
 
@@ -157,7 +157,7 @@ ErrorInfo PrefillRpcServerNew::notifyStoreCache(PrefillGenerateContextNew& prefi
     }
 
     constructRemoteLoadRequest(prefill_context, index);
-    RTP_LLM_LOG_INFO("remote load request is %s", rpc_context->request.ShortDebugString().c_str());
+    RTP_LLM_LOG_DEBUG("remote load request is %s", rpc_context->request.ShortDebugString().c_str());
 
     std::unique_ptr<grpc::ClientAsyncResponseReader<RemoteStoreResponsePB>> reader(rpc_context->stub->AsyncRemoteStore(
         rpc_context->client_context.get(), rpc_context->request, rpc_context->completion_queue.get()));
@@ -243,7 +243,7 @@ ErrorInfo PrefillRpcServerNew::generateFirstToken(PrefillGenerateContextNew& pre
                 return result.status();
             }
         }
-        RTP_LLM_LOG_INFO("request [%s] generate next output success", prefill_context.request_key.c_str());
+        RTP_LLM_LOG_DEBUG("request [%s] generate next output success", prefill_context.request_key.c_str());
         auto response_output = prefill_context.response->mutable_output();
         QueryConverter::transResponse(response_output, &(result.value()));
         // should only generate one token
@@ -439,13 +439,6 @@ grpc::Status PrefillRpcServerNew::RemoteStore(grpc::ServerContext*        server
         task->waitDone();
     }
 
-    // for (int i = 0; i < request->prefill_block_ids_size(); i++) {
-    //    auto block_id = request->prefill_block_ids(i);
-    //    auto [k_buffer, v_buffer] = engine_->resourceContext().cache_manager->getKVBlockValue(block_id);
-    //    printBufferData_(*k_buffer, "prefill-k_buffer-"+std::to_string(block_id));
-    //    printBufferData_(*v_buffer, "prefill-v_buffer-"+std::to_string(block_id));
-    // }
-
     std::string error_msg;
     for (auto& task : tasks) {
         if (!task->success()) {
@@ -454,7 +447,7 @@ grpc::Status PrefillRpcServerNew::RemoteStore(grpc::ServerContext*        server
         resource_.cache_store->releaseRemoteStoreTask(task);
     }
     if (error_msg.empty()) {
-        RTP_LLM_LOG_INFO("request [%s] remote store success", request->request_key().c_str());
+        RTP_LLM_LOG_DEBUG("request [%s] remote store success", request->request_key().c_str());
         return grpc::Status::OK;
     }
 

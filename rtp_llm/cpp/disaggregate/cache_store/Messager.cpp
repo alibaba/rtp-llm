@@ -25,7 +25,7 @@ CacheLoadRequest* Messager::makeLoadRequest(const std::shared_ptr<LoadRequest>& 
 }
 
 void Messager::transfer(const std::shared_ptr<TransferRequest>& request) {
-    RTP_LLM_LOG_INFO("transfer engine start to transfer, ip %s:%u", request->ip.c_str(), request->port);
+    RTP_LLM_LOG_DEBUG("transfer engine start to transfer, ip %s:%u", request->ip.c_str(), request->port);
 
     auto channel = tcp_client_->getChannel(request->ip, request->port);
     if (!channel) {

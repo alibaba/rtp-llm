@@ -27,7 +27,7 @@ void RemoteStoreTaskImpl::waitDone() {
             RTP_LLM_LOG_WARNING("remote store task %s wait done on cancel", request_->request_id.c_str());
         }
         if (done_) {
-            RTP_LLM_LOG_INFO("remote store task %s wait done, success %d", request_->request_id.c_str(), all_success_);
+            RTP_LLM_LOG_DEBUG("remote store task %s wait done, success %d", request_->request_id.c_str(), all_success_);
             break;
         }
         // sync wait, safe to use this
@@ -76,7 +76,7 @@ RemoteStoreTaskImpl::makeAvailableRequest(const std::shared_ptr<RequestBlockBuff
             transfer_request->buffer_pairs[key] = iter->second;
             loading_buffers_[key]               = iter->second;
             to_load_buffers_.erase(iter);
-            RTP_LLM_LOG_INFO("remote store task %s found local key %s", request_->request_id.c_str(), key.c_str());
+            RTP_LLM_LOG_DEBUG("remote store task %s found local key %s", request_->request_id.c_str(), key.c_str());
         }
     }
 
@@ -94,11 +94,11 @@ RemoteStoreTaskImpl::makeAvailableRequest(const std::shared_ptr<RequestBlockBuff
             if (task) {
                 task->notifyRequestDone(block_keys, success);
             } else {
-                RTP_LLM_LOG_INFO("transfer request %s finish after task done", request_id.c_str());
+                RTP_LLM_LOG_DEBUG("transfer request %s finish after task done", request_id.c_str());
             }
         };
 
-    RTP_LLM_LOG_INFO("remote store task make available request success, request id is %s",
+    RTP_LLM_LOG_DEBUG("remote store task make available request success, request id is %s",
                      request_block_buffer->getRequestId().c_str());
     return transfer_request;
 }

@@ -149,7 +149,7 @@ void DeviceBase::writeCacheStore(const WriteCacheParams& params) {
         return;
     }
     if (!param.pd_separation || param.context_batch_size == 0) {
-        RTP_LLM_LOG_INFO("pd_separation = %d, context_batch_size = %d, so ignore writeCacheStore",
+        RTP_LLM_LOG_DEBUG("pd_separation = %d, context_batch_size = %d, so ignore writeCacheStore",
             param.pd_separation, param.context_batch_size);
         return;
     }

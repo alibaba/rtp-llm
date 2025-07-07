@@ -39,7 +39,7 @@ void CacheStoreServiceImpl::transfer(::google::protobuf::RpcController* controll
                                      const ::CacheTransferRequest*      request,
                                      CacheTransferResponse*             response,
                                      ::google::protobuf::Closure*       done) {
-    RTP_LLM_LOG_INFO("recv transfer request %s", request->ShortDebugString().c_str());
+    RTP_LLM_LOG_DEBUG("recv transfer request %s", request->ShortDebugString().c_str());
 
     // get peer block infos
     std::map<std::string, std::shared_ptr<BlockBufferInfo>> remote_block_infos;
