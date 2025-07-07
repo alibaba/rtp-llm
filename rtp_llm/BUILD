@@ -91,7 +91,8 @@ requirement([
     "setproctitle",
     "bitsandbytes",
     "portalocker",
-    "concurrent_log_handler"
+    "concurrent_log_handler",
+    "aiter"
 ] + tensorrt)
 
 
@@ -383,7 +384,10 @@ py_library(
         "//rtp_llm/aios/kmonitor:kmonitor_py",
         "//rtp_llm/metrics:metrics",
         "//rtp_llm/access_logger:access_logger",
-    ],
+    ] + select({
+        "@//:using_rocm": [":aiter",],
+        "//conditions:default": [],
+    }), 
     data = [
         "//rtp_llm/libs:libs"
     ]
