@@ -287,6 +287,8 @@ bool StreamCacheResource::generateKVBlockUpdateMapping(const std::vector<int>& b
     // generate update mapping for block ids
     vector<vector<int32_t>> old_block_ids = std::move(batch_resource_.batch_block_id);
     batch_resource_.batch_block_id.reserve(new_batch_size);
+    vector<vector<int64_t>> old_cache_keys = std::move(batch_resource_.cache_keys);
+    batch_resource_.cache_keys.reserve(new_batch_size);
     block_update_mapping_.reserve(num_new_blocks);
     for (int new_batch_idx = 0; new_batch_idx < new_batch_size; ++new_batch_idx) {
         int   old_batch_idx = block_src_batch[new_batch_idx];
@@ -295,9 +297,11 @@ bool StreamCacheResource::generateKVBlockUpdateMapping(const std::vector<int>& b
         if (fork_count == 1) {
             // move from old blocks directly
             batch_resource_.batch_block_id.emplace_back(std::move(old_block_ids[old_batch_idx]));
+            batch_resource_.cache_keys.emplace_back(std::move(old_cache_keys[old_batch_idx]));
         } else {
             // copy from old blocks
             batch_resource_.batch_block_id.emplace_back(old_block_ids[old_batch_idx]);
+            batch_resource_.cache_keys.emplace_back(old_cache_keys[old_batch_idx]);
             auto& blocks = batch_resource_.batch_block_id.back();
             if (unaligned_seq_length && blocks.size() > 0) {
                 int old_block = blocks.back();
