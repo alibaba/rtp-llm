@@ -176,39 +176,71 @@ ErrorInfo DecodeRpcServerNew::callPrefill(DecodeGenerateContextNew& decode_conte
                          "get grpc connection for decode addr " + prefill_addr + " failed");
     }
 
+    auto                                 rpc_context = std::make_shared<DecodeRpcContextNew>(); 
     auto                                 grpc_connection = connect_status.value();
     auto                                 stub            = grpc_connection.stub;
-    std::unique_ptr<grpc::ClientContext> client_context(new grpc::ClientContext);
+    rpc_context->request = decode_context.remote_generate_request;
 
-    // TODO: cancel request to prefill if request is cancelled
-    auto status = stub->RemoteGenerateNew(
-        client_context.get(), decode_context.remote_generate_request, &(decode_context.remote_generate_response));
+    std::unique_ptr<grpc::ClientAsyncResponseReader<RemoteGenerateResponsePBNew>> reader(
+        stub->AsyncRemoteGenerateNew(rpc_context->client_context.get(), rpc_context->request , rpc_context->completion_queue.get()));
 
-    if (!status.ok()) {
-        const auto& error_msg      = status.error_message();
-        ErrorCode   new_error_code = ErrorCode::LOAD_KV_CACHE_FAILED;
-        if (error_msg.find("Connect Failed") != std::string::npos) {
-            new_error_code = ErrorCode::CONNECT_FAILED;
-            resource_.rpc_pool.removeConnection(prefill_addr);
-        } else if (error_msg.find("No route to host") != std::string::npos) {
-            new_error_code = ErrorCode::CONNECT_FAILED;
-            resource_.rpc_pool.removeConnection(prefill_addr);
-        } else if (error_msg.find("Connection reset by peer") != std::string::npos) {
-            new_error_code = ErrorCode::CONNECTION_RESET_BY_PEER;
-            resource_.rpc_pool.removeConnection(prefill_addr);
-        } else if (error_msg.find("Connection timed out") != std::string::npos) {
-            new_error_code = ErrorCode::CONNECT_TIMEOUT;
-            resource_.rpc_pool.removeConnection(prefill_addr);
-        } else if (error_msg.find("Deadline Exceeded") != std::string::npos) {
-            new_error_code = ErrorCode::DEADLINE_EXCEEDED;
-            resource_.rpc_pool.removeConnection(prefill_addr);
+    reader->Finish(&decode_context.remote_generate_response, &rpc_context->status, reinterpret_cast<void*>(0));
+    rpc_context->reader = std::move(reader);
+
+    void* got_tag;
+    bool  ok = false;
+
+    auto deadline_us = rpc_context->request.deadline_us();
+
+    while (!rpc_context->finished) {
+        if(rpc_context->completion_queue->AsyncNext(&got_tag, &ok, std::chrono::system_clock::now() + std::chrono::milliseconds(maga_init_params_.gpt_init_parameter.decode_polling_call_prefil_ms_))
+            == grpc::CompletionQueue::NextStatus::TIMEOUT) {
+            if (decode_context.server_context->IsCancelled()) {
+                RTP_LLM_LOG_WARNING("request [%s] is cancelled", decode_context.request_key.c_str());
+                rpc_context->client_context->TryCancel();
+                return ErrorInfo(ErrorCode::CANCELLED, "request is cancelled");
+            } else if (currentTimeUs() > deadline_us) {
+                RTP_LLM_LOG_WARNING("request [%s] deadline exceed [%ld]", decode_context.request_key.c_str(), deadline_us);
+                rpc_context->client_context->TryCancel();
+                return ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "request deadline exceeded");
+            }
+            continue;
         }
-        return ErrorInfo(new_error_code, error_msg);
+
+        if (!ok) {
+            RTP_LLM_LOG_WARNING("request [%s] async get next event from grpc completion queue failed", decode_context.request_key.c_str());
+            return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "async get next event from grpc completion queue failed");
+        }
+        
+        if (!rpc_context->status.ok()) {
+            const auto& error_msg      = rpc_context->status.error_message();
+            ErrorCode   new_error_code = ErrorCode::LOAD_KV_CACHE_FAILED;
+            if (error_msg.find("Connect Failed") != std::string::npos) {
+                new_error_code = ErrorCode::CONNECT_FAILED;
+                resource_.rpc_pool.removeConnection(prefill_addr);
+            } else if (error_msg.find("No route to host") != std::string::npos) {
+                new_error_code = ErrorCode::CONNECT_FAILED;
+                resource_.rpc_pool.removeConnection(prefill_addr);
+            } else if (error_msg.find("Connection reset by peer") != std::string::npos) {
+                new_error_code = ErrorCode::CONNECTION_RESET_BY_PEER;
+                resource_.rpc_pool.removeConnection(prefill_addr);
+            } else if (error_msg.find("Connection timed out") != std::string::npos) {
+                new_error_code = ErrorCode::CONNECT_TIMEOUT;
+                resource_.rpc_pool.removeConnection(prefill_addr);
+            } else if (error_msg.find("Deadline Exceeded") != std::string::npos) {
+                new_error_code = ErrorCode::DEADLINE_EXCEEDED;
+                resource_.rpc_pool.removeConnection(prefill_addr);
+            }
+            return ErrorInfo(new_error_code, error_msg);
+        } else {
+            rpc_context->finished = true;
+        }
     }
+   
     
     auto block_ids = decode_context.getStream()->kvCache().blocks(0);
     for (auto block_id : block_ids) {
-       auto [k_buffer, v_buffer] = engine_->resourceContext().cache_manager->getKVBlockValue(block_id); 
+        auto [k_buffer, v_buffer] = engine_->resourceContext().cache_manager->getKVBlockValue(block_id); 
     }
     
     decode_context.load_cache_from_prefill_done_time_us = currentTimeUs();

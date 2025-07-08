@@ -144,7 +144,7 @@ RemoteStoreTaskImpl::makeAvailableRequest(const std::vector<std::shared_ptr<Bloc
             }
         };
 
-    RTP_LLM_LOG_INFO("remote store task make available request success, request id is %s",
+    RTP_LLM_LOG_DEBUG("remote store task make available request success, request id is %s",
                      request_->request_id.c_str());
     return transfer_request;
 }

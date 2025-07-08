@@ -32,14 +32,18 @@ ErrorInfo PrefillGenerateContextNew::init(const std::shared_ptr<EngineBase>& eng
 }
 
 void PrefillGenerateContextNew::stopStream() {
-    if (stream_) {
-        // TODO: 如何安全的停止prefill generate
-        stream_->cancelIfNotRunning();
-        while (stream_->running()) {
-            RTP_LLM_LOG_INFO("waiting prefill stream [%d] running done to cancel", stream_->generateInput()->request_id);
-            usleep(1000);
-        }
+     if (stream_ != nullptr && stream_->running()) {
+        stream_->setStop(error_info.code(), error_info.ToString());
     }
+
+    // if (stream_) {
+    //     // TODO: 如何安全的停止prefill generate
+    //     stream_->cancelIfNotRunning();
+    //     while (stream_->running()) {
+    //         RTP_LLM_LOG_INFO("waiting prefill stream [%d] running done to cancel", stream_->generateInput()->request_id);
+    //         usleep(1000);
+    //     }
+    // }
 }
 
 }  // namespace rtp_llm

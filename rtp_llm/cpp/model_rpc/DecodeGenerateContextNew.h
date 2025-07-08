@@ -5,6 +5,28 @@
 
 namespace rtp_llm {
 
+
+struct DecodeRpcContextNew {
+    DecodeRpcContextNew() {
+        client_context   = std::make_shared<grpc::ClientContext>();
+        completion_queue = std::make_shared<grpc::CompletionQueue>();
+    }
+
+    ~DecodeRpcContextNew() {
+        completion_queue->Shutdown();
+    }
+
+    bool                                                                            finished = false;
+    RemoteGenerateRequestPBNew                                                      request;
+    RemoteGenerateResponsePBNew                                                     response;
+    grpc::Status                                                                    status;
+    std::shared_ptr<RpcService::Stub>                                               stub;
+    std::shared_ptr<grpc::ClientContext>                                            client_context;
+    std::shared_ptr<grpc::CompletionQueue>                                          completion_queue;
+    std::unique_ptr<grpc::ClientAsyncResponseReader<RemoteGenerateResponsePBNew>>   reader;
+};
+
+
 struct DecodeGenerateContextNew: public GenerateContext {
 
     DecodeGenerateContextNew(grpc::ServerContext*                   server_context,
