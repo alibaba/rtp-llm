@@ -19,21 +19,21 @@ from rtp_llm.utils.oss_util import get_bytes_io_from_oss_path
 
 logger = logging.getLogger(__name__)
 
-SSRF_CHECKER = None
+REQUEST_GET = None
 
 
-def safe_check_ssrf(url):
-    global SSRF_CHECKER
-    if SSRF_CHECKER is None:
+def request_get(url, headers):
+    global REQUEST_GET
+    if REQUEST_GET is None:
         try:
-            from internal_source.rtp_llm.utils.ssrf_check import check_ssrf
+            from internal_source.rtp_llm.utils.ssrf_check import safe_request_get
 
-            SSRF_CHECKER = check_ssrf
+            REQUEST_GET = safe_request_get
         except ImportError:
-            logger.info("SSRF check module not available, skipping")
-            SSRF_CHECKER = lambda _: True
-
-    return SSRF_CHECKER(url)
+            REQUEST_GET = lambda url, headers: requests.get(
+                url, stream=True, headers=headers, timeout=10
+            )
+    return REQUEST_GET(url, headers)
 
 
 if os.environ.get("DOWNLOAD_HEADERS", "") != "":
@@ -44,6 +44,7 @@ else:
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
     }
 
+BASE64_PREFIX = "data:image/jpeg;base64,"
 URL_CACHE_SIZE = int(os.environ.get("URL_CACHE_ITEM_NUM", "100"))
 MM_CACHE_SIZE = int(os.environ.get("MM_CACHE_ITEM_NUM", "10"))
 
@@ -101,20 +102,11 @@ def get_vit_compute_dtype(dtype: str):
 
 
 def get_bytes_io_from_url(url: str):
-    ssrf_success = safe_check_ssrf(url)
-    if not ssrf_success:
-        raise Exception(f"url ssrf check failed {url}")
     cached_res = url_data_cache_.check_cache(url)
     if cached_res is None:
         try:
             if url.startswith("http") or url.startswith("https"):
-                response = requests.get(
-                    url,
-                    stream=True,
-                    headers=HTTP_HEADS,
-                    timeout=10,
-                    allow_redirects=False,
-                )
+                response = request_get(url, HTTP_HEADS)
                 if response.status_code == 200:
                     res = BytesIO(response.content)
                 else:
