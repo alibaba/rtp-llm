@@ -12,7 +12,7 @@
 
 
 * `TOKENIZER_PATH` 和 `CHECKPOINT_PATH` 必须为本地路径。
-* `MODEL_TYPE` 目前支持 `chatglm``chat_glm``chatglm2``chat_glm_2``chatglm3``chat_glm_3``glm_130b``gpt_bigcode``starcoder2``wizardcoder``sgpt_bloom``sgpt_bloom_vector``bloom``llama``gemma``xverse``llava``baichuan``gpt_neox``qwen_7b``qwen_13b``qwen_1b8``qwen_2``qwen_vl``falcon``mpt``internlm``phi``aquila``cogvlm2``chatglm4v`
+* `MODEL_TYPE` 目前支持 `chatglm``chat_glm``chatglm2``chat_glm_2``chatglm3``chat_glm_3``glm_130b``gpt_bigcode``starcoder2``wizardcoder``sgpt_bloom``sgpt_bloom_vector``bloom``llama``gemma``xverse``llava``baichuan``gpt_neox``qwen_7b``qwen_13b``qwen_1b8``qwen_2``qwen_vl``falcon``mpt``internlm``phi``aquila``chatglm4v`
 
 ## 高级选项
 | 环境变量名 | 类型 | 说明 |

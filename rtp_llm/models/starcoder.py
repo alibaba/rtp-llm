@@ -204,8 +204,8 @@ class StarCoder(BaseModel):
         config.head_num_kv = 1
         config.layernorm_eps = config_json["layer_norm_epsilon"]
         config.inter_size = config_json["n_inner"]
-        config.special_tokens.eos_token_id = config_json["eos_token_id"]
-        config.special_tokens.bos_token_id = config_json["bos_token_id"]
+        config.special_tokens.eos_token_id = config_json.get("eos_token_id", 0)
+        config.special_tokens.bos_token_id = config_json.get("bos_token_id", -1)
         # config.activation_type = config_json['activation_function']
         config.has_positional_encoding = True
         config.has_post_decoder_layernorm = True

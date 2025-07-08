@@ -30,22 +30,11 @@ class WeightOnlyPerColWeight(CompositeWeight, QuantWeight):
         W.mla_v_w: W.mla_v_s,
     }
 
-    int8_attn_vision_weights_map = {
-        W.vision_attn_qkv_w: W.vision_attn_qkv_s,
-        W.vision_attn_o_w: W.vision_attn_o_s,
-    }
-
     int8_ffn_weights_maps = {
         W.ffn_w1: W.ffn_s1,
         W.ffn_w3: W.ffn_s3,
         W.ffn_w2: W.ffn_s2,
         W.ffn_w13: W.ffn_s13,
-    }
-
-    int8_vision_ffn_weights_maps = {
-        W.vision_ffn_w1: W.vision_ffn_s1,
-        W.vision_ffn_w3: W.vision_ffn_s3,
-        W.vision_ffn_w2: W.vision_ffn_s2,
     }
 
     int8_partial_moe_weights_maps = {
@@ -55,9 +44,7 @@ class WeightOnlyPerColWeight(CompositeWeight, QuantWeight):
 
     weight_only_w = {
         **int8_attn_weights_map,
-        **int8_attn_vision_weights_map,
         **int8_ffn_weights_maps,
-        **int8_vision_ffn_weights_maps,
         **int8_partial_moe_weights_maps,
     }
 

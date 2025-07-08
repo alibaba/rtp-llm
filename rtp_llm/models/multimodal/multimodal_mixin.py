@@ -134,7 +134,6 @@ class MultiModalMixin:
         if add_special_tokens:
             return tokenizer.encode(prompt)
         else:
-            # for CogVLM2, we need to pass add_special_tokens=False to tokenizer
             return tokenizer.encode(prompt, add_special_tokens=False)
 
     @staticmethod

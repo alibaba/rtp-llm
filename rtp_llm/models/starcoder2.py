@@ -221,8 +221,8 @@ class StarCoder2(BaseModel):
             raise BaseException(f"model type is not starcoder: {model_type}")
         config.layernorm_eps = config_json["layer_norm_epsilon"]
         config.inter_size = config_json["intermediate_size"]
-        config.special_tokens.eos_token_id = config_json["eos_token_id"]
-        config.special_tokens.bos_token_id = config_json["bos_token_id"]
+        config.special_tokens.eos_token_id = config_json.get("eos_token_id", 0)
+        config.special_tokens.bos_token_id = config_json.get("bos_token_id", -1)
         config.activation_type = config_json["activation_function"]
         config.has_post_decoder_layernorm = True
         config.rotary_embedding_base = config_json.get("rope_theta", 1000000)

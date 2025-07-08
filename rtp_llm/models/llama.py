@@ -125,8 +125,8 @@ class Llama(BaseModel):
             else:
                 raise Exception(f"unsupport rope_scaling {rope_scaling}")
         # config.activation_type = config_json.get("hidden_act", config.activation_type)
-        config.special_tokens.bos_token_id = config_json["bos_token_id"]
-        eos_token_id = config_json["eos_token_id"]
+        config.special_tokens.bos_token_id = config_json.get("bos_token_id", -1)
+        eos_token_id = config_json.get("eos_token_id", 0)
         # openai endpoint will get corrent eos token id list from tokenizer
         if isinstance(eos_token_id, list):
             config.special_tokens.eos_token_id = eos_token_id[0]

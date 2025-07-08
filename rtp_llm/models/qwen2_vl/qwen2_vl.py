@@ -288,8 +288,8 @@ class QWen2_VL(QWen_VL, MultiModalMixin):
         config.norm_type = "rmsnorm"
         config.layernorm_eps = config_json["rms_norm_eps"]
         config.has_post_decoder_layernorm = True
-        config.special_tokens.bos_token_id = config_json["bos_token_id"]
-        config.special_tokens.eos_token_id = config_json["eos_token_id"]
+        config.special_tokens.bos_token_id = config_json.get("bos_token_id", -1)
+        config.special_tokens.eos_token_id = config_json.get("eos_token_id", 0)
         config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
 
         config.rotary_embedding_style = 7

@@ -57,8 +57,8 @@ class GPTNeox(BaseModel):
         config.layernorm_eps = config_json["layer_norm_eps"]
         config.inter_size = config_json["intermediate_size"]
         config.inter_padding_size = config.inter_size
-        config.special_tokens.bos_token_id = config_json["bos_token_id"]
-        config.special_tokens.eos_token_id = config_json["eos_token_id"]
+        config.special_tokens.bos_token_id = config_json.get("bos_token_id", -1)
+        config.special_tokens.eos_token_id = config_json.get("eos_token_id", 0)
         config.rotary_embedding_dim = int(
             config.size_per_head * config_json.get("rotary_pct", 1.0)
         )
@@ -128,8 +128,8 @@ class GPTNeox13B(GPTNeox):
         config.layernorm_eps = config_json["layer_norm_eps"]
         config.inter_size = config_json["intermediate_size"]
         config.inter_padding_size = config.inter_size
-        config.special_tokens.bos_token_id = config_json["bos_token_id"]
-        config.special_tokens.eos_token_id = config_json["eos_token_id"]
+        config.special_tokens.bos_token_id = config_json.get("bos_token_id", -1)
+        config.special_tokens.eos_token_id = config_json.get("eos_token_id", 0)
         if config_json.get("rope_scaling", None):
             if config_json["rope_scaling"]["type"] == "dynamic":
                 config.rotary_embedding_style = 3

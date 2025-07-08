@@ -403,7 +403,6 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(ep_size, ep_size_)                                                                                    \
     DEF_PROPERTY(ep_rank, ep_rank_)                                                                                    \
     DEF_PROPERTY(use_kvcache, use_kvcache_)                                                                            \
-    DEF_PROPERTY(use_expert_attention, use_expert_attention_)                                                          \
     DEF_PROPERTY(local_rank, local_rank_)                                                                              \
     DEF_PROPERTY(rotary_embedding_mscale, rotary_embedding_mscale_)                                                    \
     DEF_PROPERTY(rotary_embedding_offset, rotary_embedding_offset_)                                                    \

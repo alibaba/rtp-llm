@@ -447,7 +447,6 @@ class GptInitParameter:
     use_attention_linear_bias: bool
     use_cache_store: bool
     use_cross_attn: bool
-    use_expert_attention: bool
     use_fp32_to_compute_logit: bool
     use_kvcache: bool
     use_logn_attn: bool

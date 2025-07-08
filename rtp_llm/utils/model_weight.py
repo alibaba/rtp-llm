@@ -990,16 +990,6 @@ class W:
     post_ffn_ln_gamma = "post_ffn_layernorm_weights.gamma"
     post_ffn_ln_beta = "post_ffn_layernorm_weights.beta"
 
-    # cogvlm2-expert-attn
-    vision_attn_qkv_w = "self_attention_weights.vision_query_weight.kernel"
-    vision_attn_qkv_b = "self_attention_weights.vision_query_weight.bias"
-    vision_attn_o_w = "self_attention_weights.vision_attention_output_weight.kernel"
-
-    # cogvlm2-expert-ffn
-    vision_ffn_w1 = "vision_ffn_weights.intermediate_weight.kernel"
-    vision_ffn_w3 = "vision_ffn_weights.intermediate_weight3.kernel"
-    vision_ffn_w2 = "vision_ffn_weights.intermediate_weight2.kernel"
-
     # partial moe
     moe = "__moe_weights__"
     shared_expert_gate = "ffn_weights.shared_expert_gate.kernel"
@@ -1039,26 +1029,17 @@ class W:
     # gptq
     attn_qkv_z = "self_attention_weights.query_weight.zero"
     attn_qkv_s = "self_attention_weights.query_weight.weight_only_quant_scale"
-    vision_attn_qkv_s = (
-        "self_attention_weights.vision_query_weight.weight_only_quant_scale"
-    )
     attn_o_z = "self_attention_weights.attention_output_weight.zero"
     attn_o_s = "self_attention_weights.attention_output_weight.weight_only_quant_scale"
-    vision_attn_o_s = (
-        "self_attention_weights.vision_attention_output_weight.weight_only_quant_scale"
-    )
     ffn_z1 = "ffn_weights.intermediate_weight.zero"
     ffn_s1 = "ffn_weights.intermediate_weight.weight_only_quant_scale"
-    vision_ffn_s1 = "vision_ffn_weights.intermediate_weight.weight_only_quant_scale"
     ffn_z3 = "ffn_weights.intermediate_weight3.zero"
     ffn_s3 = "ffn_weights.intermediate_weight3.weight_only_quant_scale"
     ffn_z13 = "ffn_weights.intermediate_weight13.zero"
     ffn_s13 = "ffn_weights.intermediate_weight13.weight_only_quant_scale"
-    vision_ffn_s3 = "vision_ffn_weights.intermediate_weight3.weight_only_quant_scale"
     ffn_act_s = "ffn_weights.intermediate_weight2.act_quant_scale"  # gpt_xx model awq quant act need div scales
     ffn_z2 = "ffn_weights.intermediate_weight2.zero"
     ffn_s2 = "ffn_weights.intermediate_weight2.weight_only_quant_scale"
-    vision_ffn_s2 = "vision_ffn_weights.intermediate_weight2.weight_only_quant_scale"
     moe_z1 = "partial_moe_weights.intermediate_weight.zero"
     moe_s1 = "partial_moe_weights.intermediate_weight.weight_only_quant_scale"
     moe_z2 = "partial_moe_weights.intermediate_weight2.zero"
@@ -1133,13 +1114,10 @@ class W:
         q_ln_gamma: sp_id,
         k_ln_gamma: sp_id,
         attn_qkv_w: sp_head,
-        vision_attn_qkv_w: sp_head,
         attn_qkv_z: sp_head_z,
         attn_qkv_s: sp_head_s,
         attn_qkv_b: sp_head_b,
-        vision_attn_qkv_b: sp_head_b,
         attn_o_w: sp_0,
-        vision_attn_o_w: sp_0,
         attn_o_z: sp_0,
         attn_o_s: sp_0,
         attn_o_b: sp_id,
@@ -1173,12 +1151,10 @@ class W:
         cross_attn_o_w: sp_0,
         cross_attn_o_b: sp_id,
         ffn_w1: ffn_sp_neg1,
-        vision_ffn_w1: ffn_sp_neg1,
         ffn_z1: ffn_sp_neg1,
         ffn_s1: ffn_sp_neg1,
         ffn_b1: ffn_sp_neg1,
         ffn_w3: ffn_sp_neg1,
-        vision_ffn_w3: ffn_sp_neg1,
         ffn_z3: ffn_sp_neg1,
         ffn_s3: ffn_sp_neg1,
         ffn_b3: ffn_sp_neg1,
@@ -1187,7 +1163,6 @@ class W:
         ffn_s13: ffn_sp_neg1_w13,
         ffn_b13: ffn_sp_neg1_w13,
         ffn_w2: ffn_sp_0,
-        vision_ffn_w2: ffn_sp_0,
         ffn_z2: ffn_sp_0,
         ffn_s2: ffn_sp_0,
         ffn_b2: sp_id,

@@ -350,25 +350,6 @@ cc_library(
 )
 
 cc_library(
-    name = "expert_attention_util",
-    srcs = [
-        "ExpertAttentionUtil.cc"
-    ],
-    hdrs = [
-        "ExpertAttentionUtil.h"
-    ],
-    copts = copts(),
-    deps = torch_deps() + [
-        ":cuda_utils",
-        "//rtp_llm/cpp/core:allocator",
-        "@local_config_cuda//cuda:cuda_headers",
-        "@local_config_cuda//cuda:cudart",
-    ],
-    include_prefix = "src",
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
     name = "cuda_utils_rocm",
     srcs = [
         "launch_utils.cc",

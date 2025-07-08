@@ -191,7 +191,6 @@ public:
     bool    warm_up_with_loss_                = false;
     int64_t fast_gen_max_context_len_         = 0;
     bool    reverse_e_h_norm_                 = false;
-    bool    use_expert_attention_             = false;  // true for CogVLM2, false for other models
 
     std::string nccl_ip_          = "";
     bool        use_all_gather_   = false;

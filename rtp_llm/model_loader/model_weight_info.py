@@ -173,7 +173,6 @@ class ModelDeployWeightInfo:
         self._moe_inter_padding_size = config.moe_inter_padding_size
 
         self.tie_word_embeddings = config.tie_word_embeddings
-        self.use_expert_attention = config.use_expert_attention
         self.weight_style = WeightStyle.NONE
 
         # for mla

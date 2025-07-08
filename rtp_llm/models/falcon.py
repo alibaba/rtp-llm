@@ -196,8 +196,8 @@ class Falcon(BaseModel):
             rotary_embedding_style=1,
             ckpt_path=ckpt_path,
         )
-        config.special_tokens.bos_token_id = config_json["bos_token_id"]
-        config.special_tokens.eos_token_id = config_json["eos_token_id"]
+        config.special_tokens.bos_token_id = config_json.get("bos_token_id", -1)
+        config.special_tokens.eos_token_id = config_json.get("eos_token_id", 0)
         config.rotary_embedding_dim = config.size_per_head
         config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
         return config

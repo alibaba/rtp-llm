@@ -1,7 +1,6 @@
 import logging
 
 from .chatglm4_renderer import ChatGlm4Renderer
-from .cogvlm2_render import CogVLM2Renderer
 from .internvl_renderer import InternVLRenderer
 from .llava_renderer import LlavaRenderer
 from .minicpmv_renderer import MiniCPMVRenderer

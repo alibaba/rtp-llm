@@ -561,11 +561,6 @@ class LoadQuantStaticPerTensorFp8Weight(StaticPerTensorFp8Weight):
         W.mla_v_w: (W.mla_v_s, None, None),
     }
 
-    fp8_attn_vision_weights_map = {
-        W.vision_attn_qkv_w: (W.vision_attn_qkv_s, None, None),
-        W.vision_attn_o_w: (W.vision_attn_o_s, None, None),
-    }
-
     fp8_ffn_weights_maps = {
         W.ffn_w1: (W.ffn_s1, None, None),
         W.ffn_w3: (W.ffn_s3, W.post_ln_static_quant, W.post_ln_static_quant_reciprocal),
@@ -581,12 +576,6 @@ class LoadQuantStaticPerTensorFp8Weight(StaticPerTensorFp8Weight):
         ),
     }
 
-    fp8_vision_ffn_weights_maps = {
-        W.vision_ffn_w1: (W.vision_ffn_s1, None, None),
-        W.vision_ffn_w3: (W.vision_ffn_s3, None, None),
-        W.vision_ffn_w2: (W.vision_ffn_s2, None, None),
-    }
-
     fp8_partial_moe_weights_maps = {
         W.moe_w1: (W.moe_s1, None, None),
         W.moe_w2: (W.moe_s2, None, None),
@@ -594,9 +583,7 @@ class LoadQuantStaticPerTensorFp8Weight(StaticPerTensorFp8Weight):
 
     weight_scale_map = {
         **fp8_attn_weights_map,
-        **fp8_attn_vision_weights_map,
         **fp8_ffn_weights_maps,
-        **fp8_vision_ffn_weights_maps,
         **fp8_partial_moe_weights_maps,
     }
 
