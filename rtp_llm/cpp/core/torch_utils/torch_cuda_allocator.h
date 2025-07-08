@@ -5,11 +5,10 @@
 #include "rtp_llm/cpp/devices/DeviceBase.h"
 #include <torch/version.h>
 
-#if defined(TORCH_VERSION_MAJOR)                                                                                       \
-    && ((TORCH_VERSION_MAJOR == 2) & (TORCH_VERSION_MINOR >= 6))
+#if defined(TORCH_VERSION_MAJOR) && ((TORCH_VERSION_MAJOR == 2) & (TORCH_VERSION_MINOR >= 6))
 #define UNDER_TORCH_2_6
 #define TORCH_CUDA_ALLOCATOR_INDEX_DTYPE c10::DeviceIndex
-#else 
+#else
 #define TORCH_CUDA_ALLOCATOR_INDEX_DTYPE int
 #endif
 
@@ -17,8 +16,9 @@ namespace rtp_llm {
 
 class TorchCudaAllocator: public c10::cuda::CUDACachingAllocator::CUDAAllocator {
 private:
-    DeviceBase*                                 device_;
-    c10::Device                                 torch_device_;
+    DeviceBase* device_;
+    c10::Device torch_device_;
+    bool        allocate_private_ = false;
 
 public:
     TorchCudaAllocator(DeviceBase* device);
@@ -40,8 +40,10 @@ public:
 
     bool isEnabled() const override;
 
-    void beginAllocateToPool(TORCH_CUDA_ALLOCATOR_INDEX_DTYPE device, at::cuda::MempoolId_t mempool_id, std::function<bool(cudaStream_t)> filter) override;
-  
+    void beginAllocateToPool(TORCH_CUDA_ALLOCATOR_INDEX_DTYPE  device,
+                             at::cuda::MempoolId_t             mempool_id,
+                             std::function<bool(cudaStream_t)> filter) override;
+
     void endAllocateToPool(TORCH_CUDA_ALLOCATOR_INDEX_DTYPE device, at::cuda::MempoolId_t mempool_id) override;
 
     void attachAllocatorTraceTracker(c10::cuda::CUDACachingAllocator::AllocatorTraceTracker tracker) override;
@@ -50,7 +52,9 @@ public:
 
     at::DataPtr allocate(size_t size) override;
 #else
-    void beginAllocateStreamToPool(TORCH_CUDA_ALLOCATOR_INDEX_DTYPE device, cudaStream_t stream, at::cuda::MempoolId_t mempool_id) override;
+    void beginAllocateStreamToPool(TORCH_CUDA_ALLOCATOR_INDEX_DTYPE device,
+                                   cudaStream_t                     stream,
+                                   at::cuda::MempoolId_t            mempool_id) override;
 
     void endAllocateStreamToPool(TORCH_CUDA_ALLOCATOR_INDEX_DTYPE device, cudaStream_t stream) override;
 
@@ -84,7 +88,8 @@ public:
     getCheckpointState(TORCH_CUDA_ALLOCATOR_INDEX_DTYPE device, at::cuda::MempoolId_t id) override;
 
     at::cuda::CUDACachingAllocator::CheckpointDelta
-    setCheckpointPoolState(TORCH_CUDA_ALLOCATOR_INDEX_DTYPE device, std::shared_ptr<at::cuda::CUDACachingAllocator::AllocatorState> as) override;
+    setCheckpointPoolState(TORCH_CUDA_ALLOCATOR_INDEX_DTYPE                                device,
+                           std::shared_ptr<at::cuda::CUDACachingAllocator::AllocatorState> as) override;
 
     at::DeleterFnPtr raw_deleter() const override;
 
@@ -104,7 +109,8 @@ public:
 
     void* raw_alloc_with_stream(size_t nbytes, cudaStream_t stream) override;
 
-    void enablePeerAccess(TORCH_CUDA_ALLOCATOR_INDEX_DTYPE dev, TORCH_CUDA_ALLOCATOR_INDEX_DTYPE dev_to_access) override;
+    void enablePeerAccess(TORCH_CUDA_ALLOCATOR_INDEX_DTYPE dev,
+                          TORCH_CUDA_ALLOCATOR_INDEX_DTYPE dev_to_access) override;
 
     cudaError_t memcpyAsync(void*        dst,
                             int          dstDevice,

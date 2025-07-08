@@ -5,5 +5,9 @@
 
 namespace rtp_llm {
 
+void* IAllocator::mallocPrivate(size_t size) {
+    throw std::runtime_error("mallocPrivate is not implemented in base IAllocator class. "
+                             "CudaGraph should be used with TrackerAllocator.");
+}
 
 }  // namespace rtp_llm

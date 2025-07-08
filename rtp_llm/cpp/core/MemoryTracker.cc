@@ -2,88 +2,68 @@
 #include "rtp_llm/cpp/core/MemoryTracker.h"
 
 using namespace std;
-using ReadLock = std::shared_lock<std::shared_mutex>;
+using ReadLock  = std::shared_lock<std::shared_mutex>;
 using WriteLock = std::unique_lock<std::shared_mutex>;
 
 namespace rtp_llm {
 
-MemoryTracker::MemoryTracker(void* ptr, size_t size, const size_t align_size, bool use_small_chunk) {
-    total_size_ = size;
-    align_size_ = align_size;
-    if (use_small_chunk && size > small_chunk_size_ * small_chunk_num_) {
-        base_ptr_ = ptr;
-        MemoryChunk* small_chunk = new MemoryChunk();
-        small_chunk->ptr = base_ptr_;
-        small_chunk->size = small_chunk_size_ * small_chunk_num_;
-        small_chunk->used = true;
-        chunk_map_[base_ptr_] = small_chunk;
-        size -= small_chunk_size_ * small_chunk_num_;
-        ptr = (int8_t *)ptr + small_chunk_size_ * small_chunk_num_;
-        for (auto i = 0; i < small_chunk_num_; ++i) {
-            small_chunk_queue_.push(i);
-        }
-    } else {
-        small_chunk_num_ = 0;
-    }
+MemoryTracker::MemoryTracker(void* ptr, size_t size, const size_t align_size) {
+    total_size_        = size;
+    align_size_        = align_size;
     MemoryChunk* chunk = new MemoryChunk();
-    chunk->ptr = ptr;
-    chunk->size = size;
-    chunk_map_[ptr] = chunk;
+    chunk->ptr         = ptr;
+    chunk->size        = size;
+    chunk_map_[ptr]    = chunk;
     free_chunk_.insert({size, chunk});
+    base_ptr_         = ptr;
+    freezed_from_ptr_ = (void*)((size_t)ptr + size);  // initially, no memory is freezed.
 }
 
 MemoryTracker::~MemoryTracker() {
     auto status = getStatus();
     if (status.allocated_chunk_count) {
         RTP_LLM_LOG_ERROR("Memory tracker is destroyed with %lu allocated chunks of size %lu!",
-                     status.allocated_chunk_count, status.allocated_size);
+                          status.allocated_chunk_count,
+                          status.allocated_size);
     }
     for (auto& pair : chunk_map_) {
         delete pair.second;
     }
     free_chunk_.clear();
-    while(!small_chunk_queue_.empty()) {
-        small_chunk_queue_.pop();
-    }
 }
 
 void* MemoryTracker::allocate(const size_t alloc_size) {
-    if (alloc_size == 0) {
-        RTP_LLM_LOG_ERROR("Memory tracker can not allocate memory of size 0!");
-        return nullptr;
-    }
-    WriteLock lock(mutex_);
-    if (small_chunk_num_ && alloc_size <= small_chunk_size_ && !small_chunk_queue_.empty()) {
-        size_t chunk_idx = small_chunk_queue_.front();
-        small_chunk_queue_.pop();
-        return (int8_t *)base_ptr_ + chunk_idx * small_chunk_size_;
-    }    
+    WriteLock    lock(mutex_);
+    const auto   aligned_size = checkAndAlign(alloc_size);
     MemoryChunk* chunk_to_use = nullptr;
-    const auto aligned_size = align(alloc_size);
-    // 1. find the smallest chunk that holds the requested size
+
+    // 1. find the smallest chunk that holds the requested size, and is not freezed for private alloc.
     auto it = free_chunk_.lower_bound({aligned_size, nullptr});
-    if (it != free_chunk_.end()) {
-        chunk_to_use = it->second;
-        free_chunk_.erase(it);
+    while (it != free_chunk_.end()) {
+        if (((size_t)it->second->ptr + aligned_size) <= ((size_t)freezed_from_ptr_)) {
+            chunk_to_use = it->second;
+            free_chunk_.erase(it);
+            break;  // found a chunk that can be used
+        }
+        it = next(it);  // skip chunks that reaches freezed memory area
     }
 
     // 2. allocate memory
     if (chunk_to_use) {
         if (chunk_to_use->size == aligned_size) {
             chunk_to_use->used = true;
-            return chunk_to_use->ptr;
         } else {
-            auto chunk_size = chunk_to_use->size;
-            chunk_to_use->used = true;
-            chunk_to_use->size = aligned_size;
-            auto new_chunk = new MemoryChunk();
-            new_chunk->ptr = (void*)((size_t)chunk_to_use->ptr + aligned_size);
-            new_chunk->size = chunk_size - aligned_size;
-            new_chunk->used = false;
+            auto chunk_size            = chunk_to_use->size;
+            chunk_to_use->used         = true;
+            chunk_to_use->size         = aligned_size;
+            auto new_chunk             = new MemoryChunk();
+            new_chunk->ptr             = (void*)((size_t)chunk_to_use->ptr + aligned_size);
+            new_chunk->size            = chunk_size - aligned_size;
+            new_chunk->used            = false;
             chunk_map_[new_chunk->ptr] = new_chunk;
             free_chunk_.insert({new_chunk->size, new_chunk});
-            return chunk_to_use->ptr;
         }
+        return chunk_to_use->ptr;
     }
 
     // 3. failed to allocate
@@ -91,23 +71,59 @@ void* MemoryTracker::allocate(const size_t alloc_size) {
     return nullptr;
 }
 
+void* MemoryTracker::allocatePrivate(const size_t size) {
+    WriteLock    lock(mutex_);
+    const auto   aligned_size = checkAndAlign(size);
+    MemoryChunk* chunk_to_use = nullptr;
+
+    // allocate private starts from the end of the whole memory chunk
+    auto iter = chunk_map_.rbegin();
+    while (iter != chunk_map_.rend()) {
+        auto chunk = iter->second;
+        if ((!chunk->used) && (chunk->size >= aligned_size)) {
+            chunk_to_use = chunk;
+            free_chunk_.erase({chunk_to_use->size, chunk_to_use});
+            break;
+        }
+        iter = next(iter);
+    }
+
+    if (chunk_to_use) {
+        if (chunk_to_use->size == aligned_size) {
+            chunk_to_use->used = true;
+            freezed_from_ptr_  = min(freezed_from_ptr_, chunk_to_use->ptr);
+            return chunk_to_use->ptr;
+        } else {
+            // shrink the chunk to use
+            auto remained_size = chunk_to_use->size - aligned_size;
+            chunk_to_use->size = remained_size;
+            free_chunk_.insert({remained_size, chunk_to_use});
+
+            // newly allocated chunk
+            auto allocated_chunk             = new MemoryChunk();
+            allocated_chunk->ptr             = ((char*)chunk_to_use->ptr) + remained_size;
+            allocated_chunk->size            = aligned_size;
+            allocated_chunk->used            = true;
+            chunk_map_[allocated_chunk->ptr] = allocated_chunk;
+            freezed_from_ptr_                = min(freezed_from_ptr_, allocated_chunk->ptr);
+            return allocated_chunk->ptr;
+        }
+    }
+
+    // TODO: should throw exception here ?
+    RTP_LLM_LOG_ERROR("Memory tracker failed to allocate private memory of size %lu", aligned_size);
+    return nullptr;
+}
+
 bool MemoryTracker::isTracking(void* ptr) const {
     ReadLock lock(mutex_);
-    if (ptr >= base_ptr_ && ptr < (int8_t *)base_ptr_ + small_chunk_num_ * small_chunk_size_) {
-        return true;
-    }
-    auto iter = chunk_map_.find(ptr);
+    auto     iter = chunk_map_.find(ptr);
     return (iter != chunk_map_.end()) && iter->second->used;
 }
 
 void MemoryTracker::deallocate(void* ptr) {
     WriteLock lock(mutex_);
-    if (ptr >= base_ptr_ && ptr < (int8_t *)base_ptr_ + small_chunk_num_ * small_chunk_size_) {
-        assert(((int8_t *)ptr - (int8_t *)base_ptr_) % small_chunk_size_ == 0);
-        small_chunk_queue_.push(((int8_t *)ptr - (int8_t *)base_ptr_) / small_chunk_size_);
-        return;
-    }
-    
+
     // 1. find the chunk and free
     auto chunk_iter = chunk_map_.find(ptr);
     if (chunk_iter == chunk_map_.end()) {
@@ -115,7 +131,7 @@ void MemoryTracker::deallocate(void* ptr) {
         return;
     }
     chunk_iter->second->used = false;
-    MemoryChunk* new_chunk = chunk_iter->second;
+    MemoryChunk* new_chunk   = chunk_iter->second;
     // 2. merge with the next chunk if possible
     auto next_chunk_iter = next(chunk_iter);
     if ((next_chunk_iter != chunk_map_.end()) && (!next_chunk_iter->second->used)) {
@@ -141,9 +157,9 @@ void MemoryTracker::deallocate(void* ptr) {
     free_chunk_.insert({new_chunk->size, new_chunk});
 }
 
-vector<MemoryChunk *> MemoryTracker::getAllChunks() const {
-    ReadLock lock(mutex_);
-    vector<MemoryChunk *> chunks;
+vector<MemoryChunk*> MemoryTracker::getAllChunks() const {
+    ReadLock             lock(mutex_);
+    vector<MemoryChunk*> chunks;
     for (auto& pair : chunk_map_) {
         chunks.push_back(pair.second);
     }
@@ -151,8 +167,9 @@ vector<MemoryChunk *> MemoryTracker::getAllChunks() const {
 }
 
 TrackerStatus MemoryTracker::getStatus() const {
-    ReadLock lock(mutex_);
+    ReadLock      lock(mutex_);
     TrackerStatus status;
+    status.freezed_bytes = (size_t)(total_size_ - ((char*)freezed_from_ptr_ - (char*)base_ptr_));
 
     for (auto iter = chunk_map_.begin(); iter != chunk_map_.end(); iter++) {
         auto chunk = iter->second;
@@ -160,13 +177,14 @@ TrackerStatus MemoryTracker::getStatus() const {
         if (chunk->used) {
             status.allocated_size += chunk->size;
             status.allocated_chunk_count++;
+            if (chunk->ptr >= freezed_from_ptr_) {
+                status.allocated_private_size += chunk->size;
+            }
         } else {
             status.available_size += chunk->size;
             if (next(iter) != chunk_map_.end()) {
                 status.fragmented_size += chunk->size;
                 status.fragment_chunk_count++;
-            } else {
-                status.free_size = chunk->size;
             }
         }
     }
@@ -174,9 +192,11 @@ TrackerStatus MemoryTracker::getStatus() const {
     return status;
 }
 
-
-size_t MemoryTracker::align(const size_t size) const {
+size_t MemoryTracker::checkAndAlign(const size_t size) const {
+    if (size == 0) {
+        throw std::runtime_error("Memory tracker can not allocate memory of size 0!");
+    }
     return ((size + align_size_ - 1) / align_size_) * align_size_;
 }
 
-} // namespace rtp_llm
+}  // namespace rtp_llm
