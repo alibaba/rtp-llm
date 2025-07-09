@@ -10,7 +10,6 @@
 
 using namespace std;
 
-
 namespace th = torch;
 
 namespace torch_ext {
@@ -19,10 +18,11 @@ RtpEmbeddingOp::RtpEmbeddingOp() {}
 void RtpEmbeddingOp::init(py::object model, py::object mm_process_engine) {
     try {
         auto [gpt_init_params, gpt_weight] = rtp_llm::prepareEngineInitParams(model);
-        rtp_llm::EngineInitParams params(0, gpt_init_params, std::move(*gpt_weight));
-        py::object custom_module = model.attr("custom_module");
-        py::object py_render     = model.attr("custom_module").attr("renderer");
-        py::object py_handler    = model.attr("custom_module").attr("handler");
+        auto                      py_model = model.attr("py_model");
+        rtp_llm::EngineInitParams params(0, gpt_init_params, std::move(*gpt_weight), py_model);
+        py::object                custom_module = model.attr("custom_module");
+        py::object                py_render     = model.attr("custom_module").attr("renderer");
+        py::object                py_handler    = model.attr("custom_module").attr("handler");
 
         if (gpt_init_params.tp_rank_ == 0) {
             // kmon metric init
@@ -63,7 +63,12 @@ void RtpEmbeddingOp::startHttpServer(std::shared_ptr<rtp_llm::EmbeddingEngine>  
                                      std::shared_ptr<rtp_llm::MultimodalProcessor> mm_processor,
                                      const rtp_llm::EngineInitParams&              params,
                                      py::object                                    custom_module) {
-    http_server_.reset(new rtp_llm::HttpApiServer(embedding_engine, mm_processor, params, custom_module, embedding_engine.get()->GetGptInitParameter().profiling_debug_logging_config.py_inference_log_response));
+    http_server_.reset(new rtp_llm::HttpApiServer(
+        embedding_engine,
+        mm_processor,
+        params,
+        custom_module,
+        embedding_engine.get()->GetGptInitParameter().profiling_debug_logging_config.py_inference_log_response));
     std::string http_server_address("tcp:0.0.0.0:" + std::to_string(params.gpt_init_parameter.http_port_));
     if (http_server_->start(http_server_address)) {
         RTP_LLM_LOG_INFO("embedding HTTP Server listening on %s", http_server_address.c_str());
@@ -72,11 +77,12 @@ void RtpEmbeddingOp::startHttpServer(std::shared_ptr<rtp_llm::EmbeddingEngine>  
     }
 }
 
-void RtpEmbeddingOp::startRpcServer(const rtp_llm::GptInitParameter& gpt_init_params,
-                                    py::object py_render,
-                                    kmonitor::MetricsReporterPtr reporter,
+void RtpEmbeddingOp::startRpcServer(const rtp_llm::GptInitParameter&              gpt_init_params,
+                                    py::object                                    py_render,
+                                    kmonitor::MetricsReporterPtr                  reporter,
                                     std::shared_ptr<rtp_llm::MultimodalProcessor> mm_processor) {
-    auto arpc_service = std::move(createEmbeddingArpcService(gpt_init_params, py_render, mm_processor, embedding_engine_, reporter));
+    auto arpc_service =
+        std::move(createEmbeddingArpcService(gpt_init_params, py_render, mm_processor, embedding_engine_, reporter));
     if (arpc_service) {
         RTP_LLM_LOG_INFO("creating arpc service");
         embedding_rpc_service_.reset(new rtp_llm::ArpcServerWrapper(std::move(arpc_service),
@@ -90,23 +96,24 @@ void RtpEmbeddingOp::startRpcServer(const rtp_llm::GptInitParameter& gpt_init_pa
     }
 }
 
-py::object RtpEmbeddingOp::decode(th::Tensor token_ids,
-                                  th::Tensor token_type_ids,
-                                  th::Tensor input_lengths,
-                                  int64_t    request_id,
+py::object RtpEmbeddingOp::decode(th::Tensor                            token_ids,
+                                  th::Tensor                            token_type_ids,
+                                  th::Tensor                            input_lengths,
+                                  int64_t                               request_id,
                                   std::vector<rtp_llm::MultimodalInput> multimodal_inputs) {
     if (is_server_shutdown_) {
         throw std::runtime_error("server is shut down, can't handle request");
     }
     std::optional<rtp_llm::MultimodalFeature> multimodal_features = std::nullopt;
-    auto embedding_input = std::make_shared<rtp_llm::EmbeddingInput>(token_ids, token_type_ids, input_lengths, request_id, multimodal_features);
+    auto                                      embedding_input     = std::make_shared<rtp_llm::EmbeddingInput>(
+        token_ids, token_type_ids, input_lengths, request_id, multimodal_features);
     if (mm_processor_ != nullptr && !multimodal_inputs.empty()) {
         auto mm_res = mm_processor_->updateMultimodalFeatures(embedding_input, multimodal_inputs);
         if (!mm_res.ok()) {
             throw std::runtime_error(mm_res.ToString());
         }
     }
-    auto embedding_output = embedding_engine_->decode(embedding_input);
+    auto                   embedding_output = embedding_engine_->decode(embedding_input);
     py::gil_scoped_acquire acquire;
     if (embedding_output->output.isTensor) {
         RTP_LLM_CHECK_WITH_INFO(embedding_output->output.t.has_value(), "embedding output has null tensor value");

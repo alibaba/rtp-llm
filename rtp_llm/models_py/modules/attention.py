@@ -1,24 +1,32 @@
+import logging
+from typing import Any, Dict, Optional, Tuple, TypedDict
+
 import torch
 import torch.nn as nn
-import logging
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.models_py.modules.norm import RMSNorm
 from torch import dtype as _dtype
-from typing import Optional, Dict, TypedDict, Tuple, Any
 from typing_extensions import Unpack
-from rtp_llm.utils.model_weight import W
+
+from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.models_py.modules.linear import Linear
-from rtp_llm.ops import PyModelInputs, PyModelOutputs, PyAttentionInputs
+from rtp_llm.models_py.modules.norm import RMSNorm
+from rtp_llm.ops import PyAttentionInputs, PyModelInputs, PyModelOutputs
+from rtp_llm.utils.model_weight import W
 
 try:
     from libth_transformer.rtp_llm_ops import FlashInferOp
 except ImportError:
     logging.info("FlashInferOp not available, using fallback implementation.")
 
+
 class FlashInferAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
-    def __init__(self, config: GptInitModelParameters, weights: Dict[str, torch.Tensor], layer_idx: int):
+    def __init__(
+        self,
+        config: GptInitModelParameters,
+        weights: Dict[str, torch.Tensor],
+        layer_idx: int,
+    ):
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
@@ -33,8 +41,12 @@ class FlashInferAttention(nn.Module):
         self.qkv_proj = Linear(weights[W.attn_qkv_w], weights.get(W.attn_qkv_b, None))
         self.o_proj = Linear(weights[W.attn_o_w], weights.get(W.attn_o_b, None))
         if W.q_ln_gamma in weights:
-            self.q_norm = RMSNorm(weights[W.q_ln_gamma], eps=config.layernorm_eps)  # unlike olmo, only on the head dim!
-            self.k_norm = RMSNorm(weights[W.k_ln_gamma], eps=config.layernorm_eps)  # thus post q_norm does not need reshape
+            self.q_norm = RMSNorm(
+                weights[W.q_ln_gamma], eps=config.layernorm_eps
+            )  # unlike olmo, only on the head dim!
+            self.k_norm = RMSNorm(
+                weights[W.k_ln_gamma], eps=config.layernorm_eps
+            )  # thus post q_norm does not need reshape
         self.sliding_window = None
         self.flash_infer = FlashInferOp(config)
 
@@ -63,7 +75,14 @@ class FlashInferAttention(nn.Module):
         attn_output = torch.empty_like(hidden_states)
         k_cache = k_cache_base[self.layer_idx] if k_cache_base is not None else None
         v_cache = v_cache_base[self.layer_idx] if v_cache_base is not None else None
-        self.flash_infer.forward(qkv, attn_output, k_cache, v_cache, attention_inputs)
+
+        # TODO(wangyin / xinglai): deal with embedding query (no kv cache)
+        if k_cache != None:
+            self.flash_infer.forward(
+                qkv, attn_output, k_cache, v_cache, attention_inputs
+            )
+        else:
+            attn_output = hidden_states
 
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)

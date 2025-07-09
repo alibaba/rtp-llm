@@ -2,12 +2,11 @@
 #include <pybind11/embed.h>
 #include <torch/extension.h>
 
-
 namespace torch_ext {
 
 struct PyModelInitResources {
-    torch::Tensor k_cache_base;
-    torch::Tensor v_cache_base;
+    std::optional<torch::Tensor> k_cache_base;
+    std::optional<torch::Tensor> v_cache_base;
 };
 
 struct PyAttentionInputs {
@@ -16,7 +15,7 @@ struct PyAttentionInputs {
 };
 
 struct PyModelInputs {
-    torch::Tensor input_ids;
+    torch::Tensor     input_ids;
     PyAttentionInputs attention_inputs;
 };
 
@@ -24,7 +23,6 @@ struct PyModelOutputs {
     torch::Tensor hidden_states;
 };
 
-void registerPyOpDefs(pybind11::module &m);
+void registerPyOpDefs(pybind11::module& m);
 
-}
-
+}  // namespace torch_ext
