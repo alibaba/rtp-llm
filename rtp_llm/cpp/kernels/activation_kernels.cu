@@ -31,15 +31,13 @@ namespace rtp_llm {
 
 /* Gelu Activation */
 
-__forceinline__ __device__ float copysignf_pos(float a, float b)
-{
+__forceinline__ __device__ float copysignf_pos(float a, float b) {
     float r;
     r = __int_as_float(__float_as_int(a) | (__float_as_int(b) & 0x80000000));
     return r;
 }
 
-__inline__ __device__ float tanh_opt(float x)
-{
+__inline__ __device__ float tanh_opt(float x) {
 #if (__CUDA_ARCH__ >= 750 && CUDART_VERSION >= 11000)
     float r;
     asm("tanh.approx.f32 %0,%1; \n\t" : "=f"(r) : "f"(x));
@@ -53,8 +51,7 @@ __inline__ __device__ float tanh_opt(float x)
 template<typename T>
 struct GeluActivation {
     using return_type = T;
-    static __device__ __forceinline__ T apply(const T& val)
-    {
+    static __device__ __forceinline__ T apply(const T& val) {
         const float cdf = 0.5f * (1.0f + tanh_opt((0.7978845608028654f * (val + 0.044715f * val * val * val))));
         return val * cdf;
     }
@@ -63,8 +60,7 @@ struct GeluActivation {
 template<typename T>
 struct GeluActivationNoneApproximate {
     using return_type = T;
-    static __device__ __forceinline__ T apply(const T& val)
-    {
+    static __device__ __forceinline__ T apply(const T& val) {
         return 0.5f * val * (1.0f + std::erf(val * M_SQRT1_2));
     }
 };
@@ -72,8 +68,7 @@ struct GeluActivationNoneApproximate {
 template<>
 struct GeluActivation<half2> {
     using return_type = half2;
-    static __device__ __forceinline__ half2 apply(const half2& val)
-    {
+    static __device__ __forceinline__ half2 apply(const half2& val) {
         half2  val_pow3 = __hmul2(val, __hmul2(val, val));
         float2 tmp_pow  = __half22float2(val_pow3);
         float2 tmp      = __half22float2(val);
@@ -88,8 +83,7 @@ struct GeluActivation<half2> {
 template<>
 struct GeluActivationNoneApproximate<half2> {
     using return_type = half2;
-    static __device__ __forceinline__ half2 apply(const half2& val)
-    {
+    static __device__ __forceinline__ half2 apply(const half2& val) {
         half2  val_pow3 = __hmul2(val, __hmul2(val, val));
         float2 tmp_pow  = __half22float2(val_pow3);
         float2 tmp      = __half22float2(val);
@@ -105,8 +99,7 @@ struct GeluActivationNoneApproximate<half2> {
 template<>
 struct GeluActivation<__nv_bfloat162> {
     using return_type = __nv_bfloat162;
-    static __device__ __forceinline__ __nv_bfloat162 apply(const __nv_bfloat162& val)
-    {
+    static __device__ __forceinline__ __nv_bfloat162 apply(const __nv_bfloat162& val) {
         __nv_bfloat162 val_pow3 = bf16hmul2(val, bf16hmul2(val, val));
         float2         tmp_pow  = bf1622float2(val_pow3);
         float2         tmp      = bf1622float2(val);
@@ -120,13 +113,13 @@ struct GeluActivation<__nv_bfloat162> {
 template<>
 struct GeluActivationNoneApproximate<__nv_bfloat162> {
     using return_type = __nv_bfloat162;
-    static __device__ __forceinline__ __nv_bfloat162 apply(const __nv_bfloat162& val)
-    {
+    static __device__ __forceinline__ __nv_bfloat162 apply(const __nv_bfloat162& val) {
         __nv_bfloat162 val_pow3 = bf16hmul2(val, bf16hmul2(val, val));
         float2         tmp_pow  = bf1622float2(val_pow3);
         float2         tmp      = bf1622float2(val);
 
-        tmp.x = 0.5f * (1.0f + std::erf(tmp.x * M_SQRT1_2));;
+        tmp.x = 0.5f * (1.0f + std::erf(tmp.x * M_SQRT1_2));
+        ;
         tmp.y = 0.5f * (1.0f + std::erf(tmp.y * M_SQRT1_2));
 
         return bf16hmul2(val, __floats2bfloat162_rn(tmp.x, tmp.y));
@@ -140,8 +133,7 @@ struct GeluActivationNoneApproximate<__nv_bfloat162> {
 template<typename T>
 struct ReluActivation {
     using return_type = T;
-    static __device__ __forceinline__ T apply(const T& val)
-    {
+    static __device__ __forceinline__ T apply(const T& val) {
         return val > static_cast<T>(0.0f) ? val : static_cast<T>(0.0f);
     }
 };
@@ -149,8 +141,7 @@ struct ReluActivation {
 template<>
 struct ReluActivation<half2> {
     using return_type = half2;
-    static __device__ __forceinline__ half2 apply(const half2& val)
-    {
+    static __device__ __forceinline__ half2 apply(const half2& val) {
         const half zero_half = static_cast<half>(0.0f);
         return make_half2(val.x > zero_half ? val.x : zero_half, val.y > zero_half ? val.y : zero_half);
     }
@@ -160,8 +151,7 @@ struct ReluActivation<half2> {
 template<>
 struct ReluActivation<__nv_bfloat162> {
     using return_type = __nv_bfloat162;
-    static __device__ __forceinline__ __nv_bfloat162 apply(const __nv_bfloat162& val)
-    {
+    static __device__ __forceinline__ __nv_bfloat162 apply(const __nv_bfloat162& val) {
         const __nv_bfloat16 zero_bf16 = static_cast<__nv_bfloat16>(0.0f);
         return make_bfloat162(val.x > zero_bf16 ? val.x : zero_bf16, val.y > zero_bf16 ? val.y : zero_bf16);
     }
@@ -173,8 +163,7 @@ struct ReluActivation<__nv_bfloat162> {
 template<typename T>
 struct SiluActivation {
     using return_type = T;
-    static __device__ __forceinline__ T apply(const T& val)
-    {
+    static __device__ __forceinline__ T apply(const T& val) {
         return (T)((float)val / (1.0f + __expf((float)-val)));
     }
 };
@@ -182,8 +171,7 @@ struct SiluActivation {
 template<>
 struct SiluActivation<half2> {
     using return_type = float2;
-    static __device__ __forceinline__ float2 apply(const half2& val)
-    {
+    static __device__ __forceinline__ float2 apply(const half2& val) {
         return make_float2(SiluActivation<float>::apply(val.x), SiluActivation<float>::apply(val.y));
     }
 };
@@ -192,8 +180,7 @@ struct SiluActivation<half2> {
 template<>
 struct SiluActivation<__nv_bfloat162> {
     using return_type = float2;
-    static __device__ __forceinline__ float2 apply(const __nv_bfloat162& val)
-    {
+    static __device__ __forceinline__ float2 apply(const __nv_bfloat162& val) {
         return make_float2(SiluActivation<float>::apply(val.x), SiluActivation<float>::apply(val.y));
     }
 };
@@ -204,8 +191,7 @@ struct SiluActivation<__nv_bfloat162> {
 template<typename T>
 struct IdentityActivation {
     using return_type = T;
-    static __device__ __forceinline__ T apply(const T& val)
-    {
+    static __device__ __forceinline__ T apply(const T& val) {
         return val;
     }
 };
@@ -309,8 +295,7 @@ void invokeGenericActivation(T*           up_out,
                              const BT*    activation_scale,
                              const int*   padding_offset,
                              const int    seq_len,
-                             cudaStream_t stream)
-{
+                             cudaStream_t stream) {
     using PT                   = typename packed_type_2<T>::type;
     constexpr int packed_elems = num_elems<PT>::value;
     using PBT                  = typename packed_as<BT, packed_elems>::type;
@@ -318,18 +303,19 @@ void invokeGenericActivation(T*           up_out,
     // should be even
     int temp_n = n + n % 2;
 
-    dim3 block, grid;
+    dim3          block, grid;
     constexpr int max_threads_per_block = 1024;
-    constexpr int elems_per_thread = 4 * packed_elems;
+    constexpr int elems_per_thread      = 4 * packed_elems;
 
     if (temp_n / elems_per_thread <= max_threads_per_block) {
         block.x = temp_n / elems_per_thread;
         grid.x  = m;
-    }
-    else {
-        block.x = max_threads_per_block;
+    } else {
+        block.x                       = max_threads_per_block;
         constexpr int elems_per_block = max_threads_per_block * elems_per_thread;
-        grid.x  = (m * temp_n + elems_per_block - 1) / elems_per_block;
+        // grid.x  = (m * temp_n + elems_per_block - 1) / elems_per_block;
+        int64_t total_elems = static_cast<int64_t>(m) * static_cast<int64_t>(temp_n);
+        grid.x              = static_cast<int>((total_elems + elems_per_block - 1) / elems_per_block);
     }
     generic_activation<Activation><<<grid, block, 0, stream>>>(reinterpret_cast<PT*>(up_out),
                                                                reinterpret_cast<const PBT*>(bias),
@@ -360,7 +346,7 @@ void invokeGenericActivation(T*           up_out,
                                                              const int    int8_mode,                                   \
                                                              const float* activation_in,                               \
                                                              const float* activation_out,                              \
-                                                             const BT* activation_scale,                               \
+                                                             const BT*    activation_scale,                            \
                                                              const int*   padding_offset,                              \
                                                              const int    seq_len,                                     \
                                                              cudaStream_t stream);
@@ -399,8 +385,7 @@ INSTANTIATE_GENERIC_ACTIVATION(IdentityActivation, float, __nv_bfloat16);
 #undef INSTANCIATE_GENERIC_ACTIVATION
 
 template<typename T>
-__global__ void add_bias_tanh(T* out, const T* __restrict bias, int m, int n)
-{
+__global__ void add_bias_tanh(T* out, const T* __restrict bias, int m, int n) {
     for (int id = blockIdx.x * blockDim.x + threadIdx.x; id < m * n; id += blockDim.x * gridDim.x) {
         T val = out[id];
         if (bias != nullptr) {
@@ -411,8 +396,7 @@ __global__ void add_bias_tanh(T* out, const T* __restrict bias, int m, int n)
 }
 
 template<>
-__global__ void add_bias_tanh(half* out, const half* __restrict bias, int m, int n)
-{
+__global__ void add_bias_tanh(half* out, const half* __restrict bias, int m, int n) {
     half2*       out_ptr  = (half2*)out;
     const half2* bias_ptr = (half2*)bias;
 
@@ -429,8 +413,7 @@ __global__ void add_bias_tanh(half* out, const half* __restrict bias, int m, int
 
 #ifdef ENABLE_BF16
 template<>
-__global__ void add_bias_tanh(__nv_bfloat16* out, const __nv_bfloat16* __restrict bias, int m, int n)
-{
+__global__ void add_bias_tanh(__nv_bfloat16* out, const __nv_bfloat16* __restrict bias, int m, int n) {
     __nv_bfloat162*       out_ptr  = (__nv_bfloat162*)out;
     const __nv_bfloat162* bias_ptr = (__nv_bfloat162*)bias;
 
@@ -447,15 +430,13 @@ __global__ void add_bias_tanh(__nv_bfloat16* out, const __nv_bfloat16* __restric
 #endif
 
 template<typename T>
-void invokeAddBiasTanh(T* out, const T* bias, const int m, const int n, cudaStream_t stream)
-{
+void invokeAddBiasTanh(T* out, const T* bias, const int m, const int n, cudaStream_t stream) {
     const int data_type_factor = 4 / sizeof(T);  // 1 for fp32, 2 for fp16 and bf16
     dim3      block, grid;
     if (n / 4 / data_type_factor <= 1024) {
         block.x = n / 4 / data_type_factor;
         grid.x  = m;
-    }
-    else {
+    } else {
         block.x = 1024;
         grid.x  = ceil(m * n / 1024.);
     }
@@ -476,8 +457,7 @@ __global__ void addBiasGeluV2(T2* out,
                               const T2*  ia3_weights,
                               const int  size,
                               const int* padding_offset,
-                              const int  seq_len)
-{
+                              const int  seq_len) {
     const bool with_ia3 = ia3_tasks != nullptr;
     for (int id = blockIdx.x * blockDim.x + threadIdx.x; id < size; id += blockDim.x * gridDim.x) {
         T2 val = out[id];
@@ -504,8 +484,7 @@ __global__ void addBiasGeluV3(T2* out,
                               const T2*  ia3_weights,
                               const int  size,
                               const int* padding_offset,
-                              const int  seq_len)
-{
+                              const int  seq_len) {
     const bool with_ia3 = ia3_tasks != nullptr;
     T2         buffer[ELEMENT_PER_ROUND];
     T2         tmp_bias[ELEMENT_PER_ROUND];
@@ -542,8 +521,7 @@ __global__ void addBiasGeluV3(T2* out,
             grid.x = grid.x / ELEMENT_PER_ROUND;                                                                       \
             addBiasGeluV3<T2, HALF_N, ELEMENT_PER_ROUND><<<grid, block, 0, stream>>>(                                  \
                 (T2*)out, (const T2*)bias, ia3_tasks, (T2*)ia3_weights, m * half_n, padding_offset, seq_len);          \
-        }                                                                                                              \
-        else {                                                                                                         \
+        } else {                                                                                                       \
             addBiasGeluV2<T2, HALF_N><<<grid, block, 0, stream>>>(                                                     \
                 (T2*)out, (const T2*)bias, ia3_tasks, (T2*)ia3_weights, m * half_n, padding_offset, seq_len);          \
         }                                                                                                              \
@@ -558,8 +536,7 @@ void invokeAddBiasGeluV2(T*           out,
                          const int    seq_len,
                          const int    m,
                          const int    n,
-                         cudaStream_t stream)
-{
+                         cudaStream_t stream) {
     if (n % 2 == 0 && sizeof(T) == 2) {
         const int half_n = n / 2;
         dim3      block, grid;
@@ -597,8 +574,7 @@ void invokeAddBiasGeluV2(T*           out,
                                                             stream);
                     break;
             }
-        }
-        else {
+        } else {
             switch (half_n) {
                 ADD_BIAS_GELU(256, 1)
                 ADD_BIAS_GELU(512, 1)
@@ -629,8 +605,7 @@ void invokeAddBiasGeluV2(T*           out,
                     break;
             }
         }
-    }
-    else {
+    } else {
         invokeGenericActivation<GeluActivation>(out,
                                                 bias,
                                                 (T*)nullptr,
@@ -682,8 +657,7 @@ template void invokeAddBiasGeluV2(__nv_bfloat16*       out,
 #endif  // ENABLE_BF16
 
 template<typename T>
-__global__ void sigmoid_kernel(T* data, const int size, const float scale)
-{
+__global__ void sigmoid_kernel(T* data, const int size, const float scale) {
     const int index = (blockIdx.y * gridDim.x + blockIdx.x) * blockDim.x + threadIdx.x;
     if (index < size) {
         float val   = cuda_cast<float>(data[index]);
@@ -693,8 +667,7 @@ __global__ void sigmoid_kernel(T* data, const int size, const float scale)
 }
 
 template<>
-__global__ void sigmoid_kernel(half2* data, const int size, const float scale)
-{
+__global__ void sigmoid_kernel(half2* data, const int size, const float scale) {
     const int index = (blockIdx.y * gridDim.x + blockIdx.x) * blockDim.x + threadIdx.x;
     if (index < size / 2) {
         half2  val        = data[index];
@@ -706,29 +679,27 @@ __global__ void sigmoid_kernel(half2* data, const int size, const float scale)
 }
 #ifdef ENABLE_BF16
 template<>
-__global__ void sigmoid_kernel(__nv_bfloat162* data, const int size, const float scale)
-{
+__global__ void sigmoid_kernel(__nv_bfloat162* data, const int size, const float scale) {
     const int index = (blockIdx.y * gridDim.x + blockIdx.x) * blockDim.x + threadIdx.x;
     if (index < size / 2) {
-        __nv_bfloat162  val        = data[index];
-        float2 val_float2 = cuda_cast<float2>(val);
-        val_float2.x      = 1.0f / (1.0f + exp(-val_float2.x)) * scale;
-        val_float2.y      = 1.0f / (1.0f + exp(-val_float2.y)) * scale;
-        data[index]       = cuda_cast<__nv_bfloat162>(val_float2);
+        __nv_bfloat162 val        = data[index];
+        float2         val_float2 = cuda_cast<float2>(val);
+        val_float2.x              = 1.0f / (1.0f + exp(-val_float2.x)) * scale;
+        val_float2.y              = 1.0f / (1.0f + exp(-val_float2.y)) * scale;
+        data[index]               = cuda_cast<__nv_bfloat162>(val_float2);
     }
 }
 #endif
 
 template<typename T>
-void invokeSigmoid(T* data, const int size, const float scale, cudaStream_t stream)
-{
-    if (std::is_same<T, half>::value && (size %2 == 0)) {
+void invokeSigmoid(T* data, const int size, const float scale, cudaStream_t stream) {
+    if (std::is_same<T, half>::value && (size % 2 == 0)) {
         dim3 block(128);
         dim3 grid((size + 255) / 256);
         sigmoid_kernel<<<grid, block, 0, stream>>>((half2*)data, size, scale);
     }
 #ifdef ENABLE_BF16
-    else if (std::is_same<T, __nv_bfloat16>::value && (size %2 == 0)) {
+    else if (std::is_same<T, __nv_bfloat16>::value && (size % 2 == 0)) {
         dim3 block(128);
         dim3 grid((size + 255) / 256);
         sigmoid_kernel<<<grid, block, 0, stream>>>((__nv_bfloat162*)data, size, scale);
@@ -748,15 +719,14 @@ template void invokeSigmoid(__nv_bfloat16* data, const int size, const float sca
 #endif
 
 template<typename T>
-__global__ void scaledot_kernel(T* out, const T* in, const T* scale, const int m, const int n)
-{
-    const int size = m * n;
-    const int index = (blockIdx.y * gridDim.x + blockIdx.x) * blockDim.x + threadIdx.x;
+__global__ void scaledot_kernel(T* out, const T* in, const T* scale, const int m, const int n) {
+    const int size        = m * n;
+    const int index       = (blockIdx.y * gridDim.x + blockIdx.x) * blockDim.x + threadIdx.x;
     const int scale_index = index / n;
     if (index < size) {
-        float val   = cuda_cast<float>(in[index]);
+        float val       = cuda_cast<float>(in[index]);
         float scale_val = cuda_cast<float>(scale[scale_index]);
-        out[index] = T(val * scale_val);
+        out[index]      = T(val * scale_val);
     }
 }
 
@@ -768,19 +738,25 @@ void invokeScaledDot(T* out, const T* input, const T* scale, const int m, const 
     if (temp_n <= 1024) {
         block.x = temp_n;
         grid.x  = m;
-    }
-    else {
+    } else {
         block.x = 1024;
         grid.x  = ceil(m * temp_n / 1024.);
     }
     scaledot_kernel<<<grid, block, 0, stream>>>(out, input, scale, m, n);
 }
 
-template void invokeScaledDot(float* out, const float* input, const float* scale, const int m, const int n, cudaStream_t stream);
-template void invokeScaledDot(half* out, const half* input, const half* scale, const int m, const int n, cudaStream_t stream);
+template void
+invokeScaledDot(float* out, const float* input, const float* scale, const int m, const int n, cudaStream_t stream);
+template void
+invokeScaledDot(half* out, const half* input, const half* scale, const int m, const int n, cudaStream_t stream);
 
 #ifdef ENABLE_BF16
-template void invokeScaledDot(__nv_bfloat16* out, const __nv_bfloat16* input, const __nv_bfloat16* scale, const int m, const int n, cudaStream_t stream);
+template void invokeScaledDot(__nv_bfloat16*       out,
+                              const __nv_bfloat16* input,
+                              const __nv_bfloat16* scale,
+                              const int            m,
+                              const int            n,
+                              cudaStream_t         stream);
 #endif
 
 }  // namespace rtp_llm
