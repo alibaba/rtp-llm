@@ -34,23 +34,17 @@ build --define=NVSHMEM_DIR=/
 build:cuda --copt="-DENABLE_BF16=1"
 build:cuda --copt="-DBUILD_CUTLASS_MIXED_GEMM=ON"
 build:cuda --copt="-DC10_CUDA_NO_CMAKE_CONFIGURE_FILE"
-build:cuda --copt="-DUSE_NVTX=ON"
 build:cuda --copt="-DUSING_CUDA=1"
-build:cuda --define=using_cuda=true --define=using_cuda11=true --define=using_cuda_nvcc=true
+build:cuda --define=using_cuda=true --define=using_cuda_nvcc=true
 build:cuda --crosstool_top=@local_config_cuda//crosstool:toolchain
 build:cuda --action_env CUDA_TOOLKIT_PATH="/usr/local/cuda/"
 build:cuda --host_action_env CUDA_TOOLKIT_PATH="/usr/local/cuda/"
-build:cuda --action_env TF_CUDA_VERSION="11.4" # 11.8 12.1
-build:cuda --host_action_env TF_CUDA_VERSION="11.4" # 11.8 12.1
 build:cuda --action_env TF_CUDA_PATHS="/usr/local/cuda/"
 build:cuda --host_action_env TF_CUDA_PATHS="/usr/local/cuda/"
 build:cuda --action_env TF_CUDA_CLANG="0"
 build:cuda --host_action_env TF_CUDA_CLANG="0"
 build:cuda --action_env TF_NEED_CUDA="1"
 build:cuda --host_action_env TF_NEED_CUDA="1"
-# 6.0 = P100, 7.0 = V100, 7.5 = T4, 8.6 = A10, 8.0 = A100
-build:cuda --action_env TF_CUDA_COMPUTE_CAPABILITIES="7.0,7.5,8.0,8.6"
-build:cuda --host_action_env TF_CUDA_COMPUTE_CAPABILITIES="7.0,7.5,8.0,8.6"
 build:cuda --action_env LD_LIBRARY_PATH="/lib64:/opt/conda310/lib/:/usr/local/cuda/compat/:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64:/usr/local/cuda/lib64/stubs/:/usr/local/cuda/extras/CUPTI/lib64/:$LD_LIBRARY_PATH"
 build:cuda --host_action_env LD_LIBRARY_PATH="/lib64:/opt/conda310/lib/:/usr/local/cuda/compat/:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64:/usr/local/cuda/lib64/stubs/:/usr/local/cuda/extras/CUPTI/lib64/:$LD_LIBRARY_PATH"
 build:cuda --linkopt="-L/usr/local/cuda/lib64/stubs/"
@@ -59,13 +53,12 @@ build:cuda --action_env NCCL_HDR_PATH="/usr/local/cuda/include"
 build:cuda --action_env TF_NCCL_VERSION="2"
 build:cuda --action_env CUDNN_INSTALL_PATH="/usr/local/cuda/"
 
-# 8.9 = L, 9.0 = H800
+# 6.0 = P100, 7.0 = V100, 7.5 = T4, 8.6 = A10, 8.0 = A100 8.9 = L, 9.0 = H800
 build:cuda12 --config=cuda
 build:cuda12 --action_env TF_CUDA_COMPUTE_CAPABILITIES="7.0,7.5,8.0,8.6,8.9,9.0"
 build:cuda12 --host_action_env TF_CUDA_COMPUTE_CAPABILITIES="7.0,7.5,8.0,8.6,8.9,9.0"
 build:cuda12 --action_env TF_CUDA_VERSION="12.4"
 build:cuda12 --host_action_env TF_CUDA_VERSION="12.4"
-build:cuda12 --define=using_cuda11=false
 build:cuda12 --define=using_cuda12=true
 build:cuda12 --copt="-DUSING_CUDA12=1"
 build:cuda12 --copt="-DUSE_OLD_TRT_FMHA=1"

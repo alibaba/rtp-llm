@@ -10,11 +10,9 @@ echo $DIR
 
 USERNAME=$(whoami)
 PASSWORD=""
-CUDA11_DOCKER=false
-CUDA12_DOCKER=false
 
 SHORT_OPTS="p:onh"
-LONG_OPTS="password:,cuda11_docker,cuda12_docker,help"
+LONG_OPTS="password:,help"
 
 PARSED_OPTS=$(getopt -o "$SHORT_OPTS" --long "$LONG_OPTS"  -- "$@")
 
@@ -32,19 +30,9 @@ while true; do
       PASSWORD="$2"
       shift 2
       ;;
-    -o|--cuda11_docker)
-      CUDA11_DOCKER=true
-      shift
-      ;;
-    -n|--cuda12_docker)
-      CUDA12_DOCKER=true
-      shift
-      ;;
     -h|--help)
       echo "用法:$0 [-p PASSWORD] [-o] [-n] "
       echo "-p password ,docker 仓库密码"
-      echo "-o 使用nvidia cuda11的docker"
-      echo "-n 使用nvidia cuda12的docker"
       shift
       exit 0
       ;;
@@ -98,21 +86,10 @@ if auths:
 fi
 
 NVIDIA_MAGA_TAG=`date "+%Y_%m_%d_%H_%M"`_`git rev-parse --short HEAD`
-
 NVIDIA_BASE_IMAGE=nvcr.io/nvidia/pytorch
-NVIDIA_BASE_TAG=""
-NVIDIA_MAGA_IMAGE=""
+NVIDIA_BASE_TAG="23.10-py3"
+NVIDIA_MAGA_IMAGE=reg.docker.alibaba-inc.com/isearch/maga_image_open_source_cuda12
 
-if ${CUDA11_DOCKER}; then
-  NVIDIA_BASE_TAG="21.10-py3"
-  NVIDIA_MAGA_IMAGE=reg.docker.alibaba-inc.com/isearch/maga_image_open_source
-elif ${CUDA12_DOCKER}; then
-  NVIDIA_BASE_TAG="23.10-py3"
-  NVIDIA_MAGA_IMAGE=reg.docker.alibaba-inc.com/isearch/maga_image_open_source_cuda12
-else
-  echo "error, nvidia docker must be cuda11 or cuda12"
-  exit 1
-fi
 
 # echo "pull nvidia docker $NVIDIA_BASE_IMAGE:$NVIDIA_BASE_TAG"
 # docker pull $NVIDIA_BASE_IMAGE:$NVIDIA_BASE_TAG

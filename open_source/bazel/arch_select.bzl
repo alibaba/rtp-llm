@@ -1,7 +1,6 @@
 # to wrapper target relate with different system config
 load("@pip_cpu_torch//:requirements.bzl", requirement_cpu="requirement")
 load("@pip_arm_torch//:requirements.bzl", requirement_arm="requirement")
-load("@pip_gpu_torch//:requirements.bzl", requirement_gpu="requirement")
 load("@pip_gpu_cuda12_torch//:requirements.bzl", requirement_gpu_cuda12="requirement")
 load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm="requirement")
 load("//bazel:defs.bzl", "copy_so", "copy_so_inst")
@@ -34,7 +33,6 @@ def requirement(names):
             name = name,
             deps = select({
                 "@//:using_cuda12": [requirement_gpu_cuda12(name)],
-                "@//:using_cuda11": [requirement_gpu(name)],
                 "@//:using_rocm": [requirement_gpu_rocm(name)],
                 "@//:using_arm": [requirement_arm(name)],
                 "//conditions:default": [requirement_cpu(name)],
@@ -63,7 +61,6 @@ def subscribe_deps():
 def whl_deps():
     return select({
         "@//:using_cuda12": ["torch==2.1.2+cu121"],
-        "@//:using_cuda11": ["torch==2.1.2+cu118"],
         "@//:using_rocm": ["torch==2.1.2", "pyyaml"],
         "//conditions:default": ["torch==2.1.2"],
     })

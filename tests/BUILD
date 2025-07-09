@@ -17,11 +17,6 @@ cc_library(
         "mla/*.cc",
         "unittests/test_activation.cu",
     ]) + select({
-        "@//:using_cuda11": glob([
-            "fp8_gemm/*.cc",
-            "gemm_dequantize/*.cc",
-            "int8_gemm/*.cc",
-        ]),
         "@//:using_cuda12": glob([
             "fp8_gemm/*.cc",
             "gemm_dequantize/*.cc",
@@ -240,13 +235,13 @@ cc_library(
     srcs = glob([
         "mla/mla_rotary_kvcache_test.cc",
         "mla/mla_decoder_attention.cc",
-        "mla/mla_context_attention.cc",        
+        "mla/mla_context_attention.cc",
         "gemm/gemm_op_test.cc",
         "ffn/rocm_ffn_moe_fp8_test.cc",
         "ffn/rocm_ffn_moe_bf16_test.cc",
     ]),
     deps = torch_deps() + [
-        "//rtp_llm/cpp/devices/rocm_impl:rocm_impl",        
+        "//rtp_llm/cpp/devices/rocm_impl:rocm_impl",
     ],
     copts = rocm_copts(),
     alwayslink = True,
@@ -420,7 +415,7 @@ py_test(
     tags = [
         "manual",
 		"rocm",
-    ], 
+    ],
 )
 
 py_test(

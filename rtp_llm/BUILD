@@ -208,9 +208,8 @@ py_library(
             "xfastertransformer_devel",
         ],
     }) + select({
-        "@//:using_cuda11": [],
         "@//:using_arm": [],
-	"@//:using_rocm": ["pyrsmi", "amdsmi"],
+	    "@//:using_rocm": ["pyrsmi", "amdsmi"],
         "@//:using_cpu": [],
         "//conditions:default": ["flash_attn"]
     }),
@@ -494,12 +493,6 @@ rename_wheel_aarch64(
 rename_wheel(
     name = "rtp_llm",
     package_name = "rtp_llm-0.2.0",
-    src = ":rtp_llm_whl",
-)
-
-rename_wheel(
-    name = "rtp_llm_cuda11",
-    package_name = "rtp_llm-0.2.0+cuda118",
     src = ":rtp_llm_whl",
 )
 

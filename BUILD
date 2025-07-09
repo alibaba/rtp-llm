@@ -17,10 +17,6 @@ config_setting(
     values = {"define": "using_cuda12=true"},
 )
 
-config_setting(
-    name = "using_cuda11",
-    values = {"define": "using_cuda11=true"},
-)
 
 config_setting(
     name = "using_rocm",
@@ -138,9 +134,6 @@ cc_library(
 cc_library(
     name = "th_transformer_gpu",
     srcs = select({
-        "@//:using_cuda11": [
-            "//rtp_llm/cpp:th_op/common/CutlassConfigOps.cc",
-        ],
         "@//:using_cuda12": [
             "//rtp_llm/cpp:th_op/common/CutlassConfigOps.cc",
         ],
