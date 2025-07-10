@@ -98,9 +98,6 @@ MultiSeqsResponse GenerateStreamWrapper::formatResponse(const std::vector<std::s
                    std::back_inserter(res.aux_info),
                    [generate_config, generate_texts](const auto& out) {
                        auto aux_info = AuxInfoAdapter(out.aux_info);
-                       if (generate_config->hasNumBeams()) {
-                           aux_info.beam_responses = generate_texts;
-                       }
                        return aux_info;
                    });
 

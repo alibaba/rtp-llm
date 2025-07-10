@@ -70,7 +70,7 @@ class TokenProcessorPerStream:
             self.ouput_tokens_list[i] = torch.cat(
                 (self.ouput_tokens_list[i], tokens), dim=1
             )
-        tokens = self.ouput_tokens_list[i]
+            tokens = self.ouput_tokens_list[i]
         tokens = remove_padding_eos(tokens, self.special_tokens.eos_token_id)
         output_len = tokens.nelement()
         tokens = self.process_stop_id(
