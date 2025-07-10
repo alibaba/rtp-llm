@@ -104,3 +104,9 @@ def http_deps():
         strip_prefix = "bazel-compile-commands-extractor-4f28899228fb3ad0126897876f147ca15026151e",
         sha256 = "658122cfb1f25be76ea212b00f5eb047d8e2adc8bcf923b918461f2b1e37cdf2",
     )
+
+    http_file(
+        name = "hf3fs_rpm",
+        urls = ["https://271332.oss-cn-hangzhou-zmf.aliyuncs.com/3fs/rpm/hf3fs-1.1.0-1.alios7.x86_64.rpm"],
+        sha256 = "ebe51a157d0315e1b1c65d61e22401fac92cfd26fe331aaa37beed86cf08a01f"
+    )
