@@ -412,8 +412,8 @@ class ModelDeployWeightInfo:
 
     def create_model_weight_info(self, database: BaseDatabase) -> ModelWeightInfo:
         if isinstance(database, CkptDatabase) and not database.is_ft_style:
-            self.process_meta_from_ckpt(database.PretrainFileList)
-            self.process_meta_from_ckpt(database.FinetuneFileList)
+            self.process_meta_from_ckpt(database.pretrain_file_list)
+            self.process_meta_from_ckpt(database.finetune_file_list)
             return self.get_weight_info()
         elif database.is_ft_style:
             return None

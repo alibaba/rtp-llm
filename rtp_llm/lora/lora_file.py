@@ -72,21 +72,23 @@ class LoraCkpt:
         self.LoraFileList = {}
 
     def get_lora_tensor_names(self, config_name: str) -> List[str]:
-        tensor_names = []
+        tensor_names: List[str] = []
         for key, value in self.LoraFileList.items():
             if key.name == config_name:
                 for ckptfile in value:
                     tensor_names.extend(ckptfile.get_tensor_names())
         return tensor_names
 
-    def load_lora_tensor(self, lora_name: str, tensor_name: str) -> List[torch.Tensor]:
-        tensors = []
+    def load_lora_tensor(
+        self, lora_name: str, tensor_name: str, data_type: torch.dtype
+    ) -> List[torch.Tensor]:
+        tensors: List[torch.Tensor] = []
         for key, value in self.LoraFileList.items():
             if not key.name == lora_name:
                 continue
             for ckpt_file in value:
                 if tensor_name in ckpt_file.get_tensor_names():
-                    tensors.append(ckpt_file.load_tensor(tensor_name))
+                    tensors.append(ckpt_file.load_tensor(tensor_name, data_type))
         return tensors
 
     def load_lora(self, config_name: str, lora_path: str):
