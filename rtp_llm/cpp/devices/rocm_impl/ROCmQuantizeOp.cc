@@ -48,20 +48,21 @@ BufferPtr ROCmDevice::quantize(const QuantizeParams& params) {
             ROCM_CHECK_VALUE((params.axis == 1), "Qfp8PerToken only support axis = 1");
             size_t num_token = params.input.shape()[0];
             size_t model_dim = params.input.shape()[1];
-            torch::Tensor input_tensor = Buffer2torchTensor(params.input, false);
             kernel = allocateBuffer({DataType::TYPE_FP8_E4M3, params.input.shape()}, {"quant_kernel"});
             scales = allocateBuffer({DataType::TYPE_FP32, {num_token, 1}}, {"quant_scale"});
             zeros = BufferPtr(new Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_INVALID, {0}, nullptr));
-            torch::Tensor kernel_tensor = Buffer2torchTensor(kernel, false);
-            torch::Tensor scales_tensor = Buffer2torchTensor(scales, false);
+            if (num_token > 0) {
+                torch::Tensor input_tensor = Buffer2torchTensor(params.input, false);
+                torch::Tensor kernel_tensor = Buffer2torchTensor(kernel, false);
+                torch::Tensor scales_tensor = Buffer2torchTensor(scales, false);
 
-            // invoke aiter quant kernel
-            aiter::dynamic_per_token_scaled_quant(
-                /*out=*/kernel_tensor,
-                /*input=*/input_tensor,
-                /*scales=*/scales_tensor,
-                /*scale_ub=*/std::nullopt
-            );
+                // invoke aiter quant kernel
+                aiter::dynamic_per_token_scaled_quant(
+                    /*out=*/kernel_tensor,
+                    /*input=*/input_tensor,
+                    /*scales=*/scales_tensor,
+                    /*scale_ub=*/std::nullopt);
+            }
         } else if (params.qscheme == QScheme::Qfp8PerTokenBlock) {
             ROCM_CHECK_VALUE((params.groupSize == 32 || params.groupSize == 64 || params.groupSize == 128), "Qfp8PerTokenBlock only support groupSize = 32,64 or 128");
             ROCM_CHECK_VALUE((params.qtype == DataType::TYPE_QFP8_E4M3), "Qfp8PerTokenBlock only support qtype = TYPE_QFP8_E4M3");
@@ -69,22 +70,23 @@ BufferPtr ROCmDevice::quantize(const QuantizeParams& params) {
             size_t num_token = params.input.shape()[0];
             size_t model_dim = params.input.shape()[1];
             size_t block_scale_k = params.groupSize;
-            torch::Tensor input_tensor = Buffer2torchTensor(params.input, false);
             kernel = allocateBuffer({DataType::TYPE_FP8_E4M3, params.input.shape()}, {"quant_kernel"});
             scales = allocateBuffer({DataType::TYPE_FP32, {num_token, model_dim / block_scale_k}}, {"quant_scale"});
             zeros = BufferPtr(new Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_INVALID, {0}, nullptr));
-            torch::Tensor kernel_tensor = Buffer2torchTensor(kernel, false);
-            torch::Tensor scales_tensor = Buffer2torchTensor(scales, false);
+            if (num_token > 0) {
+                torch::Tensor input_tensor = Buffer2torchTensor(params.input, false);
+                torch::Tensor kernel_tensor = Buffer2torchTensor(kernel, false);
+                torch::Tensor scales_tensor = Buffer2torchTensor(scales, false);
 
-            input_tensor = input_tensor.view({(int)num_token, (int)model_dim / (int)block_scale_k, (int)block_scale_k});
+                input_tensor = input_tensor.view({(int)num_token, (int)model_dim / (int)block_scale_k, (int)block_scale_k});
 
-            // invoke aiter quant kernel
-            aiter::dynamic_per_token_scaled_quant(
-                /*out=*/kernel_tensor,
-                /*input=*/input_tensor,
-                /*scales=*/scales_tensor,
-                /*scale_ub=*/std::nullopt
-            );
+                // invoke aiter quant kernel
+                aiter::dynamic_per_token_scaled_quant(
+                    /*out=*/kernel_tensor,
+                    /*input=*/input_tensor,
+                    /*scales=*/scales_tensor,
+                    /*scale_ub=*/std::nullopt);
+            }
         } else {
             ROCM_FAIL("other quantize not implemented");
         }

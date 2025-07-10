@@ -98,9 +98,11 @@ MoeDispatchOutput ROCmDevice::epDispatch(const MoeDispatchParams& params) {
       output_split_sizes[i] = *(all_token_nums_per_rank->dataWithOffset<int32_t>(i));
   }
   vector<BufferPtr> selected_buffers;
+  QBufferPtr q_hidden;
   BufferPtr select_hidden = select({*hidden, *all_token_indices});
-  if (params.qscheme == QScheme::Qfp8PerTokenBlock) {
-      QBufferPtr q_hidden = std::dynamic_pointer_cast<QBuffer>(quantize(QuantizeParams(*select_hidden, DataType::TYPE_QFP8_E4M3, 1, QScheme::Qfp8PerTokenBlock, 128, 0)));
+  if (params.qscheme != QScheme::NoQuantize) {
+      // ignore groupSize when using per_token quantization
+      q_hidden = std::dynamic_pointer_cast<QBuffer>(quantize(QuantizeParams(*select_hidden, DataType::TYPE_QFP8_E4M3, 1, params.qscheme, 128, 0)));
       selected_buffers.emplace_back(q_hidden->kernelPtr());
       selected_buffers.emplace_back(q_hidden->scalesPtr());
   } else {
@@ -112,7 +114,7 @@ MoeDispatchOutput ROCmDevice::epDispatch(const MoeDispatchParams& params) {
   auto all2all_output = allToAll({selected_buffers, input_split_sizes, output_split_sizes, params.overlapped});
   // syncCommunication(false);  // Debug only
   const auto& global_buffers = all2all_output.outputs;
-  if (params.qscheme == QScheme::Qfp8PerTokenBlock) {
+  if (params.qscheme != QScheme::NoQuantize) {
       BufferPtr hidden_fp8 = BufferPtr(new QBuffer(std::move(const_cast<BufferPtr&>(global_buffers[0])),
                                        std::move(const_cast<BufferPtr&>(global_buffers[1])),
                                        std::move(BufferPtr(new Buffer(MemoryType::MEMORY_GPU,
@@ -318,12 +320,17 @@ FfnLayerOutput ROCmDevice::moeFfn(const FfnLayerParams& params, const MoeGateSel
     const size_t num_expert = moe_conf.expert_num;
     const size_t num_expert_per_rank = moe_conf.expert_num / moe_conf.ep_size;
     const size_t topk = moe_conf.top_k;
-    const DataType dtype = hidden.type();
+    DataType dtype;
+    if (params.qscheme == QScheme::NoQuantize) {
+        dtype = hidden.type();
+    } else {
+        dtype = DataType::TYPE_BF16;
+    }
 
     BufferPtr moe_out_final = allocateBuffer({dtype, {num_token, model_dim}}, {"rocm_moe_final_out"});
     if (num_token == 0) {
         return {moe_out_final};
-    };
+    }
 
     torch::Tensor topk_ids_tensor = Buffer2torchTensor(*(gate_outputs.expert_ids), false);
     torch::Tensor topk_weights_tensor = Buffer2torchTensor(*(gate_outputs.expert_scales), false);

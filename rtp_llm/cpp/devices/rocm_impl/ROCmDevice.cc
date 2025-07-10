@@ -186,6 +186,7 @@ DeviceProperties ROCmDevice::getDeviceProperties() {
         prop->ffn_tp_size = init_params_.ffn_tp_size;
         prop->ffn_tp_rank = init_params_.ffn_tp_rank;
         prop->m_split = init_params_.m_split;
+        prop->use_all_gather = init_params_.use_all_gather;
     }
     return *prop;
 }
