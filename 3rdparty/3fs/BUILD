@@ -24,6 +24,7 @@ rpm_library(
         "libicui18n.so.66",
         "libicuuc.so.66",
         "libicudata.so.66",
+        "libunwind.so.8",
     ],
     hdrs = [
         "hf3fs_usrbio.h",

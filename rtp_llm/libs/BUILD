@@ -1,7 +1,18 @@
 load("//bazel:arch_select.bzl", "kernel_so_deps", "copy_all_so")
+load("//bazel:defs.bzl", "copy_files")
 package(default_visibility = ["//rtp_llm:__subpackages__"])
 
 copy_all_so()
+
+# copy 3fs libs
+copy_files(
+    name = "copy_hf3fs_libs",
+    srcs = select({
+        "//:using_3fs": ["//3rdparty/3fs:hf3fs_shared"],
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:public"],
+)
 
 genrule(
     name = "aiter_copy",
@@ -41,5 +52,6 @@ filegroup(
     srcs = [],
     data = [
         ":libth_transformer_so",
+        ":copy_hf3fs_libs",
     ] + kernel_so_deps()
 )

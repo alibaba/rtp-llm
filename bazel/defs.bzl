@@ -278,3 +278,33 @@ def rpm_library(
             include_prefix = include_prefix,
             **kwargs
         )
+
+def _copy_files_impl(ctx):
+    if not ctx.files.srcs:
+        return [DefaultInfo(files = depset())]
+
+    output_files = []
+    for f in ctx.files.srcs:
+        output_files.append(ctx.actions.declare_file(f.basename))
+
+    commands = []
+    for i in range(len(output_files)):
+        f_in = ctx.files.srcs[i]
+        f_out = output_files[i]
+        commands.append("cp {input} {output}".format(input = f_in.path, output = f_out.path))
+    
+    ctx.actions.run_shell(
+        inputs = ctx.files.srcs,
+        outputs = output_files,
+        command = " && ".join(commands),
+        progress_message = "Copying %d files for %s" % (len(output_files), ctx.label),
+    )
+
+    return [DefaultInfo(files = depset(output_files))]
+
+copy_files = rule(
+    implementation = _copy_files_impl,
+    attrs = {
+        "srcs": attr.label_list(allow_files = True, mandatory = True),
+    },
+)

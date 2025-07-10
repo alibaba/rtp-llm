@@ -38,6 +38,11 @@ config_setting(
     values = {"define": "xft_use_icx=true"},
 )
 
+config_setting(
+    name = "using_3fs",
+    define_values = {"use_3fs": "true",},
+)
+
 cc_library(
     name = "config_modules",
     srcs = [
