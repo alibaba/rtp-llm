@@ -15,7 +15,6 @@
 using namespace std;
 namespace th = torch;
 
-
 namespace torch_ext {
 
 RtpLLMOp::RtpLLMOp() {}
@@ -30,9 +29,13 @@ void RtpLLMOp::init(py::object model,
     RTP_LLM_LOG_INFO("init engine params success");
     params.showGptInitParameter();
     std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params = initProposeModel(propose_model);
-    pybind11::gil_scoped_release release;
-    grpc_server_thread_ = std::thread(&RtpLLMOp::initRPCServer, this,
-        std::move(params), std::move(mm_process_engine), std::move(propose_params), std::move(token_processor));
+    pybind11::gil_scoped_release                           release;
+    grpc_server_thread_ = std::thread(&RtpLLMOp::initRPCServer,
+                                      this,
+                                      std::move(params),
+                                      std::move(mm_process_engine),
+                                      std::move(propose_params),
+                                      std::move(token_processor));
     grpc_server_thread_.detach();
     while (!is_server_ready_) {
         sleep(1);  // wait 1s for server ready
@@ -42,7 +45,7 @@ void RtpLLMOp::init(py::object model,
 rtp_llm::EngineInitParams RtpLLMOp::initModel(py::object model) {
     try {
         auto [gpt_init_params, gpt_weight] = rtp_llm::prepareEngineInitParams(model);
-        auto py_model = model.attr("py_model");
+        auto py_model                      = model.attr("py_model");
         // TODO(wangyin.yx): Only one of `py_model` and `gpt_weight` is actually needed.
 
         rtp_llm::EngineInitParams params(model_id_, gpt_init_params, std::move(*gpt_weight), py_model);
@@ -55,7 +58,7 @@ rtp_llm::EngineInitParams RtpLLMOp::initModel(py::object model) {
             params.metrics_reporter.reset(new kmonitor::MetricsReporter("", "", kmon_tags));
         }
         return params;
-     } catch (const std::exception& e){
+    } catch (const std::exception& e) {
         RTP_LLM_FAIL("init engine params failed, error msg: %s", e.what());
         return rtp_llm::EngineInitParams();
     }
@@ -67,15 +70,12 @@ std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> RtpLLMOp::initProposeMode
             return nullptr;
         }
         std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> params = nullptr;
-        std::string sp_type = propose_model.attr("sp_type").cast<std::string>();
-        size_t gen_num_per_circle = propose_model.attr("gen_num_per_circle").cast<size_t>();
+        std::string sp_type            = propose_model.attr("sp_type").cast<std::string>();
+        size_t      gen_num_per_circle = propose_model.attr("gen_num_per_circle").cast<size_t>();
         if (sp_type == "vanilla") {
             auto [gpt_init_params, gpt_weight] = rtp_llm::prepareEngineInitParams(propose_model, true);
-            params = std::make_unique<rtp_llm::ProposeModelEngineInitParams>(model_id_,
-                                                                             sp_type,
-                                                                             gen_num_per_circle,
-                                                                             gpt_init_params,
-                                                                             std::move(*gpt_weight));
+            params                             = std::make_unique<rtp_llm::ProposeModelEngineInitParams>(
+                model_id_, sp_type, gen_num_per_circle, gpt_init_params, std::move(*gpt_weight));
             model_id_++;
         } else if (sp_type == "mtp" || sp_type == "eagle3") {
             params = rtp_llm::prepareMTPEngineInitParams(model_id_, propose_model);
@@ -86,14 +86,14 @@ std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> RtpLLMOp::initProposeMode
             RTP_LLM_FAIL("sp_type %s not support", sp_type.c_str());
         }
         return params;
-     } catch (const std::exception& e ){
+    } catch (const std::exception& e) {
         RTP_LLM_FAIL("init propose engine params failed, error msg: %s", e.what());
         return nullptr;
     }
 }
 
 void RtpLLMOp::addLora(const std::string& adapter_name, py::object py_lora_a_weights, py::object py_lora_b_weights) {
-    auto convert = rtp_llm::WeightsConverter(true);
+    auto convert        = rtp_llm::WeightsConverter(true);
     auto lora_a_weights = convert.convertLayerWeights_(py_lora_a_weights);
     auto lora_b_weights = convert.convertLayerWeights_(py_lora_b_weights);
     model_rpc_service_->addLora(adapter_name, *lora_a_weights, *lora_b_weights);
@@ -111,15 +111,15 @@ rtp_llm::EngineScheduleInfo RtpLLMOp::getEngineScheduleInfo() {
     return model_rpc_service_->getEngineScheduleInfo();
 }
 
-void RtpLLMOp::initRPCServer(
-                     const rtp_llm::EngineInitParams maga_init_params,
-                     py::object mm_process_engine,
-                     std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
-                     py::object token_processor) {
-    auto http_port = maga_init_params.gpt_init_parameter.http_port_;
-    auto model_rpc_port = maga_init_params.gpt_init_parameter.model_rpc_port_;
+void RtpLLMOp::initRPCServer(const rtp_llm::EngineInitParams                        maga_init_params,
+                             py::object                                             mm_process_engine,
+                             std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
+                             py::object                                             token_processor) {
+    auto http_port       = maga_init_params.gpt_init_parameter.http_port_;
+    auto model_rpc_port  = maga_init_params.gpt_init_parameter.model_rpc_port_;
     auto use_cache_store = maga_init_params.gpt_init_parameter.use_cache_store_;
-    auto py_inference_log_response = maga_init_params.gpt_init_parameter.profiling_debug_logging_config.py_inference_log_response;
+    auto py_inference_log_response =
+        maga_init_params.gpt_init_parameter.profiling_debug_logging_config.py_inference_log_response;
     // NOTE: ip/ip段可自定义为所需范围。
     std::string server_address("0.0.0.0:" + std::to_string(model_rpc_port));
     {
@@ -129,7 +129,8 @@ void RtpLLMOp::initRPCServer(
         } else {
             model_rpc_service_.reset(new rtp_llm::LocalRpcServiceImpl());
         }
-        grpc::Status grpc_status = model_rpc_service_->init(maga_init_params, std::move(mm_process_engine), std::move(propose_params));
+        grpc::Status grpc_status =
+            model_rpc_service_->init(maga_init_params, std::move(mm_process_engine), std::move(propose_params));
         if (!grpc_status.ok()) {
             RTP_LLM_FAIL("init rpc server failed, error msg: %s", grpc_status.error_message().c_str());
         }
@@ -137,11 +138,11 @@ void RtpLLMOp::initRPCServer(
         // NOTE: ip/ip段可自定义为所需范围。
         std::string http_server_address("tcp:0.0.0.0:" + std::to_string(http_port));
         http_server_.reset(new rtp_llm::HttpApiServer(model_rpc_service_->getEngine(),
-                                                    model_rpc_service_->getMultimodalProcessor(),
-                                                    http_server_address,
-                                                    maga_init_params,
-                                                    token_processor,
-                                                    py_inference_log_response));
+                                                      model_rpc_service_->getMultimodalProcessor(),
+                                                      http_server_address,
+                                                      maga_init_params,
+                                                      token_processor,
+                                                      py_inference_log_response));
         if (model_rpc_port < 0) {
             is_server_ready_ = true;
             return;
@@ -149,6 +150,7 @@ void RtpLLMOp::initRPCServer(
     }
     grpc::ServerBuilder builder;
     builder.AddChannelArgument(GRPC_ARG_MAX_CONCURRENT_STREAMS, 100000);
+    builder.AddChannelArgument(GRPC_ARG_MAX_METADATA_SIZE, 1024 * 1024 * 1024);
     builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
     builder.RegisterService(model_rpc_service_.get());
     grpc_server_ = builder.BuildAndStart();

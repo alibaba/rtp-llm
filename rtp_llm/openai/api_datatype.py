@@ -1,10 +1,13 @@
 import time
 import uuid
 from enum import Enum
+from typing import Any, Dict, List, Literal, Optional, Union
+
 from pydantic import BaseModel, Field
-from typing import Union, Optional, List, Dict, Literal, Any
-from rtp_llm.models.base_model import AuxInfo
+
 from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.models.base_model import AuxInfo
+
 
 class ModelCard(BaseModel):
     id: str
@@ -15,13 +18,16 @@ class ModelCard(BaseModel):
     parent: Optional[str] = None
     permission: Optional[list] = None
 
+
 class ModelList(BaseModel):
     object: str = "list"
     data: List[ModelCard] = []
 
+
 class FunctionCall(BaseModel):
     name: Optional[str]
     arguments: Optional[str]
+
 
 class ToolCall(BaseModel):
     # 参照 openai 官方api definition
@@ -29,6 +35,7 @@ class ToolCall(BaseModel):
     id: str
     type: str
     function: FunctionCall
+
 
 class RoleEnum(str, Enum):
     user = "user"
@@ -38,11 +45,13 @@ class RoleEnum(str, Enum):
     tool = "tool"
     observation = "observation"
 
+
 class ContentPartTypeEnum(str, Enum):
     text = "text"
     image_url = "image_url"
     video_url = "video_url"
     audio_url = "audio_url"
+
 
 class MMPreprocessConfigPart(BaseModel):
     resized_width: Optional[int] = None
@@ -53,12 +62,15 @@ class MMPreprocessConfigPart(BaseModel):
     min_frames: Optional[int] = None
     max_frames: Optional[int] = None
 
+
 class ImageURL(BaseModel):
     url: str
     detail: Optional[str] = "auto"
 
+
 class AudioURL(BaseModel):
     url: str
+
 
 class ContentPart(BaseModel):
     type: ContentPartTypeEnum
@@ -68,6 +80,7 @@ class ContentPart(BaseModel):
     audio_url: Optional[AudioURL] = None
     preprocess_config: Optional[MMPreprocessConfigPart] = None
 
+
 class ChatMessage(BaseModel):
     role: RoleEnum
     content: Union[str, None, List[ContentPart]] = ""
@@ -76,11 +89,13 @@ class ChatMessage(BaseModel):
     tool_calls: Optional[List[ToolCall]] = None
     partial: Optional[bool] = False
 
+
 # NOTE: according to openai api definition, `function_call` is deprecated, and replaced by `tool_calls`.
 # see `openai/types/chat/chat_completion_chunk.py`
 
 # TODO: maybe also implement Qwen Style function call.
 # See https://github.com/QwenLM/Qwen/blob/35023b6f2a932bde6ed27f21ec03164ccf09a25f/examples/function_call_examples.py#L47
+
 
 class GPTFunctionDefinition(BaseModel):
     name: str
@@ -121,6 +136,7 @@ class ChatCompletionRequest(BaseModel):
     # logit_bias: Optional[Dict[str, float]] = None
 
     # ---- These params are hacked for our framework, not standard.
+    add_vision_id: Optional[bool] = True  # whether add vision id in chat template
     extra_configs: Optional[GenerateConfig] = None
     private_request: bool = False
     trace_id: Optional[str] = None
@@ -129,33 +145,44 @@ class ChatCompletionRequest(BaseModel):
     user_template: Optional[str] = None
     debug_info: Optional[bool] = False
     aux_info: Optional[bool] = False
-    extend_fields: Optional[Dict[str, Any]] = None # This field is not effective, only for logging.
+    extend_fields: Optional[Dict[str, Any]] = (
+        None  # This field is not effective, only for logging.
+    )
     master_info: Optional[Dict[str, Any]] = None
     chat_template_kwargs: Optional[Dict[str, Any]] = None
 
     @staticmethod
     def is_openai_request(request: Dict[str, Any]):
-        return 'messages' in request
-    
+        return "messages" in request
+
     def get_chat_template_kwargs(self):
-        if self.extend_fields is not None and 'chat_template_kwargs' in self.extend_fields:
-            return self.extend_fields['chat_template_kwargs']
+        if (
+            self.extend_fields is not None
+            and "chat_template_kwargs" in self.extend_fields
+        ):
+            return self.extend_fields["chat_template_kwargs"]
         else:
             return self.chat_template_kwargs
-    
+
     def disable_thinking(self):
-        if self.get_chat_template_kwargs() is not None and self.get_chat_template_kwargs().get('enable_thinking', True) is False:
+        if (
+            self.get_chat_template_kwargs() is not None
+            and self.get_chat_template_kwargs().get("enable_thinking", True) is False
+        ):
             return True
         else:
             return False
+
 
 class CompletionTokensDetails(BaseModel):
     audio_tokens: Optional[int] = None
     reasoning_tokens: Optional[int] = None
 
+
 class PromptTokensDetails(BaseModel):
     audio_tokens: Optional[int] = None
     cached_tokens: Optional[int] = None
+
 
 class UsageInfo(BaseModel):
     prompt_tokens: int = 0
@@ -164,10 +191,12 @@ class UsageInfo(BaseModel):
     completion_tokens_details: Optional[CompletionTokensDetails] = None
     prompt_tokens_details: Optional[PromptTokensDetails] = None
 
+
 class TopLogprob(BaseModel):
     token: str
     bytes: Optional[List[int]] = None
     logprob: float
+
 
 class ChatCompletionTokenLogprob(BaseModel):
     token: str
@@ -175,9 +204,11 @@ class ChatCompletionTokenLogprob(BaseModel):
     logprob: float
     top_logprobs: List[TopLogprob]
 
+
 class ChoiceLogprobs(BaseModel):
     content: Optional[List[ChatCompletionTokenLogprob]] = None
     refusal: Optional[List[ChatCompletionTokenLogprob]] = None
+
 
 class FinisheReason(str, Enum):
     stop = "stop"
@@ -185,12 +216,14 @@ class FinisheReason(str, Enum):
     function_call = "function_call"
     tool_calls = "tool_calls"
 
+
 class RendererInfo(BaseModel):
     class_name: str
     renderer_model_type: str
     extra_stop_word_ids_list: List[List[int]]
     extra_stop_words_list: List[str]
     template: Optional[Union[str, Dict[str, str]]] = None
+
 
 class DebugInfo(BaseModel):
     input_prompt: str
@@ -204,11 +237,13 @@ class DebugInfo(BaseModel):
     renderer_info: RendererInfo
     generate_config: GenerateConfig
 
+
 class ChatCompletionResponseChoice(BaseModel):
     index: int
     message: ChatMessage
     finish_reason: Optional[FinisheReason] = None
     logprobs: Optional[ChoiceLogprobs] = None
+
 
 class ChatCompletionResponse(BaseModel):
     id: str = Field(default_factory=lambda: f"chat-")
@@ -220,6 +255,7 @@ class ChatCompletionResponse(BaseModel):
     debug_info: Optional[Union[DebugInfo, str]] = None
     aux_info: Optional[AuxInfo] = None
 
+
 class DeltaMessage(BaseModel):
     role: Optional[RoleEnum] = None
     content: Optional[str] = None
@@ -227,11 +263,13 @@ class DeltaMessage(BaseModel):
     function_call: Optional[FunctionCall] = None
     tool_calls: Optional[List[ToolCall]] = None
 
+
 class ChatCompletionResponseStreamChoice(BaseModel):
     index: int
     delta: DeltaMessage
     finish_reason: Optional[FinisheReason] = None
     logprobs: Optional[ChoiceLogprobs] = None
+
 
 class ChatCompletionStreamResponse(BaseModel):
     id: str = Field(default_factory=lambda: f"chat")
