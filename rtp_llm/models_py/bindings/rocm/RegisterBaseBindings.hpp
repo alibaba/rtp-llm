@@ -1,6 +1,7 @@
 #include "rtp_llm/models_py/bindings/rocm/Norm.h"
 #include "rtp_llm/models_py/bindings/common/RtpEmbeddingLookup.h"
 #include "rtp_llm/models_py/bindings/common/FusedQKRmsNorm.h"
+#include "rtp_llm/models_py/bindings/rocm/Gemm.h"
 
 using namespace rtp_llm;
 
@@ -39,6 +40,12 @@ void registerBasicRocmOps(py::module &rtp_ops_m) {
         py::arg("m"),
         py::arg("n"),
         py::arg("norm_size"));
+    
+    rtp_ops_m.def("gemm", &gemm, "Gemm kernel",
+        py::arg("output"),
+        py::arg("input"),
+        py::arg("weight"),
+        py::arg("hip_stream") = 0);
 }
 
 void registerBaseRocmBindings(py::module &rtp_ops_m) {

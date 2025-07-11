@@ -216,3 +216,18 @@ py_test (
     env = test_envs,
     exec_properties = {'gpu':'H20'},
 )
+
+py_test (
+    name = "rocm_linear_test",
+    srcs = ["rocm_linear_test.py"],
+    deps = [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm:config",
+        "//rtp_llm:utils",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/model_test/test_util:test_util"
+    ],
+    env = test_envs,
+    tags = ["rocm"],
+    exec_properties = {'gpu':'MI308X'},
+)
