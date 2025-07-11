@@ -333,19 +333,7 @@ absl::Status NormalEngine::step() {
         profiler_step_ = (*it)->profileStep();
     }
     int64_t      step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-    absl::Status status;
-    if (params_.world_size_ > 1) {
-        status = executor_->process(streams);
-    } else {
-        try {
-            status = executor_->process(streams);
-        } catch (const std::exception& e) {
-            RTP_LLM_LOG_ERROR("step running error: %s", e.what());
-            for (auto& stream : streams) {
-                stream->stopAndRelease(ErrorCode::EXECUTION_EXCEPTION, e.what());
-            }
-        }
-    }
+    absl::Status status             = executor_->process(streams);
 
     // report step metrics
     if (device_->getDeviceProperties().tp_rank == 0) {
