@@ -688,8 +688,9 @@ class CustomChatRenderer:
         generate_config: GenerateConfig,
     ) -> AsyncGenerator[StreamResponseObject, None]:
         stop_word_slice_list = get_stop_word_slices(generate_config.stop_words_str)
-        num_return_sequences = request.n if request.n is not None else 1
-        status_list = await self._create_status_list(num_return_sequences, request)
+        nums_output = request.n if request.n is not None else 1
+        nums_output = generate_config.num_beams if generate_config.num_beams != 1 else nums_output
+        status_list = await self._create_status_list(nums_output, request)
         index = 0
         enable_think_mode = self.in_think_mode(request)
         think_status = ThinkStatus(
@@ -701,10 +702,10 @@ class CustomChatRenderer:
         )
         async for outputs in output_generator:
             if index == 0:
-                yield await self._generate_first(num_return_sequences)
+                yield await self._generate_first(nums_output)
             index += 1
-            if len(outputs.generate_outputs) != num_return_sequences:
-                raise Exception("output num != num_return_sequences")
+            if len(outputs.generate_outputs) != nums_output:
+                raise Exception(f"output num {len(outputs.generate_outputs)} != nums_output {nums_output}")
             delta_list: List[OutputDelta] = []
             for status, output in zip(status_list, outputs.generate_outputs):
                 delta_list.append(
