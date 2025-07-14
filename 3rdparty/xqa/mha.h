@@ -106,14 +106,12 @@ void launchMHA(cudaDeviceProp const& prop, uint32_t const nbKHeads,
 #endif
     uint32_t* semaphores, void* scratch, cudaStream_t stream);
 
-void run_xqa_sm90(uint32_t head_dim, uint32_t page_size, uint32_t group_size, cudaDeviceProp const& prop, uint32_t nbKHeads,
+void run_xqa_sm90(uint32_t head_dim, uint32_t page_size, uint32_t group_size, bool is_input_bf16,
+    bool is_kv_cache_fp8, cudaDeviceProp const& prop, uint32_t nbKHeads,
 #if SLIDING_WINDOW
     uint32_t slidingWinSize,
 #endif
     float qScale, void* output,
-#if LOW_PREC_OUTPUT
-    float const* rcpOutScale,
-#endif
 #if USE_PAGED_KV_CACHE
     void* pool, // global pool of pages
     KVCachePageIndex const*
@@ -129,7 +127,7 @@ void run_xqa_sm90(uint32_t head_dim, uint32_t page_size, uint32_t group_size, cu
     float const* __restrict__ kvCacheScale, // Device memory scalar. Same scale for K and V cache. Used only for
                                             // int8/fp8 KV cache.
     uint32_t* semaphores, void* scratch, cudaStream_t stream,
-    void const* input = nullptr, void* specDecParams = nullptr);
+    void const* input = nullptr, float const* rcpOutScale = nullptr, void* specDecParams = nullptr);
 
 #if STATIC_NB_K_HEADS
 constexpr uint32_t nbKHeads = NB_K_HEADS;

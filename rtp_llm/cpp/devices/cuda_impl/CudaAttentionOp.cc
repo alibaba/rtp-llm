@@ -84,7 +84,7 @@ BufferPtr getRopeCosSin(CudaDevice* device,
             break;
 
         default:
-            RTP_LLM_LOG_ERROR("unsupported rope_style = ", rope_style);
+            RTP_LLM_LOG_WARNING("unsupported rope_style = %d, not use rope_cache", rope_style);
             break;
     }
 
@@ -487,6 +487,7 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
                       local_tokens_per_block)) {
 
         runXqa(q_output->data(),
+               q_output->type() == DataType::TYPE_BF16,
                params.output.data(),
                local_head_num,
                local_kv_head_num,
@@ -496,8 +497,12 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
                local_tokens_per_block,
                kv_block_array.mPrimaryPoolPtr,
                reinterpret_cast<int32_t*>(const_cast<KVCacheIndex*>(kv_block_array.data)),
+               params.common.kv_cache->k_cache_buffer->type() == DataType::TYPE_FP8_E4M3,
                reinterpret_cast<uint32_t*>(params.common.sequence_lengths->data()),
-               this);
+               this,
+               params.output.type() == DataType::TYPE_FP8_E4M3 ?
+                   reinterpret_cast<float*>(params.weights.static_scale_reciprocal_weight->kernel->data()) :
+                   nullptr);
 
         return;
     }

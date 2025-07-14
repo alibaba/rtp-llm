@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/devices/cuda_impl/CudaXqa.h"
+#include "3rdparty/xqa/mha.h"
 
 using namespace std;
 using namespace rtp_llm;
@@ -56,13 +57,17 @@ bool supportXqa(DataType input_type,
                 size_t   group_size,
                 size_t   head_dim,
                 size_t   page_size) {
-    return (input_type == DataType::TYPE_BF16) && (output_type == DataType::TYPE_BF16)
-           && (kv_cache_type == DataType::TYPE_FP8_E4M3) && (group_size <= 16)
-           && (head_dim == 64 || head_dim == 128 || head_dim == 256)
+    return (input_type == DataType::TYPE_BF16 || input_type == DataType::TYPE_FP16)
+           && (output_type == DataType::TYPE_BF16 || output_type == DataType::TYPE_FP16
+               || output_type == DataType::TYPE_FP8_E4M3)
+           && (kv_cache_type == DataType::TYPE_BF16 || kv_cache_type == DataType::TYPE_FP16
+               || kv_cache_type == DataType::TYPE_FP8_E4M3)
+           && (group_size <= 16) && (head_dim == 64 || head_dim == 128 || head_dim == 256)
            && (page_size == 16 || page_size == 32 || page_size == 64 || page_size == 128);
 }
 
 void runXqa(void*       input,
+            bool        is_input_bf16,
             void*       output,
             size_t      head_num,
             size_t      kv_head_num,
@@ -72,8 +77,10 @@ void runXqa(void*       input,
             size_t      page_size,
             void*       kv_cache_pool,
             int32_t*    kv_cache_page_list,
+            bool        is_kv_cache_fp8,
             uint32_t*   sequence_lengths,
             CudaDevice* device,
+            float*      rcp_out_scale,
             size_t      max_q_len,
             void*       q_cu_seqlens,
             float       q_scale,
@@ -84,10 +91,12 @@ void runXqa(void*       input,
         || !max_seq_len || (page_size != 16 && page_size != 32 && page_size != 64 && page_size != 128) || !kv_cache_pool
         || !kv_cache_page_list || !sequence_lengths || !device || (max_q_len > 0 && !q_cu_seqlens)) {
         RTP_LLM_LOG_ERROR(
-            "xqa params error: input = %p, output = %p, head_num = %zu, kv_head_num = %zu, head_dim = %zu, batch_size = %zu, "
-            "max_seq_len = %zu, page_size = %zu, kv_cache_pool = %p, kv_cache_page_list = %p, sequence_lengths = %p, device = %p, "
-            "q_scale = %f, max_batch_size = %zu, beam_width = %zu, max_q_len = %d, q_cu_seqlens = %p",
+            "xqa params error: input = %p, is_input_bf16 = %d, output = %p, head_num = %zu, kv_head_num = %zu, head_dim = %zu, "
+            "batch_size = %zu, max_seq_len = %zu, page_size = %zu, kv_cache_pool = %p, kv_cache_page_list = %p, is_kv_cache_fp8 = %d, "
+            "sequence_lengths = %p, device = %p, rcp_out_scale = %p, q_scale = %f, max_batch_size = %zu, beam_width = %zu, max_q_len = %d, "
+            "q_cu_seqlens = %p",
             input,
+            is_input_bf16,
             output,
             head_num,
             kv_head_num,
@@ -97,13 +106,16 @@ void runXqa(void*       input,
             page_size,
             kv_cache_pool,
             kv_cache_page_list,
+            is_kv_cache_fp8,
             sequence_lengths,
             device,
+            rcp_out_scale,
             q_scale,
             max_batch_size,
             beam_width,
             max_q_len,
             q_cu_seqlens);
+
         return;
     }
 
@@ -125,6 +137,8 @@ void runXqa(void*       input,
     run_xqa_sm90(static_cast<uint32_t>(head_dim),
                  static_cast<uint32_t>(page_size),
                  static_cast<uint32_t>(group_size),
+                 is_input_bf16,
+                 is_kv_cache_fp8,
                  device->getDeviceProp(),
                  static_cast<uint32_t>(kv_head_num),
                  q_scale,
@@ -139,6 +153,7 @@ void runXqa(void*       input,
                  scratch,
                  device->getStream(),
                  input,
+                 rcp_out_scale,
                  is_context_attn ? &specDecParams : nullptr);
 
     check_cuda_error();

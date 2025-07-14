@@ -118,5 +118,6 @@
         "locale": "cpp",
         "print": "cpp",
         "*.inc": "cpp"
-    }
+    },
+    "editor.formatOnSave": true
 }

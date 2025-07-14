@@ -616,6 +616,7 @@ void AttentionOpTest::xqaAttentionOpTest(size_t batch_size,
     TRTAttn::setKvCache(trt_attn->kv_block_array, *common_inputs.kv_cache);
 
     runXqa(params.input.data(),
+           true,
            params.output.data(),
            num_heads,
            num_key_value_heads,
@@ -625,6 +626,7 @@ void AttentionOpTest::xqaAttentionOpTest(size_t batch_size,
            tokens_per_block,
            trt_attn->kv_block_array.mPrimaryPoolPtr,
            reinterpret_cast<int32_t*>(const_cast<KVCacheIndex*>(trt_attn->kv_block_array.data)),
+           true,
            reinterpret_cast<uint32_t*>(params.common.sequence_lengths->data()),
            device);
 
