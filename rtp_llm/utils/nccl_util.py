@@ -1,6 +1,8 @@
 import torch
 import torch.distributed as dist
+
 from rtp_llm.distribute.worker_info import g_parallel_info
+
 
 def all_gather_tp(output: torch.Tensor) -> torch.Tensor:
     tensor_list = [torch.empty_like(output) for _ in range(g_parallel_info.tp_size)]

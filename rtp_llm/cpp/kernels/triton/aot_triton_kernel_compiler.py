@@ -1,31 +1,44 @@
-from argparse import ArgumentParser
-import sys
-import os
-import shutil
 import glob
-import subprocess
+import os
 import re
+import shutil
+import subprocess
+import sys
+from argparse import ArgumentParser
+
 desc = """
 Triton ahead-of-time compiler in Bazel
 """
 
+
 def get_triton_tools_path(imports):
     py_path = []
     for path in imports:
-        new_path = os.path.join('external', path)
+        new_path = os.path.join("external", path)
         sys.path.append(new_path)
         py_path.append(new_path)
     import triton.tools
+
     # return path like ~/.local/lib/python3.10/site-packages/triton/__init__.py
     triton_tools_path = os.path.dirname(triton.tools.__file__)
-    return triton_tools_path, ':'.join(py_path)
+    return triton_tools_path, ":".join(py_path)
 
-def compile_kernel(interpreter, script_name, kernel_name, output_dir,
-output_name, spec, num_warps, grid, imports):
+
+def compile_kernel(
+    interpreter,
+    script_name,
+    kernel_name,
+    output_dir,
+    output_name,
+    spec,
+    num_warps,
+    grid,
+    imports,
+):
     triton_tools_path, py_path = get_triton_tools_path(imports)
     with open(f"{triton_tools_path}/compile.py") as f:
         code = f.read()
-    pattern = r'triton\.compile\(([^,]+),\s*options=([^)]+)\)'
+    pattern = r"triton\.compile\(([^,]+),\s*options=([^)]+)\)"
     replacement = r'triton.compile(\1, target=GPUTarget("cuda", 80, 32), options=\2)'
     modified_code = re.sub(pattern, replacement, code)
     os.makedirs(f"{output_dir}/tools", exist_ok=True)
@@ -35,29 +48,38 @@ output_name, spec, num_warps, grid, imports):
         f.write("from triton.backends.compiler import GPUTarget\n")
         f.write(modified_code)
     compile_command = [
-        interpreter, f"{output_dir}/tools/compile.py",
+        interpreter,
+        f"{output_dir}/tools/compile.py",
         script_name,
-        "-n", kernel_name,
-        "-o", f"{output_dir}/{output_name}",
-        "-on", output_name,
-        "-w", f"{num_warps}",
-        #"-ns", "1",
-        "-s", spec,
-        "-g", grid,
+        "-n",
+        kernel_name,
+        "-o",
+        f"{output_dir}/{output_name}",
+        "-on",
+        output_name,
+        "-w",
+        f"{num_warps}",
+        # "-ns", "1",
+        "-s",
+        spec,
+        "-g",
+        grid,
     ]
     env = os.environ.copy()
-    PPU_SDK = env['PPU_SDK']
-    CUDA_HOME = env['CUDA_HOME']
-    env['PYTHONPATH'] = py_path
-    PATH = env['PATH']
-    PATH = f'{PPU_SDK}/bin:{CUDA_HOME}/bin:{PATH}'
-    env['PATH'] = PATH
-    env['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
-    env['TRITON_TARGET_PPU'] = "1.3.0"
+    PPU_SDK = env["PPU_SDK"]
+    CUDA_HOME = env["CUDA_HOME"]
+    env["PYTHONPATH"] = py_path
+    PATH = env["PATH"]
+    PATH = f"{PPU_SDK}/bin:{CUDA_HOME}/bin:{PATH}"
+    env["PATH"] = PATH
+    env["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+    env["TRITON_TARGET_PPU"] = "1.3.0"
     subprocess.run(compile_command, check=True, env=env)
 
+
 def parse_int_list(arg):
-    return [int(x) for x in arg.split(',')]
+    return [int(x) for x in arg.split(",")]
+
 
 def rename_generated_files(output_dir, output_name, bazel_id):
     hdr = None
@@ -76,12 +98,15 @@ def rename_generated_files(output_dir, output_name, bazel_id):
             src = entry
             continue
         raise Exception("bad file", entry)
+
     def rename_file(old_file, new_file):
         old_file_path = os.path.join(output_dir, old_file)
         new_file_path = os.path.join(output_dir, new_file)
         ret = os.rename(old_file_path, new_file_path)
-    rename_file(hdr, f'{output_name}__{bazel_id}.h')
-    rename_file(src, f'{output_name}__{bazel_id}.c')
+
+    rename_file(hdr, f"{output_name}__{bazel_id}.h")
+    rename_file(src, f"{output_name}__{bazel_id}.c")
+
 
 def main():
     parser = ArgumentParser(description=desc)
@@ -95,7 +120,7 @@ def main():
     parser.add_argument("--spec", type=str, required=True)
     parser.add_argument("--num_warps", type=int, required=True)
     parser.add_argument("--bazel_id", type=str, required=True)
-    parser.add_argument("--imports", nargs='+', required=True)
+    parser.add_argument("--imports", nargs="+", required=True)
     args = parser.parse_args()
     script_name = args.script_name
     kernel_name = args.kernel_name
@@ -107,10 +132,19 @@ def main():
     output_name = args.output_name
     shutil.rmtree(output_dir)
     os.makedirs(output_dir, exist_ok=True)
-    compile_kernel(interpreter, script_name, kernel_name, output_dir, 
-                   output_name, spec, num_warps, args.grid, args.imports)
+    compile_kernel(
+        interpreter,
+        script_name,
+        kernel_name,
+        output_dir,
+        output_name,
+        spec,
+        num_warps,
+        args.grid,
+        args.imports,
+    )
     rename_generated_files(output_dir, output_name, bazel_id)
+
 
 if __name__ == "__main__":
     main()
-

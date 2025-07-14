@@ -48,7 +48,7 @@
       "dup     "#TMP2".s,  "#CONST3".s[3]                   \n" /* inf  */                          \
                                                                                                     \
       "sel     "#DST".s,   "#PRED2",   "#TMP1".s, "#DST".s  \n" /* if (x < min_input), y = 0   */   \
-      "sel     "#DST".s,   "#PRED3",   "#TMP2".s, "#DST".s  \n" /* if (x > max_input), y = inf */ 
+      "sel     "#DST".s,   "#PRED3",   "#TMP2".s, "#DST".s  \n" /* if (x > max_input), y = inf */
 
 
 #define ASM_BLOCK_EXP(SRC,  DST,  CONST1, CONST2, CONST3,       \

@@ -8,11 +8,11 @@
 namespace rtp_llm {
 
 // declares here for test
-//BufferPtr prepareGemmOptWeight(ConstBufferPtr input, bool isTranspose = false);
+// BufferPtr prepareGemmOptWeight(ConstBufferPtr input, bool isTranspose = false);
 ConstBufferPtr prepareGemmWeight(const std::string& key, ConstBufferPtr input);
 
 ConstBufferPtr prepareGemmOptWeight(ConstBufferPtr input, bool isTranspose = false, bool unused = false);
-BufferPtr transposeWeight(ConstBufferPtr input);
+BufferPtr      transposeWeight(ConstBufferPtr input);
 ConstBufferPtr prepareKaiWeightBf16(ConstBufferPtr input, bool isTranspose = false, bool isForceF32Out = false);
 ConstBufferPtr prepareGemmOptForGPTQInt4(ConstBufferPtr kernel, ConstBufferPtr scales, const std::string& key);
 
@@ -75,12 +75,12 @@ public:
 };
 
 enum UnaryType : int {
-    UNARYTYPE_UNDEFINED = 0,
-    TANH = 1,
-    GELU_ERF = 2,
-    GELU_TANH = 3,
-    RELU = 4,
-    SILU = 5,
+    UNARYTYPE_UNDEFINED                    = 0,
+    TANH                                   = 1,
+    GELU_ERF                               = 2,
+    GELU_TANH                              = 3,
+    RELU                                   = 4,
+    SILU                                   = 5,
     UnaryType_INT_MIN_SENTINEL_DO_NOT_USE_ = std::numeric_limits<int32_t>::min(),
     UnaryType_INT_MAX_SENTINEL_DO_NOT_USE_ = std::numeric_limits<int32_t>::max()
 };
@@ -88,32 +88,38 @@ enum UnaryType : int {
 class GemmKernel {
 private:
     void pack_input_impl_parallel_simd(int M, int N, int K, int lda, int K_pack, float* a_fp32, hie::bfloat16* a_bf16);
-    void pack_input_fp16tobf16_impl_parallel_simd(int M, int N, int K, int lda, int K_pack, float16_t* a_fp16, hie::bfloat16* a_bf16);
+    void pack_input_fp16tobf16_impl_parallel_simd(
+        int M, int N, int K, int lda, int K_pack, float16_t* a_fp16, hie::bfloat16* a_bf16);
 
-    void thread_block_bf16_m8(GemmPartParam<hie::bfloat16, hie::bfloat16, float, float>& p, int m, int n, int k, int k_tile);
     void
-    thread_block_bf16_m8_mres(GemmPartParam<hie::bfloat16, hie::bfloat16, float, float>& p, int m, int n, int k, int k_tile);
-    void
-    thread_block_bf16_m8_nres(GemmPartParam<hie::bfloat16, hie::bfloat16, float, float>& p, int m, int n, int k, int k_tile);
-    void
-    thread_block_bf16_m8_res(GemmPartParam<hie::bfloat16, hie::bfloat16, float, float>& p, int m, int n, int k, int k_tile);
+    thread_block_bf16_m8(GemmPartParam<hie::bfloat16, hie::bfloat16, float, float>& p, int m, int n, int k, int k_tile);
+    void thread_block_bf16_m8_mres(
+        GemmPartParam<hie::bfloat16, hie::bfloat16, float, float>& p, int m, int n, int k, int k_tile);
+    void thread_block_bf16_m8_nres(
+        GemmPartParam<hie::bfloat16, hie::bfloat16, float, float>& p, int m, int n, int k, int k_tile);
+    void thread_block_bf16_m8_res(
+        GemmPartParam<hie::bfloat16, hie::bfloat16, float, float>& p, int m, int n, int k, int k_tile);
 
-    void thread_block_bf16_m8(GemmPartParam<hie::bfloat16, hie::bfloat16, float16_t, float>& p, int m, int n, int k, int k_tile);
-    void
-    thread_block_bf16_m8_mres(GemmPartParam<hie::bfloat16, hie::bfloat16, float16_t, float>& p, int m, int n, int k, int k_tile);
-    void
-    thread_block_bf16_m8_nres(GemmPartParam<hie::bfloat16, hie::bfloat16, float16_t, float>& p, int m, int n, int k, int k_tile);
-    void
-    thread_block_bf16_m8_res(GemmPartParam<hie::bfloat16, hie::bfloat16, float16_t, float>& p, int m, int n, int k, int k_tile);
+    void thread_block_bf16_m8(
+        GemmPartParam<hie::bfloat16, hie::bfloat16, float16_t, float>& p, int m, int n, int k, int k_tile);
+    void thread_block_bf16_m8_mres(
+        GemmPartParam<hie::bfloat16, hie::bfloat16, float16_t, float>& p, int m, int n, int k, int k_tile);
+    void thread_block_bf16_m8_nres(
+        GemmPartParam<hie::bfloat16, hie::bfloat16, float16_t, float>& p, int m, int n, int k, int k_tile);
+    void thread_block_bf16_m8_res(
+        GemmPartParam<hie::bfloat16, hie::bfloat16, float16_t, float>& p, int m, int n, int k, int k_tile);
 
     void pack_input_arm(int M, int N, int K, int lda, int K_pack, float* a_fp32, hie::bfloat16* a_bf16);
-
 
     void gemm_thread_block_bf16(
         GemmPartParam<hie::bfloat16, hie::bfloat16, float, float> p, int m, int n, int m_tile, int n_tile, int k_tile);
 
-    void gemm_thread_block_bf16(
-        GemmPartParam<hie::bfloat16, hie::bfloat16, float16_t, float> p, int m, int n, int m_tile, int n_tile, int k_tile);
+    void gemm_thread_block_bf16(GemmPartParam<hie::bfloat16, hie::bfloat16, float16_t, float> p,
+                                int                                                           m,
+                                int                                                           n,
+                                int                                                           m_tile,
+                                int                                                           n_tile,
+                                int                                                           k_tile);
 
     template<typename Tc>
     void gemm_thread_block_bf16(
@@ -127,7 +133,7 @@ public:
 
     void gemm_pack_weight_FP16toBF16_arm(int N, int K, int K_pack, const float16_t* b_fp16, hie::bfloat16* b_bf16);
 
-    template <typename Ta, typename Tc>
+    template<typename Ta, typename Tc>
     void gemm_kernel_arm(int            M,
                          int            N,
                          int            K,
@@ -141,7 +147,7 @@ public:
                          void*          workspace);
 };
 
-template <typename Ta, typename Tc>
+template<typename Ta, typename Tc>
 void GemmKernel::gemm_kernel_arm(int            M,
                                  int            N,
                                  int            K,
@@ -158,8 +164,9 @@ void GemmKernel::gemm_kernel_arm(int            M,
     int with_bias = bias_fp32 == nullptr ? 0 : 1;
 
     hie::bfloat16* a_bf16 = reinterpret_cast<hie::bfloat16*>(workspace);
-    // int            a_bf16_size = (M * K_pack + M % 2 * K_pack) * 2;  // 括号内确保对齐需要额外增加的存储空间，M是奇数的时候多加一行K_pack, * 2是因为sizeof(bf16) = 2
-    // memset(a_bf16, 0, a_bf16_size);
+    // int            a_bf16_size = (M * K_pack + M % 2 * K_pack) * 2;  //
+    // 括号内确保对齐需要额外增加的存储空间，M是奇数的时候多加一行K_pack, * 2是因为sizeof(bf16) = 2 memset(a_bf16, 0,
+    // a_bf16_size);
 
     if constexpr (std::is_same<Ta, float>::value) {
         pack_input_arm(M, N, K, lda, K_pack, a, a_bf16);
@@ -170,7 +177,7 @@ void GemmKernel::gemm_kernel_arm(int            M,
         return;
     }
 
-    int k_pack_compute = std::ceil(K / 8.0) * 8;
+    int                                                    k_pack_compute = std::ceil(K / 8.0) * 8;
     GemmPartParam<hie::bfloat16, hie::bfloat16, Tc, float> p(
         M, N, k_pack_compute, a_bf16, b_bf16, c, bias_fp32, with_bias, actType);
 
@@ -195,9 +202,7 @@ void GemmKernel::gemm_thread_strategy(GemmPartParam<hie::bfloat16, hie::bfloat16
 
     int m_max = (p.M + m_tile - 1) / m_tile;
     int n_max = (p.N + n_tile - 1) / n_tile;
-    parallel_for(m_max, n_max, [&](int m, int n) {
-        gemm_thread_block_bf16<Tc>(p, m, n, m_tile, n_tile, k_tile);
-    });
+    parallel_for(m_max, n_max, [&](int m, int n) { gemm_thread_block_bf16<Tc>(p, m, n, m_tile, n_tile, k_tile); });
     return;
 }
 

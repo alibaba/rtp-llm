@@ -1,4 +1,3 @@
-
 # change uvicorn acess logger handler to file
 UVICORN_LOGGING_CONFIG = {
     "version": 1,
@@ -6,7 +5,7 @@ UVICORN_LOGGING_CONFIG = {
     "formatters": {
         "access": {
             "()": "uvicorn.logging.AccessFormatter",
-            "fmt": '%(asctime)s.%(msecs)03d %(levelprefix)s %(client_addr)s - "%(request_line)s" %(status_code)s', # noqa: E501
+            "fmt": '%(asctime)s.%(msecs)03d %(levelprefix)s %(client_addr)s - "%(request_line)s" %(status_code)s',  # noqa: E501
             "datefmt": "%Y-%m-%d %H:%M:%S",  # 只包含到秒，毫秒在 fmt 中处理
         },
     },

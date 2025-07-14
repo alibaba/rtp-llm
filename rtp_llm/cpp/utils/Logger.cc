@@ -26,10 +26,10 @@ namespace rtp_llm {
 std::string Logger::log_level_ = "INFO";
 
 bool initLogger(std::string log_file_path) {
-    std::cerr<<"initLogger log_file_path: "<<log_file_path<<std::endl;
+    std::cerr << "initLogger log_file_path: " << log_file_path << std::endl;
     if (log_file_path == "") {
         std::string alog_conf_full_path = std::filesystem::current_path().string() + "/rtp_llm/config/alog.conf";
-        bool exist = std::filesystem::exists(alog_conf_full_path);
+        bool        exist               = std::filesystem::exists(alog_conf_full_path);
         if (!exist) {
             AUTIL_ROOT_LOG_CONFIG();
             AUTIL_ROOT_LOG_SETLEVEL(INFO);
@@ -71,7 +71,7 @@ Logger::Logger(const std::string& submodule_name) {
         logger_->setLevel(log_level);
     }
     base_log_level_ = logger_->getLevel();
-    auto success = autil::NetUtil::GetDefaultIp(ip_);
+    auto success    = autil::NetUtil::GetDefaultIp(ip_);
     if (!success) {
         printf("Logger failed to get default ip\n");
     }

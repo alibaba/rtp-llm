@@ -1,17 +1,27 @@
-from typing import Dict, Any, Union, List
+from dataclasses import dataclass
 from enum import Enum, auto
+from typing import Any, Dict, List, Union
+
 from transformers import PreTrainedTokenizerBase
 
-from dataclasses import dataclass
-
-from rtp_llm.openai.api_datatype import ChatMessage, GPTFunctionDefinition, \
-    ChatCompletionRequest, RoleEnum, FunctionCall, ContentPart
-from rtp_llm.openai.renderers.custom_renderer import CustomChatRenderer, RendererParams, \
-    StreamResponseObject, RenderedInputs
+from rtp_llm.openai.api_datatype import (
+    ChatCompletionRequest,
+    ChatMessage,
+    ContentPart,
+    ContentPartTypeEnum,
+    FunctionCall,
+    GPTFunctionDefinition,
+    RoleEnum,
+)
+from rtp_llm.openai.renderer_factory_register import register_renderer
 from rtp_llm.openai.renderers.basic_renderer import BasicRenderer, PromptWithMMInput
 from rtp_llm.openai.renderers.conversation import get_conv_template
-from rtp_llm.openai.renderer_factory_register import register_renderer
-from rtp_llm.openai.api_datatype import ContentPartTypeEnum
+from rtp_llm.openai.renderers.custom_renderer import (
+    CustomChatRenderer,
+    RenderedInputs,
+    RendererParams,
+    StreamResponseObject,
+)
 from rtp_llm.utils.util import check_with_info
 
 
@@ -79,33 +89,58 @@ class QwenV2AudioRenderer(BasicRenderer):
             return message
         message_list: List[Dict[str, Any]] = []
         for content_part in message:
-            if content_part.type not in [ContentPartTypeEnum.audio_url, ContentPartTypeEnum.text]:
-                raise Exception(f"unsupported content_part: {content_part.type} in message: {message}")
+            if content_part.type not in [
+                ContentPartTypeEnum.audio_url,
+                ContentPartTypeEnum.text,
+            ]:
+                raise Exception(
+                    f"unsupported content_part: {content_part.type} in message: {message}"
+                )
             if content_part.type == ContentPartTypeEnum.text:
                 message_list.append({"type": "text", "text": content_part.text})
             else:
-                message_list.append({"type": "audio", "audio_url": content_part.audio_url.url})
+                message_list.append(
+                    {"type": "audio", "audio_url": content_part.audio_url.url}
+                )
         return message_list
-    
+
     def _extract_audio_urls(self, request: ChatCompletionRequest) -> List[str]:
         urls: List[str] = []
         for message in request.messages:
             if isinstance(message.content, list):
                 for content_part in message.content:
                     if content_part.type == ContentPartTypeEnum.audio_url:
-                        check_with_info(content_part.audio_url is not None, f"audio_url should not be none in {content_part}")
+                        check_with_info(
+                            content_part.audio_url is not None,
+                            f"audio_url should not be none in {content_part}",
+                        )
                         urls.append(content_part.audio_url.url)
         return urls
-        
+
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         rendered_request = []
         for message in request.messages:
             if message.role not in [RoleEnum.system, RoleEnum.assistant, RoleEnum.user]:
-                raise Exception(f"unsupported role: {message.role} in QwenV2Audio request: {request}")
-            rendered_request.append({"role": message.role.value, "content": self._render_content(message.content)})
-        encoded_text = self.tokenizer.apply_chat_template(rendered_request, add_generation_prompt=True, tokenize=False, chat_template=self.chat_template)
+                raise Exception(
+                    f"unsupported role: {message.role} in QwenV2Audio request: {request}"
+                )
+            rendered_request.append(
+                {
+                    "role": message.role.value,
+                    "content": self._render_content(message.content),
+                }
+            )
+        encoded_text = self.tokenizer.apply_chat_template(
+            rendered_request,
+            add_generation_prompt=True,
+            tokenize=False,
+            chat_template=self.chat_template,
+        )
         audio_urls = self._extract_audio_urls(request)
-        input_ids = self.tokenizer.encode(encoded_text)        
-        return RenderedInputs(rendered_prompt=encoded_text, input_urls=audio_urls, input_ids=input_ids)
-            
-register_renderer('qwen_v2_audio', QwenV2AudioRenderer)
+        input_ids = self.tokenizer.encode(encoded_text)
+        return RenderedInputs(
+            rendered_prompt=encoded_text, input_urls=audio_urls, input_ids=input_ids
+        )
+
+
+register_renderer("qwen_v2_audio", QwenV2AudioRenderer)

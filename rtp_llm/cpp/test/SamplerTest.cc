@@ -7,9 +7,8 @@ using namespace std;
 using namespace rtp_llm;
 
 // TODO: make this test device-independent
-class SamplerTest : public DeviceTestBase {
+class SamplerTest: public DeviceTestBase {
 public:
-
     void SetUp() override {
         DeviceTestBase::SetUp();
         const auto eos_id = 1;
@@ -21,42 +20,41 @@ protected:
 };
 
 TEST_F(SamplerTest, testGeneralSampling) {
-    size_t batch_size = 5;
-    size_t vocab_size = 8;
-    BufferPtr logits = createBuffer<float>({batch_size, vocab_size}, {
-        0.1, 0.1, 0.2, 0.1, 0.3, 0.1, 0.1, 0.1,
-        1, 2, 3, 4, 5, 6, 7, 8,
-        0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64, 0.01,
-        0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8,
-        0.99, 0.98, 0.97, 0.96, 0.95, 0.94, 0.93, 0.92,
-    });
+    size_t    batch_size = 5;
+    size_t    vocab_size = 8;
+    BufferPtr logits =
+        createBuffer<float>({batch_size, vocab_size},
+                            {
+                                0.1, 0.1, 0.2,  0.1,  0.3,  0.1,  0.1,  0.1,  1,    2,    3,    4,    5,   6,
+                                7,   8,   0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64, 0.01, 0.1,  0.2,  0.3, 0.4,
+                                0.5, 0.6, 0.7,  0.8,  0.99, 0.98, 0.97, 0.96, 0.95, 0.94, 0.93, 0.92,
+                            });
     BufferPtr original_logits_host = device_->clone({*logits, AllocationType::HOST});
 
-    int32_t step = 3; // also max_input_length - 1
+    int32_t step = 3;  // also max_input_length - 1
     // BufferPtr finished = createBuffer<bool>({1}, {0});
-    BufferPtr output_token_ids = createBuffer<int32_t>({batch_size, (uint)step + 1}, {
-        1, 0, 0, 0,
-        1, 1, 0, 0,
-        1, 1, 2, 0,
-        3, 3, 0, 0,
-        8, 2, 3, 0,
-    }, AllocationType::HOST);
+    BufferPtr output_token_ids = createBuffer<int32_t>({batch_size, (uint)step + 1},
+                                                       {
+                                                           1, 0, 0, 0, 1, 1, 0, 0, 1, 1, 2, 0, 3, 3, 0, 0, 8, 2, 3, 0,
+                                                       },
+                                                       AllocationType::HOST);
 
-    BufferPtr input_lengths = createBuffer<int32_t>({batch_size}, {1, 1, 1, 1, 1}, AllocationType::HOST);
+    BufferPtr input_lengths    = createBuffer<int32_t>({batch_size}, {1, 1, 1, 1, 1}, AllocationType::HOST);
     BufferPtr sequence_lengths = createBuffer<int32_t>({batch_size}, {1, 2, 3, 2, 3}, AllocationType::HOST);
-    BufferPtr num_beams = createBuffer<uint64_t>({batch_size}, {1, 1, 1, 1, 1}, AllocationType::HOST);
+    BufferPtr num_beams        = createBuffer<uint64_t>({batch_size}, {1, 1, 1, 1, 1}, AllocationType::HOST);
 
     BufferPtr cum_log_probs = createBuffer<float>({batch_size}, {-1, -1, -1, -1, -1});
-    BufferPtr rand_seed = createBuffer<uint64_t>({batch_size}, {0, 0, 0, 0, 0}, AllocationType::HOST);
-    BufferPtr repetition_penalty = createBuffer<float>({batch_size}, {1.0f, 1.0f, 1.0f, 10000.0f, 1.0f}, AllocationType::HOST);
+    BufferPtr rand_seed     = createBuffer<uint64_t>({batch_size}, {0, 0, 0, 0, 0}, AllocationType::HOST);
+    BufferPtr repetition_penalty =
+        createBuffer<float>({batch_size}, {1.0f, 1.0f, 1.0f, 10000.0f, 1.0f}, AllocationType::HOST);
     BufferPtr min_length = createBuffer<int32_t>({batch_size}, {0, 0, 0, 0, 10}, AllocationType::HOST);
 
-    auto top_k = createBuffer<uint32_t>({batch_size}, {1, 4, 0, 0, 8}, AllocationType::HOST);
-    auto top_p = createBuffer<float>({batch_size}, {0.0, 0.0, 0.001, 0.99, 0.9}, AllocationType::HOST);
+    auto top_k       = createBuffer<uint32_t>({batch_size}, {1, 4, 0, 0, 8}, AllocationType::HOST);
+    auto top_p       = createBuffer<float>({batch_size}, {0.0, 0.0, 0.001, 0.99, 0.9}, AllocationType::HOST);
     auto temperature = createBuffer<float>({batch_size}, {0.1, 0.001, 0.2, 1.0, 100.0f}, AllocationType::HOST);
     LogitsProcessorStatesPtr state_ptr = std::make_shared<LogitsProcessorStates>();
 
-    SamplerInputs inputs {
+    SamplerInputs inputs{
         move(logits),
         device_->clone({*output_token_ids, AllocationType::HOST}),
         move(input_lengths),
@@ -72,7 +70,7 @@ TEST_F(SamplerTest, testGeneralSampling) {
         rand_seed,
         repetition_penalty,
         min_length,
-        nullptr, // no_repeat_ngram_size
+        nullptr,  // no_repeat_ngram_size
         device_->clone({*cum_log_probs}),
     };
 
@@ -81,7 +79,7 @@ TEST_F(SamplerTest, testGeneralSampling) {
     printBuffer<float>(*outputs.cum_log_probs, "cum_log_probs");
 
     auto output_token_ids_host = getBufferValues<int32_t>(*outputs.token_ids);
-    auto cum_log_probs_host = getBufferValues<float>(*outputs.cum_log_probs);
+    auto cum_log_probs_host    = getBufferValues<float>(*outputs.cum_log_probs);
 
     ASSERT_EQ(output_token_ids_host[3], 4);
     ASSERT_EQ(output_token_ids_host[7], 7);
@@ -93,9 +91,9 @@ TEST_F(SamplerTest, testGeneralSampling) {
             rand_seed->data<uint64_t>()[j] = i * 1000 + j;
         }
 
-        inputs.token_ids = device_->clone({*output_token_ids, AllocationType::HOST});
+        inputs.token_ids     = device_->clone({*output_token_ids, AllocationType::HOST});
         inputs.cum_log_probs = device_->clone({*cum_log_probs});
-        outputs = sampler_->forward(inputs);
+        outputs              = sampler_->forward(inputs);
 
         // printf("i=%d  ", i);
         // printBuffer<int32_t>(*outputs.token_ids, "output_token_ids");

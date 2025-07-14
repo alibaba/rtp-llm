@@ -21,13 +21,13 @@ EmbeddingEngine::~EmbeddingEngine() {
     (void)stop();
 }
 
-const rtp_llm::GptInitParameter& EmbeddingEngine::GetGptInitParameter(){
+const rtp_llm::GptInitParameter& EmbeddingEngine::GetGptInitParameter() {
     return params_;
 }
 
 absl::Status EmbeddingEngine::startLoop() {
     RTP_LLM_LOG_INFO("start embedding engine");
-    running_ = true;
+    running_     = true;
     loop_thread_ = std::thread(&EmbeddingEngine::loop, this);
     return absl::OkStatus();
 }
@@ -47,13 +47,17 @@ void EmbeddingEngine::loop() {
     while (running_) {
         auto status = step();
         if (!status.ok()) {
-             RTP_LLM_LOG_ERROR("step running error: %s", status.ToString().c_str());
+            RTP_LLM_LOG_ERROR("step running error: %s", status.ToString().c_str());
             THROW_IF_STATUS_ERROR(trySaveStepError());
         }
     }
 }
 
-std::shared_ptr<EmbeddingOutput> EmbeddingEngine::decode(th::Tensor token_ids, th::Tensor token_type_ids, th::Tensor input_lengths, int64_t request_id, std::optional<MultimodalFeature> multimodal_features) {
+std::shared_ptr<EmbeddingOutput> EmbeddingEngine::decode(th::Tensor                       token_ids,
+                                                         th::Tensor                       token_type_ids,
+                                                         th::Tensor                       input_lengths,
+                                                         int64_t                          request_id,
+                                                         std::optional<MultimodalFeature> multimodal_features) {
     auto input =
         std::make_shared<EmbeddingInput>(token_ids, token_type_ids, input_lengths, request_id, multimodal_features);
     return decode(input);
@@ -85,15 +89,16 @@ absl::Status EmbeddingEngine::step() {
     try {
         auto status = executor_->process(streams);
         if (!status.ok()) {
-            for (auto& stream: streams) {
+            for (auto& stream : streams) {
                 stream->setError(status.ToString());
-                RTP_LLM_LOG_WARNING("error_stream_info: length: %d, exception: %s", stream->inputLength(), status.ToString().c_str());
+                RTP_LLM_LOG_WARNING(
+                    "error_stream_info: length: %d, exception: %s", stream->inputLength(), status.ToString().c_str());
             }
         }
     } catch (const exception& e) {
         std::string error_msg = e.what();
         RTP_LLM_LOG_WARNING("run engine failed, stream size: %d, error: %s", streams.size(), error_msg.c_str());
-        for (auto& stream: streams) {            
+        for (auto& stream : streams) {
             stream->setError(error_msg);
             RTP_LLM_LOG_WARNING("error_stream_info: length: %d", stream->inputLength());
         }

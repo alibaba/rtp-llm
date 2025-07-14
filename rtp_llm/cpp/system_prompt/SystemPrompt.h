@@ -11,16 +11,16 @@ namespace rtp_llm {
 
 struct SystemPromptParams {
     SystemPromptParams() {}
-    SystemPromptParams(const std::vector<int>& prompt_tokens, const std::vector<int>& block_ids) 
-        : prompt_tokens(prompt_tokens), block_ids(block_ids) {}
+    SystemPromptParams(const std::vector<int>& prompt_tokens, const std::vector<int>& block_ids):
+        prompt_tokens(prompt_tokens), block_ids(block_ids) {}
 
-    std::vector<int>    prompt_tokens;
-    std::vector<int>    block_ids;
+    std::vector<int> prompt_tokens;
+    std::vector<int> block_ids;
 };
 
 class SystemPrompt {
 public:
-    SystemPrompt(const std::unordered_map<std::string, SystemPromptParams>& prompt_map) : prompt_map_(prompt_map) {}
+    SystemPrompt(const std::unordered_map<std::string, SystemPromptParams>& prompt_map): prompt_map_(prompt_map) {}
 
     SystemPromptParams getPromptParams(const GenerateConfig& generate_config) {
         const auto& task_id = generate_config.task_id;

@@ -13,7 +13,7 @@ model_config = ModelConfig(
     model_type = "MODEL_TYPE",
     ckpt_path = "/path/to/ckpt",
     tokenizer_path = "/path/to/tokenizer",
-    weight_type = "WEIGHT_TYPE"    
+    weight_type = "WEIGHT_TYPE"
     gen_num_per_circle = 5
 )
 

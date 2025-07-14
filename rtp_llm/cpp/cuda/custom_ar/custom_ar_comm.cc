@@ -37,7 +37,8 @@ CustomAllReduceComm::CustomAllReduceComm(const std::vector<size_t>& tp_ranks, si
     rank_index_(rank_index),
     world_size_(tp_ranks.size()),
     support_nv_link_(checkAllNVLinks(tp_ranks)),
-    comm_buf_threshold_(getCommBufThreshold(support_nv_link_, world_size_)), tp_ranks_(std::move(tp_ranks)) {
+    comm_buf_threshold_(getCommBufThreshold(support_nv_link_, world_size_)),
+    tp_ranks_(std::move(tp_ranks)) {
     param_.barrier_flag        = 0;
     param_.rank                = rank_;
     param_.local_rank          = rank_;
@@ -190,15 +191,18 @@ std::vector<cudaIpcMemHandle_t> CustomAllReduceComm::prepareP2PBuffer_(const Ncc
     return handles;
 }
 
-bool CustomAllReduceComm::shouldCustomAR(const std::vector<size_t>& tp_ranks, size_t rank, const HWKernelConfig& hw_kernel_config) {
+bool CustomAllReduceComm::shouldCustomAR(const std::vector<size_t>& tp_ranks,
+                                         size_t                     rank,
+                                         const HWKernelConfig&      hw_kernel_config) {
 
     size_t world_size       = tp_ranks.size();
     size_t local_world_size = getVisibleDeviceNum();
     // check whether all ranks are on same nodes
     if (world_size != local_world_size) {
-        RTP_LLM_LOG_INFO("Disable custom ar since TP is performanced on multi nodes, world_size=%d, local_world_size=%d",
-                    world_size,
-                    local_world_size);
+        RTP_LLM_LOG_INFO(
+            "Disable custom ar since TP is performanced on multi nodes, world_size=%d, local_world_size=%d",
+            world_size,
+            local_world_size);
         return false;
     }
 
@@ -239,7 +243,8 @@ bool CustomAllReduceComm::shouldCustomAR(const std::vector<size_t>& tp_ranks, si
         int peer_access_available = 0;
         check_cuda_value(cudaDeviceCanAccessPeer(&peer_access_available, rank, i));
         if (peer_access_available == 0) {
-            RTP_LLM_LOG_INFO("Disable custom all reduce since device %d and device %d do not have peer access", rank, i);
+            RTP_LLM_LOG_INFO(
+                "Disable custom all reduce since device %d and device %d do not have peer access", rank, i);
             return false;
         }
     }
@@ -257,9 +262,10 @@ size_t CustomAllReduceComm::getCommBufThreshold(bool support_nv_link, size_t wor
         }
     } else {
         constexpr size_t elts_per_thread = 8;
-        size_t           mod = elts_per_thread * world_size * DEFAULT_BLOCK_SIZE * MAX_ALL_REDUCE_BLOCKS * 2;
+        size_t           mod     = elts_per_thread * world_size * DEFAULT_BLOCK_SIZE * MAX_ALL_REDUCE_BLOCKS * 2;
         custom_ar_size_threshold = 8 * 1000 * 1000;
-        custom_ar_size_threshold += (custom_ar_size_threshold % mod) == 0 ? 0 : (mod - (custom_ar_size_threshold % mod));
+        custom_ar_size_threshold +=
+            (custom_ar_size_threshold % mod) == 0 ? 0 : (mod - (custom_ar_size_threshold % mod));
     }
     return custom_ar_size_threshold;
 }
@@ -289,8 +295,10 @@ CustomAllReduceComm::select_kernel_algo(bool support_nv_link, size_t elts_total_
     return kernel_algo;
 }
 
-std::unique_ptr<CustomAllReduceComm>
-initCustomAllReduceComm(const NcclParam& nccl_para, const std::vector<size_t>& tp_ranks, cudaStream_t stream, const HWKernelConfig& hw_kernel_config) {
+std::unique_ptr<CustomAllReduceComm> initCustomAllReduceComm(const NcclParam&           nccl_para,
+                                                             const std::vector<size_t>& tp_ranks,
+                                                             cudaStream_t               stream,
+                                                             const HWKernelConfig&      hw_kernel_config) {
     size_t rank_index = 0;
     for (size_t i = 0; i < tp_ranks.size(); i++) {
         if (tp_ranks[i] == nccl_para.rank_) {

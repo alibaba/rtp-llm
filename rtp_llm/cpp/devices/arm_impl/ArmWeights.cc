@@ -43,15 +43,16 @@ torch::Tensor ArmCpuDevice::packInt8TensorToPackedInt4(torch::Tensor weight) {
     return packed_weight;
 }
 
-
-torch::Tensor ArmCpuDevice::preprocessWeightsForMixedGemm(torch::Tensor row_major_quantized_weight, torch::ScalarType quant_type, const string &arch) {
+torch::Tensor ArmCpuDevice::preprocessWeightsForMixedGemm(torch::Tensor     row_major_quantized_weight,
+                                                          torch::ScalarType quant_type,
+                                                          const string&     arch) {
     return row_major_quantized_weight;
 }
 
 torch::Tensor ArmCpuDevice::preprocessWeightScale(torch::Tensor qweight, torch::Tensor scales) {
     auto qweightBuffer = torchTensor2Buffer(qweight);
-    auto scaleBuffer = torchTensor2Buffer(scales);
-    auto retBuffer = prepareGemmOptForGPTQInt4(qweightBuffer, scaleBuffer, "");
+    auto scaleBuffer   = torchTensor2Buffer(scales);
+    auto retBuffer     = prepareGemmOptForGPTQInt4(qweightBuffer, scaleBuffer, "");
 
     return Buffer2torchTensor(*retBuffer, false);
 }

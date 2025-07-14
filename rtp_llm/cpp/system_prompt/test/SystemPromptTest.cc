@@ -14,13 +14,11 @@ using namespace std;
 
 namespace rtp_llm {
 
-class SystemPromptTest : public DeviceTestBase {
+class SystemPromptTest: public DeviceTestBase {
 protected:
-
 protected:
 };
 
-TEST_F(SystemPromptTest, testConstruct) {
-}
+TEST_F(SystemPromptTest, testConstruct) {}
 
-}
+}  // namespace rtp_llm

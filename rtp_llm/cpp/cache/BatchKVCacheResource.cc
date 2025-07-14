@@ -83,14 +83,13 @@ std::string BatchKVCacheResource::debugString() const {
     std::stringstream debug_string, batch_offset_string;
     for (size_t i = 0; i < batch_block_id.size(); i++) {
         batch_offset_string << "batch:[" << i << "] , block:[";
-        for (auto &v: batch_block_id[i]) {
+        for (auto& v : batch_block_id[i]) {
             batch_offset_string << v << ", ";
         }
         batch_offset_string << "], ";
     }
 
-    debug_string << "BatchKVCacheResource {" << batch_offset_string.str()
-                    << "}";
+    debug_string << "BatchKVCacheResource {" << batch_offset_string.str() << "}";
     return debug_string.str();
 }
 

@@ -39,8 +39,12 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
     }
     if (params.ffn_tp_size > 1) {
         if (params.ffn_tp_size != params.tp_size) {
-            initNcclParam(params.ffn_tp_rank, params.ffn_tp_size, params.master_ip,
-                        params.ffn_tp_master_port - params.tp_rank / params.ffn_tp_size, "RTP_LLM_FFN_TP_GROUP_", ffn_tp_nccl_param_);
+            initNcclParam(params.ffn_tp_rank,
+                          params.ffn_tp_size,
+                          params.master_ip,
+                          params.ffn_tp_master_port - params.tp_rank / params.ffn_tp_size,
+                          "RTP_LLM_FFN_TP_GROUP_",
+                          ffn_tp_nccl_param_);
         } else {
             ffn_tp_nccl_param_ = tp_nccl_param_;
         }
@@ -77,10 +81,10 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
                                                 free_bytes + params.device_reserve_memory_bytes - ROCM_RUNTIME_MEM_SIZE;
         tracker_params.align_size         = 16;
         RTP_LLM_LOG_INFO("[ROCM] total = %.2f(GB), free = %.2f(GB), reserve = %.2f(GB), track = %.2f(GB)\n",
-                    total_bytes / 1024.0 / 1024.0 / 1024.0,
-                    free_bytes / 1024.0 / 1024.0 / 1024.0,
-                    params.device_reserve_memory_bytes / 1024.0 / 1024.0 / 1024.0,
-                    tracker_params.target_track_bytes / 1024.0 / 1024.0 / 1024.0);
+                         total_bytes / 1024.0 / 1024.0 / 1024.0,
+                         free_bytes / 1024.0 / 1024.0 / 1024.0,
+                         params.device_reserve_memory_bytes / 1024.0 / 1024.0 / 1024.0,
+                         tracker_params.target_track_bytes / 1024.0 / 1024.0 / 1024.0);
         assert(tracker_params.target_track_bytes <= free_bytes && tracker_params.target_track_bytes > 0);
         allocator_.reset(new TrackerAllocator(tracker_params));
         syncAndCheck();
@@ -111,11 +115,10 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
     ROCM_CHECK(hipblasCreate(&hipblas_handle_));
     ROCM_CHECK(hipblasLtCreate(&hipblaslt_handle_));
 
-    hipblas_mm_wrapper_.reset(new hipblasMMWrapper(hipblas_handle_, hipblaslt_handle_, stream_, allocator_ptr, init_params_.hw_kernel_config));
-    hipblas_mm_wrapper_->setGemmConfig(hipDataType::HIP_R_16F,
-                                       hipDataType::HIP_R_16F,
-                                       hipDataType::HIP_R_16F,
-                                       hipDataType::HIP_R_32F);
+    hipblas_mm_wrapper_.reset(new hipblasMMWrapper(
+        hipblas_handle_, hipblaslt_handle_, stream_, allocator_ptr, init_params_.hw_kernel_config));
+    hipblas_mm_wrapper_->setGemmConfig(
+        hipDataType::HIP_R_16F, hipDataType::HIP_R_16F, hipDataType::HIP_R_16F, hipDataType::HIP_R_32F);
 
     hipblas_mm_wrapper_->setStream(stream_);
     fmha_runner_.reset(new rocmFmhaWrapper());
@@ -164,59 +167,56 @@ ROCmDevice::~ROCmDevice() {
 void ROCmDevice::init() {
     DeviceBase::init();
     RTP_LLM_LOG_INFO("max batch size: %d", init_params_.max_batch_size);
-    curandstate_buf_ = allocateBuffer(
-        {init_params_.max_batch_size * sizeof(curandState_t)}, {"curandstate"});
+    curandstate_buf_ = allocateBuffer({init_params_.max_batch_size * sizeof(curandState_t)}, {"curandstate"});
 }
 
 DeviceProperties ROCmDevice::getDeviceProperties() {
     static DeviceProperties* prop = nullptr;
     if (prop == nullptr) {
-        prop          = new DeviceProperties();
-        prop->type    = DeviceType::ROCm;
-        prop->id      = device_id_;
-        prop->tp_rank = init_params_.tp_rank;
-        prop->tp_size = init_params_.tp_size;
-        prop->dp_rank = init_params_.dp_rank;
-        prop->dp_size = init_params_.dp_size;
-        prop->enable_comm_overlap = init_params_.enable_comm_overlap;
+        prop                           = new DeviceProperties();
+        prop->type                     = DeviceType::ROCm;
+        prop->id                       = device_id_;
+        prop->tp_rank                  = init_params_.tp_rank;
+        prop->tp_size                  = init_params_.tp_size;
+        prop->dp_rank                  = init_params_.dp_rank;
+        prop->dp_size                  = init_params_.dp_size;
+        prop->enable_comm_overlap      = init_params_.enable_comm_overlap;
         prop->enable_layer_micro_batch = init_params_.enable_layer_micro_batch;
-        prop->enable_sp = init_params_.enable_sp;
-        prop->overlap_math_sm_count = init_params_.device_resource_config.overlap_math_sm_count;
-        prop->overlap_comm_type = init_params_.device_resource_config.overlap_comm_type;
-        prop->ffn_tp_size = init_params_.ffn_tp_size;
-        prop->ffn_tp_rank = init_params_.ffn_tp_rank;
-        prop->m_split = init_params_.m_split;
-        prop->use_all_gather = init_params_.use_all_gather;
+        prop->enable_sp                = init_params_.enable_sp;
+        prop->overlap_math_sm_count    = init_params_.device_resource_config.overlap_math_sm_count;
+        prop->overlap_comm_type        = init_params_.device_resource_config.overlap_comm_type;
+        prop->ffn_tp_size              = init_params_.ffn_tp_size;
+        prop->ffn_tp_rank              = init_params_.ffn_tp_rank;
+        prop->m_split                  = init_params_.m_split;
+        prop->use_all_gather           = init_params_.use_all_gather;
     }
     return *prop;
 }
 
 DevicePrepOutput ROCmDevice::prepareModelRun(const DevicePrepParams& params) {
     DevicePrepOutput output;
-    output.need_mask = false;
-    output.decode_flash_infer_attn = FlashInferAttnParams::prepareDecodeFlashInferAttnParams(
-             this,
-             params.configs,
-             params.sequence_lengths,
-             params.input_lengths,
-             params.kv_cache_block_id,
-             params.attn_dtype);
-     output.prefill_flash_infer_attn = FlashInferAttnParams::preparePrefillFlashInferAttnParams(
-             this,
-             params.configs,
-             params.prefix_lengths,
-             params.sequence_lengths,
-             params.input_lengths,
-             params.kv_cache_block_id,
-             params.attn_dtype
-     );
+    output.need_mask                = false;
+    output.decode_flash_infer_attn  = FlashInferAttnParams::prepareDecodeFlashInferAttnParams(this,
+                                                                                             params.configs,
+                                                                                             params.sequence_lengths,
+                                                                                             params.input_lengths,
+                                                                                             params.kv_cache_block_id,
+                                                                                             params.attn_dtype);
+    output.prefill_flash_infer_attn = FlashInferAttnParams::preparePrefillFlashInferAttnParams(this,
+                                                                                               params.configs,
+                                                                                               params.prefix_lengths,
+                                                                                               params.sequence_lengths,
+                                                                                               params.input_lengths,
+                                                                                               params.kv_cache_block_id,
+                                                                                               params.attn_dtype);
     return std::move(output);
 }
 
 void ROCmDevice::copy(const CopyParams& params) {
     ROCM_CHECK_VALUE(params.src.type() == params.dst.type(),
-                       "copy dst[%d] and src[%d] need has same type.",
-                       params.src.type(), params.dst.type());
+                     "copy dst[%d] and src[%d] need has same type.",
+                     params.src.type(),
+                     params.dst.type());
 
     if (params.dst.isQBuffer() && params.src.isQBuffer()) {
         auto dst_ptr = reinterpret_cast<const QBuffer*>(&params.dst);
@@ -275,10 +275,10 @@ void ROCmDevice::noBlockCopy(const CopyParams& params) {
 }
 
 hipStream_t ROCmDevice::getStream(DeviceStream stream) {
-  switch (stream) {
-      default:
-          return stream_;
-  }
+    switch (stream) {
+        default:
+            return stream_;
+    }
 }
 
 void ROCmDevice::bufMemset(Buffer& buf, int val, DeviceStream stream) {
@@ -291,28 +291,27 @@ void ROCmDevice::bufMemset(Buffer& buf, int val, DeviceStream stream) {
 }
 
 TransposeOutput ROCmDevice::transpose(const TransposeParams& params) {
-    const auto& input = params.input;
-    const auto data_type = input.type();
-    const auto shape = input.shape();
+    const auto& input     = params.input;
+    const auto  data_type = input.type();
+    const auto  shape     = input.shape();
 
     RUNTIME_ASSERT_OP_ARG(shape.size() == 2 || shape.size() == 3,
-        "You can only transpose a 2D buffer, but got [%s]", input.debugString().c_str());
+                          "You can only transpose a 2D buffer, but got [%s]",
+                          input.debugString().c_str());
     if (shape.size() == 2) {
         auto output = allocateBuffer({data_type, {shape[1], shape[0]}});
-        DISPATCH_CUDA_FUNCTION_GENERAL_TYPE(data_type, invokeTransposeAxis01,
-                                            output->data(), input.data(), shape[0], shape[1], stream_
-                                            );
+        DISPATCH_CUDA_FUNCTION_GENERAL_TYPE(
+            data_type, invokeTransposeAxis01, output->data(), input.data(), shape[0], shape[1], stream_);
         return std::move(output);
     } else {
         auto output = allocateBuffer({data_type, {shape[1], shape[0], shape[2]}});
-        DISPATCH_CUDA_FUNCTION_GENERAL_TYPE(data_type, invokeTransposeAxis012,
-                                            output->data(), input.data(), shape[0], shape[1], shape[2], stream_
-                                            );
+        DISPATCH_CUDA_FUNCTION_GENERAL_TYPE(
+            data_type, invokeTransposeAxis012, output->data(), input.data(), shape[0], shape[1], shape[2], stream_);
         return std::move(output);
     }
 }
 
-void  ROCmDevice::checkError() {
+void ROCmDevice::checkError() {
     ROCM_CHECK_ERROR();
 }
 
@@ -320,7 +319,7 @@ void ROCmDevice::initNcclParam(size_t             rank,
                                size_t             world_size,
                                const std::string& ip,
                                size_t             port,
-                               const std::string&      group_name,
+                               const std::string& group_name,
                                NcclParam&         nccl_param) {
     nccl_param.rank_       = rank;
     nccl_param.world_size_ = world_size;
@@ -361,12 +360,14 @@ void ROCmDevice::syncCommunication(bool timeout) {
     }
     if (dp_tp_nccl_param_.world_size_ > 1) {
         RTP_LLM_LOG_DEBUG("Synchronize dp_tp NCCL communicators rank %d of %d.",
-                     dp_tp_nccl_param_.rank_,
-                     dp_tp_nccl_param_.world_size_);
+                          dp_tp_nccl_param_.rank_,
+                          dp_tp_nccl_param_.world_size_);
         ftNcclStreamSynchronize(dp_tp_nccl_param_, stream_, timeout);
     }
     if (ffn_tp_nccl_param_.world_size_ > 1 && ffn_tp_nccl_param_ != tp_nccl_param_) {
-        RTP_LLM_LOG_DEBUG("Synchronize ffn_tp NCCL communicators rank %d of %d.", ffn_tp_nccl_param_.rank_, ffn_tp_nccl_param_.world_size_);
+        RTP_LLM_LOG_DEBUG("Synchronize ffn_tp NCCL communicators rank %d of %d.",
+                          ffn_tp_nccl_param_.rank_,
+                          ffn_tp_nccl_param_.world_size_);
         ftNcclStreamSynchronize(ffn_tp_nccl_param_, stream_, timeout);
     }
 }
@@ -406,56 +407,55 @@ SelectOutput ROCmDevice::select(const SelectParams& params) {
 
     RUNTIME_ASSERT_OP_ARG(params.index.type() == DataType::TYPE_INT32, "Select index must be int32.");
     RUNTIME_ASSERT_OP_ARG(params.dim == 0, "select op tmp only support dim == 0");
-    const auto& input = params.input;
-    auto output_shape = input.shape();
-    output_shape[0] = params.index.size();
-    auto output = allocateBuffer({input.type(), output_shape});
-    if (output_shape[0] == 0 || input.shape()[0] ==0) {
+    const auto& input        = params.input;
+    auto        output_shape = input.shape();
+    output_shape[0]          = params.index.size();
+    auto output              = allocateBuffer({input.type(), output_shape});
+    if (output_shape[0] == 0 || input.shape()[0] == 0) {
         return output;
     }
     auto num_selected_element = input.size() / input.shape()[0];
-    DISPATCH_CUDA_FUNCTION_GENERAL_TYPE(
-        input.type(),
-        invokeLookupHiddenStateOfLastToken,
-        output->data(),
-        input.data(),
-        (int*)params.index.data(),
-        (int)params.index.size(),
-        num_selected_element,
-        0,
-        stream_);
+    DISPATCH_CUDA_FUNCTION_GENERAL_TYPE(input.type(),
+                                        invokeLookupHiddenStateOfLastToken,
+                                        output->data(),
+                                        input.data(),
+                                        (int*)params.index.data(),
+                                        (int)params.index.size(),
+                                        num_selected_element,
+                                        0,
+                                        stream_);
     return output;
 }
 
 BufferPtr ROCmDevice::embeddingLookup(const EmbeddingLookupParams& params) {
-    const auto& tokens = params.combo_tokens;
-    const auto& embedding_table = params.embedding_table;
-    const auto& mask = params.text_tokens_mask;
-    const auto& position_ids = params.position_ids;
-    const auto& postition_table = params.position_table;
-    const auto& token_types = params.token_types;
+    const auto& tokens           = params.combo_tokens;
+    const auto& embedding_table  = params.embedding_table;
+    const auto& mask             = params.text_tokens_mask;
+    const auto& position_ids     = params.position_ids;
+    const auto& postition_table  = params.position_table;
+    const auto& token_types      = params.token_types;
     const auto& token_type_table = params.token_type_table;
 
-    const auto token_num = tokens.size();
+    const auto token_num   = tokens.size();
     const auto hidden_size = embedding_table.shape()[1];
-    const auto data_type = embedding_table.type();
+    const auto data_type   = embedding_table.type();
 
     auto embeddings = allocateBuffer({data_type, {token_num, hidden_size}}, {"embedding"});
 
-    DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type, invokeEmebeddingLookup,
-        embeddings->data(),
-        embedding_table.data(),
-        params.input_embedding_scalar,
-        postition_table.has_value() ? postition_table.value().get().data() : nullptr,
-        token_type_table.has_value() ? token_type_table.value().get().data() : nullptr,
-        tokens.data<int>(),
-        position_ids.has_value() ? position_ids.value().get().data<int>() : nullptr,
-        token_types.has_value() ? token_types.value().get().data<int>() : nullptr,
-        mask.has_value() ? mask.value().get().data<int>() : nullptr,
-        token_num,
-        hidden_size,
-        stream_
-    );
+    DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type,
+                                     invokeEmebeddingLookup,
+                                     embeddings->data(),
+                                     embedding_table.data(),
+                                     params.input_embedding_scalar,
+                                     postition_table.has_value() ? postition_table.value().get().data() : nullptr,
+                                     token_type_table.has_value() ? token_type_table.value().get().data() : nullptr,
+                                     tokens.data<int>(),
+                                     position_ids.has_value() ? position_ids.value().get().data<int>() : nullptr,
+                                     token_types.has_value() ? token_types.value().get().data<int>() : nullptr,
+                                     mask.has_value() ? mask.value().get().data<int>() : nullptr,
+                                     token_num,
+                                     hidden_size,
+                                     stream_);
 
     return embeddings;
 }
@@ -477,8 +477,8 @@ BufferPtr ROCmDevice::testVecAdd(const BufferPtr a, const BufferPtr b) {
 
 MemoryStatus ROCmDevice::getDeviceMemoryStatus() {
     MemoryStatus status;
-    size_t total_bytes;
-    auto   error = hipMemGetInfo(&status.free_bytes, &total_bytes);
+    size_t       total_bytes;
+    auto         error = hipMemGetInfo(&status.free_bytes, &total_bytes);
     RTP_LLM_CHECK(error == hipSuccess);
     status.used_bytes = total_bytes - status.free_bytes;
     return status;
@@ -560,7 +560,7 @@ DeviceEventPtr ROCmDevice::createEvent() {
     return std::make_unique<ROCmEvent>(stream_);
 }
 
-ROCmEvent::ROCmEvent(hipStream_t stream) : stream_(stream) {
+ROCmEvent::ROCmEvent(hipStream_t stream): stream_(stream) {
     ROCM_CHECK(hipEventCreate(&event_));
     ROCM_CHECK(hipEventRecord(event_, stream));
 }
@@ -576,8 +576,8 @@ void ROCmEvent::synchronize() const {
     hipDeviceSynchronize();
 }
 
-ROCmCommHook::ROCmCommHook(hipStream_t main_stream, hipStream_t comm_stream)
-    : main_stream_(main_stream), comm_stream_(comm_stream) {
+ROCmCommHook::ROCmCommHook(hipStream_t main_stream, hipStream_t comm_stream):
+    main_stream_(main_stream), comm_stream_(comm_stream) {
     ROCM_CHECK(hipEventCreate(&hook_event_));
     ROCM_CHECK(hipEventRecord(hook_event_, comm_stream_));
 }
@@ -595,24 +595,30 @@ void ROCmCommHook::hook_sync() const {
 //         return;
 //     }
 
-//     RTP_LLM_LOG_INFO("[PrepareCommBuffer] max_batch_seq_len %d, attn_rs_hidden %d, ffn_rs_hidden %d, attn_ag_hidden %d, ffn_ag_hidden %d, rs_output_type %d, ag_input_type %d, enable_per_token_scale %d, enable_ffn_tp %d",
-//             params.max_batch_seq_len, params.attn_rs_hidden, params.ffn_rs_hidden, params.attn_ag_hidden, params.ffn_ag_hidden, params.rs_output_type, params.ag_input_type, params.enable_per_token_scale, params.enable_ffn_tp);
+//     RTP_LLM_LOG_INFO("[PrepareCommBuffer] max_batch_seq_len %d, attn_rs_hidden %d, ffn_rs_hidden %d, attn_ag_hidden
+//     %d, ffn_ag_hidden %d, rs_output_type %d, ag_input_type %d, enable_per_token_scale %d, enable_ffn_tp %d",
+//             params.max_batch_seq_len, params.attn_rs_hidden, params.ffn_rs_hidden, params.attn_ag_hidden,
+//             params.ffn_ag_hidden, params.rs_output_type, params.ag_input_type, params.enable_per_token_scale,
+//             params.enable_ffn_tp);
 
 //     size_t m = params.max_batch_seq_len * 1.1;
 //     std::vector<size_t> tp_ranks = fcNcclGatherRanks(tp_nccl_param_, stream_);
 
 //     RTP_LLM_LOG_INFO("[PrepareCommBuffer] prepare attn_rs_comm_buffer_");
 //     std::vector<size_t> attn_rs_buffer_shape = {m, params.attn_rs_hidden};
-//     attn_rs_comm_buffer_ = initCommBuffer(attn_rs_buffer_shape, params.rs_output_type, tp_nccl_param_, tp_ranks, false, stream_);
+//     attn_rs_comm_buffer_ = initCommBuffer(attn_rs_buffer_shape, params.rs_output_type, tp_nccl_param_, tp_ranks,
+//     false, stream_);
 
 //     RTP_LLM_LOG_INFO("[PrepareCommBuffer] prepare attn_ag_comm_buffer_");
 //     std::vector<size_t> attn_ag_buffer_shape = {m, params.attn_ag_hidden};
-//     attn_ag_comm_buffer_ = initCommBuffer(attn_ag_buffer_shape, params.ag_input_type, tp_nccl_param_, tp_ranks, true, stream_);
+//     attn_ag_comm_buffer_ = initCommBuffer(attn_ag_buffer_shape, params.ag_input_type, tp_nccl_param_, tp_ranks, true,
+//     stream_);
 
 //     if (params.enable_per_token_scale) {
 //         RTP_LLM_LOG_INFO("[PrepareCommBuffer] prepare attn_ag_scale_comm_buffer_");
 //         std::vector<size_t> attn_ag_scale_shape = {m, 1};
-//         attn_ag_scale_comm_buffer_ = initCommBuffer(attn_ag_scale_shape, DataType::TYPE_FP32, tp_nccl_param_, tp_ranks, true, stream_);
+//         attn_ag_scale_comm_buffer_ = initCommBuffer(attn_ag_scale_shape, DataType::TYPE_FP32, tp_nccl_param_,
+//         tp_ranks, true, stream_);
 //     }
 
 //     if (params.enable_ffn_tp) {
@@ -620,18 +626,21 @@ void ROCmCommHook::hook_sync() const {
 
 //         RTP_LLM_LOG_INFO("[PrepareCommBuffer] prepare ffn_rs_comm_buffer_");
 //         std::vector<size_t> ffn_rs_buffer_shape = {m, params.ffn_rs_hidden};
-//         ffn_rs_comm_buffer_ = initCommBuffer(ffn_rs_buffer_shape, params.rs_output_type, ffn_tp_nccl_param_, ffn_tp_ranks, false, stream_);
+//         ffn_rs_comm_buffer_ = initCommBuffer(ffn_rs_buffer_shape, params.rs_output_type, ffn_tp_nccl_param_,
+//         ffn_tp_ranks, false, stream_);
 
 //         RTP_LLM_LOG_INFO("[PrepareCommBuffer] prepare ffn_ag_comm_buffer_");
 //         std::vector<size_t> ffn_ag_buffer_shape = {m, params.ffn_ag_hidden};
-//         ffn_ag_comm_buffer_ = initCommBuffer(ffn_ag_buffer_shape, params.ag_input_type, ffn_tp_nccl_param_, ffn_tp_ranks, true, stream_);
+//         ffn_ag_comm_buffer_ = initCommBuffer(ffn_ag_buffer_shape, params.ag_input_type, ffn_tp_nccl_param_,
+//         ffn_tp_ranks, true, stream_);
 
 //         RTP_LLM_LOG_INFO("[PrepareCommBuffer] prepare ffn_ag_scale_comm_buffer_");
 //         if (params.enable_per_token_scale) {
 //             std::vector<size_t> ffn_ag_scale_shape = {m, 1};
-//             ffn_ag_scale_comm_buffer_ = initCommBuffer(ffn_ag_scale_shape, DataType::TYPE_FP32, ffn_tp_nccl_param_, ffn_tp_ranks, true, stream_);
+//             ffn_ag_scale_comm_buffer_ = initCommBuffer(ffn_ag_scale_shape, DataType::TYPE_FP32, ffn_tp_nccl_param_,
+//             ffn_tp_ranks, true, stream_);
 //         }
 //     }
 // }
 
-}  // namespace fastertransformer
+}  // namespace rtp_llm

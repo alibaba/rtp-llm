@@ -10,7 +10,7 @@ namespace rtp_llm {
 namespace rtp_llm_master {
 
 struct EstimateInfo {
-    std::shared_ptr<const Host> host                     = nullptr;
+    std::shared_ptr<const Host> host                   = nullptr;
     int64_t                     expect_execute_time_ms = -1;
     int64_t                     expect_wait_time_ms    = -1;
     std::string                 machine_info;
@@ -31,7 +31,7 @@ public:
 private:
     void updateWorkerStatusImpl(ErrorResult<HeartbeatSynchronizer::NodeStatus>& result) override;
     bool updateWorkerExpectFinishTime(PrefillWorkerInfo& worker);
-    std::unordered_map<std::string, PrefillWorkerInfo> worker_map_; 
+    std::unordered_map<std::string, PrefillWorkerInfo> worker_map_;
     std::shared_ptr<TimeEstimatorBase>                 estimator_;
 
     int                       pending_task_timeout_ms_{1000};

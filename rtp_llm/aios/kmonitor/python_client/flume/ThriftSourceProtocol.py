@@ -6,13 +6,21 @@
 #  options string: py
 #
 
-from thrift.Thrift import TType, TMessageType, TFrozenDict, TException, TApplicationException
-from thrift.protocol.TProtocol import TProtocolException
-import sys
 import logging
-from .ttypes import *
-from thrift.Thrift import TProcessor
+import sys
+
+from thrift.protocol.TProtocol import TProtocolException
+from thrift.Thrift import (
+    TApplicationException,
+    TException,
+    TFrozenDict,
+    TMessageType,
+    TProcessor,
+    TType,
+)
 from thrift.transport import TTransport
+
+from .ttypes import *
 
 
 class Iface(object):
@@ -47,7 +55,7 @@ class Client(Iface):
         return self.recv_append()
 
     def send_append(self, event):
-        self._oprot.writeMessageBegin('append', TMessageType.CALL, self._seqid)
+        self._oprot.writeMessageBegin("append", TMessageType.CALL, self._seqid)
         args = append_args()
         args.event = event
         args.write(self._oprot)
@@ -67,7 +75,9 @@ class Client(Iface):
         iprot.readMessageEnd()
         if result.success is not None:
             return result.success
-        raise TApplicationException(TApplicationException.MISSING_RESULT, "append failed: unknown result")
+        raise TApplicationException(
+            TApplicationException.MISSING_RESULT, "append failed: unknown result"
+        )
 
     def appendBatch(self, events):
         """
@@ -78,7 +88,7 @@ class Client(Iface):
         return self.recv_appendBatch()
 
     def send_appendBatch(self, events):
-        self._oprot.writeMessageBegin('appendBatch', TMessageType.CALL, self._seqid)
+        self._oprot.writeMessageBegin("appendBatch", TMessageType.CALL, self._seqid)
         args = appendBatch_args()
         args.events = events
         args.write(self._oprot)
@@ -98,7 +108,9 @@ class Client(Iface):
         iprot.readMessageEnd()
         if result.success is not None:
             return result.success
-        raise TApplicationException(TApplicationException.MISSING_RESULT, "appendBatch failed: unknown result")
+        raise TApplicationException(
+            TApplicationException.MISSING_RESULT, "appendBatch failed: unknown result"
+        )
 
 
 class Processor(Iface, TProcessor):
@@ -113,7 +125,9 @@ class Processor(Iface, TProcessor):
         if name not in self._processMap:
             iprot.skip(TType.STRUCT)
             iprot.readMessageEnd()
-            x = TApplicationException(TApplicationException.UNKNOWN_METHOD, 'Unknown function %s' % (name))
+            x = TApplicationException(
+                TApplicationException.UNKNOWN_METHOD, "Unknown function %s" % (name)
+            )
             oprot.writeMessageBegin(name, TMessageType.EXCEPTION, seqid)
             x.write(oprot)
             oprot.writeMessageEnd()
@@ -136,7 +150,9 @@ class Processor(Iface, TProcessor):
         except Exception as ex:
             msg_type = TMessageType.EXCEPTION
             logging.exception(ex)
-            result = TApplicationException(TApplicationException.INTERNAL_ERROR, 'Internal error')
+            result = TApplicationException(
+                TApplicationException.INTERNAL_ERROR, "Internal error"
+            )
         oprot.writeMessageBegin("append", msg_type, seqid)
         result.write(oprot)
         oprot.writeMessageEnd()
@@ -155,11 +171,14 @@ class Processor(Iface, TProcessor):
         except Exception as ex:
             msg_type = TMessageType.EXCEPTION
             logging.exception(ex)
-            result = TApplicationException(TApplicationException.INTERNAL_ERROR, 'Internal error')
+            result = TApplicationException(
+                TApplicationException.INTERNAL_ERROR, "Internal error"
+            )
         oprot.writeMessageBegin("appendBatch", msg_type, seqid)
         result.write(oprot)
         oprot.writeMessageEnd()
         oprot.trans.flush()
+
 
 # HELPER FUNCTIONS AND STRUCTURES
 
@@ -172,14 +191,27 @@ class append_args(object):
 
     thrift_spec = (
         None,  # 0
-        (1, TType.STRUCT, 'event', (ThriftFlumeEvent, ThriftFlumeEvent.thrift_spec), None, ),  # 1
+        (
+            1,
+            TType.STRUCT,
+            "event",
+            (ThriftFlumeEvent, ThriftFlumeEvent.thrift_spec),
+            None,
+        ),  # 1
     )
 
-    def __init__(self, event=None,):
+    def __init__(
+        self,
+        event=None,
+    ):
         self.event = event
 
     def read(self, iprot):
-        if iprot._fast_decode is not None and isinstance(iprot.trans, TTransport.CReadableTransport) and self.thrift_spec is not None:
+        if (
+            iprot._fast_decode is not None
+            and isinstance(iprot.trans, TTransport.CReadableTransport)
+            and self.thrift_spec is not None
+        ):
             iprot._fast_decode(self, iprot, (self.__class__, self.thrift_spec))
             return
         iprot.readStructBegin()
@@ -200,11 +232,13 @@ class append_args(object):
 
     def write(self, oprot):
         if oprot._fast_encode is not None and self.thrift_spec is not None:
-            oprot.trans.write(oprot._fast_encode(self, (self.__class__, self.thrift_spec)))
+            oprot.trans.write(
+                oprot._fast_encode(self, (self.__class__, self.thrift_spec))
+            )
             return
-        oprot.writeStructBegin('append_args')
+        oprot.writeStructBegin("append_args")
         if self.event is not None:
-            oprot.writeFieldBegin('event', TType.STRUCT, 1)
+            oprot.writeFieldBegin("event", TType.STRUCT, 1)
             self.event.write(oprot)
             oprot.writeFieldEnd()
         oprot.writeFieldStop()
@@ -214,9 +248,8 @@ class append_args(object):
         return
 
     def __repr__(self):
-        L = ['%s=%r' % (key, value)
-             for key, value in list(self.__dict__.items())]
-        return '%s(%s)' % (self.__class__.__name__, ', '.join(L))
+        L = ["%s=%r" % (key, value) for key, value in list(self.__dict__.items())]
+        return "%s(%s)" % (self.__class__.__name__, ", ".join(L))
 
     def __eq__(self, other):
         return isinstance(other, self.__class__) and self.__dict__ == other.__dict__
@@ -232,14 +265,27 @@ class append_result(object):
     """
 
     thrift_spec = (
-        (0, TType.I32, 'success', None, None, ),  # 0
+        (
+            0,
+            TType.I32,
+            "success",
+            None,
+            None,
+        ),  # 0
     )
 
-    def __init__(self, success=None,):
+    def __init__(
+        self,
+        success=None,
+    ):
         self.success = success
 
     def read(self, iprot):
-        if iprot._fast_decode is not None and isinstance(iprot.trans, TTransport.CReadableTransport) and self.thrift_spec is not None:
+        if (
+            iprot._fast_decode is not None
+            and isinstance(iprot.trans, TTransport.CReadableTransport)
+            and self.thrift_spec is not None
+        ):
             iprot._fast_decode(self, iprot, (self.__class__, self.thrift_spec))
             return
         iprot.readStructBegin()
@@ -259,11 +305,13 @@ class append_result(object):
 
     def write(self, oprot):
         if oprot._fast_encode is not None and self.thrift_spec is not None:
-            oprot.trans.write(oprot._fast_encode(self, (self.__class__, self.thrift_spec)))
+            oprot.trans.write(
+                oprot._fast_encode(self, (self.__class__, self.thrift_spec))
+            )
             return
-        oprot.writeStructBegin('append_result')
+        oprot.writeStructBegin("append_result")
         if self.success is not None:
-            oprot.writeFieldBegin('success', TType.I32, 0)
+            oprot.writeFieldBegin("success", TType.I32, 0)
             oprot.writeI32(self.success)
             oprot.writeFieldEnd()
         oprot.writeFieldStop()
@@ -273,9 +321,8 @@ class append_result(object):
         return
 
     def __repr__(self):
-        L = ['%s=%r' % (key, value)
-             for key, value in list(self.__dict__.items())]
-        return '%s(%s)' % (self.__class__.__name__, ', '.join(L))
+        L = ["%s=%r" % (key, value) for key, value in list(self.__dict__.items())]
+        return "%s(%s)" % (self.__class__.__name__, ", ".join(L))
 
     def __eq__(self, other):
         return isinstance(other, self.__class__) and self.__dict__ == other.__dict__
@@ -292,14 +339,27 @@ class appendBatch_args(object):
 
     thrift_spec = (
         None,  # 0
-        (1, TType.LIST, 'events', (TType.STRUCT, (ThriftFlumeEvent, ThriftFlumeEvent.thrift_spec), False), None, ),  # 1
+        (
+            1,
+            TType.LIST,
+            "events",
+            (TType.STRUCT, (ThriftFlumeEvent, ThriftFlumeEvent.thrift_spec), False),
+            None,
+        ),  # 1
     )
 
-    def __init__(self, events=None,):
+    def __init__(
+        self,
+        events=None,
+    ):
         self.events = events
 
     def read(self, iprot):
-        if iprot._fast_decode is not None and isinstance(iprot.trans, TTransport.CReadableTransport) and self.thrift_spec is not None:
+        if (
+            iprot._fast_decode is not None
+            and isinstance(iprot.trans, TTransport.CReadableTransport)
+            and self.thrift_spec is not None
+        ):
             iprot._fast_decode(self, iprot, (self.__class__, self.thrift_spec))
             return
         iprot.readStructBegin()
@@ -325,11 +385,13 @@ class appendBatch_args(object):
 
     def write(self, oprot):
         if oprot._fast_encode is not None and self.thrift_spec is not None:
-            oprot.trans.write(oprot._fast_encode(self, (self.__class__, self.thrift_spec)))
+            oprot.trans.write(
+                oprot._fast_encode(self, (self.__class__, self.thrift_spec))
+            )
             return
-        oprot.writeStructBegin('appendBatch_args')
+        oprot.writeStructBegin("appendBatch_args")
         if self.events is not None:
-            oprot.writeFieldBegin('events', TType.LIST, 1)
+            oprot.writeFieldBegin("events", TType.LIST, 1)
             oprot.writeListBegin(TType.STRUCT, len(self.events))
             for iter15 in self.events:
                 iter15.write(oprot)
@@ -342,9 +404,8 @@ class appendBatch_args(object):
         return
 
     def __repr__(self):
-        L = ['%s=%r' % (key, value)
-             for key, value in list(self.__dict__.items())]
-        return '%s(%s)' % (self.__class__.__name__, ', '.join(L))
+        L = ["%s=%r" % (key, value) for key, value in list(self.__dict__.items())]
+        return "%s(%s)" % (self.__class__.__name__, ", ".join(L))
 
     def __eq__(self, other):
         return isinstance(other, self.__class__) and self.__dict__ == other.__dict__
@@ -360,14 +421,27 @@ class appendBatch_result(object):
     """
 
     thrift_spec = (
-        (0, TType.I32, 'success', None, None, ),  # 0
+        (
+            0,
+            TType.I32,
+            "success",
+            None,
+            None,
+        ),  # 0
     )
 
-    def __init__(self, success=None,):
+    def __init__(
+        self,
+        success=None,
+    ):
         self.success = success
 
     def read(self, iprot):
-        if iprot._fast_decode is not None and isinstance(iprot.trans, TTransport.CReadableTransport) and self.thrift_spec is not None:
+        if (
+            iprot._fast_decode is not None
+            and isinstance(iprot.trans, TTransport.CReadableTransport)
+            and self.thrift_spec is not None
+        ):
             iprot._fast_decode(self, iprot, (self.__class__, self.thrift_spec))
             return
         iprot.readStructBegin()
@@ -387,11 +461,13 @@ class appendBatch_result(object):
 
     def write(self, oprot):
         if oprot._fast_encode is not None and self.thrift_spec is not None:
-            oprot.trans.write(oprot._fast_encode(self, (self.__class__, self.thrift_spec)))
+            oprot.trans.write(
+                oprot._fast_encode(self, (self.__class__, self.thrift_spec))
+            )
             return
-        oprot.writeStructBegin('appendBatch_result')
+        oprot.writeStructBegin("appendBatch_result")
         if self.success is not None:
-            oprot.writeFieldBegin('success', TType.I32, 0)
+            oprot.writeFieldBegin("success", TType.I32, 0)
             oprot.writeI32(self.success)
             oprot.writeFieldEnd()
         oprot.writeFieldStop()
@@ -401,9 +477,8 @@ class appendBatch_result(object):
         return
 
     def __repr__(self):
-        L = ['%s=%r' % (key, value)
-             for key, value in list(self.__dict__.items())]
-        return '%s(%s)' % (self.__class__.__name__, ', '.join(L))
+        L = ["%s=%r" % (key, value) for key, value in list(self.__dict__.items())]
+        return "%s(%s)" % (self.__class__.__name__, ", ".join(L))
 
     def __eq__(self, other):
         return isinstance(other, self.__class__) and self.__dict__ == other.__dict__

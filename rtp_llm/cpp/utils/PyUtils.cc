@@ -6,9 +6,9 @@ std::unordered_map<std::string, pybind11::handle> convertPyObjectToDict(pybind11
     if (!pybind11::isinstance<pybind11::dict>(obj)) {
         throw std::runtime_error("Expected a dict, but get " + pybind11::cast<std::string>(pybind11::str(obj)));
     }
-    pybind11::dict py_dict = pybind11::reinterpret_borrow<pybind11::dict>(obj);
+    pybind11::dict                                    py_dict = pybind11::reinterpret_borrow<pybind11::dict>(obj);
     std::unordered_map<std::string, pybind11::handle> map;
-    for (auto kv : py_dict) {   
+    for (auto kv : py_dict) {
         if (!pybind11::isinstance<pybind11::str>(kv.first)) {
             throw std::runtime_error("Expected a str, but get " + pybind11::cast<std::string>(pybind11::str(obj)));
         }
@@ -21,8 +21,8 @@ std::vector<pybind11::handle> convertPyObjectToVec(pybind11::handle obj) {
     if (!pybind11::isinstance<pybind11::list>(obj)) {
         throw std::runtime_error("Expected a list, but get " + pybind11::cast<std::string>(pybind11::str(obj)));
     }
-    pybind11::list py_list = pybind11::reinterpret_borrow<pybind11::list>(obj);
-    std::vector<pybind11::handle> vec;    
+    pybind11::list                py_list = pybind11::reinterpret_borrow<pybind11::list>(obj);
+    std::vector<pybind11::handle> vec;
     for (auto item : py_list) {
         vec.push_back(item);
     }
@@ -31,16 +31,16 @@ std::vector<pybind11::handle> convertPyObjectToVec(pybind11::handle obj) {
 
 std::vector<std::map<std::string, torch::Tensor>> pyListToTensorMapVec(py::list pyList) {
     std::vector<std::map<std::string, torch::Tensor>> out;
-    auto torch_type = py::module::import("torch").attr("Tensor");
-    for (auto& item: pyList) {
+    auto                                              torch_type = py::module::import("torch").attr("Tensor");
+    for (auto& item : pyList) {
         std::map<std::string, torch::Tensor> single_out;
         if (!pybind11::isinstance<py::dict>(item)) {
             throw std::runtime_error("Input is not a dictionary");
         }
         py::dict py_dict = py::cast<py::dict>(item);
         for (auto item : py_dict) {
-            std::string key = py::str(item.first);
-            py::handle value = item.second;
+            std::string key   = py::str(item.first);
+            py::handle  value = item.second;
             if (!py::isinstance(value, torch_type)) {
                 throw std::runtime_error("Non-tensor value found in dictionary");
             }
@@ -55,8 +55,8 @@ py::object convertTensorMapVectorToObject(const std::vector<std::map<std::string
     py::list result_list;
     for (const auto& map : tensor_map_vec) {
         py::dict tensor_dict;
-        for (const auto& item : map) {            
-            tensor_dict[py::cast(item.first)] = py::cast(item.second);        
+        for (const auto& item : map) {
+            tensor_dict[py::cast(item.first)] = py::cast(item.second);
         }
         result_list.append(tensor_dict);
     }

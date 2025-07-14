@@ -1,19 +1,24 @@
-import socket
-import random
-import time
 import fcntl
 import json
 import os
+import random
+import socket
 import tempfile
+import time
+from contextlib import closing
 from pathlib import Path
 
-from contextlib import closing
 
 class PortInUseError(Exception):
     pass
+
+
 class ExpiredLockFile:
     """lock file with expiration info"""
-    def __init__(self, path: Path, port: int, ttl: int = 3600):  # 1 hour ttl by default, make it long enough to guarantee the lock is valid during whole lifecycle of the test
+
+    def __init__(
+        self, path: Path, port: int, ttl: int = 3600
+    ):  # 1 hour ttl by default, make it long enough to guarantee the lock is valid during whole lifecycle of the test
         self.path = path
         self.port = port
         self.ttl = ttl
@@ -22,13 +27,13 @@ class ExpiredLockFile:
     def __enter__(self):
         # record all necessary info to metadata
         metadata = {
-            'port': self.port,
-            'pid': os.getpid(),
-            'timestamp': time.time(),
-            'ttl': self.ttl
+            "port": self.port,
+            "pid": os.getpid(),
+            "timestamp": time.time(),
+            "ttl": self.ttl,
         }
 
-        self.fd = open(self.path, 'w')
+        self.fd = open(self.path, "w")
         try:
             fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             json.dump(metadata, self.fd)
@@ -47,6 +52,7 @@ class ExpiredLockFile:
             except OSError:
                 pass
 
+
 class PortManager:
     def __init__(self, lock_dir: Path = None, start_port: int = None, ttl: int = 3600):
         self.start_port = start_port or get_random_start_port()
@@ -57,7 +63,7 @@ class PortManager:
     def cleanup_stale_locks(self):
         """clean up the potential stale lock files"""
         current_time = time.time()
-        for lock_file in self.lock_dir.glob('port_*.lock'):
+        for lock_file in self.lock_dir.glob("port_*.lock"):
             try:
                 with open(lock_file) as f:
                     try:
@@ -65,7 +71,7 @@ class PortManager:
                         fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                         try:
                             metadata = json.load(f)
-                            if current_time - metadata['timestamp'] > metadata['ttl']:
+                            if current_time - metadata["timestamp"] > metadata["ttl"]:
                                 lock_file.unlink()
                         except (json.JSONDecodeError, KeyError):
                             # remove the lock-file directly if json format error
@@ -115,10 +121,11 @@ class PortManager:
     def is_port_available(port: int) -> bool:
         with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as sock:
             try:
-                sock.bind(('', port))
+                sock.bind(("", port))
                 return True
             except socket.error:
                 return False
+
 
 class PortsContext:
     """
@@ -126,6 +133,7 @@ class PortsContext:
     It is friendly for lock-files auto releasing after the scope exits -- this can make sure ports reuse efficiently.
     Use PortManager directly if you want hold the allocated ports for a long time.
     """
+
     def __init__(self, lock_dir: Path = None, num_ports: int = 1, ttl: int = 3600):
         lock_dir = lock_dir or Path(tempfile.gettempdir()) / "test_port_locks"
         self.manager = PortManager(lock_dir, get_random_start_port(), ttl)
@@ -141,6 +149,7 @@ class PortsContext:
         if self.locks:
             for lock in self.locks:
                 lock.__exit__(None, None, None)
+
 
 def get_random_start_port():
     random.seed()

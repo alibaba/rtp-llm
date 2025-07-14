@@ -6,8 +6,7 @@ namespace rtp_llm {
 
 class AtomicGuard {
 public:
-    AtomicGuard(std::atomic<size_t>& atomic_var)
-        : atomic_var_(atomic_var) {
+    AtomicGuard(std::atomic<size_t>& atomic_var): atomic_var_(atomic_var) {
         atomic_var_++;
     }
 
@@ -21,4 +20,4 @@ private:
 
 typedef std::shared_ptr<AtomicGuard> AtomicGuardPtr;
 
-}
+}  // namespace rtp_llm

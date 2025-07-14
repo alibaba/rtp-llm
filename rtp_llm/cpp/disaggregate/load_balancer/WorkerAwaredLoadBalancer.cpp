@@ -3,10 +3,9 @@
 
 namespace rtp_llm {
 
-WorkerAwaredLoadBalancer::~WorkerAwaredLoadBalancer() {
-}
+WorkerAwaredLoadBalancer::~WorkerAwaredLoadBalancer() {}
 
-void WorkerAwaredLoadBalancer::stop() {  
+void WorkerAwaredLoadBalancer::stop() {
     if (!sync_worker_status_stop_) {
         sync_worker_status_stop_ = true;
         sync_worker_status_thread_->join();
@@ -48,7 +47,7 @@ bool WorkerAwaredLoadBalancer::init(const LoadBalancerInitParams& params) {
 
 void WorkerAwaredLoadBalancer::syncWorkerThread() {
     while (!sync_worker_status_stop_) {
-        int64_t                            start_time_us = autil::TimeUtility::currentTime();
+        int64_t start_time_us = autil::TimeUtility::currentTime();
         syncWorkerStatus();
         int64_t end_time_us  = autil::TimeUtility::currentTime();
         int     wait_time_us = sync_worker_status_interval_ms_ * 1000 - (end_time_us - start_time_us);
@@ -63,6 +62,5 @@ void WorkerAwaredLoadBalancer::syncWorkerStatus() {
     auto result = heartbeat_synchronizer_->getHeartbeatFromHost(biz_hosts_, sync_worker_status_interval_ms_);
     updateWorkerStatusImpl(result);
 }
-
 
 }  // namespace rtp_llm

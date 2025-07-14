@@ -7,7 +7,7 @@
 #endif
 
 // wont't support new features
-namespace rtp_llm{
+namespace rtp_llm {
 #if USING_ROCM
 using namespace rocm;
 #endif
@@ -780,7 +780,7 @@ __global__ void generalLayerNormWithPadding(const T* __restrict input,
     }
 
     if (DYNAMIC_SCALING) {
-        float          abs_max_f               = blockAllReduceMax(cuda_cast<float>(abs_max));
+        float          abs_max_f = blockAllReduceMax(cuda_cast<float>(abs_max));
         const Scalar_T dynamic_per_token_scale(float(127. / abs_max_f));
         for (int i = tid; i < real_n; i += blockDim.x) {
             const int index                                        = blockIdx.x * padding_n + i;
@@ -853,4 +853,4 @@ INVOKE_GENERAL_LN_WITH_PADDING(half)
 #ifdef ENABLE_BF16
 INVOKE_GENERAL_LN_WITH_PADDING(__nv_bfloat16)
 #endif
-}
+}  // namespace rtp_llm

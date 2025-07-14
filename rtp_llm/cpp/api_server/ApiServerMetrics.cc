@@ -110,17 +110,18 @@ void ApiServerMetricReporter::reportErrorQpsMetric(const std::string& source, in
     framework_error_qps_metric_->Report(&tags, 1);
 }
 
-#define REPORT_METRIC_IF_INITED(metric, value, errorMessage) \
-    do { \
-        if (!inited) { \
-            AUTIL_LOG(ERROR, errorMessage); \
-            return; \
-        } \
-        metric->Report(value); \
+#define REPORT_METRIC_IF_INITED(metric, value, errorMessage)                                                           \
+    do {                                                                                                               \
+        if (!inited) {                                                                                                 \
+            AUTIL_LOG(ERROR, errorMessage);                                                                            \
+            return;                                                                                                    \
+        }                                                                                                              \
+        metric->Report(value);                                                                                         \
     } while (0)
 
 void ApiServerMetricReporter::reportConflictQpsMetric() {
-    REPORT_METRIC_IF_INITED(framework_concurrency_exception_qps_metric_, 1, "report conflict qps metric failed, not inited");
+    REPORT_METRIC_IF_INITED(
+        framework_concurrency_exception_qps_metric_, 1, "report conflict qps metric failed, not inited");
 }
 
 void ApiServerMetricReporter::reportResponseIterateQpsMetric() {
@@ -132,7 +133,8 @@ void ApiServerMetricReporter::reportResponseLatencyMs(double val) {
 }
 
 void ApiServerMetricReporter::reportResponseFirstTokenLatencyMs(double val) {
-    REPORT_METRIC_IF_INITED(response_first_token_rt_metric_, val, "report response first token latency ms failed, not inited");
+    REPORT_METRIC_IF_INITED(
+        response_first_token_rt_metric_, val, "report response first token latency ms failed, not inited");
 }
 
 void ApiServerMetricReporter::reportResponseIterateLatencyMs(double val) {
@@ -140,7 +142,8 @@ void ApiServerMetricReporter::reportResponseIterateLatencyMs(double val) {
 }
 
 void ApiServerMetricReporter::reportResponseIterateCountMetric(int32_t val) {
-    REPORT_METRIC_IF_INITED(response_iterate_count_metric_, val, "report response iterate count metric failed, not inited");
+    REPORT_METRIC_IF_INITED(
+        response_iterate_count_metric_, val, "report response iterate count metric failed, not inited");
 }
 
 void ApiServerMetricReporter::reportUpdateQpsMetric() {
@@ -148,7 +151,8 @@ void ApiServerMetricReporter::reportUpdateQpsMetric() {
 }
 
 void ApiServerMetricReporter::reportErrorUpdateTargetQpsMetric() {
-    REPORT_METRIC_IF_INITED(error_update_target_qps_metric_, 1, "report error update target qps metric failed, not inited");
+    REPORT_METRIC_IF_INITED(
+        error_update_target_qps_metric_, 1, "report error update target qps metric failed, not inited");
 }
 
 void ApiServerMetricReporter::reportUpdateLatencyMs(double val) {
@@ -160,19 +164,23 @@ void ApiServerMetricReporter::reportFTIterateCountMetric(double val) {
 }
 
 void ApiServerMetricReporter::reportFTInputTokenLengthMetric(double val) {
-    REPORT_METRIC_IF_INITED(ft_input_token_length_metric_, val, "report ft input token length metric failed, not inited");
+    REPORT_METRIC_IF_INITED(
+        ft_input_token_length_metric_, val, "report ft input token length metric failed, not inited");
 }
 
 void ApiServerMetricReporter::reportFTOutputTokenLengthMetric(double val) {
-    REPORT_METRIC_IF_INITED(ft_output_token_length_metric_, val, "report ft output token length metric failed, not inited");
+    REPORT_METRIC_IF_INITED(
+        ft_output_token_length_metric_, val, "report ft output token length metric failed, not inited");
 }
 
 void ApiServerMetricReporter::reportFTPreTokenProcessorRtMetric(double val) {
-    REPORT_METRIC_IF_INITED(ft_pre_token_processor_rt_metric_, val, "report ft pre token_processor rt metric failed, not inited");
+    REPORT_METRIC_IF_INITED(
+        ft_pre_token_processor_rt_metric_, val, "report ft pre token_processor rt metric failed, not inited");
 }
 
 void ApiServerMetricReporter::reportFTPostTokenProcessorRtMetric(double val) {
-    REPORT_METRIC_IF_INITED(ft_post_token_processor_rt_metric_, val, "report ft post token_processor rt metric failed, not inited");
+    REPORT_METRIC_IF_INITED(
+        ft_post_token_processor_rt_metric_, val, "report ft post token_processor rt metric failed, not inited");
 }
 
 void ApiServerMetricReporter::reportFTNumBeansMetric(double val) {

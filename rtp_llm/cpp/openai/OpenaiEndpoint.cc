@@ -6,7 +6,7 @@ namespace rtp_llm {
 
 OpenaiEndpoint::OpenaiEndpoint(const std::shared_ptr<Tokenizer>&  tokenizer,
                                const std::shared_ptr<ChatRender>& chat_render,
-                               const rtp_llm::GptInitParameter&        params):
+                               const rtp_llm::GptInitParameter&   params):
     tokenizer_(tokenizer), chat_render_(chat_render), model_config_(params) {
 
     max_seq_len_ = model_config_.max_seq_len_;
@@ -19,7 +19,7 @@ OpenaiEndpoint::OpenaiEndpoint(const std::shared_ptr<Tokenizer>&  tokenizer,
 
     for (const auto& vec : model_config_.special_tokens_.stop_words_id_list_) {
         std::vector<int> tmpVec;
-        for (int64_t val: vec) {
+        for (int64_t val : vec) {
             tmpVec.push_back(static_cast<int>(val));
         }
         stop_word_ids_list_.push_back(tmpVec);
@@ -33,7 +33,7 @@ OpenaiEndpoint::OpenaiEndpoint(const std::shared_ptr<Tokenizer>&  tokenizer,
         RTP_LLM_LOG_WARNING("chat render is null");
     }
 
-    for (const auto& stop_word_ids: stop_word_ids_list_) {
+    for (const auto& stop_word_ids : stop_word_ids_list_) {
         if (tokenizer_) {
             auto word = tokenizer_->decode(stop_word_ids);
             if (!word.empty()) {
@@ -44,9 +44,9 @@ OpenaiEndpoint::OpenaiEndpoint(const std::shared_ptr<Tokenizer>&  tokenizer,
     RTP_LLM_LOG_INFO("use stop_words_list [%s]", autil::StringUtil::join(stop_words_list_, ",").c_str());
 }
 
-std::shared_ptr<GenerateConfig> OpenaiEndpoint::extract_generation_config(const ChatCompletionRequest &req) {
+std::shared_ptr<GenerateConfig> OpenaiEndpoint::extract_generation_config(const ChatCompletionRequest& req) {
     GenerateConfig config = req.extra_configs.value_or(GenerateConfig());
-    config.is_streaming = true;
+    config.is_streaming   = true;
     if (req.temperature.has_value()) {
         config.temperature = req.temperature.value();
     }
@@ -66,24 +66,17 @@ std::shared_ptr<GenerateConfig> OpenaiEndpoint::extract_generation_config(const 
         }
         if (std::holds_alternative<std::vector<std::string>>(stop)) {
             auto stop_vec = std::get<std::vector<std::string>>(stop);
-            request_stop_words_list.insert(request_stop_words_list.begin(),
-                                           stop_vec.begin(),
-                                           stop_vec.end());
+            request_stop_words_list.insert(request_stop_words_list.begin(), stop_vec.begin(), stop_vec.end());
         }
     }
-    config.stop_words_str.insert(config.stop_words_str.begin(),
-                                 request_stop_words_list.begin(),
-                                 request_stop_words_list.end());
-    config.stop_words_str.insert(config.stop_words_str.begin(),
-                                 stop_words_list_.begin(),
-                                 stop_words_list_.end());
-    config.stop_words_list.insert(config.stop_words_list.begin(),
-                                  stop_word_ids_list_.begin(),
-                                  stop_word_ids_list_.end());
+    config.stop_words_str.insert(
+        config.stop_words_str.begin(), request_stop_words_list.begin(), request_stop_words_list.end());
+    config.stop_words_str.insert(config.stop_words_str.begin(), stop_words_list_.begin(), stop_words_list_.end());
+    config.stop_words_list.insert(
+        config.stop_words_list.begin(), stop_word_ids_list_.begin(), stop_word_ids_list_.end());
     auto request_stop_words_list_ids = chat_render_->tokenize_words(request_stop_words_list);
-    config.stop_words_list.insert(config.stop_words_list.begin(),
-                                  request_stop_words_list_ids.begin(),
-                                  request_stop_words_list_ids.end());
+    config.stop_words_list.insert(
+        config.stop_words_list.begin(), request_stop_words_list_ids.begin(), request_stop_words_list_ids.end());
     // if (req.chat_id.has_value()) {
     //     config.chat_id = req.chat_id.value();
     // }
@@ -102,14 +95,12 @@ std::shared_ptr<GenerateConfig> OpenaiEndpoint::extract_generation_config(const 
 }
 
 std::string OpenaiEndpoint::getDebugInfo(const ChatCompletionRequest& chat_request,
-                                         const RenderedInputs& rendered_input) {
+                                         const RenderedInputs&        rendered_input) {
     std::vector<std::string> input_urls;
-    const auto& mm_inputs = rendered_input.multimodal_inputs;
-    std::transform(mm_inputs.begin(), mm_inputs.end(),
-                   std::back_inserter(input_urls),
-                   [](const auto& mm_input) {
-                       return mm_input.url;
-                   });
+    const auto&              mm_inputs = rendered_input.multimodal_inputs;
+    std::transform(mm_inputs.begin(), mm_inputs.end(), std::back_inserter(input_urls), [](const auto& mm_input) {
+        return mm_input.url;
+    });
 
     std::string prompt;
     if (rendered_input.rendered_prompt.empty()) {
@@ -119,16 +110,16 @@ std::string OpenaiEndpoint::getDebugInfo(const ChatCompletionRequest& chat_reque
     }
 
     DebugInfo debug_info;
-    debug_info.input_prompt = prompt;
-    debug_info.input_ids = rendered_input.input_ids;
-    debug_info.input_urls = input_urls;
-    debug_info.tokenizer_info = tokenizer_->toString();
-    debug_info.max_seq_len = max_seq_len_;
-    debug_info.eos_token_id = eos_token_id_;
+    debug_info.input_prompt       = prompt;
+    debug_info.input_ids          = rendered_input.input_ids;
+    debug_info.input_urls         = input_urls;
+    debug_info.tokenizer_info     = tokenizer_->toString();
+    debug_info.max_seq_len        = max_seq_len_;
+    debug_info.eos_token_id       = eos_token_id_;
     debug_info.stop_word_ids_list = stop_word_ids_list_;
-    debug_info.stop_words_list = stop_words_list_;
-    debug_info.renderer_info = chat_render_->toString();
-    debug_info.generate_config = *(extract_generation_config(chat_request));
+    debug_info.stop_words_list    = stop_words_list_;
+    debug_info.renderer_info      = chat_render_->toString();
+    debug_info.generate_config    = *(extract_generation_config(chat_request));
 
     return ToJsonString(debug_info, true);
 }

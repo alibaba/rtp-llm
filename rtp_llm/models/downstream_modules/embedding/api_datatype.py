@@ -1,21 +1,27 @@
-from typing import Union, List, Dict, Optional, Any
 from enum import Enum
+from typing import Any, Dict, List, Optional, Union
+
+from pydantic import BaseModel, Field
+
 from rtp_llm.config.base_model_config import PyDanticModelBase
 from rtp_llm.config.generate_config import GenerateConfig
-from pydantic import BaseModel, Field
+
 
 class Usage(PyDanticModelBase):
     prompt_tokens: int = 0
     total_tokens: int = 0
 
+
 class ExtraConfigs(PyDanticModelBase):
     tokenizer_config: Dict[str, Any] = {}
+
 
 class ContentPartTypeEnum(str, Enum):
     text = "text"
     image_url = "image_url"
     video_url = "video_url"
     audio_url = "audio_url"
+
 
 class MMPreprocessConfigPart(BaseModel):
     resized_width: Optional[int] = None
@@ -26,12 +32,15 @@ class MMPreprocessConfigPart(BaseModel):
     min_frames: Optional[int] = None
     max_frames: Optional[int] = None
 
+
 class ImageURL(BaseModel):
     url: str
     detail: Optional[str] = "auto"
 
+
 class AudioURL(BaseModel):
     url: str
+
 
 class ContentPart(BaseModel):
     type: ContentPartTypeEnum
@@ -41,6 +50,7 @@ class ContentPart(BaseModel):
     audio_url: Optional[AudioURL] = None
     preprocess_config: Optional[MMPreprocessConfigPart] = None
 
+
 class RoleEnum(str, Enum):
     user = "user"
     assistant = "assistant"
@@ -48,10 +58,13 @@ class RoleEnum(str, Enum):
     function = "function"
     tool = "tool"
     observation = "observation"
+
+
 class ChatMessage(BaseModel):
     role: RoleEnum
     content: Union[str, None, List[ContentPart]] = None
     partial: Optional[bool] = False
+
 
 class GPTFunctionDefinition(BaseModel):
     name: str
@@ -62,6 +75,7 @@ class GPTFunctionDefinition(BaseModel):
     name_for_model: Optional[str] = None
     name_for_human: Optional[str] = None
     description_for_model: Optional[str] = None
+
 
 class ChatCompletionRequest(BaseModel):
     model: Optional[str] = None
@@ -92,32 +106,41 @@ class ChatCompletionRequest(BaseModel):
     user_template: Optional[str] = None
     debug_info: Optional[bool] = False
     aux_info: Optional[bool] = False
-    extend_fields: Optional[Dict[str, Any]] = None # This field is not effective, only for logging.
+    extend_fields: Optional[Dict[str, Any]] = (
+        None  # This field is not effective, only for logging.
+    )
 
 
 class OpenAIEmbeddingRequest(PyDanticModelBase):
     prompt: str = ""
-    input: Union[str, List[str], ContentPart, List[ContentPart], ChatMessage, List[ChatMessage]] = None
+    input: Union[
+        str, List[str], ContentPart, List[ContentPart], ChatMessage, List[ChatMessage]
+    ] = None
     model: str = ""
-    encoding_format: str = 'float'
+    encoding_format: str = "float"
     user: str = ""
     extra_configs: ExtraConfigs = ExtraConfigs()
+
 
 class EmbeddingResponseType(str, Enum):
     DENSE = "embedding"
     SPARSE = "sparse_embedding"
     COLBERT = "colbert_embedding"
 
-'''
+
+"""
 List[float] -> dense response
 List[List[float]] -> colbert response
 Dict[str, float] -> sparse response
 str -> for smoke, embedding file path
-'''
+"""
+
+
 class EmbeddingResponseFormat(PyDanticModelBase):
     object: EmbeddingResponseType
     embedding: Union[List[float], Dict[str, float], List[List[float]], str]
     index: int
+
 
 class ALLEmbeddingResponseFormat(PyDanticModelBase):
     object: EmbeddingResponseType
@@ -125,17 +148,20 @@ class ALLEmbeddingResponseFormat(PyDanticModelBase):
     token_ids: List[int]
     index: int
 
+
 class OpenAIEmbeddingResponse(PyDanticModelBase):
-    object: str = 'list'
+    object: str = "list"
     data: List[EmbeddingResponseFormat] = []
     model: str = ""
     usage: Usage = Usage()
 
+
 class ALLEmbeddingResponse(PyDanticModelBase):
-    object: str = 'list'
+    object: str = "list"
     data: List[ALLEmbeddingResponseFormat] = []
     model: str = ""
     usage: Usage = Usage()
+
 
 class SimilarityRequest(PyDanticModelBase):
     left: Union[List[str], List[ContentPart]]
@@ -143,17 +169,21 @@ class SimilarityRequest(PyDanticModelBase):
     model: str = ""
     return_response: bool = False
 
+
 class SimilarityResponse(PyDanticModelBase):
     model: str = ""
     similarity: List[List[float]]
     left_response: Optional[OpenAIEmbeddingResponse] = None
     right_response: Optional[OpenAIEmbeddingResponse] = None
 
+
 class SparseEmbeddingRequest(OpenAIEmbeddingRequest):
     return_decoded: bool = True
 
+
 class ColbertEmbeddingRequest(OpenAIEmbeddingRequest):
     pass
+
 
 class AllEmbeddingRequest(OpenAIEmbeddingRequest):
     normalize: bool = True

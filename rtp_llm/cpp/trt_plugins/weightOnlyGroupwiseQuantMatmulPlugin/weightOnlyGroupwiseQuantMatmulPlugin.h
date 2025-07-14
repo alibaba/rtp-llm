@@ -25,14 +25,12 @@
 #include <string>
 #include <vector>
 
-namespace tensorrt_llm::plugins
-{
+namespace tensorrt_llm::plugins {
 
-using WeightOnlyGemmRunner = tensorrt_llm::kernels::cutlass_kernels::CutlassFpAIntBGemmRunnerInterface;
+using WeightOnlyGemmRunner    = tensorrt_llm::kernels::cutlass_kernels::CutlassFpAIntBGemmRunnerInterface;
 using WeightOnlyGemmRunnerPtr = std::shared_ptr<WeightOnlyGemmRunner>;
 
-class WeightOnlyGroupwiseQuantMatmulPlugin
-{
+class WeightOnlyGroupwiseQuantMatmulPlugin {
 public:
     WeightOnlyGroupwiseQuantMatmulPlugin() = default;
 
@@ -54,24 +52,22 @@ public:
                    cudaStream_t stream);
 
     // group_size: 64, 128
-    void init(nvinfer1::DataType type, bool has_zeros,int group_size, int weight_bits);
+    void init(nvinfer1::DataType type, bool has_zeros, int group_size, int weight_bits);
 
 private:
     void configGemm();
 
 private:
-
-    WeightOnlyGemmRunnerPtr m_weightOnlyGroupwiseGemmRunner;
-    size_t m_workspaceMaxSize;
-    nvinfer1::DataType mType;
-    bool mCudaKernelEnabled;
-    bool mHasZeros;
+    WeightOnlyGemmRunnerPtr                        m_weightOnlyGroupwiseGemmRunner;
+    size_t                                         m_workspaceMaxSize;
+    nvinfer1::DataType                             mType;
+    bool                                           mCudaKernelEnabled;
+    bool                                           mHasZeros;
     tensorrt_llm::kernels::weight_only::KernelType mCudaKernelType;
-    int mArch;
+    int                                            mArch;
 
-    int mGroupSize;
+    int                  mGroupSize;
     static constexpr int SMALL_M_FAST_PATH = 4;
-
 };
 
-} // namespace tensorrt_llm::plugins
+}  // namespace tensorrt_llm::plugins

@@ -13,13 +13,13 @@ public:
     ~MockEmbeddingEndpoint() override = default;
 
 public:
-    MOCK_METHOD(
-        (std::pair<std::string, std::optional<std::string>>),
-        handle,
-        (const std::string& body, std::optional<EmbeddingEndpoint::EmbeddingType> type,
-         const kmonitor::MetricsReporterPtr& metrics_reporter, int64_t start_time_us),
-        (override)
-    );
+    MOCK_METHOD((std::pair<std::string, std::optional<std::string>>),
+                handle,
+                (const std::string&                              body,
+                 std::optional<EmbeddingEndpoint::EmbeddingType> type,
+                 const kmonitor::MetricsReporterPtr&             metrics_reporter,
+                 int64_t                                         start_time_us),
+                (override));
 };
 
 }  // namespace rtp_llm

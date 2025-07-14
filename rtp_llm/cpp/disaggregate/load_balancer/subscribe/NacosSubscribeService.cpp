@@ -42,11 +42,14 @@ bool NacosSubscribeService::getTopoNodes(std::vector<std::shared_ptr<const TopoN
             if (instance.enabled && instance.healthy) {
                 topo_nodes.push_back(std::make_shared<TopoNode>(cluster, instance.ip, instance.port));
             } else {
-                RTP_LLM_LOG_DEBUG("nacos subscribe service get topo nodes failed, instance is not enabled or healthy, instance is [%s:%d]", instance.ip.c_str(), instance.port);
+                RTP_LLM_LOG_DEBUG(
+                    "nacos subscribe service get topo nodes failed, instance is not enabled or healthy, instance is [%s:%d]",
+                    instance.ip.c_str(),
+                    instance.port);
             }
         }
     }
     return true;
-} 
-
 }
+
+}  // namespace rtp_llm

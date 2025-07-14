@@ -6,7 +6,7 @@ namespace rtp_llm {
 
 class RRLoadBalancer: public BaseLoadBalancer {
 public:
-    RRLoadBalancer()          = default;
+    RRLoadBalancer() = default;
     virtual ~RRLoadBalancer();
 
 public:

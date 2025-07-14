@@ -22,8 +22,8 @@ public:
 
     // for SubscribeConfigType::LOCAL
     std::string local_ip;
-    int local_http_port;
-    int local_rpc_port;
+    int         local_http_port;
+    int         local_rpc_port;
 };
 
 class PyLoadbalanceConfig {

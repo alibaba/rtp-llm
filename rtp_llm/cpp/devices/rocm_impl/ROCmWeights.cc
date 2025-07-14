@@ -10,8 +10,7 @@ namespace rtp_llm {
 
 #if USING_CK_INT4
 // column major
-torch::Tensor ROCmDevice::packInt8TensorToPackedInt4(torch::Tensor weight)
-{
+torch::Tensor ROCmDevice::packInt8TensorToPackedInt4(torch::Tensor weight) {
     CHECK_CPU(weight);
     CHECK_CONTIGUOUS(weight);
     TORCH_CHECK(weight.numel() != 0, "weight should not be empty tensor");
@@ -28,9 +27,9 @@ torch::Tensor ROCmDevice::packInt8TensorToPackedInt4(torch::Tensor weight)
     Tensor packed_weight =
         torch::zeros(packed_tensor_size, torch::dtype(torch::kInt8).device(torch::kCPU).requires_grad(false));
 
-    Tensor weight_transposed = weight.transpose(0, 1).contiguous();
-    int8_t* unpacked_ptr = get_ptr<int8_t>(weight_transposed);
-    int8_t* packed_ptr   = get_ptr<int8_t>(packed_weight);
+    Tensor  weight_transposed = weight.transpose(0, 1).contiguous();
+    int8_t* unpacked_ptr      = get_ptr<int8_t>(weight_transposed);
+    int8_t* packed_ptr        = get_ptr<int8_t>(packed_weight);
 
     for (int packed_idx = 0; packed_idx < packed_weight.numel(); ++packed_idx) {
         int8_t packed_int4s = 0;
@@ -88,19 +87,22 @@ torch::Tensor ROCmDevice::packInt8TensorToPackedInt4(torch::Tensor weight) {
 }
 #endif
 
-torch::Tensor ROCmDevice::preprocessWeightsForMixedGemm(torch::Tensor column_major_quantized_weight, torch::ScalarType quant_type, const string &arch) {
+torch::Tensor ROCmDevice::preprocessWeightsForMixedGemm(torch::Tensor     column_major_quantized_weight,
+                                                        torch::ScalarType quant_type,
+                                                        const string&     arch) {
     auto _st = column_major_quantized_weight.scalar_type();
     CHECK_CPU(column_major_quantized_weight);
     TORCH_CHECK(_st == torch::kInt8, "Quantized tensor must be int8 dtype");
 
-    int columns=column_major_quantized_weight.size(1);
-    int rows=column_major_quantized_weight.size(0);
+    int columns = column_major_quantized_weight.size(1);
+    int rows    = column_major_quantized_weight.size(0);
 
     std::vector<long int> permute_tensor_size(column_major_quantized_weight.dim());
     for (int i = 0; i < column_major_quantized_weight.dim(); ++i) {
         permute_tensor_size[i] = column_major_quantized_weight.size(i);
     }
-    // permute_tensor_size[column_major_quantized_weight.dim() - 2] = (permute_tensor_size[column_major_quantized_weight.dim() - 2] + 1) / 2;
+    // permute_tensor_size[column_major_quantized_weight.dim() - 2] =
+    // (permute_tensor_size[column_major_quantized_weight.dim() - 2] + 1) / 2;
 
     std::reverse(permute_tensor_size.begin(), permute_tensor_size.end());
     Tensor permute_weight =
@@ -113,7 +115,7 @@ torch::Tensor ROCmDevice::preprocessWeightsForMixedGemm(torch::Tensor column_maj
         int input[8];
 
         for (int k = 0; k < 4; k++) {
-            int i4x2 = unpermute_ptr[permute_idx + k];
+            int i4x2         = unpermute_ptr[permute_idx + k];
             input[k * 2 + 0] = (i4x2 >> 4) & 0xf;
             input[k * 2 + 1] = (i4x2 >> 0) & 0xf;
         }
@@ -153,6 +155,5 @@ torch::Tensor ROCmDevice::preprocessWeightsForMixedGemm(torch::Tensor column_maj
     }
     return permute_weight.transpose(0, 1);
 }
-
 
 }  // namespace rtp_llm

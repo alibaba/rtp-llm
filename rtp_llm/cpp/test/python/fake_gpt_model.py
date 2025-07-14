@@ -1,5 +1,5 @@
-import sys
 import os
+import sys
 
 test_srcdir = os.environ.get("TEST_SRCDIR", "")
 if test_srcdir:
@@ -14,8 +14,8 @@ for path in sys.path:
     print(f"sys.path: {path}")
 
 import torch
-
 from subs.test_sub_module import TestSubModule
+
 
 def set_trace_on_tty():
     """
@@ -24,20 +24,24 @@ def set_trace_on_tty():
     """
     try:
         import pdb
+
         # 尝试打开 /dev/tty。如果失败（例如在非交互式会话中），则什么也不做。
-        tty_r = open('/dev/tty', 'r')
-        tty_w = open('/dev/tty', 'w')
+        tty_r = open("/dev/tty", "r")
+        tty_w = open("/dev/tty", "w")
         pdb.Pdb(stdin=tty_r, stdout=tty_w).set_trace()
     except OSError as e:
         # 在无法打开 tty 的环境中（如CI/CD），优雅地跳过调试
         print(f"Warning: Could not open /dev/tty: {e}. Skipping pdb.")
         import traceback
+
         traceback.print_exc()
         pass
+
 
 # TODO(wangyin): how to import python modules (like torch) from c++?
 # TODO(wangyin): how to pass parameters from c++ to python?
 # TODO(wangyin): how to log properly in python? (inherits binary starter python logger config)
+
 
 class GptModel:
     def __init__(self) -> None:

@@ -1,33 +1,52 @@
-import torch
-import logging
-import os
 import functools
 import json
-from typing import List, Any, Dict
+import logging
+import os
+from typing import Any, Dict, List
 
-from rtp_llm.utils.model_weight import (W, WeightStyle,
-                                                 CkptWeightInfo, identity, sp_0, sp_head_lora, sp_id, sp_neg1, zeros, transpose, transpose_pad,
-                                                 merge_qkv_b, merge_qkv_hf, merge_qkv_lora_A, merge_qkv_lora_B)
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.models.qwen import QWen
+import torch
 from transformers import AutoTokenizer
+
+from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_factory_register import register_model
-from rtp_llm.model_loader.weight_module import WeightModule, AtomicWeight
-from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, FfnWeight, FfnConfig
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
-from rtp_llm.model_loader.ffn_weight import FfnWeight, FfnAtomicWeight, FfnConfig
-from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
-from rtp_llm.model_loader.model_weight_info import ModelWeightInfo, ModelDeployWeightInfo
+from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, FfnConfig, FfnWeight
+from rtp_llm.model_loader.model_weight_info import (
+    ModelDeployWeightInfo,
+    ModelWeightInfo,
+)
+from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
+from rtp_llm.models.qwen import QWen
+from rtp_llm.utils.model_weight import (
+    CkptWeightInfo,
+    W,
+    WeightStyle,
+    identity,
+    merge_qkv_b,
+    merge_qkv_hf,
+    merge_qkv_lora_A,
+    merge_qkv_lora_B,
+    sp_0,
+    sp_head_lora,
+    sp_id,
+    sp_neg1,
+    transpose,
+    transpose_pad,
+    zeros,
+)
+
 
 def scale_reshape(ts: List[torch.Tensor]):
     return ts[0].reshape(-1)
 
+
 def create_scalar_ones(ts: List[torch.Tensor]):
     return torch.ones([1], dtype=torch.float32).to(ts[0].device)
 
+
 class QWenV2Weight(ModelDeployWeightInfo):
     def __init__(self, *args: Any, **kwargs: Any):
-        self.prefix: str = kwargs.pop('prefix', "")
+        self.prefix: str = kwargs.pop("prefix", "")
         self.bias = True
         super().__init__(*args, **kwargs)
 
@@ -37,9 +56,9 @@ class QWenV2Weight(ModelDeployWeightInfo):
 
     def _process_meta(self, meta_dicts: Any, weight_keys: List[str]):
         # compat for qwen_v2_video
-        if self._contains(weight_keys, 'language_model.'):
-            self.prefix = 'language_model.'
-        if self.prefix + 'transformer.layers.0.attention.dense.weight' in meta_dicts[0]:
+        if self._contains(weight_keys, "language_model."):
+            self.prefix = "language_model."
+        if self.prefix + "transformer.layers.0.attention.dense.weight" in meta_dicts[0]:
             self.weight_style = WeightStyle.TRT_ENGINE
         logging.info(f"weight_style: {self.weight_style}")
 
@@ -50,30 +69,77 @@ class QWenV2Weight(ModelDeployWeightInfo):
         ffn_config = FfnConfig(
             is_gated_activation=self._is_gated_activation,
             inter_padding_size=self._inter_padding_size,
-            is_moe=False
+            is_moe=False,
         )
 
-        inter_padding_size = self._layer_inter_padding_size[layer_id] if self._layer_inter_padding_size else self._inter_padding_size
-        return [FfnWeight(sub_weights=[
-            FfnAtomicWeight(W.ffn_w1, [CkptWeightInfo(self.prefix + 'model.layers.{i}.mlp.gate_proj.weight', identity)],
-                functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=0),
+        inter_padding_size = (
+            self._layer_inter_padding_size[layer_id]
+            if self._layer_inter_padding_size
+            else self._inter_padding_size
+        )
+        return [
+            FfnWeight(
+                sub_weights=[
+                    FfnAtomicWeight(
+                        W.ffn_w1,
+                        [
+                            CkptWeightInfo(
+                                self.prefix + "model.layers.{i}.mlp.gate_proj.weight",
+                                identity,
+                            )
+                        ],
+                        functools.partial(
+                            transpose_pad, inter_padding_size=inter_padding_size, dim=0
+                        ),
+                        config=ffn_config,
+                        lora_a_process_func=transpose,
+                        lora_b_process_func=functools.partial(
+                            transpose_pad, inter_padding_size=inter_padding_size, dim=0
+                        ),
+                        lora_a_split_func=sp_id,
+                        lora_b_split_func=sp_neg1,
+                    ),
+                    FfnAtomicWeight(
+                        W.ffn_w3,
+                        [
+                            CkptWeightInfo(
+                                self.prefix + "model.layers.{i}.mlp.up_proj.weight",
+                                identity,
+                            )
+                        ],
+                        functools.partial(
+                            transpose_pad, inter_padding_size=inter_padding_size, dim=0
+                        ),
+                        config=ffn_config,
+                        lora_a_process_func=transpose,
+                        lora_b_process_func=functools.partial(
+                            transpose_pad, inter_padding_size=inter_padding_size, dim=0
+                        ),
+                        lora_a_split_func=sp_id,
+                        lora_b_split_func=sp_neg1,
+                    ),
+                    FfnAtomicWeight(
+                        W.ffn_w2,
+                        [
+                            CkptWeightInfo(
+                                self.prefix + "model.layers.{i}.mlp.down_proj.weight",
+                                identity,
+                            )
+                        ],
+                        functools.partial(
+                            transpose_pad, inter_padding_size=inter_padding_size, dim=1
+                        ),
+                        config=ffn_config,
+                        lora_a_process_func=functools.partial(
+                            transpose_pad, inter_padding_size=inter_padding_size, dim=1
+                        ),
+                        lora_b_process_func=transpose,
+                        lora_a_split_func=sp_0,
+                        lora_b_split_func=sp_id,
+                    ),
+                ],
                 config=ffn_config,
-                lora_a_process_func=transpose,
-                lora_b_process_func=functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=0),
-                lora_a_split_func=sp_id, lora_b_split_func=sp_neg1),
-            FfnAtomicWeight(W.ffn_w3, [CkptWeightInfo(self.prefix + 'model.layers.{i}.mlp.up_proj.weight', identity)],
-                functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=0),
-                config=ffn_config,
-                lora_a_process_func=transpose,
-                lora_b_process_func=functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=0),
-                lora_a_split_func=sp_id, lora_b_split_func=sp_neg1),
-            FfnAtomicWeight(W.ffn_w2, [CkptWeightInfo(self.prefix + 'model.layers.{i}.mlp.down_proj.weight', identity)],
-                functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=1),
-                config=ffn_config,
-                lora_a_process_func=functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=1),
-                lora_b_process_func=transpose,
-                lora_a_split_func=sp_0, lora_b_split_func=sp_id)
-            ], config=ffn_config)
+            )
         ]
 
     def _get_hf_layer_weight_info(self, layer_id: int):
@@ -81,45 +147,144 @@ class QWenV2Weight(ModelDeployWeightInfo):
             hidden_size=self._hidden_size,
             size_per_head=self._size_per_head,
             head_num=self._head_num,
-            head_num_kv=self._head_num_kv)
+            head_num_kv=self._head_num_kv,
+        )
 
         layer_weights = [
-            AtomicWeight(W.pre_ln_gamma, [CkptWeightInfo(self.prefix + 'model.layers.{i}.input_layernorm.weight', identity)],
-                       identity),
-            AttnAtomicWeight(W.attn_qkv_w, [
-                    CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.q_proj.weight', identity),
-                    CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.k_proj.weight', identity),
-                    CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.v_proj.weight', identity)
+            AtomicWeight(
+                W.pre_ln_gamma,
+                [
+                    CkptWeightInfo(
+                        self.prefix + "model.layers.{i}.input_layernorm.weight",
+                        identity,
+                    )
                 ],
-                functools.partial(merge_qkv_hf), config=attn_config,
-                lora_a_process_func=functools.partial(merge_qkv_lora_A, allow_empty=False, hidden_size=self._hidden_size, head_num=self._head_num, head_num_kv=self._head_num_kv, size_per_head=self._size_per_head),
-                lora_b_process_func=functools.partial(merge_qkv_lora_B, allow_empty=False, hidden_size=self._hidden_size, head_num=self._head_num, head_num_kv=self._head_num_kv, size_per_head=self._size_per_head),
-                lora_a_split_func=sp_id, lora_b_split_func=sp_head_lora
+                identity,
+            ),
+            AttnAtomicWeight(
+                W.attn_qkv_w,
+                [
+                    CkptWeightInfo(
+                        self.prefix + "model.layers.{i}.self_attn.q_proj.weight",
+                        identity,
+                    ),
+                    CkptWeightInfo(
+                        self.prefix + "model.layers.{i}.self_attn.k_proj.weight",
+                        identity,
+                    ),
+                    CkptWeightInfo(
+                        self.prefix + "model.layers.{i}.self_attn.v_proj.weight",
+                        identity,
+                    ),
+                ],
+                functools.partial(merge_qkv_hf),
+                config=attn_config,
+                lora_a_process_func=functools.partial(
+                    merge_qkv_lora_A,
+                    allow_empty=False,
+                    hidden_size=self._hidden_size,
+                    head_num=self._head_num,
+                    head_num_kv=self._head_num_kv,
+                    size_per_head=self._size_per_head,
                 ),
-            AttnAtomicWeight(W.attn_o_w, [CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.o_proj.weight', identity)],
-                       transpose, config=attn_config,
-                       lora_a_process_func=transpose, lora_b_process_func=transpose,
-                       lora_a_split_func=sp_0, lora_b_split_func=sp_id),
-
-            AtomicWeight(W.post_ln_gamma, [CkptWeightInfo(self.prefix + 'model.layers.{i}.post_attention_layernorm.weight', identity)],
-                       identity, config=attn_config),
+                lora_b_process_func=functools.partial(
+                    merge_qkv_lora_B,
+                    allow_empty=False,
+                    hidden_size=self._hidden_size,
+                    head_num=self._head_num,
+                    head_num_kv=self._head_num_kv,
+                    size_per_head=self._size_per_head,
+                ),
+                lora_a_split_func=sp_id,
+                lora_b_split_func=sp_head_lora,
+            ),
+            AttnAtomicWeight(
+                W.attn_o_w,
+                [
+                    CkptWeightInfo(
+                        self.prefix + "model.layers.{i}.self_attn.o_proj.weight",
+                        identity,
+                    )
+                ],
+                transpose,
+                config=attn_config,
+                lora_a_process_func=transpose,
+                lora_b_process_func=transpose,
+                lora_a_split_func=sp_0,
+                lora_b_split_func=sp_id,
+            ),
+            AtomicWeight(
+                W.post_ln_gamma,
+                [
+                    CkptWeightInfo(
+                        self.prefix
+                        + "model.layers.{i}.post_attention_layernorm.weight",
+                        identity,
+                    )
+                ],
+                identity,
+                config=attn_config,
+            ),
         ]
 
         if self.attn_config.use_fp8_kv_cache:
-            layer_weights.append(AtomicWeight(W.attention_output_static_quant_reciprocal, [CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.q_proj.weight')], create_scalar_ones, torch.float32))
+            layer_weights.append(
+                AtomicWeight(
+                    W.attention_output_static_quant_reciprocal,
+                    [
+                        CkptWeightInfo(
+                            self.prefix + "model.layers.{i}.self_attn.q_proj.weight"
+                        )
+                    ],
+                    create_scalar_ones,
+                    torch.float32,
+                )
+            )
         if self.bias:
             layer_weights.append(
-                AttnAtomicWeight(W.attn_qkv_b, [
-                    CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.q_proj.bias', identity),
-                    CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.k_proj.bias', identity),
-                    CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.v_proj.bias', identity)
-                ],
-                functools.partial(merge_qkv_b), config=attn_config))
+                AttnAtomicWeight(
+                    W.attn_qkv_b,
+                    [
+                        CkptWeightInfo(
+                            self.prefix + "model.layers.{i}.self_attn.q_proj.bias",
+                            identity,
+                        ),
+                        CkptWeightInfo(
+                            self.prefix + "model.layers.{i}.self_attn.k_proj.bias",
+                            identity,
+                        ),
+                        CkptWeightInfo(
+                            self.prefix + "model.layers.{i}.self_attn.v_proj.bias",
+                            identity,
+                        ),
+                    ],
+                    functools.partial(merge_qkv_b),
+                    config=attn_config,
+                )
+            )
 
         if self._use_qk_norm:
-            layer_weights.extend([
-                 AttnAtomicWeight(W.q_ln_gamma, [CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.q_norm.weight')], config=attn_config),
-                 AttnAtomicWeight(W.k_ln_gamma, [CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.k_norm.weight')], config=attn_config)]
+            layer_weights.extend(
+                [
+                    AttnAtomicWeight(
+                        W.q_ln_gamma,
+                        [
+                            CkptWeightInfo(
+                                self.prefix + "model.layers.{i}.self_attn.q_norm.weight"
+                            )
+                        ],
+                        config=attn_config,
+                    ),
+                    AttnAtomicWeight(
+                        W.k_ln_gamma,
+                        [
+                            CkptWeightInfo(
+                                self.prefix + "model.layers.{i}.self_attn.k_norm.weight"
+                            )
+                        ],
+                        config=attn_config,
+                    ),
+                ]
             )
 
         layer_weights.extend(self._get_hf_ffn_layer_weight_info(layer_id))
@@ -128,17 +293,51 @@ class QWenV2Weight(ModelDeployWeightInfo):
     def _get_hf_weight_info(self):
         if self.weight_style == WeightStyle.TRT_ENGINE:
             weights = [
-                AtomicWeight(W.embedding, [CkptWeightInfo('transformer.vocab_embedding.weight', identity)], identity),
-                AtomicWeight(W.lm_head, [CkptWeightInfo('lm_head.weight', identity)], identity),
-                AtomicWeight(W.final_ln_gamma, [CkptWeightInfo('transformer.ln_f.weight', identity)], identity),
-                AtomicWeight(W.final_ln_beta, [], functools.partial(zeros, shape=[self._hidden_size])),
+                AtomicWeight(
+                    W.embedding,
+                    [CkptWeightInfo("transformer.vocab_embedding.weight", identity)],
+                    identity,
+                ),
+                AtomicWeight(
+                    W.lm_head, [CkptWeightInfo("lm_head.weight", identity)], identity
+                ),
+                AtomicWeight(
+                    W.final_ln_gamma,
+                    [CkptWeightInfo("transformer.ln_f.weight", identity)],
+                    identity,
+                ),
+                AtomicWeight(
+                    W.final_ln_beta,
+                    [],
+                    functools.partial(zeros, shape=[self._hidden_size]),
+                ),
             ]
         else:
             weights = [
-                AtomicWeight(W.embedding, [CkptWeightInfo(self.prefix + 'model.embed_tokens.weight', identity)], identity),
-                AtomicWeight(W.lm_head, [CkptWeightInfo(self.prefix + 'lm_head.weight', identity)], identity),
-                AtomicWeight(W.final_ln_gamma, [CkptWeightInfo(self.prefix + 'model.norm.weight', identity)], identity),
-                AtomicWeight(W.final_ln_beta, [], functools.partial(zeros, shape=[self._hidden_size])),
+                AtomicWeight(
+                    W.embedding,
+                    [
+                        CkptWeightInfo(
+                            self.prefix + "model.embed_tokens.weight", identity
+                        )
+                    ],
+                    identity,
+                ),
+                AtomicWeight(
+                    W.lm_head,
+                    [CkptWeightInfo(self.prefix + "lm_head.weight", identity)],
+                    identity,
+                ),
+                AtomicWeight(
+                    W.final_ln_gamma,
+                    [CkptWeightInfo(self.prefix + "model.norm.weight", identity)],
+                    identity,
+                ),
+                AtomicWeight(
+                    W.final_ln_beta,
+                    [],
+                    functools.partial(zeros, shape=[self._hidden_size]),
+                ),
             ]
 
         layer_weights: List[List[WeightModule]] = []
@@ -157,29 +356,47 @@ class QWenV2(QWen):
             head_num_kv=0,
             size_per_head=0,
             layer_num=0,
-            inter_size=0, # 13696
+            inter_size=0,  # 13696
             vocab_size=152064,
-            max_seq_len=8192)
+            max_seq_len=8192,
+        )
         config.rotary_embedding_dim = 128
         config.rotary_embedding_style = 1
-        config.activation_type = 'SiGLU'
+        config.activation_type = "SiGLU"
         config.has_pre_decoder_layernorm = False
         config.has_post_decoder_layernorm = True
-        config.norm_type = 'rmsnorm'
+        config.norm_type = "rmsnorm"
         config.special_tokens.bos_token_id = -1
         config.special_tokens.eos_token_id = 151643
         # <|im_start|> and <|im_end|>
         config.special_tokens.stop_words_id_list = [[151645], [151644]]
-        config.special_tokens.system.token_ids = [151644, 8948, 198] # '<|im_start|>system\n'
-        config.special_tokens.system.eos_token_ids = [151645, 198] # '<|im_end|>\n'
-        config.special_tokens.user.token_ids = [151644, 872, 198] # '<|im_start|>user\n'
+        config.special_tokens.system.token_ids = [
+            151644,
+            8948,
+            198,
+        ]  # '<|im_start|>system\n'
+        config.special_tokens.system.eos_token_ids = [151645, 198]  # '<|im_end|>\n'
+        config.special_tokens.user.token_ids = [
+            151644,
+            872,
+            198,
+        ]  # '<|im_start|>user\n'
         config.special_tokens.user.eos_token_ids = [151645, 198]  # '<|im_end|>\n'
-        config.special_tokens.assistant.token_ids = [151644, 77091, 198] # '<|im_start|>assistant\n'
-        config.special_tokens.assistant.eos_token_ids = [151645, 198] # '<|im_end|>\n'
+        config.special_tokens.assistant.token_ids = [
+            151644,
+            77091,
+            198,
+        ]  # '<|im_start|>assistant\n'
+        config.special_tokens.assistant.eos_token_ids = [151645, 198]  # '<|im_end|>\n'
 
         cls._from_hf(config, ckpt_path)
-        assert config.head_num > 0 and config.head_num_kv > 0 and config.size_per_head > 0 and config.layer_num > 0 and config.inter_size > 0, \
-            f"error config config.head_num={config.head_num} config.head_num_kv={config.head_num_kv} config.size_per_head={config.size_per_head} config.layer_num={config.layer_num} config.inter_size={config.inter_size}"
+        assert (
+            config.head_num > 0
+            and config.head_num_kv > 0
+            and config.size_per_head > 0
+            and config.layer_num > 0
+            and config.inter_size > 0
+        ), f"error config config.head_num={config.head_num} config.head_num_kv={config.head_num_kv} config.size_per_head={config.size_per_head} config.layer_num={config.layer_num} config.inter_size={config.inter_size}"
         return config
 
     @classmethod
@@ -200,15 +417,21 @@ class QWenV2(QWen):
         config.inter_size = config_json["intermediate_size"]
         config.head_num = config_json["num_attention_heads"]
         config.head_num_kv = config_json.get("num_key_value_heads", config.head_num)
-        config.size_per_head = int(config_json.get("head_dim")) if "head_dim" in config_json else config_json["hidden_size"] // config.head_num
+        config.size_per_head = (
+            int(config_json.get("head_dim"))
+            if "head_dim" in config_json
+            else config_json["hidden_size"] // config.head_num
+        )
         if config_json.get("hidden_size") is not None:
             config.hidden_size = config_json["hidden_size"]
         config.layer_num = config_json["num_hidden_layers"]
-        config.rotary_embedding_base = config_json.get("rope_theta", config.rotary_embedding_base)
+        config.rotary_embedding_base = config_json.get(
+            "rope_theta", config.rotary_embedding_base
+        )
         config.vocab_size = config_json["vocab_size"]
         config.rotary_embedding_dim = config.size_per_head
         config.layernorm_eps = config_json.get("rms_norm_eps", 1e-06)
-        config.tie_word_embeddings = config_json.get('tie_word_embeddings', False)
+        config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
 
     @staticmethod
     def get_weight_cls():
@@ -216,10 +439,13 @@ class QWenV2(QWen):
 
     @classmethod
     def get_tokenizer(cls, config: GptInitModelParameters):
-        tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_path, verbose=False, trust_remote_code=True)
-        tokenizer.im_start_id = tokenizer.encode('<|im_start|>')[0]
-        tokenizer.im_end_id = tokenizer.encode('<|im_end|>')[0]
+        tokenizer = AutoTokenizer.from_pretrained(
+            config.tokenizer_path, verbose=False, trust_remote_code=True
+        )
+        tokenizer.im_start_id = tokenizer.encode("<|im_start|>")[0]
+        tokenizer.im_end_id = tokenizer.encode("<|im_end|>")[0]
         return tokenizer
+
 
 class QWenV2Embedding(QWenV2):
     @classmethod
@@ -228,33 +454,78 @@ class QWenV2Embedding(QWenV2):
         config.is_causal = False
         return config
 
+
 class QwenV2MTPWeight(QWenV2Weight):
     def __init__(self, config: GptInitModelParameters, tp_size: int, tp_rank: int):
         super().__init__(config, tp_size, tp_rank)
+
     def _get_weight_info(self):
         weights = [
-            AtomicWeight(W.embedding, [CkptWeightInfo(self.prefix + 'model.embed_tokens.weight', identity)], identity),
-            AtomicWeight(W.lm_head, [CkptWeightInfo(self.prefix + 'lm_head.weight', identity)], identity),
+            AtomicWeight(
+                W.embedding,
+                [CkptWeightInfo(self.prefix + "model.embed_tokens.weight", identity)],
+                identity,
+            ),
+            AtomicWeight(
+                W.lm_head,
+                [CkptWeightInfo(self.prefix + "lm_head.weight", identity)],
+                identity,
+            ),
         ]
         layer_weights: List[List[AtomicWeight]] = []
         for layer in range(self._num_layers):
             w = self._get_hf_layer_weight_info(layer)
             layer_weights.append(w)
         for layer_id in range(self._num_layers):
-            layer_weights[layer_id].extend([
-                AtomicWeight(W.multi_tokens_predict_enorm, [CkptWeightInfo('model.layers.{i}.e_norm.weight', identity)], identity),
-                AtomicWeight(W.multi_tokens_predict_hnorm, [CkptWeightInfo('model.layers.{i}.h_norm.weight', identity)], identity),
-                AtomicWeight(W.multi_tokens_predict_eh_proj, [CkptWeightInfo('model.layers.{i}.eh_proj.weight', identity)], identity),
-                AtomicWeight(W.multi_tokens_predict_final_ln_gamma, [CkptWeightInfo('model.layers.{i}.final_head.norm.weight', identity)], identity),
-                AtomicWeight(W.multi_tokens_predict_final_ln_beta, [], functools.partial(zeros, shape=[self._hidden_size])),
-            ])
+            layer_weights[layer_id].extend(
+                [
+                    AtomicWeight(
+                        W.multi_tokens_predict_enorm,
+                        [CkptWeightInfo("model.layers.{i}.e_norm.weight", identity)],
+                        identity,
+                    ),
+                    AtomicWeight(
+                        W.multi_tokens_predict_hnorm,
+                        [CkptWeightInfo("model.layers.{i}.h_norm.weight", identity)],
+                        identity,
+                    ),
+                    AtomicWeight(
+                        W.multi_tokens_predict_eh_proj,
+                        [CkptWeightInfo("model.layers.{i}.eh_proj.weight", identity)],
+                        identity,
+                    ),
+                    AtomicWeight(
+                        W.multi_tokens_predict_final_ln_gamma,
+                        [
+                            CkptWeightInfo(
+                                "model.layers.{i}.final_head.norm.weight", identity
+                            )
+                        ],
+                        identity,
+                    ),
+                    AtomicWeight(
+                        W.multi_tokens_predict_final_ln_beta,
+                        [],
+                        functools.partial(zeros, shape=[self._hidden_size]),
+                    ),
+                ]
+            )
         return ModelWeightInfo(layer_weights=layer_weights, weights=weights)
+
     def _get_weights(self):
         weights = [
-            AtomicWeight(W.embedding, [CkptWeightInfo('model.embeddings.weight', concat_1)], identity),
-            AtomicWeight(W.lm_head, [CkptWeightInfo('lm_head.weight', identity)], identity)
+            AtomicWeight(
+                W.embedding,
+                [CkptWeightInfo("model.embeddings.weight", concat_1)],
+                identity,
+            ),
+            AtomicWeight(
+                W.lm_head, [CkptWeightInfo("lm_head.weight", identity)], identity
+            ),
         ]
         return weights
+
+
 class QwenV2MTP(QWenV2):
     @classmethod
     def _create_config(cls, ckpt_path: str):
@@ -262,14 +533,14 @@ class QwenV2MTP(QWenV2):
         config.moe_layer_index = [i for i in range(config.layer_num)]
         config.is_mtp = True
         return config
+
     @staticmethod
     def get_weight_cls():
         return QwenV2MTPWeight
 
 
-
-register_model('qwen_2', QWenV2, ["Qwen2ForCausalLM"])
-register_model('qwen_agent', QWenV2)
-register_model('qwen_2_embedding', QWenV2Embedding)
+register_model("qwen_2", QWenV2, ["Qwen2ForCausalLM"])
+register_model("qwen_agent", QWenV2)
+register_model("qwen_2_embedding", QWenV2Embedding)
 register_model("qwen_tool", QWenV2)
-register_model('qwen_2-mtp', QwenV2MTP)
+register_model("qwen_2-mtp", QwenV2MTP)

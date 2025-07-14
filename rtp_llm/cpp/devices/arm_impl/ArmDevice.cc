@@ -9,7 +9,7 @@
 namespace rtp_llm {
 ConstBufferPtr (*armPrepareWeightFunc)(ConstBufferPtr input, bool isTranspose, bool isForceF32Out);
 
-int getMemoryInfo(unsigned long *free_bytes, unsigned long *total_bytes) {
+int getMemoryInfo(unsigned long* free_bytes, unsigned long* total_bytes) {
     struct sysinfo info;
 
     if (sysinfo(&info) != 0) {
@@ -17,7 +17,7 @@ int getMemoryInfo(unsigned long *free_bytes, unsigned long *total_bytes) {
         return -1;
     }
 
-    *free_bytes = info.freeram * info.mem_unit;
+    *free_bytes  = info.freeram * info.mem_unit;
     *total_bytes = info.totalram * info.mem_unit;
 
     return 0;
@@ -25,7 +25,7 @@ int getMemoryInfo(unsigned long *free_bytes, unsigned long *total_bytes) {
 
 ArmCpuDevice::ArmCpuDevice(const DeviceInitParams& params): DeviceBase(params) {
 
-    auto allocator_ptr     = new Allocator<AllocatorType::CPU>();
+    auto allocator_ptr = new Allocator<AllocatorType::CPU>();
     if (params.device_reserve_memory_bytes) {
         size_t free_bytes, total_bytes;
         RTP_LLM_CHECK(getMemoryInfo(&free_bytes, &total_bytes) == 0);
@@ -36,9 +36,9 @@ ArmCpuDevice::ArmCpuDevice(const DeviceInitParams& params): DeviceBase(params) {
                                                 free_bytes + params.device_reserve_memory_bytes;
         tracker_params.align_size         = 16;
         RTP_LLM_LOG_INFO("Arm device %d has %lu bytes free memory, trying to reserve %lu bytes.",
-                    device_id_,
-                    free_bytes,
-                    tracker_params.target_track_bytes);
+                         device_id_,
+                         free_bytes,
+                         tracker_params.target_track_bytes);
         allocator_.reset(new TrackerAllocator(tracker_params));
     } else {
         allocator_.reset(allocator_ptr);
@@ -46,12 +46,11 @@ ArmCpuDevice::ArmCpuDevice(const DeviceInitParams& params): DeviceBase(params) {
 
     if (!params.hw_kernel_config.arm_gemm_use_kai) {
         isKAIenabled = false;
-        gemmFunc = &ArmCpuDevice::gemm_opt;
+        gemmFunc     = &ArmCpuDevice::gemm_opt;
     } else {
         isKAIenabled = true;
-        gemmFunc = &ArmCpuDevice::gemm_kai_bf16;
+        gemmFunc     = &ArmCpuDevice::gemm_kai_bf16;
     }
-
 }
 
 ArmCpuDevice::~ArmCpuDevice() {}
@@ -111,39 +110,39 @@ void ArmCpuDevice::allReduceSum(const AllReduceParams& params) {
 
 MemoryStatus ArmCpuDevice::getDeviceMemoryStatus() {
     MemoryStatus status;
-    size_t total_bytes;
-    auto error = getMemoryInfo(&status.free_bytes, &total_bytes);
+    size_t       total_bytes;
+    auto         error = getMemoryInfo(&status.free_bytes, &total_bytes);
     RTP_LLM_CHECK(error == 0);
     status.used_bytes = total_bytes - status.free_bytes;
     return status;
 }
 
-#define MAX_PRE_CALC_SEQ_LEN 1024 // TODO: get it from model config
+#define MAX_PRE_CALC_SEQ_LEN 1024  // TODO: get it from model config
 DevicePrepOutput ArmCpuDevice::prepareModelRun(const DevicePrepParams& params) {
     auto output = DevicePrepOutput();
     /* Prepare cos/sin values used in RoPE. */
     auto base = params.configs.rope_config.base;
-    auto dim = params.configs.rope_config.dim;
+    auto dim  = params.configs.rope_config.dim;
 
     auto it = ropeCosSin.find(base);
     if (it == ropeCosSin.end()) {
         size_t inv_freq_size = (dim + 1) / 2;
-        float *inv_freq = (float *)malloc(inv_freq_size * sizeof(float));
+        float* inv_freq      = (float*)malloc(inv_freq_size * sizeof(float));
 
         for (size_t i = 0; i < inv_freq_size; i++) {
             inv_freq[i] = 1.0f / powf(base, (float)(i * 2) / dim);
         }
-        float *emb_cos = (float *)malloc(MAX_PRE_CALC_SEQ_LEN * inv_freq_size * sizeof(float));
-        float *emb_sin = (float *)malloc(MAX_PRE_CALC_SEQ_LEN * inv_freq_size * sizeof(float));
+        float* emb_cos = (float*)malloc(MAX_PRE_CALC_SEQ_LEN * inv_freq_size * sizeof(float));
+        float* emb_sin = (float*)malloc(MAX_PRE_CALC_SEQ_LEN * inv_freq_size * sizeof(float));
 
         ropeCosSin[base] = std::make_tuple(MAX_PRE_CALC_SEQ_LEN, emb_cos, emb_sin);
 
         for (size_t i = 0; i < MAX_PRE_CALC_SEQ_LEN; i++) {
-            float *pcos = emb_cos + i * inv_freq_size;
-            float *psin = emb_sin + i * inv_freq_size;
+            float* pcos = emb_cos + i * inv_freq_size;
+            float* psin = emb_sin + i * inv_freq_size;
 
             for (size_t j = 0; j < inv_freq_size; j++) {
-                float val = i * inv_freq[j];
+                float val     = i * inv_freq[j];
                 float cos_tmp = cosf(val);
                 float sin_tmp = sinf(val);
 

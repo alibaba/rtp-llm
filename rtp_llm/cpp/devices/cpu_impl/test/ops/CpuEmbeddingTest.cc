@@ -26,7 +26,7 @@ protected:
         auto table           = tensorToBuffer(table_tensor);
         auto output          = device_->embeddingLookup({*ids, *table});
         auto expected_values = table_tensor.index_select(0, ids_tensor);
-        
+
         assertTensorClose(expected_values, bufferToTensor(*(output)));
     }
 };

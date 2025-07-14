@@ -129,4 +129,3 @@ inline __device__ void zero(T& dst) {
     }
     dst = tmp.raw;
 }
-

@@ -58,7 +58,7 @@ TEST_F(GangServerTest, Constructor) {
 }
 
 TEST_F(GangServerTest, RequestWorkers_PushWorkItemFailed) {
-    const int worker_num = 5;
+    const int                                worker_num = 5;
     std::vector<std::pair<std::string, int>> workers;
     for (int i = 0; i < worker_num; ++i) {
         workers.emplace_back(std::make_pair("127.0.0.1", 55555));
@@ -83,7 +83,7 @@ TEST_F(GangServerTest, RequestWorkers_Success) {
     StartLocalHttpServer(port);
 
     // 模拟 worker 数量
-    const int worker_num = 5;
+    const int                                worker_num = 5;
     std::vector<std::pair<std::string, int>> workers;
     for (int i = 0; i < worker_num; ++i) {
         workers.emplace_back(std::make_pair("127.0.0.1", port));

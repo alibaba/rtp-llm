@@ -77,10 +77,10 @@ DeviceBase* initTestDevices(const size_t rank, const size_t world_size, const si
     auto             device_type    = getDeviceType(device_name);
     auto             device_creator = DeviceFactory::getRegistrationMap().at(device_type);
     DeviceInitParams params;
-    params.device_id   = rank;
-    params.tp_rank     = rank;
-    params.tp_size     = world_size;
-    params.master_ip   = "127.0.0.1";
+    params.device_id      = rank;
+    params.tp_rank        = rank;
+    params.tp_size        = world_size;
+    params.master_ip      = "127.0.0.1";
     params.tp_master_port = port;
     return device_creator.create(params);
 }
@@ -108,7 +108,6 @@ void baseTest(const size_t rank, const size_t world_size, const size_t port, con
                         * (((int32_t)world_size * ((int32_t)world_size - 1) / 2) + (int32_t)world_size);
         CHECK_TRUE(checkTensorClose(expected, out, 1e-3, 1e-3));
     }
-
 
     for (size_t i = 1; i < 4096; i++) {
         // test castom all reduce
@@ -190,7 +189,7 @@ void benchmark(const size_t rank, const size_t world_size, size_t port) {
             part_sz_vec.push_back(s * h);
         }
 
-        auto device = initTestDevices(rank, world_size, port2 + k);
+        auto device                                                   = initTestDevices(rank, world_size, port2 + k);
         device->initParamsRef().hw_kernel_config.ft_disable_custom_ar = false;
         RTP_LLM_LOG_INFO("[Custom AR] Start hot run");
         executeBenchmarkRun(device, rank, world_size, 100, 0, 1024, false, false);
@@ -203,7 +202,7 @@ void benchmark(const size_t rank, const size_t world_size, size_t port) {
             part_custom_ar_times.push_back(time);
         }
 
-        device = initTestDevices(rank, world_size, port + k);
+        device                                                        = initTestDevices(rank, world_size, port + k);
         device->initParamsRef().hw_kernel_config.ft_disable_custom_ar = true;
         RTP_LLM_LOG_INFO("[NCCL] Start hot run");
         executeBenchmarkRun(device, rank, world_size, 100, 0, 1024, false, false);
@@ -220,10 +219,10 @@ void benchmark(const size_t rank, const size_t world_size, size_t port) {
             double avg_speed_up = 0;
             for (size_t i = 0; i < part_sz_vec.size(); i++) {
                 RTP_LLM_LOG_INFO("[AR] %d us, [NCCL] %d us, speed up %f x, Data num %d",
-                            part_custom_ar_times[i],
-                            part_nccl_times[i],
-                            (part_nccl_times[i] * 1.0 / part_custom_ar_times[i]) - 1.0,
-                            part_sz_vec[i]);
+                                 part_custom_ar_times[i],
+                                 part_nccl_times[i],
+                                 (part_nccl_times[i] * 1.0 / part_custom_ar_times[i]) - 1.0,
+                                 part_sz_vec[i]);
                 avg_speed_up += (part_nccl_times[i] * 1.0 / part_custom_ar_times[i]) - 1.0;
             }
 

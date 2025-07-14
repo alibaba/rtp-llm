@@ -13,8 +13,8 @@ TODO(wangyin.yx): import fastchat as a dependency in the future if possible.
 """
 
 import dataclasses
-from enum import auto, IntEnum
-from typing import List, Any, Dict, Union, Tuple
+from enum import IntEnum, auto
+from typing import Any, Dict, List, Tuple, Union
 
 
 class SeparatorStyle(IntEnum):
@@ -259,9 +259,9 @@ class Conversation:
             ret = self.system_message + seps[0]
             for i, (role, message) in enumerate(self.messages):
                 if message:
-                    ret += role + ': ' + message + seps[i % 2]
+                    ret += role + ": " + message + seps[i % 2]
                 else:
-                    ret += role + ':'
+                    ret += role + ":"
             return ret
         elif self.sep_style == SeparatorStyle.MPT:
             ret = system_prompt + self.sep

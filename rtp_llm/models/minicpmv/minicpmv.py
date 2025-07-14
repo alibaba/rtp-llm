@@ -4,25 +4,38 @@ from typing import Any, Dict, List
 
 import torch
 from PIL import Image
-from transformers import AutoTokenizer, AutoProcessor
-from rtp_llm.config.gpt_init_model_parameters import \
-    GptInitModelParameters
+from transformers import AutoProcessor, AutoTokenizer
+
+from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.distribute.worker_info import g_parallel_info
 from rtp_llm.model_factory_register import register_model
-from rtp_llm.models.qwen_v2 import QWenV2, QWenV2Weight
-from rtp_llm.models.multimodal.multimodal_mixin import MultiModalMixin, BaseVitWeights
-from rtp_llm.models.multimodal.multimodal_common import MultiModalEmbeddingInterface, mm_lock 
-from rtp_llm.utils.multimodal_util import MMUrlType
-from rtp_llm.models.minicpmv.modeling_navit_siglip import SiglipVisionTransformer, SiglipVisionConfig
+from rtp_llm.models.minicpmv.modeling_navit_siglip import (
+    SiglipVisionConfig,
+    SiglipVisionTransformer,
+)
 from rtp_llm.models.minicpmv.resampler import Resampler
-from rtp_llm.models.multimodal.multimodal_mixin import BaseVitWeights, BaseMultiModalWeightInfo
-from rtp_llm.utils.multimodal_util import MMUrlType, vit_emb_cache_, get_bytes_io_from_url
+from rtp_llm.models.multimodal.multimodal_common import (
+    MultiModalEmbeddingInterface,
+    mm_lock,
+)
+from rtp_llm.models.multimodal.multimodal_mixin import (
+    BaseMultiModalWeightInfo,
+    BaseVitWeights,
+    MultiModalMixin,
+)
+from rtp_llm.models.qwen_v2 import QWenV2, QWenV2Weight
+from rtp_llm.utils.multimodal_util import (
+    MMUrlType,
+    get_bytes_io_from_url,
+    vit_emb_cache_,
+)
 
 try:
     from decord import VideoReader, cpu
 except ModuleNotFoundError:
     VideoReader = None
     cpu = None
+
 
 def encode_video(video_path, max_num_frames: int = 32):
     def uniform_sample(l, n):
@@ -36,8 +49,9 @@ def encode_video(video_path, max_num_frames: int = 32):
     if len(frame_idx) > max_num_frames:
         frame_idx = uniform_sample(frame_idx, max_num_frames)
     frames = vr.get_batch(frame_idx).asnumpy()
-    frames = [Image.fromarray(v.astype('uint8')) for v in frames]
+    frames = [Image.fromarray(v.astype("uint8")) for v in frames]
     return frames
+
 
 class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
 
@@ -45,17 +59,20 @@ class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
         self.config = config
         config = config.mm_related_params.config
         self.vision_config = SiglipVisionConfig(**config)
-        self.processor = AutoProcessor.from_pretrained(config['ckpt_path'],
-                                                       trust_remote_code=True)
+        self.processor = AutoProcessor.from_pretrained(
+            config["ckpt_path"], trust_remote_code=True
+        )
         self.vpm = SiglipVisionTransformer(self.vision_config)
-        self.embed_dim = config['llm_hidden_size']
-        self.query_num = config['query_num']
+        self.embed_dim = config["llm_hidden_size"]
+        self.query_num = config["query_num"]
         self.vision_dim = self.vision_config.hidden_size
-        self.resampler = Resampler(num_queries=self.query_num,
-                                   embed_dim=self.embed_dim,
-                                   num_heads=self.embed_dim // 128,
-                                   kv_dim=self.vision_dim,
-                                   adaptive=True)
+        self.resampler = Resampler(
+            num_queries=self.query_num,
+            embed_dim=self.embed_dim,
+            num_heads=self.embed_dim // 128,
+            kv_dim=self.vision_dim,
+            adaptive=True,
+        )
 
     @property
     def _device(self):
@@ -71,16 +88,14 @@ class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
             cached_url_res = get_bytes_io_from_url(url)
             cached_url_res = self._mm_preprocess(cached_url_res, mm_type)
             with mm_lock:
-                features = self.mm_process(cached_url_res,
-                                        mm_type=mm_type,
-                                        **kwargs)
+                features = self.mm_process(cached_url_res, mm_type=mm_type, **kwargs)
             if isinstance(features, list):
                 features = torch.stack(features).to(dtype).contiguous()
             vit_emb_cache_.insert_cache(url, features)
             return (features, None)
         else:
             return (cached_res, None)
-        
+
     def _mm_preprocess(self, data, type, **kwargs):
         if type == MMUrlType.IMAGE:
             return Image.open(data).convert("RGB")
@@ -110,41 +125,41 @@ class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
     def image_embedding(self, images: List[Any]) -> List[torch.Tensor]:
         data = self.processor.image_processor(images, return_tensors="pt")
         dtype = self._data_type
-        tgt_sizes = data['tgt_sizes']
-        pixel_values_list = data['pixel_values']
+        tgt_sizes = data["tgt_sizes"]
+        pixel_values_list = data["pixel_values"]
         vision_hidden_states = []
         all_pixel_values = []
         img_cnt = []
         for pixel_values in pixel_values_list:
             img_cnt.append(len(pixel_values))
-            all_pixel_values.extend([
-                i.flatten(end_dim=1).permute(1, 0).to(self._device)
-                for i in pixel_values
-            ])
+            all_pixel_values.extend(
+                [
+                    i.flatten(end_dim=1).permute(1, 0).to(self._device)
+                    for i in pixel_values
+                ]
+            )
 
         assert all_pixel_values
         # exist image
         if all_pixel_values:
             tgt_sizes = [
-                tgt_size for tgt_size in tgt_sizes
-                if isinstance(tgt_size, torch.Tensor)
+                tgt_size for tgt_size in tgt_sizes if isinstance(tgt_size, torch.Tensor)
             ]
             tgt_sizes = torch.vstack(tgt_sizes).type(torch.int32)
 
             max_patches = torch.max(tgt_sizes[:, 0] * tgt_sizes[:, 1])
 
             all_pixel_values = torch.nn.utils.rnn.pad_sequence(
-                all_pixel_values, batch_first=True, padding_value=0.0)
+                all_pixel_values, batch_first=True, padding_value=0.0
+            )
             B, L, _ = all_pixel_values.shape
-            all_pixel_values = all_pixel_values.permute(0, 2, 1).reshape(
-                B, 3, -1, L)
+            all_pixel_values = all_pixel_values.permute(0, 2, 1).reshape(B, 3, -1, L)
 
-            patch_attn_mask = torch.zeros((B, 1, max_patches),
-                                          dtype=torch.bool,
-                                          device=self._device)
+            patch_attn_mask = torch.zeros(
+                (B, 1, max_patches), dtype=torch.bool, device=self._device
+            )
             for i in range(B):
-                patch_attn_mask[i,
-                                0, :tgt_sizes[i][0] * tgt_sizes[i][1]] = True
+                patch_attn_mask[i, 0, : tgt_sizes[i][0] * tgt_sizes[i][1]] = True
 
             vision_batch_size = 16
             all_pixel_values = all_pixel_values.type(dtype)
@@ -153,18 +168,19 @@ class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
                 for i in range(0, B, vision_batch_size):
                     start_idx = i
                     end_idx = i + vision_batch_size
-                    tmp_hs = self.vpm(all_pixel_values[start_idx:end_idx],
-                                      patch_attention_mask=patch_attn_mask[
-                                          start_idx:end_idx],
-                                      tgt_sizes=tgt_sizes[start_idx:end_idx]
-                                      ).last_hidden_state
+                    tmp_hs = self.vpm(
+                        all_pixel_values[start_idx:end_idx],
+                        patch_attention_mask=patch_attn_mask[start_idx:end_idx],
+                        tgt_sizes=tgt_sizes[start_idx:end_idx],
+                    ).last_hidden_state
                     hs.append(tmp_hs)
                 vision_embedding = torch.cat(hs, dim=0)
             else:
                 vision_embedding = self.vpm(
                     all_pixel_values,
                     patch_attention_mask=patch_attn_mask,
-                    tgt_sizes=tgt_sizes).last_hidden_state
+                    tgt_sizes=tgt_sizes,
+                ).last_hidden_state
             vision_embedding = self.resampler(vision_embedding, tgt_sizes)
 
             start = 0
@@ -172,8 +188,7 @@ class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
                 img_cnt = len(pixel_values)
                 if img_cnt > 0:
                     for i in range(img_cnt):
-                        vision_hidden_states.append(vision_embedding[start +
-                                                                     i])
+                        vision_hidden_states.append(vision_embedding[start + i])
                     start += img_cnt
                 else:
                     vision_hidden_states.append([])
@@ -207,17 +222,14 @@ class MiniCPMV(QWenV2, MultiModalMixin):
         QWenV2.__init__(self, config)
         self.config.mm_sep_tokens = [
             [self.tokenizer.im_start_id, self.tokenizer.im_end_id],
-            [self.tokenizer.slice_start_id, self.tokenizer.slice_end_id]
+            [self.tokenizer.slice_start_id, self.tokenizer.slice_end_id],
         ]
 
     def _init_multimodal(self, config: GptInitModelParameters):
         self.mm_part = ImageEmbeddingInterface(config)
-        config.mm_related_params.vit_weights = MiniCPMVVitWeight({
-            "vpm":
-            self.mm_part.vpm,
-            "resampler":
-            self.mm_part.resampler
-        })
+        config.mm_related_params.vit_weights = MiniCPMVVitWeight(
+            {"vpm": self.mm_part.vpm, "resampler": self.mm_part.resampler}
+        )
 
     @staticmethod
     def get_weight_cls():
@@ -225,29 +237,30 @@ class MiniCPMV(QWenV2, MultiModalMixin):
 
     @classmethod
     def get_tokenizer(cls, config: GptInitModelParameters):
-        tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_path,
-                                                  verbose=False,
-                                                  trust_remote_code=True,
-                                                  use_fast=True)
+        tokenizer = AutoTokenizer.from_pretrained(
+            config.tokenizer_path, verbose=False, trust_remote_code=True, use_fast=True
+        )
         return tokenizer
 
     @classmethod
     def _create_config(cls, ckpt_path: str):
-        config = GptInitModelParameters(head_num=0,
-                                        head_num_kv=0,
-                                        size_per_head=0,
-                                        layer_num=0,
-                                        inter_size=0,
-                                        vocab_size=0,
-                                        max_seq_len=8192,
-                                        ckpt_path=ckpt_path,
-                                        rotary_embedding_dim=128,
-                                        rotary_embedding_style=1,
-                                        activation_type='SiGLU',
-                                        has_pre_decoder_layernorm=False,
-                                        has_post_decoder_layernorm=True,
-                                        norm_type='rmsnorm')
-        config_path = os.path.join(ckpt_path, 'config.json')
+        config = GptInitModelParameters(
+            head_num=0,
+            head_num_kv=0,
+            size_per_head=0,
+            layer_num=0,
+            inter_size=0,
+            vocab_size=0,
+            max_seq_len=8192,
+            ckpt_path=ckpt_path,
+            rotary_embedding_dim=128,
+            rotary_embedding_style=1,
+            activation_type="SiGLU",
+            has_pre_decoder_layernorm=False,
+            has_post_decoder_layernorm=True,
+            norm_type="rmsnorm",
+        )
+        config_path = os.path.join(ckpt_path, "config.json")
         if os.path.exists(config_path):
             with open(config_path) as reader:
                 content = reader.read()
@@ -259,13 +272,11 @@ class MiniCPMV(QWenV2, MultiModalMixin):
         return config
 
     @staticmethod
-    def _init_vit_params(config: GptInitModelParameters,
-                         config_json: Dict[str, Any]):
+    def _init_vit_params(config: GptInitModelParameters, config_json: Dict[str, Any]):
         config.mm_related_params.config = config_json["vision_config"]
-        config.mm_related_params.config["llm_hidden_size"] = config_json[
-            "hidden_size"]
+        config.mm_related_params.config["llm_hidden_size"] = config_json["hidden_size"]
         config.mm_related_params.config["query_num"] = config_json["query_num"]
         config.mm_related_params.config["ckpt_path"] = config.ckpt_path
 
 
-register_model('minicpmv', MiniCPMV, ["MiniCPMV"])
+register_model("minicpmv", MiniCPMV, ["MiniCPMV"])

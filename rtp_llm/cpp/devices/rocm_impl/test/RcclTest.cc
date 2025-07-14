@@ -12,7 +12,6 @@ public:
     void SetUp() override {
         DeviceTestBase::SetUp();
     }
-
 };
 
 struct NcclResponse {
@@ -48,14 +47,14 @@ TEST_F(NcclTest, testBasicComm) {
 
     ncclUniqueId nccl_id;
     NCCLCHECK(ncclGetUniqueId(&nccl_id));
-    std:vector<future<void>> futures;
+std:
+    vector<future<void>> futures;
     for (size_t i = 0; i < device_count; i++) {
         auto future = async(launch::async, runTest, i, device_count, nccl_id);
         futures.push_back(move(future));
     }
 
-    for (auto& future: futures) {
+    for (auto& future : futures) {
         future.get();
     }
-
 }

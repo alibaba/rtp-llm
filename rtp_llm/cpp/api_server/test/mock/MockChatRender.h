@@ -23,32 +23,19 @@ class MockRenderContext: public RenderContext {
 public:
     MockRenderContext(): RenderContext() {}
     ~MockRenderContext() override = default;
+
 public:
-    MOCK_METHOD(
-            void,
-            init,
-            (int n, std::string body, std::shared_ptr<ChatRender> chat_render),
-            (override));
-    MOCK_METHOD(
-            std::string,
-            render_stream_response_first,
-            (int n, std::string debug_info),
-            (override));
-    MOCK_METHOD(
-            std::string,
-            render_stream_response,
-            (const GenerateOutputs& outputs, const std::shared_ptr<GenerateConfig>& config, bool is_streaming),
-            (override));
-    MOCK_METHOD(
-            std::string,
-            render_stream_response_flush,
-            (const GenerateOutputs& outputs, const std::shared_ptr<GenerateConfig>& config, bool is_streaming),
-            (override));
-    MOCK_METHOD(
-            std::string,
-            render_stream_response_final,
-            (const GenerateOutputs& outputs),
-            (override));
+    MOCK_METHOD(void, init, (int n, std::string body, std::shared_ptr<ChatRender> chat_render), (override));
+    MOCK_METHOD(std::string, render_stream_response_first, (int n, std::string debug_info), (override));
+    MOCK_METHOD(std::string,
+                render_stream_response,
+                (const GenerateOutputs& outputs, const std::shared_ptr<GenerateConfig>& config, bool is_streaming),
+                (override));
+    MOCK_METHOD(std::string,
+                render_stream_response_flush,
+                (const GenerateOutputs& outputs, const std::shared_ptr<GenerateConfig>& config, bool is_streaming),
+                (override));
+    MOCK_METHOD(std::string, render_stream_response_final, (const GenerateOutputs& outputs), (override));
 };
 
 }  // namespace rtp_llm

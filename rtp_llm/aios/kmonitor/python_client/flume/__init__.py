@@ -1,1 +1,1 @@
-__all__ = ['ttypes', 'constants', 'ThriftSourceProtocol']
+__all__ = ["ttypes", "constants", "ThriftSourceProtocol"]

@@ -7,21 +7,32 @@ import torch
 from einops import rearrange
 from transformers import AutoTokenizer
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters, TemplateType
+from rtp_llm.config.gpt_init_model_parameters import (
+    GptInitModelParameters,
+    TemplateType,
+)
 from rtp_llm.model_factory_register import register_model
+from rtp_llm.models.cogvlm2_weight import CogVLM2VitWeights, CogVLM2WeightInfo
 from rtp_llm.models.eva2clip_vit import EVA2CLIPImageEmbedding
-from rtp_llm.models.cogvlm2_weight import CogVLM2WeightInfo, CogVLM2VitWeights
 from rtp_llm.models.llama import Llama
 from rtp_llm.models.multimodal.multimodal_mixin import MultiModalMixin
 
 LANGUAGE_TOKEN_TYPE = 0
 VISION_TOKEN_TYPE = 1
 
+
 class CogVLM2(Llama, MultiModalMixin):
     def __init__(self, config: GptInitModelParameters):
         quant_algo = config.quant_algo
-        if quant_algo.isGptq() or quant_algo.isAwq() or quant_algo.isSmoothQuant() or quant_algo.isOmniQuant():
-            raise Exception("CogVLM2 only support FP32, BF16, FP16, INT8, not support other quant algorithm")
+        if (
+            quant_algo.isGptq()
+            or quant_algo.isAwq()
+            or quant_algo.isSmoothQuant()
+            or quant_algo.isOmniQuant()
+        ):
+            raise Exception(
+                "CogVLM2 only support FP32, BF16, FP16, INT8, not support other quant algorithm"
+            )
         super().__init__(config)
 
     def _init_multimodal(self, config: GptInitModelParameters):
@@ -44,7 +55,7 @@ class CogVLM2(Llama, MultiModalMixin):
             rotary_embedding_dim=128,
             rotary_embedding_style=1,
             rotary_embedding_base=500000,
-            has_post_decoder_layernorm=True
+            has_post_decoder_layernorm=True,
         )
         # hugggingface
         config_path = os.path.join(ckpt_path, "config.json")
@@ -91,15 +102,17 @@ class CogVLM2(Llama, MultiModalMixin):
         vit_config = config_json["vision_config"]
         config.mm_related_params.config.update(vit_config)
         # use vision hidden size for linear_proj and conv layer in eva2clip
-        config.mm_related_params.config['use_vision_hidden_size'] = True
+        config.mm_related_params.config["use_vision_hidden_size"] = True
         config.special_tokens.bos_token_id = config_json["bos_token_id"]
         config.special_tokens.pad_token_id = config_json["pad_token_id"]
 
-        if isinstance(config_json['eos_token_id'], list):
-            config.special_tokens.eos_token_id = config_json['eos_token_id'][0]
-            config.special_tokens.stop_words_id_list = [[x] for x in config_json['eos_token_id']]
+        if isinstance(config_json["eos_token_id"], list):
+            config.special_tokens.eos_token_id = config_json["eos_token_id"][0]
+            config.special_tokens.stop_words_id_list = [
+                [x] for x in config_json["eos_token_id"]
+            ]
         else:
-            config.special_tokens.eos_token_id = config_json['eos_token_id']
+            config.special_tokens.eos_token_id = config_json["eos_token_id"]
 
     @classmethod
     def get_tokenizer(cls, config: GptInitModelParameters):
@@ -116,8 +129,11 @@ class CogVLM2(Llama, MultiModalMixin):
         return token_types
 
     def extend_generate_position_ids(
-        self, generate_batch_size: int, num_beams: int,
-        vision_token_length: List[int], seq_lengths_list: List[int]
+        self,
+        generate_batch_size: int,
+        num_beams: int,
+        vision_token_length: List[int],
+        seq_lengths_list: List[int],
     ) -> List[int]:
         position_ids = []
         for i in range(generate_batch_size):
@@ -127,21 +143,30 @@ class CogVLM2(Llama, MultiModalMixin):
                 position_ids.append(seq_lengths_list[start_idx] - 1)
             else:
                 # ccontain image
-                position_ids.append(seq_lengths_list[start_idx] - vision_token_length[start_idx] + 2)
+                position_ids.append(
+                    seq_lengths_list[start_idx] - vision_token_length[start_idx] + 2
+                )
         return position_ids
 
     def extend_context_position_ids(
-        self, context_begin_position: int, context_end_position: int,
-        token_type_ids: torch.Tensor, token_ids: torch.Tensor
+        self,
+        context_begin_position: int,
+        context_end_position: int,
+        token_type_ids: torch.Tensor,
+        token_ids: torch.Tensor,
     ) -> List[int]:
         # construct position ids for rotary embedding, assuming the token_type_ids is [T, V, V, V, V, V, T, T, T]
         # the expected position ids is [0, 1, 2, 2, 2, 3, 4, 5, 6]
         # see https://huggingface.co/THUDM/cogvlm2-llama3-chat-19B/blob/main/modeling_cogvlm.py#318
         tmp = token_type_ids.numpy().copy()
         is_boi_eoi = np.zeros_like(tmp, dtype=bool)
-        is_boi_eoi[1:] |= (tmp[1:] == VISION_TOKEN_TYPE) & (tmp[:-1] == LANGUAGE_TOKEN_TYPE)
+        is_boi_eoi[1:] |= (tmp[1:] == VISION_TOKEN_TYPE) & (
+            tmp[:-1] == LANGUAGE_TOKEN_TYPE
+        )
         is_boi_eoi[0] |= tmp[0] == VISION_TOKEN_TYPE
-        is_boi_eoi[:-1] |= (tmp[:-1] == VISION_TOKEN_TYPE) & (tmp[1:] == LANGUAGE_TOKEN_TYPE)
+        is_boi_eoi[:-1] |= (tmp[:-1] == VISION_TOKEN_TYPE) & (
+            tmp[1:] == LANGUAGE_TOKEN_TYPE
+        )
         is_boi_eoi[-1] |= tmp[-1] == VISION_TOKEN_TYPE
         tmp[is_boi_eoi] = LANGUAGE_TOKEN_TYPE
         y = np.zeros_like(tmp, dtype=np.int32)
@@ -195,12 +220,10 @@ class CogVLM2(Llama, MultiModalMixin):
             )
         return input_embeds
 
+
 register_model(
     "cogvlm2",
     CogVLM2,
     ["CogVLMForCausalLM"],
-    [
-        "THUDM/cogvlm2-llama3-chat-19B",
-        "THUDM/cogvlm2-llama3-chinese-chat-19B"
-    ],
+    ["THUDM/cogvlm2-llama3-chat-19B", "THUDM/cogvlm2-llama3-chinese-chat-19B"],
 )

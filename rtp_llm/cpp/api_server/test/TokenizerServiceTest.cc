@@ -18,10 +18,10 @@ public:
 
 protected:
     void SetUp() override {
-        mock_writer_       = std::make_unique<http_server::MockHttpResponseWriter>();
-        mock_token_processor_     = std::make_shared<MockTokenProcessor>();
-        auto token_processor      = std::dynamic_pointer_cast<TokenProcessor>(mock_token_processor_);
-        tokenizer_service_ = std::make_shared<TokenizerService>(token_processor);
+        mock_writer_          = std::make_unique<http_server::MockHttpResponseWriter>();
+        mock_token_processor_ = std::make_shared<MockTokenProcessor>();
+        auto token_processor  = std::dynamic_pointer_cast<TokenProcessor>(mock_token_processor_);
+        tokenizer_service_    = std::make_shared<TokenizerService>(token_processor);
     }
     void TearDown() override {}
 
@@ -54,7 +54,7 @@ protected:
 
 protected:
     std::unique_ptr<http_server::MockHttpResponseWriter> mock_writer_;
-    std::shared_ptr<MockTokenProcessor>                        mock_token_processor_;
+    std::shared_ptr<MockTokenProcessor>                  mock_token_processor_;
     std::shared_ptr<TokenizerService>                    tokenizer_service_;
 };
 
@@ -301,7 +301,7 @@ TEST_F(TokenizerServiceTest, TokenizerEncode_WithoutOffsetMapping) {
 
 TEST_F(TokenizerServiceTest, TokenizerEncodeRequest) {
     TokenizerEncodeRequest req;
-    req.prompt = "hello";
+    req.prompt                 = "hello";
     req.return_offsets_mapping = true;
 
     auto json_str = autil::legacy::ToJsonString(req);

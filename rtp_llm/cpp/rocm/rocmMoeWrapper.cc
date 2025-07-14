@@ -13,7 +13,8 @@
 namespace rtp_llm {
 
 static void throwCKError(const char* const file, int const line, std::string const& info = "") {
-    auto error_msg = std::string("[CK][ERROR] ") + info + " Assertion fail: " + file + ":" + std::to_string(line) + " \n";
+    auto error_msg =
+        std::string("[CK][ERROR] ") + info + " Assertion fail: " + file + ":" + std::to_string(line) + " \n";
     std::printf("%s", error_msg.c_str());
     fflush(stdout);
     fflush(stderr);
@@ -96,9 +97,9 @@ uint32_t rocmMoeWrapper::runCKMoe(const rocmMoeParams& params,
                         params.gate_scale_ptr,
                         params.down_scale_ptr,
                         params.smooth_scale_ptr,
-                        nullptr, //local_expert_mask_ptr
+                        nullptr,  // local_expert_mask_ptr
                         params.output_ptr,
-                        nullptr, //ws_ptr
+                        nullptr,  // ws_ptr
                         params.topk_ids_ptr,
                         params.topk_weight_ptr,
                         params.sorted_token_ids_ptr,

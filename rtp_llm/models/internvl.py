@@ -1,24 +1,27 @@
-import os
-import logging
 import json
+import logging
 import math
-import torch
-
+import os
 from typing import Any, Dict, List
 
+import torch
 from transformers import AutoTokenizer
+
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.models.qwen_v2 import QWenV2
-from rtp_llm.models.llama import Llama
-from rtp_llm.models.base_model import BaseModel
-from rtp_llm.models.multimodal.multimodal_mixin import MultiModalMixin
-from rtp_llm.models.internvl_weight import InternVLVitWeight, InternVLWeightInfo
 from rtp_llm.model_factory_register import register_model
+from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.internvl_vit import InternVLImageEmbedding
+from rtp_llm.models.internvl_weight import InternVLVitWeight, InternVLWeightInfo
+from rtp_llm.models.llama import Llama
+from rtp_llm.models.multimodal.multimodal_mixin import MultiModalMixin
+from rtp_llm.models.qwen_v2 import QWenV2
+
 
 class InternVLTokenizer:
     def __init__(self, tokenizer_path: str):
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            tokenizer_path, trust_remote_code=True
+        )
 
     def encode(self, prompt: str, **kwargs):
         prompt_slices = prompt.split("<image>")
@@ -30,13 +33,16 @@ class InternVLTokenizer:
     def decode(self, token_id: List[int], **kwargs):
         return self.tokenizer.decode(token_id, **kwargs)
 
+
 class InternVL(BaseModel, MultiModalMixin):
     def _init_multimodal(self, config: GptInitModelParameters):
         self.mm_part = InternVLImageEmbedding(config)
-        config.mm_related_params.vit_weights = InternVLVitWeight({"vision_model": self.mm_part.vision_model,
-                                                                    "mlp1": self.mm_part.mlp1}, True)
-        config.mm_sep_tokens = [[self.tokenizer.encode("<img>")[0], self.tokenizer.encode("</img>")[0]]]
-
+        config.mm_related_params.vit_weights = InternVLVitWeight(
+            {"vision_model": self.mm_part.vision_model, "mlp1": self.mm_part.mlp1}, True
+        )
+        config.mm_sep_tokens = [
+            [self.tokenizer.encode("<img>")[0], self.tokenizer.encode("</img>")[0]]
+        ]
 
     @staticmethod
     def get_weight_cls():
@@ -59,13 +65,13 @@ class InternVL(BaseModel, MultiModalMixin):
             ckpt_path=ckpt_path,
             rotary_embedding_dim=128,
             rotary_embedding_style=1,
-            activation_type='SiGLU',
+            activation_type="SiGLU",
             has_pre_decoder_layernorm=False,
             has_post_decoder_layernorm=True,
-            norm_type='rmsnorm'
-            )
+            norm_type="rmsnorm",
+        )
 
-        config_path = os.path.join(ckpt_path, 'config.json')
+        config_path = os.path.join(ckpt_path, "config.json")
         if os.path.exists(config_path):
             with open(config_path) as reader:
                 content = reader.read()
@@ -73,8 +79,10 @@ class InternVL(BaseModel, MultiModalMixin):
                 llm_config = config_json["llm_config"]
                 if llm_config["architectures"][0] == "Qwen2ForCausalLM":
                     QWenV2._from_config_json(config, llm_config)
-                elif llm_config["architectures"][0] == "InternLM2ForCausalLM" or \
-                    llm_config["architectures"][0] == "LlamaForCausalLM":
+                elif (
+                    llm_config["architectures"][0] == "InternLM2ForCausalLM"
+                    or llm_config["architectures"][0] == "LlamaForCausalLM"
+                ):
                     Llama.from_huggingface(config, llm_config)
                 else:
                     raise Exception("unknown language model architecture")
@@ -82,21 +90,34 @@ class InternVL(BaseModel, MultiModalMixin):
         else:
             raise Exception("no config.json found")
         config.special_tokens.stop_words_str_list = ["<|im_end|>"]
-        assert config.head_num > 0 and config.head_num_kv > 0 and config.size_per_head > 0 and config.layer_num > 0 and config.inter_size > 0, "error config"
-        config.mm_related_params.special_tokens.update({'default_mm_token': '<image>'})
+        assert (
+            config.head_num > 0
+            and config.head_num_kv > 0
+            and config.size_per_head > 0
+            and config.layer_num > 0
+            and config.inter_size > 0
+        ), "error config"
+        config.mm_related_params.special_tokens.update({"default_mm_token": "<image>"})
         return config
 
     @classmethod
     def _update_config(cls, config: GptInitModelParameters):
         if config.tokenizer_path:
-            config.special_tokens.stop_words_id_list = [cls.get_tokenizer(config).encode("<|im_end|>")]
+            config.special_tokens.stop_words_id_list = [
+                cls.get_tokenizer(config).encode("<|im_end|>")
+            ]
 
     @staticmethod
     def _init_vit_params(config: GptInitModelParameters, config_json: Dict[str, Any]):
         config.mm_related_params.config = config_json["vision_config"]
         config.mm_related_params.config["select_layer"] = config_json["select_layer"]
-        config.mm_related_params.config["llm_hidden_size"] = config_json["llm_config"]["hidden_size"]
-        config.mm_related_params.config["downsample_ratio"] = config_json["downsample_ratio"]
+        config.mm_related_params.config["llm_hidden_size"] = config_json["llm_config"][
+            "hidden_size"
+        ]
+        config.mm_related_params.config["downsample_ratio"] = config_json[
+            "downsample_ratio"
+        ]
         config.mm_related_params.config["ps_version"] = config_json["ps_version"]
+
 
 register_model("internvl", InternVL, ["InternVLChatModel"])

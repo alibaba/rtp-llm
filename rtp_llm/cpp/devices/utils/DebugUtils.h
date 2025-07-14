@@ -6,29 +6,34 @@
 
 namespace rtp_llm {
 
-#define printBufferData(buffer, hint)                                       \
-    do {                                                                    \
-        if (rtp_llm::Logger::getEngineLogger().isTraceMode()) {             \
-            printBufferData_(buffer, hint);                                 \
-        }                                                                   \
-    } while(0)
+#define printBufferData(buffer, hint)                                                                                  \
+    do {                                                                                                               \
+        if (rtp_llm::Logger::getEngineLogger().isTraceMode()) {                                                        \
+            printBufferData_(buffer, hint);                                                                            \
+        }                                                                                                              \
+    } while (0)
 
 #define forcePrintBufferData(buffer, hint)                                                                             \
     do {                                                                                                               \
         printBufferData_(buffer, hint);                                                                                \
-    }                                                                                                                  \
-    while (0)
+    } while (0)
 
-void printBufferData_(const Buffer& buffer, const std::string& hint, DeviceBase* device = nullptr, bool show_stats_only = false);
+void printBufferData_(const Buffer&      buffer,
+                      const std::string& hint,
+                      DeviceBase*        device          = nullptr,
+                      bool               show_stats_only = false);
 
-#define printTorchTensorData(buffer, hint)                      \
-    do {                                                        \
-        if (rtp_llm::Logger::getEngineLogger().isTraceMode()) { \
-            printTorchTensorData_(buffer, hint);                \
-        }                                                       \
-    } while(0)
+#define printTorchTensorData(buffer, hint)                                                                             \
+    do {                                                                                                               \
+        if (rtp_llm::Logger::getEngineLogger().isTraceMode()) {                                                        \
+            printTorchTensorData_(buffer, hint);                                                                       \
+        }                                                                                                              \
+    } while (0)
 
-void printTorchTensorData_(const torch::Tensor& tensor, const std::string& hint, DeviceBase* device = nullptr, bool show_stats_only = false);
+void printTorchTensorData_(const torch::Tensor& tensor,
+                           const std::string&   hint,
+                           DeviceBase*          device          = nullptr,
+                           bool                 show_stats_only = false);
 
 BufferPtr loadTorchToBuffer(const std::string& fileName, DeviceBase* device);
 
@@ -37,7 +42,10 @@ BufferPtr loadTorchToBuffer(const std::string& fileName, DeviceBase* device);
 #define printBufferData(buffer, hint) saveBufferData_(buffer, nullptr, hint, std::string(__FILE__));
 #endif
 
-void saveBufferData_(const Buffer& buffer, DeviceBase* device, const std::string& fileName, const std::string& sourceFile);
+void saveBufferData_(const Buffer&      buffer,
+                     DeviceBase*        device,
+                     const std::string& fileName,
+                     const std::string& sourceFile);
 
 void saveBufferData_(Buffer& buffer, DeviceBase* device, const std::string& fileName, const std::string& sourceFile);
 
@@ -58,4 +66,4 @@ std::pair<double, double> calculateTensorSum(TensorAccessor&& accessor, size_t d
     }
     return {sum1, sum2};
 }
-}
+}  // namespace rtp_llm

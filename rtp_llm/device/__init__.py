@@ -1,10 +1,12 @@
 import logging
 from typing import Optional, Type
-from rtp_llm.device.device_base import DeviceType, DeviceBase
-from rtp_llm.device.device_impl import CpuImpl, ArmCpuImpl, CudaImpl, PpuImpl, RocmImpl
-from rtp_llm.ops import get_device, DeviceType, DeviceExporter
+
+from rtp_llm.device.device_base import DeviceBase, DeviceType
+from rtp_llm.device.device_impl import ArmCpuImpl, CpuImpl, CudaImpl, PpuImpl, RocmImpl
+from rtp_llm.ops import DeviceExporter, DeviceType, get_device
 
 _current_device: Optional[DeviceBase] = None
+
 
 def get_device_cls(type: DeviceType) -> Type:
     if type == DeviceType.Cpu:
@@ -20,6 +22,7 @@ def get_device_cls(type: DeviceType) -> Type:
     else:
         raise ValueError(f"Invalid device type {type}")
 
+
 def get_current_device() -> DeviceBase:
     global _current_device
 
@@ -31,7 +34,7 @@ def get_current_device() -> DeviceBase:
     device_cls = get_device_cls(device_type)
 
     _current_device = device_cls(exported_device)
-    if (not _current_device):
+    if not _current_device:
         raise ValueError(f"Failed to create device of type {device_type}")
 
     return _current_device

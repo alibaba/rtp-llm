@@ -2,21 +2,18 @@ import functools
 from typing import List
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.model_loader.attn_weight import AttnAtomicWeight
+from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, FfnWeight
+from rtp_llm.model_loader.model_weight_info import (
+    ModelDeployWeightInfo,
+    ModelWeightInfo,
+)
+from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
 from rtp_llm.models.multimodal.multimodal_mixin import (
     BaseMultiModalWeightInfo,
     BaseVitWeights,
 )
-from rtp_llm.utils.model_weight import (
-    CkptWeightInfo,
-    W,
-    identity,
-    transpose,
-    zeros,
-)
-from rtp_llm.model_loader.weight_module import WeightModule, AtomicWeight
-from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, FfnWeight
-from rtp_llm.model_loader.attn_weight import AttnAtomicWeight
-from rtp_llm.model_loader.model_weight_info import ModelWeightInfo, ModelDeployWeightInfo
+from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity, transpose, zeros
 
 from ..config.gpt_init_model_parameters import GptInitModelParameters
 
@@ -43,7 +40,7 @@ class CogVLM2Weight(ModelDeployWeightInfo):
                     )
                 ],
                 transpose,
-                config=attn_config
+                config=attn_config,
             ),
             AttnAtomicWeight(
                 W.attn_o_w,
@@ -54,7 +51,7 @@ class CogVLM2Weight(ModelDeployWeightInfo):
                     )
                 ],
                 transpose,
-                config=attn_config
+                config=attn_config,
             ),
             AtomicWeight(
                 W.vision_attn_qkv_w,
@@ -95,37 +92,44 @@ class CogVLM2Weight(ModelDeployWeightInfo):
                 ],
                 identity,
             ),
-            FfnWeight(sub_weights=[
-                FfnAtomicWeight(
-                    W.ffn_w2,
-                    [
-                        CkptWeightInfo(
-                            "model.layers.{i}.mlp.language_mlp.down_proj.weight", identity
-                        )
-                    ],
-                    transpose,
-                    config=ffn_config
-                ),
-                FfnAtomicWeight(
-                    W.ffn_w1,
-                    [
-                        CkptWeightInfo(
-                            "model.layers.{i}.mlp.language_mlp.gate_proj.weight", identity
-                        )
-                    ],
-                    transpose,
-                    config=ffn_config
-                ),
-                FfnAtomicWeight(
-                    W.ffn_w3,
-                    [
-                        CkptWeightInfo(
-                            "model.layers.{i}.mlp.language_mlp.up_proj.weight", identity
-                        )
-                    ],
-                    transpose,
-                    config=ffn_config
-                )], config=ffn_config),
+            FfnWeight(
+                sub_weights=[
+                    FfnAtomicWeight(
+                        W.ffn_w2,
+                        [
+                            CkptWeightInfo(
+                                "model.layers.{i}.mlp.language_mlp.down_proj.weight",
+                                identity,
+                            )
+                        ],
+                        transpose,
+                        config=ffn_config,
+                    ),
+                    FfnAtomicWeight(
+                        W.ffn_w1,
+                        [
+                            CkptWeightInfo(
+                                "model.layers.{i}.mlp.language_mlp.gate_proj.weight",
+                                identity,
+                            )
+                        ],
+                        transpose,
+                        config=ffn_config,
+                    ),
+                    FfnAtomicWeight(
+                        W.ffn_w3,
+                        [
+                            CkptWeightInfo(
+                                "model.layers.{i}.mlp.language_mlp.up_proj.weight",
+                                identity,
+                            )
+                        ],
+                        transpose,
+                        config=ffn_config,
+                    ),
+                ],
+                config=ffn_config,
+            ),
             AtomicWeight(
                 W.vision_ffn_w2,
                 [

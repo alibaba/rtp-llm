@@ -26,17 +26,8 @@ void MergeTransposeOP::forward(
     int rope_dim  = k_rope.size(2);
     int vhead_dim = v.size(2);
 
-    invokeMlaMergeTranspose<float>(q_data,
-                                   k_nope_data,
-                                   k_rope_data,
-                                   v_data,
-                                   qkv_data,
-                                   token_num,
-                                   head_num,
-                                   nope_dim,
-                                   rope_dim,
-                                   vhead_dim,
-                                   stream);
+    invokeMlaMergeTranspose<float>(
+        q_data, k_nope_data, k_rope_data, v_data, qkv_data, token_num, head_num, nope_dim, rope_dim, vhead_dim, stream);
 }
 
 }  // namespace unittest

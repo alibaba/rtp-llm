@@ -14,11 +14,10 @@ namespace rtp_llm {
 
 class DFAUtilTest: public ::testing::Test {
 protected:
-
 };
 
 TEST_F(DFAUtilTest, testSimple) {
-    std::vector<int> re = {3};
+    std::vector<int>              re = {3};
     StringContainDFA<size_t, int> dfa(re);
 
     ASSERT_FALSE(dfa.isFinished());
@@ -32,7 +31,7 @@ TEST_F(DFAUtilTest, testSimple) {
 }
 
 TEST_F(DFAUtilTest, testComplex) {
-    std::vector<int> re = {1, 1, 2};
+    std::vector<int>              re = {1, 1, 2};
     StringContainDFA<size_t, int> dfa(re);
 
     ASSERT_FALSE(dfa.isFinished());

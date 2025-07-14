@@ -46,7 +46,7 @@ public:
 
     void updateWithResponse(WorkerStatusResponse& response, int64_t timeout_ms) {
         std::vector<PendingTask> new_pending_task_list;
-        for (auto& task: pending_task_list_) {
+        for (auto& task : pending_task_list_) {
             if (!timeoutOrTaskEnqueued(response, task, timeout_ms)) {
                 new_pending_task_list.push_back(task);
             }
@@ -56,12 +56,19 @@ public:
     }
 
     int64_t expect_wait_time() const {
-        RTP_LLM_LOG_DEBUG("running_task_cost_time_ %ld, pending_task_cost_time_ %ld, update_time_ %ld, last_running_delta_ %ld", running_task_cost_time_, pending_task_cost_time_, update_time_, last_running_delta_);
-        auto running_task_cost_time = std::max((int64_t)0, running_task_cost_time_ - (autil::TimeUtility::currentTimeInMilliSeconds() - update_time_ + last_running_delta_));
+        RTP_LLM_LOG_DEBUG(
+            "running_task_cost_time_ %ld, pending_task_cost_time_ %ld, update_time_ %ld, last_running_delta_ %ld",
+            running_task_cost_time_,
+            pending_task_cost_time_,
+            update_time_,
+            last_running_delta_);
+        auto running_task_cost_time =
+            std::max((int64_t)0,
+                     running_task_cost_time_
+                         - (autil::TimeUtility::currentTimeInMilliSeconds() - update_time_ + last_running_delta_));
         auto pending_task_penalty = pending_task_cost_time_;
         return running_task_cost_time + pending_task_penalty;
     }
-
 
     const std::vector<WorkerTaskStatus>& running_task_list() const {
         return running_task_list_;
@@ -126,7 +133,7 @@ protected:
         std::swap(running_task_list_, response.running_task_list);
         std::swap(machine_info_, response.machine_info);
         last_running_delta_ = response.last_schedule_delta;
-        update_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
+        update_time_        = autil::TimeUtility::currentTimeInMilliSeconds();
     }
 
 protected:

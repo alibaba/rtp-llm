@@ -11,9 +11,9 @@ void DecodeStatInfo::restoreStage(DecodeStatInfo::ExecuteStage stage_) {
 }
 
 void DecodeStatInfo::nextStage() {
-    stage = static_cast<DecodeStatInfo::ExecuteStage>(static_cast<int>(stage) + 1);
+    stage             = static_cast<DecodeStatInfo::ExecuteStage>(static_cast<int>(stage) + 1);
     auto cost_time_us = currentTimeUs() - begin_time;
-    begin_time = currentTimeUs();
+    begin_time        = currentTimeUs();
     switch (stage) {
         case prepareGenerateContext: {
             break;
@@ -66,17 +66,17 @@ int64_t DecodeGenerateContext::TimeInfo::loadCacheTimeMs() const {
 void DecodeGenerateContext::reportTime() {
     RpcMetricsCollector collector;
     collectBasicMetrics(collector);
-    collector.retry_times                       = retry_times;
-    collector.loading_cache_request             = loading_cache_requests;
-    collector.prepare_generate_context_rt_us    = stat_info.prepare_generate_context_rt_us;
-    collector.allocate_resource_rt_us           = stat_info.allocate_resource_rt_us;
-    collector.load_cache_from_prefill_rt_us     = stat_info.load_cache_from_prefill_rt_us;
-    collector.local_generate_rt_us              = stat_info.local_generate_rt_us;
+    collector.retry_times                    = retry_times;
+    collector.loading_cache_request          = loading_cache_requests;
+    collector.prepare_generate_context_rt_us = stat_info.prepare_generate_context_rt_us;
+    collector.allocate_resource_rt_us        = stat_info.allocate_resource_rt_us;
+    collector.load_cache_from_prefill_rt_us  = stat_info.load_cache_from_prefill_rt_us;
+    collector.local_generate_rt_us           = stat_info.local_generate_rt_us;
 
     // for tp
-    collector.load_cache_min_rt_us              = stat_info.load_cache_min_rt_us;
-    collector.load_cache_max_rt_us              = stat_info.load_cache_max_rt_us;
-    collector.load_cache_polling_cost_us        = stat_info.load_cache_polling_cost_us;
+    collector.load_cache_min_rt_us       = stat_info.load_cache_min_rt_us;
+    collector.load_cache_max_rt_us       = stat_info.load_cache_max_rt_us;
+    collector.load_cache_polling_cost_us = stat_info.load_cache_polling_cost_us;
 
     reportMetrics(collector);
     metrics_reporter.reset();  // avoid to report metrics in base class

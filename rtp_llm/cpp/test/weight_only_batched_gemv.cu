@@ -7,15 +7,12 @@
 #include "rtp_llm/cpp/utils/memory_utils.h"
 #include "rtp_llm/cpp/cutlass/interface.h"
 
-
-
 struct Dim2 {
     int k;
     int n;
 };
 
-void gemm_test(int m, Dim2 dim2, cudaStream_t stream)
-{
+void gemm_test(int m, Dim2 dim2, cudaStream_t stream) {
     int n = dim2.n;
     int k = dim2.k;
 
@@ -47,32 +44,41 @@ void gemm_test(int m, Dim2 dim2, cudaStream_t stream)
 
     cublasStatus_t status = CUBLAS_STATUS_SUCCESS;
 
-    rtp_llm::kernels::WeightOnlyActivationType weight_only_act_type =
-        rtp_llm::kernels::WeightOnlyActivationType::FP16;
-    rtp_llm::kernels::WeightOnlyParams params{
-        reinterpret_cast<const uint8_t*>(w_ptr1),
-        s_ptr1,
-        nullptr,
-        in_ptr1,
-        nullptr,
-        out_ptr1,
-        m,
-        n,
-        k,
-        0,
-        rtp_llm::kernels::WeightOnlyQuantType::Int8b,
-        rtp_llm::kernels::WeightOnlyType::PerChannel,
-        rtp_llm::kernels::WeightOnlyActivationFunctionType::Identity,
-        weight_only_act_type};
+    rtp_llm::kernels::WeightOnlyActivationType weight_only_act_type = rtp_llm::kernels::WeightOnlyActivationType::FP16;
+    rtp_llm::kernels::WeightOnlyParams         params{reinterpret_cast<const uint8_t*>(w_ptr1),
+                                              s_ptr1,
+                                              nullptr,
+                                              in_ptr1,
+                                              nullptr,
+                                              out_ptr1,
+                                              m,
+                                              n,
+                                              k,
+                                              0,
+                                              rtp_llm::kernels::WeightOnlyQuantType::Int8b,
+                                              rtp_llm::kernels::WeightOnlyType::PerChannel,
+                                              rtp_llm::kernels::WeightOnlyActivationFunctionType::Identity,
+                                              weight_only_act_type};
     tensorrt_llm::kernels::cutlass_kernels::
         CutlassFpAIntBGemmRunner<half, uint8_t, cutlass::WeightOnlyQuantOp::PER_COLUMN_SCALE_ONLY>
-                                                        runner;
+            runner;
 
-    char*                                   ws_ptr = nullptr;
+    char* ws_ptr = nullptr;
     deviceMalloc(&ws_ptr, runner.getWorkspaceSize(m, n, k));
-    tensorrt_llm::cutlass_extensions::CutlassGemmConfig config = runner.getChosenConfig(
-        in_ptr2, w_ptr2, s_ptr2, nullptr, nullptr, out_ptr2, m, n, k, k, ws_ptr, runner.getWorkspaceSize(m, n, k), stream);
-
+    tensorrt_llm::cutlass_extensions::CutlassGemmConfig config =
+        runner.getChosenConfig(in_ptr2,
+                               w_ptr2,
+                               s_ptr2,
+                               nullptr,
+                               nullptr,
+                               out_ptr2,
+                               m,
+                               n,
+                               k,
+                               k,
+                               ws_ptr,
+                               runner.getWorkspaceSize(m, n, k),
+                               stream);
 
     // warm up
 
@@ -104,7 +110,8 @@ void gemm_test(int m, Dim2 dim2, cudaStream_t stream)
     cudaEventRecord(start2, stream);
 
     for (int iter = 0; iter < iterations; iter++) {
-        runner.gemm(in_ptr2, w_ptr2, s_ptr2, out_ptr2, m, n, k, config, ws_ptr, runner.getWorkspaceSize(m, n, k), stream);
+        runner.gemm(
+            in_ptr2, w_ptr2, s_ptr2, out_ptr2, m, n, k, config, ws_ptr, runner.getWorkspaceSize(m, n, k), stream);
     }
     cudaEventRecord(stop2, stream);
     cudaEventSynchronize(stop2);
@@ -116,9 +123,15 @@ void gemm_test(int m, Dim2 dim2, cudaStream_t stream)
     cudaEventDestroy(stop1);
     cudaEventDestroy(stop2);
 
-    float avg_time_gemv = total_time_gemv / iterations;
+    float avg_time_gemv    = total_time_gemv / iterations;
     float avg_time_fpaintb = total_time_fpaintb / iterations;
-    printf("m=%d n=%d k=%d batched_gemv=%.6f fpa_intb=%.6f ratio=%f\n", m, n, k, avg_time_gemv, avg_time_fpaintb, avg_time_gemv/avg_time_fpaintb);
+    printf("m=%d n=%d k=%d batched_gemv=%.6f fpa_intb=%.6f ratio=%f\n",
+           m,
+           n,
+           k,
+           avg_time_gemv,
+           avg_time_fpaintb,
+           avg_time_gemv / avg_time_fpaintb);
 
     check_cuda_value(status);
 
@@ -133,8 +146,7 @@ void gemm_test(int m, Dim2 dim2, cudaStream_t stream)
     deviceFree(ws_ptr);
 }
 
-int main()
-{
+int main() {
     std::vector<int>  M_list{1, 2, 3, 4};
     std::vector<Dim2> dim_list;
     dim_list.push_back({4096, 4096});

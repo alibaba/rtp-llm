@@ -73,9 +73,9 @@ absl::StatusOr<EstimateInfo> PrefillLoadBalancer::chooseHostWithTask(const std::
     std::string                         choosed_machine_info;
     int64_t                             min_finish_time    = -1;
     int64_t                             estimate_cost_time = -1;
-    int64_t                             choosed_wait_time = -1;
+    int64_t                             choosed_wait_time  = -1;
     std::unique_lock<std::shared_mutex> worker_lock(host_load_balance_info_map_mutex_);
-    std::string last_error_msg;
+    std::string                         last_error_msg;
     for (auto& host : biz_hosts->hosts) {
         const std::string spec = "tcp:" + host->ip + ":" + std::to_string(host->http_port);
         auto              iter = worker_map_.find(spec);
@@ -85,22 +85,24 @@ absl::StatusOr<EstimateInfo> PrefillLoadBalancer::chooseHostWithTask(const std::
         auto& worker    = iter->second;
         auto  cost_time = estimator_->estimate(worker.machine_info(), {task.prefix_length, task.input_length});
         if (!cost_time.ok()) {
-            last_error_msg = autil::StringUtil::formatString("failed to get task cost time with error %s", cost_time.status().message().data());
+            last_error_msg = autil::StringUtil::formatString("failed to get task cost time with error %s",
+                                                             cost_time.status().message().data());
             RTP_LLM_LOG_WARNING("%s", last_error_msg.c_str());
             continue;
         }
         auto expect_wait_time = worker.expect_wait_time();
         if (!choosed_host || min_finish_time > cost_time.value() + expect_wait_time) {
-            choosed_host       = host;
-            choosed_host_key   = spec;
-            estimate_cost_time = cost_time.value();
-            min_finish_time    = cost_time.value() + expect_wait_time;
+            choosed_host         = host;
+            choosed_host_key     = spec;
+            estimate_cost_time   = cost_time.value();
+            min_finish_time      = cost_time.value() + expect_wait_time;
             choosed_machine_info = worker.machine_info();
-            choosed_wait_time = expect_wait_time;
+            choosed_wait_time    = expect_wait_time;
         }
     }
     if (!choosed_host) {
-        return absl::InternalError(autil::StringUtil::formatString("here7 failed to choose host in biz: %s, last error: %s", biz.c_str(), last_error_msg.c_str()));
+        return absl::InternalError(autil::StringUtil::formatString(
+            "here7 failed to choose host in biz: %s, last error: %s", biz.c_str(), last_error_msg.c_str()));
     }
     auto& choosed_worker = worker_map_[choosed_host_key];
     choosed_worker.insertPendingTaskUpdateTime(task, estimate_cost_time);
@@ -108,16 +110,16 @@ absl::StatusOr<EstimateInfo> PrefillLoadBalancer::chooseHostWithTask(const std::
 }
 
 bool PrefillLoadBalancer::updateWorkerExpectFinishTime(PrefillWorkerInfo& worker) {
-    //TODO: what happens if worker get error time? maybe use timedelta is better
+    // TODO: what happens if worker get error time? maybe use timedelta is better
     int64_t running_time = 0;
     for (auto& task : worker.running_task_list()) {
         auto stat = estimator_->estimate(worker.machine_info(), {task.prefix_length, task.input_length});
         if (!stat.ok()) {
             RTP_LLM_LOG_WARNING("failed to update worker: %s with task: (%d, %d), err: %s",
-                           worker.machine_info().c_str(),
-                           task.prefix_length,
-                           task.input_length,
-                           stat.status().message().data());
+                                worker.machine_info().c_str(),
+                                task.prefix_length,
+                                task.input_length,
+                                stat.status().message().data());
             return false;
         }
         running_time += stat.value();
@@ -128,10 +130,10 @@ bool PrefillLoadBalancer::updateWorkerExpectFinishTime(PrefillWorkerInfo& worker
         auto stat = estimator_->estimate(worker.machine_info(), {task.prefix_length, task.input_length});
         if (!stat.ok()) {
             RTP_LLM_LOG_WARNING("failed to update worker: %s with task: (%d, %d), err: %s",
-                           worker.machine_info().c_str(),
-                           task.prefix_length,
-                           task.input_length,
-                           stat.status().message().data());
+                                worker.machine_info().c_str(),
+                                task.prefix_length,
+                                task.input_length,
+                                stat.status().message().data());
             return false;
         }
         pending_time += stat.value();
@@ -141,24 +143,24 @@ bool PrefillLoadBalancer::updateWorkerExpectFinishTime(PrefillWorkerInfo& worker
 }
 
 void PrefillLoadBalancer::updateWorkerStatusImpl(ErrorResult<HeartbeatSynchronizer::NodeStatus>& result) {
-    HeartbeatSynchronizer::NodeStatus response = std::move(result.value());
-    std::unique_lock<std::shared_mutex>                lock(host_load_balance_info_map_mutex_);
+    HeartbeatSynchronizer::NodeStatus   response = std::move(result.value());
+    std::unique_lock<std::shared_mutex> lock(host_load_balance_info_map_mutex_);
     // update exist worker info, remove unhealthy worker
     for (auto it = worker_map_.begin(); it != worker_map_.end();) {
         if (response.find(it->first) == response.end()) {
             it->second.addUpdateFailedTimes();
             if (it->second.getUpdateFailedTimes() >= max_update_failed_times_) {
-                RTP_LLM_LOG_WARNING("worker [%s] update failed times: %d, do remove", it->first.c_str(), max_update_failed_times_);
+                RTP_LLM_LOG_WARNING(
+                    "worker [%s] update failed times: %d, do remove", it->first.c_str(), max_update_failed_times_);
                 it = worker_map_.erase(it);
             }
         } else {
-            it->second.updateWithResponse(response[it->first], pending_task_timeout_ms_);            
+            it->second.updateWithResponse(response[it->first], pending_task_timeout_ms_);
             it++;
         }
-
     }
     // add new worker info
-    for (auto& it : response) {        
+    for (auto& it : response) {
         if (worker_map_.find(it.first) == worker_map_.end()) {
             worker_map_[it.first] = PrefillWorkerInfo(it.second);
         }

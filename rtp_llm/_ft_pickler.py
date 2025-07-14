@@ -1,5 +1,3 @@
-from torch._weights_only_unpickler import _get_allowed_globals # type: ignore
-from torch.serialization import _maybe_decode_ascii # type: ignore
 from collections import OrderedDict
 from pickle import (
     APPEND,
@@ -13,8 +11,6 @@ from pickle import (
     BINPUT,
     BINUNICODE,
     BUILD,
-    bytes_types,
-    decode_long,
     EMPTY_DICT,
     EMPTY_LIST,
     EMPTY_SET,
@@ -38,26 +34,32 @@ from pickle import (
     TUPLE1,
     TUPLE2,
     TUPLE3,
-    UnpicklingError
+    UnpicklingError,
+    bytes_types,
+    decode_long,
 )
 from struct import unpack
 from sys import maxsize
-from typing import Any, List, Dict
+from typing import Any, Dict, List
 
 import torch
+from torch._weights_only_unpickler import _get_allowed_globals  # type: ignore
+from torch.serialization import _maybe_decode_ascii  # type: ignore
 
-class Placeholder():
-        def __init__(self, *args: Any, **kwargs: Any):
-            pass
 
-        def append(self, _):
-            pass
+class Placeholder:
+    def __init__(self, *args: Any, **kwargs: Any):
+        pass
 
-        def appends(self, _):
-            pass
+    def append(self, _):
+        pass
 
-        def update(self, _):
-            pass
+    def appends(self, _):
+        pass
+
+    def update(self, _):
+        pass
+
 
 class Unpickler:
     def __init__(self, file: str, *, encoding: str = "bytes"):
@@ -66,7 +68,7 @@ class Unpickler:
         self.read = file.read
         self.memo: Dict[int, Any] = {}
         self.rc = _get_allowed_globals()
-        self.rc['placeholder'] = Placeholder
+        self.rc["placeholder"] = Placeholder
 
     def load(self):
         """Read a pickled object representation from the open file.
@@ -91,7 +93,7 @@ class Unpickler:
                 if full_path in self.rc:
                     self.append(self.rc[full_path])
                 else:
-                    self.append(self.rc['placeholder'])
+                    self.append(self.rc["placeholder"])
                     # raise RuntimeError(f"Unsupported class {full_path}")
             elif key[0] == NEWOBJ[0]:
                 args = self.stack.pop()
@@ -244,6 +246,7 @@ class Unpickler:
 
     def persistent_load(self, pid: Any):
         raise UnpicklingError("unsupported persistent id encountered")
+
 
 def load(file: str, *, encoding: str = "ASCII"):
     return Unpickler(file, encoding=encoding).load()

@@ -3,7 +3,7 @@ index 64ee3d6..a3d6349 100644
 --- src/utils/DirUtils.cpp
 +++ src/utils/DirUtils.cpp
 @@ -5,7 +5,7 @@
- 
+
  #if defined(__CYGWIN__) || defined(MS_WINDOWS)
  #define PATH_MAX 260
 -#elif defined(linux)
@@ -23,4 +23,4 @@ index 21aee69..5856415 100644
 +#include "src/log/Logger.h"
  #include <string.h>
  #include <unistd.h>
- 
+

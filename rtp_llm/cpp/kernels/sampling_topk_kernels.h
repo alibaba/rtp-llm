@@ -86,16 +86,14 @@ void invokeAddBiasEndMask(T*           logits,
                           const int    vocab_size_padded,
                           cudaStream_t stream);
 
-void invokeSetupTopKRuntimeArgs(int    batch_size,
-                                uint   top_k,
-                                uint*  top_ks,
-                                int    top_ks_size,
-                                float  top_p,
-                                float* top_ps,
-                                int    top_ps_size,
-                                bool*  skip_decode,
+void invokeSetupTopKRuntimeArgs(int          batch_size,
+                                uint         top_k,
+                                uint*        top_ks,
+                                int          top_ks_size,
+                                float        top_p,
+                                float*       top_ps,
+                                int          top_ps_size,
+                                bool*        skip_decode,
                                 cudaStream_t stream);
 
-
 }  // namespace rtp_llm
-

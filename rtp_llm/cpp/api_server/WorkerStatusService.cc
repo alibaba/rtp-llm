@@ -6,18 +6,18 @@ using namespace autil::legacy::json;
 
 namespace rtp_llm {
 
-// refactor(wantuan.tp): EmbeddingEngine should inherit from EngineBase, we need to remove the strange codes here for `load_balance_env_`
-// because the engine is nullptr when starting EmbeddingEngine.
+// refactor(wantuan.tp): EmbeddingEngine should inherit from EngineBase, we need to remove the strange codes here for
+// `load_balance_env_` because the engine is nullptr when starting EmbeddingEngine.
 WorkerStatusService::WorkerStatusService(const std::shared_ptr<EngineBase>&            engine,
                                          const std::shared_ptr<ConcurrencyController>& controller,
-                                         const int load_balance):
+                                         const int                                     load_balance):
     engine_(engine), controller_(controller) {
-        if(engine != nullptr){
-            load_balance_env_ = engine->getDevice()->initParams().misc_config.load_balance;
-        }else{
-            load_balance_env_ = load_balance;
-        }
+    if (engine != nullptr) {
+        load_balance_env_ = engine->getDevice()->initParams().misc_config.load_balance;
+    } else {
+        load_balance_env_ = load_balance;
     }
+}
 
 void WorkerStatusService::workerStatus(const std::unique_ptr<http_server::HttpResponseWriter>& writer,
                                        const http_server::HttpRequest&                         request) {

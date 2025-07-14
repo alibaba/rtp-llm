@@ -1,7 +1,9 @@
+import logging
 import time
 import unittest
-import logging
+
 from rtp_llm.utils.util import has_overlap_kmp
+
 
 class TestUtil(unittest.TestCase):
     def setUp(self):
@@ -34,10 +36,13 @@ class TestUtil(unittest.TestCase):
             b = "aaaaaa"  # b 的长度小于 10
             result = has_overlap_kmp(a, b)
         end_time = time.perf_counter()
-        avg_cost_time = (end_time - start_time) / test_turn # unit: second
+        avg_cost_time = (end_time - start_time) / test_turn  # unit: second
         self.assertTrue(avg_cost_time < 0.0001)
-        logging.info(f"Performance test for large input: Result = {result}, Time taken = {avg_cost_time:.6f} seconds")
-        
-if __name__ == '__main__':
+        logging.info(
+            f"Performance test for large input: Result = {result}, Time taken = {avg_cost_time:.6f} seconds"
+        )
+
+
+if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     unittest.main()

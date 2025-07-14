@@ -104,4 +104,3 @@ inline __device__ void convert_to_fp8(fp8_8_t* v, const Float8_ u) {
     v[0].w = fp8_2_t(u.w);
 }
 #endif  // ENABLE_FP8
-

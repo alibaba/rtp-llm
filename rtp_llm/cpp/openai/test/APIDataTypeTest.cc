@@ -204,4 +204,4 @@ TEST_F(APIDataTypeTest, testChatCompletionRequest) {
     ASSERT_EQ(std::get<std::string>(obj.messages[1].content), "you are a English teacher");
 }
 
-} // namespace rtp_llm
+}  // namespace rtp_llm

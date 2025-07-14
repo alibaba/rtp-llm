@@ -3,12 +3,18 @@ from threading import Thread
 from typing import Dict, Iterator, List, Optional
 
 from qwen_agent.llm.base import register_llm
-from qwen_agent.llm.schema import ASSISTANT, DEFAULT_SYSTEM_MESSAGE, SYSTEM, USER, Message
+from qwen_agent.llm.schema import (
+    ASSISTANT,
+    DEFAULT_SYSTEM_MESSAGE,
+    SYSTEM,
+    USER,
+    Message,
+)
 from qwen_agent.llm.text_base import BaseTextChatModel
 from qwen_agent.log import logger
 
 
-@register_llm('openvino')
+@register_llm("openvino")
 class OpenVINO(BaseTextChatModel):
     """
     OpenVINO Pipeline API.
@@ -40,32 +46,41 @@ class OpenVINO(BaseTextChatModel):
 
     def __init__(self, cfg: Optional[Dict] = None):
         super().__init__(cfg)
-        if 'ov_model_dir' not in cfg:
-            raise ValueError('Please provide openvino model directory through `ov_model_dir` in cfg.')
+        if "ov_model_dir" not in cfg:
+            raise ValueError(
+                "Please provide openvino model directory through `ov_model_dir` in cfg."
+            )
 
         try:
             from optimum.intel.openvino import OVModelForCausalLM
         except ImportError as e:
-            raise ImportError('Could not import optimum-intel python package for openvino. '
-                              'Please install it with: '
-                              "pip install -U 'optimum[openvino]'") from e
+            raise ImportError(
+                "Could not import optimum-intel python package for openvino. "
+                "Please install it with: "
+                "pip install -U 'optimum[openvino]'"
+            ) from e
         try:
             from transformers import AutoConfig, AutoTokenizer
         except ImportError as e:
-            raise ImportError('Could not import transformers python package for openvino. '
-                              'Please install it with: '
-                              "pip install -U 'transformers'") from e
+            raise ImportError(
+                "Could not import transformers python package for openvino. "
+                "Please install it with: "
+                "pip install -U 'transformers'"
+            ) from e
 
         self.ov_model = OVModelForCausalLM.from_pretrained(
-            cfg['ov_model_dir'],
-            device=cfg.get('device', 'cpu'),
-            ov_config=cfg.get('ov_config', {}),
-            config=AutoConfig.from_pretrained(cfg['ov_model_dir']),
+            cfg["ov_model_dir"],
+            device=cfg.get("device", "cpu"),
+            ov_config=cfg.get("ov_config", {}),
+            config=AutoConfig.from_pretrained(cfg["ov_model_dir"]),
         )
-        self.tokenizer = AutoTokenizer.from_pretrained(cfg['ov_model_dir'])
+        self.tokenizer = AutoTokenizer.from_pretrained(cfg["ov_model_dir"])
 
     def _get_stopping_criteria(self, generate_cfg: dict):
-        from transformers.generation.stopping_criteria import StoppingCriteria, StoppingCriteriaList
+        from transformers.generation.stopping_criteria import (
+            StoppingCriteria,
+            StoppingCriteriaList,
+        )
 
         class StopSequenceCriteria(StoppingCriteria):
             """
@@ -86,9 +101,14 @@ class OpenVINO(BaseTextChatModel):
 
             def __call__(self, input_ids, scores, **kwargs) -> bool:
                 decoded_output = self.tokenizer.decode(input_ids.tolist()[0])
-                return any(decoded_output.endswith(stop_sequence) for stop_sequence in self.stop_sequences)
+                return any(
+                    decoded_output.endswith(stop_sequence)
+                    for stop_sequence in self.stop_sequences
+                )
 
-        return StoppingCriteriaList([StopSequenceCriteria(generate_cfg['stop'], self.tokenizer)])
+        return StoppingCriteriaList(
+            [StopSequenceCriteria(generate_cfg["stop"], self.tokenizer)]
+        )
 
     def _chat_stream(
         self,
@@ -97,26 +117,32 @@ class OpenVINO(BaseTextChatModel):
         generate_cfg: dict,
     ) -> Iterator[List[Message]]:
         from transformers import TextIteratorStreamer
+
         generate_cfg = copy.deepcopy(generate_cfg)
         prompt = self._build_text_completion_prompt(messages)
-        logger.debug(f'*{prompt}*')
-        input_token = self.tokenizer(prompt, return_tensors='pt').input_ids
-        streamer = TextIteratorStreamer(self.tokenizer, timeout=60.0, skip_prompt=True, skip_special_tokens=True)
+        logger.debug(f"*{prompt}*")
+        input_token = self.tokenizer(prompt, return_tensors="pt").input_ids
+        streamer = TextIteratorStreamer(
+            self.tokenizer, timeout=60.0, skip_prompt=True, skip_special_tokens=True
+        )
         generate_cfg.update(
             dict(
                 input_ids=input_token,
                 streamer=streamer,
-                max_new_tokens=generate_cfg.get('max_new_tokens', 2048),
-                stopping_criteria=self._get_stopping_criteria(generate_cfg=generate_cfg),
-            ))
-        del generate_cfg['stop']
+                max_new_tokens=generate_cfg.get("max_new_tokens", 2048),
+                stopping_criteria=self._get_stopping_criteria(
+                    generate_cfg=generate_cfg
+                ),
+            )
+        )
+        del generate_cfg["stop"]
 
         def generate_and_signal_complete():
             self.ov_model.generate(**generate_cfg)
 
         t1 = Thread(target=generate_and_signal_complete)
         t1.start()
-        partial_text = ''
+        partial_text = ""
         for new_text in streamer:
             partial_text += new_text
             if delta_stream:
@@ -131,40 +157,43 @@ class OpenVINO(BaseTextChatModel):
     ) -> List[Message]:
         generate_cfg = copy.deepcopy(generate_cfg)
         prompt = self._build_text_completion_prompt(messages)
-        logger.debug(f'*{prompt}*')
-        input_token = self.tokenizer(prompt, return_tensors='pt').input_ids
+        logger.debug(f"*{prompt}*")
+        input_token = self.tokenizer(prompt, return_tensors="pt").input_ids
         generate_cfg.update(
             dict(
                 input_ids=input_token,
-                max_new_tokens=generate_cfg.get('max_new_tokens', 2048),
-                stopping_criteria=self._get_stopping_criteria(generate_cfg=generate_cfg),
-            ))
-        del generate_cfg['stop']
+                max_new_tokens=generate_cfg.get("max_new_tokens", 2048),
+                stopping_criteria=self._get_stopping_criteria(
+                    generate_cfg=generate_cfg
+                ),
+            )
+        )
+        del generate_cfg["stop"]
         response = self.ov_model.generate(**generate_cfg)
-        response = response[:, len(input_token[0]):]
+        response = response[:, len(input_token[0]) :]
         answer = self.tokenizer.batch_decode(response, skip_special_tokens=True)[0]
         return [Message(ASSISTANT, answer)]
 
     @staticmethod
     def _build_text_completion_prompt(messages: List[Message]) -> str:
-        im_start = '<|im_start|>'
-        im_end = '<|im_end|>'
+        im_start = "<|im_start|>"
+        im_end = "<|im_end|>"
         if messages[0].role == SYSTEM:
             sys = messages[0].content
             assert isinstance(sys, str)
-            prompt = f'{im_start}{SYSTEM}\n{sys}{im_end}'
+            prompt = f"{im_start}{SYSTEM}\n{sys}{im_end}"
         else:
-            prompt = f'{im_start}{SYSTEM}\n{DEFAULT_SYSTEM_MESSAGE}{im_end}'
+            prompt = f"{im_start}{SYSTEM}\n{DEFAULT_SYSTEM_MESSAGE}{im_end}"
         if messages[-1].role != ASSISTANT:
-            messages.append(Message(ASSISTANT, ''))
+            messages.append(Message(ASSISTANT, ""))
         for msg in messages:
             assert isinstance(msg.content, str)
             if msg.role == USER:
-                query = msg.content.lstrip('\n').rstrip()
-                prompt += f'\n{im_start}{USER}\n{query}{im_end}'
+                query = msg.content.lstrip("\n").rstrip()
+                prompt += f"\n{im_start}{USER}\n{query}{im_end}"
             elif msg.role == ASSISTANT:
-                response = msg.content.lstrip('\n').rstrip()
-                prompt += f'\n{im_start}{ASSISTANT}\n{response}{im_end}'
+                response = msg.content.lstrip("\n").rstrip()
+                prompt += f"\n{im_start}{ASSISTANT}\n{response}{im_end}"
         assert prompt.endswith(im_end)
-        prompt = prompt[:-len(im_end)]
+        prompt = prompt[: -len(im_end)]
         return prompt

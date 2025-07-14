@@ -53,25 +53,35 @@ inline __device__ __nv_bfloat16 ldg(const __nv_bfloat16* val) {
     return __ldg(val);
 #endif
 }
-#endif // ENABLE_BF16
+#endif  // ENABLE_BF16
 
 // Get type2 from type or vice versa (applied to half and bfloat16)
 template<typename T>
-struct TypeConverter {using Type = half2;}; // keep for generality
+struct TypeConverter {
+    using Type = half2;
+};  // keep for generality
 
 template<>
-struct TypeConverter<half2> {using Type = half;};
+struct TypeConverter<half2> {
+    using Type = half;
+};
 
 template<>
-struct TypeConverter<half> {using Type = half2;};
+struct TypeConverter<half> {
+    using Type = half2;
+};
 
 #if ENABLE_BF16
 template<>
-struct TypeConverter<__nv_bfloat162> {using Type = __nv_bfloat16;};
+struct TypeConverter<__nv_bfloat162> {
+    using Type = __nv_bfloat16;
+};
 
 template<>
-struct TypeConverter<__nv_bfloat16> {using Type = __nv_bfloat162;};
-#endif // ENABLE_BF16
+struct TypeConverter<__nv_bfloat16> {
+    using Type = __nv_bfloat162;
+};
+#endif  // ENABLE_BF16
 
 // Defined math operations (bfloat16 fallback to fp32 when it is not supported)
 template<typename T>
@@ -84,7 +94,7 @@ template<>
 inline __device__ __nv_bfloat162 hadd2(__nv_bfloat162 a, __nv_bfloat162 b) {
     return bf16hadd2(a, b);
 }
-#endif // ENABLE_BF16
+#endif  // ENABLE_BF16
 
 template<typename T>
 inline __device__ T add(T a, T b) {
@@ -115,7 +125,7 @@ inline __device__ __nv_bfloat16 add(__nv_bfloat16 a, __nv_bfloat16 b) {
 inline __device__ __nv_bfloat16 add(__nv_bfloat16 a, float b) {
     return bf16hadd(a, __float2bfloat16(b));
 }
-#endif // ENABLE_BF16
+#endif  // ENABLE_BF16
 
 // applies to all 4 values addition
 template<typename T>
@@ -131,7 +141,7 @@ inline __device__ __nv_bfloat16 add(__nv_bfloat16 a, __nv_bfloat16 b, __nv_bfloa
 inline __device__ __nv_bfloat162 add(__nv_bfloat162 a, __nv_bfloat162 b, __nv_bfloat162 c) {
     return bf16hadd2(a, b, c);
 }
-#endif // ENABLE_BF16
+#endif  // ENABLE_BF16
 
 // applies to all 4 values addition
 template<typename T>
@@ -143,7 +153,7 @@ inline __device__ T add(T a, T b, T c, T d) {
 inline __device__ __nv_bfloat16 add(__nv_bfloat16 a, __nv_bfloat16 b, __nv_bfloat16 c, __nv_bfloat16 d) {
     return bf16hadd(a, b, c, d);
 }
-#endif // ENABLE_BF16
+#endif  // ENABLE_BF16
 
 template<typename T>
 inline __device__ T hsub2(T a, T b) {
@@ -155,7 +165,7 @@ template<>
 inline __device__ __nv_bfloat162 hsub2(__nv_bfloat162 a, __nv_bfloat162 b) {
     return bf16hsub2(a, b);
 }
-#endif // ENABLE_BF16
+#endif  // ENABLE_BF16
 
 template<typename T>
 inline __device__ T hmul2(T a, T b) {
@@ -167,7 +177,7 @@ template<>
 inline __device__ __nv_bfloat162 hmul2(__nv_bfloat162 a, __nv_bfloat162 b) {
     return bf16hmul2(a, b);
 }
-#endif // ENABLE_BF16
+#endif  // ENABLE_BF16
 
 template<typename T>
 inline __device__ T hmul2(T a, T b, T c) {
@@ -179,7 +189,7 @@ template<>
 inline __device__ __nv_bfloat162 hmul2(__nv_bfloat162 a, __nv_bfloat162 b, __nv_bfloat162 c) {
     return bf16hmul2(a, b, c);
 }
-#endif // ENABLE_BF16
+#endif  // ENABLE_BF16
 
 template<typename T>
 inline __device__ T mul(T a, T b, T c) {
@@ -195,7 +205,7 @@ inline __device__ __nv_bfloat16 mul(__nv_bfloat16 a, __nv_bfloat16 b, __nv_bfloa
 inline __device__ __nv_bfloat162 mul(__nv_bfloat162 a, __nv_bfloat162 b, __nv_bfloat162 c) {
     return bf16hmul2(a, b, c);
 }
-#endif // ENABLE_BF16
+#endif  // ENABLE_BF16
 
 template<typename T>
 inline __device__ T fma(T a, T b, T c, T d) {
@@ -206,7 +216,7 @@ inline __device__ T fma(T a, T b, T c, T d) {
 inline __device__ __nv_bfloat162 fma(__nv_bfloat162 a, __nv_bfloat162 b, __nv_bfloat162 c, __nv_bfloat162 d) {
     return bf16hfma2(a, b, c, d);
 }
-#endif // ENABLE_BF16
+#endif  // ENABLE_BF16
 
 template<typename T>
 inline __device__ T fma(T a, T b, T c) {
@@ -223,7 +233,7 @@ template<>
 inline __device__ __nv_bfloat16 fma(__nv_bfloat16 a, __nv_bfloat16 b, __nv_bfloat16 c) {
     return bf16hfma(a, b, c);
 }
-#endif // ENABLE_BF16
+#endif  // ENABLE_BF16
 
 template<typename T>
 inline __device__ T hexp2(T a) {
@@ -235,82 +245,168 @@ template<>
 inline __device__ __nv_bfloat162 hexp2(__nv_bfloat162 a) {
     return bf16exp2(a);
 }
-#endif // ENABLE_BF16
+#endif  // ENABLE_BF16
 
-template<typename T_OUT, typename T_IN> __device__ inline T_OUT cuda_cast(T_IN val) { return val; }
+template<typename T_OUT, typename T_IN>
+__device__ inline T_OUT cuda_cast(T_IN val) {
+    return val;
+}
 
-template<> __device__ inline float2 cuda_cast<float2, int2>(int2 val) { return make_float2(val.x, val.y); }
-template<> __device__ inline float2 cuda_cast<float2, float>(float val) { return make_float2(val, val); }
-template<> __device__ inline float2 cuda_cast<float2, half2>(half2 val) { return __half22float2(val); }
-template<> __device__ inline half2 cuda_cast<half2, float2>(float2 val) { return __float22half2_rn(val); }
-template<> __device__ inline half2 cuda_cast<half2, float>(float val) { return __float2half2_rn(val); }
-template<> __device__ inline half2 cuda_cast<half2, half>(half val) { return __half2half2(val); }
+template<>
+__device__ inline float2 cuda_cast<float2, int2>(int2 val) {
+    return make_float2(val.x, val.y);
+}
+template<>
+__device__ inline float2 cuda_cast<float2, float>(float val) {
+    return make_float2(val, val);
+}
+template<>
+__device__ inline float2 cuda_cast<float2, half2>(half2 val) {
+    return __half22float2(val);
+}
+template<>
+__device__ inline half2 cuda_cast<half2, float2>(float2 val) {
+    return __float22half2_rn(val);
+}
+template<>
+__device__ inline half2 cuda_cast<half2, float>(float val) {
+    return __float2half2_rn(val);
+}
+template<>
+__device__ inline half2 cuda_cast<half2, half>(half val) {
+    return __half2half2(val);
+}
 
 #if USING_CUDA
-template<> __device__ inline int8_t cuda_cast<int8_t, half>(half val) {
-    union { int8_t int8[2]; int16_t int16; };
-    union { half fp16; int16_t int16_in; };
+template<>
+__device__ inline int8_t cuda_cast<int8_t, half>(half val) {
+    union {
+        int8_t  int8[2];
+        int16_t int16;
+    };
+    union {
+        half    fp16;
+        int16_t int16_in;
+    };
     fp16 = val;
-    asm volatile ("cvt.rni.sat.s8.f16 %0, %1;" : "=h"(int16) : "h"(int16_in));
+    asm volatile("cvt.rni.sat.s8.f16 %0, %1;" : "=h"(int16) : "h"(int16_in));
     return int8[0];
 }
 
-template<> __device__ inline int16_t cuda_cast<int16_t, half2>(half2 val) {
-    union { int8_t int8[2]; int16_t int16; };
+template<>
+__device__ inline int16_t cuda_cast<int16_t, half2>(half2 val) {
+    union {
+        int8_t  int8[2];
+        int16_t int16;
+    };
     int8[0] = cuda_cast<int8_t>(val.x);
     int8[1] = cuda_cast<int8_t>(val.y);
     return int16;
 }
 
-template<> __device__ inline int8_t cuda_cast<int8_t, float>(float val) {
-    union { int8_t int8[2]; int16_t int16; };
-    asm volatile ("cvt.rni.sat.s8.f32 %0, %1;" : "=h"(int16) : "f"(val));
+template<>
+__device__ inline int8_t cuda_cast<int8_t, float>(float val) {
+    union {
+        int8_t  int8[2];
+        int16_t int16;
+    };
+    asm volatile("cvt.rni.sat.s8.f32 %0, %1;" : "=h"(int16) : "f"(val));
     return int8[0];
 }
 #endif
 
-template<> __device__ inline int16_t cuda_cast<int16_t, float2>(float2 val) {
-    union { int8_t int8[2]; int16_t int16; };
+template<>
+__device__ inline int16_t cuda_cast<int16_t, float2>(float2 val) {
+    union {
+        int8_t  int8[2];
+        int16_t int16;
+    };
     int8[0] = cuda_cast<int8_t>(val.x);
     int8[1] = cuda_cast<int8_t>(val.y);
     return int16;
 }
 
-template<> __device__ inline half2 cuda_cast<half2, int16_t>(int16_t val) {
-    union { int8_t int8[2]; int16_t int16; };
+template<>
+__device__ inline half2 cuda_cast<half2, int16_t>(int16_t val) {
+    union {
+        int8_t  int8[2];
+        int16_t int16;
+    };
     int16 = val;
     return make_half2(int8[0], int8[1]);
 }
 
-template<> __device__ inline float2 cuda_cast<float2, int16_t>(int16_t val) {
-    union { int8_t int8[2]; int16_t int16; };
+template<>
+__device__ inline float2 cuda_cast<float2, int16_t>(int16_t val) {
+    union {
+        int8_t  int8[2];
+        int16_t int16;
+    };
     int16 = val;
     return make_float2(int8[0], int8[1]);
 }
 
 #ifdef ENABLE_BF16
-template<> __device__ inline __nv_bfloat16 cuda_cast(int32_t val) { return static_cast<float>(val); }
-template<> __device__ inline __nv_bfloat16 cuda_cast(int8_t val) { return static_cast<float>(val); }
-template<> __device__ inline int8_t cuda_cast(__nv_bfloat16 val) { return static_cast<float>(val); }
+template<>
+__device__ inline __nv_bfloat16 cuda_cast(int32_t val) {
+    return static_cast<float>(val);
+}
+template<>
+__device__ inline __nv_bfloat16 cuda_cast(int8_t val) {
+    return static_cast<float>(val);
+}
+template<>
+__device__ inline int8_t cuda_cast(__nv_bfloat16 val) {
+    return static_cast<float>(val);
+}
 
 template<>
-__device__ inline float cuda_cast<float, __nv_bfloat16>(__nv_bfloat16 val) { return __bfloat162float(val); }
+__device__ inline float cuda_cast<float, __nv_bfloat16>(__nv_bfloat16 val) {
+    return __bfloat162float(val);
+}
 
-template<> __device__ inline float2 cuda_cast<float2, __nv_bfloat162>(__nv_bfloat162 val) { return bf1622float2(val); }
+template<>
+__device__ inline float2 cuda_cast<float2, __nv_bfloat162>(__nv_bfloat162 val) {
+    return bf1622float2(val);
+}
 
-template<> __device__ inline half cuda_cast<half, __nv_bfloat16>(__nv_bfloat16 val) { return __float2half(__bfloat162float(val)); }
+template<>
+__device__ inline half cuda_cast<half, __nv_bfloat16>(__nv_bfloat16 val) {
+    return __float2half(__bfloat162float(val));
+}
 
-template<> __device__ inline int16_t cuda_cast<int16_t, __nv_bfloat162>(__nv_bfloat162 val) { return bf1622int16(val); }
+template<>
+__device__ inline int16_t cuda_cast<int16_t, __nv_bfloat162>(__nv_bfloat162 val) {
+    return bf1622int16(val);
+}
 
-template<> __device__ inline __nv_bfloat16 cuda_cast<__nv_bfloat16, float>(float val) { return __float2bfloat16(val); }
-template<> __device__ inline __nv_bfloat16 cuda_cast<__nv_bfloat16, half>(half val) { return __float2bfloat16(__half2float(val)); }
+template<>
+__device__ inline __nv_bfloat16 cuda_cast<__nv_bfloat16, float>(float val) {
+    return __float2bfloat16(val);
+}
+template<>
+__device__ inline __nv_bfloat16 cuda_cast<__nv_bfloat16, half>(half val) {
+    return __float2bfloat16(__half2float(val));
+}
 
-
-template<> __device__ inline __nv_bfloat162 cuda_cast<__nv_bfloat162, __nv_bfloat16>(__nv_bfloat16 val) { return bf162bf162(val); }
-template<> __device__ inline __nv_bfloat162 cuda_cast<__nv_bfloat162, float>(float val) { return __float2bfloat162_rn(val); }
-template<> __device__ inline __nv_bfloat162 cuda_cast<__nv_bfloat162, float2>(float2 val) { return float22bf162(val); }
-template<> __device__ inline __nv_bfloat162 cuda_cast<__nv_bfloat162, int16_t>(int16_t val) {
-    union { int8_t int8[2]; int16_t int16; };
+template<>
+__device__ inline __nv_bfloat162 cuda_cast<__nv_bfloat162, __nv_bfloat16>(__nv_bfloat16 val) {
+    return bf162bf162(val);
+}
+template<>
+__device__ inline __nv_bfloat162 cuda_cast<__nv_bfloat162, float>(float val) {
+    return __float2bfloat162_rn(val);
+}
+template<>
+__device__ inline __nv_bfloat162 cuda_cast<__nv_bfloat162, float2>(float2 val) {
+    return float22bf162(val);
+}
+template<>
+__device__ inline __nv_bfloat162 cuda_cast<__nv_bfloat162, int16_t>(int16_t val) {
+    union {
+        int8_t  int8[2];
+        int16_t int16;
+    };
     int16 = val;
     __nv_bfloat162 res;
     res.x = cuda_cast<__nv_bfloat16>(int8[0]);
@@ -318,146 +414,175 @@ template<> __device__ inline __nv_bfloat162 cuda_cast<__nv_bfloat162, int16_t>(i
     return res;
 }
 
-template<> __device__ inline __nv_bfloat162 cuda_cast<__nv_bfloat162, half2>(half2 val) { return float22bf162(__half22float2(val)); }
+template<>
+__device__ inline __nv_bfloat162 cuda_cast<__nv_bfloat162, half2>(half2 val) {
+    return float22bf162(__half22float2(val));
+}
 
-#endif // ENABLE BF16
+#endif  // ENABLE BF16
 
-template<typename T> __device__ inline T cuda_abs(T val);
-template<> __device__ inline float cuda_abs(float val) { return fabs(val); }
-template<> __device__ inline half  cuda_abs(half  val) { return __habs(val); }
-template<> __device__ inline half2 cuda_abs(half2 val) { return __habs2(val); }
-template<> __device__ inline float2 cuda_abs(float2 val) { return make_float2(fabs(val.x), fabs(val.y)); }
+template<typename T>
+__device__ inline T cuda_abs(T val);
+template<>
+__device__ inline float cuda_abs(float val) {
+    return fabs(val);
+}
+template<>
+__device__ inline half cuda_abs(half val) {
+    return __habs(val);
+}
+template<>
+__device__ inline half2 cuda_abs(half2 val) {
+    return __habs2(val);
+}
+template<>
+__device__ inline float2 cuda_abs(float2 val) {
+    return make_float2(fabs(val.x), fabs(val.y));
+}
 
 #ifdef ENABLE_BF16
 
 #if __CUDA_ARCH__ >= 800 || !defined(__CUDA_ARCH__)
-template<> __device__ inline __nv_bfloat16  cuda_abs(__nv_bfloat16  val) { return __habs(val); }
-template<> __device__ inline __nv_bfloat162 cuda_abs(__nv_bfloat162 val) { return __habs2(val); }
+template<>
+__device__ inline __nv_bfloat16 cuda_abs(__nv_bfloat16 val) {
+    return __habs(val);
+}
+template<>
+__device__ inline __nv_bfloat162 cuda_abs(__nv_bfloat162 val) {
+    return __habs2(val);
+}
 #else
-template<> __device__ inline __nv_bfloat16  cuda_abs(__nv_bfloat16  val) { return fabs(float(val)); }
-template<> __device__ inline __nv_bfloat162 cuda_abs(__nv_bfloat162 val) { return make_bfloat162(fabs(float(val.x)), fabs(float(val.y))); }
+template<>
+__device__ inline __nv_bfloat16 cuda_abs(__nv_bfloat16 val) {
+    return fabs(float(val));
+}
+template<>
+__device__ inline __nv_bfloat162 cuda_abs(__nv_bfloat162 val) {
+    return make_bfloat162(fabs(float(val.x)), fabs(float(val.y)));
+}
 #endif
 
-#endif // ENABLE_FP16
+#endif  // ENABLE_FP16
 
-template<typename To, typename Ti> __device__ inline To cuda_sum(Ti val)
-{
+template<typename To, typename Ti>
+__device__ inline To cuda_sum(Ti val) {
     return cuda_cast<To>(val);
 };
 
-template<typename To> __device__ inline To cuda_sum(float2 val)
-{
+template<typename To>
+__device__ inline To cuda_sum(float2 val) {
     return cuda_cast<To>(val.x + val.y);
 };
 
 // Unary maximum: compute the max of a vector type
-template<typename To, typename Ti> __device__ inline To cuda_max(Ti val)
-{
+template<typename To, typename Ti>
+__device__ inline To cuda_max(Ti val) {
     return cuda_cast<To>(val);
 };
 
-template<> __device__ inline half cuda_max(half2 val) { return (val.x > val.y) ? val.x : val.y; }
-template<> __device__ inline float cuda_max(float2 val) { return (val.x > val.y) ? val.x : val.y; }
+template<>
+__device__ inline half cuda_max(half2 val) {
+    return (val.x > val.y) ? val.x : val.y;
+}
+template<>
+__device__ inline float cuda_max(float2 val) {
+    return (val.x > val.y) ? val.x : val.y;
+}
 #ifdef ENABLE_BF16
-template<> __device__ inline __nv_bfloat16 cuda_max(__nv_bfloat162 val) { return (val.x > val.y) ? val.x : val.y; }
+template<>
+__device__ inline __nv_bfloat16 cuda_max(__nv_bfloat162 val) {
+    return (val.x > val.y) ? val.x : val.y;
+}
 #endif
 
 // Binary maximum: compute the max of two scalar types
-template<typename T> __device__ inline T cuda_max(T val1, T val2) { return (val1 > val2) ? val1 : val2; }
+template<typename T>
+__device__ inline T cuda_max(T val1, T val2) {
+    return (val1 > val2) ? val1 : val2;
+}
 
-template <typename int8_t>
+template<typename int8_t>
 __inline__ __device__ float getAmax() {
     return 1e-6f;
 }
-template <typename int8_t>
+template<typename int8_t>
 __device__ float getScaleFactor() {
     return 127.0f;
 }
 
 #ifdef ENABLE_FP8
-template <> __device__ inline float2 cuda_cast<float2, __nv_fp8x2_e4m3>(__nv_fp8x2_e4m3 val) 
-{ 
-    return bf1622float2(tensorrt_llm::common::fp8x2_e4m3_to_bfloat2(&val)); 
+template<>
+__device__ inline float2 cuda_cast<float2, __nv_fp8x2_e4m3>(__nv_fp8x2_e4m3 val) {
+    return bf1622float2(tensorrt_llm::common::fp8x2_e4m3_to_bfloat2(&val));
 }
 
 template<>
-__device__ inline half2 cuda_cast<half2, __nv_fp8x2_e4m3>(__nv_fp8x2_e4m3 val)
-{
+__device__ inline half2 cuda_cast<half2, __nv_fp8x2_e4m3>(__nv_fp8x2_e4m3 val) {
     return tensorrt_llm::common::fp8x2_e4m3_to_half2(&val);
 }
 
-template <>
-__device__ inline __nv_fp8x2_e4m3 cuda_cast<__nv_fp8x2_e4m3, float2>(float2 val)
-{
+template<>
+__device__ inline __nv_fp8x2_e4m3 cuda_cast<__nv_fp8x2_e4m3, float2>(float2 val) {
     return __nv_fp8x2_e4m3(bf1622float2(float22bf162(val)));
 }
 
-template <>
-__device__ inline __nv_fp8x2_e4m3 cuda_cast<__nv_fp8x2_e4m3, half2>(half2 val)
-{
+template<>
+__device__ inline __nv_fp8x2_e4m3 cuda_cast<__nv_fp8x2_e4m3, half2>(half2 val) {
     return __nv_fp8x2_e4m3(cuda_cast<float2>(val));
 }
 
-template <>
-__device__ inline __nv_fp8x2_e4m3 cuda_cast<__nv_fp8x2_e4m3, __nv_bfloat162>(__nv_bfloat162 val)
-{
+template<>
+__device__ inline __nv_fp8x2_e4m3 cuda_cast<__nv_fp8x2_e4m3, __nv_bfloat162>(__nv_bfloat162 val) {
     return __nv_fp8x2_e4m3(cuda_cast<float2>(val));
 }
 
-template <>
-__device__ inline __nv_fp8_e4m3 cuda_cast<__nv_fp8_e4m3, half>(half val)
-{
+template<>
+__device__ inline __nv_fp8_e4m3 cuda_cast<__nv_fp8_e4m3, half>(half val) {
     return __nv_fp8_e4m3(val);
 }
 
-template <>
-__device__ inline __nv_fp8_e4m3 cuda_cast<__nv_fp8_e4m3, __nv_bfloat16>(__nv_bfloat16 val)
-{
+template<>
+__device__ inline __nv_fp8_e4m3 cuda_cast<__nv_fp8_e4m3, __nv_bfloat16>(__nv_bfloat16 val) {
     return __nv_fp8_e4m3(val);
 }
 
-template <>
-__device__ inline __nv_fp8_e4m3 cuda_cast<__nv_fp8_e4m3, float>(float val)
-{
+template<>
+__device__ inline __nv_fp8_e4m3 cuda_cast<__nv_fp8_e4m3, float>(float val) {
     return __nv_fp8_e4m3(val);
 }
 
-template <>
-__device__ inline float cuda_cast<float, __nv_fp8_e4m3>(__nv_fp8_e4m3 val)
-{
-    return (float) val;
+template<>
+__device__ inline float cuda_cast<float, __nv_fp8_e4m3>(__nv_fp8_e4m3 val) {
+    return (float)val;
 }
 
-template <>
-__device__ inline __nv_bfloat162 cuda_cast<__nv_bfloat162, __nv_fp8x2_e4m3>(__nv_fp8x2_e4m3 val)
-{
+template<>
+__device__ inline __nv_bfloat162 cuda_cast<__nv_bfloat162, __nv_fp8x2_e4m3>(__nv_fp8x2_e4m3 val) {
     return tensorrt_llm::common::fp8x2_e4m3_to_bfloat2(&val);
 }
 
-template <>
-__device__ inline int8_t cuda_cast<int8_t, __nv_fp8_e4m3>(__nv_fp8_e4m3 val)
-{
+template<>
+__device__ inline int8_t cuda_cast<int8_t, __nv_fp8_e4m3>(__nv_fp8_e4m3 val) {
     // no impl
     return 0;
 }
 
-template <>
-__device__ inline __nv_fp8_e4m3 cuda_cast<__nv_fp8_e4m3, int8_t>(int8_t val)
-{
+template<>
+__device__ inline __nv_fp8_e4m3 cuda_cast<__nv_fp8_e4m3, int8_t>(int8_t val) {
     return cuda_cast<__nv_fp8_e4m3>(cuda_cast<__nv_bfloat16>(cuda_cast<float>(val)));
 }
 
-template <>
+template<>
 __inline__ __device__ float getAmax<__nv_fp8_e4m3>() {
     // 针对 __nv_fp8_e4m3 类型的特化实现
     return 1 / 512.0f;
 }
 
-template <>
+template<>
 __inline__ __device__ float getScaleFactor<__nv_fp8_e4m3>() {
     // 针对 __nv_fp8_e4m3 类型的特化实现
     return tensorrt_llm::common::FP8_E4M3_MAX;
 }
-#endif // ENABLE_FP8
+#endif  // ENABLE_FP8
 
-}
+}  // namespace rtp_llm

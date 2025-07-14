@@ -15,15 +15,13 @@
 #include <iterator>
 #include <mutex>
 
-
-
 namespace rtp_llm {
 
 // WARNGING: buffer in generate stream should all be host to avoid gpu buffer hold more time (except kv cache)
 
 struct StreamUpdateInfo {
     const rtp_llm::BufferPtr new_tokens;
-    int                 num_new_tokens;
+    int                      num_new_tokens;
     const rtp_llm::BufferPtr hidden_states;
     const rtp_llm::BufferPtr logits;
     const rtp_llm::BufferPtr softmax_probs;
@@ -32,8 +30,8 @@ struct StreamUpdateInfo {
     const rtp_llm::BufferPtr loss;
     // for mtp
     const rtp_llm::BufferPtr all_hidden_states;
-    bool update_remote_generate = true;
-    bool force_update_info = false;
+    bool                     update_remote_generate = true;
+    bool                     force_update_info      = false;
 };
 struct SpeculativeExecutorStreamOutput {
 public:
@@ -69,16 +67,18 @@ public:
     rtp_llm::BufferPtr softmax_probs = nullptr;
 };
 using SpeculativeExecutorStreamOutputPtr = std::shared_ptr<SpeculativeExecutorStreamOutput>;
-    
+
 class GenerateStream;
 
 using GenerateStreamPtr = std::shared_ptr<GenerateStream>;
 
 class GenerateStream {
 public:
-    GenerateStream(const std::shared_ptr<GenerateInput>& query, const rtp_llm::GptInitParameter& params,
-                   const ResourceContext& resource_context, kmonitor::MetricsReporterPtr metrics_reporter,
-                   size_t extra_reserve_token_num = 0);
+    GenerateStream(const std::shared_ptr<GenerateInput>& query,
+                   const rtp_llm::GptInitParameter&      params,
+                   const ResourceContext&                resource_context,
+                   kmonitor::MetricsReporterPtr          metrics_reporter,
+                   size_t                                extra_reserve_token_num = 0);
     virtual ~GenerateStream() {
         reportMetric();
         releaseResource();
@@ -88,123 +88,125 @@ public:
     // Exported to python world.
     virtual void cancel();
 
-    virtual ErrorResult<GenerateOutputs>     nextOutput() = 0;
-    virtual bool hasOutput() {return false;}
+    virtual ErrorResult<GenerateOutputs> nextOutput() = 0;
+    virtual bool                         hasOutput() {
+        return false;
+    }
 
     virtual void updateOutput(const StreamUpdateInfo& update_info) = 0;
-    void update(const StreamUpdateInfo& update_info);
+    void         update(const StreamUpdateInfo& update_info);
 
     virtual size_t scoreLen() const {
         return 1;
     }
 
     // Only used in C++ world.
-    int reuseBlockSize() const;
-    void fakeInitKVBlock();
+    int                         reuseBlockSize() const;
+    void                        fakeInitKVBlock();
     virtual absl::StatusOr<int> initKVBlock(int token_capacity, size_t reserve_step = 0);
     virtual absl::StatusOr<int> incrKVBlock(int token_capacity, size_t reserve_step = 0);
-    virtual int tryReleaseKVBlock(int nums);
-    virtual void releaseResource();
-    int nextNeedBlockNums(size_t reserve_step) const;
-    void setNeedReleaseResource(bool need_release_resource);
-    void incrFallbackBlock(int fallback_blocks);
-    bool hasCacheKeys() const;
+    virtual int                 tryReleaseKVBlock(int nums);
+    virtual void                releaseResource();
+    int                         nextNeedBlockNums(size_t reserve_step) const;
+    void                        setNeedReleaseResource(bool need_release_resource);
+    void                        incrFallbackBlock(int fallback_blocks);
+    bool                        hasCacheKeys() const;
     const std::vector<int64_t>& cacheKeys(int32_t batch_id = 0) const;
 
-    std::shared_ptr<GenerateInput> generateInput() const;
+    std::shared_ptr<GenerateInput>   generateInput() const;
     std::shared_ptr<GenerateConfig>& generateConfig() const;
-    std::vector<int> textTokensMask() const;
-    bool isStreaming() const;
-    int64_t streamId() const;
-    int loraId() const;
-    std::string adapterName() const;
-    rtp_llm::SpecialTokens specialTokens() const;
+    std::vector<int>                 textTokensMask() const;
+    bool                             isStreaming() const;
+    int64_t                          streamId() const;
+    int                              loraId() const;
+    std::string                      adapterName() const;
+    rtp_llm::SpecialTokens           specialTokens() const;
 
-    int tileNum() const;
-    int batchSize() const;
-    int numBeams() const;
-    int numReturnSequences() const;
-    bool calculateLoss() const;
-    bool calculateSoftmaxProbs() const;
-    bool returnLogits() const;
-    bool returnCumLogProbs() const;
-    bool genTimeline() const;
-    int  profileStep() const;
-    void setGenTimeline(bool gen_timeline);
-    bool updatePrefix(const std::shared_ptr<SystemPrompt>& system_prompt);
+    int    tileNum() const;
+    int    batchSize() const;
+    int    numBeams() const;
+    int    numReturnSequences() const;
+    bool   calculateLoss() const;
+    bool   calculateSoftmaxProbs() const;
+    bool   returnLogits() const;
+    bool   returnCumLogProbs() const;
+    bool   genTimeline() const;
+    int    profileStep() const;
+    void   setGenTimeline(bool gen_timeline);
+    bool   updatePrefix(const std::shared_ptr<SystemPrompt>& system_prompt);
     size_t maxSeqLen() const;
-    int inputLength() const;
-    int seqLength() const;
+    int    inputLength() const;
+    int    seqLength() const;
     // NOTE: In generatestream, set seq len must use setSeqLength api, we need to save start_check_seq_length_
     // for checking EOS and stop words
-    void setSeqLength(int seq_length);
-    int adjustedCommonLen() const;
-    int seqSizePerBlock() const;
-    int contextLength() const;
-    int prefixLength() const;
-    int inputPrefixLength() const;
-    int reuseLength() const;
-    int initialReuseLength() const;
+    void   setSeqLength(int seq_length);
+    int    adjustedCommonLen() const;
+    int    seqSizePerBlock() const;
+    int    contextLength() const;
+    int    prefixLength() const;
+    int    inputPrefixLength() const;
+    int    reuseLength() const;
+    int    initialReuseLength() const;
     size_t maxTokenNum() const;
-    void setReuseLength(int reuse_length);
-    void setInitialReuseLength(int initial_reuse_length);
-    int fallbackPrefixLength() const;
-    void setFallbackPrefixLength(int fallback_prefix_length);
-    void incLastOutputPos();
+    void   setReuseLength(int reuse_length);
+    void   setInitialReuseLength(int initial_reuse_length);
+    int    fallbackPrefixLength() const;
+    void   setFallbackPrefixLength(int fallback_prefix_length);
+    void   incLastOutputPos();
 
     absl::StatusOr<int> acquireCapacity(int token_capacity);
-    int currentChunkLen() const;
-    void resetChunkLen(int chunck_len, int max_chunk_len);
+    int                 currentChunkLen() const;
+    void                resetChunkLen(int chunck_len, int max_chunk_len);
 
-    bool isContextStream() const;
-    bool isChunkStream() const;
+    bool                      isContextStream() const;
+    bool                      isChunkStream() const;
     const rtp_llm::BufferPtr& cumLogProbs() const;
 
     const rtp_llm::BufferPtr& completeTokenIds();
-    std::vector<int> completeTokenIdsVec(int batch_idx = 0);
-    std::vector<int> commonCompleteTokenIdsVec(int batch_idx = 0);
-    int currentExecuteTokenSize();
-    std::vector<int> currentExecuteTokens(int batch_idx = 0) const;
+    std::vector<int>          completeTokenIdsVec(int batch_idx = 0);
+    std::vector<int>          commonCompleteTokenIdsVec(int batch_idx = 0);
+    int                       currentExecuteTokenSize();
+    std::vector<int>          currentExecuteTokens(int batch_idx = 0) const;
 
     void step();
     void spStep();
 
-    std::vector<torch::Tensor> multimodalFeatures() const;
-    int multimodalFeaturesLength() const;
-    rtp_llm::BufferPtr multimodalLocations() const;
+    std::vector<torch::Tensor>    multimodalFeatures() const;
+    int                           multimodalFeaturesLength() const;
+    rtp_llm::BufferPtr            multimodalLocations() const;
     std::vector<std::vector<int>> multimodalIntervals() const;
 
-    int64_t getTimeoutMs() const;
-    void checkTimeout();
-    void setStop(ErrorCode error_code, const std::string& error_msg);
-    void setStopWithoutLock(ErrorCode error_code, const std::string& error_msg);
-    void stopAndRelease(ErrorCode error_code, const std::string& error_msg);
-    ErrorInfo statusInfo();
-    bool isDoneWithoutLock(int batch_id) const;
-    void setPaused();
-    bool setRunning();
-    bool stoppedWithoutLock();
+    int64_t      getTimeoutMs() const;
+    void         checkTimeout();
+    void         setStop(ErrorCode error_code, const std::string& error_msg);
+    void         setStopWithoutLock(ErrorCode error_code, const std::string& error_msg);
+    void         stopAndRelease(ErrorCode error_code, const std::string& error_msg);
+    ErrorInfo    statusInfo();
+    bool         isDoneWithoutLock(int batch_id) const;
+    void         setPaused();
+    bool         setRunning();
+    bool         stoppedWithoutLock();
     virtual bool stopped();
-    bool paused();
-    std::string stopReason();
+    bool         paused();
+    std::string  stopReason();
     virtual bool finished();
-    bool running();
-    bool waiting();
-    bool finishedWithoutLock();
-    void cancelIfNotRunning();
-    void setFinishedWithoutLock();
-    bool needRemoteGenerate() const;
-    void setRemoteGenerate();
-    size_t iterCount() const;
-    size_t spIterCount() const;
-    void setSpIterCount(int sp_iter_count);
+    bool         running();
+    bool         waiting();
+    bool         finishedWithoutLock();
+    void         cancelIfNotRunning();
+    void         setFinishedWithoutLock();
+    bool         needRemoteGenerate() const;
+    void         setRemoteGenerate();
+    size_t       iterCount() const;
+    size_t       spIterCount() const;
+    void         setSpIterCount(int sp_iter_count);
 
-    const ResourceContext& resourceContext() const;
-    void setKVCache(const BatchKVCacheResource &kv_cache_resource);
-    void setLoss(const rtp_llm::Buffer& loss);
-    void setSoftmaxProbs(const rtp_llm::Buffer& softmax_probs, int start_pos);
+    const ResourceContext&      resourceContext() const;
+    void                        setKVCache(const BatchKVCacheResource& kv_cache_resource);
+    void                        setLoss(const rtp_llm::Buffer& loss);
+    void                        setSoftmaxProbs(const rtp_llm::Buffer& softmax_probs, int start_pos);
     const BatchKVCacheResource& kvCache() const;
-    size_t maxBlockSize() const;
+    size_t                      maxBlockSize() const;
 
     bool needFinish();
     bool needFinishBySPTokens();
@@ -213,22 +215,22 @@ public:
     void matchStopWordsList();
     void matchStopWordsList(int batch_id);
 
-    void setMetricsReporter(kmonitor::MetricsReporterPtr metrics_reporter);
-    void reportMetric();
+    void        setMetricsReporter(kmonitor::MetricsReporterPtr metrics_reporter);
+    void        reportMetric();
     std::string debugString() const;
 
     void resetBeginTime(int64_t begin_time_us);
 
     // for test
-    void setIsContextStream(bool is_context_stream);
+    void               setIsContextStream(bool is_context_stream);
     rtp_llm::BufferPtr getLoss();
     rtp_llm::BufferPtr getLastHiddenStates() const;
-    void setLastHiddenStates(rtp_llm::BufferPtr hidden_states) {
+    void               setLastHiddenStates(rtp_llm::BufferPtr hidden_states) {
         last_hidden_states_ = hidden_states;
     };
-    rtp_llm::BufferPtr getSoftmaxProbs();
+    rtp_llm::BufferPtr   getSoftmaxProbs();
     StreamCacheResource& streamCacheResource();
-    void setPerfTest(bool perf_test_);
+    void                 setPerfTest(bool perf_test_);
 
     absl::Status releaseSequenceKVCache(size_t total_seq_len, size_t release_seq_len) {
         return stream_cache_resource_->releaseSequenceKVCache(total_seq_len, release_seq_len);
@@ -278,9 +280,7 @@ public:
 
     bool waitForRemoteGenerate() {
         std::unique_lock<std::mutex> lock(*output_mutex_);
-        return cv_->wait_for(lock, std::chrono::seconds(2), [this] {
-            return need_remote_generate_;
-        });
+        return cv_->wait_for(lock, std::chrono::seconds(2), [this] { return need_remote_generate_; });
     }
 
     void setNeedRemoteGenerate(bool need_remote_generate) {
@@ -297,7 +297,6 @@ public:
 
     void incBatchWithPrefillTimes(int32_t times);
     void incBatchWithPrefillLen(int32_t len);
-
 
     std::shared_ptr<CompleteTokenIds> getCompleteTokenIds() const {
         return complete_token_ids_;
@@ -380,7 +379,7 @@ public:
         return tree_logits_processor_ptr_;
     }
 
-    void initializeLogitsProcessorList();
+    void                                initializeLogitsProcessorList();
     std::vector<BaseLogitsProcessorPtr> getAllLogitsProcessorPtr() const {
         return logits_processor_list_;
     }
@@ -439,72 +438,72 @@ public:
         int64_t first_token_rt_us;
     };
     TimeInfo getTimeInfo();
-    bool queryPdSep() const;
+    bool     queryPdSep() const;
 
 protected:
-    rtp_llm::DeviceBase* device_;
-    std::shared_ptr<GenerateInput>      generate_input_;
-    std::shared_ptr<GenerateStatus>     generate_status_;
-    std::vector<GenerateStatus>         sub_generate_status_;
-    int                                 max_seq_len_;
-    int64_t                             vocab_size_;
-    std::shared_ptr<CompleteTokenIds>   complete_token_ids_;
-    int64_t                             begin_time_us_;
-    int64_t                             last_pause_us_ = 0;
-    int64_t                             pause_time_us_ = 0;
-    int64_t                             wait_time_us_ = 0;
+    rtp_llm::DeviceBase*                 device_;
+    std::shared_ptr<GenerateInput>       generate_input_;
+    std::shared_ptr<GenerateStatus>      generate_status_;
+    std::vector<GenerateStatus>          sub_generate_status_;
+    int                                  max_seq_len_;
+    int64_t                              vocab_size_;
+    std::shared_ptr<CompleteTokenIds>    complete_token_ids_;
+    int64_t                              begin_time_us_;
+    int64_t                              last_pause_us_ = 0;
+    int64_t                              pause_time_us_ = 0;
+    int64_t                              wait_time_us_  = 0;
     std::shared_ptr<StreamCacheResource> stream_cache_resource_;
-    std::shared_ptr<bool>               is_context_stream_;
-    size_t                              iter_count_             = 0;
-    size_t                              sp_iter_count_          = 0;
-    size_t                              last_output_pos_        = 0;
-    int                                 initial_reuse_length_   = 0;
-    int                                 reuse_length_           = 0;
-    int                                 reuse_mm_length_        = 0;
-    int                                 fallback_blocks_        = 0;
-    int                                 fallback_times_         = 0;
-    int                                 fallback_prefix_length_ = 0;
+    std::shared_ptr<bool>                is_context_stream_;
+    size_t                               iter_count_             = 0;
+    size_t                               sp_iter_count_          = 0;
+    size_t                               last_output_pos_        = 0;
+    int                                  initial_reuse_length_   = 0;
+    int                                  reuse_length_           = 0;
+    int                                  reuse_mm_length_        = 0;
+    int                                  fallback_blocks_        = 0;
+    int                                  fallback_times_         = 0;
+    int                                  fallback_prefix_length_ = 0;
     // TOOD(xinfei.sxf) fix state
-    bool                                done_                   = false;
-    bool                                released_               = false;
-    bool                                need_release_resource_  = true;
+    bool done_                  = false;
+    bool released_              = false;
+    bool need_release_resource_ = true;
 
-    bool                                enable_fast_gen_        = false;
-    bool                                return_all_probs_       = false;
-    int                                 current_chunk_len_      = 0;
-    int                                 last_chunk_len_         = 0;
-    int                                 max_chunk_len_          = 0;
+    bool enable_fast_gen_   = false;
+    bool return_all_probs_  = false;
+    int  current_chunk_len_ = 0;
+    int  last_chunk_len_    = 0;
+    int  max_chunk_len_     = 0;
 
-    bool                                last_block_aligned_     = false;
-    volatile bool                       need_remote_generate_   = false;
-    bool                                use_cache_store_        = false;
+    bool          last_block_aligned_   = false;
+    volatile bool need_remote_generate_ = false;
+    bool          use_cache_store_      = false;
 
-    bool                                gen_timeline_           = false;
+    bool gen_timeline_ = false;
 
     // The number of times this stream has been interfered by prefills
-    int32_t                             batch_with_prefill_times_ = 0;
-    int32_t                             batch_with_prefill_len_ = 0;
+    int32_t batch_with_prefill_times_ = 0;
+    int32_t batch_with_prefill_len_   = 0;
 
-    kmonitor::MetricsReporterPtr        metrics_reporter_;
-    rtp_llm::SpecialTokens              special_tokens_;
-    rtp_llm::BufferPtr                  cum_log_probs_;
-    rtp_llm::BufferPtr                  all_probs_;
-    rtp_llm::BufferPtr                  softmax_probs_;
-    rtp_llm::BufferPtr                  loss_;
-    rtp_llm::BufferPtr                  last_hidden_states_ = nullptr;
-    int                                 loss_index_ = 0;
-    std::shared_ptr<std::mutex>         output_mutex_;
+    kmonitor::MetricsReporterPtr             metrics_reporter_;
+    rtp_llm::SpecialTokens                   special_tokens_;
+    rtp_llm::BufferPtr                       cum_log_probs_;
+    rtp_llm::BufferPtr                       all_probs_;
+    rtp_llm::BufferPtr                       softmax_probs_;
+    rtp_llm::BufferPtr                       loss_;
+    rtp_llm::BufferPtr                       last_hidden_states_ = nullptr;
+    int                                      loss_index_         = 0;
+    std::shared_ptr<std::mutex>              output_mutex_;
     std::shared_ptr<std::condition_variable> cv_;
 
-    GenerateStreamPtr                   propose_stream_        = nullptr;
-    GenerateStreamPtr                   score_stream_          = nullptr;
+    GenerateStreamPtr propose_stream_ = nullptr;
+    GenerateStreamPtr score_stream_   = nullptr;
 
-    size_t                             propose_step_ = 0;
-    size_t                             score_len_    = 0;
-    bool                               acceped_bouns_token_   = false;
-    int                                sp_edit_search_index_  = 0;
-    bool                               sp_edit_first_time_    = true;
-    bool                               sp_edit_run_           = false;
+    size_t                             propose_step_         = 0;
+    size_t                             score_len_            = 0;
+    bool                               acceped_bouns_token_  = false;
+    int                                sp_edit_search_index_ = 0;
+    bool                               sp_edit_first_time_   = true;
+    bool                               sp_edit_run_          = false;
     std::vector<int>                   propose_token_;
     bool                               contain_propose_token_ = false;
     int                                mtp_token_index_       = 0;
@@ -512,12 +511,12 @@ protected:
 
     bool return_all_hidden_states_ = false;
 
-    std::optional<rtp_llm::BufferPtr>        context_position_ids_;
-    PositionIdsStyle                    mm_position_ids_style_;
+    std::optional<rtp_llm::BufferPtr> context_position_ids_;
+    PositionIdsStyle                  mm_position_ids_style_;
 
     rtp_llm::DataType dtype_;
-    size_t hidden_size_;
-    
+    size_t            hidden_size_;
+
     ThinkModeLogitsProcessorPtr         think_logits_processor_ptr_;
     TreeLogitsProcessorPtr              tree_logits_processor_ptr_;
     std::vector<BaseLogitsProcessorPtr> logits_processor_list_;
@@ -529,4 +528,4 @@ protected:
 
 typedef std::shared_ptr<GenerateStream> GenerateStreamPtr;
 
-} // namespace rtp_llm
+}  // namespace rtp_llm

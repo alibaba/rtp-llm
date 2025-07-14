@@ -4,12 +4,11 @@
 
 namespace torch_ext {
 
-
 using namespace tensorrt_llm::kernels::cutlass_kernels;
 
 #define CONVERT(s)                                                                                                     \
-    if (tile_config == #s) {                                                                                            \
-        return {tensorrt_llm::cutlass_extensions::s, split_k, stage};                                                   \
+    if (tile_config == #s) {                                                                                           \
+        return {tensorrt_llm::cutlass_extensions::s, split_k, stage};                                                  \
     }
 
 CutlassGemmConfig getConfigFromStr(std::string tile_config, int split_k, int stage) {
@@ -42,12 +41,14 @@ CutlassGemmConfig getConfigFromStr(std::string tile_config, int split_k, int sta
 
 #undef CONVERT
 
-void insertFp16Int8GemmConfig(int64_t m, int64_t n, int64_t k, std::string tile_config, int64_t split_k, int64_t stage) {
+void insertFp16Int8GemmConfig(
+    int64_t m, int64_t n, int64_t k, std::string tile_config, int64_t split_k, int64_t stage) {
     auto gemm_config = getConfigFromStr(tile_config, split_k, stage);
     GemmConfigMap::registerEntryForFp16Int8Lut(m, n, k, gemm_config);
 }
 
-void insertFp16Int4GemmConfig(int64_t m, int64_t n, int64_t k, std::string tile_config, int64_t split_k, int64_t stage) {
+void insertFp16Int4GemmConfig(
+    int64_t m, int64_t n, int64_t k, std::string tile_config, int64_t split_k, int64_t stage) {
     auto gemm_config = getConfigFromStr(tile_config, split_k, stage);
     GemmConfigMap::registerEntryForFp16Int4Lut(m, n, k, gemm_config);
 }
@@ -56,7 +57,7 @@ void insertW8A8GemmConfig(int64_t m, int64_t n, int64_t k, std::string tile_conf
     auto gemm_config = getConfigFromStr(tile_config, split_k, stage);
     GemmConfigMap::registerEntryForW8A8Lut(m, n, k, gemm_config);
 }
-}
+}  // namespace torch_ext
 
 static auto insert_fp16_int8_gemm_config =
     torch::RegisterOperators("rtp_llm::insert_fp16_int8_gemm_config", &torch_ext::insertFp16Int8GemmConfig);

@@ -3,7 +3,6 @@
 #include <vector>
 #include <algorithm>
 
-
 namespace rtp_llm {
 
 using Shape = std::vector<size_t>;

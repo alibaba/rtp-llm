@@ -1,37 +1,38 @@
-import os
-import sys
+import asyncio
 import json
-import time
 import logging
 import logging.config
-from functools import cached_property
-from typing_extensions import override
-from rtp_llm.config.py_config_modules import PyEnvConfigs, StaticConfig
-import uvicorn
-from uvicorn import Server, Config
-import asyncio
+import os
 import socket
+import sys
 import threading
-from typing import Union, Any, Dict, Optional, List
+import time
+from functools import cached_property
+from typing import Any, Dict, List, Optional, Union
 
-from fastapi import FastAPI, status, HTTPException
+import uvicorn
+from anyio import CapacityLimiter
+from anyio.lowlevel import RunVar
+from fastapi import FastAPI, HTTPException
 from fastapi import Request as RawRequest
+from fastapi import status
 from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
-from anyio.lowlevel import RunVar
-from anyio import CapacityLimiter
+from typing_extensions import override
+from uvicorn import Config, Server
 from uvicorn.loops.auto import auto_loop_setup
 
-from rtp_llm.distribute.worker_info import g_worker_info, g_parallel_info
-from rtp_llm.embedding.backend_embedding_app import register_backend_embedding_api
-from rtp_llm.utils.version_info import VersionInfo
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.config.py_config_modules import PyEnvConfigs, StaticConfig
 from rtp_llm.config.uvicorn_config import UVICORN_LOGGING_CONFIG
+from rtp_llm.distribute.worker_info import g_parallel_info, g_worker_info
+from rtp_llm.embedding.backend_embedding_app import register_backend_embedding_api
+from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.server.backend_server import BackendServer
 from rtp_llm.server.misc import check_is_master, check_is_worker
-from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.utils.util import AtomicCounter
-from rtp_llm.model_factory import ModelFactory
+from rtp_llm.utils.version_info import VersionInfo
 
 # make buffer larger to avoid throw exception "RemoteProtocolError Receive buffer too long"
 MAX_INCOMPLETE_EVENT_SIZE = 1024 * 1024
@@ -40,6 +41,7 @@ StreamObjectType = Union[Dict[str, Any], BaseModel]
 
 active_requests = AtomicCounter()
 server_shutdown = False
+
 
 class GracefulShutdownServer(Server):
     def set_server(self, backend_server):
@@ -56,6 +58,7 @@ class GracefulShutdownServer(Server):
         self.backend_server.stop()
         await super().shutdown(sockets)
 
+
 class BackendApp(object):
     def __init__(self, py_env_configs: PyEnvConfigs = StaticConfig):
         self.py_env_configs = py_env_configs
@@ -69,7 +72,7 @@ class BackendApp(object):
         timeout_keep_alive = self.py_env_configs.server_config.timeout_keep_alive
 
         loop = "auto"
-        if (threading.current_thread() != threading.main_thread()):
+        if threading.current_thread() != threading.main_thread():
             # NOTE: asyncio
             loop = "none"
             auto_loop_setup()
@@ -97,19 +100,19 @@ class BackendApp(object):
         middleware = [
             Middleware(
                 CORSMiddleware,
-                allow_origins=['*'],
+                allow_origins=["*"],
                 allow_credentials=True,
-                allow_methods=['*'],
-                allow_headers=['*']
+                allow_methods=["*"],
+                allow_headers=["*"],
             )
         ]
         app = FastAPI(middleware=middleware)
 
         def check_shutdown():
             global server_shutdown
-            detail=""
+            detail = ""
             ready = True
-            if server_shutdown :
+            if server_shutdown:
                 detail = "this server has been shutdown"
                 ready = False
             elif self.backend_server.ready() == False:
@@ -118,13 +121,16 @@ class BackendApp(object):
 
             if not ready:
                 raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail=detail
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=detail
                 )
 
         @app.on_event("startup")
         async def startup():
-            RunVar("_default_thread_limiter").set(CapacityLimiter(self.backend_server._global_controller.max_concurrency * 2))
+            RunVar("_default_thread_limiter").set(
+                CapacityLimiter(
+                    self.backend_server._global_controller.max_concurrency * 2
+                )
+            )
 
         @app.get("/health")
         @app.post("/health")
@@ -150,10 +156,16 @@ class BackendApp(object):
             load_balance_version = 0
             load_balance_info = self.backend_server.get_load_balance_info()
             engine_schedule_info = self.backend_server.get_engine_schedule_info()
-            available_concurrency = self.backend_server._global_controller.get_available_concurrency()
+            available_concurrency = (
+                self.backend_server._global_controller.get_available_concurrency()
+            )
             backend_available_concurrency = available_concurrency
 
-            if int(os.environ.get('LOAD_BALANCE', 0)) and load_balance_info.step_per_minute > 0 and load_balance_info.step_latency_us > 0:
+            if (
+                int(os.environ.get("LOAD_BALANCE", 0))
+                and load_balance_info.step_per_minute > 0
+                and load_balance_info.step_latency_us > 0
+            ):
                 available_concurrency = load_balance_info.step_per_minute
                 # when use new version available_concurrency need set new load_balance_version
                 load_balance_version = 1
@@ -171,24 +183,32 @@ class BackendApp(object):
                 "running_query_len": load_balance_info.running_query_len,
                 "version": load_balance_version,
                 "alive": True,
-                "running_task_list": [{
-                    "request_id": task.request_id,
-                    "prefix_length": task.prefix_length,
-                    "input_length": task.input_length
-                } for task in engine_schedule_info.running_task_info_list],
-                "finished_task_list": [{
-                    "request_id": task.request_id,
-                    "prefix_length": task.prefix_length,
-                    "input_length": task.input_length
-                } for task in engine_schedule_info.finished_task_info_list],
+                "running_task_list": [
+                    {
+                        "request_id": task.request_id,
+                        "prefix_length": task.prefix_length,
+                        "input_length": task.input_length,
+                    }
+                    for task in engine_schedule_info.running_task_info_list
+                ],
+                "finished_task_list": [
+                    {
+                        "request_id": task.request_id,
+                        "prefix_length": task.prefix_length,
+                        "input_length": task.input_length,
+                    }
+                    for task in engine_schedule_info.finished_task_info_list
+                ],
                 "last_schedule_delta": engine_schedule_info.last_schedule_delta,
-                "machine_info": self.backend_server.model_runtime_meta()
+                "machine_info": self.backend_server.model_runtime_meta(),
             }
 
         # entry for worker RANK != 0
         @app.post("/inference_internal")
         @check_is_worker()
-        async def inference_internal(req: Union[str,Dict[Any, Any]], raw_request: RawRequest):
+        async def inference_internal(
+            req: Union[str, Dict[Any, Any]], raw_request: RawRequest
+        ):
             global active_requests
             active_requests.increment()
             try:
@@ -222,7 +242,7 @@ class BackendApp(object):
 
         # request format: {"log_level": "DEBUG"}, {"log_level": "info"}
         @app.post("/set_log_level")
-        async def set_log_level(req: Union[str,Dict[Any, Any]]):
+        async def set_log_level(req: Union[str, Dict[Any, Any]]):
             try:
                 if self.backend_server.set_log_level(req):
                     return {"status": "ok"}

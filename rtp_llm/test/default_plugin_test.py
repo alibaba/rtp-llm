@@ -1,13 +1,14 @@
+from typing import Any, List
+from unittest import TestCase, main
 
 from rtp_llm.pipeline.default_plugin import DefaultPlugin
 from rtp_llm.utils.tokenizer_utils import DecodingState, IncrementDecodingUtils
 
-from unittest import TestCase, main
-from typing import Any, List
 
 class FakeTokenizer(object):
     def decode(self, ids: List[int]):
         return " ".join([str(x) for x in ids])
+
 
 class DefaultPluginTest(TestCase):
     def test_incremental_decode(self):
@@ -17,10 +18,12 @@ class DefaultPluginTest(TestCase):
         res = []
         for i in range(1, len(output_ids) + 1):
             ids = output_ids[:i]
-            text, all_text = DefaultPlugin.tokenids_decode_func(ids, tokenizer, state, True)
+            text, all_text = DefaultPlugin.tokenids_decode_func(
+                ids, tokenizer, state, True
+            )
             res.append(text)
-        self.assertEqual(res, ['5', ' 9', ' 11', ' 13', ' 15', ' 17', ' 19', ' 21'])
+        self.assertEqual(res, ["5", " 9", " 11", " 13", " 15", " 17", " 19", " 21"])
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

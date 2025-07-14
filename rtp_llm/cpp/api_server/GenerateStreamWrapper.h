@@ -10,32 +10,27 @@
 #include "rtp_llm/cpp/api_server/ApiServerMetrics.h"
 #include "rtp_llm/cpp/api_server/InferenceDataType.h"
 
-
-
 namespace rtp_llm {
 
 class GenerateStreamWrapper {
 public:
     GenerateStreamWrapper(const std::shared_ptr<ApiServerMetricReporter>& metric_reporter,
-                          const std::shared_ptr<TokenProcessor>& token_processor);
+                          const std::shared_ptr<TokenProcessor>&          token_processor);
     virtual ~GenerateStreamWrapper() = default;
 
-    void init(const std::shared_ptr<GenerateInput>& input,
-              const std::shared_ptr<EngineBase>& engine);
+    void init(const std::shared_ptr<GenerateInput>& input, const std::shared_ptr<EngineBase>& engine);
 
-    void init(GenerateStreamPtr input,
-              const std::shared_ptr<EngineBase>& engine);
+    void init(GenerateStreamPtr input, const std::shared_ptr<EngineBase>& engine);
 
-    virtual std::pair<MultiSeqsResponse, bool>
-    generateResponse();
+    virtual std::pair<MultiSeqsResponse, bool> generateResponse();
 
 private:
     // static for ease of UT
-    static MultiSeqsResponse
-    formatResponse(const std::vector<std::string>&        generate_texts,
-                   const GenerateOutputs&                 generate_outputs,
-                   const std::shared_ptr<GenerateConfig>& generate_config,
-                   rtp_llm::BufferPtr                          input_ids);
+    static MultiSeqsResponse formatResponse(const std::vector<std::string>&        generate_texts,
+                                            const GenerateOutputs&                 generate_outputs,
+                                            const std::shared_ptr<GenerateConfig>& generate_config,
+                                            rtp_llm::BufferPtr                     input_ids);
+
 private:
     GenerateStreamPtr                        stream_;
     std::shared_ptr<GenerateConfig>          generate_config_;
@@ -45,7 +40,7 @@ private:
     std::shared_ptr<lora::LoraResourceGuard> lora_guard_;
     std::vector<int>                         output_lens_;
     GenerateOutputs                          outputs_cache_;
-    rtp_llm::BufferPtr                            input_ids_;
+    rtp_llm::BufferPtr                       input_ids_;
 };
 
 }  // namespace rtp_llm

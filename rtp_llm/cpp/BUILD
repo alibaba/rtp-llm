@@ -169,7 +169,7 @@ cc_library(
         "cache/CacheManager.h",
         "cache/KVCacheResource.h",
     ] + select({
-        ":enable_3fs": [ 
+        ":enable_3fs": [
             "model_rpc/RPCPool.h",
             "cache/ThreeFSBlockCache.h",
             "cache/ThreeFSCacheManager.h",
@@ -187,7 +187,7 @@ cc_library(
         "cache/CacheManager.cc",
         "cache/KVCacheResource.cc",
     ] + select({
-        ":enable_3fs": [ 
+        ":enable_3fs": [
             "cache/ThreeFSBlockCache.cc",
             "cache/ThreeFSCacheManager.cc",
             "cache/ThreeFSFile.cc",
@@ -206,7 +206,7 @@ cc_library(
         "//rtp_llm/cpp/devices:device_utils",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store",
     ] + select({
-        ":enable_3fs": [ 
+        ":enable_3fs": [
             "//3rdparty/3fs:hf3fs",
         ],
         "//conditions:default": [],

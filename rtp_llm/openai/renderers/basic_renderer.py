@@ -1,34 +1,46 @@
-from typing import Optional, List, Dict, Any, Union, Callable, AsyncGenerator
-import logging
-import torch
-import os
-from functools import lru_cache
-from packaging import version
 import json
-
-from transformers import PreTrainedTokenizerBase
+import logging
+import os
 from dataclasses import dataclass, field
+from functools import lru_cache
+from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Union
 
 import jinja2
+import torch
 from jinja2.exceptions import TemplateError
 from jinja2.sandbox import ImmutableSandboxedEnvironment
+from packaging import version
+from transformers import PreTrainedTokenizerBase
 
-from rtp_llm.openai.renderers.custom_renderer import CustomChatRenderer, \
-    RendererParams, StreamResponseObject, RenderedInputs, RendererInfo
 from rtp_llm.models.base_model import GenerateOutput
-from rtp_llm.openai.api_datatype import ChatMessage, GPTFunctionDefinition, RoleEnum, \
-    ChatCompletionRequest, ChatCompletionResponseStreamChoice, DeltaMessage, FinisheReason, UsageInfo
-from rtp_llm.utils.multimodal_util import MMUrlType, MMPreprocessConfig
-
+from rtp_llm.openai.api_datatype import (
+    ChatCompletionRequest,
+    ChatCompletionResponseStreamChoice,
+    ChatMessage,
+    DeltaMessage,
+    FinisheReason,
+    GPTFunctionDefinition,
+    RoleEnum,
+    UsageInfo,
+)
+from rtp_llm.openai.renderers.custom_renderer import (
+    CustomChatRenderer,
+    RenderedInputs,
+    RendererInfo,
+    RendererParams,
+    StreamResponseObject,
+)
+from rtp_llm.utils.multimodal_util import MMPreprocessConfig, MMUrlType
 
 DEFAULT_CHAT_API_TEMPLATE = (
     "{% for message in messages %}"
-        "{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}"
+    "{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}"
     "{% endfor %}"
     "{% if add_generation_prompt %}"
-        "{{ '<|im_start|>assistant\n' }}"
+    "{{ '<|im_start|>assistant\n' }}"
     "{% endif %}"
 )
+
 
 @dataclass
 class PromptWithMMInput:
@@ -37,21 +49,24 @@ class PromptWithMMInput:
     mm_types: List[MMUrlType] = field(default_factory=list)
     preprocess_configs: List[MMPreprocessConfig] = field(default_factory=list)
 
+
 # This class is designed to replace `PreTrainedTokenizerBase.apply_chat_template` functionality,
 # providing more capability to customize the template.
 # More specifically, this method allows template to use `functions` field, following openai chat api format.
 # Besides that, other template elements is compatible with `PreTrainedTokenizerBase.apply_chat_template`.
 class BasicRenderer(CustomChatRenderer):
-    def __init__(self,
-                 tokenizer: PreTrainedTokenizerBase,
-                 renderer_params: RendererParams,
+    def __init__(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        renderer_params: RendererParams,
     ):
         super().__init__(tokenizer, renderer_params)
 
         if version.parse(jinja2.__version__) <= version.parse("3.0.0"):
             raise ImportError(
                 "apply_chat_template requires jinja2>=3.0.0 to be installed. "
-                "Your version is " f"{jinja2.__version__}."
+                "Your version is "
+                f"{jinja2.__version__}."
             )
 
         self.add_generation_prompt = True
@@ -60,14 +75,16 @@ class BasicRenderer(CustomChatRenderer):
 
         try:
             self.chat_template = tokenizer.chat_template
-            assert (self.chat_template != None)
+            assert self.chat_template != None
         except:
             try:
                 self.chat_template = tokenizer.default_chat_template
-                assert (self.chat_template != None)
+                assert self.chat_template != None
             except:
-                logging.info(f"tokenizer {tokenizer} has no chat_template nor "
-                              "default_chat_template attribute. Use default template.")
+                logging.info(
+                    f"tokenizer {tokenizer} has no chat_template nor "
+                    "default_chat_template attribute. Use default template."
+                )
                 self.chat_template = DEFAULT_CHAT_API_TEMPLATE
                 self.add_extra_stop_words(["<|im_end|>"])
 
@@ -85,8 +102,10 @@ class BasicRenderer(CustomChatRenderer):
 
         try:
             if tokenizer.additional_special_tokens != None:
-                logging.info(f"additional special tokens {tokenizer.additional_special_tokens}"
-                             "added as stop words.")
+                logging.info(
+                    f"additional special tokens {tokenizer.additional_special_tokens}"
+                    "added as stop words."
+                )
                 self.add_extra_stop_words(tokenizer.additional_special_tokens)
         except:
             pass
@@ -100,25 +119,37 @@ class BasicRenderer(CustomChatRenderer):
         #     pass
 
         logging.info(f"found chat template to use: {self.chat_template}")
-        self.default_template_key = os.environ.get("DEFAULT_CHAT_TEMPLATE_KEY", "default")
-        self.default_tool_use_template_key = os.environ.get("DEFAULT_TOOL_USE_TEMPLATE_KEY", "tool_use")
+        self.default_template_key = os.environ.get(
+            "DEFAULT_CHAT_TEMPLATE_KEY", "default"
+        )
+        self.default_tool_use_template_key = os.environ.get(
+            "DEFAULT_TOOL_USE_TEMPLATE_KEY", "tool_use"
+        )
         self.compiled_template_map: Dict[str, jinja2.Template] = {}
 
         if isinstance(self.chat_template, dict):
             for key, template in self.chat_template.items():
                 self.compiled_template_map[key] = self._compile_jinja_template(template)
         elif isinstance(self.chat_template, str):
-            self.compiled_template_map[self.default_template_key] = self._compile_jinja_template(self.chat_template)
+            self.compiled_template_map[self.default_template_key] = (
+                self._compile_jinja_template(self.chat_template)
+            )
         else:
-            raise Exception(f"chat template [{self.chat_template}] "
-                            f"of type [{type(self.chat_template)}] is not supported.")
+            raise Exception(
+                f"chat template [{self.chat_template}] "
+                f"of type [{type(self.chat_template)}] is not supported."
+            )
 
         if self.default_template_key not in self.compiled_template_map:
-            raise Exception(f"default template key [{self.default_template_key}] not found "
-                            f"in chat templates: [{self.compiled_template_map.keys()}]")
+            raise Exception(
+                f"default template key [{self.default_template_key}] not found "
+                f"in chat templates: [{self.compiled_template_map.keys()}]"
+            )
         if self.default_tool_use_template_key not in self.compiled_template_map:
             self.default_tool_use_template_key = self.default_template_key
-        logging.info(f"compiled chat templates to use: {self.compiled_template_map.keys()}")
+        logging.info(
+            f"compiled chat templates to use: {self.compiled_template_map.keys()}"
+        )
 
     def get_renderer_info(self) -> RendererInfo:
         renderer_info = super().get_renderer_info()
@@ -138,10 +169,15 @@ class BasicRenderer(CustomChatRenderer):
     def _get_template(self, request: ChatCompletionRequest) -> jinja2.Template:
         if request.user_template:
             if request.template_key:
-                raise ValueError("template_key and user_template can not be used together.")
+                raise ValueError(
+                    "template_key and user_template can not be used together."
+                )
             return self._compile_jinja_template(request.user_template)
-        template_key = self.default_tool_use_template_key \
-            if request.functions else self.default_template_key
+        template_key = (
+            self.default_tool_use_template_key
+            if request.functions
+            else self.default_template_key
+        )
         template_key = request.template_key or template_key
         return self.compiled_template_map[template_key]
 
@@ -149,21 +185,26 @@ class BasicRenderer(CustomChatRenderer):
         template = self._get_template(request)
         request_dict = json.loads(request.model_dump_json(exclude_none=True))
         render_args = {
-            "messages": request_dict['messages'],
+            "messages": request_dict["messages"],
             "json": json,
             "add_generation_prompt": self.add_generation_prompt,
         }
         render_args.update(self.special_tokens_map)
         # functions with none value may occur exception in llama3 template
-        if request_dict.get('functions', None):
-            render_args['functions'] = request_dict['functions']
+        if request_dict.get("functions", None):
+            render_args["functions"] = request_dict["functions"]
         if request.chat_template_kwargs is not None:
             render_args.update(request.chat_template_kwargs)
-        if request.extend_fields is not None and 'chat_template_kwargs' in request.extend_fields and \
-            isinstance(request.extend_fields['chat_template_kwargs'], dict):
-            render_args.update(request.extend_fields['chat_template_kwargs'])
-        rendered = template.render(
-            **render_args
+        if (
+            request.extend_fields is not None
+            and "chat_template_kwargs" in request.extend_fields
+            and isinstance(request.extend_fields["chat_template_kwargs"], dict)
+        ):
+            render_args.update(request.extend_fields["chat_template_kwargs"])
+        rendered = template.render(**render_args)
+        logging.debug(
+            f"request [{request.model_dump_json(indent=4)}] rendered string: [{rendered}]]"
         )
-        logging.debug(f"request [{request.model_dump_json(indent=4)}] rendered string: [{rendered}]]")
-        return RenderedInputs(input_ids=self.tokenizer.encode(rendered), rendered_prompt=rendered)
+        return RenderedInputs(
+            input_ids=self.tokenizer.encode(rendered), rendered_prompt=rendered
+        )

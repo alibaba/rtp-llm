@@ -126,7 +126,7 @@ struct is_alignment<__nv_bfloat16, bf16_8_t> {
 
 template<typename scalar_t, typename vector_t>
 struct assign {
-    static __device__ __inline__ void read(vector_t& vec, scalar_t& x){};
+    static __device__ __inline__ void read(vector_t& vec, scalar_t& x) {};
 
     static __device__ __inline__ void read2(vector_t& vec, scalar_t& x, scalar_t& y) {
         if constexpr (is_alignment<scalar_t, vector_t>::value) {
@@ -301,24 +301,16 @@ __device__ __inline__ void RotaryHalfWrite(vector_t& vec, scalar_t* smem, const 
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-__device__ __inline__ float rope_inv_freq(const int   zid,
-                                          const int   rot_embed_dim,
-                                          const float t_step,
-                                          const float base)
-{
+__device__ __inline__ float
+rope_inv_freq(const int zid, const int rot_embed_dim, const float t_step, const float base) {
     return (t_step / pow(base, zid / (float)rot_embed_dim));
 }
 
 template<typename RopeInit>
 __device__ __inline__ float2 rotary_embedding_coefficient(
-        const int   zid,
-        const int   rot_embed_dim,
-        const float t_step,
-        const float base,
-        const RopeInit &rope_init)
-{
-    float inv_freq = rope_inv_freq(zid, rot_embed_dim, t_step, base);
-    inv_freq = rope_init(inv_freq, zid);
+    const int zid, const int rot_embed_dim, const float t_step, const float base, const RopeInit& rope_init) {
+    float inv_freq      = rope_inv_freq(zid, rot_embed_dim, t_step, base);
+    inv_freq            = rope_init(inv_freq, zid);
     float sin_cos_scale = rope_init.sin_cos_scale();
 #if USING_CUDA
     float sin_i, cos_i;
@@ -341,7 +333,7 @@ struct DefaultRope {
 };
 
 struct LinearScaleRope {
-    float scale = 1.0;
+    float                       scale = 1.0;
     __device__ __inline__ float operator()(float inv_freq, int zid) const {
         return inv_freq / scale;
     }
@@ -352,17 +344,19 @@ struct LinearScaleRope {
 };
 
 struct YarnRope {
-    int dim;
-    int base;
-    int max_pos;
+    int   dim;
+    int   base;
+    int   max_pos;
     float beta_slow;
     float beta_fast;
     float scaling_factor;
     float extrapolation_factor;
     float mscale;
 
-    static __device__ __inline__ float find_correction_dim(const int num_rotations, const int dim, const int base,
-                                                           const int max_position_embeddings=2048) {
+    static __device__ __inline__ float find_correction_dim(const int num_rotations,
+                                                           const int dim,
+                                                           const int base,
+                                                           const int max_position_embeddings = 2048) {
 
         float pi = 3.141592654f;
         float t0 = dim * logf((float)max_position_embeddings / (num_rotations * 2 * pi));
@@ -370,14 +364,13 @@ struct YarnRope {
         return (t0 / t1);
     }
 
-    static __device__ __inline__ float2 find_correction_range(float low_rot, float high_rot, int dim, int base,
-                                                              int max_position_embeddings)
-    {
+    static __device__ __inline__ float2
+    find_correction_range(float low_rot, float high_rot, int dim, int base, int max_position_embeddings) {
         float2 low_high;
-        int low = floor(find_correction_dim(low_rot, dim, base, max_position_embeddings));
-        int high = ceil(find_correction_dim(high_rot, dim, base, max_position_embeddings));
-        low_high.x = max(low, 0);
-        low_high.y = min(high, dim-1);
+        int    low  = floor(find_correction_dim(low_rot, dim, base, max_position_embeddings));
+        int    high = ceil(find_correction_dim(high_rot, dim, base, max_position_embeddings));
+        low_high.x  = max(low, 0);
+        low_high.y  = min(high, dim - 1);
         return low_high;
     }
 
@@ -390,10 +383,10 @@ struct YarnRope {
     }
 
     __device__ __inline__ float operator()(float inv_freq, int zid) const {
-        float2 low_high = find_correction_range(beta_fast, beta_slow, dim, base, max_pos);
+        float2      low_high   = find_correction_range(beta_fast, beta_slow, dim, base, max_pos);
         const float inv_freq_e = inv_freq;
         const float inv_freq_i = inv_freq_e / scaling_factor;
-        const float mask     = (1 - linear_ramp_mask(low_high.x, low_high.y, zid)) * extrapolation_factor;
+        const float mask       = (1 - linear_ramp_mask(low_high.x, low_high.y, zid)) * extrapolation_factor;
         return inv_freq_i * (1 - mask) + inv_freq_e * mask;
     }
 
@@ -406,12 +399,12 @@ struct Llama3Rope {
     float low_freq_factor;
     float high_freq_factor;
     float factor;
-    int old_context_len;
+    int   old_context_len;
 
     __device__ __inline__ float operator()(float inv_freq, int zid) const {
-        const float pi = 3.141592654f;
-        const float wavelen = 2 * pi / inv_freq;
-        const float low_freq_wavelen = old_context_len / low_freq_factor;
+        const float pi                = 3.141592654f;
+        const float wavelen           = 2 * pi / inv_freq;
+        const float low_freq_wavelen  = old_context_len / low_freq_factor;
         const float high_freq_wavelen = old_context_len / high_freq_factor;
         if (wavelen < high_freq_wavelen) {
             return inv_freq;
@@ -461,80 +454,55 @@ __device__ __inline__ __nv_bfloat162 rotary_embedding_transform(const __nv_bfloa
 #endif
 
 template<typename RopeInit>
-__device__ __inline__ void apply_rotary_embedding(float2& q,
-                                                  int     tid,
-                                                  int     rot_embed_dim,
-                                                  int     t_step,
-                                                  float   base,
-                                                  const RopeInit &rope_init)
-{
+__device__ __inline__ void
+apply_rotary_embedding(float2& q, int tid, int rot_embed_dim, int t_step, float base, const RopeInit& rope_init) {
     if (2 * tid >= rot_embed_dim) {
         return;
     }
     float2 coef = rotary_embedding_coefficient(2 * tid, rot_embed_dim, t_step, base, rope_init);
-    q = rotary_embedding_transform(q, coef);
+    q           = rotary_embedding_transform(q, coef);
 }
 
 template<typename RopeInit>
-__device__ __inline__ void apply_rotary_embedding(float4& q,
-                                                  int     tid,
-                                                  int     rot_embed_dim,
-                                                  int     t_step,
-                                                  float   base,
-                                                  const RopeInit &rope_init)
-{
+__device__ __inline__ void
+apply_rotary_embedding(float4& q, int tid, int rot_embed_dim, int t_step, float base, const RopeInit& rope_init) {
     if (4 * tid >= rot_embed_dim) {
         return;
     }
 
     Float4_& q_    = *reinterpret_cast<Float4_*>(&q);
-    float2 coef0 = rotary_embedding_coefficient(4 * tid, rot_embed_dim, t_step, base, rope_init);
-    float2 coef1 = rotary_embedding_coefficient(4 * tid + 2, rot_embed_dim, t_step, base, rope_init);
-    q_.x = rotary_embedding_transform(q_.x, coef0);
-    q_.y = rotary_embedding_transform(q_.y, coef1);
+    float2   coef0 = rotary_embedding_coefficient(4 * tid, rot_embed_dim, t_step, base, rope_init);
+    float2   coef1 = rotary_embedding_coefficient(4 * tid + 2, rot_embed_dim, t_step, base, rope_init);
+    q_.x           = rotary_embedding_transform(q_.x, coef0);
+    q_.y           = rotary_embedding_transform(q_.y, coef1);
 }
 
 template<typename RopeInit>
-__device__ __inline__ void apply_rotary_embedding(uint32_t&   q,
-                                                  int         tid,
-                                                  int         rot_embed_dim,
-                                                  int         t_step,
-                                                  float       base,
-                                                  const RopeInit &rope_init)
-{
+__device__ __inline__ void
+apply_rotary_embedding(uint32_t& q, int tid, int rot_embed_dim, int t_step, float base, const RopeInit& rope_init) {
     if (2 * tid >= rot_embed_dim) {
         return;
     }
     float2 coef = rotary_embedding_coefficient(2 * tid, rot_embed_dim, t_step, base, rope_init);
-    q = rotary_embedding_transform(q, coef);
+    q           = rotary_embedding_transform(q, coef);
 }
 
 template<typename RopeInit>
-__device__ __inline__ void apply_rotary_embedding(uint2&      q,
-                                                  int         tid,
-                                                  int         rot_embed_dim,
-                                                  int         t_step,
-                                                  float       base,
-                                                  const RopeInit &rope_init)
-{
+__device__ __inline__ void
+apply_rotary_embedding(uint2& q, int tid, int rot_embed_dim, int t_step, float base, const RopeInit& rope_init) {
     if (4 * tid >= rot_embed_dim) {
         return;
     }
 
     float2 coef0 = rotary_embedding_coefficient(4 * tid, rot_embed_dim, t_step, base, rope_init);
     float2 coef1 = rotary_embedding_coefficient(4 * tid + 2, rot_embed_dim, t_step, base, rope_init);
-    q.x = rotary_embedding_transform(q.x, coef0);
-    q.y = rotary_embedding_transform(q.y, coef1);
+    q.x          = rotary_embedding_transform(q.x, coef0);
+    q.y          = rotary_embedding_transform(q.y, coef1);
 }
 
 template<typename RopeInit>
-__device__ __inline__ void apply_rotary_embedding(uint4&      q,
-                                                  int         tid,
-                                                  int         rot_embed_dim,
-                                                  int         t_step,
-                                                  float       base,
-                                                  const RopeInit &rope_init)
-{
+__device__ __inline__ void
+apply_rotary_embedding(uint4& q, int tid, int rot_embed_dim, int t_step, float base, const RopeInit& rope_init) {
     if (8 * tid >= rot_embed_dim) {
         return;
     }
@@ -553,27 +521,18 @@ __device__ __inline__ void apply_rotary_embedding(uint4&      q,
 #ifdef ENABLE_BF16
 
 template<typename RopeInit>
-__device__ __inline__ void apply_rotary_embedding(__nv_bfloat162& q,
-                                                  int             tid,
-                                                  int             rot_embed_dim,
-                                                  int             t_step,
-                                                  float           base,
-                                                  const RopeInit &rope_init)
-{
+__device__ __inline__ void apply_rotary_embedding(
+    __nv_bfloat162& q, int tid, int rot_embed_dim, int t_step, float base, const RopeInit& rope_init) {
     if (2 * tid >= rot_embed_dim) {
         return;
     }
     float2 coef = rotary_embedding_coefficient(2 * tid, rot_embed_dim, t_step, base, rope_init);
-    q = rotary_embedding_transform(q, coef);
+    q           = rotary_embedding_transform(q, coef);
 }
 
 template<typename RopeInit>
-__device__ __inline__ void apply_rotary_embedding(bf16_4_t&   q,
-                                                  int         tid,
-                                                  int         rot_embed_dim,
-                                                  int         t_step,
-                                                  float       base,
-                                                  const RopeInit &rope_init) {
+__device__ __inline__ void
+apply_rotary_embedding(bf16_4_t& q, int tid, int rot_embed_dim, int t_step, float base, const RopeInit& rope_init) {
     if (4 * tid >= rot_embed_dim) {
         return;
     }
@@ -586,13 +545,8 @@ __device__ __inline__ void apply_rotary_embedding(bf16_4_t&   q,
 }
 
 template<typename RopeInit>
-__device__ __inline__ void apply_rotary_embedding(bf16_8_t&   q,
-                                                  int         tid,
-                                                  int         rot_embed_dim,
-                                                  int         t_step,
-                                                  float       base,
-                                                  const RopeInit &rope_init)
-{
+__device__ __inline__ void
+apply_rotary_embedding(bf16_8_t& q, int tid, int rot_embed_dim, int t_step, float base, const RopeInit& rope_init) {
     if (8 * tid >= rot_embed_dim) {
         return;
     }
@@ -618,8 +572,7 @@ __device__ __inline__ void normal_rope(vector_t&       x,
                                        const int       dim,
                                        const float     base,
                                        const RopeInit& rope_init,
-                                       const int       offset = 0)
-{
+                                       const int       offset = 0) {
     const int  vec_size  = vector_size<scalar_t, vector_t>::size;
     const int  rope_idx  = tidx * vec_size - offset;
     const bool work      = (rope_idx >= 0 && rope_idx < dim);
@@ -645,13 +598,8 @@ __device__ __inline__ void normal_rope(vector_t&       x,
 }
 
 template<typename vector_t, typename scalar_t>
-__device__ __inline__ void normal_rope_with_cache(vector_t&     x,
-                                                  scalar_t*     smem,
-                                                  const int     tidx,
-                                                  const int     dim,
-                                                  const float2& coef,
-                                                  const bool work)
-{
+__device__ __inline__ void normal_rope_with_cache(
+    vector_t& x, scalar_t* smem, const int tidx, const int dim, const float2& coef, const bool work) {
     if (work) {
         reinterpret_cast<vector_t*>(smem)[tidx] = x;
     }
@@ -672,13 +620,8 @@ __device__ __inline__ void normal_rope_with_cache(vector_t&     x,
 }
 
 template<typename RopeInit, typename scalar_t, typename vector_t>
-__device__ __inline__ void glm2_rope(vector_t&   x,
-                                     const int   tidx,
-                                     const int   seqidx,
-                                     const int   dim,
-                                     const float base,
-                                     const RopeInit& rope_init)
-{
+__device__ __inline__ void
+glm2_rope(vector_t& x, const int tidx, const int seqidx, const int dim, const float base, const RopeInit& rope_init) {
     const int  vec_size = vector_size<scalar_t, vector_t>::size;
     const bool work     = (tidx * vec_size < dim);
 
@@ -687,69 +630,80 @@ __device__ __inline__ void glm2_rope(vector_t&   x,
     }
 }
 
-__device__ __inline__ float get_dynamic_ntk_base(const int dim, const float base, const int seq_len, const float scale, const int max_pos) {
+__device__ __inline__ float
+get_dynamic_ntk_base(const int dim, const float base, const int seq_len, const float scale, const int max_pos) {
     float new_base = base * 1.0f * pow(((scale * seq_len / max_pos) - (scale - 1)), (dim / (dim - 2.0f)));
     return new_base;
 }
 
-__device__ __inline__ float get_qwen_dynamic_ntk_base(const int dim, const float base, const int seq_len, const int max_pos) {
+__device__ __inline__ float
+get_qwen_dynamic_ntk_base(const int dim, const float base, const int seq_len, const int max_pos) {
     float context_value = logf((float)seq_len / max_pos) / logf(2.0) + 1.0;
     float ntk_scalar    = pow(2.0, ceil(context_value)) - 1;
-    ntk_scalar = max(ntk_scalar, 1.0);
+    ntk_scalar          = max(ntk_scalar, 1.0);
     float new_base      = base * pow((float)ntk_scalar, (float)dim / (dim - 2));
     return new_base;
 }
 
-
 template<typename scalar_t, typename vector_t, RopeStyle ROPE_STYLE>
-__device__ inline void apply_rope(RopeConfig rope_config,
-                                  vector_t& x,
-                                  scalar_t* smem,
-                                  int       tidx,
-                                  int       seqidx,
-                                  int       seq_len)
-{
+__device__ inline void
+apply_rope(RopeConfig rope_config, vector_t& x, scalar_t* smem, int tidx, int seqidx, int seq_len) {
     auto base = rope_config.base;
-    auto dim = rope_config.dim;
+    auto dim  = rope_config.dim;
     switch (ROPE_STYLE) {
-    case RopeStyle::No:
-        break;
-    case RopeStyle::Base:
-        normal_rope(x, smem, tidx, seqidx, dim, base, LinearScaleRope{rope_config.scale});
-        break;
-    case RopeStyle::Glm2:
-        // only do rotary embedding for [..., d / 2]
-        glm2_rope<LinearScaleRope, scalar_t, vector_t>(x, tidx, seqidx, dim / 2, base, LinearScaleRope{rope_config.scale});
-        break;
-    case RopeStyle::DynamicNTK:
-        if (seq_len > rope_config.max_pos) {
-            base = get_dynamic_ntk_base(dim, base, seq_len, rope_config.scale, rope_config.max_pos);
-        }
-        normal_rope(x, smem, tidx, seqidx, dim, base, DefaultRope{});
-        break;
-    case RopeStyle::Yarn:
-        normal_rope(x, smem, tidx, seqidx, dim, base,
-                    YarnRope{rope_config.dim, rope_config.base, rope_config.max_pos,
-                        rope_config.factor1, rope_config.factor2, rope_config.scale,
-                        rope_config.extrapolation_factor, rope_config.mscale},
-                    rope_config.offset);
-        break;
-    case RopeStyle::QwenDynamicNTK:
-        if (seq_len > rope_config.max_pos) {
-            base = get_qwen_dynamic_ntk_base(dim, base, seq_len, rope_config.max_pos);
-        }
-        normal_rope(x, smem, tidx, seqidx, dim, base, DefaultRope{});
-        break;
-    case RopeStyle::Llama3:
-        normal_rope(x, smem, tidx, seqidx, dim, base,
-                    Llama3Rope{rope_config.factor1, rope_config.factor2, rope_config.scale,
-                        rope_config.max_pos});
-        break;
-    case RopeStyle::Mrope:
-        normal_rope(x, smem, tidx, seqidx, dim, base, LinearScaleRope{rope_config.scale});
-        break;
-    default:
-        break;
+        case RopeStyle::No:
+            break;
+        case RopeStyle::Base:
+            normal_rope(x, smem, tidx, seqidx, dim, base, LinearScaleRope{rope_config.scale});
+            break;
+        case RopeStyle::Glm2:
+            // only do rotary embedding for [..., d / 2]
+            glm2_rope<LinearScaleRope, scalar_t, vector_t>(
+                x, tidx, seqidx, dim / 2, base, LinearScaleRope{rope_config.scale});
+            break;
+        case RopeStyle::DynamicNTK:
+            if (seq_len > rope_config.max_pos) {
+                base = get_dynamic_ntk_base(dim, base, seq_len, rope_config.scale, rope_config.max_pos);
+            }
+            normal_rope(x, smem, tidx, seqidx, dim, base, DefaultRope{});
+            break;
+        case RopeStyle::Yarn:
+            normal_rope(x,
+                        smem,
+                        tidx,
+                        seqidx,
+                        dim,
+                        base,
+                        YarnRope{rope_config.dim,
+                                 rope_config.base,
+                                 rope_config.max_pos,
+                                 rope_config.factor1,
+                                 rope_config.factor2,
+                                 rope_config.scale,
+                                 rope_config.extrapolation_factor,
+                                 rope_config.mscale},
+                        rope_config.offset);
+            break;
+        case RopeStyle::QwenDynamicNTK:
+            if (seq_len > rope_config.max_pos) {
+                base = get_qwen_dynamic_ntk_base(dim, base, seq_len, rope_config.max_pos);
+            }
+            normal_rope(x, smem, tidx, seqidx, dim, base, DefaultRope{});
+            break;
+        case RopeStyle::Llama3:
+            normal_rope(x,
+                        smem,
+                        tidx,
+                        seqidx,
+                        dim,
+                        base,
+                        Llama3Rope{rope_config.factor1, rope_config.factor2, rope_config.scale, rope_config.max_pos});
+            break;
+        case RopeStyle::Mrope:
+            normal_rope(x, smem, tidx, seqidx, dim, base, LinearScaleRope{rope_config.scale});
+            break;
+        default:
+            break;
     }
 }
 
@@ -765,8 +719,7 @@ __device__ inline void context_rope(RopeConfig rope_config,
                                     int        input_len,
                                     bool       PREFIX_PROMPT,
                                     int        prefix_prompt_length,
-                                    int        count_length)
-{
+                                    int        count_length) {
     if (PREFIX_PROMPT && count_length) {
         input_len = input_len + prefix_prompt_length;
         seqidx    = seqidx + prefix_prompt_length;
@@ -775,31 +728,28 @@ __device__ inline void context_rope(RopeConfig rope_config,
         seqidx = position_id;
     }
 
-    apply_rope<scalar_t, vector_t, ROPE_STYLE>(
-            rope_config, q, smem, tidx, seqidx, seq_len);
+    apply_rope<scalar_t, vector_t, ROPE_STYLE>(rope_config, q, smem, tidx, seqidx, seq_len);
 
-    apply_rope<scalar_t, vector_t, ROPE_STYLE>(
-            rope_config, k, smem, tidx, seqidx, seq_len);
+    apply_rope<scalar_t, vector_t, ROPE_STYLE>(rope_config, k, smem, tidx, seqidx, seq_len);
 }
 
 template<typename scalar_t, typename vector_t, RopeStyle ROPE_STYLE>
 __device__ inline void attention_rope(RopeConfig rope_config,
-                                      vector_t& q,
-                                      vector_t& k,
-                                      scalar_t* smem,
-                                      int       tidx,
-                                      int       tlength,
-                                      int       timestep,
-                                      int       seq_len,
-                                      int       position_id,
-                                      int       input_len,
+                                      vector_t&  q,
+                                      vector_t&  k,
+                                      scalar_t*  smem,
+                                      int        tidx,
+                                      int        tlength,
+                                      int        timestep,
+                                      int        seq_len,
+                                      int        position_id,
+                                      int        input_len,
 #pragma nv_diagnostic push
 #pragma nv_diag_suppress 550
-                                      [[maybe_unused]] int       prefix_prompt_length,
+                                      [[maybe_unused]] int prefix_prompt_length,
 #pragma nv_diagnostic pop
-                                      int       count_prefix_length,
-                                      bool      handle_kv)
-{
+                                      int  count_prefix_length,
+                                      bool handle_kv) {
     if (count_prefix_length) {
         prefix_prompt_length = 0;
     }
@@ -812,12 +762,10 @@ __device__ inline void attention_rope(RopeConfig rope_config,
         tlength = tlength - prefix_prompt_length;
     }
 
-    apply_rope<scalar_t, vector_t, ROPE_STYLE>(
-            rope_config, q, smem, tidx, tlength, seq_len);
+    apply_rope<scalar_t, vector_t, ROPE_STYLE>(rope_config, q, smem, tidx, tlength, seq_len);
 
     if (handle_kv) {
-        apply_rope<scalar_t, vector_t, ROPE_STYLE>(
-                rope_config, k, smem, tidx, tlength, seq_len);
+        apply_rope<scalar_t, vector_t, ROPE_STYLE>(rope_config, k, smem, tidx, tlength, seq_len);
     }
 }
 
@@ -831,16 +779,16 @@ __global__ void launchApplyRopeKernel(scalar_t*  input,
                                       const int* prefill_length) {
     extern __shared__ __align__(sizeof(float2)) char smem[];
 
-    const int token_idx     = blockIdx.x;
-    const int head_num_idx  = blockIdx.y;
-    const int tidx          = threadIdx.x;
-    const int head_size_idx = tidx * 2;
+    const int token_idx            = blockIdx.x;
+    const int head_num_idx         = blockIdx.y;
+    const int tidx                 = threadIdx.x;
+    const int head_size_idx        = tidx * 2;
     const int token_padding_offset = padding_offset == nullptr ? 0 : padding_offset[token_idx];
-    const int tgt_token_idx = token_idx + token_padding_offset;
+    const int tgt_token_idx        = token_idx + token_padding_offset;
 
-    const int batch_idx = tgt_token_idx / seq_len;
+    const int batch_idx            = tgt_token_idx / seq_len;
     const int token_prefill_length = prefill_length == nullptr ? 0 : prefill_length[batch_idx];
-    const int seq_idx = tgt_token_idx % seq_len + token_prefill_length;
+    const int seq_idx              = tgt_token_idx % seq_len + token_prefill_length;
 
     const bool work = (head_num_idx < head_num && head_size_idx < head_size);
 

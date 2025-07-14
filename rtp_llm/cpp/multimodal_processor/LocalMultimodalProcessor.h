@@ -2,8 +2,6 @@
 
 #include "rtp_llm/cpp/multimodal_processor/MultimodalProcessor.h"
 
-
-
 namespace rtp_llm {
 
 class LocalMultimodalProcessor: public MultimodalProcessor {
@@ -15,11 +13,11 @@ private:
         if (mm_inputs.size() == 0) {
             return MultimodalOutput();
         } else if (!mm_process_engine_.is_none()) {
-            std::vector<std::string> urls;
-            std::vector<int32_t> types;
-            std::vector<torch::Tensor> tensors;
+            std::vector<std::string>          urls;
+            std::vector<int32_t>              types;
+            std::vector<torch::Tensor>        tensors;
             std::vector<std::vector<int32_t>> mm_preprocess_configs;
-            for (auto& mm_input: mm_inputs) {
+            for (auto& mm_input : mm_inputs) {
                 urls.push_back(mm_input.url);
                 tensors.push_back(mm_input.tensor);
                 types.push_back(mm_input.mm_type);
@@ -33,26 +31,26 @@ private:
             }
             try {
                 py::gil_scoped_acquire acquire;
-                auto res = mm_process_engine_.attr("submit")(urls, types, tensors, mm_preprocess_configs);
+                auto res              = mm_process_engine_.attr("submit")(urls, types, tensors, mm_preprocess_configs);
                 auto mm_embedding_vec = convertPyObjectToVec(res.attr("embeddings"));
 
-                MultimodalOutput mm_embedding_res;
+                MultimodalOutput           mm_embedding_res;
                 std::vector<torch::Tensor> mm_features;
-                for (auto& emb: mm_embedding_vec) {
+                for (auto& emb : mm_embedding_vec) {
                     mm_features.emplace_back(convertPyObjectToTensor(emb));
                 }
-                mm_embedding_res.mm_features = mm_features;
-                auto position_id_vec = res.attr("position_ids");
+                mm_embedding_res.mm_features               = mm_features;
+                auto                       position_id_vec = res.attr("position_ids");
                 std::vector<torch::Tensor> position_ids;
                 if (!position_id_vec.is_none()) {
-                    for (auto& position_id: convertPyObjectToVec(position_id_vec)) {
+                    for (auto& position_id : convertPyObjectToVec(position_id_vec)) {
                         auto pos = convertPyObjectToTensor(position_id);
                         position_ids.emplace_back(pos);
                     }
                     mm_embedding_res.mm_position_ids = position_ids;
                 }
                 return mm_embedding_res;
-            } catch (py::error_already_set &e) {
+            } catch (py::error_already_set& e) {
                 std::string error_msg = e.what();
                 if (error_msg.find("download failed") != std::string::npos) {
                     return ErrorInfo(ErrorCode::MM_DOWNLOAD_FAILED, error_msg);
@@ -65,4 +63,4 @@ private:
     }
 };
 
-}
+}  // namespace rtp_llm

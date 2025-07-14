@@ -22,7 +22,7 @@ enum class KvCacheDataType : int8_t {
     FP8  = 2
 };
 
-KvCacheDataType inline loadKvCacheDataTypeFromString(const std::string &str) {
+KvCacheDataType inline loadKvCacheDataTypeFromString(const std::string& str) {
     if (str == "base" || str == "fp16") {
         return KvCacheDataType::BASE;
     } else if (str == "int8") {

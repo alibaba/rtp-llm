@@ -14,10 +14,10 @@ public:
     ~TokenizerEncodeRequest() override = default;
 
 public:
-    void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override ;
+    void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override;
 
 public:
-    std::optional<bool> return_offsets_mapping;
+    std::optional<bool>        return_offsets_mapping;
     std::optional<std::string> prompt;
 };
 

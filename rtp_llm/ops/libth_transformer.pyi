@@ -71,12 +71,18 @@ class CacheStoreConfig:
     thread_count: int
     rdma_connect_timeout_ms: int
     rdma_qp_count_per_connection: int
-    def __init__(self, cache_store_rdma_mode: bool = False, wrr_available_ratio: int = 80, rank_factor: int = 0, thread_count: int = 16, rdma_connect_timeout_ms: int = 250, rdma_qp_count_per_connection: int = 2) -> None:
-        ...
-    def to_string(self) -> str:
-        ...
-    def update_from_env(self) -> None:
-        ...
+    def __init__(
+        self,
+        cache_store_rdma_mode: bool = False,
+        wrr_available_ratio: int = 80,
+        rank_factor: int = 0,
+        thread_count: int = 16,
+        rdma_connect_timeout_ms: int = 250,
+        rdma_qp_count_per_connection: int = 2,
+    ) -> None: ...
+    def to_string(self) -> str: ...
+    def update_from_env(self) -> None: ...
+
 class ConcurrencyConfig:
     concurrency_limit: int
     concurrency_with_block: bool

@@ -10,7 +10,7 @@ namespace rtp_llm {
 class MockGenerateStreamWrapper: public GenerateStreamWrapper {
 public:
     MockGenerateStreamWrapper(const std::shared_ptr<ApiServerMetricReporter>& metric_reporter,
-                              const std::shared_ptr<TokenProcessor>& token_processor):
+                              const std::shared_ptr<TokenProcessor>&          token_processor):
         GenerateStreamWrapper(metric_reporter, token_processor) {}
     ~MockGenerateStreamWrapper() override = default;
 

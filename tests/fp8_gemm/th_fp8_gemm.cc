@@ -35,8 +35,8 @@ Tensor fp8_quant_gemm_helper(Tensor A, Tensor B, Tensor act_scale, Tensor w_scal
     allocator->setStream(stream);
 
     rtp_llm::cublasAlgoMap*   cublas_algo_map = new rtp_llm::cublasAlgoMap(GEMM_CONFIG);
-    rtp_llm::cublasMMWrapper* cublas_wrapper =
-        new rtp_llm::cublasMMWrapper(cublas_handle, cublaslt_handle, stream, cublas_algo_map, new std::mutex(), allocator);
+    rtp_llm::cublasMMWrapper* cublas_wrapper  = new rtp_llm::cublasMMWrapper(
+        cublas_handle, cublaslt_handle, stream, cublas_algo_map, new std::mutex(), allocator);
     cublas_wrapper->setFP8GemmConfig(CUDA_R_32F);
 
     int m = A.size(0);
@@ -75,7 +75,7 @@ Tensor fp8_quant_gemm_helper(Tensor A, Tensor B, Tensor act_scale, Tensor w_scal
 
 template<typename T>
 Tensor fp8_gemm_helper(Tensor A, Tensor B, Tensor act_scale, Tensor w_scale) {
-    auto                                  stream    = at::cuda::getCurrentCUDAStream().stream();
+    auto                                            stream    = at::cuda::getCurrentCUDAStream().stream();
     rtp_llm::Allocator<rtp_llm::AllocatorType::TH>* allocator = new rtp_llm::Allocator<rtp_llm::AllocatorType::TH>();
     allocator->setStream(stream);
 

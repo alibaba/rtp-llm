@@ -44,11 +44,9 @@ protected:
 
         ON_CALL(*mock_weights_loader_, loadLoraWeights(::testing::_, ::testing::_))
             .WillByDefault(::testing::Invoke([](const std::string&, const std::string&) {
-                        return std::make_pair(
-                                std::make_unique<rtp_llm::lora::loraLayerWeightsMap>(),
-                                std::make_unique<rtp_llm::lora::loraLayerWeightsMap>()
-                                );
-                        }));
+                return std::make_pair(std::make_unique<rtp_llm::lora::loraLayerWeightsMap>(),
+                                      std::make_unique<rtp_llm::lora::loraLayerWeightsMap>());
+            }));
 
         std::map<std::string, std::string> lora_infos;
         lora_service_ = std::make_shared<LoraService>(engine, gang_server, weights_loader, lora_infos, metric_reporter);
@@ -106,16 +104,16 @@ protected:
 TEST_F(LoraServiceTest, Constructor) {
     {
         std::map<std::string, std::string> lora_infos;
-        LoraService lora_service(nullptr, nullptr, nullptr, lora_infos, nullptr);
+        LoraService                        lora_service(nullptr, nullptr, nullptr, lora_infos, nullptr);
         EXPECT_EQ(lora_service.engine_, nullptr);
         EXPECT_EQ(lora_service.gang_server_, nullptr);
         EXPECT_EQ(lora_service.metric_reporter_, nullptr);
     }
     {
-        auto        engine          = std::dynamic_pointer_cast<EngineBase>(mock_engine_);
-        auto        gang_server     = std::dynamic_pointer_cast<GangServer>(mock_gang_server_);
-        auto        weights_loader  = std::dynamic_pointer_cast<WeightsLoader>(mock_weights_loader_);
-        auto        metric_reporter = std::dynamic_pointer_cast<ApiServerMetricReporter>(mock_metric_reporter_);
+        auto engine          = std::dynamic_pointer_cast<EngineBase>(mock_engine_);
+        auto gang_server     = std::dynamic_pointer_cast<GangServer>(mock_gang_server_);
+        auto weights_loader  = std::dynamic_pointer_cast<WeightsLoader>(mock_weights_loader_);
+        auto metric_reporter = std::dynamic_pointer_cast<ApiServerMetricReporter>(mock_metric_reporter_);
         std::map<std::string, std::string> lora_infos;
         LoraService lora_service(engine, gang_server, weights_loader, lora_infos, metric_reporter);
         EXPECT_NE(lora_service.engine_, nullptr);
@@ -250,9 +248,7 @@ TEST_F(LoraServiceTest, Update_Success) {
     }));
 
     // 模拟 lora manager 中的 lora map
-    lora_service_->lora_info_map_ = {{"test0", "/path0"},
-                                     {"test1", "/path/to/lora/test/"},
-                                     {"test2", "/path2"}};
+    lora_service_->lora_info_map_ = {{"test0", "/path0"}, {"test1", "/path/to/lora/test/"}, {"test2", "/path2"}};
     // 只有 test0 和 test2 会被 remove, test1 不会被 remove
     EXPECT_CALL(*mock_lora_manager_, removeLora("test0")).WillOnce(Return());
     EXPECT_CALL(*mock_lora_manager_, removeLora("test2")).WillOnce(Return());

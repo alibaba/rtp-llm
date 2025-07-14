@@ -1,46 +1,65 @@
-from typing import List, Tuple, Union, Any
+from threading import Lock
+from typing import Any, List, Tuple, Union
 
 import torch
-from threading import Lock
+
 try:
     from decord import VideoReader, cpu
 except ModuleNotFoundError:
     VideoReader = None
     cpu = None
 from PIL import Image, ImageFile
+
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 import pillow_avif
 from pillow_heif import register_heif_opener
+
 register_heif_opener()
+
+import threading
 
 from torchvision import transforms
 
 from rtp_llm.distribute.worker_info import g_parallel_info
-from rtp_llm.utils.multimodal_util import (vit_emb_cache_,
-                                                    get_bytes_io_from_url,
-                                                    MMUrlType,
-                                                    get_vit_compute_dtype)
+from rtp_llm.utils.multimodal_util import (
+    MMUrlType,
+    get_bytes_io_from_url,
+    get_vit_compute_dtype,
+    vit_emb_cache_,
+)
 
-import threading
 mm_lock = threading.Lock()
+
 
 class ImageTransform:
 
     def __init__(self, image_size: int):
         mean = (0.48145466, 0.4578275, 0.40821073)
         std = (0.26862954, 0.26130258, 0.27577711)
-        self.image_transform = transforms.Compose([
-            transforms.Resize((image_size, image_size),
-                              interpolation=transforms.InterpolationMode.BICUBIC),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=mean, std=std),
-        ])
+        self.image_transform = transforms.Compose(
+            [
+                transforms.Resize(
+                    (image_size, image_size),
+                    interpolation=transforms.InterpolationMode.BICUBIC,
+                ),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=mean, std=std),
+            ]
+        )
 
-    def encode(self, images: List[Image.Image], device: Union[str, torch.device], dtype: torch.dtype) -> torch.Tensor:
-        tensor_images = torch.stack(
-            [self.image_transform(image) for image in images], dim=0
-        ).to(device=device).to(dtype=dtype)
+    def encode(
+        self,
+        images: List[Image.Image],
+        device: Union[str, torch.device],
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        tensor_images = (
+            torch.stack([self.image_transform(image) for image in images], dim=0)
+            .to(device=device)
+            .to(dtype=dtype)
+        )
         return tensor_images
+
 
 class MultiModalEmbeddingInterface:
     @property
@@ -77,6 +96,7 @@ class MultiModalEmbeddingInterface:
     def mm_process(self, mm_input, **kwargs):
         raise NotImplementedError
 
+
 class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
     def _mm_preprocess(self, data, **kwargs):
         return Image.open(data).convert("RGB")
@@ -94,6 +114,7 @@ class AudioEmbeddingInterface(MultiModalEmbeddingInterface):
     def _mm_preprocess(self, data, **kwargs):
         # temporary
         import torchaudio
+
         return torchaudio.load(data)
 
     @torch.inference_mode()
@@ -103,6 +124,7 @@ class AudioEmbeddingInterface(MultiModalEmbeddingInterface):
     @torch.inference_mode()
     def audio_embedding(self, audio: Tuple[torch.Tensor, int]):
         raise NotImplementedError()
+
 
 class VideoEmbeddingInterface(MultiModalEmbeddingInterface):
     def _mm_preprocess(self, data, **kwargs):

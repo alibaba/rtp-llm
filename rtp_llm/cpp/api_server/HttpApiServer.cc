@@ -12,7 +12,8 @@ namespace rtp_llm {
 
 void HttpApiServer::init_controller(const rtp_llm::GptInitParameter& params) {
     bool block = params.concurrency_config.concurrency_with_block;
-    RTP_LLM_LOG_INFO("Get concurrency_with_block: %d from GptInitParameter.",params.concurrency_config.concurrency_with_block);
+    RTP_LLM_LOG_INFO("Get concurrency_with_block: %d from GptInitParameter.",
+                     params.concurrency_config.concurrency_with_block);
     if (params.tp_rank_ == 0) {
         int limit = params.concurrency_config.concurrency_limit;
         RTP_LLM_LOG_INFO("CONCURRENCY_LIMIT to %d", limit);
@@ -151,7 +152,8 @@ bool HttpApiServer::registerWorkerStatusService() {
         return false;
     }
 
-    worker_status_service_.reset(new WorkerStatusService(engine_, controller_, engine_init_param_.gpt_init_parameter.misc_config.load_balance));
+    worker_status_service_.reset(
+        new WorkerStatusService(engine_, controller_, engine_init_param_.gpt_init_parameter.misc_config.load_balance));
     auto callback = [worker_status_service =
                          worker_status_service_](std::unique_ptr<http_server::HttpResponseWriter> writer,
                                                  const http_server::HttpRequest&                  request) -> void {
@@ -209,15 +211,15 @@ bool HttpApiServer::registerChatService() {
     chat_service_.reset(
         new ChatService(engine_, mm_processor_, request_counter_, tokenizer_, render_, params_, metric_reporter_));
     auto chat_completions_callback = [active_request_count = active_request_count_,
-                                      chat_service = chat_service_,
-                                      controller = controller_,
-                                      request_counter = request_counter_,
-                                      metric_reporter = metric_reporter_](
-                                         std::unique_ptr<http_server::HttpResponseWriter> writer,
-                                         const http_server::HttpRequest&                  request) -> void {
+                                      chat_service         = chat_service_,
+                                      controller           = controller_,
+                                      request_counter      = request_counter_,
+                                      metric_reporter =
+                                          metric_reporter_](std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                                            const http_server::HttpRequest& request) -> void {
         auto request_id = request_counter->incAndReturn();
         try {
-            CounterGuard counter_guard(active_request_count);
+            CounterGuard               counter_guard(active_request_count);
             ConcurrencyControllerGuard controller_guard(controller);
             if (controller_guard.isPassed() == false) {
                 if (metric_reporter) {
@@ -236,8 +238,8 @@ bool HttpApiServer::registerChatService() {
     };
 
     auto chat_render_callback = [active_request_count = active_request_count_,
-                                 request_counter = request_counter_,
-                                 metric_reporter = metric_reporter_,
+                                 request_counter      = request_counter_,
+                                 metric_reporter      = metric_reporter_,
                                  chat_service = chat_service_](std::unique_ptr<http_server::HttpResponseWriter> writer,
                                                                const http_server::HttpRequest& request) -> void {
         auto request_id = request_counter->incAndReturn();
@@ -252,10 +254,10 @@ bool HttpApiServer::registerChatService() {
             HttpApiServerException::handleException(e, request_id, metric_reporter, request, writer);
         }
     };
-    return http_server_->RegisterRoute("POST", "/chat/completions",    chat_completions_callback) &&
-           http_server_->RegisterRoute("POST", "/v1/chat/completions", chat_completions_callback) &&
-           http_server_->RegisterRoute("POST", "/chat/render",         chat_render_callback) &&
-           http_server_->RegisterRoute("POST", "/v1/chat/render",      chat_render_callback);
+    return http_server_->RegisterRoute("POST", "/chat/completions", chat_completions_callback)
+           && http_server_->RegisterRoute("POST", "/v1/chat/completions", chat_completions_callback)
+           && http_server_->RegisterRoute("POST", "/chat/render", chat_render_callback)
+           && http_server_->RegisterRoute("POST", "/v1/chat/render", chat_render_callback);
 }
 
 bool HttpApiServer::registerInferenceService() {
@@ -263,74 +265,68 @@ bool HttpApiServer::registerInferenceService() {
         RTP_LLM_LOG_WARNING("register inference service failed, http server is null");
         return false;
     }
-    inference_service_.reset(new InferenceService(engine_,
-                                                  mm_processor_,
-                                                  request_counter_,
-                                                  token_processor_,
-                                                  controller_,
-                                                  params_,
-                                                  metric_reporter_));
+    inference_service_.reset(new InferenceService(
+        engine_, mm_processor_, request_counter_, token_processor_, controller_, params_, metric_reporter_));
     auto inference_internal_callback =
         [active_request_count = active_request_count_, inference_service = inference_service_](
             std::unique_ptr<http_server::HttpResponseWriter> writer, const http_server::HttpRequest& request) -> void {
         CounterGuard counter_guard(active_request_count);
         inference_service->inference(writer, request, /*isInternal=*/true);
     };
-    auto inference_callback =
-        [active_request_count = active_request_count_, inference_service = inference_service_](
-            std::unique_ptr<http_server::HttpResponseWriter> writer, const http_server::HttpRequest& request) -> void {
+    auto inference_callback = [active_request_count = active_request_count_, inference_service = inference_service_](
+                                  std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                  const http_server::HttpRequest&                  request) -> void {
         CounterGuard counter_guard(active_request_count);
         inference_service->inference(writer, request, /*isInternal=*/false);
     };
 
-    return http_server_->RegisterRoute("POST", "/",                   inference_callback) &&
-           http_server_->RegisterRoute("POST", "/inference_internal", inference_internal_callback);
+    return http_server_->RegisterRoute("POST", "/", inference_callback)
+           && http_server_->RegisterRoute("POST", "/inference_internal", inference_internal_callback);
 }
 
 bool HttpApiServer::registerEmbedingService() {
-    embedding_service_.reset(new EmbeddingService(embedding_endpoint_,
-                                                  request_counter_,
-                                                  controller_,
-                                                  metrics_reporter_,
-                                                  py_inference_log_response_));
-    auto callback = [active_request_count = active_request_count_, embedding_service = embedding_service_](
-            std::unique_ptr<http_server::HttpResponseWriter> writer, const http_server::HttpRequest& request) -> void {
+    embedding_service_.reset(new EmbeddingService(
+        embedding_endpoint_, request_counter_, controller_, metrics_reporter_, py_inference_log_response_));
+    auto callback = [active_request_count = active_request_count_,
+                     embedding_service    = embedding_service_](std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                                             const http_server::HttpRequest& request) -> void {
         CounterGuard counter_guard(active_request_count);
         embedding_service->embedding(writer, request);
     };
     auto callback_dense = [active_request_count = active_request_count_, embedding_service = embedding_service_](
-            std::unique_ptr<http_server::HttpResponseWriter> writer, const http_server::HttpRequest& request) -> void {
+                              std::unique_ptr<http_server::HttpResponseWriter> writer,
+                              const http_server::HttpRequest&                  request) -> void {
         CounterGuard counter_guard(active_request_count);
         embedding_service->embedding(writer, request, EmbeddingEndpoint::DENSE);
     };
     auto callback_sparse = [active_request_count = active_request_count_, embedding_service = embedding_service_](
-            std::unique_ptr<http_server::HttpResponseWriter> writer, const http_server::HttpRequest& request) -> void {
+                               std::unique_ptr<http_server::HttpResponseWriter> writer,
+                               const http_server::HttpRequest&                  request) -> void {
         CounterGuard counter_guard(active_request_count);
         embedding_service->embedding(writer, request, EmbeddingEndpoint::SPARSE);
     };
     auto callback_colbert = [active_request_count = active_request_count_, embedding_service = embedding_service_](
-            std::unique_ptr<http_server::HttpResponseWriter> writer, const http_server::HttpRequest& request) -> void {
+                                std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                const http_server::HttpRequest&                  request) -> void {
         CounterGuard counter_guard(active_request_count);
         embedding_service->embedding(writer, request, EmbeddingEndpoint::COLBERT);
     };
 
-    return http_server_->RegisterRoute("POST", "/v1/embeddings",            callback) &&
-           http_server_->RegisterRoute("POST", "/v1/embeddings/similarity", callback) &&
-           http_server_->RegisterRoute("POST", "/v1/embeddings/dense",      callback_dense) &&
-           http_server_->RegisterRoute("POST", "/v1/embeddings/sparse",     callback_sparse) &&
-           http_server_->RegisterRoute("POST", "/v1/embeddings/colbert",    callback_colbert) &&
-           http_server_->RegisterRoute("POST", "/v1/classifier",            callback) &&
-           http_server_->RegisterRoute("POST", "/v1/reranker",              callback) &&
-           http_server_->RegisterRoute("POST", "/",                         callback);
+    return http_server_->RegisterRoute("POST", "/v1/embeddings", callback)
+           && http_server_->RegisterRoute("POST", "/v1/embeddings/similarity", callback)
+           && http_server_->RegisterRoute("POST", "/v1/embeddings/dense", callback_dense)
+           && http_server_->RegisterRoute("POST", "/v1/embeddings/sparse", callback_sparse)
+           && http_server_->RegisterRoute("POST", "/v1/embeddings/colbert", callback_colbert)
+           && http_server_->RegisterRoute("POST", "/v1/classifier", callback)
+           && http_server_->RegisterRoute("POST", "/v1/reranker", callback)
+           && http_server_->RegisterRoute("POST", "/", callback);
 }
 
 bool HttpApiServer::registerLoraService() {
     lora_service_.reset(new LoraService(engine_, gang_server_, weights_loader_, lora_infos_, metric_reporter_));
-    auto add_lora_internal_callback = [lora_service = lora_service_,
-                                       request_counter = request_counter_,
-                                       metric_reporter = metric_reporter_](
-                                           std::unique_ptr<http_server::HttpResponseWriter> writer,
-                                           const http_server::HttpRequest& request) -> void {
+    auto add_lora_internal_callback =
+        [lora_service = lora_service_, request_counter = request_counter_, metric_reporter = metric_reporter_](
+            std::unique_ptr<http_server::HttpResponseWriter> writer, const http_server::HttpRequest& request) -> void {
         auto request_id = request_counter->incAndReturn();
         try {
             lora_service->addLoraInternal(writer, request);
@@ -345,11 +341,9 @@ bool HttpApiServer::registerLoraService() {
         }
     };
 
-    auto remove_lora_internal_callback = [lora_service = lora_service_,
-                                          request_counter = request_counter_,
-                                          metric_reporter = metric_reporter_](
-                                              std::unique_ptr<http_server::HttpResponseWriter> writer,
-                                              const http_server::HttpRequest& request) -> void {
+    auto remove_lora_internal_callback =
+        [lora_service = lora_service_, request_counter = request_counter_, metric_reporter = metric_reporter_](
+            std::unique_ptr<http_server::HttpResponseWriter> writer, const http_server::HttpRequest& request) -> void {
         auto request_id = request_counter->incAndReturn();
         try {
             lora_service->removeLoraInternal(writer, request);
@@ -364,11 +358,9 @@ bool HttpApiServer::registerLoraService() {
         }
     };
 
-    auto update_callback = [lora_service = lora_service_,
-                            request_counter = request_counter_,
-                            metric_reporter = metric_reporter_](
-                                std::unique_ptr<http_server::HttpResponseWriter> writer,
-                                const http_server::HttpRequest& request) -> void {
+    auto update_callback =
+        [lora_service = lora_service_, request_counter = request_counter_, metric_reporter = metric_reporter_](
+            std::unique_ptr<http_server::HttpResponseWriter> writer, const http_server::HttpRequest& request) -> void {
         auto request_id = request_counter->incAndReturn();
         try {
             lora_service->update(writer, request);
@@ -382,9 +374,9 @@ bool HttpApiServer::registerLoraService() {
             HttpApiServerException::handleException(e, request_id, metric_reporter, request, writer);
         }
     };
-    return http_server_->RegisterRoute("POST", "/add_lora_internal",    add_lora_internal_callback) &&
-           http_server_->RegisterRoute("POST", "/remove_lora_internal", remove_lora_internal_callback) &&
-           http_server_->RegisterRoute("POST", "/update",               update_callback);
+    return http_server_->RegisterRoute("POST", "/add_lora_internal", add_lora_internal_callback)
+           && http_server_->RegisterRoute("POST", "/remove_lora_internal", remove_lora_internal_callback)
+           && http_server_->RegisterRoute("POST", "/update", update_callback);
 }
 
 void HttpApiServer::stop() {
@@ -402,7 +394,8 @@ void HttpApiServer::stop() {
     // wait all active request finished
     if (active_request_count_) {
         while (active_request_count_->getValue() > 0) {
-            RTP_LLM_LOG_DEBUG("wait active request processed. active request count: %d", active_request_count_->getValue());
+            RTP_LLM_LOG_DEBUG("wait active request processed. active request count: %d",
+                              active_request_count_->getValue());
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
     }

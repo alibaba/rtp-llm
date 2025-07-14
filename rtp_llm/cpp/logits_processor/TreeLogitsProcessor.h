@@ -6,20 +6,28 @@
 namespace rtp_llm {
 
 struct StreamTreeInfo {
-    bool in_tree_mode;
-    int32_t input_length;
-    int32_t current_output_length;
-    bool is_beam_search;
+    bool                                       in_tree_mode;
+    int32_t                                    input_length;
+    int32_t                                    current_output_length;
+    bool                                       is_beam_search;
     std::shared_ptr<TreeDFA<std::string, int>> dfa_ptr;
     StreamTreeInfo() = default;
-    StreamTreeInfo(bool in_tree_mode, int32_t input_length, int32_t output_length, bool is_beam_search, std::shared_ptr<TreeDFA<std::string, int>> dfa_ptr) : 
-        in_tree_mode(in_tree_mode), input_length(input_length), current_output_length(output_length), is_beam_search(is_beam_search), dfa_ptr(dfa_ptr) {}
+    StreamTreeInfo(bool                                       in_tree_mode,
+                   int32_t                                    input_length,
+                   int32_t                                    output_length,
+                   bool                                       is_beam_search,
+                   std::shared_ptr<TreeDFA<std::string, int>> dfa_ptr):
+        in_tree_mode(in_tree_mode),
+        input_length(input_length),
+        current_output_length(output_length),
+        is_beam_search(is_beam_search),
+        dfa_ptr(dfa_ptr) {}
     StreamTreeInfo copy() {
         StreamTreeInfo tree_info;
-        tree_info.in_tree_mode = in_tree_mode;
-        tree_info.input_length = input_length;
+        tree_info.in_tree_mode          = in_tree_mode;
+        tree_info.input_length          = input_length;
         tree_info.current_output_length = current_output_length;
-        tree_info.is_beam_search = is_beam_search;
+        tree_info.is_beam_search        = is_beam_search;
         if (dfa_ptr) {
             tree_info.dfa_ptr = std::make_shared<TreeDFA<std::string, int>>(*dfa_ptr);
         }
@@ -34,7 +42,8 @@ public:
     virtual ~TreeLogitsProcessor() {}
 
 public:
-    static std::shared_ptr<TreeLogitsProcessor> fromGenerateInput(rtp_llm::DeviceBase* device, std::shared_ptr<GenerateInput> generate_input, int32_t num);
+    static std::shared_ptr<TreeLogitsProcessor>
+    fromGenerateInput(rtp_llm::DeviceBase* device, std::shared_ptr<GenerateInput> generate_input, int32_t num);
 
 public:
     void process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override;
@@ -43,7 +52,7 @@ public:
 
 public:
     std::vector<std::string> getStatus();
-    size_t size() {
+    size_t                   size() {
         return tree_infos_.size();
     }
     void insert(std::shared_ptr<TreeLogitsProcessor> others, size_t num) {
@@ -57,4 +66,4 @@ private:
 };
 typedef std::shared_ptr<TreeLogitsProcessor> TreeLogitsProcessorPtr;
 
-} // namespace rtp_llm
+}  // namespace rtp_llm

@@ -1,5 +1,9 @@
 import torch
-from rtp_llm.models.rotary_embedding.deepseek_rotary_embedding import DeepseekV3YarnRotaryEmbedding
+
+from rtp_llm.models.rotary_embedding.deepseek_rotary_embedding import (
+    DeepseekV3YarnRotaryEmbedding,
+)
+
 
 # Copied from transformers.models.llama.modeling_llama.rotate_half
 def rotate_half(x):
@@ -44,20 +48,27 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids, unsqueeze_dim=1):
     k_embed = (k * cos) + (rotate_half(k) * sin)
     return q_embed, k_embed
 
+
 def create_cos_sin_cache():
-    rotary_emb = DeepseekV3YarnRotaryEmbedding(64,
-                                                32768,
-                                                10000,
-                                                scaling_factor=1.0,
-                                                original_max_position_embeddings=4096,
-                                                beta_fast=32,
-                                                beta_slow=1,
-                                                mscale=1.0,
-                                                mscale_all_dim=1.0)
+    rotary_emb = DeepseekV3YarnRotaryEmbedding(
+        64,
+        32768,
+        10000,
+        scaling_factor=1.0,
+        original_max_position_embeddings=4096,
+        beta_fast=32,
+        beta_slow=1,
+        mscale=1.0,
+        mscale_all_dim=1.0,
+    )
     half_rope_dim = 64 // 2
     cos_cache = rotary_emb.cos_cached[:, :half_rope_dim]
     sin_cache = rotary_emb.sin_cached[:, :half_rope_dim]
     # cos sin cache must be float32
-    cos_sin_cache = torch.cat([cos_cache, sin_cache], dim=-1).contiguous().to(torch.device("cuda")).to(torch.float32)
+    cos_sin_cache = (
+        torch.cat([cos_cache, sin_cache], dim=-1)
+        .contiguous()
+        .to(torch.device("cuda"))
+        .to(torch.float32)
+    )
     return cos_sin_cache
-

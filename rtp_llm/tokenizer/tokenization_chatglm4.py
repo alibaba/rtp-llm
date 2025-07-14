@@ -1,23 +1,19 @@
-import regex as re
 import base64
 import os
+from typing import Dict, List, Optional, Union
+
+import regex as re
 import tiktoken
-from typing import List, Optional, Union, Dict
 from transformers import PreTrainedTokenizer
+from transformers.tokenization_utils_base import BatchEncoding, EncodedInput
 from transformers.utils import PaddingStrategy
-from transformers.tokenization_utils_base import EncodedInput, BatchEncoding
 
 
 class ChatGLM4Tokenizer(PreTrainedTokenizer):
     vocab_files_names = {"vocab_file": "tokenizer.model"}
     model_input_names = ["input_ids", "attention_mask", "position_ids"]
 
-    def __init__(
-            self,
-            vocab_file,
-            clean_up_tokenization_spaces=False,
-            **kwargs
-    ):
+    def __init__(self, vocab_file, clean_up_tokenization_spaces=False, **kwargs):
         self.name = "GLM4Tokenizer"
         self.vocab_file = vocab_file
         pat_str = "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
@@ -37,14 +33,13 @@ class ChatGLM4Tokenizer(PreTrainedTokenizer):
             name="my_tokenizer",
             pat_str=pat_str,
             mergeable_ranks=mergeable_ranks,
-            special_tokens={}
+            special_tokens={},
         )
         self.decoder = {rank: token for token, rank in mergeable_ranks.items()}
         self.n_words = len(self.decoder)
 
         super().__init__(
-            clean_up_tokenization_spaces=clean_up_tokenization_spaces,
-            **kwargs
+            clean_up_tokenization_spaces=clean_up_tokenization_spaces, **kwargs
         )
 
     @property
@@ -52,7 +47,7 @@ class ChatGLM4Tokenizer(PreTrainedTokenizer):
         return self.n_words
 
     def get_vocab(self):
-        """ Returns vocab as a dict """
+        """Returns vocab as a dict"""
         vocab = {self._convert_id_to_token(i): i for i in range(self.vocab_size)}
         vocab.update(self.added_tokens_encoder)
         return vocab
@@ -85,7 +80,7 @@ class ChatGLM4Tokenizer(PreTrainedTokenizer):
         return tokens
 
     def _convert_token_to_id(self, token):
-        """ Converts a token (str) in an id using the vocab. """
+        """Converts a token (str) in an id using the vocab."""
         return self.mergeable_ranks[token]
 
     def _convert_id_to_token(self, index):
@@ -112,7 +107,7 @@ class ChatGLM4Tokenizer(PreTrainedTokenizer):
         else:
             vocab_file = save_directory
 
-        with open(self.vocab_file, 'rb') as fin:
+        with open(self.vocab_file, "rb") as fin:
             proto_str = fin.read()
 
         with open(vocab_file, "wb") as writer:
@@ -121,14 +116,18 @@ class ChatGLM4Tokenizer(PreTrainedTokenizer):
         return (vocab_file,)
 
     def get_prefix_tokens(self):
-        prefix_tokens = [self.convert_tokens_to_ids("[gMASK]"), self.convert_tokens_to_ids("<sop>")]
+        prefix_tokens = [
+            self.convert_tokens_to_ids("[gMASK]"),
+            self.convert_tokens_to_ids("<sop>"),
+        ]
         return prefix_tokens
 
     def build_single_message(self, role, metadata, message, tokenize=True):
         assert role in ["system", "user", "assistant", "observation"], role
         if tokenize:
-            role_tokens = [self.convert_tokens_to_ids(f"<|{role}|>")] + self.tokenizer.encode(f"{metadata}\n",
-                                                                                              disallowed_special=())
+            role_tokens = [
+                self.convert_tokens_to_ids(f"<|{role}|>")
+            ] + self.tokenizer.encode(f"{metadata}\n", disallowed_special=())
             message_tokens = self.tokenizer.encode(message, disallowed_special=())
             tokens = role_tokens + message_tokens
             return tokens
@@ -136,7 +135,7 @@ class ChatGLM4Tokenizer(PreTrainedTokenizer):
             return str(f"<|{role}|>{metadata}\n{message}")
 
     def build_inputs_with_special_tokens(
-            self, token_ids_0: List[int], token_ids_1: Optional[List[int]] = None
+        self, token_ids_0: List[int], token_ids_1: Optional[List[int]] = None
     ) -> List[int]:
         """
         Build model inputs from a sequence or a pair of sequence for sequence classification tasks by concatenating and
@@ -157,17 +156,19 @@ class ChatGLM4Tokenizer(PreTrainedTokenizer):
         prefix_tokens = self.get_prefix_tokens()
         token_ids_0 = prefix_tokens + token_ids_0
         if token_ids_1 is not None:
-            token_ids_0 = token_ids_0 + token_ids_1 + [self.convert_tokens_to_ids("<eos>")]
+            token_ids_0 = (
+                token_ids_0 + token_ids_1 + [self.convert_tokens_to_ids("<eos>")]
+            )
         return token_ids_0
 
     def _pad(
-            self,
-            encoded_inputs: Union[Dict[str, EncodedInput], BatchEncoding],
-            max_length: Optional[int] = None,
-            padding_side: str = "left",
-            padding_strategy: PaddingStrategy = PaddingStrategy.DO_NOT_PAD,
-            pad_to_multiple_of: Optional[int] = None,
-            return_attention_mask: Optional[bool] = None,
+        self,
+        encoded_inputs: Union[Dict[str, EncodedInput], BatchEncoding],
+        max_length: Optional[int] = None,
+        padding_side: str = "left",
+        padding_strategy: PaddingStrategy = PaddingStrategy.DO_NOT_PAD,
+        pad_to_multiple_of: Optional[int] = None,
+        return_attention_mask: Optional[bool] = None,
     ) -> dict:
         """
         Pad encoded inputs (on left/right and up to predefined length or max length in the batch)
@@ -200,10 +201,17 @@ class ChatGLM4Tokenizer(PreTrainedTokenizer):
         if padding_strategy == PaddingStrategy.LONGEST:
             max_length = len(required_input)
 
-        if max_length is not None and pad_to_multiple_of is not None and (max_length % pad_to_multiple_of != 0):
+        if (
+            max_length is not None
+            and pad_to_multiple_of is not None
+            and (max_length % pad_to_multiple_of != 0)
+        ):
             max_length = ((max_length // pad_to_multiple_of) + 1) * pad_to_multiple_of
 
-        needs_to_be_padded = padding_strategy != PaddingStrategy.DO_NOT_PAD and len(required_input) != max_length
+        needs_to_be_padded = (
+            padding_strategy != PaddingStrategy.DO_NOT_PAD
+            and len(required_input) != max_length
+        )
 
         # Initialize attention mask if not present.
         if "attention_mask" not in encoded_inputs:
@@ -216,9 +224,15 @@ class ChatGLM4Tokenizer(PreTrainedTokenizer):
             difference = max_length - len(required_input)
 
             if "attention_mask" in encoded_inputs:
-                encoded_inputs["attention_mask"] = [0] * difference + encoded_inputs["attention_mask"]
+                encoded_inputs["attention_mask"] = [0] * difference + encoded_inputs[
+                    "attention_mask"
+                ]
             if "position_ids" in encoded_inputs:
-                encoded_inputs["position_ids"] = [0] * difference + encoded_inputs["position_ids"]
-            encoded_inputs[self.model_input_names[0]] = [self.pad_token_id] * difference + required_input
+                encoded_inputs["position_ids"] = [0] * difference + encoded_inputs[
+                    "position_ids"
+                ]
+            encoded_inputs[self.model_input_names[0]] = [
+                self.pad_token_id
+            ] * difference + required_input
 
         return encoded_inputs

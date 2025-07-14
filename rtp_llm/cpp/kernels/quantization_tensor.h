@@ -21,15 +21,20 @@
 #include <cuda_fp8.h>
 #endif
 
-namespace rtp_llm
-{
+namespace rtp_llm {
 
-template <typename T>
+template<typename T>
 void invokeQuantization(
     int8_t* dst, const T* src, const int64_t size, const float* scalePtr, cudaStream_t stream = 0, int maxGirdSize = 0);
 
-template <typename T>
-void invokePerTokenQuantization(
-    int8_t* dst, const T* src, const int64_t numRows, const int64_t numCols, float* scalePtr, const float* smoother,  const float* shift, cudaStream_t stream = 0);
+template<typename T>
+void invokePerTokenQuantization(int8_t*       dst,
+                                const T*      src,
+                                const int64_t numRows,
+                                const int64_t numCols,
+                                float*        scalePtr,
+                                const float*  smoother,
+                                const float*  shift,
+                                cudaStream_t  stream = 0);
 
-}
+}  // namespace rtp_llm

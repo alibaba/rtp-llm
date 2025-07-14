@@ -4,7 +4,6 @@
 
 using namespace std;
 
-
 namespace rtp_llm {
 
 grpc::Status RemoteRpcServer::init(const EngineInitParams&                                maga_init_params,
@@ -63,10 +62,11 @@ void RemoteRpcServer::initLocalPeerInfo() {
     RTP_LLM_LOG_INFO(worker_grpc_info);
 }
 
-void RemoteRpcServer::initCacheStore(const GptInitParameter& init_params, rtp_llm::ProposeModelEngineInitParams* propose_params) {
+void RemoteRpcServer::initCacheStore(const GptInitParameter&                init_params,
+                                     rtp_llm::ProposeModelEngineInitParams* propose_params) {
     RTP_LLM_LOG_INFO("init_params.use_cache_store = %d, init_params.pd_separation = %d",
-                init_params.use_cache_store_,
-                init_params.pd_separation_);
+                     init_params.use_cache_store_,
+                     init_params.pd_separation_);
 
     if (!init_params.use_cache_store_) {
         RTP_LLM_FAIL("cache store not used in RemoteRpcServer is unexpected");
@@ -76,19 +76,19 @@ void RemoteRpcServer::initCacheStore(const GptInitParameter& init_params, rtp_ll
     auto cache_manager = engine_->resourceContext().cache_manager;
 
     CacheStoreInitParams params;
-    params.listen_port      = init_params.cache_store_listen_port_;
-    params.rdma_listen_port = init_params.cache_store_rdma_listen_port_;
-    params.rdma_mode        = init_params.cache_store_rdma_mode_;
-    params.thread_count     = init_params.cache_store_config.thread_count;
-    params.queue_size       = 500;
-    params.rdma_connect_timeout_ms = init_params.cache_store_config.rdma_connect_timeout_ms;
+    params.listen_port                  = init_params.cache_store_listen_port_;
+    params.rdma_listen_port             = init_params.cache_store_rdma_listen_port_;
+    params.rdma_mode                    = init_params.cache_store_rdma_mode_;
+    params.thread_count                 = init_params.cache_store_config.thread_count;
+    params.queue_size                   = 500;
+    params.rdma_connect_timeout_ms      = init_params.cache_store_config.rdma_connect_timeout_ms;
     params.rdma_qp_count_per_connection = init_params.cache_store_config.rdma_qp_count_per_connection;
-    params.device           = device;
-    params.metrics_reporter = metrics_reporter_;
+    params.device                       = device;
+    params.metrics_reporter             = metrics_reporter_;
     RTP_LLM_LOG_INFO("cache store listen port is [%ld], rdma listen port is [%ld] rdma_mode is [%d]",
-                params.listen_port,
-                params.rdma_listen_port,
-                params.rdma_mode);
+                     params.listen_port,
+                     params.rdma_listen_port,
+                     params.rdma_mode);
     cache_store_ = NormalCacheStore::createNormalCacheStore(params);
     RTP_LLM_CHECK_WITH_INFO(cache_store_ != nullptr, "cache store init failed");
     RTP_LLM_LOG_INFO("cache store init success");
@@ -97,8 +97,9 @@ void RemoteRpcServer::initCacheStore(const GptInitParameter& init_params, rtp_ll
     cache_manager->regUserMr();
     if (propose_params) {
         if (propose_params->mtp_model_params_) {
-            for (size_t mtp_model_id = 0; mtp_model_id < propose_params->mtp_model_params_->size(); mtp_model_id++) { 
-                const std::shared_ptr<CacheManager>& mtp_cache_manager = engine_->resourceContext().mtp_cache_managers[mtp_model_id];
+            for (size_t mtp_model_id = 0; mtp_model_id < propose_params->mtp_model_params_->size(); mtp_model_id++) {
+                const std::shared_ptr<CacheManager>& mtp_cache_manager =
+                    engine_->resourceContext().mtp_cache_managers[mtp_model_id];
                 mtp_cache_manager->regUserMr();
             }
         }

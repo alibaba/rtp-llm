@@ -9,7 +9,7 @@ namespace rtp_llm {
 absl::Status VanillaExecutor::propose(const std::list<GenerateStreamPtr>& streams, bool skip_check) {
     std::list<GenerateStreamPtr> propose_streams;
 
-    for (auto& stream: streams) {
+    for (auto& stream : streams) {
         RTP_LLM_LOG_DEBUG("before create vanilla stream [%d]: %s", stream->streamId(), stream->debugString().c_str());
     }
 
@@ -31,19 +31,19 @@ absl::Status VanillaExecutor::propose(const std::list<GenerateStreamPtr>& stream
         propose_streams.push_back(propose_stream);
     }
 
-    for (auto& stream: propose_streams) {
+    for (auto& stream : propose_streams) {
         RTP_LLM_LOG_DEBUG("before propose stream [%d]: %s", stream->streamId(), stream->debugString().c_str());
     }
 
     for (size_t i = 0; i < propose_step_; i++) {
-    // remove stopped/finished stream
-    propose_streams.remove_if([](const GenerateStreamPtr& stream) {
-        return stream->stoppedWithoutLock() || stream->finishedWithoutLock();
-    });
+        // remove stopped/finished stream
+        propose_streams.remove_if([](const GenerateStreamPtr& stream) {
+            return stream->stoppedWithoutLock() || stream->finishedWithoutLock();
+        });
         RETURN_IF_STATUS_ERROR(normal_executor_.process(propose_streams));
     }
 
-    for (auto& stream: propose_streams) {
+    for (auto& stream : propose_streams) {
         RTP_LLM_LOG_DEBUG("after propose stream [%d]: %s", stream->streamId(), stream->debugString().c_str());
     }
 

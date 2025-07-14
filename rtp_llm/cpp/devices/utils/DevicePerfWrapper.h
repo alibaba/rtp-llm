@@ -26,10 +26,11 @@ public:
     ~DevicePerfWrapper() {
         stop();
     }
+
 private:
-    bool perfing_ = false;
+    bool              perfing_ = false;
     const DeviceBase* device_;
-    std::string name_;
+    std::string       name_;
 };
 
-} // namespace rtp_llm
+}  // namespace rtp_llm

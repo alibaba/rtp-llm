@@ -391,7 +391,20 @@ void topkGatingSoftmaxLauncherHelper(const float* input,
 
     dim3 block_dim(WARP_SIZE, WARPS_PER_TB);
     dim3 grid_dim(num_blocks);
-    LAUNCH_KERNEL_WITH_PDL((topkGatingSoftmax<VPT, EXPERTS, WARPS_PER_TB, BYTES_PER_LDG>), grid_dim, block_dim, 0, stream, input, finished, topk_scales, num_rows, topk_expertID, topk_rowColID, num_cols, start_expert, end_expert);
+    LAUNCH_KERNEL_WITH_PDL((topkGatingSoftmax<VPT, EXPERTS, WARPS_PER_TB, BYTES_PER_LDG>),
+                           grid_dim,
+                           block_dim,
+                           0,
+                           stream,
+                           input,
+                           finished,
+                           topk_scales,
+                           num_rows,
+                           topk_expertID,
+                           topk_rowColID,
+                           num_cols,
+                           start_expert,
+                           end_expert);
 }
 
 void topkGatingSoftmax_KL(const float* input,

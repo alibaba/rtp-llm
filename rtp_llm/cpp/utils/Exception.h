@@ -23,14 +23,11 @@
 
 #include "rtp_llm/cpp/utils/StringUtil.h"
 
-#define FT_EXCEPTION(...)                                                                                        \
-    rtp_llm::FTException(__FILE__, __LINE__, rtp_llm::fmtstr(__VA_ARGS__))
+#define FT_EXCEPTION(...) rtp_llm::FTException(__FILE__, __LINE__, rtp_llm::fmtstr(__VA_ARGS__))
 
-namespace rtp_llm
-{
+namespace rtp_llm {
 
-class FTException : public std::runtime_error
-{
+class FTException: public std::runtime_error {
 public:
     static auto constexpr MAX_FRAMES = 128;
 
@@ -44,7 +41,7 @@ public:
 
 private:
     std::array<void*, MAX_FRAMES> mCallstack{};
-    int mNbFrames;
+    int                           mNbFrames;
 };
 
-} // namespace rtp_llm
+}  // namespace rtp_llm

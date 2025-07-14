@@ -203,7 +203,7 @@ void ftNcclStreamSynchronize(NcclParam tensor_para, cudaStream_t stream, bool ti
     RTP_LLM_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
     cudaError_t  cudaErr;
     ncclResult_t tensor_ncclErr = ncclSuccess, tensor_ncclAsyncErr = ncclSuccess;
-    ncclComm_t tensor_comm             = tensor_para.nccl_comm_;
+    ncclComm_t   tensor_comm = tensor_para.nccl_comm_;
     if (tensor_para.world_size_ == 1) {
         check_cuda_value(cudaStreamSynchronize(stream));
         return;
@@ -213,8 +213,9 @@ void ftNcclStreamSynchronize(NcclParam tensor_para, cudaStream_t stream, bool ti
 
     while (1) {
         auto currentTimepoint = std::chrono::steady_clock::now();
-        if (timeout && std::chrono::duration_cast<std::chrono::milliseconds>(currentTimepoint - synchronizeTimepoint)
-            >= opTimeout) {
+        if (timeout
+            && std::chrono::duration_cast<std::chrono::milliseconds>(currentTimepoint - synchronizeTimepoint)
+                   >= opTimeout) {
             RTP_LLM_LOG_WARNING("Op run time more than 120000ms, abort");
             abort();
         }
@@ -233,8 +234,8 @@ void ftNcclStreamSynchronize(NcclParam tensor_para, cudaStream_t stream, bool ti
         }
 
         if (tensor_ncclErr != ncclSuccess) {
-            std::string error_msg = "NCCL Error : ncclCommGetAsyncError returned " + std::to_string(tensor_ncclErr)
-                                    + " (tensor_para) ";
+            std::string error_msg =
+                "NCCL Error : ncclCommGetAsyncError returned " + std::to_string(tensor_ncclErr) + " (tensor_para) ";
             throw std::runtime_error(error_msg);
         }
 
@@ -274,13 +275,12 @@ void ftNcclParamDestroy(NcclParam& param) {
     }
 }
 
-void ftNcclInitialize(NcclParam& tensor_para,
-                      NcclParam& pipeline_para,
-                      const int  tensor_para_size,
-                      const int  pipeline_para_size,
-                      const int64_t      world_size,
-                      const int64_t      world_rank
-                    ) {
+void ftNcclInitialize(NcclParam&    tensor_para,
+                      NcclParam&    pipeline_para,
+                      const int     tensor_para_size,
+                      const int     pipeline_para_size,
+                      const int64_t world_size,
+                      const int64_t world_rank) {
     ftNcclInitialize(tensor_para, pipeline_para, tensor_para_size, pipeline_para_size, world_size, world_rank, "", 0);
 }
 
@@ -311,11 +311,12 @@ void ftNcclInitialize(NcclParam&         tensor_para,
         pipeline_para.world_size_ = pipeline_para_size;
         return;
     }
-    RTP_LLM_CHECK_WITH_INFO(tensor_para_size * pipeline_para_size == world_size,
-                       rtp_llm::fmtstr("tensor_para_size (%d) * pipeline_para_size (%d) should equal to the world size (%d).",
-                              tensor_para_size,
-                              pipeline_para_size,
-                              world_size));
+    RTP_LLM_CHECK_WITH_INFO(
+        tensor_para_size * pipeline_para_size == world_size,
+        rtp_llm::fmtstr("tensor_para_size (%d) * pipeline_para_size (%d) should equal to the world size (%d).",
+                        tensor_para_size,
+                        pipeline_para_size,
+                        world_size));
     auto tcpStore = createTcpStore(master_ip, master_port, world_size, world_rank);
 
     int pp_rank = world_rank / tensor_para_size;
@@ -327,7 +328,8 @@ void ftNcclInitialize(NcclParam&         tensor_para,
     ncclUniqueId pp_uid;
 
     if (tp_rank == 0) {
-        RTP_LLM_LOG_INFO("rank %d tp rank %d creates nccl uid in group %s.", world_rank, tp_rank, tp_group_name.c_str());
+        RTP_LLM_LOG_INFO(
+            "rank %d tp rank %d creates nccl uid in group %s.", world_rank, tp_rank, tp_group_name.c_str());
         NCCLCHECK(ncclGetUniqueId(&tp_uid));
         setUniqueId(&tp_uid, tp_group_name, tcpStore);
     } else {
@@ -336,7 +338,8 @@ void ftNcclInitialize(NcclParam&         tensor_para,
     }
 
     if (pp_rank == 0) {
-        RTP_LLM_LOG_INFO("rank %d pp rank %d creates nccl uid in group %s.", world_rank, pp_rank, pp_group_name.c_str());
+        RTP_LLM_LOG_INFO(
+            "rank %d pp rank %d creates nccl uid in group %s.", world_rank, pp_rank, pp_group_name.c_str());
         NCCLCHECK(ncclGetUniqueId(&pp_uid));
         setUniqueId(&pp_uid, pp_group_name, tcpStore);
     } else {
@@ -358,10 +361,10 @@ void ftNcclInitialize(NcclParam&         tensor_para,
     pipeline_para.nccl_uid_   = pp_uid;
     pipeline_para.nccl_comm_  = pp_nccl_comm;
     RTP_LLM_LOG_INFO("NCCL initialized rank=%d world_size=%d tensor_para=%s pipeline_para=%s",
-                world_rank,
-                world_size,
-                tensor_para.toString().c_str(),
-                pipeline_para.toString().c_str());
+                     world_rank,
+                     world_size,
+                     tensor_para.toString().c_str(),
+                     pipeline_para.toString().c_str());
     RTP_LLM_LOG_DEBUG("%s stop", __PRETTY_FUNCTION__);
 }
 
@@ -389,14 +392,15 @@ std::vector<int64_t> getLocalParameter(std::vector<int64_t> layer_para, int tens
 
 std::vector<size_t> fcNcclGatherRanks(NcclParam& para, cudaStream_t stream) {
     std::vector<int> ranks(para.world_size_);
-    size_t* d_sendbuf;
-    size_t* d_recvbuf;
+    size_t*          d_sendbuf;
+    size_t*          d_recvbuf;
     check_cuda_value(cudaMallocAsync(&d_sendbuf, sizeof(int), stream));
     check_cuda_value(cudaMallocAsync(&d_recvbuf, sizeof(int) * para.world_size_, stream));
     check_cuda_value(cudaMemcpyAsync(d_sendbuf, &para.rank_, sizeof(int), cudaMemcpyHostToDevice, stream));
     NCCLCHECK(ncclAllGather((const void*)d_sendbuf, (void*)d_recvbuf, 1, ncclInt, para.nccl_comm_, stream));
     check_cuda_value(cudaStreamSynchronize(stream));
-    check_cuda_value(cudaMemcpyAsync(ranks.data(), d_recvbuf, sizeof(int) * para.world_size_, cudaMemcpyDeviceToHost, stream));
+    check_cuda_value(
+        cudaMemcpyAsync(ranks.data(), d_recvbuf, sizeof(int) * para.world_size_, cudaMemcpyDeviceToHost, stream));
     check_cuda_value(cudaFreeAsync(d_sendbuf, stream));
     check_cuda_value(cudaFreeAsync(d_recvbuf, stream));
     check_cuda_value(cudaStreamSynchronize(stream));

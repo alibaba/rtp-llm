@@ -24,7 +24,7 @@ public:
                      double  softmax_extra_scale);
     torch::Tensor forward(torch::Tensor q,
                           torch::Tensor fused_qkv,
-                          int64_t kv_offset,
+                          int64_t       kv_offset,
                           torch::Tensor k_nope_weight,
                           torch::Tensor v_weight,
                           torch::Tensor cos_sin_cache,
@@ -46,11 +46,12 @@ MlaContextAttnOp::MlaContextAttnOp(int64_t mla_type,
                                    double  softmax_extra_scale) {
     rtp_llm::initLogger();
 
-    auto gpt_params = GptInitParameter();
+    auto gpt_params          = GptInitParameter();
     gpt_params.mla_ops_type_ = MlaOpsType(mla_type);
     gpt_params.update_from_env_for_test();
     rtp_llm::DeviceFactory::initDevices(gpt_params);
-    device_ = rtp_llm::DeviceFactory::getDefaultDevice();;
+    device_ = rtp_llm::DeviceFactory::getDefaultDevice();
+    ;
     attn_configs = AttentionConfigs({
         static_cast<size_t>(head_num),
         static_cast<size_t>(head_num),
@@ -75,14 +76,14 @@ MlaContextAttnOp::MlaContextAttnOp(int64_t mla_type,
 
 torch::Tensor MlaContextAttnOp::forward(torch::Tensor q,
                                         torch::Tensor fused_qkv,
-                                        int64_t kv_offset,
+                                        int64_t       kv_offset,
                                         torch::Tensor k_nope_weight,
                                         torch::Tensor v_weight,
                                         torch::Tensor cos_sin_cache,
                                         torch::Tensor seq_len) {
     size_t token_num       = q.size(0);
     auto   q_b             = torchTensor2Buffer(q);
-    auto   fused_qkv_b          = torchTensor2Buffer(fused_qkv);
+    auto   fused_qkv_b     = torchTensor2Buffer(fused_qkv);
     auto   k_nope_weight_b = torchTensor2Buffer(k_nope_weight);
     auto   v_weight_b      = torchTensor2Buffer(v_weight);
     auto   cos_sin_cache_b = torchTensor2Buffer(cos_sin_cache);
@@ -99,9 +100,9 @@ torch::Tensor MlaContextAttnOp::forward(torch::Tensor q,
         max_seq_len            = std::max(max_seq_len, cur_seq_len);
     }
 
-    torch::Tensor prefix_length_t = torch::zeros(batch_size, torch::dtype(torch::kInt32));
-    BufferPtr sequence_lengths = torchTensor2Buffer(torch::empty({0}, torch::dtype(torch::kInt32)));
-    BufferPtr prefix_lengths = torchTensor2Buffer(prefix_length_t);
+    torch::Tensor prefix_length_t  = torch::zeros(batch_size, torch::dtype(torch::kInt32));
+    BufferPtr     sequence_lengths = torchTensor2Buffer(torch::empty({0}, torch::dtype(torch::kInt32)));
+    BufferPtr     prefix_lengths   = torchTensor2Buffer(prefix_length_t);
 
     BufferPtr input_lengths = torchTensor2Buffer(seq_len);
 
@@ -129,11 +130,11 @@ torch::Tensor MlaContextAttnOp::forward(torch::Tensor q,
     auto k_nope_w = std::make_shared<DenseWeights>(k_nope_weight_b);
     auto v_w      = std::make_shared<DenseWeights>(v_weight_b);
 
-    auto attn_layer_weight          = AttentionLayerWeights();
-    attn_layer_weight.k_nope_weight = k_nope_w;
-    attn_layer_weight.v_weight      = v_w;
+    auto attn_layer_weight               = AttentionLayerWeights();
+    attn_layer_weight.k_nope_weight      = k_nope_w;
+    attn_layer_weight.v_weight           = v_w;
     attn_layer_weight.rope_cos_sin_cache = cos_sin_cache_b;
-    auto attn_common_inputs         = AttentionCommonInputs();
+    auto attn_common_inputs              = AttentionCommonInputs();
     attn_common_inputs.cu_seqlens =
         device_->clone({*vector2Buffer(cu_seqlens_data), AllocationType::DEVICE, {"cu_seqlens"}});
     attn_common_inputs.context_batch_size  = batch_size;
@@ -141,8 +142,15 @@ torch::Tensor MlaContextAttnOp::forward(torch::Tensor q,
     attn_common_inputs.context_max_seq_len = token_num;
     attn_common_inputs.prefill_flash_infer_attn.swap(prep_output.prefill_flash_infer_attn);
 
-    auto mla_params = MlaAttentionModuleParams{
-        0, *q_b, *fused_qkv_b, kv_offset, output, attn_common_inputs, attn_layer_weight, attn_configs, QScheme::NoQuantize};
+    auto mla_params = MlaAttentionModuleParams{0,
+                                               *q_b,
+                                               *fused_qkv_b,
+                                               kv_offset,
+                                               output,
+                                               attn_common_inputs,
+                                               attn_layer_weight,
+                                               attn_configs,
+                                               QScheme::NoQuantize};
 
     device_->mlaContextAttention(mla_params);
 

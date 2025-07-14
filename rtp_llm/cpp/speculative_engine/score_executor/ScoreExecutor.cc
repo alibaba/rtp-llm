@@ -9,7 +9,7 @@ absl::Status ScoreExecutor::score(const std::list<GenerateStreamPtr>& streams, b
 
     RTP_LLM_LOG_DEBUG("score begin");
 
-    for (const GenerateStreamPtr& stream: streams) {
+    for (const GenerateStreamPtr& stream : streams) {
         RTP_LLM_LOG_DEBUG("before create score stream [%d]: %s", stream->streamId(), stream->debugString().c_str());
     }
 
@@ -31,13 +31,13 @@ absl::Status ScoreExecutor::score(const std::list<GenerateStreamPtr>& streams, b
         score_streams.push_back(score_stream);
     }
 
-    for (const GenerateStreamPtr& stream: score_streams) {
+    for (const GenerateStreamPtr& stream : score_streams) {
         RTP_LLM_LOG_DEBUG("before score stream [%d]: %s", stream->streamId(), stream->debugString().c_str());
     }
 
     RETURN_IF_STATUS_ERROR(score_normal_executor_.process(score_streams));
 
-    for (auto& stream: score_streams) {
+    for (auto& stream : score_streams) {
         RTP_LLM_LOG_DEBUG("post score stream [%d]: %s", stream->streamId(), stream->debugString().c_str());
     }
 
@@ -51,5 +51,4 @@ bool ScoreExecutor::updateEplbConfig(const EplbConfig& config) {
     return true;
 }
 
-} // namespace rtp_llm
-
+}  // namespace rtp_llm

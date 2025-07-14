@@ -1,7 +1,8 @@
-from unittest import TestCase, main
+import importlib
 import os
 import sys
-import importlib
+from unittest import TestCase, main
+
 
 class ServerArgsDefaultTest(TestCase):
     def setUp(self):
@@ -12,17 +13,18 @@ class ServerArgsDefaultTest(TestCase):
     def test_default_args_env(self):
         # 动态导入 server_args 以应用纯净的环境
         import rtp_llm.server.server_args
+
         importlib.reload(rtp_llm.server.server_args)
         rtp_llm.server.server_args.setup_args()
         env = os.environ
 
         # 1. Parallelism and Distributed Setup Configuration
-        self.assertIsNone(env.get("TP_SIZE"))           # 有默认值
-        self.assertIsNone(env.get("EP_SIZE"))               # 无默认值
-        self.assertIsNone(env.get("DP_SIZE"))               # 无默认值
-        self.assertIsNone(env.get("WORLD_SIZE"))            # 无默认值
-        self.assertIsNone(env.get("WORLD_RANK"))            # 无默认值
-        self.assertIsNone(env.get("LOCAL_WORLD_SIZE"))      # 无默认值
+        self.assertIsNone(env.get("TP_SIZE"))  # 有默认值
+        self.assertIsNone(env.get("EP_SIZE"))  # 无默认值
+        self.assertIsNone(env.get("DP_SIZE"))  # 无默认值
+        self.assertIsNone(env.get("WORLD_SIZE"))  # 无默认值
+        self.assertIsNone(env.get("WORLD_RANK"))  # 无默认值
+        self.assertIsNone(env.get("LOCAL_WORLD_SIZE"))  # 无默认值
         self.assertEqual(env.get("FFN_SP_SIZE"), "1")
 
         # 2. Concurrency 控制
@@ -30,8 +32,8 @@ class ServerArgsDefaultTest(TestCase):
         self.assertEqual(env.get("CONCURRENCY_LIMIT"), "32")
 
         # 3. FMHA
-        self.assertEqual(env.get("ENABLE_FMHA"), "1")       # 默认True->"1"
-        self.assertEqual(env.get("ENABLE_TRT_FMHA"), "1")   # 默认False->"0"
+        self.assertEqual(env.get("ENABLE_FMHA"), "1")  # 默认True->"1"
+        self.assertEqual(env.get("ENABLE_TRT_FMHA"), "1")  # 默认False->"0"
         self.assertEqual(env.get("ENABLE_PAGED_TRT_FMHA"), "1")
         self.assertEqual(env.get("ENABLE_OPENSOURCE_FMHA"), "1")
         self.assertEqual(env.get("ENABLE_PAGED_OPEN_SOURCE_FMHA"), "1")
@@ -167,7 +169,9 @@ class ServerArgsDefaultTest(TestCase):
         self.assertEqual(env.get("VIT_SEPARATION"), "0")
         self.assertEqual(env.get("VIT_TRT"), "0")
         self.assertEqual(env.get("TRT_CACHE_ENABLED"), "0")
-        self.assertEqual(env.get("TRT_CACHE_PATH"), os.path.join(os.getcwd(), "trt_cache"))
+        self.assertEqual(
+            env.get("TRT_CACHE_PATH"), os.path.join(os.getcwd(), "trt_cache")
+        )
         self.assertEqual(env.get("DOWNLOAD_HEADERS"), "")
         self.assertEqual(env.get("MM_CACHE_ITEM_NUM"), "10")
 
@@ -259,239 +263,382 @@ class ServerArgsSetTest(TestCase):
         sys.argv = [
             "prog",
             # 1. Parallelism and Distributed Setup Configuration
-            "--tp_size", "3",
-            "--ep_size", "5",
-            "--dp_size", "4",
-            "--world_size", "12",
-            "--world_rank", "2",
-            "--local_world_size", "6",
-            "--ffn_sp_size", "2",
-
+            "--tp_size",
+            "3",
+            "--ep_size",
+            "5",
+            "--dp_size",
+            "4",
+            "--world_size",
+            "12",
+            "--world_rank",
+            "2",
+            "--local_world_size",
+            "6",
+            "--ffn_sp_size",
+            "2",
             # 2. Concurrency 控制
-            "--concurrency_with_block", "True",
-            "--concurrency_limit", "64",
-
+            "--concurrency_with_block",
+            "True",
+            "--concurrency_limit",
+            "64",
             # 3. FMHA
-            "--enable_fmha", "False",
-            "--enable_trt_fmha", "False",
-            "--enable_paged_trt_fmha", "False",
-            "--enable_open_source_fmha", "False",
-            "--enable_paged_open_source_fmha", "False",
-            "--enable_trtv1_fmha", "False",
-            "--fmha_perf_instrument", "True",
-            "--fmha_show_params", "True",
-            "--disable_flash_infer", "True",
-            "--enable_xqa", "False",
-
+            "--enable_fmha",
+            "False",
+            "--enable_trt_fmha",
+            "False",
+            "--enable_paged_trt_fmha",
+            "False",
+            "--enable_open_source_fmha",
+            "False",
+            "--enable_paged_open_source_fmha",
+            "False",
+            "--enable_trtv1_fmha",
+            "False",
+            "--fmha_perf_instrument",
+            "True",
+            "--fmha_show_params",
+            "True",
+            "--disable_flash_infer",
+            "True",
+            "--enable_xqa",
+            "False",
             # 4. KV Cache 相关配置
-            "--reuse_cache", "True",
-            "--multi_task_prompt", "/tmp/another_prompt.json",
-            "--multi_task_prompt_str", '{"task": "another"}',
-            "--int8_kv_cache", "1",
-            "--kv_cache_mem_mb", "2048",
-            "--seq_size_per_block", "64",
-            "--test_block_num", "128",
-
+            "--reuse_cache",
+            "True",
+            "--multi_task_prompt",
+            "/tmp/another_prompt.json",
+            "--multi_task_prompt_str",
+            '{"task": "another"}',
+            "--int8_kv_cache",
+            "1",
+            "--kv_cache_mem_mb",
+            "2048",
+            "--seq_size_per_block",
+            "64",
+            "--test_block_num",
+            "128",
             # 5. Profiling、Debugging、Logging
-            "--ft_nvtx", "True",
-            "--py_inference_log_response", "True",
-            "--rtp_llm_trace_memory", "True",
-            "--rtp_llm_trace_malloc_stack", "True",
-            "--enable_device_perf", "True",
-            "--ft_core_dump_on_exception", "True",
-            "--ft_alog_conf_path", "/tmp/another_log.conf",
-            "--log_level", "ERROR",
-            "--gen_timeline_sync", "True",
-            "--torch_cuda_profiler_dir", "/path/to/dir",
-            "--log_path", "/tmp/logs",
-            "--log_file_backup_count", "32",
-            "--nccl_debug_file", "/tmp/nccl.log",
-            "--debug_load_server", "True",
-            "--hack_layer_num", "2",
-            "--test_layer_num", "4",
-            "--debug_start_fake_process", "True",
-
+            "--ft_nvtx",
+            "True",
+            "--py_inference_log_response",
+            "True",
+            "--rtp_llm_trace_memory",
+            "True",
+            "--rtp_llm_trace_malloc_stack",
+            "True",
+            "--enable_device_perf",
+            "True",
+            "--ft_core_dump_on_exception",
+            "True",
+            "--ft_alog_conf_path",
+            "/tmp/another_log.conf",
+            "--log_level",
+            "ERROR",
+            "--gen_timeline_sync",
+            "True",
+            "--torch_cuda_profiler_dir",
+            "/path/to/dir",
+            "--log_path",
+            "/tmp/logs",
+            "--log_file_backup_count",
+            "32",
+            "--nccl_debug_file",
+            "/tmp/nccl.log",
+            "--debug_load_server",
+            "True",
+            "--hack_layer_num",
+            "2",
+            "--test_layer_num",
+            "4",
+            "--debug_start_fake_process",
+            "True",
             # 6. 硬件/Kernel 特定优化
-            "--deep_gemm_num_sm", "16",
-            "--arm_gemm_use_kai", "True",
-            "--enable_stable_scatter_add", "True",
-            "--enable_multi_block_mode", "False",
-            "--rocm_hipblaslt_config", "another_gemm_config.csv",
-            "--ft_disable_custom_ar", "False",
-
+            "--deep_gemm_num_sm",
+            "16",
+            "--arm_gemm_use_kai",
+            "True",
+            "--enable_stable_scatter_add",
+            "True",
+            "--enable_multi_block_mode",
+            "False",
+            "--rocm_hipblaslt_config",
+            "another_gemm_config.csv",
+            "--ft_disable_custom_ar",
+            "False",
             # 7. 采样
-            "--max_batch_size", "128",
-            "--enable_flashinfer_sample_kernel", "False",
-
+            "--max_batch_size",
+            "128",
+            "--enable_flashinfer_sample_kernel",
+            "False",
             # 8. 设备和资源管理
-            "--device_reserve_memory_bytes", "4096000",
-            "--host_reserve_memory_bytes", "8192000",
-            "--overlap_math_sm_count", "3",
-            "--overlap_comm_type", "2",
-            "--m_split", "8",
-            "--enable_comm_overlap", "False",
-            "--enable_layer_micro_batch", "2",
-            "--not_use_default_stream", "True",
-            "--reserver_runtime_mem_mb", "256",
-            "--specify_gpu_arch", "sm_90",
-            "--acext_gemm_config_dir", "/path/to/acext",
-
+            "--device_reserve_memory_bytes",
+            "4096000",
+            "--host_reserve_memory_bytes",
+            "8192000",
+            "--overlap_math_sm_count",
+            "3",
+            "--overlap_comm_type",
+            "2",
+            "--m_split",
+            "8",
+            "--enable_comm_overlap",
+            "False",
+            "--enable_layer_micro_batch",
+            "2",
+            "--not_use_default_stream",
+            "True",
+            "--reserver_runtime_mem_mb",
+            "256",
+            "--specify_gpu_arch",
+            "sm_90",
+            "--acext_gemm_config_dir",
+            "/path/to/acext",
             # 9. MOE 专家并行
-            "--use_deepep_moe", "True",
-            "--use_deepep_internode", "True",
-            "--use_deepep_low_latency", "False",
-            "--use_deepep_p2p_low_latency", "True",
-            "--deep_ep_num_sm", "7",
-            "--fake_balance_expert", "True",
-            "--eplb_control_step", "300",
-            "--eplb_test_mode", "True",
-            "--eplb_balance_layer_per_step", "5",
-            "--eplb_mode", "FULL",
-            "--eplb_update_time", "9999",
-            "--redundant_expert", "2",
-            "--hack_ep_single_entry", "1",
-            "--balance_method", "greedy",
-            "--eplb_force_repack", "1",
-            "--eplb_stats_window_size", "20",
-
+            "--use_deepep_moe",
+            "True",
+            "--use_deepep_internode",
+            "True",
+            "--use_deepep_low_latency",
+            "False",
+            "--use_deepep_p2p_low_latency",
+            "True",
+            "--deep_ep_num_sm",
+            "7",
+            "--fake_balance_expert",
+            "True",
+            "--eplb_control_step",
+            "300",
+            "--eplb_test_mode",
+            "True",
+            "--eplb_balance_layer_per_step",
+            "5",
+            "--eplb_mode",
+            "FULL",
+            "--eplb_update_time",
+            "9999",
+            "--redundant_expert",
+            "2",
+            "--hack_ep_single_entry",
+            "1",
+            "--balance_method",
+            "greedy",
+            "--eplb_force_repack",
+            "1",
+            "--eplb_stats_window_size",
+            "20",
             # 10. 模型特定配置
-            "--max_lora_model_size", "2048",
-
+            "--max_lora_model_size",
+            "2048",
             # 11. 投机采样配置
-            "--sp_model_type", "deepseek-v3-mtp",
-            "--sp_type", "mtp",
-            "--sp_min_token_match", "5",
-            "--sp_max_token_match", "7",
-            "--tree_decode_config", "/tmp/another_tree.json",
-            "--gen_num_per_cycle", "8",
-            "--sp_act_type", "FP8",
-            "--sp_quantization", "int8",
-            "--sp_checkpoint_path", "/path/to/sp_ckpt",
-            "--force_stream_sample", "True",
-            "--force_score_context_attention", "False",
-
+            "--sp_model_type",
+            "deepseek-v3-mtp",
+            "--sp_type",
+            "mtp",
+            "--sp_min_token_match",
+            "5",
+            "--sp_max_token_match",
+            "7",
+            "--tree_decode_config",
+            "/tmp/another_tree.json",
+            "--gen_num_per_cycle",
+            "8",
+            "--sp_act_type",
+            "FP8",
+            "--sp_quantization",
+            "int8",
+            "--sp_checkpoint_path",
+            "/path/to/sp_ckpt",
+            "--force_stream_sample",
+            "True",
+            "--force_score_context_attention",
+            "False",
             # 12. RPC 与服务发现配置
-            "--use_local", "True",
-            "--remote_rpc_server_ip", "192.168.1.100:9000",
-            "--rtp_llm_decode_cm2_config", '{"cm2": "decode2"}',
-            "--remote_vit_server_ip", "192.168.1.101:9001",
-            "--rtp_llm_multimodal_part_cm2_config", '{"cm2": "multi2"}',
-
+            "--use_local",
+            "True",
+            "--remote_rpc_server_ip",
+            "192.168.1.100:9000",
+            "--rtp_llm_decode_cm2_config",
+            '{"cm2": "decode2"}',
+            "--remote_vit_server_ip",
+            "192.168.1.101:9001",
+            "--rtp_llm_multimodal_part_cm2_config",
+            '{"cm2": "multi2"}',
             # 13. Cache Store 配置
-            "--cache_store_rdma_mode", "True",
-            "--wrr_available_ratio", "95",
-            "--rank_factor", "1",
-            "--cache_store_thread_count", "8",
-            "--cache_store_rdma_connect_timeout_ms", "500",
-            "--cache_store_rdma_qp_count_per_connection", "8",
-
+            "--cache_store_rdma_mode",
+            "True",
+            "--wrr_available_ratio",
+            "95",
+            "--rank_factor",
+            "1",
+            "--cache_store_thread_count",
+            "8",
+            "--cache_store_rdma_connect_timeout_ms",
+            "500",
+            "--cache_store_rdma_qp_count_per_connection",
+            "8",
             # 14. 调度器配置
-            "--use_batch_decode_scheduler", "True",
-
+            "--use_batch_decode_scheduler",
+            "True",
             # 15. FIFO 调度器配置
-            "--max_context_batch_size", "16",
-            "--scheduler_reserve_resource_ratio", "20",
-            "--enable_fast_gen", "True",
-            "--fast_gen_context_budget", "256",
-            "--enable_partial_fallback", "True",
-
+            "--max_context_batch_size",
+            "16",
+            "--scheduler_reserve_resource_ratio",
+            "20",
+            "--enable_fast_gen",
+            "True",
+            "--fast_gen_context_budget",
+            "256",
+            "--enable_partial_fallback",
+            "True",
             # 16. BatchDecode 调度器配置
-            "--batch_decode_scheduler_batch_size", "32",
-
+            "--batch_decode_scheduler_batch_size",
+            "32",
             # 17. Gang Configuration
-            "--fake_gang_env", "True",
-            "--gang_annocation_path", "/tmp/annocations",
-            "--gang_config_string", "test_gang_string",
-            "--zone_name", "test_zone",
-            "--distribute_config_file", "/tmp/dist.conf",
-            "--dist_barrier_timeout", "90",
-            "--gang_sleep_time", "20",
-            "--gang_timeout_min", "60",
-
+            "--fake_gang_env",
+            "True",
+            "--gang_annocation_path",
+            "/tmp/annocations",
+            "--gang_config_string",
+            "test_gang_string",
+            "--zone_name",
+            "test_zone",
+            "--distribute_config_file",
+            "/tmp/dist.conf",
+            "--dist_barrier_timeout",
+            "90",
+            "--gang_sleep_time",
+            "20",
+            "--gang_timeout_min",
+            "60",
             # 18. Vit Configuration
-            "--vit_separation", "1",
-            "--vit_trt", "1",
-            "--trt_cache_enabled", "1",
-            "--trt_cache_path", "/tmp/trt_cache",
-            "--download_headers", '{"X-Test": "True"}',
-            "--mm_cache_item_num", "20",
-
+            "--vit_separation",
+            "1",
+            "--vit_trt",
+            "1",
+            "--trt_cache_enabled",
+            "1",
+            "--trt_cache_path",
+            "/tmp/trt_cache",
+            "--download_headers",
+            '{"X-Test": "True"}',
+            "--mm_cache_item_num",
+            "20",
             # 19. Server Configuration
-            "--frontend_server_count", "8",
-            "--start_port", "9099",
-            "--timeout_keep_alive", "10",
-            "--frontend_server_id", "2",
-
+            "--frontend_server_count",
+            "8",
+            "--start_port",
+            "9099",
+            "--timeout_keep_alive",
+            "10",
+            "--frontend_server_id",
+            "2",
             # 20. Generate Configuration
-            "--think_end_tag", "end_think",
-            "--think_end_token_id", "12345",
-            "--think_mode", "1",
-            "--force_stop_words", "True",
-            "--stop_words_list", "54321,54322",
-            "--stop_words_str", "stop,word",
-            "--think_start_tag", "start_think",
-            "--generation_config_path", "/path/to/gen.json",
-
+            "--think_end_tag",
+            "end_think",
+            "--think_end_token_id",
+            "12345",
+            "--think_mode",
+            "1",
+            "--force_stop_words",
+            "True",
+            "--stop_words_list",
+            "54321,54322",
+            "--stop_words_str",
+            "stop,word",
+            "--think_start_tag",
+            "start_think",
+            "--generation_config_path",
+            "/path/to/gen.json",
             # 21. Quantization Configuration
-            "--int8_mode", "1",
-            "--quantization", "w8a8",
-
+            "--int8_mode",
+            "1",
+            "--quantization",
+            "w8a8",
             # 22. Sparse Configuration
-            "--sparse_config_file", "/path/to/sparse.conf",
-
+            "--sparse_config_file",
+            "/path/to/sparse.conf",
             # 23. Engine Configuration
-            "--warm_up", "0",
-            "--warm_up_with_loss", "1",
-            "--max_seq_len", "8192",
-
+            "--warm_up",
+            "0",
+            "--warm_up_with_loss",
+            "1",
+            "--max_seq_len",
+            "8192",
             # 24. Embedding Configuration
-            "--embedding_model", "1",
-
+            "--embedding_model",
+            "1",
             # 25. Worker Configuration
-            "--worker_info_port_num", "10",
-
+            "--worker_info_port_num",
+            "10",
             # 26. Model Configuration
-            "--extra_data_path", "/path/to/extra",
-            "--local_extra_data_path", "/local/path/to/extra",
-            "--tokenizer_path", "/path/to/tokenizer",
-            "--act_type", "BF16",
-            "--use_float32", "True",
-            "--original_checkpoint_path", "/path/to/original/ckpt",
-            "--mla_ops_type", "CUSTOM",
-            "--parallel_batch", "1",
-            "--ft_plugin_path", "/path/to/plugin",
-            "--weight_type", "FP16",
-            "--task_type", "generation",
-            "--model_type", "qwen",
-            "--checkpoint_path", "/path/to/checkpoint",
-            "--oss_endpoint", "test.oss.endpoint",
-            "--ptuning_path", "/path/to/ptuning",
-
+            "--extra_data_path",
+            "/path/to/extra",
+            "--local_extra_data_path",
+            "/local/path/to/extra",
+            "--tokenizer_path",
+            "/path/to/tokenizer",
+            "--act_type",
+            "BF16",
+            "--use_float32",
+            "True",
+            "--original_checkpoint_path",
+            "/path/to/original/ckpt",
+            "--mla_ops_type",
+            "CUSTOM",
+            "--parallel_batch",
+            "1",
+            "--ft_plugin_path",
+            "/path/to/plugin",
+            "--weight_type",
+            "FP16",
+            "--task_type",
+            "generation",
+            "--model_type",
+            "qwen",
+            "--checkpoint_path",
+            "/path/to/checkpoint",
+            "--oss_endpoint",
+            "test.oss.endpoint",
+            "--ptuning_path",
+            "/path/to/ptuning",
             # 27. Lora Configuration
-            "--lora_info", '{"lora1": "/path/to/lora1"}',
-            "--merge_lora", "False",
-
+            "--lora_info",
+            '{"lora1": "/path/to/lora1"}',
+            "--merge_lora",
+            "False",
             # 28. Load Configuration
-            "--phy2log_path", "/path/to/pylog",
-            "--converter_num_per_gpu", "8",
-            "--tokenizers_parallelism", "True",
-            "--load_ckpt_num_process", "4",
-
+            "--phy2log_path",
+            "/path/to/pylog",
+            "--converter_num_per_gpu",
+            "8",
+            "--tokenizers_parallelism",
+            "True",
+            "--load_ckpt_num_process",
+            "4",
             # 29. Render Configuration
-            "--model_template_type", "qwen",
-            "--default_chat_template_key", "custom_chat",
-            "--default_tool_use_template_key", "custom_tool",
-            "--llava_chat_template", "llava_template_string",
-
+            "--model_template_type",
+            "qwen",
+            "--default_chat_template_key",
+            "custom_chat",
+            "--default_tool_use_template_key",
+            "custom_tool",
+            "--llava_chat_template",
+            "llava_template_string",
             # 30. Miscellaneous Configuration
-            "--load_balance", "True",
-            "--step_records_time_range", "240000000",
-            "--step_records_max_size", "4000",
-            "--disable_pdl", "True",
+            "--load_balance",
+            "True",
+            "--step_records_time_range",
+            "240000000",
+            "--step_records_max_size",
+            "4000",
+            "--disable_pdl",
+            "True",
         ]
 
         # 重新加载 server_args 并执行 setup_args
         import rtp_llm.server.server_args
+
         importlib.reload(rtp_llm.server.server_args)
         rtp_llm.server.server_args.setup_args()
         env = os.environ
@@ -727,5 +874,6 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env["STEP_RECORDS_MAX_SIZE"], "4000")
         self.assertEqual(env["DISABLE_PDL"], "1")
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

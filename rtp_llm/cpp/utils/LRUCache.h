@@ -8,7 +8,7 @@ template<typename KeyType, typename ValueType>
 class LRUCache {
 public:
     typedef typename std::list<std::pair<KeyType, ValueType>>::const_iterator CacheIterator;
-    explicit LRUCache(size_t capacity) : capacity_(capacity) {}
+    explicit LRUCache(size_t capacity): capacity_(capacity) {}
 
     void put(const KeyType& key, const ValueType& value);
 
@@ -26,7 +26,7 @@ public:
 
     CacheIterator end() {
         return items_list_.end();
-    } 
+    }
 
     const std::list<std::pair<KeyType, ValueType>>& items() const {
         return items_list_;
@@ -41,8 +41,8 @@ public:
     }
 
 private:
-    size_t capacity_;
-    std::list<std::pair<KeyType, ValueType>> items_list_;
+    size_t                                                                                   capacity_;
+    std::list<std::pair<KeyType, ValueType>>                                                 items_list_;
     std::unordered_map<KeyType, typename std::list<std::pair<KeyType, ValueType>>::iterator> cache_items_map_;
 };
 
@@ -82,7 +82,7 @@ std::tuple<bool, ValueType> LRUCache<KeyType, ValueType>::pop() {
         return {false, ValueType()};
     }
     // 删除最不常用的项
-    auto last = items_list_.back().first;
+    auto last  = items_list_.back().first;
     auto value = items_list_.back().second;
     items_list_.pop_back();
     cache_items_map_.erase(last);

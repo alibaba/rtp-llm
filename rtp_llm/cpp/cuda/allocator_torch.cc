@@ -7,10 +7,8 @@
 
 namespace rtp_llm {
 
-Allocator<AllocatorType::TH>::Allocator()
-    : ICudaAllocator(0)
-    , pointer_mapping_(new std::unordered_map<void*, torch::Tensor>)
-    {}
+Allocator<AllocatorType::TH>::Allocator():
+    ICudaAllocator(0), pointer_mapping_(new std::unordered_map<void*, torch::Tensor>) {}
 
 Allocator<AllocatorType::TH>::~Allocator() {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
@@ -33,7 +31,7 @@ void* Allocator<AllocatorType::TH>::malloc(size_t size) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     int64_t       buf_size = static_cast<int64_t>(ceil(size / 32.)) * 32;
     torch::Tensor buf;
-    buf = torch::empty({buf_size}, torch::dtype(torch::kUInt8).device(torch::kCUDA));
+    buf       = torch::empty({buf_size}, torch::dtype(torch::kUInt8).device(torch::kCUDA));
     void* ptr = buf.data_ptr();
     RTP_LLM_LOG_DEBUG("malloc buffer %p with size %ld", ptr, buf_size);
     pointer_mapping_->insert({ptr, buf});
@@ -44,4 +42,4 @@ void* Allocator<AllocatorType::TH>::mallocSync(size_t size) {
     return malloc(size);
 }
 
-}
+}  // namespace rtp_llm

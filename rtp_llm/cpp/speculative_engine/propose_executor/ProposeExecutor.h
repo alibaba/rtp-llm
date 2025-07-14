@@ -12,7 +12,7 @@ namespace rtp_llm {
 class ProposeExecutor {
 public:
     ProposeExecutor(rtp_llm::DeviceBase* device): device_(device) {}
-    virtual ~ProposeExecutor(){};
+    virtual ~ProposeExecutor() {};
 
     virtual absl::Status propose(const std::list<GenerateStreamPtr>& streams, bool skip_check = false) = 0;
     virtual size_t       reserveStep() const                                                           = 0;

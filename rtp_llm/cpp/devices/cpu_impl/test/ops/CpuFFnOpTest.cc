@@ -22,4 +22,3 @@ TEST_F(CpuFfnLayerTest, NoGate_Fp16_FfnOpTest) {
     FfnOpTest(1, 2, 4096, ActivationType::Geglu, DataType::TYPE_FP32);
     FfnOpTest(1000, 2048, 128, ActivationType::Geglu, DataType::TYPE_FP32);
 }
-

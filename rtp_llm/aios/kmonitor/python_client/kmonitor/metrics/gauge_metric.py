@@ -1,6 +1,11 @@
-from typing import Dict, List
-from rtp_llm.aios.kmonitor.python_client.kmonitor.metrics.metric_base import MetricBase, MetricDataPoint
 from threading import Lock
+from typing import Dict, List
+
+from rtp_llm.aios.kmonitor.python_client.kmonitor.metrics.metric_base import (
+    MetricBase,
+    MetricDataPoint,
+)
+
 
 class GaugeMetric(MetricBase):
     def __init__(self, *args):

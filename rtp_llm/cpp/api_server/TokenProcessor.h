@@ -19,19 +19,17 @@ public:
 
 public:
     // virtual for test
-    virtual std::string decode(const std::vector<int>& token_ids);
-    virtual std::vector<int> encode(const std::string& prompt);
+    virtual std::string                              decode(const std::vector<int>& token_ids);
+    virtual std::vector<int>                         encode(const std::string& prompt);
     virtual std::shared_ptr<TokenizerEncodeResponse> tokenizer(const std::string& prompt);
-    virtual std::vector<std::string> decodeTokens(std::shared_ptr<TokenProcessorPerStream> tps,
-                                                  GenerateOutputs& responses,
-                                                  std::vector<int>& output_lens,
-                                                  std::shared_ptr<GenerateConfig> config);
-    py::object getPyObject() const;
+    virtual std::vector<std::string>                 decodeTokens(std::shared_ptr<TokenProcessorPerStream> tps,
+                                                                  GenerateOutputs&                         responses,
+                                                                  std::vector<int>&                        output_lens,
+                                                                  std::shared_ptr<GenerateConfig>          config);
+    py::object                                       getPyObject() const;
 
     virtual std::shared_ptr<TokenProcessorPerStream>
-    getTokenProcessorCtx(int num_beams,
-                         int size,
-                         const std::shared_ptr<TokenProcessor>& token_processor_cpp);
+    getTokenProcessorCtx(int num_beams, int size, const std::shared_ptr<TokenProcessor>& token_processor_cpp);
 
 private:
     // TODO: change to tokenizer wrapper
@@ -43,9 +41,9 @@ public:
     TokenProcessorPerStream() = default;
     ~TokenProcessorPerStream();
     void init(int num_beams, int size, const std::shared_ptr<TokenProcessor>& token_processor_cpp);
-    std::vector<std::string> decodeTokens(GenerateOutputs& responses,
-                                          std::vector<int>& output_lens,
-                                          std::shared_ptr<GenerateConfig> config);
+    std::vector<std::string>
+    decodeTokens(GenerateOutputs& responses, std::vector<int>& output_lens, std::shared_ptr<GenerateConfig> config);
+
 private:
     py::object token_processor_stream_;
 };

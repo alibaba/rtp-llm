@@ -54,10 +54,9 @@ def torch_type_to_path(dtype: torch.dtype):
     else:
         raise TypeError(f"unknown torch data type {dtype}")
 
+
 # TODO(xyz): support handle video and audio case, not only image
-class MultiModalTRTEngine(
-    nn.Module, ImageEmbeddingInterface, AudioEmbeddingInterface
-):
+class MultiModalTRTEngine(nn.Module, ImageEmbeddingInterface, AudioEmbeddingInterface):
     def __init__(
         self,
         model_name: str,
@@ -117,21 +116,23 @@ class MultiModalTRTEngine(
                 output_names=output_names,
             )
 
-    async def _export_onnx_async_internal(self, network: torch.nn.Module, dummy_input: torch.Tensor):
+    async def _export_onnx_async_internal(
+        self, network: torch.nn.Module, dummy_input: torch.Tensor
+    ):
         loop = asyncio.get_event_loop()
         with ProcessPoolExecutor() as executor:
             future = loop.run_in_executor(
-                executor, self._export_onnx_helper,
-                network, dummy_input, self.onnx_file_path, self.input_names,
+                executor,
+                self._export_onnx_helper,
+                network,
+                dummy_input,
+                self.onnx_file_path,
+                self.input_names,
                 self.output_names,
             )
             await asyncio.wait([future])
 
-    def export_onnx(
-        self,
-        network: torch.nn.Module,
-        tp_size: int
-    ):
+    def export_onnx(self, network: torch.nn.Module, tp_size: int):
         logging.info("Start exporting torch to ONNX model")
         dummy_input = (
             torch.randn(self.cur_batch_size, 3, self.image_size, self.image_size)
@@ -140,7 +141,13 @@ class MultiModalTRTEngine(
         )
 
         if tp_size <= 1:
-            self._export_onnx_helper(network, dummy_input, self.onnx_file_path, self.input_names, self.output_names)
+            self._export_onnx_helper(
+                network,
+                dummy_input,
+                self.onnx_file_path,
+                self.input_names,
+                self.output_names,
+            )
         else:
             # here we need to export onnx in another new thread, otherwise it will
             # block heartbeat of gang_server when TP > 1
@@ -235,10 +242,8 @@ class MultiModalTRTEngine(
             input = inputs[0]
             batch_size = input.shape[0]
 
-            output_shape = tuple(
-                self.engine.get_tensor_shape(self.output_names[0])
-            )
-            
+            output_shape = tuple(self.engine.get_tensor_shape(self.output_names[0]))
+
             # update input shape
             if batch_size != self.cur_batch_size:
                 self.cur_batch_size = batch_size

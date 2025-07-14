@@ -19,19 +19,17 @@ protected:
         mock_embedding_endpoint_ = std::make_shared<MockEmbeddingEndpoint>();
         auto embedding_endpoint  = std::dynamic_pointer_cast<EmbeddingEndpoint>(mock_embedding_endpoint_);
 
-        //mock_metric_reporter_ = std::make_shared<MockApiServerMetricReporter>();
-        //auto metric_reporter  = std::dynamic_pointer_cast<ApiServerMetricReporter>(mock_metric_reporter_);
-        // TODO: mock kmonitor::MetricsReporterPtr
+        // mock_metric_reporter_ = std::make_shared<MockApiServerMetricReporter>();
+        // auto metric_reporter  = std::dynamic_pointer_cast<ApiServerMetricReporter>(mock_metric_reporter_);
+        //  TODO: mock kmonitor::MetricsReporterPtr
         kmonitor::MetricsReporterPtr metric_reporter;
 
         auto request_counter = std::make_shared<autil::AtomicCounter>();
         auto controller      = std::make_shared<ConcurrencyController>(1, false);
 
         SetToMaster();
-        embedding_service_ = std::make_shared<EmbeddingService>(embedding_endpoint,
-                                                                request_counter,
-                                                                controller,
-                                                                metric_reporter);
+        embedding_service_ =
+            std::make_shared<EmbeddingService>(embedding_endpoint, request_counter, controller, metric_reporter);
 
         mock_writer_ = std::make_unique<http_server::MockHttpResponseWriter>();
         auto writer  = dynamic_cast<http_server::HttpResponseWriter*>(mock_writer_.get());
@@ -81,8 +79,8 @@ protected:
 
 TEST_F(EmbeddingServiceTest, Embedding_ParseJsonFailed) {
     http_server::HttpRequest request;
-    const std::string body = R"({"private_request": "invalid_bool"})";
-    request._request = CreateHttpPacket(body);
+    const std::string        body = R"({"private_request": "invalid_bool"})";
+    request._request              = CreateHttpPacket(body);
 
     EXPECT_CALL(*mock_writer_, Write).WillOnce(Invoke([](const std::string& data) {
         EXPECT_FALSE(data.empty());
@@ -104,8 +102,8 @@ TEST_F(EmbeddingServiceTest, Embedding_EmbeddingEndpointIsNull) {
     embedding_service_->embedding_endpoint_ = nullptr;
 
     http_server::HttpRequest request;
-    const std::string body = R"({"source": "test_source"})";
-    request._request = CreateHttpPacket(body);
+    const std::string        body = R"({"source": "test_source"})";
+    request._request              = CreateHttpPacket(body);
 
     EXPECT_CALL(*mock_writer_, Write).WillOnce(Invoke([](const std::string& data) {
         EXPECT_FALSE(data.empty());
@@ -124,19 +122,18 @@ TEST_F(EmbeddingServiceTest, Embedding_EmbeddingEndpointIsNull) {
 
 TEST_F(EmbeddingServiceTest, Embedding_Success) {
     http_server::HttpRequest request;
-    const std::string body = R"({"source": "test_source"})";
-    request._request = CreateHttpPacket(body);
+    const std::string        body = R"({"source": "test_source"})";
+    request._request              = CreateHttpPacket(body);
 
     // EXPECT_CALL(*mock_metric_reporter_, reportQpsMetric(StrEq("test_source")));
 
     std::string handle_response = "hello world";
-    EXPECT_CALL(*mock_embedding_endpoint_, handle).WillOnce(Invoke([handle_response](
-                    const std::string& body,
-                    std::optional<EmbeddingEndpoint::EmbeddingType> type,
-                    const kmonitor::MetricsReporterPtr& metrics_reporter,
-                    int64_t start_time_us) {
-        return std::make_pair(handle_response, std::nullopt);
-    }));
+    EXPECT_CALL(*mock_embedding_endpoint_, handle)
+        .WillOnce(
+            Invoke([handle_response](const std::string&                              body,
+                                     std::optional<EmbeddingEndpoint::EmbeddingType> type,
+                                     const kmonitor::MetricsReporterPtr&             metrics_reporter,
+                                     int64_t start_time_us) { return std::make_pair(handle_response, std::nullopt); }));
     EXPECT_CALL(*mock_writer_, Write).WillOnce(Invoke([handle_response](const std::string& data) {
         EXPECT_EQ(data, handle_response);
         return true;

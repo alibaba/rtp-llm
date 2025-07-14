@@ -20,24 +20,19 @@ TEST_F(AttentionOpTest, SelfAttentionOpTest) {
     printf("Runing SelfAttentionOpTest\n");
     DeviceInitParams device_init_params;
     device_init_params.hw_kernel_config.enable_multi_block_mode = false;
-    device_ = new ROCmDevice(device_init_params);
+    device_                                                     = new ROCmDevice(device_init_params);
     device_->init();
     // ASSERT_FALSE(static_cast<ROCmDevice*>(device_)->use_multi_block_mode);
-    std::vector<size_t> batch = {128};
-    std::vector<size_t> seq   = {1};
+    std::vector<size_t> batch  = {128};
+    std::vector<size_t> seq    = {1};
     std::vector<size_t> kv_seq = {4096};
     for (auto batch_size : batch) {
         for (auto seq_len : seq) {
-            for (auto kv_seq_len: kv_seq) {
-                size_t num_heads = 64;
+            for (auto kv_seq_len : kv_seq) {
+                size_t num_heads           = 64;
                 size_t num_key_value_heads = 4;
-                size_t head_dim = 128;
-                selfAttentionOpTest(batch_size,
-                                    seq_len,
-                                    kv_seq_len,
-                                    num_heads,
-                                    num_key_value_heads,
-                                    head_dim);
+                size_t head_dim            = 128;
+                selfAttentionOpTest(batch_size, seq_len, kv_seq_len, num_heads, num_key_value_heads, head_dim);
             }
         }
     }

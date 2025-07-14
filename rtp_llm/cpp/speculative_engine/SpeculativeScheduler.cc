@@ -3,7 +3,6 @@
 
 namespace rtp_llm {
 
-
 absl::StatusOr<std::list<GenerateStreamPtr>> SpeculativeScheduler::schedule(size_t reserve_step) {
     if (!pending_sp_run_streams_.empty()) {
         std::list<GenerateStreamPtr> moved_pending_sp_run_streams;

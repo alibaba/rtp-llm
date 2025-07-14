@@ -36,12 +36,10 @@ void ArmGemmOpTest::BasicGemmOP_FP16(size_t m, size_t n, size_t k) {
     auto A_device = createDeviceBuffer<half>(A_host);
     auto B_device = createDeviceBuffer<half>(B_host);
 
-
-//    B_device = prepareGemmOptWeight(B_device);
+    //    B_device = prepareGemmOptWeight(B_device);
     auto B_new = prepareGemmOptWeight(B_device);
 
-
-//    GemmParams params{*A_device, *B_device};
+    //    GemmParams params{*A_device, *B_device};
     GemmParams params{*A_device, *B_new};
     auto       C_device = device_->gemm(params);
 
@@ -54,13 +52,13 @@ void ArmGemmOpTest::BasicGemmOP_FP16(size_t m, size_t n, size_t k) {
 }
 
 void ArmGemmOpTest::BasicGemmOP(size_t m, size_t n, size_t k) {
-    //auto A_host = torch::rand({(int)m, (int)k}, torch::Device(torch::kCPU)).to(torch::kFloat);
-    //auto B_host = torch::rand({(int)k, (int)n}, torch::Device(torch::kCPU)).to(torch::kFloat);
+    // auto A_host = torch::rand({(int)m, (int)k}, torch::Device(torch::kCPU)).to(torch::kFloat);
+    // auto B_host = torch::rand({(int)k, (int)n}, torch::Device(torch::kCPU)).to(torch::kFloat);
     auto A_host = torch::randn({(int)m, (int)k}, torch::Device(torch::kCPU)).to(torch::kFloat);
     auto B_host = torch::randn({(int)k, (int)n}, torch::Device(torch::kCPU)).to(torch::kFloat);
 
-    //auto A_device = createHostBuffer<float>({m, k}, tensorToBuffer(A_host, AllocationType::HOST)->data());
-    //auto B_device = createHostBuffer<float>({k, n}, tensorToBuffer(B_host, AllocationType::HOST)->data());
+    // auto A_device = createHostBuffer<float>({m, k}, tensorToBuffer(A_host, AllocationType::HOST)->data());
+    // auto B_device = createHostBuffer<float>({k, n}, tensorToBuffer(B_host, AllocationType::HOST)->data());
     A_host *= 0.01;
     B_host *= 0.01;
 
@@ -73,11 +71,11 @@ void ArmGemmOpTest::BasicGemmOP(size_t m, size_t n, size_t k) {
     printBufferData(*C_device, "C_device after gemm");
 
     auto C_host = torch::matmul(A_host, B_host).to(torch::kFloat);
-    //auto A      = bufferToTensor(*A_device);
-    //auto B      = bufferToTensor(*B_device);
-    auto C      = bufferToTensor(*C_device);
+    // auto A      = bufferToTensor(*A_device);
+    // auto B      = bufferToTensor(*B_device);
+    auto C = bufferToTensor(*C_device);
 
-    //ASSERT_TRUE(torch::allclose(C, C_host, rtol_, atol_));
+    // ASSERT_TRUE(torch::allclose(C, C_host, rtol_, atol_));
     assertTensorClose(C, C_host, 0.1, 0.02);
 }
 
@@ -169,7 +167,7 @@ void ArmGemmOpTest::BasicGemmOP_fp16fp16fp32(size_t m, size_t n, size_t k) {
 
     GemmParams params{*A_device, *B_packed, std::nullopt, nullptr, DataType::TYPE_FP32};
 
-    auto       C_device = device_->gemm(params);
+    auto C_device = device_->gemm(params);
     printBufferData(*C_device, "C_device after gemm");
 
     auto C_host = torch::matmul(A_host, B_host).to(torch::kFloat);
@@ -185,10 +183,10 @@ void ArmGemmOpTest::BatchGemmOP(size_t b, size_t m, size_t n, size_t k) {
     auto A_device = createDeviceBuffer<half>(A_host);
     auto B_device = createDeviceBuffer<half>(B_host);
 
-    //B_device = prepareGemmOptWeight(B_device);
+    // B_device = prepareGemmOptWeight(B_device);
     auto B_packed = prepareGemmOptWeight(B_device);
 
-    //GemmParams params{*A_device, *B_device};
+    // GemmParams params{*A_device, *B_device};
     GemmParams params{*A_device, *B_packed};
     auto       C_device = device_->gemm(params);
 
@@ -215,10 +213,10 @@ void ArmGemmOpTest::TransposeBatchGemmOP(TransposeOperation op_a,
     auto A_device = createDeviceBuffer<float>(A_host);
     auto B_device = createDeviceBuffer<float>(B_host);
 
-    //B_device = prepareGemmOptWeight(B_device);
+    // B_device = prepareGemmOptWeight(B_device);
     auto B_packed = prepareGemmOptWeight(B_device);
 
-    //GemmParams params{*A_device, *B_device, nullopt, nullptr, DataType::TYPE_INVALID, op_a, op_b};
+    // GemmParams params{*A_device, *B_device, nullopt, nullptr, DataType::TYPE_INVALID, op_a, op_b};
     GemmParams params{*A_device, *B_packed, nullopt, nullptr, DataType::TYPE_INVALID, op_a, op_b};
     auto       C_device = device_->gemm(params);
 
@@ -278,7 +276,7 @@ TEST_F(ArmGemmOpTest, TransposeBatchGemmOpTest) {
     // size_t n    = 8;
     // size_t k    = 16;
     // TransposeBatchGemmOP(none, none, b, m, k, k, n, m, n);
-//     TransposeBatchGemmOP(none, tran, b, m, k, n, k, m, n);
-//     TransposeBatchGemmOP(tran, tran, b, k, m, n, k, m, n);
-//     TransposeBatchGemmOP(tran, none, b, k, m, k, n, m, n);
+    //     TransposeBatchGemmOP(none, tran, b, m, k, n, k, m, n);
+    //     TransposeBatchGemmOP(tran, tran, b, k, m, n, k, m, n);
+    //     TransposeBatchGemmOP(tran, none, b, k, m, k, n, m, n);
 }

@@ -30,30 +30,26 @@
 // breaking dependencies
 #include "cutlass/numeric_types.h"
 
-namespace tensorrt_llm::plugins
-{
-enum class WeightTypeId
-{
+namespace tensorrt_llm::plugins {
+enum class WeightTypeId {
     INT8 = 1,
     INT4 = 2,
 };
 
-constexpr int32_t FP16_BITS = 16;
-constexpr int32_t INT8_BITS = 8;
-constexpr int32_t INT4_BITS = 4;
+constexpr int32_t FP16_BITS       = 16;
+constexpr int32_t INT8_BITS       = 8;
+constexpr int32_t INT4_BITS       = 4;
 constexpr int32_t INT8_INT4_RATIO = INT8_BITS / INT4_BITS;
 constexpr int32_t FP16_INT4_RATIO = FP16_BITS / INT4_BITS;
 
-inline int32_t getWeightTypeMultiplier(WeightTypeId weightTypeId)
-{
+inline int32_t getWeightTypeMultiplier(WeightTypeId weightTypeId) {
     return weightTypeId == WeightTypeId::INT8 ? 1 : INT8_INT4_RATIO;
 }
 
-using WeightOnlyGemmRunner = tensorrt_llm::kernels::cutlass_kernels::CutlassFpAIntBGemmRunnerInterface;
+using WeightOnlyGemmRunner    = tensorrt_llm::kernels::cutlass_kernels::CutlassFpAIntBGemmRunnerInterface;
 using WeightOnlyGemmRunnerPtr = std::shared_ptr<WeightOnlyGemmRunner>;
 
-class WeightOnlyQuantMatmulPlugin
-{
+class WeightOnlyQuantMatmulPlugin {
 public:
     // using PluginProfilerPtr = std::shared_ptr<WeightOnlyQuantGemmPluginProfiler>;
     WeightOnlyQuantMatmulPlugin() = default;
@@ -73,7 +69,7 @@ public:
                    const int    k,
                    cudaStream_t stream);
 
-    int  initialize();
+    int initialize();
 
     void init(nvinfer1::DataType type, WeightTypeId weightTypeId);
 
@@ -81,15 +77,15 @@ private:
     void configGemm();
 
 private:
-    WeightOnlyGemmRunnerPtr m_weightOnlyGemmRunner;
-    size_t m_workspaceMaxSize;
-    nvinfer1::DataType mType;
-    WeightTypeId mWeightTypeId;
-    bool mCudaKernelEnabled;
+    WeightOnlyGemmRunnerPtr                        m_weightOnlyGemmRunner;
+    size_t                                         m_workspaceMaxSize;
+    nvinfer1::DataType                             mType;
+    WeightTypeId                                   mWeightTypeId;
+    bool                                           mCudaKernelEnabled;
     tensorrt_llm::kernels::weight_only::KernelType mCudaKernelType;
-    int mArch;
+    int                                            mArch;
 
     static constexpr int SMALL_M_FAST_PATH = 4;
 };
 
-} // namespace tensorrt_llm::plugins
+}  // namespace tensorrt_llm::plugins

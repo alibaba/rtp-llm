@@ -1,16 +1,18 @@
-import torch
-import pathlib
-import os
-import sys
 import logging
+import os
+import pathlib
+import sys
 import traceback
+
+import torch
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 libs_path = os.path.join(parent_dir, "libs")
-SO_NAME = 'libth_transformer.so'
+SO_NAME = "libth_transformer.so"
 
-#for py test
+
+# for py test
 def find_upper_so(current_dir: str):
     p = pathlib.Path(current_dir).resolve()
     while p != p.parent:
@@ -20,6 +22,7 @@ def find_upper_so(current_dir: str):
                     return root
         p = p.parent
     raise Exception(f"failed to find {SO_NAME} in {current_dir}")
+
 
 def find_th_transformer(current_dir: str):
     if not os.path.exists(current_dir):
@@ -43,8 +46,11 @@ def find_th_transformer(current_dir: str):
                 if subsubdir.is_dir():
                     for file in subsubdir.iterdir():
                         if file.is_file() and file.name == SO_NAME:
-                            return os.path.join(os.path.join(current_dir, subdir.name), subsubdir.name)
+                            return os.path.join(
+                                os.path.join(current_dir, subdir.name), subsubdir.name
+                            )
     return None
+
 
 so_path = os.path.join(libs_path)
 if not os.path.exists(os.path.join(so_path, SO_NAME)):
@@ -83,20 +89,56 @@ try:
     so_load_path = f"{torch.__path__[0]}/lib/libcaffe2_nvrtc.so"
     if os.path.exists(so_load_path):
         from ctypes import cdll
+
         cdll.LoadLibrary(so_load_path)
         logging.info(f"loaded libcaffe2_nvrtc.so from {so_load_path}")
 except BaseException as e:
     logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
 
-torch.ops.load_library(os.path.join(so_path, 'libth_transformer.so'))
+torch.ops.load_library(os.path.join(so_path, "libth_transformer.so"))
 try:
-    from libth_transformer import GptInitParameter, RtpEmbeddingOp, RtpLLMOp, SpecialTokens, LoadBalanceInfo, EngineScheduleInfo, QuantAlgo, SpecialTokens, MlaOpsType, EplbMode, EplbConfig
+    from libth_transformer import (
+        ArpcConfig,
+        BatchDecodeSchedulerConfig,
+        CacheStoreConfig,
+        ConcurrencyConfig,
+        DeviceExporter,
+        DeviceResourceConfig,
+        DeviceType,
+        EngineScheduleInfo,
+        EplbConfig,
+        EplbMode,
+        FIFOSchedulerConfig,
+        FMHAConfig,
+        GptInitParameter,
+        HWKernelConfig,
+        KVCacheConfig,
+        LoadBalanceInfo,
+        MiscellaneousConfig,
+        MlaOpsType,
+        ModelSpecificConfig,
+        MoeConfig,
+    )
     from libth_transformer import MultimodalInput as MultimodalInputCpp
-    from libth_transformer import get_device, DeviceType, DeviceExporter
-    from libth_transformer import ConcurrencyConfig, DeviceResourceConfig, FMHAConfig, HWKernelConfig, KVCacheConfig, MiscellaneousConfig, ModelSpecificConfig, ParallelismDistributedConfig, ProfilingDebugLoggingConfig, ServiceDiscoveryConfig, SchedulerConfig, MoeConfig, SamplerConfig, SpeculativeExecutionConfig, CacheStoreConfig, BatchDecodeSchedulerConfig, FIFOSchedulerConfig, ArpcConfig
-    from libth_transformer import PyModelInputs, PyModelOutputs, PyAttentionInputs, PyModelInitResources
+    from libth_transformer import (
+        ParallelismDistributedConfig,
+        ProfilingDebugLoggingConfig,
+        PyAttentionInputs,
+        PyModelInitResources,
+        PyModelInputs,
+        PyModelOutputs,
+        QuantAlgo,
+        RtpEmbeddingOp,
+        RtpLLMOp,
+        SamplerConfig,
+        SchedulerConfig,
+        ServiceDiscoveryConfig,
+        SpecialTokens,
+        SpeculativeExecutionConfig,
+        get_device,
+    )
 except BaseException as e:
     import traceback
+
     print(f"Exception: {e}, traceback: {traceback.format_exc()}")
     logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
-

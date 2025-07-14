@@ -43,9 +43,9 @@ LoadBalancerInitParams WRRLoadBalancerTest::makeConfig() {
     SubscribeServiceConfig config;
     config.local_configs.push_back(local_config);
     LoadBalancerInitParams params;
-    params.update_interval_ms = 100;
+    params.update_interval_ms      = 100;
     params.sync_status_interval_ms = 10;
-    params.subscribe_config = config;
+    params.subscribe_config        = config;
     return params;
 }
 
@@ -87,11 +87,15 @@ TEST_F(WRRLoadBalancerTest, testSyncWorkStatus) {
         ASSERT_EQ(load_balancer_->host_load_balance_info_map_.size(), 30);
         for (int i = 0; i < 10; i++) {
             auto server_info = http_servers_[i];
-            ASSERT_TRUE(load_balancer_->host_load_balance_info_map_[server_info.address].load_balance_info.available_kv_cache == 200);
+            ASSERT_TRUE(
+                load_balancer_->host_load_balance_info_map_[server_info.address].load_balance_info.available_kv_cache
+                == 200);
         }
         for (int i = 10; i < 30; i++) {
             auto server_info = http_servers_[i];
-            ASSERT_TRUE(load_balancer_->host_load_balance_info_map_[server_info.address].load_balance_info.available_kv_cache == 400);
+            ASSERT_TRUE(
+                load_balancer_->host_load_balance_info_map_[server_info.address].load_balance_info.available_kv_cache
+                == 400);
         }
     }
 }

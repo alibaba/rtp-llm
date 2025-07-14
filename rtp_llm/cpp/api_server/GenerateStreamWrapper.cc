@@ -5,33 +5,30 @@
 namespace rtp_llm {
 
 GenerateStreamWrapper::GenerateStreamWrapper(const std::shared_ptr<ApiServerMetricReporter>& metric_reporter,
-                                             const std::shared_ptr<TokenProcessor>& token_processor):
-        metric_reporter_(metric_reporter),
-        token_processor_(token_processor) {
-}
+                                             const std::shared_ptr<TokenProcessor>&          token_processor):
+    metric_reporter_(metric_reporter), token_processor_(token_processor) {}
 
 void GenerateStreamWrapper::init(const std::shared_ptr<GenerateInput>& input,
-                                 const std::shared_ptr<EngineBase>& engine) {
-    input_ids_ = input->input_ids;
+                                 const std::shared_ptr<EngineBase>&    engine) {
+    input_ids_       = input->input_ids;
     generate_config_ = input->generate_config;
     // align life cycle with stream
-    lora_guard_ = std::make_shared<lora::LoraResourceGuard>(engine->getLoraManager(),
-                                                            input->generate_config->adapter_name);
+    lora_guard_ =
+        std::make_shared<lora::LoraResourceGuard>(engine->getLoraManager(), input->generate_config->adapter_name);
     stream_ = engine->enqueue(input);
 }
 
 void GenerateStreamWrapper::init(GenerateStreamPtr stream, const std::shared_ptr<EngineBase>& engine) {
-    auto input = stream->generateInput();
-    input_ids_ = input->input_ids;
+    auto input       = stream->generateInput();
+    input_ids_       = input->input_ids;
     generate_config_ = input->generate_config;
     // align life cycle with stream
-    lora_guard_ = std::make_shared<lora::LoraResourceGuard>(engine->getLoraManager(),
-                                input->generate_config->adapter_name);
+    lora_guard_ =
+        std::make_shared<lora::LoraResourceGuard>(engine->getLoraManager(), input->generate_config->adapter_name);
     stream_ = stream;
 }
 
-std::pair<MultiSeqsResponse, bool>
-GenerateStreamWrapper::generateResponse() {
+std::pair<MultiSeqsResponse, bool> GenerateStreamWrapper::generateResponse() {
     if (stream_->finished() && stream_->hasOutput() == false) {
         RTP_LLM_LOG_INFO("stream finished.");
         return std::make_pair(MultiSeqsResponse(), true);
@@ -56,12 +53,10 @@ GenerateStreamWrapper::generateResponse() {
     autil::ScopedTime2 timer;
     if (token_processor_ctx_ == nullptr) {
         token_processor_ctx_ = token_processor_->getTokenProcessorCtx(
-                generate_config_->num_beams, outputs_cache_.generate_outputs.size(), token_processor_);
+            generate_config_->num_beams, outputs_cache_.generate_outputs.size(), token_processor_);
     }
-    std::vector<std::string> texts = token_processor_->decodeTokens(token_processor_ctx_,
-                                                                    outputs_cache_,
-                                                                    output_lens_,
-                                                                    generate_config_);
+    std::vector<std::string> texts =
+        token_processor_->decodeTokens(token_processor_ctx_, outputs_cache_, output_lens_, generate_config_);
     if (metric_reporter_) {
         metric_reporter_->reportFTPostTokenProcessorRtMetric(timer.done_ms());
     }
@@ -69,7 +64,7 @@ GenerateStreamWrapper::generateResponse() {
 
     bool all_finished = std::all_of(outputs_cache_.generate_outputs.begin(),
                                     outputs_cache_.generate_outputs.end(),
-                                    [](const auto& out){ return out.finished; });
+                                    [](const auto& out) { return out.finished; });
     if (all_finished && metric_reporter_ && outputs_cache_.generate_outputs.size() > 0) {
         metric_reporter_->reportFTIterateCountMetric(outputs_cache_.generate_outputs[0].aux_info.iter_count);
         for (const auto& len : output_lens_) {
@@ -79,11 +74,10 @@ GenerateStreamWrapper::generateResponse() {
     return std::make_pair(response, false);
 }
 
-MultiSeqsResponse
-GenerateStreamWrapper::formatResponse(const std::vector<std::string>&        generate_texts,
-                                      const GenerateOutputs&                 generate_outputs,
-                                      const std::shared_ptr<GenerateConfig>& generate_config,
-                                      rtp_llm::BufferPtr                          input_ids) {
+MultiSeqsResponse GenerateStreamWrapper::formatResponse(const std::vector<std::string>&        generate_texts,
+                                                        const GenerateOutputs&                 generate_outputs,
+                                                        const std::shared_ptr<GenerateConfig>& generate_config,
+                                                        rtp_llm::BufferPtr                     input_ids) {
     if (generate_texts.size() == 0) {
         RTP_LLM_LOG_WARNING("generate_texts is empty!");
         return MultiSeqsResponse();
@@ -97,24 +91,29 @@ GenerateStreamWrapper::formatResponse(const std::vector<std::string>&        gen
     res.response = generate_texts;
     res.finished = std::all_of(generate_outputs.generate_outputs.begin(),
                                generate_outputs.generate_outputs.end(),
-                               [](const auto& out){ return out.finished; });
+                               [](const auto& out) { return out.finished; });
 
     std::transform(generate_outputs.generate_outputs.begin(),
                    generate_outputs.generate_outputs.end(),
                    std::back_inserter(res.aux_info),
                    [generate_config, generate_texts](const auto& out) {
-                       auto aux_info =  AuxInfoAdapter(out.aux_info);
+                       auto aux_info = AuxInfoAdapter(out.aux_info);
                        if (generate_config->num_beams > 1) {
                            aux_info.beam_responses = generate_texts;
                        }
                        return aux_info;
                    });
 
-    if (generate_config->return_logits) res.logits.emplace();
-    if (generate_config->calculate_loss) res.loss.emplace();
-    if (generate_config->return_hidden_states) res.hidden_states.emplace();
-    if (generate_config->return_output_ids) res.output_ids.emplace();
-    if (generate_config->return_input_ids) res.input_ids.emplace();
+    if (generate_config->return_logits)
+        res.logits.emplace();
+    if (generate_config->calculate_loss)
+        res.loss.emplace();
+    if (generate_config->return_hidden_states)
+        res.hidden_states.emplace();
+    if (generate_config->return_output_ids)
+        res.output_ids.emplace();
+    if (generate_config->return_input_ids)
+        res.input_ids.emplace();
 
     for (const auto& generate_output : generate_outputs.generate_outputs) {
         auto logits        = generate_output.logits;
@@ -131,13 +130,13 @@ GenerateStreamWrapper::formatResponse(const std::vector<std::string>&        gen
             res.loss.value().push_back(rtp_llm::buffer2vector<float>(*buffer));
         }
         if (generate_config->return_hidden_states && hidden_states.has_value()) {
-            auto buffer = hidden_states.value();
-            auto hidden_states_tensor = Buffer2torchTensor(buffer);
-            hidden_states_tensor = hidden_states_tensor.to(torch::kFloat).to(torch::kCPU);
+            auto buffer                          = hidden_states.value();
+            auto hidden_states_tensor            = Buffer2torchTensor(buffer);
+            hidden_states_tensor                 = hidden_states_tensor.to(torch::kFloat).to(torch::kCPU);
             std::vector<float> hidden_states_vec = std::vector<float>(hidden_states_tensor.numel());
             memcpy(hidden_states_vec.data(),
-                    hidden_states_tensor.data_ptr<float>(),
-                    hidden_states_tensor.numel() * sizeof(float));
+                   hidden_states_tensor.data_ptr<float>(),
+                   hidden_states_tensor.numel() * sizeof(float));
             res.hidden_states.value().push_back(hidden_states_vec);
         }
         if (generate_config->return_output_ids) {

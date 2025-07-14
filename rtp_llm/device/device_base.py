@@ -1,10 +1,10 @@
-from enum import Enum
-from typing import Optional, Union, Dict, Any, List, Set
 import logging
+from enum import Enum
+from typing import Any, Dict, List, Optional, Set, Union
 
 import torch
 
-from rtp_llm.ops import DeviceType, DeviceExporter
+from rtp_llm.ops import DeviceExporter, DeviceType
 
 
 class MemInfo:
@@ -14,6 +14,7 @@ class MemInfo:
     def __init__(self, used: int, free: int):
         self.used = used
         self.free = free
+
 
 class DeviceBase:
     def __init__(self, exported_device: DeviceExporter):
@@ -39,12 +40,33 @@ class DeviceBase:
             logging.warning(f"get_mem_info failed: {e}")
             return None
 
-    def preprocess_groupwise_weight_params(self, qweight_int32, qzeros_int32, scales_fp16, device: str,
-                                           gptq: bool, awq: bool, weight_bits: int):
-        raise NotImplementedError("preprocess_groupwise_weight_params is not implemented")
+    def preprocess_groupwise_weight_params(
+        self,
+        qweight_int32,
+        qzeros_int32,
+        scales_fp16,
+        device: str,
+        gptq: bool,
+        awq: bool,
+        weight_bits: int,
+    ):
+        raise NotImplementedError(
+            "preprocess_groupwise_weight_params is not implemented"
+        )
 
-    def preprocess_moe_groupwise_weight_params(self, qweight_int32, qzeros_int32, scales_fp16, device: str, gptq: bool, awq: bool, weight_bits: int):
-        raise NotImplementedError("preprocess_moe_groupwise_weight_params is not implemented")
+    def preprocess_moe_groupwise_weight_params(
+        self,
+        qweight_int32,
+        qzeros_int32,
+        scales_fp16,
+        device: str,
+        gptq: bool,
+        awq: bool,
+        weight_bits: int,
+    ):
+        raise NotImplementedError(
+            "preprocess_moe_groupwise_weight_params is not implemented"
+        )
 
     def apply_int8(self, tensor: torch.Tensor, device: str):
         raise NotImplementedError("apply_int8 is not implemented")
@@ -52,5 +74,7 @@ class DeviceBase:
     def moe_apply_int8(self, tensor: torch.Tensor, device: str):
         raise NotImplementedError("moe_apply_int8 is not implemented")
 
-    def maybe_rewrite_weight_by_key(self, key: str, weight: torch.Tensor) -> torch.Tensor:
+    def maybe_rewrite_weight_by_key(
+        self, key: str, weight: torch.Tensor
+    ) -> torch.Tensor:
         return weight

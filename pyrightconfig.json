@@ -11,7 +11,7 @@
         "docker",
         "tests",
         "build",
-        "templates",       
+        "templates",
         "cmake"
     ],
     "defineConstant": {

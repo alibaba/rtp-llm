@@ -40,7 +40,7 @@ protected:
 private:
     std::atomic<int64_t>                     request_id_counter_{0};
     std::atomic_bool                         is_stopped_{true};
-    std::shared_ptr<HealthService>           health_service_;    
+    std::shared_ptr<HealthService>           health_service_;
     std::unique_ptr<http_server::HttpServer> http_server_;
     std::shared_ptr<RemoteTokenizeModule>    tokenize_service_;
     std::shared_ptr<PrefillLoadBalancer>     load_balancer_;

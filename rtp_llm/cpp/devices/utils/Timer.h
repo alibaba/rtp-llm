@@ -20,31 +20,38 @@ public:
 
     // default using milliseconds.
     int64_t elapsed() const {
-        return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - m_begin).count();
+        return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now()
+                                                                     - m_begin)
+            .count();
     }
 
     int64_t elapsed_micro(int epoch = 1) const {
         int64_t t =
-            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now() - m_begin).count();
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now() - m_begin)
+                .count();
         return t;
     }
 
     int64_t elapsed_nano(int epoch = 1) const {
         int64_t t =
-            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::high_resolution_clock::now() - m_begin).count();
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::high_resolution_clock::now() - m_begin)
+                .count();
         return t;
     }
 
     int64_t elapsed_seconds() const {
-        return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::high_resolution_clock::now() - m_begin).count();
+        return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::high_resolution_clock::now() - m_begin)
+            .count();
     }
 
     int64_t elapsed_minutes() const {
-        return std::chrono::duration_cast<std::chrono::minutes>(std::chrono::high_resolution_clock::now() - m_begin).count();
+        return std::chrono::duration_cast<std::chrono::minutes>(std::chrono::high_resolution_clock::now() - m_begin)
+            .count();
     }
 
     int64_t elapsed_hours() const {
-        return std::chrono::duration_cast<std::chrono::hours>(std::chrono::high_resolution_clock::now() - m_begin).count();
+        return std::chrono::duration_cast<std::chrono::hours>(std::chrono::high_resolution_clock::now() - m_begin)
+            .count();
     }
 
 private:
@@ -55,8 +62,9 @@ private:
 class TimerCounter {
 private:
     std::vector<int64_t> m_time;
-    int64_t m_count;
-    int64_t m_sum;
+    int64_t              m_count;
+    int64_t              m_sum;
+
 public:
     TimerCounter(): m_count(0), m_sum(0) {}
 
@@ -90,13 +98,14 @@ public:
     void clear() {
         m_time.clear();
         m_count = 0;
-        m_sum = 0;
+        m_sum   = 0;
     }
 };
 
 class TimerRecorder {
 private:
     std::map<std::string, TimerCounter> m_timers;
+
 public:
     void record(std::string name, int64_t time) {
         if (m_timers.find(name) == m_timers.end()) {
@@ -111,8 +120,14 @@ public:
 
     void print() {
         for (auto& timer : m_timers) {
-            printf("Timer %-50s\t: count %ld,\t average %10.3lf ms,\t max %10.3lf ms,\t min %10.3lf ms,\t sum %10.3lf ms\n",
-                   timer.first.c_str(), timer.second.count(), timer.second.average(), timer.second.max(), timer.second.min(), timer.second.sum());
+            printf(
+                "Timer %-50s\t: count %ld,\t average %10.3lf ms,\t max %10.3lf ms,\t min %10.3lf ms,\t sum %10.3lf ms\n",
+                timer.first.c_str(),
+                timer.second.count(),
+                timer.second.average(),
+                timer.second.max(),
+                timer.second.min(),
+                timer.second.sum());
         }
     }
 };

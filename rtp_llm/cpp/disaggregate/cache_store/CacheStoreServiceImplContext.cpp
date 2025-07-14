@@ -16,7 +16,7 @@ CacheStoreServiceImplContext::CacheStoreServiceImplContext(
     total_block_count_(request_->blocks_size()),
     request_id_(request_->requestid()),
     peer_ip_(request->client_ip()),
-    partition_count_(request->partition_count() == 0 ? 1 : request->partition_count()), // compatible with old version
+    partition_count_(request->partition_count() == 0 ? 1 : request->partition_count()),  // compatible with old version
     partition_id_(request->partition_id()),
     response_(response),
     collector_(collector),

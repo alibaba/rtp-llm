@@ -8,7 +8,7 @@
 在这篇文章我们将为大家介绍完整的RTP-LLM推理引擎系统的部署和使用路径。本文以一台单机4卡A10的机器为例子进行介绍。首先是我们的机器配置，我们给出GPU配置情况如下:
 ```shell
 $nvidia-smi
-Fri May 16 14:52:19 2025       
+Fri May 16 14:52:19 2025
 +-----------------------------------------------------------------------------+
 | NVIDIA-SMI 470.82.01    Driver Version: 470.82.01    CUDA Version: 12.6     |
 |-------------------------------+----------------------+----------------------+
@@ -32,7 +32,7 @@ Fri May 16 14:52:19 2025
 |  0%   30C    P8    21W / 150W |      2MiB / 24258MiB |      0%      Default |
 |                               |                      |                  N/A |
 +-------------------------------+----------------------+----------------------+
-                                                                               
+
 +-----------------------------------------------------------------------------+
 | Processes:                                                                  |
 |  GPU   GI   CI        PID   Type   Process name                  GPU Memory |
@@ -220,7 +220,7 @@ if __name__ == '__main__':
     print(f"server thread started, waiting...")
     wait_server_start(None, port)
     print(f"server start done!")
-    
+
     import openai # you want `pip install openai==1.3.9`
     from openai.types.chat import ChatCompletionMessageParam, ChatCompletionUserMessageParam
     openai.base_url = f"http://127.0.0.1:{int(os.environ['START_PORT'])}/"

@@ -10,8 +10,8 @@ RUN apt-get update &&  apt install \
 
 RUN chmod +x /tmp/$BAZEL_INSTALL_SH \
     && bash /tmp/$BAZEL_INSTALL_SH
-   
-RUN if [ -f '/usr/bin/python3.10' ]; \ 
+
+RUN if [ -f '/usr/bin/python3.10' ]; \
     then \
 	echo "python3.10 has exist, so not need to install it"; ls -lrt /usr/bin/python3.10; \
     else \
@@ -44,7 +44,7 @@ RUN apt -y install git git-lfs \
     && git config --system core.hooksPath .githooks \
     && git lfs install
 
-## prepare python && cudnn env 
+## prepare python && cudnn env
 RUN mkdir -p /opt/conda310/bin/ \
     && ln -s /usr/bin/python3.10 /opt/conda310/bin/python3 \
     && ln -s /usr/bin/python3.10 /opt/conda310/bin/python
@@ -55,7 +55,7 @@ RUN if [ -f '/usr/bin/python' ]; \
     else \
 	ln -s /opt/conda310/bin/python3 /usr/bin/python; \
     fi
- 
+
 RUN ln -s /usr/include/cudnn.h  /usr/local/cuda/include/cudnn.h \
     && ln -s /usr/include/cudnn_version.h  /usr/local/cuda/include/cudnn_version.h \
     && ln -s /usr/lib/x86_64-linux-gnu/libcudnn.so /usr/local/cuda/lib64/libcudnn.so \

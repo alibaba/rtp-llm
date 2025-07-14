@@ -291,10 +291,10 @@ void ExpertBalancer::excuteEplbPlan(OverallExpertStats& stats, GptModel& model) 
                     balance_layer_cnt_++;
 
                     if (balance_layer_cnt_ >= balance_layer_per_step_) {
-                        update_cnt_ = 0;
+                        update_cnt_        = 0;
                         balance_layer_cnt_ = 0;
                     } else {
-                        update_cnt_ = eplb_control_data_.update_time; // quick update
+                        update_cnt_ = eplb_control_data_.update_time;  // quick update
                     }
 
                     setPlanStatus(EplbPlanStatus::INIT);

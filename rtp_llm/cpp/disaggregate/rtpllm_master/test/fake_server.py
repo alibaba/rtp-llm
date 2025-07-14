@@ -1,15 +1,19 @@
 import json
-from typing import Dict, Any, Union
-from fastapi import FastAPI
-from fastapi.responses import ORJSONResponse
-from fastapi.requests import Request
-from threading import Thread
-import uvicorn
-
 import logging
-logging.basicConfig(level="INFO",
-                format="[process-%(process)d][%(name)s][%(asctime)s][%(filename)s:%(funcName)s():%(lineno)s][%(levelname)s] %(message)s",
-                datefmt='%m/%d/%Y %H:%M:%S')
+from threading import Thread
+from typing import Any, Dict, Union
+
+import uvicorn
+from fastapi import FastAPI
+from fastapi.requests import Request
+from fastapi.responses import ORJSONResponse
+
+logging.basicConfig(
+    level="INFO",
+    format="[process-%(process)d][%(name)s][%(asctime)s][%(filename)s:%(funcName)s():%(lineno)s][%(levelname)s] %(message)s",
+    datefmt="%m/%d/%Y %H:%M:%S",
+)
+
 
 class FakeServer:
     def __init__(self):
@@ -24,13 +28,17 @@ class FakeServer:
                 "total_kv_cache": 1000,
                 "step_latency_ms": 10,
                 "step_per_minute": 100,
-                "iterate_count" : 100,
+                "iterate_count": 100,
                 "onflight_requests": 0,
                 "alive": True,
-                "running_task_list": [{"prefix_length": 5, "input_length": 5, "task_id": "100"}],
-                "finished_task_list": [{"prefix_length": 5, "input_length": 5, "task_id": "100"}],
+                "running_task_list": [
+                    {"prefix_length": 5, "input_length": 5, "task_id": "100"}
+                ],
+                "finished_task_list": [
+                    {"prefix_length": 5, "input_length": 5, "task_id": "100"}
+                ],
                 "last_schedule_time": 100000,
-                "machine_info": "FAKE_GPU_TP1"
+                "machine_info": "FAKE_GPU_TP1",
             }
             return ORJSONResponse(resposne)
 
@@ -38,13 +46,13 @@ class FakeServer:
         async def tokenize(req: Union[Dict[str, str], str]):
             # body = await request_str.body()
             print("body:", req)
-            request_str = json.loads(req)['prompt']
+            request_str = json.loads(req)["prompt"]
             return ORJSONResponse({"token_ids": [i for i in range(len(request_str))]})
 
     def start(self, port: int):
         uvicorn.run(self.app, host="127.0.0.1", port=port)
 
-if __name__ == '__main__':
-    server = FakeServer()
-    server.start(8088) 
 
+if __name__ == "__main__":
+    server = FakeServer()
+    server.start(8088)

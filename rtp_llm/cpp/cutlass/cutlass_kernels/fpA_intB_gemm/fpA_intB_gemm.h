@@ -125,7 +125,7 @@ private:
 
 
 template <typename WeightType, cutlass::WeightOnlyQuantOp QuantOp>
-class CutlassFpAIntBGemmRunner<float, WeightType, QuantOp> : public virtual CutlassFpAIntBGemmRunnerInterface 
+class CutlassFpAIntBGemmRunner<float, WeightType, QuantOp> : public virtual CutlassFpAIntBGemmRunnerInterface
 {
 public:
     CutlassFpAIntBGemmRunner() = default;

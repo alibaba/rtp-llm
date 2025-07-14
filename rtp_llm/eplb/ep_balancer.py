@@ -1,23 +1,26 @@
 import datetime
-import os
 import json
-import random
-from rtp_llm.config.py_config_modules import PyEnvConfigs
-import torch
 import logging
+import os
+import random
 import traceback
-
-from queue import Queue
-from enum import Enum
 from collections import deque
-from typing import Deque, Sequence, Any
+from enum import Enum
+from queue import Queue
+from typing import Any, Deque, Sequence
 
+import torch
+
+from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.device import get_current_device
+from rtp_llm.eplb.eplb import rebalance_experts
+from rtp_llm.model_loader.load_config import LoadConfig
+from rtp_llm.model_loader.model_weight_info import (
+    ModelDeployWeightInfo,
+    ModelWeightInfo,
+)
 from rtp_llm.utils.database import BaseDatabase
 from rtp_llm.utils.model_weight import W
-from rtp_llm.eplb.eplb import rebalance_experts
-from rtp_llm.device import get_current_device
-from rtp_llm.model_loader.load_config import LoadConfig
-from rtp_llm.model_loader.model_weight_info import ModelDeployWeightInfo, ModelWeightInfo
 
 
 class HistoryStats:
@@ -37,11 +40,13 @@ class HistoryStats:
         self.stats_tensor += stats
         return self.stats_tensor
 
+
 class SelectLayerMethod(Enum):
     ROUND = "round"
     RANDOM = "random"
     MOST_UNBALANCED_LAYER = "most_unbalanced_layer"
     MIX = "mix"
+
 
 class ExpertBalancer:
     def __init__(
@@ -50,16 +55,20 @@ class ExpertBalancer:
         compute_dtype: torch.dtype,
         phy2log: Any,
         database: BaseDatabase,
-        py_env_configs: PyEnvConfigs
+        py_env_configs: PyEnvConfigs,
     ):
         self.database: BaseDatabase = database
         self._weights_info: ModelDeployWeightInfo = weights_info
-        self._model_weight_info: ModelWeightInfo = self._weights_info.create_model_weight_info(database)
+        self._model_weight_info: ModelWeightInfo = (
+            self._weights_info.create_model_weight_info(database)
+        )
         use_fp32 = py_env_configs.model_config.use_float32
         if use_fp32:
             compute_dtype = torch.float32
 
-        self._load_config: LoadConfig = self._weights_info.create_load_config(compute_dtype, database, get_current_device())
+        self._load_config: LoadConfig = self._weights_info.create_load_config(
+            compute_dtype, database, get_current_device()
+        )
         self.num_layers = self._load_config.num_layers
         self.num_replicas = self._load_config.phy_exp_num
         self.num_groups = self._load_config.moe_n_group
@@ -67,7 +76,6 @@ class ExpertBalancer:
         self.num_gpu = self._load_config.ep_size
         self.moe_layer_index = self._load_config.moe_layer_index
         self.num_experts = self._load_config.expert_num
-
 
         self.time_prefix = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         self.queue: Queue[int] = Queue()
@@ -77,13 +85,18 @@ class ExpertBalancer:
         self.update_cnt = 0
 
         window_size = int(os.environ.get("EPLB_STATS_WINDOW_SIZE", 10))
-        self.history_log_stats = HistoryStats(window_size=window_size, shape=(self._load_config.num_layers, self._load_config.expert_num))
+        self.history_log_stats = HistoryStats(
+            window_size=window_size,
+            shape=(self._load_config.num_layers, self._load_config.expert_num),
+        )
 
         logging.info(f"Balance method: {self.select_layer_method}")
 
         # record the expert count, used for dump stats
-        self.log_exp_cnt = torch.zeros((self._load_config.num_layers, self._load_config.expert_num), dtype=torch.int32)
-
+        self.log_exp_cnt = torch.zeros(
+            (self._load_config.num_layers, self._load_config.expert_num),
+            dtype=torch.int32,
+        )
 
         self.force_repack = os.environ.get("EPLB_FORCE_REPACK", "0") == "1"
 
@@ -123,15 +136,16 @@ class ExpertBalancer:
         # note: select idx must in moe_layer_index
         most_unbalanced_idx = -1
         for idx in self.moe_layer_index:
-            if most_unbalanced_idx == -1 or max_per_layer[idx] > max_per_layer[most_unbalanced_idx]:
+            if (
+                most_unbalanced_idx == -1
+                or max_per_layer[idx] > max_per_layer[most_unbalanced_idx]
+            ):
                 most_unbalanced_idx = idx
 
         return most_unbalanced_idx
 
     @torch.inference_mode()
-    def create_balance_plan(
-        self, log_stats: torch.Tensor, gpu_loads: torch.Tensor
-    ):
+    def create_balance_plan(self, log_stats: torch.Tensor, gpu_loads: torch.Tensor):
         self.update_cnt += 1
         log_stats = self.history_log_stats.add_stats(log_stats)
         logging.info(log_stats)
@@ -147,7 +161,7 @@ class ExpertBalancer:
             self.num_groups,
             self.num_nodes,
             self.num_gpu,
-            self.force_repack
+            self.force_repack,
         )
 
         self.phy2log[layer_id] = phy2log.tolist()
@@ -193,17 +207,31 @@ class ExpertBalancer:
         layer_id = int(layer_id_tensor.item())
         # Notice now that the phy2log is updated in load_config, not support multi thread
         self._load_config.udpate_layer_experts(layer_id, phy2log)
-        choose_expert_id = self._load_config.get_selected_experts(layer_id, self.num_experts)
+        choose_expert_id = self._load_config.get_selected_experts(
+            layer_id, self.num_experts
+        )
         moe_weight = self._model_weight_info.get_layer_weight_info(layer_id, W.moe)
         assert moe_weight is not None
-        logging.info(f"[EPLB_py][RANK {self._load_config.ep_rank}] Load MOE weight layer {layer_id} for {choose_expert_id}")
+        logging.info(
+            f"[EPLB_py][RANK {self._load_config.ep_rank}] Load MOE weight layer {layer_id} for {choose_expert_id}"
+        )
         try:
             res = moe_weight.load(self.database, layer_id, "cpu", self._load_config)
         except:
-            logging.error(f"[EPLB_py][RANK {self._load_config.ep_rank}] Load MOE weight layer failed: 完整堆栈:\n{traceback.format_exc()}")
+            logging.error(
+                f"[EPLB_py][RANK {self._load_config.ep_rank}] Load MOE weight layer failed: 完整堆栈:\n{traceback.format_exc()}"
+            )
 
-        logging.info(f"[EPLB_py][RANK {self._load_config.ep_rank}] Load MOE weight layer {layer_id} done")
-        return layer_id, res.get(W.moe_w1), res.get(W.moe_w2), res.get(W.moe_s1, torch.empty(0, dtype=torch.float32)), res.get(W.moe_s2, torch.empty(0, dtype=torch.float32))
+        logging.info(
+            f"[EPLB_py][RANK {self._load_config.ep_rank}] Load MOE weight layer {layer_id} done"
+        )
+        return (
+            layer_id,
+            res.get(W.moe_w1),
+            res.get(W.moe_w2),
+            res.get(W.moe_s1, torch.empty(0, dtype=torch.float32)),
+            res.get(W.moe_s2, torch.empty(0, dtype=torch.float32)),
+        )
 
     @torch.inference_mode()
     def dump_stats(self):

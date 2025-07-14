@@ -42,7 +42,7 @@ class Logger {
 public:
     Logger(const std::string& submodule_name);
 
-    Logger(Logger const&) = delete;
+    Logger(Logger const&)         = delete;
     void operator=(Logger const&) = delete;
 
     static Logger& getEngineLogger() {
@@ -73,7 +73,7 @@ public:
              int               line,
              const std::string func,
              const std::string format,
-             const Args&... args)  {
+             const Args&... args) {
         std::string fmt;
         if (isTraceMode()) {
             fmt = getTracePrefix() + format;
@@ -86,9 +86,7 @@ public:
     }
 
     template<typename... Args>
-    void log_access(uint32_t          level,
-                    const std::string format,
-                    const Args&...    args) {
+    void log_access(uint32_t level, const std::string format, const Args&... args) {
         std::string logstr = rtp_llm::fmtstr(format, args...);
         logger_->log(level, "%s", logstr.c_str());
         tryFlush(level);
@@ -126,8 +124,8 @@ public:
         return logger_->isLevelEnabled(level);
     }
     static std::string log_level_;
-private:
 
+private:
     void tryFlush(int32_t level) {
         if (base_log_level_ >= alog::LOG_LEVEL_DEBUG || level <= alog::LOG_LEVEL_ERROR) {
             flush();
@@ -137,9 +135,8 @@ private:
     uint32_t getLevelfromstr(const char* s);
 
     inline const std::string getPrefix(const std::string& file, int line, const std::string& func) {
-        return "[RANK " + std::to_string(rank_)
-               + "][" + ip_
-               + "][" + file + ":" + std::to_string(line) + "][" + func + "] ";
+        return "[RANK " + std::to_string(rank_) + "][" + ip_ + "][" + file + ":" + std::to_string(line) + "][" + func
+               + "] ";
     }
 
     inline const std::string getTracePrefix() {
@@ -157,30 +154,30 @@ private:
 
     uint32_t                                          base_log_level_ = alog::LOG_LEVEL_INFO;
     const std::map<const uint32_t, const std::string> level_name_     = {{alog::LOG_LEVEL_TRACE1, "TRACE"},
-                                                                     {alog::LOG_LEVEL_DEBUG, "DEBUG"},
-                                                                     {alog::LOG_LEVEL_INFO, "INFO"},
-                                                                     {alog::LOG_LEVEL_WARN, "WARNING"},
-                                                                     {alog::LOG_LEVEL_ERROR, "ERROR"}};
+                                                                         {alog::LOG_LEVEL_DEBUG, "DEBUG"},
+                                                                         {alog::LOG_LEVEL_INFO, "INFO"},
+                                                                         {alog::LOG_LEVEL_WARN, "WARNING"},
+                                                                         {alog::LOG_LEVEL_ERROR, "ERROR"}};
 
-    int32_t rank_ = 0;
+    int32_t     rank_ = 0;
     std::string ip_;
 };
 
-} // namespace rtp_llm
+}  // namespace rtp_llm
 
-#define RTP_LLM_INTERVAL_LOG(logInterval, level, format, args...)                                                           \
+#define RTP_LLM_INTERVAL_LOG(logInterval, level, format, args...)                                                      \
     do {                                                                                                               \
         static int64_t logTimestamp;                                                                                   \
-        int64_t now = autil::TimeUtility::currentTimeInSeconds();                                                      \
+        int64_t        now = autil::TimeUtility::currentTimeInSeconds();                                               \
         if (now - logTimestamp > logInterval) {                                                                        \
-            RTP_LLM_LOG(alog::LOG_LEVEL_##level, format, ##args);                                                                             \
+            RTP_LLM_LOG(alog::LOG_LEVEL_##level, format, ##args);                                                      \
             logTimestamp = now;                                                                                        \
         }                                                                                                              \
     } while (0)
 
-#define RTP_LLM_LOG(level, ...)                                                                                             \
+#define RTP_LLM_LOG(level, ...)                                                                                        \
     do {                                                                                                               \
-        auto& logger = rtp_llm::Logger::getEngineLogger();                                                   \
+        auto& logger = rtp_llm::Logger::getEngineLogger();                                                             \
         if (!logger.isLevelEnabled(level)) {                                                                           \
             break;                                                                                                     \
         }                                                                                                              \
@@ -194,7 +191,7 @@ private:
 #define RTP_LLM_LOG_ERROR(...) RTP_LLM_LOG(alog::LOG_LEVEL_ERROR, __VA_ARGS__)
 #define RTP_LLM_LOG_EXCEPTION(ex, ...) rtp_llm::Logger::getEngineLogger().log(ex, ##__VA_ARGS__)
 
-#define RTP_LLM_ACCESS_LOG(level, ...)                                                                                      \
+#define RTP_LLM_ACCESS_LOG(level, ...)                                                                                 \
     do {                                                                                                               \
         auto& logger = rtp_llm::Logger::getAccessLogger();                                                             \
         if (!logger.isLevelEnabled(level)) {                                                                           \
@@ -210,9 +207,9 @@ private:
 #define RTP_LLM_ACCESS_LOG_ERROR(...) RTP_LLM_ACCESS_LOG(alog::LOG_LEVEL_ERROR, __VA_ARGS__)
 #define RTP_LLM_ACCESS_LOG_EXCEPTION(ex, ...) rtp_llm::Logger::getAccessLogger().log(ex, ##__VA_ARGS__)
 
-#define RTP_LLM_QUERY_ACCESS_LOG(level, ...)                                                                                \
+#define RTP_LLM_QUERY_ACCESS_LOG(level, ...)                                                                           \
     do {                                                                                                               \
-        auto& logger = rtp_llm::Logger::getQueryAccessLogger();                                              \
+        auto& logger = rtp_llm::Logger::getQueryAccessLogger();                                                        \
         logger.log(level, __FILE__, __LINE__, __PRETTY_FUNCTION__, __VA_ARGS__);                                       \
     } while (0)
 #define RTP_LLM_QUERY_ACCESS_LOG_TRACE(...) RTP_LLM_QUERY_ACCESS_LOG(alog::LOG_LEVEL_TRACE1, __VA_ARGS__)
@@ -222,9 +219,9 @@ private:
 #define RTP_LLM_QUERY_ACCESS_LOG_ERROR(...) RTP_LLM_QUERY_ACCESS_LOG(alog::LOG_LEVEL_ERROR, __VA_ARGS__)
 #define RTP_LLM_QUERY_ACCESS_LOG_EXCEPTION(ex, ...) rtp_llm::Logger::getQueryAccessLogger().log(ex, ##__VA_ARGS__)
 
-#define RTP_LLM_STACKTRACE_LOG(level, ...)                                                                                  \
+#define RTP_LLM_STACKTRACE_LOG(level, ...)                                                                             \
     do {                                                                                                               \
-        auto& logger = rtp_llm::Logger::getStackTraceLogger();                                               \
+        auto& logger = rtp_llm::Logger::getStackTraceLogger();                                                         \
         if (!logger.isLevelEnabled(level)) {                                                                           \
             break;                                                                                                     \
         }                                                                                                              \

@@ -19,7 +19,7 @@
 
 namespace ft_nvtx {
 
-class ReportCounter{
+class ReportCounter {
 
 public:
     void setReportStep(int step) {
@@ -45,12 +45,13 @@ protected:
 
 class NvtxResource {
 private:
-    ReportCounter counter_;
+    ReportCounter                counter_;
     kmonitor::MetricsReporterPtr metrics_reporter_;
-    NvtxResource(): counter_(ReportCounter()), metrics_reporter_(nullptr) {} 
-    NvtxResource(const NvtxResource&) = delete;
-    NvtxResource(const NvtxResource&&) = delete;
+    NvtxResource(): counter_(ReportCounter()), metrics_reporter_(nullptr) {}
+    NvtxResource(const NvtxResource&)            = delete;
+    NvtxResource(const NvtxResource&&)           = delete;
     NvtxResource& operator=(const NvtxResource&) = delete;
+
 public:
     ReportCounter& getCounter() {
         return counter_;
@@ -69,7 +70,6 @@ public:
         return instance;
     }
 };
-
 
 std::string getScope();
 void        addScope(std::string name);

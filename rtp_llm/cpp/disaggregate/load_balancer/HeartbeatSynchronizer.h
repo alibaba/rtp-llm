@@ -61,23 +61,22 @@ public:
 
     bool init();
 
-    ErrorResult<NodeStatus> getHeartbeatFromHost(std::map<std::string,
-                                                 std::shared_ptr<BizHosts>>& biz_hosts, int timeout_ms = 10);
+    ErrorResult<NodeStatus> getHeartbeatFromHost(std::map<std::string, std::shared_ptr<BizHosts>>& biz_hosts,
+                                                 int                                               timeout_ms = 10);
 
 protected:
     int getHostCnt(const std::map<std::string, std::shared_ptr<BizHosts>>& biz_hosts);
 
-    void getStatusFromHost(const std::string&                                                      spec,
-                           std::shared_ptr<std::atomic_int>&                                       sync_cnt,
-                           int                                                                     total_count,
-                           std::shared_ptr<std::shared_mutex>&                                     mutex,
-                           std::shared_ptr<NodeStatus>& result);
+    void getStatusFromHost(const std::string&                  spec,
+                           std::shared_ptr<std::atomic_int>&   sync_cnt,
+                           int                                 total_count,
+                           std::shared_ptr<std::shared_mutex>& mutex,
+                           std::shared_ptr<NodeStatus>&        result);
 
-    void processWorkerStatusResponse(
-        const std::string&                                                            spec,
-        const std::string&                                                            response_body,
-        const std::shared_ptr<std::shared_mutex>&                                     sync_result_map_mutex,
-        const std::shared_ptr<NodeStatus>&                                            sync_result_map);
+    void processWorkerStatusResponse(const std::string&                        spec,
+                                     const std::string&                        response_body,
+                                     const std::shared_ptr<std::shared_mutex>& sync_result_map_mutex,
+                                     const std::shared_ptr<NodeStatus>&        sync_result_map);
 
     bool waitDone(const std::shared_ptr<std::atomic_int>& sync_cnt, int total_count, int timeout_ms);
 

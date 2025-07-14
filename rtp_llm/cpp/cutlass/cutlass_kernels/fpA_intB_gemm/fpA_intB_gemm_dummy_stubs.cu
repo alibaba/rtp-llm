@@ -28,6 +28,6 @@ template class CutlassFpAIntBGemmRunner<float, uint8_t, cutlass::WeightOnlyQuant
 template class CutlassFpAIntBGemmRunner<float, cutlass::uint4b_t, cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_ONLY>;
 template class CutlassFpAIntBGemmRunner<float, uint8_t, cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_AND_ZEROS>;
 template class CutlassFpAIntBGemmRunner<float, cutlass::uint4b_t, cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_AND_ZEROS>;
-}  
-}  
-}  
+}
+}
+}

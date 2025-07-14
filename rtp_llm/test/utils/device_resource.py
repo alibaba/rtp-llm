@@ -1,28 +1,32 @@
-import os
-import time
-import torch
 import logging
-import traceback
-from filelock import FileLock, Timeout
-from typing import Tuple, Any, List
-from contextlib import ExitStack
+import os
 import platform
+import time
+import traceback
+from contextlib import ExitStack
+from typing import Any, List, Tuple
+
+import torch
+from filelock import FileLock, Timeout
+
 
 class DeviceResource:
     def __init__(self, required_gpu_count: int):
         self.required_gpu_count = required_gpu_count
 
-        if platform.processor() != 'aarch64':
+        if platform.processor() != "aarch64":
             self.total_gpus = list(range(torch.cuda.device_count()))
-            gpus = os.environ.get('CUDA_VISIBLE_DEVICES')
+            gpus = os.environ.get("CUDA_VISIBLE_DEVICES")
             if gpus is not None:
-                self.total_gpus = [int(id) for id in gpus.split(',')]
+                self.total_gpus = [int(id) for id in gpus.split(",")]
         else:
             # TODO: for arm cpu device, how to simulate gpu ?
             self.total_gpus = [0, 1]
         logging.info(f"total gpu: {self.total_gpus}")
         if required_gpu_count > len(self.total_gpus):
-            raise ValueError(f"required gpu count {required_gpu_count} is greater than total gpu count {len(self.total_gpus)}")
+            raise ValueError(
+                f"required gpu count {required_gpu_count} is greater than total gpu count {len(self.total_gpus)}"
+            )
         self.gpu_ids: List[int] = []
         self.gpu_locks = ExitStack()
         self.global_lock_file = "/tmp/rtp_llm/smoke/test/gpu_status_lock"

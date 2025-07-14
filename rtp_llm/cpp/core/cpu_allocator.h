@@ -5,7 +5,7 @@
 namespace rtp_llm {
 
 template<>
-class Allocator<AllocatorType::CPU> : public TypedAllocator<AllocatorType::CPU> {
+class Allocator<AllocatorType::CPU>: public TypedAllocator<AllocatorType::CPU> {
 public:
     Allocator() {}
     ~Allocator() {}
@@ -20,6 +20,4 @@ public:
     void* reMalloc(void* ptr, size_t size);
 };
 
-
-} // namespace rtp_llm
-
+}  // namespace rtp_llm

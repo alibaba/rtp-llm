@@ -1,15 +1,17 @@
 import json
 import os
+
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.qwen_v2 import QWenV2
+
 
 class CosyVoiceQwen(QWenV2):
     @classmethod
     def _create_config(cls, ckpt_path: str):
         config = QWenV2._create_config(ckpt_path)
         CosyVoiceQwen._update_config(config, ckpt_path)
-        config.mm_sep_tokens = [[-200]] # TODO(yinzhi): for SFT support
+        config.mm_sep_tokens = [[-200]]  # TODO(yinzhi): for SFT support
         return config
 
     @classmethod
@@ -23,7 +25,9 @@ class CosyVoiceQwen(QWenV2):
             config_json = json.loads(content)
 
         # input vocab size = speech vocab_size + (LLM vocab size + 2)
-        config.input_vocab_size = config_json.get("input_vocab_size", config.vocab_size + 151938)
+        config.input_vocab_size = config_json.get(
+            "input_vocab_size", config.vocab_size + 151938
+        )
 
-register_model('cosyvoice_qwen', CosyVoiceQwen, ["CosyQwen2ForCausalLM"])
 
+register_model("cosyvoice_qwen", CosyVoiceQwen, ["CosyQwen2ForCausalLM"])

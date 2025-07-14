@@ -16,8 +16,6 @@
 
 #pragma once
 
-
-
 #include <assert.h>
 #include <cuda_runtime.h>
 #include <stdint.h>
@@ -29,10 +27,9 @@ enum class PositionEmbeddingType {
     absolute,
 };
 
-enum class RotaryScalingType : int8_t
-{
-    kNONE = 0,
-    kLINEAR = 1,
+enum class RotaryScalingType : int8_t {
+    kNONE    = 0,
+    kLINEAR  = 1,
     kDYNAMIC = 2,
 };
 

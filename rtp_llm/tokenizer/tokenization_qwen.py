@@ -12,7 +12,7 @@ import unicodedata
 from typing import Collection, Dict, List, Set, Tuple, Union
 
 import tiktoken
-from transformers import PreTrainedTokenizer, AddedToken
+from transformers import AddedToken, PreTrainedTokenizer
 
 logger = logging.getLogger(__name__)
 
@@ -36,19 +36,18 @@ SPECIAL_TOKENS = (
 QWEN_CHAT_TEMPLATE = (
     # system message at start.
     "{% if messages[0]['role'] != 'system' %}"
-        "{{ '<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n' }}"
+    "{{ '<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n' }}"
     "{% endif %}"
-
     # functions
     "{% if functions %}"
-        "{{ '<|im_start|>user\n' }}"
-        "{{ 'Answer the following questions as best you can. You have access to the following APIs:\n\n'}}"
-        "{% for function in functions %}"
-            "{{ function['name'] + ': Call this tool to interact with the ' + function['name'] + ' API. ' }}"
-            "{{ 'What is the ' + function['name'] + ' API useful for? ' + function['description']}}"
-            "{{ ' Parameters: ' + json.dumps(function['parameters']) + '\n\n'}}"
-        "{% endfor %}"
-"""Use the following format:
+    "{{ '<|im_start|>user\n' }}"
+    "{{ 'Answer the following questions as best you can. You have access to the following APIs:\n\n'}}"
+    "{% for function in functions %}"
+    "{{ function['name'] + ': Call this tool to interact with the ' + function['name'] + ' API. ' }}"
+    "{{ 'What is the ' + function['name'] + ' API useful for? ' + function['description']}}"
+    "{{ ' Parameters: ' + json.dumps(function['parameters']) + '\n\n'}}"
+    "{% endfor %}"
+    """Use the following format:
 
 Question: the input question you must answer
 Thought: you should always think about what to do
@@ -63,15 +62,14 @@ Begin!
 
 """
     "{% endif %}"
-
     "{% for message in messages %}"
-        "{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}"
+    "{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}"
     "{% endfor %}"
-
     "{% if add_generation_prompt %}"
-        "{{ '<|im_start|>assistant\n' }}"
+    "{{ '<|im_start|>assistant\n' }}"
     "{% endif %}"
 )
+
 
 def _load_tiktoken_bpe(tiktoken_bpe_file: str) -> Dict[bytes, int]:
     contents = open(tiktoken_bpe_file, "rb").read()
@@ -79,6 +77,7 @@ def _load_tiktoken_bpe(tiktoken_bpe_file: str) -> Dict[bytes, int]:
         base64.b64decode(token): int(rank)
         for token, rank in (line.split() for line in contents.splitlines() if line)
     }
+
 
 class QWenTokenizer(PreTrainedTokenizer):
     """QWen tokenizer."""
@@ -149,13 +148,17 @@ class QWenTokenizer(PreTrainedTokenizer):
                 ids.append(self.mergeable_ranks.get(token))
         return ids
 
-    def _add_tokens(self, new_tokens: Union[List[str], List[AddedToken]], special_tokens: bool = False) -> int:
+    def _add_tokens(
+        self,
+        new_tokens: Union[List[str], List[AddedToken]],
+        special_tokens: bool = False,
+    ) -> int:
         if not special_tokens and new_tokens:
-            raise ValueError('Adding regular tokens is not supported')
+            raise ValueError("Adding regular tokens is not supported")
         for token in new_tokens:
             surface_form = token.content if isinstance(token, AddedToken) else token
             if surface_form not in SPECIAL_TOKENS:
-                raise ValueError('Adding unknown special tokens is not supported')
+                raise ValueError("Adding unknown special tokens is not supported")
         return 0
 
     def save_vocabulary(self, save_directory: str, **kwargs) -> Tuple[str]:

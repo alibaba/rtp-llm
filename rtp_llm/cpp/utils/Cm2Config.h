@@ -13,9 +13,9 @@ public:
     }
 
 public:
-    std::string              cluster_name;
-    std::string              zk_path;
-    std::string              zk_host;
+    std::string cluster_name;
+    std::string zk_path;
+    std::string zk_host;
 };
 
-}
+}  // namespace rtp_llm

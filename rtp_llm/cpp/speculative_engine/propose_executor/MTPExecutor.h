@@ -9,41 +9,44 @@
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/speculative_engine/propose_executor/MTPBatchStreamProcessor.h"
 
-
 namespace rtp_llm {
 
 class MTPExecutor: public ProposeExecutor {
 public:
-    explicit MTPExecutor(const std::string& sp_type,
+    explicit MTPExecutor(const std::string&                                sp_type,
                          std::unique_ptr<ProposeModelEngineInitParams>&    propose_model_engine_init_params,
                          rtp_llm::DeviceBase*                              device,
                          const std::vector<std::shared_ptr<CacheManager>>& mtp_cache_managers,
                          const std::shared_ptr<lora::LoraManager>&         lora_manager,
                          bool                                              warm_up = false):
-        ProposeExecutor(device),
-        sp_type_(sp_type) {
+        ProposeExecutor(device), sp_type_(sp_type) {
         propose_step_ = std::min(propose_model_engine_init_params->gen_num_per_circle,
                                  propose_model_engine_init_params->mtp_model_params_->size());
 
         RTP_LLM_LOG_INFO("create MTPExecutor use propose_step_ is %d, gen_num_per_circle is %d, mtp_model_num is %d",
-            propose_step_,
-            propose_model_engine_init_params->gen_num_per_circle,
-            propose_model_engine_init_params->mtp_model_params_->size());
+                         propose_step_,
+                         propose_model_engine_init_params->gen_num_per_circle,
+                         propose_model_engine_init_params->mtp_model_params_->size());
 
         size_t index = 0;
         for (auto& mtp_params : *propose_model_engine_init_params->mtp_model_params_) {
             RTP_LLM_LOG_INFO("index %d, mtp model_id %d", index, mtp_params->model_id);
             auto cache_manager = (index < mtp_cache_managers.size()) ? mtp_cache_managers[index] : nullptr;
-            auto executor = std::make_shared<NormalExecutor>(*mtp_params, cache_manager, device_, lora_manager, warm_up);
+            auto executor =
+                std::make_shared<NormalExecutor>(*mtp_params, cache_manager, device_, lora_manager, warm_up);
 
-            auto norm_executor = std::make_shared<NormalExecutor>(*mtp_params, cache_manager, device_, lora_manager, warm_up);
+            auto norm_executor =
+                std::make_shared<NormalExecutor>(*mtp_params, cache_manager, device_, lora_manager, warm_up);
             const auto& cache_config = cache_manager ? cache_manager->cacheConfig() : CacheConfig();
-            executor->setBatchProcessor(std::move(std::make_unique<MTPBatchStreamProcessor>(
-                mtp_params->gpt_init_parameter, cache_config, warm_up)));
-            auto model_params = GptModelInitParams({device_, mtp_params->gpt_weights,
-                Executor::genModelDescription(mtp_params->gpt_init_parameter),
-                cache_manager ? ((std::optional<CacheManager::KVCacheBuffer>)cache_manager->kvCacheBuffer()) : std::nullopt,
-                mtp_params->model_id});
+            executor->setBatchProcessor(std::move(
+                std::make_unique<MTPBatchStreamProcessor>(mtp_params->gpt_init_parameter, cache_config, warm_up)));
+            auto model_params = GptModelInitParams(
+                {device_,
+                 mtp_params->gpt_weights,
+                 Executor::genModelDescription(mtp_params->gpt_init_parameter),
+                 cache_manager ? ((std::optional<CacheManager::KVCacheBuffer>)cache_manager->kvCacheBuffer()) :
+                                 std::nullopt,
+                 mtp_params->model_id});
             std::unique_ptr<GptModel> new_model;
             if (sp_type_ == "mtp") {
                 RTP_LLM_LOG_INFO("prepare mtp model");
@@ -61,11 +64,9 @@ public:
             index++;
         }
         RTP_LLM_LOG_INFO("mtp executor init index is %d", index);
-
     }
 
     ~MTPExecutor() {};
-
 
     // care about hidden states.
     absl::Status normalProcess(const std::list<GenerateStreamPtr>& streams) override {

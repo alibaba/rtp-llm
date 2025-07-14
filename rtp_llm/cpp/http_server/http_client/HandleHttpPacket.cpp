@@ -39,12 +39,15 @@ anet::IPacketHandler::HPRetCode HandleHttpPacket::handlePacket(anet::Packet* pac
     }
 
     if (200 != httpPacket->getStatusCode()) {
-        size_t length;
+        size_t      length;
         std::string response = "";
         if (httpPacket->getBody(length)) {
             response = std::string(httpPacket->getBody(), length);
         }
-        RTP_LLM_LOG_WARNING("decode body failed, packet get error status, status: %d, response: %s, length: %d", httpPacket->getStatusCode(), response.c_str(), length);
+        RTP_LLM_LOG_WARNING("decode body failed, packet get error status, status: %d, response: %s, length: %d",
+                            httpPacket->getStatusCode(),
+                            response.c_str(),
+                            length);
         triggerCallBack(false, response, handle_packet_unique_ptr->http_call_back_);
         return anet::IPacketHandler::FREE_CHANNEL;
     }

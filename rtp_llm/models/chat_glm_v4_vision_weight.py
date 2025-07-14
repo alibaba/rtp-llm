@@ -1,8 +1,9 @@
-from rtp_llm.config.gpt_init_model_parameters import \
-    GptInitModelParameters
+from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.models.glm_v2_weight import GlmV2WeightInfo
-from rtp_llm.models.multimodal.multimodal_mixin import (BaseMultiModalWeightInfo,
-                                                      BaseVitWeights)
+from rtp_llm.models.multimodal.multimodal_mixin import (
+    BaseMultiModalWeightInfo,
+    BaseVitWeights,
+)
 
 
 class ChatGlmV4VisionVitWeights(BaseVitWeights):

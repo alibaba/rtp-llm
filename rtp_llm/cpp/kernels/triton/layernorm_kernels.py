@@ -3,11 +3,12 @@
 # The models we train have hidden dim up to 8k anyway (e.g. Llama 70B), so this is fine.
 
 import math
+
 import torch
 import torch.nn.functional as F
-
 import triton
 import triton.language as tl
+
 
 @triton.jit
 def _layer_norm_fwd_1pass_kernel(
@@ -25,9 +26,9 @@ def _layer_norm_fwd_1pass_kernel(
     N,  # number of columns in X
     eps,  # epsilon to avoid division by zero
     HAS_Y1,
-    HAS_RESIDUAL : tl.constexpr,
-    HAS_BIAS : tl.constexpr,
-    BLOCK_N: tl.constexpr
+    HAS_RESIDUAL: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
+    BLOCK_N: tl.constexpr,
 ):
     # Map the program id to the row of X and Y it should compute.
     row = tl.program_id(0)
@@ -39,7 +40,7 @@ def _layer_norm_fwd_1pass_kernel(
     x = tl.load(X + cols, mask=cols < N, other=0.0).to(tl.float32)
 
     if HAS_BIAS:
-        bias = tl.load(BIAS + cols, mask= cols < N, other=0.0).to(tl.float32)
+        bias = tl.load(BIAS + cols, mask=cols < N, other=0.0).to(tl.float32)
         x += bias
 
     if HAS_RESIDUAL:

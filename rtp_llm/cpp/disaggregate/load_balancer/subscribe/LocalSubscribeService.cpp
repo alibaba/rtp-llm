@@ -8,7 +8,7 @@ bool LocalSubscribeService::init(const LocalSubscribeServiceConfig& config) {
     for (auto& node_config : config.nodes) {
         if (!node_config.validate()) {
             RTP_LLM_LOG_WARNING("local subscribe service init failed, node config is invalid, config is [%s]",
-                           autil::legacy::ToJsonString(node_config).c_str());
+                                autil::legacy::ToJsonString(node_config).c_str());
             return false;
         }
 

@@ -63,23 +63,29 @@ bool LookupMapImpl::checkConfigValid(int                 input_lower_bound,
                                      const SingleConfig& input_config,
                                      const SingleConfig& prefix_config) const {
     // prefix_config of different scope support euqal now
-    if (input_lower_bound != input_config.lower_bound || (prefix_lower_bound != prefix_config.lower_bound && prefix_lower_bound != 
-    prefix_config.lower_bound + 1)) {
+    if (input_lower_bound != input_config.lower_bound
+        || (prefix_lower_bound != prefix_config.lower_bound && prefix_lower_bound != prefix_config.lower_bound + 1)) {
         RTP_LLM_LOG_WARNING("input or prefix lower bound match failed, expect: [%d:%d], actual: [%d:%d]",
-                       input_lower_bound,
-                       prefix_lower_bound,
-                       input_config.lower_bound,
-                       prefix_config.lower_bound);
+                            input_lower_bound,
+                            prefix_lower_bound,
+                            input_config.lower_bound,
+                            prefix_config.lower_bound);
         return false;
     }
     if ((input_config.lower_bound % input_config.step_size != 0)
         || (input_config.upper_bound % input_config.step_size != 0)) {
-        RTP_LLM_LOG_WARNING("input config step length error, range: (%d, %d], step: %d", input_config.lower_bound, input_config.upper_bound, input_config.step_size);
+        RTP_LLM_LOG_WARNING("input config step length error, range: (%d, %d], step: %d",
+                            input_config.lower_bound,
+                            input_config.upper_bound,
+                            input_config.step_size);
         return false;
     }
     if ((prefix_config.lower_bound % prefix_config.step_size != 0)
         || (prefix_config.upper_bound % prefix_config.step_size != 0)) {
-        RTP_LLM_LOG_WARNING("prefix config step length error, range: (%d, %d], step: %d", prefix_config.lower_bound, prefix_config.upper_bound, prefix_config.step_size);
+        RTP_LLM_LOG_WARNING("prefix config step length error, range: (%d, %d], step: %d",
+                            prefix_config.lower_bound,
+                            prefix_config.upper_bound,
+                            prefix_config.step_size);
         return false;
     }
     return true;
@@ -89,8 +95,8 @@ absl::Status LookupMapImpl::checkTaskBoundary(const TaskInfo& task_info) const {
     static std::string error_msg = "illegal node: (%d, %d) with boundary: (%d, %d) - [%d, %d]";
     if (task_info.prefix_length < 0 || task_info.input_length <= 0 || task_info.prefix_length > max_prefix_length_
         || task_info.input_length > max_input_length_) {
-        return absl::OutOfRangeError(
-            autil::StringUtil::formatString(error_msg, task_info.prefix_length, task_info.input_length, 0, 0, max_prefix_length_, max_input_length_));
+        return absl::OutOfRangeError(autil::StringUtil::formatString(
+            error_msg, task_info.prefix_length, task_info.input_length, 0, 0, max_prefix_length_, max_input_length_));
     }
     return absl::OkStatus();
 }
@@ -104,8 +110,7 @@ absl::StatusOr<int64_t> LookupMapImpl::getItemFromMap(const std::pair<int, int>&
     return iter->second;
 }
 
-absl::StatusOr<int64_t> LookupMapImpl::estimateInternal(const TaskInfo&       task_info,
-                                                              const LookupMapScope& scope) const {
+absl::StatusOr<int64_t> LookupMapImpl::estimateInternal(const TaskInfo& task_info, const LookupMapScope& scope) const {
     int prefix_step = scope.prefix_config.step_size;
     int input_step  = scope.input_config.step_size;
     if (task_info.prefix_length % prefix_step == 0 && task_info.input_length % input_step == 0) {
@@ -114,8 +119,8 @@ absl::StatusOr<int64_t> LookupMapImpl::estimateInternal(const TaskInfo&       ta
     std::pair<int, int> lower(floorOfValueWithStep(task_info.prefix_length, prefix_step),
                               floorOfValueWithStep(task_info.input_length, input_step));
     std::pair<int, int> upper(ceilOfValueWithStep(task_info.prefix_length, prefix_step),
-                              ceilOfValueWithStep(task_info.input_length, input_step));    
-    int64_t floor_value, ceil_value;
+                              ceilOfValueWithStep(task_info.input_length, input_step));
+    int64_t             floor_value, ceil_value;
     CHECK_AND_ASSIGN(floor_value, getItemFromMap(lower));
     CHECK_AND_ASSIGN(ceil_value, getItemFromMap(upper));
     switch (scope.estimate_func) {
@@ -152,7 +157,7 @@ bool LookupMapImpl::initFromLookupMapJson(LookupMapJson& map_json) {
         RTP_LLM_LOG_WARNING("map json items size == 0, init LookupMapImpl failed");
         return false;
     }
-    for (int i = 0; i < map_json.items.size(); i++) {        
+    for (int i = 0; i < map_json.items.size(); i++) {
         auto& scope = map_json.items[i];
         RETURN_IF_NOT_SUCCESS(
             checkConfigValid(max_input_length_, max_prefix_length_, scope.input_config, scope.prefix_config));
@@ -163,7 +168,10 @@ bool LookupMapImpl::initFromLookupMapJson(LookupMapJson& map_json) {
     map_[{0, 0}] = 0;
     std::swap(scopes_, map_json.items);
     if (max_input_length_ <= 0 || max_prefix_length_ < 0) {
-        RTP_LLM_LOG_WARNING("get max_input_length == %d and max_prefix_length == %d not valid, init LookupMapImpl failed", max_input_length_, max_prefix_length_);
+        RTP_LLM_LOG_WARNING(
+            "get max_input_length == %d and max_prefix_length == %d not valid, init LookupMapImpl failed",
+            max_input_length_,
+            max_prefix_length_);
         return false;
     }
     return true;
@@ -180,7 +188,8 @@ bool LookupMapImpl::checkInitScopeMap(const LookupMapScope& scope) {
         map_[{item.prefix_length, item.input_length}] = item.cost_time_ms;
     }
     // validate
-    for (int i = scope.prefix_config.step_size; i <= scope.prefix_config.upper_bound; i += scope.prefix_config.step_size) {
+    for (int i = scope.prefix_config.step_size; i <= scope.prefix_config.upper_bound;
+         i += scope.prefix_config.step_size) {
         for (int j = scope.input_config.lower_bound + scope.input_config.step_size; j <= scope.input_config.upper_bound;
              j += scope.input_config.step_size) {
             if (map_.find({i, j}) == map_.end()) {

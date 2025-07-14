@@ -9,7 +9,7 @@ class InferenceDataTypeTest: public ::testing::Test {};
 
 TEST(InferenceDataTypeTest, RawRequest) {
     std::string jsonStr = R"({"source": "alibaba", "private_request": true})";
-    RawRequest req1;
+    RawRequest  req1;
     FromJsonString(req1, jsonStr);
     ASSERT_EQ(req1.source, "alibaba");
     ASSERT_EQ(req1.private_request, true);
@@ -38,7 +38,7 @@ TEST(InferenceDataTypeTest, RawRequest) {
 
 TEST(InferenceDataTypeTest, RawRequest_GenerateConfig_TopK) {
     std::string jsonStr = R"({"generate_config": {"top_k": 1}})";
-    RawRequest req;
+    RawRequest  req;
     FromJsonString(req, jsonStr);
     ASSERT_EQ(req.generate_config.has_value(), true);
     ASSERT_EQ(req.generate_config.value().top_k, 1);
@@ -46,7 +46,7 @@ TEST(InferenceDataTypeTest, RawRequest_GenerateConfig_TopK) {
 
 TEST(InferenceDataTypeTest, RawRequest_GenerateConfig_HiddenStates_False) {
     std::string jsonStr = R"({"generate_config": {"top_k": 1}})";
-    RawRequest req;
+    RawRequest  req;
     FromJsonString(req, jsonStr);
     ASSERT_EQ(req.generate_config.has_value(), true);
     ASSERT_EQ(req.generate_config.value().top_k, 1);
@@ -55,7 +55,7 @@ TEST(InferenceDataTypeTest, RawRequest_GenerateConfig_HiddenStates_False) {
 
 TEST(InferenceDataTypeTest, RawRequest_GenerateConfig_HiddenStates_True) {
     std::string jsonStr = R"({"generate_config": {"top_k": 1, "return_hidden_states": true}})";
-    RawRequest req;
+    RawRequest  req;
     FromJsonString(req, jsonStr);
     ASSERT_EQ(req.generate_config.has_value(), true);
     ASSERT_EQ(req.generate_config.value().top_k, 1);
@@ -64,7 +64,7 @@ TEST(InferenceDataTypeTest, RawRequest_GenerateConfig_HiddenStates_True) {
 
 TEST(InferenceDataTypeTest, RawRequest_Images_Vector) {
     std::string jsonStr = R"({"images": ["prompt1", "prompt2", "prompt3"]})";
-    RawRequest req;
+    RawRequest  req;
     FromJsonString(req, jsonStr);
     ASSERT_EQ(req.images.has_value(), true);
     ASSERT_EQ(req.images_batch.has_value(), false);
@@ -80,7 +80,7 @@ TEST(InferenceDataTypeTest, RawRequest_Images_VectorVector) {
     std::string jsonStr = R"({"images": [["prompt1"],
                                         ["prompt1", "prompt2"],
                                         ["prompt1", "prompt2", "prompt3"]]})";
-    RawRequest req;
+    RawRequest  req;
     FromJsonString(req, jsonStr);
     ASSERT_EQ(req.images.has_value(), false);
     ASSERT_EQ(req.images_batch.has_value(), true);
@@ -94,14 +94,14 @@ TEST(InferenceDataTypeTest, RawRequest_Images_VectorVector) {
 
 TEST(InferenceDataTypeTest, RawRequest_Text) {
     std::string jsonStr = R"({"text": "alibaba"})";
-    RawRequest req;
+    RawRequest  req;
     FromJsonString(req, jsonStr);
     ASSERT_EQ(req.prompt, "alibaba");
 }
 
 TEST(InferenceDataTypeTest, RawRequest_Prompt) {
     std::string jsonStr = R"({"prompt": "alibaba"})";
-    RawRequest req;
+    RawRequest  req;
     FromJsonString(req, jsonStr);
     ASSERT_EQ(req.prompt, "alibaba");
 }
@@ -110,18 +110,18 @@ TEST(InferenceDataTypeTest, AuxInfoAdapter) {
     AuxInfo aux_info;
     aux_info.cost_time_us = 1000;
     AuxInfoAdapter aux_info_adapter(aux_info);
-    std::string jsonStr = ToJsonString(aux_info_adapter, true);
-    ASSERT_TRUE(jsonStr.find(R"("cost_time":1)")       != std::string::npos);
-    ASSERT_TRUE(jsonStr.find(R"("iter_count":0)")      != std::string::npos);
-    ASSERT_TRUE(jsonStr.find(R"("input_len":0)")       != std::string::npos);
-    ASSERT_TRUE(jsonStr.find(R"("prefix_len":0)")      != std::string::npos);
-    ASSERT_TRUE(jsonStr.find(R"("output_len":0)")      != std::string::npos);
-    ASSERT_TRUE(jsonStr.find(R"("pd_sep":false)")      != std::string::npos);
+    std::string    jsonStr = ToJsonString(aux_info_adapter, true);
+    ASSERT_TRUE(jsonStr.find(R"("cost_time":1)") != std::string::npos);
+    ASSERT_TRUE(jsonStr.find(R"("iter_count":0)") != std::string::npos);
+    ASSERT_TRUE(jsonStr.find(R"("input_len":0)") != std::string::npos);
+    ASSERT_TRUE(jsonStr.find(R"("prefix_len":0)") != std::string::npos);
+    ASSERT_TRUE(jsonStr.find(R"("output_len":0)") != std::string::npos);
+    ASSERT_TRUE(jsonStr.find(R"("pd_sep":false)") != std::string::npos);
     ASSERT_TRUE(jsonStr.find(R"("step_output_len":0)") != std::string::npos);
     ASSERT_TRUE(jsonStr.find(R"("fallback_tokens":0)") != std::string::npos);
-    ASSERT_TRUE(jsonStr.find(R"("fallback_times":0)")  != std::string::npos);
+    ASSERT_TRUE(jsonStr.find(R"("fallback_times":0)") != std::string::npos);
     ASSERT_TRUE(jsonStr.find(R"("beam_responses":[])") != std::string::npos);
-    ASSERT_TRUE(jsonStr.find(R"("cum_log_probs":)")    == std::string::npos);
+    ASSERT_TRUE(jsonStr.find(R"("cum_log_probs":)") == std::string::npos);
 }
 
 TEST(InferenceDataTypeTest, MultiSeqsResponse) {
@@ -132,10 +132,10 @@ TEST(InferenceDataTypeTest, MultiSeqsResponse) {
     res.aux_info.push_back(AuxInfoAdapter());
 
     std::string jsonStr = ToJsonString(res, true);
-    ASSERT_TRUE(jsonStr.find(R"("finished":true)")   != std::string::npos);
+    ASSERT_TRUE(jsonStr.find(R"("finished":true)") != std::string::npos);
     ASSERT_TRUE(jsonStr.find(R"("fake response 1")") != std::string::npos);
     ASSERT_TRUE(jsonStr.find(R"("fake response 2")") != std::string::npos);
-    ASSERT_TRUE(jsonStr.find(R"("aux_info":[)")      != std::string::npos);
+    ASSERT_TRUE(jsonStr.find(R"("aux_info":[)") != std::string::npos);
 }
 
 TEST(InferenceDataTypeTest, MultiSeqsResponse_OptionalHasValue) {
@@ -149,9 +149,9 @@ TEST(InferenceDataTypeTest, MultiSeqsResponse_OptionalHasValue) {
     res.logits.value().push_back(vec);
 
     std::string jsonStr = ToJsonString(res, true);
-    ASSERT_TRUE(jsonStr.find(R"("finished":true)")                != std::string::npos);
-    ASSERT_TRUE(jsonStr.find(R"("response":"fake response")")     != std::string::npos);
-    ASSERT_TRUE(jsonStr.find(R"("aux_info":[)")                   != std::string::npos);
+    ASSERT_TRUE(jsonStr.find(R"("finished":true)") != std::string::npos);
+    ASSERT_TRUE(jsonStr.find(R"("response":"fake response")") != std::string::npos);
+    ASSERT_TRUE(jsonStr.find(R"("aux_info":[)") != std::string::npos);
     ASSERT_TRUE(jsonStr.find(R"("logits":[[1.111,2.222,3.333]])") != std::string::npos);
 }
 
@@ -162,21 +162,21 @@ TEST(InferenceDataTypeTest, MultiSeqsResponse_OptionalNull) {
     res.aux_info.push_back(AuxInfoAdapter());
 
     std::string jsonStr = ToJsonString(res, true);
-    ASSERT_TRUE(jsonStr.find(R"("finished":true)")              != std::string::npos);
-    ASSERT_TRUE(jsonStr.find(R"("response":"fake response")")   != std::string::npos);
-    ASSERT_TRUE(jsonStr.find(R"("aux_info":[)")                 != std::string::npos);
-    ASSERT_TRUE(jsonStr.find(R"("logits":[)")                   == std::string::npos);
+    ASSERT_TRUE(jsonStr.find(R"("finished":true)") != std::string::npos);
+    ASSERT_TRUE(jsonStr.find(R"("response":"fake response")") != std::string::npos);
+    ASSERT_TRUE(jsonStr.find(R"("aux_info":[)") != std::string::npos);
+    ASSERT_TRUE(jsonStr.find(R"("logits":[)") == std::string::npos);
 }
 
 TEST(InferenceDataTypeTest, BatchResponse) {
     std::vector<MultiSeqsResponse> batch;
     batch.push_back(MultiSeqsResponse());
     BatchResponse res(batch);
-    std::string jsonStr = ToJsonString(res, true);
+    std::string   jsonStr = ToJsonString(res, true);
     ASSERT_TRUE(jsonStr.find(R"("response_batch":[)") != std::string::npos);
-    ASSERT_TRUE(jsonStr.find(R"("finished":)")        != std::string::npos);
-    ASSERT_TRUE(jsonStr.find(R"("response":[)")       != std::string::npos);
-    ASSERT_TRUE(jsonStr.find(R"("aux_info":[)")       != std::string::npos);
+    ASSERT_TRUE(jsonStr.find(R"("finished":)") != std::string::npos);
+    ASSERT_TRUE(jsonStr.find(R"("response":[)") != std::string::npos);
+    ASSERT_TRUE(jsonStr.find(R"("aux_info":[)") != std::string::npos);
 }
 
 }  // namespace rtp_llm

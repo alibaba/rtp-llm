@@ -1,5 +1,6 @@
 from enum import IntEnum
 
+
 class ExceptionType(IntEnum):
     # Old error codes, remain compatible
     CONCURRENCY_LIMIT_ERROR = 409
@@ -68,6 +69,7 @@ class ExceptionType(IntEnum):
             return cls(value).name  # 获取对应的枚举名
         except ValueError:
             raise ValueError(f"{value} is not a valid ExceptionType")
+
 
 class FtRuntimeException(Exception):
     def __init__(self, exception_type: ExceptionType, message: str):

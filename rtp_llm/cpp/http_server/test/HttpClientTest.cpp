@@ -80,7 +80,9 @@ void processResponse(const std::string& response_body) {
         WorkerStatusResponse worker_status_response;
         autil::legacy::FromJsonString(worker_status_response, response_body);
         ASSERT_TRUE(worker_status_response.available_concurrency == 32);
-    } catch (...) { ASSERT_TRUE(0); }
+    } catch (...) {
+        ASSERT_TRUE(0);
+    }
 }
 
 TEST_F(HttpClientTest, testRequestSuccess) {
@@ -147,7 +149,7 @@ TEST_F(HttpClientTest, testRecycleConnectionInHandlePacket) {
     auto http_client_ = std::make_shared<SimpleHttpClient>();
     ASSERT_TRUE(http_client_ != nullptr);
 
-    auto address = http_servers_.begin()->first;    
+    auto       address = http_servers_.begin()->first;
     std::mutex mutex;
     mutex.lock();
     HttpCallBack http_call_back = [&mutex](bool ok, const std::string& response_body) {

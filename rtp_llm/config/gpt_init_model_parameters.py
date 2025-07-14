@@ -1,26 +1,72 @@
-from typing import Dict, Any, List, Optional, Set
-import os
 import json
-import torch
 import logging
+import os
 import typing
+
 # make sure so init
 from dataclasses import dataclass, field, fields
 from enum import Enum
-from rtp_llm.utils.util import str_to_bool, closest_power_of_2
-from rtp_llm.utils.weight_type import WEIGHT_TYPE
+from typing import Any, Dict, List, Optional, Set
+
+import torch
+
+from rtp_llm.config.py_config_modules import (
+    PyEnvConfigs,
+    StaticConfig,
+    get_env_bool,
+    get_env_int,
+    get_env_str,
+)
+from rtp_llm.config.quant_config import (
+    Fp8BlockWiseQuantConfig,
+    Fp8PerChannelCompressedQuantConfig,
+    QuantizationConfig,
+    preset_quant_config,
+)
 from rtp_llm.config.task_type import TaskType, check_task_type
-from rtp_llm.distribute.worker_info import ParallelInfo, g_parallel_info, g_master_info, g_worker_info, WORKER_INFO_PORT_NUM
-from rtp_llm.distribute.gang_info import get_gang_info, GangInfo
-from rtp_llm.ops import GptInitParameter, QuantAlgo, SpecialTokens, MlaOpsType, EplbMode
-from rtp_llm.ops import ConcurrencyConfig, DeviceResourceConfig, FMHAConfig, HWKernelConfig, KVCacheConfig, MiscellaneousConfig, ModelSpecificConfig, MoeConfig, ParallelismDistributedConfig, ProfilingDebugLoggingConfig, ServiceDiscoveryConfig, SchedulerConfig, BatchDecodeSchedulerConfig, FIFOSchedulerConfig, CacheStoreConfig, SamplerConfig, SpeculativeExecutionConfig, ArpcConfig
+from rtp_llm.distribute.gang_info import GangInfo, get_gang_info
+from rtp_llm.distribute.worker_info import (
+    WORKER_INFO_PORT_NUM,
+    ParallelInfo,
+    g_master_info,
+    g_parallel_info,
+    g_worker_info,
+)
+from rtp_llm.ops import (
+    ArpcConfig,
+    BatchDecodeSchedulerConfig,
+    CacheStoreConfig,
+    ConcurrencyConfig,
+    DeviceResourceConfig,
+    EplbMode,
+    FIFOSchedulerConfig,
+    FMHAConfig,
+    GptInitParameter,
+    HWKernelConfig,
+    KVCacheConfig,
+    MiscellaneousConfig,
+    MlaOpsType,
+    ModelSpecificConfig,
+    MoeConfig,
+    ParallelismDistributedConfig,
+    ProfilingDebugLoggingConfig,
+    QuantAlgo,
+    SamplerConfig,
+    SchedulerConfig,
+    ServiceDiscoveryConfig,
+    SpecialTokens,
+    SpeculativeExecutionConfig,
+)
 from rtp_llm.utils.gemm_utils.cutlass_config import load_cutlass_gemm_config
-from rtp_llm.config.quant_config import QuantizationConfig, Fp8BlockWiseQuantConfig, Fp8PerChannelCompressedQuantConfig, preset_quant_config
-from rtp_llm.config.py_config_modules import PyEnvConfigs, StaticConfig, get_env_bool, get_env_int, get_env_str
+from rtp_llm.utils.util import closest_power_of_2, str_to_bool
+from rtp_llm.utils.weight_type import WEIGHT_TYPE
+
 updated_params: Set[str] = set()
 
-def get_pad_size(size: int , align_size: int):
+
+def get_pad_size(size: int, align_size: int):
     return (align_size - (size % align_size)) % align_size
+
 
 class DataClassBase:
     @classmethod
@@ -30,12 +76,78 @@ class DataClassBase:
         # 兼容老的sparse config使用的key 没有加layer
         for k, v in kvs.items():
             if k in ["head_num", "inter_size"] and isinstance(v, list):
-                n_kvs.update({"layer_"+k : v})
+                n_kvs.update({"layer_" + k: v})
 
         data_class = cls(**n_kvs)
         return data_class
 
-mc_sim_7b_63 = [[0], [0, 0], [1], [0, 1], [2], [0, 0, 0], [1, 0], [0, 2], [3], [0, 3], [4], [0, 4], [2, 0], [0, 5], [0, 0, 1], [5], [0, 6], [6], [0, 7], [0, 1, 0], [1, 1], [7], [0, 8], [0, 0, 2], [3, 0], [0, 9], [8], [9], [1, 0, 0], [0, 2, 0], [1, 2], [0, 0, 3], [4, 0], [2, 1], [0, 0, 4], [0, 0, 5], [0, 0, 0, 0], [0, 1, 1], [0, 0, 6], [0, 3, 0], [5, 0], [1, 3], [0, 0, 7], [0, 0, 8], [0, 0, 9], [6, 0], [0, 4, 0], [1, 4], [7, 0], [0, 1, 2], [2, 0, 0], [3, 1], [2, 2], [8, 0], [0, 5, 0], [1, 5], [1, 0, 1], [0, 2, 1], [9, 0], [0, 6, 0], [0, 0, 0, 1], [1, 6], [0, 7, 0]]
+
+mc_sim_7b_63 = [
+    [0],
+    [0, 0],
+    [1],
+    [0, 1],
+    [2],
+    [0, 0, 0],
+    [1, 0],
+    [0, 2],
+    [3],
+    [0, 3],
+    [4],
+    [0, 4],
+    [2, 0],
+    [0, 5],
+    [0, 0, 1],
+    [5],
+    [0, 6],
+    [6],
+    [0, 7],
+    [0, 1, 0],
+    [1, 1],
+    [7],
+    [0, 8],
+    [0, 0, 2],
+    [3, 0],
+    [0, 9],
+    [8],
+    [9],
+    [1, 0, 0],
+    [0, 2, 0],
+    [1, 2],
+    [0, 0, 3],
+    [4, 0],
+    [2, 1],
+    [0, 0, 4],
+    [0, 0, 5],
+    [0, 0, 0, 0],
+    [0, 1, 1],
+    [0, 0, 6],
+    [0, 3, 0],
+    [5, 0],
+    [1, 3],
+    [0, 0, 7],
+    [0, 0, 8],
+    [0, 0, 9],
+    [6, 0],
+    [0, 4, 0],
+    [1, 4],
+    [7, 0],
+    [0, 1, 2],
+    [2, 0, 0],
+    [3, 1],
+    [2, 2],
+    [8, 0],
+    [0, 5, 0],
+    [1, 5],
+    [1, 0, 1],
+    [0, 2, 1],
+    [9, 0],
+    [0, 6, 0],
+    [0, 0, 0, 1],
+    [1, 6],
+    [0, 7, 0],
+]
+
 
 @dataclass
 class SparseConfig(DataClassBase):
@@ -48,12 +160,17 @@ class SparseConfig(DataClassBase):
             logging.info("sparse config layer_num must not be empty")
             return False
         if len(self.layer_head_num) != self.layer_num:
-            logging.info(f"sparse config layer_num and head_num must match, layer_num: {self.layer_num}, head_num: {self.layer_head_num}")
+            logging.info(
+                f"sparse config layer_num and head_num must match, layer_num: {self.layer_num}, head_num: {self.layer_head_num}"
+            )
             return False
         if len(self.layer_inter_size) != self.layer_num:
-            logging.info(f"sparse config layer_num and inter_size must match, layer_num: {self.layer_num}, inter_size: {self.layer_inter_size}")
+            logging.info(
+                f"sparse config layer_num and inter_size must match, layer_num: {self.layer_num}, inter_size: {self.layer_inter_size}"
+            )
             return False
         return True
+
 
 class VitParameters:
     # config includes origin vit config in ckpt/config.json
@@ -101,7 +218,7 @@ class GptInitModelParameters:
         "use_qk_norm",
         "enable_merge_w13",
         "quant_config",
-        "py_env_configs"
+        "py_env_configs",
     }
 
     # copy from rtp_llm/ops/libth_transformer.pyi for python intelligence
@@ -282,13 +399,15 @@ class GptInitModelParameters:
     speculative_decoding_config: SpeculativeExecutionConfig
     py_env_configs: PyEnvConfigs
 
-    def __init__(self,
-                 head_num: int,
-                 size_per_head: int,
-                 layer_num: int,
-                 max_seq_len: int,
-                 vocab_size: int,
-                 **kwargs: Any):
+    def __init__(
+        self,
+        head_num: int,
+        size_per_head: int,
+        layer_num: int,
+        max_seq_len: int,
+        vocab_size: int,
+        **kwargs: Any,
+    ):
         hidden_size = head_num * size_per_head
         self.gpt_init_params = GptInitParameter(
             head_num, size_per_head, layer_num, max_seq_len, vocab_size, hidden_size
@@ -297,7 +416,7 @@ class GptInitModelParameters:
             "layernorm_type": "setLayerNormType",
             "norm_type": "setNormType",
             "activation_type": "setActivationType",
-            "kv_cache_data_type": "setKvCacheDataType"
+            "kv_cache_data_type": "setKvCacheDataType",
         }
         self.has_lm_head_bias = False
         self.normalize_lm_head_weight = False
@@ -350,12 +469,15 @@ class GptInitModelParameters:
         self.update_gpt_init_params_from_env()
         self.py_env_configs = PyEnvConfigs()
         self.py_env_configs.update_from_env()
-        self.py_env_configs.parallelism_distributed_config = self.gpt_init_params.parallelism_distributed_config
-        StaticConfig.parallelism_distributed_config = self.gpt_init_params.parallelism_distributed_config
+        self.py_env_configs.parallelism_distributed_config = (
+            self.gpt_init_params.parallelism_distributed_config
+        )
+        StaticConfig.parallelism_distributed_config = (
+            self.gpt_init_params.parallelism_distributed_config
+        )
 
         for k, v in kwargs.items():
             setattr(self, k, v)
-
 
     # read and write directly through GptInitModelParameters.k
     def __getattr__(self, k: str):
@@ -379,29 +501,39 @@ class GptInitModelParameters:
         worker_addrs = []
         worker_grpc_addrs = []
         for member in get_gang_info().members:
-            logging.info(f"member world rank: {member.world_rank}, member local rank: {member.local_rank}, local rank: {self.local_rank}, " \
-                f"tp_size: {self.tp_size}, dp_size: {self.dp_size}, dp_rank: {self.dp_rank}, use_all_gather: {self.use_all_gather}")
+            logging.info(
+                f"member world rank: {member.world_rank}, member local rank: {member.local_rank}, local rank: {self.local_rank}, "
+                f"tp_size: {self.tp_size}, dp_size: {self.dp_size}, dp_rank: {self.dp_rank}, use_all_gather: {self.use_all_gather}"
+            )
             if int((member.world_rank / self.tp_size) % self.dp_size) == self.dp_rank:
-                worker_addrs.append(f'{member.ip}:{member.cache_store_listen_port}:{member.cache_store_rdma_listen_port}')
-                worker_grpc_addrs.append(f'{member.ip}:{member.rpc_server_port}')
-                logging.info(f"append member for pd sep " \
-                    f"{member.ip}:{member.rpc_server_port}, {member.cache_store_listen_port}, " \
-                    f"{member.cache_store_rdma_listen_port} to local rank {self.local_rank}, world rank {member.world_rank}")
+                worker_addrs.append(
+                    f"{member.ip}:{member.cache_store_listen_port}:{member.cache_store_rdma_listen_port}"
+                )
+                worker_grpc_addrs.append(f"{member.ip}:{member.rpc_server_port}")
+                logging.info(
+                    f"append member for pd sep "
+                    f"{member.ip}:{member.rpc_server_port}, {member.cache_store_listen_port}, "
+                    f"{member.cache_store_rdma_listen_port} to local rank {self.local_rank}, world rank {member.world_rank}"
+                )
         self.worker_grpc_addrs = worker_grpc_addrs
         self.worker_addrs = worker_addrs
 
-    def update_gpt_init_params_from_env(self, parallel_info: ParallelInfo=g_parallel_info):
+    def update_gpt_init_params_from_env(
+        self, parallel_info: ParallelInfo = g_parallel_info
+    ):
 
         # ParallelismDistributedConfig
-        self.gpt_init_params.parallelism_distributed_config = ParallelismDistributedConfig(
-            tp_size=parallel_info.tp_size,
-            ep_size=parallel_info.ep_size,
-            dp_size=parallel_info.dp_size,
-            world_size=parallel_info.world_size,
-            world_rank=parallel_info.world_rank,
-            local_world_size=parallel_info.local_world_size,
-            pp_size=parallel_info.pp_size,
-            ffn_sp_size=parallel_info.ffn_sp_size
+        self.gpt_init_params.parallelism_distributed_config = (
+            ParallelismDistributedConfig(
+                tp_size=parallel_info.tp_size,
+                ep_size=parallel_info.ep_size,
+                dp_size=parallel_info.dp_size,
+                world_size=parallel_info.world_size,
+                world_rank=parallel_info.world_rank,
+                local_world_size=parallel_info.local_world_size,
+                pp_size=parallel_info.pp_size,
+                ffn_sp_size=parallel_info.ffn_sp_size,
+            )
         )
 
         # CacheStoreConfig
@@ -410,14 +542,18 @@ class GptInitModelParameters:
             wrr_available_ratio=get_env_int("WRR_AVAILABLE_RATIO", 80),
             rank_factor=get_env_int("RANK_FACTOR", 0),
             thread_count=get_env_int("CACHE_STORE_THREAD_COUNT", 16),
-            rdma_connect_timeout_ms=get_env_int("CACHE_STORE_RDMA_CONNECT_TIMEOUT_MS", 250),
-            rdma_qp_count_per_connection=get_env_int("CACHE_STORE_RDMA_QP_COUNT_PER_CONNECTION", 2),
+            rdma_connect_timeout_ms=get_env_int(
+                "CACHE_STORE_RDMA_CONNECT_TIMEOUT_MS", 250
+            ),
+            rdma_qp_count_per_connection=get_env_int(
+                "CACHE_STORE_RDMA_QP_COUNT_PER_CONNECTION", 2
+            ),
         )
 
         # ConcurrencyConfig
         self.gpt_init_params.concurrency_config = ConcurrencyConfig(
-            concurrency_with_block=get_env_bool("CONCURRENCY_WITH_BLOCK",False),
-            concurrency_limit=get_env_int("CONCURRENCY_LIMIT",32),
+            concurrency_with_block=get_env_bool("CONCURRENCY_WITH_BLOCK", False),
+            concurrency_limit=get_env_int("CONCURRENCY_LIMIT", 32),
         )
 
         # FMHAConfig
@@ -426,40 +562,52 @@ class GptInitModelParameters:
             enable_trt_fmha=get_env_bool("ENABLE_TRT_FMHA", True),
             enable_paged_trt_fmha=get_env_bool("ENABLE_PAGED_TRT_FMHA", True),
             enable_open_source_fmha=get_env_bool("ENABLE_OPENSOURCE_FMHA", True),
-            enable_paged_open_source_fmha=get_env_bool("ENABLE_PAGED_OPEN_SOURCE_FMHA", True),
+            enable_paged_open_source_fmha=get_env_bool(
+                "ENABLE_PAGED_OPEN_SOURCE_FMHA", True
+            ),
             enable_trtv1_fmha=get_env_bool("ENABLE_TRTV1_FMHA", True),
-            fmha_perf_instrument=get_env_bool("FMHA_PERF_INSTRUMENT",False),
-            fmha_show_params=get_env_bool("FMHA_SHOW_PARAMS",False),
-            disable_flash_infer=get_env_bool("DISABLE_FLASH_INFER",False),
+            fmha_perf_instrument=get_env_bool("FMHA_PERF_INSTRUMENT", False),
+            fmha_show_params=get_env_bool("FMHA_SHOW_PARAMS", False),
+            disable_flash_infer=get_env_bool("DISABLE_FLASH_INFER", False),
             enable_xqa=get_env_bool("ENABLE_XQA", True),
         )
 
         # KVCacheConfig
         self.gpt_init_params.kv_cache_config = KVCacheConfig(
-            reuse_cache=get_env_bool("REUSE_CACHE",False),
+            reuse_cache=get_env_bool("REUSE_CACHE", False),
             multi_task_prompt=get_env_str("MULTI_TASK_PROMPT"),
             multi_task_prompt_str=get_env_str("MULTI_TASK_PROMPT_STR"),
         )
 
         # ProfilingDebugLoggingConfig
-        self.gpt_init_params.profiling_debug_logging_config = ProfilingDebugLoggingConfig(
-            ft_nvtx=get_env_bool("FT_NVTX", False),
-            py_inference_log_response=get_env_bool("PY_INFERENCE_LOG_RESPONSE",False),
-            rtp_llm_trace_memory=get_env_bool("RTP_LLM_TRACE_MEMORY", False),
-            rtp_llm_trace_malloc_stack=get_env_bool("RTP_LLM_TRACE_MALLOC_STACK", False),
-            enable_device_perf=get_env_bool("ENABLE_DEVICE_PERF", False),
-            ft_core_dump_on_exception=get_env_bool("FT_CORE_DUMP_ON_EXCEPTION", False),
-            ft_alog_conf_path=get_env_str("FT_ALOG_CONF_PATH"),
-            log_level=get_env_str("LOG_LEVEL", "INFO"),
-            gen_timeline_sync=get_env_bool("GEN_TIMELINE_SYNC", False),
-            torch_cuda_profiler_dir=get_env_str("TORCH_CUDA_PROFILER_DIR",""),
-            log_path=get_env_str("log_path", "logs"),
-            log_file_backup_count=get_env_int("LOG_FILE_BACKUP_COUNT",16),
-            nccl_debug_file=get_env_str("NCCL_DEBUG_FILE",""),
-            debug_load_server=get_env_bool("DEBUG_LOAD_SERVER",False),
-            hack_layer_num=get_env_int("HACK_LAYER_NUM",0),
-            test_layer_num=get_env_int("TEST_LAYER_NUM",0),
-            debug_start_fake_process=get_env_bool("DEBUG_START_FAKE_PROCESS",False)
+        self.gpt_init_params.profiling_debug_logging_config = (
+            ProfilingDebugLoggingConfig(
+                ft_nvtx=get_env_bool("FT_NVTX", False),
+                py_inference_log_response=get_env_bool(
+                    "PY_INFERENCE_LOG_RESPONSE", False
+                ),
+                rtp_llm_trace_memory=get_env_bool("RTP_LLM_TRACE_MEMORY", False),
+                rtp_llm_trace_malloc_stack=get_env_bool(
+                    "RTP_LLM_TRACE_MALLOC_STACK", False
+                ),
+                enable_device_perf=get_env_bool("ENABLE_DEVICE_PERF", False),
+                ft_core_dump_on_exception=get_env_bool(
+                    "FT_CORE_DUMP_ON_EXCEPTION", False
+                ),
+                ft_alog_conf_path=get_env_str("FT_ALOG_CONF_PATH"),
+                log_level=get_env_str("LOG_LEVEL", "INFO"),
+                gen_timeline_sync=get_env_bool("GEN_TIMELINE_SYNC", False),
+                torch_cuda_profiler_dir=get_env_str("TORCH_CUDA_PROFILER_DIR", ""),
+                log_path=get_env_str("log_path", "logs"),
+                log_file_backup_count=get_env_int("LOG_FILE_BACKUP_COUNT", 16),
+                nccl_debug_file=get_env_str("NCCL_DEBUG_FILE", ""),
+                debug_load_server=get_env_bool("DEBUG_LOAD_SERVER", False),
+                hack_layer_num=get_env_int("HACK_LAYER_NUM", 0),
+                test_layer_num=get_env_int("TEST_LAYER_NUM", 0),
+                debug_start_fake_process=get_env_bool(
+                    "DEBUG_START_FAKE_PROCESS", False
+                ),
+            )
         )
         # HWKernelConfig
         self.gpt_init_params.hw_kernel_config = HWKernelConfig(
@@ -467,34 +615,40 @@ class GptInitModelParameters:
             arm_gemm_use_kai=get_env_bool("ARM_GEMM_USE_KAI"),
             enable_stable_scatter_add=get_env_bool("ENABLE_STABLE_SCATTER_ADD", False),
             enable_multi_block_mode=get_env_bool("ENABLE_MULTI_BLOCK_MODE", True),
-            rocm_hipblaslt_config=get_env_str("ROCM_HIPBLASLT_CONFIG", "gemm_config.csv"),
-            ft_disable_custom_ar=get_env_bool("FT_DISABLE_CUSTOM_AR",True)
+            rocm_hipblaslt_config=get_env_str(
+                "ROCM_HIPBLASLT_CONFIG", "gemm_config.csv"
+            ),
+            ft_disable_custom_ar=get_env_bool("FT_DISABLE_CUSTOM_AR", True),
         )
 
         # DeviceResourceConfig
         self.gpt_init_params.device_resource_config = DeviceResourceConfig(
-            device_reserve_memory_bytes=get_env_int("DEVICE_RESERVE_MEMORY_BYTES",0),
-            host_reserve_memory_bytes=get_env_int("HOST_RESERVE_MEMORY_BYTES", 4 * 1024 * 1024 * 1024),
-            overlap_math_sm_count=get_env_int("OVERLAP_MATH_SM_COUNT",0),
-            overlap_comm_type=get_env_int("OVERLAP_COMM_TYPE",0),
-            m_split=get_env_int("M_SPLIT",0),
+            device_reserve_memory_bytes=get_env_int("DEVICE_RESERVE_MEMORY_BYTES", 0),
+            host_reserve_memory_bytes=get_env_int(
+                "HOST_RESERVE_MEMORY_BYTES", 4 * 1024 * 1024 * 1024
+            ),
+            overlap_math_sm_count=get_env_int("OVERLAP_MATH_SM_COUNT", 0),
+            overlap_comm_type=get_env_int("OVERLAP_COMM_TYPE", 0),
+            m_split=get_env_int("M_SPLIT", 0),
             enable_comm_overlap=get_env_bool("ENABLE_COMM_OVERLAP", True),
-            enable_layer_micro_batch=get_env_int("ENABLE_LAYER_MICRO_BATCH",0),
-            not_use_default_stream=get_env_bool("NOT_USE_DEFAULT_STREAM",False),
+            enable_layer_micro_batch=get_env_int("ENABLE_LAYER_MICRO_BATCH", 0),
+            not_use_default_stream=get_env_bool("NOT_USE_DEFAULT_STREAM", False),
         )
 
         # MoeConfig
         self.gpt_init_params.moe_config = MoeConfig(
-            use_deepep_moe=get_env_bool("USE_DEEPEP_MOE",False),
-            use_deepep_internode=get_env_bool("USE_DEEPEP_INTERNODE",False),
+            use_deepep_moe=get_env_bool("USE_DEEPEP_MOE", False),
+            use_deepep_internode=get_env_bool("USE_DEEPEP_INTERNODE", False),
             use_deepep_low_latency=get_env_bool("USE_DEEPEP_LOW_LATENCY", True),
-            use_deepep_p2p_low_latency=get_env_bool("USE_DEEPEP_P2P_LOW_LATENCY", False),
-            fake_balance_expert=get_env_bool("FAKE_BALANCE_EXPERT",False),
-            eplb_control_step=get_env_int("EPLB_CONTROL_STEP",100),
-            eplb_test_mode=get_env_bool("EPLB_TEST_MODE",False),
-            hack_moe_expert=get_env_bool("HACK_MOE_EXPERT",False),
+            use_deepep_p2p_low_latency=get_env_bool(
+                "USE_DEEPEP_P2P_LOW_LATENCY", False
+            ),
+            fake_balance_expert=get_env_bool("FAKE_BALANCE_EXPERT", False),
+            eplb_control_step=get_env_int("EPLB_CONTROL_STEP", 100),
+            eplb_test_mode=get_env_bool("EPLB_TEST_MODE", False),
+            hack_moe_expert=get_env_bool("HACK_MOE_EXPERT", False),
             eplb_balance_layer_per_step=get_env_int("EPLB_BALANCE_LAYER_PER_STEP", 1),
-            deep_ep_num_sm=get_env_int("DEEP_EP_NUM_SM",0)
+            deep_ep_num_sm=get_env_int("DEEP_EP_NUM_SM", 0),
         )
 
         # ModelSpecificConfig
@@ -509,7 +663,9 @@ class GptInitModelParameters:
             remote_rpc_server_ip=get_env_str("REMOTE_RPC_SERVER_IP"),
             rtp_llm_decode_cm2_config=get_env_str("RTP_LLM_DECODE_CM2_CONFIG"),
             remote_vit_server_ip=get_env_str("REMOTE_VIT_SERVER_IP"),
-            rtp_llm_multimodal_part_cm2_config=get_env_str("RTP_LLM_MULTIMODAL_PART_CM2_CONFIG"),
+            rtp_llm_multimodal_part_cm2_config=get_env_str(
+                "RTP_LLM_MULTIMODAL_PART_CM2_CONFIG"
+            ),
         )
 
         # SchedulerConfig
@@ -519,13 +675,17 @@ class GptInitModelParameters:
 
         # BatchDecodeSchedulerConfig
         self.gpt_init_params.batch_decode_scheduler_config = BatchDecodeSchedulerConfig(
-            batch_decode_scheduler_batch_size=get_env_int("BATCH_DECODE_SCHEDULER_BATCH_SIZE", 1),
+            batch_decode_scheduler_batch_size=get_env_int(
+                "BATCH_DECODE_SCHEDULER_BATCH_SIZE", 1
+            ),
         )
 
         # FIFOSchedulerConfig
         self.gpt_init_params.fifo_scheduler_config = FIFOSchedulerConfig(
             max_context_batch_size=get_env_int("MAX_CONTEXT_BATCH_SIZE", 1),
-            scheduler_reserve_resource_ratio=get_env_int("SCHEDULER_RESERVE_RESOURCE_RATIO", 5),
+            scheduler_reserve_resource_ratio=get_env_int(
+                "SCHEDULER_RESERVE_RESOURCE_RATIO", 5
+            ),
             enable_fast_gen=get_env_bool("ENABLE_FAST_GEN", False),
             enable_partial_fallback=get_env_bool("ENABLE_PARTIAL_FALLBACK", False),
             fast_gen_context_budget=get_env_int("FAST_GEN_MAX_CONTEXT_LEN", 0),
@@ -534,7 +694,9 @@ class GptInitModelParameters:
         # SamplerConfig
         self.gpt_init_params.sampler_config = SamplerConfig(
             max_batch_size=get_env_int("SAMPLER_MAX_BATCH_SIZE", 0),
-            enable_flashinfer_sample_kernel=get_env_bool("ENABLE_FLASHINFER_SAMPLE_KERNEL", True),
+            enable_flashinfer_sample_kernel=get_env_bool(
+                "ENABLE_FLASHINFER_SAMPLE_KERNEL", True
+            ),
         )
 
         # SpeculativeExecutionConfig
@@ -546,15 +708,19 @@ class GptInitModelParameters:
             tree_decode_config=get_env_str("TREE_DECODE_CONFIG", ""),
             gen_num_per_cycle=get_env_int("GEN_NUM_PER_CIRCLE", 1),
             force_stream_sample=get_env_bool("FORCE_STREAM_SAMPLE", False),
-            force_score_context_attention=get_env_bool("FORCE_SCORE_CONTEXT_ATTENTION", True)
+            force_score_context_attention=get_env_bool(
+                "FORCE_SCORE_CONTEXT_ATTENTION", True
+            ),
         )
 
         # MiscellaneousConfig
         self.gpt_init_params.misc_config = MiscellaneousConfig(
             load_balance=get_env_int("LOAD_BALANCE", 0),
-            step_records_time_range=get_env_int("STEP_RECORDS_TIME_RANGE", 60 * 1000 * 1000),
+            step_records_time_range=get_env_int(
+                "STEP_RECORDS_TIME_RANGE", 60 * 1000 * 1000
+            ),
             step_records_max_size=get_env_int("STEP_RECORDS_MAX_SIZE", 1000),
-            disable_pdl=get_env_bool("DISABLE_PDL", False)
+            disable_pdl=get_env_bool("DISABLE_PDL", False),
         )
 
         # ArpcConfig
@@ -572,12 +738,12 @@ class GptInitModelParameters:
         sparse_config = None
         if os.path.exists(os.path.join(ckpt_path, "config.json")):
             sparse_config_file = os.path.join(ckpt_path, "config.json")
-        if os.environ.get('SPARSE_CONFIG_FILE', None) is not None:
-            sparse_config_file = os.environ['SPARSE_CONFIG_FILE']
+        if os.environ.get("SPARSE_CONFIG_FILE", None) is not None:
+            sparse_config_file = os.environ["SPARSE_CONFIG_FILE"]
 
         if sparse_config_file is not None:
             logging.info(f"read sparse config from: {sparse_config_file}")
-            with open(sparse_config_file, 'r') as reader:
+            with open(sparse_config_file, "r") as reader:
                 sparse_config_json = json.loads(reader.read())
                 sparse_config = SparseConfig.from_dict(sparse_config_json)
 
@@ -590,7 +756,9 @@ class GptInitModelParameters:
 
     def update_inter_padding_size(self, tp_size: int, ep_size: int, dp_size: int):
         if tp_size * dp_size != ep_size:
-            raise ValueError(f"tp_size:{tp_size} * dp_size:{dp_size} != ep_size:{ep_size}")
+            raise ValueError(
+                f"tp_size:{tp_size} * dp_size:{dp_size} != ep_size:{ep_size}"
+            )
         # new tp_size just only for moe
         if self.quant_algo.isGroupwise():
             align_size = tp_size * self.quant_algo.getGroupSize()
@@ -602,10 +770,20 @@ class GptInitModelParameters:
             layer_inter_padding_size = []
             for idx in range(len(self.layer_inter_size)):
                 inter_size = self.layer_inter_size[idx]
-                layer_inter_padding_size.append(inter_size + (get_pad_size(inter_size, align_size) if self.quant_algo.isQuant() else 0))
+                layer_inter_padding_size.append(
+                    inter_size
+                    + (
+                        get_pad_size(inter_size, align_size)
+                        if self.quant_algo.isQuant()
+                        else 0
+                    )
+                )
             self.layer_inter_padding_size = layer_inter_padding_size
-        self.inter_padding_size = \
-            self.inter_size + (get_pad_size(self.inter_size, align_size) if self.quant_algo.isQuant() else 0)
+        self.inter_padding_size = self.inter_size + (
+            get_pad_size(self.inter_size, align_size)
+            if self.quant_algo.isQuant()
+            else 0
+        )
         if self.head_num_kv <= 0:
             self.head_num_kv = self.head_num
         if self.inter_padding_size <= 0:
@@ -614,30 +792,34 @@ class GptInitModelParameters:
         if self.moe_inter_padding_size <= 0:
             self.moe_inter_padding_size = self.inter_size
         if self.moe_inter_padding_size > 0:
-            moe_align_size = moe_align_size if self.quant_algo.isQuant() else  8
-            self.moe_inter_padding_size = self.moe_inter_padding_size + (get_pad_size(self.moe_inter_padding_size, moe_align_size))
+            moe_align_size = moe_align_size if self.quant_algo.isQuant() else 8
+            self.moe_inter_padding_size = self.moe_inter_padding_size + (
+                get_pad_size(self.moe_inter_padding_size, moe_align_size)
+            )
 
-        logging.info(f"update_inter_padding_size: {self.inter_padding_size}, moe_inter_padding_size: {self.moe_inter_padding_size}, layer_inter_size: {self.layer_inter_size}")
+        logging.info(
+            f"update_inter_padding_size: {self.inter_padding_size}, moe_inter_padding_size: {self.moe_inter_padding_size}, layer_inter_size: {self.layer_inter_size}"
+        )
 
     def update_task_prompt_tokens_id(self, tokenizer):
         if self.multi_task_prompt:
             for info in self.multi_task_prompt:
-                task_id: str = str(info['task_id'])
-                prompt: str = info['prompt']
+                task_id: str = str(info["task_id"])
+                prompt: str = info["prompt"]
                 tokens_id = tokenizer.encode(prompt)
                 self.insertMultiTaskPromptTokens(task_id, tokens_id)
 
     def update_task_prompt_config(self):
-        prompt_file_path =  os.environ.get('MULTI_TASK_PROMPT', None)
+        prompt_file_path = os.environ.get("MULTI_TASK_PROMPT", None)
         if not prompt_file_path:
             self.multi_task_prompt = None
         else:
-            with open(prompt_file_path, 'r') as reader:
+            with open(prompt_file_path, "r") as reader:
                 multi_task_prompt = json.loads(reader.read(), strict=False)
                 self.multi_task_prompt = multi_task_prompt
                 return
 
-        prompt_str =  os.environ.get('MULTI_TASK_PROMPT_STR', None)
+        prompt_str = os.environ.get("MULTI_TASK_PROMPT_STR", None)
         if not prompt_str:
             self.multi_task_prompt = None
         else:
@@ -647,24 +829,28 @@ class GptInitModelParameters:
     def update_task_type_use_kvcache(self):
         self.task_type = check_task_type(self.ckpt_path)
         self.setTaskType(self.task_type.value)
-        self.use_kvcache = (self.task_type == TaskType.LANGUAGE_MODEL)
-        logging.info(f"model task type: {self.task_type}, use_kvcache: {self.use_kvcache}")
+        self.use_kvcache = self.task_type == TaskType.LANGUAGE_MODEL
+        logging.info(
+            f"model task type: {self.task_type}, use_kvcache: {self.use_kvcache}"
+        )
 
-    def update_common(self,
-                      ckpt_path: str,
-                      lora_infos: Optional[Dict[str, str]],
-                      ptuning_path: Optional[str],
-                      tokenizer_path: str,
-                      quantization: str,
-                      data_type: WEIGHT_TYPE,
-                      max_seq_len: int,
-                      seq_size_per_block: int,
-                      gen_num_per_circle: int,
-                      ref_module: Optional[torch.nn.Module] = None,
-                      ref_dict: Dict[str, torch.Tensor] = {},
-                      parallel_info: ParallelInfo=g_parallel_info,
-                      config_mode: ConfigMode = ConfigMode.ComplexMode,
-                      gang_info: Optional[GangInfo] = None):
+    def update_common(
+        self,
+        ckpt_path: str,
+        lora_infos: Optional[Dict[str, str]],
+        ptuning_path: Optional[str],
+        tokenizer_path: str,
+        quantization: str,
+        data_type: WEIGHT_TYPE,
+        max_seq_len: int,
+        seq_size_per_block: int,
+        gen_num_per_circle: int,
+        ref_module: Optional[torch.nn.Module] = None,
+        ref_dict: Dict[str, torch.Tensor] = {},
+        parallel_info: ParallelInfo = g_parallel_info,
+        config_mode: ConfigMode = ConfigMode.ComplexMode,
+        gang_info: Optional[GangInfo] = None,
+    ):
         self._load_quant_config(ckpt_path, quantization)
 
         self.tp_size = parallel_info.tp_size
@@ -681,12 +867,14 @@ class GptInitModelParameters:
         logging.info(f"use_all_gather: {self.use_all_gather}")
 
         self.eplb_update_time = int(os.environ.get("EPLB_UPDATE_TIME", 5000))
-        self.eplb_mode = EplbMode.__members__[os.environ.get('EPLB_MODE', 'NONE')]
+        self.eplb_mode = EplbMode.__members__[os.environ.get("EPLB_MODE", "NONE")]
         self.enable_eplb = self.eplb_mode != EplbMode.NONE
 
         self.phy_exp_num = int(os.environ.get("REDUNDANT_EXPERT", 0)) + self.expert_num
-        self.enable_merge_w13 = os.getenv('ENABLE_MERGE_W13', '0').lower() == '1'
-        logging.info(f"phy_exp_num: {self.phy_exp_num}, use merge w13: {self.enable_merge_w13}")
+        self.enable_merge_w13 = os.getenv("ENABLE_MERGE_W13", "0").lower() == "1"
+        logging.info(
+            f"phy_exp_num: {self.phy_exp_num}, use merge w13: {self.enable_merge_w13}"
+        )
 
         if gang_info is not None:
             self.num_nodes = gang_info.num_nodes
@@ -695,7 +883,6 @@ class GptInitModelParameters:
                 self.num_nodes = get_gang_info().num_nodes
             except:
                 self.num_nodes = 1
-
 
         self.ckpt_path = ckpt_path
         self.lora_infos = lora_infos
@@ -710,7 +897,7 @@ class GptInitModelParameters:
             self.max_seq_len = max_seq_len
         if self.max_seq_len < 1:
             self.max_seq_len = 1024
-        logging.info(f'max_seq_len: {self.max_seq_len}')
+        logging.info(f"max_seq_len: {self.max_seq_len}")
 
         self.update_task_type_use_kvcache()
 
@@ -725,131 +912,204 @@ class GptInitModelParameters:
 
         load_cutlass_gemm_config(self.quant_algo)
 
-        hack_layer_num = int(os.environ.get('HACK_LAYER_NUM', 0))
-        if (hack_layer_num):
+        hack_layer_num = int(os.environ.get("HACK_LAYER_NUM", 0))
+        if hack_layer_num:
             logging.info(f"hack layernum to {hack_layer_num}")
             self.layer_num = hack_layer_num
 
-        self.seq_size_per_block = closest_power_of_2(int(max(seq_size_per_block, self.max_seq_len // 128))) # must be 2^n
-        self.seq_size_per_block = int(os.environ.get('SEQ_SIZE_PER_BLOCK', self.seq_size_per_block))
-        logging.info(f'seq_size_per_block: {self.seq_size_per_block}')
-        self.max_generate_batch_size = int(os.environ.get('CONCURRENCY_LIMIT', 128))
-        logging.info(f'max_generate_batch_size: {self.max_generate_batch_size}')
-        self.max_context_batch_size = int(os.environ.get('MAX_CONTEXT_BATCH_SIZE', 1))
-        logging.info(f'max_context_batch_size: {self.max_context_batch_size}')
-        self.reserve_runtime_mem_mb = int(os.environ.get('RESERVER_RUNTIME_MEM_MB', 1024))
-        logging.info(f'reserve_runtime_mem_mb: {self.reserve_runtime_mem_mb}')
-        self.kv_cache_mem_mb = int(os.environ.get('KV_CACHE_MEM_MB', -1))
-        logging.info(f'kv_cache_mem_mb: {self.kv_cache_mem_mb}')
-        self.block_nums = int(os.environ.get('TEST_BLOCK_NUM', 0))
-        logging.info(f'block_nums: {self.block_nums}')
-        if os.environ.get('TEST_LAYER_NUM'):
-            logging.info(f'replace model layer with TEST_LAYER_NUM: {os.environ.get("TEST_LAYER_NUM")}')
-            self.layer_num = int(os.environ.get('TEST_LAYER_NUM', self.layer_num))
-        self.enable_partial_fallback = bool(int(os.environ.get('ENABLE_PARTIAL_FALLBACK', 0)))
-        logging.info(f'enable_partial_fallback: {self.enable_partial_fallback}')
-        self.enable_fast_gen = bool(int(os.environ.get('ENABLE_FAST_GEN', 0)))
-        logging.info(f'enable_fast_gen: {self.enable_fast_gen}')
-        self.warm_up = bool(int(os.environ.get('WARM_UP', 1)))
-        logging.info(f'warm_up: {self.warm_up}')
-        self.warm_up_with_loss = bool(int(os.environ.get('WARM_UP_WITH_LOSS', 0)))
-        logging.info(f'warm_up_with_loss: {self.warm_up_with_loss}')
+        self.seq_size_per_block = closest_power_of_2(
+            int(max(seq_size_per_block, self.max_seq_len // 128))
+        )  # must be 2^n
+        self.seq_size_per_block = int(
+            os.environ.get("SEQ_SIZE_PER_BLOCK", self.seq_size_per_block)
+        )
+        logging.info(f"seq_size_per_block: {self.seq_size_per_block}")
+        self.max_generate_batch_size = int(os.environ.get("CONCURRENCY_LIMIT", 128))
+        logging.info(f"max_generate_batch_size: {self.max_generate_batch_size}")
+        self.max_context_batch_size = int(os.environ.get("MAX_CONTEXT_BATCH_SIZE", 1))
+        logging.info(f"max_context_batch_size: {self.max_context_batch_size}")
+        self.reserve_runtime_mem_mb = int(
+            os.environ.get("RESERVER_RUNTIME_MEM_MB", 1024)
+        )
+        logging.info(f"reserve_runtime_mem_mb: {self.reserve_runtime_mem_mb}")
+        self.kv_cache_mem_mb = int(os.environ.get("KV_CACHE_MEM_MB", -1))
+        logging.info(f"kv_cache_mem_mb: {self.kv_cache_mem_mb}")
+        self.block_nums = int(os.environ.get("TEST_BLOCK_NUM", 0))
+        logging.info(f"block_nums: {self.block_nums}")
+        if os.environ.get("TEST_LAYER_NUM"):
+            logging.info(
+                f'replace model layer with TEST_LAYER_NUM: {os.environ.get("TEST_LAYER_NUM")}'
+            )
+            self.layer_num = int(os.environ.get("TEST_LAYER_NUM", self.layer_num))
+        self.enable_partial_fallback = bool(
+            int(os.environ.get("ENABLE_PARTIAL_FALLBACK", 0))
+        )
+        logging.info(f"enable_partial_fallback: {self.enable_partial_fallback}")
+        self.enable_fast_gen = bool(int(os.environ.get("ENABLE_FAST_GEN", 0)))
+        logging.info(f"enable_fast_gen: {self.enable_fast_gen}")
+        self.warm_up = bool(int(os.environ.get("WARM_UP", 1)))
+        logging.info(f"warm_up: {self.warm_up}")
+        self.warm_up_with_loss = bool(int(os.environ.get("WARM_UP_WITH_LOSS", 0)))
+        logging.info(f"warm_up_with_loss: {self.warm_up_with_loss}")
 
-        self.vit_separation = int(os.environ.get('VIT_SEPARATION', 0))
-        logging.info(f'vit_separation: {self.vit_separation}')
+        self.vit_separation = int(os.environ.get("VIT_SEPARATION", 0))
+        logging.info(f"vit_separation: {self.vit_separation}")
 
-        self.fast_gen_max_context_len = int(os.environ.get('FAST_GEN_MAX_CONTEXT_LEN', 1024))
-        logging.info(f'fast_gen_max_context_len: {self.fast_gen_max_context_len}')
+        self.fast_gen_max_context_len = int(
+            os.environ.get("FAST_GEN_MAX_CONTEXT_LEN", 1024)
+        )
+        logging.info(f"fast_gen_max_context_len: {self.fast_gen_max_context_len}")
 
-        self.max_rpc_timeout_ms = int(os.environ.get('MAX_RPC_TIMEOUT_MS', 0))
-        logging.info(f'max_rpc_timeout_ms: {self.max_rpc_timeout_ms}')
+        self.max_rpc_timeout_ms = int(os.environ.get("MAX_RPC_TIMEOUT_MS", 0))
+        logging.info(f"max_rpc_timeout_ms: {self.max_rpc_timeout_ms}")
 
-        self.pd_separation = bool(int(os.environ.get('PD_SEPARATION', 0)))
-        logging.info(f'pd_separation: {self.pd_separation}')
+        self.pd_separation = bool(int(os.environ.get("PD_SEPARATION", 0)))
+        logging.info(f"pd_separation: {self.pd_separation}")
         if self.pd_separation:
-            self.prefill_retry_times = int(os.environ.get('PREFILL_RETRY_TIMES', 0))
-            logging.info(f'prefill_retry_times: {self.prefill_retry_times}')
-            self.prefill_retry_timeout_ms = int(os.environ.get('PREFILL_RETRY_TIMEOUT_MS', 0))
-            logging.info(f'prefill_retry_timeout_ms: {self.prefill_retry_timeout_ms}')
-            self.prefill_max_wait_timeout_ms = int(os.environ.get('PREFILL_MAX_WAIT_TIMEOUT_US', 600 * 1000 * 1000))
-            logging.info(f'prefill_max_wait_timeout_ms: {self.prefill_max_wait_timeout_ms}')
-            self.pd_sep_enable_fallback = bool(int(os.environ.get('PD_SEP_ENABLE_FALLBACK', 0)))
-            logging.info(f'pd_sep_enable_fallback: {self.pd_sep_enable_fallback}')
-            self.load_balance_policy_name = os.environ.get('LOAD_BALANCE_POLICY_NAME', "RR")
-            logging.info(f'load_balance_policy_name: {self.load_balance_policy_name}')
+            self.prefill_retry_times = int(os.environ.get("PREFILL_RETRY_TIMES", 0))
+            logging.info(f"prefill_retry_times: {self.prefill_retry_times}")
+            self.prefill_retry_timeout_ms = int(
+                os.environ.get("PREFILL_RETRY_TIMEOUT_MS", 0)
+            )
+            logging.info(f"prefill_retry_timeout_ms: {self.prefill_retry_timeout_ms}")
+            self.prefill_max_wait_timeout_ms = int(
+                os.environ.get("PREFILL_MAX_WAIT_TIMEOUT_US", 600 * 1000 * 1000)
+            )
+            logging.info(
+                f"prefill_max_wait_timeout_ms: {self.prefill_max_wait_timeout_ms}"
+            )
+            self.pd_sep_enable_fallback = bool(
+                int(os.environ.get("PD_SEP_ENABLE_FALLBACK", 0))
+            )
+            logging.info(f"pd_sep_enable_fallback: {self.pd_sep_enable_fallback}")
+            self.load_balance_policy_name = os.environ.get(
+                "LOAD_BALANCE_POLICY_NAME", "RR"
+            )
+            logging.info(f"load_balance_policy_name: {self.load_balance_policy_name}")
             policy_list = ["RR", "WRR"]
             if not self.load_balance_policy_name in policy_list:
-                raise Exception(f"load_balance_policy_name {self.load_balance_policy_name} " \
-                    f"is not right, it must in {policy_list}")
-            self.sync_status_interval_ms = int(os.environ.get('SYNC_STATUS_INTERVAL_MS', 50))
-            logging.info(f'sync_status_interval_ms: {self.sync_status_interval_ms}')
+                raise Exception(
+                    f"load_balance_policy_name {self.load_balance_policy_name} "
+                    f"is not right, it must in {policy_list}"
+                )
+            self.sync_status_interval_ms = int(
+                os.environ.get("SYNC_STATUS_INTERVAL_MS", 50)
+            )
+            logging.info(f"sync_status_interval_ms: {self.sync_status_interval_ms}")
 
-        self.use_cache_store = bool(int(os.environ.get('USE_CACHE_STORE', 0)))
-        logging.info(f'use_cache_store: {self.use_cache_store}')
+        self.use_cache_store = bool(int(os.environ.get("USE_CACHE_STORE", 0)))
+        logging.info(f"use_cache_store: {self.use_cache_store}")
         if self.use_cache_store:
-            self.cache_store_rdma_mode = bool(int(os.environ.get('CACHE_STORE_RDMA_MODE', 1)))
-            logging.info(f'cache_store_rdma_mode: {self.cache_store_rdma_mode}')
+            self.cache_store_rdma_mode = bool(
+                int(os.environ.get("CACHE_STORE_RDMA_MODE", 1))
+            )
+            logging.info(f"cache_store_rdma_mode: {self.cache_store_rdma_mode}")
 
-            self.load_cache_timeout_ms = int(os.environ.get('LOAD_CACHE_TIMEOUT_MS', 0))
-            logging.info(f'load_cache_timeout_ms: {self.load_cache_timeout_ms}')
+            self.load_cache_timeout_ms = int(os.environ.get("LOAD_CACHE_TIMEOUT_MS", 0))
+            logging.info(f"load_cache_timeout_ms: {self.load_cache_timeout_ms}")
 
-            self.decode_retry_times = int(os.environ.get('DECODE_RETRY_TIMES', 0))
-            logging.info(f'decode_retry_times: {self.prefill_retry_times}')
-            self.decode_retry_timeout_ms = int(os.environ.get('DECODE_RETRY_TIMEOUT_MS', 0))
-            logging.info(f'decode_retry_timeout_ms: {self.decode_retry_timeout_ms}')
+            self.decode_retry_times = int(os.environ.get("DECODE_RETRY_TIMES", 0))
+            logging.info(f"decode_retry_times: {self.prefill_retry_times}")
+            self.decode_retry_timeout_ms = int(
+                os.environ.get("DECODE_RETRY_TIMEOUT_MS", 0)
+            )
+            logging.info(f"decode_retry_timeout_ms: {self.decode_retry_timeout_ms}")
 
-            self.rdma_connect_retry_times = int(os.environ.get('RDMA_CONNECT_RETRY_TIMES', 0))
-            logging.info(f'rdma_connect_retry_times: {self.rdma_connect_retry_times}')
+            self.rdma_connect_retry_times = int(
+                os.environ.get("RDMA_CONNECT_RETRY_TIMES", 0)
+            )
+            logging.info(f"rdma_connect_retry_times: {self.rdma_connect_retry_times}")
 
-            self.decode_polling_kv_cache_step_ms = int(os.environ.get('DECODE_POLLING_KV_CACHE_STEP_MS', 30))
-            logging.info(f'decode_polling_kv_cache_step_ms: {self.decode_polling_kv_cache_step_ms}')
+            self.decode_polling_kv_cache_step_ms = int(
+                os.environ.get("DECODE_POLLING_KV_CACHE_STEP_MS", 30)
+            )
+            logging.info(
+                f"decode_polling_kv_cache_step_ms: {self.decode_polling_kv_cache_step_ms}"
+            )
 
-            self.decode_use_async_load_cache = bool(int(os.environ.get('DECODE_USE_ASYNC_LOAD_CACHE', 1)))
-            logging.info(f'decode_use_async_load_cache: {self.decode_use_async_load_cache}')
+            self.decode_use_async_load_cache = bool(
+                int(os.environ.get("DECODE_USE_ASYNC_LOAD_CACHE", 1))
+            )
+            logging.info(
+                f"decode_use_async_load_cache: {self.decode_use_async_load_cache}"
+            )
 
-        self.scheduler_reserve_resource_ratio = int(os.environ.get('SCHEDUlER_RESERVE_RESOURCE_RATIO', 5))
-        logging.info(f'scheduler_reserve_resource_ratio: {self.scheduler_reserve_resource_ratio}')
-        self.reuse_cache = os.environ.get('REUSE_CACHE', None) == '1' or os.environ.get('USE_BLOCK_CACHE', None) == '1'
-        logging.info(f'reuse_cache: {self.reuse_cache}')
-        self.pre_allocate_op_mem = bool(int(os.environ.get('PRE_ALLOCATE_OP_MEM', 1)))
-        logging.info(f'pre_allocate_op_mem: {self.pre_allocate_op_mem}')
+        self.scheduler_reserve_resource_ratio = int(
+            os.environ.get("SCHEDUlER_RESERVE_RESOURCE_RATIO", 5)
+        )
+        logging.info(
+            f"scheduler_reserve_resource_ratio: {self.scheduler_reserve_resource_ratio}"
+        )
+        self.reuse_cache = (
+            os.environ.get("REUSE_CACHE", None) == "1"
+            or os.environ.get("USE_BLOCK_CACHE", None) == "1"
+        )
+        logging.info(f"reuse_cache: {self.reuse_cache}")
+        self.pre_allocate_op_mem = bool(int(os.environ.get("PRE_ALLOCATE_OP_MEM", 1)))
+        logging.info(f"pre_allocate_op_mem: {self.pre_allocate_op_mem}")
         self.kv_cache_data_type = self.data_type
-        if bool(int(os.environ.get('INT8_KV_CACHE', 0))):
+        if bool(int(os.environ.get("INT8_KV_CACHE", 0))):
             self.kv_cache_data_type = WEIGHT_TYPE.INT8.to_str()
         elif self.quant_algo.isFp8():
             if self.quant_algo.isGroupwise():
-                if os.environ.get('BLOCKWISE_USE_FP8_KV_CACHE', '0') == '1':
+                if os.environ.get("BLOCKWISE_USE_FP8_KV_CACHE", "0") == "1":
                     self.kv_cache_data_type = WEIGHT_TYPE.FP8.to_str()
             else:
                 self.kv_cache_data_type = WEIGHT_TYPE.FP8.to_str()
-        logging.info(f'kv_cache_data_type: {self.kv_cache_data_type}')
-        logging.info(f'tp_split_emb_and_lm_head: {self.tp_split_emb_and_lm_head}')
+        logging.info(f"kv_cache_data_type: {self.kv_cache_data_type}")
+        logging.info(f"tp_split_emb_and_lm_head: {self.tp_split_emb_and_lm_head}")
 
         # use environment variables to update stop_words_str and stop_words_id
-        env_stop_words_str = os.environ.get('STOP_WORDS_STR', None)
-        env_stop_words_id = os.environ.get('STOP_WORDS_LIST', None)
-        env_stop_words_str_list = json.loads(env_stop_words_str) if env_stop_words_str else []
-        env_stop_words_id_list = json.loads(env_stop_words_id) if env_stop_words_id else []
-        env_force_stop = os.environ.get('FORCE_STOP_WORDS', None)
+        env_stop_words_str = os.environ.get("STOP_WORDS_STR", None)
+        env_stop_words_id = os.environ.get("STOP_WORDS_LIST", None)
+        env_stop_words_str_list = (
+            json.loads(env_stop_words_str) if env_stop_words_str else []
+        )
+        env_stop_words_id_list = (
+            json.loads(env_stop_words_id) if env_stop_words_id else []
+        )
+        env_force_stop = os.environ.get("FORCE_STOP_WORDS", None)
         if env_force_stop and str_to_bool(env_force_stop):
             self.special_tokens.stop_words_str_list = env_stop_words_str_list
             self.special_tokens.stop_words_id_list = env_stop_words_id_list
         else:
-            self.special_tokens.stop_words_str_list = self.special_tokens.stop_words_str_list + env_stop_words_str_list
-            self.special_tokens.stop_words_id_list = self.special_tokens.stop_words_id_list + env_stop_words_id_list
+            self.special_tokens.stop_words_str_list = (
+                self.special_tokens.stop_words_str_list + env_stop_words_str_list
+            )
+            self.special_tokens.stop_words_id_list = (
+                self.special_tokens.stop_words_id_list + env_stop_words_id_list
+            )
 
-        logging.info(f"use stop_words_str_list [{self.special_tokens.stop_words_str_list }]," \
-                        f" stop_words_id_list [{self.special_tokens.stop_words_id_list}]")
+        logging.info(
+            f"use stop_words_str_list [{self.special_tokens.stop_words_str_list }],"
+            f" stop_words_id_list [{self.special_tokens.stop_words_id_list}]"
+        )
 
-    def _load_quant_config_from_ckpt(self, ckpt_path: str) -> Optional[QuantizationConfig]:
-        quant_config_path = os.path.join(ckpt_path, 'smoothquant.ini')
+    def _load_quant_config_from_ckpt(
+        self, ckpt_path: str
+    ) -> Optional[QuantizationConfig]:
+        quant_config_path = os.path.join(ckpt_path, "smoothquant.ini")
         if os.path.exists(quant_config_path):
-            return QuantizationConfig.from_config({"bits": 0, "method": "smooth_quant", "group_size": 0, "is_quanted": True})
+            return QuantizationConfig.from_config(
+                {
+                    "bits": 0,
+                    "method": "smooth_quant",
+                    "group_size": 0,
+                    "is_quanted": True,
+                }
+            )
 
         per_tensor_config_path = os.path.join(ckpt_path, "pertensorquant.ini")
 
         if os.path.exists(per_tensor_config_path):
-            return QuantizationConfig.from_config({"bits": 0, "method": "pertensor_quant", "group_size": 0, "is_quanted": True})
+            return QuantizationConfig.from_config(
+                {
+                    "bits": 0,
+                    "method": "pertensor_quant",
+                    "group_size": 0,
+                    "is_quanted": True,
+                }
+            )
 
         config_path = os.path.join(ckpt_path, "config.json")
         if not os.path.exists(config_path):
@@ -860,32 +1120,43 @@ class GptInitModelParameters:
         quant_method = None
         if config_json.get("quantization_config", None):
             quant_config = config_json["quantization_config"]
-            quant_method = quant_config['quant_method'].lower()
+            quant_method = quant_config["quant_method"].lower()
 
         if config_json.get("quantization", None):
             quant_config = config_json["quantization"]
-            quant_method = quant_config['quant_algo'].lower()
+            quant_method = quant_config["quant_algo"].lower()
         if quant_config is None:
             return None
 
-        group_size = quant_config['group_size'] if 'group_size' in quant_config else 0
-        bits = quant_config['bits'] if 'bits' in quant_config else 0
-        if quant_method == 'fp8':
+        group_size = quant_config["group_size"] if "group_size" in quant_config else 0
+        bits = quant_config["bits"] if "bits" in quant_config else 0
+        if quant_method == "fp8":
             bits = 8
-            if 'weight_block_size' in quant_config:
+            if "weight_block_size" in quant_config:
                 weight_block = quant_config.get("weight_block_size")
-                assert isinstance(weight_block, list) and all(element == weight_block[0] for element in weight_block), f"weight_block_size: {weight_block} must be same"
+                assert isinstance(weight_block, list) and all(
+                    element == weight_block[0] for element in weight_block
+                ), f"weight_block_size: {weight_block} must be same"
                 group_size = weight_block[0]
                 quant_method = Fp8BlockWiseQuantConfig.get_method()
         if quant_method == "compressed-tensors":
             config_groups = quant_config["config_groups"]
             weights_config = config_groups["group_0"]["weights"]
             bits = weights_config["num_bits"]
-            if weights_config["type"] == "float" and bits == 8 and \
-                    weights_config["strategy"] == "channel":
+            if (
+                weights_config["type"] == "float"
+                and bits == 8
+                and weights_config["strategy"] == "channel"
+            ):
                 quant_method = Fp8PerChannelCompressedQuantConfig.get_method()
-        return QuantizationConfig.from_config({"bits": bits, "method": quant_method, "group_size": group_size, "is_quanted": True})
-
+        return QuantizationConfig.from_config(
+            {
+                "bits": bits,
+                "method": quant_method,
+                "group_size": group_size,
+                "is_quanted": True,
+            }
+        )
 
     def _load_quant_config(self, ckpt_path: str, quantization: str):
         self.quant_config = self._load_quant_config_from_ckpt(ckpt_path)
@@ -893,23 +1164,34 @@ class GptInitModelParameters:
             if quantization:
                 try:
                     quant_config_dict = json.loads(quantization)
-                    self.quant_config: QuantizationConfig = QuantizationConfig.from_config(quant_config_dict)
+                    self.quant_config: QuantizationConfig = (
+                        QuantizationConfig.from_config(quant_config_dict)
+                    )
                 except Exception:
-                    self.quant_config = preset_quant_config.get(quantization.upper(), None)
+                    self.quant_config = preset_quant_config.get(
+                        quantization.upper(), None
+                    )
                     if self.quant_config is None:
-                        raise ValueError(f"{quantization.upper()} is not support now, quantization must in {list(preset_quant_config.keys())}")
+                        raise ValueError(
+                            f"{quantization.upper()} is not support now, quantization must in {list(preset_quant_config.keys())}"
+                        )
                 logging.info(f"need_load_quant by {self.quant_config.get_method()}")
         if self.quant_config:
-            logging.info(f"quant config info: {self.quant_config.get_algo()}, {self.quant_config.bits()}, {self.quant_config.group_size()}")
-            self.quant_algo.setQuantAlgo(self.quant_config.get_algo().lower(), self.quant_config.bits(), self.quant_config.group_size())
+            logging.info(
+                f"quant config info: {self.quant_config.get_algo()}, {self.quant_config.bits()}, {self.quant_config.group_size()}"
+            )
+            self.quant_algo.setQuantAlgo(
+                self.quant_config.get_algo().lower(),
+                self.quant_config.bits(),
+                self.quant_config.group_size(),
+            )
         else:
             logging.info("no quant config")
-
 
     def get_params_dict(self):
         res: Dict[str, Any] = {}
         for name in updated_params:
-            res[name] = eval('self.' + name)
+            res[name] = eval("self." + name)
         return res
 
     def eval_model_size(self):
@@ -919,36 +1201,63 @@ class GptInitModelParameters:
         elif self.quant_algo.getWeightBits() == 4:
             layer_param_bytes = 0.54
 
-        model_size = self.word_emb_param_count * 2 + \
-            self.layer_weight_param_count * layer_param_bytes + \
-                self.gpt_init_params.hidden_size * layer_param_bytes + \
-                self.word_emb_param_count * 2  # maybe some model donot have lm_head
+        model_size = (
+            self.word_emb_param_count * 2
+            + self.layer_weight_param_count * layer_param_bytes
+            + self.gpt_init_params.hidden_size * layer_param_bytes
+            + self.word_emb_param_count * 2
+        )  # maybe some model donot have lm_head
 
         kv_cache_mem_size = self._eval_kv_cache_mem_size()
         runtime_buffer = self._eval_runtime_buffer_mem_size()
-        total_size = model_size  + kv_cache_mem_size + runtime_buffer
-        logging.info(f"total_size(Bytes): {total_size}, model_size:{model_size}, kv_cache_mem_size:{kv_cache_mem_size}, runtime_buffer:{runtime_buffer}")
+        total_size = model_size + kv_cache_mem_size + runtime_buffer
+        logging.info(
+            f"total_size(Bytes): {total_size}, model_size:{model_size}, kv_cache_mem_size:{kv_cache_mem_size}, runtime_buffer:{runtime_buffer}"
+        )
         return total_size
 
     def _eval_kv_cache_mem_size(self):
         if self.task_type != TaskType.LANGUAGE_MODEL:
             return 0
-        kv_cache_bytes = 1 if self.kv_cache_data_type in [WEIGHT_TYPE.FP8.to_str(), WEIGHT_TYPE.INT8.to_str()] else 2
-        kv_cache_size = 2 * self.layer_num * self.head_num_kv * self.size_per_head * kv_cache_bytes * self.max_seq_len
+        kv_cache_bytes = (
+            1
+            if self.kv_cache_data_type
+            in [WEIGHT_TYPE.FP8.to_str(), WEIGHT_TYPE.INT8.to_str()]
+            else 2
+        )
+        kv_cache_size = (
+            2
+            * self.layer_num
+            * self.head_num_kv
+            * self.size_per_head
+            * kv_cache_bytes
+            * self.max_seq_len
+        )
         return kv_cache_size
 
     def _eval_runtime_buffer_mem_size(self):
         input_buffer = self.max_seq_len * self.gpt_init_params.hidden_size
-        qkv_gemm_buffer_size = self.max_seq_len * (self.head_num_kv*2 + self.head_num_kv) * self.size_per_head
+        qkv_gemm_buffer_size = (
+            self.max_seq_len
+            * (self.head_num_kv * 2 + self.head_num_kv)
+            * self.size_per_head
+        )
         attn_buffer_size = self.max_seq_len * self.gpt_init_params.hidden_size
         ffn_export_num = self.expert_num if self.gpt_init_params.moe_k else 1
-        ffn_w_count = 1 if self.activation_type == 'gelu' else 2
-        ffn_buffer = (self.max_seq_len * self.gpt_init_params.hidden_size + ffn_w_count* self.max_seq_len * self.inter_size)*ffn_export_num
+        ffn_w_count = 1 if self.activation_type == "gelu" else 2
+        ffn_buffer = (
+            self.max_seq_len * self.gpt_init_params.hidden_size
+            + ffn_w_count * self.max_seq_len * self.inter_size
+        ) * ffn_export_num
         return input_buffer + qkv_gemm_buffer_size + attn_buffer_size + ffn_buffer
 
     @property
     def model_param_count(self):
-        return self.word_emb_param_count*2 + self.layer_weight_param_count + self.gpt_init_params.hidden_size
+        return (
+            self.word_emb_param_count * 2
+            + self.layer_weight_param_count
+            + self.gpt_init_params.hidden_size
+        )
 
     @property
     def word_emb_param_count(self):
@@ -962,42 +1271,90 @@ class GptInitModelParameters:
         # qkv
         if self.layer_head_num and isinstance(self.layer_head_num, list):
             for head_num in self.layer_head_num:
-                layer_weight_param_count = layer_weight_param_count + head_num * self.size_per_head * hidden_size *3
+                layer_weight_param_count = (
+                    layer_weight_param_count
+                    + head_num * self.size_per_head * hidden_size * 3
+                )
         elif self.head_num_kv != self.head_num:
-            layer_weight_param_count = layer_weight_param_count + self.layer_num * hidden_size * hidden_size + \
-                self.layer_num * (self.head_num_kv * self.size_per_head) * 2
+            layer_weight_param_count = (
+                layer_weight_param_count
+                + self.layer_num * hidden_size * hidden_size
+                + self.layer_num * (self.head_num_kv * self.size_per_head) * 2
+            )
         else:
-            layer_weight_param_count = layer_weight_param_count + self.layer_num * hidden_size * hidden_size *3
+            layer_weight_param_count = (
+                layer_weight_param_count
+                + self.layer_num * hidden_size * hidden_size * 3
+            )
 
         # attn_o_w
         if self.layer_head_num and isinstance(self.layer_head_num, list):
             for head_num in self.layer_head_num:
-                layer_weight_param_count = layer_weight_param_count + head_num * self.size_per_head * hidden_size
+                layer_weight_param_count = (
+                    layer_weight_param_count
+                    + head_num * self.size_per_head * hidden_size
+                )
         else:
-            layer_weight_param_count = layer_weight_param_count + self.layer_num * hidden_size * hidden_size
+            layer_weight_param_count = (
+                layer_weight_param_count + self.layer_num * hidden_size * hidden_size
+            )
 
         # ffn w1, w2, w3
         ffn_export_num = self.expert_num if self.expert_num > 0 else 1
-        ffn_w_count = 2 if self.activation_type == 'gelu' else 3
+        ffn_w_count = 2 if self.activation_type == "gelu" else 3
         if self.layer_inter_size and isinstance(self.layer_inter_size, list):
             for layer_inter_size in self.layer_inter_size:
                 if self.moe_style == 1:
-                    layer_weight_param_count = layer_weight_param_count + layer_inter_size * hidden_size * ffn_w_count * ffn_export_num
+                    layer_weight_param_count = (
+                        layer_weight_param_count
+                        + layer_inter_size * hidden_size * ffn_w_count * ffn_export_num
+                    )
                 else:
-                    layer_weight_param_count = layer_weight_param_count + layer_inter_size * hidden_size * ffn_w_count
+                    layer_weight_param_count = (
+                        layer_weight_param_count
+                        + layer_inter_size * hidden_size * ffn_w_count
+                    )
                     if self.moe_style == 2:
-                        layer_weight_param_count = layer_weight_param_count + self.moe_inter_padding_size * hidden_size * ffn_w_count * ffn_export_num
+                        layer_weight_param_count = (
+                            layer_weight_param_count
+                            + self.moe_inter_padding_size
+                            * hidden_size
+                            * ffn_w_count
+                            * ffn_export_num
+                        )
 
         else:
             if self.moe_style == 1:
-                layer_weight_param_count = layer_weight_param_count + self.layer_num * self.inter_size * hidden_size * ffn_w_count * ffn_export_num
+                layer_weight_param_count = (
+                    layer_weight_param_count
+                    + self.layer_num
+                    * self.inter_size
+                    * hidden_size
+                    * ffn_w_count
+                    * ffn_export_num
+                )
             else:
-                layer_weight_param_count = layer_weight_param_count + self.layer_num * self.inter_size * hidden_size * ffn_w_count
+                layer_weight_param_count = (
+                    layer_weight_param_count
+                    + self.layer_num * self.inter_size * hidden_size * ffn_w_count
+                )
                 if self.moe_style == 2:
-                    layer_weight_param_count = layer_weight_param_count + len(self.moe_layer_index) * self.moe_inter_padding_size * hidden_size * ffn_w_count * ffn_export_num
+                    layer_weight_param_count = (
+                        layer_weight_param_count
+                        + len(self.moe_layer_index)
+                        * self.moe_inter_padding_size
+                        * hidden_size
+                        * ffn_w_count
+                        * ffn_export_num
+                    )
 
         if ffn_export_num > 1:
-            layer_weight_param_count = layer_weight_param_count + len(self.moe_layer_index) * hidden_size * ffn_export_num
+            layer_weight_param_count = (
+                layer_weight_param_count
+                + len(self.moe_layer_index) * hidden_size * ffn_export_num
+            )
         # other small tensor
-        layer_weight_param_count = layer_weight_param_count + self.layer_num * hidden_size * 11
+        layer_weight_param_count = (
+            layer_weight_param_count + self.layer_num * hidden_size * 11
+        )
         return layer_weight_param_count

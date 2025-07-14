@@ -11,22 +11,26 @@ namespace rtp_llm {
 
 std::string EmbeddingEndpoint::embeddingTypeToString(EmbeddingType type) {
     switch (type) {
-        case DENSE: return "dense";
-        case SPARSE: return "sparse";
-        case COLBERT: return "colbert";
-        default: return "unknown_embedding_type";
+        case DENSE:
+            return "dense";
+        case SPARSE:
+            return "sparse";
+        case COLBERT:
+            return "colbert";
+        default:
+            return "unknown_embedding_type";
     }
 }
 
 std::pair<std::string, std::optional<std::string>>
-EmbeddingEndpoint::handle(const std::string& body,
+EmbeddingEndpoint::handle(const std::string&                              body,
                           std::optional<EmbeddingEndpoint::EmbeddingType> type,
-                          const kmonitor::MetricsReporterPtr& metrics_reporter,
-                          int64_t start_time_us) {
+                          const kmonitor::MetricsReporterPtr&             metrics_reporter,
+                          int64_t                                         start_time_us) {
     py::gil_scoped_acquire gil_before_deocde;
-    py::module embedding_endpoint = py::module::import("rtp_llm.embedding.embedding_endpoint");
-    py::object EmbeddingHandler   = embedding_endpoint.attr("EmbeddingHandler");
-    py::object embedding_handler  = EmbeddingHandler("request"_a = body, "custom_module"_a = custom_module_);
+    py::module             embedding_endpoint = py::module::import("rtp_llm.embedding.embedding_endpoint");
+    py::object             EmbeddingHandler   = embedding_endpoint.attr("EmbeddingHandler");
+    py::object             embedding_handler = EmbeddingHandler("request"_a = body, "custom_module"_a = custom_module_);
     if (type.has_value()) {
         auto type_str = embeddingTypeToString(type.value());
         embedding_handler.attr("set_embedding_type")(type_str);
@@ -39,12 +43,15 @@ EmbeddingEndpoint::handle(const std::string& body,
 
     py::gil_scoped_release gil_release;
     metrics_reporter->report((autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us) / 1000.0,
-            "ft_pre_pipeline_rt", kmonitor::MetricType::GAUGE, nullptr, true);
-    auto results = embedding_engine_->decode(token_ids, token_type_ids, input_lengths, 0, mm_features);
+                             "ft_pre_pipeline_rt",
+                             kmonitor::MetricType::GAUGE,
+                             nullptr,
+                             true);
+    auto results  = embedding_engine_->decode(token_ids, token_type_ids, input_lengths, 0, mm_features);
     start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
 
     py::gil_scoped_acquire gil_after_deocde;
-    py::object batch_output;
+    py::object             batch_output;
     if (results->output.isTensor) {
         RTP_LLM_CHECK_WITH_INFO(results->output.t.has_value(), "embedding output has null tensor value");
         batch_output = rtp_llm::convertTensorToObject(results->output.t.value());
@@ -54,14 +61,17 @@ EmbeddingEndpoint::handle(const std::string& body,
     }
 
     py::module::import("nest_asyncio").attr("apply")();
-    auto loop = py::module::import("asyncio").attr("get_event_loop")();
-    auto coro = embedding_handler.attr("render_response")(batch_output);
-    auto response = getAsyncResult(loop, coro);
-    coro = embedding_handler.attr("render_log_response")();
+    auto loop             = py::module::import("asyncio").attr("get_event_loop")();
+    auto coro             = embedding_handler.attr("render_response")(batch_output);
+    auto response         = getAsyncResult(loop, coro);
+    coro                  = embedding_handler.attr("render_log_response")();
     auto logable_response = getAsyncResult(loop, coro);
 
     metrics_reporter->report((autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us) / 1000.0,
-            "ft_post_pipeline_rt", kmonitor::MetricType::GAUGE, nullptr, true);
+                             "ft_post_pipeline_rt",
+                             kmonitor::MetricType::GAUGE,
+                             nullptr,
+                             true);
     if (logable_response == "null") {
         return std::make_pair(response, std::nullopt);
     } else {
@@ -76,13 +86,13 @@ std::string EmbeddingEndpoint::getAsyncResult(py::object loop, py::object coro) 
     return py::cast<std::string>(result);
 }
 
-std::optional<MultimodalFeature> EmbeddingEndpoint::getMultimodalFeature(py::object py_mm_inputs,
+std::optional<MultimodalFeature> EmbeddingEndpoint::getMultimodalFeature(py::object  py_mm_inputs,
                                                                          th::Tensor& token_ids) {
     if (!py::isinstance<py::list>(py_mm_inputs)) {
         throw std::runtime_error("Expected a list, but get " + py::cast<std::string>(py::str(py_mm_inputs)));
     }
     std::vector<MultimodalInput> mm_inputs;
-    auto py_list = py::reinterpret_borrow<py::list>(py_mm_inputs);
+    auto                         py_list = py::reinterpret_borrow<py::list>(py_mm_inputs);
     for (const auto& item : py_list) {
         mm_inputs.emplace_back(py::cast<std::string>(item.attr("url")),
                                py::cast<th::Tensor>(item.attr("tensor")),

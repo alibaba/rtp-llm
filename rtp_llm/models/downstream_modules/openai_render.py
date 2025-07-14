@@ -1,15 +1,18 @@
 import logging
 import os
+
 from transformers import PreTrainedTokenizerBase
+
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.openai.renderers.custom_renderer import RendererParams, CustomChatRenderer
 from rtp_llm.openai.renderer_factory import ChatRendererFactory
 from rtp_llm.openai.renderers.basic_renderer import BasicRenderer
-
+from rtp_llm.openai.renderers.custom_renderer import CustomChatRenderer, RendererParams
 
 
 class OpenAIRenderBasicInfo(object):
-    def __init__(self, tokenizer: PreTrainedTokenizerBase, config: GptInitModelParameters):
+    def __init__(
+        self, tokenizer: PreTrainedTokenizerBase, config: GptInitModelParameters
+    ):
         self.config = config
         self.max_seq_len = self.config.max_seq_len
 
@@ -18,7 +21,7 @@ class OpenAIRenderBasicInfo(object):
         self.tokenizer = tokenizer
 
         self.eos_token_id = None
-        if (isinstance(tokenizer, PreTrainedTokenizerBase)):
+        if isinstance(tokenizer, PreTrainedTokenizerBase):
             self.eos_token_id = tokenizer.eos_token_id
         if self.eos_token_id is None:
             self.eos_token_id = self.config.special_tokens.eos_token_id
@@ -31,14 +34,18 @@ class OpenAIRenderBasicInfo(object):
             eos_token_id=self.eos_token_id,
             stop_word_ids_list=self.stop_word_ids_list,
             template_type=self.config.template_type,
-            ckpt_path=self.config.ckpt_path
+            ckpt_path=self.config.ckpt_path,
         )
 
-        self.chat_renderer: CustomChatRenderer = ChatRendererFactory.get_renderer(self.tokenizer, render_params)
+        self.chat_renderer: CustomChatRenderer = ChatRendererFactory.get_renderer(
+            self.tokenizer, render_params
+        )
         logging.info(f"Finally openai endpoint uses renderer: {self.chat_renderer} ")
-        self.template_renderer: CustomChatRenderer = self.chat_renderer \
-            if isinstance(self.chat_renderer,BasicRenderer) \
+        self.template_renderer: CustomChatRenderer = (
+            self.chat_renderer
+            if isinstance(self.chat_renderer, BasicRenderer)
             else BasicRenderer(self.tokenizer, render_params)
+        )
         logging.info(f"chat_renderer [{self.chat_renderer}] is created.")
         extra_stop_word_ids_list = self.chat_renderer.get_all_extra_stop_word_ids_list()
         self.stop_word_ids_list.extend(extra_stop_word_ids_list)

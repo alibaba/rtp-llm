@@ -194,4 +194,3 @@ inline __device__ Float8_ add(bf16_8_t a, Float8_ fb) {
     return fc;
 }
 #endif  // ENABLE_BF16
-

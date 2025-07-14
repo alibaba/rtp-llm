@@ -65,7 +65,7 @@ TEST_F(OpenaiEndpointTest, Constructor_IsNotPreTrainedTokenizer) {
 
 TEST_F(OpenaiEndpointTest, Constructor_RenderIsNotNull) {
     rtp_llm::GptInitParameter param;
-    param.special_tokens_.eos_token_id_    = 5;
+    param.special_tokens_.eos_token_id_       = 5;
     param.special_tokens_.stop_words_id_list_ = {{1, 2, 3}, {4, 5, 6}};
 
     EXPECT_CALL(*mock_tokenizer_, isPreTrainedTokenizer).WillOnce(Return(true));
@@ -101,7 +101,7 @@ TEST_F(OpenaiEndpointTest, ExtractGenerationConfig) {
     EXPECT_CALL(*mock_render_, get_all_extra_stop_word_ids_list).WillOnce(Return(std::vector<std::vector<int>>()));
 
     rtp_llm::GptInitParameter param;
-    auto                 openai_endpoint = std::make_shared<OpenaiEndpoint>(tokenizer_, render_, param);
+    auto                      openai_endpoint = std::make_shared<OpenaiEndpoint>(tokenizer_, render_, param);
 
     ChatCompletionRequest req;
     req.stream      = false;
@@ -118,7 +118,7 @@ TEST_F(OpenaiEndpointTest, ExtractGenerationConfig) {
     auto config = openai_endpoint->extract_generation_config(req);
     EXPECT_TRUE(config != nullptr);
     EXPECT_EQ(req.stream.value(), false);
-    EXPECT_EQ(config->is_streaming, true); // always true
+    EXPECT_EQ(config->is_streaming, true);  // always true
     EXPECT_NEAR(config->temperature, req.temperature.value(), 1e-6);
     EXPECT_NEAR(config->top_p, req.top_p.value(), 1e-6);
     EXPECT_EQ(config->max_new_tokens, req.max_tokens.value());

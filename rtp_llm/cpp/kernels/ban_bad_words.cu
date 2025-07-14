@@ -30,8 +30,7 @@ __global__ void ban_bad_words(T*         logits,
                               bool       share_words,
                               int        id_offset,
                               int        vocab_size_padded,
-                              size_t     step)
-{
+                              size_t     step) {
     const int id        = blockIdx.x * blockDim.x + threadIdx.x;
     const int batch_idx = blockIdx.y / beam_width;
     const int beam_idx  = blockIdx.y % beam_width;
@@ -98,8 +97,7 @@ void invokeBanBadWords(T*           logits,
                        int          id_offset,
                        int          vocab_size_padded,
                        size_t       step,
-                       cudaStream_t stream)
-{
+                       cudaStream_t stream) {
     dim3 block, grid;
     block.x = min(((bad_words_len + 32 - 1) / 32) * 32, 256UL);
     grid.x  = (bad_words_len + block.x - 1) / block.x;

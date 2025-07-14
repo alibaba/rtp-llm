@@ -11,15 +11,12 @@
 #include "rtp_llm/cpp/cuda/allocator_cuda.h"
 #include "rtp_llm/cpp/cuda/cublas/cublas.h"
 
-
-
 struct Dim2 {
     int k;
     int n;
 };
 
-void gemm_test(int m, Dim2 dim2, cudaStream_t stream)
-{
+void gemm_test(int m, Dim2 dim2, cudaStream_t stream) {
     int n = dim2.n;
     int k = dim2.k;
 
@@ -49,24 +46,24 @@ void gemm_test(int m, Dim2 dim2, cudaStream_t stream)
     deviceMalloc(&out_ptr2, m * n, false);
     check_cuda_value(cudaMemset(out_ptr2, 0xdc, m * n * sizeof(half)));
 
-    Allocator<AllocatorType::CUDA>* allocator_      = nullptr;
-    std::mutex*    mutex_           = nullptr;
-    mutex_     = new std::mutex();  // mutex per process
+    Allocator<AllocatorType::CUDA>* allocator_ = nullptr;
+    std::mutex*                     mutex_     = nullptr;
+    mutex_                                     = new std::mutex();  // mutex per process
 
     cublasAlgoMap* cublas_algo_map_ = nullptr;
-    cublas_algo_map_      = new cublasAlgoMap(GEMM_CONFIG);
+    cublas_algo_map_                = new cublasAlgoMap(GEMM_CONFIG);
 
     allocator_ = new Allocator<AllocatorType::CUDA>(getDevice());
     allocator_->setStream(stream);
 
-    cublasHandle_t   cublas_handle_;
+    cublasHandle_t cublas_handle_;
     check_cuda_value(cublasCreate(&cublas_handle_));
     cublasLtHandle_t cublaslt_handle_;
     check_cuda_value(cublasLtCreate(&cublaslt_handle_));
     check_cuda_value(cublasSetStream(cublas_handle_, stream));
 
-    cublasMMWrapper* cublas_wrapper_= new cublasMMWrapper(
-        cublas_handle_, cublaslt_handle_, stream, cublas_algo_map_, mutex_, allocator_);
+    cublasMMWrapper* cublas_wrapper_ =
+        new cublasMMWrapper(cublas_handle_, cublaslt_handle_, stream, cublas_algo_map_, mutex_, allocator_);
 
     cublas_wrapper_->setGemmConfig(CUDA_R_16F, CUDA_R_16F, CUDA_R_16F, CUDA_R_32F);
 
@@ -147,9 +144,15 @@ void gemm_test(int m, Dim2 dim2, cudaStream_t stream)
     cudaEventDestroy(stop1);
     cudaEventDestroy(stop2);
 
-    float avg_time_fp16 = total_time_fp16 / iterations;
+    float avg_time_fp16    = total_time_fp16 / iterations;
     float avg_time_fpaintb = total_time_fpaintb / iterations;
-    printf("m=%d n=%d k=%d cublas=%.6f fpa_intb=%.6f ratio=%f\n", m, n, k, avg_time_fp16, avg_time_fpaintb, avg_time_fp16/avg_time_fpaintb);
+    printf("m=%d n=%d k=%d cublas=%.6f fpa_intb=%.6f ratio=%f\n",
+           m,
+           n,
+           k,
+           avg_time_fp16,
+           avg_time_fpaintb,
+           avg_time_fp16 / avg_time_fpaintb);
 
     delete cublas_algo_map_;
     delete cublas_wrapper_;
@@ -167,8 +170,7 @@ void gemm_test(int m, Dim2 dim2, cudaStream_t stream)
     deviceFree(ws_ptr);
 }
 
-int main()
-{
+int main() {
     std::vector<int>  M_list{1, 2, 3, 4, 1024, 2048, 4096, 16384};
     std::vector<Dim2> dim_list;
     dim_list.push_back({4096, 4096});

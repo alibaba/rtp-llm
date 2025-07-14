@@ -13,14 +13,14 @@ namespace rtp_llm {
 template<typename StatusType, typename InputType>
 class BaseDFA {
 public:
-    BaseDFA() = default;
-    virtual ~BaseDFA() = default;
-    virtual bool isFinished() = 0;
+    BaseDFA()                                = default;
+    virtual ~BaseDFA()                       = default;
+    virtual bool       isFinished()          = 0;
     virtual StatusType next(InputType input) = 0;
 };
 
 template<typename StatusType, typename InputType>
-class StringContainDFA : public BaseDFA<StatusType, InputType> {
+class StringContainDFA: public BaseDFA<StatusType, InputType> {
 public:
     bool isFinished() override {
         std::stringstream ss;
@@ -37,16 +37,15 @@ public:
 };
 
 template<typename InputType>
-class StringContainDFA<size_t, InputType> : public BaseDFA<size_t, InputType> {
+class StringContainDFA<size_t, InputType>: public BaseDFA<size_t, InputType> {
 public:
     StringContainDFA(): contain_string_(), status_(0) {}
 
-    StringContainDFA(std::vector<InputType> input_list)
-        : contain_string_(input_list), status_(0) {
+    StringContainDFA(std::vector<InputType> input_list): contain_string_(input_list), status_(0) {
         computeNextArray(contain_string_);
     }
 
-    StringContainDFA(StringContainDFA&) = default;
+    StringContainDFA(StringContainDFA&)  = default;
     StringContainDFA(StringContainDFA&&) = default;
 
     void compile(const std::vector<InputType>& input_list) {
@@ -66,14 +65,14 @@ public:
         status_ = status;
     }
 
-    size_t next(InputType input) override { // find next available suffix by kmp
+    size_t next(InputType input) override {  // find next available suffix by kmp
         if (isFinished()) {
             return status_;
         }
-        while(status_ > 0 && contain_string_[status_] != input) {
+        while (status_ > 0 && contain_string_[status_] != input) {
             status_ = next_array_[status_ - 1];
         }
-        if(contain_string_[status_] == input) {
+        if (contain_string_[status_] == input) {
             ++status_;
         }
         return status_;
@@ -85,11 +84,11 @@ private:
         next_array_.resize(n, 0);
         size_t j = 0;
 
-        for(size_t i = 1; i < n; ++i) {
-            while(j > 0 && input_list[i] != input_list[j]) {
+        for (size_t i = 1; i < n; ++i) {
+            while (j > 0 && input_list[i] != input_list[j]) {
                 j = next_array_[j - 1];
             }
-            if(input_list[i] == input_list[j]) {
+            if (input_list[i] == input_list[j]) {
                 ++j;
             }
             next_array_[i] = j;
@@ -98,13 +97,12 @@ private:
 
 private:
     std::vector<InputType> contain_string_;
-    size_t status_;
-    std::vector<size_t> next_array_;
+    size_t                 status_;
+    std::vector<size_t>    next_array_;
 };
 
-
 template<typename StatusType, typename InputType>
-class TreeDFA : public BaseDFA<StatusType, InputType> {
+class TreeDFA: public BaseDFA<StatusType, InputType> {
 public:
     bool isFinished() override {
         std::stringstream ss;
@@ -120,14 +118,15 @@ public:
     }
 };
 
-
 template<typename InputType>
-class TreeDFA<std::string, InputType> : public BaseDFA<std::string, InputType> {
+class TreeDFA<std::string, InputType>: public BaseDFA<std::string, InputType> {
 public:
-    TreeDFA(PrefixToCandidateTokensPtr prefixToCandidateTokensPtr) : 
-        prefixToCandidateTokensPtr_(prefixToCandidateTokensPtr), status_(std::to_string(prefixToCandidateTokensPtr->startTokenId())), input_list_(10) {}
+    TreeDFA(PrefixToCandidateTokensPtr prefixToCandidateTokensPtr):
+        prefixToCandidateTokensPtr_(prefixToCandidateTokensPtr),
+        status_(std::to_string(prefixToCandidateTokensPtr->startTokenId())),
+        input_list_(10) {}
 
-    TreeDFA(TreeDFA&) = default;
+    TreeDFA(TreeDFA&)  = default;
     TreeDFA(TreeDFA&&) = default;
 
     bool isFinished() override {
@@ -150,7 +149,8 @@ public:
             return status_;
         }
         std::string new_status = prefixToCandidateTokensPtr_->generateNextKey(status_, input);
-        if (prefixToCandidateTokensPtr_->isValidStatus(new_status) || std::to_string(input) == std::to_string(prefixToCandidateTokensPtr_->endTokenId())) {
+        if (prefixToCandidateTokensPtr_->isValidStatus(new_status)
+            || std::to_string(input) == std::to_string(prefixToCandidateTokensPtr_->endTokenId())) {
             input_list_.push_back(input);
             status_ = new_status;
         } else {
@@ -163,7 +163,7 @@ public:
 
     std::vector<size_t> getCandidateTokenIds() {
         std::vector<size_t> token_ids;
-        for (auto token_id: prefixToCandidateTokensPtr_->getCandidateTokens(status_)) {
+        for (auto token_id : prefixToCandidateTokensPtr_->getCandidateTokens(status_)) {
             if (token_id >= 0) {
                 token_ids.push_back(static_cast<size_t>(token_id));
             } else {
@@ -175,8 +175,8 @@ public:
 
 private:
     PrefixToCandidateTokensPtr prefixToCandidateTokensPtr_;
-    std::string status_;
-    std::vector<InputType> input_list_;
+    std::string                status_;
+    std::vector<InputType>     input_list_;
 };
 
-}
+}  // namespace rtp_llm

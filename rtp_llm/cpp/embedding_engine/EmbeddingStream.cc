@@ -14,7 +14,7 @@ EmbeddingStream::EmbeddingStream(const shared_ptr<rtp_llm::EmbeddingInput>& quer
     begin_time_       = autil::TimeUtility::currentTimeInMilliSeconds();
     device_           = rtp_llm::DeviceFactory::getDefaultDevice();
     embedding_output_ = make_shared<EmbeddingOutput>();
-    stream_state_   = StreamState::WAITING;
+    stream_state_     = StreamState::WAITING;
     begin_time_us_    = autil::TimeUtility::currentTimeInMicroSeconds();
 }
 
@@ -73,7 +73,7 @@ void EmbeddingStream::setError(const std::string& error_info) {
 }
 
 void EmbeddingStream::setStart() {
-    wait_time_us_   = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
+    wait_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
     stream_state_ = StreamState::RUNNING;
 }
 

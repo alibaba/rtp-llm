@@ -22,6 +22,7 @@ public:
     virtual void requestWorkers(const std::map<std::string, std::string>& body_map,
                                 const std::string&                        uri     = "inference_internal",
                                 bool                                      is_wait = false);
+
 private:
     void getWorkers();
 

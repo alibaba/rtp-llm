@@ -40,10 +40,19 @@ __device__ inline unsigned __ballot_sync(unsigned mask, int predicate) {
     return __ballot(predicate);
 }
 
-template<typename T_OUT, typename T_IN> __host__ __device__ inline T_OUT special_cast(T_IN val) { return val; }
+template<typename T_OUT, typename T_IN>
+__host__ __device__ inline T_OUT special_cast(T_IN val) {
+    return val;
+}
 #ifdef ENABLE_BF16
-template<> __host__ __device__ inline amd_bfloat16 special_cast<amd_bfloat16, float>(float val) { return __float2bfloat16(val); };
-template<> __host__ __device__ inline float special_cast<float, amd_bfloat16>(amd_bfloat16 val) { return __bfloat162float(val); };
+template<>
+__host__ __device__ inline amd_bfloat16 special_cast<amd_bfloat16, float>(float val) {
+    return __float2bfloat16(val);
+};
+template<>
+__host__ __device__ inline float special_cast<float, amd_bfloat16>(amd_bfloat16 val) {
+    return __bfloat162float(val);
+};
 #endif
 
 #define curand_uniform hiprand_uniform
@@ -87,7 +96,6 @@ template<> __host__ __device__ inline float special_cast<float, amd_bfloat16>(am
 #define cudaFree hipFree
 #define cudaFreeAsync hipFreeAsync
 
-
 #define cudaEventSynchronize hipEventSynchronize
 #define cudaEventCreate hipEventCreate
 #define cudaEventRecord hipEventRecord
@@ -115,4 +123,4 @@ template<> __host__ __device__ inline float special_cast<float, amd_bfloat16>(am
 #define cudaIpcOpenMemHandle hipIpcOpenMemHandle
 #define cudaIpcMemLazyEnablePeerAccess hipIpcMemLazyEnablePeerAccess
 
-    // Taken from cuda_utils.h
+// Taken from cuda_utils.h

@@ -71,15 +71,14 @@ double_vec_t generateRandomBalancePlan(int log_exp_num, int phy_exp_num) {
     return {log2phy, logic_expert_cnt};
 }
 
-
 void equalExpertBalanceHost(vector<int>&       experts_ids,
-                               vector<int>&       log_stats,
-                               const vector<int>& log2phy,
-                               const vector<int>& logic_expert_cnt,
-                               int                log_exp_num,
-                               int                phy_exp_num,
-                               int                total_tokens,
-                               int                ep_rank) {
+                            vector<int>&       log_stats,
+                            const vector<int>& log2phy,
+                            const vector<int>& logic_expert_cnt,
+                            int                log_exp_num,
+                            int                phy_exp_num,
+                            int                total_tokens,
+                            int                ep_rank) {
     int max_exp_num = phy_exp_num - log_exp_num + 1;
     for (int i = 0; i < total_tokens; ++i) {
         int log_exp_id = experts_ids[i];
@@ -105,8 +104,7 @@ void updateGpuLoadsHost(
     }
 }
 
-void updateGpuLoadsLLHost(
-    vector<int>& experts_cnts, vector<int>& gpu_loads, int local_experts_num, int ep_rank) {
+void updateGpuLoadsLLHost(vector<int>& experts_cnts, vector<int>& gpu_loads, int local_experts_num, int ep_rank) {
     for (int i = 0; i < local_experts_num; ++i) {
         gpu_loads[ep_rank] += experts_cnts[i];
     }
@@ -125,27 +123,27 @@ void equalExpertBalanceTest(int total_tokens, int log_exp_num, int phy_exp_num, 
     vector<int> log_stats(log_exp_num, 0);
     auto [log2phy, logic_expert_cnt] = generateRandomBalancePlan(log_exp_num, phy_exp_num);
 
-    int* experts_ids_d = createDeviceBufferFromVector(experts_ids);
-    int* log_stats_d = createDeviceBufferFromVector(log_stats);
-    int* log2phy_d = createDeviceBufferFromVector(log2phy);
+    int* experts_ids_d      = createDeviceBufferFromVector(experts_ids);
+    int* log_stats_d        = createDeviceBufferFromVector(log_stats);
+    int* log2phy_d          = createDeviceBufferFromVector(log2phy);
     int* logic_expert_cnt_d = createDeviceBufferFromVector(logic_expert_cnt);
 
     // device
     cudaStream_t stream = cudaStreamDefault;
     launch_equal_expert_balance(experts_ids_d,
-                                 log_stats_d,
-                                 log2phy_d,
-                                 logic_expert_cnt_d,
-                                 log_exp_num,
-                                 phy_exp_num,
-                                 total_tokens,
-                                 ep_rank,
-                                 stream);
+                                log_stats_d,
+                                log2phy_d,
+                                logic_expert_cnt_d,
+                                log_exp_num,
+                                phy_exp_num,
+                                total_tokens,
+                                ep_rank,
+                                stream);
     cudaStreamSynchronize(stream);
 
     // copy back to host
     vector<int> expert_ids_res = createVectorFromDeviceBuffer(experts_ids_d, total_tokens);
-    vector<int> log_stats_res = createVectorFromDeviceBuffer(log_stats_d, log_exp_num);
+    vector<int> log_stats_res  = createVectorFromDeviceBuffer(log_stats_d, log_exp_num);
 
     // host
     equalExpertBalanceHost(
@@ -160,7 +158,7 @@ void updateGpuLoadsTest(int total_tokens, int log_exp_num, int phy_exp_num, int 
     vector<int> gpu_loads(ep_size, 0);
 
     int* experts_ids_d = createDeviceBufferFromVector(experts_ids);
-    int* gpu_loads_d = createDeviceBufferFromVector(gpu_loads);
+    int* gpu_loads_d   = createDeviceBufferFromVector(gpu_loads);
 
     // device
     cudaStream_t stream = cudaStreamDefault;
@@ -175,13 +173,12 @@ void updateGpuLoadsTest(int total_tokens, int log_exp_num, int phy_exp_num, int 
     EXPECT_EQ(gpu_loads_res, gpu_loads);
 }
 
-void updateGpuLoadsLLTest(int local_experts_num, int ep_rank, int ep_size)
-{
+void updateGpuLoadsLLTest(int local_experts_num, int ep_rank, int ep_size) {
     vector<int> experts_cnts = generateRandomVector<int>(local_experts_num, 10000);
     vector<int> gpu_loads(ep_size, 0);
 
     int* experts_cnts_d = createDeviceBufferFromVector(experts_cnts);
-    int* gpu_loads_d = createDeviceBufferFromVector(gpu_loads);
+    int* gpu_loads_d    = createDeviceBufferFromVector(gpu_loads);
 
     // device
     cudaStream_t stream = cudaStreamDefault;
@@ -196,17 +193,16 @@ void updateGpuLoadsLLTest(int local_experts_num, int ep_rank, int ep_size)
     EXPECT_EQ(gpu_loads_res, gpu_loads);
 }
 
-void updateGpuLoadsDeepEPTest(int total_tokens, int log_exp_num, int phy_exp_num, int ep_rank, int ep_size)
-{
-    int local_experts_num = phy_exp_num / ep_size;
-    vector<int64_t> expert_ids = generateRandomVector<int64_t>(total_tokens, local_experts_num + 1);
+void updateGpuLoadsDeepEPTest(int total_tokens, int log_exp_num, int phy_exp_num, int ep_rank, int ep_size) {
+    int             local_experts_num = phy_exp_num / ep_size;
+    vector<int64_t> expert_ids        = generateRandomVector<int64_t>(total_tokens, local_experts_num + 1);
     for (auto& id : expert_ids) {
         id--;
     }
     vector<int> gpu_loads(ep_size, 0);
 
     int64_t* expert_ids_d = createDeviceBufferFromVector(expert_ids);
-    int* gpu_loads_d = createDeviceBufferFromVector(gpu_loads);
+    int*     gpu_loads_d  = createDeviceBufferFromVector(gpu_loads);
 
     // device
     cudaStream_t stream = cudaStreamDefault;

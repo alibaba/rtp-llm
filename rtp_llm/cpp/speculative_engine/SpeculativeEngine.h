@@ -29,36 +29,34 @@ public:
         tap::enableProfiler(config_, activities_);
     }
     void stop() {
-        std::unique_ptr<tap::ProfilerResult> res = tap::disableProfiler();
-        std::string file_name = prefix_ + std::to_string(count) + ".json";
+        std::unique_ptr<tap::ProfilerResult> res       = tap::disableProfiler();
+        std::string                          file_name = prefix_ + std::to_string(count) + ".json";
         res->save(file_name);
         stoped_ = true;
     }
-protected:
-    static size_t count;
-    std::string   prefix_;
-    tpi::ProfilerConfig config_ = tpi::ProfilerConfig(tpi::ProfilerState::KINETO);
-    std::set<tpi::ActivityType> activities_{tpi::ActivityType::CUDA};
-    bool stoped_ = true;
-};
 
+protected:
+    static size_t               count;
+    std::string                 prefix_;
+    tpi::ProfilerConfig         config_ = tpi::ProfilerConfig(tpi::ProfilerState::KINETO);
+    std::set<tpi::ActivityType> activities_{tpi::ActivityType::CUDA};
+    bool                        stoped_ = true;
+};
 
 struct SpeculativeEngineStepMetrics {
     void reset() {
-        propose_time_us = 0;
-        score_time_us = 0;
-        sampler_time_us = 0;
+        propose_time_us   = 0;
+        score_time_us     = 0;
+        sampler_time_us   = 0;
         propose_token_num = 0;
-        accept_token_num = 0;
+        accept_token_num  = 0;
     }
-    int64_t propose_time_us = 0;
-    int64_t score_time_us = 0;
-    int64_t sampler_time_us = 0;
-    int64_t propose_token_num  = 0;
-    int64_t accept_token_num = 0;
+    int64_t propose_time_us   = 0;
+    int64_t score_time_us     = 0;
+    int64_t sampler_time_us   = 0;
+    int64_t propose_token_num = 0;
+    int64_t accept_token_num  = 0;
 };
-
-
 
 class SpeculativeEngine: public EngineBase {
 public:
@@ -66,9 +64,9 @@ public:
                                std::unique_ptr<ProposeModelEngineInitParams> propose_model_engine_init_params);
     ~SpeculativeEngine();
     absl::Status                      init();
-    std::shared_ptr<GenerateStream> makeStream(const std::shared_ptr<GenerateInput>& input) override;
+    std::shared_ptr<GenerateStream>   makeStream(const std::shared_ptr<GenerateInput>& input) override;
     std::shared_ptr<GenerateStream>   enqueue(const std::shared_ptr<GenerateInput>& input) override;
-    void enqueue(std::shared_ptr<GenerateStream>& stream) override;
+    void                              enqueue(std::shared_ptr<GenerateStream>& stream) override;
     absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>& generate_input,
                                              preRunMode                            mode) override;
     absl::Status                      stop() override;
@@ -104,17 +102,17 @@ private:
         std::list<GenerateStreamPtr> need_prefill_streams;
         streams.erase(std::remove_if(streams.begin(),
                                      streams.end(),
-                                    [&](GenerateStreamPtr stream) {
-                                        if (stream->getLastHiddenStates() == nullptr) {
-                                            need_prefill_streams.push_back(stream);
-                                            return true;
-                                        } else {
-                                            return false;
-                                        }
-                                    }), streams.end());
+                                     [&](GenerateStreamPtr stream) {
+                                         if (stream->getLastHiddenStates() == nullptr) {
+                                             need_prefill_streams.push_back(stream);
+                                             return true;
+                                         } else {
+                                             return false;
+                                         }
+                                     }),
+                      streams.end());
         return need_prefill_streams;
     };
-
 
     absl::Status startLoop();
     void         loop();
@@ -123,7 +121,6 @@ private:
     absl::Status initSystemPrompt();
     void         tpSyncDisableSPRun(bool& all_streams_disable_sp_run);
     void         reportMetrics();
-
 
     std::shared_ptr<GenerateStream> enqueueMinFakeQuery(int32_t max_new_tokens, bool fake_hidden_states = false);
 

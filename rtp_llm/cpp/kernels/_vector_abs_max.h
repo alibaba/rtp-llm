@@ -68,4 +68,3 @@ inline __device__ float vector_abs_max(uint4 a) {
     return cuda_max(cuda_max(vector_abs_max(a.x), vector_abs_max(a.y)),
                     cuda_max(vector_abs_max(a.z), vector_abs_max(a.w)));
 }
-

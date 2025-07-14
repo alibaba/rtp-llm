@@ -1,17 +1,18 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
 
+import os
+import unittest
+
 import torch
 import torch.nn.functional as F
-import unittest
-import os
-os.environ['DEVICE_RESERVE_MEMORY_BYTES'] = '128000000'
+
+os.environ["DEVICE_RESERVE_MEMORY_BYTES"] = "128000000"
+
 
 def per_token_quant_fp8(x):
     x = x.to(torch.float32)
-    per_token_amax, _ = torch.max(
-        input=torch.abs(x), dim=-1, keepdim=True
-    )
+    per_token_amax, _ = torch.max(input=torch.abs(x), dim=-1, keepdim=True)
     per_token_scale = per_token_amax / torch.finfo(torch.float8_e4m3fnuz).max
     per_token_scale[per_token_scale == 0] = 1
 
@@ -20,23 +21,21 @@ def per_token_quant_fp8(x):
     y_scale = per_token_scale.to(torch.float32)
     return y, y_scale
 
-def shuffle_weight(x, layout = (16, 16), use_int4 = False):
-        # Hardcode BLOCK_K and BLOCK_N
-        IN, IK = layout
-        BK = IK * 2
-        K = 16 // x.element_size() if not use_int4 else 32
-        BN = IN
-        assert (x.shape[-2] %
-                BN == 0), f'{x.shape[-2]} % {BN} == {x.shape[-2] % BN }'
-        assert (x.shape[-1] %
-                BK == 0), f'{x.shape[-1]} % {BK} == {x.shape[-1] % BK }'
-        x_ = x.view(-1,
-                    x.shape[-2]//BN, BN,
-                    x.shape[-1]//BK, BK//K, K)
-        x_ = x_.permute(0, 1, 3, 4, 2, 5)
-        x_ = x_.contiguous()
-        x_ = x_.view(*x.shape)
-        return x_
+
+def shuffle_weight(x, layout=(16, 16), use_int4=False):
+    # Hardcode BLOCK_K and BLOCK_N
+    IN, IK = layout
+    BK = IK * 2
+    K = 16 // x.element_size() if not use_int4 else 32
+    BN = IN
+    assert x.shape[-2] % BN == 0, f"{x.shape[-2]} % {BN} == {x.shape[-2] % BN }"
+    assert x.shape[-1] % BK == 0, f"{x.shape[-1]} % {BK} == {x.shape[-1] % BK }"
+    x_ = x.view(-1, x.shape[-2] // BN, BN, x.shape[-1] // BK, BK // K, K)
+    x_ = x_.permute(0, 1, 3, 4, 2, 5)
+    x_ = x_.contiguous()
+    x_ = x_.view(*x.shape)
+    return x_
+
 
 def detailed_assert_close(a, b, rtol, atol, msg=""):
     mismatch_mask = ~torch.isclose(a, b, rtol=rtol, atol=atol)
@@ -54,9 +53,12 @@ def detailed_assert_close(a, b, rtol, atol, msg=""):
             error_msg += f"...（共 {len(mismatch_indices)} 处不匹配）"
         raise AssertionError(error_msg)
 
+
 class TestGemmOp(unittest.TestCase):
     def setUp(self):
-        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/rtp_llm/tests/librocm_test_ops.so")
+        torch.classes.load_library(
+            os.environ["TEST_SRCDIR"] + "/rtp_llm/tests/librocm_test_ops.so"
+        )
         self.gemm_op = torch.classes.unittest.GemmOp()
 
     def _fp8_gemm_ref(self, input, weight_quant, weight_scale):
@@ -69,19 +71,26 @@ class TestGemmOp(unittest.TestCase):
         return out
 
     def test_ptpc_gemm(self):
-        for (n, k) in [(9216, 4096),(4608, 4096),]:
+        for n, k in [
+            (9216, 4096),
+            (4608, 4096),
+        ]:
             for m in [1, 2, 4, 8, 16, 32, 64, 128, 256, 1024, 2048, 4096, 16384, 32768]:
-                input = torch.randn(m, k, device='cuda', dtype=torch.bfloat16) * 0.1
-                weight = torch.randn(n, k, device='cuda', dtype=torch.bfloat16) * 0.1
+                input = torch.randn(m, k, device="cuda", dtype=torch.bfloat16) * 0.1
+                weight = torch.randn(n, k, device="cuda", dtype=torch.bfloat16) * 0.1
                 weight_quant, weight_scale = per_token_quant_fp8(weight)
-                
-                torch_output = self._fp8_gemm_ref(input, weight_quant, weight_scale).to("cpu")
-                
+
+                torch_output = self._fp8_gemm_ref(input, weight_quant, weight_scale).to(
+                    "cpu"
+                )
+
                 weight_quant_shuffle = shuffle_weight(weight_quant)
-                weight_quant_shuffle = weight_quant_shuffle.t() # k,n
-                weight_scale = weight_scale.t() # 1,n
-                custom_output = torch.zeros((m, n), device='cuda', dtype=torch.bfloat16)
-                self.gemm_op.forward(input, weight_quant_shuffle, weight_scale, custom_output)
+                weight_quant_shuffle = weight_quant_shuffle.t()  # k,n
+                weight_scale = weight_scale.t()  # 1,n
+                custom_output = torch.zeros((m, n), device="cuda", dtype=torch.bfloat16)
+                self.gemm_op.forward(
+                    input, weight_quant_shuffle, weight_scale, custom_output
+                )
                 custom_output = custom_output.to(torch.float32).to("cpu")
 
                 detailed_assert_close(
@@ -89,10 +98,10 @@ class TestGemmOp(unittest.TestCase):
                     torch_output,
                     rtol=1e-2,
                     atol=4e-2,
-                    msg=f"m:{m}, k:{k}, n:{n} 结果不匹配: rtp: {custom_output},\n torch: {torch_output},"
+                    msg=f"m:{m}, k:{k}, n:{n} 结果不匹配: rtp: {custom_output},\n torch: {torch_output},",
                 )
                 print(f"dims({m=}, {n=}, {k=}) passed~")
 
+
 if __name__ == "__main__":
     unittest.main()
-

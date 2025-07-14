@@ -177,7 +177,7 @@ struct bfloat16 {
         return (reinterpret_cast<const std::uint16_t&>(__x) & 0x7fff) != 0;
     }
 
-    //convert from other extended types
+    // convert from other extended types
     __BF16_DEVICE_FUNC operator float16_t() const {
         return __Bf16Impl::bfloat162float16(__x);
     }

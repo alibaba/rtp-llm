@@ -36,11 +36,11 @@ void GenerateContext::reportTime() {
 }
 
 void GenerateContext::collectBasicMetrics(RpcMetricsCollector& collector) {
-    collector.qps                               = true;
-    collector.error_qps                         = hasError();
-    collector.cancel_qps                        = cancelled();
-    collector.onflight_request                  = onflight_requests;
-    collector.total_rt_us                       = executeTimeMs() * 1000;
+    collector.qps              = true;
+    collector.error_qps        = hasError();
+    collector.cancel_qps       = cancelled();
+    collector.onflight_request = onflight_requests;
+    collector.total_rt_us      = executeTimeMs() * 1000;
 }
 
 void GenerateContext::reportMetrics(RpcMetricsCollector& collector) {

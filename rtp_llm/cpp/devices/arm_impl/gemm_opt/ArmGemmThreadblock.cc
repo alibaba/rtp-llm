@@ -20,7 +20,8 @@ void GemmKernel::thread_block_bf16_m8(
     int M = p.M;
     int N = p.N;
 
-    hie::bfloat16* a_bf16_ptr1 = p.a_ptr + (m + 0) * p.K_pack + k * 2; // [m, k*2], *2 is for processing 2*k_tile per kernel
+    hie::bfloat16* a_bf16_ptr1 =
+        p.a_ptr + (m + 0) * p.K_pack + k * 2;  // [m, k*2], *2 is for processing 2*k_tile per kernel
     hie::bfloat16* a_bf16_ptr2 = p.a_ptr + (m + 2) * p.K_pack + k * 2;
     hie::bfloat16* a_bf16_ptr3 = p.a_ptr + (m + 4) * p.K_pack + k * 2;
     hie::bfloat16* a_bf16_ptr4 = p.a_ptr + (m + 6) * p.K_pack + k * 2;
@@ -38,7 +39,7 @@ void GemmKernel::thread_block_bf16_m8(
     int k_init = k * 2;
     int K_MAX  = (k + k_tile) * 2;
     K_MAX      = K_MAX < p.K_pack * 2 ? K_MAX : p.K_pack * 2;
-    int K_MAIN = K_MAX / 16 * 16; // floor
+    int K_MAIN = K_MAX / 16 * 16;  // floor
 
     activation_const_t constant;
 
@@ -50,7 +51,7 @@ void GemmKernel::thread_block_bf16_m8(
         "ptrue   p5.b                               \n"
 
         // ASM_BLOCK_PREFETCH_PART_0
-        
+
         "mov     x0, %[k_init]                      \n" // k
         "mov     x2, %[m]                           \n"
         "mov     x3, %[n]                           \n"
@@ -106,10 +107,10 @@ void GemmKernel::thread_block_bf16_m8(
         [M] "r"(M), [N] "r"(N), [K_MAIN] "r"(K_MAIN), [K_MAX] "r"(K_MAX)
         : "p0", "p1", "p2", "p4", "p5",
         "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8",
-        "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7", "z8", "z9", 
+        "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7", "z8", "z9",
         "z10", "z11", "z12", "z13", "z14", "z15", "z16", "z17", "z18", "z19",
         "z20", "z21", "z22", "z23", "z24", "z25", "z26", "z27", "z28", "z29",
-        "z30", "z31", 
+        "z30", "z31",
         "cc", "memory");
 
     if (p.with_bias && k == 0) {
@@ -168,7 +169,8 @@ void GemmKernel::thread_block_bf16_m8(
     int M = p.M;
     int N = p.N;
 
-    hie::bfloat16* a_bf16_ptr1 = p.a_ptr + (m + 0) * p.K_pack + k * 2; // [m, k*2], *2 is for processing 2*k_tile per kernel
+    hie::bfloat16* a_bf16_ptr1 =
+        p.a_ptr + (m + 0) * p.K_pack + k * 2;  // [m, k*2], *2 is for processing 2*k_tile per kernel
     hie::bfloat16* a_bf16_ptr2 = p.a_ptr + (m + 2) * p.K_pack + k * 2;
     hie::bfloat16* a_bf16_ptr3 = p.a_ptr + (m + 4) * p.K_pack + k * 2;
     hie::bfloat16* a_bf16_ptr4 = p.a_ptr + (m + 6) * p.K_pack + k * 2;
@@ -181,12 +183,12 @@ void GemmKernel::thread_block_bf16_m8(
 
     int next_line_offset = N * sizeof(float16_t);
 
-    float* bias_ptr = p.bias_ptr + n; // TODO: handle float16_t bias
+    float* bias_ptr = p.bias_ptr + n;  // TODO: handle float16_t bias
 
     int k_init = k * 2;
     int K_MAX  = (k + k_tile) * 2;
     K_MAX      = K_MAX < p.K_pack * 2 ? K_MAX : p.K_pack * 2;
-    int K_MAIN = K_MAX / 16 * 16; // floor
+    int K_MAIN = K_MAX / 16 * 16;  // floor
 
     activation_const_t constant;
 
@@ -198,7 +200,7 @@ void GemmKernel::thread_block_bf16_m8(
         "ptrue   p5.b                               \n"
 
         // ASM_BLOCK_PREFETCH_PART_0
-        
+
         "mov     x0, %[k_init]                      \n" // k
         "mov     x2, %[m]                           \n"
         "mov     x3, %[n]                           \n"
@@ -254,10 +256,10 @@ void GemmKernel::thread_block_bf16_m8(
         [M] "r"(M), [N] "r"(N), [K_MAIN] "r"(K_MAIN), [K_MAX] "r"(K_MAX)
         : "p0", "p1", "p2", "p4", "p5", "p3",
         "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8",
-        "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7", "z8", "z9", 
+        "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7", "z8", "z9",
         "z10", "z11", "z12", "z13", "z14", "z15", "z16", "z17", "z18", "z19",
         "z20", "z21", "z22", "z23", "z24", "z25", "z26", "z27", "z28", "z29",
-        "z30", "z31", 
+        "z30", "z31",
         "cc", "memory");
 
     if (p.with_bias && k == 0) {
@@ -306,7 +308,6 @@ void GemmKernel::thread_block_bf16_m8(
 #undef LABEL_SKIP_PRF
     return;
 }
-
 
 /*********************************************************/
 
@@ -404,12 +405,12 @@ void GemmKernel::thread_block_bf16_m8_mres(
         [next_line_offset] "r"(next_line_offset),
         [m] "r"(m), [n] "r"(n), [k_init] "r"(k_init),
         [M] "r"(M), [N] "r"(N), [K_MAIN] "r"(K_MAIN), [K_MAX] "r"(K_MAX)
-        : "p0", "p1", "p2", "p4", "p5", 
+        : "p0", "p1", "p2", "p4", "p5",
         "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8",
         "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7", "z8", "z9",
         "z10", "z11", "z12", "z13", "z14", "z15", "z16", "z17", "z18", "z19",
         "z20", "z21", "z22", "z23", "z24", "z25", "z26", "z27", "z28", "z29",
-        "z30", "z31", 
+        "z30", "z31",
         "cc", "memory");
 
     if (p.with_bias && k == 0) {
@@ -562,7 +563,7 @@ void GemmKernel::thread_block_bf16_m8_mres(
         "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7", "z8", "z9",
         "z10", "z11", "z12", "z13", "z14", "z15", "z16", "z17", "z18", "z19",
         "z20", "z21", "z22", "z23", "z24", "z25", "z26", "z27", "z28", "z29",
-        "z30", "z31", 
+        "z30", "z31",
         "cc", "memory");
 
     if (p.with_bias && k == 0) {
@@ -712,12 +713,12 @@ void GemmKernel::thread_block_bf16_m8_nres(
         [next_line_offset] "r"(next_line_offset),
         [m] "r"(m), [n] "r"(n), [k_init] "r"(k_init),
         [M] "r"(M), [N] "r"(N), [K_MAIN] "r"(K_MAIN), [K_MAX] "r"(K_MAX)
-        : "p0", "p1", "p2", "p4", "p5", 
+        : "p0", "p1", "p2", "p4", "p5",
         "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8",
         "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7", "z8", "z9",
         "z10", "z11", "z12", "z13", "z14", "z15", "z16", "z17", "z18", "z19",
         "z20", "z21", "z22", "z23", "z24", "z25", "z26", "z27", "z28", "z29",
-        "z30", "z31", 
+        "z30", "z31",
         "cc", "memory");
 
     if (p.with_bias && k == 0) {
@@ -870,7 +871,7 @@ void GemmKernel::thread_block_bf16_m8_nres(
         "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7", "z8", "z9",
         "z10", "z11", "z12", "z13", "z14", "z15", "z16", "z17", "z18", "z19",
         "z20", "z21", "z22", "z23", "z24", "z25", "z26", "z27", "z28", "z29",
-        "z30", "z31", 
+        "z30", "z31",
         "cc", "memory");
 
     if (p.with_bias && k == 0) {
@@ -1019,12 +1020,12 @@ void GemmKernel::thread_block_bf16_m8_res(
         [next_line_offset] "r"(next_line_offset),
         [m] "r"(m), [n] "r"(n), [k_init] "r"(k_init),
         [M] "r"(M), [N] "r"(N), [K_MAIN] "r"(K_MAIN), [K_MAX] "r"(K_MAX)
-        : "p0", "p1", "p2", "p4", "p5", 
+        : "p0", "p1", "p2", "p4", "p5",
         "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8",
         "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7", "z8", "z9",
         "z10", "z11", "z12", "z13", "z14", "z15", "z16", "z17", "z18", "z19",
         "z20", "z21", "z22", "z23", "z24", "z25", "z26", "z27", "z28", "z29",
-        "z30", "z31", 
+        "z30", "z31",
         "cc", "memory");
 
     if (p.with_bias && k == 0) {
@@ -1176,7 +1177,7 @@ void GemmKernel::thread_block_bf16_m8_res(
         "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7", "z8", "z9",
         "z10", "z11", "z12", "z13", "z14", "z15", "z16", "z17", "z18", "z19",
         "z20", "z21", "z22", "z23", "z24", "z25", "z26", "z27", "z28", "z29",
-        "z30", "z31", 
+        "z30", "z31",
         "cc", "memory");
 
     if (p.with_bias && k == 0) {
@@ -1229,6 +1230,5 @@ void GemmKernel::thread_block_bf16_m8_res(
 #undef LABEL_SKIP_ACCUMULATE
     return;
 }
-
 
 }  // namespace rtp_llm

@@ -7,8 +7,8 @@ namespace http_server {
 
 AUTIL_LOG_SETUP(http_server, HttpServer);
 
-HttpServer::HttpServer(anet::Transport *transport, size_t threadNum, size_t queueSize) : _anetApp(transport) {
-    _router = std::make_shared<HttpRouter>();
+HttpServer::HttpServer(anet::Transport* transport, size_t threadNum, size_t queueSize): _anetApp(transport) {
+    _router        = std::make_shared<HttpRouter>();
     _serverAdapter = std::make_shared<HttpServerAdapter>(_router, threadNum, queueSize);
 }
 
@@ -18,7 +18,7 @@ HttpServer::~HttpServer() {
     _router.reset();
 }
 
-bool HttpServer::RegisterRoute(const std::string &method, const std::string &endpoint, const ResponseHandler &func) {
+bool HttpServer::RegisterRoute(const std::string& method, const std::string& endpoint, const ResponseHandler& func) {
     if (!_router) {
         AUTIL_LOG(
             WARN, "register route failed, router is null, method: %s, endpoint: %s", method.c_str(), endpoint.c_str());
@@ -27,7 +27,7 @@ bool HttpServer::RegisterRoute(const std::string &method, const std::string &end
     return _router->RegisterRoute(method, endpoint, func);
 }
 
-bool HttpServer::Start(const std::string &address, int timeout, int maxIdleTime, int backlog) {
+bool HttpServer::Start(const std::string& address, int timeout, int maxIdleTime, int backlog) {
     _listenIoc = _anetApp.Listen(address, _serverAdapter.get(), timeout, maxIdleTime, backlog);
 
     if (_listenIoc == nullptr) {
@@ -51,4 +51,4 @@ bool HttpServer::Stop() {
     return true;
 }
 
-} // namespace http_server
+}  // namespace http_server

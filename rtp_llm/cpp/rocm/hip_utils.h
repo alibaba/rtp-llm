@@ -1,6 +1,5 @@
 #pragma once
 
-
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/StringUtil.h"
@@ -12,7 +11,6 @@
 #include <hipblaslt/hipblaslt.h>
 #include <hipblaslt/hipblaslt-ext.hpp>
 
-
 #include <fstream>
 #include <iostream>
 #include <string>
@@ -21,18 +19,18 @@
 namespace rtp_llm {
 namespace rocm {
 
-#define HIPBLAS_WORKSPACE_SIZE (512L*1024L*1024L) // C*splitK
-#define ROCM_RUNTIME_MEM_SIZE  (HIPBLAS_WORKSPACE_SIZE + 512L*1024L*1024L)
+#define HIPBLAS_WORKSPACE_SIZE (512L * 1024L * 1024L)  // C*splitK
+#define ROCM_RUNTIME_MEM_SIZE (HIPBLAS_WORKSPACE_SIZE + 512L * 1024L * 1024L)
 
 #define ROCM_CHECK(val) rocm::check((val), __FILE__, __LINE__)
 #define ROCM_CHECK_ERROR() rocm::syncAndCheckInDebug(__FILE__, __LINE__)
-#define ROCM_CHECK_VALUE(val, info, ...)                              \
-do {                                                                \
-    bool is_valid_val = (val);                                      \
-    if (!is_valid_val) {						                    \
-        rocm::throwRocmError(__FILE__, __LINE__, rtp_llm::fmtstr(info, ##__VA_ARGS__)); \
-    }								                                \
-} while (0)
+#define ROCM_CHECK_VALUE(val, info, ...)                                                                               \
+    do {                                                                                                               \
+        bool is_valid_val = (val);                                                                                     \
+        if (!is_valid_val) {                                                                                           \
+            rocm::throwRocmError(__FILE__, __LINE__, rtp_llm::fmtstr(info, ##__VA_ARGS__));                            \
+        }                                                                                                              \
+    } while (0)
 #define ROCM_FAIL(info, ...) rocm::throwRocmError(__FILE__, __LINE__, rtp_llm::fmtstr(info, ##__VA_ARGS__))
 
 void throwRocmError(const char* const file, int const line, std::string const& info = "");
@@ -49,7 +47,7 @@ T getRocmValue(const T* ptr, int index) {
 
 template<typename T>
 void setRocmValue(T* ptr, int index, T value) {
-  ROCM_CHECK(hipMemcpy(ptr + index, &value, sizeof(T), hipMemcpyHostToDevice));
+    ROCM_CHECK(hipMemcpy(ptr + index, &value, sizeof(T), hipMemcpyHostToDevice));
 }
 
 enum FtHipDataType {

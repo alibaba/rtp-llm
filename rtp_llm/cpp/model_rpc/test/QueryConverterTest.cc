@@ -13,8 +13,7 @@
 using namespace std;
 namespace rtp_llm {
 
-class QueryConverterTest: public DeviceTestBase {
-};
+class QueryConverterTest: public DeviceTestBase {};
 
 TEST_F(QueryConverterTest, testTransInput) {
     GenerateInputPB input;
@@ -43,7 +42,7 @@ TEST_F(QueryConverterTest, testTransInput) {
         }
     }
     auto generate_input = QueryConverter::transQuery(&input);
-    auto input_ids = generate_input->input_ids.get();
+    auto input_ids      = generate_input->input_ids.get();
     ASSERT_EQ(input_ids->size(), 2);
     ASSERT_EQ(*(int*)(input_ids->data()), 0);
     auto generate_config = generate_input->generate_config;
@@ -70,22 +69,24 @@ TEST_F(QueryConverterTest, testTransInput) {
 }
 
 TEST_F(QueryConverterTest, testTransOutput) {
-    auto device           = rtp_llm::DeviceFactory::getDefaultDevice();
-    auto output_token_ids = device->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {1, 3}, rtp_llm::AllocationType::HOST}, {});
-    auto data             = (int*)output_token_ids->data();
+    auto device = rtp_llm::DeviceFactory::getDefaultDevice();
+    auto output_token_ids =
+        device->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {1, 3}, rtp_llm::AllocationType::HOST}, {});
+    auto data = (int*)output_token_ids->data();
     for (int i = 0; i < 3; ++i) {
         data[i] = i;
     }
     GenerateOutputs outputs;
-    GenerateOutput res;
+    GenerateOutput  res;
     res.output_ids            = std::move(output_token_ids);
     res.finished              = true;
     res.aux_info.cost_time_us = 1000;
     res.aux_info.iter_count   = 9;
     res.aux_info.input_len    = 8;
     res.aux_info.output_len   = 7;
-    auto hidden_states        = device->allocateBuffer({rtp_llm::DataType::TYPE_FP32, {3, 2}, rtp_llm::AllocationType::HOST}, {});
-    auto hidden_states_data   = (float*)hidden_states->data();
+    auto hidden_states =
+        device->allocateBuffer({rtp_llm::DataType::TYPE_FP32, {3, 2}, rtp_llm::AllocationType::HOST}, {});
+    auto hidden_states_data = (float*)hidden_states->data();
     for (int i = 0; i < 6; ++i) {
         hidden_states_data[i] = i;
     }
@@ -95,8 +96,8 @@ TEST_F(QueryConverterTest, testTransOutput) {
     GenerateOutputsPB outputs_pb;
     QueryConverter::transResponse(&outputs_pb, &outputs);
 
-    auto& output_pb = outputs_pb.generate_outputs(0);
-    auto aux_info_pb = output_pb.aux_info();
+    auto& output_pb   = outputs_pb.generate_outputs(0);
+    auto  aux_info_pb = output_pb.aux_info();
     EXPECT_EQ(aux_info_pb.cost_time_us(), 1000);
     EXPECT_EQ(aux_info_pb.iter_count(), 9);
     EXPECT_EQ(aux_info_pb.input_len(), 8);
@@ -106,7 +107,7 @@ TEST_F(QueryConverterTest, testTransOutput) {
     ASSERT_EQ(output_ids_pb.shape_size(), 2);
     ASSERT_EQ(output_ids_pb.shape(0), 1);
     ASSERT_EQ(output_ids_pb.shape(1), 3);
-    auto output_ids_string = output_ids_pb.int32_data();
+    auto            output_ids_string = output_ids_pb.int32_data();
     vector<int32_t> output_ids_vector;
     output_ids_vector.resize(output_ids_string.size() / sizeof(int32_t));
     std::memcpy(output_ids_vector.data(), output_ids_string.data(), output_ids_string.size());
@@ -119,7 +120,7 @@ TEST_F(QueryConverterTest, testTransOutput) {
     ASSERT_EQ(hidden_states_pb.shape_size(), 2);
     ASSERT_EQ(hidden_states_pb.shape(0), 3);
     ASSERT_EQ(hidden_states_pb.shape(1), 2);
-    auto hidden_states_string = hidden_states_pb.fp32_data();
+    auto          hidden_states_string = hidden_states_pb.fp32_data();
     vector<float> hidden_states_vector;
     hidden_states_vector.resize(hidden_states_string.size() / sizeof(float));
     std::memcpy(hidden_states_vector.data(), hidden_states_string.data(), hidden_states_string.size());

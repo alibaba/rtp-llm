@@ -29,12 +29,12 @@ index 7389e72..0ca3180 100644
          py_test: the py_test rule to be used.
 @@ -90,6 +92,7 @@ def pip_compile(
      )
- 
+
      data = [name, requirements_txt, src] + [f for f in (requirements_linux, requirements_darwin, requirements_windows) if f != None]
 +    data += extra_data
- 
+
      # Use the Label constructor so this is expanded in the context of the file
      # where it appears, which is to say, in @rules_python
--- 
+--
 2.32.0.3.g01195cf9f
 

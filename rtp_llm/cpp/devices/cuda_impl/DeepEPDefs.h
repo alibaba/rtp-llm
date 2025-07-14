@@ -22,8 +22,7 @@ public:
                  const std::vector<std::optional<torch::Tensor>>& extra_tensors):
         event_(event), extra_tensors_(extra_tensors) {}
 
-    ~EventOverlap() {
-    }
+    ~EventOverlap() {}
 
 public:
     void currentStreamWait() {
@@ -234,8 +233,8 @@ struct DeepEPCombineOutputLowLatency {
 };
 
 struct DeepEPLowLatencyExpertContext {
-    uint32_t index{0};
-    uint64_t token_num{0};
+    uint32_t  index{0};
+    uint64_t  token_num{0};
     BufferPtr all_hidden_states;
     BufferPtr hidden_states;
     BufferPtr expert_ids;
@@ -243,23 +242,36 @@ struct DeepEPLowLatencyExpertContext {
     BufferPtr expert_ids_cpu_buffer;
     BufferPtr expert_scales_cpu_buffer;
     BufferPtr out_hidden_states;
-    DeepEPLowLatencyExpertContext(uint32_t index) : index(index) {}
-    DeepEPLowLatencyExpertContext(uint32_t index, uint64_t token_num, const BufferPtr& all_hidden_states, const BufferPtr& hidden_states, const BufferPtr& expert_ids, const BufferPtr& expert_scales, const BufferPtr& expert_ids_cpu_buffer, const BufferPtr& expert_scales_cpu_buffer): index(index), token_num(token_num), all_hidden_states(all_hidden_states), hidden_states(hidden_states), expert_ids(expert_ids), expert_scales(expert_scales), expert_ids_cpu_buffer(expert_ids_cpu_buffer), expert_scales_cpu_buffer(expert_scales_cpu_buffer) {}
+    DeepEPLowLatencyExpertContext(uint32_t index): index(index) {}
+    DeepEPLowLatencyExpertContext(uint32_t         index,
+                                  uint64_t         token_num,
+                                  const BufferPtr& all_hidden_states,
+                                  const BufferPtr& hidden_states,
+                                  const BufferPtr& expert_ids,
+                                  const BufferPtr& expert_scales,
+                                  const BufferPtr& expert_ids_cpu_buffer,
+                                  const BufferPtr& expert_scales_cpu_buffer):
+        index(index),
+        token_num(token_num),
+        all_hidden_states(all_hidden_states),
+        hidden_states(hidden_states),
+        expert_ids(expert_ids),
+        expert_scales(expert_scales),
+        expert_ids_cpu_buffer(expert_ids_cpu_buffer),
+        expert_scales_cpu_buffer(expert_scales_cpu_buffer) {}
 };
 
-class DeepEPRecvHook : public DeviceHook {
+class DeepEPRecvHook: public DeviceHook {
 public:
-    DeepEPRecvHook(
-        const std::function<void()>& hook,
-        const std::function<void()>&& stats_hook,
-        const std::vector<BufferPtr>& hold_buffers,
-        const std::vector<torch::Tensor>& hold_tensors)
-    : hook_(hook)
-    , stats_hook_(stats_hook)
-    , hold_buffers_(hold_buffers)
-    , hold_tensors_(hold_tensors)
-    , synchronized_(false)
-    {};
+    DeepEPRecvHook(const std::function<void()>&      hook,
+                   const std::function<void()>&&     stats_hook,
+                   const std::vector<BufferPtr>&     hold_buffers,
+                   const std::vector<torch::Tensor>& hold_tensors):
+        hook_(hook),
+        stats_hook_(stats_hook),
+        hold_buffers_(hold_buffers),
+        hold_tensors_(hold_tensors),
+        synchronized_(false) {};
 
     ~DeepEPRecvHook() override {
         RTP_LLM_CHECK(synchronized_);
@@ -275,29 +287,26 @@ public:
     }
 
 private:
-    std::function<void()> hook_;
-    std::function<void()> stats_hook_;
-    std::vector<BufferPtr> hold_buffers_;
+    std::function<void()>      hook_;
+    std::function<void()>      stats_hook_;
+    std::vector<BufferPtr>     hold_buffers_;
     std::vector<torch::Tensor> hold_tensors_;
-    mutable bool synchronized_;
+    mutable bool               synchronized_;
 };
 
-class DeepEPCudaEventHook : public DeviceHook {
+class DeepEPCudaEventHook: public DeviceHook {
 public:
-    DeepEPCudaEventHook(
-        at::cuda::CUDAStream main_stream,
-        deep_ep::EventHandle event_handle,
-        const std::vector<BufferPtr>& hold_buffers = {},
-        const std::vector<torch::Tensor>& hold_tensors = {},
-        std::optional<DeepEPDispatchHandle> dispatch_handle = std::nullopt
-    )
-    : main_stream_(main_stream)
-    , event_handle_(event_handle)
-    , hold_buffers_(hold_buffers)
-    , hold_tensors_(hold_tensors)
-    , dispatch_handle_(dispatch_handle)
-    , synchronized_(false)
-    {
+    DeepEPCudaEventHook(at::cuda::CUDAStream                main_stream,
+                        deep_ep::EventHandle                event_handle,
+                        const std::vector<BufferPtr>&       hold_buffers    = {},
+                        const std::vector<torch::Tensor>&   hold_tensors    = {},
+                        std::optional<DeepEPDispatchHandle> dispatch_handle = std::nullopt):
+        main_stream_(main_stream),
+        event_handle_(event_handle),
+        hold_buffers_(hold_buffers),
+        hold_tensors_(hold_tensors),
+        dispatch_handle_(dispatch_handle),
+        synchronized_(false) {
         RTP_LLM_CHECK(bool(event_handle_.event));
     };
 
@@ -312,12 +321,12 @@ public:
     }
 
 private:
-    at::cuda::CUDAStream main_stream_;
-    deep_ep::EventHandle event_handle_;
-    std::vector<BufferPtr> hold_buffers_;
-    std::vector<torch::Tensor> hold_tensors_;
+    at::cuda::CUDAStream                main_stream_;
+    deep_ep::EventHandle                event_handle_;
+    std::vector<BufferPtr>              hold_buffers_;
+    std::vector<torch::Tensor>          hold_tensors_;
     std::optional<DeepEPDispatchHandle> dispatch_handle_;
-    mutable bool synchronized_;
+    mutable bool                        synchronized_;
 };
 
 }  // namespace rtp_llm

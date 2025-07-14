@@ -6,8 +6,8 @@ cc_proto(
     name = "cache_store_service",
     srcs = [
         "cache_store_service.proto",
-    ],   
+    ],
     deps = [
         "@havenask//aios/network/arpc:proto",
-    ], 
+    ],
 )

@@ -9,21 +9,21 @@ namespace rtp_llm {
 class BatchKVCacheResource {
 public:
     BatchKVCacheResource() {}
-    int                         batchSize() const;
-    int                         blockSize(int batch_id) const;
-    void                        resize(size_t batch_size);
-    void                        resize(size_t batch_id, int reserver_blocks, bool clear = false);
-    void                        shrink(size_t batch_id, int reserver_blocks);
-    void                        pushBack(const KVCacheResource& addr);
-    void                        append(size_t batch_id, const KVCacheResource& addr);
-    void                        appendClone(const KVCacheResource& addr, std::shared_ptr<CacheManager>& cache_manager);
-    void                        append(const std::vector<KVCacheResource>& resource);
-    int                         maxBlockSize() const;
-    const std::vector<int>&     blocks(int batch_id) const;
-    void                        clear();
-    void                        check() const;
+    int                     batchSize() const;
+    int                     blockSize(int batch_id) const;
+    void                    resize(size_t batch_size);
+    void                    resize(size_t batch_id, int reserver_blocks, bool clear = false);
+    void                    shrink(size_t batch_id, int reserver_blocks);
+    void                    pushBack(const KVCacheResource& addr);
+    void                    append(size_t batch_id, const KVCacheResource& addr);
+    void                    appendClone(const KVCacheResource& addr, std::shared_ptr<CacheManager>& cache_manager);
+    void                    append(const std::vector<KVCacheResource>& resource);
+    int                     maxBlockSize() const;
+    const std::vector<int>& blocks(int batch_id) const;
+    void                    clear();
+    void                    check() const;
 
-    std::string                 debugString() const;
+    std::string debugString() const;
 
 public:
     // [batch_size, max_block_per_seq]

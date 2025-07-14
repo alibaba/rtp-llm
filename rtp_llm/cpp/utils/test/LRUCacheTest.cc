@@ -14,7 +14,6 @@ namespace rtp_llm {
 
 class LRUCacheTest: public ::testing::Test {
 protected:
-
 };
 
 TEST_F(LRUCacheTest, testSimple) {

@@ -3,13 +3,14 @@ import logging
 import logging.config
 from typing import Any, Dict, Union
 
+from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models.base_model import ModelConfig
+from rtp_llm.tools.api.hf_model_helper import HfStyleModelInfo, get_hf_model_info
 from rtp_llm.tools.api.utils import handler_error
-from rtp_llm.utils.weight_type import WEIGHT_TYPE, get_weight_type_from_env
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.utils.fuser import fetch_remote_file_to_local, umount_file
-from rtp_llm.tools.api.hf_model_helper import get_hf_model_info, HfStyleModelInfo
+from rtp_llm.utils.weight_type import WEIGHT_TYPE, get_weight_type_from_env
+
 
 def eval_model_size(env_params, model_type, model_path, ptuning_path):
     model_cls = ModelFactory.get_model_cls(model_type)
@@ -20,10 +21,11 @@ def eval_model_size(env_params, model_type, model_path, ptuning_path):
         ptuning_path=ptuning_path,
         max_seq_len=int(env_params.get("MAX_SEQ_LEN", "0")),
         tokenizer_path=None,
-        quantization=env_params.get(ModelConfig.QUANTIZATION_KEY)
+        quantization=env_params.get(ModelConfig.QUANTIZATION_KEY),
     )
     config: GptInitModelParameters = model_cls.create_config(model_config)
     return model_cls.eval_model_size(config), model_cls.eval_model_param_count(config)
+
 
 def calc_hf_model_size(req: Dict[str, Any]):
     model_path = req.get("model_path")
@@ -31,17 +33,19 @@ def calc_hf_model_size(req: Dict[str, Any]):
     model_type = req.get("ft_model_type", None)
     env_params: Any | dict[Any, Any] = req.get("env_params", {})
 
-    hf_model_info:HfStyleModelInfo = get_hf_model_info(model_path)
+    hf_model_info: HfStyleModelInfo = get_hf_model_info(model_path)
     logging.info(f"hf_model_info: {hf_model_info}, {env_params}, {model_type}")
     if model_type:
         try:
-            return eval_model_size(env_params, model_type, hf_model_info.hf_local_dir, None)
+            return eval_model_size(
+                env_params, model_type, hf_model_info.hf_local_dir, None
+            )
         except Exception as e:
             logging.exception(f"eval ft model size failed: e: {e}")
 
-    param_count =  hf_model_info.param_count
+    param_count = hf_model_info.param_count
     total_size = hf_model_info.total_size
-    if param_count :
+    if param_count:
         weight_type = get_weight_type_from_env(env_params)
         if weight_type == WEIGHT_TYPE.INT8:
             return param_count, param_count
@@ -49,11 +53,16 @@ def calc_hf_model_size(req: Dict[str, Any]):
             return param_count * 2, param_count
     return param_count, total_size
 
+
 def cacl_ft_model_size(req: Dict[str, Any]) -> int:
     env_params = req.get("env_params", {})
     model_type = req.get("ft_model_type")
     model_path = fetch_remote_file_to_local(req.get("model_path"))
-    ptuning_path = fetch_remote_file_to_local(req.get("ptuning_path")) if req.get("ptuning_path", None) else None
+    ptuning_path = (
+        fetch_remote_file_to_local(req.get("ptuning_path"))
+        if req.get("ptuning_path", None)
+        else None
+    )
 
     if not model_type or not model_path:
         return handler_error(Exception.ERROR_INPUT_FORMAT_ERROR, "bad_input")
@@ -71,9 +80,10 @@ from fastapi.responses import JSONResponse
 
 router = APIRouter()
 
+
 @router.post("/calc_model_size")
 @router.get("/calc_model_size")
-def calc_mdoel_size(req: Union[str,Dict[Any, Any]]):
+def calc_mdoel_size(req: Union[str, Dict[Any, Any]]):
     if isinstance(req, str):
         req = json.loads(req)
 
@@ -87,4 +97,4 @@ def calc_mdoel_size(req: Union[str,Dict[Any, Any]]):
     if param_count:
         response["param_count"] = param_count
 
-    return JSONResponse(content = response)
+    return JSONResponse(content=response)

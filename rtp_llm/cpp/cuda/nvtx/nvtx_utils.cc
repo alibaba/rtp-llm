@@ -25,8 +25,8 @@
 namespace ft_nvtx {
 
 static std::vector<rtp_llm::KernelProfiler*> profilers;
-static std::string                                     scope;
-static int                                             domain = 0;
+static std::string                           scope;
+static int                                   domain = 0;
 
 std::string getScope() {
     return scope;

@@ -16,15 +16,16 @@ class LocalRpcServiceImpl: public RpcService::Service {
 public:
     LocalRpcServiceImpl() {}
     virtual ~LocalRpcServiceImpl() {}
-    virtual grpc::Status init(const EngineInitParams& maga_init_params, py::object mm_process_engine,
+    virtual grpc::Status init(const EngineInitParams&                                maga_init_params,
+                              py::object                                             mm_process_engine,
                               std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params) {
         local_server_ = std::make_shared<LocalRpcServer>();
         return local_server_->init(maga_init_params, mm_process_engine, std::move(propose_params));
     }
 
-    grpc::Status GenerateStreamCall(grpc::ServerContext*                context,
-                                 const GenerateInputPB*                 request,
-                                 grpc::ServerWriter<GenerateOutputsPB>* writer) override {
+    grpc::Status GenerateStreamCall(grpc::ServerContext*                   context,
+                                    const GenerateInputPB*                 request,
+                                    grpc::ServerWriter<GenerateOutputsPB>* writer) override {
         return local_server_->GenerateStreamCall(context, request, writer);
     }
 
@@ -48,7 +49,7 @@ public:
         return local_server_->getEngineScheduleInfo();
     }
 
-    void addLora(const std::string& adapter_name,
+    void addLora(const std::string&                        adapter_name,
                  const rtp_llm::lora::loraLayerWeightsMap& lora_a_weights,
                  const rtp_llm::lora::loraLayerWeightsMap& lora_b_weights) {
         local_server_->addLora(adapter_name, lora_a_weights, lora_b_weights);
@@ -58,11 +59,11 @@ public:
         local_server_->removeLora(adapter_name);
     }
 
-    std::shared_ptr<EngineBase> getEngine() const { 
+    std::shared_ptr<EngineBase> getEngine() const {
         return local_server_->getEngine();
     };
 
-    std::shared_ptr<MultimodalProcessor> getMultimodalProcessor() const { 
+    std::shared_ptr<MultimodalProcessor> getMultimodalProcessor() const {
         return local_server_->getMultimodalProcessor();
     };
 

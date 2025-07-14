@@ -15,17 +15,17 @@
  */
 
 #include "rtp_llm/cpp/kernels/triton/layernorm_kernels.h"
-extern "C"
-{
+extern "C" {
 #include "rtp_llm/cpp/kernels/triton/aot/layernorm_kernel_bf16.h"
 #include "rtp_llm/cpp/kernels/triton/aot/layernorm_kernel_fp16.h"
 #include "rtp_llm/cpp/kernels/triton/aot/layernorm_kernel_fp32.h"
 }
 
 // wont't support new features
-namespace rtp_llm{
+namespace rtp_llm {
 unsigned int nextPowerOf2(unsigned int n) {
-    if (n == 0) return 1;
+    if (n == 0)
+        return 1;
 
     n--;
     n |= n >> 1;
@@ -37,48 +37,126 @@ unsigned int nextPowerOf2(unsigned int n) {
     return n + 1;
 }
 
-#define TRITON_LAYERNORM_KERNEL(T, LEN, WARPS, HAS_BIAS, ...) \
-    do {                                                          \
-      if constexpr (std::is_same_v<T, float>) {                   \
-        if constexpr (HAS_BIAS)                                    \
-          check_cuda_value(layernorm_kernel_fp32_1x1x ## LEN ## _ ## warps ## WARPS ## xstages3(__VA_ARGS__)); \
-        else                                                      \
-          check_cuda_value(layernorm_kernel_fp32_0x0x ## LEN ## _ ## warps ## WARPS ## xstages3(__VA_ARGS__)); \
-      } else if constexpr (std::is_same_v<T, half>) {             \
-        if constexpr (HAS_BIAS)                                    \
-          check_cuda_value(layernorm_kernel_fp16_1x1x ## LEN ## _ ## warps ## WARPS ## xstages3(__VA_ARGS__)); \
-        else                                                      \
-          check_cuda_value(layernorm_kernel_fp16_0x0x ## LEN ## _ ## warps ## WARPS ## xstages3(__VA_ARGS__)); \
-      }                                                           \
-      else if constexpr (std::is_same_v<T, __nv_bfloat16>) {      \
-        if constexpr (HAS_BIAS)                                    \
-          check_cuda_value(layernorm_kernel_bf16_1x1x ## LEN ## _ ## warps ## WARPS ## xstages3(__VA_ARGS__)); \
-        else                                                      \
-          check_cuda_value(layernorm_kernel_bf16_0x0x ## LEN ## _ ## warps ## WARPS ## xstages3(__VA_ARGS__)); \
-      }                                                           \
-   } while (0)
+#define TRITON_LAYERNORM_KERNEL(T, LEN, WARPS, HAS_BIAS, ...)                                                          \
+    do {                                                                                                               \
+        if constexpr (std::is_same_v<T, float>) {                                                                      \
+            if constexpr (HAS_BIAS)                                                                                    \
+                check_cuda_value(layernorm_kernel_fp32_1x1x##LEN##_##warps##WARPS##xstages3(__VA_ARGS__));             \
+            else                                                                                                       \
+                check_cuda_value(layernorm_kernel_fp32_0x0x##LEN##_##warps##WARPS##xstages3(__VA_ARGS__));             \
+        } else if constexpr (std::is_same_v<T, half>) {                                                                \
+            if constexpr (HAS_BIAS)                                                                                    \
+                check_cuda_value(layernorm_kernel_fp16_1x1x##LEN##_##warps##WARPS##xstages3(__VA_ARGS__));             \
+            else                                                                                                       \
+                check_cuda_value(layernorm_kernel_fp16_0x0x##LEN##_##warps##WARPS##xstages3(__VA_ARGS__));             \
+        } else if constexpr (std::is_same_v<T, __nv_bfloat16>) {                                                       \
+            if constexpr (HAS_BIAS)                                                                                    \
+                check_cuda_value(layernorm_kernel_bf16_1x1x##LEN##_##warps##WARPS##xstages3(__VA_ARGS__));             \
+            else                                                                                                       \
+                check_cuda_value(layernorm_kernel_bf16_0x0x##LEN##_##warps##WARPS##xstages3(__VA_ARGS__));             \
+        }                                                                                                              \
+    } while (0)
 
-template <typename T, typename QUANT_OUT_T, bool HAS_BIAS>
-void invokeTritonLayerNorm(T* out, T* norm_output, const T* input, const T* bias, const T* residual,
-    const T* gamma, const T* beta, const float eps, const int tokens, const int hidden_dim, cudaStream_t stream,
-    bool use_diff_of_squares, const float* scale, float* dynamic_scale, QUANT_OUT_T* out_quant, bool return_normed_output)
-{
-      unsigned hdim = nextPowerOf2(hidden_dim);
-      if (hdim <= 1024)
+template<typename T, typename QUANT_OUT_T, bool HAS_BIAS>
+void invokeTritonLayerNorm(T*           out,
+                           T*           norm_output,
+                           const T*     input,
+                           const T*     bias,
+                           const T*     residual,
+                           const T*     gamma,
+                           const T*     beta,
+                           const float  eps,
+                           const int    tokens,
+                           const int    hidden_dim,
+                           cudaStream_t stream,
+                           bool         use_diff_of_squares,
+                           const float* scale,
+                           float*       dynamic_scale,
+                           QUANT_OUT_T* out_quant,
+                           bool         return_normed_output) {
+    unsigned hdim = nextPowerOf2(hidden_dim);
+    if (hdim <= 1024)
         hdim = 1024;
 
-      if (hdim == 1024)
-        TRITON_LAYERNORM_KERNEL(T, 1024, 4, HAS_BIAS, stream, reinterpret_cast<CUdeviceptr>(const_cast<T*>(input)), reinterpret_cast<CUdeviceptr>(norm_output), reinterpret_cast<CUdeviceptr>(out), reinterpret_cast<CUdeviceptr>(const_cast<T*>(gamma)), reinterpret_cast<CUdeviceptr>(const_cast<T*>(beta)),reinterpret_cast<CUdeviceptr>(const_cast<T*>(residual)), reinterpret_cast<CUdeviceptr>(const_cast<T*>(bias)),hidden_dim,hidden_dim,hidden_dim, tokens,hidden_dim,eps, out != nullptr);
-     else if (hdim == 2048)
-        TRITON_LAYERNORM_KERNEL(T, 2048, 8, HAS_BIAS, stream, reinterpret_cast<CUdeviceptr>(const_cast<T*>(input)), reinterpret_cast<CUdeviceptr>(norm_output), reinterpret_cast<CUdeviceptr>(out), reinterpret_cast<CUdeviceptr>(const_cast<T*>(gamma)), reinterpret_cast<CUdeviceptr>(const_cast<T*>(beta)),reinterpret_cast<CUdeviceptr>(const_cast<T*>(residual)), reinterpret_cast<CUdeviceptr>(const_cast<T*>(bias)),hidden_dim,hidden_dim,hidden_dim, tokens,hidden_dim,eps, out != nullptr);
-     else
-        TRITON_LAYERNORM_KERNEL(T, 4096, 8, HAS_BIAS, stream, reinterpret_cast<CUdeviceptr>(const_cast<T*>(input)), reinterpret_cast<CUdeviceptr>(norm_output), reinterpret_cast<CUdeviceptr>(out), reinterpret_cast<CUdeviceptr>(const_cast<T*>(gamma)), reinterpret_cast<CUdeviceptr>(const_cast<T*>(beta)),reinterpret_cast<CUdeviceptr>(const_cast<T*>(residual)), reinterpret_cast<CUdeviceptr>(const_cast<T*>(bias)),hidden_dim,hidden_dim,hidden_dim, tokens,hidden_dim,eps, out != nullptr);
+    if (hdim == 1024)
+        TRITON_LAYERNORM_KERNEL(T,
+                                1024,
+                                4,
+                                HAS_BIAS,
+                                stream,
+                                reinterpret_cast<CUdeviceptr>(const_cast<T*>(input)),
+                                reinterpret_cast<CUdeviceptr>(norm_output),
+                                reinterpret_cast<CUdeviceptr>(out),
+                                reinterpret_cast<CUdeviceptr>(const_cast<T*>(gamma)),
+                                reinterpret_cast<CUdeviceptr>(const_cast<T*>(beta)),
+                                reinterpret_cast<CUdeviceptr>(const_cast<T*>(residual)),
+                                reinterpret_cast<CUdeviceptr>(const_cast<T*>(bias)),
+                                hidden_dim,
+                                hidden_dim,
+                                hidden_dim,
+                                tokens,
+                                hidden_dim,
+                                eps,
+                                out != nullptr);
+    else if (hdim == 2048)
+        TRITON_LAYERNORM_KERNEL(T,
+                                2048,
+                                8,
+                                HAS_BIAS,
+                                stream,
+                                reinterpret_cast<CUdeviceptr>(const_cast<T*>(input)),
+                                reinterpret_cast<CUdeviceptr>(norm_output),
+                                reinterpret_cast<CUdeviceptr>(out),
+                                reinterpret_cast<CUdeviceptr>(const_cast<T*>(gamma)),
+                                reinterpret_cast<CUdeviceptr>(const_cast<T*>(beta)),
+                                reinterpret_cast<CUdeviceptr>(const_cast<T*>(residual)),
+                                reinterpret_cast<CUdeviceptr>(const_cast<T*>(bias)),
+                                hidden_dim,
+                                hidden_dim,
+                                hidden_dim,
+                                tokens,
+                                hidden_dim,
+                                eps,
+                                out != nullptr);
+    else
+        TRITON_LAYERNORM_KERNEL(T,
+                                4096,
+                                8,
+                                HAS_BIAS,
+                                stream,
+                                reinterpret_cast<CUdeviceptr>(const_cast<T*>(input)),
+                                reinterpret_cast<CUdeviceptr>(norm_output),
+                                reinterpret_cast<CUdeviceptr>(out),
+                                reinterpret_cast<CUdeviceptr>(const_cast<T*>(gamma)),
+                                reinterpret_cast<CUdeviceptr>(const_cast<T*>(beta)),
+                                reinterpret_cast<CUdeviceptr>(const_cast<T*>(residual)),
+                                reinterpret_cast<CUdeviceptr>(const_cast<T*>(bias)),
+                                hidden_dim,
+                                hidden_dim,
+                                hidden_dim,
+                                tokens,
+                                hidden_dim,
+                                eps,
+                                out != nullptr);
 }
 
-#define INSTANTIATE_TRITON_ADD_BIAS_RESIDUAL_LAYERNORM(T, QUANT_OUT_T, HAS_BIAS)                                                      \
-    template void invokeTritonLayerNorm<T, QUANT_OUT_T, HAS_BIAS>(T* out, T* norm_output, const T* input, const T* bias,         \
-        const T* residual, const T* gamma, const T* beta, const float eps, const int tokens, const int hidden_dim,     \
-        cudaStream_t stream, bool use_diff_of_squares, const float* scale, float* dynamic_scale, QUANT_OUT_T* out_quant, bool return_normed_output);
+#define INSTANTIATE_TRITON_ADD_BIAS_RESIDUAL_LAYERNORM(T, QUANT_OUT_T, HAS_BIAS)                                       \
+    template void invokeTritonLayerNorm<T, QUANT_OUT_T, HAS_BIAS>(T * out,                                             \
+                                                                  T * norm_output,                                     \
+                                                                  const T*     input,                                  \
+                                                                  const T*     bias,                                   \
+                                                                  const T*     residual,                               \
+                                                                  const T*     gamma,                                  \
+                                                                  const T*     beta,                                   \
+                                                                  const float  eps,                                    \
+                                                                  const int    tokens,                                 \
+                                                                  const int    hidden_dim,                             \
+                                                                  cudaStream_t stream,                                 \
+                                                                  bool         use_diff_of_squares,                    \
+                                                                  const float* scale,                                  \
+                                                                  float*       dynamic_scale,                          \
+                                                                  QUANT_OUT_T* out_quant,                              \
+                                                                  bool         return_normed_output);
 
 INSTANTIATE_TRITON_ADD_BIAS_RESIDUAL_LAYERNORM(float, int8_t, true);
 INSTANTIATE_TRITON_ADD_BIAS_RESIDUAL_LAYERNORM(float, int8_t, false);
@@ -89,4 +167,4 @@ INSTANTIATE_TRITON_ADD_BIAS_RESIDUAL_LAYERNORM(__nv_bfloat16, int8_t, true);
 INSTANTIATE_TRITON_ADD_BIAS_RESIDUAL_LAYERNORM(__nv_bfloat16, int8_t, false);
 #endif
 
-} // namespace rtp_llm
+}  // namespace rtp_llm

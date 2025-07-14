@@ -11,19 +11,17 @@ namespace rtp_llm {
 using namespace rocm;
 #endif
 
-template <typename Tf, typename T, bool IS_BETA>
-__inline__ __device__ Tf compute_rmsnorm(Tf val, float s_variance, const T* gamma, const T* beta, int i)
-{
+template<typename Tf, typename T, bool IS_BETA>
+__inline__ __device__ Tf compute_rmsnorm(Tf val, float s_variance, const T* gamma, const T* beta, int i) {
     Tf ret = val * s_variance * cuda_cast<Tf>(gamma[i]);
-    if (IS_BETA)
-    {
+    if (IS_BETA) {
         ret = ret + cuda_cast<Tf>(beta[i]);
     }
     return ret;
 }
 
 template<typename T, bool IS_BIAS>
-__global__ void fusedQkRmsNorm(T* __restrict input,                               
+__global__ void fusedQkRmsNorm(T* __restrict input,
                                const T* __restrict q_gamma,
                                const T* __restrict q_bias,
                                const T* __restrict k_gamma,
@@ -41,7 +39,7 @@ __global__ void fusedQkRmsNorm(T* __restrict input,
 
     const int sample_idx  = blockIdx.x / (q_group_num + k_group_num);
     const int group_idx   = blockIdx.x % (q_group_num + k_group_num);
-    T*  group_start = input + sample_idx * (n / vec_size) + group_idx * (norm_size / vec_size);
+    T*        group_start = input + sample_idx * (n / vec_size) + group_idx * (norm_size / vec_size);
 
     const T* gamma = group_idx < q_group_num ? q_gamma : k_gamma;
     const T* bias  = group_idx < q_group_num ? q_bias : k_bias;
@@ -105,7 +103,7 @@ void invokeFusedQkRmsNorm(T* __restrict input,
     using Tp     = typename packed_as<T, vec_size>::type;
     bool is_bias = k_bias != nullptr && q_bias != nullptr;
     if (is_bias) {
-        fusedQkRmsNorm<Tp, true><<<grid, block, 0, stream>>>(reinterpret_cast<Tp*>(input),                                                             
+        fusedQkRmsNorm<Tp, true><<<grid, block, 0, stream>>>(reinterpret_cast<Tp*>(input),
                                                              reinterpret_cast<const Tp*>(q_gamma),
                                                              reinterpret_cast<const Tp*>(q_bias),
                                                              reinterpret_cast<const Tp*>(k_gamma),
@@ -116,14 +114,14 @@ void invokeFusedQkRmsNorm(T* __restrict input,
                                                              n,
                                                              norm_size);
     } else {
-        fusedQkRmsNorm<Tp, false><<<grid, block, 0, stream>>>(reinterpret_cast<Tp*>(input),                                                              
+        fusedQkRmsNorm<Tp, false><<<grid, block, 0, stream>>>(reinterpret_cast<Tp*>(input),
                                                               reinterpret_cast<const Tp*>(q_gamma),
                                                               nullptr,
                                                               reinterpret_cast<const Tp*>(k_gamma),
                                                               nullptr,
                                                               q_group_num,
                                                               k_group_num,
-                                                              layernorm_eps,                                                              
+                                                              layernorm_eps,
                                                               n,
                                                               norm_size);
     }

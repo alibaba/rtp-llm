@@ -25,7 +25,7 @@ class GemmConfigMap{
 template <typename T, typename WeightType, bool is_moe=false>
 GemmLut* get_gemm_lut()
 {
-    if constexpr (is_moe) 
+    if constexpr (is_moe)
     {
         if ((std::is_same<T, half>::value || std::is_same<T, __nv_bfloat16>::value)
             && std::is_same<WeightType, uint8_t>::value)

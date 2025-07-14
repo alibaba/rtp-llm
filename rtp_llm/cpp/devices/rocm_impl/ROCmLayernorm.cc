@@ -25,80 +25,86 @@ using namespace rocm;
 
 LayernormOutput ROCmDevice::layernormWithStride(const LayernormWithStrideParams& params) {
     RTP_LLM_CHECK_WITH_INFO(params.qscheme == QScheme::NoQuantize, "qscheme must be NoQuantize in layernormWithStride");
-    const auto data_type = params.input->type();
-    const auto m = params.input->shape()[0];
-    const auto in_stride = params.input->shape()[1];
-    const auto norm_weight = params.norm_weight;
-    const auto& gamma = norm_weight ? norm_weight->get().gamma.get()->data() : nullptr;
+    const auto  data_type   = params.input->type();
+    const auto  m           = params.input->shape()[0];
+    const auto  in_stride   = params.input->shape()[1];
+    const auto  norm_weight = params.norm_weight;
+    const auto& gamma       = norm_weight ? norm_weight->get().gamma.get()->data() : nullptr;
     const auto& beta = (norm_weight && norm_weight->get().beta) ? norm_weight->get().beta.get()->data() : nullptr;
-    const auto eps = params.eps;
+    const auto  eps  = params.eps;
 
-    int out_stride;
-    int out_offset;
+    int       out_stride;
+    int       out_offset;
     BufferPtr norm_output;
 
     // if not in_place, we hope that the output is contiguous
     if (params.in_place) {
         norm_output = params.input;
-        out_stride = in_stride;
-        out_offset = params.offset;
+        out_stride  = in_stride;
+        out_offset  = params.offset;
     } else {
-        norm_output = allocateBuffer({data_type, {m, params.norm_group_size}, AllocationType::DEVICE}, {"norm_with_stride_output"});
-        out_stride = params.norm_group_size;
-        out_offset = 0;
+        norm_output = allocateBuffer({data_type, {m, params.norm_group_size}, AllocationType::DEVICE},
+                                     {"norm_with_stride_output"});
+        out_stride  = params.norm_group_size;
+        out_offset  = 0;
     }
 
     if (params.norm_type == NormType::layernorm) {
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type,
-                                        invokeLayerNormWithStride,
-                                        norm_output->dataWithOffset(out_offset),
-                                        out_stride,
-                                        params.input->dataWithOffset(params.offset),
-                                        in_stride,
-                                        gamma,
-                                        beta,
-                                        eps,
-                                        m,
-                                        params.norm_group_size,
-                                        norm_weight->get().gamma.get()->shape()[0],
-                                        stream_);
+                                         invokeLayerNormWithStride,
+                                         norm_output->dataWithOffset(out_offset),
+                                         out_stride,
+                                         params.input->dataWithOffset(params.offset),
+                                         in_stride,
+                                         gamma,
+                                         beta,
+                                         eps,
+                                         m,
+                                         params.norm_group_size,
+                                         norm_weight->get().gamma.get()->shape()[0],
+                                         stream_);
         ROCM_CHECK_ERROR();
         return LayernormOutput({norm_output, nullptr});
     } else if (params.norm_type == NormType::rmsnorm) {
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type,
-                                        invokeRmsNormWithStride,
-                                        norm_output->dataWithOffset(out_offset),
-                                        out_stride,
-                                        params.input->dataWithOffset(params.offset),
-                                        in_stride,
-                                        gamma,
-                                        beta,
-                                        eps,
-                                        m,
-                                        params.norm_group_size,
-                                        norm_weight->get().gamma.get()->shape()[0],
-                                        stream_);
+                                         invokeRmsNormWithStride,
+                                         norm_output->dataWithOffset(out_offset),
+                                         out_stride,
+                                         params.input->dataWithOffset(params.offset),
+                                         in_stride,
+                                         gamma,
+                                         beta,
+                                         eps,
+                                         m,
+                                         params.norm_group_size,
+                                         norm_weight->get().gamma.get()->shape()[0],
+                                         stream_);
         ROCM_CHECK_ERROR();
         return LayernormOutput({norm_output, nullptr});
     } else {
-        throw std::runtime_error(autil::StringUtil::formatString("unsupported layernorm type for layernormWithStride: %d", int(params.norm_type)));
+        throw std::runtime_error(autil::StringUtil::formatString(
+            "unsupported layernorm type for layernormWithStride: %d", int(params.norm_type)));
     }
 }
 
 QkRmsNormOutput ROCmDevice::qkRmsNorm(const QkRmsNormParams& params) {
-    const auto data_type = params.input->type();
-    const auto m = params.input->shape()[0];
-    const auto n = params.input->shape()[1];
-    const auto& q_gamma = params.q_norm_weight->get().gamma.get()->data();
-    const auto& q_beta = (params.q_norm_weight && params.q_norm_weight->get().beta) ? params.q_norm_weight->get().beta.get()->data() : nullptr;
-    const auto& k_gamma = params.k_norm_weight->get().gamma.get()->data();
-    const auto& k_beta = (params.k_norm_weight && params.k_norm_weight->get().beta) ? params.k_norm_weight->get().beta.get()->data() : nullptr;
+    const auto  data_type = params.input->type();
+    const auto  m         = params.input->shape()[0];
+    const auto  n         = params.input->shape()[1];
+    const auto& q_gamma   = params.q_norm_weight->get().gamma.get()->data();
+    const auto& q_beta    = (params.q_norm_weight && params.q_norm_weight->get().beta) ?
+                                params.q_norm_weight->get().beta.get()->data() :
+                                nullptr;
+    const auto& k_gamma   = params.k_norm_weight->get().gamma.get()->data();
+    const auto& k_beta    = (params.k_norm_weight && params.k_norm_weight->get().beta) ?
+                                params.k_norm_weight->get().beta.get()->data() :
+                                nullptr;
     RTP_LLM_CHECK_WITH_INFO((q_beta != nullptr && k_beta != nullptr) || (q_beta == nullptr && k_beta == nullptr),
-                       "q_gamma and k_gamma should both nullptr or not nullptr");
+                            "q_gamma and k_gamma should both nullptr or not nullptr");
     const auto eps         = params.eps;
     const auto q_group_num = params.q_group_num;
     const auto k_group_num = params.k_group_num;
-    const auto norm_size = params.norm_size;
+    const auto norm_size   = params.norm_size;
 
     DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type,
                                      invokeFusedQkRmsNorm,
@@ -133,9 +139,9 @@ LayernormOutput ROCmDevice::layernorm(const LayernormParams& params) {
     const auto  eps       = params.eps;
     const auto& weights   = params.norm_weight;
 
-    if (!params.is_inplace && (params.qscheme == QScheme::NoQuantize ||
-            params.qscheme == QScheme::Qfp8PerTokenBlock ||
-            params.qscheme == QScheme::Qfp8PerToken)) {
+    if (!params.is_inplace
+        && (params.qscheme == QScheme::NoQuantize || params.qscheme == QScheme::Qfp8PerTokenBlock
+            || params.qscheme == QScheme::Qfp8PerToken)) {
         norm_output = allocateBufferLike(*params.input);
     } else if (params.qscheme == Qint8PerToken) {
         auto kernel  = allocateBuffer({DataType::TYPE_INT8, {input->shape()}, AllocationType::DEVICE}, {"kernel"});
@@ -149,19 +155,20 @@ LayernormOutput ROCmDevice::layernorm(const LayernormParams& params) {
     }
 
     if (params.norm_type == NormType::alphanorm || !norm_weight.has_value()) {
-        if (params.alpha == 0.f || params.bias.has_value() || params.residual1.has_value() || params.residual2.has_value()) {
+        if (params.alpha == 0.f || params.bias.has_value() || params.residual1.has_value()
+            || params.residual2.has_value()) {
             DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type,
-                                            invokeAddBiasResidual,
-                                            norm_output->data(),
-                                            input->data(),
-                                            params.residual1 ? params.residual1.value().get().data() : nullptr,
-                                            params.residual2 ? params.residual2.value().get().data() : nullptr,
-                                            params.bias.has_value() ? params.bias.value().get().data() : nullptr,
-                                            nullptr,  // scale_inter
-                                            nullptr,  // scale_out
-                                            m,
-                                            n,
-                                            stream_);
+                                             invokeAddBiasResidual,
+                                             norm_output->data(),
+                                             input->data(),
+                                             params.residual1 ? params.residual1.value().get().data() : nullptr,
+                                             params.residual2 ? params.residual2.value().get().data() : nullptr,
+                                             params.bias.has_value() ? params.bias.value().get().data() : nullptr,
+                                             nullptr,  // scale_inter
+                                             nullptr,  // scale_out
+                                             m,
+                                             n,
+                                             stream_);
             check_cuda_error();
             return LayernormOutput({std::move(norm_output), nullptr});
         } else if (params.alpha != 0.f) {
@@ -315,13 +322,13 @@ LayernormOutput ROCmDevice::layernorm(const LayernormParams& params) {
             std::string prec_i;
             if (data_type == DataType::TYPE_FP16)
                 prec_i = "fp16";
-            else if(data_type == DataType::TYPE_BF16)
+            else if (data_type == DataType::TYPE_BF16)
                 prec_i = "bf16";
             else
                 throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
-            
+
             rmsnorm2d_fwd_traits traits{prec_i, prec_i, "fp32", "fp32", 0, 0, 0, 0};
-            
+
             rmsnorm2d_fwd_args args{input->data(),
                                     nullptr,
                                     nullptr,
@@ -338,9 +345,9 @@ LayernormOutput ROCmDevice::layernorm(const LayernormParams& params) {
                                     static_cast<int32_t>(n),
                                     static_cast<int32_t>(n),
                                     static_cast<int32_t>(n)};
-            
+
             float run_time = rmsnorm2d_fwd(traits, args, {stream_, false, 0, 0, 1});
-            
+
             // std::cout << "rmsnorm2d_fwd run_time: " << run_time * 1.E3 << " us"<< std::endl;
 
             check_cuda_error();

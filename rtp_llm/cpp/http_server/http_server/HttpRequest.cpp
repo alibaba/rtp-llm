@@ -14,10 +14,10 @@ HttpError HttpRequest::Parse(std::unique_ptr<::anet::HTTPPacket, std::function<v
     if (!request) {
         return HttpError::BadRequest("http packet is nullptr");
     }
-    _request = std::move(request);
+    _request      = std::move(request);
     recv_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
 
-    std::string uri = _request->getURI();
+    std::string              uri   = _request->getURI();
     std::vector<std::string> items = autil::StringUtil::split(uri, "?");
     if (items.size() == 0 || items.size() > 2) {
         return HttpError::BadRequest("invalid uri: " + uri);
@@ -27,8 +27,8 @@ HttpError HttpRequest::Parse(std::unique_ptr<::anet::HTTPPacket, std::function<v
     if (items.size() == 2) {
         std::vector<std::string> paramItems = autil::StringUtil::split(items[1], "&");
         for (size_t i = 0; i < paramItems.size(); i++) {
-            std::string paramKvStr = paramItems[i];
-            std::vector<std::string> kvItems = autil::StringUtil::split(paramKvStr, "=", false);
+            std::string              paramKvStr = paramItems[i];
+            std::vector<std::string> kvItems    = autil::StringUtil::split(paramKvStr, "=", false);
             if (kvItems.size() != 2) {
                 return HttpError::BadRequest("uri has invalid param: " + uri);
             }
@@ -38,4 +38,4 @@ HttpError HttpRequest::Parse(std::unique_ptr<::anet::HTTPPacket, std::function<v
     return HttpError::OK();
 }
 
-} // namespace http_server
+}  // namespace http_server

@@ -19,4 +19,4 @@ void registerMultimodalInput(const py::module& m) {
         .def_readwrite("tensor", &MultimodalInput::tensor);
 }
 
-} // namespace rtp_llm
+}  // namespace rtp_llm

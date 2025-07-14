@@ -1,9 +1,9 @@
-
-from rtp_llm.utils.model_weight import W
-from rtp_llm.models.llama_weight import LlamaWeightInfo
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.models.multimodal.multimodal_mixin import BaseMultiModalWeightInfo
 from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
+from rtp_llm.models.llama_weight import LlamaWeightInfo
+from rtp_llm.models.multimodal.multimodal_mixin import BaseMultiModalWeightInfo
+from rtp_llm.utils.model_weight import W
+
 
 class LlavaWeightInfo(LlamaWeightInfo, BaseMultiModalWeightInfo):
     def __init__(self, config: GptInitModelParameters, tp_size: int, tp_rank: int):

@@ -21,7 +21,7 @@ namespace rtp_llm {
 struct SpanItem {
 public:
     SpanItem(size_t origin_index, size_t offset):
-        origin_index(origin_index), target_index(origin_index) , offset(offset) {}
+        origin_index(origin_index), target_index(origin_index), offset(offset) {}
 
     size_t origin_index       = 0;
     size_t target_index       = 0;
@@ -153,7 +153,7 @@ public:
                         const int32_t* token_type_ids,
                         size_t         token_length,
                         const T*       input_buf  = nullptr,
-                        T*       output_buf = nullptr):
+                        T*             output_buf = nullptr):
         stream_(stream),
         allocator_(allocator),
         spans_(token_type_ids, token_length),
@@ -240,7 +240,6 @@ public:
         print_bsd(layer_id, "text intermediate buf", text_intermediate_buf(), 1, text_token_length(), n_);
     }
 
-
 private:
     cudaStream_t*       stream_;
     IAllocator*         allocator_;
@@ -251,8 +250,8 @@ private:
     T*                  vision_split_buf_ = nullptr;
     T*                  text_split_buf_   = nullptr;
     ExpertAttentionSpan spans_;
-    const T*                  input_buf_        = nullptr;
-    T*                  output_buf_       = nullptr;
+    const T*            input_buf_  = nullptr;
+    T*                  output_buf_ = nullptr;
 };
 
 template class ExpertAttentionUtil<float>;

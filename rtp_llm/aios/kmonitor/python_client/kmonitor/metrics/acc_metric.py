@@ -1,15 +1,19 @@
-from rtp_llm.aios.kmonitor.python_client.kmonitor.metrics.metric_base import MetricBase, MetricDataPoint
-
+import time
 from threading import Lock
 from typing import Dict, List
-import time
+
+from rtp_llm.aios.kmonitor.python_client.kmonitor.metrics.metric_base import (
+    MetricBase,
+    MetricDataPoint,
+)
+
 
 # there should be a lock at metric level,
 # thus no lock in this class.
 class ValueAggregation(object):
     def __init__(self, tags: Dict[str, str]):
         super(ValueAggregation, self).__init__()
-        self.acc_value : float = 0
+        self.acc_value: float = 0
         self.tags = tags
 
     def accumulate(self, value: float) -> None:
@@ -21,12 +25,11 @@ class ValueAggregation(object):
         return MetricDataPoint(value, self.tags)
 
 
-
 class AccMetric(MetricBase):
     def __init__(self, *args):
         super(AccMetric, self).__init__(*args)
-        self.last_report_time : float = time.time()
-        self.tag_value_map : Dict[int, ValueAggregation] = {
+        self.last_report_time: float = time.time()
+        self.tag_value_map: Dict[int, ValueAggregation] = {
             hash(frozenset(self.tags.items())): ValueAggregation(self.tags)
         }
         self.lock = Lock()
@@ -50,4 +53,3 @@ class AccMetric(MetricBase):
             for value_agg in self.tag_value_map.values():
                 data_list.append(value_agg.fetch_report_data(report_time_interval))
         return data_list
-

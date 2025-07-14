@@ -15,12 +15,12 @@
 namespace rtp_llm {
 namespace rocm {
 
-constexpr absl::string_view COLUMN_HEADER = "trans_a, trans_b, m, n, k, A_data_type, lda, stride_a, "
-                                            "B_data_type, ldb, stride_b, C_data_type, ldc, stride_c, "
-                                            "compute_type, batch_count, algo_index";
+constexpr absl::string_view COLUMN_HEADER    = "trans_a, trans_b, m, n, k, A_data_type, lda, stride_a, "
+                                               "B_data_type, ldb, stride_b, C_data_type, ldc, stride_c, "
+                                               "compute_type, batch_count, algo_index";
 constexpr absl::string_view COLUMN_HEADER_V2 = "trans_a, trans_b, m, n, k, A_data_type, lda, stride_a, "
-                                            "B_data_type, ldb, stride_b, C_data_type, ldc, stride_c, "
-                                            "compute_type, batch_count, epilogue, algo_index";
+                                               "B_data_type, ldb, stride_b, C_data_type, ldc, stride_c, "
+                                               "compute_type, batch_count, epilogue, algo_index";
 
 static absl::StatusOr<std::pair<hipblasLtAlgoConfig, int32_t>> parseRow(const std::string& row) {
     constexpr size_t                                  numFields = 18;
@@ -46,7 +46,7 @@ static absl::StatusOr<std::pair<hipblasLtAlgoConfig, int32_t>> parseRow(const st
 
     auto parseEpilogue = [](const absl::string_view& field) -> absl::StatusOr<hipblasLtEpilogue_t> {
         if (field == "none") {
-            return HIPBLASLT_EPILOGUE_DEFAULT ;
+            return HIPBLASLT_EPILOGUE_DEFAULT;
         } else if (field == "gelu_bias") {
             return HIPBLASLT_EPILOGUE_GELU_BIAS;
         } else if (field == "relu_bias") {
@@ -110,13 +110,10 @@ static absl::StatusOr<std::pair<hipblasLtAlgoConfig, int32_t>> parseRow(const st
     ATOI(fields[13], config.stride_c);
     ASSIGN(config.compute_type, parseComputeType(fields[14]));
     ATOI(fields[15], config.batch_count);
-    if(has_epilogue)
-    {
+    if (has_epilogue) {
         ASSIGN(config.epilogue, parseEpilogue(fields[16]));
         ATOI(fields[17], algoIndex);
-    }
-    else
-    {
+    } else {
         config.epilogue = HIPBLASLT_EPILOGUE_DEFAULT;
         ATOI(fields[16], algoIndex);
     }
@@ -136,7 +133,7 @@ void hipblasAlgoMap::loadGemmConfig(const std::string& filename, hipblasLtHandle
 
     if (!std::getline(file, line)) {
         std::printf("[BLAS] Gemm config not find: %s \n", filename.c_str());
-        return ;
+        return;
     }
 
     if (line != COLUMN_HEADER && line != COLUMN_HEADER_V2) {
@@ -153,7 +150,7 @@ void hipblasAlgoMap::loadGemmConfig(const std::string& filename, hipblasLtHandle
             continue;
 
         auto config_and_algoIndex = parseRow(line);
-        
+
         if (!config_and_algoIndex.ok()) {
             // std::printf("%s\n", config_and_algoIndex.status().ToString().c_str());
             continue;
@@ -167,32 +164,32 @@ void hipblasAlgoMap::loadGemmConfig(const std::string& filename, hipblasLtHandle
         hipblasLtMatmulDescCreate(&opDesc, config.compute_type, HIP_R_32F);
         hipblasLtMatmulDescSetAttribute(opDesc, HIPBLASLT_MATMUL_DESC_TRANSA, &config.trans_a, sizeof(int32_t));
         hipblasLtMatmulDescSetAttribute(opDesc, HIPBLASLT_MATMUL_DESC_TRANSB, &config.trans_b, sizeof(int32_t));
-        if(config.epilogue != HIPBLASLT_EPILOGUE_DEFAULT)
-        {
+        if (config.epilogue != HIPBLASLT_EPILOGUE_DEFAULT) {
             hipblasLtEpilogue_t epilogue_ = config.epilogue;
-            ROCM_CHECK(hipblasLtMatmulDescSetAttribute(opDesc, HIPBLASLT_MATMUL_DESC_EPILOGUE, &epilogue_, sizeof(epilogue_)));
+            ROCM_CHECK(
+                hipblasLtMatmulDescSetAttribute(opDesc, HIPBLASLT_MATMUL_DESC_EPILOGUE, &epilogue_, sizeof(epilogue_)));
             int32_t bias_data_type = config.C_data_type;
-            ROCM_CHECK(hipblasLtMatmulDescSetAttribute(opDesc, HIPBLASLT_MATMUL_DESC_BIAS_DATA_TYPE, &bias_data_type, sizeof(bias_data_type)));
+            ROCM_CHECK(hipblasLtMatmulDescSetAttribute(
+                opDesc, HIPBLASLT_MATMUL_DESC_BIAS_DATA_TYPE, &bias_data_type, sizeof(bias_data_type)));
         }
 
         ROCM_CHECK(hipblasLtMatrixLayoutCreate(&ADesc,
-                                    config.A_data_type,
-                                    config.trans_a == HIPBLAS_OP_N ? config.m : config.k,
-                                    config.trans_a == HIPBLAS_OP_N ? config.k : config.m,
-                                    config.lda));
+                                               config.A_data_type,
+                                               config.trans_a == HIPBLAS_OP_N ? config.m : config.k,
+                                               config.trans_a == HIPBLAS_OP_N ? config.k : config.m,
+                                               config.lda));
         ROCM_CHECK(hipblasLtMatrixLayoutCreate(&BDesc,
-                                    config.B_data_type,
-                                    config.trans_b == HIPBLAS_OP_N ? config.k : config.n,
-                                    config.trans_b == HIPBLAS_OP_N ? config.n : config.k,
-                                    config.ldb));
+                                               config.B_data_type,
+                                               config.trans_b == HIPBLAS_OP_N ? config.k : config.n,
+                                               config.trans_b == HIPBLAS_OP_N ? config.n : config.k,
+                                               config.ldb));
         ROCM_CHECK(hipblasLtMatrixLayoutCreate(&CDesc, config.C_data_type, config.m, config.n, config.ldc));
 
         algoIndices[0] = algoIndex;
         algos.clear();
         ROCM_CHECK(hipblaslt_ext::getAlgosFromIndex(handle, algoIndices, algos));
 
-        if(algos.size() > 0)
-        {
+        if (algos.size() > 0) {
             hipblasLtMatmulInfo i;
             i.algo = algos.at(0).algo;
             i.opDesc.reset(opDesc);
@@ -281,15 +278,19 @@ const hipblasLtMatmulInfo* hipblasAlgoMap::getAlgo(const hipblasOperation_t   tr
 
     auto epilogueToString = [](hipblasLtEpilogue_t t) -> const char* {
         switch (t) {
-            case HIPBLASLT_EPILOGUE_DEFAULT: return "none";
-            case HIPBLASLT_EPILOGUE_GELU_BIAS: return "gelu_bias";
-            case HIPBLASLT_EPILOGUE_RELU_BIAS: return "relu_bias";
-            case HIPBLASLT_EPILOGUE_BIAS: return "bias";
+            case HIPBLASLT_EPILOGUE_DEFAULT:
+                return "none";
+            case HIPBLASLT_EPILOGUE_GELU_BIAS:
+                return "gelu_bias";
+            case HIPBLASLT_EPILOGUE_RELU_BIAS:
+                return "relu_bias";
+            case HIPBLASLT_EPILOGUE_BIAS:
+                return "bias";
             default:
                 return "<?>";
         }
     };
-    
+
     /*printf("[ALGO] map size = %u\n", algo_map_.size());
     printf("[ALGO] MISSING HIPBLASLT CONFIG:\n %s,%s,%d,%d,%d,%s,%d,%lld,%s,%d,%lld,%s,%d,%lld,%s,%d,%d\n",
                    opToString(trans_a),

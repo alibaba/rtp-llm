@@ -1,21 +1,26 @@
+from typing import Any, Dict, List, Optional, Union
+
 import torch
-from typing import List, Any, Dict, Union, Optional
+
 from rtp_llm.config.base_model_config import PyDanticModelBase
 from rtp_llm.utils.multimodal_util import MMUrlType, MultimodalInput
 
-class EngineInputs():
+
+class EngineInputs:
     token_ids: torch.Tensor
     token_type_ids: torch.Tensor
     input_lengths: torch.Tensor
     config: Dict[str, Any] = {}
     multimodal_inputs: List[MultimodalInput] = []
 
-    def __init__(self,
-                 token_ids: torch.Tensor,
-                 token_type_ids: torch.Tensor,
-                 input_lengths: torch.Tensor,
-                 config: Dict[str, Any] = {},
-                 multimodal_inputs: List[MultimodalInput] = []):
+    def __init__(
+        self,
+        token_ids: torch.Tensor,
+        token_type_ids: torch.Tensor,
+        input_lengths: torch.Tensor,
+        config: Dict[str, Any] = {},
+        multimodal_inputs: List[MultimodalInput] = [],
+    ):
         self.token_ids = token_ids
         self.token_type_ids = token_type_ids
         self.input_lengths = input_lengths
@@ -32,5 +37,7 @@ class EngineInputs():
 
 
 class EngineOutputs(PyDanticModelBase):
-    outputs: Optional[Union[List[Dict[str, torch.Tensor]], torch.Tensor, List[torch.Tensor]]]
+    outputs: Optional[
+        Union[List[Dict[str, torch.Tensor]], torch.Tensor, List[torch.Tensor]]
+    ]
     input_length: int

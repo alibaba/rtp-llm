@@ -1,18 +1,22 @@
-
-import os
-import json
 import functools
+import json
+import os
+from typing import Any, Dict, List, Tuple, Union
+
 import torch
-from typing import List, Any, Tuple, Dict, Union
-from transformers import AutoTokenizer
 from torchvision import io, transforms
 from torchvision.transforms import InterpolationMode
+from transformers import AutoTokenizer
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel, MultimodalInput
 from rtp_llm.models.multimodal.multimodal_mixin import MultiModalMixin
-from rtp_llm.models.qwen2_vl.qwen2_vl import QwenVL2VitWeight, QWen2VLWeightInfo, QWen2_VL
-from rtp_llm.model_factory_register import register_model
+from rtp_llm.models.qwen2_vl.qwen2_vl import (
+    QWen2_VL,
+    QWen2VLWeightInfo,
+    QwenVL2VitWeight,
+)
 
 try:
     from decord import VideoReader, cpu
@@ -20,28 +24,60 @@ except ModuleNotFoundError:
     VideoReader = None
     cpu = None
 
-from rtp_llm.models.qwen2_vl.qwen2_vl_vit import (Qwen2VLImageEmbedding, Qwen2VLImageProcessor, FRAME_FACTOR, FPS_MIN_FRAMES, FPS_MAX_FRAMES, ceil_by_factor, floor_by_factor,
-                                                  FPS, smart_resize, VIDEO_MIN_PIXELS, VIDEO_TOTAL_PIXELS, VIDEO_MAX_PIXELS, IMAGE_FACTOR)
-from rtp_llm.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VisionTransformerPretrainedModel
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.models.qwen2_5_vl.modeling_qwen2_5_vl import (
+    Qwen2_5_VisionTransformerPretrainedModel,
+)
+from rtp_llm.models.qwen2_vl.qwen2_vl_vit import (
+    FPS,
+    FPS_MAX_FRAMES,
+    FPS_MIN_FRAMES,
+    FRAME_FACTOR,
+    IMAGE_FACTOR,
+    VIDEO_MAX_PIXELS,
+    VIDEO_MIN_PIXELS,
+    VIDEO_TOTAL_PIXELS,
+    Qwen2VLImageEmbedding,
+    Qwen2VLImageProcessor,
+    ceil_by_factor,
+    floor_by_factor,
+    smart_resize,
+)
+
 
 def smart_nframes(configs, total_frames, video_fps) -> int:
     fps = configs.fps if configs.fps != -1 else FPS
-    min_frames = ceil_by_factor(configs.min_frames if configs.min_frames != -1 else FPS_MIN_FRAMES, FRAME_FACTOR)
-    max_frames = floor_by_factor(configs.max_frames if configs.max_frames != -1 else min(FPS_MAX_FRAMES, total_frames), FRAME_FACTOR)
+    min_frames = ceil_by_factor(
+        configs.min_frames if configs.min_frames != -1 else FPS_MIN_FRAMES, FRAME_FACTOR
+    )
+    max_frames = floor_by_factor(
+        (
+            configs.max_frames
+            if configs.max_frames != -1
+            else min(FPS_MAX_FRAMES, total_frames)
+        ),
+        FRAME_FACTOR,
+    )
     nframes = total_frames / video_fps * fps
     nframes = min(min(max(nframes, min_frames), max_frames), total_frames)
     nframes = floor_by_factor(nframes, FRAME_FACTOR)
     if not (FRAME_FACTOR <= nframes and nframes <= total_frames):
-        raise ValueError(f"nframes should in interval [{FRAME_FACTOR}, {total_frames}], but got {nframes}.")
+        raise ValueError(
+            f"nframes should in interval [{FRAME_FACTOR}, {total_frames}], but got {nframes}."
+        )
     return nframes
+
 
 class Qwen2_5_VLImageEmbedding(Qwen2VLImageEmbedding):
     def __init__(self, config: GptInitModelParameters):
-        self.image_processor = Qwen2VLImageProcessor.from_pretrained(config.mm_related_params.config["ckpt_path"])
-        self.visual = Qwen2_5_VisionTransformerPretrainedModel(config.mm_related_params.config)
+        self.image_processor = Qwen2VLImageProcessor.from_pretrained(
+            config.mm_related_params.config["ckpt_path"]
+        )
+        self.visual = Qwen2_5_VisionTransformerPretrainedModel(
+            config.mm_related_params.config
+        )
         self.config = config
-    
+
     def load_video(self, data, configs, **kwargs):
         vr = VideoReader(data, ctx=cpu(0), num_threads=1)
         total_frames, video_fps = len(vr), vr.get_avg_fps()
@@ -55,10 +91,17 @@ class Qwen2_5_VLImageEmbedding(Qwen2VLImageEmbedding):
         image_factor = IMAGE_FACTOR
 
         nframes, _, height, width = video.shape
-        min_pixels = configs.min_pixels if configs.min_pixels != -1 else VIDEO_MIN_PIXELS
+        min_pixels = (
+            configs.min_pixels if configs.min_pixels != -1 else VIDEO_MIN_PIXELS
+        )
         total_pixels = VIDEO_TOTAL_PIXELS
-        max_pixels = max(min(VIDEO_MAX_PIXELS, total_pixels / nframes * FRAME_FACTOR), int(min_pixels * 1.05))
-        max_pixels_supposed = configs.max_pixels if configs.max_pixels != -1 else max_pixels
+        max_pixels = max(
+            min(VIDEO_MAX_PIXELS, total_pixels / nframes * FRAME_FACTOR),
+            int(min_pixels * 1.05),
+        )
+        max_pixels_supposed = (
+            configs.max_pixels if configs.max_pixels != -1 else max_pixels
+        )
         max_pixels = min(max_pixels_supposed, max_pixels)
         if configs.height != -1 and configs.width != -1:
             resized_height, resized_width = smart_resize(
@@ -82,9 +125,13 @@ class Qwen2_5_VLImageEmbedding(Qwen2VLImageEmbedding):
         ).float()
         return video
 
+
 class QWen2_5_VL(QWen2_VL):
     def _init_multimodal(self, config: GptInitModelParameters):
         self.mm_part = Qwen2_5_VLImageEmbedding(config)
-        config.mm_related_params.vit_weights = QwenVL2VitWeight({"vit": self.mm_part.visual})
+        config.mm_related_params.vit_weights = QwenVL2VitWeight(
+            {"vit": self.mm_part.visual}
+        )
 
-register_model('qwen2_5_vl', QWen2_5_VL, ["Qwen2_5_VLForConditionalGeneration"])
+
+register_model("qwen2_5_vl", QWen2_5_VL, ["Qwen2_5_VLForConditionalGeneration"])

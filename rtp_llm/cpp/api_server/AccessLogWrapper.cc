@@ -9,8 +9,8 @@ using namespace autil::legacy;
 namespace rtp_llm {
 
 std::string logFormatTimeInMilliseconds(const int64_t& now_time_us) {
-    auto now_time = autil::TimeUtility::usFormat(now_time_us, "%Y-%m-%d %H:%M:%S");
-    auto ms_part = now_time_us / 1000 % 1000;
+    auto               now_time = autil::TimeUtility::usFormat(now_time_us, "%Y-%m-%d %H:%M:%S");
+    auto               ms_part  = now_time_us / 1000 % 1000;
     std::ostringstream ms_str;
     ms_str << std::setfill('0') << std::setw(3) << ms_part;
     return now_time + "." + ms_str.str();
@@ -59,7 +59,10 @@ private:
 
 class AccessLogInfoEmbedding: public autil::legacy::Jsonizable {
 public:
-    AccessLogInfoEmbedding(const RequestLogInfo& request, const ResponseLogInfo& response, int64_t request_id, int64_t start_time_us):
+    AccessLogInfoEmbedding(const RequestLogInfo&  request,
+                           const ResponseLogInfo& response,
+                           int64_t                request_id,
+                           int64_t                start_time_us):
         request_(request),
         response_(response),
         request_id_(request_id),
@@ -106,9 +109,7 @@ private:
     std::string     log_time_;
 };
 
-void AccessLogWrapper::logQueryAccess(const std::string& raw_request,
-                                      int64_t            request_id,
-                                      bool               private_request) {
+void AccessLogWrapper::logQueryAccess(const std::string& raw_request, int64_t request_id, bool private_request) {
     if (private_request) {
         return;
     }
@@ -126,23 +127,23 @@ void AccessLogWrapper::logQueryAccess(const std::string& raw_request,
 }
 
 bool AccessLogWrapper::logResponse(bool py_inference_log_response) {
-    static bool checked = false;
+    static bool checked      = false;
     static bool log_response = false;
     if (!checked) {
         log_response = py_inference_log_response;
-        checked = true;
+        checked      = true;
     }
     return log_response;
 }
 
 std::string decodeUnicode(const std::string& input) {
     std::string result;
-    size_t i = 0;
+    size_t      i = 0;
     while (i < input.size()) {
         if (input[i] == '\\' && i + 5 < input.size() && input[i + 1] == 'u') {
             // 提取 \uXXXX 中的 XXXX
-            std::string hexStr = input.substr(i + 2, 4);
-            unsigned int codePoint;
+            std::string       hexStr = input.substr(i + 2, 4);
+            unsigned int      codePoint;
             std::stringstream ss;
             ss << std::hex << hexStr;
             ss >> codePoint;
@@ -158,7 +159,7 @@ std::string decodeUnicode(const std::string& input) {
                 result += static_cast<char>(((codePoint >> 6) & 0x3F) | 0x80);
                 result += static_cast<char>((codePoint & 0x3F) | 0x80);
             }
-            i += 6; // 跳过 \uXXXX
+            i += 6;  // 跳过 \uXXXX
         } else {
             result += input[i];
             ++i;
@@ -168,9 +169,9 @@ std::string decodeUnicode(const std::string& input) {
 }
 
 std::string removeEscapedQuotes(const std::string& jsonString) {
-    std::string result = jsonString;
+    std::string result       = jsonString;
     std::string escapedQuote = "\\\"";
-    std::string quote = "\"";
+    std::string quote        = "\"";
     // Remove escaped quotes
     size_t pos = 0;
     while ((pos = result.find(escapedQuote, pos)) != std::string::npos) {

@@ -1,24 +1,28 @@
-import os
 import json
+import os
 import re
-from typing import List, Any, Dict, Tuple, Union
-from transformers import CLIPVisionConfig, AutoTokenizer
+from typing import Any, Dict, List, Tuple, Union
+
+from transformers import AutoTokenizer, CLIPVisionConfig
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.models.llava_weight import LlavaWeightInfo
-from rtp_llm.models.llama import Llama
-from rtp_llm.models.multimodal.multimodal_mixin import MultiModalMixin, BaseVitWeights
-from rtp_llm.models.llava_vit import LlavaImageEmbedding
 from rtp_llm.model_factory_register import register_model
+from rtp_llm.models.llama import Llama
+from rtp_llm.models.llava_vit import LlavaImageEmbedding
+from rtp_llm.models.llava_weight import LlavaWeightInfo
+from rtp_llm.models.multimodal.multimodal_mixin import BaseVitWeights, MultiModalMixin
+
 
 class LlavaTokenizer(object):
-    def __init__(self,
-                 tokenzier_path: str,
-                 mm_use_im_patch_token: bool,
-                 mm_use_im_start_end: bool,
-                 special_token_ids: Dict[str, Any],
-                 special_tokens: Dict[str, Any],
-                 bos_id: int = 1):
+    def __init__(
+        self,
+        tokenzier_path: str,
+        mm_use_im_patch_token: bool,
+        mm_use_im_start_end: bool,
+        special_token_ids: Dict[str, Any],
+        special_tokens: Dict[str, Any],
+        bos_id: int = 1,
+    ):
         self.tokenizer = AutoTokenizer.from_pretrained(tokenzier_path)
         self.mm_use_im_patch_token = mm_use_im_patch_token
         self.mm_use_im_start_end = mm_use_im_start_end
@@ -40,23 +44,33 @@ class LlavaTokenizer(object):
     def encode(self, s: str, **kwargs) -> List[int]:
         replace_token = self.default_image_token
         if self.mm_use_im_start_end:
-            replace_token = self.default_im_start_token + replace_token + self.default_im_end_token
+            replace_token = (
+                self.default_im_start_token + replace_token + self.default_im_end_token
+            )
         s = s.replace(self.default_image_token, replace_token)
 
-        prompt_chunks: List[List[int]] = [self.tokenizer.encode(chunk) for chunk in s.split(self.default_image_token)]
+        prompt_chunks: List[List[int]] = [
+            self.tokenizer.encode(chunk) for chunk in s.split(self.default_image_token)
+        ]
 
         images = len(prompt_chunks) - 1
 
         def insert_separator(X, sep):
-            return [ele for sublist in zip(X, [sep]*len(X)) for ele in sublist][:-1]
+            return [ele for sublist in zip(X, [sep] * len(X)) for ele in sublist][:-1]
 
         t: List[int] = []
         offset = 0
-        if len(prompt_chunks) > 0 and len(prompt_chunks[0]) > 0 and prompt_chunks[0][0] == self.bos_id:
+        if (
+            len(prompt_chunks) > 0
+            and len(prompt_chunks[0]) > 0
+            and prompt_chunks[0][0] == self.bos_id
+        ):
             offset = 1
             t.append(prompt_chunks[0][0])
 
-        for x in insert_separator(prompt_chunks, [self.image_token_index] * (offset + 1)):
+        for x in insert_separator(
+            prompt_chunks, [self.image_token_index] * (offset + 1)
+        ):
             t.extend(x[offset:])
 
         return t
@@ -67,21 +81,32 @@ class LlavaTokenizer(object):
     def apply_chat_template(self, messages, **kwargs):
         return self.tokenizer.apply_chat_template(messages, **kwargs)
 
+
 class Llava(Llama, MultiModalMixin):
     def _init_multimodal(self, config: GptInitModelParameters):
         self.mm_part = LlavaImageEmbedding(config)
         vit_weight_dict: Dict[str, Any] = {"mm_projector": self.mm_part.mm_projector}
-        if config.mm_related_params.config["unfreeze_mm_vision_tower"] or \
-            "mm_vision_tower" in config.mm_related_params.config["mm_tunable_parts"]:
+        if (
+            config.mm_related_params.config["unfreeze_mm_vision_tower"]
+            or "mm_vision_tower" in config.mm_related_params.config["mm_tunable_parts"]
+        ):
             vit_weight_dict["vision_tower"] = self.mm_part.vision_tower
-        if "unpad" in config.mm_related_params.config.get("mm_patch_merge_type", "flat"):
+        if "unpad" in config.mm_related_params.config.get(
+            "mm_patch_merge_type", "flat"
+        ):
             vit_weight_dict["image_newline"] = self.mm_part.image_newline
         config.mm_related_params.vit_weights = BaseVitWeights(vit_weight_dict, True)
 
     @staticmethod
-    def multimodal_modify_prompt_plugin(prompt: Union[List[Dict[str, Any]], str], images: List[str],
-                                        img_token: str, **kwargs: Any) -> Tuple[str, List[Any]]:
-        prompt, mm_inputs = MultiModalMixin.multimodal_modify_prompt_plugin(prompt, images, img_token, **kwargs)
+    def multimodal_modify_prompt_plugin(
+        prompt: Union[List[Dict[str, Any]], str],
+        images: List[str],
+        img_token: str,
+        **kwargs: Any
+    ) -> Tuple[str, List[Any]]:
+        prompt, mm_inputs = MultiModalMixin.multimodal_modify_prompt_plugin(
+            prompt, images, img_token, **kwargs
+        )
         if img_token in prompt:
             return prompt, mm_inputs
         else:
@@ -100,7 +125,7 @@ class Llava(Llama, MultiModalMixin):
             norm_type="rmsnorm",
             rotary_embedding_dim=128,
             rotary_embedding_style=1,
-            has_post_decoder_layernorm=True
+            has_post_decoder_layernorm=True,
         )
         # hugggingface
         config_path = os.path.join(ckpt_path, "config.json")
@@ -128,7 +153,9 @@ class Llava(Llama, MultiModalMixin):
             Llama.from_huggingface(config, text_config)
 
             vision_config = config_json["vision_config"]
-            config.mm_related_params.config["vision_config"] = CLIPVisionConfig(vision_config)
+            config.mm_related_params.config["vision_config"] = CLIPVisionConfig(
+                vision_config
+            )
 
         else:
             Llama.from_huggingface(config, config_json)
@@ -148,21 +175,31 @@ class Llava(Llama, MultiModalMixin):
                 ("mm_tunable_parts", ""),
                 ("add_faster_video", False),
                 ("mm_newline_position", "grid"),
-                ("mm_spatial_pool_mode", "bilinear")
+                ("mm_spatial_pool_mode", "bilinear"),
             ]
 
             for param_name, default_value in mm_related_params_list:
-                config.mm_related_params.config[param_name] = config_json.get(param_name, default_value)
+                config.mm_related_params.config[param_name] = config_json.get(
+                    param_name, default_value
+                )
 
-            config.mm_related_params.config["mm_hidden_size"] = config_json.get("mm_hidden_size", config_json["hidden_size"])
-            config.mm_related_params.special_token_ids.update({"ignore_token_index": -100, "image_token_index": -200})
-            config.mm_related_params.special_tokens.update({
-                "default_mm_token": "<image>",
-                "default_im_start_token": "<im_start>",
-                "default_im_end_token": "<im_end>"
-            })
+            config.mm_related_params.config["mm_hidden_size"] = config_json.get(
+                "mm_hidden_size", config_json["hidden_size"]
+            )
+            config.mm_related_params.special_token_ids.update(
+                {"ignore_token_index": -100, "image_token_index": -200}
+            )
+            config.mm_related_params.special_tokens.update(
+                {
+                    "default_mm_token": "<image>",
+                    "default_im_start_token": "<im_start>",
+                    "default_im_end_token": "<im_end>",
+                }
+            )
 
-            vis_tower_name = config_json.get("mm_vision_tower", config_json.get("vision_tower", None))
+            vis_tower_name = config_json.get(
+                "mm_vision_tower", config_json.get("vision_tower", None)
+            )
             img_expand_match = re.search("patch(\d+)-(\d+)", vis_tower_name)
             if img_expand_match:
                 patch_size = int(img_expand_match.group(1))
@@ -170,15 +207,18 @@ class Llava(Llama, MultiModalMixin):
                 config.mm_related_params.config["patch_size"] = patch_size
                 config.mm_related_params.config["image_size"] = img_size
             config.mm_related_params.config["vit_tower_path"] = vis_tower_name
-            config.mm_sep_tokens = [[-200]] # image_token_index
+            config.mm_sep_tokens = [[-200]]  # image_token_index
 
     @classmethod
     def get_tokenizer(cls, config: GptInitModelParameters):
-        return LlavaTokenizer(config.tokenizer_path,
-                              config.mm_related_params.config["mm_use_im_patch_token"],
-                              config.mm_related_params.config["mm_use_im_start_end"],
-                              config.mm_related_params.special_token_ids,
-                              config.mm_related_params.special_tokens,
-                              config.special_tokens.bos_token_id)
+        return LlavaTokenizer(
+            config.tokenizer_path,
+            config.mm_related_params.config["mm_use_im_patch_token"],
+            config.mm_related_params.config["mm_use_im_start_end"],
+            config.mm_related_params.special_token_ids,
+            config.mm_related_params.special_tokens,
+            config.special_tokens.bos_token_id,
+        )
+
 
 register_model("llava", Llava, ["LlavaLlamaForCausalLM"])

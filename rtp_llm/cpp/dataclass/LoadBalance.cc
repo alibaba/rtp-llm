@@ -5,7 +5,7 @@
 namespace rtp_llm {
 
 size_t StepRecorder::STEP_RECORDS_TIME_RANGE = 60 * 1000 * 1000;
-size_t StepRecorder::STEP_RECORDS_MAX_SIZE = 1000;
+size_t StepRecorder::STEP_RECORDS_MAX_SIZE   = 1000;
 
 PIController::PIController(float kp, float ki): kp_(kp), ki_(ki) {}
 
@@ -70,9 +70,9 @@ void StepRecorder::registerStep(size_t step_time_us, size_t batch_avg_gen_num) {
             RTP_LLM_LOG_ERROR("step time not in order");
             return;
         }
-        min_step_latency_ = std::min(
-            min_step_latency_,
-            (size_t)((step_time_us - step_records_.back().time_us) * 1.0 / ((batch_avg_gen_num + step_records_.back().batch_avg_gen_num) / 2.0)));
+        min_step_latency_ = std::min(min_step_latency_,
+                                     (size_t)((step_time_us - step_records_.back().time_us) * 1.0
+                                              / ((batch_avg_gen_num + step_records_.back().batch_avg_gen_num) / 2.0)));
     }
     step_records_.push({step_time_us, batch_avg_gen_num});
     queue_total_gen_num_ += batch_avg_gen_num;

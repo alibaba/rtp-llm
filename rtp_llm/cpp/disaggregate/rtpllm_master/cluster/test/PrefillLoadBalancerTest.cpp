@@ -62,7 +62,7 @@ LoadBalancerInitParams PrefillLoadBalancerTest::makeConfig() {
 void PrefillLoadBalancerTest::initServer(const std::string& spec,
                                          const std::string& running_task_list,
                                          const std::string& finished_task_list) {
-    auto server = FakeServer::initServer(spec, running_task_list, finished_task_list);
+    auto       server = FakeServer::initServer(spec, running_task_list, finished_task_list);
     ServerInfo server_info;
     server_info.address = spec;
     server_info.server  = server;

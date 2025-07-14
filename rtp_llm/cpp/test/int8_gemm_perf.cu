@@ -11,11 +11,9 @@
 #include "rtp_llm/cpp/cuda/cublas/cublasMMWrapper.h"
 #include "rtp_llm/cpp/cutlass/interface.h"
 
-
 namespace tk = tensorrt_llm::common;
 namespace tc = tensorrt_llm::cutlass_extensions;
 //
-
 
 struct Dim2 {
     int k;
@@ -23,8 +21,7 @@ struct Dim2 {
 };
 
 template<typename T>
-void gemm_test(int m, Dim2 dim2, cudaStream_t stream)
-{
+void gemm_test(int m, Dim2 dim2, cudaStream_t stream) {
     int n = dim2.n;
     int k = dim2.k;
     // quantizeWeights quantizeActivations perToken perChannel useInt4Weights useInt8KvCache useFp8KvCache useFp8Qdq
@@ -43,24 +40,24 @@ void gemm_test(int m, Dim2 dim2, cudaStream_t stream)
     deviceMalloc(&out_ptr1, m * n, false);
     check_cuda_value(cudaMemset(out_ptr1, 0xdc, m * n * sizeof(half)));
 
-    Allocator<AllocatorType::CUDA>* allocator_      = nullptr;
-    std::mutex*    mutex_           = nullptr;
-    mutex_     = new std::mutex();  // mutex per process
+    Allocator<AllocatorType::CUDA>* allocator_ = nullptr;
+    std::mutex*                     mutex_     = nullptr;
+    mutex_                                     = new std::mutex();  // mutex per process
 
     cublasAlgoMap* cublas_algo_map_ = nullptr;
-    cublas_algo_map_      = new cublasAlgoMap(GEMM_CONFIG);
+    cublas_algo_map_                = new cublasAlgoMap(GEMM_CONFIG);
 
     allocator_ = new Allocator<AllocatorType::CUDA>(getDevice());
     allocator_->setStream(stream);
 
-    cublasHandle_t   cublas_handle_;
+    cublasHandle_t cublas_handle_;
     check_cuda_value(cublasCreate(&cublas_handle_));
     cublasLtHandle_t cublaslt_handle_;
     check_cuda_value(cublasLtCreate(&cublaslt_handle_));
     check_cuda_value(cublasSetStream(cublas_handle_, stream));
 
-    cublasMMWrapper* cublas_wrapper_= new cublasMMWrapper(
-        cublas_handle_, cublaslt_handle_, stream, cublas_algo_map_, mutex_, allocator_);
+    cublasMMWrapper* cublas_wrapper_ =
+        new cublasMMWrapper(cublas_handle_, cublaslt_handle_, stream, cublas_algo_map_, mutex_, allocator_);
 
     cublas_wrapper_->setGemmConfig(CUDA_R_16F, CUDA_R_16F, CUDA_R_16F, CUDA_R_32F);
 
@@ -76,7 +73,7 @@ void gemm_test(int m, Dim2 dim2, cudaStream_t stream)
 
     float* alphaCol = nullptr;
     check_cuda_value(cudaMalloc((void**)(&alphaCol), sizeof(float)));
-    
+
     float* alphaRow = nullptr;
     check_cuda_value(cudaMalloc((void**)(&alphaRow), sizeof(float)));
 
@@ -85,10 +82,9 @@ void gemm_test(int m, Dim2 dim2, cudaStream_t stream)
     cudaMemcpy(alphaCol, &Colscale, sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(alphaRow, &Rowscale, sizeof(float), cudaMemcpyHostToDevice);
 
-
     cublasStatus_t status = CUBLAS_STATUS_SUCCESS;
 
-    int iterations = 100;
+    int   iterations         = 100;
     float total_time_fp16    = 0;
     float total_time_ms_int8 = 0;
 
@@ -100,15 +96,15 @@ void gemm_test(int m, Dim2 dim2, cudaStream_t stream)
     cudaEventCreate(&stop2);
 
     tensorrt_llm::kernels::cutlass_kernels::CutlassInt8GemmRunner<T> runner;
-    char*       ws_ptr = nullptr;
-    const int   wsSize = runner.getWorkspaceSize(m, n, k);
+    char*                                                            ws_ptr = nullptr;
+    const int                                                        wsSize = runner.getWorkspaceSize(m, n, k);
     deviceMalloc(&ws_ptr, wsSize);
 
     // warm up
-    const auto gemmConfig = runner.getChosenConfig(in_ptr2, w_ptr2, quant_mode, alphaCol, alphaRow, out_ptr2, m, n, k, ws_ptr, wsSize, stream);
+    const auto gemmConfig = runner.getChosenConfig(
+        in_ptr2, w_ptr2, quant_mode, alphaCol, alphaRow, out_ptr2, m, n, k, ws_ptr, wsSize, stream);
     runner.gemm(in_ptr2, w_ptr2, quant_mode, alphaCol, alphaRow, out_ptr2, m, n, k, gemmConfig, ws_ptr, wsSize, stream);
     cublas_wrapper_->Gemm(CUBLAS_OP_N, CUBLAS_OP_N, n, m, k, w_ptr1, n, in_ptr1, k, out_ptr1, n);
-    
 
     cudaDeviceSynchronize();
     cudaEventSynchronize(start1);
@@ -125,7 +121,8 @@ void gemm_test(int m, Dim2 dim2, cudaStream_t stream)
     cudaEventRecord(start2, stream);
 
     for (int iter = 0; iter < iterations; iter++) {
-        runner.gemm(in_ptr2, w_ptr2, quant_mode, alphaCol, alphaRow, out_ptr2, m, n, k, gemmConfig, ws_ptr, wsSize, stream);
+        runner.gemm(
+            in_ptr2, w_ptr2, quant_mode, alphaCol, alphaRow, out_ptr2, m, n, k, gemmConfig, ws_ptr, wsSize, stream);
     }
     cudaEventRecord(stop2, stream);
     cudaEventSynchronize(stop2);
@@ -134,7 +131,13 @@ void gemm_test(int m, Dim2 dim2, cudaStream_t stream)
 
     float avg_time_int8 = total_time_ms_int8 / float(iterations);
     float avg_time_fp16 = total_time_fp16 / float(iterations);
-    printf("m=%d n=%d k=%d cublas=%.6f w8a8=%.6f ratio=%f\n", m, n, k, avg_time_fp16, avg_time_int8, avg_time_fp16/avg_time_int8);
+    printf("m=%d n=%d k=%d cublas=%.6f w8a8=%.6f ratio=%f\n",
+           m,
+           n,
+           k,
+           avg_time_fp16,
+           avg_time_int8,
+           avg_time_fp16 / avg_time_int8);
 
     check_cuda_value(status);
 
@@ -155,8 +158,7 @@ void gemm_test(int m, Dim2 dim2, cudaStream_t stream)
     cudaFree(alphaCol);
 }
 
-int main()
-{
+int main() {
     std::vector<int>  M_list{1, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 24576, 32768};
     std::vector<Dim2> dim_list;
     dim_list.push_back({4096, 4096});

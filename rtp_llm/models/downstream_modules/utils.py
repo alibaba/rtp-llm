@@ -1,18 +1,34 @@
 import os
 from typing import Optional
+
 from transformers import PreTrainedTokenizerBase
 
-from rtp_llm.config.task_type import TaskType
-from rtp_llm.utils.util import get_config_from_path
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.task_type import TaskType
+from rtp_llm.models.downstream_modules import (
+    ALLEmbeddingModule,
+    BgeM3EmbeddingModule,
+    ClassifierModule,
+    ColBertEmbeddingModule,
+    DenseEmbeddingModule,
+    RerankerModule,
+    SparseEmbeddingModule,
+)
 from rtp_llm.models.downstream_modules.plugin_loader import UserModuleLoader
-from rtp_llm.models.downstream_modules import SparseEmbeddingModule, DenseEmbeddingModule, \
-    ALLEmbeddingModule, ColBertEmbeddingModule, ClassifierModule, BgeM3EmbeddingModule, RerankerModule
+from rtp_llm.utils.util import get_config_from_path
 
-def create_custom_module(task_type: TaskType, config: GptInitModelParameters, tokenizer: Optional[PreTrainedTokenizerBase]):
+
+def create_custom_module(
+    task_type: TaskType,
+    config: GptInitModelParameters,
+    tokenizer: Optional[PreTrainedTokenizerBase],
+):
     # try import internal module
     try:
-        from internal_source.rtp_llm.models.downstream_modules.utils import create_custom_module
+        from internal_source.rtp_llm.models.downstream_modules.utils import (
+            create_custom_module,
+        )
+
         internal_module = create_custom_module(task_type, config, tokenizer)
         if internal_module is not None:
             return internal_module

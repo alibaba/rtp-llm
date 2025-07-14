@@ -34,7 +34,7 @@ namespace rtp_llm {
 inline __device__ float2 bf1622float2(const __nv_bfloat162 val) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
     float2 f_val;
-    f_val.x = __low2float(val); 
+    f_val.x = __low2float(val);
     f_val.y = __high2float(val);
     return f_val;
 #else
@@ -47,14 +47,20 @@ inline __device__ int16_t bf1622int16(__nv_bfloat162 val) {
     float2 f_val;
     f_val.x = max(min(__low2float(val), 127.f), -128.f);
     f_val.y = max(min(__high2float(val), 127.f), -128.f);
-    union { int8_t int8[2]; int16_t int16; };
+    union {
+        int8_t  int8[2];
+        int16_t int16;
+    };
     int8[0] = static_cast<int8_t>(static_cast<short>(f_val.x));
     int8[1] = static_cast<int8_t>(static_cast<short>(f_val.y));
     return int16;
 #else
     val = __hmin2(val, make_bfloat162(127., 127.));
     val = __hmax2(val, make_bfloat162(-128., -128.));
-    union { int8_t int8[2]; int16_t int16; };
+    union {
+        int8_t  int8[2];
+        int16_t int16;
+    };
     int8[0] = static_cast<int8_t>(static_cast<short>(val.x));
     int8[1] = static_cast<int8_t>(static_cast<short>(val.y));
     return int16;
@@ -95,7 +101,7 @@ inline __device__ __nv_bfloat162 bf16hadd2(const __nv_bfloat162 x, const __nv_bf
 
 inline __device__ __nv_bfloat16 bf16hadd(const __nv_bfloat16 x, const __nv_bfloat16 y) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
-    return __float2bfloat16( __bfloat162float(x) + __bfloat162float(y) );
+    return __float2bfloat16(__bfloat162float(x) + __bfloat162float(y));
 #else
     return __hadd(x, y);
 #endif
@@ -116,7 +122,7 @@ inline __device__ __nv_bfloat162 bf16hsub2(const __nv_bfloat162 x, const __nv_bf
 
 inline __device__ __nv_bfloat16 bf16hsub(const __nv_bfloat16 x, const __nv_bfloat16 y) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
-    return __float2bfloat16( __bfloat162float(x) - __bfloat162float(y) );
+    return __float2bfloat16(__bfloat162float(x) - __bfloat162float(y));
 #else
     return __hsub(x, y);
 #endif
@@ -137,13 +143,13 @@ inline __device__ __nv_bfloat162 bf16hmul2(const __nv_bfloat162 x, const __nv_bf
 
 inline __device__ __nv_bfloat16 bf16hmul(const __nv_bfloat16 x, const __nv_bfloat16 y) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
-    return __float2bfloat16( __bfloat162float(x) * __bfloat162float(y) );
-#else 
+    return __float2bfloat16(__bfloat162float(x) * __bfloat162float(y));
+#else
     return __hmul(x, y);
 #endif
 }
 
-// fix 
+// fix
 inline __device__ __nv_bfloat162 bf16h2div2(const __nv_bfloat162 x, const __nv_bfloat162 y) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
     float fxl, fxh, fyl, fyh;
@@ -164,7 +170,7 @@ inline __device__ __nv_bfloat16 bf16hdiv(const __nv_bfloat16 x, const __nv_bfloa
     float fy = __bfloat162float(y);
     assert(fy != 0.0f && "bf16hdiv Division by zero!");
     return __float2bfloat16(fx / fy);
-#else 
+#else
     return __hdiv(x, y);
 #endif
 }
@@ -186,7 +192,7 @@ inline __device__ __nv_bfloat162 bf16hfma2(const __nv_bfloat162 x, const __nv_bf
 
 inline __device__ __nv_bfloat16 bf16hfma(const __nv_bfloat16 x, const __nv_bfloat16 y, const __nv_bfloat16 z) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
-    return __float2bfloat16( __bfloat162float(x) * __bfloat162float(y) + __bfloat162float(z));
+    return __float2bfloat16(__bfloat162float(x) * __bfloat162float(y) + __bfloat162float(z));
 #else
     return __hfma(x, y, z);
 #endif
@@ -196,7 +202,8 @@ inline __device__ __nv_bfloat162 bf16exp2(const __nv_bfloat162 x) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
     float fxl, fxh;
     fxl = __low2float(x);
-    fxh = __high2float(x);;
+    fxh = __high2float(x);
+    ;
     return __floats2bfloat162_rn(expf(fxl), expf(fxh));
 #else
     return h2exp(x);
@@ -204,27 +211,61 @@ inline __device__ __nv_bfloat162 bf16exp2(const __nv_bfloat162 x) {
 }
 
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ < 800) && !defined(USING_CUDA12) && !defined(USING_ROCM)
-inline __device__ __nv_bfloat162 operator+(const __nv_bfloat162 x, const __nv_bfloat162 y) { return bf16hadd2(x, y); };
-inline __device__ __nv_bfloat162 operator+=(const __nv_bfloat162 x, const __nv_bfloat162 y) { return bf16hadd2(x, y); };
-inline __device__ __nv_bfloat162 operator-(const __nv_bfloat162 x, const __nv_bfloat162 y) { return bf16hsub2(x, y); };
-inline __device__ __nv_bfloat162 operator-=(const __nv_bfloat162 x, const __nv_bfloat162 y) { return bf16hsub2(x, y); };
-inline __device__ __nv_bfloat162 operator*(const __nv_bfloat162 x, const __nv_bfloat162 y) { return bf16hmul2(x, y); };
-inline __device__ __nv_bfloat162 operator*=(const __nv_bfloat162 x, const __nv_bfloat162 y) { return bf16hmul2(x, y); };
-inline __device__ __nv_bfloat162 operator/(const __nv_bfloat162 x, const __nv_bfloat162 y) { return bf16h2div2(x, y); };
-inline __device__ __nv_bfloat162 operator/=(const __nv_bfloat162 x, const __nv_bfloat162 y) { return bf16h2div2(x, y); };
+inline __device__ __nv_bfloat162 operator+(const __nv_bfloat162 x, const __nv_bfloat162 y) {
+    return bf16hadd2(x, y);
+};
+inline __device__ __nv_bfloat162 operator+=(const __nv_bfloat162 x, const __nv_bfloat162 y) {
+    return bf16hadd2(x, y);
+};
+inline __device__ __nv_bfloat162 operator-(const __nv_bfloat162 x, const __nv_bfloat162 y) {
+    return bf16hsub2(x, y);
+};
+inline __device__ __nv_bfloat162 operator-=(const __nv_bfloat162 x, const __nv_bfloat162 y) {
+    return bf16hsub2(x, y);
+};
+inline __device__ __nv_bfloat162 operator*(const __nv_bfloat162 x, const __nv_bfloat162 y) {
+    return bf16hmul2(x, y);
+};
+inline __device__ __nv_bfloat162 operator*=(const __nv_bfloat162 x, const __nv_bfloat162 y) {
+    return bf16hmul2(x, y);
+};
+inline __device__ __nv_bfloat162 operator/(const __nv_bfloat162 x, const __nv_bfloat162 y) {
+    return bf16h2div2(x, y);
+};
+inline __device__ __nv_bfloat162 operator/=(const __nv_bfloat162 x, const __nv_bfloat162 y) {
+    return bf16h2div2(x, y);
+};
 
-inline __device__ __nv_bfloat16 operator+(const __nv_bfloat16 x, const __nv_bfloat16 y) { return bf16hadd(x, y); };
-inline __device__ __nv_bfloat16 operator+=(const __nv_bfloat16 x, const __nv_bfloat16 y) { return bf16hadd(x, y); };
-inline __device__ __nv_bfloat16 operator-(const __nv_bfloat16 x, const __nv_bfloat16 y) { return bf16hsub(x, y); };
-inline __device__ __nv_bfloat16 operator-=(const __nv_bfloat16 x, const __nv_bfloat16 y) { return bf16hsub(x, y); };
-inline __device__ __nv_bfloat16 operator*(const __nv_bfloat16 x, const __nv_bfloat16 y) { return bf16hmul(x, y); };
-inline __device__ __nv_bfloat16 operator*=(const __nv_bfloat16 x, const __nv_bfloat16 y) { return bf16hmul(x, y); };
-inline __device__ __nv_bfloat16 operator/(const __nv_bfloat16 x, const __nv_bfloat16 y) { return bf16hdiv(x, y); };
-inline __device__ __nv_bfloat16 operator/=(const __nv_bfloat16 x, const __nv_bfloat16 y) { return bf16hdiv(x, y); };
+inline __device__ __nv_bfloat16 operator+(const __nv_bfloat16 x, const __nv_bfloat16 y) {
+    return bf16hadd(x, y);
+};
+inline __device__ __nv_bfloat16 operator+=(const __nv_bfloat16 x, const __nv_bfloat16 y) {
+    return bf16hadd(x, y);
+};
+inline __device__ __nv_bfloat16 operator-(const __nv_bfloat16 x, const __nv_bfloat16 y) {
+    return bf16hsub(x, y);
+};
+inline __device__ __nv_bfloat16 operator-=(const __nv_bfloat16 x, const __nv_bfloat16 y) {
+    return bf16hsub(x, y);
+};
+inline __device__ __nv_bfloat16 operator*(const __nv_bfloat16 x, const __nv_bfloat16 y) {
+    return bf16hmul(x, y);
+};
+inline __device__ __nv_bfloat16 operator*=(const __nv_bfloat16 x, const __nv_bfloat16 y) {
+    return bf16hmul(x, y);
+};
+inline __device__ __nv_bfloat16 operator/(const __nv_bfloat16 x, const __nv_bfloat16 y) {
+    return bf16hdiv(x, y);
+};
+inline __device__ __nv_bfloat16 operator/=(const __nv_bfloat16 x, const __nv_bfloat16 y) {
+    return bf16hdiv(x, y);
+};
 
-inline __device__ __nv_bfloat162 make_bfloat162(const __nv_bfloat16 x, const __nv_bfloat16 y)
-{
-    __nv_bfloat162 t; t.x = x; t.y = y; return t;
+inline __device__ __nv_bfloat162 make_bfloat162(const __nv_bfloat16 x, const __nv_bfloat16 y) {
+    __nv_bfloat162 t;
+    t.x = x;
+    t.y = y;
+    return t;
 }
 #endif
 
@@ -299,7 +340,7 @@ inline __device__ __nv_bfloat162 bf16hfma2(__nv_bfloat162 a, __nv_bfloat162 b, _
 #endif
 }
 
-#endif // ENABLE_BF16
+#endif  // ENABLE_BF16
 
 #if !USING_CUDA
 #undef __CUDA_ARCH__

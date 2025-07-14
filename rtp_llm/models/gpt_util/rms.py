@@ -1,5 +1,6 @@
 import torch
 
+
 class RMSNorm(torch.nn.Module):
     def __init__(self, dim, p=-1.0, eps=1e-8, use_bias=False):
         """
@@ -42,4 +43,3 @@ class RMSNorm(torch.nn.Module):
             return self.weight * x_normed + self.bias
 
         return self.weight * x_normed
-

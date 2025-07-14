@@ -9,13 +9,11 @@
 #include "rtp_llm/cpp/schedulers/SchedulerBase.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/NormalCacheStore.h"
 
-
-
 namespace rtp_llm {
 
 enum preRunMode {
-    prefill_warm_up = 0,
-    decode_warm_up = 1,
+    prefill_warm_up     = 0,
+    decode_warm_up      = 1,
     build_system_prompt = 2
 };
 
@@ -37,12 +35,14 @@ public:
     EngineBase(const EngineInitParams& params);
     virtual ~EngineBase();
 
-    void initDevices(const EngineInitParams& params);
+    void                 initDevices(const EngineInitParams& params);
     rtp_llm::DeviceBase* getDevice() {
         return device_;
     }
 
-    void addLora(const std::string& adapter_name, rtp_llm::lora::loraLayerWeightsMap lora_a, rtp_llm::lora::loraLayerWeightsMap lora_b);
+    void addLora(const std::string&                 adapter_name,
+                 rtp_llm::lora::loraLayerWeightsMap lora_a,
+                 rtp_llm::lora::loraLayerWeightsMap lora_b);
 
     void removeLora(const std::string& adapter_name);
 
@@ -58,7 +58,8 @@ public:
 
     virtual absl::Status stop() = 0;
 
-    virtual absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>& generate_input, preRunMode mode) = 0;
+    virtual absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>& generate_input,
+                                                     preRunMode                            mode) = 0;
 
     virtual LoadBalanceInfo getLoadBalanceInfo() {
         return LoadBalanceInfo();
@@ -72,9 +73,13 @@ public:
         return *scheduler_;
     }
 
-    virtual int64_t getLastScheduleTime() { return autil::TimeUtility::currentTimeInMilliSeconds(); }
+    virtual int64_t getLastScheduleTime() {
+        return autil::TimeUtility::currentTimeInMilliSeconds();
+    }
 
-    virtual bool isMTPEagle() { return false; }
+    virtual bool isMTPEagle() {
+        return false;
+    }
 
     virtual bool updateEplbConfig(const EplbConfig& config) {
         return false;
@@ -83,10 +88,10 @@ public:
     std::shared_ptr<CacheManager> getCacheManager() const;
 
 protected:
-    rtp_llm::DeviceBase*                      device_;
-    ResourceContext                      resource_context_;
-    std::shared_ptr<lora::LoraManager>   lora_manager_;
-    std::unique_ptr<SchedulerBase>       scheduler_ = nullptr;
+    rtp_llm::DeviceBase*               device_;
+    ResourceContext                    resource_context_;
+    std::shared_ptr<lora::LoraManager> lora_manager_;
+    std::unique_ptr<SchedulerBase>     scheduler_ = nullptr;
 };
 
 }  // namespace rtp_llm

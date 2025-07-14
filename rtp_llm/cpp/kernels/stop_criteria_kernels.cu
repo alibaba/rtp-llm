@@ -29,8 +29,7 @@ __global__ void stop_words_criterion(const int* output_ids,
                                      size_t     stop_words_len,
                                      int        batch_size,
                                      int        beam_width,
-                                     int        step)
-{
+                                     int        step) {
     const int id        = blockIdx.x * blockDim.x + threadIdx.x;
     const int batch_idx = blockIdx.y / beam_width;
     const int beam_idx  = blockIdx.y % beam_width;
@@ -89,8 +88,7 @@ void invokeStopWordsCriterion(const int*   output_ids,
                               int          batch_size,
                               int          beam_width,
                               int          step,
-                              cudaStream_t stream)
-{
+                              cudaStream_t stream) {
     RTP_LLM_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
     // Check if we have sampled a word from the stop_words list. If so, stop the sequence.
     dim3 block, grid;
@@ -109,8 +107,7 @@ __global__ void length_criterion(bool*           finished,
                                  const uint32_t* sequence_limit_length,
                                  int             batch_size,
                                  int             beam_width,
-                                 int             step)
-{
+                                 int             step) {
     int thread_finished_count = 0;
     for (int index = threadIdx.x; index < batch_size * beam_width; index += blockDim.x) {
         const int batch_idx = index / beam_width;
@@ -121,8 +118,7 @@ __global__ void length_criterion(bool*           finished,
     int block_finished_count = 0;
     if (blockDim.x <= 32) {
         block_finished_count = warpReduceSum(thread_finished_count);
-    }
-    else {
+    } else {
         block_finished_count = blockReduceSum(thread_finished_count);
     }
     __syncthreads();
@@ -139,8 +135,7 @@ void invokeLengthCriterion(bool*           finished,
                            int             batch_size,
                            int             beam_width,
                            int             step,
-                           cudaStream_t    stream)
-{
+                           cudaStream_t    stream) {
     // Check if we have attained the sequence length limit. If so, stop the sequence.
     // In addition, check if all sequences are stopped and return the result in should_stop
     RTP_LLM_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);

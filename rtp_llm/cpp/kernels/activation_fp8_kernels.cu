@@ -21,15 +21,13 @@
 
 namespace rtp_llm {
 
-__forceinline__ __device__ float copysignf_pos(float a, float b)
-{
+__forceinline__ __device__ float copysignf_pos(float a, float b) {
     float r;
     r = __int_as_float(__float_as_int(a) | (__float_as_int(b) & 0x80000000));
     return r;
 }
 
-__inline__ __device__ float tanh_opt(float x)
-{
+__inline__ __device__ float tanh_opt(float x) {
     return tanh(x);
 #if (__CUDA_ARCH__ >= 750)
     float r;
@@ -42,16 +40,14 @@ __inline__ __device__ float tanh_opt(float x)
 }
 
 template<typename T>
-__inline__ __device__ T gelu(T x)
-{
+__inline__ __device__ T gelu(T x) {
     float f_x = (float)(x);
     float cdf = 0.5f * (1.0f + tanh_opt((0.7978845608028654f * (f_x + 0.044715f * f_x * f_x * f_x))));
     return (T)(f_x * cdf);
 }
 
 template<>
-__inline__ __device__ __nv_bfloat162 gelu(__nv_bfloat162 val)
-{
+__inline__ __device__ __nv_bfloat162 gelu(__nv_bfloat162 val) {
     __nv_bfloat162 val_pow3 = __hmul2(val, __hmul2(val, val));
     float2         tmp_pow  = cuda_cast<float2>(val_pow3);
     float2         tmp      = cuda_cast<float2>(val);
@@ -62,8 +58,7 @@ __inline__ __device__ __nv_bfloat162 gelu(__nv_bfloat162 val)
 }
 
 template<typename T1, typename T2>
-__global__ void FP8AddBiasGelu(FP8ActivationParam<T1, T2> param)
-{
+__global__ void FP8AddBiasGelu(FP8ActivationParam<T1, T2> param) {
     for (int id = blockIdx.x * blockDim.x + threadIdx.x; id < param.m * param.n; id += blockDim.x * gridDim.x) {
         T2 val = (T2)((float)(param.out[id]) * __ldg(param.input_scale));
         // TODO(bhsueh) check do we need it
@@ -112,8 +107,7 @@ __global__ void FP8AddBiasGelu(FP8ActivationParam<T1, T2> param)
 
 // NOTE: input is bfloat (pack8 to have 128 bit input, and 64 bit output)
 template<>
-__global__ void FP8AddBiasGelu(FP8ActivationParam<__nv_fp8_e4m3, __nv_bfloat16> param)
-{
+__global__ void FP8AddBiasGelu(FP8ActivationParam<__nv_fp8_e4m3, __nv_bfloat16> param) {
     float         input_scale     = __ldg(param.input_scale);
     float         output_scale    = __ldg(param.output_scale);
     constexpr int Packed_Elements = 8;
@@ -143,8 +137,7 @@ __global__ void FP8AddBiasGelu(FP8ActivationParam<__nv_fp8_e4m3, __nv_bfloat16> 
 }
 
 template<typename T1, typename T2>
-void invokeFP8AddBiasGelu(FP8ActivationParam<T1, T2> param)
-{
+void invokeFP8AddBiasGelu(FP8ActivationParam<T1, T2> param) {
     RTP_LLM_CHECK(param.n % 8 == 0);
     // NOTE: input data type is bfloat now
     const int data_type_factor = 8;  // pack 8 elements for bfloat16 input
@@ -162,8 +155,7 @@ template void
 invokeFP8AddBiasGelu<__nv_fp8_e4m3, __nv_bfloat16>(FP8ActivationParam<__nv_fp8_e4m3, __nv_bfloat16> param);
 
 template<typename T1, typename T2>
-__global__ void FP8AddBiasRelu(FP8ActivationParam<T1, T2> param)
-{
+__global__ void FP8AddBiasRelu(FP8ActivationParam<T1, T2> param) {
     for (int id = blockIdx.x * blockDim.x + threadIdx.x; id < param.m * param.n; id += blockDim.x * gridDim.x) {
         T2 val = (T2)((float)(param.out[id]) * __ldg(param.input_scale));
         // TODO(bhsueh) check do we need it
@@ -217,8 +209,7 @@ __global__ void FP8AddBiasRelu(FP8ActivationParam<T1, T2> param)
 
 // NOTE: input is bfloat
 template<>
-__global__ void FP8AddBiasRelu(FP8ActivationParam<__nv_fp8_e4m3, __nv_bfloat16> param)
-{
+__global__ void FP8AddBiasRelu(FP8ActivationParam<__nv_fp8_e4m3, __nv_bfloat16> param) {
     float            input_scale  = __ldg(param.input_scale);
     float            output_scale = __ldg(param.output_scale);
     __nv_fp8x2_e4m3* out_ptr      = (__nv_fp8x2_e4m3*)param.out;
@@ -241,8 +232,7 @@ __global__ void FP8AddBiasRelu(FP8ActivationParam<__nv_fp8_e4m3, __nv_bfloat16> 
 }
 
 template<typename T1, typename T2>
-void invokeFP8AddBiasRelu(FP8ActivationParam<T1, T2> param)
-{
+void invokeFP8AddBiasRelu(FP8ActivationParam<T1, T2> param) {
     RTP_LLM_CHECK(param.n % 2 == 0);
     // NOTE: input data type is bfloat now
     const int data_type_factor = 2;  // 1 for fp32, 2 for fp16/bf16, 4 for fp86
@@ -250,8 +240,7 @@ void invokeFP8AddBiasRelu(FP8ActivationParam<T1, T2> param)
     if (param.n / 4 / data_type_factor <= 1024) {
         block.x = param.n / 4 / data_type_factor;
         grid.x  = param.m;
-    }
-    else {
+    } else {
         block.x = 1024;
         grid.x  = ceil(param.m * param.n / 1024.);
     }

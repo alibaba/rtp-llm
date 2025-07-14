@@ -5,7 +5,7 @@ namespace rtp_llm {
 
 std::optional<int> Tokenizer::getEosTokenId() {
     py::gil_scoped_acquire acquire;
-    auto res = tokenizer_.attr("eos_token_id");
+    auto                   res = tokenizer_.attr("eos_token_id");
     if (res.is_none()) {
         return std::nullopt;
     }
@@ -45,8 +45,8 @@ std::string Tokenizer::decode(const std::vector<int>& token_ids) {
 
 std::string Tokenizer::toString() {
     py::gil_scoped_acquire acquire;
-    py::str py_str = py::str(tokenizer_);
-    std::string cpp_str = py_str;
+    py::str                py_str  = py::str(tokenizer_);
+    std::string            cpp_str = py_str;
     return cpp_str;
 }
 

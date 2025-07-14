@@ -66,8 +66,8 @@ static const char* _cudaGetErrorEnum(cublasStatus_t error) {
 }
 
 static const char* _cudaGetErrorEnum(CUresult error) {
-    const char* error_name = nullptr;
-    CUresult name_result = cuGetErrorName(error, &error_name);
+    const char* error_name  = nullptr;
+    CUresult    name_result = cuGetErrorName(error, &error_name);
     if (name_result != CUDA_SUCCESS) {
         RTP_LLM_LOG_WARNING("Failed to get error name, %d", int(error));
         return "Unknown CUDA error (failed to get error name)";
@@ -78,8 +78,8 @@ static const char* _cudaGetErrorEnum(CUresult error) {
 template<typename T>
 void check(T result, const char* const file, int const line) {
     if (result) {
-        std::string error_str = std::string("[FT][ERROR] CUDA runtime error: ") + (_cudaGetErrorEnum(result)) + " " + file + ":"
-                     + std::to_string(line);
+        std::string error_str = std::string("[FT][ERROR] CUDA runtime error: ") + (_cudaGetErrorEnum(result)) + " "
+                                + file + ":" + std::to_string(line);
         printStackTrace();
         RTP_LLM_LOG_ERROR(error_str);
         fflush(stdout);
@@ -113,27 +113,23 @@ int get_sm() {
 }
 
 bool is_sm70() {
-    static bool IS_SM70 = []() {
-        return get_sm() == 70;
-    }();
+    static bool IS_SM70 = []() { return get_sm() == 70; }();
     return IS_SM70;
 }
 
 bool is_sm8x() {
-    static bool IS_SM8X = []() {
-        return (get_sm() >= 80) && (get_sm() <= 89);
-    }();
+    static bool IS_SM8X = []() { return (get_sm() >= 80) && (get_sm() <= 89); }();
     return IS_SM8X;
 }
 
 bool is_sm90() {
-    static bool IS_SM90 = []() {
-        return get_sm() == 90;
-    }();
+    static bool IS_SM90 = []() { return get_sm() == 90; }();
     return IS_SM90;
 }
 
-float timing_function(const std::function<void(cudaStream_t)>& operation, int64_t timing_iterations, cudaStream_t stream) {
+float timing_function(const std::function<void(cudaStream_t)>& operation,
+                      int64_t                                  timing_iterations,
+                      cudaStream_t                             stream) {
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
@@ -173,9 +169,9 @@ int currentDeviceId() {
     return device_id;
 }
 
-void priorityRange(int *low_priority, int *high_priority, int device_id) {
+void priorityRange(int* low_priority, int* high_priority, int device_id) {
     static std::vector<std::pair<int, int>> cache(getDeviceCount());
-    static std::vector<std::once_flag> flags(getDeviceCount());
+    static std::vector<std::once_flag>      flags(getDeviceCount());
     if (device_id < 0) {
         device_id = currentDeviceId();
     }
@@ -193,14 +189,14 @@ void priorityRange(int *low_priority, int *high_priority, int device_id) {
         cache[device_id] = std::make_pair(min_pri, max_pri);
     };
     std::call_once(flags[device_id], init);
-    *low_priority = cache[device_id].first;
+    *low_priority  = cache[device_id].first;
     *high_priority = cache[device_id].second;
 }
 
 std::string getDriverVersion() {
     nvmlReturn_t result;
     nvmlDevice_t device;
-    size_t device_count = getDeviceCount();
+    size_t       device_count = getDeviceCount();
     if (device_count == 0) {
         throw std::runtime_error("no cuda device");
     }
@@ -214,13 +210,15 @@ std::string getDriverVersion() {
     check_cuda_value(cudaDeviceGetPCIBusId(pci_bus_id, sizeof(pci_bus_id), 0));
     result = nvmlDeviceGetHandleByPciBusId(pci_bus_id, &device);
     if (NVML_SUCCESS != result) {
-        throw std::runtime_error("Failed to call nvmlDeviceGetHandleByIndex() API, Error code:" + std::to_string(result));
+        throw std::runtime_error("Failed to call nvmlDeviceGetHandleByIndex() API, Error code:"
+                                 + std::to_string(result));
     }
 
     char driverVersion[NVML_SYSTEM_DRIVER_VERSION_BUFFER_SIZE];
     result = nvmlSystemGetDriverVersion(driverVersion, NVML_SYSTEM_DRIVER_VERSION_BUFFER_SIZE);
     if (NVML_SUCCESS != result) {
-        throw std::runtime_error("Failed to call nvmlSystemGetDriverVersion() API, Error code: " + std::to_string(result));
+        throw std::runtime_error("Failed to call nvmlSystemGetDriverVersion() API, Error code: "
+                                 + std::to_string(result));
     }
     result = nvmlShutdown();
     if (NVML_SUCCESS != result) {
@@ -269,20 +267,23 @@ bool checkAllNVLinks(std::vector<size_t> device_ids) {
             check_cuda_value(cudaDeviceGetPCIBusId(pci_bus_id1, sizeof(pci_bus_id1), device_id1));
             result = nvmlDeviceGetHandleByPciBusId(pci_bus_id1, &deviceHandles[0]);
             if (NVML_SUCCESS != result) {
-                throw std::runtime_error("Failed to get handle for device " + std::to_string(device_id1) + ", Error code: " + std::to_string(result));
+                throw std::runtime_error("Failed to get handle for device " + std::to_string(device_id1)
+                                         + ", Error code: " + std::to_string(result));
             }
 
             char pci_bus_id2[NVML_DEVICE_PCI_BUS_ID_BUFFER_SIZE];
             check_cuda_value(cudaDeviceGetPCIBusId(pci_bus_id2, sizeof(pci_bus_id2), device_id2));
             result = nvmlDeviceGetHandleByPciBusId(pci_bus_id2, &deviceHandles[1]);
             if (NVML_SUCCESS != result) {
-                throw std::runtime_error("Failed to get handle for device " + std::to_string(device_id2) + ", Error code: " + std::to_string(result));
+                throw std::runtime_error("Failed to get handle for device " + std::to_string(device_id2)
+                                         + ", Error code: " + std::to_string(result));
             }
 
             nvmlGpuP2PStatus_t isActive;
             result = nvmlDeviceGetP2PStatus(deviceHandles[0], deviceHandles[1], NVML_P2P_CAPS_INDEX_NVLINK, &isActive);
             if (NVML_SUCCESS != result) {
-                throw std::runtime_error("Failed to call nvmlDeviceGetP2PStatus() API, Error code: " + std::to_string(result));
+                throw std::runtime_error("Failed to call nvmlDeviceGetP2PStatus() API, Error code: "
+                                         + std::to_string(result));
             }
             if (isActive != NVML_P2P_STATUS_OK) {
                 RTP_LLM_LOG_INFO("GPU %d and GPU %d are not connected via NVLink", device_id1, device_id2);
@@ -316,20 +317,23 @@ bool checkOnSameNumaNodes(std::vector<size_t> device_ids) {
             check_cuda_value(cudaDeviceGetPCIBusId(pci_bus_id1, sizeof(pci_bus_id1), device_id1));
             result = nvmlDeviceGetHandleByPciBusId(pci_bus_id1, &deviceHandles[0]);
             if (NVML_SUCCESS != result) {
-                throw std::runtime_error("Failed to get handle for device " + std::to_string(device_id1) + ", Error code: " + std::to_string(result));
+                throw std::runtime_error("Failed to get handle for device " + std::to_string(device_id1)
+                                         + ", Error code: " + std::to_string(result));
             }
 
             char pci_bus_id2[NVML_DEVICE_PCI_BUS_ID_BUFFER_SIZE];
             check_cuda_value(cudaDeviceGetPCIBusId(pci_bus_id2, sizeof(pci_bus_id2), device_id2));
             result = nvmlDeviceGetHandleByPciBusId(pci_bus_id2, &deviceHandles[1]);
             if (NVML_SUCCESS != result) {
-                throw std::runtime_error("Failed to get handle for device " + std::to_string(device_id2) + ", Error code: " + std::to_string(result));
+                throw std::runtime_error("Failed to get handle for device " + std::to_string(device_id2)
+                                         + ", Error code: " + std::to_string(result));
             }
 
             nvmlGpuTopologyLevel_t topo;
             result = nvmlDeviceGetTopologyCommonAncestor(deviceHandles[0], deviceHandles[1], &topo);
             if (NVML_SUCCESS != result) {
-                throw std::runtime_error("Failed to call nvmlDeviceGetTopologyCommonAncestor() API, Error code: " + std::to_string(result));
+                throw std::runtime_error("Failed to call nvmlDeviceGetTopologyCommonAncestor() API, Error code: "
+                                         + std::to_string(result));
             }
             if (topo == NVML_TOPOLOGY_SYSTEM) {
                 RTP_LLM_LOG_INFO("GPU %d and GPU %d are not on same numa node", device_id1, device_id2);
@@ -351,34 +355,32 @@ int getVisibleDeviceNum() {
     return device_count;
 }
 
-std::tuple<size_t, size_t> getDeviceMemoryInfo(bool const useUvm)
-{
-    if (useUvm)
-    {
+std::tuple<size_t, size_t> getDeviceMemoryInfo(bool const useUvm) {
+    if (useUvm) {
         size_t freeSysMem, totalSysMem;
-#ifndef _WIN32 // Linux
+#ifndef _WIN32  // Linux
         struct sysinfo info;
         sysinfo(&info);
         totalSysMem = info.totalram * info.mem_unit;
-        freeSysMem = info.freeram * info.mem_unit;
-#else  // Windows
+        freeSysMem  = info.freeram * info.mem_unit;
+#else   // Windows
         MEMORYSTATUSEX memInfo;
         memInfo.dwLength = sizeof(memInfo);
         GlobalMemoryStatusEx(&memInfo);
         totalSysMem = memInfo.ullTotalPhys;
-        freeSysMem = memInfo.ullAvailPhys;
-#endif // WIN32
+        freeSysMem  = memInfo.ullAvailPhys;
+#endif  // WIN32
 
         RTP_LLM_LOG_INFO("Using UVM based system memory for KV cache, total memory %0.2f GB, available memory %0.2f GB",
-            ((double) totalSysMem / 1e9), ((double) freeSysMem / 1e9));
+                         ((double)totalSysMem / 1e9),
+                         ((double)freeSysMem / 1e9));
         return {freeSysMem, totalSysMem};
-    }
-    else
-    {
+    } else {
         size_t free, total;
         check_cuda_value(cudaMemGetInfo(&free, &total));
         RTP_LLM_LOG_DEBUG("Using GPU memory for KV cache, total memory %0.2f GB, available memory %0.2f GB",
-            ((double) total / 1e9), ((double) free / 1e9));
+                          ((double)total / 1e9),
+                          ((double)free / 1e9));
         return {free, total};
     }
 }
@@ -445,7 +447,7 @@ void print_bshd(const int   layer_id,
     fflush(stdout);
     for (int i = 0; i < batch_size; i++) {
         for (int j = 0; j < seq_len; j++) {
-            auto print_func = [&](int head_start, int head_end){
+            auto print_func = [&](int head_start, int head_end) {
                 auto md_array_ptr = (T(*)[seq_len][total_num_heads][hidden_size_per_head])cpu_ptr;
                 for (int k = head_start; k < head_end; k++) {
                     printf("b_%d s_%d h_%d ", i, j, k);
@@ -577,9 +579,9 @@ void print_bsd(const int   layer_id,
         for (int j = 0; j < seq_len; j++) {
             printf("b_%d s_%d ", i, j);
             fflush(stdout);
-            double sum1 = 0;
-            double sum2 = 0;
-            auto print_func = [&](int k_start, int k_end){
+            double sum1       = 0;
+            double sum2       = 0;
+            auto   print_func = [&](int k_start, int k_end) {
                 auto md_array_ptr = (T(*)[seq_len][hidden_size])cpu_ptr;
                 for (int k = k_start; k < k_end && k < hidden_size; k++) {
                     printf("k = %d, value = %f ", k, float(md_array_ptr[i][j][k]));
@@ -720,62 +722,62 @@ void print_bsd_sum_and_square(const int   layer_id,
     fflush(stdout);
 }
 
-#define DECLARE_PRINT_TYPE(CPP_TYPE)                                    \
-    template void print_bhsd<CPP_TYPE>(const int       layer_id,        \
-                                       const char*     name,            \
-                                       const CPP_TYPE* ptr,             \
-                                       int             batch_size,      \
-                                       int             num_heads,       \
-                                       int             seq_len,         \
-                                       int             hidden_size_per_head, \
-                                       bool            is_device_ptr);  \
-    template void print_bshd<CPP_TYPE>(const int       layer_id,        \
-                                       const char*     name,            \
-                                       const CPP_TYPE* ptr,             \
-                                       int             batch_size,      \
-                                       int             seq_len,         \
-                                       int             num_heads,       \
-                                       int             hidden_size_per_head, \
-                                       int             total_num_heads, \
-                                       int             heads_offset,    \
-                                       bool            is_device_ptr);  \
-                                                                        \
-    template void print_bhss<CPP_TYPE>(const int       layer_id,        \
-                                       const char*     name,            \
-                                       const CPP_TYPE* ptr,             \
-                                       int             batch_size,      \
-                                       int             num_heads,       \
-                                       int             seq_len,         \
-                                       int             seq_len2,        \
-                                       bool            is_device_ptr);  \
-    template void print_bsd<CPP_TYPE>(const int       layer_id,         \
-                                      const char*     name,             \
-                                      const CPP_TYPE* ptr,              \
-                                      int             batch_size,       \
-                                      int             seq_len,          \
-                                      int             hidden_size,      \
-                                      int             start,            \
-                                      int             end,              \
-                                      bool            is_device_ptr);   \
-    template void print_bsd_sum_and_square<CPP_TYPE>(const int       layer_id, \
-                                                     const char*     name, \
-                                                     const CPP_TYPE* ptr, \
-                                                     int             batch_size, \
-                                                     int             seq_len, \
-                                                     int             hidden_size, \
-                                                     int             start, \
-                                                     int             end, \
-                                                     bool            is_device_ptr); \
-    template void print_kv_cache<CPP_TYPE>(const int       layer_id,    \
-                                           const char*     name,        \
-                                           const CPP_TYPE* ptr,         \
-                                           int             dim1,        \
-                                           int             dim2,        \
-                                           int             dim3,        \
-                                           int             dim4,        \
-                                           int             dim5,        \
-                                           int             dim6,        \
-                                           bool            print_all,   \
+#define DECLARE_PRINT_TYPE(CPP_TYPE)                                                                                   \
+    template void print_bhsd<CPP_TYPE>(const int       layer_id,                                                       \
+                                       const char*     name,                                                           \
+                                       const CPP_TYPE* ptr,                                                            \
+                                       int             batch_size,                                                     \
+                                       int             num_heads,                                                      \
+                                       int             seq_len,                                                        \
+                                       int             hidden_size_per_head,                                           \
+                                       bool            is_device_ptr);                                                            \
+    template void print_bshd<CPP_TYPE>(const int       layer_id,                                                       \
+                                       const char*     name,                                                           \
+                                       const CPP_TYPE* ptr,                                                            \
+                                       int             batch_size,                                                     \
+                                       int             seq_len,                                                        \
+                                       int             num_heads,                                                      \
+                                       int             hidden_size_per_head,                                           \
+                                       int             total_num_heads,                                                \
+                                       int             heads_offset,                                                   \
+                                       bool            is_device_ptr);                                                            \
+                                                                                                                       \
+    template void print_bhss<CPP_TYPE>(const int       layer_id,                                                       \
+                                       const char*     name,                                                           \
+                                       const CPP_TYPE* ptr,                                                            \
+                                       int             batch_size,                                                     \
+                                       int             num_heads,                                                      \
+                                       int             seq_len,                                                        \
+                                       int             seq_len2,                                                       \
+                                       bool            is_device_ptr);                                                            \
+    template void print_bsd<CPP_TYPE>(const int       layer_id,                                                        \
+                                      const char*     name,                                                            \
+                                      const CPP_TYPE* ptr,                                                             \
+                                      int             batch_size,                                                      \
+                                      int             seq_len,                                                         \
+                                      int             hidden_size,                                                     \
+                                      int             start,                                                           \
+                                      int             end,                                                             \
+                                      bool            is_device_ptr);                                                             \
+    template void print_bsd_sum_and_square<CPP_TYPE>(const int       layer_id,                                         \
+                                                     const char*     name,                                             \
+                                                     const CPP_TYPE* ptr,                                              \
+                                                     int             batch_size,                                       \
+                                                     int             seq_len,                                          \
+                                                     int             hidden_size,                                      \
+                                                     int             start,                                            \
+                                                     int             end,                                              \
+                                                     bool            is_device_ptr);                                              \
+    template void print_kv_cache<CPP_TYPE>(const int       layer_id,                                                   \
+                                           const char*     name,                                                       \
+                                           const CPP_TYPE* ptr,                                                        \
+                                           int             dim1,                                                       \
+                                           int             dim2,                                                       \
+                                           int             dim3,                                                       \
+                                           int             dim4,                                                       \
+                                           int             dim5,                                                       \
+                                           int             dim6,                                                       \
+                                           bool            print_all,                                                  \
                                            bool            is_device_ptr);
 
 DECLARE_PRINT_TYPE(float);

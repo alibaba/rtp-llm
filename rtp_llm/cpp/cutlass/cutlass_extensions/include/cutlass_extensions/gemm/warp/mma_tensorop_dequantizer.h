@@ -576,7 +576,7 @@ public:
 
             multiplies<FragmentDequantizedOperand> mul_op;
             plus<FragmentDequantizedOperand> plus_op;
-            
+
             operand_frag = plus_op(mul_op(operand_frag, scale_frag), zero_frag);
         }
         else
@@ -593,7 +593,7 @@ public:
         pointer_scale_ += offset;
         pointer_zero_ += offset;
     }
-    
+
 private:
     ElementScale const* pointer_scale_;
     ElementScale const* pointer_zero_;

@@ -24,8 +24,7 @@
 namespace rtp_llm {
 
 template<typename T>
-struct Vec_t {
-};
+struct Vec_t {};
 template<>
 struct Vec_t<float> {
     using Type = float2;
@@ -46,40 +45,34 @@ struct Vec_t<__nv_bfloat16> {
 };
 
 template<typename Vec1, typename Vec2>
-__device__ __inline__ Vec1 convert_vec(Vec2 in_vec)
-{
+__device__ __inline__ Vec1 convert_vec(Vec2 in_vec) {
     return Vec1(in_vec);
 }
 
 template<>
-__device__ __inline__ float2 convert_vec(half2 in_vec)
-{
+__device__ __inline__ float2 convert_vec(half2 in_vec) {
     return float2{(float)in_vec.x, (float)in_vec.y};
 }
 
 template<>
-__device__ __inline__ float2 convert_vec(__nv_bfloat162 in_vec)
-{
+__device__ __inline__ float2 convert_vec(__nv_bfloat162 in_vec) {
     return float2{(float)in_vec.x, (float)in_vec.y};
 }
 
 template<>
-__device__ __inline__ __nv_bfloat162 convert_vec(half2 in_vec)
-{
+__device__ __inline__ __nv_bfloat162 convert_vec(half2 in_vec) {
     __nv_bfloat162 out = cuda_cast<__nv_bfloat162, half2>(in_vec);
     return out;
 }
 
 #ifdef ENABLE_FP8
 template<>
-__device__ __inline__ float2 convert_vec(__nv_fp8x2_e4m3 in_vec)
-{
+__device__ __inline__ float2 convert_vec(__nv_fp8x2_e4m3 in_vec) {
     return (float2)in_vec;
 }
 
 template<>
-__device__ __inline__ __nv_bfloat162 convert_vec(__nv_fp8x2_e4m3 in_vec)
-{
+__device__ __inline__ __nv_bfloat162 convert_vec(__nv_fp8x2_e4m3 in_vec) {
     return fp8x2_e4m3_to_bfloat2(&in_vec);
 }
 #endif
@@ -89,8 +82,7 @@ __device__ __inline__ __nv_bfloat162 convert_vec(__nv_fp8x2_e4m3 in_vec)
 
 #ifdef OPT_TRANSPOSE
 template<typename T1, typename T2, int SEQ_GROUP_SIZE, int SIZE_PER_HEAD>
-__global__ void FP8AddFusedQKVBiasRebuildPaddingKernel(FP8AddFusedQKVBiasRebuildPaddingParam<T1, T2> param)
-{
+__global__ void FP8AddFusedQKVBiasRebuildPaddingKernel(FP8AddFusedQKVBiasRebuildPaddingParam<T1, T2> param) {
     using T1_4 = __nv_fp8x4_e4m3;
     using T2_2 = typename TypeConverter<T2>::Type;
 
@@ -147,8 +139,7 @@ __global__ void FP8AddFusedQKVBiasRebuildPaddingKernel(FP8AddFusedQKVBiasRebuild
             //       * (param.input_scale_2_min == nullptr ? 1.0f : ldg(param.input_scale_2_min));
             // v.y = v.y * input_scale * __ldg(param.input_scale_2 + hidden_idx + 2 * n)
             //       * (param.input_scale_2_min == nullptr ? 1.0f : ldg(param.input_scale_2_min));
-        }
-        else {
+        } else {
             q[0] = hmul2(q[0], input_scale2);
             q[1] = hmul2(q[1], input_scale2);
             k[0] = hmul2(k[0], input_scale2);
@@ -190,8 +181,7 @@ __global__ void FP8AddFusedQKVBiasRebuildPaddingKernel(FP8AddFusedQKVBiasRebuild
 
         q_out_ptr[dest_idx] = T1_4(q[0], q[1]);
         k_out_ptr[dest_idx] = T1_4(k[0], k[1]);
-    }
-    else {
+    } else {
         src_v_2[threadIdx.y * (SIZE_PER_HEAD / 2 + 1) + tidx * 2 + 0] = cuda_cast<T2_2>(0.0f);
         src_v_2[threadIdx.y * (SIZE_PER_HEAD / 2 + 1) + tidx * 2 + 1] = cuda_cast<T2_2>(0.0f);
     }
@@ -221,8 +211,7 @@ __global__ void FP8AddFusedQKVBiasRebuildPaddingKernel(FP8AddFusedQKVBiasRebuild
 }
 
 template<typename T1, typename T2>
-void invokeFP8AddFusedQKVBiasRebuildPadding(FP8AddFusedQKVBiasRebuildPaddingParam<T1, T2> param)
-{
+void invokeFP8AddFusedQKVBiasRebuildPadding(FP8AddFusedQKVBiasRebuildPaddingParam<T1, T2> param) {
     // To implement rotary embeddings, each thread processes two QKV elems:
     const int seq_group_size = 64;
     dim3      block((param.size_per_head / 4 + 1) / 2 * 2, seq_group_size);
@@ -231,8 +220,7 @@ void invokeFP8AddFusedQKVBiasRebuildPadding(FP8AddFusedQKVBiasRebuildPaddingPara
     RTP_LLM_CHECK(block.x * block.y <= 1024);
     if (param.size_per_head == 64) {
         FP8AddFusedQKVBiasRebuildPaddingKernel<T1, T2, seq_group_size, 64><<<grid, block, 0, param.stream>>>(param);
-    }
-    else {
+    } else {
         RTP_LLM_CHECK(false);
     }
 }
@@ -245,8 +233,7 @@ template void invokeFP8AddFusedQKVBiasRebuildPadding<__nv_fp8_e4m3, __nv_bfloat1
     FP8AddFusedQKVBiasRebuildPaddingParam<__nv_fp8_e4m3, __nv_bfloat16> param);
 #else
 template<typename T1, typename T2, bool INPUT_T1>
-__global__ void FP8AddFusedQKVBiasRebuildPaddingKernel(FP8AddFusedQKVBiasRebuildPaddingParam<T1, T2> param)
-{
+__global__ void FP8AddFusedQKVBiasRebuildPaddingKernel(FP8AddFusedQKVBiasRebuildPaddingParam<T1, T2> param) {
     using VecFP8_t                   = typename Vec_t<T1>::Type;
     using VecBias_t                  = typename Vec_t<T2>::Type;
     using PACKED_BF16                = __nv_bfloat162_2;
@@ -294,8 +281,7 @@ __global__ void FP8AddFusedQKVBiasRebuildPaddingKernel(FP8AddFusedQKVBiasRebuild
                 k.array[i] = convert_vec<VecBF16_t, VecFP8_t>(k_input.array[i]);
                 v.array[i] = convert_vec<VecBF16_t, VecFP8_t>(v_input.array[i]);
             }
-        }
-        else {
+        } else {
             q = *reinterpret_cast<const PACKED_BF16*>(&param.QKV_T2[q_idx]);
             k = *reinterpret_cast<const PACKED_BF16*>(&param.QKV_T2[k_idx]);
             v = *reinterpret_cast<const PACKED_BF16*>(&param.QKV_T2[v_idx]);
@@ -376,8 +362,7 @@ __global__ void FP8AddFusedQKVBiasRebuildPaddingKernel(FP8AddFusedQKVBiasRebuild
 }
 
 template<typename T1, typename T2>
-void invokeFP8AddFusedQKVBiasRebuildPadding(FP8AddFusedQKVBiasRebuildPaddingParam<T1, T2> param)
-{
+void invokeFP8AddFusedQKVBiasRebuildPadding(FP8AddFusedQKVBiasRebuildPaddingParam<T1, T2> param) {
     // To implement rotary embeddings, each thread processes two QKV elems:
     // dim3 block((param.size_per_head / 2 + 31) / 32 * 32);
     // dim3 grid(param.head_num, param.token_num);
@@ -396,8 +381,7 @@ void invokeFP8AddFusedQKVBiasRebuildPadding(FP8AddFusedQKVBiasRebuildPaddingPara
                              cudaFuncAttributePreferredSharedMemoryCarveout,
                              carveout);
         FP8AddFusedQKVBiasRebuildPaddingKernel<T1, T2, false><<<grid, block, 0, param.stream>>>(param);
-    }
-    else {
+    } else {
         cudaFuncSetAttribute((const void*)FP8AddFusedQKVBiasRebuildPaddingKernel<T1, T2, true>,
                              cudaFuncAttributePreferredSharedMemoryCarveout,
                              carveout);
@@ -415,8 +399,7 @@ template void invokeFP8AddFusedQKVBiasRebuildPadding<__nv_fp8_e4m3, __nv_bfloat1
 #endif
 
 template<typename T1, typename T2>
-__global__ void FP8TrtAddQKVBiasKernel(FP8TrtAddQKVBiasParam<T1, T2> param)
-{
+__global__ void FP8TrtAddQKVBiasKernel(FP8TrtAddQKVBiasParam<T1, T2> param) {
     // Add bias ([3, head, size]), and then transpose from
     // [valid_word_num, 3, head, size] -> [valid_word_num, head, 3, size]
 
@@ -432,8 +415,7 @@ __global__ void FP8TrtAddQKVBiasKernel(FP8TrtAddQKVBiasParam<T1, T2> param)
 }
 
 template<>
-__global__ void FP8TrtAddQKVBiasKernel(FP8TrtAddQKVBiasParam<__nv_fp8_e4m3, __nv_bfloat16> param)
-{
+__global__ void FP8TrtAddQKVBiasKernel(FP8TrtAddQKVBiasParam<__nv_fp8_e4m3, __nv_bfloat16> param) {
     // Add bias ([3, head, size]), and then transpose from
     // [valid_word_num, 3, head, size] -> [valid_word_num, head, 3, size]
 
@@ -460,15 +442,13 @@ __global__ void FP8TrtAddQKVBiasKernel(FP8TrtAddQKVBiasParam<__nv_fp8_e4m3, __nv
 }
 
 template<typename T1, typename T2>
-void invokeFP8TrtAddQKVBias(FP8TrtAddQKVBiasParam<T1, T2> param)
-{
+void invokeFP8TrtAddQKVBias(FP8TrtAddQKVBiasParam<T1, T2> param) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     if (std::is_same<T1, __nv_fp8_e4m3>::value && std::is_same<T2, __nv_bfloat16>::value) {
         dim3 grid(param.valid_word_num);
         dim3 block(param.size_per_head / 4, param.head_num, 3);
         FP8TrtAddQKVBiasKernel<T1, T2><<<grid, block, 0, param.stream>>>(param);
-    }
-    else {
+    } else {
         dim3 grid(param.valid_word_num, 3);
         dim3 block(param.head_num, param.size_per_head);
 
@@ -489,8 +469,7 @@ __global__ void transpose_4d_batch_major_k_cache(T2*          k_dst,
                                                  const int    size_per_head,
                                                  const int    seq_len,
                                                  const int    max_seq_len,
-                                                 const int    seq_len_padded)
-{
+                                                 const int    seq_len_padded) {
     const int     batch_id = blockIdx.y;
     const int     head_id  = blockIdx.z;
     constexpr int X_ELEMS  = 16;
@@ -524,8 +503,7 @@ __global__ void transpose_4d_batch_major_k_cache(__nv_bfloat16*       k_dst,
                                                  const int            size_per_head,
                                                  const int            seq_len,
                                                  const int            max_seq_len,
-                                                 const int            seq_len_padded)
-{
+                                                 const int            seq_len_padded) {
     const int     batch_id  = blockIdx.y;
     const int     head_id   = blockIdx.z;
     constexpr int X_ELEMS   = 8;
@@ -568,8 +546,7 @@ __global__ void transpose_4d_batch_major_v_cache(T2*          v_dst,
                                                  const int    size_per_head,
                                                  const int    seq_len,
                                                  const int    max_seq_len,
-                                                 const int    seq_len_padded)
-{
+                                                 const int    seq_len_padded) {
     const int      batch_id    = blockIdx.y;
     const int      head_id     = blockIdx.z;
     constexpr bool BF16_OUTPUT = std::is_same<T2, __nv_bfloat16>::value;
@@ -637,8 +614,7 @@ __global__ void transpose_4d_batch_major_v_cache(T2*          v_dst,
 // }
 
 template<typename T1, typename T2>
-void invokeFP8Transpose4dBatchMajor(FP8Transpose4dBatchMajorParam<T1, T2> param)
-{
+void invokeFP8Transpose4dBatchMajor(FP8Transpose4dBatchMajorParam<T1, T2> param) {
     constexpr int block_sz = 128;
     constexpr int x        = std::is_same<T2, __nv_bfloat16>::value ? 8 : 16;
     int           size     = param.max_seq_len * param.size_per_head / x;
@@ -679,8 +655,7 @@ __global__ void softmax_kernel(T* qk_buf_,
                                const int    seq_len,
                                const float  scalar,
                                const float* input_scale,
-                               const float* output_scale)
-{
+                               const float* output_scale) {
     float input_scale_val  = input_scale == nullptr ? 1.0f : __ldg(input_scale);
     float output_scale_val = output_scale == nullptr ? 1.0f : __ldg(output_scale);
     for (int seq_id = blockIdx.x; seq_id < seq_len; seq_id += gridDim.x) {
@@ -738,8 +713,7 @@ __global__ void softmax_kernel_v5_half2(T_OUT*       qk_buf,
                                         const int    seq_len,
                                         const float  scalar,
                                         const float* input_scale,
-                                        const float* output_scale)
-{
+                                        const float* output_scale) {
     using T2_OUT     = typename Vec_t<T_OUT>::Type;
     using T2_IN      = typename Vec_t<T_IN>::Type;
     using T2_COMPUTE = typename Vec_t<T_COMPUTE>::Type;
@@ -811,8 +785,7 @@ __global__ void softmax_kernel_v5_half2(T_OUT*       qk_buf,
         }
         if (blockDim.x <= 32) {
             warpReduceMaxV2<float, NUM>(local_max);
-        }
-        else {
+        } else {
             blockReduceMaxV2<float, NUM>(local_max);
         }
 
@@ -844,8 +817,7 @@ __global__ void softmax_kernel_v5_half2(T_OUT*       qk_buf,
 
         if (blockDim.x <= 32) {
             warpReduceSumV2<float, NUM>(local_sum);
-        }
-        else {
+        } else {
             blockReduceSumV2<float, NUM>(local_sum);
         }
 
@@ -890,8 +862,7 @@ __global__ void softmax_kernel_v5_half2(T_OUT*       qk_buf,
                                            param.output_scale);
 
 template<typename T, typename T_IN>
-void invokeFP8MaskedSoftMax(FP8MaskedSoftMaxParam<T, T_IN> param)
-{
+void invokeFP8MaskedSoftMax(FP8MaskedSoftMaxParam<T, T_IN> param) {
     dim3 grid(param.seq_len, param.batch_size, param.head_num);
     if (param.batch_size * param.head_num > 360) {
         grid.x = ceil(float(param.seq_len) / 32.0f);
@@ -903,18 +874,14 @@ void invokeFP8MaskedSoftMax(FP8MaskedSoftMaxParam<T, T_IN> param)
         dim3 block((param.seq_len / (is_half2 ? 2 : 1) + 31) / 32 * 32);
         if (block.x > 2048 && block.x <= 4096) {
             SOFTMAX_KERNEL_HALF2(4)
-        }
-        else if (block.x > 1024) {
+        } else if (block.x > 1024) {
             SOFTMAX_KERNEL_HALF2(2)
-        }
-        else if (block.x > 0) {
+        } else if (block.x > 0) {
             SOFTMAX_KERNEL_HALF2(1)
-        }
-        else {
+        } else {
             RTP_LLM_CHECK(param.seq_len <= 4096);
         }
-    }
-    else {
+    } else {
         dim3 block((param.seq_len + 31) / 32 * 32);
         if (block.x > 2048 && block.x <= 4096) {
             softmax_kernel<4, T, T_IN><<<grid, block, 0, param.stream>>>(param.buffer,
@@ -926,8 +893,7 @@ void invokeFP8MaskedSoftMax(FP8MaskedSoftMaxParam<T, T_IN> param)
                                                                          param.scalar,
                                                                          param.input_scale,
                                                                          param.output_scale);
-        }
-        else if (block.x > 1024) {
+        } else if (block.x > 1024) {
             softmax_kernel<2, T, T_IN><<<grid, block, 0, param.stream>>>(param.buffer,
                                                                          param.buffer_src,
                                                                          param.attr_mask,
@@ -937,8 +903,7 @@ void invokeFP8MaskedSoftMax(FP8MaskedSoftMaxParam<T, T_IN> param)
                                                                          param.scalar,
                                                                          param.input_scale,
                                                                          param.output_scale);
-        }
-        else if (block.x > 0) {
+        } else if (block.x > 0) {
             softmax_kernel<1, T, T_IN><<<grid, block, 0, param.stream>>>(param.buffer,
                                                                          param.buffer_src,
                                                                          param.attr_mask,
@@ -948,8 +913,7 @@ void invokeFP8MaskedSoftMax(FP8MaskedSoftMaxParam<T, T_IN> param)
                                                                          param.scalar,
                                                                          param.input_scale,
                                                                          param.output_scale);
-        }
-        else {
+        } else {
             RTP_LLM_CHECK(param.seq_len <= 4096);
         }
     }
@@ -981,8 +945,7 @@ __global__ void FP8TransposeAttentionOutRemovePadding(T_OUT*       dst,
                                                       const int    seq_len,
                                                       const int    head_num,
                                                       const int    size_per_head,
-                                                      const int*   padding_offset)
-{
+                                                      const int*   padding_offset) {
     // transpose from [batch_size, head_num, seq_len, size_per_head] to [batch_size, seq_len, head_num, size_per_head]
     using pack4_in                = typename Pack4_type<T_IN>::type;
     using pack4_out               = typename Pack4_type<T_OUT>::type;
@@ -1013,8 +976,7 @@ __global__ void FP8TransposeAttentionOutRemovePadding(T_OUT*       dst,
 }
 
 template<typename T_IN, typename T_OUT>
-void invokeFP8TransposeAttentionOutRemovePadding(FP8TransposeAttentionOutRemovePaddingParam<T_IN, T_OUT> param)
-{
+void invokeFP8TransposeAttentionOutRemovePadding(FP8TransposeAttentionOutRemovePaddingParam<T_IN, T_OUT> param) {
     // NOTE: fp8_4_t optimization
     assert(param.size_per_head % 4 == 0);
     int block_size = param.head_num * param.size_per_head;
@@ -1069,8 +1031,7 @@ __global__ void tmpHanldKCache(__nv_bfloat16* dst_k,
                                int            seq_len,
                                int            padded_seq_len,
                                int            head_num,
-                               int            size_per_head)
-{
+                               int            size_per_head) {
     int batch_id = blockIdx.y;
     int head_id  = blockIdx.z;
 
@@ -1097,8 +1058,7 @@ void invokeTmpHanldKCache(__nv_bfloat16* dst_k,
                           int            padded_seq_len,
                           int            head_num,
                           int            size_per_head,
-                          cudaStream_t   stream)
-{
+                          cudaStream_t   stream) {
     // from [batch, head_num, seq_len_paaded, size_per_head] to [batch, head_num, seq_len, size_per_head]
 
     int  block_sz = 128;
@@ -1115,8 +1075,7 @@ __global__ void tmpHanldVCache(__nv_bfloat16* dst_v,
                                int            seq_len,
                                int            padded_seq_len,
                                int            head_num,
-                               int            size_per_head)
-{
+                               int            size_per_head) {
     int batch_id = blockIdx.y;
     int head_id  = blockIdx.z;
 
@@ -1145,8 +1104,7 @@ void invokeTmpHanldVCache(__nv_bfloat16* dst_v,
                           int            padded_seq_len,
                           int            head_num,
                           int            size_per_head,
-                          cudaStream_t   stream)
-{
+                          cudaStream_t   stream) {
     // from [batch, head_num, size_per_head, seq_len_paaded] to [batch, head_num, seq_len, size_per_head]
     int  block_sz = 128;
     dim3 grid((seq_len * size_per_head + block_sz - 1) / block_sz, batch_size, head_num);

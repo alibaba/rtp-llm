@@ -22,12 +22,12 @@ public:
     }
 
     void updateStream(const GenerateStream& stream) {
-        size_t  propose_step = stream.getProposeStep();
+        size_t             propose_step   = stream.getProposeStep();
         rtp_llm::BufferPtr propose_tokens = stream.getProposeTokens();
 
-        propose_step_ = propose_step;
+        propose_step_                   = propose_step;
         sp_output_buffer_->propose_step = propose_step;
-        score_len_ = propose_step == 0 ? 1 : propose_step + 1;
+        score_len_                      = propose_step == 0 ? 1 : propose_step + 1;
 
         complete_token_ids_->setSeqLength(stream.seqLength());
 
@@ -36,7 +36,7 @@ public:
         }
         if (score_len_ > history_max_score_len_) {
             sp_output_buffer_->tokens = device_->allocateBuffer(
-                    {rtp_llm::DataType::TYPE_INT32, {1, score_len_}, rtp_llm::AllocationType::HOST}, {"score_tokens"});
+                {rtp_llm::DataType::TYPE_INT32, {1, score_len_}, rtp_llm::AllocationType::HOST}, {"score_tokens"});
         }
         if (score_len_ > 1 || device_->initParams().sp_config.force_score_context_attention) {
             setIsContextStream(true);
@@ -59,11 +59,13 @@ public:
         }
 
         if (generate_input_->generate_config->return_logits) {
-            sp_output_buffer_->logits = device_->clone({*update_info.logits, rtp_llm::AllocationType::DEVICE, {"score_logits"}});
+            sp_output_buffer_->logits =
+                device_->clone({*update_info.logits, rtp_llm::AllocationType::DEVICE, {"score_logits"}});
         }
 
         if (generate_input_->generate_config->return_softmax_probs) {
-            sp_output_buffer_->softmax_probs = device_->clone({*update_info.softmax_probs, rtp_llm::AllocationType::DEVICE, {"softmax_probs"}});
+            sp_output_buffer_->softmax_probs =
+                device_->clone({*update_info.softmax_probs, rtp_llm::AllocationType::DEVICE, {"softmax_probs"}});
         }
 
         if (needReturnHiddenStates()) {
@@ -72,7 +74,8 @@ public:
         }
 
         if (update_info.loss) {
-            sp_output_buffer_->loss = device_->clone({*update_info.loss, rtp_llm::AllocationType::DEVICE, {"score_loss"}});
+            sp_output_buffer_->loss =
+                device_->clone({*update_info.loss, rtp_llm::AllocationType::DEVICE, {"score_loss"}});
         }
     }
 
@@ -81,7 +84,7 @@ public:
     }
 
 protected:
-    size_t                             history_max_score_len_ = 0;
+    size_t history_max_score_len_ = 0;
 };
 
 }  // namespace rtp_llm

@@ -17,12 +17,12 @@ private:
     BufferPtr buf_h;
     BufferPtr buf_d;
 
-    int batch_size = 0;
+    int batch_size      = 0;
     int input_token_num = 0;
-    int page_num = 0;
-    int max_kv_len = 0;
-    int max_q_len = 0;
-    int accu_q_len = 0;
+    int page_num        = 0;
+    int max_kv_len      = 0;
+    int max_q_len       = 0;
+    int accu_q_len      = 0;
 
 public:
     torch::Tensor float_workspace_d;
@@ -48,11 +48,11 @@ public:
     torch::Tensor kv_cache_block_id_d;
 
     std::vector<torch::Tensor> flash_mla_plan;
-    MlaOpsType mla_ops_type = MlaOpsType::AUTO;
+    MlaOpsType                 mla_ops_type = MlaOpsType::AUTO;
 
-    bool decode_plan = true;
+    bool          decode_plan = true;
     torch::Tensor plan;
-    DataType dtype = DataType::TYPE_INVALID;
+    DataType      dtype = DataType::TYPE_INVALID;
 
     static ParamsPtr prepare(rtp_llm::DeviceBase*             device,
                              const rtp_llm::AttentionConfigs& attn_configs,
@@ -63,41 +63,37 @@ public:
                              const BufferPtr&                 kv_cache_block_id_device,
                              DataType                         dtype,
                              bool                             skip_no_prefix = true);
-    void run(const AttentionModuleParams& params,
-             const BufferPtr& input_q,
-             const BufferPtr& fp16_out,
-             int64_t stream);
+    void run(const AttentionModuleParams& params, const BufferPtr& input_q, const BufferPtr& fp16_out, int64_t stream);
+
 private:
-    static std::tuple<BufferPtr, std::vector<torch::Tensor>> allocateManyBuffer(
-            CudaDevice *device,
-            const std::vector<std::vector<int64_t>> &shapes,
-            AllocationType atype);
+    static std::tuple<BufferPtr, std::vector<torch::Tensor>>
+    allocateManyBuffer(CudaDevice* device, const std::vector<std::vector<int64_t>>& shapes, AllocationType atype);
 
-    static FlashInferAttnParams *create(CudaDevice *device, int batch_size, int token_num, int page_num);
+    static FlashInferAttnParams* create(CudaDevice* device, int batch_size, int token_num, int page_num);
 
-    void fillFlashInfer(const BufferPtr &prefix_lengths_host,
-                        const BufferPtr &sequence_lengths_host,
-                        const BufferPtr &input_lengths_host,
-                        const BufferPtr &kv_cache_block_id_host,
-                        const int batch_size,
-                        const int tokens_per_block);
-    void refreshFlashInferBuf(CudaDevice *device, int batch_size, int token_num);
+    void fillFlashInfer(const BufferPtr& prefix_lengths_host,
+                        const BufferPtr& sequence_lengths_host,
+                        const BufferPtr& input_lengths_host,
+                        const BufferPtr& kv_cache_block_id_host,
+                        const int        batch_size,
+                        const int        tokens_per_block);
+    void refreshFlashInferBuf(CudaDevice* device, int batch_size, int token_num);
 
-    void genPlan(int batch_size,
-                 int q_length,
-                 int local_head_num,
-                 int local_head_num_kv,
-                 int size_per_head,
-                 int tokens_per_block,
-                 int kv_lora_rank,
-                 bool use_mla,
+    void genPlan(int     batch_size,
+                 int     q_length,
+                 int     local_head_num,
+                 int     local_head_num_kv,
+                 int     size_per_head,
+                 int     tokens_per_block,
+                 int     kv_lora_rank,
+                 bool    use_mla,
                  int64_t stream);
 
-    static bool sameQLength(const BufferPtr &input_lengths_host, int context_batch_size, int &q_length);
+    static bool sameQLength(const BufferPtr& input_lengths_host, int context_batch_size, int& q_length);
 
-    static bool isDecode(int input_token_num);
-    static void recycle(void* p);
+    static bool                  isDecode(int input_token_num);
+    static void                  recycle(void* p);
     static FlashInferAttnParams* get(int batch_size, int input_token_num);
 };
 
-}
+}  // namespace rtp_llm

@@ -104,7 +104,8 @@ std::vector<std::shared_ptr<RequestBlockBuffer>> BlockBufferUtil::makeRequestBlo
     return request_block_buffer_vec;
 }
 
-bool BlockBufferUtil::verifyBlock(const std::shared_ptr<BlockBuffer>& block, const std::string& key, uint32_t len, bool gpu_mem, char val) {
+bool BlockBufferUtil::verifyBlock(
+    const std::shared_ptr<BlockBuffer>& block, const std::string& key, uint32_t len, bool gpu_mem, char val) {
     if (block == nullptr) {
         return false;
     }
@@ -127,7 +128,7 @@ bool BlockBufferUtil::verifyBlock(const std::shared_ptr<BlockBuffer>& block, con
     }
 
     auto ret = device_util_->memcopy(buf, false, block->addr.get(), block->gpu_mem, len);
-    if (!ret) { 
+    if (!ret) {
         device_util_->freeCPU(buf);
         return false;
     }

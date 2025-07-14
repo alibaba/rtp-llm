@@ -44,7 +44,8 @@ std::shared_ptr<const Host> WRRLoadBalancer::chooseHost(const std::string& biz, 
     if (global_counter != -1) {
         auto& host = biz_hosts->hosts[global_counter % biz_hosts->hosts.size()];
         RTP_LLM_LOG_DEBUG("global counter = %lu, min_spec = %s",
-            global_counter, ("tcp:" + ((host)->ip) + ":" + std::to_string((host)->http_port)).c_str());
+                          global_counter,
+                          ("tcp:" + ((host)->ip) + ":" + std::to_string((host)->http_port)).c_str());
         return host;
     }
 
@@ -56,10 +57,9 @@ std::shared_ptr<const Host> WRRLoadBalancer::chooseHost(const std::string& biz, 
     return current_host;
 }
 
-std::shared_ptr<const Host>
-WRRLoadBalancer::chooseHostByWeight(const std::shared_ptr<BizHosts>& biz_hosts) const {
+std::shared_ptr<const Host> WRRLoadBalancer::chooseHostByWeight(const std::shared_ptr<BizHosts>& biz_hosts) const {
     std::shared_lock<std::shared_mutex> lock(host_load_balance_info_map_mutex_);
-    auto& hosts = biz_hosts->hosts;
+    auto&                               hosts = biz_hosts->hosts;
     if (host_load_balance_info_map_.size() < hosts.size() * available_ratio_ / 100) {
         // use round robin load balance
         return hosts[(*(biz_hosts->index))++ % hosts.size()];
@@ -74,11 +74,12 @@ WRRLoadBalancer::chooseHostByWeight(const std::shared_ptr<BizHosts>& biz_hosts) 
     }
     for (auto& pair : host_load_balance_info_map_) {
         WorkerStatusResponse& response = pair.second;
-        response.load_balance_info.onflight_requests = max_onflight_requests - response.load_balance_info.onflight_requests;
+        response.load_balance_info.onflight_requests =
+            max_onflight_requests - response.load_balance_info.onflight_requests;
     }
 
-    double                              threshold  = calculateThreshold(hosts);
-    double                              weight_acc = 0;
+    double threshold  = calculateThreshold(hosts);
+    double weight_acc = 0;
 
     for (auto& host : hosts) {
         // calculate weight sum
@@ -87,8 +88,8 @@ WRRLoadBalancer::chooseHostByWeight(const std::shared_ptr<BizHosts>& biz_hosts) 
         if (iter == host_load_balance_info_map_.end()) {
             continue;
         }
-        weight_acc += rank_factor_ == 0 ?
-            iter->second.load_balance_info.available_kv_cache : iter->second.load_balance_info.onflight_requests;
+        weight_acc += rank_factor_ == 0 ? iter->second.load_balance_info.available_kv_cache :
+                                          iter->second.load_balance_info.onflight_requests;
         if (weight_acc >= threshold) {
             return host;
         }
@@ -105,18 +106,18 @@ double WRRLoadBalancer::calculateThreshold(std::vector<std::shared_ptr<const Hos
         if (iter == host_load_balance_info_map_.end()) {
             continue;
         }
-        weight_sum += rank_factor_ == 0 ?
-            iter->second.load_balance_info.available_kv_cache : iter->second.load_balance_info.onflight_requests;
+        weight_sum += rank_factor_ == 0 ? iter->second.load_balance_info.available_kv_cache :
+                                          iter->second.load_balance_info.onflight_requests;
     }
     return weight_sum * generateRandomDouble();
 }
 
 void WRRLoadBalancer::updateWorkerStatusImpl(ErrorResult<HeartbeatSynchronizer::NodeStatus>& result) {
-    const int wait_success_times = 100;
+    const int  wait_success_times = 100;
     static int part_success_times = 0;
     if (result.ok()) {
-        part_success_times = 0;
-        HeartbeatSynchronizer::NodeStatus temp = std::move(result.value());
+        part_success_times                       = 0;
+        HeartbeatSynchronizer::NodeStatus   temp = std::move(result.value());
         std::unique_lock<std::shared_mutex> lock(host_load_balance_info_map_mutex_);
         std::swap(host_load_balance_info_map_, temp);
         return;
@@ -125,15 +126,16 @@ void WRRLoadBalancer::updateWorkerStatusImpl(ErrorResult<HeartbeatSynchronizer::
     if (result.status().code() == ErrorCode::GET_PART_NODE_STATUS_FAILED) {
         if (part_success_times == wait_success_times) {
             RTP_LLM_LOG_INFO("part success times reached [%d], so update load balance info map", wait_success_times);
-            part_success_times = 0;
-            HeartbeatSynchronizer::NodeStatus temp = std::move(result.value());
+            part_success_times                       = 0;
+            HeartbeatSynchronizer::NodeStatus   temp = std::move(result.value());
             std::unique_lock<std::shared_mutex> lock(host_load_balance_info_map_mutex_);
             std::swap(host_load_balance_info_map_, temp);
         } else {
             part_success_times++;
         }
     } else {
-        RTP_LLM_LOG_ERROR("worker status is failed, error msg is [%s]", ErrorCodeToString(result.status().code()).c_str());
+        RTP_LLM_LOG_ERROR("worker status is failed, error msg is [%s]",
+                          ErrorCodeToString(result.status().code()).c_str());
     }
 }
 

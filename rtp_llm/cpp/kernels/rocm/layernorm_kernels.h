@@ -36,26 +36,48 @@ struct LayerNormWeight {
     const T* beta  = nullptr;
 };
 
-template <typename T, typename QUANT_OUT_T=int8_t>
-void invokeGeneralAddBiasResidualLayerNorm(T* out, T* norm_output, const T* input, const T* bias, const T* residual,
-    const T* gamma, const T* beta, const float eps, const int tokens, const int hidden_dim, cudaStream_t stream = 0,
-    bool use_diff_of_squares = true, const float* scale = nullptr, float* dynamic_scale = nullptr,
-    QUANT_OUT_T* out_quant = nullptr, bool return_normed_output = false);
+template<typename T, typename QUANT_OUT_T = int8_t>
+void invokeGeneralAddBiasResidualLayerNorm(T*           out,
+                                           T*           norm_output,
+                                           const T*     input,
+                                           const T*     bias,
+                                           const T*     residual,
+                                           const T*     gamma,
+                                           const T*     beta,
+                                           const float  eps,
+                                           const int    tokens,
+                                           const int    hidden_dim,
+                                           cudaStream_t stream               = 0,
+                                           bool         use_diff_of_squares  = true,
+                                           const float* scale                = nullptr,
+                                           float*       dynamic_scale        = nullptr,
+                                           QUANT_OUT_T* out_quant            = nullptr,
+                                           bool         return_normed_output = false);
 
-template <typename T, typename QUANT_OUT_T=int8_t>
-void invokeGeneralLayerNorm(T* out, T* normed_output, const T* input, const T* gamma, const T* beta, const float eps, const int tokens,
-    const int hidden_dim, cudaStream_t stream = 0, bool use_diff_of_squares = true, const float* scale = nullptr,
-    float* dynamic_scale = nullptr, QUANT_OUT_T* out_quant = nullptr, bool return_normed_output = false);
-
+template<typename T, typename QUANT_OUT_T = int8_t>
+void invokeGeneralLayerNorm(T*           out,
+                            T*           normed_output,
+                            const T*     input,
+                            const T*     gamma,
+                            const T*     beta,
+                            const float  eps,
+                            const int    tokens,
+                            const int    hidden_dim,
+                            cudaStream_t stream               = 0,
+                            bool         use_diff_of_squares  = true,
+                            const float* scale                = nullptr,
+                            float*       dynamic_scale        = nullptr,
+                            QUANT_OUT_T* out_quant            = nullptr,
+                            bool         return_normed_output = false);
 
 template<typename T, bool IS_BIAS>
 void invokeQkLayerNorm(T* __restrict qkv,
                        const T* __restrict gamma,
-                       const float layernorm_eps,
-                       const int tokens,
-                       const int head_num,
-                       const int head_num_kv,
-                       const int size_per_head,
+                       const float  layernorm_eps,
+                       const int    tokens,
+                       const int    head_num,
+                       const int    head_num_kv,
+                       const int    size_per_head,
                        cudaStream_t stream = 0);
 
 template<typename T>

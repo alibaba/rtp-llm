@@ -34,7 +34,7 @@ typedef struct activation_const_s {
     };
 
     const float gelu_tanh_const[2] = {
-        0.044715, 
+        0.044715,
         0.7978845608028654 // sqrt(2/pi)
     };
 

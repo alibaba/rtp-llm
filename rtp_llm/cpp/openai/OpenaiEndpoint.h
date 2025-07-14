@@ -6,7 +6,6 @@
 #include "rtp_llm/cpp/openai/ChatRender.h"
 #include "rtp_llm/cpp/tokenizer/Tokenizer.h"
 
-
 namespace th = torch;
 
 namespace rtp_llm {
@@ -15,7 +14,7 @@ class OpenaiEndpoint {
 public:
     OpenaiEndpoint(const std::shared_ptr<Tokenizer>&  tokenizer,
                    const std::shared_ptr<ChatRender>& chat_render,
-                   const rtp_llm::GptInitParameter&        params);
+                   const rtp_llm::GptInitParameter&   params);
     virtual ~OpenaiEndpoint() {}
 
 public:
@@ -24,8 +23,7 @@ public:
     std::shared_ptr<ChatRender>             getChatRender() {
         return chat_render_;
     }
-    std::string getDebugInfo(const ChatCompletionRequest& chat_request,
-                             const RenderedInputs& rendered_input);
+    std::string getDebugInfo(const ChatCompletionRequest& chat_request, const RenderedInputs& rendered_input);
 
 private:
     int                           max_seq_len_;
@@ -35,7 +33,7 @@ private:
 
     std::shared_ptr<Tokenizer>  tokenizer_;
     std::shared_ptr<ChatRender> chat_render_;
-    rtp_llm::GptInitParameter        model_config_;
+    rtp_llm::GptInitParameter   model_config_;
 };
 
 }  // namespace rtp_llm

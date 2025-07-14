@@ -1,18 +1,21 @@
+import logging
 import os
 import time
-import logging
-from multiprocessing import Process, Lock, Value
+from multiprocessing import Lock, Process, Value
+
 from rtp_llm.distribute.worker_info import g_parallel_info
+
 
 class ConcurrencyException(Exception):
     pass
+
 
 class ConcurrencyController:
     def __init__(self, max_concurrency: int = 1) -> None:
         self.max_concurrency = max_concurrency
         self.lock = Lock()
-        self.current_concurrency = Value('i', 0)
-        self.request_counter = Value('i', 0)
+        self.current_concurrency = Value("i", 0)
+        self.request_counter = Value("i", 0)
 
     def get_available_concurrency(self) -> int:
         with self.lock:
@@ -25,8 +28,10 @@ class ConcurrencyController:
                     self.current_concurrency.value += 1
                     self.request_counter.value += 1
                     return self.request_counter.value
-    
-                raise ConcurrencyException(f"Concurrency limit {self.max_concurrency} reached")
+
+                raise ConcurrencyException(
+                    f"Concurrency limit {self.max_concurrency} reached"
+                )
 
     def decrement(self) -> None:
         with self.lock:
@@ -41,25 +46,31 @@ class ConcurrencyController:
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
         self.decrement()
-        
+
+
 global_controller = None
 
+
 def init_controller():
-    concurrency_limit = int(os.environ.get('CONCURRENCY_LIMIT', 32))
+    concurrency_limit = int(os.environ.get("CONCURRENCY_LIMIT", 32))
     global_concurrency_limit = concurrency_limit * g_parallel_info.dp_size
-    logging.info(f"concurrency_limit : {concurrency_limit}, global_concurrency_limit : {global_concurrency_limit}")
+    logging.info(
+        f"concurrency_limit : {concurrency_limit}, global_concurrency_limit : {global_concurrency_limit}"
+    )
     controller = ConcurrencyController(global_concurrency_limit)
     return controller
+
 
 def set_global_controller(_global_controller):
     global global_controller
     global_controller = _global_controller
-    
+
+
 def get_global_controller():
     if global_controller:
         return global_controller
 
-    if int(os.environ.get('FT_SERVER_TEST', 0)) == 1:
+    if int(os.environ.get("FT_SERVER_TEST", 0)) == 1:
         set_global_controller(init_controller())
 
     return global_controller

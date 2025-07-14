@@ -21,13 +21,10 @@ public:
                 const std::shared_ptr<WeightsLoader>&           weights_loader,
                 const std::map<std::string, std::string>&       lora_infos,
                 const std::shared_ptr<ApiServerMetricReporter>& metric_reporter):
-        engine_(engine),
-        gang_server_(gang_server),
-        weights_loader_(weights_loader),
-        metric_reporter_(metric_reporter) {
+        engine_(engine), gang_server_(gang_server), weights_loader_(weights_loader), metric_reporter_(metric_reporter) {
         autil::ScopedTime2 timer;
         if (lora_infos.size() > 1) {
-            for (const auto& [adapter_name, lora_path]: lora_infos) {
+            for (const auto& [adapter_name, lora_path] : lora_infos) {
                 addLora(adapter_name, lora_path);
             }
         }
@@ -50,12 +47,12 @@ private:
     std::unordered_map<std::string, std::string> getLoraInfoMap() const;
 
 private:
-    std::shared_ptr<EngineBase>              engine_;
-    std::shared_ptr<GangServer>              gang_server_;
-    std::shared_ptr<WeightsLoader>           weights_loader_;
-    std::shared_ptr<ApiServerMetricReporter> metric_reporter_;
+    std::shared_ptr<EngineBase>                  engine_;
+    std::shared_ptr<GangServer>                  gang_server_;
+    std::shared_ptr<WeightsLoader>               weights_loader_;
+    std::shared_ptr<ApiServerMetricReporter>     metric_reporter_;
     std::unordered_map<std::string, std::string> lora_info_map_;  // {adapter_name: lora_path}
-    mutable std::shared_mutex lora_info_map_mutex_;
+    mutable std::shared_mutex                    lora_info_map_mutex_;
 };
 
 }  // namespace rtp_llm

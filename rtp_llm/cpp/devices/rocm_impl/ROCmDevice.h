@@ -1,6 +1,5 @@
 #pragma once
 
-
 #include "rtp_llm/cpp/devices/DeviceOps.h"
 #include "rtp_llm/cpp/devices/DeviceData.h"
 #include "rtp_llm/cpp/devices/BufferManager.h"
@@ -27,74 +26,72 @@
 
 namespace rtp_llm {
 
-    struct FlashInferAttnParams {
-        BufferPtr float_workspace;
-        BufferPtr int_workspace;
-        BufferPtr int_host_workspace;
+struct FlashInferAttnParams {
+    BufferPtr float_workspace;
+    BufferPtr int_workspace;
+    BufferPtr int_host_workspace;
 
-        BufferPtr batch_indice_host;
-        BufferPtr positions_host;
-        BufferPtr kvlen_host;
-        BufferPtr paged_kv_last_page_len_host;
-        BufferPtr paged_kv_last_page_len_1_host;
-        BufferPtr page_indice_host;
+    BufferPtr batch_indice_host;
+    BufferPtr positions_host;
+    BufferPtr kvlen_host;
+    BufferPtr paged_kv_last_page_len_host;
+    BufferPtr paged_kv_last_page_len_1_host;
+    BufferPtr page_indice_host;
 
-        BufferPtr batch_indice;
-        BufferPtr positions;
-        BufferPtr paged_kv_last_page_len; // w/o current
-        BufferPtr paged_kv_last_page_len_1; // w current
+    BufferPtr batch_indice;
+    BufferPtr positions;
+    BufferPtr paged_kv_last_page_len;    // w/o current
+    BufferPtr paged_kv_last_page_len_1;  // w current
 
-        BufferPtr qo_indptr;
-        BufferPtr qo_indptr_host;
-        BufferPtr page_indptr;
-        BufferPtr page_indptr_host;
-        BufferPtr page_indice;
+    BufferPtr qo_indptr;
+    BufferPtr qo_indptr_host;
+    BufferPtr page_indptr;
+    BufferPtr page_indptr_host;
+    BufferPtr page_indice;
 
-        torch::Tensor float_workspace_t;
-        torch::Tensor int_workspace_t;
-        torch::Tensor int_host_workspace_t;
-        torch::Tensor batch_indice_t;
-        torch::Tensor positions_t;
-        torch::Tensor paged_kv_last_page_len_t;
-        torch::Tensor paged_kv_last_page_len_1_t;
+    torch::Tensor float_workspace_t;
+    torch::Tensor int_workspace_t;
+    torch::Tensor int_host_workspace_t;
+    torch::Tensor batch_indice_t;
+    torch::Tensor positions_t;
+    torch::Tensor paged_kv_last_page_len_t;
+    torch::Tensor paged_kv_last_page_len_1_t;
 
-        torch::Tensor qo_indptr_t;
-        torch::Tensor qo_indptr_host_t;
-        torch::Tensor page_indptr_t;
-        torch::Tensor page_indptr_host_t;
-        torch::Tensor kvlen_host_t;
-        torch::Tensor page_indice_t;
-        // for flashmla only
-        BufferPtr kv_cache_block_id;
-        BufferPtr kvlen;
+    torch::Tensor qo_indptr_t;
+    torch::Tensor qo_indptr_host_t;
+    torch::Tensor page_indptr_t;
+    torch::Tensor page_indptr_host_t;
+    torch::Tensor kvlen_host_t;
+    torch::Tensor page_indice_t;
+    // for flashmla only
+    BufferPtr kv_cache_block_id;
+    BufferPtr kvlen;
 
-        torch::Tensor kv_cache_block_id_t;
-        torch::Tensor kvlen_t;
+    torch::Tensor kv_cache_block_id_t;
+    torch::Tensor kvlen_t;
 
-        std::vector<torch::Tensor> flash_mla_plan;
+    std::vector<torch::Tensor> flash_mla_plan;
 
-        bool decode = true;
-        torch::Tensor plan;
+    bool          decode = true;
+    torch::Tensor plan;
 
-        static ParamsPtr prepareDecodeFlashInferAttnParams(
-            rtp_llm::DeviceBase *device,
-            const rtp_llm::AttentionConfigs &attn_configs,
-            const BufferPtr &sequence_lengths_host,
-            const BufferPtr &input_lengths_host,
-            const BufferPtr &kv_cache_block_id_host,
-            DataType dtype);
+    static ParamsPtr prepareDecodeFlashInferAttnParams(rtp_llm::DeviceBase*             device,
+                                                       const rtp_llm::AttentionConfigs& attn_configs,
+                                                       const BufferPtr&                 sequence_lengths_host,
+                                                       const BufferPtr&                 input_lengths_host,
+                                                       const BufferPtr&                 kv_cache_block_id_host,
+                                                       DataType                         dtype);
 
-        static ParamsPtr preparePrefillFlashInferAttnParams(
-            rtp_llm::DeviceBase *device,
-            const rtp_llm::AttentionConfigs &attn_configs,
-            const BufferPtr &prefix_lengths_host,
-            const BufferPtr &sequence_lengths_host,
-            const BufferPtr &input_lengths_host,
-            const BufferPtr &kv_cache_block_id_host,
-            DataType dtype);
-    };
+    static ParamsPtr preparePrefillFlashInferAttnParams(rtp_llm::DeviceBase*             device,
+                                                        const rtp_llm::AttentionConfigs& attn_configs,
+                                                        const BufferPtr&                 prefix_lengths_host,
+                                                        const BufferPtr&                 sequence_lengths_host,
+                                                        const BufferPtr&                 input_lengths_host,
+                                                        const BufferPtr&                 kv_cache_block_id_host,
+                                                        DataType                         dtype);
+};
 
-class ROCmEvent : public DeviceEvent {
+class ROCmEvent: public DeviceEvent {
 public:
     ROCmEvent(hipStream_t stream);
     ~ROCmEvent() override;
@@ -102,11 +99,11 @@ public:
     void synchronize() const override;
 
 private:
-    hipEvent_t event_;
+    hipEvent_t  event_;
     hipStream_t stream_;
 };
 
-class ROCmCommHook : public DeviceHook {
+class ROCmCommHook: public DeviceHook {
 public:
     ROCmCommHook(hipStream_t main_stream, hipStream_t comm_stream);
     ~ROCmCommHook() override;
@@ -114,7 +111,7 @@ public:
     void hook_sync() const override;
 
 private:
-    hipEvent_t hook_event_;
+    hipEvent_t  hook_event_;
     hipStream_t main_stream_;
     hipStream_t comm_stream_;
 };
@@ -124,49 +121,55 @@ public:
     ROCmDevice(const DeviceInitParams& params);
     ~ROCmDevice();
 
-    void init() override;
+    void             init() override;
     DeviceProperties getDeviceProperties() override;
-    IAllocator* getAllocator() override { return allocator_.get(); }
-    IAllocator* getHostAllocator() override { return hostAllocator_.get(); }
-    void copy(const CopyParams& params);
-    void noBlockCopy(const CopyParams& params) override;
-    void bufMemset(Buffer& buf, int val, DeviceStream stream = DeviceStream::DEFAULT) override;
-    TransposeOutput transpose(const TransposeParams& params) override;
-    void checkError() override;
-    void syncAndCheck() override;
-    void overlappedCommBarrier() override;
-    DeviceHookPtr createCommHook() override;
-    void overlappedComputeBarrier() override;
-    DevicePrepOutput prepareModelRun(const DevicePrepParams& params) override;
-    BufferPtr gemm(const GemmParams& params) override;
-    SelectOutput select(const SelectParams& params) override;
-    MultiplyOutput multiply(const MultiplyParams& params) override;
-    BufferPtr embeddingLookup(const EmbeddingLookupParams& params) override;
-    LayernormOutput layernorm(const LayernormParams& params) override;
-    LayernormOutput layernormWithStride(const LayernormWithStrideParams& params) override;
-    QkRmsNormOutput qkRmsNorm(const QkRmsNormParams& params) override;
-    BufferPtr activation(const ActivationParams& params) override;
-    AttentionModuleOutput contextAttention(const AttentionModuleParams& params) override;
-    AttentionModuleOutput mlaContextAttention(const MlaAttentionModuleParams& params) override;
-    AttentionModuleOutput decoderSelfAttention(const AttentionModuleParams& params) override;
-    MoeGateSelectOutput moeGateSelect(const FfnLayerParams& params) override;
-    FfnLayerOutput moeFfn(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs) override;
-    MoeDispatchOutput epDispatch(const MoeDispatchParams& params) override;
-    MoeCombineOutput epCombine(const MoeCombineParams& params) override;
-    FfnLayerOutput gatherCombineOutput(const MoeCombineOutput& params) override;
-    BufferPtr softmax(const SoftmaxParams& params) override;
-    GreedyOutput sampleGreedy(const GreedyParams& params) override;
-    MemoryStatus getDeviceMemoryStatus() override;
-    BufferPtr loraLinearWithActivation(const LoraLinearWithActivationParams& params) override;
-    void syncCommunication(bool timeout = true) override;
-    void broadcast(const BroadcastParams& params) override;
-    AllReduceOutput allReduce(const AllReduceParams& params) override;
+    IAllocator*      getAllocator() override {
+        return allocator_.get();
+    }
+    IAllocator* getHostAllocator() override {
+        return hostAllocator_.get();
+    }
+    void                   copy(const CopyParams& params);
+    void                   noBlockCopy(const CopyParams& params) override;
+    void                   bufMemset(Buffer& buf, int val, DeviceStream stream = DeviceStream::DEFAULT) override;
+    TransposeOutput        transpose(const TransposeParams& params) override;
+    void                   checkError() override;
+    void                   syncAndCheck() override;
+    void                   overlappedCommBarrier() override;
+    DeviceHookPtr          createCommHook() override;
+    void                   overlappedComputeBarrier() override;
+    DevicePrepOutput       prepareModelRun(const DevicePrepParams& params) override;
+    BufferPtr              gemm(const GemmParams& params) override;
+    SelectOutput           select(const SelectParams& params) override;
+    MultiplyOutput         multiply(const MultiplyParams& params) override;
+    BufferPtr              embeddingLookup(const EmbeddingLookupParams& params) override;
+    LayernormOutput        layernorm(const LayernormParams& params) override;
+    LayernormOutput        layernormWithStride(const LayernormWithStrideParams& params) override;
+    QkRmsNormOutput        qkRmsNorm(const QkRmsNormParams& params) override;
+    BufferPtr              activation(const ActivationParams& params) override;
+    AttentionModuleOutput  contextAttention(const AttentionModuleParams& params) override;
+    AttentionModuleOutput  mlaContextAttention(const MlaAttentionModuleParams& params) override;
+    AttentionModuleOutput  decoderSelfAttention(const AttentionModuleParams& params) override;
+    MoeGateSelectOutput    moeGateSelect(const FfnLayerParams& params) override;
+    FfnLayerOutput         moeFfn(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs) override;
+    MoeDispatchOutput      epDispatch(const MoeDispatchParams& params) override;
+    MoeCombineOutput       epCombine(const MoeCombineParams& params) override;
+    FfnLayerOutput         gatherCombineOutput(const MoeCombineOutput& params) override;
+    BufferPtr              softmax(const SoftmaxParams& params) override;
+    GreedyOutput           sampleGreedy(const GreedyParams& params) override;
+    MemoryStatus           getDeviceMemoryStatus() override;
+    BufferPtr              loraLinearWithActivation(const LoraLinearWithActivationParams& params) override;
+    void                   syncCommunication(bool timeout = true) override;
+    void                   broadcast(const BroadcastParams& params) override;
+    AllReduceOutput        allReduce(const AllReduceParams& params) override;
     PrepareAllReduceOutput prepareAllReduce(const PrepareAllReduceParams& params) override;
-    void allGather(const AllGatherParams& params) override;
-    SplitOutput split(const SplitParams& params) override;
-    AllToAllOutput allToAll(const AllToAllParams& params) override;
+    void                   allGather(const AllGatherParams& params) override;
+    SplitOutput            split(const SplitParams& params) override;
+    AllToAllOutput         allToAll(const AllToAllParams& params) override;
 
-    void preRun() override { ROCM_CHECK(hipSetDevice(device_id_)); }
+    void preRun() override {
+        ROCM_CHECK(hipSetDevice(device_id_));
+    }
     DeviceEventPtr createEvent() override;
 
     BufferPtr quantize(const QuantizeParams& params) override;
@@ -174,38 +177,42 @@ public:
     void      printBuffer(const BufferPtr buffer);
 
     static torch::Tensor packInt8TensorToPackedInt4(torch::Tensor weight);
-    static torch::Tensor preprocessWeightsForMixedGemm(torch::Tensor row_major_quantized_weight, torch::ScalarType quant_type, const std::string &arch);
+    static torch::Tensor preprocessWeightsForMixedGemm(torch::Tensor      row_major_quantized_weight,
+                                                       torch::ScalarType  quant_type,
+                                                       const std::string& arch);
     void QInputBatchMatmulWrapper(torch::Tensor& fused_q_input_t, const MlaAttentionModuleParams& params);
-    void DecoderOutputGemmWrapper(torch::Tensor& qkv_output_t, const torch::Tensor& mla_out_t, const MlaAttentionModuleParams& params);
+    void DecoderOutputGemmWrapper(torch::Tensor&                  qkv_output_t,
+                                  const torch::Tensor&            mla_out_t,
+                                  const MlaAttentionModuleParams& params);
 
-    void mlaAbsorbAttention(const MlaAttentionModuleParams& params);
-    void mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params);
-    SliceOutput slice(const SliceParams& params) override;
+    void         mlaAbsorbAttention(const MlaAttentionModuleParams& params);
+    void         mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params);
+    SliceOutput  slice(const SliceParams& params) override;
     KVBlockArray getKVBlockArray(const AttentionModuleParams& params,
                                  const Buffer&                kv_cache_offset_pointers,
                                  int                          batch_size,
                                  bool                         use_fp8_fmha);
 
 protected:
-    void InvokeROCmDeepGemm(const GemmParams& params,
-                            BufferPtr         output);
-    void InvokeROCmPTPCGemm(const GemmParams& params,
-                            BufferPtr         output);
+    void InvokeROCmDeepGemm(const GemmParams& params, BufferPtr output);
+    void InvokeROCmPTPCGemm(const GemmParams& params, BufferPtr output);
     // void prepareCommBuffer(const PrepareCommBufferParams& params) override;
 
 public:
-    BufferPtr        testVecAdd(const BufferPtr a, const BufferPtr b);
+    BufferPtr   testVecAdd(const BufferPtr a, const BufferPtr b);
     hipStream_t getStream(DeviceStream stream);
-    hipStream_t getStream() {return stream_;}
+    hipStream_t getStream() {
+        return stream_;
+    }
     hipDeviceProp_t* getRocmDeviceProperties() {
         return &rocmDevProp;
     }
 
 private:
-    hipDeviceProp_t             rocmDevProp;
-    std::unique_ptr<IAllocator> allocator_;
-    std::unique_ptr<IAllocator> hostAllocator_;
-    c10::hip::HIPCachingAllocator::HIPAllocator *origin_torch_hip_allocator_;
+    hipDeviceProp_t                              rocmDevProp;
+    std::unique_ptr<IAllocator>                  allocator_;
+    std::unique_ptr<IAllocator>                  hostAllocator_;
+    c10::hip::HIPCachingAllocator::HIPAllocator* origin_torch_hip_allocator_;
 
     hipStream_t     stream_ = nullptr;
     hipStream_t     no_block_copy_stream_;
@@ -214,7 +221,7 @@ private:
     hipStream_t     current_stream_ = nullptr;
     hipDeviceProp_t device_prop_;
 
-    BufferPtr curandstate_buf_; // for sampler use.
+    BufferPtr curandstate_buf_;  // for sampler use.
 
     rocm::hipblasMMWrapper* hipblasMMWrapperPtr() const {
         return hipblas_mm_wrapper_.get();
@@ -226,18 +233,22 @@ private:
     std::unique_ptr<rocm::hipblasMMWrapper> hipblas_mm_wrapper_;
 
     // fmha
-    std::unique_ptr<rocmFmhaWrapper>      fmha_runner_;
-    bool use_openSource_fmha    = true;
+    std::unique_ptr<rocmFmhaWrapper> fmha_runner_;
+    bool                             use_openSource_fmha = true;
 
     NcclParam tp_nccl_param_;
     NcclParam dp_nccl_param_;
     NcclParam dp_tp_nccl_param_;
     NcclParam ffn_tp_nccl_param_;
 
-    void initNcclParam(size_t rank, size_t world_size, const std::string& ip, size_t port,
-                       const std::string& tp_group_name, NcclParam& nccl_param);
+    void      initNcclParam(size_t             rank,
+                            size_t             world_size,
+                            const std::string& ip,
+                            size_t             port,
+                            const std::string& tp_group_name,
+                            NcclParam&         nccl_param);
     NcclParam getNcclParam(ParallelMode mode);
-    //moe
+    // moe
     std::unique_ptr<rocmMoeWrapper> moe_runner_;
 
     // for custom allreduce use
@@ -252,12 +263,11 @@ private:
     // std::unique_ptr<CommBuffer> ffn_ag_scale_comm_buffer_ = nullptr;
     // std::unique_ptr<CommBuffer> ffn_rs_comm_buffer_ = nullptr;
 
-    //CK gemm
+    // CK gemm
     std::unique_ptr<rocmCKGemmWrapper> ck_gemm_runner_;
 
-
 protected:
-    bool use_multi_block_mode       = false;
+    bool use_multi_block_mode = false;
 };
 
 }  // namespace rtp_llm

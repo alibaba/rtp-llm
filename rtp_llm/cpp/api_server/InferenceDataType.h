@@ -11,16 +11,17 @@ using namespace autil::legacy::json;
 namespace rtp_llm {
 
 // used for de-serialization
-#define JSONIZE_OPTIONAL(field) try { \
-                                    using Type = decltype(field)::value_type; \
-                                    Type field##Tmp; \
-                                    json.Jsonize(#field, field##Tmp); \
-                                    field = field##Tmp; \
-                                } catch (autil::legacy::ExceptionBase &e) { \
-                                    if (field.has_value() == false) { \
-                                        field = std::nullopt; \
-                                    } \
-                                }
+#define JSONIZE_OPTIONAL(field)                                                                                        \
+    try {                                                                                                              \
+        using Type = decltype(field)::value_type;                                                                      \
+        Type field##Tmp;                                                                                               \
+        json.Jsonize(#field, field##Tmp);                                                                              \
+        field = field##Tmp;                                                                                            \
+    } catch (autil::legacy::ExceptionBase & e) {                                                                       \
+        if (field.has_value() == false) {                                                                              \
+            field = std::nullopt;                                                                                      \
+        }                                                                                                              \
+    }
 
 class EmbeddingRequest: public autil::legacy::Jsonizable {
 public:
@@ -29,7 +30,7 @@ public:
         json.Jsonize("private_request", private_request, false);
     }
     std::string source;
-    bool private_request;
+    bool        private_request;
 };
 
 class RawRequest: public autil::legacy::Jsonizable {
@@ -43,7 +44,7 @@ public:
             std::string text;
             json.Jsonize("text", text);
             prompt = text;
-        } catch (autil::legacy::ExceptionBase &e) {
+        } catch (autil::legacy::ExceptionBase& e) {
             if (prompt.has_value() == false) {
                 prompt = std::nullopt;
             }
@@ -54,27 +55,27 @@ public:
             std::vector<std::string> images_;
             json.Jsonize("images", images_);
             images = images_;
-        } catch (autil::legacy::ExceptionBase &e) {
+        } catch (autil::legacy::ExceptionBase& e) {
             try {
                 std::vector<std::vector<std::string>> images_batch_;
                 json.Jsonize("images", images_batch_);
                 images_batch = images_batch_;
-            } catch (autil::legacy::ExceptionBase &e) {
+            } catch (autil::legacy::ExceptionBase& e) {
                 images_batch = std::nullopt;
-                images = std::nullopt;
+                images       = std::nullopt;
             }
         }
 
         JSONIZE_OPTIONAL(generate_config);
     }
-    std::string source;
-    bool private_request;
-    bool yield_generator;
-    std::optional<std::string> prompt;
-    std::optional<std::vector<std::string>> prompt_batch;
+    std::string                                          source;
+    bool                                                 private_request;
+    bool                                                 yield_generator;
+    std::optional<std::string>                           prompt;
+    std::optional<std::vector<std::string>>              prompt_batch;
     std::optional<std::vector<std::vector<std::string>>> images_batch;
-    std::optional<std::vector<std::string>> images;
-    std::optional<GenerateConfig> generate_config;
+    std::optional<std::vector<std::string>>              images;
+    std::optional<GenerateConfig>                        generate_config;
 };
 
 class AuxInfoAdapter: public Jsonizable, public AuxInfo {
@@ -114,7 +115,7 @@ public:
 
         cost_time_ms = cost_time_us / 1000.0;
     }
-    float cost_time_ms;
+    float                    cost_time_ms;
     std::vector<std::string> beam_responses;
 };
 
@@ -128,15 +129,20 @@ public:
         }
         json.Jsonize("finished", finished, finished);
         json.Jsonize("aux_info", aux_info, aux_info);
-        if (logits.has_value()) json.Jsonize("logits", logits.value(), logits.value());
-        if (loss.has_value()) json.Jsonize("loss", loss.value(), loss.value());
-        if (hidden_states.has_value()) json.Jsonize("hidden_states", hidden_states.value(), hidden_states.value());
-        if (output_ids.has_value()) json.Jsonize("output_ids", output_ids.value(), output_ids.value());
-        if (input_ids.has_value()) json.Jsonize("input_ids", input_ids.value(), input_ids.value());
+        if (logits.has_value())
+            json.Jsonize("logits", logits.value(), logits.value());
+        if (loss.has_value())
+            json.Jsonize("loss", loss.value(), loss.value());
+        if (hidden_states.has_value())
+            json.Jsonize("hidden_states", hidden_states.value(), hidden_states.value());
+        if (output_ids.has_value())
+            json.Jsonize("output_ids", output_ids.value(), output_ids.value());
+        if (input_ids.has_value())
+            json.Jsonize("input_ids", input_ids.value(), input_ids.value());
     }
-    bool finished;
-    std::vector<std::string> response;
-    std::vector<AuxInfoAdapter> aux_info;
+    bool                                           finished;
+    std::vector<std::string>                       response;
+    std::vector<AuxInfoAdapter>                    aux_info;
     std::optional<std::vector<std::vector<float>>> logits;
     std::optional<std::vector<std::vector<float>>> loss;
     std::optional<std::vector<std::vector<float>>> hidden_states;

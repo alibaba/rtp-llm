@@ -41,9 +41,9 @@
 namespace rtp_llm {
 #define NCCLCHECK(cmd)                                                                                                 \
     do {                                                                                                               \
-        ncclResult_t __r = cmd;                                                                                          \
-        if (__r != ncclSuccess) {                                                                                        \
-            printf("Failed, NCCL error %s:%d '%s'\n", __FILE__, __LINE__, ncclGetErrorString(__r));                      \
+        ncclResult_t __r = cmd;                                                                                        \
+        if (__r != ncclSuccess) {                                                                                      \
+            printf("Failed, NCCL error %s:%d '%s'\n", __FILE__, __LINE__, ncclGetErrorString(__r));                    \
             fflush(stdout);                                                                                            \
             fflush(stderr);                                                                                            \
             abort();                                                                                                   \
@@ -52,27 +52,25 @@ namespace rtp_llm {
 
 struct NcclUid {
     ncclUniqueId nccl_uid_;
-    NcclUid(){};
-    NcclUid(NcclUid const& uid): nccl_uid_(uid.nccl_uid_){};
+    NcclUid() {};
+    NcclUid(NcclUid const& uid): nccl_uid_(uid.nccl_uid_) {};
 };
 
 struct NcclParam {
-    int rank_{0};
-    int world_size_{1};
+    int          rank_{0};
+    int          world_size_{1};
     ncclUniqueId nccl_uid_;
     ncclComm_t   nccl_comm_ = nullptr;
 
-    NcclParam(): rank_(0), world_size_(1), nccl_comm_(nullptr){};
-    NcclParam(int rank, int world_size): rank_(rank), world_size_(world_size){};
+    NcclParam(): rank_(0), world_size_(1), nccl_comm_(nullptr) {};
+    NcclParam(int rank, int world_size): rank_(rank), world_size_(world_size) {};
     NcclParam(NcclParam const& param):
-        rank_(param.rank_), world_size_(param.world_size_), nccl_uid_(param.nccl_uid_), nccl_comm_(param.nccl_comm_){};
+        rank_(param.rank_), world_size_(param.world_size_), nccl_uid_(param.nccl_uid_), nccl_comm_(param.nccl_comm_) {};
     std::string toString() const {
         return rtp_llm::fmtstr("NcclParam[rank=%d, world_size=%d, nccl_comm=%p]", rank_, world_size_, nccl_comm_);
     }
     bool operator==(const NcclParam& other) const {
-        return rank_ == other.rank_ &&
-               world_size_ == other.world_size_ &&
-               nccl_comm_ == other.nccl_comm_;
+        return rank_ == other.rank_ && world_size_ == other.world_size_ && nccl_comm_ == other.nccl_comm_;
     }
 
     bool operator!=(const NcclParam& other) const {
@@ -115,13 +113,12 @@ void ftNcclInitialize(NcclParam&         tensor_para,
                       const std::string& master_ip,
                       const int          master_port);
 
-void ftNcclInitialize(NcclParam& tensor_para,
-                      NcclParam& pipeline_para,
-                      const int  tensor_para_size,
-                      const int  pipeline_para_size,
-                      const int64_t      world_size,
-                      const int64_t      world_rank
-                    );
+void ftNcclInitialize(NcclParam&    tensor_para,
+                      NcclParam&    pipeline_para,
+                      const int     tensor_para_size,
+                      const int     pipeline_para_size,
+                      const int64_t world_size,
+                      const int64_t world_rank);
 
 std::vector<size_t> fcNcclGatherRanks(NcclParam& para, cudaStream_t stream);
 

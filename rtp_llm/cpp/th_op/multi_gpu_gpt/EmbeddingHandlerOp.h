@@ -9,6 +9,7 @@ namespace torch_ext {
 class EmbeddingHandlerOp {
 private:
     std::unique_ptr<rtp_llm::HandlerBase> handler_ = nullptr;
+
 public:
     EmbeddingHandlerOp() {}
     void setHandler(std::unique_ptr<rtp_llm::HandlerBase>& handler) {
@@ -33,9 +34,8 @@ public:
         }
         return handler_->forward(hidden_states, input_lengths);
     }
-
 };
 
 void registerEmbeddingHandler(py::module& m);
 
-} // namespace ft
+}  // namespace torch_ext

@@ -49,8 +49,7 @@ struct hipblasLtAlgoConfig {
                && a.A_data_type == b.A_data_type && a.lda == b.lda && a.stride_a == b.stride_a
                && a.B_data_type == b.B_data_type && a.ldb == b.ldb && a.stride_b == b.stride_b
                && a.C_data_type == b.C_data_type && a.ldc == b.ldc && a.stride_c == b.stride_c
-               && a.compute_type == b.compute_type && a.batch_count == b.batch_count
-               && a.epilogue == b.epilogue;
+               && a.compute_type == b.compute_type && a.batch_count == b.batch_count && a.epilogue == b.epilogue;
     }
 
     template<typename H>

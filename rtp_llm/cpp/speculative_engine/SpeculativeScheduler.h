@@ -6,7 +6,7 @@ namespace rtp_llm {
 
 class SpeculativeScheduler: public FIFOScheduler {
 public:
-    explicit SpeculativeScheduler(const rtp_llm::GptInitParameter&          params,
+    explicit SpeculativeScheduler(const rtp_llm::GptInitParameter&     params,
                                   const std::shared_ptr<CacheManager>& cache_manager,
                                   const kmonitor::MetricsReporterPtr   metrics_reporter = nullptr):
         FIFOScheduler(params, cache_manager, metrics_reporter) {}

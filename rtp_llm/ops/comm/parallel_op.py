@@ -1,8 +1,10 @@
+from typing import Dict, List, Optional, Union
+
 import torch
 import torch.nn.functional as F
-from typing import Optional, Union, List, Dict
 
 from rtp_llm.utils.nccl_util import all_gather_tp
+
 
 class ParallelEmbedding(object):
     def __init__(self, all_gather: bool):
@@ -24,13 +26,14 @@ class ParallelEmbedding(object):
         if self._all_gather:
             return all_gather_tp(output)
         return output
-    
+
     @property
     def weight(self):
         return self._emb
 
+
 class ParallelLinear(object):
-    def __init__(self, all_gather: bool):        
+    def __init__(self, all_gather: bool):
         self._w: Optional[torch.Tensor] = None
         self._b: Optional[torch.Tensor] = None
         self._all_gather = all_gather
@@ -38,11 +41,11 @@ class ParallelLinear(object):
     def set_weight(self, w: torch.Tensor, b: Optional[torch.Tensor]):
         self._w = w
         self._b = b
-        
+
     @property
     def weight(self):
         return self._w
-    
+
     @property
     def bias(self):
         return self._b

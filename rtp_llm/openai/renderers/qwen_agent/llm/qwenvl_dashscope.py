@@ -6,7 +6,6 @@ from pprint import pformat
 from typing import Dict, Iterator, List, Optional
 
 import dashscope
-
 from qwen_agent.llm.base import ModelServiceError, register_llm
 from qwen_agent.llm.function_calling import BaseFnCallModel
 from qwen_agent.llm.qwen_dashscope import initialize_dashscope
@@ -15,12 +14,12 @@ from qwen_agent.log import logger
 from qwen_agent.utils.utils import format_as_text_message
 
 
-@register_llm('qwenvl_dashscope')
+@register_llm("qwenvl_dashscope")
 class QwenVLChatAtDS(BaseFnCallModel):
 
     def __init__(self, cfg: Optional[Dict] = None):
         super().__init__(cfg)
-        self.model = self.model or 'qwen-vl-max'
+        self.model = self.model or "qwen-vl-max"
         initialize_dashscope(cfg)
 
     def _chat_stream(
@@ -34,12 +33,14 @@ class QwenVLChatAtDS(BaseFnCallModel):
 
         messages = _format_local_files(messages)
         messages = [msg.model_dump() for msg in messages]
-        logger.debug(f'*{pformat(messages, indent=2)}*')
-        response = dashscope.MultiModalConversation.call(model=self.model,
-                                                         messages=messages,
-                                                         result_format='message',
-                                                         stream=True,
-                                                         **generate_cfg)
+        logger.debug(f"*{pformat(messages, indent=2)}*")
+        response = dashscope.MultiModalConversation.call(
+            model=self.model,
+            messages=messages,
+            result_format="message",
+            stream=True,
+            **generate_cfg,
+        )
 
         for chunk in response:
             if chunk.status_code == HTTPStatus.OK:
@@ -54,21 +55,29 @@ class QwenVLChatAtDS(BaseFnCallModel):
     ) -> List[Message]:
         messages = _format_local_files(messages)
         messages = [msg.model_dump() for msg in messages]
-        logger.debug(f'*{pformat(messages, indent=2)}*')
-        response = dashscope.MultiModalConversation.call(model=self.model,
-                                                         messages=messages,
-                                                         result_format='message',
-                                                         stream=False,
-                                                         **generate_cfg)
+        logger.debug(f"*{pformat(messages, indent=2)}*")
+        response = dashscope.MultiModalConversation.call(
+            model=self.model,
+            messages=messages,
+            result_format="message",
+            stream=False,
+            **generate_cfg,
+        )
         if response.status_code == HTTPStatus.OK:
             return _extract_vl_response(response=response)
         else:
             raise ModelServiceError(code=response.code, message=response.message)
 
-    def _postprocess_messages(self, messages: List[Message], fncall_mode: bool, generate_cfg: dict) -> List[Message]:
-        messages = super()._postprocess_messages(messages, fncall_mode=fncall_mode, generate_cfg=generate_cfg)
+    def _postprocess_messages(
+        self, messages: List[Message], fncall_mode: bool, generate_cfg: dict
+    ) -> List[Message]:
+        messages = super()._postprocess_messages(
+            messages, fncall_mode=fncall_mode, generate_cfg=generate_cfg
+        )
         # Make VL return the same format as text models for easy usage
-        messages = [format_as_text_message(msg, add_upload_info=False) for msg in messages]
+        messages = [
+            format_as_text_message(msg, add_upload_info=False) for msg in messages
+        ]
         return messages
 
 
@@ -82,15 +91,17 @@ def _format_local_files(messages: List[Message]) -> List[Message]:
             for item in msg.content:
                 if item.image:
                     fname = item.image
-                    if not fname.startswith((
-                            'http://',
-                            'https://',
-                            'file://',
-                    )):
-                        if fname.startswith('~'):
+                    if not fname.startswith(
+                        (
+                            "http://",
+                            "https://",
+                            "file://",
+                        )
+                    ):
+                        if fname.startswith("~"):
                             fname = os.path.expanduser(fname)
-                        if re.match(r'^[A-Za-z]:\\', fname):
-                            fname = fname.replace('\\', '/')
+                        if re.match(r"^[A-Za-z]:\\", fname):
+                            fname = fname.replace("\\", "/")
                         item.image = fname
     return messages
 
@@ -103,6 +114,6 @@ def _extract_vl_response(response) -> List[Message]:
             text_content.append(ContentItem(text=item))
         else:
             for k, v in item.items():
-                if k in ('text', 'box'):
+                if k in ("text", "box"):
                     text_content.append(ContentItem(text=v))
     return [Message(role=output.role, content=text_content)]

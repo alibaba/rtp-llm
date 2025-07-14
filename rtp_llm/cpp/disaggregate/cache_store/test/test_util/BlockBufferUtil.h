@@ -18,7 +18,8 @@ public:
     std::vector<std::shared_ptr<RequestBlockBuffer>>
     makeRequestBlockBufferVec(const std::string& requestid, int layer_num, int block_num, uint32_t block_size);
 
-    bool verifyBlock(const std::shared_ptr<BlockBuffer>& block, const std::string& key, uint32_t len, bool gpu_mem, char val);
+    bool verifyBlock(
+        const std::shared_ptr<BlockBuffer>& block, const std::string& key, uint32_t len, bool gpu_mem, char val);
 
 private:
     std::shared_ptr<MemoryUtil> memory_util_;

@@ -8,7 +8,6 @@ import sentencepiece as spm
 from transformers.tokenization_utils import AddedToken, PreTrainedTokenizer
 from transformers.utils import logging
 
-
 logger = logging.get_logger(__name__)
 
 VOCAB_FILES_NAMES = {"vocab_file": "tokenizer.model"}
@@ -74,7 +73,7 @@ class BaichuanTokenizer(PreTrainedTokenizer):
         self.add_eos_token = add_eos_token
         self.sp_model = spm.SentencePieceProcessor(**self.sp_model_kwargs)
         self.sp_model.Load(vocab_file)
-        
+
         super().__init__(
             bos_token=bos_token,
             eos_token=eos_token,

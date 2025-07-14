@@ -33,12 +33,11 @@ static const std::string PART_ID("partId");
 static const std::string HIPPO_SLAVE_IP("HIPPO_SLAVE_IP");
 static const std::string ROLE_TYPE("roleType");
 
-KmonParam::KmonParam()
-    : kmonitorEnableLogFileSink(false), kmonitorManuallyMode(false), kmonitorNormalSamplePeriod(1) {}
+KmonParam::KmonParam(): kmonitorEnableLogFileSink(false), kmonitorManuallyMode(false), kmonitorNormalSamplePeriod(1) {}
 
-bool KmonParam::parseKMonitorTags(const string &tagsStr, map<string, string> &tagsMap) {
+bool KmonParam::parseKMonitorTags(const string& tagsStr, map<string, string>& tagsMap) {
     auto tagVec = StringUtil::split(tagsStr, KMONITOR_MULTI_SEP);
-    for (const auto &tags : tagVec) {
+    for (const auto& tags : tagVec) {
         auto kvVec = StringUtil::split(tags, KMONITOR_KEYVALUE_SEP);
         if (kvVec.size() != 2) {
             RTP_LLM_LOG_ERROR("parse kmonitor tags [%s] failed.", tags.c_str());
@@ -52,30 +51,31 @@ bool KmonParam::parseKMonitorTags(const string &tagsStr, map<string, string> &ta
 }
 
 bool KmonParam::init() {
-    serviceName = autil::EnvUtil::getEnv(SERVICE_NAME, "suez_service");
+    serviceName  = autil::EnvUtil::getEnv(SERVICE_NAME, "suez_service");
     amonitorPath = autil::EnvUtil::getEnv(AMONITOR_PATH, "");
 
     // compatible with ha3 qrs && searcher
-    partId = autil::EnvUtil::getEnv(PART_ID, "");
+    partId       = autil::EnvUtil::getEnv(PART_ID, "");
     hippoSlaveIp = autil::EnvUtil::getEnv(HIPPO_SLAVE_IP, "127.0.0.1");
-    roleType = autil::EnvUtil::getEnv(ROLE_TYPE, "");
+    roleType     = autil::EnvUtil::getEnv(ROLE_TYPE, "");
 
     /***
         for kmon
     ***/
-    kmonitorPort = autil::EnvUtil::getEnv(KMONITOR_PORT, "4141");
+    kmonitorPort        = autil::EnvUtil::getEnv(KMONITOR_PORT, "4141");
     kmonitorServiceName = autil::EnvUtil::getEnv(KMONITOR_SERVICE_NAME, "");
     kmonitorSinkAddress =
         autil::EnvUtil::getEnv(KMONITOR_SINK_ADDRESS, autil::EnvUtil::getEnv(HIPPO_SLAVE_IP, "127.0.0.1"));
     kmonitorEnableLogFileSink = autil::EnvUtil::getEnv(KMONITOR_ENABLE_LOGFILE_SINK, kmonitorEnableLogFileSink);
-    kmonitorEnablePrometheusSink = autil::EnvUtil::getEnv(KMONITOR_ENABLE_PROMETHEUS_SINK, kmonitorEnablePrometheusSink);
-    kmonitorManuallyMode = autil::EnvUtil::getEnv(KMONITOR_MANUALLY_MODE, kmonitorManuallyMode);
-    kmonitorTenant = autil::EnvUtil::getEnv(KMONITOR_TENANT, "default");
-    kmonitorMetricsPrefix = autil::EnvUtil::getEnv(KMONITOR_METRICS_PREFIX, "");
-    kmonitorGlobalTableMetricsPrefix = autil::EnvUtil::getEnv(KMONITOR_GLOBAL_TABLE_METRICS_PREFIX, "");
-    kmonitorTableMetricsPrefix = autil::EnvUtil::getEnv(KMONITOR_TABLE_METRICS_PREFIX, "");
+    kmonitorEnablePrometheusSink =
+        autil::EnvUtil::getEnv(KMONITOR_ENABLE_PROMETHEUS_SINK, kmonitorEnablePrometheusSink);
+    kmonitorManuallyMode              = autil::EnvUtil::getEnv(KMONITOR_MANUALLY_MODE, kmonitorManuallyMode);
+    kmonitorTenant                    = autil::EnvUtil::getEnv(KMONITOR_TENANT, "default");
+    kmonitorMetricsPrefix             = autil::EnvUtil::getEnv(KMONITOR_METRICS_PREFIX, "");
+    kmonitorGlobalTableMetricsPrefix  = autil::EnvUtil::getEnv(KMONITOR_GLOBAL_TABLE_METRICS_PREFIX, "");
+    kmonitorTableMetricsPrefix        = autil::EnvUtil::getEnv(KMONITOR_TABLE_METRICS_PREFIX, "");
     kmonitorMetricsReporterCacheLimit = autil::EnvUtil::getEnv(KMONITOR_METRICS_REPORTER_CACHE_LIMIT, "");
-    string kmonitorTagsStr = autil::EnvUtil::getEnv(KMONITOR_TAGS, "");
+    string kmonitorTagsStr            = autil::EnvUtil::getEnv(KMONITOR_TAGS, "");
     if (!kmonitorTagsStr.empty() && !parseKMonitorTags(kmonitorTagsStr, kmonitorTags)) {
         return false;
     }
@@ -84,4 +84,4 @@ bool KmonParam::init() {
     return true;
 }
 
-} // namespace suez
+}  // namespace rtp_llm

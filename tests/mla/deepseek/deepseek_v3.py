@@ -22,12 +22,13 @@ import math
 import warnings
 from typing import List, Optional, Tuple, Union
 
+import numpy as np
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 import torch.utils.checkpoint
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
-
 from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.modeling_attn_mask_utils import (
@@ -54,9 +55,8 @@ from transformers.utils import (
     replace_return_docstrings,
 )
 from transformers.utils.import_utils import is_torch_fx_available
+
 from .configuration_deepseek import DeepseekV3Config
-import torch.distributed as dist
-import numpy as np
 
 if is_flash_attn_2_available():
     from flash_attn import flash_attn_func, flash_attn_varlen_func
@@ -437,9 +437,13 @@ class MoEGate(nn.Module):
         ### select top-k experts
         if self.topk_method == "noaux_tc":
             assert not self.training
-            scores_for_choice = scores.view(bsz * seq_len, -1) + self.e_score_correction_bias.unsqueeze(0)
+            scores_for_choice = scores.view(
+                bsz * seq_len, -1
+            ) + self.e_score_correction_bias.unsqueeze(0)
             group_scores = (
-                scores_for_choice.view(bsz * seq_len, self.n_group, -1).topk(2, dim=-1)[0].sum(dim = -1)
+                scores_for_choice.view(bsz * seq_len, self.n_group, -1)
+                .topk(2, dim=-1)[0]
+                .sum(dim=-1)
             )  # [n, n_group]
             group_idx = torch.topk(
                 group_scores, k=self.topk_group, dim=-1, sorted=False
@@ -455,10 +459,10 @@ class MoEGate(nn.Module):
                 )
                 .reshape(bsz * seq_len, -1)
             )  # [n, e]
-            tmp_scores = scores_for_choice.masked_fill(~score_mask.bool(), 0.0)  # [n, e]
-            _, topk_idx = torch.topk(
-                tmp_scores, k=self.top_k, dim=-1, sorted=False
-            )
+            tmp_scores = scores_for_choice.masked_fill(
+                ~score_mask.bool(), 0.0
+            )  # [n, e]
+            _, topk_idx = torch.topk(tmp_scores, k=self.top_k, dim=-1, sorted=False)
             topk_weight = scores.gather(1, topk_idx)
         else:
             raise NotImplementedError(
@@ -469,9 +473,12 @@ class MoEGate(nn.Module):
         if self.top_k > 1 and self.norm_topk_prob:
             denominator = topk_weight.sum(dim=-1, keepdim=True) + 1e-20
             topk_weight = topk_weight / denominator
-        topk_weight = topk_weight * self.routed_scaling_factor # must multiply the scaling factor
+        topk_weight = (
+            topk_weight * self.routed_scaling_factor
+        )  # must multiply the scaling factor
 
         return topk_idx, topk_weight
+
 
 class DeepseekV3MoE(nn.Module):
     """
@@ -794,8 +801,6 @@ class DeepseekV3Attention(nn.Module):
                     f"The cache structure has changed since version v4.36. If you are using {self.__class__.__name__} "
                     "for auto-regressive decoding with k/v caching, please make sure to initialize the attention class "
                     "with a layer index."
-
-                    
                 )
             kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)

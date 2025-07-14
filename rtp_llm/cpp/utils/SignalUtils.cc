@@ -15,7 +15,8 @@ namespace rtp_llm {
 void printSignalStackTrace(int signum, siginfo_t* siginfo, void* ucontext) {
     std::stringstream stack_ss;
     time_t            current_time = time(nullptr);
-    stack_ss << std::endl << "*** Aborted at " << current_time << " (unix time) try \"date -d @" << current_time
+    stack_ss << std::endl
+             << "*** Aborted at " << current_time << " (unix time) try \"date -d @" << current_time
              << "\" if you are using GNU date***" << std::endl;
 
     switch (signum) {
@@ -69,11 +70,16 @@ bool installSighandler() {
     action.sa_flags     = SA_SIGINFO;
     sigfillset(&action.sa_mask);
 
-    if (sigaction(SIGSEGV, &action, nullptr) != 0) return false;
-    if (sigaction(SIGFPE, &action, nullptr) != 0) return false;
-    if (sigaction(SIGILL, &action, nullptr) != 0) return false;
-    if (sigaction(SIGABRT, &action, nullptr) != 0) return false;
-    if (sigaction(SIGBUS, &action, nullptr) != 0) return false;
+    if (sigaction(SIGSEGV, &action, nullptr) != 0)
+        return false;
+    if (sigaction(SIGFPE, &action, nullptr) != 0)
+        return false;
+    if (sigaction(SIGILL, &action, nullptr) != 0)
+        return false;
+    if (sigaction(SIGABRT, &action, nullptr) != 0)
+        return false;
+    if (sigaction(SIGBUS, &action, nullptr) != 0)
+        return false;
 
     return true;
 }

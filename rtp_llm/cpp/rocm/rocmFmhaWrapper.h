@@ -37,30 +37,30 @@ public:
         q_scaling_     = q_scaling;
     }
     uint32_t runCKFmha(void*  q,
-                   void*  k,
-                   void*  v,
-                   void*  output,
-                   void*  softmax_lse_,
-                   size_t batch_size,
-                   size_t seq_len,
-                   void*  seqstart_q,
-                   void*  seqstart_k,
-                   void*  lse_acc_buf,
-                   void*  linear_bias_slopes = nullptr,
-                   void*  biasBuffer         = nullptr);
+                       void*  k,
+                       void*  v,
+                       void*  output,
+                       void*  softmax_lse_,
+                       size_t batch_size,
+                       size_t seq_len,
+                       void*  seqstart_q,
+                       void*  seqstart_k,
+                       void*  lse_acc_buf,
+                       void*  linear_bias_slopes = nullptr,
+                       void*  biasBuffer         = nullptr);
     uint32_t runCKFmhaMLA(void*  q,
-    void*  k,
-    void*  v,
-    void*  output,
-    void*  softmax_lse_,
-    size_t batch_size,
-    size_t seq_len,
-    float  softmax_extra_scale,
-    void*  seqstart_q,
-    void*  seqstart_k,
-    void*  lse_acc_buf,
-    void*  linear_bias_slopes = nullptr,
-    void*  biasBuffer         = nullptr);
+                          void*  k,
+                          void*  v,
+                          void*  output,
+                          void*  softmax_lse_,
+                          size_t batch_size,
+                          size_t seq_len,
+                          float  softmax_extra_scale,
+                          void*  seqstart_q,
+                          void*  seqstart_k,
+                          void*  lse_acc_buf,
+                          void*  linear_bias_slopes = nullptr,
+                          void*  biasBuffer         = nullptr);
 };
 
 }  // namespace rtp_llm

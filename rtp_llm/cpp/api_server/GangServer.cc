@@ -21,13 +21,16 @@ namespace rtp_llm {
 
 class GangServerRequestWorkItem: public autil::WorkItem {
 public:
-    GangServerRequestWorkItem(const std::string&    server_addr,
-                              const std::string&    route,
-                              const std::string&    body_json_str,
-                              autil::AtomicCounter* counter,
+    GangServerRequestWorkItem(const std::string&                               server_addr,
+                              const std::string&                               route,
+                              const std::string&                               body_json_str,
+                              autil::AtomicCounter*                            counter,
                               std::shared_ptr<::http_server::SimpleHttpClient> http_client):
-        server_addr_(server_addr), route_(route), body_json_str_(body_json_str), counter_(counter), http_client_(http_client) {
-    }
+        server_addr_(server_addr),
+        route_(route),
+        body_json_str_(body_json_str),
+        counter_(counter),
+        http_client_(http_client) {}
     ~GangServerRequestWorkItem() override {
         counter_ = nullptr;
     }
@@ -43,12 +46,11 @@ public:
         }
         auto succ = http_client_->post(server_addr_, route_, body_json_str_, nullptr);
         if (!succ) {
-            RTP_LLM_LOG_WARNING(
-                "process gang server request work item failed, http client post failed, "
-                "server addr: %s, route: %s, request body: %s",
-                server_addr_.c_str(),
-                route_.c_str(),
-                body_json_str_.c_str());
+            RTP_LLM_LOG_WARNING("process gang server request work item failed, http client post failed, "
+                                "server addr: %s, route: %s, request body: %s",
+                                server_addr_.c_str(),
+                                route_.c_str(),
+                                body_json_str_.c_str());
         }
     }
 
@@ -77,10 +79,10 @@ GangServer::~GangServer() {
 void GangServer::getWorkers() {
     if (workers_.empty()) {
         std::vector<std::pair<std::string, int>> workers_cpp;
-        py::list workers_py = gang_info_.attr("workers")();
+        py::list                                 workers_py = gang_info_.attr("workers")();
         for (const auto& worker : workers_py) {
-            std::string ip = worker.attr("ip").cast<std::string>();
-            int port       = worker.attr("server_port").cast<int>();
+            std::string ip   = worker.attr("ip").cast<std::string>();
+            int         port = worker.attr("server_port").cast<int>();
             workers_cpp.emplace_back(std::make_pair(ip, port));
         }
         workers_ = workers_cpp;
@@ -92,16 +94,16 @@ void GangServer::requestWorkers(const std::map<std::string, std::string>& body_m
                                 bool                                      is_wait) {
     getWorkers();
     autil::AtomicCounter counter;
-    auto http_client = std::make_shared<::http_server::SimpleHttpClient>();
+    auto                 http_client = std::make_shared<::http_server::SimpleHttpClient>();
     for (const auto& worker : workers_) {
         counter.inc();
-        std::string ip                  = worker.first;
-        int port                        = worker.second;
+        std::string       ip            = worker.first;
+        int               port          = worker.second;
         const std::string server_addr   = "tcp:" + ip + ":" + std::to_string(port);
         const std::string route         = "/" + uri;
         const std::string body_json_str = ::autil::legacy::ToJsonString(body_map, true);
-        auto              work_item     = new GangServerRequestWorkItem(server_addr, route, body_json_str, &counter, http_client);
-        auto              code          = thread_pool_->pushWorkItem(work_item, false);
+        auto work_item = new GangServerRequestWorkItem(server_addr, route, body_json_str, &counter, http_client);
+        auto code      = thread_pool_->pushWorkItem(work_item, false);
         if (code != autil::ThreadPool::ERROR_NONE) {
             RTP_LLM_LOG_WARNING(
                 "gang server request worker failed, push work item failed, error code: %d, url: %s, body: %s",

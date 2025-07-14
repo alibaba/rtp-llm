@@ -16,7 +16,6 @@
 
 #pragma once
 
-
 #include <assert.h>
 
 #if USING_ROCM
@@ -29,17 +28,36 @@
 #include "rtp_llm/cpp/cuda/cuda_utils.h"
 #endif
 
-namespace rtp_llm
-{
-template <typename T, typename QUANT_OUT_T>
-void invokeGeneralRmsNorm(T* out, const T* input, const T* gamma, const T* beta, const float eps, const int tokens,
-    const int hidden_dim, cudaStream_t stream = 0, const float* scale = nullptr, float* dynamic_scale = nullptr,
-    QUANT_OUT_T* out_quant = nullptr);
+namespace rtp_llm {
+template<typename T, typename QUANT_OUT_T>
+void invokeGeneralRmsNorm(T*           out,
+                          const T*     input,
+                          const T*     gamma,
+                          const T*     beta,
+                          const float  eps,
+                          const int    tokens,
+                          const int    hidden_dim,
+                          cudaStream_t stream        = 0,
+                          const float* scale         = nullptr,
+                          float*       dynamic_scale = nullptr,
+                          QUANT_OUT_T* out_quant     = nullptr);
 
-template <typename T, typename QUANT_OUT_T>
-void invokeAddBiasResidualRmsNorm(T* output, T* normed_output, const T* input, const T* bias, const T* residual, const T* residual2,
-    const T* gamma, const T* beta, const float eps, const int tokens, const int hidden_dim, cudaStream_t stream = 0,
-    const float* scale = nullptr, float* dynamic_scale = nullptr, QUANT_OUT_T* out_quant = nullptr);
+template<typename T, typename QUANT_OUT_T>
+void invokeAddBiasResidualRmsNorm(T*           output,
+                                  T*           normed_output,
+                                  const T*     input,
+                                  const T*     bias,
+                                  const T*     residual,
+                                  const T*     residual2,
+                                  const T*     gamma,
+                                  const T*     beta,
+                                  const float  eps,
+                                  const int    tokens,
+                                  const int    hidden_dim,
+                                  cudaStream_t stream        = 0,
+                                  const float* scale         = nullptr,
+                                  float*       dynamic_scale = nullptr,
+                                  QUANT_OUT_T* out_quant     = nullptr);
 
 template<typename T>
 void invokeRmsNormWithStride(T* __restrict output,
@@ -54,4 +72,4 @@ void invokeRmsNormWithStride(T* __restrict output,
                              const int    norm_size,
                              cudaStream_t stream);
 
-} // namespace rtp_llm
+}  // namespace rtp_llm

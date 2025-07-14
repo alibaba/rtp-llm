@@ -19,7 +19,6 @@
 #include <cuda_fp16.h>
 #endif
 
-
 #include "rtp_llm/cpp/kernels/penalty_types.h"
 #if USING_CUDA
 #include "rtp_llm/cpp/cuda/cuda_utils.h"

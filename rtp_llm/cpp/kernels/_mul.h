@@ -810,4 +810,3 @@ inline __device__ float4 mul(float4 a, int32_t b) {
     fc.w = a.w * float(int8[3]);
     return fc;
 }
-

@@ -42,7 +42,7 @@ def sub_lib_and_interleave(name, srcs):
         copts = sm90_cuda_copts,
         visibility = ["//visibility:public"],
     )
-    
+
     cc_shared_library(
         name = name + "_so",
         roots = [":" + name + "_cu"],
@@ -93,7 +93,7 @@ def gen_dispatch_code(name, params_list, template_header, template, template_tai
     all_dispatch_code = ""
     for params in params_list:
         all_dispatch_code += template.format(*list(params))
-    
+
     native.genrule(
         name = name,
         srcs = [],

@@ -19,4 +19,4 @@ void HttpRequestWorkItem::process() {
     _func(std::move(writer), *_request);
 }
 
-} // namespace http_server
+}  // namespace http_server

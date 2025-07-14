@@ -18,12 +18,12 @@ namespace rtp_llm {
 #ifdef ENABLE_DEEP_EP
 
 bool CudaDevice::initDeepEPBuffer() {
-    auto   nccl_param  = getNcclParam(ParallelMode::DP_AND_TP);
-    size_t world_rank  = nccl_param.rank_;
-    size_t world_size  = nccl_param.world_size_;
+    auto   nccl_param       = getNcclParam(ParallelMode::DP_AND_TP);
+    size_t world_rank       = nccl_param.rank_;
+    size_t world_size       = nccl_param.world_size_;
     size_t local_world_size = init_params_.parallelism_distributed_config.local_world_size;
 
-    int    num_experts = init_params_.num_experts + init_params_.extra_experts;
+    int num_experts = init_params_.num_experts + init_params_.extra_experts;
 
     // TODO: check if get right
     ll_num_max_token_per_rank =
@@ -44,9 +44,9 @@ bool CudaDevice::initDeepEPBuffer() {
 
     try {
         RTP_LLM_LOG_INFO("deep ep init with num_rdma_bytes %ld, world_rank %ld, world_size %ld",
-                    num_rdma_bytes,
-                    world_rank,
-                    world_size);
+                         num_rdma_bytes,
+                         world_rank,
+                         world_size);
 #if USE_ACCL_EP
         num_qps_per_rank = num_experts / init_params_.ep_size;
         deepep_buffer_.reset(new DeepEPBuffer(this,
@@ -99,9 +99,9 @@ MoeDispatchOutput CudaDevice::deepEpDispatch(const MoeDispatchParams& params) {
     size_t    tp_token_size = (token_num + tp_size - 1) / tp_size;
     size_t    slice_begin   = std::min(tp_token_size * moe_conf.tp_rank, token_num);
     size_t    slice_size    = std::min(token_num - slice_begin, tp_token_size);
-    BufferPtr hidden        = params.input.isQBuffer()
-        ? dynamic_cast<const QBuffer*>(&(params.input))->qslice(slice_begin, slice_size)
-        : params.input.slice(slice_begin, slice_size);          // [tp_token_size, hidden_size]
+    BufferPtr hidden        = params.input.isQBuffer() ?
+                                  dynamic_cast<const QBuffer*>(&(params.input))->qslice(slice_begin, slice_size) :
+                                  params.input.slice(slice_begin, slice_size);      // [tp_token_size, hidden_size]
     auto      expert_ids    = params.expert_ids.slice(slice_begin, slice_size);     // [tp_token_size, topk]
     auto      expert_scales = params.expert_scales.slice(slice_begin, slice_size);  // [tp_token_size, topk]
 
@@ -117,37 +117,36 @@ MoeDispatchOutput CudaDevice::deepEpDispatch(const MoeDispatchParams& params) {
             torch::empty({0, static_cast<long int>(expert_ids->shape()[1])},
                          torch::dtype(torch::kFloat).device(torch::Device(torch::kCUDA)));  //[num_tokens, top_k]
     } else {
-        RUNTIME_ASSERT_OP_ARG(expert_ids->type() == DataType::TYPE_INT64,
-                              "expert_ids must be int64 but got %d", int(expert_ids->type()));
-        topk_idx_tensor     = Buffer2torchTensor(expert_ids, false);                        //[num_tokens, top_k]
-        topk_weights_tensor = Buffer2torchTensor(expert_scales, false);                     //[num_tokens, top_k]
+        RUNTIME_ASSERT_OP_ARG(
+            expert_ids->type() == DataType::TYPE_INT64, "expert_ids must be int64 but got %d", int(expert_ids->type()));
+        topk_idx_tensor     = Buffer2torchTensor(expert_ids, false);     //[num_tokens, top_k]
+        topk_weights_tensor = Buffer2torchTensor(expert_scales, false);  //[num_tokens, top_k]
     }
-    RUNTIME_ASSERT_OP_ARG(hidden->type() == DataType::TYPE_BF16
-                          || (params.qscheme == QScheme::Qfp8PerTokenBlock
-                              && hidden->type() == DataType::TYPE_QFP8_E4M3),
-                          "hidden must be bf16 or fp8 in deepEpDispatch, actual: %d",
-                          int(hidden->type()));
+    RUNTIME_ASSERT_OP_ARG(
+        hidden->type() == DataType::TYPE_BF16
+            || (params.qscheme == QScheme::Qfp8PerTokenBlock && hidden->type() == DataType::TYPE_QFP8_E4M3),
+        "hidden must be bf16 or fp8 in deepEpDispatch, actual: %d",
+        int(hidden->type()));
     BufferPtr                    quantized_hidden;
     torch::Tensor                x;
     std::optional<torch::Tensor> x_scales;
 
     if (params.qscheme == QScheme::Qfp8PerTokenBlock) {
-        quantized_hidden = hidden->isQBuffer()
-                         ? hidden
-                         : quantize({*hidden, DataType::TYPE_QFP8_E4M3, 1, params.qscheme});
-        auto kernel_ptr  = reinterpret_cast<const QBuffer&>(*quantized_hidden).kernelPtr();
-        auto scales_ptr  = reinterpret_cast<const QBuffer&>(*quantized_hidden).scalesPtr();
-        x                = Buffer2torchTensor(kernel_ptr, false);  // [num_tokens, hidden_size]
-        x_scales         = Buffer2torchTensor(scales_ptr, false);  // [num_tokens, hidden_size / 128]
+        quantized_hidden =
+            hidden->isQBuffer() ? hidden : quantize({*hidden, DataType::TYPE_QFP8_E4M3, 1, params.qscheme});
+        auto kernel_ptr = reinterpret_cast<const QBuffer&>(*quantized_hidden).kernelPtr();
+        auto scales_ptr = reinterpret_cast<const QBuffer&>(*quantized_hidden).scalesPtr();
+        x               = Buffer2torchTensor(kernel_ptr, false);  // [num_tokens, hidden_size]
+        x_scales        = Buffer2torchTensor(scales_ptr, false);  // [num_tokens, hidden_size / 128]
     } else {
         x = Buffer2torchTensor(hidden, false);  // [num_tokens, hidden_size]
     }
 
     std::shared_ptr<EventOverlap> dispatch_begin_event;
     if (params.overlapped && params.compute_stream_event) {
-        auto casted_event = dynamic_cast<TorchEvent*>(params.compute_stream_event.get());
-        auto event_handle = deep_ep::EventHandle();
-        event_handle.event = casted_event->event;
+        auto casted_event    = dynamic_cast<TorchEvent*>(params.compute_stream_event.get());
+        auto event_handle    = deep_ep::EventHandle();
+        event_handle.event   = casted_event->event;
         dispatch_begin_event = std::make_shared<EventOverlap>(event_handle);
     } else {
         dispatch_begin_event = deepep_buffer_->capture();
@@ -254,9 +253,9 @@ MoeCombineOutput CudaDevice::deepEpCombine(const MoeCombineParams& params) {
 
     std::shared_ptr<EventOverlap> combine_begin_event;
     if (params.overlapped && params.compute_stream_event) {
-        auto casted_event = dynamic_cast<TorchEvent*>(params.compute_stream_event.get());
-        auto event_handle = deep_ep::EventHandle();
-        event_handle.event = casted_event->event;
+        auto casted_event   = dynamic_cast<TorchEvent*>(params.compute_stream_event.get());
+        auto event_handle   = deep_ep::EventHandle();
+        event_handle.event  = casted_event->event;
         combine_begin_event = std::make_shared<EventOverlap>(event_handle);
     } else {
         combine_begin_event = deepep_buffer_->capture();

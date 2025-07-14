@@ -1,8 +1,6 @@
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 
-
-
 namespace rtp_llm {
 
 ErrorResult<GenerateOutputs> NormalGenerateStream::nextOutput() {
@@ -38,7 +36,7 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
         generate_output.aux_info.iter_count      = iter_count_;
         generate_output.aux_info.fallback_tokens = fallback_blocks_ * seqSizePerBlock();
         generate_output.aux_info.fallback_times  = fallback_times_;
-        generate_output.output_ids = SAFE_CACHED_HOST_BUF(TYPE_INT32, {1lu, output_len});
+        generate_output.output_ids               = SAFE_CACHED_HOST_BUF(TYPE_INT32, {1lu, output_len});
 
         // TODO(xinfei.sxf) optimize this copy : only copy last token
         complete_token_ids_->copyTokensTo(i, generate_output.output_ids->data(), last_output_pos_, output_len);
@@ -60,40 +58,44 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
 
         if (generate_input_->generate_config->return_hidden_states && update_info.hidden_states) {
             if (update_info.hidden_states->shape()[0] == 1) {
-                generate_output.hidden_states = device_->clone({*update_info.hidden_states, rtp_llm::AllocationType::HOST});
+                generate_output.hidden_states =
+                    device_->clone({*update_info.hidden_states, rtp_llm::AllocationType::HOST});
             } else {
-                generate_output.hidden_states = device_->clone({update_info.hidden_states->view(i, 1), rtp_llm::AllocationType::HOST});
+                generate_output.hidden_states =
+                    device_->clone({update_info.hidden_states->view(i, 1), rtp_llm::AllocationType::HOST});
             }
         }
         if (loss_) {
             RTP_LLM_CHECK_WITH_INFO(loss_index_ == inputLength() - 1,
-                               "loss index should be input len [%d] - 1 but is [%d]",
-                               inputLength(),
-                               loss_index_);
+                                    "loss index should be input len [%d] - 1 but is [%d]",
+                                    inputLength(),
+                                    loss_index_);
             auto loss = loss_;
             if (generate_input_->generate_config->calculate_loss == 1) {
-                loss = device_->clone({*rtp_llm::torchTensor2Buffer(torch::mean(rtp_llm::Buffer2torchTensor(*loss_)).exp()),
-                                       rtp_llm::AllocationType::HOST});
+                loss = device_->clone(
+                    {*rtp_llm::torchTensor2Buffer(torch::mean(rtp_llm::Buffer2torchTensor(*loss_)).exp()),
+                     rtp_llm::AllocationType::HOST});
             }
             generate_output.loss = loss;
         }
 
         if (generate_input_->generate_config->return_softmax_probs && softmax_probs_) {
-            generate_output.aux_info.softmax_probs = device_->clone({(*softmax_probs_)[i].view(last_output_pos_, output_len), rtp_llm::AllocationType::HOST});
+            generate_output.aux_info.softmax_probs = device_->clone(
+                {(*softmax_probs_)[i].view(last_output_pos_, output_len), rtp_llm::AllocationType::HOST});
         }
 
         generate_output.finished              = sub_generate_status_[i].status == StreamState::FINISHED;
         generate_output.aux_info.cost_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
         generate_output.aux_info.first_token_cost_time_us = complete_token_ids_->firstTokenLatencyUs();
-        generate_output.aux_info.wait_time_us = wait_time_us_;
-        generate_output.aux_info.input_len    = generate_input_->promptLength();
-        generate_output.aux_info.prefix_len   = generate_input_->prefix_length;
+        generate_output.aux_info.wait_time_us             = wait_time_us_;
+        generate_output.aux_info.input_len                = generate_input_->promptLength();
+        generate_output.aux_info.prefix_len               = generate_input_->prefix_length;
         // TODO(xinfei.sxf) 提前结束的query，output len要设置正确
-        generate_output.aux_info.output_len         = seqLength() - generate_input_->inputLength();
-        generate_output.aux_info.step_output_len    = output_len;
-        generate_output.aux_info.reuse_len          = reuse_length_;
-        generate_output.aux_info.pd_sep             = queryPdSep();
-        generate_output.aux_info.cum_log_probs = SAFE_CACHED_HOST_BUF(TYPE_FP32, {1lu});
+        generate_output.aux_info.output_len      = seqLength() - generate_input_->inputLength();
+        generate_output.aux_info.step_output_len = output_len;
+        generate_output.aux_info.reuse_len       = reuse_length_;
+        generate_output.aux_info.pd_sep          = queryPdSep();
+        generate_output.aux_info.cum_log_probs   = SAFE_CACHED_HOST_BUF(TYPE_FP32, {1lu});
 
         if (update_info.cum_log_probs) {
             memcpy(generate_output.aux_info.cum_log_probs.value()->data(),
@@ -105,22 +107,27 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             if (!update_info.all_probs) {
                 throw std::runtime_error("all_probs is not while generate_config return_all_probs is true");
             }
-            generate_output.aux_info.all_probs = device_->clone(
-                {all_probs_->view(i, 1), rtp_llm::AllocationType::HOST});
+            generate_output.aux_info.all_probs =
+                device_->clone({all_probs_->view(i, 1), rtp_llm::AllocationType::HOST});
         }
         // hidden_states post process
-        if (generate_output.finished && generate_input_->generate_config->return_hidden_states && generate_output.hidden_states.has_value() && (generate_input_->generate_config->hidden_states_cut_dim > 0 || generate_input_->generate_config->normalized_hidden_states)) {
-            auto buffer = generate_output.hidden_states.value();
+        if (generate_output.finished && generate_input_->generate_config->return_hidden_states
+            && generate_output.hidden_states.has_value()
+            && (generate_input_->generate_config->hidden_states_cut_dim > 0
+                || generate_input_->generate_config->normalized_hidden_states)) {
+            auto buffer               = generate_output.hidden_states.value();
             auto hidden_states_tensor = rtp_llm::Buffer2torchTensor(buffer);
             if (generate_input_->generate_config->hidden_states_cut_dim > 0) {
-                hidden_states_tensor = hidden_states_tensor.index({torch::indexing::Slice(), torch::indexing::Slice(0, generate_input_->generate_config->hidden_states_cut_dim)});
+                hidden_states_tensor = hidden_states_tensor.index(
+                    {torch::indexing::Slice(),
+                     torch::indexing::Slice(0, generate_input_->generate_config->hidden_states_cut_dim)});
             }
             if (generate_input_->generate_config->normalized_hidden_states) {
-                hidden_states_tensor = torch::nn::functional::normalize(hidden_states_tensor, 
-                    torch::nn::functional::NormalizeFuncOptions().p(2).dim(-1));
+                hidden_states_tensor = torch::nn::functional::normalize(
+                    hidden_states_tensor, torch::nn::functional::NormalizeFuncOptions().p(2).dim(-1));
             }
-            generate_output.hidden_states = device_->clone({*rtp_llm::torchTensor2Buffer(hidden_states_tensor),
-                                       rtp_llm::AllocationType::HOST});
+            generate_output.hidden_states =
+                device_->clone({*rtp_llm::torchTensor2Buffer(hidden_states_tensor), rtp_llm::AllocationType::HOST});
         }
 
         generate_results.generate_outputs.emplace_back(std::move(generate_output));
@@ -128,7 +135,7 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
     return generate_results;
 }
 
-void NormalGenerateStream::enqueueGenerateOutput(GenerateOutputs &&generate_results) {
+void NormalGenerateStream::enqueueGenerateOutput(GenerateOutputs&& generate_results) {
     if (generate_outputs_queue_.getSize() >= generate_outputs_queue_.getCapacity()) {
         /* No matter if the queue is full for any reason,
            the stream will be set to stop directly to prevent the push to queue from getting stuck. */
@@ -152,7 +159,6 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         last_hidden_states_ = update_info.all_hidden_states;
     }
 
-
     if (generate_input_->generate_config->return_softmax_probs && update_info.softmax_probs) {
         RTP_LLM_CHECK(update_info.softmax_probs->dim() == 2);
         RTP_LLM_CHECK(update_info.softmax_probs->shape()[1] == update_info.num_new_tokens);
@@ -170,13 +176,13 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         all_probs_ = device_->clone({*update_info.all_probs, rtp_llm::AllocationType::HOST});
     }
 
-    //TODO: move it to better position
+    // TODO: move it to better position
     if (!finished_ && queryPdSep() && update_info.update_remote_generate) {
         setNeedRemoteGenerateWithoutLock(true);
     }
 
     bool pd_sep_first_token = queryPdSep();
-    bool need_update = pd_sep_first_token || isStreaming() || finished_;
+    bool need_update        = pd_sep_first_token || isStreaming() || finished_;
     if (!need_update) {
         return;
     }

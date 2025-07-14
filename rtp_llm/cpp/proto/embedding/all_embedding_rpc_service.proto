@@ -5,7 +5,7 @@ message AllEmbeddingInput {
     repeated string input = 1;
 }
 
-message AllEmbeddingTensorPB {  
+message AllEmbeddingTensorPB {
   repeated int64 shape = 1;
   bytes data = 2;
 }

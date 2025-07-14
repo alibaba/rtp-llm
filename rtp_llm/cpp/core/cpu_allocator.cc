@@ -10,7 +10,7 @@ void* Allocator<AllocatorType::CPU>::mallocSync(size_t size) {
     return malloc(size);
 }
 
-void  Allocator<AllocatorType::CPU>::free(void** ptr) {
+void Allocator<AllocatorType::CPU>::free(void** ptr) {
     std::free(*ptr);
     *ptr = nullptr;
 }
@@ -20,6 +20,5 @@ void* Allocator<AllocatorType::CPU>::reMalloc(void* ptr, size_t size) {
     RTP_LLM_FAIL("cpu reMalloc not implemented");
     return nullptr;
 }
-
 
 }  // namespace rtp_llm

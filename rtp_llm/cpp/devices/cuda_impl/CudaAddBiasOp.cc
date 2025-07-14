@@ -12,9 +12,9 @@ using namespace std;
 namespace rtp_llm {
 
 AddBiasOutput CudaDevice::addbias(const AddBiasParams& params) {
-    BufferPtr input = params.input;
-    const auto& bias = params.bias;
-    const auto data_type = input->type();
+    BufferPtr   input     = params.input;
+    const auto& bias      = params.bias;
+    const auto  data_type = input->type();
     RTP_LLM_CHECK_WITH_INFO(params.inplace == true, "bias only support inplace now");
     RTP_LLM_CHECK_WITH_INFO(bias.dim() == 1, "bias dim should be 1");
     RTP_LLM_CHECK_WITH_INFO(input->dim() == 2, "input dim should be 2");
@@ -25,5 +25,4 @@ AddBiasOutput CudaDevice::addbias(const AddBiasParams& params) {
     return {input};
 }
 
-
-} // namespace rtp_llm
+}  // namespace rtp_llm

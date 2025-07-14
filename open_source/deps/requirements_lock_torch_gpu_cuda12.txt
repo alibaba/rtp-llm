@@ -404,6 +404,10 @@ charset-normalizer==3.3.2 \
 click==8.1.7 \
     --hash=sha256:ae74fb96c20a0277a1d615f1e4d73c8414f5a98db8b799a7931d1582f3390c28 \
     --hash=sha256:ca9853ad459e787e2192211578cc907e7594e294c7ccc834310722b41b9ca6de
+    # via autoawq
+concurrent-log-handler==0.9.25 \
+    --hash=sha256:157bee12914aa2a72246d1d0641ce07c1aa7a55faa3322bed02f21e60395eb82 \
+    --hash=sha256:1e2c6f021414e214d3dac66107894827a3e78db63018304a4f29e55ba549ac22
     # via uvicorn
 contourpy==1.3.0 \
     --hash=sha256:00ccd0dbaad6d804ab259820fa7cb0b8036bda0686ef844d24125d8287178ce0 \
@@ -1984,6 +1988,10 @@ platformdirs==4.2.2 \
 pooch==1.8.2 \
     --hash=sha256:3529a57096f7198778a5ceefd5ac3ef0e4d06a6ddaf9fc2d609b806f25302c47 \
     --hash=sha256:76561f0de68a01da4df6af38e9955c4c9d1a5c90da73f7e40276a5728ec83d10
+    # via -r internal_source/deps/../../open_source/deps/requirements_base.txt
+portalocker==3.1.1 \
+    --hash=sha256:80e984e24de292ff258a5bea0e4f3f778fff84c0ae1275dbaebc4658de4aacb3 \
+    --hash=sha256:ec20f6dda2ad9ce89fa399a5f31f4f1495f515958f0cb7ca6543cef7bb5a749e
     # via librosa
 prettytable==3.11.0 \
     --hash=sha256:7e23ca1e68bbfd06ba8de98bf553bf3493264c96d5e8a615c0471025deeba722 \
@@ -2759,6 +2767,14 @@ setproctitle==1.3.5 \
     --hash=sha256:fb0500e1bc6f00b8ba696c3743ddff14c8679e3c2ca9d292c008ac51488d17cf \
     --hash=sha256:fe3bfd5e51c24349d022e062a96c316a1b8862ea9a0cf5ea2a8b2ae008b77cec \
     --hash=sha256:fec8340ab543144d04a9d805d80a0aad73fdeb54bea6ff94e70d39a676ea4ec0
+    # via
+    #   -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    #   concurrent-log-handler
+
+# The following packages are considered to be unsafe in a requirements file:
+setuptools==60.5.0 \
+    --hash=sha256:2404879cda71495fc4d5cbc445ed52fdaddf352b36e40be8dcc63147cb4edabe \
+    --hash=sha256:68eb94073fc486091447fcb0501efd6560a0e5a1839ba249e5ff3c4c93f05f90
     # via -r open_source/deps/requirements_base.txt
 six==1.16.0 \
     --hash=sha256:1e61c37477a1626458e36f7b1d82aa5c9b094fa4802892072e49de9c60c4c926 \
@@ -3412,22 +3428,6 @@ zstandard==0.23.0 \
     --hash=sha256:fd30d9c67d13d891f2360b2a120186729c111238ac63b43dbd37a5a40670b8ca \
     --hash=sha256:fd7699e8fd9969f455ef2926221e0233f81a2542921471382e77a9e2f2b57f4b \
     --hash=sha256:fe3b385d996ee0822fd46528d9f0443b880d4d05528fd26a9119a54ec3f91c69
-    # via autoawq
-concurrent-log-handler==0.9.25 \
-    --hash=sha256:157bee12914aa2a72246d1d0641ce07c1aa7a55faa3322bed02f21e60395eb82 \
-    --hash=sha256:1e2c6f021414e214d3dac66107894827a3e78db63018304a4f29e55ba549ac22
-    # via -r internal_source/deps/../../open_source/deps/requirements_base.txt
-portalocker==3.1.1 \
-    --hash=sha256:80e984e24de292ff258a5bea0e4f3f778fff84c0ae1275dbaebc4658de4aacb3 \
-    --hash=sha256:ec20f6dda2ad9ce89fa399a5f31f4f1495f515958f0cb7ca6543cef7bb5a749e
-    # via
-    #   -r internal_source/deps/../../open_source/deps/requirements_base.txt
-    #   concurrent-log-handler
-
-# The following packages are considered to be unsafe in a requirements file:
-setuptools==60.5.0 \
-    --hash=sha256:2404879cda71495fc4d5cbc445ed52fdaddf352b36e40be8dcc63147cb4edabe \
-    --hash=sha256:68eb94073fc486091447fcb0501efd6560a0e5a1839ba249e5ff3c4c93f05f90
     # via
     #   -r open_source/deps/requirements_base.txt
     #   grpcio-tools

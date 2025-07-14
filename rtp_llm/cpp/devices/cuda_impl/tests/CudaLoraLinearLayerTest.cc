@@ -6,13 +6,12 @@ using namespace rtp_llm;
 
 class CudaLoraLinearLayerTest: public LoraLinearLayerTest {};
 
-
 TEST_F(CudaLoraLinearLayerTest, LoraLinearLayerTest) {
-    std::vector<int> ms = {64, 1024};
-    std::vector<int> ns = {64, 1024};
-    std::vector<int> ks = {64, 1024};
+    std::vector<int>      ms           = {64, 1024};
+    std::vector<int>      ns           = {64, 1024};
+    std::vector<int>      ks           = {64, 1024};
     std::vector<DataType> input_dtypes = {DataType::TYPE_FP16};
-    std::vector<DataType> lora_dtypes = {DataType::TYPE_FP16};
+    std::vector<DataType> lora_dtypes  = {DataType::TYPE_FP16};
     for (auto m : ms) {
         for (auto n : ns) {
             for (auto k : ks) {
@@ -34,15 +33,14 @@ TEST_F(CudaLoraLinearLayerTest, LoraLinearLayerTest) {
     }
 }
 
-
 TEST_F(CudaLoraLinearLayerTest, LoraLinearLayerForGroupGemmTest) {
     static_cast<CudaDevice*>(device_)->use_group_gemm = false;
     ASSERT_TRUE(!static_cast<CudaDevice*>(device_)->useGroupGemm());
-    std::vector<int> ms = {64, 1024};
-    std::vector<int> ns = {64, 1024};
-    std::vector<int> ks = {64, 1024};
+    std::vector<int>      ms           = {64, 1024};
+    std::vector<int>      ns           = {64, 1024};
+    std::vector<int>      ks           = {64, 1024};
     std::vector<DataType> input_dtypes = {DataType::TYPE_FP16};
-    std::vector<DataType> lora_dtypes = {DataType::TYPE_FP16};
+    std::vector<DataType> lora_dtypes  = {DataType::TYPE_FP16};
     for (auto m : ms) {
         for (auto n : ns) {
             for (auto k : ks) {
@@ -65,11 +63,11 @@ TEST_F(CudaLoraLinearLayerTest, LoraLinearLayerForGroupGemmTest) {
 }
 
 TEST_F(CudaLoraLinearLayerTest, LoraLinearLayerForSameLoraTest) {
-    std::vector<int> ms = {64, 1024};
-    std::vector<int> ns = {64, 1024};
-    std::vector<int> ks = {64, 1024};
+    std::vector<int>      ms           = {64, 1024};
+    std::vector<int>      ns           = {64, 1024};
+    std::vector<int>      ks           = {64, 1024};
     std::vector<DataType> input_dtypes = {DataType::TYPE_FP16};
-    std::vector<DataType> lora_dtypes = {DataType::TYPE_FP16};
+    std::vector<DataType> lora_dtypes  = {DataType::TYPE_FP16};
     for (auto m : ms) {
         for (auto n : ns) {
             for (auto k : ks) {

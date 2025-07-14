@@ -1,5 +1,5 @@
-import math
 import logging
+import math
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -16,9 +16,13 @@ default_attn_impl = "sdpa"
 try:
     if can_use_flash_attn():
         from flash_attn import flash_attn_varlen_func
+
         default_attn_impl = "flash_attention_2"
 except Exception as e:
-    logging.info(f'initialize flash_attn failed, exception {e}, using sdpa attention in qwen2 vl vit')
+    logging.info(
+        f"initialize flash_attn failed, exception {e}, using sdpa attention in qwen2 vl vit"
+    )
+
 
 class PatchEmbed(nn.Module):
     def __init__(
@@ -35,15 +39,28 @@ class PatchEmbed(nn.Module):
         self.embed_dim = embed_dim
 
         kernel_size = [temporal_patch_size, patch_size, patch_size]
-        self.proj = nn.Conv3d(in_channels, embed_dim, kernel_size=kernel_size, stride=kernel_size, bias=False)
+        self.proj = nn.Conv3d(
+            in_channels,
+            embed_dim,
+            kernel_size=kernel_size,
+            stride=kernel_size,
+            bias=False,
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         target_dtype = self.proj.weight.dtype
         hidden_states = hidden_states.view(
-            -1, self.in_channels, self.temporal_patch_size, self.patch_size, self.patch_size
+            -1,
+            self.in_channels,
+            self.temporal_patch_size,
+            self.patch_size,
+            self.patch_size,
         )
-        hidden_states = self.proj(hidden_states.to(dtype=target_dtype)).view(-1, self.embed_dim)
+        hidden_states = self.proj(hidden_states.to(dtype=target_dtype)).view(
+            -1, self.embed_dim
+        )
         return hidden_states
+
 
 # Copied from transformers.models.llama.modeling_llama.rotate_half
 def rotate_half(x):
@@ -53,7 +70,9 @@ def rotate_half(x):
     return torch.cat((-x2, x1), dim=-1)
 
 
-def apply_multimodal_rotary_pos_emb(q, k, cos, sin, position_ids, mrope_section, unsqueeze_dim=1):
+def apply_multimodal_rotary_pos_emb(
+    q, k, cos, sin, position_ids, mrope_section, unsqueeze_dim=1
+):
     """Applies Rotary Position Embedding with Multimodal Sections to the query and key tensors (https://qwenlm.github.io/blog/qwen2-vl/).
 
     Explanation:
@@ -88,18 +107,21 @@ def apply_multimodal_rotary_pos_emb(q, k, cos, sin, position_ids, mrope_section,
     cos = cos[position_ids]
     sin = sin[position_ids]
     mrope_section = mrope_section * 2
-    cos = torch.cat([m[i % 3] for i, m in enumerate(cos.split(mrope_section, dim=-1))], dim=-1).unsqueeze(
-        unsqueeze_dim
-    )
-    sin = torch.cat([m[i % 3] for i, m in enumerate(sin.split(mrope_section, dim=-1))], dim=-1).unsqueeze(
-        unsqueeze_dim
-    )
+    cos = torch.cat(
+        [m[i % 3] for i, m in enumerate(cos.split(mrope_section, dim=-1))], dim=-1
+    ).unsqueeze(unsqueeze_dim)
+    sin = torch.cat(
+        [m[i % 3] for i, m in enumerate(sin.split(mrope_section, dim=-1))], dim=-1
+    ).unsqueeze(unsqueeze_dim)
 
     q_embed = (q * cos) + (rotate_half(q) * sin)
     k_embed = (k * cos) + (rotate_half(k) * sin)
     return q_embed, k_embed
 
-def apply_rotary_pos_emb_vision(tensor: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
+
+def apply_rotary_pos_emb_vision(
+    tensor: torch.Tensor, freqs: torch.Tensor
+) -> torch.Tensor:
     orig_dtype = tensor.dtype
     tensor = tensor.float()
     cos = freqs.cos()
@@ -110,6 +132,7 @@ def apply_rotary_pos_emb_vision(tensor: torch.Tensor, freqs: torch.Tensor) -> to
     output = output.to(orig_dtype)
     return output
 
+
 class VisionRotaryEmbedding(nn.Module):
     def __init__(self, dim: int, theta: float = 10000.0) -> None:
         super().__init__()
@@ -117,9 +140,12 @@ class VisionRotaryEmbedding(nn.Module):
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
     def forward(self, seqlen: int) -> torch.Tensor:
-        seq = torch.arange(seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
+        seq = torch.arange(
+            seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype
+        )
         freqs = torch.outer(seq, self.inv_freq)
         return freqs
+
 
 class VisionMlp(nn.Module):
     def __init__(self, dim: int, hidden_dim: int, hidden_act: str) -> None:
@@ -131,6 +157,7 @@ class VisionMlp(nn.Module):
     def forward(self, x) -> torch.Tensor:
         return self.fc2(self.act(self.fc1(x)))
 
+
 class VisionAttention(nn.Module):
     def __init__(self, dim: int, num_heads: int = 16) -> None:
         super().__init__()
@@ -139,23 +166,39 @@ class VisionAttention(nn.Module):
         self.proj = nn.Linear(dim, dim)
 
     def forward(
-        self, hidden_states: torch.Tensor, cu_seqlens: torch.Tensor, rotary_pos_emb: torch.Tensor = None
+        self,
+        hidden_states: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        rotary_pos_emb: torch.Tensor = None,
     ) -> torch.Tensor:
         seq_length = hidden_states.shape[0]
-        q, k, v = self.qkv(hidden_states).reshape(seq_length, 3, self.num_heads, -1).permute(1, 0, 2, 3).unbind(0)
+        q, k, v = (
+            self.qkv(hidden_states)
+            .reshape(seq_length, 3, self.num_heads, -1)
+            .permute(1, 0, 2, 3)
+            .unbind(0)
+        )
         q = apply_rotary_pos_emb_vision(q.unsqueeze(0), rotary_pos_emb).squeeze(0)
         k = apply_rotary_pos_emb_vision(k.unsqueeze(0), rotary_pos_emb).squeeze(0)
 
-        attention_mask = torch.zeros([1, seq_length, seq_length], device=q.device, dtype=torch.bool)
+        attention_mask = torch.zeros(
+            [1, seq_length, seq_length], device=q.device, dtype=torch.bool
+        )
         for i in range(1, len(cu_seqlens)):
-            attention_mask[..., cu_seqlens[i - 1] : cu_seqlens[i], cu_seqlens[i - 1] : cu_seqlens[i]] = True
+            attention_mask[
+                ...,
+                cu_seqlens[i - 1] : cu_seqlens[i],
+                cu_seqlens[i - 1] : cu_seqlens[i],
+            ] = True
 
         q = q.transpose(0, 1)
         k = k.transpose(0, 1)
         v = v.transpose(0, 1)
         attn_weights = torch.matmul(q, k.transpose(1, 2)) / math.sqrt(self.head_dim)
         attn_weights = attn_weights + attention_mask
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(q.dtype)
+        attn_weights = nn.functional.softmax(
+            attn_weights, dim=-1, dtype=torch.float32
+        ).to(q.dtype)
         attn_output = torch.matmul(attn_weights, v)
         attn_output = attn_output.transpose(0, 1)
         attn_output = attn_output.reshape(seq_length, -1)
@@ -171,17 +214,25 @@ class VisionFlashAttention2(nn.Module):
         self.proj = nn.Linear(dim, dim)
 
     def forward(
-        self, hidden_states: torch.Tensor, cu_seqlens: torch.Tensor, rotary_pos_emb: torch.Tensor = None
+        self,
+        hidden_states: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        rotary_pos_emb: torch.Tensor = None,
     ) -> torch.Tensor:
         seq_length = hidden_states.shape[0]
-        q, k, v = self.qkv(hidden_states).reshape(seq_length, 3, self.num_heads, -1).permute(1, 0, 2, 3).unbind(0)
+        q, k, v = (
+            self.qkv(hidden_states)
+            .reshape(seq_length, 3, self.num_heads, -1)
+            .permute(1, 0, 2, 3)
+            .unbind(0)
+        )
         q = apply_rotary_pos_emb_vision(q.unsqueeze(0), rotary_pos_emb).squeeze(0)
         k = apply_rotary_pos_emb_vision(k.unsqueeze(0), rotary_pos_emb).squeeze(0)
 
         max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
-        attn_output = flash_attn_varlen_func(q, k, v, cu_seqlens, cu_seqlens, max_seqlen, max_seqlen).reshape(
-            seq_length, -1
-        )
+        attn_output = flash_attn_varlen_func(
+            q, k, v, cu_seqlens, cu_seqlens, max_seqlen, max_seqlen
+        ).reshape(seq_length, -1)
         attn_output = self.proj(attn_output)
         return attn_output
 
@@ -194,31 +245,49 @@ class VisionSdpaAttention(nn.Module):
         self.proj = nn.Linear(dim, dim)
 
     def forward(
-        self, hidden_states: torch.Tensor, cu_seqlens: torch.Tensor, rotary_pos_emb: torch.Tensor = None
+        self,
+        hidden_states: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        rotary_pos_emb: torch.Tensor = None,
     ) -> torch.Tensor:
         seq_length = hidden_states.shape[0]
-        q, k, v = self.qkv(hidden_states).reshape(seq_length, 3, self.num_heads, -1).permute(1, 0, 2, 3).unbind(0)
+        q, k, v = (
+            self.qkv(hidden_states)
+            .reshape(seq_length, 3, self.num_heads, -1)
+            .permute(1, 0, 2, 3)
+            .unbind(0)
+        )
 
         q = apply_rotary_pos_emb_vision(q.unsqueeze(0), rotary_pos_emb).squeeze(0)
         k = apply_rotary_pos_emb_vision(k.unsqueeze(0), rotary_pos_emb).squeeze(0)
 
-        attention_mask = torch.zeros([1, seq_length, seq_length], device=q.device, dtype=torch.bool)
+        attention_mask = torch.zeros(
+            [1, seq_length, seq_length], device=q.device, dtype=torch.bool
+        )
         for i in range(1, len(cu_seqlens)):
-            attention_mask[..., cu_seqlens[i - 1] : cu_seqlens[i], cu_seqlens[i - 1] : cu_seqlens[i]] = True
+            attention_mask[
+                ...,
+                cu_seqlens[i - 1] : cu_seqlens[i],
+                cu_seqlens[i - 1] : cu_seqlens[i],
+            ] = True
         q = q.transpose(0, 1)
         k = k.transpose(0, 1)
         v = v.transpose(0, 1)
-        attn_output = F.scaled_dot_product_attention(q, k, v, attention_mask, dropout_p=0.0)
+        attn_output = F.scaled_dot_product_attention(
+            q, k, v, attention_mask, dropout_p=0.0
+        )
         attn_output = attn_output.transpose(0, 1)
         attn_output = attn_output.reshape(seq_length, -1)
         attn_output = self.proj(attn_output)
         return attn_output
+
 
 QWEN2_VL_VISION_ATTENTION_CLASSES = {
     "eager": VisionAttention,
     "flash_attention_2": VisionFlashAttention2,
     "sdpa": VisionSdpaAttention,
 }
+
 
 class Qwen2VLVisionBlock(nn.Module):
     def __init__(self, config, attn_implementation: str = default_attn_impl) -> None:
@@ -230,14 +299,21 @@ class Qwen2VLVisionBlock(nn.Module):
         self.attn = QWEN2_VL_VISION_ATTENTION_CLASSES[attn_implementation](
             config.embed_dim, num_heads=config.num_heads
         )
-        self.mlp = VisionMlp(dim=config.embed_dim, hidden_dim=mlp_hidden_dim, hidden_act=config.hidden_act)
+        self.mlp = VisionMlp(
+            dim=config.embed_dim,
+            hidden_dim=mlp_hidden_dim,
+            hidden_act=config.hidden_act,
+        )
 
     def forward(self, hidden_states, cu_seqlens, rotary_pos_emb) -> torch.Tensor:
         hidden_states = hidden_states + self.attn(
-            self.norm1(hidden_states), cu_seqlens=cu_seqlens, rotary_pos_emb=rotary_pos_emb
+            self.norm1(hidden_states),
+            cu_seqlens=cu_seqlens,
+            rotary_pos_emb=rotary_pos_emb,
         )
         hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
         return hidden_states
+
 
 class PatchMerger(nn.Module):
     def __init__(self, dim: int, context_dim: int, spatial_merge_size: int = 2) -> None:
@@ -253,6 +329,7 @@ class PatchMerger(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.mlp(self.ln_q(x).view(-1, self.hidden_size))
         return x
+
 
 class Qwen2VLVisionConfig:
     def __init__(
@@ -279,6 +356,7 @@ class Qwen2VLVisionConfig:
         self.patch_size = patch_size
         self.spatial_merge_size = spatial_merge_size
         self.temporal_patch_size = temporal_patch_size
+
 
 class Qwen2VisionTransformerPretrainedModel(nn.Module):
     def __init__(self, config_json):
@@ -336,16 +414,20 @@ class Qwen2VisionTransformerPretrainedModel(nn.Module):
         rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(1)
         return rotary_pos_emb
 
-    def forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, hidden_states: torch.Tensor, grid_thw: torch.Tensor
+    ) -> torch.Tensor:
         hidden_states = self.patch_embed(hidden_states)
         rotary_pos_emb = self.rot_pos_emb(grid_thw)
 
-        cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
-            dim=0, dtype=torch.int32
-        )
+        cu_seqlens = torch.repeat_interleave(
+            grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
+        ).cumsum(dim=0, dtype=torch.int32)
         cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
 
         for blk in self.blocks:
-            hidden_states = blk(hidden_states, cu_seqlens=cu_seqlens, rotary_pos_emb=rotary_pos_emb)
+            hidden_states = blk(
+                hidden_states, cu_seqlens=cu_seqlens, rotary_pos_emb=rotary_pos_emb
+            )
 
         return self.merger(hidden_states)

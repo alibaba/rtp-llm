@@ -4,13 +4,11 @@
 namespace rtp_llm {
 namespace rocm {
 
-static const char* _hipGetErrorEnum(hipError_t error)
-{
+static const char* _hipGetErrorEnum(hipError_t error) {
     return hipGetErrorString(error);
 }
 
-static const char* _hipGetErrorEnum(hipblasStatus_t error)
-{
+static const char* _hipGetErrorEnum(hipblasStatus_t error) {
     switch (error) {
         case HIPBLAS_STATUS_SUCCESS:
             return "CUBLAS_STATUS_SUCCESS";
@@ -52,7 +50,8 @@ static const char* _hipGetErrorEnum(hipblasStatus_t error)
 }
 
 void throwRocmError(const char* const file, int const line, std::string const& info) {
-    auto error_msg = std::string("[ROCm][ERROR] ") + info + " Assertion fail: " + file + ":" + std::to_string(line) + " \n";
+    auto error_msg =
+        std::string("[ROCm][ERROR] ") + info + " Assertion fail: " + file + ":" + std::to_string(line) + " \n";
     std::printf("%s", error_msg.c_str());
     fflush(stdout);
     fflush(stderr);
@@ -63,8 +62,7 @@ void throwRocmError(const char* const file, int const line, std::string const& i
 }
 
 template<typename T>
-void check(T result, const char* const file, int const line)
-{
+void check(T result, const char* const file, int const line) {
     if (result) {
         throwRocmError(file, line, _hipGetErrorEnum(result));
     }
@@ -81,9 +79,7 @@ void syncAndCheckInDebug(const char* const file, int const line) {
 template void check<hipblasStatus_t>(hipblasStatus_t result, const char* const file, int const line);
 template void check<hipError_t>(hipError_t result, const char* const file, int const line);
 
-
-int get_sm()
-{
+int get_sm() {
     int device{-1};
     ROCM_CHECK(hipGetDevice(&device));
     int sm_major = 0;
@@ -93,15 +89,13 @@ int get_sm()
     return sm_major * 10 + sm_minor;
 }
 
-int getDevice()
-{
+int getDevice() {
     int current_dev_id = 0;
     ROCM_CHECK(hipGetDevice(&current_dev_id));
     return current_dev_id;
 }
 
-int getDeviceCount()
-{
+int getDeviceCount() {
     int count = 0;
     ROCM_CHECK(hipGetDeviceCount(&count));
     return count;

@@ -24,9 +24,9 @@ bool SimpleHttpClient::get(const std::string&   address,
 }
 
 bool SimpleHttpClient::post(const std::string&   address,
-                           const std::string&   route,
-                           const std::string&   body,
-                           const HttpCallBack&& http_call_back) {
+                            const std::string&   route,
+                            const std::string&   body,
+                            const HttpCallBack&& http_call_back) {
     return send(address, route, body, HttpMethodType::POST, http_call_back);
 }
 

@@ -22,7 +22,7 @@ index 503578b..074fc08 100644
 +++ python/private/common/attributes.bzl
 @@ -14,7 +14,6 @@
  """Attributes for Python rules."""
- 
+
  load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo")
 -load("@rules_cc//cc:defs.bzl", "CcInfo")
  load("//python/private:enum.bzl", "enum")
@@ -34,7 +34,7 @@ index c86abd2..21dc78e 100644
 +++ python/private/common/common_bazel.bzl
 @@ -14,7 +14,6 @@
  """Common functions that are specific to Bazel rule implementation"""
- 
+
  load("@bazel_skylib//lib:paths.bzl", "paths")
 -load("@rules_cc//cc:defs.bzl", "CcInfo", "cc_common")
  load("//python/private:py_interpreter_program.bzl", "PyInterpreterProgramInfo")
@@ -47,17 +47,17 @@ index eb8b910..dab12c1 100644
 @@ -13,7 +13,6 @@
  # limitations under the License.
  """Providers for Python rules."""
- 
+
 -load("@rules_cc//cc:defs.bzl", "CcInfo")
  load("//python/private:util.bzl", "IS_BAZEL_6_OR_HIGHER")
- 
+
  DEFAULT_STUB_SHEBANG = "#!/usr/bin/env python3"
 diff --git python/private/common/py_executable.bzl python/private/common/py_executable.bzl
 index 2b4a939..56c5480 100644
 --- python/private/common/py_executable.bzl
 +++ python/private/common/py_executable.bzl
 @@ -15,7 +15,6 @@
- 
+
  load("@bazel_skylib//lib:dicts.bzl", "dicts")
  load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo")
 -load("@rules_cc//cc:defs.bzl", "cc_common")
@@ -69,11 +69,11 @@ index e72199e..9129101 100644
 --- python/private/current_py_cc_headers.bzl
 +++ python/private/current_py_cc_headers.bzl
 @@ -14,7 +14,6 @@
- 
+
  """Implementation of current_py_cc_headers rule."""
- 
+
 -load("@rules_cc//cc:defs.bzl", "CcInfo")
- 
+
  def _current_py_cc_headers_impl(ctx):
      py_cc_toolchain = ctx.toolchains["//python/cc:toolchain_type"].py_cc_toolchain
 diff --git python/private/current_py_cc_libs.bzl python/private/current_py_cc_libs.bzl
@@ -81,11 +81,11 @@ index d66c401..5a081f9 100644
 --- python/private/current_py_cc_libs.bzl
 +++ python/private/current_py_cc_libs.bzl
 @@ -14,7 +14,6 @@
- 
+
  """Implementation of current_py_cc_libs rule."""
- 
+
 -load("@rules_cc//cc:defs.bzl", "CcInfo")
- 
+
  def _current_py_cc_libs_impl(ctx):
      py_cc_toolchain = ctx.toolchains["//python/cc:toolchain_type"].py_cc_toolchain
 diff --git python/private/py_cc_toolchain_rule.bzl python/private/py_cc_toolchain_rule.bzl
@@ -94,20 +94,20 @@ index 1599415..92f754f 100644
 +++ python/private/py_cc_toolchain_rule.bzl
 @@ -19,7 +19,6 @@ https://github.com/bazelbuild/rules_python/issues/824 is considered done.
  """
- 
+
  load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo")
 -load("@rules_cc//cc:defs.bzl", "CcInfo")
  load(":py_cc_toolchain_info.bzl", "PyCcToolchainInfo")
- 
+
  def _py_cc_toolchain_impl(ctx):
 diff --git tests/cc/current_py_cc_headers/current_py_cc_headers_tests.bzl tests/cc/current_py_cc_headers/current_py_cc_headers_tests.bzl
 index 9aeec38..931a9c1 100644
 --- tests/cc/current_py_cc_headers/current_py_cc_headers_tests.bzl
 +++ tests/cc/current_py_cc_headers/current_py_cc_headers_tests.bzl
 @@ -14,7 +14,6 @@
- 
+
  """Tests for current_py_cc_headers."""
- 
+
 -load("@rules_cc//cc:defs.bzl", "CcInfo")
  load("@rules_testing//lib:analysis_test.bzl", "analysis_test", "test_suite")
  load("@rules_testing//lib:truth.bzl", "matching")
@@ -117,9 +117,9 @@ index 44615ee..5699b75 100644
 --- tests/cc/current_py_cc_libs/current_py_cc_libs_tests.bzl
 +++ tests/cc/current_py_cc_libs/current_py_cc_libs_tests.bzl
 @@ -14,7 +14,6 @@
- 
+
  """Tests for current_py_cc_libs."""
- 
+
 -load("@rules_cc//cc:defs.bzl", "CcInfo")
  load("@rules_testing//lib:analysis_test.bzl", "analysis_test", "test_suite")
  load("@rules_testing//lib:truth.bzl", "matching")
@@ -129,13 +129,13 @@ index a2ad615..3d3b64e 100644
 --- tests/cc/fake_cc_toolchain_config.bzl
 +++ tests/cc/fake_cc_toolchain_config.bzl
 @@ -14,7 +14,6 @@
- 
+
  """Fake for providing CcToolchainConfigInfo."""
- 
+
 -load("@rules_cc//cc:defs.bzl", "cc_common")
- 
+
  def _impl(ctx):
      return cc_common.create_cc_toolchain_config_info(
--- 
+--
 2.32.0.3.g01195cf9f
 

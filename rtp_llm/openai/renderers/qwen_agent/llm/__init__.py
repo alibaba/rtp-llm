@@ -31,39 +31,39 @@ def get_chat_model(cfg: Optional[Dict] = None) -> BaseChatModel:
         LLM object.
     """
     cfg = cfg or {}
-    if 'model_type' in cfg:
-        model_type = cfg['model_type']
+    if "model_type" in cfg:
+        model_type = cfg["model_type"]
         if model_type in LLM_REGISTRY:
             return LLM_REGISTRY[model_type](cfg)
         else:
-            raise ValueError(f'Please set model_type from {str(LLM_REGISTRY.keys())}')
+            raise ValueError(f"Please set model_type from {str(LLM_REGISTRY.keys())}")
 
     # Deduce model_type from model and model_server if model_type is not provided:
 
-    if 'model_server' in cfg:
-        if cfg['model_server'].strip().startswith('http'):
-            model_type = 'oai'
+    if "model_server" in cfg:
+        if cfg["model_server"].strip().startswith("http"):
+            model_type = "oai"
             return LLM_REGISTRY[model_type](cfg)
 
-    model = cfg.get('model', '')
+    model = cfg.get("model", "")
 
-    if 'qwen-vl' in model:
-        model_type = 'qwenvl_dashscope'
+    if "qwen-vl" in model:
+        model_type = "qwenvl_dashscope"
         return LLM_REGISTRY[model_type](cfg)
 
-    if 'qwen' in model:
-        model_type = 'qwen_dashscope'
+    if "qwen" in model:
+        model_type = "qwen_dashscope"
         return LLM_REGISTRY[model_type](cfg)
 
-    raise ValueError(f'Invalid model cfg: {cfg}')
+    raise ValueError(f"Invalid model cfg: {cfg}")
 
 
 __all__ = [
-    'BaseChatModel',
-    'QwenChatAtDS',
-    'TextChatAtOAI',
-    'QwenVLChatAtDS',
-    'OpenVINO',
-    'get_chat_model',
-    'ModelServiceError',
+    "BaseChatModel",
+    "QwenChatAtDS",
+    "TextChatAtOAI",
+    "QwenVLChatAtDS",
+    "OpenVINO",
+    "get_chat_model",
+    "ModelServiceError",
 ]

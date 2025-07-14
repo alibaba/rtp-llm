@@ -5,9 +5,8 @@ using namespace rtp_llm;
 
 namespace torch_ext {
 
-void registerPyModuleOps(py::module &rtp_ops_m) {
+void registerPyModuleOps(py::module& rtp_ops_m) {
     registerBaseCudaBindings(rtp_ops_m);
 }
 
-}
-
+}  // namespace torch_ext

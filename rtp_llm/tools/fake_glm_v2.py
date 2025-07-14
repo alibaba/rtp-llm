@@ -1,24 +1,26 @@
-import os
 import json
+import os
+
 from rtp_llm.tools.fake_model_base import *
 
-def save_config_func(dest_path: str,
-                layer: int,
-                head: int,
-                head_kv: int,
-                head_size: int,
-                ffn_hidden_size: int,
-                vocab_size: int):
+
+def save_config_func(
+    dest_path: str,
+    layer: int,
+    head: int,
+    head_kv: int,
+    head_size: int,
+    ffn_hidden_size: int,
+    vocab_size: int,
+):
     config = {
         "model_type": "chatglm",
-        "architectures": [
-            "ChatGLMModel"
-        ],
+        "architectures": ["ChatGLMModel"],
         "auto_map": {
             "AutoConfig": "configuration_chatglm.ChatGLMConfig",
             "AutoModel": "modeling_chatglm.ChatGLMForConditionalGeneration",
             "AutoModelForCausalLM": "modeling_chatglm.ChatGLMForConditionalGeneration",
-            "AutoModelForSeq2SeqLM": "modeling_chatglm.ChatGLMForConditionalGeneration"
+            "AutoModelForSeq2SeqLM": "modeling_chatglm.ChatGLMForConditionalGeneration",
         },
         "add_bias_linear": False,
         "add_qkv_bias": True,
@@ -46,10 +48,11 @@ def save_config_func(dest_path: str,
         "torch_dtype": "float16",
         "tie_word_embeddings": False,
         "eos_token_id": 2,
-        "pad_token_id": 0
+        "pad_token_id": 0,
     }
     # save to config.json
-    json.dump(config, open(os.path.join(dest_path, 'config.json'), 'w'), indent=2)
+    json.dump(config, open(os.path.join(dest_path, "config.json"), "w"), indent=2)
+
 
 def fake_glm_v2():
     default_config = DefaultModelConfig()
@@ -64,5 +67,6 @@ def fake_glm_v2():
 
     fake_model("chatglm2", default_config, save_config_func)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     fake_glm_v2()

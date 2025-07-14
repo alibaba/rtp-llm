@@ -1,39 +1,59 @@
-import torch
-
-from pydantic import BaseModel
 from typing import Any, Callable, List, Optional
-from rtp_llm.utils.model_weight import (CkptWeightInfo, identity)
+
+import torch
+from pydantic import BaseModel
+
 from rtp_llm.model_loader.weight_module import AtomicWeight
+from rtp_llm.utils.model_weight import CkptWeightInfo, identity
+
 
 class AttnConfig(BaseModel):
-    hidden_size: int=-1
-    size_per_head: int=-1
-    head_num: int=-1
-    head_num_kv: int=-1
-    use_fp8_kv_cache: bool=False
-    need_post_ln: bool=False
+    hidden_size: int = -1
+    size_per_head: int = -1
+    head_num: int = -1
+    head_num_kv: int = -1
+    use_fp8_kv_cache: bool = False
+    need_post_ln: bool = False
+
 
 class AttnAtomicWeight(AtomicWeight):
-    def __init__(self, name: str, weights: List[CkptWeightInfo], process_fun: Callable[[List[torch.Tensor]], torch.Tensor]=identity, data_type: Optional[torch.dtype]=None, config: Optional[AttnConfig] = None, *args, **kwargs):
+    def __init__(
+        self,
+        name: str,
+        weights: List[CkptWeightInfo],
+        process_fun: Callable[[List[torch.Tensor]], torch.Tensor] = identity,
+        data_type: Optional[torch.dtype] = None,
+        config: Optional[AttnConfig] = None,
+        *args,
+        **kwargs
+    ):
         self.config = config
         super().__init__(name, weights, process_fun, data_type, *args, **kwargs)
 
+
 class MlaConfig(BaseModel):
-    head_num: int=-1
-    nope_head_dim: int=-1
-    rope_head_dim: int=-1
-    kv_lora_rank: int=-1
-    v_head_dim: int=-1
-    use_mla: bool=False
-    q_use_lora: bool=False
+    head_num: int = -1
+    nope_head_dim: int = -1
+    rope_head_dim: int = -1
+    kv_lora_rank: int = -1
+    v_head_dim: int = -1
+    use_mla: bool = False
+    q_use_lora: bool = False
 
 
 class MlaAttnAtomicWeight(AtomicWeight):
-    def __init__(self, name: str, weights: List[CkptWeightInfo], process_fun: Callable[[List[torch.Tensor]], torch.Tensor]=identity, data_type: Optional[torch.dtype]=None,
-                 config: Optional[MlaConfig] = None, *args: Any, **kwargs: Any):
+    def __init__(
+        self,
+        name: str,
+        weights: List[CkptWeightInfo],
+        process_fun: Callable[[List[torch.Tensor]], torch.Tensor] = identity,
+        data_type: Optional[torch.dtype] = None,
+        config: Optional[MlaConfig] = None,
+        *args: Any,
+        **kwargs: Any
+    ):
         self.config = config
         super().__init__(name, weights, process_fun, data_type, *args, **kwargs)
-
 
     @property
     def head_num(self) -> int:

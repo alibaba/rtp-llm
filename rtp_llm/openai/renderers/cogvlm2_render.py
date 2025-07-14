@@ -1,22 +1,39 @@
 import copy
 import json
-import re
 import logging
-from typing import Optional, List, Dict, Any, Union, Callable, Tuple, AsyncGenerator
+import re
+from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple, Union
 
 from transformers import PreTrainedTokenizerBase
 
 from rtp_llm.config.gpt_init_model_parameters import TemplateType
-from rtp_llm.openai.renderers.custom_renderer import CustomChatRenderer, RendererParams, \
-    StreamResponseObject, RenderedInputs
-from rtp_llm.openai.renderers.basic_renderer import BasicRenderer, PromptWithMMInput
-from rtp_llm.openai.api_datatype import ChatMessage, GPTFunctionDefinition, RoleEnum, \
-    ChatCompletionRequest, ChatCompletionResponseStreamChoice, DeltaMessage, FinisheReason, UsageInfo, \
-    ContentPart, ContentPartTypeEnum, FunctionCall
+from rtp_llm.openai.api_datatype import (
+    ChatCompletionRequest,
+    ChatCompletionResponseStreamChoice,
+    ChatMessage,
+    ContentPart,
+    ContentPartTypeEnum,
+    DeltaMessage,
+    FinisheReason,
+    FunctionCall,
+    GPTFunctionDefinition,
+    RoleEnum,
+    UsageInfo,
+)
 from rtp_llm.openai.renderer_factory_register import register_renderer
+from rtp_llm.openai.renderers.basic_renderer import BasicRenderer, PromptWithMMInput
+from rtp_llm.openai.renderers.custom_renderer import (
+    CustomChatRenderer,
+    RenderedInputs,
+    RendererParams,
+    StreamResponseObject,
+)
+
 
 class CogVLM2Renderer(CustomChatRenderer):
-    def __init__(self, tokenizer: PreTrainedTokenizerBase, renderer_params: RendererParams):
+    def __init__(
+        self, tokenizer: PreTrainedTokenizerBase, renderer_params: RendererParams
+    ):
         super().__init__(tokenizer, renderer_params)
         self.template_type = renderer_params.template_type
 
@@ -36,11 +53,11 @@ class CogVLM2Renderer(CustomChatRenderer):
         template_type = self.template_type
 
         query_format, answer_format = self.query_answer_template(template_type)
-        
+
         last_message = ""
         last_format_message = ""
         # handle history message and save the latest query in last_message
-        # For messages with multiple content parts(containing history message), we assume last message is the lastest query. 
+        # For messages with multiple content parts(containing history message), we assume last message is the lastest query.
         # cogvlm2 chat template distinguishes between query and answer, and we assume the query's role is user and answer's role is assistant
         # see https://huggingface.co/THUDM/cogvlm2-llama3-chat-19B/blob/main/modeling_cogvlm.py#580
         for message in messages:
@@ -56,7 +73,7 @@ class CogVLM2Renderer(CustomChatRenderer):
             elif isinstance(message.content, list):
                 for content_part in message.content:
                     if content_part.type == ContentPartTypeEnum.text:
-                        assert (isinstance(content_part.text, str))
+                        assert isinstance(content_part.text, str)
                         last_message = content_part.text
                         if message.role == RoleEnum.user:
                             last_format_message = query_format.format(last_message)
@@ -68,11 +85,11 @@ class CogVLM2Renderer(CustomChatRenderer):
                         images.append(content_part.image_url.url)
 
         # handle latest query
-        if template_type == 'base':
+        if template_type == "base":
             prompt += last_message
         else:
             # remove tail answer_format for template_type 'vqa' and 'chat'
-            prompt += 'Question: {}{}'.format(last_message, answer_format[:-4])
+            prompt += "Question: {}{}".format(last_message, answer_format[:-4])
 
         return PromptWithMMInput(prompt=prompt, urls=images)
 
@@ -80,6 +97,11 @@ class CogVLM2Renderer(CustomChatRenderer):
         messages = copy.deepcopy(request.messages)
         prompt_and_mm_input = self._render_messages(messages)
         input_ids = self.tokenizer.encode(prompt_and_mm_input.prompt)
-        return RenderedInputs(input_ids=input_ids, input_urls=prompt_and_mm_input.urls, rendered_prompt=prompt_and_mm_input.prompt)
+        return RenderedInputs(
+            input_ids=input_ids,
+            input_urls=prompt_and_mm_input.urls,
+            rendered_prompt=prompt_and_mm_input.prompt,
+        )
 
-register_renderer('cogvlm2', CogVLM2Renderer)
+
+register_renderer("cogvlm2", CogVLM2Renderer)

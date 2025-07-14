@@ -1,7 +1,10 @@
-from typing import AsyncGenerator, List, Callable, Any
+from typing import Any, AsyncGenerator, Callable, List
+
 
 class CompleteResponseAsyncGenerator:
-    def __init__(self, generator: AsyncGenerator, collect_complete_response_func: Callable):
+    def __init__(
+        self, generator: AsyncGenerator, collect_complete_response_func: Callable
+    ):
         self._generator = generator
         self._collect_complete_response_func = collect_complete_response_func
         self._all_responses = []
@@ -21,7 +24,9 @@ class CompleteResponseAsyncGenerator:
         return await self._generator.aclose()
 
     async def gen_complete_response_once(self) -> Any:
-        return await self._collect_complete_response_func(CompleteResponseAsyncGenerator.generate_from_list(self._all_responses))
+        return await self._collect_complete_response_func(
+            CompleteResponseAsyncGenerator.generate_from_list(self._all_responses)
+        )
 
     @staticmethod
     async def generate_from_list(response_list) -> AsyncGenerator:

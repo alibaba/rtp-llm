@@ -41,8 +41,7 @@ __global__ void log_probs_kernel(float*       log_probs,
                                  const size_t batch_size,
                                  const size_t vocab_size,
                                  const size_t vocab_size_padded,
-                                 bool         batch_first)
-{
+                                 bool         batch_first) {
     // Calculate the log probability from logits.
     //   log_probs[t, :] = log(softmax(logits))[ids[t + 1, :]]
     //
@@ -106,8 +105,7 @@ __global__ void accumulate_log_probs(float*       cum_log_probs,
                                      const int*   lengths,
                                      const size_t max_input_length,
                                      const size_t batch_size,
-                                     const bool   batch_first)
-{
+                                     const bool   batch_first) {
     // Accumulate the log probability along with the sequence dimension.
     //   cum_log_probs[j] = sum_i log(softmax(logits))[ids[i,j]]
     //
@@ -148,8 +146,7 @@ void invokeLogProbFromLogits(float*       cum_log_probs,
                              void*        workspace,
                              const size_t workspace_size,
                              cudaStream_t stream,
-                             const bool   batch_first)
-{
+                             const bool   batch_first) {
     // A batched version of log prob computation.
     //
     // cum_log_probs: [batch_size]

@@ -2,8 +2,6 @@
 #include "rtp_llm/cpp/stream/GenerateStream.h"
 #include <cstdint>
 
-
-
 namespace rtp_llm {
 
 class NormalGenerateStream: public GenerateStream {
@@ -14,11 +12,12 @@ public:
     }
 
     NormalGenerateStream(const std::shared_ptr<GenerateInput>& query,
-                         const rtp_llm::GptInitParameter&           params,
+                         const rtp_llm::GptInitParameter&      params,
                          const ResourceContext&                resource_context,
                          kmonitor::MetricsReporterPtr          metrics_reporter,
                          size_t                                extra_reserve_token_num = 0):
-        GenerateStream(query, params, resource_context, metrics_reporter, extra_reserve_token_num), request_id_(query->request_id) {
+        GenerateStream(query, params, resource_context, metrics_reporter, extra_reserve_token_num),
+        request_id_(query->request_id) {
         generate_outputs_queue_.setCapacity(1000);
     }
 
@@ -26,13 +25,13 @@ public:
         generate_outputs_queue_.wakeup();
     }
 
-    bool hasOutput() override;
+    bool                         hasOutput() override;
     ErrorResult<GenerateOutputs> nextOutput() override;
-    void updateOutput(const StreamUpdateInfo& update_info) override;
+    void                         updateOutput(const StreamUpdateInfo& update_info) override;
 
 private:
     GenerateOutputs prepareGenerateOutput(const StreamUpdateInfo& update_info);
-    void            enqueueGenerateOutput(GenerateOutputs &&generate_results);
+    void            enqueueGenerateOutput(GenerateOutputs&& generate_results);
 
     int64_t                                   request_id_{0};
     bool                                      finished_{false};

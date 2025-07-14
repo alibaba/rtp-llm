@@ -35,13 +35,12 @@
 namespace rtp_llm {
 
 template<typename T, int Dh, bool DO_MULTI_BLOCK, bool DO_CROSS_ATTENTION>
-inline size_t smem_size_in_bytes(Multihead_attention_params<T, DO_CROSS_ATTENTION>& params, int threads_per_block)
-{
+inline size_t smem_size_in_bytes(Multihead_attention_params<T, DO_CROSS_ATTENTION>& params, int threads_per_block) {
     using Tk = typename kernel_type_t<T>::Type;
     // The amount of shared memory needed to store the Q*K^T values in float.
-    const int max_timesteps = DO_CROSS_ATTENTION
-        ? params.cyclic_kv_cache_length
-        : min((DO_MULTI_BLOCK ? params.timesteps_per_block : params.timestep), params.cyclic_kv_cache_length);
+    const int  max_timesteps = DO_CROSS_ATTENTION ? params.cyclic_kv_cache_length :
+                                                    min((DO_MULTI_BLOCK ? params.timesteps_per_block : params.timestep),
+                                                       params.cyclic_kv_cache_length);
     const auto qk_elts = static_cast<std::size_t>(divUp(max_timesteps + 1, 4));  // explicit cast because of the sign
     const auto qk_sz   = qk_elts * 16;
 
@@ -80,9 +79,8 @@ inline size_t smem_size_in_bytes(Multihead_attention_params<T, DO_CROSS_ATTENTIO
 }
 
 template<typename T, int Dh, bool DO_MULTI_BLOCK, bool DO_CROSS_ATTENTION>
-inline size_t smem_size_for_threads(Multihead_attention_params<T, DO_CROSS_ATTENTION>& params, int threads_per_block)
-{
-    using Tk = typename kernel_type_t<T>::Type;
+inline size_t smem_size_for_threads(Multihead_attention_params<T, DO_CROSS_ATTENTION>& params, int threads_per_block) {
+    using Tk                          = typename kernel_type_t<T>::Type;
     auto constexpr threads_per_value_ = threads_per_value<T>(dh_max(Dh));
 
     size_t red_sz = 0;
@@ -111,8 +109,7 @@ inline void multi_block_grid_setup(dim3&                                        
                                    int                                                block_size,
                                    int                                                tlength,
                                    bool                                               do_multi_block,
-                                   int                                                min_seq_len_tile)
-{
+                                   int                                                min_seq_len_tile) {
     if (!do_multi_block) {
         return;
     }
@@ -120,7 +117,8 @@ inline void multi_block_grid_setup(dim3&                                        
     const int threads_per_value_ = threads_per_value<T>(dh_max(Dh));
 
     // Make sure high occupancy for device
-    const int seq_len_tile_from_occupancy = divUp(params.multi_processor_count * blocks_per_sm, params.batch_size * params.num_heads);
+    const int seq_len_tile_from_occupancy =
+        divUp(params.multi_processor_count * blocks_per_sm, params.batch_size * params.num_heads);
 
     // Make sure that each block at least processes one loop of kv (unroll size is default at 8).
     const int seq_len_per_kv_loop = divUp(block_size, threads_per_value_) * 8;
@@ -146,12 +144,12 @@ inline void multi_block_grid_setup(dim3&                                        
                                                                                  DYNAMIC_THDS_PER_BLOCK,               \
                                                                                  KernelParamsType::DO_CROSS_ATTENTION, \
                                                                                  HAS_BEAMS,                            \
-                                                                                 DO_MULTI_BLOCK, \
-                                 ROPE_STYLE>,                                     \
-                                               cudaFuncAttributeMaxDynamicSharedMemorySize,                            \
-                                               dynamic_smem_sz);                                                       \
-        RTP_LLM_CHECK_WITH_INFO(res == cudaSuccess,                                                                         \
-                           "Sequence Length is too long for the MMHA kernel (not enough shared memory).");             \
+                                                                                 DO_MULTI_BLOCK,                       \
+                                                                                 ROPE_STYLE>,                          \
+                                 cudaFuncAttributeMaxDynamicSharedMemorySize,                                          \
+                                 dynamic_smem_sz);                                                                     \
+        RTP_LLM_CHECK_WITH_INFO(res == cudaSuccess,                                                                    \
+                                "Sequence Length is too long for the MMHA kernel (not enough shared memory).");        \
     }                                                                                                                  \
     check_cuda_value(cudaOccupancyMaxActiveBlocksPerMultiprocessor(                                                    \
         &available_blocks,                                                                                             \
@@ -162,8 +160,8 @@ inline void multi_block_grid_setup(dim3&                                        
                                           DYNAMIC_THDS_PER_BLOCK,                                                      \
                                           KernelParamsType::DO_CROSS_ATTENTION,                                        \
                                           HAS_BEAMS,                                                                   \
-        DO_MULTI_BLOCK,\
-        ROPE_STYLE>,                                                              \
+                                          DO_MULTI_BLOCK,                                                              \
+                                          ROPE_STYLE>,                                                                 \
         DYNAMIC_THDS_PER_BLOCK,                                                                                        \
         dynamic_smem_sz));
 
@@ -179,11 +177,11 @@ inline void multi_block_grid_setup(dim3&                                        
                                                                                  DYNAMIC_THDS_PER_BLOCK,                                                                                             \
                                                                                  KernelParamsType::DO_CROSS_ATTENTION,                                                                               \
                                                                                  HAS_BEAMS,                                                                                                          \
-                                 ENABLE_MULTI_BLOCK,\
-                                 ROPE_STYLE>,                                     \
-                                               cudaFuncAttributeMaxDynamicSharedMemorySize,                                                                                                          \
-                                               dynamic_smem_sz);                                                                                                                                     \
-        RTP_LLM_CHECK_WITH_INFO(                                                                                                                                                                          \
+                                                                                 ENABLE_MULTI_BLOCK,                                                                                                 \
+                                                                                 ROPE_STYLE>,                                                                                                        \
+                                 cudaFuncAttributeMaxDynamicSharedMemorySize,                                                                                                                        \
+                                 dynamic_smem_sz);                                                                                                                                                   \
+        RTP_LLM_CHECK_WITH_INFO(                                                                                                                                                                     \
             res == cudaSuccess,                                                                                                                                                                      \
             "Sequence Length is too long for the MMHA kernel (not enough shared memory). batch: %d head: %d seq: %d processor_count: %d smem_required: %d max_device_smem: %d multi_block_mode: %d", \
             params.batch_size,                                                                                                                                                                       \
@@ -201,8 +199,8 @@ inline void multi_block_grid_setup(dim3&                                        
                                       DYNAMIC_THDS_PER_BLOCK,                                                                                                                                        \
                                       KernelParamsType::DO_CROSS_ATTENTION,                                                                                                                          \
                                       HAS_BEAMS,                                                                                                                                                     \
-                                      ENABLE_MULTI_BLOCK,               \
-                                      ROPE_STYLE>                                 \
+                                      ENABLE_MULTI_BLOCK,                                                                                                                                            \
+                                      ROPE_STYLE>                                                                                                                                                    \
         <<<grid, DYNAMIC_THDS_PER_BLOCK, dynamic_smem_sz, stream>>>(params, kv_cache_buffer);
 
 // if resources are not enough to launch 512 threads per block, we will fallback to 256.
@@ -211,8 +209,7 @@ inline void multi_block_grid_setup(dim3&                                        
     if (available_blocks <= 0) {                                                                                       \
         MMHA_LAUNCH_CHECK(256);                                                                                        \
         dynamic_block_size = 256;                                                                                      \
-    }                                                                                                                  \
-    else {                                                                                                             \
+    } else {                                                                                                           \
         dynamic_block_size = 512;                                                                                      \
     }
 
@@ -221,8 +218,7 @@ inline void multi_block_grid_setup(dim3&                                        
     MMHA_LAUNCH_CHECK(1024);                                                                                           \
     if (available_blocks > 0) {                                                                                        \
         dynamic_block_size = 1024;                                                                                     \
-    }                                                                                                                  \
-    else {                                                                                                             \
+    } else {                                                                                                           \
         MMHA_512_BLOCKSIZE_CHECK();                                                                                    \
     }
 
@@ -232,18 +228,17 @@ template<typename T,
          typename T_cache,
          typename KVCacheBuffer,
          typename KernelParamsType,
-         int  Dh,
-         bool HAS_BEAMS,
-         bool DO_MULTI_BLOCK,
+         int       Dh,
+         bool      HAS_BEAMS,
+         bool      DO_MULTI_BLOCK,
          RopeStyle ROPE_STYLE>
 void mmha_launch_kernel_ex(KernelParamsType&    params,
                            const KVCacheBuffer& kv_cache_buffer,
                            const cudaStream_t&  stream,
-                           int                  tlength)
-{
+                           int                  tlength) {
     dim3 grid{static_cast<unsigned>(params.num_heads), static_cast<unsigned>(params.batch_size), 1};
 
-    int min_seq_len_tile = 0;
+    int min_seq_len_tile   = 0;
     int dynamic_block_size = 1024;
 
     // MMHA_LAUNCH_CHECK to get max dynamic_block_size.
@@ -251,11 +246,9 @@ void mmha_launch_kernel_ex(KernelParamsType&    params,
     if (dynamic_block_size < 512) {
         MMHA_LAUNCH_CHECK(256);
         dynamic_block_size = 256;
-    }
-    else if (dynamic_block_size < 1024) {
+    } else if (dynamic_block_size < 1024) {
         MMHA_512_BLOCKSIZE_CHECK();
-    }
-    else if (dynamic_block_size == 1024) {
+    } else if (dynamic_block_size == 1024) {
         MMHA_1024_BLOCKSIZE_CHECK();
     }
 
@@ -265,10 +258,8 @@ void mmha_launch_kernel_ex(KernelParamsType&    params,
 
     // max smem on device
     int max_dsmem_sz_on_device = -1;
-    check_cuda_value(cudaDeviceGetAttribute(
-                             &max_dsmem_sz_on_device,
-                             cudaDevAttrMaxSharedMemoryPerMultiprocessor,
-                             device));
+    check_cuda_value(
+        cudaDeviceGetAttribute(&max_dsmem_sz_on_device, cudaDevAttrMaxSharedMemoryPerMultiprocessor, device));
 
     // reserve 1KB for static smem.
     // CUDA reserves 1 KB of shared memory per thread block.
@@ -278,31 +269,31 @@ void mmha_launch_kernel_ex(KernelParamsType&    params,
     // required smem for current tlength when not using multi block mode
     size_t dsmem_smem_sz_for_kernel{smem_size_in_bytes<T, Dh, false>(params, dynamic_block_size)};
 
-    if(dsmem_smem_sz_for_kernel > max_dsmem_sz_on_device){
-        if (DO_MULTI_BLOCK){
+    if (dsmem_smem_sz_for_kernel > max_dsmem_sz_on_device) {
+        if (DO_MULTI_BLOCK) {
             min_seq_len_tile = dsmem_smem_sz_for_kernel / max_dsmem_sz_on_device + 1;
-        }
-        else {
+        } else {
             RTP_LLM_FAIL("Sequence Length is too long for the MMHA kernel (not enough shared memory): %d", tlength);
         }
     }
 
     // If blocks with larger block size already fill all SMs, then disable the multi blocks mode.
-    multi_block_grid_setup<T, Dh>(grid, params, available_blocks, dynamic_block_size, tlength, DO_MULTI_BLOCK, min_seq_len_tile);
+    multi_block_grid_setup<T, Dh>(
+        grid, params, available_blocks, dynamic_block_size, tlength, DO_MULTI_BLOCK, min_seq_len_tile);
 
-#define FT_BLOCK_SWITCH(COND, ...)                                      \
-    [&] {                                                               \
-        switch (COND) {                                                 \
-            FT_SWITCH_ONE_CASE(DYNAMIC_BLOCK_SIZE, 256, __VA_ARGS__)    \
-            FT_SWITCH_ONE_CASE(DYNAMIC_BLOCK_SIZE, 512, __VA_ARGS__)    \
-            FT_SWITCH_ONE_CASE(DYNAMIC_BLOCK_SIZE, 1024, __VA_ARGS__)   \
-            FT_SWITCH_DEFAULT_CASE(DYNAMIC_BLOCK_SIZE, 1024, __VA_ARGS__) \
-        }                                                               \
+#define FT_BLOCK_SWITCH(COND, ...)                                                                                     \
+    [&] {                                                                                                              \
+        switch (COND) {                                                                                                \
+            FT_SWITCH_ONE_CASE(DYNAMIC_BLOCK_SIZE, 256, __VA_ARGS__)                                                   \
+            FT_SWITCH_ONE_CASE(DYNAMIC_BLOCK_SIZE, 512, __VA_ARGS__)                                                   \
+            FT_SWITCH_ONE_CASE(DYNAMIC_BLOCK_SIZE, 1024, __VA_ARGS__)                                                  \
+            FT_SWITCH_DEFAULT_CASE(DYNAMIC_BLOCK_SIZE, 1024, __VA_ARGS__)                                              \
+        }                                                                                                              \
     }()
 
     // Launch kernels based on the valid block size.
-    FT_BLOCK_SWITCH(dynamic_block_size, [&]{
-        FT_SWITCH(params.enable_multi_block_mode(), MULTI_BLOCK_MODE, [&]{
+    FT_BLOCK_SWITCH(dynamic_block_size, [&] {
+        FT_SWITCH(params.enable_multi_block_mode(), MULTI_BLOCK_MODE, [&] {
             MMHA_KERNEL(DYNAMIC_BLOCK_SIZE, MULTI_BLOCK_MODE);
         });
     });

@@ -1,8 +1,10 @@
-import torch
 import itertools
-from unittest import TestCase, main, SkipTest
-from rtp_llm.models_py.modules.norm import RMSResNorm, RMSResNormTorch
+from unittest import SkipTest, TestCase, main
+
+import torch
 from torch import dtype as _dtype
+
+from rtp_llm.models_py.modules.norm import RMSResNorm, RMSResNormTorch
 
 
 class RMSResNormTest(TestCase):
@@ -22,21 +24,26 @@ class RMSResNormTest(TestCase):
         rms_res_norm_torch = RMSResNormTorch(w)
         x = torch.randn(num_tokens, hidden_size, dtype=dtype)
         residual = torch.randn(num_tokens, hidden_size, dtype=dtype)
-        self.assertTrue(torch.allclose(rms_res_norm_torch(x, residual), rms_res_norm(x, residual), atol=1e-2, rtol=1e-2))
+        self.assertTrue(
+            torch.allclose(
+                rms_res_norm_torch(x, residual),
+                rms_res_norm(x, residual),
+                atol=1e-2,
+                rtol=1e-2,
+            )
+        )
 
     def test_rms_res_norm(self):
         for params in itertools.product(
-                self.NUM_TOKENS,
-                self.HIDDEN_SIZES,
-                self.DTYPES,
+            self.NUM_TOKENS,
+            self.HIDDEN_SIZES,
+            self.DTYPES,
         ):
             with self.subTest(
-                    num_tokens=params[0],
-                    hidden_size=params[1],
-                    dtype=params[2]
+                num_tokens=params[0], hidden_size=params[1], dtype=params[2]
             ):
                 self._run_rms_res_norm_test(*params)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

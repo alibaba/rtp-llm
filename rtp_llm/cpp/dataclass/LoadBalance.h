@@ -54,6 +54,7 @@ public:
     // all time is us
     static size_t STEP_RECORDS_MAX_SIZE;
     static size_t STEP_RECORDS_TIME_RANGE;
+
 private:
     double getIntervalAvgGenNum() {
         return queue_total_gen_num_ * 1.0 / step_records_.size();
@@ -71,21 +72,21 @@ private:
     PIController step_count_controller_;
 
     std::queue<StepInfo> step_records_;
-    size_t              min_step_latency_ = 10 * 1000 * 1000;  // 10s
-    size_t              queue_total_gen_num_ = 0;
+    size_t               min_step_latency_    = 10 * 1000 * 1000;  // 10s
+    size_t               queue_total_gen_num_ = 0;
 
-    std::mutex          mutex_;
+    std::mutex mutex_;
 };
 
 struct LoadBalanceInfo {
-    int64_t step_latency_us = 0;
-    int64_t iterate_count = 0;
-    int64_t step_per_minute = 0;
+    int64_t step_latency_us    = 0;
+    int64_t iterate_count      = 0;
+    int64_t step_per_minute    = 0;
     int64_t available_kv_cache = 0;
-    int64_t total_kv_cache = 0;
-    int64_t onflight_requests = 0;
-    int64_t waiting_query_len = 0;
-    int64_t running_query_len = 0;
+    int64_t total_kv_cache     = 0;
+    int64_t onflight_requests  = 0;
+    int64_t waiting_query_len  = 0;
+    int64_t running_query_len  = 0;
 };
 
 struct Host {
@@ -103,24 +104,26 @@ struct BizHosts {
     std::shared_ptr<std::atomic_uint32_t>    index{0};
     std::vector<std::shared_ptr<const Host>> hosts;
     BizHosts() {}
-    BizHosts(const std::string&                          biz_,
-                std::shared_ptr<std::atomic_uint32_t>    index_,
-                std::vector<std::shared_ptr<const Host>> hosts_):
+    BizHosts(const std::string&                       biz_,
+             std::shared_ptr<std::atomic_uint32_t>    index_,
+             std::vector<std::shared_ptr<const Host>> hosts_):
         biz(biz_), index(index_), hosts(hosts_) {}
 
     void shuffleHost() {
-        unsigned seed = std::chrono::duration_cast<std::chrono::microseconds>(
-                        std::chrono::system_clock::now().time_since_epoch()).count();
+        unsigned seed =
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch())
+                .count();
         std::mt19937 g(seed);
         std::shuffle(hosts.begin(), hosts.end(), g);
     }
 
     void shuffleIndex() {
-        unsigned seed = std::chrono::duration_cast<std::chrono::microseconds>(
-                        std::chrono::system_clock::now().time_since_epoch()).count();
-        std::mt19937 g(seed);
+        unsigned seed =
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch())
+                .count();
+        std::mt19937                            g(seed);
         std::uniform_int_distribution<uint32_t> dist(0, hosts.size() - 1);
-        uint32_t random_number = dist(g);
+        uint32_t                                random_number = dist(g);
         index->store(random_number);
     }
 
@@ -128,9 +131,9 @@ struct BizHosts {
         // 自定义的比较函数
         auto compare = [](const std::shared_ptr<const Host>& h1, const std::shared_ptr<const Host>& h2) {
             if (h1->ip != h2->ip) {
-                return h1->ip < h2->ip; // 按照 IP 进行排序
+                return h1->ip < h2->ip;  // 按照 IP 进行排序
             }
-            return h1->rpc_port < h2->rpc_port; // 如果 IP 相同，按 RPC 端口排序
+            return h1->rpc_port < h2->rpc_port;  // 如果 IP 相同，按 RPC 端口排序
         };
 
         // 使用 std::sort 进行排序

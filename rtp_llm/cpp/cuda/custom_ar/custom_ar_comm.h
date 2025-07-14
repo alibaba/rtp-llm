@@ -46,7 +46,8 @@ public:
 
     bool checkAllReduceAvailable(size_t elts_total_num, DataType data_type, size_t world_size);
 
-    static bool shouldCustomAR(const std::vector<size_t>& tp_ranks, size_t rank, const HWKernelConfig& hw_kernel_config);
+    static bool
+    shouldCustomAR(const std::vector<size_t>& tp_ranks, size_t rank, const HWKernelConfig& hw_kernel_config);
 
     void* peerCommBufferPtr() {
         return param_.peer_comm_buffer_ptrs[rank_];
@@ -79,7 +80,9 @@ private:
     std::vector<cudaIpcMemHandle_t> peer_comm_buffer_handles_;
 };
 
-std::unique_ptr<CustomAllReduceComm>
-initCustomAllReduceComm(const NcclParam& nccl_para, const std::vector<size_t>& tp_ranks, cudaStream_t stream, const HWKernelConfig& hw_kernel_config);
+std::unique_ptr<CustomAllReduceComm> initCustomAllReduceComm(const NcclParam&           nccl_para,
+                                                             const std::vector<size_t>& tp_ranks,
+                                                             cudaStream_t               stream,
+                                                             const HWKernelConfig&      hw_kernel_config);
 
 }  // namespace rtp_llm

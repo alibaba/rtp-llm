@@ -1,16 +1,17 @@
-import time
 import logging
+import time
 from datetime import timedelta
+
 from torch.distributed.rendezvous import rendezvous
 
+
 def create_store(master_url, world_rank, world_size):
-    rendezvous_iterator = rendezvous(
-        master_url, world_rank, world_size
-    )
-    store, rank, world_size = next(rendezvous_iterator)        
+    rendezvous_iterator = rendezvous(master_url, world_rank, world_size)
+    store, rank, world_size = next(rendezvous_iterator)
     logging.info(f"store: {store}, rank: {rank}, world_size: {world_size}")
-    store.set_timeout(timedelta(seconds=10))          
+    store.set_timeout(timedelta(seconds=10))
     return store
+
 
 def store_based_barrier(rank: int, world_size: int, store, timeout: timedelta):
     store_key = "{}:{}".format("store_barrier", 0)

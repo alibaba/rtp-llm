@@ -19,9 +19,9 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
                                   const BufferPtr&             k_output,
                                   const BufferPtr&             v_output,
                                   const BufferPtr&             qkv_buf_fp8) {
-    auto fmha_type = fmha_type_;
-    auto stream  = stream_;
-    auto cufmha_runner = cufmha_runner_;
+    auto      fmha_type           = fmha_type_;
+    auto      stream              = stream_;
+    auto      cufmha_runner       = cufmha_runner_;
     auto      datatype            = params.input.type();
     auto      token_num           = params.input.shape()[0];
     auto      batch_size          = params.common.context_batch_size;
@@ -39,12 +39,14 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
     }
     switch (fmha_type) {
         case FMHAType::FLASH_INFER: {
-            RTP_LLM_CHECK_WITH_INFO(q_no_transpose_output != nullptr, "q_no_transpose_output must be provided for flashinfer");
+            RTP_LLM_CHECK_WITH_INFO(q_no_transpose_output != nullptr,
+                                    "q_no_transpose_output must be provided for flashinfer");
             FlashInferAttnParams* flash_infer = (FlashInferAttnParams*)params.common.prefill_flash_infer_attn.get();
             RTP_LLM_CHECK(flash_infer && flash_infer->plan.numel() > 0);
             BufferPtr f16_out;
             if (use_fp8_fmha_) {
-                f16_out = allocateBuffer({params.input.type(), params.output.shape(), AllocationType::DEVICE}, {"f16_out"});
+                f16_out =
+                    allocateBuffer({params.input.type(), params.output.shape(), AllocationType::DEVICE}, {"f16_out"});
             }
             flash_infer->run(params, q_no_transpose_output, f16_out, reinterpret_cast<int64_t>(stream));
             break;
@@ -68,8 +70,8 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
             break;
         }
         case FMHAType::TRT_V2: {
-            void*  fmha_input_ptr                    = use_fp8_fmha ? qkv_buf_fp8->data() : params.input.data();
-            void*  fmha_output_ptr                   = params.output.data();
+            void* fmha_input_ptr  = use_fp8_fmha ? qkv_buf_fp8->data() : params.input.data();
+            void* fmha_output_ptr = params.output.data();
             RTP_LLM_CHECK_WITH_INFO(fmha_input_ptr, "fmha_input_ptr must be provided for trt v2 fmha");
             float* attention_output_orig_quant_scale = nullptr;
             if (params.weights.static_scale_reciprocal_weight && use_fp8_fmha) {
@@ -81,10 +83,9 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
             BufferPtr tmp_fmha_output;
             if (need_quant_fmha_out) {
                 // for sm89 cannot use fp8_fmha, but attention output should be fp8
-                tmp_fmha_output = allocateBuffer({datatype,
-                                                  {batch_size, head_num * seq_len_with_prefix * size_per_head},
-                                                  AllocationType::DEVICE},
-                                                 {"fmha_fp16_output"});
+                tmp_fmha_output = allocateBuffer(
+                    {datatype, {batch_size, head_num * seq_len_with_prefix * size_per_head}, AllocationType::DEVICE},
+                    {"fmha_fp16_output"});
                 cudaMemsetAsync(tmp_fmha_output->data(), 0, tmp_fmha_output->sizeBytes(), stream);
                 fmha_output_ptr = tmp_fmha_output->data();
             } else if (use_fp8_fmha && params.output.type() != DataType::TYPE_QFP8_E4M3) {
@@ -125,10 +126,13 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
             } else if (use_fp8_fmha && params.output.type() != DataType::TYPE_QFP8_E4M3) {
                 RTP_LLM_CHECK_WITH_INFO(tmp_fmha_output != nullptr, "tmp_fmha_output must be provided for fp8 fmha");
                 printBufferData(*tmp_fmha_output, "tmp_fmha_output");
-                auto quant_fmha_output_t = Buffer2torchTensor(*tmp_fmha_output, false);
+                auto quant_fmha_output_t   = Buffer2torchTensor(*tmp_fmha_output, false);
                 auto dequant_fmha_output_t = quant_fmha_output_t.to(dataTypeToTorchType(datatype));
-                cudaMemcpyAsync(
-                    params.output.data(), dequant_fmha_output_t.data_ptr(), params.output.sizeBytes(), cudaMemcpyDeviceToDevice, stream);
+                cudaMemcpyAsync(params.output.data(),
+                                dequant_fmha_output_t.data_ptr(),
+                                params.output.sizeBytes(),
+                                cudaMemcpyDeviceToDevice,
+                                stream);
                 printBufferData(params.output, "params.output");
             }
             break;
@@ -137,8 +141,8 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
             const size_t max_blocks_per_batch = params.common.kv_cache->kv_cache_block_id->shape()[1];
             const auto   ws_size              = cufmha_runner->getOpenSourceWorkSpaceSize(
                 batch_size, seq_len, max_blocks_per_batch * params.configs.tokens_per_block, true);
-            auto ws = allocateBuffer({DataType::TYPE_INT8, {ws_size}, AllocationType::DEVICE},
-                                             {"open_source_paged_fmha_ws"});
+            auto ws =
+                allocateBuffer({DataType::TYPE_INT8, {ws_size}, AllocationType::DEVICE}, {"open_source_paged_fmha_ws"});
             cufmha_runner->runOpenSourceFmhaPaged(
                 params.input.data(),
                 params.common.kv_cache->k_cache_buffer->data(),
@@ -158,10 +162,9 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
             break;
         }
         case FMHAType::OPEN_SOURCE: {
-            const auto   ws_size      = cufmha_runner->getOpenSourceWorkSpaceSize(batch_size, seq_len);
-            auto         ws           = allocateBuffer({DataType::TYPE_INT8, {ws_size}, AllocationType::DEVICE},
-                                                               {"open_source_fmha_ws"});
-            const size_t hidden_units = head_num * size_per_head;
+            const auto ws_size = cufmha_runner->getOpenSourceWorkSpaceSize(batch_size, seq_len);
+            auto ws = allocateBuffer({DataType::TYPE_INT8, {ws_size}, AllocationType::DEVICE}, {"open_source_fmha_ws"});
+            const size_t hidden_units    = head_num * size_per_head;
             const size_t hidden_units_kv = kv_head_num * size_per_head;
             cufmha_runner->runOpenSourceFmha(
                 params.input.data(),
@@ -191,29 +194,31 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
             break;
         }
         default: {
-            RTP_LLM_CHECK_WITH_INFO(q_output && k_output && v_output, "q_output/k_output/v_output must be provided for default context attention implementation");
+            RTP_LLM_CHECK_WITH_INFO(
+                q_output && k_output && v_output,
+                "q_output/k_output/v_output must be provided for default context attention implementation");
             q_output->updateShape({batch_size, kv_head_num, (head_num / kv_head_num) * seq_len, size_per_head});
             auto qk_output = gemm({*q_output,
-                                           *k_output,
-                                           std::nullopt,
-                                           nullptr,
-                                           DataType::TYPE_FP32,
-                                           TransposeOperation::NONE,
-                                           TransposeOperation::TRANSPOSE});
+                                   *k_output,
+                                   std::nullopt,
+                                   nullptr,
+                                   DataType::TYPE_FP32,
+                                   TransposeOperation::NONE,
+                                   TransposeOperation::TRANSPOSE});
             qk_output->updateShape({batch_size, head_num, seq_len, seq_len_with_prefix});
             printBufferData(*qk_output, "qk_output: ");
             float scale = (1.0f / sqrtf(size_per_head * 1.0f)) * params.configs.softmax_extra_scale;
             // TODO(lidongjin): Only support float32(in)\float16(output).
             RUNTIME_ASSERT_OP_ARG(params.common.attention_mask,
                                   "attention_mask must be provided for default context attention implementation");
-            auto softmax_qk_output = softmax({std::move(qk_output),
-                                                      *params.common.attention_mask,
-                                                      std::nullopt,
-                                                      scale,
-                                                      datatype,
-                                                      params.common.linear_bias_slopes ?
-                                                          (OptionalConstBufferRef)*params.common.linear_bias_slopes :
-                                                          std::nullopt});
+            auto softmax_qk_output =
+                softmax({std::move(qk_output),
+                         *params.common.attention_mask,
+                         std::nullopt,
+                         scale,
+                         datatype,
+                         params.common.linear_bias_slopes ? (OptionalConstBufferRef)*params.common.linear_bias_slopes :
+                                                            std::nullopt});
             softmax_qk_output->updateShape(
                 {batch_size, kv_head_num, (head_num / kv_head_num) * seq_len, seq_len_with_prefix});
             printBufferData(*softmax_qk_output, "softmax_qk_output: ");

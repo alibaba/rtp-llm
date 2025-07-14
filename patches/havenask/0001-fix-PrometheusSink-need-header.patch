@@ -12,14 +12,14 @@ index 24125b99..ea3616f9 100644
 --- aios/kmonitor/cpp_client/src/kmonitor/client/sink/PrometheusSink.cpp
 +++ aios/kmonitor/cpp_client/src/kmonitor/client/sink/PrometheusSink.cpp
 @@ -50,7 +50,7 @@ PrometheusSink::PrometheusSink(const std::string &addr) : Sink(PrometheusSink::N
- 
+
      gatewayAddr_ += "/metrics/job/havenask";
- 
+
 -    network::Header httpHeader;
 +    network::Header httpHeader{{"Content-Type", "text/plain"}};
      httpClientPtr_ = std::make_unique<network::HttpClient>(HTTP_CLIENT_THREAD_NUM,
                                                             HTTP_CLIENT_CONNECT_TIMEOUT_MS,
                                                             HTTP_CLIENT_TIMEOUT_MS,
--- 
+--
 2.19.1.6.gb485710b
 

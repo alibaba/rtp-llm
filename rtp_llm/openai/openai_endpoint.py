@@ -1,45 +1,74 @@
-from fastapi import Request
-import torch
-from typing import Union, Optional, List, Dict, Generator, Coroutine, AsyncGenerator, Any, Iterator
-import os
 import json
 import logging
-import json
+import os
 from functools import partial
+from typing import (
+    Any,
+    AsyncGenerator,
+    Coroutine,
+    Dict,
+    Generator,
+    Iterator,
+    List,
+    Optional,
+    Union,
+)
 
+import torch
+from fastapi import Request
 from transformers import PreTrainedTokenizerBase
-from rtp_llm.utils.util import str_to_bool
-from rtp_llm.utils.complete_response_async_generator import CompleteResponseAsyncGenerator
-from transformers import PreTrainedTokenizerBase
-from rtp_llm.openai.api_datatype import ModelCard, ModelList, ChatMessage, RoleEnum, \
-    ChatCompletionRequest, ChatCompletionResponse, ChatCompletionResponseChoice, UsageInfo, \
-    ChatCompletionStreamResponse, \
-    DebugInfo
-from rtp_llm.openai.renderers.custom_renderer import RendererParams, \
-    StreamResponseObject, RenderedInputs, CustomChatRenderer
+
+from rtp_llm.async_decoder_engine.backend_rpc_server_visitor import (
+    BackendRPCServerVisitor,
+)
+from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.openai.api_datatype import (
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+    ChatCompletionResponseChoice,
+    ChatCompletionStreamResponse,
+    ChatMessage,
+    DebugInfo,
+    ModelCard,
+    ModelList,
+    RoleEnum,
+    UsageInfo,
+)
 from rtp_llm.openai.renderer_factory import ChatRendererFactory
 from rtp_llm.openai.renderers.basic_renderer import BasicRenderer
-from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.openai.renderers.custom_renderer import (
+    CustomChatRenderer,
+    RenderedInputs,
+    RendererParams,
+    StreamResponseObject,
+)
+from rtp_llm.utils.complete_response_async_generator import (
+    CompleteResponseAsyncGenerator,
+)
 from rtp_llm.utils.mm_process_engine import MMProcessEngine
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.async_decoder_engine.backend_rpc_server_visitor import BackendRPCServerVisitor
+from rtp_llm.utils.util import str_to_bool
+
 
 class OpenaiEndpoint(object):
-    def __init__(self, model_config: GptInitModelParameters,
-                 tokenizer: PreTrainedTokenizerBase,
-                 backend_rpc_server_visitor: BackendRPCServerVisitor):
+    def __init__(
+        self,
+        model_config: GptInitModelParameters,
+        tokenizer: PreTrainedTokenizerBase,
+        backend_rpc_server_visitor: BackendRPCServerVisitor,
+    ):
         self.model_config = model_config
         self.max_seq_len = self.model_config.max_seq_len
 
-        if (tokenizer == None):
+        if tokenizer == None:
             raise AttributeError(f"tokenizer is none!")
         self.tokenizer: PreTrainedTokenizerBase = tokenizer
         self.backend_rpc_server_visitor = backend_rpc_server_visitor
 
         self.eos_token_id = None
-        if (isinstance(tokenizer, PreTrainedTokenizerBase)):
+        if isinstance(tokenizer, PreTrainedTokenizerBase):
             self.eos_token_id = tokenizer.eos_token_id
-        if (self.eos_token_id == None):
+        if self.eos_token_id == None:
             self.eos_token_id = self.model_config.special_tokens.eos_token_id
 
         self.stop_words_id_list = self.model_config.special_tokens.stop_words_id_list
@@ -50,14 +79,18 @@ class OpenaiEndpoint(object):
             eos_token_id=self.eos_token_id,
             stop_word_ids_list=self.stop_words_id_list,
             template_type=self.model_config.template_type,
-            ckpt_path=self.model_config.ckpt_path
+            ckpt_path=self.model_config.ckpt_path,
         )
 
-        self.chat_renderer: CustomChatRenderer = ChatRendererFactory.get_renderer(self.tokenizer, render_params)
+        self.chat_renderer: CustomChatRenderer = ChatRendererFactory.get_renderer(
+            self.tokenizer, render_params
+        )
         logging.info(f"Finally openai endpoint uses renderer: {self.chat_renderer} ")
-        self.template_renderer: CustomChatRenderer = self.chat_renderer \
-            if isinstance(self.chat_renderer,BasicRenderer) \
+        self.template_renderer: CustomChatRenderer = (
+            self.chat_renderer
+            if isinstance(self.chat_renderer, BasicRenderer)
             else BasicRenderer(self.tokenizer, render_params)
+        )
         logging.info(f"chat_renderer [{self.chat_renderer}] is created.")
         extra_stop_word_ids_list = self.chat_renderer.get_all_extra_stop_word_ids_list()
         self.stop_words_id_list.extend(extra_stop_word_ids_list)
@@ -67,27 +100,37 @@ class OpenaiEndpoint(object):
             if len(word):
                 self.stop_words_str_list.append(word)
 
-        env_stop_words_str = os.environ.get('STOP_WORDS_STR', None)
-        env_stop_words_id = os.environ.get('STOP_WORDS_LIST', None)
-        env_stop_words_str_list = json.loads(env_stop_words_str) if env_stop_words_str else []
-        env_stop_words_id_list = json.loads(env_stop_words_id) if env_stop_words_id else []
-        env_force_stop = os.environ.get('FORCE_STOP_WORDS', None)
+        env_stop_words_str = os.environ.get("STOP_WORDS_STR", None)
+        env_stop_words_id = os.environ.get("STOP_WORDS_LIST", None)
+        env_stop_words_str_list = (
+            json.loads(env_stop_words_str) if env_stop_words_str else []
+        )
+        env_stop_words_id_list = (
+            json.loads(env_stop_words_id) if env_stop_words_id else []
+        )
+        env_force_stop = os.environ.get("FORCE_STOP_WORDS", None)
         if env_force_stop and str_to_bool(env_force_stop):
             self.stop_words_str_list = env_stop_words_str_list
             self.stop_words_id_list = env_stop_words_id_list
         else:
-            self.stop_words_str_list = self.stop_words_str_list + env_stop_words_str_list
+            self.stop_words_str_list = (
+                self.stop_words_str_list + env_stop_words_str_list
+            )
             self.stop_words_id_list = self.stop_words_id_list + env_stop_words_id_list
 
-        logging.info(f"use stop_words_str_list [{self.stop_words_str_list}], " \
-                    f"stop_words_id_list [{self.stop_words_id_list}]")
+        logging.info(
+            f"use stop_words_str_list [{self.stop_words_str_list}], "
+            f"stop_words_id_list [{self.stop_words_id_list}]"
+        )
 
     async def list_models(self):
         global model_args
         model_card = ModelCard(id=self.model_config.model_name)
         return ModelList(data=[model_card])
 
-    def _extract_generation_config(self, request: ChatCompletionRequest) -> GenerateConfig:
+    def _extract_generation_config(
+        self, request: ChatCompletionRequest
+    ) -> GenerateConfig:
         # TODO(wangyin): implement this
         config = request.extra_configs or GenerateConfig()
         if request.stream != None:
@@ -104,7 +147,10 @@ class OpenaiEndpoint(object):
         if isinstance(request_stop_words_list, str):
             request_stop_words_list = [request_stop_words_list]
         config.stop_words_str = self.stop_words_str_list + request_stop_words_list
-        config.stop_words_list = self.stop_words_id_list + self.chat_renderer.tokenize_words(request_stop_words_list)
+        config.stop_words_list = (
+            self.stop_words_id_list
+            + self.chat_renderer.tokenize_words(request_stop_words_list)
+        )
         if request.chat_id != None:
             config.chat_id = request.chat_id
         if request.seed != None:
@@ -115,22 +161,26 @@ class OpenaiEndpoint(object):
             config.is_streaming = True
         config.add_special_tokens(self.model_config.special_tokens)
         config.convert_select_tokens(self.model_config.vocab_size, self.tokenizer)
-        if request.extend_fields and "max_thinking_tokens" in request.extend_fields.keys() \
-            and isinstance(request.extend_fields["max_thinking_tokens"], int):
+        if (
+            request.extend_fields
+            and "max_thinking_tokens" in request.extend_fields.keys()
+            and isinstance(request.extend_fields["max_thinking_tokens"], int)
+        ):
             config.max_thinking_tokens = request.extend_fields["max_thinking_tokens"]
         config.add_thinking_params(self.tokenizer)
         return config
 
     async def _collect_complete_response(
-            self,
-            choice_generator: Optional[AsyncGenerator[StreamResponseObject, None]],
-            debug_info: Optional[DebugInfo]) -> ChatCompletionResponse:
+        self,
+        choice_generator: Optional[AsyncGenerator[StreamResponseObject, None]],
+        debug_info: Optional[DebugInfo],
+    ) -> ChatCompletionResponse:
         all_choices = []
         usage = None
         aux_info = None
         async for response in choice_generator:
             if len(response.choices) != len(all_choices):
-                if (all_choices == []):
+                if all_choices == []:
                     all_choices = [
                         ChatCompletionResponseChoice(
                             index=i,
@@ -142,43 +192,60 @@ class OpenaiEndpoint(object):
                             ),
                             finish_reason=choice.finish_reason,
                             logprobs=choice.logprobs,
-                        ) for i, choice in enumerate(response.choices)
+                        )
+                        for i, choice in enumerate(response.choices)
                     ]
                 else:
-                    raise ValueError(f"response.choices has different length! "
-                                     f"[{response.choices}] vs [{all_choices}].")
+                    raise ValueError(
+                        f"response.choices has different length! "
+                        f"[{response.choices}] vs [{all_choices}]."
+                    )
             else:
                 for i in range(len(all_choices)):
                     if all_choices[i].message.content == None:
-                        all_choices[i].message.content = (response.choices[i].delta.content or None)
+                        all_choices[i].message.content = (
+                            response.choices[i].delta.content or None
+                        )
                     else:
-                        all_choices[i].message.content += (response.choices[i].delta.content or "")
+                        all_choices[i].message.content += (
+                            response.choices[i].delta.content or ""
+                        )
                     if all_choices[i].message.reasoning_content == None:
-                        all_choices[i].message.reasoning_content = (response.choices[i].delta.reasoning_content or None)
+                        all_choices[i].message.reasoning_content = (
+                            response.choices[i].delta.reasoning_content or None
+                        )
                     else:
-                        all_choices[i].message.reasoning_content += (response.choices[i].delta.reasoning_content or "")
-                    all_choices[i].message.role = response.choices[i].delta.role or all_choices[i].message.role
-                    all_choices[i].message.function_call = response.choices[i].delta.function_call or all_choices[i].message.function_call
+                        all_choices[i].message.reasoning_content += (
+                            response.choices[i].delta.reasoning_content or ""
+                        )
+                    all_choices[i].message.role = (
+                        response.choices[i].delta.role or all_choices[i].message.role
+                    )
+                    all_choices[i].message.function_call = (
+                        response.choices[i].delta.function_call
+                        or all_choices[i].message.function_call
+                    )
                     all_choices[i].message.tool_calls = (
                         response.choices[i].delta.tool_calls
                         or all_choices[i].message.tool_calls
                     )
-                    all_choices[i].finish_reason = response.choices[i].finish_reason or all_choices[i].finish_reason
+                    all_choices[i].finish_reason = (
+                        response.choices[i].finish_reason
+                        or all_choices[i].finish_reason
+                    )
                     if all_choices[i].logprobs != None:
                         if response.choices[i].logprobs != None:
-                            all_choices[i].logprobs.content += response.choices[i].logprobs.content
+                            all_choices[i].logprobs.content += response.choices[
+                                i
+                            ].logprobs.content
                     else:
                         all_choices[i].logprobs = response.choices[i].logprobs
             usage = response.usage or usage
             aux_info = response.aux_info or aux_info
 
-        if (usage == None):
+        if usage == None:
             logging.warning(f"No usage returned from stream response. use empty value.")
-            usage = UsageInfo(
-                prompt_tokens=0,
-                total_tokens=0,
-                completion_tokens=0
-            )
+            usage = UsageInfo(prompt_tokens=0, total_tokens=0, completion_tokens=0)
         return ChatCompletionResponse(
             choices=all_choices,
             usage=usage,
@@ -188,8 +255,9 @@ class OpenaiEndpoint(object):
         )
 
     def _complete_stream_response(
-            self, choice_generator: AsyncGenerator[StreamResponseObject, None],
-            debug_info: Optional[DebugInfo]
+        self,
+        choice_generator: AsyncGenerator[StreamResponseObject, None],
+        debug_info: Optional[DebugInfo],
     ) -> CompleteResponseAsyncGenerator:
         async def response_generator():
             debug_info_responded = False
@@ -198,15 +266,23 @@ class OpenaiEndpoint(object):
                     choices=response.choices,
                     usage=response.usage,
                     aux_info=response.aux_info,
-                    debug_info=debug_info if not debug_info_responded else None
+                    debug_info=debug_info if not debug_info_responded else None,
                 )
                 debug_info_responded = True
 
-        complete_response_collect_func = partial(self._collect_complete_response, debug_info=debug_info)
-        return CompleteResponseAsyncGenerator(response_generator(), complete_response_collect_func)
+        complete_response_collect_func = partial(
+            self._collect_complete_response, debug_info=debug_info
+        )
+        return CompleteResponseAsyncGenerator(
+            response_generator(), complete_response_collect_func
+        )
 
-    def _get_debug_info(self, renderer: CustomChatRenderer,
-                        renderered_input: RenderedInputs, gen_config: GenerateConfig) -> DebugInfo:
+    def _get_debug_info(
+        self,
+        renderer: CustomChatRenderer,
+        renderered_input: RenderedInputs,
+        gen_config: GenerateConfig,
+    ) -> DebugInfo:
         if renderered_input.rendered_prompt != "":
             prompt = renderered_input.rendered_prompt
         else:
@@ -214,18 +290,22 @@ class OpenaiEndpoint(object):
         return DebugInfo(
             input_prompt=prompt,
             input_ids=renderered_input.input_ids,
-            input_urls=[mm_input.url for mm_input in renderered_input.multimodal_inputs],
+            input_urls=[
+                mm_input.url for mm_input in renderered_input.multimodal_inputs
+            ],
             tokenizer_info=str(self.tokenizer),
             max_seq_len=self.max_seq_len,
             eos_token_id=self.eos_token_id,
             stop_word_ids_list=self.stop_words_id_list,
             stop_words_list=self.stop_words_str_list,
             renderer_info=renderer.get_renderer_info(),
-            generate_config=gen_config
+            generate_config=gen_config,
         )
 
     def render_chat(self, chat_request: ChatCompletionRequest):
-        renderer = self.template_renderer if chat_request.user_template else self.chat_renderer
+        renderer = (
+            self.template_renderer if chat_request.user_template else self.chat_renderer
+        )
         prepopulate_str = ""
         if len(chat_request.messages) > 0 and chat_request.messages[-1].partial:
             prepopulate_str = str(chat_request.messages[-1].content)
@@ -237,9 +317,11 @@ class OpenaiEndpoint(object):
         return rendered_input
 
     def chat_completion(
-            self, request_id: int, chat_request: ChatCompletionRequest, raw_request: Request
+        self, request_id: int, chat_request: ChatCompletionRequest, raw_request: Request
     ) -> CompleteResponseAsyncGenerator:
-        renderer = self.template_renderer if chat_request.user_template else self.chat_renderer
+        renderer = (
+            self.template_renderer if chat_request.user_template else self.chat_renderer
+        )
         rendered_input = self.render_chat(chat_request)
         generate_config = self._extract_generation_config(chat_request)
 
@@ -250,23 +332,30 @@ class OpenaiEndpoint(object):
             mm_inputs = []
 
         if generate_config.sp_advice_prompt != "":
-            generate_config.sp_advice_prompt_token_ids = self.tokenizer.encode(generate_config.sp_advice_prompt)
+            generate_config.sp_advice_prompt_token_ids = self.tokenizer.encode(
+                generate_config.sp_advice_prompt
+            )
 
-        debug_info = self._get_debug_info(renderer, rendered_input, generate_config) \
-            if chat_request.debug_info else None
+        debug_info = (
+            self._get_debug_info(renderer, rendered_input, generate_config)
+            if chat_request.debug_info
+            else None
+        )
         choice_generator = renderer.generate_choice(
             request_id,
             rendered_input.input_ids,
             mm_inputs,
             generate_config,
             self.backend_rpc_server_visitor,
-            chat_request
+            chat_request,
         )
 
         return self._complete_stream_response(choice_generator, debug_info)
 
     def chat_render(self, chat_request: ChatCompletionRequest) -> DebugInfo:
-        renderer = self.template_renderer if chat_request.user_template else self.chat_renderer
+        renderer = (
+            self.template_renderer if chat_request.user_template else self.chat_renderer
+        )
         rendered_input = renderer.render_chat(chat_request)
         generate_config = self._extract_generation_config(chat_request)
         debug_info = self._get_debug_info(renderer, rendered_input, generate_config)

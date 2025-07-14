@@ -13,7 +13,6 @@ using namespace ::testing;
 
 namespace rtp_llm {
 
-
 class WorkerStatusServiceTest: public ::testing::Test {
 public:
     WorkerStatusServiceTest()           = default;
@@ -67,7 +66,7 @@ TEST_F(WorkerStatusServiceTest, WorkerStatus_AlreadyStopped) {
 
 TEST_F(WorkerStatusServiceTest, WorkerStatus_HasLoadBalanceEnv) {
     mock_engine_base_->getDevice()->initParamsRef().misc_config.load_balance = 1;
-    auto            worker_status_service = std::make_shared<WorkerStatusService>(mock_engine_base_, controller_);
+    auto worker_status_service = std::make_shared<WorkerStatusService>(mock_engine_base_, controller_);
     mock_engine_base_->getDevice()->initParamsRef().misc_config.load_balance = 0;
     auto writer = dynamic_cast<http_server::HttpResponseWriter*>(mock_writer_.get());
     ASSERT_TRUE(writer != nullptr);

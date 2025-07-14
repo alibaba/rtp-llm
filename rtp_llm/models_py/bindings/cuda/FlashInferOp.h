@@ -10,15 +10,18 @@ namespace rtp_llm {
 class FlashInferOp {
 public:
     FlashInferOp(const GptInitParameter& gpt_init_parameter);
-    void forward(torch::Tensor input, torch::Tensor output,
-                 torch::Tensor k_cache, torch::Tensor v_cache,
+    void forward(torch::Tensor                input,
+                 torch::Tensor                output,
+                 torch::Tensor                k_cache,
+                 torch::Tensor                v_cache,
                  torch_ext::PyAttentionInputs attn_params);
+
 private:
     GptInitParameter configs;
-    RopeConfig rope_config;
+    RopeConfig       rope_config;
     // const AttentionLayerWeights weights;
     // std::unique_ptr<FlashInferAttnParams> params;
 };
 
 void registerFlashInferOp(const py::module& m);
-}
+}  // namespace rtp_llm

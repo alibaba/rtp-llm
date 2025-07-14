@@ -24,13 +24,11 @@ namespace rtp_llm {
 
 template<typename T, int QUANTIZE_MODE>
 __global__ void
-quatizeVectorE4M3(__nv_fp8_e4m3* output, float const* input_qua_amax_ptr, T const* input, uint32_t size, uint32_t n)
-{
+quatizeVectorE4M3(__nv_fp8_e4m3* output, float const* input_qua_amax_ptr, T const* input, uint32_t size, uint32_t n) {
     for (uint32_t i = threadIdx.x + blockIdx.x * blockDim.x; i < size; i += blockDim.x * gridDim.x) {
         if (QUANTIZE_MODE == 0) {
             output[i] = __nv_fp8_e4m3((float)(input[i]) / __ldg(input_qua_amax_ptr + (i % n)));
-        }
-        else {
+        } else {
             output[i] = __nv_fp8_e4m3((float)(input[i]) / __ldg(input_qua_amax_ptr));
         }
     }
@@ -42,8 +40,7 @@ void invokeQuatizeVectorE4M3(__nv_fp8_e4m3* output,
                              T const*       input,
                              uint32_t       size,
                              uint32_t       n,
-                             cudaStream_t   stream)
-{
+                             cudaStream_t   stream) {
     dim3 grid(1);
     dim3 block(256);
     quatizeVectorE4M3<T, QUANTIZE_MODE><<<grid, block, 0, stream>>>(output, input_qua_amax_ptr, input, size, n);
@@ -89,13 +86,11 @@ template void invokeQuatizeVectorE4M3<__nv_bfloat16, 1>(__nv_fp8_e4m3*       out
 
 template<typename T, int QUANTIZE_MODE>
 __global__ void
-dequatizeVectorE4M3(T* output, float const* qua_amax_ptr, __nv_fp8_e4m3 const* input, uint32_t size, uint32_t n)
-{
+dequatizeVectorE4M3(T* output, float const* qua_amax_ptr, __nv_fp8_e4m3 const* input, uint32_t size, uint32_t n) {
     for (uint32_t i = threadIdx.x + blockIdx.x * blockDim.x; i < size; i += blockDim.x * gridDim.x) {
         if (QUANTIZE_MODE == 0) {
             output[i] = float(input[i]) * __ldg(qua_amax_ptr + (i % n));
-        }
-        else {
+        } else {
             output[i] = float(input[i]) * __ldg(qua_amax_ptr);
         }
     }
@@ -103,8 +98,7 @@ dequatizeVectorE4M3(T* output, float const* qua_amax_ptr, __nv_fp8_e4m3 const* i
 
 template<typename T, int QUANTIZE_MODE>
 void invokeDequatizeVectorE4M3(
-    T* output, float const* qua_amax_ptr, __nv_fp8_e4m3 const* input, uint32_t size, uint32_t n, cudaStream_t stream)
-{
+    T* output, float const* qua_amax_ptr, __nv_fp8_e4m3 const* input, uint32_t size, uint32_t n, cudaStream_t stream) {
     dim3 grid(1);
     dim3 block(256);
     dequatizeVectorE4M3<T, QUANTIZE_MODE><<<grid, block, 0, stream>>>(output, qua_amax_ptr, input, size, n);
@@ -150,8 +144,7 @@ template void invokeDequatizeVectorE4M3<__nv_bfloat16, 1>(__nv_bfloat16*       o
 
 // IDEA: bfloat162 computation ?
 template<typename T1, typename T2, int QUANTIZE_MODE, int PACKED_SIZE>
-__global__ void LayerNorm(FP8LayerNormParam<T1, T2> param)
-{
+__global__ void LayerNorm(FP8LayerNormParam<T1, T2> param) {
     __shared__ float s_mean;
     __shared__ float s_variance;
     float            mean     = 0.0f;
@@ -169,8 +162,7 @@ __global__ void LayerNorm(FP8LayerNormParam<T1, T2> param)
         input_scalar = __ldg(param.input_deq_ptr + threadIdx.x);
         // output_scalar = __ldg(param.output_qua_ptr + threadIdx.x);
         output_scalar = __ldg(param.output_qua_ptr);  // must per tensor because it is quantize of input tensor of GEMM
-    }
-    else if (QUANTIZE_MODE == 1) {
+    } else if (QUANTIZE_MODE == 1) {
         // For per tensor quantization, assume x = input, s = input_scalar, x' = x * s
         // Then Norm(x') = E[x'] / sqrt(V[x']).
         // Because E[x'] = E[sx] = sE[x], V[X'] = V[sx] = s^2 * V[x]
@@ -239,8 +231,7 @@ __global__ void LayerNorm(FP8LayerNormParam<T1, T2> param)
 }
 
 template<typename T1, typename T2, int QUANTIZE_MODE>
-__global__ void LayerNormE4M3x4(FP8LayerNormParam<T1, T2> param)
-{
+__global__ void LayerNormE4M3x4(FP8LayerNormParam<T1, T2> param) {
     __shared__ float s_mean;
     __shared__ float s_variance;
     float            mean     = 0.0f;
@@ -259,8 +250,7 @@ __global__ void LayerNormE4M3x4(FP8LayerNormParam<T1, T2> param)
         local_out1.y = local_out1.y * (__nv_bfloat16)__ldg(param.input_deq_ptr + threadIdx.x * 4 + 1);
         local_out2.x = local_out2.x * (__nv_bfloat16)__ldg(param.input_deq_ptr + threadIdx.x * 4 + 2);
         local_out2.y = local_out2.y * (__nv_bfloat16)__ldg(param.input_deq_ptr + threadIdx.x * 4 + 3);
-    }
-    else if (QUANTIZE_MODE == 1) {
+    } else if (QUANTIZE_MODE == 1) {
         // For per tensor quantization, assume x = input, s = input_scalar, x' = x * s
         // Then Norm(x') = E[x'] / sqrt(V[x']).
         // Because E[x'] = E[sx] = sE[x], V[X'] = V[sx] = s^2 * V[x]
@@ -309,8 +299,7 @@ __global__ void LayerNormE4M3x4(FP8LayerNormParam<T1, T2> param)
         output_scalar[1] = (float)__ldg(param.output_qua_ptr + threadIdx.x * 4 + 1);
         output_scalar[2] = (float)__ldg(param.output_qua_ptr + threadIdx.x * 4 + 2);
         output_scalar[3] = (float)__ldg(param.output_qua_ptr + threadIdx.x * 4 + 3);
-    }
-    else if (QUANTIZE_MODE == 1 || true) {
+    } else if (QUANTIZE_MODE == 1 || true) {
         output_scalar[0] = (float)__ldg(param.output_qua_ptr);
         output_scalar[1] = (float)__ldg(param.output_qua_ptr);
         output_scalar[2] = (float)__ldg(param.output_qua_ptr);
@@ -343,16 +332,13 @@ __global__ void LayerNormE4M3x4(FP8LayerNormParam<T1, T2> param)
     LayerNorm<T1, T2, QUANTIZE_MODE, PACKED_SIZE><<<grid, block, 0, param.stream>>>(param);
 
 template<typename T1, typename T2, int QUANTIZE_MODE>
-void invokeFP8LayerNorm(FP8LayerNormParam<T1, T2> param)
-{
+void invokeFP8LayerNorm(FP8LayerNormParam<T1, T2> param) {
     assert(param.n % 2 == 0);
     if (param.n % 8 == 0) {
         LN_KERNEL(8);
-    }
-    else if (param.n % 4 == 0) {
+    } else if (param.n % 4 == 0) {
         LN_KERNEL(4);
-    }
-    else if (param.n % 2 == 0) {
+    } else if (param.n % 2 == 0) {
         LN_KERNEL(2);
     }
 }
@@ -379,8 +365,7 @@ __global__ void generalFP8IOPostLayerNorm(T1*       normed_output,
                                           const float* input_scalar,
                                           const float* output_scalar,
                                           int          m,
-                                          int          n)
-{
+                                          int          n) {
     int tid = threadIdx.x;
 
     __shared__ float s_mean;
@@ -421,8 +406,7 @@ __global__ void generalFP8IOPostLayerNorm(T1*       normed_output,
 }
 
 template<typename T1, typename T2, int QUANTIZE_MODE>
-void invokeGeneralFP8IOPostLayerNorm(GeneralFP8IOPostLayerNormParam<T1, T2> param)
-{
+void invokeGeneralFP8IOPostLayerNorm(GeneralFP8IOPostLayerNormParam<T1, T2> param) {
     dim3 grid(param.m);
     dim3 block(min(param.n, 1024));
 
@@ -461,8 +445,7 @@ __global__ void generalFP8AddBiasResidualLayerNorm(const T2* __restrict input,
                                                    const float* input_scale,
                                                    const float* output_scale,
                                                    int          m,
-                                                   int          n)
-{
+                                                   int          n) {
     int tid = threadIdx.x;
 
     __shared__ float s_mean;
@@ -521,8 +504,7 @@ __global__ void generalFP8AddBiasResidualLayerNorm(const __nv_bfloat162_2_xy* __
                                                    const float*         input_scale,
                                                    const float*         output_scale,
                                                    int                  m,
-                                                   int                  n)
-{
+                                                   int                  n) {
     using bf16_4 = __nv_bfloat162_2_xy;
     using bf16_2 = __nv_bfloat162;
     using fp8_4  = __nv_fp8x4_e4m3;
@@ -596,8 +578,7 @@ __global__ void generalFP8AddBiasResidualLayerNorm(const __nv_bfloat162* __restr
                                                    const float*     input_scale,
                                                    const float*     output_scale,
                                                    int              m,
-                                                   int              n)
-{
+                                                   int              n) {
     using bf16_2 = __nv_bfloat162;
     using fp8_2  = __nv_fp8x2_e4m3;
     int tid      = threadIdx.x;
@@ -651,8 +632,7 @@ __global__ void generalFP8AddBiasResidualLayerNorm(const __nv_bfloat162* __restr
 }
 
 template<typename T1, typename T2, int QUANTIZE_MODE>
-void invokeGeneralFP8AddBiasResidualPreLayerNorm(GeneralFP8AddBiasResidualPreLayerNormParam<T1, T2> param)
-{
+void invokeGeneralFP8AddBiasResidualPreLayerNorm(GeneralFP8AddBiasResidualPreLayerNormParam<T1, T2> param) {
     dim3 grid(param.m);
 
     /* For general cases, n is equal to hidden_units, e.g., 512/1024.
@@ -671,8 +651,7 @@ void invokeGeneralFP8AddBiasResidualPreLayerNorm(GeneralFP8AddBiasResidualPreLay
                                                                              param.output_qua_ptr,
                                                                              param.m,
                                                                              param.n / 4);  // For gpt-3
-    }
-    else if (param.n % 2 == 0) {
+    } else if (param.n % 2 == 0) {
         dim3 block(min(param.n / 2, 1024));
         generalFP8AddBiasResidualLayerNorm<<<grid, block, 0, param.stream>>>((const __nv_bfloat162*)param.residual,
                                                                              (const __nv_bfloat162*)param.gamma,
@@ -684,8 +663,7 @@ void invokeGeneralFP8AddBiasResidualPreLayerNorm(GeneralFP8AddBiasResidualPreLay
                                                                              param.output_qua_ptr,
                                                                              param.m,
                                                                              param.n / 2);  // For gpt-3
-    }
-    else {
+    } else {
         dim3 block(min(param.n, 1024));
         if (param.n % 32 != 0) {
             block.x = 1024;
@@ -731,8 +709,8 @@ template void invokeGeneralFP8AddBiasResidualPreLayerNorm<__nv_fp8_e4m3, __nv_bf
     GeneralFP8AddBiasResidualPreLayerNormParam<__nv_fp8_e4m3, __nv_bfloat16> param);
 
 template<typename T1, typename T2, int QUANTIZE_MODE>
-__global__ void generalFP8IOAddBiasResidualPostLayerNormV1(GeneralFP8IOAddBiasResidualPostLayerNormParam<T1, T2> param)
-{
+__global__ void
+generalFP8IOAddBiasResidualPostLayerNormV1(GeneralFP8IOAddBiasResidualPostLayerNormParam<T1, T2> param) {
     int tid = threadIdx.x;
 
     __shared__ float s_mean;
@@ -749,12 +727,10 @@ __global__ void generalFP8IOAddBiasResidualPostLayerNormV1(GeneralFP8IOAddBiasRe
         // per channel
         input_scalar  = __ldg(param.input_scale + threadIdx.x);
         output_scalar = __ldg(param.output_scale);  // must per tensor because it is quantize of input tensor of GEMM
-    }
-    else if (QUANTIZE_MODE == 1) {
+    } else if (QUANTIZE_MODE == 1) {
         input_scalar  = __ldg(param.input_scale);
         output_scalar = __ldg(param.output_scale);
-    }
-    else if (QUANTIZE_MODE == QUANTIZE_MODE::PER_CHANNEL_WEIGHT_PER_TENSOR_ACT) {
+    } else if (QUANTIZE_MODE == QUANTIZE_MODE::PER_CHANNEL_WEIGHT_PER_TENSOR_ACT) {
         input_scalar = __ldg(param.input_scale) * __ldg(param.input_scale_2 + threadIdx.x)
                        * (param.input_scale_2_min == nullptr ? 1.0f : ldg(param.input_scale_2_min));
         output_scalar = __ldg(param.output_scale);
@@ -798,8 +774,8 @@ __global__ void generalFP8IOAddBiasResidualPostLayerNormV1(GeneralFP8IOAddBiasRe
 }
 
 template<typename T1, typename T2>
-__global__ void generalFP8IOAddBiasResidualPostLayerNormV2(GeneralFP8IOAddBiasResidualPostLayerNormParam<T1, T2> param)
-{
+__global__ void
+generalFP8IOAddBiasResidualPostLayerNormV2(GeneralFP8IOAddBiasResidualPostLayerNormParam<T1, T2> param) {
     using T1_4 = __nv_fp8x4_e4m3;
     using T2_2 = typename TypeConverter<T2>::Type;
     __shared__ float s_mean;
@@ -876,8 +852,8 @@ __global__ void generalFP8IOAddBiasResidualPostLayerNormV2(GeneralFP8IOAddBiasRe
 }
 
 template<typename T1, typename T2, int ELEMENT_PER_THREAD, int WARP_NUM>
-__global__ void generalFP8IOAddBiasResidualPostLayerNormV3(GeneralFP8IOAddBiasResidualPostLayerNormParam<T1, T2> param)
-{
+__global__ void
+generalFP8IOAddBiasResidualPostLayerNormV3(GeneralFP8IOAddBiasResidualPostLayerNormParam<T1, T2> param) {
     // Each warp handle one row. So, we can save the cost of sync of block.
     // But when param.m is small, the launched blocks are too small the performance is worse
     // than V2.
@@ -964,8 +940,7 @@ __global__ void generalFP8IOAddBiasResidualPostLayerNormV3(GeneralFP8IOAddBiasRe
 }
 
 template<typename T1, typename T2, int QUANTIZE_MODE>
-void invokeGeneralFP8IOAddBiasResidualPostLayerNorm(GeneralFP8IOAddBiasResidualPostLayerNormParam<T1, T2> param)
-{
+void invokeGeneralFP8IOAddBiasResidualPostLayerNorm(GeneralFP8IOAddBiasResidualPostLayerNormParam<T1, T2> param) {
     dim3 grid(param.m);
     dim3 block(min(param.n, 1024));
     RTP_LLM_CHECK(param.n <= 1024);
@@ -983,18 +958,15 @@ void invokeGeneralFP8IOAddBiasResidualPostLayerNorm(GeneralFP8IOAddBiasResidualP
             if (param.n == 1024) {
                 generalFP8IOAddBiasResidualPostLayerNormV3<T1, T2, 8, WARP_NUM>
                     <<<grid, block, 0, param.stream>>>(param);
-            }
-            else if (param.n == 768) {
+            } else if (param.n == 768) {
                 generalFP8IOAddBiasResidualPostLayerNormV3<T1, T2, 6, WARP_NUM>
                     <<<grid, block, 0, param.stream>>>(param);
             }
-        }
-        else {
+        } else {
             block.x /= 4;
             generalFP8IOAddBiasResidualPostLayerNormV2<T1, T2><<<grid, block, 0, param.stream>>>(param);
         }
-    }
-    else {
+    } else {
         generalFP8IOAddBiasResidualPostLayerNormV1<T1, T2, QUANTIZE_MODE><<<grid, block, 0, param.stream>>>(param);
     }
 }
@@ -1010,8 +982,7 @@ invokeGeneralFP8IOAddBiasResidualPostLayerNorm<__nv_fp8_e4m3, __nv_bfloat16, PER
     GeneralFP8IOAddBiasResidualPostLayerNormParam<__nv_fp8_e4m3, __nv_bfloat16> param);
 
 template<typename T1, typename T2, int ELEMENT_PER_THREAD>
-__global__ void removePaddingEmbLookupLayerNormFP8Out(RemovePaddingEmbLookupLayerNormFP8OutParam<T1, T2> param)
-{
+__global__ void removePaddingEmbLookupLayerNormFP8Out(RemovePaddingEmbLookupLayerNormFP8OutParam<T1, T2> param) {
     float local_outs[ELEMENT_PER_THREAD];
 
     __shared__ float s_mean;
@@ -1058,8 +1029,7 @@ __global__ void removePaddingEmbLookupLayerNormFP8Out(RemovePaddingEmbLookupLaye
 }
 
 template<typename T1, typename T2>
-__global__ void removePaddingEmbLookupLayerNormFP8OutV2(RemovePaddingEmbLookupLayerNormFP8OutParam<T1, T2> param)
-{
+__global__ void removePaddingEmbLookupLayerNormFP8OutV2(RemovePaddingEmbLookupLayerNormFP8OutParam<T1, T2> param) {
     using T1_4 = __nv_fp8x4_e4m3;
     using T2_2 = typename TypeConverter<T2>::Type;
 
@@ -1127,8 +1097,7 @@ __global__ void removePaddingEmbLookupLayerNormFP8OutV2(RemovePaddingEmbLookupLa
 }
 
 template<typename T1, typename T2>
-void invokeRemovePaddingEmbLookupLayerNormFP8Out(RemovePaddingEmbLookupLayerNormFP8OutParam<T1, T2> param)
-{
+void invokeRemovePaddingEmbLookupLayerNormFP8Out(RemovePaddingEmbLookupLayerNormFP8OutParam<T1, T2> param) {
     dim3 grid(param.m);
     dim3 block(min(param.n, 1024));
     RTP_LLM_CHECK(param.n <= 1024);
@@ -1144,8 +1113,7 @@ void invokeRemovePaddingEmbLookupLayerNormFP8Out(RemovePaddingEmbLookupLayerNorm
         if (block.x % 4 == 0) {
             block.x /= 4;
             removePaddingEmbLookupLayerNormFP8OutV2<T1, T2><<<grid, block, 0, param.stream>>>(param);
-        }
-        else {
+        } else {
             removePaddingEmbLookupLayerNormFP8Out<T1, T2, 1><<<grid, block, 0, param.stream>>>(param);
         }
     }

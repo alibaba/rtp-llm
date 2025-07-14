@@ -4,15 +4,14 @@
 #include "rtp_llm/cpp/kernels/banRepeatNgram.h"
 #include "rtp_llm/cpp/core/BufferHelper.h"
 #include <cuda_runtime.h>
-#include <cuda_fp16.h> // For half
-#include <cuda_bf16.h> // For __nv_bfloat16
+#include <cuda_fp16.h>  // For half
+#include <cuda_bf16.h>  // For __nv_bfloat16
 
 using namespace std;
 using namespace rtp_llm;
 
 class CudaMaskLogitsOpTest: public DeviceTestBase {
 public:
-
 protected:
 };
 
@@ -29,19 +28,21 @@ TEST_F(CudaMaskLogitsOpTest, testMaskLogits) {
         device_ = new CudaDevice(DeviceInitParams());
         device_->init();
 
-        size_t batch_size = 4;
-        BufferPtr logits = createBuffer<float>({batch_size, 10}, {
-            0, 0, 0, 0.1, 0.2, 0.3, 0, 0, 0, 0.01,
-            0.987, 0.887, 0.99999, 0.1, 0.2, 0.3, 0, 0, 0.99, 0.989,
-            0.221, 0, 0, 0.1, 0.2, 0.321, 0, 0.4432, 0.44, 0.01,
-            0.221, 0, 0, 0.1, 0.2, 0.321, 0, 0.4432, 0.44, 0.01,
-        },  rtp_llm::AllocationType::DEVICE);
-        BufferPtr vocab_mask = createBuffer<uint8_t>({batch_size, 10}, {
-            0, 1, 0, 1, 0, 0, 0, 0, 0, 0,
-            1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-            0, 0, 0, 0, 1, 0, 0, 0, 0, 0,
-        },  rtp_llm::AllocationType::DEVICE);
+        size_t    batch_size = 4;
+        BufferPtr logits     = createBuffer<float>({batch_size, 10},
+                                                   {
+                                                   0,     0,     0,       0.1, 0.2, 0.3,   0, 0,      0,    0.01,
+                                                   0.987, 0.887, 0.99999, 0.1, 0.2, 0.3,   0, 0,      0.99, 0.989,
+                                                   0.221, 0,     0,       0.1, 0.2, 0.321, 0, 0.4432, 0.44, 0.01,
+                                                   0.221, 0,     0,       0.1, 0.2, 0.321, 0, 0.4432, 0.44, 0.01,
+                                               },
+                                               rtp_llm::AllocationType::DEVICE);
+        BufferPtr vocab_mask = createBuffer<uint8_t>({batch_size, 10},
+                                                     {
+                                                         0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                                         0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0,
+                                                     },
+                                                     rtp_llm::AllocationType::DEVICE);
 
         printBufferData(*logits, "MYDEBUG_BEFORE_MASK_LOGITS");
         device_->maskLogits(*logits, *vocab_mask);
@@ -50,10 +51,10 @@ TEST_F(CudaMaskLogitsOpTest, testMaskLogits) {
         auto logits_hosts = getBufferValues<float>(*logits);
 
         std::vector<float> expect_vec = {
-            0, -INFINITY, 0, -INFINITY, 0.2, 0.3, 0, 0, 0, 0.01,
-            -INFINITY, 0.887, 0.99999, 0.1, 0.2, 0.3, 0, 0, 0.99, 0.989,
-            0.221, 0, 0, 0.1, 0.2, 0.321, 0, 0.4432, 0.44, -INFINITY,
-            0.221, 0, 0, 0.1, -INFINITY, 0.321, 0, 0.4432, 0.44, 0.01,
+            0,         -INFINITY, 0,       -INFINITY, 0.2,       0.3,   0, 0,      0,    0.01,
+            -INFINITY, 0.887,     0.99999, 0.1,       0.2,       0.3,   0, 0,      0.99, 0.989,
+            0.221,     0,         0,       0.1,       0.2,       0.321, 0, 0.4432, 0.44, -INFINITY,
+            0.221,     0,         0,       0.1,       -INFINITY, 0.321, 0, 0.4432, 0.44, 0.01,
         };
 
         ASSERT_EQ(logits_hosts.size(), expect_vec.size()) << "Vectors x and y are of unequal length";
@@ -65,15 +66,35 @@ TEST_F(CudaMaskLogitsOpTest, testMaskLogits) {
         device_ = new CudaDevice(DeviceInitParams());
         device_->init();
 
-        size_t batch_size = 2;
-        BufferPtr logits = createBuffer<half>({batch_size, 5}, {
-            __float2half(0), __float2half(0), __float2half(0), __float2half(0.1), __float2half(0.2), 
-            __float2half(0.987), __float2half(0.887), __float2half(0.99999), __float2half(0.1), __float2half(0.2), 
-        },  rtp_llm::AllocationType::DEVICE);
-        BufferPtr vocab_mask = createBuffer<uint8_t>({batch_size, 5}, {
-            0, 1, 0, 1, 0,
-            1, 0, 0, 0, 0,
-        },  rtp_llm::AllocationType::DEVICE);
+        size_t    batch_size = 2;
+        BufferPtr logits     = createBuffer<half>({batch_size, 5},
+                                                  {
+                                                  __float2half(0),
+                                                  __float2half(0),
+                                                  __float2half(0),
+                                                  __float2half(0.1),
+                                                  __float2half(0.2),
+                                                  __float2half(0.987),
+                                                  __float2half(0.887),
+                                                  __float2half(0.99999),
+                                                  __float2half(0.1),
+                                                  __float2half(0.2),
+                                              },
+                                              rtp_llm::AllocationType::DEVICE);
+        BufferPtr vocab_mask = createBuffer<uint8_t>({batch_size, 5},
+                                                     {
+                                                         0,
+                                                         1,
+                                                         0,
+                                                         1,
+                                                         0,
+                                                         1,
+                                                         0,
+                                                         0,
+                                                         0,
+                                                         0,
+                                                     },
+                                                     rtp_llm::AllocationType::DEVICE);
 
         printBufferData(*logits, "MYDEBUG_BEFORE_MASK_LOGITS");
         device_->maskLogits(*logits, *vocab_mask);
@@ -82,8 +103,16 @@ TEST_F(CudaMaskLogitsOpTest, testMaskLogits) {
         auto logits_hosts = getBufferValues<half>(*logits);
 
         std::vector<half> expect_vec = {
-            __float2half(0), -CUDART_INF_FP16, __float2half(0), -CUDART_INF_FP16, __float2half(0.2), 
-            -CUDART_INF_FP16, __float2half(0.887), __float2half(0.99999), __float2half(0.1), __float2half(0.2), 
+            __float2half(0),
+            -CUDART_INF_FP16,
+            __float2half(0),
+            -CUDART_INF_FP16,
+            __float2half(0.2),
+            -CUDART_INF_FP16,
+            __float2half(0.887),
+            __float2half(0.99999),
+            __float2half(0.1),
+            __float2half(0.2),
         };
 
         ASSERT_EQ(logits_hosts.size(), expect_vec.size()) << "Vectors x and y are of unequal length";
@@ -95,15 +124,35 @@ TEST_F(CudaMaskLogitsOpTest, testMaskLogits) {
         device_ = new CudaDevice(DeviceInitParams());
         device_->init();
 
-        size_t batch_size = 2;
-        BufferPtr logits = createBuffer<__nv_bfloat16>({batch_size, 5}, {
-            __float2bfloat16(0), __float2bfloat16(0), __float2bfloat16(0), __float2bfloat16(0.1), __float2bfloat16(0.2), 
-            __float2bfloat16(0.987), __float2bfloat16(0.887), __float2bfloat16(0.99999), __float2bfloat16(0.1), __float2bfloat16(0.2), 
-        },  rtp_llm::AllocationType::DEVICE);
-        BufferPtr vocab_mask = createBuffer<uint8_t>({batch_size, 5}, {
-            0, 1, 0, 1, 0,
-            1, 0, 0, 0, 0,
-        },  rtp_llm::AllocationType::DEVICE);
+        size_t    batch_size = 2;
+        BufferPtr logits     = createBuffer<__nv_bfloat16>({batch_size, 5},
+                                                           {
+                                                           __float2bfloat16(0),
+                                                           __float2bfloat16(0),
+                                                           __float2bfloat16(0),
+                                                           __float2bfloat16(0.1),
+                                                           __float2bfloat16(0.2),
+                                                           __float2bfloat16(0.987),
+                                                           __float2bfloat16(0.887),
+                                                           __float2bfloat16(0.99999),
+                                                           __float2bfloat16(0.1),
+                                                           __float2bfloat16(0.2),
+                                                       },
+                                                       rtp_llm::AllocationType::DEVICE);
+        BufferPtr vocab_mask = createBuffer<uint8_t>({batch_size, 5},
+                                                     {
+                                                         0,
+                                                         1,
+                                                         0,
+                                                         1,
+                                                         0,
+                                                         1,
+                                                         0,
+                                                         0,
+                                                         0,
+                                                         0,
+                                                     },
+                                                     rtp_llm::AllocationType::DEVICE);
 
         printBufferData(*logits, "MYDEBUG_BEFORE_MASK_LOGITS");
         device_->maskLogits(*logits, *vocab_mask);
@@ -112,8 +161,16 @@ TEST_F(CudaMaskLogitsOpTest, testMaskLogits) {
         auto logits_hosts = getBufferValues<__nv_bfloat16>(*logits);
 
         std::vector<__nv_bfloat16> expect_vec = {
-            __float2bfloat16(0), -CUDART_INF_BF16, __float2bfloat16(0), -CUDART_INF_BF16, __float2bfloat16(0.2), 
-            -CUDART_INF_BF16, __float2bfloat16(0.887), __float2bfloat16(0.99999), __float2bfloat16(0.1), __float2bfloat16(0.2), 
+            __float2bfloat16(0),
+            -CUDART_INF_BF16,
+            __float2bfloat16(0),
+            -CUDART_INF_BF16,
+            __float2bfloat16(0.2),
+            -CUDART_INF_BF16,
+            __float2bfloat16(0.887),
+            __float2bfloat16(0.99999),
+            __float2bfloat16(0.1),
+            __float2bfloat16(0.2),
         };
 
         ASSERT_EQ(logits_hosts.size(), expect_vec.size()) << "Vectors x and y are of unequal length";

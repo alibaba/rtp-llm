@@ -30,9 +30,9 @@ __global__ void mla_merge_transpose_kernel(T*  q,
         return;
     }
 
-    int bs_idx   = blockIdx.x;
-    int head_idx = blockIdx.y;
-    int rope_idx = tidx - nope_head_dim;
+    int bs_idx      = blockIdx.x;
+    int head_idx    = blockIdx.y;
+    int rope_idx    = tidx - nope_head_dim;
     int hidden_size = head_num * nope_rope_dim;
 
     int q_offset      = bs_idx * head_num * nope_rope_dim + head_idx * nope_rope_dim + tidx;
@@ -43,7 +43,7 @@ __global__ void mla_merge_transpose_kernel(T*  q,
     int dst_base_offset = bs_idx * 3 * hidden_size + head_idx * nope_rope_dim + tidx;
 
     if (tidx < nope_head_dim) {
-        qkv[dst_base_offset]                 = q[q_offset];
+        qkv[dst_base_offset]               = q[q_offset];
         qkv[dst_base_offset + hidden_size] = k_nope[k_nope_offset];
     } else {
         int trans_idx    = rope_idx / 2;
@@ -77,16 +77,16 @@ void invokeMlaMergeTranspose(T*           q,
     dim3 grid(token_num, head_num);
     dim3 block(nope_head_dim + rope_head_dim);
 
-    mla_merge_transpose_kernel<T>
-        <<<grid, block, 0, stream>>>(q, k_nope, k_rope, v, qkv, token_num, head_num, nope_head_dim, rope_head_dim, v_head_dim);
+    mla_merge_transpose_kernel<T><<<grid, block, 0, stream>>>(
+        q, k_nope, k_rope, v, qkv, token_num, head_num, nope_head_dim, rope_head_dim, v_head_dim);
 }
 
 #define INSTANTIATE_MLA_MERGE_TRANSPOSE(T)                                                                             \
-    template void invokeMlaMergeTranspose<T>(T*           q,                                                           \
-                                             T*           k_nope,                                                      \
-                                             T*           k_rope,                                                      \
-                                             T*           v,                                                           \
-                                             T*           qkv,                                                         \
+    template void invokeMlaMergeTranspose<T>(T * q,                                                                    \
+                                             T * k_nope,                                                               \
+                                             T * k_rope,                                                               \
+                                             T * v,                                                                    \
+                                             T * qkv,                                                                  \
                                              int          token_num,                                                   \
                                              int          head_num,                                                    \
                                              int          nope_head_dim,                                               \
@@ -177,16 +177,16 @@ void invokeMlaQKVMerge(T*           q,
 }
 
 #define INSTANTIATE_MLA_QKV_MERGE(T)                                                                                   \
-    template void invokeMlaQKVMerge<T>(T*           q,                                                          \
-                                       T*           k_nope,                                                          \
-                                       T*           k_rope,                                                          \
-                                       T*           v,                                                               \
-                                       T*           qkv,                                                             \
-                                       int          token_num,                                                       \
-                                       int          head_num,                                                        \
-                                       int          nope_head_dim,                                                   \
-                                       int          rope_head_dim,                                                   \
-                                       int          v_head_dim,                                                      \
+    template void invokeMlaQKVMerge<T>(T * q,                                                                          \
+                                       T * k_nope,                                                                     \
+                                       T * k_rope,                                                                     \
+                                       T * v,                                                                          \
+                                       T * qkv,                                                                        \
+                                       int          token_num,                                                         \
+                                       int          head_num,                                                          \
+                                       int          nope_head_dim,                                                     \
+                                       int          rope_head_dim,                                                     \
+                                       int          v_head_dim,                                                        \
                                        cudaStream_t stream);
 
 INSTANTIATE_MLA_QKV_MERGE(float);

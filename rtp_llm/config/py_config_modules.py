@@ -1,26 +1,50 @@
-from typing import Optional
 import os
-from rtp_llm.ops import ParallelismDistributedConfig, ConcurrencyConfig, ProfilingDebugLoggingConfig, DeviceResourceConfig, FMHAConfig, HWKernelConfig, KVCacheConfig, MiscellaneousConfig, ModelSpecificConfig, MoeConfig, ServiceDiscoveryConfig, SchedulerConfig, BatchDecodeSchedulerConfig, FIFOSchedulerConfig, CacheStoreConfig, SamplerConfig, SpeculativeExecutionConfig, ArpcConfig
+from typing import Optional
+
+from rtp_llm.ops import (
+    ArpcConfig,
+    BatchDecodeSchedulerConfig,
+    CacheStoreConfig,
+    ConcurrencyConfig,
+    DeviceResourceConfig,
+    FIFOSchedulerConfig,
+    FMHAConfig,
+    HWKernelConfig,
+    KVCacheConfig,
+    MiscellaneousConfig,
+    ModelSpecificConfig,
+    MoeConfig,
+    ParallelismDistributedConfig,
+    ProfilingDebugLoggingConfig,
+    SamplerConfig,
+    SchedulerConfig,
+    ServiceDiscoveryConfig,
+    SpeculativeExecutionConfig,
+)
 
 DEFAULT_START_PORT = 8088
 MASTER_INFO_PORT_NUM = 11
 MIN_WORKER_INFO_PORT_NUM = 7
 WORKER_INFO_PORT_NUM = MIN_WORKER_INFO_PORT_NUM
 
-def get_env_int(name:str, default:int=-1):
+
+def get_env_int(name: str, default: int = -1):
     v = os.environ.get(name, None)
     return int(v) if v is not None and v != "" else default
 
-def get_env_str(name:str, default:str=""):
+
+def get_env_str(name: str, default: str = ""):
     v = os.environ.get(name, None)
     return v if v is not None else default
 
-def get_env_bool(name:str, default:bool=False):
+
+def get_env_bool(name: str, default: bool = False):
     ## in fact, we can always get value from env, if that's not specified, we return default value
     v = os.environ.get(name, None)
     if v is None or v == "":
         return default
     return v.lower() == "1" or v.lower() == "on" or v.lower() == "true"
+
 
 class ServerConfig:
     def __init__(self):
@@ -30,10 +54,16 @@ class ServerConfig:
         self.fronted_server_id = 0
 
     def update_from_env(self):
-        self.fronted_server_count = int(os.environ.get("FRONTED_SERVER_COUNT", self.fronted_server_count))
+        self.fronted_server_count = int(
+            os.environ.get("FRONTED_SERVER_COUNT", self.fronted_server_count)
+        )
         self.start_port = int(os.environ.get("START_PORT", self.start_port))
-        self.timeout_keep_alive = int(os.environ.get("TIMEOUT_KEEP_ALIVE", self.timeout_keep_alive))
-        self.fronted_server_id = int(os.environ.get("FRONTED_SERVER_ID", self.fronted_server_id))
+        self.timeout_keep_alive = int(
+            os.environ.get("TIMEOUT_KEEP_ALIVE", self.timeout_keep_alive)
+        )
+        self.fronted_server_id = int(
+            os.environ.get("FRONTEND_SERVER_ID", self.fronted_server_id)
+        )
 
     def to_string(self):
         return (
@@ -43,15 +73,16 @@ class ServerConfig:
             f"fronted_server_id: {self.fronted_server_id}"
         )
 
+
 class ModelConfig:
     def __init__(self):
         self.extra_data_path: str = ""
         self.local_extra_data_path: Optional[str] = None
         self.tokenizer_path: str = ""
-        self.act_type: str = 'FP16'
+        self.act_type: str = "FP16"
         self.use_float32: bool = False
         self.original_checkpoint_path: Optional[str] = None
-        self.mla_ops_type: str = 'AUTO'
+        self.mla_ops_type: str = "AUTO"
         self.parallel_batch: bool = False
         self.ft_plugin_path: Optional[str] = None
         self.weight_type: Optional[str] = None
@@ -64,11 +95,15 @@ class ModelConfig:
 
     def update_from_env(self):
         self.extra_data_path = os.environ.get("EXTRA_DATA_PATH", self.extra_data_path)
-        self.local_extra_data_path = os.environ.get("LOCAL_EXTRA_DATA_PATH", self.local_extra_data_path)
+        self.local_extra_data_path = os.environ.get(
+            "LOCAL_EXTRA_DATA_PATH", self.local_extra_data_path
+        )
         self.tokenizer_path = os.environ.get("TOKENIZER_PATH", self.tokenizer_path)
         self.act_type = os.environ.get("ACT_TYPE", self.act_type)
         self.use_float32 = get_env_bool("USE_FLOAT32", self.use_float32)
-        self.original_checkpoint_path = os.environ.get("ORIGINAL_CHECKPOINT_PATH", self.original_checkpoint_path)
+        self.original_checkpoint_path = os.environ.get(
+            "ORIGINAL_CHECKPOINT_PATH", self.original_checkpoint_path
+        )
         self.mla_ops_type = os.environ.get("MLA_OPS_TYPE", self.mla_ops_type)
         self.parallel_batch = get_env_bool("PARALLEL_BATCH", self.parallel_batch)
         self.ft_plugin_path = os.environ.get("FT_PLUGIN_PATH", self.ft_plugin_path)
@@ -80,23 +115,24 @@ class ModelConfig:
         self.ptuning_path = os.environ.get("PTUNING_PATH", self.ptuning_path)
 
     def to_string(self):
-            return (
-                f"extra_data_path: {self.extra_data_path}\n"
-                f"local_extra_data_path: {self.local_extra_data_path}\n"
-                f"tokenizer_path: {self.tokenizer_path}\n"
-                f"act_type: {self.act_type}\n"
-                f"use_float32: {self.use_float32}\n"
-                f"original_checkpoint_path: {self.original_checkpoint_path}\n"
-                f"mla_ops_type: {self.mla_ops_type}\n"
-                f"parallel_batch: {self.parallel_batch}\n"
-                f"ft_plugin_path: {self.ft_plugin_path}\n"
-                f"weight_type: {self.weight_type}\n"
-                f"task_type: {self.task_type}\n"
-                f"model_type: {self.model_type}\n"
-                f"checkpoint_path: {self.checkpoint_path}\n"
-                f"oss_endpoint: {self.oss_endpoint}\n"
-                f"ptuning_path: {self.ptuning_path}"
-            )
+        return (
+            f"extra_data_path: {self.extra_data_path}\n"
+            f"local_extra_data_path: {self.local_extra_data_path}\n"
+            f"tokenizer_path: {self.tokenizer_path}\n"
+            f"act_type: {self.act_type}\n"
+            f"use_float32: {self.use_float32}\n"
+            f"original_checkpoint_path: {self.original_checkpoint_path}\n"
+            f"mla_ops_type: {self.mla_ops_type}\n"
+            f"parallel_batch: {self.parallel_batch}\n"
+            f"ft_plugin_path: {self.ft_plugin_path}\n"
+            f"weight_type: {self.weight_type}\n"
+            f"task_type: {self.task_type}\n"
+            f"model_type: {self.model_type}\n"
+            f"checkpoint_path: {self.checkpoint_path}\n"
+            f"oss_endpoint: {self.oss_endpoint}\n"
+            f"ptuning_path: {self.ptuning_path}"
+        )
+
 
 # Todo: 合并到c++的SpeculativeExecutionConfig
 class PySpeculativeExecutionConfig:
@@ -106,9 +142,13 @@ class PySpeculativeExecutionConfig:
         self.sp_checkpoint_path: Optional[str] = None
 
     def update_from_env(self):
-        self.gen_num_per_circle = int(os.environ.get("GEN_NUM_PER_CIRCLE", self.gen_num_per_circle))
+        self.gen_num_per_circle = int(
+            os.environ.get("GEN_NUM_PER_CIRCLE", self.gen_num_per_circle)
+        )
         self.sp_quantization = os.environ.get("SP_QUANTIZATION", self.sp_quantization)
-        self.sp_checkpoint_path = os.environ.get("SP_CHECKPOINT_PATH", self.sp_checkpoint_path)
+        self.sp_checkpoint_path = os.environ.get(
+            "SP_CHECKPOINT_PATH", self.sp_checkpoint_path
+        )
 
     def to_string(self):
         return (
@@ -117,9 +157,10 @@ class PySpeculativeExecutionConfig:
             f"sp_checkpoint_path: {self.sp_checkpoint_path}"
         )
 
+
 class LoraConfig:
     def __init__(self):
-        self.lora_info: str = '{}'
+        self.lora_info: str = "{}"
         self.merge_lora: bool = True
 
     def update_from_env(self):
@@ -129,10 +170,8 @@ class LoraConfig:
             self.merge_lora = merge_lora.lower() == "true"
 
     def to_string(self):
-        return (
-            f"lora_info: {self.lora_info}\n"
-            f"merge_lora: {self.merge_lora}"
-        )
+        return f"lora_info: {self.lora_info}\n" f"merge_lora: {self.merge_lora}"
+
 
 class LoadConfig:
     def __init__(self):
@@ -143,11 +182,15 @@ class LoadConfig:
 
     def update_from_env(self):
         self.phy2log_path = os.environ.get("PHY2LOG_PATH", self.phy2log_path)
-        self.converter_num_per_gpu = int(os.environ.get("CONVERTER_NUM_PER_GPU", self.converter_num_per_gpu))
+        self.converter_num_per_gpu = int(
+            os.environ.get("CONVERTER_NUM_PER_GPU", self.converter_num_per_gpu)
+        )
         tokenizers_parallelism = os.environ.get("TOKENIZERS_PARALLELISM")
         if tokenizers_parallelism is not None:
             self.tokenizers_parallelism = tokenizers_parallelism.lower() == "true"
-        self.load_ckpt_num_process = int(os.environ.get("CKPT_NUM_PROCESS", self.load_ckpt_num_process))
+        self.load_ckpt_num_process = int(
+            os.environ.get("LOAD_CKPT_NUM_PROCESS", self.load_ckpt_num_process)
+        )
 
     def to_string(self):
         return (
@@ -157,18 +200,27 @@ class LoadConfig:
             f"load_ckpt_num_process: {self.load_ckpt_num_process}"
         )
 
+
 class RenderConfig:
     def __init__(self):
         self.model_template_type: Optional[str] = None
-        self.default_chat_template_key: str = 'default'
-        self.default_tool_use_template_key: str = 'tool_use'
-        self.llava_chat_template: str = ''
+        self.default_chat_template_key: str = "default"
+        self.default_tool_use_template_key: str = "tool_use"
+        self.llava_chat_template: str = ""
 
     def update_from_env(self):
-        self.model_template_type = os.environ.get("MODEL_TEMPLATE_TYPE", self.model_template_type)
-        self.default_chat_template_key = os.environ.get("DEFAULT_CHAT_TEMPLATE_KEY", self.default_chat_template_key)
-        self.default_tool_use_template_key = os.environ.get("DEFAULT_TOOL_USE_TEMPLATE_KEY", self.default_tool_use_template_key)
-        self.llava_chat_template = os.environ.get("LLAVA_CHAT_TEMPLATE", self.llava_chat_template)
+        self.model_template_type = os.environ.get(
+            "MODEL_TEMPLATE_TYPE", self.model_template_type
+        )
+        self.default_chat_template_key = os.environ.get(
+            "DEFAULT_CHAT_TEMPLATE_KEY", self.default_chat_template_key
+        )
+        self.default_tool_use_template_key = os.environ.get(
+            "DEFAULT_TOOL_USE_TEMPLATE_KEY", self.default_tool_use_template_key
+        )
+        self.llava_chat_template = os.environ.get(
+            "LLAVA_CHAT_TEMPLATE", self.llava_chat_template
+        )
 
     def to_string(self):
         return (
@@ -177,6 +229,7 @@ class RenderConfig:
             f"default_tool_use_template_key: {self.default_tool_use_template_key}\n"
             f"llava_chat_template: {self.llava_chat_template}"
         )
+
 
 class GangConfig:
     def __init__(self):
@@ -193,13 +246,25 @@ class GangConfig:
         fake_gang_env = os.environ.get("FAKE_GANG_ENV")
         if fake_gang_env is not None:
             self.fake_gang_env = fake_gang_env.lower() == "true"
-        self.gang_annocation_path = os.environ.get("GANG_ANNOCATION_PATH", self.gang_annocation_path)
-        self.gang_config_string = os.environ.get("GANG_CONFIG_STRING", self.gang_config_string)
+        self.gang_annocation_path = os.environ.get(
+            "GANG_ANNOCATION_PATH", self.gang_annocation_path
+        )
+        self.gang_config_string = os.environ.get(
+            "GANG_CONFIG_STRING", self.gang_config_string
+        )
         self.zone_name = os.environ.get("ZONE_NAME", self.zone_name)
-        self.distribute_config_file = os.environ.get("DISTRIBUTE_CONFIG_FILE", self.distribute_config_file)
-        self.dist_barrier_timeout = int(os.environ.get("DIST_BARRIER_TIMEOUT", self.dist_barrier_timeout))
-        self.gang_sleep_time = int(os.environ.get("GANG_SLEEP_TIME", self.gang_sleep_time))
-        self.gang_timeout_min = int(os.environ.get("GANG_TIMEOUT_MIN", self.gang_timeout_min))
+        self.distribute_config_file = os.environ.get(
+            "DISTRIBUTE_CONFIG_FILE", self.distribute_config_file
+        )
+        self.dist_barrier_timeout = int(
+            os.environ.get("DIST_BARRIER_TIMEOUT", self.dist_barrier_timeout)
+        )
+        self.gang_sleep_time = int(
+            os.environ.get("GANG_SLEEP_TIME", self.gang_sleep_time)
+        )
+        self.gang_timeout_min = int(
+            os.environ.get("GANG_TIMEOUT_MIN", self.gang_timeout_min)
+        )
 
     def to_string(self):
         return (
@@ -213,22 +278,29 @@ class GangConfig:
             f"gang_timeout_min: {self.gang_timeout_min}"
         )
 
+
 class VitConfig:
     def __init__(self):
         self.vit_separation: int = 0
         self.vit_trt: int = 0
         self.trt_cache_enabled: int = 0
         self.trt_cache_path: Optional[str] = None
-        self.download_headers: str = ''
+        self.download_headers: str = ""
         self.mm_cache_item_num: int = 10
 
     def update_from_env(self):
         self.vit_separation = int(os.environ.get("VIT_SEPARATION", self.vit_separation))
         self.vit_trt = int(os.environ.get("VIT_TRT", self.vit_trt))
-        self.trt_cache_enabled = int(os.environ.get("TRT_CACHE_ENABLED", self.trt_cache_enabled))
+        self.trt_cache_enabled = int(
+            os.environ.get("TRT_CACHE_ENABLED", self.trt_cache_enabled)
+        )
         self.trt_cache_path = os.environ.get("TRT_CACHE_PATH", self.trt_cache_path)
-        self.download_headers = os.environ.get("DOWNLOAD_HEADERS", self.download_headers)
-        self.mm_cache_item_num = int(os.environ.get("MM_CACHE_ITEM_NUM", self.mm_cache_item_num))
+        self.download_headers = os.environ.get(
+            "DOWNLOAD_HEADERS", self.download_headers
+        )
+        self.mm_cache_item_num = int(
+            os.environ.get("MM_CACHE_ITEM_NUM", self.mm_cache_item_num)
+        )
 
     def to_string(self):
         return (
@@ -239,6 +311,7 @@ class VitConfig:
             f"download_headers: {self.download_headers}\n"
             f"mm_cache_item_num: {self.mm_cache_item_num}"
         )
+
 
 class GenerateConfig:
     def __init__(self):
@@ -253,7 +326,9 @@ class GenerateConfig:
 
     def update_from_env(self):
         self.think_end_tag = os.environ.get("THINK_END_TAG", self.think_end_tag)
-        self.think_end_token_id = int(os.environ.get("THINK_END_TOKEN_ID", self.think_end_token_id))
+        self.think_end_token_id = int(
+            os.environ.get("THINK_END_TOKEN_ID", self.think_end_token_id)
+        )
         self.think_mode = int(os.environ.get("THINK_MODE", self.think_mode))
         force_stop_words = os.environ.get("FORCE_STOP_WORDS")
         if force_stop_words is not None:
@@ -261,7 +336,9 @@ class GenerateConfig:
         self.stop_words_list = os.environ.get("STOP_WORDS_LIST", self.stop_words_list)
         self.stop_words_str = os.environ.get("STOP_WORDS_STR", self.stop_words_str)
         self.think_start_tag = os.environ.get("THINK_START_TAG", self.think_start_tag)
-        self.generation_config_path = os.environ.get("GENERATION_CONFIG_PATH", self.generation_config_path)
+        self.generation_config_path = os.environ.get(
+            "GENERATION_CONFIG_PATH", self.generation_config_path
+        )
 
     def to_string(self):
         return (
@@ -275,6 +352,7 @@ class GenerateConfig:
             f"generation_config_path: {self.generation_config_path}"
         )
 
+
 class QuantizationConfig:
     def __init__(self):
         self.int8_mode: int = 0
@@ -284,26 +362,37 @@ class QuantizationConfig:
         self.int8_mode = int(os.environ.get("INT8_MODE", self.int8_mode))
 
     def to_string(self):
-        return f"int8_mode: {self.int8_mode}"
+        return f"int8_mode: {self.int8_mode}\n" f"quantization: {self.quantization}"
+
 
 class PyEplbConfig:
     def __init__(self):
-        self.eplb_mode: str = 'NONE'
+        self.eplb_mode: str = "NONE"
         self.eplb_update_time: int = 5000
         self.redundant_expert: int = 0
         self.hack_ep_single_entry: int = 0
-        self.balance_method: str = 'mix'
+        self.balance_method: str = "mix"
         self.eplb_force_repack: int = 0
         self.eplb_stats_window_size: int = 10
 
     def update_from_env(self):
         self.eplb_mode = os.environ.get("EPLB_MODE", self.eplb_mode)
-        self.eplb_update_time = int(os.environ.get("EPLB_UPDATE_TIME", self.eplb_update_time))
-        self.redundant_expert = int(os.environ.get("REDUNDANT_EXPERT", self.redundant_expert))
-        self.hack_ep_single_entry = int(os.environ.get("HACK_EP_SINGLE_ENTRY", self.hack_ep_single_entry))
+        self.eplb_update_time = int(
+            os.environ.get("EPLB_UPDATE_TIME", self.eplb_update_time)
+        )
+        self.redundant_expert = int(
+            os.environ.get("REDUNDANT_EXPERT", self.redundant_expert)
+        )
+        self.hack_ep_single_entry = int(
+            os.environ.get("HACK_EP_SINGLE_ENTRY", self.hack_ep_single_entry)
+        )
         self.balance_method = os.environ.get("BALANCE_METHOD", self.balance_method)
-        self.eplb_force_repack = int(os.environ.get("EPLB_FORCE_REPACK", self.eplb_force_repack))
-        self.eplb_stats_window_size = int(os.environ.get("EPLB_STATS_WINDOW_SIZE", self.eplb_stats_window_size))
+        self.eplb_force_repack = int(
+            os.environ.get("EPLB_FORCE_REPACK", self.eplb_force_repack)
+        )
+        self.eplb_stats_window_size = int(
+            os.environ.get("EPLB_STATS_WINDOW_SIZE", self.eplb_stats_window_size)
+        )
 
     def to_string(self):
         return (
@@ -316,6 +405,7 @@ class PyEplbConfig:
             f"eplb_stats_window_size: {self.eplb_stats_window_size}"
         )
 
+
 class PyKvCacheConfig:
     def __init__(self):
         self.int8_kv_cache: int = 0
@@ -326,8 +416,12 @@ class PyKvCacheConfig:
 
     def update_from_env(self):
         self.int8_kv_cache = int(os.environ.get("INT8_KV_CACHE", self.int8_kv_cache))
-        self.kv_cache_mem_mb = int(os.environ.get("KV_CACHE_MEM_MB", self.kv_cache_mem_mb))
-        self.seq_size_per_block = int(os.environ.get("SEQ_SIZE_PER_BLOCK", self.seq_size_per_block))
+        self.kv_cache_mem_mb = int(
+            os.environ.get("KV_CACHE_MEM_MB", self.kv_cache_mem_mb)
+        )
+        self.seq_size_per_block = int(
+            os.environ.get("SEQ_SIZE_PER_BLOCK", self.seq_size_per_block)
+        )
         self.test_block_num = int(os.environ.get("TEST_BLOCK_NUM", self.test_block_num))
         use_block_cache = os.environ.get("USE_BLOCK_CACHE")
         if use_block_cache is not None:
@@ -342,16 +436,23 @@ class PyKvCacheConfig:
             f"use_block_cache: {self.use_block_cache}"
         )
 
+
 class PyDeviceResourceConfig:
     def __init__(self):
         self.reserver_runtime_mem_mb: int = 128
-        self.specify_gpu_arch: str = ''
+        self.specify_gpu_arch: str = ""
         self.acext_gemm_config_dir: Optional[str] = None
 
     def update_from_env(self):
-        self.reserver_runtime_mem_mb = int(os.environ.get("RESERVER_RUNTIME_MEM_MB", self.reserver_runtime_mem_mb))
-        self.specify_gpu_arch = os.environ.get("SPECIFY_GPU_ARCH", self.specify_gpu_arch)
-        self.acext_gemm_config_dir = os.environ.get("ACEXT_GEMM_CONFIG_DIR", self.acext_gemm_config_dir)
+        self.reserver_runtime_mem_mb = int(
+            os.environ.get("RESERVER_RUNTIME_MEM_MB", self.reserver_runtime_mem_mb)
+        )
+        self.specify_gpu_arch = os.environ.get(
+            "SPECIFY_GPU_ARCH", self.specify_gpu_arch
+        )
+        self.acext_gemm_config_dir = os.environ.get(
+            "ACEXT_GEMM_CONFIG_DIR", self.acext_gemm_config_dir
+        )
 
     def to_string(self):
         return (
@@ -360,15 +461,19 @@ class PyDeviceResourceConfig:
             f"acext_gemm_config_dir: {self.acext_gemm_config_dir}"
         )
 
+
 class SparseConfig:
     def __init__(self):
         self.sparse_config_file: Optional[str] = None
 
     def update_from_env(self):
-        self.sparse_config_file = os.environ.get("SPARSE_CONFIG_FILE", self.sparse_config_file)
+        self.sparse_config_file = os.environ.get(
+            "SPARSE_CONFIG_FILE", self.sparse_config_file
+        )
 
     def to_string(self):
         return f"sparse_config_file: {self.sparse_config_file}"
+
 
 class EngineConfig:
     def __init__(self):
@@ -378,7 +483,9 @@ class EngineConfig:
 
     def update_from_env(self):
         self.warm_up = int(os.environ.get("WARM_UP", self.warm_up))
-        self.warm_up_with_loss = int(os.environ.get("WARM_UP_WITH_LOSS", self.warm_up_with_loss))
+        self.warm_up_with_loss = int(
+            os.environ.get("WARM_UP_WITH_LOSS", self.warm_up_with_loss)
+        )
         self.max_seq_len = int(os.environ.get("MAX_SEQ_LEN", self.max_seq_len))
 
     def to_string(self):
@@ -388,32 +495,43 @@ class EngineConfig:
             f"max_seq_len: {self.max_seq_len}"
         )
 
+
 class EmbeddingConfig:
     def __init__(self):
         self.embedding_model: int = 0
 
     def update_from_env(self):
-        self.embedding_model = int(os.environ.get("EMBEDDING_MODEL", self.embedding_model))
+        self.embedding_model = int(
+            os.environ.get("EMBEDDING_MODEL", self.embedding_model)
+        )
 
     def to_string(self):
         return f"embedding_model: {self.embedding_model}"
+
 
 class WorkerConfig:
     def __init__(self):
         self.worker_info_port_num: int = 7
 
     def update_from_env(self):
-        self.worker_info_port_num = int(os.environ.get("WORKER_INFO_PORT_NUM", self.worker_info_port_num))
+        self.worker_info_port_num = int(
+            os.environ.get("WORKER_INFO_PORT_NUM", self.worker_info_port_num)
+        )
 
     def to_string(self):
         return f"worker_info_port_num: {self.worker_info_port_num}"
 
+
 class PyEnvConfigs:
     def __init__(self):
         self.server_config: ServerConfig = ServerConfig()
-        self.profiling_debug_config: ProfilingDebugLoggingConfig = ProfilingDebugLoggingConfig()
+        self.profiling_debug_config: ProfilingDebugLoggingConfig = (
+            ProfilingDebugLoggingConfig()
+        )
         self.model_config: ModelConfig = ModelConfig()
-        self.py_speculative_execution_config: PySpeculativeExecutionConfig = PySpeculativeExecutionConfig()
+        self.py_speculative_execution_config: PySpeculativeExecutionConfig = (
+            PySpeculativeExecutionConfig()
+        )
         self.lora_config: LoraConfig = LoraConfig()
         self.load_config: LoadConfig = LoadConfig()
         self.render_config: RenderConfig = RenderConfig()
@@ -423,12 +541,16 @@ class PyEnvConfigs:
         self.quantization_config: QuantizationConfig = QuantizationConfig()
         self.py_eplb_config: PyEplbConfig = PyEplbConfig()
         self.py_kv_cache_config: PyKvCacheConfig = PyKvCacheConfig()
-        self.py_device_resource_config: PyDeviceResourceConfig = PyDeviceResourceConfig()
+        self.py_device_resource_config: PyDeviceResourceConfig = (
+            PyDeviceResourceConfig()
+        )
         self.sparse_config: SparseConfig = SparseConfig()
         self.engine_config: EngineConfig = EngineConfig()
         self.embedding_config: EmbeddingConfig = EmbeddingConfig()
         self.worker_config: WorkerConfig = WorkerConfig()
-        self.parallelism_distributed_config: ParallelismDistributedConfig = ParallelismDistributedConfig()
+        self.parallelism_distributed_config: ParallelismDistributedConfig = (
+            ParallelismDistributedConfig()
+        )
 
     def update_from_env(self):
         self.server_config.update_from_env()
@@ -451,6 +573,7 @@ class PyEnvConfigs:
         self.worker_config.update_from_env()
         ## in gpt model parameters, we should update it from g_parallel_info
         self.parallelism_distributed_config.update_from_env()
+
 
 ## some configs are from static method or global method, etc, we collect them in `StaticConfig`, but in-none-static methods,
 ## we should use configs alone. This design can make the codes of this project more clear. All configs

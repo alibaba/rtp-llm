@@ -13,9 +13,8 @@
 using namespace std;
 using namespace rtp_llm;
 
-
 TEST_F(LayerNormTest, testFp16Conversion) {
-    double a = 1.2345678;
+    double        a      = 1.2345678;
     __nv_bfloat16 a_bf16 = a;
     cout << "a_bf16 = " << (float)a_bf16 << endl;
     double b = a_bf16;
@@ -35,12 +34,12 @@ TEST_F(LayerNormTest, testAddBiasResidual) {
 TEST_F(LayerNormTest, testSimpleLayernorm) {
     const auto test_m = vector<uint16_t>({1, 2, 4, 8, 10, 20});
     const auto test_n = vector<uint16_t>({128, 256, 1024});
-    for (const auto& m: test_m) {
-        for (const auto& n: test_n) {
+    for (const auto& m : test_m) {
+        for (const auto& n : test_n) {
             printf("testing m = %d, n = %d \n", m, n);
             testGeneralLayernorm(DataType::TYPE_FP16, NormType::layernorm, m, n);
             testGeneralLayernorm(DataType::TYPE_BF16, NormType::layernorm, m, n);
-            //testGeneralLayernorm(DataType::TYPE_FP32, NormType::layernorm, m, n);
+            // testGeneralLayernorm(DataType::TYPE_FP32, NormType::layernorm, m, n);
         }
     }
 }
@@ -48,8 +47,8 @@ TEST_F(LayerNormTest, testSimpleLayernorm) {
 TEST_F(LayerNormTest, testSimpleLayernormStride) {
     const auto test_m = vector<uint16_t>({1, 2, 4, 8, 10, 20});
     const auto test_n = vector<uint16_t>({128, 256, 1024});
-    for (const auto& m: test_m) {
-        for (const auto& n: test_n) {
+    for (const auto& m : test_m) {
+        for (const auto& n : test_n) {
             printf("testing m = %d, n = %d \n", m, n);
             testGeneralLayernormStride(DataType::TYPE_FP16, NormType::layernorm, m, n, n);
             testGeneralLayernormStride(DataType::TYPE_BF16, NormType::layernorm, m, n, n);

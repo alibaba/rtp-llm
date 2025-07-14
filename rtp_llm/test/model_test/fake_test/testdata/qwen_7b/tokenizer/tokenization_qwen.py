@@ -7,16 +7,16 @@
 
 from __future__ import absolute_import, division, print_function, unicode_literals
 
+import base64
 import json
 import logging
 import os
 import unicodedata
 from io import open
-import base64
-import tiktoken
 from typing import List, Optional, Tuple, Union
 
-from transformers import PreTrainedTokenizer, AddedToken
+import tiktoken
+from transformers import AddedToken, PreTrainedTokenizer
 
 logger = logging.getLogger(__name__)
 

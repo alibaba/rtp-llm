@@ -29,12 +29,12 @@ class TokenizerService;
 class HttpApiServer {
 public:
     // normal engine
-    HttpApiServer(std::shared_ptr<EngineBase> engine,
+    HttpApiServer(std::shared_ptr<EngineBase>          engine,
                   std::shared_ptr<MultimodalProcessor> mm_processor,
-                  std::string                 address,
-                  const EngineInitParams&     params,
-                  py::object                  token_processor,
-                  bool                        py_inference_log_response = false):
+                  std::string                          address,
+                  const EngineInitParams&              params,
+                  py::object                           token_processor,
+                  bool                                 py_inference_log_response = false):
         engine_(engine),
         mm_processor_(mm_processor),
         addr_(address),
@@ -53,15 +53,15 @@ public:
     // embedding engine
     HttpApiServer(std::shared_ptr<EmbeddingEngine>     embedding_engine,
                   std::shared_ptr<MultimodalProcessor> mm_processor,
-                  const EngineInitParams&          params,
+                  const EngineInitParams&              params,
                   py::object                           custom_module,
-                  bool                        py_inference_log_response = false):
+                  bool                                 py_inference_log_response = false):
         engine_init_param_(params),
         params_(params.gpt_init_parameter),
         metrics_reporter_(params.metrics_reporter),
         py_inference_log_response_(py_inference_log_response) {
 
-        is_embedding_ = true;
+        is_embedding_       = true;
         embedding_endpoint_ = std::make_shared<EmbeddingEndpoint>(embedding_engine, mm_processor, custom_module);
         active_request_count_.reset(new autil::AtomicCounter());
         request_counter_.reset(new autil::AtomicCounter());
@@ -105,18 +105,18 @@ private:
     std::shared_ptr<autil::AtomicCounter> active_request_count_;
     std::shared_ptr<autil::AtomicCounter> request_counter_;
 
-    std::shared_ptr<EngineBase>            engine_;
-    std::shared_ptr<MultimodalProcessor>   mm_processor_;
-    std::string                            addr_;
+    std::shared_ptr<EngineBase>          engine_;
+    std::shared_ptr<MultimodalProcessor> mm_processor_;
+    std::string                          addr_;
 
     const EngineInitParams&                engine_init_param_;
-    const rtp_llm::GptInitParameter&            params_;
+    const rtp_llm::GptInitParameter&       params_;
     std::shared_ptr<ConcurrencyController> controller_;
     std::shared_ptr<TokenProcessor>        token_processor_;
 
-    std::shared_ptr<EmbeddingEndpoint>     embedding_endpoint_;
-    std::shared_ptr<Tokenizer>             tokenizer_;
-    std::shared_ptr<ChatRender>            render_;
+    std::shared_ptr<EmbeddingEndpoint> embedding_endpoint_;
+    std::shared_ptr<Tokenizer>         tokenizer_;
+    std::shared_ptr<ChatRender>        render_;
 
     std::unique_ptr<http_server::HttpServer> http_server_;
     std::shared_ptr<ApiServerMetricReporter> metric_reporter_;
@@ -125,16 +125,16 @@ private:
     std::shared_ptr<WeightsLoader>           weights_loader_;
     std::map<std::string, std::string>       lora_infos_;
 
-    std::shared_ptr<HealthService>           health_service_;
-    std::shared_ptr<WorkerStatusService>     worker_status_service_;
-    std::shared_ptr<ModelStatusService>      model_status_service_;
-    std::shared_ptr<SysCmdService>           sys_cmd_service_;
-    std::shared_ptr<TokenizerService>        tokenizer_service_;
-    std::shared_ptr<ChatService>             chat_service_;
-    std::shared_ptr<InferenceService>        inference_service_;
-    std::shared_ptr<EmbeddingService>        embedding_service_;
-    std::shared_ptr<LoraService>             lora_service_;
-    bool                                     py_inference_log_response_;
+    std::shared_ptr<HealthService>       health_service_;
+    std::shared_ptr<WorkerStatusService> worker_status_service_;
+    std::shared_ptr<ModelStatusService>  model_status_service_;
+    std::shared_ptr<SysCmdService>       sys_cmd_service_;
+    std::shared_ptr<TokenizerService>    tokenizer_service_;
+    std::shared_ptr<ChatService>         chat_service_;
+    std::shared_ptr<InferenceService>    inference_service_;
+    std::shared_ptr<EmbeddingService>    embedding_service_;
+    std::shared_ptr<LoraService>         lora_service_;
+    bool                                 py_inference_log_response_;
 };
 
 class CounterGuard {
@@ -149,6 +149,7 @@ public:
             counter_->dec();
         }
     }
+
 private:
     std::shared_ptr<autil::AtomicCounter> counter_;
 };

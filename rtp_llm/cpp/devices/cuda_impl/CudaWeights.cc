@@ -42,7 +42,9 @@ torch::Tensor CudaDevice::packInt8TensorToPackedInt4(torch::Tensor weight) {
     return packed_weight;
 }
 
-torch::Tensor CudaDevice::preprocessWeightsForMixedGemm(torch::Tensor row_major_quantized_weight, torch::ScalarType quant_type, const string &arch) {
+torch::Tensor CudaDevice::preprocessWeightsForMixedGemm(torch::Tensor     row_major_quantized_weight,
+                                                        torch::ScalarType quant_type,
+                                                        const string&     arch) {
     auto _st = row_major_quantized_weight.scalar_type();
     CHECK_CPU(row_major_quantized_weight);
     CHECK_CONTIGUOUS(row_major_quantized_weight);
@@ -52,7 +54,7 @@ torch::Tensor CudaDevice::preprocessWeightsForMixedGemm(torch::Tensor row_major_
                 "Invalid dim. The dim of weight should be 2 or 3");
 
     trt_cutlass::QuantType ft_quant_type      = get_ft_quant_type(quant_type);
-    const size_t  bits_in_quant_type = get_bits_in_quant_type(ft_quant_type);
+    const size_t           bits_in_quant_type = get_bits_in_quant_type(ft_quant_type);
 
     const size_t num_experts = row_major_quantized_weight.dim() == 2 ? 1 : row_major_quantized_weight.size(0);
     const size_t num_rows    = row_major_quantized_weight.size(-2);
@@ -70,9 +72,11 @@ torch::Tensor CudaDevice::preprocessWeightsForMixedGemm(torch::Tensor row_major_
     return processed_tensor;
 }
 
-std::vector<torch::Tensor> CudaDevice::symmetricQuantizeLastAxisOfBatchedMatrix(torch::Tensor weight, torch::ScalarType quant_type, const string &arch) {
+std::vector<torch::Tensor> CudaDevice::symmetricQuantizeLastAxisOfBatchedMatrix(torch::Tensor     weight,
+                                                                                torch::ScalarType quant_type,
+                                                                                const string&     arch) {
     int sm_version = arch.empty() ? get_sm() : atoi(arch.c_str());
     return symmetric_quantize_helper(weight, quant_type, false, sm_version);
 }
 
-} // namespace rtp_llm
+}  // namespace rtp_llm

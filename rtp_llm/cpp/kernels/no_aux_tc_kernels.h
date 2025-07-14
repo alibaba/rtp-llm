@@ -19,12 +19,21 @@
 
 #include "rtp_llm/cpp/cuda/cuda_utils.h"
 
-namespace rtp_llm
-{
+namespace rtp_llm {
 
-template <typename T, typename IdxT>
-void invokeNoAuxTc(T* scores, T* group_scores, T* topk_values, IdxT* topk_indices, T* scores_with_bias,
-    int64_t const num_tokens, int64_t const num_experts, int64_t const n_group, int64_t const topk_group,
-    int64_t const topk, int norm_node, double const routed_scaling_factor, cudaStream_t const stream = 0);
+template<typename T, typename IdxT>
+void invokeNoAuxTc(T*                 scores,
+                   T*                 group_scores,
+                   T*                 topk_values,
+                   IdxT*              topk_indices,
+                   T*                 scores_with_bias,
+                   int64_t const      num_tokens,
+                   int64_t const      num_experts,
+                   int64_t const      n_group,
+                   int64_t const      topk_group,
+                   int64_t const      topk,
+                   int                norm_node,
+                   double const       routed_scaling_factor,
+                   cudaStream_t const stream = 0);
 
-} // namespace rtp_llm
+}  // namespace rtp_llm

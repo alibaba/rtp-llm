@@ -20,8 +20,7 @@
 
 namespace rtp_llm {
 
-enum class ActivationType
-{
+enum class ActivationType {
     Gelu = 0,
     Relu,
     Silu,

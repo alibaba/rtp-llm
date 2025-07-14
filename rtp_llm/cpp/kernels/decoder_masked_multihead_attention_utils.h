@@ -1422,11 +1422,10 @@ inline __device__ Float8_ mul(uint16_t a, uint4 b) {
 }
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <>
-inline __device__ uint2 mul(float a, uint2 b)
-{
+template<>
+inline __device__ uint2 mul(float a, uint2 b) {
     uint16_t h = float_to_half(a);
-    uint2 c = mul<uint2, uint16_t, uint2>(h, b);
+    uint2    c = mul<uint2, uint16_t, uint2>(h, b);
     return c;
 }
 
@@ -1467,14 +1466,14 @@ inline __device__ __nv_bfloat16 mul(__nv_bfloat16 a, __nv_bfloat16 b) {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <>
+template<>
 inline __device__ float mul(float a, __nv_bfloat16 b) {
     return mul<float>(a, __bfloat162float(b));
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <>
+template<>
 inline __device__ __nv_bfloat162 mul(__nv_bfloat162 a, __nv_bfloat162 b) {
     return bf16hmul2(a, b);
 }
@@ -2234,7 +2233,7 @@ inline __device__ void convert_from_float(__nv_bfloat162* dst, float2 src) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
     *dst = __float22bfloat162_rn(src);
 #else
-    *dst   = __floats2bfloat162_rn(src.x, src.y);
+    *dst = __floats2bfloat162_rn(src.x, src.y);
 #endif
 }
 #endif  // ENABLE_BF16
@@ -2345,8 +2344,7 @@ inline __device__ typename packed_type<float, num_elems<A>::value>::type convert
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-inline __device__ Float8_ convert_to_float(Float8_ u)
-{
+inline __device__ Float8_ convert_to_float(Float8_ u) {
     return u;
 }
 
@@ -2456,25 +2454,22 @@ inline __device__ Float8_ convert_to_float(bf16_8_t u) {
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 #ifdef ENABLE_FP8
-inline __device__ void convert_from_fp8(uint16_t* v, const __nv_fp8_e4m3 u)
-{
+inline __device__ void convert_from_fp8(uint16_t* v, const __nv_fp8_e4m3 u) {
     half h = half(u);
-    v[0] = reinterpret_cast<uint16_t&>(h);
+    v[0]   = reinterpret_cast<uint16_t&>(h);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-inline __device__ void convert_from_fp8(uint32_t* v, const fp8_2_t u)
-{
+inline __device__ void convert_from_fp8(uint32_t* v, const fp8_2_t u) {
     half2 h = half2(u);
-    v[0] = reinterpret_cast<uint32_t&>(h);
+    v[0]    = reinterpret_cast<uint32_t&>(h);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-inline __device__ void convert_from_fp8(uint2* v, const fp8_4_t u)
-{
-    uint32_t* v_ptr = reinterpret_cast<uint32_t*>(v);
+inline __device__ void convert_from_fp8(uint2* v, const fp8_4_t u) {
+    uint32_t*      v_ptr = reinterpret_cast<uint32_t*>(v);
     fp8_2_t const* u_ptr = reinterpret_cast<fp8_2_t const*>(&u);
 
     convert_from_fp8(v_ptr + 0, u_ptr[0]);
@@ -2483,9 +2478,8 @@ inline __device__ void convert_from_fp8(uint2* v, const fp8_4_t u)
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-inline __device__ void convert_from_fp8(uint4* v, const fp8_8_t u)
-{
-    uint32_t* v_ptr = reinterpret_cast<uint32_t*>(v);
+inline __device__ void convert_from_fp8(uint4* v, const fp8_8_t u) {
+    uint32_t*      v_ptr = reinterpret_cast<uint32_t*>(v);
     fp8_2_t const* u_ptr = reinterpret_cast<fp8_2_t const*>(&u);
 
     convert_from_fp8(v_ptr + 0, u_ptr[0]);
@@ -2496,41 +2490,36 @@ inline __device__ void convert_from_fp8(uint4* v, const fp8_8_t u)
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-inline __device__ void convert_from_fp8(__nv_bfloat16* v, const __nv_fp8_e4m3 u)
-{
+inline __device__ void convert_from_fp8(__nv_bfloat16* v, const __nv_fp8_e4m3 u) {
     v[0] = __nv_bfloat16(u);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-inline __device__ void convert_from_fp8(__nv_bfloat162* v, const fp8_2_t u)
-{
-    union
-    {
+inline __device__ void convert_from_fp8(__nv_bfloat162* v, const fp8_2_t u) {
+    union {
         __nv_fp8_e4m3 fp8[2];
-        fp8_2_t fp8_2;
+        fp8_2_t       fp8_2;
     };
 
-    fp8_2 = u;
+    fp8_2  = u;
     v[0].x = __nv_bfloat16(fp8[0]);
     v[0].y = __nv_bfloat16(fp8[1]);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-inline __device__ void convert_from_fp8(bf16_4_t* v, const fp8_4_t u)
-{
+inline __device__ void convert_from_fp8(bf16_4_t* v, const fp8_4_t u) {
 
     __nv_bfloat162* v2 = reinterpret_cast<__nv_bfloat162*>(v);
-    fp8_2_t const* u2 = reinterpret_cast<fp8_2_t const*>(&u);
+    fp8_2_t const*  u2 = reinterpret_cast<fp8_2_t const*>(&u);
     convert_from_fp8(v2, u2[0]);
     convert_from_fp8(v2 + 1, u2[1]);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-inline __device__ void convert_from_fp8(bf16_8_t* v, const fp8_8_t u)
-{
+inline __device__ void convert_from_fp8(bf16_8_t* v, const fp8_8_t u) {
     __nv_bfloat162* v2 = reinterpret_cast<__nv_bfloat162*>(v);
     convert_from_fp8(v2 + 0, u.x);
     convert_from_fp8(v2 + 1, u.y);
@@ -2540,36 +2529,32 @@ inline __device__ void convert_from_fp8(bf16_8_t* v, const fp8_8_t u)
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-inline __device__ void convert_from_fp8(float* v, const __nv_fp8_e4m3 u)
-{
+inline __device__ void convert_from_fp8(float* v, const __nv_fp8_e4m3 u) {
     v[0] = float(u);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-inline __device__ void convert_from_fp8(float2* v, const fp8_2_t u)
-{
+inline __device__ void convert_from_fp8(float2* v, const fp8_2_t u) {
     v[0] = float2(u);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-inline __device__ void convert_from_fp8(float4* v, const fp8_4_t u)
-{
+inline __device__ void convert_from_fp8(float4* v, const fp8_4_t u) {
     v[0] = float4(u);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-inline __device__ void convert_from_fp8(Float8_* v, const fp8_8_t u)
-{
+inline __device__ void convert_from_fp8(Float8_* v, const fp8_8_t u) {
     v[0].x = float2(u.x);
     v[0].y = float2(u.y);
     v[0].z = float2(u.z);
     v[0].w = float2(u.w);
 }
 
-#endif // ENALBE_FP8
+#endif  // ENALBE_FP8
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -3365,7 +3350,7 @@ inline __device__ float half_to_float(uint16_t h) {
 
 inline __device__ uint32_t float2_to_half2(float2 f) {
     union {
-        uint32_t u32;
+        uint32_t   u32;
         _Float16_2 data;
     } tmp;
     tmp.data = _Float16_2{static_cast<_Float16>(f.x), static_cast<_Float16>(f.y)};
@@ -3384,7 +3369,6 @@ inline __device__ uint32_t h0_h0(uint16_t a) {
     return b;
 #endif
 }
-
 
 #include "_vector_abs_max.h"
 #include "_convert_from_float.h"
@@ -3409,7 +3393,6 @@ template<typename Vec_k, typename T, typename T_scale>
 inline __device__ void store_8bits_kv_cache_vec(T* pointer, const Vec_k& vec, int idx, T_scale scale) {
     ;  // Not used.
 }
-
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -3496,7 +3479,6 @@ inline __device__ void convert_from_8bit_kv_cache(Vec_out* vec_o, const Vec_in& 
         ;  // not supported.
     }
 }
-
 
 #if 1
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -3892,7 +3874,7 @@ __device__ __host__ constexpr inline T const& const_max(T const& a, T const& b) 
     return b > a ? b : a;
 }
 
-#endif // if 0
+#endif  // if 0
 
 }  // namespace rtp_llm
 #endif

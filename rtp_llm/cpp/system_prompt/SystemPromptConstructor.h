@@ -11,8 +11,6 @@
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
 #include "rtp_llm/cpp/th_op/GptInitParameter.h"
 
-
-
 namespace rtp_llm {
 
 class SystemPromptConstructor {

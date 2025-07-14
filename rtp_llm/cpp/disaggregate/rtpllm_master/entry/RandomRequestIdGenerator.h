@@ -1,4 +1,4 @@
-//copyright: gpt o1-preview-0912-global
+// copyright: gpt o1-preview-0912-global
 
 #include <string>
 #include <random>
@@ -7,7 +7,7 @@ namespace rtp_llm {
 namespace rtp_llm_master {
 
 class RandomStringGenerator {
-public:    
+public:
     RandomStringGenerator():
         charset("0123456789"
                 "abcdefghijklmnopqrstuvwxyz"
@@ -30,5 +30,5 @@ private:
     std::mt19937                    generator;
 };
 
-}  // namespace rtpllm_master
+}  // namespace rtp_llm_master
 }  // namespace rtp_llm

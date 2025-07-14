@@ -17,19 +17,18 @@ namespace rtp_llm {
 class DynamicLoraModelRpcServiceTest: public DeviceTestBase {
 public:
     std::unique_ptr<ModelRpcService::Stub> MakeStub(const std::string& addr) {
-        return ModelRpcService::NewStub(
-            grpc::CreateChannel(addr, grpc::InsecureChannelCredentials()));
+        return ModelRpcService::NewStub(grpc::CreateChannel(addr, grpc::InsecureChannelCredentials()));
     }
 };
 
 TEST_F(DynamicLoraModelRpcServiceTest, testSimple) {
     std::vector<int64_t> lora_ids(100);
     std::iota(lora_ids.begin(), lora_ids.end(), 0);
-    auto params = createMockEngineInitParams(device_);
+    auto                                          params = createMockEngineInitParams(device_);
     std::unique_ptr<rtp_llm::ModelRpcServiceImpl> model_rpc_server(new ModelRpcServiceImpl(params));
-    grpc::ServerBuilder builder;
-    int port = 0;
-    std::string addr = "0.0.0.0:" + std::to_string(port);
+    grpc::ServerBuilder                           builder;
+    int                                           port = 0;
+    std::string                                   addr = "0.0.0.0:" + std::to_string(port);
     builder.AddListeningPort(addr, grpc::InsecureServerCredentials());
     builder.RegisterService(model_rpc_server.get());
     std::unique_ptr<grpc::Server> rpc_server = builder.BuildAndStart();
@@ -69,9 +68,9 @@ TEST_F(DynamicLoraModelRpcServiceTest, testSimple) {
     rpc_server->Shutdown();
     server.join();
 
-    for(const auto& [key, value] : model_rpc_server->lora_map_mutex_) {
+    for (const auto& [key, value] : model_rpc_server->lora_map_mutex_) {
         auto executor_ptr = dynamic_cast<NormalExecutor*>(model_rpc_server->engine_->executor_.get());
-        auto lora_weight = executor_ptr->model_->weights_.layers[0].self_attention_weights.qkv_lora_weights;
+        auto lora_weight  = executor_ptr->model_->weights_.layers[0].self_attention_weights.qkv_lora_weights;
         ASSERT_EQ(lora_weight->hasLoraWeight(key), value->alive_);
     }
 }

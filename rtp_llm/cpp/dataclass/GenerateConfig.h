@@ -10,8 +10,6 @@
 #include "rtp_llm/cpp/th_op/GptInitParameter.h"
 #include "autil/legacy/jsonizable.h"
 
-
-
 namespace rtp_llm {
 
 // NOTE: The params in generate config should be splitted into two parts:
@@ -22,68 +20,68 @@ namespace rtp_llm {
 //       For the second part, different samplers should be created for different params.
 //       So they can not be batched together for now.
 
-class GenerateConfig : public autil::legacy::Jsonizable {
+class GenerateConfig: public autil::legacy::Jsonizable {
 public:
     int global_request_id  = -1;
     int max_new_tokens     = 8192;
     int min_new_tokens     = 0;
     int num_validate_token = 0;  // for speculative decoding validation.
 
-    int                  num_beams            = 1;
-    int                  num_return_sequences = 1;
-    int                  top_k                = 0;
-    float                top_p                = 1.0;
-    float                temperature          = 1.0;
-    float                repetition_penalty   = 1.0;
-    std::optional<int>   no_repeat_ngram_size;
-    std::optional<int>   random_seed;
-    std::optional<float> top_p_decay;
-    std::optional<float> top_p_min;
-    std::optional<int>   top_p_reset_ids;
-    std::optional<std::string>   task_id;
-    std::string          adapter_name = "";
-    std::vector<std::string> adapter_names;
+    int                        num_beams            = 1;
+    int                        num_return_sequences = 1;
+    int                        top_k                = 0;
+    float                      top_p                = 1.0;
+    float                      temperature          = 1.0;
+    float                      repetition_penalty   = 1.0;
+    std::optional<int>         no_repeat_ngram_size;
+    std::optional<int>         random_seed;
+    std::optional<float>       top_p_decay;
+    std::optional<float>       top_p_min;
+    std::optional<int>         top_p_reset_ids;
+    std::optional<std::string> task_id;
+    std::string                adapter_name = "";
+    std::vector<std::string>   adapter_names;
 
-    std::vector<int>         select_tokens_id;
-    std::vector<std::string> select_tokens_str;
-    int                 calculate_loss       = 0;
-    int                 hidden_states_cut_dim = 0;
-    bool                return_logits        = false;
-    bool                return_cum_log_probs = false;
-    bool                return_incremental   = false;
-    bool                return_hidden_states = false;
-    bool                normalized_hidden_states = false;
-    bool                return_output_ids    = false;
-    bool                return_input_ids    = false;
-    bool                is_streaming         = false;
-    int                 timeout_ms           = -1;
-    bool                sp_edit              = false;
-    bool                force_disable_sp_run = false;
-    bool                force_sp_accept      = false;
-    bool                return_all_probs     = false;
-    bool                return_softmax_probs = false;
+    std::vector<int>              select_tokens_id;
+    std::vector<std::string>      select_tokens_str;
+    int                           calculate_loss           = 0;
+    int                           hidden_states_cut_dim    = 0;
+    bool                          return_logits            = false;
+    bool                          return_cum_log_probs     = false;
+    bool                          return_incremental       = false;
+    bool                          return_hidden_states     = false;
+    bool                          normalized_hidden_states = false;
+    bool                          return_output_ids        = false;
+    bool                          return_input_ids         = false;
+    bool                          is_streaming             = false;
+    int                           timeout_ms               = -1;
+    bool                          sp_edit                  = false;
+    bool                          force_disable_sp_run     = false;
+    bool                          force_sp_accept          = false;
+    bool                          return_all_probs         = false;
+    bool                          return_softmax_probs     = false;
     std::vector<std::vector<int>> stop_words_list;
     std::vector<std::string>      stop_words_str;
     bool                          print_stop_words = false;
-    std::string         sp_advice_prompt;
-    std::vector<int>    sp_advice_prompt_token_ids;
+    std::string                   sp_advice_prompt;
+    std::vector<int>              sp_advice_prompt_token_ids;
 
     bool can_use_pd_separation = true;
-    bool pd_separation  = false;
+    bool pd_separation         = false;
 
-    bool in_think_mode      = false;
-    int max_thinking_tokens = 0;
+    bool             in_think_mode       = false;
+    int              max_thinking_tokens = 0;
     std::vector<int> end_think_token_ids;
-    bool gen_timeline = false;
-    int  profile_step = 3;
-    bool top1() {
+    bool             gen_timeline = false;
+    int              profile_step = 3;
+    bool             top1() {
         return top_k == 1;
     }
 
     void addSpecialTokens(const rtp_llm::SpecialTokens& special_tokens) {
         for (const auto& vec : special_tokens.stop_words_id_list_) {
             std::vector<int> tmpVec;
-            for (int64_t val: vec) {
+            for (int64_t val : vec) {
                 tmpVec.push_back(static_cast<int>(val));
             }
             stop_words_list.push_back(tmpVec);
@@ -93,7 +91,7 @@ public:
     }
 
     void convertSelectTokens(int vocab_size, std::shared_ptr<Tokenizer> tokenizer) {
-        for (const auto& token_str: select_tokens_str) {
+        for (const auto& token_str : select_tokens_str) {
             auto vec = tokenizer->encode(token_str);
             select_tokens_id.insert(select_tokens_id.begin(), vec.begin(), vec.end());
         }
@@ -111,47 +109,39 @@ public:
     std::string debugString() const {
         std::stringstream debug_string;
         debug_string << "GenerateConfig {"
-                     << "max_new_tokens:" << max_new_tokens
-                     << ", min_new_tokens:" << min_new_tokens << ", num_beams:" << num_beams
-                     << ", num_return_sequences:" << num_return_sequences << ", calculate_loss:" << calculate_loss
-                     << ", return_logits:" << return_logits << ", return_incremental: " << return_incremental
+                     << "max_new_tokens:" << max_new_tokens << ", min_new_tokens:" << min_new_tokens
+                     << ", num_beams:" << num_beams << ", num_return_sequences:" << num_return_sequences
+                     << ", calculate_loss:" << calculate_loss << ", return_logits:" << return_logits
+                     << ", return_incremental: " << return_incremental
                      << ", return_hidden_states:" << return_hidden_states
                      << ", hidden_states_cut_dim:" << hidden_states_cut_dim
                      << ", normalized_hidden_states:" << normalized_hidden_states
-                     << ", return_output_ids:" << return_output_ids
-                     << ", return_input_ids:" << return_input_ids
-                     << ", is_streaming:" << is_streaming
-                     << ", timeout_ms:" << timeout_ms
-                     << ", top_k:" << top_k
-                     << ", top_p:" << top_p
-                     << ", force_disable_sp_run: " << force_disable_sp_run
-                     << ", force_sp_accept: " << force_sp_accept
-                     << ", return_all_probs: " << return_all_probs
+                     << ", return_output_ids:" << return_output_ids << ", return_input_ids:" << return_input_ids
+                     << ", is_streaming:" << is_streaming << ", timeout_ms:" << timeout_ms << ", top_k:" << top_k
+                     << ", top_p:" << top_p << ", force_disable_sp_run: " << force_disable_sp_run
+                     << ", force_sp_accept: " << force_sp_accept << ", return_all_probs: " << return_all_probs
                      << ", stop_words_list:" << vectorsToString(stop_words_list)
-                     << ", can_use_pd_separation: " << can_use_pd_separation
-                     << ", pd_separation: " << pd_separation
-                     << ", in_think_mode: " << in_think_mode
-                     << ", max_thinking_tokens: " << max_thinking_tokens
+                     << ", can_use_pd_separation: " << can_use_pd_separation << ", pd_separation: " << pd_separation
+                     << ", in_think_mode: " << in_think_mode << ", max_thinking_tokens: " << max_thinking_tokens
                      << ", end_think_token_ids: " << vectorToString(end_think_token_ids)
-                     << ", gen_timeline: " << gen_timeline
-                     << ", profile_step: " << profile_step
-                     << "}";
+                     << ", gen_timeline: " << gen_timeline << ", profile_step: " << profile_step << "}";
         return debug_string.str();
     }
 
     void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override {
 #define JSONIZE(field) json.Jsonize(#field, field, field)
 // used for de-serialization
-#define JSONIZE_OPTIONAL(field) try { \
-                                    using Type = decltype(field)::value_type; \
-                                    Type field##Tmp; \
-                                    json.Jsonize(#field, field##Tmp); \
-                                    field = field##Tmp; \
-                                } catch (autil::legacy::ExceptionBase &e) { \
-                                    if (field.has_value() == false) { \
-                                        field = std::nullopt; \
-                                    } \
-                                }
+#define JSONIZE_OPTIONAL(field)                                                                                        \
+    try {                                                                                                              \
+        using Type = decltype(field)::value_type;                                                                      \
+        Type field##Tmp;                                                                                               \
+        json.Jsonize(#field, field##Tmp);                                                                              \
+        field = field##Tmp;                                                                                            \
+    } catch (autil::legacy::ExceptionBase & e) {                                                                       \
+        if (field.has_value() == false) {                                                                              \
+            field = std::nullopt;                                                                                      \
+        }                                                                                                              \
+    }
         JSONIZE(max_new_tokens);
         JSONIZE(min_new_tokens);
         JSONIZE(num_validate_token);
@@ -171,12 +161,12 @@ public:
             std::string adapter_name_;
             json.Jsonize("adapter_name", adapter_name_);
             adapter_name = adapter_name_;
-        } catch (autil::legacy::ExceptionBase &e) {
+        } catch (autil::legacy::ExceptionBase& e) {
             try {
                 std::vector<std::string> adapter_names_;
                 json.Jsonize("adapter_name", adapter_names_);
                 adapter_names = adapter_names_;
-            } catch (autil::legacy::ExceptionBase &e) {
+            } catch (autil::legacy::ExceptionBase& e) {
                 // noop
             }
         }
@@ -209,7 +199,6 @@ public:
 #undef JSONIZE
 #undef JSONIZE_OPTIONAL
     }
-
 };
 
 }  // namespace rtp_llm

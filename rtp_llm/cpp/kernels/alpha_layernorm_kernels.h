@@ -27,7 +27,7 @@
 #include "rtp_llm/cpp/cuda/cuda_type_utils.cuh"
 #endif
 
-namespace rtp_llm{
+namespace rtp_llm {
 
 template<typename T>
 void invokeAlphaAddBiasResidualLayerNorm(T*           out,
@@ -66,4 +66,4 @@ void invokeGeneralLayerNormWithPadding(T*           out,
                                        const int    int8_mode,
                                        cudaStream_t stream,
                                        int          opt_version = 2);
-}
+}  // namespace rtp_llm

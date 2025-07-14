@@ -10,34 +10,34 @@
 #include <memory>
 
 using namespace std;
-namespace W  = rtp_llm::W;
+namespace W = rtp_llm::W;
 
 namespace rtp_llm {
 
 EngineInitParams createMockEngineInitParams(DeviceBase* device) {
-    auto params = GptInitParameter();
-    params.head_num_ = 2;
-    params.size_per_head_ = 64;
-    params.num_layers_ = 2;
-    params.max_seq_len_ = 20;
-    params.vocab_size_ = 20;
-    params.hidden_size_ = 128;
-    params.head_num_kv_ = 2;
-    params.block_nums_  = 100;
-    params.reuse_cache_ = false;
+    auto params                     = GptInitParameter();
+    params.head_num_                = 2;
+    params.size_per_head_           = 64;
+    params.num_layers_              = 2;
+    params.max_seq_len_             = 20;
+    params.vocab_size_              = 20;
+    params.hidden_size_             = 128;
+    params.head_num_kv_             = 2;
+    params.block_nums_              = 100;
+    params.reuse_cache_             = false;
     params.max_generate_batch_size_ = 128;
     params.max_context_batch_size_  = 128;
     params.kv_cache_data_type_      = DataType::TYPE_FP16;
     const size_t inter_size         = 512;
-    params.inter_size_         = inter_size;
-    params.inter_padding_size_ = inter_size;
-    params.seq_size_per_block_ = 2;
-    params.reserve_runtime_mem_mb_ = 1024;
-    typedef half         T;
-    const at::ScalarType scalar_type  = at::ScalarType::Half;
-    const rtp_llm::DataType   data_type    = getTensorType<T>();
-    auto                 mem_type     = rtp_llm::MemoryType::MEMORY_GPU;
-    const size_t         hidden_units = 128;
+    params.inter_size_              = inter_size;
+    params.inter_padding_size_      = inter_size;
+    params.seq_size_per_block_      = 2;
+    params.reserve_runtime_mem_mb_  = 1024;
+    typedef half            T;
+    const at::ScalarType    scalar_type  = at::ScalarType::Half;
+    const rtp_llm::DataType data_type    = getTensorType<T>();
+    auto                    mem_type     = rtp_llm::MemoryType::MEMORY_GPU;
+    const size_t            hidden_units = 128;
     auto data = device->allocateBuffer({data_type, {inter_size, inter_size}, AllocationType::DEVICE}, {});
 
     auto word_embeddings =
@@ -70,14 +70,14 @@ EngineInitParams createMockEngineInitParams(DeviceBase* device) {
             mem_type, data_type, vector<size_t>{hidden_units, hidden_units}, data->data());
         auto attention_output_weight_beta = make_unique<const rtp_llm::Buffer>(
             mem_type, data_type, vector<size_t>{hidden_units, hidden_units}, data->data());
-        auto ffn_weight =
-            make_unique<const rtp_llm::Buffer>(mem_type, data_type, vector<size_t>{hidden_units, inter_size}, data->data());
-        auto ffn_weight_beta =
-            make_unique<const rtp_llm::Buffer>(mem_type, data_type, vector<size_t>{hidden_units, inter_size}, data->data());
-        auto ffn_output_weight =
-            make_unique<const rtp_llm::Buffer>(mem_type, data_type, vector<size_t>{inter_size, hidden_units}, data->data());
-        auto ffn_output_weight_beta =
-            make_unique<const rtp_llm::Buffer>(mem_type, data_type, vector<size_t>{inter_size, hidden_units}, data->data());
+        auto ffn_weight = make_unique<const rtp_llm::Buffer>(
+            mem_type, data_type, vector<size_t>{hidden_units, inter_size}, data->data());
+        auto ffn_weight_beta = make_unique<const rtp_llm::Buffer>(
+            mem_type, data_type, vector<size_t>{hidden_units, inter_size}, data->data());
+        auto ffn_output_weight = make_unique<const rtp_llm::Buffer>(
+            mem_type, data_type, vector<size_t>{inter_size, hidden_units}, data->data());
+        auto ffn_output_weight_beta = make_unique<const rtp_llm::Buffer>(
+            mem_type, data_type, vector<size_t>{inter_size, hidden_units}, data->data());
         auto ffn_layer_norm =
             make_unique<const rtp_llm::Buffer>(mem_type, data_type, vector<size_t>{inter_size}, data->data());
         auto ffn_layer_norm_beta =
@@ -101,46 +101,48 @@ EngineInitParams createMockEngineInitParams(DeviceBase* device) {
         weights.emplace(W::ffn_ln_beta, std::move(ffn_layer_norm_beta));
         layer_weights.push_back(std::move(weights));
     }
-    auto convert = rtp_llm::WeightsConverter(false);
-    rtp_llm::EngineInitParams rtp_llm_params(0, params,
-                                             std::move(*convert.createGptWeights(std::make_unique<ConstBufferPtrMaps>(layer_weights),
-                                                                                 std::make_unique<ConstBufferPtrMap>(global_weights))));
+    auto                      convert = rtp_llm::WeightsConverter(false);
+    rtp_llm::EngineInitParams rtp_llm_params(
+        0,
+        params,
+        std::move(*convert.createGptWeights(std::make_unique<ConstBufferPtrMaps>(layer_weights),
+                                            std::make_unique<ConstBufferPtrMap>(global_weights))));
     return rtp_llm_params;
 }
 
 using loraLayerMap = std::vector<std::unordered_map<std::string, rtp_llm::ConstBufferPtr>>;
 
 std::array<loraLayerMap, 2> createMockLoraWeights(DeviceBase* device) {
-    size_t rank = 8;
-    size_t head_num_ = 2;
-    size_t size_per_head_ = 64;
-    size_t num_layers_ = 2;
-    size_t max_seq_len_ = 20;
-    size_t vocab_size_ = 20;
-    size_t hidden_size_ = 128;
-    size_t head_num_kv_ = 2;
-    size_t block_nums_  = 100;
-    const size_t inter_size    = 512;
-    size_t inter_size_         = inter_size;
-    size_t inter_padding_size_ = inter_size;
-    typedef half         T;
-    const at::ScalarType scalar_type  = at::ScalarType::Half;
-    const rtp_llm::DataType   data_type    = getTensorType<T>();
-    auto                 mem_type     = rtp_llm::MemoryType::MEMORY_GPU;
-    const size_t         hidden_units = 128;
+    size_t                  rank                = 8;
+    size_t                  head_num_           = 2;
+    size_t                  size_per_head_      = 64;
+    size_t                  num_layers_         = 2;
+    size_t                  max_seq_len_        = 20;
+    size_t                  vocab_size_         = 20;
+    size_t                  hidden_size_        = 128;
+    size_t                  head_num_kv_        = 2;
+    size_t                  block_nums_         = 100;
+    const size_t            inter_size          = 512;
+    size_t                  inter_size_         = inter_size;
+    size_t                  inter_padding_size_ = inter_size;
+    typedef half            T;
+    const at::ScalarType    scalar_type  = at::ScalarType::Half;
+    const rtp_llm::DataType data_type    = getTensorType<T>();
+    auto                    mem_type     = rtp_llm::MemoryType::MEMORY_GPU;
+    const size_t            hidden_units = 128;
     auto data = device->allocateBuffer({data_type, {inter_size, inter_size}, AllocationType::DEVICE}, {});
 
     loraLayerMap lora_a_weights;
     loraLayerMap lora_b_weights;
     for (int i = 0; i < num_layers_; ++i) {
-        auto qkv_weights_lora_a = make_unique<const rtp_llm::Buffer>(
-            mem_type, data_type, vector<size_t>{hidden_units, rank}, data->data());
+        auto qkv_weights_lora_a =
+            make_unique<const rtp_llm::Buffer>(mem_type, data_type, vector<size_t>{hidden_units, rank}, data->data());
         auto qkv_weights_lora_b = make_unique<const rtp_llm::Buffer>(
             mem_type, data_type, vector<size_t>{rank, 3 * hidden_units}, data->data());
-        auto attention_output_weight_lora_a = make_unique<const rtp_llm::Buffer>(
-            mem_type, data_type, vector<size_t>{hidden_units, rank}, data->data());
-        auto attention_output_weight_lora_b = make_unique<const rtp_llm::Buffer>(
-            mem_type, data_type, vector<size_t>{rank, hidden_units}, data->data());
+        auto attention_output_weight_lora_a =
+            make_unique<const rtp_llm::Buffer>(mem_type, data_type, vector<size_t>{hidden_units, rank}, data->data());
+        auto attention_output_weight_lora_b =
+            make_unique<const rtp_llm::Buffer>(mem_type, data_type, vector<size_t>{rank, hidden_units}, data->data());
         auto ffn_weight_lora_a =
             make_unique<const rtp_llm::Buffer>(mem_type, data_type, vector<size_t>{hidden_units, rank}, data->data());
         auto ffn_weight_lora_b =
@@ -165,6 +167,5 @@ std::array<loraLayerMap, 2> createMockLoraWeights(DeviceBase* device) {
     std::array<loraLayerMap, 2> result{lora_a_weights, lora_b_weights};
     return result;
 }
-
 
 }  // namespace rtp_llm

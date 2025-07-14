@@ -13,25 +13,29 @@ namespace rtp_llm {
 
 class IHandlerImpl {
 public:
-    IHandlerImpl(const rtp_llm::GptInitParameter& params) : params_(params) {}
+    IHandlerImpl(const rtp_llm::GptInitParameter& params): params_(params) {}
     virtual ~IHandlerImpl() {}
-    virtual void loadTensor(std::unordered_map<std::string, rtp_llm::ConstBufferPtr>& tensors) = 0;
-    virtual th::Tensor forward(th::Tensor hidden_states, th::Tensor input_lengths) = 0;
+    virtual void       loadTensor(std::unordered_map<std::string, rtp_llm::ConstBufferPtr>& tensors) = 0;
+    virtual th::Tensor forward(th::Tensor hidden_states, th::Tensor input_lengths)                   = 0;
+
 protected:
     const rtp_llm::GptInitParameter params_;
 };
 
 class HandlerBase {
 public:
-    HandlerBase(const rtp_llm::GptInitParameter& params) : params_(params) {}
+    HandlerBase(const rtp_llm::GptInitParameter& params): params_(params) {}
     virtual ~HandlerBase() {}
     virtual void loadTensor(std::unordered_map<std::string, rtp_llm::ConstBufferPtr>& tensors) {
         return handler_impl_->loadTensor(tensors);
     }
-    virtual th::Tensor forward(th::Tensor hidden_states, th::Tensor input_lengths) {return handler_impl_->forward(hidden_states, input_lengths); }
+    virtual th::Tensor forward(th::Tensor hidden_states, th::Tensor input_lengths) {
+        return handler_impl_->forward(hidden_states, input_lengths);
+    }
+
 protected:
     const rtp_llm::GptInitParameter params_;
-    std::unique_ptr<IHandlerImpl> handler_impl_;
+    std::unique_ptr<IHandlerImpl>   handler_impl_;
 };
 
 }  // namespace rtp_llm

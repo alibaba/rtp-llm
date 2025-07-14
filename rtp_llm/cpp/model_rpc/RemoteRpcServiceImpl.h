@@ -11,7 +11,8 @@ class RemoteRpcServiceImpl: public LocalRpcServiceImpl {
 public:
     RemoteRpcServiceImpl() {}
     ~RemoteRpcServiceImpl() {}
-    grpc::Status init(const EngineInitParams& maga_init_params, py::object mm_process_engine,
+    grpc::Status init(const EngineInitParams&                                maga_init_params,
+                      py::object                                             mm_process_engine,
                       std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params) override;
 
     grpc::Status GenerateStreamCall(grpc::ServerContext*                   context,
@@ -25,8 +26,8 @@ public:
         return prefill_server_->GenerateStreamCall(context, request, writer);
     }
 
-    grpc::Status RemoteFinish(grpc::ServerContext* context,
-                              const RemoteFinishRequestPB* request, EmptyPB* response) override {
+    grpc::Status
+    RemoteFinish(grpc::ServerContext* context, const RemoteFinishRequestPB* request, EmptyPB* response) override {
         if (!prefill_server_) {
             auto error_msg = "server not implememt RemoteFinish";
             RTP_LLM_LOG_ERROR(error_msg);
@@ -35,9 +36,9 @@ public:
         return prefill_server_->RemoteFinish(context, request, response);
     }
 
-    grpc::Status RemoteLoad(grpc::ServerContext* context,
+    grpc::Status RemoteLoad(grpc::ServerContext*          context,
                             const BroadcastLoadRequestPB* request,
-                            BroadcastLoadResponsePB* response) override {
+                            BroadcastLoadResponsePB*      response) override {
         if (!decode_server_) {
             auto error_msg = "server not implememt RemoteLoad";
             RTP_LLM_LOG_ERROR(error_msg);
@@ -73,7 +74,7 @@ public:
 
 private:
     std::shared_ptr<PrefillRpcServer> prefill_server_;
-    std::shared_ptr<DecodeRpcServer> decode_server_;
+    std::shared_ptr<DecodeRpcServer>  decode_server_;
 };
 
-}
+}  // namespace rtp_llm

@@ -16,7 +16,7 @@ HttpResponseWriter::~HttpResponseWriter() {
     _connection.reset();
 }
 
-bool HttpResponseWriter::Write(const std::string &data) {
+bool HttpResponseWriter::Write(const std::string& data) {
     if (_type == WriteType::Undefined) {
         AUTIL_LOG(WARN, "write failed, write type is undefined, call SetWriteType first");
         return false;
@@ -44,7 +44,7 @@ bool HttpResponseWriter::isConnected() {
     return _connection->isConnected();
 }
 
-bool HttpResponseWriter::WriteNormal(const std::string &data) {
+bool HttpResponseWriter::WriteNormal(const std::string& data) {
     if (_alreadyWrite) {
         AUTIL_LOG(ERROR, "write failed, already write data, cannot write more than once");
         return false;
@@ -59,7 +59,8 @@ bool HttpResponseWriter::WriteNormal(const std::string &data) {
         response      = std::make_shared<HttpResponse>(error);
     }
     response->SetHeaders(_headers);
-    if (_statusMessage) response->setStatusMessage(_statusMessage.value());
+    if (_statusMessage)
+        response->setStatusMessage(_statusMessage.value());
     if (!PostHttpResponse(response)) {
         AUTIL_LOG(WARN, "write normal failed, post http response failed");
         return false;
@@ -68,7 +69,7 @@ bool HttpResponseWriter::WriteNormal(const std::string &data) {
     return true;
 }
 
-bool HttpResponseWriter::WriteStream(const std::string &data, bool isWriteDone) {
+bool HttpResponseWriter::WriteStream(const std::string& data, bool isWriteDone) {
     if (_calledDone) {
         AUTIL_LOG(WARN, "write stream failed, already called write done, cannot write data any more");
         return false;
@@ -79,7 +80,8 @@ bool HttpResponseWriter::WriteStream(const std::string &data, bool isWriteDone) 
         AUTIL_LOG(WARN, "write stream failed, chunk http response failed");
         return false;
     }
-    if (_statusMessage) chunkResponse->setStatusMessage(_statusMessage.value());
+    if (_statusMessage)
+        chunkResponse->setStatusMessage(_statusMessage.value());
     if (!PostHttpResponse(chunkResponse)) {
         AUTIL_LOG(WARN, "write stream failed, post http response failed");
         return false;
@@ -88,7 +90,7 @@ bool HttpResponseWriter::WriteStream(const std::string &data, bool isWriteDone) 
     return true;
 }
 
-bool HttpResponseWriter::PostHttpResponse(const std::shared_ptr<HttpResponse> &response) const {
+bool HttpResponseWriter::PostHttpResponse(const std::shared_ptr<HttpResponse>& response) const {
     if (!response) {
         AUTIL_LOG(WARN, "post http response failed, http response is null");
         return false;
@@ -112,13 +114,13 @@ bool HttpResponseWriter::PostHttpResponse(const std::shared_ptr<HttpResponse> &r
     return true;
 }
 
-std::shared_ptr<HttpResponse> HttpResponseWriter::Chunk(const std::string &data, bool isWriteDone) {
+std::shared_ptr<HttpResponse> HttpResponseWriter::Chunk(const std::string& data, bool isWriteDone) {
     if (_firstPacket) {
         AddHeader("Transfer-Encoding", "chunked");
         std::stringstream ss;
         ss << std::hex << data.size();
-        const auto body = ss.str() + "\r\n" + data + "\r\n";
-        auto response = std::make_shared<HttpResponse>(body);
+        const auto body     = ss.str() + "\r\n" + data + "\r\n";
+        auto       response = std::make_shared<HttpResponse>(body);
         if (response) {
             response->SetHeaders(_headers);
             response->SetDisableContentLengthHeader(true);
@@ -141,4 +143,4 @@ std::shared_ptr<HttpResponse> HttpResponseWriter::Chunk(const std::string &data,
     return response;
 }
 
-} // namespace http_server
+}  // namespace http_server

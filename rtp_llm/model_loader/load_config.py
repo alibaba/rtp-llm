@@ -1,13 +1,15 @@
 import json
 import logging
 import os
-import torch
 from typing import Any, List, Optional, Union
+
+import torch
 from pydantic import BaseModel, field_validator, model_validator
-from rtp_llm.utils.util import check_with_info
-from rtp_llm.utils.fuser import fetch_remote_file_to_local
-from rtp_llm.utils.database import BaseDatabase
+
 from rtp_llm.device.device_base import DeviceBase
+from rtp_llm.utils.database import BaseDatabase
+from rtp_llm.utils.fuser import fetch_remote_file_to_local
+from rtp_llm.utils.util import check_with_info
 
 
 class LoadConfig(BaseModel):
@@ -41,13 +43,12 @@ class LoadConfig(BaseModel):
     bit: int = 16
     merge_lora: bool = False
 
-    vit_separation : int = 0
+    vit_separation: int = 0
     compute_dtype: Any = torch.float16
 
     quant_algo: Any = None
 
     is_ft_style_weight: bool = False
-
 
     exported_device: Optional[Any] = None
 
@@ -61,7 +62,7 @@ class LoadConfig(BaseModel):
             "database": BaseDatabase,
             "compute_dtype": torch.dtype,
             "quant_algo": (type(None), object),
-            "exported_device": (type(None), DeviceBase)
+            "exported_device": (type(None), DeviceBase),
         }
         expected = expected_types[field_name]
 
@@ -71,18 +72,19 @@ class LoadConfig(BaseModel):
             )
         return value
 
-    @model_validator(mode='after')
-    def _set_default_phy2log(self) -> 'LoadConfig':
+    @model_validator(mode="after")
+    def _set_default_phy2log(self) -> "LoadConfig":
         if self.phy2log is None and self.expert_num > 0:
-            phy2log =  self.create_redundant_expert(layer_num=self.num_layers,
-                                                          expert_num=self.expert_num,
-                                                          phy_exp_num=self.phy_exp_num, 
-                                                          ep_size=self.ep_size,
-                                                          num_nodes=self.num_nodes, 
-                                                          PHY2LOG_PATH_KEY='PHY2LOG_PATH')
+            phy2log = self.create_redundant_expert(
+                layer_num=self.num_layers,
+                expert_num=self.expert_num,
+                phy_exp_num=self.phy_exp_num,
+                ep_size=self.ep_size,
+                num_nodes=self.num_nodes,
+                PHY2LOG_PATH_KEY="PHY2LOG_PATH",
+            )
             return self.model_copy(update={"phy2log": phy2log})
         return self
-    
 
     def get_selected_experts(self, layer_id: int, expert_num):
         selected_experts = range(expert_num)
@@ -90,20 +92,44 @@ class LoadConfig(BaseModel):
             selected_experts = self.phy2log[layer_id]
         expert_per_ep = len(selected_experts) // self.ep_size
         ep_rank = self.ep_rank
-        selected_experts = selected_experts[expert_per_ep * ep_rank: expert_per_ep * (ep_rank + 1)]
+        selected_experts = selected_experts[
+            expert_per_ep * ep_rank : expert_per_ep * (ep_rank + 1)
+        ]
         return selected_experts
 
-
-    def udpate_layer_experts(self, layer_id_tensor: Union[int, torch.Tensor], layer_phy2log: Union[List[int], torch.Tensor]):
-        layer_id: int = int(layer_id_tensor.item()) if isinstance(layer_id_tensor, torch.Tensor) else layer_id_tensor
-        experts: List[int] = layer_phy2log.tolist() if isinstance(layer_phy2log, torch.Tensor) else layer_phy2log
-        check_with_info(layer_id < self.num_layers and self.phy2log and len(self.phy2log[layer_id]) == self.phy_exp_num, 
-                        f"layer_id:{layer_id} muse less than num_layers:{self.num_layers} and phy2log len(self.phy2log[layer_id]) must equal to {self.phy_exp_num}")
+    def udpate_layer_experts(
+        self,
+        layer_id_tensor: Union[int, torch.Tensor],
+        layer_phy2log: Union[List[int], torch.Tensor],
+    ):
+        layer_id: int = (
+            int(layer_id_tensor.item())
+            if isinstance(layer_id_tensor, torch.Tensor)
+            else layer_id_tensor
+        )
+        experts: List[int] = (
+            layer_phy2log.tolist()
+            if isinstance(layer_phy2log, torch.Tensor)
+            else layer_phy2log
+        )
+        check_with_info(
+            layer_id < self.num_layers
+            and self.phy2log
+            and len(self.phy2log[layer_id]) == self.phy_exp_num,
+            f"layer_id:{layer_id} muse less than num_layers:{self.num_layers} and phy2log len(self.phy2log[layer_id]) must equal to {self.phy_exp_num}",
+        )
         self.phy2log[layer_id] = experts
         logging.debug(f"update layer {layer_id} phy2log {layer_phy2log}")
 
     @staticmethod
-    def create_redundant_expert(layer_num: int, expert_num: int, phy_exp_num: int, ep_size: int, num_nodes: int, PHY2LOG_PATH_KEY: str='PHY2LOG_PATH'):
+    def create_redundant_expert(
+        layer_num: int,
+        expert_num: int,
+        phy_exp_num: int,
+        ep_size: int,
+        num_nodes: int,
+        PHY2LOG_PATH_KEY: str = "PHY2LOG_PATH",
+    ):
         if expert_num == 0:
             return None
 
@@ -112,8 +138,14 @@ class LoadConfig(BaseModel):
         expert_num_per_ep = expert_num // ep_size
         rank_per_node = ep_size // num_nodes
 
-        check_with_info(redundant_expert <= expert_num, f"redundant_expert:{redundant_expert} must less or equal than expert_num:{expert_num}")
-        check_with_info(phy_exp_num % ep_size == 0, f"phy_exp_num:{phy_exp_num} must be divisible by ep_size:{ep_size}")
+        check_with_info(
+            redundant_expert <= expert_num,
+            f"redundant_expert:{redundant_expert} must less or equal than expert_num:{expert_num}",
+        )
+        check_with_info(
+            phy_exp_num % ep_size == 0,
+            f"phy_exp_num:{phy_exp_num} must be divisible by ep_size:{ep_size}",
+        )
 
         layer_num = layer_num
 
@@ -123,17 +155,30 @@ class LoadConfig(BaseModel):
         if phy2log_path:
             with open(phy2log_path, "r") as f:
                 phy2log = json.load(f)
-                check_with_info(len(phy2log) == layer_num, f"phy2log len {len(phy2log)} != layer_num {layer_num}")
-                check_with_info(len(phy2log[0]) == phy_exp_num, f"phy2log[0] len {len(phy2log[0])} != phy_exp_num {phy_exp_num}")
+                check_with_info(
+                    len(phy2log) == layer_num,
+                    f"phy2log len {len(phy2log)} != layer_num {layer_num}",
+                )
+                check_with_info(
+                    len(phy2log[0]) == phy_exp_num,
+                    f"phy2log[0] len {len(phy2log[0])} != phy_exp_num {phy_exp_num}",
+                )
         elif redundant_expert % ep_size == 0:
             redundant_expert_per_ep = redundant_expert // ep_size
             for _ in range(layer_num):
                 layer_phy2log: List[int] = []
                 for ep_rank in range(ep_size):
                     node_id = ep_rank // rank_per_node
-                    layer_phy2log.extend(range(ep_rank * expert_num_per_ep, (ep_rank + 1) * expert_num_per_ep))
+                    layer_phy2log.extend(
+                        range(
+                            ep_rank * expert_num_per_ep,
+                            (ep_rank + 1) * expert_num_per_ep,
+                        )
+                    )
                     for i in range(redundant_expert_per_ep):
-                        redundant_ep_id = (ep_rank + 1) % rank_per_node + node_id * rank_per_node
+                        redundant_ep_id = (
+                            ep_rank + 1
+                        ) % rank_per_node + node_id * rank_per_node
                         expert_id = redundant_ep_id * expert_num_per_ep + i
                         layer_phy2log.append(expert_id)
                 phy2log.append(layer_phy2log)

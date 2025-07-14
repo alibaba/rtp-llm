@@ -7,14 +7,20 @@ import torch
 from torch import nn
 from transformers.activations import ACT2FN
 
-from rtp_llm.models.multimodal.multimodal_common import ImageTransform, ImageEmbeddingInterface
+from rtp_llm.models.multimodal.multimodal_common import (
+    ImageEmbeddingInterface,
+    ImageTransform,
+)
+
 
 class EVA2CLIPImageEmbedding(ImageEmbeddingInterface):
     def __init__(self, config):
         # EVA2CLIPModel is too big, create it in cpu
         self.config = config
         self.vit = EVA2CLIPModel(config).cpu()
-        self.image_transform = ImageTransform(config.mm_related_params.config["image_size"])
+        self.image_transform = ImageTransform(
+            config.mm_related_params.config["image_size"]
+        )
 
     @property
     def _device(self):
@@ -22,7 +28,9 @@ class EVA2CLIPImageEmbedding(ImageEmbeddingInterface):
 
     def image_embedding(self, images: List[Any]) -> torch.Tensor:
         with torch.inference_mode():
-            tensor_images = self.image_transform.encode(images, self._device, self._data_type)
+            tensor_images = self.image_transform.encode(
+                images, self._device, self._data_type
+            )
             tensor_images = self.vit(tensor_images).to(device=self._device)
         assert tensor_images.shape[0] == len(images)
         return tensor_images
@@ -60,7 +68,9 @@ class Attention(nn.Module):
     def forward(self, x: "tensor(B, L, D)") -> "tensor(B, L, D)":
         B, L, _ = x.shape
         qkv = self.query_key_value(x)
-        qkv = qkv.reshape(B, L, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)  # 3, B, H, L, D
+        qkv = qkv.reshape(B, L, 3, self.num_heads, -1).permute(
+            2, 0, 3, 1, 4
+        )  # 3, B, H, L, D
         q, k, v = qkv[0], qkv[1], qkv[2]
 
         # Due to some reason, trt can not compile scaled_dot_product_attention.
@@ -162,17 +172,29 @@ class EVA2CLIPModel(nn.Module):
         self.transformer = Transformer(vision_config)
         self.linear_proj = GLU(
             config,
-            in_features=vision_config.hidden_size if vision_config.use_vision_hidden_size else config.hidden_size
+            in_features=(
+                vision_config.hidden_size
+                if vision_config.use_vision_hidden_size
+                else config.hidden_size
+            ),
         )
         self.conv = nn.Conv2d(
             in_channels=vision_config.hidden_size,
-            out_channels=vision_config.hidden_size if vision_config.use_vision_hidden_size else config.hidden_size,
+            out_channels=(
+                vision_config.hidden_size
+                if vision_config.use_vision_hidden_size
+                else config.hidden_size
+            ),
             kernel_size=2,
             stride=2,
         )
         self.boi = nn.Parameter(torch.zeros(1, 1, config.hidden_size))
         self.eoi = nn.Parameter(torch.zeros(1, 1, config.hidden_size))
-        self.scaling_factor = vision_config.scaling_factor if hasattr(vision_config, 'scaling_factor') else 1.0
+        self.scaling_factor = (
+            vision_config.scaling_factor
+            if hasattr(vision_config, "scaling_factor")
+            else 1.0
+        )
 
     @property
     def dtype(self):

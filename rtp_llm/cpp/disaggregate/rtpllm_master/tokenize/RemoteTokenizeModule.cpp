@@ -18,9 +18,9 @@ bool RemoteTokenizeModule::init(std::shared_ptr<PrefillLoadBalancer> load_balanc
     return true;
 }
 
-//TODO: request timeout
+// TODO: request timeout
 absl::StatusOr<std::shared_ptr<TaskDescription>> RemoteTokenizeModule::encodeRequest(const std::string& request,
-                                                                                const std::string& biz_name) {
+                                                                                     const std::string& biz_name) {
     if (!http_client_) {
         return absl::InternalError("http client is null, encodeRequest failed");
     }
@@ -32,8 +32,8 @@ absl::StatusOr<std::shared_ptr<TaskDescription>> RemoteTokenizeModule::encodeReq
         auto err = autil::StringUtil::formatString("choose host failed, biz:%s", biz_name.c_str());
         return absl::InternalError(err);
     }
-    const std::string url = "tcp:" + host->ip + ":" + std::to_string(host->http_port);
-    bool                             success          = false;
+    const std::string                url     = "tcp:" + host->ip + ":" + std::to_string(host->http_port);
+    bool                             success = false;
     std::string                      error_msg;
     std::shared_ptr<TaskDescription> task_description = std::make_shared<TaskDescription>();
     autil::Notifier                  notifier;
@@ -41,7 +41,7 @@ absl::StatusOr<std::shared_ptr<TaskDescription>> RemoteTokenizeModule::encodeReq
         [this, &success, &notifier, &task_description, &error_msg](bool ok, const std::string& response_body) {
             if (!ok) {
                 error_msg = response_body;
-                success = false;
+                success   = false;
                 notifier.notify();
                 return;
             }
@@ -50,7 +50,7 @@ absl::StatusOr<std::shared_ptr<TaskDescription>> RemoteTokenizeModule::encodeReq
                 autil::legacy::FromJsonString(tokenize_response, response_body);
             } catch (const std::exception& e) {
                 error_msg = e.what();
-                success = false;
+                success   = false;
                 notifier.notify();
                 return;
             }
@@ -65,7 +65,8 @@ absl::StatusOr<std::shared_ptr<TaskDescription>> RemoteTokenizeModule::encodeReq
     }
     notifier.waitNotification();
     if (!success) {
-        return absl::InternalError(autil::StringUtil::formatString("http post request get error, url: %s, error msg: %s", url.c_str(), error_msg.c_str()));
+        return absl::InternalError(autil::StringUtil::formatString(
+            "http post request get error, url: %s, error msg: %s", url.c_str(), error_msg.c_str()));
     }
     return task_description;
 #undef CREATE_ERROR_MSG

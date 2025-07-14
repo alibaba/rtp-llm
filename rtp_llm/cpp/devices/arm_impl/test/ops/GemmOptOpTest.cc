@@ -11,21 +11,21 @@ using namespace rtp_llm;
 
 class ArmGemmOptOpTest: public DeviceTestBase {
 public:
-    void BasicGemmOP(size_t m, size_t n, size_t k);
-    void BasicGemmOP_FP16(size_t m, size_t n, size_t k);
-    void BatchGemmOP(size_t b, size_t m, size_t n, size_t k);
-    void BatchGemmFP16OP(size_t b, size_t m, size_t n, size_t k, bool check_result=true);
-    void TransposeBatchGemmOP(TransposeOperation op_a,
-                              TransposeOperation op_b,
-                              size_t             b,
-                              size_t             m1,
-                              size_t             k1,
-                              size_t             k2,
-                              size_t             n2,
-                              size_t             m3,
-                              size_t             n3);
+    void          BasicGemmOP(size_t m, size_t n, size_t k);
+    void          BasicGemmOP_FP16(size_t m, size_t n, size_t k);
+    void          BatchGemmOP(size_t b, size_t m, size_t n, size_t k);
+    void          BatchGemmFP16OP(size_t b, size_t m, size_t n, size_t k, bool check_result = true);
+    void          TransposeBatchGemmOP(TransposeOperation op_a,
+                                       TransposeOperation op_b,
+                                       size_t             b,
+                                       size_t             m1,
+                                       size_t             k1,
+                                       size_t             k2,
+                                       size_t             n2,
+                                       size_t             m3,
+                                       size_t             n3);
     TimerRecorder timer_recorder_ = TimerRecorder();
-    Timer timer_ = Timer();
+    Timer         timer_          = Timer();
 };
 
 void ArmGemmOptOpTest::BasicGemmOP_FP16(size_t m, size_t n, size_t k) {
@@ -75,24 +75,26 @@ void ArmGemmOptOpTest::BatchGemmOP(size_t b, size_t m, size_t n, size_t k) {
     GemmParams params{*A_device, *B_device};
 
     timer_.reset();
-    auto       C_device = device_->gemm(params);
-    timer_recorder_.record(std::string("BatchGemmFP16OP") + ", m=" + std::to_string(m) + ", n=" + std::to_string(n) + ", k=" + std::to_string(k), timer_.elapsed_nano());
-
+    auto C_device = device_->gemm(params);
+    timer_recorder_.record(std::string("BatchGemmFP16OP") + ", m=" + std::to_string(m) + ", n=" + std::to_string(n)
+                               + ", k=" + std::to_string(k),
+                           timer_.elapsed_nano());
 
     auto C_host = torch::matmul(A_host, B_host).to(torch::kFloat);
     auto A      = bufferToTensor(*A_device);
     auto B      = bufferToTensor(*B_device);
     auto C      = bufferToTensor(*C_device);
 
-    auto C_host_slice = C_host.index({torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(0, 8), torch::indexing::Slice(0, 8)});
-    auto C_slice = C.index({torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(0, 8), torch::indexing::Slice(0, 8)});
+    auto C_host_slice = C_host.index(
+        {torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(0, 8), torch::indexing::Slice(0, 8)});
+    auto C_slice = C.index(
+        {torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(0, 8), torch::indexing::Slice(0, 8)});
 
     // no nan
     ASSERT_TRUE((~torch::any(torch::isnan(C))).item<bool>());
-    
+
     ASSERT_TRUE(torch::allclose(C, C_host, rtol_, atol_));
 }
-
 
 void ArmGemmOptOpTest::BatchGemmFP16OP(size_t b, size_t m, size_t n, size_t k, bool check_result) {
     auto A_host = torch::rand({(int)b, (int)m, (int)k}, torch::Device(torch::kCPU)).to(torch::kHalf) - 0.5;
@@ -104,15 +106,17 @@ void ArmGemmOptOpTest::BatchGemmFP16OP(size_t b, size_t m, size_t n, size_t k, b
     GemmParams params{*A_device, *B_device, nullopt, nullptr, DataType::TYPE_FP16};
 
     timer_.reset();
-    auto       C_device = device_->gemm(params);
-    timer_recorder_.record(std::string("BatchGemmFP16OP") + ", m=" + std::to_string(m) + ", n=" + std::to_string(n) + ", k=" + std::to_string(k), timer_.elapsed_nano());
+    auto C_device = device_->gemm(params);
+    timer_recorder_.record(std::string("BatchGemmFP16OP") + ", m=" + std::to_string(m) + ", n=" + std::to_string(n)
+                               + ", k=" + std::to_string(k),
+                           timer_.elapsed_nano());
     if (check_result) {
         std::cout << "BatchGemmFP16OP" << ", m=" << m << ", n=" << n << ", k=" << k << std::endl;
     }
 
-    auto A      = bufferToTensor(*A_device);
-    auto B      = bufferToTensor(*B_device);
-    auto C      = bufferToTensor(*C_device);
+    auto A = bufferToTensor(*A_device);
+    auto B = bufferToTensor(*B_device);
+    auto C = bufferToTensor(*C_device);
 
     if (!check_result) {
         return;
@@ -122,9 +126,11 @@ void ArmGemmOptOpTest::BatchGemmFP16OP(size_t b, size_t m, size_t n, size_t k, b
     ASSERT_TRUE((~torch::any(torch::isnan(C))).item<bool>());
 
     auto C_host = torch::matmul(A_host, B_host).to(torch::kHalf);
-    
-    auto C_host_slice = C_host.index({torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(0, 8), torch::indexing::Slice(0, 8)});
-    auto C_slice = C.index({torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(0, 8), torch::indexing::Slice(0, 8)});
+
+    auto C_host_slice = C_host.index(
+        {torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(0, 8), torch::indexing::Slice(0, 8)});
+    auto C_slice = C.index(
+        {torch::indexing::Slice(torch::indexing::None), torch::indexing::Slice(0, 8), torch::indexing::Slice(0, 8)});
 
     std::cout << "C(pytorch): \n" << C_host_slice << std::endl;
     std::cout << "C(rtp-llm): \n" << C_slice << std::endl;
@@ -133,14 +139,14 @@ void ArmGemmOptOpTest::BatchGemmFP16OP(size_t b, size_t m, size_t n, size_t k, b
 }
 
 void ArmGemmOptOpTest::TransposeBatchGemmOP(TransposeOperation op_a,
-                                         TransposeOperation op_b,
-                                         size_t             b,
-                                         size_t             m1,
-                                         size_t             k1,
-                                         size_t             k2,
-                                         size_t             n2,
-                                         size_t             m3,
-                                         size_t             n3) {
+                                            TransposeOperation op_b,
+                                            size_t             b,
+                                            size_t             m1,
+                                            size_t             k1,
+                                            size_t             k2,
+                                            size_t             n2,
+                                            size_t             m3,
+                                            size_t             n3) {
     auto A_host = torch::rand({(int)b, (int)m1, (int)k1}, torch::Device(torch::kCPU)).to(torch::kFloat);
     auto B_host = torch::rand({(int)b, (int)k2, (int)n2}, torch::Device(torch::kCPU)).to(torch::kFloat);
 

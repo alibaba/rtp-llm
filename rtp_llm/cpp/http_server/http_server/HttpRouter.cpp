@@ -5,7 +5,7 @@ namespace http_server {
 
 AUTIL_LOG_SETUP(http_server, HttpRouter);
 
-bool HttpRouter::RegisterRoute(const std::string &method, const std::string &endpoint, const ResponseHandler &func) {
+bool HttpRouter::RegisterRoute(const std::string& method, const std::string& endpoint, const ResponseHandler& func) {
     if (method.empty() || endpoint.empty()) {
         AUTIL_LOG(WARN,
                   "register route failed, method or endpoint is empty, method: %s, endpoint: %s",
@@ -27,7 +27,7 @@ bool HttpRouter::RegisterRoute(const std::string &method, const std::string &end
     return true;
 }
 
-std::optional<ResponseHandler> HttpRouter::FindRoute(const std::string &method, const std::string &endpoint) const {
+std::optional<ResponseHandler> HttpRouter::FindRoute(const std::string& method, const std::string& endpoint) const {
     std::optional<ResponseHandler> handler;
     {
         std::shared_lock<std::shared_mutex> lock(_handlerMutex);
@@ -47,4 +47,4 @@ std::optional<ResponseHandler> HttpRouter::FindRoute(const std::string &method, 
     return handler;
 }
 
-} // namespace http_server
+}  // namespace http_server

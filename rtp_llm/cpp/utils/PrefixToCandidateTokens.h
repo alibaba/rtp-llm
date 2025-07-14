@@ -1,6 +1,5 @@
 #pragma once
 
-
 #include <vector>
 #include <cstring>
 #include <fstream>
@@ -13,11 +12,11 @@
 
 namespace rtp_llm {
 
-class TreeDecodeConfig : public autil::legacy::Jsonizable {
+class TreeDecodeConfig: public autil::legacy::Jsonizable {
 public:
-    int32_t start_token_id;
-    int32_t end_token_id;
-    std::string sep;
+    int32_t                                     start_token_id;
+    int32_t                                     end_token_id;
+    std::string                                 sep;
     std::map<std::string, std::vector<int32_t>> prefix_dict;
 
     void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override {
@@ -31,7 +30,7 @@ public:
 class PrefixToCandidateTokens {
 public:
     const std::unordered_set<int32_t>& getCandidateTokens(const std::string& key) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex>        lock(mutex_);
         static std::unordered_set<int32_t> EMPTY;
         if (!init_success_) {
             static std::unordered_set<int32_t> EMPTY;
@@ -46,17 +45,23 @@ public:
     }
     bool isValidStatus(const std::string& key) {
         std::lock_guard<std::mutex> lock(mutex_);
-        auto iter = prefix_to_cadicates_.find(key);
+        auto                        iter = prefix_to_cadicates_.find(key);
         if (prefix_to_cadicates_.end() == iter) {
-  	        return false;
+            return false;
         } else {
-	        return true;
-	    }
+            return true;
+        }
     }
 
-    bool initSuccess() { return init_success_; }
-    int32_t startTokenId() { return config.start_token_id; }
-    int32_t endTokenId() { return config.end_token_id; }
+    bool initSuccess() {
+        return init_success_;
+    }
+    int32_t startTokenId() {
+        return config.start_token_id;
+    }
+    int32_t endTokenId() {
+        return config.end_token_id;
+    }
     std::string generateNextKey(std::string old_key, int next) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!old_key.empty()) {
@@ -86,14 +91,14 @@ private:
     PrefixToCandidateTokens(PrefixToCandidateTokens&)                  = delete;
     PrefixToCandidateTokens(PrefixToCandidateTokens&&)                 = delete;
     PrefixToCandidateTokens& operator=(const PrefixToCandidateTokens&) = delete;
-    void loadPrefixDict(std::string file_path) {
+    void                     loadPrefixDict(std::string file_path) {
         std::lock_guard<std::mutex> lock(mutex_);
         init_success_ = false;
         prefix_to_cadicates_.clear();
         std::ifstream file(file_path);
         if (!file) {
             std::stringstream ss;
-            ss << "Unable to open file[" << file_path << "]" << std::endl ;
+            ss << "Unable to open file[" << file_path << "]" << std::endl;
             RTP_LLM_LOG_INFO("PrefixToCandidateTokens load failed: %s", ss.str().c_str());
             return;
         }
@@ -102,15 +107,15 @@ private:
             std::ostringstream ss;
             ss << file.rdbuf();
             autil::legacy::FromJsonString(config, ss.str());
-        } catch (autil::legacy::ExceptionBase &e) {
+        } catch (autil::legacy::ExceptionBase& e) {
             std::stringstream ss;
-            ss << "file[" << file_path << "]'s format is not json" << std::endl ;
+            ss << "file[" << file_path << "]'s format is not json" << std::endl;
             RTP_LLM_LOG_INFO("PrefixToCandidateTokens load failed: %s", ss.str().c_str());
             return;
         }
-        for (auto kv: config.prefix_dict) {
+        for (auto kv : config.prefix_dict) {
             std::unordered_set<int32_t> tmp_set;
-            for (auto token_id: kv.second) {
+            for (auto token_id : kv.second) {
                 tmp_set.insert(token_id);
             }
             prefix_to_cadicates_[kv.first] = tmp_set;
@@ -119,12 +124,13 @@ private:
         init_success_ = true;
         RTP_LLM_LOG_INFO("PrefixToCandidateTokens load [%s] successfully", file_path.c_str());
     }
+
 private:
-    std::mutex mutex_;
-    TreeDecodeConfig config;
+    std::mutex                                                   mutex_;
+    TreeDecodeConfig                                             config;
     std::unordered_map<std::string, std::unordered_set<int32_t>> prefix_to_cadicates_;
-    bool init_success_ = false;
+    bool                                                         init_success_ = false;
 };
 
 typedef std::shared_ptr<PrefixToCandidateTokens> PrefixToCandidateTokensPtr;
-}
+}  // namespace rtp_llm

@@ -29,4 +29,3 @@ void all2all_single_unequal_split(void*          sendbuff,
                                   cudaStream_t   stream);
 
 }  // namespace rtp_llm
-

@@ -49,5 +49,4 @@ protected:
     rtp_llm::DeviceBase* device_;
 };
 
-
 }  // namespace rtp_llm

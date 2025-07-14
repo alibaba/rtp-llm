@@ -54,7 +54,7 @@ message CacheLoadResponse {
 
 service KvCacheStoreService {
     option (arpc.global_service_id) = 10000;
-    
+
     rpc load(CacheLoadRequest) returns (CacheLoadResponse) {
         option (arpc.local_method_id) = 10002;
     }

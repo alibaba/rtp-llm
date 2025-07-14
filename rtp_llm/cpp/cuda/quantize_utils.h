@@ -23,11 +23,10 @@ inline void check_quant_type_allowed(torch::ScalarType quant_type) {
                 "Must be int4 or int8 quantization");
 }
 
-inline std::vector<torch::Tensor> symmetric_quantize_helper(torch::Tensor weight,
+inline std::vector<torch::Tensor> symmetric_quantize_helper(torch::Tensor     weight,
                                                             torch::ScalarType quant_type,
-                                                            bool return_unprocessed_quantized_tensor,
-                                                            const int arch)
-{
+                                                            bool              return_unprocessed_quantized_tensor,
+                                                            const int         arch) {
     CHECK_CPU(weight);
     CHECK_CONTIGUOUS(weight);
     TORCH_CHECK(weight.numel() != 0, "weight should not be empty tensor");
@@ -51,12 +50,10 @@ inline std::vector<torch::Tensor> symmetric_quantize_helper(torch::Tensor weight
     if (weight.dim() == 2) {
         quantized_weight_shape = {long(num_rows), long(bytes_per_out_col)};
         scale_shape            = {long(num_cols)};
-    }
-    else if (weight.dim() == 3) {
+    } else if (weight.dim() == 3) {
         quantized_weight_shape = {long(num_experts), long(num_rows), long(bytes_per_out_col)};
         scale_shape            = {long(num_experts), long(num_cols)};
-    }
-    else {
+    } else {
         TORCH_CHECK(false, "Invalid weight dimension. Weight must have dim 2 or 3");
     }
 
@@ -65,39 +62,37 @@ inline std::vector<torch::Tensor> symmetric_quantize_helper(torch::Tensor weight
 
     torch::Tensor processed_quantized_weight = torch::empty_like(unprocessed_quantized_weight);
 
-    torch::Tensor scales = torch::empty(scale_shape, torch::dtype(weight.dtype()).device(torch::kCPU).requires_grad(false));
+    torch::Tensor scales =
+        torch::empty(scale_shape, torch::dtype(weight.dtype()).device(torch::kCPU).requires_grad(false));
 
     int8_t* unprocessed_quantized_weight_ptr = torch_ext::get_ptr<int8_t>(unprocessed_quantized_weight);
     int8_t* processed_quantized_weight_ptr   = torch_ext::get_ptr<int8_t>(processed_quantized_weight);
 
     if (weight.scalar_type() == at::ScalarType::Float) {
         trt_cutlass::symmetric_quantize<float, float>(processed_quantized_weight_ptr,
-                                             unprocessed_quantized_weight_ptr,
-                                             torch_ext::get_ptr<float>(scales),
-                                             torch_ext::get_ptr<const float>(weight),
-                                             {num_experts, num_rows, num_cols},
-                                             ft_quant_type,
-                                             arch);
-    }
-    else if (weight.scalar_type() == at::ScalarType::Half) {
+                                                      unprocessed_quantized_weight_ptr,
+                                                      torch_ext::get_ptr<float>(scales),
+                                                      torch_ext::get_ptr<const float>(weight),
+                                                      {num_experts, num_rows, num_cols},
+                                                      ft_quant_type,
+                                                      arch);
+    } else if (weight.scalar_type() == at::ScalarType::Half) {
         trt_cutlass::symmetric_quantize<half, half>(processed_quantized_weight_ptr,
-                                           unprocessed_quantized_weight_ptr,
-                                           torch_ext::get_ptr<half>(scales),
-                                           torch_ext::get_ptr<const half>(weight),
-                                           {num_experts, num_rows, num_cols},
-                                           ft_quant_type,
-                                           arch);
-    }
-    else if (weight.scalar_type() == at::ScalarType::BFloat16) {
+                                                    unprocessed_quantized_weight_ptr,
+                                                    torch_ext::get_ptr<half>(scales),
+                                                    torch_ext::get_ptr<const half>(weight),
+                                                    {num_experts, num_rows, num_cols},
+                                                    ft_quant_type,
+                                                    arch);
+    } else if (weight.scalar_type() == at::ScalarType::BFloat16) {
         trt_cutlass::symmetric_quantize<__nv_bfloat16, __nv_bfloat16>(processed_quantized_weight_ptr,
-                                                             unprocessed_quantized_weight_ptr,
-                                                             torch_ext::get_ptr<__nv_bfloat16>(scales),
-                                                             torch_ext::get_ptr<const __nv_bfloat16>(weight),
-                                                             {num_experts, num_rows, num_cols},
-                                                             ft_quant_type,
-                                                             arch);
-    }
-    else {
+                                                                      unprocessed_quantized_weight_ptr,
+                                                                      torch_ext::get_ptr<__nv_bfloat16>(scales),
+                                                                      torch_ext::get_ptr<const __nv_bfloat16>(weight),
+                                                                      {num_experts, num_rows, num_cols},
+                                                                      ft_quant_type,
+                                                                      arch);
+    } else {
         TORCH_CHECK(false, "Invalid datatype. Weight must be BF16/FP16");
     }
 
@@ -108,4 +103,4 @@ inline std::vector<torch::Tensor> symmetric_quantize_helper(torch::Tensor weight
     return std::vector<torch::Tensor>{processed_quantized_weight, scales};
 }
 
-}
+}  // namespace rtp_llm

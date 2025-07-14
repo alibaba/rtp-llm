@@ -33,7 +33,7 @@ from maga_transformer.distribute.gang_info import members_from_test_env
 
 tokenizer: Optional[PreTrainedTokenizer] = None
 next_random_seed = int(os.environ.get("RANDOM_SEED", 114514))
-max_seq_len = int(os.environ["MAX_SEQ_LEN"])   
+max_seq_len = int(os.environ["MAX_SEQ_LEN"])
 
 def wait_server_start(server_thread: Optional[Thread], port: int):
     start_time = time.time()
@@ -98,7 +98,7 @@ def script_exit(pgrp_set: bool = False):
         os._exit(0)
 
 
-if __name__ == '__main__':  
+if __name__ == '__main__':
     pgrp_set = False
     try:
         os.setpgrp()
@@ -111,7 +111,7 @@ if __name__ == '__main__':
     typed_messages: List[ChatCompletionMessageParam] = [
         ChatCompletionUserMessageParam(content="中国的首都是哪里?", role="user")
     ]
-    
+
     response = openai.chat.completions.create(
         model="whatever",
         messages=typed_messages
@@ -197,7 +197,7 @@ export DEVICE_RESERVE_MEMORY_BYTES=-2048000000;
 export USE_COMPILE=1
 source prev.sh
 echo "user_home: $USER_HOME"
-$PYTHON_BIN ${USER_HOME}/backend_front/backend.py 
+$PYTHON_BIN ${USER_HOME}/backend_front/backend.py
 ```
 
 前端启动脚本:
@@ -206,7 +206,7 @@ $PYTHON_BIN ${USER_HOME}/backend_front/backend.py
 export USE_COMPILE=0
 source prev.sh
 echo $USER_HOME
-$PYTHON_BIN ${USER_HOME}/backend_front/fronted.py 
+$PYTHON_BIN ${USER_HOME}/backend_front/fronted.py
 ```
 ## 二. Python代码调试
 我们采用vscode进行代码开发调试，python代码调试比较方便使用图形化界面进行处理，比较直观。下面是进行launch调试的配置文件:
@@ -257,7 +257,7 @@ $PYTHON_BIN ${USER_HOME}/backend_front/fronted.py
 首先需要启动服务: bash backend.sh，最后下面这样就算服务启动成功。
 ![](./pics/backend_server_success.png)
 查看相关启动进程如下:
-```shell 
+```shell
 [tanboyu.tby@mainse-buffer011161048115.na132 /hio_disk/tanboyu.tby/FasterTransformer]
 $ps aux | grep maga_ft
 tanboyu+  21090  5.7  0.1 41536432 1105896 pts/20 Sl+ 23:55   0:15 maga_ft_backend_server

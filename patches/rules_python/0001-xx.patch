@@ -20,6 +20,6 @@ index 8fa3e02d..59ac3d4d 100644
                  while True:
                      block = fsrc.read(2**20)
                      if not block:
--- 
+--
 2.19.1.6.gb485710b
 

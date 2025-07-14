@@ -1,25 +1,51 @@
 import copy
-import json
-import re
-import logging
-import torch
-from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Any, Union, Callable, Tuple, AsyncGenerator
 import functools
+import json
+import logging
+import re
+from dataclasses import dataclass, field
+from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple, Union
 
-from rtp_llm.models.base_model import GenerateOutput, GenerateOutputs
-from rtp_llm.config.generate_config import GenerateConfig
-from rtp_llm.openai.renderers.qwen_tool_renderer import QwenToolRenderer, QwenToolStreamStatus
-from rtp_llm.tokenizer.tokenization_qwen import QWenTokenizer
+import torch
 from transformers import Qwen2Tokenizer
-from rtp_llm.openai.api_datatype import ChatMessage, GPTFunctionDefinition, \
-    ChatCompletionRequest, RoleEnum, FunctionCall, ChatCompletionResponseStreamChoice, \
-    DeltaMessage, FinisheReason, UsageInfo, RendererInfo, PromptTokensDetails
-from rtp_llm.openai.renderers.custom_renderer import CustomChatRenderer, RendererParams, \
-    StreamResponseObject, RenderedInputs, StreamStatus, StreamStatusSync, OutputDelta, ThinkStatus
-from rtp_llm.openai.renderers.basic_renderer import BasicRenderer
+
+from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.models.base_model import GenerateOutput, GenerateOutputs
+from rtp_llm.openai.api_datatype import (
+    ChatCompletionRequest,
+    ChatCompletionResponseStreamChoice,
+    ChatMessage,
+    DeltaMessage,
+    FinisheReason,
+    FunctionCall,
+    GPTFunctionDefinition,
+    PromptTokensDetails,
+    RendererInfo,
+    RoleEnum,
+    UsageInfo,
+)
 from rtp_llm.openai.renderer_factory_register import register_renderer
-from rtp_llm.utils.word_util import get_stop_word_slices, truncate_response_with_stop_words, is_truncated
+from rtp_llm.openai.renderers.basic_renderer import BasicRenderer
+from rtp_llm.openai.renderers.custom_renderer import (
+    CustomChatRenderer,
+    OutputDelta,
+    RenderedInputs,
+    RendererParams,
+    StreamResponseObject,
+    StreamStatus,
+    StreamStatusSync,
+    ThinkStatus,
+)
+from rtp_llm.openai.renderers.qwen_tool_renderer import (
+    QwenToolRenderer,
+    QwenToolStreamStatus,
+)
+from rtp_llm.tokenizer.tokenization_qwen import QWenTokenizer
+from rtp_llm.utils.word_util import (
+    get_stop_word_slices,
+    is_truncated,
+    truncate_response_with_stop_words,
+)
 
 QwenTokenizerTypes = Union[QWenTokenizer, Qwen2Tokenizer]
 
@@ -49,6 +75,7 @@ DUMMY_THOUGHT = {
 
 _TEXT_COMPLETION_CMD = object()
 
+
 class QwenStreamStatus(StreamStatus):
     generating_function_call: bool = False
     total_output_string: str = ""
@@ -59,7 +86,7 @@ class QwenStreamStatus(StreamStatus):
     def update_result(self):
         self.last_token_length = len(self.output_ids) - len(self.last_output_ids)
         self.last_output_ids = self.output_ids
-        self.responded_string = self.total_output_string[: - len('\nAction:')]
+        self.responded_string = self.total_output_string[: -len("\nAction:")]
 
     @property
     def responded_length(self):
@@ -71,8 +98,11 @@ class QwenStreamStatus(StreamStatus):
 
     def check_stop_reason(self):
         if self.finish_reason == None:
-            logging.debug(f"output [{self.responded_string}] found no stop reason! use stop as default.")
+            logging.debug(
+                f"output [{self.responded_string}] found no stop reason! use stop as default."
+            )
             self.finish_reason = FinisheReason.stop
+
 
 class QwenStreamStatusSync(StreamStatusSync):
     generating_function_call: bool = False
@@ -82,7 +112,7 @@ class QwenStreamStatusSync(StreamStatusSync):
         super().__init__(request)
 
     def update_result(self):
-        self.responded_string = self.total_output_string[: - len('\nAction:')]
+        self.responded_string = self.total_output_string[: -len("\nAction:")]
 
     @property
     def responded_length(self):
@@ -94,14 +124,18 @@ class QwenStreamStatusSync(StreamStatusSync):
 
     def check_stop_reason(self):
         if self.finish_reason == None:
-            logging.debug(f"output [{self.responded_string}] found no stop reason! use stop as default.")
+            logging.debug(
+                f"output [{self.responded_string}] found no stop reason! use stop as default."
+            )
             self.finish_reason = FinisheReason.stop
+
 
 @dataclass
 class ProcessedOutput:
     output_str: str
     output_token_length: int
     finish_reason: Optional[FinisheReason]
+
 
 # TODO(wangyin): pass `max_window_size` to here.
 def make_context(
@@ -131,9 +165,7 @@ def make_context(
     for turn_query, turn_response in reversed(history):
         query_text, query_tokens_part = _tokenize_str("user", turn_query)
         query_tokens = im_start_tokens + query_tokens_part + im_end_tokens
-        response_text, response_tokens_part = _tokenize_str(
-            "assistant", turn_response
-        )
+        response_text, response_tokens_part = _tokenize_str("assistant", turn_response)
         response_tokens = im_start_tokens + response_tokens_part + im_end_tokens
 
         next_context_tokens = nl_tokens + query_tokens + nl_tokens + response_tokens
@@ -165,18 +197,21 @@ def make_context(
     raw_text += f"\n{im_start}user\n{query}{im_end}\n{im_start}assistant\n"
     return raw_text, context_tokens
 
+
 class QwenRenderer(CustomChatRenderer):
     def __init__(self, tokenizer: QwenTokenizerTypes, renderer_params: RendererParams):
         super().__init__(tokenizer, renderer_params)
-        self.add_extra_stop_word_ids([[37763, 367, 25], [151643]]) # Observation:
+        self.add_extra_stop_word_ids([[37763, 367, 25], [151643]])  # Observation:
 
         self.qwen_tool_renderer = QwenToolRenderer(tokenizer, renderer_params)
 
         self.template_chat_renderer: Optional[BasicRenderer] = None
         try:
             if tokenizer.chat_template != None:
-                logging.info(f"qwen model has chat_template [{tokenizer.chat_template}], "
-                             "which will be used for non-function call dialogue.")
+                logging.info(
+                    f"qwen model has chat_template [{tokenizer.chat_template}], "
+                    "which will be used for non-function call dialogue."
+                )
                 self.template_chat_renderer = BasicRenderer(tokenizer, renderer_params)
         except AttributeError:
             pass
@@ -185,19 +220,22 @@ class QwenRenderer(CustomChatRenderer):
         if request.tools:
             return self.qwen_tool_renderer.render_chat(request)
 
-        if (self.template_chat_renderer != None) and \
-            ((request.functions == None) or (len(request.functions) == 0)):
+        if (self.template_chat_renderer != None) and (
+            (request.functions == None) or (len(request.functions) == 0)
+        ):
             return self.template_chat_renderer.render_chat(request)
 
-        query, history, system = self.parse_messages(request.messages, request.functions)
+        query, history, system = self.parse_messages(
+            request.messages, request.functions
+        )
         logging.debug(f"parsed query: {query}, history: {history}, system: {system}")
         prompt = ""
         input_ids = []
-        if (query == _TEXT_COMPLETION_CMD):
+        if query == _TEXT_COMPLETION_CMD:
             prompt = self.text_complete_last_message(history)
             input_ids = self.tokenizer.encode(prompt)
         else:
-            assert (isinstance(query, str))
+            assert isinstance(query, str)
             prompt, input_ids = make_context(self.tokenizer, query, history, system)
         return RenderedInputs(input_ids=input_ids, rendered_prompt=prompt)
 
@@ -215,18 +253,18 @@ class QwenRenderer(CustomChatRenderer):
         return prompt
 
     def parse_messages(
-            self,
-            messages: List[ChatMessage],
-            functions: Optional[List[GPTFunctionDefinition]] = None
+        self,
+        messages: List[ChatMessage],
+        functions: Optional[List[GPTFunctionDefinition]] = None,
     ):
         if all(m.role != "user" for m in messages):
             raise ValueError("At least one message must be from user.")
 
         messages = copy.deepcopy(messages)
-        if messages[0].role == 'system':
-            system = messages.pop(0).content.lstrip('\n').rstrip()
+        if messages[0].role == "system":
+            system = messages.pop(0).content.lstrip("\n").rstrip()
         else:
-            system = 'You are a helpful assistant.'
+            system = "You are a helpful assistant."
 
         if functions:
             tools_text = []
@@ -250,12 +288,16 @@ class QwenRenderer(CustomChatRenderer):
                 tools_name_text.append(name_m)
             tools_text = "\n\n".join(tools_text)
             tools_name_text = ", ".join(tools_name_text)
-            instruction = (REACT_INSTRUCTION.format(
-                tools_text=tools_text,
-                tools_name_text=tools_name_text,
-            ).lstrip('\n').rstrip())
+            instruction = (
+                REACT_INSTRUCTION.format(
+                    tools_text=tools_text,
+                    tools_name_text=tools_name_text,
+                )
+                .lstrip("\n")
+                .rstrip()
+            )
         else:
-            instruction = ''
+            instruction = ""
 
         messages_with_fncall = messages
         messages = []
@@ -265,47 +307,55 @@ class QwenRenderer(CustomChatRenderer):
             content = content.lstrip("\n").rstrip()
             if role == "function":
                 if (len(messages) == 0) or (messages[-1].role != "assistant"):
-                    raise ValueError(f"Invalid request: Expecting role assistant before role function.")
-                messages[-1].content += f'\nObservation: {content}'
+                    raise ValueError(
+                        f"Invalid request: Expecting role assistant before role function."
+                    )
+                messages[-1].content += f"\nObservation: {content}"
                 if m_idx == len(messages_with_fncall) - 1:
                     # add a prefix for text completion
-                    messages[-1].content += '\nThought:'
-            elif role == 'assistant':
+                    messages[-1].content += "\nThought:"
+            elif role == "assistant":
                 if len(messages) == 0:
-                    raise ValueError(f"Invalid request: Expecting role user before role assistant.")
+                    raise ValueError(
+                        f"Invalid request: Expecting role user before role assistant."
+                    )
                 if func_call is None:
                     if functions:
-                        content = f'Thought: I now know the final answer.\nFinal Answer: {content}'
+                        content = f"Thought: I now know the final answer.\nFinal Answer: {content}"
                 else:
                     f_name, f_args = func_call.name, func_call.arguments
-                    if not content.startswith('Thought:'):
-                        content = f'Thought: {content}'
-                    content = f'{content}\nAction: {f_name}\nAction Input: {f_args}'
-                if messages[-1].role == 'user':
+                    if not content.startswith("Thought:"):
+                        content = f"Thought: {content}"
+                    content = f"{content}\nAction: {f_name}\nAction Input: {f_args}"
+                if messages[-1].role == "user":
                     messages.append(
-                        ChatMessage(role=RoleEnum.assistant, content=content.lstrip('\n').rstrip())
+                        ChatMessage(
+                            role=RoleEnum.assistant,
+                            content=content.lstrip("\n").rstrip(),
+                        )
                     )
                 else:
-                    messages[-1].content += '\n' + content
-            elif role == 'user':
+                    messages[-1].content += "\n" + content
+            elif role == "user":
                 messages.append(
-                    ChatMessage(role='user',content=content.lstrip('\n').rstrip()))
+                    ChatMessage(role="user", content=content.lstrip("\n").rstrip())
+                )
             else:
                 raise ValueError(f"Invalid request: Incorrect role {role}.")
 
         query = _TEXT_COMPLETION_CMD
-        if messages[-1].role == 'user':
+        if messages[-1].role == "user":
             query = messages[-1].content
             messages = messages[:-1]
 
         history = []  # [(Q1, A1), (Q2, A2), ..., (Q_last_turn, A_last_turn)]
         for i in range(0, len(messages), 2):
-            if messages[i].role == 'user' and messages[i + 1].role == 'assistant':
-                usr_msg = messages[i].content.lstrip('\n').rstrip()
-                bot_msg = messages[i + 1].content.lstrip('\n').rstrip()
+            if messages[i].role == "user" and messages[i + 1].role == "assistant":
+                usr_msg = messages[i].content.lstrip("\n").rstrip()
+                bot_msg = messages[i + 1].content.lstrip("\n").rstrip()
                 if instruction and (i == len(messages) - 2):
-                    usr_msg = f'{instruction}\n\nQuestion: {usr_msg}'
-                    instruction = ''
+                    usr_msg = f"{instruction}\n\nQuestion: {usr_msg}"
+                    instruction = ""
                 history.append([usr_msg, bot_msg])
             else:
                 raise ValueError(
@@ -313,9 +363,9 @@ class QwenRenderer(CustomChatRenderer):
                 )
         if instruction:
             assert query is not _TEXT_COMPLETION_CMD
-            query = f'{instruction}\n\nQuestion: {query}'
+            query = f"{instruction}\n\nQuestion: {query}"
         return query, history, system
-    
+
     def in_think_mode(self, request: ChatCompletionRequest):
         if request.disable_thinking():
             return False
@@ -334,7 +384,9 @@ class QwenRenderer(CustomChatRenderer):
             k = response.rfind("\nObservation:")
             func_name = response[i + len("\nAction:") : j].strip()
             func_args = response[j + len("\nAction Input:") : k].strip()
-        logging.info(f"parsed function from response: [{response}]: {func_name}, {func_args}")
+        logging.info(
+            f"parsed function from response: [{response}]: {func_name}, {func_args}"
+        )
         if func_name:
             return DeltaMessage(
                 content=response[:i],
@@ -345,36 +397,63 @@ class QwenRenderer(CustomChatRenderer):
         # if z >= 0:
         #     response = response[z + len("\nFinal Answer: ") :]
 
-    async def _update_single_status(self, status: StreamStatus, 
-                                    output: GenerateOutput, max_new_tokens: int,
-                                    stop_words_str: List[str], stop_word_slice_list: List[str], is_streaming: bool) -> OutputDelta:
+    async def _update_single_status(
+        self,
+        status: StreamStatus,
+        output: GenerateOutput,
+        max_new_tokens: int,
+        stop_words_str: List[str],
+        stop_word_slice_list: List[str],
+        is_streaming: bool,
+    ) -> OutputDelta:
         if status.request.tools:
             return await self.qwen_tool_renderer._update_single_status(
-                status, output, max_new_tokens, stop_words_str, stop_word_slice_list, is_streaming)
+                status,
+                output,
+                max_new_tokens,
+                stop_words_str,
+                stop_word_slice_list,
+                is_streaming,
+            )
 
         if not isinstance(status, QwenStreamStatus):
-            return await super()._update_single_status(status, output, max_new_tokens, stop_words_str, stop_word_slice_list, is_streaming)
+            return await super()._update_single_status(
+                status,
+                output,
+                max_new_tokens,
+                stop_words_str,
+                stop_word_slice_list,
+                is_streaming,
+            )
         if status.finish_reason != None:
             return await self._create_empty_delta(status.output.aux_info)
-        status.update_output(output,
-                             self._clean_output_ids,
-                             functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens),
-                             self._remove_stop_word_ids)
+        status.update_output(
+            output,
+            self._clean_output_ids,
+            functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens),
+            self._remove_stop_word_ids,
+        )
         status.total_output_string = self.tokenizer.decode(status.output_ids).strip()
-        if (len(status.total_output_string)) and (u'\uFFFD' == status.total_output_string[-1]):
+        if (len(status.total_output_string)) and (
+            "\uFFFD" == status.total_output_string[-1]
+        ):
             return await self._create_empty_delta(output.aux_info)
             # For some tokenizers (e.g. ChatGLM), decode a single token differs from decode a list of tokens.
-        if (status.total_output_string.endswith("\nAction:")):
+        if status.total_output_string.endswith("\nAction:"):
             status.generating_function_call = True
             return await self._create_empty_delta(output.aux_info)
-        if (status.generating_function_call):
+        if status.generating_function_call:
             return await self._create_empty_delta(output.aux_info)
         if is_truncated(status.total_output_string, stop_words_str, is_streaming):
             status.finish_reason = FinisheReason.stop
             return await self._create_empty_delta(output.aux_info)
-        if (len(status.total_output_string) > status.responded_length + len('\nAction:')):
-            status.delta_output_string = status.total_output_string[status.responded_length : status.output_length - len('\nAction:')]
-            if is_truncated(status.delta_output_string, stop_word_slice_list, is_streaming):
+        if len(status.total_output_string) > status.responded_length + len("\nAction:"):
+            status.delta_output_string = status.total_output_string[
+                status.responded_length : status.output_length - len("\nAction:")
+            ]
+            if is_truncated(
+                status.delta_output_string, stop_word_slice_list, is_streaming
+            ):
                 return await self._create_empty_delta(output.aux_info)
             else:
                 status.update_result()
@@ -383,11 +462,14 @@ class QwenRenderer(CustomChatRenderer):
                     await self._generate_log_probs(status, output),
                     status.input_token_length,
                     status.output_token_length,
-                    status.reuse_length)
+                    status.reuse_length,
+                )
         return await self._create_empty_delta(output.aux_info)
 
-    #override
-    async def _create_status_list(self, n: int, request: ChatCompletionRequest) -> List[StreamStatus]:
+    # override
+    async def _create_status_list(
+        self, n: int, request: ChatCompletionRequest
+    ) -> List[StreamStatus]:
         if request.tools:
             return [QwenToolStreamStatus(request) for _ in range(n)]
         if request.functions and (len(request.functions) > 0):
@@ -395,92 +477,136 @@ class QwenRenderer(CustomChatRenderer):
         else:
             return [StreamStatus(request) for _ in range(n)]
 
-    #override
-    async def _flush_buffer(self, buffer_list: List[StreamStatus], stop_words_str: List[str], is_streaming: bool, think_status: ThinkStatus):
+    # override
+    async def _flush_buffer(
+        self,
+        buffer_list: List[StreamStatus],
+        stop_words_str: List[str],
+        is_streaming: bool,
+        think_status: ThinkStatus,
+    ):
         if buffer_list[0].request.tools:
-            return await self.qwen_tool_renderer._flush_buffer(buffer_list, stop_words_str, is_streaming, think_status)
+            return await self.qwen_tool_renderer._flush_buffer(
+                buffer_list, stop_words_str, is_streaming, think_status
+            )
 
-        if (not isinstance(buffer_list[0], QwenStreamStatus)):
-            return await super()._flush_buffer(buffer_list, stop_words_str, is_streaming, think_status)
+        if not isinstance(buffer_list[0], QwenStreamStatus):
+            return await super()._flush_buffer(
+                buffer_list, stop_words_str, is_streaming, think_status
+            )
         output_items: List[OutputDelta] = []
         for status in buffer_list:
             if status.generating_function_call:
-                function_message = self._parse_function_response(status.total_output_string[status.responded_length:])
-                if (function_message == None):
-                    logging.warning(f"output [{status.total_output_string}] failed to parse function from [{status.responded_length}]. "
-                                    "regarded as normal output.")
+                function_message = self._parse_function_response(
+                    status.total_output_string[status.responded_length :]
+                )
+                if function_message == None:
+                    logging.warning(
+                        f"output [{status.total_output_string}] failed to parse function from [{status.responded_length}]. "
+                        "regarded as normal output."
+                    )
                     function_message = ""
                 else:
                     status.finish_reason = FinisheReason.function_call
-                output_items.append(OutputDelta(
-                    function_message,
-                    await self._generate_log_probs(status, status.output),
-                    status.input_token_length,
-                    status.output_token_length,
-                    status.reuse_length))
+                output_items.append(
+                    OutputDelta(
+                        function_message,
+                        await self._generate_log_probs(status, status.output),
+                        status.input_token_length,
+                        status.output_token_length,
+                        status.reuse_length,
+                    )
+                )
             else:
-                trunc_string = truncate_response_with_stop_words(status.total_output_string[status.responded_length:], stop_words_str, is_streaming)
-                output_items.append(OutputDelta(
-                    trunc_string,
-                    await self._generate_log_probs(status, status.output),
-                    status.input_token_length,
-                    status.output_token_length,
-                    status.reuse_length))
+                trunc_string = truncate_response_with_stop_words(
+                    status.total_output_string[status.responded_length :],
+                    stop_words_str,
+                    is_streaming,
+                )
+                output_items.append(
+                    OutputDelta(
+                        trunc_string,
+                        await self._generate_log_probs(status, status.output),
+                        status.input_token_length,
+                        status.output_token_length,
+                        status.reuse_length,
+                    )
+                )
         return await self._generate_stream_response(output_items, think_status)
 
-    #override
-    def _update_single_status_sync(self,
-                                   status: StreamStatusSync,
-                                   input_len, # output.aux_info
-                                   output_len, # output.aux_info
-                                   reuse_len, # output.aux_info
-                                   all_probs: torch.Tensor,
-                                   output_ids: torch.Tensor,
-                                   max_new_tokens: int,
-                                   stop_words_str: List[str],
-                                   stop_word_slice_list: List[str],
-                                   is_streaming: bool) -> OutputDelta:
+    # override
+    def _update_single_status_sync(
+        self,
+        status: StreamStatusSync,
+        input_len,  # output.aux_info
+        output_len,  # output.aux_info
+        reuse_len,  # output.aux_info
+        all_probs: torch.Tensor,
+        output_ids: torch.Tensor,
+        max_new_tokens: int,
+        stop_words_str: List[str],
+        stop_word_slice_list: List[str],
+        is_streaming: bool,
+    ) -> OutputDelta:
         # function call is disabled when logprobs is required.
         if not isinstance(status, QwenStreamStatusSync):
-            return super()._update_single_status_sync(status,
-                                                       input_len, output_len, reuse_len,
-                                                       all_probs, output_ids,
-                                                       max_new_tokens, stop_words_str,
-                                                       stop_word_slice_list,
-                                                       is_streaming)
+            return super()._update_single_status_sync(
+                status,
+                input_len,
+                output_len,
+                reuse_len,
+                all_probs,
+                output_ids,
+                max_new_tokens,
+                stop_words_str,
+                stop_word_slice_list,
+                is_streaming,
+            )
         if status.finish_reason != None:
             return self._create_empty_delta_sync(input_len, output_len, reuse_len)
-        status.update_output_sync(output_ids, input_len,
-                                  self._clean_output_ids,
-                                  functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens),
-                                  self._remove_stop_word_ids)
+        status.update_output_sync(
+            output_ids,
+            input_len,
+            self._clean_output_ids,
+            functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens),
+            self._remove_stop_word_ids,
+        )
         status.total_output_string = self.tokenizer.decode(status.output_ids).strip()
-        if (len(status.total_output_string)) and (u'\uFFFD' == status.total_output_string[-1]):
+        if (len(status.total_output_string)) and (
+            "\uFFFD" == status.total_output_string[-1]
+        ):
             return self._create_empty_delta_sync(input_len, output_len, reuse_len)
             # For some tokenizers (e.g. ChatGLM), decode a single token differs from decode a list of tokens.
-        if (status.total_output_string.endswith("\nAction:")):
+        if status.total_output_string.endswith("\nAction:"):
             status.generating_function_call = True
             return self._create_empty_delta_sync(input_len, output_len, reuse_len)
-        if (status.generating_function_call):
+        if status.generating_function_call:
             return self._create_empty_delta_sync(input_len, output_len, reuse_len)
         if is_truncated(status.total_output_string, stop_words_str, is_streaming):
             status.finish_reason = FinisheReason.stop
             return self._create_empty_delta_sync(input_len, output_len, reuse_len)
-        if (len(status.total_output_string) > status.responded_length + len('\nAction:')):
-            status.delta_output_string = status.total_output_string[status.responded_length : status.output_length - len('\nAction:')]
-            if is_truncated(status.delta_output_string, stop_word_slice_list, is_streaming):
+        if len(status.total_output_string) > status.responded_length + len("\nAction:"):
+            status.delta_output_string = status.total_output_string[
+                status.responded_length : status.output_length - len("\nAction:")
+            ]
+            if is_truncated(
+                status.delta_output_string, stop_word_slice_list, is_streaming
+            ):
                 return self._create_empty_delta_sync(input_len, output_len, reuse_len)
             else:
                 status.update_result()
                 return OutputDelta(
                     output_str=status.delta_output_string,
-                    logprobs=self._generate_log_probs_sync(status, all_probs, output_ids),
+                    logprobs=self._generate_log_probs_sync(
+                        status, all_probs, output_ids
+                    ),
                     input_length=input_len,
                     output_length=output_len,
-                    reuse_length=reuse_len)
+                    reuse_length=reuse_len,
+                )
         return self._create_empty_delta_sync(input_len, output_len, reuse_len)
 
-    #override
+    # override
     def _create_status_list_sync(self, n: int, body: str) -> List[StreamStatusSync]:
         request = self.getRequest(body)
         if request.logprobs:
@@ -488,47 +614,74 @@ class QwenRenderer(CustomChatRenderer):
         else:
             return [QwenStreamStatusSync(request) for _ in range(n)]
 
-    #override
-    def _flush_buffer_sync(self,
-                           buffer_list: List[StreamStatusSync],
-                           input_len_list, output_len_list, reuse_len_list,
-                           all_probs_list, output_ids_list,
-                           stop_words_str: List[str],
-                           is_streaming: bool):
-        if (not isinstance(buffer_list[0], QwenStreamStatusSync)):
-            return super()._flush_buffer_sync(buffer_list,
-                                              input_len_list, output_len_list, reuse_len_list,
-                                              all_probs_list, output_ids_list,
-                                              stop_words_str,
-                                              is_streaming)
+    # override
+    def _flush_buffer_sync(
+        self,
+        buffer_list: List[StreamStatusSync],
+        input_len_list,
+        output_len_list,
+        reuse_len_list,
+        all_probs_list,
+        output_ids_list,
+        stop_words_str: List[str],
+        is_streaming: bool,
+    ):
+        if not isinstance(buffer_list[0], QwenStreamStatusSync):
+            return super()._flush_buffer_sync(
+                buffer_list,
+                input_len_list,
+                output_len_list,
+                reuse_len_list,
+                all_probs_list,
+                output_ids_list,
+                stop_words_str,
+                is_streaming,
+            )
         output_items: List[OutputDelta] = []
         for status, input_len, output_len, reuse_len, all_probs, output_ids in zip(
-                buffer_list,
-                input_len_list, output_len_list, reuse_len_list,
-                all_probs_list, output_ids_list
-                ):
+            buffer_list,
+            input_len_list,
+            output_len_list,
+            reuse_len_list,
+            all_probs_list,
+            output_ids_list,
+        ):
             if status.generating_function_call:
-                function_message = self._parse_function_response(status.total_output_string[status.responded_length:])
-                if (function_message == None):
-                    logging.warning(f"output [{status.total_output_string}] failed to parse function from [{status.responded_length}]. "
-                                    "regarded as normal output.")
+                function_message = self._parse_function_response(
+                    status.total_output_string[status.responded_length :]
+                )
+                if function_message == None:
+                    logging.warning(
+                        f"output [{status.total_output_string}] failed to parse function from [{status.responded_length}]. "
+                        "regarded as normal output."
+                    )
                     function_message = ""
                 else:
                     status.finish_reason = FinisheReason.function_call
-                output_items.append(OutputDelta(
-                    function_message,
-                    self._generate_log_probs_sync(status, all_probs, output_ids),
-                    input_len,
-                    output_len,
-                    reuse_len))
+                output_items.append(
+                    OutputDelta(
+                        function_message,
+                        self._generate_log_probs_sync(status, all_probs, output_ids),
+                        input_len,
+                        output_len,
+                        reuse_len,
+                    )
+                )
             else:
-                trunc_string = truncate_response_with_stop_words(status.total_output_string[status.responded_length:], stop_words_str, is_streaming)
-                output_items.append(OutputDelta(
-                    trunc_string,
-                    self._generate_log_probs_sync(status, all_probs, output_ids),
-                    input_len,
-                    output_len,
-                    reuse_len))
+                trunc_string = truncate_response_with_stop_words(
+                    status.total_output_string[status.responded_length :],
+                    stop_words_str,
+                    is_streaming,
+                )
+                output_items.append(
+                    OutputDelta(
+                        trunc_string,
+                        self._generate_log_probs_sync(status, all_probs, output_ids),
+                        input_len,
+                        output_len,
+                        reuse_len,
+                    )
+                )
         return self._generate_stream_response_sync(output_items)
 
     def get_renderer_info(self) -> RendererInfo:
@@ -537,11 +690,12 @@ class QwenRenderer(CustomChatRenderer):
             renderer_info.template = self.template_chat_renderer.chat_template
         return renderer_info
 
-register_renderer('qwen', QwenRenderer)
-register_renderer('qwen_7b', QwenRenderer)
-register_renderer('qwen_13b', QwenRenderer)
-register_renderer('qwen_1b8', QwenRenderer)
-register_renderer('qwen_2', QwenRenderer)
-register_renderer('qwen_2_moe', QwenRenderer)
-register_renderer('qwen_3', QwenRenderer)
-register_renderer('qwen_3_moe', QwenRenderer)
+
+register_renderer("qwen", QwenRenderer)
+register_renderer("qwen_7b", QwenRenderer)
+register_renderer("qwen_13b", QwenRenderer)
+register_renderer("qwen_1b8", QwenRenderer)
+register_renderer("qwen_2", QwenRenderer)
+register_renderer("qwen_2_moe", QwenRenderer)
+register_renderer("qwen_3", QwenRenderer)
+register_renderer("qwen_3_moe", QwenRenderer)

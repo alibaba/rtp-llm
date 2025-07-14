@@ -9,7 +9,7 @@ class FakeServer {
 public:
     static void appendTokenizeService(http_server::HttpServer& http_server, const std::vector<int>& token_ids) {
         auto route = [token_ids](std::unique_ptr<http_server::HttpResponseWriter> writer,
-                        const http_server::HttpRequest&                  request) {
+                                 const http_server::HttpRequest&                  request) {
             TokenizeResponse response;
             response.token_ids = token_ids;
             writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
@@ -19,8 +19,10 @@ public:
         http_server.RegisterRoute("POST", "/tokenize", route);
     }
 
-    static std::shared_ptr<http_server::HttpServer>
-    initServer(const std::string& spec, const std::string& running_task_list, const std::string& finished_task_list, const std::vector<int>& token_ids = {}) {
+    static std::shared_ptr<http_server::HttpServer> initServer(const std::string&      spec,
+                                                               const std::string&      running_task_list,
+                                                               const std::string&      finished_task_list,
+                                                               const std::vector<int>& token_ids = {}) {
         auto server = std::make_shared<http_server::HttpServer>();
         auto route  = [running_task_list, finished_task_list](std::unique_ptr<http_server::HttpResponseWriter> writer,
                                                              const http_server::HttpRequest&                  request) {

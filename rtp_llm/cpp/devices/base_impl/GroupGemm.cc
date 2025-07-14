@@ -5,7 +5,7 @@ namespace rtp_llm {
 GroupedGemmOutput DeviceBase::groupedGemm(const GroupedGemmParams& params) {
     RTP_LLM_LOG_DEBUG("use default group gemm");
     params.check();
-    size_t num = params.A.size();
+    size_t                 num = params.A.size();
     std::vector<BufferPtr> output(num);
     for (int i = 0; i < num; i++) {
         BufferPtr c = nullptr;
@@ -23,11 +23,8 @@ GroupedGemmOutput DeviceBase::groupedGemm(const GroupedGemmParams& params) {
         } else {
             output[i] = gemm({*params.A[i], *params.B[i]});
         }
-
     }
     return GroupedGemmOutput({std::move(output)});
 }
 
-
-} // namespace rtp_llm
-
+}  // namespace rtp_llm

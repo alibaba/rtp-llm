@@ -12,8 +12,7 @@
 #include "rtp_llm/cpp/cuda/allocator_cuda.h"
 #include "rtp_llm/cpp/cuda/cublas/cublas.h"
 
-
-namespace tc = tensorrt_llm::cutlass_extensions;
+namespace tc  = tensorrt_llm::cutlass_extensions;
 namespace tkc = tensorrt_llm::kernels::cutlass_kernels;
 
 struct Dim2 {
@@ -103,7 +102,7 @@ void gemm_test(int m, Dim2 dim2, cudaStream_t stream) {
         tensorrt_llm::kernels::weight_only::kernel_launcher(mArch, params, stream);
     };
     float gemv_time = timing_function(int4_gemv, timing_iterations, stream);
-    float ratio = gemv_time / int4_time;
+    float ratio     = gemv_time / int4_time;
     printf("m=%d n=%d k=%d gemv_time=%.6f fpa_int4_time=%.6f ratio=%.6f\n", m, n, k, gemv_time, int4_time, ratio);
 
     deviceFree(in_ptr1);

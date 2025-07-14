@@ -9,8 +9,8 @@ namespace http_server {
 
 AUTIL_LOG_SETUP(http_server, HttpServerAdapter);
 
-HttpServerAdapter::HttpServerAdapter(const std::shared_ptr<HttpRouter> &router, size_t threadNum, size_t queueSize)
-    : _router(router) {
+HttpServerAdapter::HttpServerAdapter(const std::shared_ptr<HttpRouter>& router, size_t threadNum, size_t queueSize):
+    _router(router) {
     _threadPool = std::make_shared<autil::LockFreeThreadPool>(threadNum, queueSize, nullptr, "HttpRequestThreadPool");
     _threadPool->start();
 }
@@ -23,7 +23,7 @@ HttpServerAdapter::~HttpServerAdapter() {
     _router.reset();
 }
 
-anet::IPacketHandler::HPRetCode HttpServerAdapter::handlePacket(anet::Connection *connection, anet::Packet *packet) {
+anet::IPacketHandler::HPRetCode HttpServerAdapter::handlePacket(anet::Connection* connection, anet::Packet* packet) {
     if (!connection || !packet) {
         AUTIL_LOG(WARN,
                   "http server adapter handle packet failed, connection or packet is null, connection: %p, packet: %p",
@@ -32,16 +32,16 @@ anet::IPacketHandler::HPRetCode HttpServerAdapter::handlePacket(anet::Connection
         return anet::IPacketHandler::FREE_CHANNEL;
     }
 
-    if (packet->isRegularPacket()) { // handle httpPacket
+    if (packet->isRegularPacket()) {  // handle httpPacket
         return handleRegularPacket(connection, packet);
-    } else { // control command received
+    } else {  // control command received
         return handleControlPacket(connection, packet);
     }
 }
 
-anet::IPacketHandler::HPRetCode HttpServerAdapter::handleRegularPacket(anet::Connection *connection,
-                                                                       anet::Packet *packet) const {
-    anet::HTTPPacket *httpPacket = dynamic_cast<anet::HTTPPacket *>(packet);
+anet::IPacketHandler::HPRetCode HttpServerAdapter::handleRegularPacket(anet::Connection* connection,
+                                                                       anet::Packet*     packet) const {
+    anet::HTTPPacket* httpPacket = dynamic_cast<anet::HTTPPacket*>(packet);
     if (!httpPacket) {
         AUTIL_LOG(WARN, "Invalid HTTPPacket received");
         packet->free();
@@ -50,7 +50,7 @@ anet::IPacketHandler::HPRetCode HttpServerAdapter::handleRegularPacket(anet::Con
     auto packetDeleter = [](anet::HTTPPacket* packet) { packet->free(); };
     std::unique_ptr<anet::HTTPPacket, decltype(packetDeleter)> httpPacketPtr(httpPacket, packetDeleter);
 
-    auto request = std::make_shared<HttpRequest>();
+    auto       request    = std::make_shared<HttpRequest>();
     const auto parseError = request->Parse(std::move(httpPacketPtr));
     if (!parseError.IsOK()) {
         AUTIL_LOG(WARN, "parse http request failed. error: %s", parseError.ToString().c_str());
@@ -65,8 +65,8 @@ anet::IPacketHandler::HPRetCode HttpServerAdapter::handleRegularPacket(anet::Con
         return anet::IPacketHandler::KEEP_CHANNEL;
     }
 
-    const auto method = request->GetMethod();
-    const auto endpoint = request->GetEndpoint();
+    const auto method             = request->GetMethod();
+    const auto endpoint           = request->GetEndpoint();
     const auto responseHandlerOpt = _router->FindRoute(method, endpoint);
     if (!responseHandlerOpt.has_value()) {
         AUTIL_LOG(WARN,
@@ -81,9 +81,9 @@ anet::IPacketHandler::HPRetCode HttpServerAdapter::handleRegularPacket(anet::Con
 
     connection->addRef();
     auto connectionPtr =
-        std::shared_ptr<::anet::Connection>(connection, [](anet::Connection *conn) { conn->subRef(); });
+        std::shared_ptr<::anet::Connection>(connection, [](anet::Connection* conn) { conn->subRef(); });
 
-    auto workItem = new HttpRequestWorkItem(responseHandler, connectionPtr, request);
+    auto       workItem  = new HttpRequestWorkItem(responseHandler, connectionPtr, request);
     const auto errorCode = _threadPool->pushWorkItem(workItem, false);
     if (errorCode != autil::ThreadPool::ERROR_NONE) {
         AUTIL_LOG(WARN,
@@ -98,17 +98,17 @@ anet::IPacketHandler::HPRetCode HttpServerAdapter::handleRegularPacket(anet::Con
     return anet::IPacketHandler::KEEP_CHANNEL;
 }
 
-anet::IPacketHandler::HPRetCode HttpServerAdapter::handleControlPacket(anet::Connection *connection,
-                                                                       anet::Packet *packet) const {
-    anet::ControlPacket *controlPacket = dynamic_cast<anet::ControlPacket *>(packet);
+anet::IPacketHandler::HPRetCode HttpServerAdapter::handleControlPacket(anet::Connection* connection,
+                                                                       anet::Packet*     packet) const {
+    anet::ControlPacket* controlPacket = dynamic_cast<anet::ControlPacket*>(packet);
     if (controlPacket) {
         AUTIL_LOG(DEBUG, "Control Packet (%s) received!", controlPacket->what());
     }
-    packet->free(); // free packet if finished
+    packet->free();  // free packet if finished
     return anet::IPacketHandler::FREE_CHANNEL;
 }
 
-void HttpServerAdapter::sendErrorResponse(anet::Connection *connection, HttpError error) const {
+void HttpServerAdapter::sendErrorResponse(anet::Connection* connection, HttpError error) const {
     auto response = std::make_shared<HttpResponse>(error);
     if (!response) {
         AUTIL_LOG(
@@ -131,4 +131,4 @@ void HttpServerAdapter::sendErrorResponse(anet::Connection *connection, HttpErro
     }
 }
 
-} // namespace http_server
+}  // namespace http_server

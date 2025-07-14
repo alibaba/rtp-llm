@@ -48,13 +48,15 @@ void InferenceParsedRequest::extractRequestUrls(const RawRequest& req, Inference
     }
 }
 
-void InferenceParsedRequest::extractRequestGenerateConfigs(RawRequest& req, InferenceParsedRequest& pr,
-        const rtp_llm::GptInitParameter& params, const std::shared_ptr<TokenProcessor>& token_processor) {
+void InferenceParsedRequest::extractRequestGenerateConfigs(RawRequest&                            req,
+                                                           InferenceParsedRequest&                pr,
+                                                           const rtp_llm::GptInitParameter&       params,
+                                                           const std::shared_ptr<TokenProcessor>& token_processor) {
     if (req.generate_config.has_value()) {
         auto& config = req.generate_config.value();
         if (req.yield_generator == false && config.return_incremental == true) {
             throw HttpApiServerException(HttpApiServerException::ERROR_INPUT_FORMAT_ERROR,
-                    "request is non_stream but use incremental decoder");
+                                         "request is non_stream but use incremental decoder");
         }
         config.addSpecialTokens(params.special_tokens_);
         if (config.sp_advice_prompt.empty() == false) {
@@ -67,11 +69,11 @@ void InferenceParsedRequest::extractRequestGenerateConfigs(RawRequest& req, Infe
             const auto& config = req.generate_config.value();
             if (config.adapter_name.size() > 0 && pr.input_texts.size() != 1) {
                 throw HttpApiServerException(HttpApiServerException::ERROR_INPUT_FORMAT_ERROR,
-                        "adapter_name is not alignment");
+                                             "adapter_name is not alignment");
             }
             if (config.adapter_names.size() > 0 && pr.input_texts.size() != config.adapter_names.size()) {
                 throw HttpApiServerException(HttpApiServerException::ERROR_INPUT_FORMAT_ERROR,
-                        "adapter_name is not alignment");
+                                             "adapter_name is not alignment");
             }
             // copy constructor
             pr.generate_configs.push_back(std::make_shared<GenerateConfig>(req.generate_config.value()));
@@ -84,16 +86,17 @@ void InferenceParsedRequest::extractRequestGenerateConfigs(RawRequest& req, Infe
     }
 }
 
-InferenceParsedRequest InferenceParsedRequest::extractRequest(const std::string& body,
-        const rtp_llm::GptInitParameter& params, const std::shared_ptr<TokenProcessor>& token_processor) {
+InferenceParsedRequest InferenceParsedRequest::extractRequest(const std::string&                     body,
+                                                              const rtp_llm::GptInitParameter&       params,
+                                                              const std::shared_ptr<TokenProcessor>& token_processor) {
     RawRequest req;
     FromJsonString(req, body);
 
     InferenceParsedRequest pr;
     pr.private_request = req.private_request;
-    pr.source = req.source;
-    pr.batch_infer = req.prompt_batch.has_value();
-    pr.is_streaming = req.generate_config.value_or(GenerateConfig()).is_streaming;
+    pr.source          = req.source;
+    pr.batch_infer     = req.prompt_batch.has_value();
+    pr.is_streaming    = req.generate_config.value_or(GenerateConfig()).is_streaming;
 
     InferenceParsedRequest::extractRequestTexts(req, pr);
     InferenceParsedRequest::extractRequestUrls(req, pr);
@@ -107,7 +110,7 @@ InferenceService::InferenceService(const std::shared_ptr<EngineBase>&           
                                    const std::shared_ptr<autil::AtomicCounter>&    request_counter,
                                    const std::shared_ptr<TokenProcessor>&          token_processor,
                                    const std::shared_ptr<ConcurrencyController>&   controller,
-                                   const rtp_llm::GptInitParameter&                     params,
+                                   const rtp_llm::GptInitParameter&                params,
                                    const std::shared_ptr<ApiServerMetricReporter>& metric_reporter):
     engine_(engine),
     mm_processor_(mm_processor),
@@ -115,21 +118,20 @@ InferenceService::InferenceService(const std::shared_ptr<EngineBase>&           
     request_counter_(request_counter),
     controller_(controller),
     params_(params),
-    metric_reporter_(metric_reporter) {
-}
+    metric_reporter_(metric_reporter) {}
 
 void checkMasterWorker(bool isInternal) {
     if (isInternal) {
         if (!ParallelInfo::globalParallelInfo().isWorker()) {
             RTP_LLM_LOG_WARNING("gang master should not access /inference_internal api directly");
             throw HttpApiServerException(HttpApiServerException::UNSUPPORTED_OPERATION,
-                    "gang master should not access /inference_internal api directly");
+                                         "gang master should not access /inference_internal api directly");
         }
     } else {
         if (!ParallelInfo::globalParallelInfo().isMaster()) {
             RTP_LLM_LOG_WARNING("gang worker should not access /inference api directly");
             throw HttpApiServerException(HttpApiServerException::UNSUPPORTED_OPERATION,
-                    "gang worker should not access /inference api directly");
+                                         "gang worker should not access /inference api directly");
         }
     }
 }
@@ -156,12 +158,12 @@ void InferenceService::inferResponse(int64_t                                    
                                      const http_server::HttpRequest&                         request) {
     if (!controller_) {
         throw HttpApiServerException(HttpApiServerException::UNKNOWN_ERROR,
-                "infer response failed, concurrency controller is null");
+                                     "infer response failed, concurrency controller is null");
     }
     autil::StageTime iterate_stage_timer;
-    auto start_time_ms = autil::TimeUtility::currentTimeInMilliSeconds();
-    const auto body = request.GetBody();
-    auto req = InferenceParsedRequest::extractRequest(body, params_, token_processor_);
+    auto             start_time_ms = autil::TimeUtility::currentTimeInMilliSeconds();
+    const auto       body          = request.GetBody();
+    auto             req           = InferenceParsedRequest::extractRequest(body, params_, token_processor_);
     if (metric_reporter_) {
         metric_reporter_->reportQpsMetric(req.source);
     }
@@ -184,12 +186,12 @@ void InferenceService::inferResponse(int64_t                                    
         auto input = fillGenerateInput(request_id, req.input_texts[i], req.input_urls[i], req.generate_configs[i]);
         inputs.push_back(input);
     }
-    auto ori_streams = engine_->batchEnqueue(inputs);
+    auto                                                ori_streams = engine_->batchEnqueue(inputs);
     std::vector<std::shared_ptr<GenerateStreamWrapper>> streams;
     streams.reserve(ori_streams.size());
     for (size_t idx = 0; idx < ori_streams.size(); ++idx) {
         auto stream_wrapper = std::make_shared<GenerateStreamWrapper>(metric_reporter_, token_processor_);
-        stream_wrapper->init(ori_streams[idx], engine_); 
+        stream_wrapper->init(ori_streams[idx], engine_);
         streams.push_back(stream_wrapper);
     }
 
@@ -206,15 +208,15 @@ void InferenceService::inferResponse(int64_t                                    
 }
 
 std::shared_ptr<GenerateInput>
-InferenceService::fillGenerateInput(int64_t request_id,
-                                    const std::string& text,
-                                    const std::vector<std::string>& urls,
+InferenceService::fillGenerateInput(int64_t                                request_id,
+                                    const std::string&                     text,
+                                    const std::vector<std::string>&        urls,
                                     const std::shared_ptr<GenerateConfig>& generate_config) {
 
     std::shared_ptr<GenerateInput> input = std::make_shared<GenerateInput>();
-    input->request_id      = request_id;
-    input->begin_time_us   = autil::TimeUtility::currentTimeInMicroSeconds();
-    input->generate_config = generate_config;
+    input->request_id                    = request_id;
+    input->begin_time_us                 = autil::TimeUtility::currentTimeInMicroSeconds();
+    input->generate_config               = generate_config;
 
     if (urls.size() > 0) {
         std::vector<MultimodalInput> mm_inputs;
@@ -227,7 +229,7 @@ InferenceService::fillGenerateInput(int64_t request_id,
         auto mm_res = mm_processor_->updateMultimodalFeatures(input);
         if (!mm_res.ok()) {
             throw HttpApiServerException(HttpApiServerException::MULTIMODAL_ERROR,
-                    "mm_processor updateMultimodalFeatures failed: " + mm_res.ToString());
+                                         "mm_processor updateMultimodalFeatures failed: " + mm_res.ToString());
         }
     }
     input->lora_id = engine_->getLoraManager()->getLoraId(input->generate_config->adapter_name);
@@ -236,32 +238,33 @@ InferenceService::fillGenerateInput(int64_t request_id,
         metric_reporter_->reportFTNumBeansMetric(input->generate_config->num_beams);
     }
     autil::ScopedTime2 timer;
-    auto vec = token_processor_->encode(text);
+    auto               vec = token_processor_->encode(text);
     if (metric_reporter_) {
         metric_reporter_->reportFTPreTokenProcessorRtMetric(timer.done_ms());
     }
     auto device = rtp_llm::DeviceFactory::getDefaultDevice();
-    input->input_ids = device->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {vec.size()}, rtp_llm::AllocationType::HOST}, {});
+    input->input_ids =
+        device->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {vec.size()}, rtp_llm::AllocationType::HOST}, {});
     memcpy(input->input_ids->data(), vec.data(), input->input_ids->sizeBytes());
 
     return input;
 }
 
 std::pair<int, std::vector<std::string>>
-InferenceService::iterateStreams(std::vector<std::shared_ptr<GenerateStreamWrapper>>& streams,
+InferenceService::iterateStreams(std::vector<std::shared_ptr<GenerateStreamWrapper>>&    streams,
                                  const std::unique_ptr<http_server::HttpResponseWriter>& writer,
-                                 const InferenceParsedRequest& req,
-                                 autil::StageTime& iterate_stage_timer) {
+                                 const InferenceParsedRequest&                           req,
+                                 autil::StageTime&                                       iterate_stage_timer) {
 
     std::vector<MultiSeqsResponse> batch_state(streams.size());
-    std::vector<std::string> complete_response;
-    std::set<int> done_idxs;
-    int iterate_counter = 0;
+    std::vector<std::string>       complete_response;
+    std::set<int>                  done_idxs;
+    int                            iterate_counter = 0;
 
     while (true) {
         for (int i = 0; i < streams.size(); i++) {
             auto [response, finished] = streams[i]->generateResponse();
-            batch_state[i] = response;
+            batch_state[i]            = response;
             if (finished) {
                 done_idxs.insert(i);
             }
@@ -270,7 +273,7 @@ InferenceService::iterateStreams(std::vector<std::shared_ptr<GenerateStreamWrapp
             writeDoneResponse(writer, req);
             break;
         }
-        auto res = formatResponse(batch_state, req.batch_infer);
+        auto res             = formatResponse(batch_state, req.batch_infer);
         auto [err, response] = writeResponse(writer, req, res);
         if (err) {
             throw HttpApiServerException(HttpApiServerException::CANCELLED_ERROR, "client disconnects");
@@ -290,10 +293,11 @@ InferenceService::iterateStreams(std::vector<std::shared_ptr<GenerateStreamWrapp
     return std::make_pair(iterate_counter, complete_response);
 }
 
-std::pair<bool, std::string> InferenceService::writeResponse(const std::unique_ptr<http_server::HttpResponseWriter>& writer,
-                                                             const InferenceParsedRequest& req,
-                                                             const std::any& res) {
-    bool connection_broken = false;
+std::pair<bool, std::string>
+InferenceService::writeResponse(const std::unique_ptr<http_server::HttpResponseWriter>& writer,
+                                const InferenceParsedRequest&                           req,
+                                const std::any&                                         res) {
+    bool        connection_broken = false;
     std::string response_str;
     if (req.is_streaming) {
         response_str = streamingResponse(res);
@@ -314,7 +318,7 @@ std::pair<bool, std::string> InferenceService::writeResponse(const std::unique_p
 }
 
 void InferenceService::writeDoneResponse(const std::unique_ptr<http_server::HttpResponseWriter>& writer,
-                                         const InferenceParsedRequest& req) {
+                                         const InferenceParsedRequest&                           req) {
     if (req.is_streaming) {
         std::string response_str = doneResponse();
         writer->AddHeader("Content-Type", "text/event-stream");
@@ -341,21 +345,16 @@ std::string InferenceService::completeResponse(const std::any& response) {
 std::string InferenceService::streamingResponse(const std::any& response) {
     if (response.type() == typeid(MultiSeqsResponse)) {
         auto res = std::any_cast<MultiSeqsResponse>(response);
-        return "data:" +
-               ToJsonString(res, /*isCompact=*/true) +
-               "\n\n";
+        return "data:" + ToJsonString(res, /*isCompact=*/true) + "\n\n";
     } else if (response.type() == typeid(BatchResponse)) {
-        return "data:" +
-               ToJsonString(std::any_cast<BatchResponse>(response), /*isCompact=*/true) +
-               "\n\n";
+        return "data:" + ToJsonString(std::any_cast<BatchResponse>(response), /*isCompact=*/true) + "\n\n";
     } else {
         RTP_LLM_LOG_WARNING("unknown streaming response type: %s", response.type().name());
         return "data:\n\n";
     }
 }
 
-std::any InferenceService::formatResponse(std::vector<MultiSeqsResponse> batch_state,
-                                               bool batch_infer) {
+std::any InferenceService::formatResponse(std::vector<MultiSeqsResponse> batch_state, bool batch_infer) {
     if (batch_infer) {
         return BatchResponse(batch_state);
     } else {

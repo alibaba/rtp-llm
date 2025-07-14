@@ -9,9 +9,7 @@ namespace rtp_llm {
 class ConcurrencyController {
 public:
     ConcurrencyController(int max_concurrency = 1, bool block = false):
-        max_concurrency_(max_concurrency),
-        block_(block),
-        current_concurrency_(0) {}
+        max_concurrency_(max_concurrency), block_(block), current_concurrency_(0) {}
 
     int get_available_concurrency() {
         std::unique_lock<std::mutex> scopeLock(mtx_);
@@ -38,10 +36,10 @@ public:
     }
 
 private:
-    int max_concurrency_;
-    bool block_;
-    int current_concurrency_;
-    std::mutex mtx_;
+    int                     max_concurrency_;
+    bool                    block_;
+    int                     current_concurrency_;
+    std::mutex              mtx_;
     std::condition_variable cv_;
 };
 
@@ -58,9 +56,10 @@ public:
     bool isPassed() {
         return passed_;
     }
+
 private:
-    bool passed_;
+    bool                                   passed_;
     std::shared_ptr<ConcurrencyController> controller_;
 };
 
-} // namespace rtp_llm
+}  // namespace rtp_llm

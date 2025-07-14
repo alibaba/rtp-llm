@@ -1,19 +1,24 @@
 import asyncio
 import logging
-from typing import Dict, AsyncGenerator
+from typing import AsyncGenerator, Dict
+
 from typing_extensions import override
-from rtp_llm.models.base_model import BaseModel
-from rtp_llm.config.exceptions import FtRuntimeException, ExceptionType
-from rtp_llm.async_decoder_engine.embedding.interface import EngineInputs, EngineOutputs
+
 from rtp_llm.async_decoder_engine.base_engine import BaseEngine
-from rtp_llm.ops import RtpEmbeddingOp, LoadBalanceInfo, MultimodalInputCpp
+from rtp_llm.async_decoder_engine.embedding.interface import EngineInputs, EngineOutputs
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.models.base_model import BaseModel
+from rtp_llm.ops import LoadBalanceInfo, MultimodalInputCpp, RtpEmbeddingOp
 from rtp_llm.utils.mm_process_engine import MMProcessEngine
+
 
 class EmbeddingCppEngine(BaseEngine):
     def __init__(self, model: BaseModel):
         logging.info("creating cpp embedding engine")
         self.model = model
-        assert self.model.custom_module is not None, "embedding custom module should not be None"
+        assert (
+            self.model.custom_module is not None
+        ), "embedding custom module should not be None"
         # self.cpp_handler = self.model.custom_module.create_cpp_handler()
         self.cpp_engine = RtpEmbeddingOp()
 
@@ -30,13 +35,18 @@ class EmbeddingCppEngine(BaseEngine):
         self.cpp_engine.init(self.model, self.mm_engine)
         self.model.custom_module.handler.init_cpp_handler()
 
-    def decode_sync(self, inputs: EngineInputs, outputs: EngineOutputs):    
-        multimodal_inputs = [MultimodalInputCpp(i.url, i.tensor, int(i.mm_type)) for i in inputs.multimodal_inputs]
-        results = self.cpp_engine.decode(inputs.token_ids,
-                                             inputs.token_type_ids,
-                                             inputs.input_lengths,
-                                             0,
-                                             multimodal_inputs)
+    def decode_sync(self, inputs: EngineInputs, outputs: EngineOutputs):
+        multimodal_inputs = [
+            MultimodalInputCpp(i.url, i.tensor, int(i.mm_type))
+            for i in inputs.multimodal_inputs
+        ]
+        results = self.cpp_engine.decode(
+            inputs.token_ids,
+            inputs.token_type_ids,
+            inputs.input_lengths,
+            0,
+            multimodal_inputs,
+        )
         outputs.outputs = results
         outputs.input_length = inputs.input_length
 
@@ -49,7 +59,7 @@ class EmbeddingCppEngine(BaseEngine):
     @override
     def get_load_balance_info(self) -> LoadBalanceInfo:
         return LoadBalanceInfo()
-    
+
     @override
     def ready(self) -> bool:
         return True

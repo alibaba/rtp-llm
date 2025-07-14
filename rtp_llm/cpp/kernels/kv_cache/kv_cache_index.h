@@ -29,31 +29,26 @@
 #include "rtp_llm/cpp/rocm/hip_utils.h"
 #endif
 
-namespace rtp_llm
-{
+namespace rtp_llm {
 
-class KVCacheIndex
-{
+class KVCacheIndex {
 public:
     using UnderlyingType = std::int32_t;
 
     // Flag indicating KVCacheIndex refers to secondary pool
     static constexpr UnderlyingType kSecondaryPoolFlag = static_cast<UnderlyingType>(1)
-        << (8 * sizeof(UnderlyingType) - 1);
+                                                         << (8 * sizeof(UnderlyingType) - 1);
 
-    explicit KVCacheIndex(UnderlyingType value, bool isSecondary = false)
-        : value{isSecondary ? value | kSecondaryPoolFlag : value}
-    {
+    explicit KVCacheIndex(UnderlyingType value, bool isSecondary = false):
+        value{isSecondary ? value | kSecondaryPoolFlag : value} {
         RTP_LLM_CHECK_WITH_INFO(value >= 0, "value < 0 is not allowed.");
     }
 
-    __host__ __device__ UnderlyingType get() const
-    {
+    __host__ __device__ UnderlyingType get() const {
         return value & (~kSecondaryPoolFlag);
     }
 
-    __host__ __device__ bool isPrimary() const
-    {
+    __host__ __device__ bool isPrimary() const {
         return (value & kSecondaryPoolFlag) == 0;
     }
 
@@ -61,4 +56,4 @@ private:
     UnderlyingType value;
 };
 
-} // namespace rtp_llm
+}  // namespace rtp_llm

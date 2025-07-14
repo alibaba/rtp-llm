@@ -9,7 +9,7 @@ class RequestExtractorTest: public ::testing::Test {};
 
 TEST(RequestExtractorTest, Constructor_PromptBatch) {
     std::string jsonStr = R"({"prompt_batch": ["prompt1", "prompt2", "prompt3"]})";
-    RawRequest rq;
+    RawRequest  rq;
     FromJsonString(rq, jsonStr);
 
     RequestExtractor req(rq);
@@ -22,7 +22,7 @@ TEST(RequestExtractorTest, Constructor_PromptBatch) {
 
 TEST(RequestExtractorTest, Constructor_Prompt) {
     std::string jsonStr = R"({"prompt": "prompt1"})";
-    RawRequest rq;
+    RawRequest  rq;
     FromJsonString(rq, jsonStr);
 
     RequestExtractor req(rq);

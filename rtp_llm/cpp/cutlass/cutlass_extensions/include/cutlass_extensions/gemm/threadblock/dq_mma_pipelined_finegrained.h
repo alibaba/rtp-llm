@@ -94,7 +94,7 @@ template <
     typename TransformBAfterLDS_,
     /// The quantization operator being used
     WeightOnlyQuantOp QuantOp_>
-class DqMmaPipelined<Shape_, IteratorA_, SmemIteratorA_, IteratorB_, SmemIteratorB_, 
+class DqMmaPipelined<Shape_, IteratorA_, SmemIteratorA_, IteratorB_, SmemIteratorB_,
                      IteratorScale_, SmemIteratorScale_, ElementC_, LayoutC_, Policy_,
                      TransformBAfterLDG_, TransformBAfterLDS_, QuantOp_,
                      std::enable_if_t<isFinegrained(QuantOp_)>>

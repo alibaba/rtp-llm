@@ -17,7 +17,6 @@
 
 using namespace std;
 
-
 namespace rtp_llm {
 
 class StreamCacheResourceTest: public DeviceTestBase {
@@ -28,23 +27,24 @@ protected:
     }
 
     void prepareResource(bool reuse_cache = false) {
-        auto            cache_config = init_config();
-        cache_manager_ = std::make_shared<CacheManager>(cache_config, device_);
+        auto cache_config = init_config();
+        cache_manager_    = std::make_shared<CacheManager>(cache_config, device_);
         ASSERT_EQ(cache_manager_->freeBlockNums(), 8);
         ResourceContext resource_context;
         resource_context.cache_manager = cache_manager_;
-        resource_context.reuse_cache = reuse_cache;
+        resource_context.reuse_cache   = reuse_cache;
 
         std::shared_ptr<GenerateInput>  generate_input(new GenerateInput());
         std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
         generate_config->num_beams = 2;
-        auto vec = vector<int>{1, 2, 3, 4, 5, 6};
-        std::vector<size_t> shape = {6};
-        generate_input->input_ids = std::make_unique<rtp_llm::Buffer>(rtp_llm::MEMORY_CPU, rtp_llm::TYPE_INT32, shape, (void*)(vec.data()));
+        auto                vec    = vector<int>{1, 2, 3, 4, 5, 6};
+        std::vector<size_t> shape  = {6};
+        generate_input->input_ids =
+            std::make_unique<rtp_llm::Buffer>(rtp_llm::MEMORY_CPU, rtp_llm::TYPE_INT32, shape, (void*)(vec.data()));
         generate_input->generate_config = generate_config;
         rtp_llm::GptInitParameter params;
         params.max_seq_len_ = 2048;
-        stream_ = std::make_shared<NormalGenerateStream>(generate_input, params, resource_context, nullptr);
+        stream_             = std::make_shared<NormalGenerateStream>(generate_input, params, resource_context, nullptr);
         stream_->setRunning();
     }
 
@@ -55,7 +55,7 @@ protected:
 
 protected:
     GenerateStreamPtr stream_;
-    CacheManagerPtr cache_manager_;
+    CacheManagerPtr   cache_manager_;
 };
 
 TEST_F(StreamCacheResourceTest, testAllocateResource) {
@@ -115,7 +115,7 @@ TEST_F(StreamCacheResourceTest, testFallback) {
 TEST_F(StreamCacheResourceTest, testFallbackWithFastGen) {
     prepareResource();
     ASSERT_EQ(cache_manager_->freeBlockNums(), 8);
-    auto& resource = stream_->streamCacheResource();
+    auto& resource            = stream_->streamCacheResource();
     stream_->enable_fast_gen_ = true;
 
     int token_capacity = 1000;
@@ -196,7 +196,7 @@ TEST_F(StreamCacheResourceTest, testPartialFallbackWithFastGen) {
     prepareResource();
     ASSERT_EQ(cache_manager_->freeBlockNums(), 8);
     stream_->enable_fast_gen_ = true;
-    auto& resource = stream_->streamCacheResource();
+    auto& resource            = stream_->streamCacheResource();
 
     int token_capacity = 1000;
     ASSERT_TRUE(resource.initKVBlock(token_capacity).ok());
@@ -249,7 +249,7 @@ TEST_F(StreamCacheResourceTest, testAllocateResourceWithFastGen) {
     prepareResource();
 
     stream_->enable_fast_gen_ = true;
-    auto& resource = stream_->streamCacheResource();
+    auto& resource            = stream_->streamCacheResource();
 
     // first chunk
     int token_capacity = 4;
@@ -289,10 +289,10 @@ TEST_F(StreamCacheResourceTest, testReuseCache) {
     ASSERT_TRUE(resource.incrKVBlock(token_capacity).ok());
     ASSERT_EQ(cache_manager_->freeBlockNums(), 1);
 
-    auto batch_tokens_1 = stream_->complete_token_ids_->data(0);
+    auto batch_tokens_1                      = stream_->complete_token_ids_->data(0);
     batch_tokens_1[stream_->seqLength() - 3] = 7;
     batch_tokens_1[stream_->seqLength() - 2] = 8;
-    auto batch_tokens_2 = stream_->complete_token_ids_->data(1);
+    auto batch_tokens_2                      = stream_->complete_token_ids_->data(1);
     batch_tokens_2[stream_->seqLength() - 3] = 9;
     batch_tokens_2[stream_->seqLength() - 2] = 10;
 
@@ -315,21 +315,22 @@ TEST_F(StreamCacheResourceTest, testReuseCache) {
     std::shared_ptr<GenerateInput>  generate_input(new GenerateInput());
     std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
     generate_config->num_beams = 2;
-    auto vec = vector<int>{1, 2, 3, 4, 5, 6, 7, 8, 11};
-    std::vector<size_t> shape = {9};
-    generate_input->input_ids = std::make_unique<rtp_llm::Buffer>(rtp_llm::MEMORY_CPU, rtp_llm::TYPE_INT32, shape, (void*)(vec.data()));
+    auto                vec    = vector<int>{1, 2, 3, 4, 5, 6, 7, 8, 11};
+    std::vector<size_t> shape  = {9};
+    generate_input->input_ids =
+        std::make_unique<rtp_llm::Buffer>(rtp_llm::MEMORY_CPU, rtp_llm::TYPE_INT32, shape, (void*)(vec.data()));
     generate_input->generate_config = generate_config;
 
     ResourceContext resource_context;
-    resource_context.reuse_cache = true;
+    resource_context.reuse_cache   = true;
     resource_context.cache_manager = cache_manager_;
     rtp_llm::GptInitParameter params;
     params.max_seq_len_ = 2048;
-    stream_ = std::make_shared<NormalGenerateStream>(generate_input, params, resource_context, nullptr);
+    stream_             = std::make_shared<NormalGenerateStream>(generate_input, params, resource_context, nullptr);
     stream_->setRunning();
 
     auto& resource2 = stream_->streamCacheResource();
-    token_capacity = 1000;
+    token_capacity  = 1000;
     ASSERT_TRUE(resource2.initKVBlock(token_capacity).ok());
     ASSERT_EQ(cache_manager_->freeBlockNums(), 1);
 
@@ -342,10 +343,10 @@ TEST_F(StreamCacheResourceTest, testReuseCache) {
     ASSERT_TRUE(resource2.incrKVBlock(token_capacity).ok());
     ASSERT_EQ(cache_manager_->freeBlockNums(), 0);
 
-    auto tokens_1 = stream_->complete_token_ids_->data(0);
+    auto tokens_1                      = stream_->complete_token_ids_->data(0);
     tokens_1[stream_->seqLength() - 2] = 12;
     tokens_1[stream_->seqLength() - 1] = 13;
-    auto tokens_2 = stream_->complete_token_ids_->data(1);
+    auto tokens_2                      = stream_->complete_token_ids_->data(1);
     tokens_2[stream_->seqLength() - 2] = 14;
     tokens_2[stream_->seqLength() - 1] = 15;
 
@@ -357,7 +358,7 @@ TEST_F(StreamCacheResourceTest, testReuseCache) {
 TEST_F(StreamCacheResourceTest, testReuseCacheWithFastGen) {
     prepareResource(true);
     stream_->enable_fast_gen_ = true;
-    auto& resource = stream_->streamCacheResource();
+    auto& resource            = stream_->streamCacheResource();
 
     int token_capacity = 1000;
     ASSERT_TRUE(resource.initKVBlock(token_capacity).ok());
@@ -375,17 +376,18 @@ TEST_F(StreamCacheResourceTest, testReuseCacheWithFastGen) {
     std::shared_ptr<GenerateInput>  generate_input(new GenerateInput());
     std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
     generate_config->num_beams = 2;
-    auto vec = vector<int>{1, 2, 30, 40, 50, 60, 90};
-    std::vector<size_t> shape = {7};
-    generate_input->input_ids = std::make_unique<rtp_llm::Buffer>(rtp_llm::MEMORY_CPU, rtp_llm::TYPE_INT32, shape, (void*)(vec.data()));
+    auto                vec    = vector<int>{1, 2, 30, 40, 50, 60, 90};
+    std::vector<size_t> shape  = {7};
+    generate_input->input_ids =
+        std::make_unique<rtp_llm::Buffer>(rtp_llm::MEMORY_CPU, rtp_llm::TYPE_INT32, shape, (void*)(vec.data()));
     generate_input->generate_config = generate_config;
 
     ResourceContext resource_context;
-    resource_context.reuse_cache = true;
+    resource_context.reuse_cache   = true;
     resource_context.cache_manager = cache_manager_;
     rtp_llm::GptInitParameter params;
     params.max_seq_len_ = 2048;
-    stream_ = std::make_shared<NormalGenerateStream>(generate_input, params, resource_context, nullptr);
+    stream_             = std::make_shared<NormalGenerateStream>(generate_input, params, resource_context, nullptr);
     stream_->setRunning();
     stream_->enable_fast_gen_ = true;
 
@@ -491,10 +493,10 @@ TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock) {
     ASSERT_EQ(resource.maxBlockSize(), 1);
 
     resource.resource_context_.reuse_cache = true;
-    auto tokens_1 = stream_->complete_token_ids_->data(0);
-    tokens_1[0] = 1;
-    auto tokens_2 = stream_->complete_token_ids_->data(1);
-    tokens_2[0] = 2;
+    auto tokens_1                          = stream_->complete_token_ids_->data(0);
+    tokens_1[0]                            = 1;
+    auto tokens_2                          = stream_->complete_token_ids_->data(1);
+    tokens_2[0]                            = 2;
 
     resource.tryReleaseKVBlock(1);
     ASSERT_EQ(cache_manager_->freeBlockNums(), 7);

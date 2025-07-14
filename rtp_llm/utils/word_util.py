@@ -1,6 +1,8 @@
+from typing import Any, List, Union
+
 import numpy as np
 import torch
-from typing import List, Union, Any
+
 
 def remove_padding_eos(token_ids: torch.Tensor, eos_token_id: int) -> torch.Tensor:
     # token_ids shape: [max_length]
@@ -8,9 +10,13 @@ def remove_padding_eos(token_ids: torch.Tensor, eos_token_id: int) -> torch.Tens
     out_token_ids = out_token_ids[out_token_ids != eos_token_id].tolist()
     return torch.IntTensor(out_token_ids)
 
-def remove_padding_eos_for_list(token_ids_list: List[torch.Tensor], eos_token_id: int) -> List[torch.Tensor]:
+
+def remove_padding_eos_for_list(
+    token_ids_list: List[torch.Tensor], eos_token_id: int
+) -> List[torch.Tensor]:
     # token_ids shape: [sub batch of stream, max_length]
     return [remove_padding_eos(token_ids, eos_token_id) for token_ids in token_ids_list]
+
 
 def get_list_dim(origin: Any) -> int:
     def _get_dim_internal(x: Any) -> int:
@@ -20,14 +26,18 @@ def get_list_dim(origin: Any) -> int:
             return 1
         else:
             return _get_dim_internal(x[0]) + 1
+
     return _get_dim_internal(origin)
 
-'''
+
+"""
 input:
 words_list shape: [batch_size, word_num, word_token_size]
 output:
 [batch_size, 2, max_seq_length]
-'''
+"""
+
+
 def to_word_list_format(words_list: List[List[List[int]]]):
     flat_ids = []
     offsets = []
@@ -57,7 +67,10 @@ def to_word_list_format(words_list: List[List[List[int]]]):
     #   result = result.squeeze(0)
     return np.ascontiguousarray(result)
 
-def get_stop_word_slices(stop_word_list: List[Union[str, List[int]]]) -> List[Union[str, List[int]]]:
+
+def get_stop_word_slices(
+    stop_word_list: List[Union[str, List[int]]]
+) -> List[Union[str, List[int]]]:
     result: List[Union[str, List[int]]] = []
     for stop_word in stop_word_list:
         result.append(stop_word)
@@ -65,16 +78,22 @@ def get_stop_word_slices(stop_word_list: List[Union[str, List[int]]]) -> List[Un
             result.append(stop_word[:-i])
     return result
 
+
 def is_truncated(input_str: str, trunc_strs: List[str], is_streaming: bool):
-    if len(input_str) > 0 and len(truncate_response_with_stop_words(input_str, trunc_strs, is_streaming)) != len(input_str):
+    if len(input_str) > 0 and len(
+        truncate_response_with_stop_words(input_str, trunc_strs, is_streaming)
+    ) != len(input_str):
         return True
     return False
 
-def truncate_response_with_stop_words(response: str, stop_word_strs: List[str], is_streaming: bool = True):
+
+def truncate_response_with_stop_words(
+    response: str, stop_word_strs: List[str], is_streaming: bool = True
+):
     if is_streaming:
         for stop_word in stop_word_strs:
             if stop_word and response.endswith(stop_word):
-                response = response[:(-len(stop_word))]
+                response = response[: (-len(stop_word))]
                 break
     else:
         min_index = len(response)
@@ -87,12 +106,14 @@ def truncate_response_with_stop_words(response: str, stop_word_strs: List[str], 
             response = response[:min_index]
     return response
 
+
 def truncate_token_with_stop_word_id(tokens: List[int], stop_word_ids: List[int]):
     for stop_word_id in stop_word_ids:
-        if stop_word_id and tokens[-len(stop_word_id):] == stop_word_id:
-            tokens = tokens[:(-len(stop_word_id))]
+        if stop_word_id and tokens[-len(stop_word_id) :] == stop_word_id:
+            tokens = tokens[: (-len(stop_word_id))]
             break
     return tokens
+
 
 def match_stop_words(response: str, stop_word_strs: List[str]) -> bool:
     for stop_word in stop_word_strs:
@@ -100,11 +121,12 @@ def match_stop_words(response: str, stop_word_strs: List[str]) -> bool:
             return True
     return False
 
+
 # main
 if __name__ == "__main__":
     # word_list = [[20490, 25]]
     # stop_list = to_word_list_format([word_list])
     # print(stop_list, stop_list.shape)
-    
-    stop_words = ['abc', '11123']
+
+    stop_words = ["abc", "11123"]
     print(get_stop_word_slices(stop_words))

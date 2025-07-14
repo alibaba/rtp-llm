@@ -30,5 +30,6 @@ TEST_F(RocmFfnLayerTest, NoGate_Fp16_FfnOpTest) {
 }
 
 // TEST_F(MoELayerTest, GateFp8MoEOpTest) {
-//     MoEOpTest(10, 7168, 256, 32, 0, 8, ActivationType::Swiglu, DataType::TYPE_BF16, QScheme::Qfp8PerTokenBlock, 2e-1, 1e2);
+//     MoEOpTest(10, 7168, 256, 32, 0, 8, ActivationType::Swiglu, DataType::TYPE_BF16, QScheme::Qfp8PerTokenBlock, 2e-1,
+//     1e2);
 // }

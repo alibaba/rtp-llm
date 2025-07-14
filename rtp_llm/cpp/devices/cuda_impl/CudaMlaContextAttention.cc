@@ -4,6 +4,4 @@
 #include "rtp_llm/cpp/core/BufferHelper.h"
 #include "rtp_llm/cpp/cuda/Dispatch.h"
 
-namespace rtp_llm {
-
-}  // namespace rtp_llm
+namespace rtp_llm {}  // namespace rtp_llm

@@ -1,5 +1,7 @@
 from typing import List, Optional
+
 from rtp_llm.config.base_model_config import PyDanticModelBase
+
 
 class VoyageRerankerRequest(PyDanticModelBase):
     query: str
@@ -10,12 +12,14 @@ class VoyageRerankerRequest(PyDanticModelBase):
     truncation: bool = True
     return_documents: bool = True
     normalize: bool = False
-    
+
+
 class RankingItem(PyDanticModelBase):
     index: int
     document: Optional[str] = None
     relevance_score: float
-    
+
+
 class VoyageRerankerResponse(PyDanticModelBase):
     results: List[RankingItem]
     total_tokens: int

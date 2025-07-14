@@ -7,8 +7,8 @@
 using namespace std;
 namespace rtp_llm {
 
-EmbeddingScheduler::EmbeddingScheduler(const rtp_llm::GptInitParameter& config,
-                                       const kmonitor::MetricsReporterPtr         metrics_reporter):
+EmbeddingScheduler::EmbeddingScheduler(const rtp_llm::GptInitParameter&   config,
+                                       const kmonitor::MetricsReporterPtr metrics_reporter):
     config_(config), metrics_reporter_(metrics_reporter) {}
 
 EmbeddingScheduler::~EmbeddingScheduler() {
@@ -25,18 +25,18 @@ absl::Status EmbeddingScheduler::stop() {
 }
 
 absl::Status EmbeddingScheduler::enqueue(EmbeddingStreamPtr stream) {
-    lock_guard<mutex> lock(lock_);    
-    waiting_streams_.emplace_back(stream);    
+    lock_guard<mutex> lock(lock_);
+    waiting_streams_.emplace_back(stream);
     cond_.notify_all();
     return absl::OkStatus();
 }
 
 absl::StatusOr<list<EmbeddingStreamPtr>> EmbeddingScheduler::scheduleNew() {
     unique_lock<mutex> lock(lock_);
-    cond_.wait(lock, [this]{return stop_ || !waiting_streams_.empty();});
+    cond_.wait(lock, [this] { return stop_ || !waiting_streams_.empty(); });
     std::list<EmbeddingStreamPtr> new_streams;
-    int total_len = 0;
-    auto it = waiting_streams_.begin();
+    int                           total_len = 0;
+    auto                          it        = waiting_streams_.begin();
     while (it != waiting_streams_.end()) {
         const auto& stream = *it;
         if (total_len + stream->inputLength() > config_.max_context_batch_size_ * config_.max_seq_len_) {
@@ -48,8 +48,8 @@ absl::StatusOr<list<EmbeddingStreamPtr>> EmbeddingScheduler::scheduleNew() {
         it = waiting_streams_.erase(it);
     }
     // if new streams is empty, meaning that first stream is too big
-    if (waiting_streams_.size() != 0 && new_streams.size() == 0) {            
-        it = waiting_streams_.begin();
+    if (waiting_streams_.size() != 0 && new_streams.size() == 0) {
+        it                 = waiting_streams_.begin();
         const auto& stream = *it;
         stream->setError("long prompt error, not scheduled");
         it = waiting_streams_.erase(it);
@@ -61,7 +61,7 @@ absl::StatusOr<list<EmbeddingStreamPtr>> EmbeddingScheduler::scheduleNew() {
 void EmbeddingScheduler::reportMetrics(size_t new_stream_size) {
     if (metrics_reporter_) {
         RtpLLMSchedulerMetricsCollector collector;
-        collector.wait_stream_size = waitingStreamsSize();
+        collector.wait_stream_size    = waitingStreamsSize();
         collector.running_stream_size = new_stream_size;
         metrics_reporter_->report<RtpLLMSchedulerMetrics, RtpLLMSchedulerMetricsCollector>(nullptr, &collector);
     }

@@ -6,4 +6,4 @@ enum class DeepGemmType {
     GroupedContiguous,
     GroupedMasked
 };
-}
+}  // namespace rtp_llm

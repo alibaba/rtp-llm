@@ -82,8 +82,8 @@ protected:
 
         std::vector<size_t> shape = {data_.size()};
         // 由于 Buffer 内部不负责管理传入的地址数据(只是使用), 所以数据必须具有较久的生命周期
-        input->input_ids =
-            std::make_shared<rtp_llm::Buffer>(rtp_llm::MemoryType::MEMORY_CPU, rtp_llm::DataType::TYPE_INT32, shape, data_.data());
+        input->input_ids = std::make_shared<rtp_llm::Buffer>(
+            rtp_llm::MemoryType::MEMORY_CPU, rtp_llm::DataType::TYPE_INT32, shape, data_.data());
 
         rtp_llm::GptInitParameter param;
         param.max_seq_len_ = data_.size();
@@ -94,7 +94,8 @@ protected:
 
     rtp_llm::ConstBufferPtr CreateBuffer() {
         std::vector<size_t> shape = {data_.size()};
-        return std::make_shared<rtp_llm::Buffer>(rtp_llm::MemoryType::MEMORY_CPU, rtp_llm::DataType::TYPE_INT32, shape, data_.data());
+        return std::make_shared<rtp_llm::Buffer>(
+            rtp_llm::MemoryType::MEMORY_CPU, rtp_llm::DataType::TYPE_INT32, shape, data_.data());
     }
 
 protected:
@@ -155,14 +156,13 @@ TEST_F(ChatServiceTest, ChatCompletions_ThrowException) {
     EXPECT_CALL(*mock_engine_, enqueue(Matcher<const std::shared_ptr<GenerateInput>&>(_))).WillOnce(Return(stream));
 
     auto mock_ctx = std::make_shared<MockRenderContext>();
-    auto ctx = std::dynamic_pointer_cast<RenderContext>(mock_ctx);
+    auto ctx      = std::dynamic_pointer_cast<RenderContext>(mock_ctx);
     EXPECT_CALL(*mock_render_, getRenderContext).WillOnce(Return(ctx));
     EXPECT_CALL(*mock_ctx, init).WillOnce(Return());
 
     // outputs.generate_outputs 为空, 模拟抛出异常的情况
     GenerateOutputs outputs;
-    EXPECT_CALL(*mock_stream, nextOutput())
-        .WillOnce(Return(ErrorResult<GenerateOutputs>(std::move(outputs))));
+    EXPECT_CALL(*mock_stream, nextOutput()).WillOnce(Return(ErrorResult<GenerateOutputs>(std::move(outputs))));
 
     // EXPECT_CALL(*mock_metric_reporter_, reportErrorQpsMetric)
     //     .WillOnce(Invoke([](const std::string& source, int error_code) {
@@ -223,63 +223,58 @@ TEST_F(ChatServiceTest, ChatCompletions) {
     EXPECT_CALL(*mock_engine_, enqueue(Matcher<const std::shared_ptr<GenerateInput>&>(_))).WillOnce(Return(stream));
 
     auto mock_ctx = std::make_shared<MockRenderContext>();
-    auto ctx = std::dynamic_pointer_cast<RenderContext>(mock_ctx);
+    auto ctx      = std::dynamic_pointer_cast<RenderContext>(mock_ctx);
     EXPECT_CALL(*mock_render_, getRenderContext).WillOnce(Return(ctx));
     EXPECT_CALL(*mock_ctx, init).WillOnce(Return());
 
     const std::string json_response = "this is a test json response";
     EXPECT_CALL(*mock_ctx, render_stream_response_first)
-        .WillOnce(
-            Invoke([generate_config, json_response](int n, std::string debug_info) {
-                EXPECT_EQ(generate_config->num_return_sequences, n);
-                return json_response;
-            }));
-    EXPECT_CALL(*mock_ctx, render_stream_response)
-        .WillOnce(
-            Invoke([generate_config, data = data_, json_response](const GenerateOutputs&                  resp,
-                                                                  const std::shared_ptr<GenerateConfig>& config,
-                                                                  bool is_streaming) {
-                EXPECT_EQ(config, generate_config);
-                EXPECT_EQ(is_streaming, true);
-                auto buffer_ptr = resp.generate_outputs[0].output_ids;
-                auto output_tokens_list = rtp_llm::buffer2vector<int>(*buffer_ptr);
-                EXPECT_EQ(output_tokens_list.size(), data.size());
-                for (int i = 0; i < output_tokens_list.size(); ++i) {
-                    EXPECT_EQ(output_tokens_list.at(i), data.at(i));
-                }
-                return json_response;
-            }));
-    EXPECT_CALL(*mock_ctx, render_stream_response_flush)
-        .WillOnce(
-            Invoke([generate_config, data = data_, json_response](const GenerateOutputs&                  resp,
-                                                                  const std::shared_ptr<GenerateConfig>& config,
-                                                                  bool is_streaming) {
-                EXPECT_EQ(config, generate_config);
-                EXPECT_EQ(is_streaming, true);
-                auto buffer_ptr = resp.generate_outputs[0].output_ids;
-                auto output_tokens_list = rtp_llm::buffer2vector<int>(*buffer_ptr);
-                EXPECT_EQ(output_tokens_list.size(), data.size());
-                for (int i = 0; i < output_tokens_list.size(); ++i) {
-                    EXPECT_EQ(output_tokens_list.at(i), data.at(i));
-                }
-                return json_response;
-            }));
-    EXPECT_CALL(*mock_ctx, render_stream_response_final)
-        .WillOnce(
-            Invoke([data = data_, json_response](const GenerateOutputs& resp) {
-                auto buffer_ptr = resp.generate_outputs[0].output_ids;
-                auto output_tokens_list = rtp_llm::buffer2vector<int>(*buffer_ptr);
-                EXPECT_EQ(output_tokens_list.size(), data.size());
-                for (int i = 0; i < output_tokens_list.size(); ++i) {
-                    EXPECT_EQ(output_tokens_list.at(i), data.at(i));
-                }
-                return json_response;
-            }));
-    EXPECT_CALL(*mock_writer_, Write)
-        .WillRepeatedly(Invoke([json_response](const std::string& data) {
-            EXPECT_EQ(data, ChatService::sseResponse(json_response));
-            return true;
+        .WillOnce(Invoke([generate_config, json_response](int n, std::string debug_info) {
+            EXPECT_EQ(generate_config->num_return_sequences, n);
+            return json_response;
         }));
+    EXPECT_CALL(*mock_ctx, render_stream_response)
+        .WillOnce(Invoke([generate_config, data = data_, json_response](const GenerateOutputs&                 resp,
+                                                                        const std::shared_ptr<GenerateConfig>& config,
+                                                                        bool is_streaming) {
+            EXPECT_EQ(config, generate_config);
+            EXPECT_EQ(is_streaming, true);
+            auto buffer_ptr         = resp.generate_outputs[0].output_ids;
+            auto output_tokens_list = rtp_llm::buffer2vector<int>(*buffer_ptr);
+            EXPECT_EQ(output_tokens_list.size(), data.size());
+            for (int i = 0; i < output_tokens_list.size(); ++i) {
+                EXPECT_EQ(output_tokens_list.at(i), data.at(i));
+            }
+            return json_response;
+        }));
+    EXPECT_CALL(*mock_ctx, render_stream_response_flush)
+        .WillOnce(Invoke([generate_config, data = data_, json_response](const GenerateOutputs&                 resp,
+                                                                        const std::shared_ptr<GenerateConfig>& config,
+                                                                        bool is_streaming) {
+            EXPECT_EQ(config, generate_config);
+            EXPECT_EQ(is_streaming, true);
+            auto buffer_ptr         = resp.generate_outputs[0].output_ids;
+            auto output_tokens_list = rtp_llm::buffer2vector<int>(*buffer_ptr);
+            EXPECT_EQ(output_tokens_list.size(), data.size());
+            for (int i = 0; i < output_tokens_list.size(); ++i) {
+                EXPECT_EQ(output_tokens_list.at(i), data.at(i));
+            }
+            return json_response;
+        }));
+    EXPECT_CALL(*mock_ctx, render_stream_response_final)
+        .WillOnce(Invoke([data = data_, json_response](const GenerateOutputs& resp) {
+            auto buffer_ptr         = resp.generate_outputs[0].output_ids;
+            auto output_tokens_list = rtp_llm::buffer2vector<int>(*buffer_ptr);
+            EXPECT_EQ(output_tokens_list.size(), data.size());
+            for (int i = 0; i < output_tokens_list.size(); ++i) {
+                EXPECT_EQ(output_tokens_list.at(i), data.at(i));
+            }
+            return json_response;
+        }));
+    EXPECT_CALL(*mock_writer_, Write).WillRepeatedly(Invoke([json_response](const std::string& data) {
+        EXPECT_EQ(data, ChatService::sseResponse(json_response));
+        return true;
+    }));
 
     GenerateOutput output;
     output.output_ids = CreateBuffer();

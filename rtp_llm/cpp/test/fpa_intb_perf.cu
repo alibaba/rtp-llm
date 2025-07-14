@@ -7,15 +7,12 @@
 #include "rtp_llm/cpp/cuda/cuda_utils.h"
 #include "rtp_llm/cpp/cuda/memory_utils.h"
 
-
-
 struct Dim2 {
     int k;
     int n;
 };
 
-void gemm_test(int m, Dim2 dim2, cudaStream_t stream)
-{
+void gemm_test(int m, Dim2 dim2, cudaStream_t stream) {
     int n = dim2.n;
     int k = dim2.k;
 
@@ -79,17 +76,17 @@ void gemm_test(int m, Dim2 dim2, cudaStream_t stream)
 
     int iterations = 10;
     for (int iter = 0; iter < iterations; iter++) {
-            runner.gemm(reinterpret_cast<const void*>(in_ptr),
-                reinterpret_cast<const void*>(w_ptr),
-                reinterpret_cast<const void*>(s_ptr),
-                reinterpret_cast<void*>(out_ptr),
-                m,
-                n,
-                k,
-                bestTactic,
-                reinterpret_cast<char*>(ws_ptr),
-                ws_size,
-                stream);
+        runner.gemm(reinterpret_cast<const void*>(in_ptr),
+                    reinterpret_cast<const void*>(w_ptr),
+                    reinterpret_cast<const void*>(s_ptr),
+                    reinterpret_cast<void*>(out_ptr),
+                    m,
+                    n,
+                    k,
+                    bestTactic,
+                    reinterpret_cast<char*>(ws_ptr),
+                    ws_size,
+                    stream);
     }
     cudaEventRecord(stop, stream);
     cudaEventSynchronize(stop);
@@ -108,8 +105,7 @@ void gemm_test(int m, Dim2 dim2, cudaStream_t stream)
     deviceFree(ws_ptr);
 }
 
-int main()
-{
+int main() {
     std::vector<int>  M_list{1, 4, 8, 16, 32, 64, 128};
     std::vector<Dim2> dim_list;
     dim_list.push_back({4096, 4096});

@@ -12,6 +12,6 @@ int64_t DeviceExporter::getDeviceId() {
     return device_params_.device_id;
 }
 
-} // namespace torch_ext
+}  // namespace torch_ext
 
 using namespace torch_ext;

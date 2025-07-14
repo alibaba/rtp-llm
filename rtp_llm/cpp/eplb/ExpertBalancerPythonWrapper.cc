@@ -44,8 +44,8 @@ void ExpertBalancerPythonWrapper::loadBalanceWeight(int ep_rank, int ep_size, Ep
     eplb_plan.layer_id     = result_tuple[0].cast<int>();
     eplb_plan.moe_weight_1 = result_tuple[1].cast<torch::Tensor>();
     eplb_plan.moe_weight_2 = result_tuple[2].cast<torch::Tensor>();
-    eplb_plan.moe_scale_1 = result_tuple[3].cast<torch::Tensor>();
-    eplb_plan.moe_scale_2 = result_tuple[4].cast<torch::Tensor>();
+    eplb_plan.moe_scale_1  = result_tuple[3].cast<torch::Tensor>();
+    eplb_plan.moe_scale_2  = result_tuple[4].cast<torch::Tensor>();
 }
 
 }  // namespace rtp_llm

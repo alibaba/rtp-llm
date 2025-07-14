@@ -27,8 +27,8 @@ __global__ void perColQuantization(const T*      src,
     const float groupMaxh = blockAllReduceMax(valh);
 
     if (threadIdx.x == 0) {
-        scalePtr[rowGrpIdx * numCols + colPckIdx * 2 + 0]  = groupMaxl / 7.0f;
-        scalePtr[rowGrpIdx * numCols + colPckIdx * 2 + 1]  = groupMaxh / 7.0f;
+        scalePtr[rowGrpIdx * numCols + colPckIdx * 2 + 0] = groupMaxl / 7.0f;
+        scalePtr[rowGrpIdx * numCols + colPckIdx * 2 + 1] = groupMaxh / 7.0f;
         zerosPtr[rowGrpIdx * numCols + colPckIdx * 2 + 0] = 0;
         zerosPtr[rowGrpIdx * numCols + colPckIdx * 2 + 1] = 0;
     }

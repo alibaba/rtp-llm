@@ -16,7 +16,7 @@
 
 ## 请求和响应格式
 
-与 openai 格式基本一致，详情参考 [openai embedding](https://platform.openai.com/docs/api-reference/embeddings/create) 和`rtp_llm/models/downstream_modules/embedding/api_datatype.py` 
+与 openai 格式基本一致，详情参考 [openai embedding](https://platform.openai.com/docs/api-reference/embeddings/create) 和`rtp_llm/models/downstream_modules/embedding/api_datatype.py`
 
 # all embedding
 

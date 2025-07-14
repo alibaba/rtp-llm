@@ -9,11 +9,11 @@ namespace rtp_llm {
 absl::Status MTPExecutor::propose(const std::list<GenerateStreamPtr>& streams, bool skip_check) {
     std::list<GenerateStreamPtr> propose_streams;
 
-    for (auto& stream: streams) {
+    for (auto& stream : streams) {
         RTP_LLM_LOG_DEBUG("before create mtp stream [%d]: %s", stream->streamId(), stream->debugString().c_str());
     }
 
-    for (auto& stream : streams) { 
+    for (auto& stream : streams) {
         if (!skip_check) {
             if (stream->stoppedWithoutLock() || stream->finishedWithoutLock()) {
                 continue;
@@ -31,10 +31,9 @@ absl::Status MTPExecutor::propose(const std::list<GenerateStreamPtr>& streams, b
         propose_streams.push_back(propose_stream);
     }
 
-    for (auto& stream: propose_streams) {
+    for (auto& stream : propose_streams) {
         RTP_LLM_LOG_DEBUG("before propose stream [%d]: %s", stream->streamId(), stream->debugString().c_str());
     }
-
 
     for (size_t i = 0; i < propose_step_; i++) {
         if (i > 0) {
@@ -47,12 +46,11 @@ absl::Status MTPExecutor::propose(const std::list<GenerateStreamPtr>& streams, b
                 auto mtp_stream = std::static_pointer_cast<MTPStream>(stream);
                 mtp_stream->shiftRightOneToken(*stream);
             }
-           
         }
         RETURN_IF_STATUS_ERROR(mtp_executors_[i]->process(propose_streams));
     }
 
-    for (auto& stream: propose_streams) {
+    for (auto& stream : propose_streams) {
         RTP_LLM_LOG_DEBUG("after propose stream [%d]: %s", stream->streamId(), stream->debugString().c_str());
     }
 

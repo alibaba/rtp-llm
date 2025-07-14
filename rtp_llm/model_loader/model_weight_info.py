@@ -2,31 +2,47 @@ import functools
 import gc
 import logging
 import os
+from typing import Any, Dict, List, Optional, Tuple, Union
+
 import torch
-from rtp_llm.utils.ckpt_file_info import CkptFileInfo
-from typing import List, Tuple, Union, Optional, Dict, Any
-from rtp_llm.config.quant_config import QuantizationConfig
-from rtp_llm.utils.database import BaseDatabase, CkptDatabase
-from rtp_llm.utils.model_weight import W, CkptWeightInfo, WeightStyle, choose_available, identity, tolerate_failed
+
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.model_loader.load_config import LoadConfig
-from rtp_llm.model_loader.weight_module import WeightModule, AtomicWeight, CompositeWeight
-from rtp_llm.model_loader.ffn_weight import FfnConfig, FfnWeight, MoeWithSharedWeight
-from rtp_llm.model_loader.attn_weight import AttnConfig
+from rtp_llm.config.quant_config import QuantizationConfig
 from rtp_llm.distribute.worker_info import ParallelInfo
+from rtp_llm.model_loader.attn_weight import AttnConfig
+from rtp_llm.model_loader.ffn_weight import FfnConfig, FfnWeight, MoeWithSharedWeight
+from rtp_llm.model_loader.load_config import LoadConfig
+from rtp_llm.model_loader.weight_module import (
+    AtomicWeight,
+    CompositeWeight,
+    WeightModule,
+)
+from rtp_llm.utils.ckpt_file_info import CkptFileInfo
+from rtp_llm.utils.database import BaseDatabase, CkptDatabase
+from rtp_llm.utils.model_weight import (
+    CkptWeightInfo,
+    W,
+    WeightStyle,
+    choose_available,
+    identity,
+    tolerate_failed,
+)
 from rtp_llm.utils.weight_type import WEIGHT_TYPE
+
 
 class ModelWeightInfo:
     layer_weights: Union[List[WeightModule], List[List[WeightModule]]]
     weights: List[WeightModule]
 
-    def __init__(self, weights: List[WeightModule],
-                 layer_weights: Union[List[WeightModule], List[List[WeightModule]]]) -> None:
+    def __init__(
+        self,
+        weights: List[WeightModule],
+        layer_weights: Union[List[WeightModule], List[List[WeightModule]]],
+    ) -> None:
         self.weights = weights
         self.layer_weights = layer_weights
         if len(self.layer_weights) == 0:
             return
-
 
     def set_weight_dtype(self, dtype: torch.dtype):
         if self.layer_weights:
@@ -35,6 +51,7 @@ class ModelWeightInfo:
 
     def get_layer_weight_info(self, layer_id: int, name: str) -> Optional[WeightModule]:
         from collections import deque
+
         queue = deque(self.layer_weights[layer_id])
 
         while queue:
@@ -46,15 +63,16 @@ class ModelWeightInfo:
 
         return None
 
-
     def to_quant_weight_info(self, quant_config: QuantizationConfig):
-        if quant_config is None :
+        if quant_config is None:
             raise ValueError("quant_config is None ")
         weights = []
         if self.weights:
             for weight in self.weights:
                 weights.append(weight.create(weight, quant_config))
-        layer_weights: Union[List[WeightModule], List[List[WeightModule]]] = [] if self.layer_weights else None
+        layer_weights: Union[List[WeightModule], List[List[WeightModule]]] = (
+            [] if self.layer_weights else None
+        )
         if self.layer_weights:
             for weight in self.layer_weights:
                 if isinstance(weight, list):
@@ -68,60 +86,49 @@ class ModelWeightInfo:
         return ModelWeightInfo(weights, layer_weights)
 
 
-
 class ModelDeployWeightInfo:
 
     TRT_ENGINE_LAYER_WEIGHT_MAP = {
-        W.pre_ln_beta : 'transformer.layers.{i}.input_layernorm.bias',
-        W.pre_ln_gamma : 'transformer.layers.{i}.input_layernorm.weight',
-        W.attn_qkv_w : 'transformer.layers.{i}.attention.qkv.weight',
-        W.attn_qkv_b : 'transformer.layers.{i}.attention.qkv.bias',
-        W.attn_qkv_s : 'transformer.layers.{i}.attention.qkv.weights_scaling_factor',
-
-        W.attn_o_w : 'transformer.layers.{i}.attention.dense.weight',
-        W.attn_o_b : 'transformer.layers.{i}.attention.dense.bias',
-        W.attn_o_s : 'transformer.layers.{i}.attention.dense.weights_scaling_factor',
-
-        W.ffn_w3 : 'transformer.layers.{i}.mlp.fc.weight',
-        W.ffn_b3 : 'transformer.layers.{i}.mlp.fc.bias',
-        W.ffn_s3 : 'transformer.layers.{i}.mlp.fc.weights_scaling_factor',
-
-        W.ffn_w2 : 'transformer.layers.{i}.mlp.proj.weight',
-        W.ffn_b2 : 'transformer.layers.{i}.mlp.proj.bias',
-        W.ffn_s2 : 'transformer.layers.{i}.mlp.proj.weights_scaling_factor',
-
-        W.post_ln_gamma : 'transformer.layers.{i}.post_layernorm.weight',
-        W.post_ln_beta : 'transformer.layers.{i}.post_layernorm.bias',
-
+        W.pre_ln_beta: "transformer.layers.{i}.input_layernorm.bias",
+        W.pre_ln_gamma: "transformer.layers.{i}.input_layernorm.weight",
+        W.attn_qkv_w: "transformer.layers.{i}.attention.qkv.weight",
+        W.attn_qkv_b: "transformer.layers.{i}.attention.qkv.bias",
+        W.attn_qkv_s: "transformer.layers.{i}.attention.qkv.weights_scaling_factor",
+        W.attn_o_w: "transformer.layers.{i}.attention.dense.weight",
+        W.attn_o_b: "transformer.layers.{i}.attention.dense.bias",
+        W.attn_o_s: "transformer.layers.{i}.attention.dense.weights_scaling_factor",
+        W.ffn_w3: "transformer.layers.{i}.mlp.fc.weight",
+        W.ffn_b3: "transformer.layers.{i}.mlp.fc.bias",
+        W.ffn_s3: "transformer.layers.{i}.mlp.fc.weights_scaling_factor",
+        W.ffn_w2: "transformer.layers.{i}.mlp.proj.weight",
+        W.ffn_b2: "transformer.layers.{i}.mlp.proj.bias",
+        W.ffn_s2: "transformer.layers.{i}.mlp.proj.weights_scaling_factor",
+        W.post_ln_gamma: "transformer.layers.{i}.post_layernorm.weight",
+        W.post_ln_beta: "transformer.layers.{i}.post_layernorm.bias",
     }
 
     TRT_ENGINE_LAYER_WEIGHT_MAP2 = {
-        W.pre_ln_beta : 'transformer.layers.{i}.input_layernorm.bias',
-        W.pre_ln_gamma : 'transformer.layers.{i}.input_layernorm.weight',
-        W.attn_qkv_w : 'transformer.layers.{i}.attention.qkv.weight',
-        W.attn_qkv_b : 'transformer.layers.{i}.attention.qkv.bias',
-        W.attn_qkv_s : 'transformer.layers.{i}.attention.qkv.weights_scaling_factor',
-
-        W.attn_o_w : 'transformer.layers.{i}.attention.dense.weight',
-        W.attn_o_b : 'transformer.layers.{i}.attention.dense.bias',
-        W.attn_o_s : 'transformer.layers.{i}.attention.dense.weights_scaling_factor',
-
-        W.ffn_w1 : 'transformer.layers.{i}.mlp.fc.weight',
-        W.ffn_b1 : 'transformer.layers.{i}.mlp.fc.bias',
-        W.ffn_s1 : 'transformer.layers.{i}.mlp.fc.weights_scaling_factor',
-
-        W.ffn_w2 : 'transformer.layers.{i}.mlp.proj.weight',
-        W.ffn_b2 : 'transformer.layers.{i}.mlp.proj.bias',
-        W.ffn_s2 : 'transformer.layers.{i}.mlp.proj.weights_scaling_factor',
-
-        W.ffn_w3 : 'transformer.layers.{i}.mlp.gate.weight',
-        W.ffn_b3 : 'transformer.layers.{i}.mlp.gate.bias',
-        W.ffn_s3 : 'transformer.layers.{i}.mlp.gate.weights_scaling_factor',
-
-        W.post_ln_gamma : 'transformer.layers.{i}.post_layernorm.weight',
-        W.post_ln_beta : 'transformer.layers.{i}.post_layernorm.bias',
-
+        W.pre_ln_beta: "transformer.layers.{i}.input_layernorm.bias",
+        W.pre_ln_gamma: "transformer.layers.{i}.input_layernorm.weight",
+        W.attn_qkv_w: "transformer.layers.{i}.attention.qkv.weight",
+        W.attn_qkv_b: "transformer.layers.{i}.attention.qkv.bias",
+        W.attn_qkv_s: "transformer.layers.{i}.attention.qkv.weights_scaling_factor",
+        W.attn_o_w: "transformer.layers.{i}.attention.dense.weight",
+        W.attn_o_b: "transformer.layers.{i}.attention.dense.bias",
+        W.attn_o_s: "transformer.layers.{i}.attention.dense.weights_scaling_factor",
+        W.ffn_w1: "transformer.layers.{i}.mlp.fc.weight",
+        W.ffn_b1: "transformer.layers.{i}.mlp.fc.bias",
+        W.ffn_s1: "transformer.layers.{i}.mlp.fc.weights_scaling_factor",
+        W.ffn_w2: "transformer.layers.{i}.mlp.proj.weight",
+        W.ffn_b2: "transformer.layers.{i}.mlp.proj.bias",
+        W.ffn_s2: "transformer.layers.{i}.mlp.proj.weights_scaling_factor",
+        W.ffn_w3: "transformer.layers.{i}.mlp.gate.weight",
+        W.ffn_b3: "transformer.layers.{i}.mlp.gate.bias",
+        W.ffn_s3: "transformer.layers.{i}.mlp.gate.weights_scaling_factor",
+        W.post_ln_gamma: "transformer.layers.{i}.post_layernorm.weight",
+        W.post_ln_beta: "transformer.layers.{i}.post_layernorm.bias",
     }
+
     def __init__(self, config: GptInitModelParameters, tp_size: int, tp_rank: int):
         self.config = config
         self._use_qk_norm = config.use_qk_norm
@@ -154,14 +161,13 @@ class ModelDeployWeightInfo:
         self._src_quantization_bit = config.src_quantization_bit
         self.tp_split_emb_and_lm_head = config.tp_split_emb_and_lm_head
 
-
         self._is_gated_activation = config.gpt_init_params.isGatedActivation()
         self.expert_num_ = config.gpt_init_params.expert_num
         self.moe_n_group_ = config.moe_n_group
         self.enable_eplb_ = config.enable_eplb
         self.phy_exp_num_ = config.phy_exp_num
         self.enable_merge_w13_ = config.enable_merge_w13
-        self.moe_k_      = config.gpt_init_params.moe_k
+        self.moe_k_ = config.gpt_init_params.moe_k
         self.moe_layer_index_ = config.gpt_init_params.moe_layer_index
         self.moe_style_ = config.gpt_init_params.moe_style
         self._moe_inter_padding_size = config.moe_inter_padding_size
@@ -169,7 +175,6 @@ class ModelDeployWeightInfo:
         self.tie_word_embeddings = config.tie_word_embeddings
         self.use_expert_attention = config.use_expert_attention
         self.weight_style = WeightStyle.NONE
-
 
         # for mla
         self.kv_lora_rank = config.kv_lora_rank
@@ -199,7 +204,8 @@ class ModelDeployWeightInfo:
             size_per_head=self._size_per_head,
             head_num=self._head_num,
             head_num_kv=self._head_num_kv,
-            use_fp8_kv_cache=self.kv_cache_data_type == WEIGHT_TYPE.FP8.to_str() and os.environ.get('BLOCKWISE_USE_FP8_KV_CACHE', '0') == '1'
+            use_fp8_kv_cache=self.kv_cache_data_type == WEIGHT_TYPE.FP8.to_str()
+            and os.environ.get("BLOCKWISE_USE_FP8_KV_CACHE", "0") == "1",
         )
         return attn_config
 
@@ -208,7 +214,7 @@ class ModelDeployWeightInfo:
         ffn_config = FfnConfig(
             is_gated_activation=self._is_gated_activation,
             inter_padding_size=self._inter_padding_size,
-            is_moe=False
+            is_moe=False,
         )
         return ffn_config
 
@@ -218,7 +224,9 @@ class ModelDeployWeightInfo:
         if use_fp32:
             weight_info = weight_info.set_weight_dtype(torch.float32)
 
-        if weight_info.layer_weights and not isinstance(weight_info.layer_weights[0], List):
+        if weight_info.layer_weights and not isinstance(
+            weight_info.layer_weights[0], List
+        ):
             layer_weights = []
             for _ in range(self._num_layers):
                 layer_weights.append(weight_info.layer_weights)
@@ -246,14 +254,18 @@ class ModelDeployWeightInfo:
 
     def _fix_weight_style_layer_weight(self, origin_weight_info: ModelWeightInfo):
         global_weights = []
-        m1 = {
-            W.embedding : 'transformer.vocab_embedding.weight',
-            W.lm_head : 'lm_head.weight',
-            W.final_ln_gamma : 'transformer.ln_f.weight'
-        } if self.weight_style == WeightStyle.TRT_ENGINE else {}
+        m1 = (
+            {
+                W.embedding: "transformer.vocab_embedding.weight",
+                W.lm_head: "lm_head.weight",
+                W.final_ln_gamma: "transformer.ln_f.weight",
+            }
+            if self.weight_style == WeightStyle.TRT_ENGINE
+            else {}
+        )
 
         def __update_weight_style(weight: WeightModule, name_map: Dict[str, str]):
-            if isinstance(weight , AtomicWeight):
+            if isinstance(weight, AtomicWeight):
                 weight.weight_style = self.weight_style
                 if weight.name in name_map:
                     if len(weight.weights) == 1:
@@ -261,15 +273,20 @@ class ModelDeployWeightInfo:
                     elif weight.name in [W.attn_qkv_b, W.attn_qkv_w]:
                         weight.weights = [CkptWeightInfo(name_map[weight.name])]
                         weight.process_fun = identity
-                        logging.error(f"{weight.name} have many weight, maybe cause bug {weight.weights}")
+                        logging.error(
+                            f"{weight.name} have many weight, maybe cause bug {weight.weights}"
+                        )
                     elif len(weight.weights) >= 2:
-                        raise ValueError(f"{weight.name} should have only one or zero weight, {weight.weights}")
-                    logging.info(f"update weight style for {weight.name}: {weight.weights[0].name}")
+                        raise ValueError(
+                            f"{weight.name} should have only one or zero weight, {weight.weights}"
+                        )
+                    logging.info(
+                        f"update weight style for {weight.name}: {weight.weights[0].name}"
+                    )
             elif isinstance(weight, CompositeWeight):
                 weight.weight_style = self.weight_style
                 for _, sub_weight in weight.sub_weights.items():
                     __update_weight_style(sub_weight, name_map)
-
 
         for _, weight in enumerate(origin_weight_info.weights):
             __update_weight_style(weight, m1)
@@ -280,7 +297,10 @@ class ModelDeployWeightInfo:
         for weights in origin_weight_info.layer_weights:
             ffn_weight = [weight for weight in weights if weight.name == W.ffn]
             assert len(ffn_weight) == 1
-            if ffn_weight[0].w1 is not None and self.weight_style == WeightStyle.TRT_ENGINE:
+            if (
+                ffn_weight[0].w1 is not None
+                and self.weight_style == WeightStyle.TRT_ENGINE
+            ):
                 m2 = self.TRT_ENGINE_LAYER_WEIGHT_MAP2
             elif self.weight_style == WeightStyle.TRT_ENGINE:
                 m2 = self.TRT_ENGINE_LAYER_WEIGHT_MAP
@@ -299,7 +319,7 @@ class ModelDeployWeightInfo:
 
     def _fix_merge_w1_w3(self, origin_weight_info: ModelWeightInfo):
         def __update_weight_config(weight: WeightModule):
-            if isinstance(weight , FfnWeight) or isinstance(weight, MoeWithSharedWeight):
+            if isinstance(weight, FfnWeight) or isinstance(weight, MoeWithSharedWeight):
                 weight.config.enable_merge_w13 = True
                 logging.info(f"src_weights: {weight}")
                 params = weight.extract_params(weight.__class__, weight, None)
@@ -315,7 +335,9 @@ class ModelDeployWeightInfo:
             layer_weights.append(fix_weight)
 
         origin_weight_info.layer_weights = layer_weights
-        logging.info(f"fix weight config when need_merge_w13 {origin_weight_info.layer_weights[0]}")
+        logging.info(
+            f"fix weight config when need_merge_w13 {origin_weight_info.layer_weights[0]}"
+        )
         return origin_weight_info
 
     def _fix_tie_lm_head(self, origin_weight_info: ModelWeightInfo) -> ModelWeightInfo:
@@ -334,15 +356,32 @@ class ModelDeployWeightInfo:
             return origin_weight_info
 
         assert len(lm_head.weights) == 1 and len(word_emb.weights) == 1
-        lm_head_ckpt_weigth_infos = [CkptWeightInfo(w.name, functools.partial(tolerate_failed, origin_func=w.merge_fun)) for w in lm_head.weights]
-        lm_head_ckpt_weigth_infos.extend([CkptWeightInfo(w.name, functools.partial(tolerate_failed, origin_func=w.merge_fun)) for w in word_emb.weights])
+        lm_head_ckpt_weigth_infos = [
+            CkptWeightInfo(
+                w.name, functools.partial(tolerate_failed, origin_func=w.merge_fun)
+            )
+            for w in lm_head.weights
+        ]
+        lm_head_ckpt_weigth_infos.extend(
+            [
+                CkptWeightInfo(
+                    w.name, functools.partial(tolerate_failed, origin_func=w.merge_fun)
+                )
+                for w in word_emb.weights
+            ]
+        )
         lm_head_merge_funcs = [lm_head.process_fun, word_emb.process_fun]
-        lm_head = AtomicWeight(W.lm_head, lm_head_ckpt_weigth_infos, functools.partial(choose_available, origin_func_list = lm_head_merge_funcs))
+        lm_head = AtomicWeight(
+            W.lm_head,
+            lm_head_ckpt_weigth_infos,
+            functools.partial(choose_available, origin_func_list=lm_head_merge_funcs),
+        )
         origin_weight_info.weights[lm_head_idx] = lm_head
         return origin_weight_info
 
-
-    def _process_sparse_weight(self, origin_weight_info: ModelWeightInfo) -> ModelWeightInfo:
+    def _process_sparse_weight(
+        self, origin_weight_info: ModelWeightInfo
+    ) -> ModelWeightInfo:
         if not isinstance(origin_weight_info.layer_weights[0], list):
             raise Exception("model weight use sparse config should be list(list())")
         new_layer_weights = []
@@ -358,7 +397,11 @@ class ModelDeployWeightInfo:
 
         for i, layer_weight in enumerate(origin_weight_info.layer_weights):
             if self._layer_head_num[i] == 0:
-                new_weights = [weight for weight in layer_weight if weight.name not in skip_weights_list]
+                new_weights = [
+                    weight
+                    for weight in layer_weight
+                    if weight.name not in skip_weights_list
+                ]
             else:
                 new_weights = layer_weight
             new_layer_weights.append(new_weights)
@@ -392,7 +435,11 @@ class ModelDeployWeightInfo:
             return
         # call subclass process_meta
         meta_dicts = [ckpt_file.get_metadata() for ckpt_file in ckpt_metas]
-        weight_keys = set(functools.reduce(lambda x,y:x+y, [list(meta.keys()) for meta in meta_dicts], []))
+        weight_keys = set(
+            functools.reduce(
+                lambda x, y: x + y, [list(meta.keys()) for meta in meta_dicts], []
+            )
+        )
         self._process_meta(meta_dicts, weight_keys)
 
     def _process_meta(self, meta_dict, weight_keys):
@@ -408,62 +455,76 @@ class ModelDeployWeightInfo:
                 return True
         return False
 
-    def create_load_config(self,
-                           compute_dtype: torch.dtype,
-                           database: BaseDatabase,
-                           exported_device: Optional[Any] = None):
+    def create_load_config(
+        self,
+        compute_dtype: torch.dtype,
+        database: BaseDatabase,
+        exported_device: Optional[Any] = None,
+    ):
         merge_lora = False
 
         if not database.is_ft_style:
             merge_lora = database.has_lora() and bool(os.environ.get("MERGE_LORA", 1))
 
         if database.has_lora() and not self.support_lora:
-            raise Exception(f"current weights_info: {self.__class__} not support lora, but database has lora")
+            raise Exception(
+                f"current weights_info: {self.__class__} not support lora, but database has lora"
+            )
 
-        if database.is_ft_style and database.ft_weight_params and self.vit_separation != 1:
+        if (
+            database.is_ft_style
+            and database.ft_weight_params
+            and self.vit_separation != 1
+        ):
             # check ft_style ParallelInfo is match weight's ParallelInfo
-            src_tp_size = int(database.ft_weight_params.get('TP_SIZE', self.tp_size))
-            src_dp_size = int(database.ft_weight_params.get('DP_SIZE', self.dp_size))
-            src_ep_size = int(database.ft_weight_params.get('EP_SIZE', self.ep_size))
-            if src_tp_size != self.tp_size or src_dp_size != self.dp_size or src_ep_size != self.ep_size:
-                raise ValueError(f"ft_style ParallelInfo is not match weight's ParallelInfo," + \
-                    f"tp_size: {src_tp_size} vs {self.tp_size}, dp_size: {src_dp_size} vs {self.dp_size}, ep_size: {src_ep_size} vs {self.ep_size}")
+            src_tp_size = int(database.ft_weight_params.get("TP_SIZE", self.tp_size))
+            src_dp_size = int(database.ft_weight_params.get("DP_SIZE", self.dp_size))
+            src_ep_size = int(database.ft_weight_params.get("EP_SIZE", self.ep_size))
+            if (
+                src_tp_size != self.tp_size
+                or src_dp_size != self.dp_size
+                or src_ep_size != self.ep_size
+            ):
+                raise ValueError(
+                    f"ft_style ParallelInfo is not match weight's ParallelInfo,"
+                    + f"tp_size: {src_tp_size} vs {self.tp_size}, dp_size: {src_dp_size} vs {self.dp_size}, ep_size: {src_ep_size} vs {self.ep_size}"
+                )
 
         load_config = LoadConfig(
-            database = database,
-            num_layers = self._num_layers,
-            hidden_size = self._hidden_size,
-            head_num = self._head_num,
-            head_num_kv = self._head_num_kv,
-            size_per_head = self._size_per_head,
-            use_stack_weight = self._use_stack_weight,
-            inter_size = self._inter_size,
-            moe_layer_index = self.moe_layer_index_,
-            moe_n_group = self.moe_n_group_,
-            inter_padding_size = self._inter_padding_size,
-            moe_inter_padding_size = self._moe_inter_padding_size,
-            expert_num = self.expert_num_,
-            enable_eplb = self.enable_eplb_,
-            phy_exp_num = self.phy_exp_num_,
-            enable_merge_w13 = self.enable_merge_w13_,
-            tp_size = self.tp_size,
-            tp_rank = self.tp_rank,
-            ep_size = self.ep_size,
-            ep_rank = self.ep_rank,
-            dp_size = self.dp_size,
-            dp_rank = self.dp_rank,
-            num_nodes = self.num_nodes,
-            ffn_tp_rank = self.ffn_tp_rank,
-            ffn_tp_size = self.ffn_tp_size,
-            tp_split_emb_and_lm_head = self.tp_split_emb_and_lm_head,
-            merge_lora = merge_lora,
-            vit_separation = self.vit_separation,
-            compute_dtype = compute_dtype,
-            quant_algo = self._quant_algo,
-            bit = self._quant_algo.getWeightBits(),
-            is_ft_style_weight = database.is_ft_style,
-            phy2log=self.config.phy2log,                      # Notice use config, because phy2log init after ModelDeployWeightInfo.__init__
-            exported_device = exported_device
+            database=database,
+            num_layers=self._num_layers,
+            hidden_size=self._hidden_size,
+            head_num=self._head_num,
+            head_num_kv=self._head_num_kv,
+            size_per_head=self._size_per_head,
+            use_stack_weight=self._use_stack_weight,
+            inter_size=self._inter_size,
+            moe_layer_index=self.moe_layer_index_,
+            moe_n_group=self.moe_n_group_,
+            inter_padding_size=self._inter_padding_size,
+            moe_inter_padding_size=self._moe_inter_padding_size,
+            expert_num=self.expert_num_,
+            enable_eplb=self.enable_eplb_,
+            phy_exp_num=self.phy_exp_num_,
+            enable_merge_w13=self.enable_merge_w13_,
+            tp_size=self.tp_size,
+            tp_rank=self.tp_rank,
+            ep_size=self.ep_size,
+            ep_rank=self.ep_rank,
+            dp_size=self.dp_size,
+            dp_rank=self.dp_rank,
+            num_nodes=self.num_nodes,
+            ffn_tp_rank=self.ffn_tp_rank,
+            ffn_tp_size=self.ffn_tp_size,
+            tp_split_emb_and_lm_head=self.tp_split_emb_and_lm_head,
+            merge_lora=merge_lora,
+            vit_separation=self.vit_separation,
+            compute_dtype=compute_dtype,
+            quant_algo=self._quant_algo,
+            bit=self._quant_algo.getWeightBits(),
+            is_ft_style_weight=database.is_ft_style,
+            phy2log=self.config.phy2log,  # Notice use config, because phy2log init after ModelDeployWeightInfo.__init__
+            exported_device=exported_device,
         )
         return load_config
 
@@ -502,11 +563,10 @@ class ModelWeights:
     def dtype(self):
         return self._dtype
 
-
     @staticmethod
-    def layer_weight_prefix(tp_rank:int, dp_rank: int, ep_rank: int):
+    def layer_weight_prefix(tp_rank: int, dp_rank: int, ep_rank: int):
         return f"rank_{tp_rank:02d}_{dp_rank:02d}_{ep_rank:02d}.layers."
 
     @staticmethod
-    def global_weight_prefix(tp_rank:int, dp_rank: int, ep_rank: int):
+    def global_weight_prefix(tp_rank: int, dp_rank: int, ep_rank: int):
         return f"rank_{tp_rank:02d}_{dp_rank:02d}_{ep_rank:02d}.global."

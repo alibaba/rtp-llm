@@ -1,5 +1,7 @@
 import torch
+
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+
 
 class PrefixEncoder(torch.nn.Module):
     """
@@ -19,10 +21,13 @@ class PrefixEncoder(torch.nn.Module):
             self.trans = torch.nn.Sequential(
                 torch.nn.Linear(hidden_size, hidden_size),
                 torch.nn.Tanh(),
-                torch.nn.Linear(hidden_size, config.layer_num * hidden_size * 2)
+                torch.nn.Linear(hidden_size, config.layer_num * hidden_size * 2),
             )
         else:
-            self.embedding = torch.nn.Embedding(config.pre_seq_len, config.layer_num * config.size_per_head * config.head_num_kv * 2)
+            self.embedding = torch.nn.Embedding(
+                config.pre_seq_len,
+                config.layer_num * config.size_per_head * config.head_num_kv * 2,
+            )
 
     # input shape: [batch_size, pre_seq_len]
     # output shape: [batch_size, layer_num * 2, head_num, pre_seq_len, size_per_head]
@@ -33,7 +38,12 @@ class PrefixEncoder(torch.nn.Module):
             past_key_values = self.trans(prefix_tokens)
         else:
             past_key_values = self.embedding(prefix)
-        past_key_values = past_key_values.view(batch_size, self.config.pre_seq_len, self.config.layer_num * 2, 
-                                               self.config.head_num_kv, self.config.size_per_head)
+        past_key_values = past_key_values.view(
+            batch_size,
+            self.config.pre_seq_len,
+            self.config.layer_num * 2,
+            self.config.head_num_kv,
+            self.config.size_per_head,
+        )
         past_key_values = past_key_values.permute(0, 2, 3, 1, 4).contiguous()
         return past_key_values

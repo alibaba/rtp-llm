@@ -6,37 +6,42 @@ from pathlib import Path
 from typing import Collection, Dict, List, Set, Union
 
 import tiktoken
-
 from qwen_agent.log import logger
 
-VOCAB_FILES_NAMES = {'vocab_file': 'qwen.tiktoken'}
+VOCAB_FILES_NAMES = {"vocab_file": "qwen.tiktoken"}
 
 PAT_STR = r"""(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"""
-ENDOFTEXT = '<|endoftext|>'
-IMSTART = '<|im_start|>'
-IMEND = '<|im_end|>'
+ENDOFTEXT = "<|endoftext|>"
+IMSTART = "<|im_start|>"
+IMEND = "<|im_end|>"
 # as the default behavior is changed to allow special tokens in
 # regular texts, the surface forms of special tokens need to be
 # as different as possible to minimize the impact
-EXTRAS = tuple((f'<|extra_{i}|>' for i in range(205)))
+EXTRAS = tuple((f"<|extra_{i}|>" for i in range(205)))
 # changed to use actual index to avoid misconfiguration with vocabulary expansion
 SPECIAL_START_ID = 151643
-SPECIAL_TOKENS = tuple(enumerate(
-    ((
-        ENDOFTEXT,
-        IMSTART,
-        IMEND,
-    ) + EXTRAS),
-    start=SPECIAL_START_ID,
-))
+SPECIAL_TOKENS = tuple(
+    enumerate(
+        (
+            (
+                ENDOFTEXT,
+                IMSTART,
+                IMEND,
+            )
+            + EXTRAS
+        ),
+        start=SPECIAL_START_ID,
+    )
+)
 SPECIAL_TOKENS_SET = set(t for i, t in SPECIAL_TOKENS)
 
 
 def _load_tiktoken_bpe(tiktoken_bpe_file: str) -> Dict[bytes, int]:
-    with open(tiktoken_bpe_file, 'rb') as f:
+    with open(tiktoken_bpe_file, "rb") as f:
         contents = f.read()
     return {
-        base64.b64decode(token): int(rank) for token, rank in (line.split() for line in contents.splitlines() if line)
+        base64.b64decode(token): int(rank)
+        for token, rank in (line.split() for line in contents.splitlines() if line)
     }
 
 
@@ -48,12 +53,12 @@ class QWenTokenizer:
     def __init__(
         self,
         vocab_file=None,
-        errors='replace',
+        errors="replace",
         extra_vocab_file=None,
         **kwargs,
     ):
         if not vocab_file:
-            vocab_file = VOCAB_FILES_NAMES['vocab_file']
+            vocab_file = VOCAB_FILES_NAMES["vocab_file"]
         self._decode_use_source_tokenizer = False
 
         # how to handle errors in decoding UTF-8 byte sequences
@@ -65,29 +70,35 @@ class QWenTokenizer:
 
         # try load extra vocab from file
         if extra_vocab_file is not None:
-            used_ids = set(self.mergeable_ranks.values()) | set(self.special_tokens.values())
+            used_ids = set(self.mergeable_ranks.values()) | set(
+                self.special_tokens.values()
+            )
             extra_mergeable_ranks = _load_tiktoken_bpe(extra_vocab_file)
             for token, index in extra_mergeable_ranks.items():
                 if token in self.mergeable_ranks:
-                    logger.info(f'extra token {token} exists, skipping')
+                    logger.info(f"extra token {token} exists, skipping")
                     continue
                 if index in used_ids:
-                    logger.info(f'the index {index} for extra token {token} exists, skipping')
+                    logger.info(
+                        f"the index {index} for extra token {token} exists, skipping"
+                    )
                     continue
                 self.mergeable_ranks[token] = index
             # the index may be sparse after this, but don't worry tiktoken.Encoding will handle this
 
         enc = tiktoken.Encoding(
-            'Qwen',
+            "Qwen",
             pat_str=PAT_STR,
             mergeable_ranks=self.mergeable_ranks,
             special_tokens=self.special_tokens,
         )
-        assert len(self.mergeable_ranks) + len(
-            self.special_tokens
-        ) == enc.n_vocab, f'{len(self.mergeable_ranks) + len(self.special_tokens)} != {enc.n_vocab} in encoding'
+        assert (
+            len(self.mergeable_ranks) + len(self.special_tokens) == enc.n_vocab
+        ), f"{len(self.mergeable_ranks) + len(self.special_tokens)} != {enc.n_vocab} in encoding"
 
-        self.decoder = {v: k for k, v in self.mergeable_ranks.items()}  # type: dict[int, bytes|str]
+        self.decoder = {
+            v: k for k, v in self.mergeable_ranks.items()
+        }  # type: dict[int, bytes|str]
         self.decoder.update({v: k for k, v in self.special_tokens.items()})
 
         self.tokenizer = enc  # type: tiktoken.Encoding
@@ -99,14 +110,14 @@ class QWenTokenizer:
     def __getstate__(self):
         # for pickle lovers
         state = self.__dict__.copy()
-        del state['tokenizer']
+        del state["tokenizer"]
         return state
 
     def __setstate__(self, state):
         # tokenizer is not python native; don't pass it; rebuild it
         self.__dict__.update(state)
         enc = tiktoken.Encoding(
-            'Qwen',
+            "Qwen",
             pat_str=PAT_STR,
             mergeable_ranks=self.mergeable_ranks,
             special_tokens=self.special_tokens,
@@ -119,7 +130,9 @@ class QWenTokenizer:
     def get_vocab(self) -> Dict[bytes, int]:
         return self.mergeable_ranks
 
-    def convert_tokens_to_ids(self, tokens: Union[bytes, str, List[Union[bytes, str]]]) -> List[int]:
+    def convert_tokens_to_ids(
+        self, tokens: Union[bytes, str, List[Union[bytes, str]]]
+    ) -> List[int]:
         ids = []
         if isinstance(tokens, (str, bytes)):
             if tokens in self.special_tokens:
@@ -134,11 +147,11 @@ class QWenTokenizer:
         return ids
 
     def tokenize(
-            self,
-            text: str,
-            allowed_special: Union[Set, str] = 'all',
-            disallowed_special: Union[Collection, str] = (),
-            **kwargs,
+        self,
+        text: str,
+        allowed_special: Union[Set, str] = "all",
+        disallowed_special: Union[Collection, str] = (),
+        **kwargs,
     ) -> List[Union[bytes, str]]:
         """
         Converts a string in a sequence of tokens.
@@ -160,10 +173,12 @@ class QWenTokenizer:
             `List[bytes|str]`: The list of tokens.
         """
         tokens = []
-        text = unicodedata.normalize('NFC', text)
+        text = unicodedata.normalize("NFC", text)
 
         # this implementation takes a detour: text -> token id -> token surface forms
-        for t in self.tokenizer.encode(text, allowed_special=allowed_special, disallowed_special=disallowed_special):
+        for t in self.tokenizer.encode(
+            text, allowed_special=allowed_special, disallowed_special=disallowed_special
+        ):
             tokens.append(self.decoder[t])
         return tokens
 
@@ -171,20 +186,20 @@ class QWenTokenizer:
         """
         Converts a sequence of tokens in a single string.
         """
-        text = ''
-        temp = b''
+        text = ""
+        temp = b""
         for t in tokens:
             if isinstance(t, str):
                 if temp:
-                    text += temp.decode('utf-8', errors=self.errors)
-                    temp = b''
+                    text += temp.decode("utf-8", errors=self.errors)
+                    temp = b""
                 text += t
             elif isinstance(t, bytes):
                 temp += t
             else:
-                raise TypeError('token should only be of type types or str')
+                raise TypeError("token should only be of type types or str")
         if temp:
-            text += temp.decode('utf-8', errors=self.errors)
+            text += temp.decode("utf-8", errors=self.errors)
         return text
 
     @property
@@ -212,11 +227,13 @@ class QWenTokenizer:
 
     def truncate(self, text: str, max_token: int, start_token: int = 0) -> str:
         token_list = self.tokenize(text)
-        token_list = token_list[start_token:min(len(token_list), start_token + max_token)]
+        token_list = token_list[
+            start_token : min(len(token_list), start_token + max_token)
+        ]
         return self.convert_tokens_to_string(token_list)
 
 
-tokenizer = QWenTokenizer(Path(__file__).resolve().parent / 'qwen.tiktoken')
+tokenizer = QWenTokenizer(Path(__file__).resolve().parent / "qwen.tiktoken")
 
 
 def count_tokens(text: str) -> int:

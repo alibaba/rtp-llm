@@ -18,54 +18,55 @@ using namespace std;
 namespace rtp_llm {
 
 GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
-                               const rtp_llm::GptInitParameter&      params,
+                               const rtp_llm::GptInitParameter& params,
                                const ResourceContext&           resource_context,
                                kmonitor::MetricsReporterPtr     metrics_reporter,
-                               size_t extra_reserve_token_num)
-    : generate_input_(input)
-    , max_seq_len_(params.max_seq_len_)
-    , vocab_size_(params.vocab_size_)
-    , stream_cache_resource_(std::make_shared<StreamCacheResource>(this, resource_context, input->need_release_resource))
-    , need_release_resource_(input->need_release_resource)
-    , enable_fast_gen_(params.enable_fast_gen_)
-    , use_cache_store_(params.use_cache_store_)
-    , gen_timeline_(input->generate_config->gen_timeline)
-    , metrics_reporter_(metrics_reporter)
-    , special_tokens_(params.special_tokens_)
-    , output_mutex_(std::make_shared<std::mutex>())
-    , cv_(std::make_shared<std::condition_variable>())
-    , mm_position_ids_style_(PositionIdsStyle(params.mm_position_ids_style_))
-    , dtype_(rtp_llm::getDataType(params.data_type_))
-    , hidden_size_(params.hidden_size_)
-{
+                               size_t                           extra_reserve_token_num):
+    generate_input_(input),
+    max_seq_len_(params.max_seq_len_),
+    vocab_size_(params.vocab_size_),
+    stream_cache_resource_(std::make_shared<StreamCacheResource>(this, resource_context, input->need_release_resource)),
+    need_release_resource_(input->need_release_resource),
+    enable_fast_gen_(params.enable_fast_gen_),
+    use_cache_store_(params.use_cache_store_),
+    gen_timeline_(input->generate_config->gen_timeline),
+    metrics_reporter_(metrics_reporter),
+    special_tokens_(params.special_tokens_),
+    output_mutex_(std::make_shared<std::mutex>()),
+    cv_(std::make_shared<std::condition_variable>()),
+    mm_position_ids_style_(PositionIdsStyle(params.mm_position_ids_style_)),
+    dtype_(rtp_llm::getDataType(params.data_type_)),
+    hidden_size_(params.hidden_size_) {
     if (!updatePrefix(resource_context.system_prompt)) {
         return;
     }
 
-    begin_time_us_      = input->begin_time_us;
-    device_             = rtp_llm::DeviceFactory::getDefaultDevice();
+    begin_time_us_ = input->begin_time_us;
+    device_        = rtp_llm::DeviceFactory::getDefaultDevice();
     if (generate_input_->generate_config->calculate_loss && inputLength() > 1) {
         loss_ = device_->allocateBuffer(
-                {rtp_llm::DataType::TYPE_FP32, {(size_t)inputLength() - 1}, rtp_llm::AllocationType::HOST}, {});
+            {rtp_llm::DataType::TYPE_FP32, {(size_t)inputLength() - 1}, rtp_llm::AllocationType::HOST}, {});
     }
     if (generate_input_->generate_config->return_softmax_probs) {
         softmax_probs_ = device_->allocateBuffer(
-                {rtp_llm::DataType::TYPE_FP32, {(size_t)tileNum(), (size_t)max_seq_len_}, rtp_llm::AllocationType::HOST}, {});
+            {rtp_llm::DataType::TYPE_FP32, {(size_t)tileNum(), (size_t)max_seq_len_}, rtp_llm::AllocationType::HOST},
+            {});
         memset(softmax_probs_->data(), 0, softmax_probs_->sizeBytes());
     }
-    complete_token_ids_ = std::make_shared<CompleteTokenIds>(device_, tileNum(), max_seq_len_, params.seq_size_per_block_);
+    complete_token_ids_ =
+        std::make_shared<CompleteTokenIds>(device_, tileNum(), max_seq_len_, params.seq_size_per_block_);
     complete_token_ids_->init(input, extra_reserve_token_num);
 
     last_output_pos_ = seqLength();
-    max_chunk_len_ = seqLength();
+    max_chunk_len_   = seqLength();
 
     cum_log_probs_ =
         device_->allocateBuffer({rtp_llm::DataType::TYPE_FP32, {(size_t)tileNum()}, rtp_llm::AllocationType::HOST}, {});
     memset(cum_log_probs_->data(), 0, cum_log_probs_->sizeBytes());
 
-    is_context_stream_ = std::make_shared<bool>();
-    *is_context_stream_ = true;
-    generate_status_ = std::make_shared<GenerateStatus>();
+    is_context_stream_       = std::make_shared<bool>();
+    *is_context_stream_      = true;
+    generate_status_         = std::make_shared<GenerateStatus>();
     generate_status_->status = StreamState::WAITING;
     sub_generate_status_.clear();
     sub_generate_status_.resize(tileNum());
@@ -82,7 +83,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     setReturnAllProbs(generate_input_->generate_config->return_all_probs);
 
     think_logits_processor_ptr_ = ThinkModeLogitsProcessor::fromGenerateInput(device_, generate_input_, tileNum());
-    tree_logits_processor_ptr_ = TreeLogitsProcessor::fromGenerateInput(device_, generate_input_, tileNum());
+    tree_logits_processor_ptr_  = TreeLogitsProcessor::fromGenerateInput(device_, generate_input_, tileNum());
     initializeLogitsProcessorList();
 }
 
@@ -117,7 +118,7 @@ absl::StatusOr<int> GenerateStream::acquireCapacity(int token_capacity) {
             current_chunk_len_ = reuse_length_;
         }
         auto remaining_token = max_chunk_len_ - current_chunk_len_;
-        last_chunk_len_ = current_chunk_len_;
+        last_chunk_len_      = current_chunk_len_;
         if (token_capacity > remaining_token) {
             current_chunk_len_ = max_chunk_len_;
             return remaining_token;
@@ -253,8 +254,9 @@ bool GenerateStream::updatePrefix(const std::shared_ptr<SystemPrompt>& system_pr
         if (!prefix_param.prompt_tokens.empty()) {
             auto total_input_len = inputLength() + prefix_param.prompt_tokens.size();
             if (total_input_len >= max_seq_len_) {
-                setStop(ErrorCode::LONG_PROMPT_ERROR, "after update prefix, total input len " + std::to_string(total_input_len)
-                    + " is greater than max seq len " + std::to_string(max_seq_len_));
+                setStop(ErrorCode::LONG_PROMPT_ERROR,
+                        "after update prefix, total input len " + std::to_string(total_input_len)
+                            + " is greater than max seq len " + std::to_string(max_seq_len_));
                 return false;
             }
             generate_input_->updatePrefix(prefix_param.prompt_tokens);
@@ -276,9 +278,9 @@ int GenerateStream::currentChunkLen() const {
 }
 
 void GenerateStream::resetChunkLen(int chunk_len, int max_chunk_len) {
-    last_chunk_len_ = 0;
+    last_chunk_len_    = 0;
     current_chunk_len_ = chunk_len;
-    max_chunk_len_ = max_chunk_len;
+    max_chunk_len_     = max_chunk_len;
 }
 
 int GenerateStream::seqLength() const {
@@ -295,7 +297,7 @@ int GenerateStream::seqSizePerBlock() const {
 
 int GenerateStream::contextLength() const {
     int begin_pos = prefixLength();
-    int end_pos = isChunkStream() ? currentChunkLen() : seqLength();
+    int end_pos   = isChunkStream() ? currentChunkLen() : seqLength();
     return end_pos - begin_pos;
 }
 
@@ -405,9 +407,9 @@ vector<vector<int>> GenerateStream::multimodalIntervals() const {
         return {};
     }
     vector<vector<int>> res;
-    auto locs = generate_input_->mm_locs.value();
-    auto features = generate_input_->multimodal_features.value();
-    for (int i = 0;i < locs->size();++i) {
+    auto                locs     = generate_input_->mm_locs.value();
+    auto                features = generate_input_->multimodal_features.value();
+    for (int i = 0; i < locs->size(); ++i) {
         res.emplace_back(vector<int>({*locs->dataWithOffset<int>(i), int(features[i].sizes()[0])}));
     }
     return res;
@@ -430,8 +432,8 @@ rtp_llm::BufferPtr GenerateStream::generateContextPositionIds(rtp_llm::DeviceBas
     if (generate_input_->mm_position_ids.has_value()) {
         position_ids_buffer = rtp_llm::torchTensorVec2BufferVec(generate_input_->mm_position_ids.value());
     }
-    context_position_ids_ = PositionIdsGenerator::generatePositionIds(device, generate_input_->inputLength(),
-        mm_position_ids_style_, generate_input_->mm_locs, position_ids_buffer);
+    context_position_ids_ = PositionIdsGenerator::generatePositionIds(
+        device, generate_input_->inputLength(), mm_position_ids_style_, generate_input_->mm_locs, position_ids_buffer);
     return context_position_ids_.value();
 }
 
@@ -439,7 +441,8 @@ void GenerateStream::generateNextPositionId(int32_t* now_pos) {
     if (!context_position_ids_) {
         return;
     }
-    PositionIdsGenerator::generateNextPositionId(now_pos, seqLength(), mm_position_ids_style_, context_position_ids_.value());
+    PositionIdsGenerator::generateNextPositionId(
+        now_pos, seqLength(), mm_position_ids_style_, context_position_ids_.value());
 }
 
 vector<int> GenerateStream::currentExecuteTokens(int batch_idx) const {
@@ -473,16 +476,21 @@ void GenerateStream::checkTimeout() {
     if (timeout_ms > 0 && timeout_ms < running_time_ms) {
         stopAndRelease(ErrorCode::GENERATE_TIMEOUT,
                        "query has been running " + std::to_string(running_time_ms) + " ms, "
-                       + "timeout_ms = " + std::to_string(timeout_ms) + ", it's timeout");
+                           + "timeout_ms = " + std::to_string(timeout_ms) + ", it's timeout");
     }
 }
 
 void GenerateStream::setStopWithoutLock(ErrorCode error_code, const std::string& error_msg) {
     auto cost_time_ms = (autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_) / 1000;
     RTP_LLM_LOG_WARNING("stop stream [%d], error msg: [%s], current state [%s], "
-                    "input len [%d], seq len [%d], timeout [%ld] ms, running [%ld] ms",
-                    streamId(), error_msg.c_str(), StreamStateToString(generate_status_->status).c_str(),
-                    inputLength(), seqLength(), getTimeoutMs(), cost_time_ms);
+                        "input len [%d], seq len [%d], timeout [%ld] ms, running [%ld] ms",
+                        streamId(),
+                        error_msg.c_str(),
+                        StreamStateToString(generate_status_->status).c_str(),
+                        inputLength(),
+                        seqLength(),
+                        getTimeoutMs(),
+                        cost_time_ms);
     generate_status_->status     = StreamState::STOPPED;
     generate_status_->error_info = ErrorInfo(error_code, error_msg);
 }
@@ -510,7 +518,7 @@ void GenerateStream::setPaused() {
     }
     *is_context_stream_      = true;
     generate_status_->status = StreamState::PAUSED;
-    last_pause_us_          = autil::TimeUtility::currentTimeInMicroSeconds();
+    last_pause_us_           = autil::TimeUtility::currentTimeInMicroSeconds();
 }
 
 bool GenerateStream::setRunning() {
@@ -563,14 +571,16 @@ bool GenerateStream::running() {
 
 void GenerateStream::cancelIfNotRunning() {
     std::lock_guard<std::mutex> lock(*output_mutex_);
-    if (generate_status_->status == StreamState::WAITING
-            || generate_status_->status == StreamState::REMOTE_RUNNING) {
+    if (generate_status_->status == StreamState::WAITING || generate_status_->status == StreamState::REMOTE_RUNNING) {
         auto cost_time_ms = (autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_) / 1000;
         RTP_LLM_LOG_WARNING("stop stream: %d %s, input len [%d], seq len [%d], timeout: [%ld] ms, running [%ld] ms",
-            streamId(), "cancel stream in waiting or remote running",
-            inputLength(), seqLength(),
-            getTimeoutMs(), cost_time_ms);
-        generate_status_->status = StreamState::STOPPED;
+                            streamId(),
+                            "cancel stream in waiting or remote running",
+                            inputLength(),
+                            seqLength(),
+                            getTimeoutMs(),
+                            cost_time_ms);
+        generate_status_->status     = StreamState::STOPPED;
         generate_status_->error_info = ErrorInfo(ErrorCode::CANCELLED, "cancel stream in waiting or remote running");
     }
 }
@@ -618,8 +628,7 @@ size_t GenerateStream::maxBlockSize() const {
 }
 
 size_t GenerateStream::maxTokenNum() const {
-    return std::min(max_seq_len_,
-        generate_input_->generate_config->max_new_tokens + generate_input_->inputLength());
+    return std::min(max_seq_len_, generate_input_->generate_config->max_new_tokens + generate_input_->inputLength());
 }
 
 bool GenerateStream::needFinish() {
@@ -689,15 +698,23 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
         return;
     }
 
-    const auto& new_tokens = update_info.new_tokens;
-    auto num_new_tokens = update_info.num_new_tokens;
+    const auto& new_tokens     = update_info.new_tokens;
+    auto        num_new_tokens = update_info.num_new_tokens;
     updateLogitProcessorStatus(update_info);
 
     int error_token_id = 0;
-    if (!complete_token_ids_->update(new_tokens, begin_time_us_, num_new_tokens, generate_input_->inputLength(), maxTokenNum(), vocab_size_, numBeams(), streamId(), error_token_id)) {
+    if (!complete_token_ids_->update(new_tokens,
+                                     begin_time_us_,
+                                     num_new_tokens,
+                                     generate_input_->inputLength(),
+                                     maxTokenNum(),
+                                     vocab_size_,
+                                     numBeams(),
+                                     streamId(),
+                                     error_token_id)) {
         setStopWithoutLock(ErrorCode::OUT_OF_VOCAB_RANGE,
-                        "output token id:" + std::to_string(error_token_id) +
-                        " out of vocab size: " + std::to_string(vocab_size_));
+                           "output token id:" + std::to_string(error_token_id)
+                               + " out of vocab size: " + std::to_string(vocab_size_));
         return;
     }
 
@@ -717,16 +734,16 @@ void GenerateStream::beamSearchLogitProcessorUpdate(const rtp_llm::BufferPtr& be
     auto beam_idx_vec = rtp_llm::buffer2vector<int>(*beam_idx);
     RTP_LLM_CHECK(beam_idx_vec.size() == tileNum());
 
-    for (auto logit_processor_ptr: getAllLogitsProcessorPtr()) {
+    for (auto logit_processor_ptr : getAllLogitsProcessorPtr()) {
         logit_processor_ptr->beamSearchLogitProcessorUpdate(beam_idx_vec);
     }
 }
 
 void GenerateStream::updateLogitProcessorStatus(const StreamUpdateInfo& update_info) {
-    const auto& new_tokens = update_info.new_tokens;
-    auto num_new_tokens = update_info.num_new_tokens;
+    const auto& new_tokens     = update_info.new_tokens;
+    auto        num_new_tokens = update_info.num_new_tokens;
 
-    for (auto logit_processor_ptr: getAllLogitsProcessorPtr()) {
+    for (auto logit_processor_ptr : getAllLogitsProcessorPtr()) {
         logit_processor_ptr->updateLogitProcessorStatus(new_tokens, num_new_tokens);
     }
 }
@@ -762,13 +779,13 @@ void GenerateStream::setMetricsReporter(kmonitor::MetricsReporterPtr metrics_rep
 }
 void GenerateStream::reportMetric() {
     if (metrics_reporter_) {
-        bool cancelled = statusInfo().code() == ErrorCode::CANCELLED;
-        bool timeout = statusInfo().code() == ErrorCode::GENERATE_TIMEOUT;
+        bool                         cancelled = statusInfo().code() == ErrorCode::CANCELLED;
+        bool                         timeout   = statusInfo().code() == ErrorCode::GENERATE_TIMEOUT;
         RtpLLMStreamMetricsCollector collector;
-        collector.qps        = true;
-        collector.cancel_qps = cancelled;
-        collector.error_qps  = stopped() && !cancelled;
-        collector.is_streaming_qps = generate_input_->generate_config->is_streaming;
+        collector.qps               = true;
+        collector.cancel_qps        = cancelled;
+        collector.error_qps         = stopped() && !cancelled;
+        collector.is_streaming_qps  = generate_input_->generate_config->is_streaming;
         collector.not_streaming_qps = !generate_input_->generate_config->is_streaming;
         if (finished() || cancelled || timeout) {
             collector.reuse_length           = initial_reuse_length_;
@@ -778,11 +795,12 @@ void GenerateStream::reportMetric() {
             collector.query_batch_size       = tileNum();
             collector.total_latency_us       = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
             collector.first_token_latency_us = complete_token_ids_->firstTokenLatencyUs();
-            RTP_LLM_LOG_DEBUG("stream [%ld] report first latency us = %ld", streamId(), collector.first_token_latency_us);
-            collector.wait_latency_us        = wait_time_us_;
-            collector.pause_latency_us       = pause_time_us_;
-            collector.fallback_tokens        = fallback_blocks_ * seqSizePerBlock();
-            collector.fallback_times         = fallback_times_;
+            RTP_LLM_LOG_DEBUG(
+                "stream [%ld] report first latency us = %ld", streamId(), collector.first_token_latency_us);
+            collector.wait_latency_us          = wait_time_us_;
+            collector.pause_latency_us         = pause_time_us_;
+            collector.fallback_tokens          = fallback_blocks_ * seqSizePerBlock();
+            collector.fallback_times           = fallback_times_;
             collector.batch_with_prefill_times = batch_with_prefill_times_;
             collector.batch_with_prefill_len   = batch_with_prefill_len_;
             collector.malloc_failed_times      = stream_cache_resource_->mallocFailedTimes();
@@ -800,17 +818,16 @@ void GenerateStream::reportMetric() {
 std::string GenerateStream::debugString() const {
     std::stringstream debug_string;
     debug_string << "GenerateStream {"
-                << "generate_input:" << generate_input_->debugString() << ", max_seq_len:" << max_seq_len_
-                << ", input_length:" << inputLength() << ", seq_length:" << seqLength()
-                << ", reuse_length:" << reuse_length_ << ", current_chunk_len:" << current_chunk_len_
-                << ", last_chunk_len_:" << last_chunk_len_ << ", max_chunk_len_:" << max_chunk_len_
-                << ", batch_size:" << batchSize() << ", tile_num:" << tileNum()
-                << ", need_release_resource: " << need_release_resource_
-                << ", fallback_prefix_length: " << fallback_prefix_length_
-                << ", sp_edit_search_index: " << sp_edit_search_index_ << ", mtp token indices" << mtp_token_index_
-                << ", need_remote_generate: " << need_remote_generate_
-                << ", contain_propose_token: " << contain_propose_token_
-                << ", propose_token: ";
+                 << "generate_input:" << generate_input_->debugString() << ", max_seq_len:" << max_seq_len_
+                 << ", input_length:" << inputLength() << ", seq_length:" << seqLength()
+                 << ", reuse_length:" << reuse_length_ << ", current_chunk_len:" << current_chunk_len_
+                 << ", last_chunk_len_:" << last_chunk_len_ << ", max_chunk_len_:" << max_chunk_len_
+                 << ", batch_size:" << batchSize() << ", tile_num:" << tileNum()
+                 << ", need_release_resource: " << need_release_resource_
+                 << ", fallback_prefix_length: " << fallback_prefix_length_
+                 << ", sp_edit_search_index: " << sp_edit_search_index_ << ", mtp token indices" << mtp_token_index_
+                 << ", need_remote_generate: " << need_remote_generate_
+                 << ", contain_propose_token: " << contain_propose_token_ << ", propose_token: ";
 
     for (int i = 0; i < propose_token_.size(); i++) {
         debug_string << propose_token_[i] << " ";
@@ -831,7 +848,7 @@ std::string GenerateStream::debugString() const {
 }
 
 int GenerateStream::reuseBlockSize() const {
-    int reuse_length = reuseLength();
+    int reuse_length       = reuseLength();
     int seq_size_per_block = seqSizePerBlock();
     return reuse_length / seq_size_per_block;
 }
@@ -854,7 +871,7 @@ StreamCacheResource& GenerateStream::streamCacheResource() {
 
 void GenerateStream::CopyOnWrite(const GenerateStream& other_stream, bool copy_loss, bool share) {
     complete_token_ids_ = make_shared<CompleteTokenIds>(*other_stream.complete_token_ids_, share);
-    cum_log_probs_ = device_->clone({*other_stream.cum_log_probs_, rtp_llm::AllocationType::HOST});
+    cum_log_probs_      = device_->clone({*other_stream.cum_log_probs_, rtp_llm::AllocationType::HOST});
     if (other_stream.calculateLoss() && copy_loss) {
         loss_ = device_->clone({*other_stream.loss_, rtp_llm::AllocationType::HOST});
     } else {
@@ -863,7 +880,8 @@ void GenerateStream::CopyOnWrite(const GenerateStream& other_stream, bool copy_l
 }
 
 GenerateStream::TimeInfo GenerateStream::getTimeInfo() {
-    return {begin_time_us_, wait_time_us_,
+    return {begin_time_us_,
+            wait_time_us_,
             complete_token_ids_->firstTokenTimeUs(),
             complete_token_ids_->firstTokenLatencyUs()};
 }

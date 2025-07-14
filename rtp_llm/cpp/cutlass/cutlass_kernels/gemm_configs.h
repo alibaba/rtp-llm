@@ -105,7 +105,7 @@ enum class CutlassTileConfigSM90
     // CTA configs for M=128
     CtaShape256x128x128B,
 };
- 
+
 enum class MainloopScheduleType
 {
     AUTO // Automatically selects between pingpong and cooperative schedules on Hopper. On older architectures, this
@@ -140,7 +140,7 @@ struct CutlassGemmConfig
         GROUPED_GEMM = 1u << 4,
         FP8_ONLY = 1u << 5,
     };
-    
+
     CutlassTileConfig tile_config = CutlassTileConfig::ChooseWithHeuristic;
     SplitKStyle split_k_style = SplitKStyle::NO_SPLIT_K;
     int split_k_factor = -1;

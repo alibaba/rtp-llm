@@ -8,14 +8,14 @@
 import base64
 import logging
 import os
-import requests
 import unicodedata
-from typing import Collection, Dict, List, Set, Tuple, Union, Any, Callable, Optional
+from typing import Any, Callable, Collection, Dict, List, Optional, Set, Tuple, Union
 
-import tiktoken
 import numpy as np
+import requests
+import tiktoken
 from PIL import Image
-from transformers import PreTrainedTokenizer, AddedToken
+from transformers import AddedToken, PreTrainedTokenizer
 from transformers.utils import try_to_load_from_cache
 
 logger = logging.getLogger(__name__)
@@ -25,7 +25,9 @@ VOCAB_FILES_NAMES = {"vocab_file": "qwen.tiktoken", "ttf": "SimSun.ttf"}
 FONT_PATH = try_to_load_from_cache("Qwen/Qwen-VL-Chat", "SimSun.ttf")
 if FONT_PATH is None:
     if not os.path.exists("SimSun.ttf"):
-        ttf = requests.get("https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/SimSun.ttf")
+        ttf = requests.get(
+            "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/SimSun.ttf"
+        )
         open("SimSun.ttf", "wb").write(ttf.content)
     FONT_PATH = "SimSun.ttf"
 
@@ -53,6 +55,7 @@ def _load_tiktoken_bpe(tiktoken_bpe_file: str) -> Dict[bytes, int]:
         for token, rank in (line.split() for line in contents.splitlines() if line)
     }
 
+
 def _list_find(
     input_list: List[Any],
     candidates: Tuple[Any],
@@ -62,6 +65,7 @@ def _list_find(
         if input_list[i] in candidates:
             return i
     return -1
+
 
 def _replace_closed_tag(
     input_tokens: List[Any],
@@ -82,15 +86,16 @@ def _replace_closed_tag(
         start = _list_find(input_tokens, start_tags, end)
         if start == -1:
             break
-        output_tokens.extend(exclusive_replace_func(input_tokens[end : start]))
+        output_tokens.extend(exclusive_replace_func(input_tokens[end:start]))
         tag_idx = start_tags.index(input_tokens[start])
         end = _list_find(input_tokens, (end_tags[tag_idx],), start)
         if end == -1:
             raise ValueError("Unclosed image token")
         output_tokens.extend(inclusive_replace_func(input_tokens[start : end + 1]))
         end += 1
-    output_tokens.extend(exclusive_replace_func(input_tokens[end : ]))
+    output_tokens.extend(exclusive_replace_func(input_tokens[end:]))
     return output_tokens
+
 
 class QWenTokenizer(PreTrainedTokenizer):
     """QWen tokenizer."""
@@ -101,15 +106,15 @@ class QWenTokenizer(PreTrainedTokenizer):
         self,
         vocab_file,
         errors="replace",
-        image_start_tag='<img>',
-        image_end_tag='</img>',
-        image_pad_tag='<imgpad>',
-        ref_start_tag='<ref>',
-        ref_end_tag='</ref>',
-        box_start_tag='<box>',
-        box_end_tag='</box>',
-        quad_start_tag='<quad>',
-        quad_end_tag='</quad>',
+        image_start_tag="<img>",
+        image_end_tag="</img>",
+        image_pad_tag="<imgpad>",
+        ref_start_tag="<ref>",
+        ref_end_tag="</ref>",
+        box_start_tag="<box>",
+        box_end_tag="</box>",
+        quad_start_tag="<quad>",
+        quad_end_tag="</quad>",
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -123,11 +128,15 @@ class QWenTokenizer(PreTrainedTokenizer):
         self.quad_start_tag = quad_start_tag
         self.quad_end_tag = quad_end_tag
         self.IMAGE_ST = (
-            ref_start_tag, ref_end_tag,
-            box_start_tag, box_end_tag,
-            quad_start_tag, quad_end_tag,
-            image_start_tag, image_end_tag,
-            image_pad_tag
+            ref_start_tag,
+            ref_end_tag,
+            box_start_tag,
+            box_end_tag,
+            quad_start_tag,
+            quad_end_tag,
+            image_start_tag,
+            image_end_tag,
+            image_pad_tag,
         )
 
         self.errors = errors  # how to handle errors in decoding
@@ -148,10 +157,16 @@ class QWenTokenizer(PreTrainedTokenizer):
         self.box_end_id = self.special_tokens[self.box_end_tag]
         self.quad_start_id = self.special_tokens[self.quad_start_tag]
         self.quad_end_id = self.special_tokens[self.quad_end_tag]
-        self.image_special_tokens = set([
-            self.ref_start_id, self.ref_end_id, self.box_start_id, self.box_end_id,
-            self.quad_start_id, self.quad_end_id,
-        ])
+        self.image_special_tokens = set(
+            [
+                self.ref_start_id,
+                self.ref_end_id,
+                self.box_start_id,
+                self.box_end_id,
+                self.quad_start_id,
+                self.quad_end_id,
+            ]
+        )
 
         enc = tiktoken.Encoding(
             "Qwen",
@@ -177,7 +192,7 @@ class QWenTokenizer(PreTrainedTokenizer):
     def __getstate__(self):
         # for pickle lovers
         state = self.__dict__.copy()
-        del state['tokenizer']
+        del state["tokenizer"]
         return state
 
     def __setstate__(self, state):
@@ -190,7 +205,6 @@ class QWenTokenizer(PreTrainedTokenizer):
             special_tokens=self.special_tokens,
         )
         self.tokenizer = enc
-
 
     def __len__(self) -> int:
         return self.tokenizer.n_vocab
@@ -214,13 +228,17 @@ class QWenTokenizer(PreTrainedTokenizer):
                 ids.append(self.mergeable_ranks.get(token))
         return ids
 
-    def _add_tokens(self, new_tokens: Union[List[str], List[AddedToken]], special_tokens: bool = False) -> int:
+    def _add_tokens(
+        self,
+        new_tokens: Union[List[str], List[AddedToken]],
+        special_tokens: bool = False,
+    ) -> int:
         if not special_tokens and new_tokens:
-            raise ValueError('Adding regular tokens is not supported')
+            raise ValueError("Adding regular tokens is not supported")
         for token in new_tokens:
             surface_form = token.content if isinstance(token, AddedToken) else token
             if surface_form not in SPECIAL_TOKENS + self.IMAGE_ST:
-                raise ValueError('Adding unknown special tokens is not supported')
+                raise ValueError("Adding unknown special tokens is not supported")
         return 0
 
     def save_vocabulary(self, save_directory: str, **kwargs) -> Tuple[str]:
@@ -273,18 +291,30 @@ class QWenTokenizer(PreTrainedTokenizer):
             tokens.append(self.decoder[t])
 
         def _encode_imgurl(img_tokens):
-            assert img_tokens[0] == self.image_start_tag and img_tokens[-1] == self.image_end_tag
+            assert (
+                img_tokens[0] == self.image_start_tag
+                and img_tokens[-1] == self.image_end_tag
+            )
             img_tokens = img_tokens[1:-1]
-            img_url = b''.join(img_tokens)
+            img_url = b"".join(img_tokens)
             out_img_tokens = list(map(self.decoder.get, img_url))
             if len(out_img_tokens) > IMG_TOKEN_SPAN:
-                raise ValueError("The content in {}..{} is too long".format(
-                    self.image_start_tag, self.image_end_tag))
-            out_img_tokens.extend([self.image_pad_tag] * (IMG_TOKEN_SPAN - len(out_img_tokens)))
-            out_img_tokens = [self.image_start_tag] + out_img_tokens + [self.image_end_tag]
+                raise ValueError(
+                    "The content in {}..{} is too long".format(
+                        self.image_start_tag, self.image_end_tag
+                    )
+                )
+            out_img_tokens.extend(
+                [self.image_pad_tag] * (IMG_TOKEN_SPAN - len(out_img_tokens))
+            )
+            out_img_tokens = (
+                [self.image_start_tag] + out_img_tokens + [self.image_end_tag]
+            )
             return out_img_tokens
 
-        return _replace_closed_tag(tokens, self.image_start_tag, self.image_end_tag, _encode_imgurl)
+        return _replace_closed_tag(
+            tokens, self.image_start_tag, self.image_end_tag, _encode_imgurl
+        )
 
     def convert_tokens_to_string(self, tokens: List[Union[bytes, str]]) -> str:
         """
@@ -344,18 +374,28 @@ class QWenTokenizer(PreTrainedTokenizer):
             token_ids = [token_ids]
 
         def _decode_imgurl(img_token_ids):
-            assert img_token_ids[0] == self.img_start_id and img_token_ids[-1] == self.img_end_id
+            assert (
+                img_token_ids[0] == self.img_start_id
+                and img_token_ids[-1] == self.img_end_id
+            )
             img_token_ids = img_token_ids[1:-1]
-            img_token_ids = img_token_ids[ : img_token_ids.index(self.img_pad_id)]
-            img_url = bytes(img_token_ids).decode('utf-8')
-            return [self.img_start_id] + self.tokenizer.encode(img_url) + [self.img_end_id]
+            img_token_ids = img_token_ids[: img_token_ids.index(self.img_pad_id)]
+            img_url = bytes(img_token_ids).decode("utf-8")
+            return (
+                [self.img_start_id] + self.tokenizer.encode(img_url) + [self.img_end_id]
+            )
 
-        token_ids = _replace_closed_tag(token_ids, self.img_start_id, self.img_end_id, _decode_imgurl)
+        token_ids = _replace_closed_tag(
+            token_ids, self.img_start_id, self.img_end_id, _decode_imgurl
+        )
 
         if skip_special_tokens:
-            if kwargs.get('keep_image_special', False):
-                token_ids = [i for i in token_ids if i < self.eod_id 
-                    or i in self.image_special_tokens]
+            if kwargs.get("keep_image_special", False):
+                token_ids = [
+                    i
+                    for i in token_ids
+                    if i < self.eod_id or i in self.image_special_tokens
+                ]
             else:
                 token_ids = [i for i in token_ids if i < self.eod_id]
         return self.tokenizer.decode(token_ids, errors=errors or self.errors)
@@ -363,50 +403,68 @@ class QWenTokenizer(PreTrainedTokenizer):
     def to_list_format(self, text: str):
         text = unicodedata.normalize("NFC", text)
         token_ids = self.tokenizer.encode(
-            text, allowed_special=set(self.IMAGE_ST + (ENDOFTEXT,)))
+            text, allowed_special=set(self.IMAGE_ST + (ENDOFTEXT,))
+        )
 
         def _encode_vl_info(tokens):
             if len(tokens) == 0:
                 return []
             if tokens[0] == self.img_start_id and tokens[-1] == self.img_end_id:
-                key = 'image'
+                key = "image"
             elif tokens[0] == self.ref_start_id and tokens[-1] == self.ref_end_id:
-                key = 'ref'
+                key = "ref"
             elif tokens[0] == self.box_start_id and tokens[-1] == self.box_end_id:
-                key = 'box'
+                key = "box"
             elif tokens[0] == self.quad_start_id and tokens[-1] == self.quad_end_id:
-                key = 'quad'
+                key = "quad"
             else:
-                _tobytes = lambda x: x.encode('utf-8') if isinstance(x, str) else x
-                return [{'text': b''.join(map(_tobytes, map(self.decoder.get, tokens))).decode('utf-8')}]
-            _tobytes = lambda x: x.encode('utf-8') if isinstance(x, str) else x
-            val = b''.join(map(_tobytes, map(self.decoder.get, tokens[1:-1]))).decode('utf-8')
+                _tobytes = lambda x: x.encode("utf-8") if isinstance(x, str) else x
+                return [
+                    {
+                        "text": b"".join(
+                            map(_tobytes, map(self.decoder.get, tokens))
+                        ).decode("utf-8")
+                    }
+                ]
+            _tobytes = lambda x: x.encode("utf-8") if isinstance(x, str) else x
+            val = b"".join(map(_tobytes, map(self.decoder.get, tokens[1:-1]))).decode(
+                "utf-8"
+            )
             return [{key: val}]
 
         return _replace_closed_tag(
             token_ids,
-            (self.img_start_id, self.ref_start_id, self.box_start_id, self.quad_start_id),
+            (
+                self.img_start_id,
+                self.ref_start_id,
+                self.box_start_id,
+                self.quad_start_id,
+            ),
             (self.img_end_id, self.ref_end_id, self.box_end_id, self.quad_end_id),
             _encode_vl_info,
             _encode_vl_info,
         )
 
     def from_list_format(self, list_format: List[Dict]):
-        text = ''
+        text = ""
         num_images = 0
         for ele in list_format:
-            if 'image' in ele:
+            if "image" in ele:
                 num_images += 1
-                text += f'Picture {num_images}: '
-                text += self.image_start_tag + ele['image'] + self.image_end_tag
-                text += '\n'
-            elif 'text' in ele:
-                text += ele['text']
-            elif 'box' in ele:
-                if 'ref' in ele:
-                    text += self.ref_start_tag + ele['ref'] + self.ref_end_tag
-                for box in ele['box']:
-                    text += self.box_start_tag + '(%d,%d),(%d,%d)' % (box[0], box[1], box[2], box[3]) + self.box_end_tag
+                text += f"Picture {num_images}: "
+                text += self.image_start_tag + ele["image"] + self.image_end_tag
+                text += "\n"
+            elif "text" in ele:
+                text += ele["text"]
+            elif "box" in ele:
+                if "ref" in ele:
+                    text += self.ref_start_tag + ele["ref"] + self.ref_end_tag
+                for box in ele["box"]:
+                    text += (
+                        self.box_start_tag
+                        + "(%d,%d),(%d,%d)" % (box[0], box[1], box[2], box[3])
+                        + self.box_end_tag
+                    )
             else:
                 raise ValueError("Unsupport element: " + str(ele))
         return text
@@ -417,20 +475,22 @@ class QWenTokenizer(PreTrainedTokenizer):
         _history = history + [(response, None)]
         for q, r in _history[::-1]:
             for ele in self.to_list_format(q)[::-1]:
-                if 'image' in ele:
-                    return ele['image']
+                if "image" in ele:
+                    return ele["image"]
         return None
 
     def _fetch_all_box_with_ref(self, text):
         list_format = self.to_list_format(text)
         output = []
         for i, ele in enumerate(list_format):
-            if 'box' in ele:
-                bbox = tuple(map(int, ele['box'].replace('(', '').replace(')', '').split(',')))
+            if "box" in ele:
+                bbox = tuple(
+                    map(int, ele["box"].replace("(", "").replace(")", "").split(","))
+                )
                 assert len(bbox) == 4
-                output.append({'box': bbox})
-                if i > 0 and 'ref' in list_format[i-1]:
-                    output[-1]['ref'] = list_format[i-1]['ref'].strip()
+                output.append({"box": bbox})
+                if i > 0 and "ref" in list_format[i - 1]:
+                    output[-1]["ref"] = list_format[i - 1]["ref"].strip()
         return output
 
     def draw_bbox_on_latest_picture(
@@ -452,24 +512,32 @@ class QWenTokenizer(PreTrainedTokenizer):
         boxes = self._fetch_all_box_with_ref(response)
         if not boxes:
             return None
-        color = random.choice([_ for _ in mcolors.TABLEAU_COLORS.keys()]) # init color
+        color = random.choice([_ for _ in mcolors.TABLEAU_COLORS.keys()])  # init color
         for box in boxes:
-            if 'ref' in box: # random new color for new refexps
+            if "ref" in box:  # random new color for new refexps
                 color = random.choice([_ for _ in mcolors.TABLEAU_COLORS.keys()])
-            x1, y1, x2, y2 = box['box']
-            x1, y1, x2, y2 = (int(x1 / 1000 * w), int(y1 / 1000 * h), int(x2 / 1000 * w), int(y2 / 1000 * h))
+            x1, y1, x2, y2 = box["box"]
+            x1, y1, x2, y2 = (
+                int(x1 / 1000 * w),
+                int(y1 / 1000 * h),
+                int(x2 / 1000 * w),
+                int(y2 / 1000 * h),
+            )
             visualizer.draw_box((x1, y1, x2, y2), alpha=1, edge_color=color)
-            if 'ref' in box:
-                visualizer.draw_text(box['ref'], (x1, y1), color=color, horizontal_alignment="left")
+            if "ref" in box:
+                visualizer.draw_text(
+                    box["ref"], (x1, y1), color=color, horizontal_alignment="left"
+                )
         return visualizer.output
 
 
 import colorsys
 import logging
 import math
+import random
+
 import numpy as np
 import torch
-import random
 
 logger = logging.getLogger(__name__)
 
@@ -500,7 +568,9 @@ class VisImage:
 
     def reset_image(self, img):
         img = img.astype("uint8")
-        self.ax.imshow(img, extent=(0, self.width, self.height, 0), interpolation="nearest")
+        self.ax.imshow(
+            img, extent=(0, self.width, self.height, 0), interpolation="nearest"
+        )
 
     def save(self, filepath):
         self.fig.savefig(filepath)
@@ -562,7 +632,7 @@ class Visualizer:
         return self.output
 
     def draw_box(self, box_coord, alpha=0.5, edge_color="g", line_style="-"):
-        
+
         x0, y0, x1, y1 = box_coord
         width = x1 - x0
         height = y1 - y0
@@ -584,5 +654,5 @@ class Visualizer:
         return self.output
 
     def get_output(self):
-        
+
         return self.output

@@ -21,7 +21,7 @@ std::string ShapeStringView(const Shape& shape) {
     std::string s;
     s = s + '(';
     for (size_t i = 0; i < shape.size(); i++) {
-        s =  s + std::to_string(shape[i]) + ',';
+        s = s + std::to_string(shape[i]) + ',';
     }
     s = s + ')';
     return s;

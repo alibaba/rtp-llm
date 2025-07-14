@@ -16,7 +16,7 @@ CustomAllReduceComm::CustomAllReduceComm(const std::vector<size_t>& tp_ranks, si
     rank_(rank),
     rank_index_(rank_index),
     world_size_(tp_ranks.size()),
-    support_nv_link_(true), // TODO(liyangcheng.lyc): add check function
+    support_nv_link_(true),  // TODO(liyangcheng.lyc): add check function
     comm_buf_threshold_(getCommBufThreshold()),
     tp_ranks_(std::move(tp_ranks)) {}
 
@@ -47,14 +47,16 @@ void CustomAllReduceComm::init(const NcclParam& nccl_para, hipStream_t stream) {
     // prepare share buffer
 
     // meta data buffers need to be "uncached" for signal on MI200
-    meta_ = aiter::allocate_meta_buffer(aiter::meta_size() + comm_buf_threshold_);
-    buffer_ = torch::empty({comm_buf_threshold_,}, torch::dtype(torch::kUInt8).device(torch::kCUDA));
+    meta_   = aiter::allocate_meta_buffer(aiter::meta_size() + comm_buf_threshold_);
+    buffer_ = torch::empty(
+        {
+            comm_buf_threshold_,
+        },
+        torch::dtype(torch::kUInt8).device(torch::kCUDA));
     rank_data_ = torch::empty({8 * 1024 * 1024}, torch::dtype(torch::kUInt8).device(torch::kCUDA));
 
-    std::vector<std::string> meta_handles =
-        prepareP2PBuffer_(nccl_para, meta_, stream);
-    std::vector<std::string> buffer_handles =
-        prepareP2PBuffer_(nccl_para, buffer_, stream);
+    std::vector<std::string> meta_handles   = prepareP2PBuffer_(nccl_para, meta_, stream);
+    std::vector<std::string> buffer_handles = prepareP2PBuffer_(nccl_para, buffer_, stream);
 
     std::vector<int64_t> meta_offsets(world_size_, 0);
     std::vector<int64_t> buffer_offsets(world_size_, 0);
@@ -64,16 +66,15 @@ void CustomAllReduceComm::init(const NcclParam& nccl_para, hipStream_t stream) {
     aiter::register_buffer(fa_, buffer_, buffer_handles, buffer_offsets);
 }
 
-std::vector<std::string> CustomAllReduceComm::prepareP2PBuffer_(const NcclParam& nccl_para,
-                                                                torch::Tensor&   local_buffer,
-                                                                hipStream_t      stream) {
+std::vector<std::string>
+CustomAllReduceComm::prepareP2PBuffer_(const NcclParam& nccl_para, torch::Tensor& local_buffer, hipStream_t stream) {
     // malloc serial handle buffer
     char* serial_handle_buffer_ptr;
     ROCM_CHECK(hipMalloc(&serial_handle_buffer_ptr, IPChandleBufSize(world_size_)));
 
     // open local hipIpcMemHandle
-    torch::Tensor local_buffer_handle_tensor = aiter::get_meta_buffer_ipc_handle(local_buffer);
-    hipIpcMemHandle_t local_buffer_handle = *(hipIpcMemHandle_t *)local_buffer_handle_tensor.data_ptr();
+    torch::Tensor     local_buffer_handle_tensor = aiter::get_meta_buffer_ipc_handle(local_buffer);
+    hipIpcMemHandle_t local_buffer_handle        = *(hipIpcMemHandle_t*)local_buffer_handle_tensor.data_ptr();
 
     // serialized hipIpcMemHandle
     ROCM_CHECK(hipMemcpyAsync(serial_handle_buffer_ptr + HIP_IPC_HANDLE_SIZE * rank_index_,
@@ -109,9 +110,10 @@ bool CustomAllReduceComm::shouldCustomAR(const std::vector<size_t>& tp_ranks, si
 
     // 1. check whether all ranks are on same nodes
     if (world_size != local_world_size) {
-        RTP_LLM_LOG_INFO("Disable custom ar since TP is performanced on multi nodes, world_size=%d, local_world_size=%d",
-                    world_size,
-                    local_world_size);
+        RTP_LLM_LOG_INFO(
+            "Disable custom ar since TP is performanced on multi nodes, world_size=%d, local_world_size=%d",
+            world_size,
+            local_world_size);
         return false;
     }
 

@@ -1,47 +1,51 @@
-import os
-from rtp_llm.config.py_config_modules import StaticConfig
-import torch
 import logging
-from unittest import TestCase, main
+import os
 from typing import Any
-from transformers import AutoTokenizer, PreTrainedTokenizer
+from unittest import TestCase, main
 
-from rtp_llm.openai.renderers.qwen_agent_tool_renderer import (
-    QwenAgentToolRenderer,
-)
-from rtp_llm.openai.renderers.qwen_tool_renderer import QwenToolRenderer
-from rtp_llm.pipeline.chatapi_format import encode_chatapi
-from rtp_llm.models.starcoder import StarcoderTokenizer
+import torch
+from transformers import AutoTokenizer, PreTrainedTokenizer
+from transformers.models.qwen2.tokenization_qwen2 import Qwen2Tokenizer
+
+from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.models.llava import LlavaTokenizer
+from rtp_llm.models.starcoder import StarcoderTokenizer
 from rtp_llm.openai.api_datatype import (
-    ChatMessage,
-    FunctionCall,
-    GPTToolDefinition,
-    RoleEnum,
     ChatCompletionRequest,
-    GPTFunctionDefinition,
+    ChatMessage,
     ContentPart,
     ContentPartTypeEnum,
+    FunctionCall,
+    GPTFunctionDefinition,
+    GPTToolDefinition,
     RendererInfo,
+    RoleEnum,
     ToolCall,
 )
-from rtp_llm.tokenizer.tokenization_qwen import QWenTokenizer
-from transformers.models.qwen2.tokenization_qwen2 import Qwen2Tokenizer
-from rtp_llm.openai.renderer_factory import ChatRendererFactory, RendererParams, \
-    CustomChatRenderer, FastChatRenderer, LlamaTemplateRenderer
-from rtp_llm.openai.renderers.qwen_renderer import QwenRenderer
+from rtp_llm.openai.renderer_factory import (
+    ChatRendererFactory,
+    CustomChatRenderer,
+    FastChatRenderer,
+    LlamaTemplateRenderer,
+    RendererParams,
+)
 from rtp_llm.openai.renderers.qwen_agent_renderer import QwenAgentRenderer
+from rtp_llm.openai.renderers.qwen_agent_tool_renderer import QwenAgentToolRenderer
+from rtp_llm.openai.renderers.qwen_renderer import QwenRenderer
+from rtp_llm.openai.renderers.qwen_tool_renderer import QwenToolRenderer
+from rtp_llm.pipeline.chatapi_format import encode_chatapi
+from rtp_llm.tokenizer.tokenization_qwen import QWenTokenizer
 
 
 class TemplateTest(TestCase):
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
-        self.test_data_path = os.path.join(
-            os.getcwd(), 'rtp_llm/test'
-        )
+        self.test_data_path = os.path.join(os.getcwd(), "rtp_llm/test")
 
     def test_qwen(self):
-        tokenizer = QWenTokenizer(f"{self.test_data_path}/model_test/fake_test/testdata/qwen_7b/tokenizer/qwen.tiktoken")
+        tokenizer = QWenTokenizer(
+            f"{self.test_data_path}/model_test/fake_test/testdata/qwen_7b/tokenizer/qwen.tiktoken"
+        )
         render_params = RendererParams(
             model_type="qwen",
             max_seq_len=1024,
@@ -49,45 +53,57 @@ class TemplateTest(TestCase):
             stop_word_ids_list=[],
         )
         chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
-        logging.info(f"------- chat_renderer.get_renderer_info(): {chat_renderer.get_renderer_info()}")
-        assert (isinstance(chat_renderer, QwenRenderer))
+        logging.info(
+            f"------- chat_renderer.get_renderer_info(): {chat_renderer.get_renderer_info()}"
+        )
+        assert isinstance(chat_renderer, QwenRenderer)
 
         functions = [
-            GPTFunctionDefinition(**{
-                "name": "get_current_weather",
-                "description": "Get the current weather in a given location.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "location": {
-                            "type": "string",
-                            "description": "The city and state, e.g. San Francisco, CA",
+            GPTFunctionDefinition(
+                **{
+                    "name": "get_current_weather",
+                    "description": "Get the current weather in a given location.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "location": {
+                                "type": "string",
+                                "description": "The city and state, e.g. San Francisco, CA",
+                            },
+                            "unit": {
+                                "type": "string",
+                                "enum": ["celsius", "fahrenheit"],
+                            },
                         },
-                        "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]},
+                        "required": ["location"],
                     },
-                    "required": ["location"],
-                },
-            })
+                }
+            )
         ]
 
         messages = [
-            ChatMessage(**{
-                "role": RoleEnum.user,
-                "content": "波士顿天气如何？",
-            }),
+            ChatMessage(
+                **{
+                    "role": RoleEnum.user,
+                    "content": "波士顿天气如何？",
+                }
+            ),
         ]
 
-        request = ChatCompletionRequest(**{
-            "messages": messages,
-            "functions": functions,
-            "stream": False,
-        })
+        request = ChatCompletionRequest(
+            **{
+                "messages": messages,
+                "functions": functions,
+                "stream": False,
+            }
+        )
 
         ids = chat_renderer.render_chat(request).input_ids
         prompt = tokenizer.decode(ids)
-        logging.info(f"rendered prompt: \n{prompt}\n-----------------------------------")
-        expected_prompt = \
-"""<|im_start|>system
+        logging.info(
+            f"rendered prompt: \n{prompt}\n-----------------------------------"
+        )
+        expected_prompt = """<|im_start|>system
 You are a helpful assistant.<|im_end|>
 <|im_start|>user
 Answer the following questions as best you can. You have access to the following APIs:
@@ -110,34 +126,41 @@ Begin!
 Question: 波士顿天气如何？<|im_end|>
 <|im_start|>assistant
 """
-        logging.info(f"expected prompt: \n{expected_prompt}\n-----------------------------------")
-        assert (prompt == expected_prompt)
+        logging.info(
+            f"expected prompt: \n{expected_prompt}\n-----------------------------------"
+        )
+        assert prompt == expected_prompt
 
         messages.append(
-            ChatMessage(**{
-                "role": RoleEnum.assistant,
-                "content": "我需要调用get_current_weather API来获取天气",
-                "function_call": {
-                    "name": "get_current_weather",
-                    "arguments": '{"location": "Boston, MA"}',
-                },
-            })
+            ChatMessage(
+                **{
+                    "role": RoleEnum.assistant,
+                    "content": "我需要调用get_current_weather API来获取天气",
+                    "function_call": {
+                        "name": "get_current_weather",
+                        "arguments": '{"location": "Boston, MA"}',
+                    },
+                }
+            )
         )
 
         messages.append(
-            ChatMessage(**{
-                "role": RoleEnum.function,
-                "name": "get_current_weather",
-                "content": '{"temperature": "22", "unit": "celsius", "description": "Sunny"}',
-            })
+            ChatMessage(
+                **{
+                    "role": RoleEnum.function,
+                    "name": "get_current_weather",
+                    "content": '{"temperature": "22", "unit": "celsius", "description": "Sunny"}',
+                }
+            )
         )
 
         request.messages = messages
         ids = chat_renderer.render_chat(request).input_ids
         prompt = tokenizer.decode(ids)
-        logging.info(f"rendered prompt: \n{prompt}\n-----------------------------------")
-        expected_prompt = \
-"""<|im_start|>system
+        logging.info(
+            f"rendered prompt: \n{prompt}\n-----------------------------------"
+        )
+        expected_prompt = """<|im_start|>system
 You are a helpful assistant.<|im_end|>
 <|im_start|>user
 Answer the following questions as best you can. You have access to the following APIs:
@@ -164,12 +187,16 @@ Action: get_current_weather
 Action Input: {"location": "Boston, MA"}
 Observation: {"temperature": "22", "unit": "celsius", "description": "Sunny"}
 Thought:"""
-        logging.info(f"expected prompt: \n{expected_prompt}\n-----------------------------------")
+        logging.info(
+            f"expected prompt: \n{expected_prompt}\n-----------------------------------"
+        )
         logging.info(f"actual prompt: \n{prompt}\n-----------------------------------")
-        assert (prompt == expected_prompt)
+        assert prompt == expected_prompt
 
     def test_qwen_agent(self):
-        tokenizer = QWenTokenizer(f"{self.test_data_path}/model_test/fake_test/testdata/qwen_7b/tokenizer/qwen.tiktoken")
+        tokenizer = QWenTokenizer(
+            f"{self.test_data_path}/model_test/fake_test/testdata/qwen_7b/tokenizer/qwen.tiktoken"
+        )
         render_params = RendererParams(
             model_type="qwen_agent",
             max_seq_len=1024,
@@ -177,50 +204,64 @@ Thought:"""
             stop_word_ids_list=[],
         )
         chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
-        logging.info(f"------- chat_renderer.get_renderer_info(): {chat_renderer.get_renderer_info()}")
-        assert (isinstance(chat_renderer, QwenAgentRenderer))
+        logging.info(
+            f"------- chat_renderer.get_renderer_info(): {chat_renderer.get_renderer_info()}"
+        )
+        assert isinstance(chat_renderer, QwenAgentRenderer)
 
         functions = [
-            GPTFunctionDefinition(**{
-                "name": "get_current_weather",
-                "description": "Get the current weather in a given location.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "location": {
-                            "type": "string",
-                            "description": "The city and state, e.g. San Francisco, CA",
+            GPTFunctionDefinition(
+                **{
+                    "name": "get_current_weather",
+                    "description": "Get the current weather in a given location.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "location": {
+                                "type": "string",
+                                "description": "The city and state, e.g. San Francisco, CA",
+                            },
+                            "unit": {
+                                "type": "string",
+                                "enum": ["celsius", "fahrenheit"],
+                            },
                         },
-                        "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]},
+                        "required": ["location"],
                     },
-                    "required": ["location"],
-                },
-            })
+                }
+            )
         ]
 
         messages = [
-            ChatMessage(**{
-                "role": RoleEnum.system,
-                "content": "你是一个有用的助手",
-            }),
-            ChatMessage(**{
-                "role": RoleEnum.user,
-                "content": "波士顿天气如何？",
-            }),
+            ChatMessage(
+                **{
+                    "role": RoleEnum.system,
+                    "content": "你是一个有用的助手",
+                }
+            ),
+            ChatMessage(
+                **{
+                    "role": RoleEnum.user,
+                    "content": "波士顿天气如何？",
+                }
+            ),
         ]
 
-        request = ChatCompletionRequest(**{
-            "messages": messages,
-            "functions": functions,
-            "stream": False,
-            "extend_fields":{"lang":"zh"}
-        })
+        request = ChatCompletionRequest(
+            **{
+                "messages": messages,
+                "functions": functions,
+                "stream": False,
+                "extend_fields": {"lang": "zh"},
+            }
+        )
 
         ids = chat_renderer.render_chat(request).input_ids
         prompt = tokenizer.decode(ids)
-        logging.info(f"rendered prompt: \n{prompt}\n-----------------------------------")
-        expected_prompt = \
-"""<|im_start|>system
+        logging.info(
+            f"rendered prompt: \n{prompt}\n-----------------------------------"
+        )
+        expected_prompt = """<|im_start|>system
 你是一个有用的助手
 
 # 工具
@@ -241,34 +282,41 @@ get_current_weather: Get the current weather in a given location. 输入参数�
 波士顿天气如何？<|im_end|>
 <|im_start|>assistant
 """
-        logging.info(f"expected prompt: \n{expected_prompt}\n-----------------------------------")
-        assert (prompt == expected_prompt)
+        logging.info(
+            f"expected prompt: \n{expected_prompt}\n-----------------------------------"
+        )
+        assert prompt == expected_prompt
 
         messages.append(
-            ChatMessage(**{
-                "role": RoleEnum.assistant,
-                "content": None,
-                "function_call": {
-                    "name": "get_current_weather",
-                    "arguments": '{"location": "Boston, MA"}',
-                },
-            })
+            ChatMessage(
+                **{
+                    "role": RoleEnum.assistant,
+                    "content": None,
+                    "function_call": {
+                        "name": "get_current_weather",
+                        "arguments": '{"location": "Boston, MA"}',
+                    },
+                }
+            )
         )
 
         messages.append(
-            ChatMessage(**{
-                "role": RoleEnum.function,
-                "name": "get_current_weather",
-                "content": '{"temperature": "22", "unit": "celsius", "description": "Sunny"}',
-            })
+            ChatMessage(
+                **{
+                    "role": RoleEnum.function,
+                    "name": "get_current_weather",
+                    "content": '{"temperature": "22", "unit": "celsius", "description": "Sunny"}',
+                }
+            )
         )
 
         request.messages = messages
         ids = chat_renderer.render_chat(request).input_ids
         prompt = tokenizer.decode(ids)
-        logging.info(f"rendered prompt: \n{prompt}\n-----------------------------------")
-        expected_prompt = \
-"""<|im_start|>system
+        logging.info(
+            f"rendered prompt: \n{prompt}\n-----------------------------------"
+        )
+        expected_prompt = """<|im_start|>system
 你是一个有用的助手
 
 # 工具
@@ -292,9 +340,11 @@ get_current_weather: Get the current weather in a given location. 输入参数�
 ✿ARGS✿: {"location": "Boston, MA"}
 ✿RESULT✿: {"temperature": "22", "unit": "celsius", "description": "Sunny"}
 ✿RETURN✿"""
-        logging.info(f"expected prompt: \n{expected_prompt}\n-----------------------------------")
+        logging.info(
+            f"expected prompt: \n{expected_prompt}\n-----------------------------------"
+        )
         logging.info(f"actual prompt: \n{prompt}\n-----------------------------------")
-        assert (prompt == expected_prompt)
+        assert prompt == expected_prompt
 
     def test_qwen_tool(self):
         logging.info("begin test_qwen_tool")
@@ -696,8 +746,11 @@ get_current_weather: Get the current weather in a given location. 输入参数�
         assert prompt == expected_prompt
 
     def test_qwen_vl(self):
-        tokenizer = AutoTokenizer.from_pretrained(f"{self.test_data_path}/model_test/fake_test/testdata/qwen_vl/tokenizer/", trust_remote_code=True)
-        assert(isinstance(tokenizer, PreTrainedTokenizer))
+        tokenizer = AutoTokenizer.from_pretrained(
+            f"{self.test_data_path}/model_test/fake_test/testdata/qwen_vl/tokenizer/",
+            trust_remote_code=True,
+        )
+        assert isinstance(tokenizer, PreTrainedTokenizer)
         render_params = RendererParams(
             model_type="qwen_vl",
             max_seq_len=1024,
@@ -706,54 +759,752 @@ get_current_weather: Get the current weather in a given location. 输入参数�
         )
         chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
 
-        test_messages = [ChatMessage(**{
-            "role": RoleEnum.user,
-            "content": [
-                ContentPart(**{
-                    "type": ContentPartTypeEnum.image_url,
-                    "image_url": {
-                        "url": "https://modelscope.cn/api/v1/models/damo/speech_eres2net_sv_zh-cn_16k-common/repo?Revision=master&FilePath=images/ERes2Net_architecture.png"
-                    }
-                }),
-                ContentPart(**{
-                    "type": ContentPartTypeEnum.text,
-                    "text": "这是什么"
-                }),
-            ],
-        })]
-        request = ChatCompletionRequest(**{
-            "messages": test_messages,
-            "stream": False,
-        })
+        test_messages = [
+            ChatMessage(
+                **{
+                    "role": RoleEnum.user,
+                    "content": [
+                        ContentPart(
+                            **{
+                                "type": ContentPartTypeEnum.image_url,
+                                "image_url": {
+                                    "url": "https://modelscope.cn/api/v1/models/damo/speech_eres2net_sv_zh-cn_16k-common/repo?Revision=master&FilePath=images/ERes2Net_architecture.png"
+                                },
+                            }
+                        ),
+                        ContentPart(
+                            **{"type": ContentPartTypeEnum.text, "text": "这是什么"}
+                        ),
+                    ],
+                }
+            )
+        ]
+        request = ChatCompletionRequest(
+            **{
+                "messages": test_messages,
+                "stream": False,
+            }
+        )
         ids = chat_renderer.render_chat(request).input_ids
-        expected_ids = [151644, 8948, 198, 2610, 525, 264, 10950, 17847, 13, 151645, 198, 151644, 872, 198, 24669, 220, 16, 25, 220, 151857, 104, 116, 116, 112, 115, 58, 47, 47, 109, 111, 100, 101, 108, 115, 99, 111, 112, 101, 46, 99, 110, 47, 97, 112, 105, 47, 118, 49, 47, 109, 111, 100, 101, 108, 115, 47, 100, 97, 109, 111, 47, 115, 112, 101, 101, 99, 104, 95, 101, 114, 101, 115, 50, 110, 101, 116, 95, 115, 118, 95, 122, 104, 45, 99, 110, 95, 49, 54, 107, 45, 99, 111, 109, 109, 111, 110, 47, 114, 101, 112, 111, 63, 82, 101, 118, 105, 115, 105, 111, 110, 61, 109, 97, 115, 116, 101, 114, 38, 70, 105, 108, 101, 80, 97, 116, 104, 61, 105, 109, 97, 103, 101, 115, 47, 69, 82, 101, 115, 50, 78, 101, 116, 95, 97, 114, 99, 104, 105, 116, 101, 99, 116, 117, 114, 101, 46, 112, 110, 103, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151858, 198, 100346, 99245, 151645, 198, 151644, 77091, 198]
+        expected_ids = [
+            151644,
+            8948,
+            198,
+            2610,
+            525,
+            264,
+            10950,
+            17847,
+            13,
+            151645,
+            198,
+            151644,
+            872,
+            198,
+            24669,
+            220,
+            16,
+            25,
+            220,
+            151857,
+            104,
+            116,
+            116,
+            112,
+            115,
+            58,
+            47,
+            47,
+            109,
+            111,
+            100,
+            101,
+            108,
+            115,
+            99,
+            111,
+            112,
+            101,
+            46,
+            99,
+            110,
+            47,
+            97,
+            112,
+            105,
+            47,
+            118,
+            49,
+            47,
+            109,
+            111,
+            100,
+            101,
+            108,
+            115,
+            47,
+            100,
+            97,
+            109,
+            111,
+            47,
+            115,
+            112,
+            101,
+            101,
+            99,
+            104,
+            95,
+            101,
+            114,
+            101,
+            115,
+            50,
+            110,
+            101,
+            116,
+            95,
+            115,
+            118,
+            95,
+            122,
+            104,
+            45,
+            99,
+            110,
+            95,
+            49,
+            54,
+            107,
+            45,
+            99,
+            111,
+            109,
+            109,
+            111,
+            110,
+            47,
+            114,
+            101,
+            112,
+            111,
+            63,
+            82,
+            101,
+            118,
+            105,
+            115,
+            105,
+            111,
+            110,
+            61,
+            109,
+            97,
+            115,
+            116,
+            101,
+            114,
+            38,
+            70,
+            105,
+            108,
+            101,
+            80,
+            97,
+            116,
+            104,
+            61,
+            105,
+            109,
+            97,
+            103,
+            101,
+            115,
+            47,
+            69,
+            82,
+            101,
+            115,
+            50,
+            78,
+            101,
+            116,
+            95,
+            97,
+            114,
+            99,
+            104,
+            105,
+            116,
+            101,
+            99,
+            116,
+            117,
+            114,
+            101,
+            46,
+            112,
+            110,
+            103,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151858,
+            198,
+            100346,
+            99245,
+            151645,
+            198,
+            151644,
+            77091,
+            198,
+        ]
         assert ids == expected_ids, f"ids: {ids} vs expected ids {expected_ids}"
 
-        request.messages.append(ChatMessage(**{
-            "role": RoleEnum.assistant,
-            "content": "这是一个深度神经网络模型的结构图。从图中可以看出，这个模型包括全局特征融合和局部特征融合两部分。全局特征融合部分使用了ERes2Net block，而局部特征融合部分则使用了多个ERes2Net block和AFF block。此外，模型的最后一层还使用了一个1×1的卷积层。图中还标注了各个模块之间的连接关系，包括输入、输出以及与其他模块的连接。",
-        }))
-        request.messages.append(ChatMessage(**{
-            "role": RoleEnum.user,
-            "content": "输出 embedding 层的检测框",
-        }))
+        request.messages.append(
+            ChatMessage(
+                **{
+                    "role": RoleEnum.assistant,
+                    "content": "这是一个深度神经网络模型的结构图。从图中可以看出，这个模型包括全局特征融合和局部特征融合两部分。全局特征融合部分使用了ERes2Net block，而局部特征融合部分则使用了多个ERes2Net block和AFF block。此外，模型的最后一层还使用了一个1×1的卷积层。图中还标注了各个模块之间的连接关系，包括输入、输出以及与其他模块的连接。",
+                }
+            )
+        )
+        request.messages.append(
+            ChatMessage(
+                **{
+                    "role": RoleEnum.user,
+                    "content": "输出 embedding 层的检测框",
+                }
+            )
+        )
 
         ids = chat_renderer.render_chat(request).input_ids
-        expected_ids = [151644, 8948, 198, 2610, 525, 264, 10950, 17847, 13, 151645, 198, 151644, 872, 198, 24669, 220, 16, 25, 220, 151857, 104, 116, 116, 112, 115, 58, 47, 47, 109, 111, 100, 101, 108, 115, 99, 111, 112, 101, 46, 99, 110, 47, 97, 112, 105, 47, 118, 49, 47, 109, 111, 100, 101, 108, 115, 47, 100, 97, 109, 111, 47, 115, 112, 101, 101, 99, 104, 95, 101, 114, 101, 115, 50, 110, 101, 116, 95, 115, 118, 95, 122, 104, 45, 99, 110, 95, 49, 54, 107, 45, 99, 111, 109, 109, 111, 110, 47, 114, 101, 112, 111, 63, 82, 101, 118, 105, 115, 105, 111, 110, 61, 109, 97, 115, 116, 101, 114, 38, 70, 105, 108, 101, 80, 97, 116, 104, 61, 105, 109, 97, 103, 101, 115, 47, 69, 82, 101, 115, 50, 78, 101, 116, 95, 97, 114, 99, 104, 105, 116, 101, 99, 116, 117, 114, 101, 46, 112, 110, 103, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151859, 151858, 198, 100346, 99245, 151645, 198, 151644, 77091, 198, 105464, 102217, 102398, 71356, 104949, 9370, 100166, 28029, 1773, 45181, 28029, 15946, 107800, 3837, 99487, 104949, 100630, 109894, 104363, 101164, 33108, 106304, 104363, 101164, 77540, 99659, 1773, 109894, 104363, 101164, 99659, 37029, 34187, 640, 288, 17, 6954, 2504, 3837, 68536, 106304, 104363, 101164, 99659, 46448, 37029, 34187, 101213, 640, 288, 17, 6954, 2504, 33108, 48045, 2504, 1773, 104043, 3837, 104949, 114641, 99371, 97706, 37029, 104059, 16, 17568, 16, 9370, 100199, 99263, 99371, 1773, 28029, 15946, 97706, 111066, 34187, 101284, 106393, 104186, 64064, 100145, 3837, 100630, 31196, 5373, 66017, 101034, 106961, 106393, 9370, 64064, 1773, 151645, 198, 151644, 872, 198, 66017, 39088, 79621, 224, 9370, 101978, 101540, 151645, 198, 151644, 77091, 198]
-        assert (ids == expected_ids)
+        expected_ids = [
+            151644,
+            8948,
+            198,
+            2610,
+            525,
+            264,
+            10950,
+            17847,
+            13,
+            151645,
+            198,
+            151644,
+            872,
+            198,
+            24669,
+            220,
+            16,
+            25,
+            220,
+            151857,
+            104,
+            116,
+            116,
+            112,
+            115,
+            58,
+            47,
+            47,
+            109,
+            111,
+            100,
+            101,
+            108,
+            115,
+            99,
+            111,
+            112,
+            101,
+            46,
+            99,
+            110,
+            47,
+            97,
+            112,
+            105,
+            47,
+            118,
+            49,
+            47,
+            109,
+            111,
+            100,
+            101,
+            108,
+            115,
+            47,
+            100,
+            97,
+            109,
+            111,
+            47,
+            115,
+            112,
+            101,
+            101,
+            99,
+            104,
+            95,
+            101,
+            114,
+            101,
+            115,
+            50,
+            110,
+            101,
+            116,
+            95,
+            115,
+            118,
+            95,
+            122,
+            104,
+            45,
+            99,
+            110,
+            95,
+            49,
+            54,
+            107,
+            45,
+            99,
+            111,
+            109,
+            109,
+            111,
+            110,
+            47,
+            114,
+            101,
+            112,
+            111,
+            63,
+            82,
+            101,
+            118,
+            105,
+            115,
+            105,
+            111,
+            110,
+            61,
+            109,
+            97,
+            115,
+            116,
+            101,
+            114,
+            38,
+            70,
+            105,
+            108,
+            101,
+            80,
+            97,
+            116,
+            104,
+            61,
+            105,
+            109,
+            97,
+            103,
+            101,
+            115,
+            47,
+            69,
+            82,
+            101,
+            115,
+            50,
+            78,
+            101,
+            116,
+            95,
+            97,
+            114,
+            99,
+            104,
+            105,
+            116,
+            101,
+            99,
+            116,
+            117,
+            114,
+            101,
+            46,
+            112,
+            110,
+            103,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151859,
+            151858,
+            198,
+            100346,
+            99245,
+            151645,
+            198,
+            151644,
+            77091,
+            198,
+            105464,
+            102217,
+            102398,
+            71356,
+            104949,
+            9370,
+            100166,
+            28029,
+            1773,
+            45181,
+            28029,
+            15946,
+            107800,
+            3837,
+            99487,
+            104949,
+            100630,
+            109894,
+            104363,
+            101164,
+            33108,
+            106304,
+            104363,
+            101164,
+            77540,
+            99659,
+            1773,
+            109894,
+            104363,
+            101164,
+            99659,
+            37029,
+            34187,
+            640,
+            288,
+            17,
+            6954,
+            2504,
+            3837,
+            68536,
+            106304,
+            104363,
+            101164,
+            99659,
+            46448,
+            37029,
+            34187,
+            101213,
+            640,
+            288,
+            17,
+            6954,
+            2504,
+            33108,
+            48045,
+            2504,
+            1773,
+            104043,
+            3837,
+            104949,
+            114641,
+            99371,
+            97706,
+            37029,
+            104059,
+            16,
+            17568,
+            16,
+            9370,
+            100199,
+            99263,
+            99371,
+            1773,
+            28029,
+            15946,
+            97706,
+            111066,
+            34187,
+            101284,
+            106393,
+            104186,
+            64064,
+            100145,
+            3837,
+            100630,
+            31196,
+            5373,
+            66017,
+            101034,
+            106961,
+            106393,
+            9370,
+            64064,
+            1773,
+            151645,
+            198,
+            151644,
+            872,
+            198,
+            66017,
+            39088,
+            79621,
+            224,
+            9370,
+            101978,
+            101540,
+            151645,
+            198,
+            151644,
+            77091,
+            198,
+        ]
+        assert ids == expected_ids
 
     def test_llava(self):
         StaticConfig.model_config.checkpoint_path = "llava-v1.5"
         tokenizer = LlavaTokenizer(
-            tokenzier_path = f"{self.test_data_path}/model_test/fake_test/testdata/llava/tokenizer/",
-            mm_use_im_patch_token = False,
-            mm_use_im_start_end = False,
-            special_token_ids = {'ignore_token_index': -100, 'image_token_index': -200},
-            special_tokens = {
-                'default_mm_token': '<image>',
-                'default_im_start_token': '<im_start>',
-                'default_im_end_token': '<im_end>'
-            }
+            tokenzier_path=f"{self.test_data_path}/model_test/fake_test/testdata/llava/tokenizer/",
+            mm_use_im_patch_token=False,
+            mm_use_im_start_end=False,
+            special_token_ids={"ignore_token_index": -100, "image_token_index": -200},
+            special_tokens={
+                "default_mm_token": "<image>",
+                "default_im_start_token": "<im_start>",
+                "default_im_end_token": "<im_end>",
+            },
         )
 
         render_params = RendererParams(
@@ -763,41 +1514,111 @@ get_current_weather: Get the current weather in a given location. 输入参数�
             stop_word_ids_list=[],
         )
         chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
-        test_messages = [ChatMessage(**{
-            "role": RoleEnum.user,
-            "content": [
-                ContentPart(**{
-                    "type": ContentPartTypeEnum.image_url,
-                    "image_url": {
-                        "url": "https://modelscope.cn/api/v1/models/damo/speech_eres2net_sv_zh-cn_16k-common/repo?Revision=master&FilePath=images/ERes2Net_architecture.png"
-                    }
-                }),
-                ContentPart(**{
-                    "type": ContentPartTypeEnum.text,
-                    "text": "这是什么"
-                }),
-            ],
-        })]
-        test_messages.append(ChatMessage(**{
-            "role": RoleEnum.assistant,
-            "content": [
-                ContentPart(**{
-                    "type": ContentPartTypeEnum.text,
-                    "text": "这是图"
-                }),
-            ],
-        }))
-        request = ChatCompletionRequest(**{
-            "messages": test_messages,
-            "stream": False,
-        })
+        test_messages = [
+            ChatMessage(
+                **{
+                    "role": RoleEnum.user,
+                    "content": [
+                        ContentPart(
+                            **{
+                                "type": ContentPartTypeEnum.image_url,
+                                "image_url": {
+                                    "url": "https://modelscope.cn/api/v1/models/damo/speech_eres2net_sv_zh-cn_16k-common/repo?Revision=master&FilePath=images/ERes2Net_architecture.png"
+                                },
+                            }
+                        ),
+                        ContentPart(
+                            **{"type": ContentPartTypeEnum.text, "text": "这是什么"}
+                        ),
+                    ],
+                }
+            )
+        ]
+        test_messages.append(
+            ChatMessage(
+                **{
+                    "role": RoleEnum.assistant,
+                    "content": [
+                        ContentPart(
+                            **{"type": ContentPartTypeEnum.text, "text": "这是图"}
+                        ),
+                    ],
+                }
+            )
+        )
+        request = ChatCompletionRequest(
+            **{
+                "messages": test_messages,
+                "stream": False,
+            }
+        )
         ids = chat_renderer.render_chat(request).input_ids
-        expected_ids = [1, 319, 13563, 1546, 263, 12758, 5199, 322, 385, 23116, 21082, 20255, 29889, 450, 20255, 4076, 8444, 29892, 13173, 29892, 322, 1248, 568, 6089, 304, 278, 5199, 29915, 29879, 5155, 29889, 3148, 1001, 29901, 29871, -200, 29871, 13, 30810, 30392, 231, 190, 131, 31882, 319, 1799, 9047, 13566, 29901, 29871, 30810, 30392, 30861, 2, 22933, 9047, 13566, 29901]
+        expected_ids = [
+            1,
+            319,
+            13563,
+            1546,
+            263,
+            12758,
+            5199,
+            322,
+            385,
+            23116,
+            21082,
+            20255,
+            29889,
+            450,
+            20255,
+            4076,
+            8444,
+            29892,
+            13173,
+            29892,
+            322,
+            1248,
+            568,
+            6089,
+            304,
+            278,
+            5199,
+            29915,
+            29879,
+            5155,
+            29889,
+            3148,
+            1001,
+            29901,
+            29871,
+            -200,
+            29871,
+            13,
+            30810,
+            30392,
+            231,
+            190,
+            131,
+            31882,
+            319,
+            1799,
+            9047,
+            13566,
+            29901,
+            29871,
+            30810,
+            30392,
+            30861,
+            2,
+            22933,
+            9047,
+            13566,
+            29901,
+        ]
         assert ids == expected_ids, f"ids: {ids} vs expected ids {expected_ids}"
 
     def test_baichuan2(self):
         tokenizer = AutoTokenizer.from_pretrained(
-            f"{self.test_data_path}/model_test/fake_test/testdata/baichuan/tokenizer/", trust_remote_code=True
+            f"{self.test_data_path}/model_test/fake_test/testdata/baichuan/tokenizer/",
+            trust_remote_code=True,
         )
         render_params = RendererParams(
             model_type="baichuan2",
@@ -805,33 +1626,53 @@ get_current_weather: Get the current weather in a given location. 输入参数�
             eos_token_id=tokenizer.eos_token_id or 0,
             stop_word_ids_list=[],
         )
-        assert (isinstance(tokenizer, PreTrainedTokenizer))
+        assert isinstance(tokenizer, PreTrainedTokenizer)
         chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
 
         messages = [
-            ChatMessage(**{
-                "role": RoleEnum.user,
-                "content": "你是谁？",
-            }),
-            ChatMessage(**{
-                "role": RoleEnum.assistant,
-                "content": "我是百川大模型",
-            }),
-            ChatMessage(**{
-                "role": RoleEnum.assistant,
-                "content": "展开讲讲",
-            }),
+            ChatMessage(
+                **{
+                    "role": RoleEnum.user,
+                    "content": "你是谁？",
+                }
+            ),
+            ChatMessage(
+                **{
+                    "role": RoleEnum.assistant,
+                    "content": "我是百川大模型",
+                }
+            ),
+            ChatMessage(
+                **{
+                    "role": RoleEnum.assistant,
+                    "content": "展开讲讲",
+                }
+            ),
         ]
         request = ChatCompletionRequest(messages=messages)
 
         ids = chat_renderer.render_chat(request).input_ids
         prompt = tokenizer.decode(ids)
-        expected_ids = [195, 92067, 68, 196, 6461, 70335, 92366, 9528, 195, 8277, 57056, 196]
+        expected_ids = [
+            195,
+            92067,
+            68,
+            196,
+            6461,
+            70335,
+            92366,
+            9528,
+            195,
+            8277,
+            57056,
+            196,
+        ]
         assert ids == expected_ids, f"ids: {ids} vs expected ids {expected_ids}"
 
     def test_imported_template(self):
         tokenizer = AutoTokenizer.from_pretrained(
-            f"{self.test_data_path}/model_test/fake_test/testdata/baichuan/tokenizer/", trust_remote_code=True
+            f"{self.test_data_path}/model_test/fake_test/testdata/baichuan/tokenizer/",
+            trust_remote_code=True,
         )
         render_params = RendererParams(
             model_type="mixtral",
@@ -840,29 +1681,31 @@ get_current_weather: Get the current weather in a given location. 输入参数�
             stop_word_ids_list=[],
         )
         expected_renderer_info = RendererInfo(
-            class_name = "LlamaTemplateRenderer",
-            renderer_model_type = "mixtral",
-            extra_stop_word_ids_list = [[2]],
-            extra_stop_words_list = ['</s>'],
-            template = "Template(prefix=['<s>'], prompt=['[INST]{{query}}[/INST]'], system='', sep=['</s>'], stop_words=['</s>'], use_history=True, efficient_eos=False, replace_eos=False)"
+            class_name="LlamaTemplateRenderer",
+            renderer_model_type="mixtral",
+            extra_stop_word_ids_list=[[2]],
+            extra_stop_words_list=["</s>"],
+            template="Template(prefix=['<s>'], prompt=['[INST]{{query}}[/INST]'], system='', sep=['</s>'], stop_words=['</s>'], use_history=True, efficient_eos=False, replace_eos=False)",
         )
-        assert (isinstance(tokenizer, PreTrainedTokenizer))
+        assert isinstance(tokenizer, PreTrainedTokenizer)
         chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
         self.assertEqual(chat_renderer.get_renderer_info(), expected_renderer_info)
 
         expected_renderer_info = RendererInfo(
-            class_name = "FastChatRenderer",
-            renderer_model_type = "mistral",
-            extra_stop_word_ids_list = [],
-            extra_stop_words_list = [],
-            template = "Conversation(name='mistral', system_template='[INST] {system_message}\\n', system_message='', roles=('[INST]', '[/INST]'), messages=[], offset=0, sep_style=<SeparatorStyle.LLAMA2: 7>, sep=' ', sep2='</s>', stop_str=None, stop_token_ids=None)"
+            class_name="FastChatRenderer",
+            renderer_model_type="mistral",
+            extra_stop_word_ids_list=[],
+            extra_stop_words_list=[],
+            template="Conversation(name='mistral', system_template='[INST] {system_message}\\n', system_message='', roles=('[INST]', '[/INST]'), messages=[], offset=0, sep_style=<SeparatorStyle.LLAMA2: 7>, sep=' ', sep2='</s>', stop_str=None, stop_token_ids=None)",
         )
         render_params.model_type = "mistral"
         chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
         self.assertEqual(chat_renderer.get_renderer_info(), expected_renderer_info)
 
     def test_qwen_with_chat_template(self):
-        tokenizer = Qwen2Tokenizer.from_pretrained(f"{self.test_data_path}/tokenizer_test/testdata/qwen2_tokenizer")
+        tokenizer = Qwen2Tokenizer.from_pretrained(
+            f"{self.test_data_path}/tokenizer_test/testdata/qwen2_tokenizer"
+        )
         render_params = RendererParams(
             model_type="qwen_2",
             max_seq_len=1024,
@@ -870,34 +1713,48 @@ get_current_weather: Get the current weather in a given location. 输入参数�
             stop_word_ids_list=[],
         )
         chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
-        assert(isinstance(chat_renderer, QwenRenderer))
-        assert(chat_renderer.template_chat_renderer.chat_template == "{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}template ends here")
+        assert isinstance(chat_renderer, QwenRenderer)
+        assert (
+            chat_renderer.template_chat_renderer.chat_template
+            == "{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}template ends here"
+        )
         messages = [
-            ChatMessage(**{
-                "role": RoleEnum.system,
-                "content": "你是小助手",
-            }),
-            ChatMessage(**{
-                "role": RoleEnum.user,
-                "content": "介绍一下自己",
-            }),
+            ChatMessage(
+                **{
+                    "role": RoleEnum.system,
+                    "content": "你是小助手",
+                }
+            ),
+            ChatMessage(
+                **{
+                    "role": RoleEnum.user,
+                    "content": "介绍一下自己",
+                }
+            ),
         ]
         request = ChatCompletionRequest(messages=messages)
         ids = chat_renderer.render_chat(request).input_ids
         prompt = tokenizer.decode(ids)
-        logging.info(f"rendered prompt: \n{prompt}\n-----------------------------------")
-        assert(prompt == """<|im_start|>system
+        logging.info(
+            f"rendered prompt: \n{prompt}\n-----------------------------------"
+        )
+        assert (
+            prompt
+            == """<|im_start|>system
 你是小助手<|im_end|>
 <|im_start|>user
 介绍一下自己<|im_end|>
 <|im_start|>assistant
-template ends here""")
+template ends here"""
+        )
 
     def test_qwen_default_system(self):
-        tokenizer = Qwen2Tokenizer.from_pretrained(f"{self.test_data_path}/tokenizer_test/testdata/qwen2_tokenizer")
+        tokenizer = Qwen2Tokenizer.from_pretrained(
+            f"{self.test_data_path}/tokenizer_test/testdata/qwen2_tokenizer"
+        )
         tokenizer.chat_template = None
-        tokenizer.im_start_id = tokenizer.encode('<|im_start|>')[0]
-        tokenizer.im_end_id = tokenizer.encode('<|im_end|>')[0]
+        tokenizer.im_start_id = tokenizer.encode("<|im_start|>")[0]
+        tokenizer.im_end_id = tokenizer.encode("<|im_end|>")[0]
         render_params = RendererParams(
             model_type="qwen_2",
             max_seq_len=1024,
@@ -905,32 +1762,42 @@ template ends here""")
             stop_word_ids_list=[],
         )
         chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
-        assert(isinstance(chat_renderer, QwenRenderer))
-        assert(chat_renderer.template_chat_renderer == None)
+        assert isinstance(chat_renderer, QwenRenderer)
+        assert chat_renderer.template_chat_renderer == None
         messages = [
-            ChatMessage(**{
-                "role": RoleEnum.system,
-                "content": "你是小助手",
-            }),
-            ChatMessage(**{
-                "role": RoleEnum.user,
-                "content": "介绍一下自己",
-            }),
+            ChatMessage(
+                **{
+                    "role": RoleEnum.system,
+                    "content": "你是小助手",
+                }
+            ),
+            ChatMessage(
+                **{
+                    "role": RoleEnum.user,
+                    "content": "介绍一下自己",
+                }
+            ),
         ]
         request = ChatCompletionRequest(messages=messages)
         ids = chat_renderer.render_chat(request).input_ids
         prompt = tokenizer.decode(ids)
-        logging.info(f"rendered prompt: \n{prompt}\n-----------------------------------")
-        assert(prompt == """<|im_start|>system
+        logging.info(
+            f"rendered prompt: \n{prompt}\n-----------------------------------"
+        )
+        assert (
+            prompt
+            == """<|im_start|>system
 你是小助手<|im_end|>
 <|im_start|>user
 介绍一下自己<|im_end|>
 <|im_start|>assistant
-""")
+"""
+        )
 
     def test_multi_templates(self):
         tokenizer = AutoTokenizer.from_pretrained(
-            f"{self.test_data_path}/model_test/fake_test/testdata/cohere/tokenizer/", trust_remote_code=True
+            f"{self.test_data_path}/model_test/fake_test/testdata/cohere/tokenizer/",
+            trust_remote_code=True,
         )
         render_params = RendererParams(
             model_type="cohere",
@@ -941,20 +1808,26 @@ template ends here""")
         chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
 
         messages = [
-            ChatMessage(**{
-                "role": RoleEnum.user,
-                "content": "你是谁？",
-            }),
+            ChatMessage(
+                **{
+                    "role": RoleEnum.user,
+                    "content": "你是谁？",
+                }
+            ),
         ]
         request = ChatCompletionRequest(messages=messages)
         prompt = tokenizer.decode(chat_renderer.render_chat(request).input_ids)
-        self.assertEqual(prompt, "<BOS_TOKEN><BOS_TOKEN><|START_OF_TURN_TOKEN|><|USER_TOKEN|>你是谁？<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>")
+        self.assertEqual(
+            prompt,
+            "<BOS_TOKEN><BOS_TOKEN><|START_OF_TURN_TOKEN|><|USER_TOKEN|>你是谁？<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>",
+        )
 
         request.template_key = "rag"
         self.maxDiff = None
         prompt = tokenizer.decode(chat_renderer.render_chat(request).input_ids)
-        self.assertEqual(prompt,
-"""<BOS_TOKEN><BOS_TOKEN><|START_OF_TURN_TOKEN|><|SYSTEM_TOKEN|># Safety Preamble
+        self.assertEqual(
+            prompt,
+            """<BOS_TOKEN><BOS_TOKEN><|START_OF_TURN_TOKEN|><|SYSTEM_TOKEN|># Safety Preamble
 The instructions in this section override those in the task description and style guide sections. Don't answer questions that are harmful or immoral.
 
 # System Preamble
@@ -969,7 +1842,8 @@ You help people answer their questions and other requests interactively. You wil
 Unless the user asks for a different style of answer, you should answer in full sentences, using proper grammar and spelling.<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|USER_TOKEN|>你是谁？<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|SYSTEM_TOKEN|><results></results><|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|SYSTEM_TOKEN|>Carefully perform the following instructions, in order, starting each with a new line.
 Firstly, Decide which of the retrieved documents are relevant to the user's last input by writing 'Relevant Documents:' followed by comma-separated list of document numbers. If none are relevant, you should instead write 'None'.
 Secondly, Decide which of the retrieved documents contain facts that should be cited in a good answer to the user's last input by writing 'Cited Documents:' followed a comma-separated list of document numbers. If you dont want to cite any of them, you should instead write 'None'.
-Finally, Write 'Grounded answer:' followed by a response to the user's last input in high quality natural english. Use the symbols <co: doc> and </co: doc> to indicate when a fact comes from a document in the search result, e.g <co: 0>my fact</co: 0> for a fact from document 0.<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>""")
+Finally, Write 'Grounded answer:' followed by a response to the user's last input in high quality natural english. Use the symbols <co: doc> and </co: doc> to indicate when a fact comes from a document in the search result, e.g <co: 0>my fact</co: 0> for a fact from document 0.<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>""",
+        )
         request.template_key = None
         request.user_template = "{{bos_token}}{% for message in messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if message['role'] == 'user' %}{{ ' [INST] ' + message['content'] + ' [/INST]' }}{% elif message['role'] == 'assistant' %}{{ ' ' + message['content'] + ' ' + eos_token}}{% endif %}{% endfor %}{{123}}"
         prompt = tokenizer.decode(chat_renderer.render_chat(request).input_ids)
@@ -977,5 +1851,6 @@ Finally, Write 'Grounded answer:' followed by a response to the user's last inpu
 
         print(prompt)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

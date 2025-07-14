@@ -77,7 +77,7 @@ struct ROCmGemmActArguments {
 
 static hipDataType dtypeConvert(DataType dtype) {
     switch (dtype) {
-        case DataType::TYPE_BF16: 
+        case DataType::TYPE_BF16:
             return hipDataType::HIP_R_16BF;
         case DataType::TYPE_FP16:
             return hipDataType::HIP_R_16F;
@@ -134,7 +134,8 @@ BufferPtr ROCmDevice::loraLinearWithActivation(const LoraLinearWithActivationPar
     if (gemm_params.compute_type == DataType::TYPE_INVALID) {
         hipblasMMWrapperPtr()->setGemmConfig(A_data_type, B_data_type, D_data_type, HIP_R_32F);
     } else {
-        hipblasMMWrapperPtr()->setGemmConfig(A_data_type, B_data_type, D_data_type, dtypeConvert(gemm_params.compute_type));
+        hipblasMMWrapperPtr()->setGemmConfig(
+            A_data_type, B_data_type, D_data_type, dtypeConvert(gemm_params.compute_type));
     }
 
     hipblas_mm_wrapper_->GemmBiasAct(

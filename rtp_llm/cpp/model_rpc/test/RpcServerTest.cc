@@ -15,7 +15,6 @@ namespace rtp_llm {
 
 class RpcServiceTest: public DeviceTestBase {
 protected:
-
 };
 
 TEST_F(RpcServiceTest, testSimple) {
@@ -31,7 +30,7 @@ TEST_F(RpcServiceTest, testSimple) {
 
     grpc::ClientContext context;
 
-    MagaInitParams                                                   maga_init_params;
+    MagaInitParams                                                        maga_init_params;
     std::vector<std::unordered_map<std::string, rtp_llm::ConstBufferPtr>> layer_weights;
     std::unordered_map<std::string, rtp_llm::ConstBufferPtr>              weights;
 

@@ -18,22 +18,31 @@ namespace rtp_llm {
 
 cublasOperation_t opConvert(TransposeOperation op) {
     switch (op) {
-        case TransposeOperation::NONE: return cublasOperation_t::CUBLAS_OP_N;
-        case TransposeOperation::TRANSPOSE: return cublasOperation_t::CUBLAS_OP_T;
-        default: throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+        case TransposeOperation::NONE:
+            return cublasOperation_t::CUBLAS_OP_N;
+        case TransposeOperation::TRANSPOSE:
+            return cublasOperation_t::CUBLAS_OP_T;
+        default:
+            throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }
 };
 
 cudaDataType_t dtypeConvert(DataType dtype) {
     switch (dtype) {
-        case DataType::TYPE_FP16 : return cudaDataType_t::CUDA_R_16F;
-        case DataType::TYPE_BF16 : return cudaDataType_t::CUDA_R_16BF;
-        case DataType::TYPE_FP32 : return cudaDataType_t::CUDA_R_32F;
+        case DataType::TYPE_FP16:
+            return cudaDataType_t::CUDA_R_16F;
+        case DataType::TYPE_BF16:
+            return cudaDataType_t::CUDA_R_16BF;
+        case DataType::TYPE_FP32:
+            return cudaDataType_t::CUDA_R_32F;
 #ifdef ENABLE_FP8
-	case DataType::TYPE_FP8_E4M3 : return cudaDataType_t::CUDA_R_8F_E4M3;
-	case DataType::TYPE_QFP8_E4M3 : return cudaDataType_t::CUDA_R_8F_E4M3;
+        case DataType::TYPE_FP8_E4M3:
+            return cudaDataType_t::CUDA_R_8F_E4M3;
+        case DataType::TYPE_QFP8_E4M3:
+            return cudaDataType_t::CUDA_R_8F_E4M3;
 #endif
-        default: throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+        default:
+            throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }
 };
 
@@ -70,11 +79,11 @@ struct CudaGemmArguments {
         Bshape = params.B.shape();
 
         if (params.transA == TransposeOperation::TRANSPOSE) {
-            std::iter_swap(Ashape.end() -1, Ashape.end() -2);
+            std::iter_swap(Ashape.end() - 1, Ashape.end() - 2);
         }
 
         if (params.transB == TransposeOperation::TRANSPOSE) {
-            std::iter_swap(Bshape.end() -1, Bshape.end() -2);
+            std::iter_swap(Bshape.end() - 1, Bshape.end() - 2);
         }
 
         if (params.C != std::nullopt) {
@@ -86,8 +95,7 @@ struct CudaGemmArguments {
         if (params.C != std::nullopt) {
             CDtype = params.C.value().get().type();
         }
-        DDtype = (params.compute_type == DataType::TYPE_INVALID) ?
-                  params.A.type() : params.compute_type;
+        DDtype = (params.compute_type == DataType::TYPE_INVALID) ? params.A.type() : params.compute_type;
         // int8 gemm
         if (ADtype == DataType::TYPE_QINT8 && BDtype == DataType::TYPE_QINT8) {
             DDtype = DataType::TYPE_FP16;
@@ -101,9 +109,8 @@ struct CudaGemmArguments {
             DDtype = DataType::TYPE_BF16;
         }
 
-        dim =  params.A.dim();
-        batch_size = std::accumulate(Ashape.begin(), Ashape.end() - 2,
-                                     (size_t)1, std::multiplies<size_t>());
+        dim        = params.A.dim();
+        batch_size = std::accumulate(Ashape.begin(), Ashape.end() - 2, (size_t)1, std::multiplies<size_t>());
 
         m = Ashape[dim - 2];
         k = Ashape[dim - 1];
@@ -112,14 +119,14 @@ struct CudaGemmArguments {
         Dshape = std::vector<size_t>(Ashape.begin(), Ashape.end() - 2);
         Dshape.insert(Dshape.end(), {m, n});
 
-        lda = params.A.shape()[dim - 1];
+        lda      = params.A.shape()[dim - 1];
         stride_a = m * k;
-        ldb = params.B.shape()[dim - 1];
+        ldb      = params.B.shape()[dim - 1];
         stride_b = k * n;
-        ldc = n;
+        ldc      = n;
         stride_c = m * n;
-        alpha = params.alpha;
-        beta = params.beta;
+        alpha    = params.alpha;
+        beta     = params.beta;
     }
 
     void dump() {
@@ -137,14 +144,12 @@ struct CudaGemmArguments {
                   << "ldc is : " << ldc << "\n"
                   << "stride_a is : " << stride_a << "\n"
                   << "stride_b is : " << stride_b << "\n"
-                  << "stride_c is : " << stride_c << "\n" << std::endl;
+                  << "stride_c is : " << stride_c << "\n"
+                  << std::endl;
     }
-
 };
 
-void CudaDevice::InvokeSmoothQaunt(const GemmParams& params,
-                                   CudaGemmArguments arguments,
-                                   BufferPtr         output) {
+void CudaDevice::InvokeSmoothQaunt(const GemmParams& params, CudaGemmArguments arguments, BufferPtr output) {
     bool perToken   = true;
     bool perChannel = true;
     if (reinterpret_cast<const QBuffer&>(params.B).scales().size() == 1) {
@@ -160,7 +165,8 @@ void CudaDevice::InvokeSmoothQaunt(const GemmParams& params,
 
     RTP_LLM_LOG_DEBUG("use int8 soomth gemm.");
     RTP_LLM_CHECK_WITH_INFO(smooth_quant_plugin_->addBiasActivationEpilogueSupported(params.activationType),
-     "activation type not supported: %d", int(params.activationType));
+                            "activation type not supported: %d",
+                            int(params.activationType));
     BUFFER_DTYPE_CHECK(params.A, {DataType::TYPE_QINT8});
     BUFFER_DTYPE_CHECK(params.B, {DataType::TYPE_QINT8});
     size_t ws_size   = smooth_quant_plugin_->getWorkspaceSize(arguments.m, arguments.n, arguments.k);
@@ -180,9 +186,7 @@ void CudaDevice::InvokeSmoothQaunt(const GemmParams& params,
                                   params.stream == nullptr ? stream_ : (cudaStream_t)params.stream);
 }
 
-void CudaDevice::InvokeWeightOnlyGemm(const GemmParams& params,
-                                      CudaGemmArguments arguments,
-                                      BufferPtr         output) {
+void CudaDevice::InvokeWeightOnlyGemm(const GemmParams& params, CudaGemmArguments arguments, BufferPtr output) {
     RTP_LLM_LOG_DEBUG("use weight only int8 gemm.");
     RTP_LLM_CHECK_WITH_INFO(params.activationType == ActivationType::Identity, "activation type should be identity");
     RTP_LLM_CHECK_WITH_INFO(params.C == std::nullopt, "weightonly bias should be nullopt");
@@ -233,11 +237,10 @@ void CudaDevice::InvokeWeightOnlyGemm(const GemmParams& params,
     }
 }
 
-void CudaDevice::InvokeGeneralGemm(const GemmParams& params,
-                                   CudaGemmArguments arguments,
-                                   BufferPtr         output) {
+void CudaDevice::InvokeGeneralGemm(const GemmParams& params, CudaGemmArguments arguments, BufferPtr output) {
     RTP_LLM_LOG_DEBUG("use general gemm.");
-    RTP_LLM_CHECK_WITH_INFO(params.activationType == ActivationType::Identity, "general gemm activation type should be identity");
+    RTP_LLM_CHECK_WITH_INFO(params.activationType == ActivationType::Identity,
+                            "general gemm activation type should be identity");
     RTP_LLM_CHECK_WITH_INFO(params.C == std::nullopt, "general gemm bias should be nullopt");
     auto A_data_type = dtypeConvert(arguments.ADtype);
     auto B_data_type = dtypeConvert(arguments.BDtype);
@@ -253,10 +256,11 @@ void CudaDevice::InvokeGeneralGemm(const GemmParams& params,
     auto       b_op = opConvert(params.transB);
 
 #ifdef ENABLE_FP8
-    if (params.dispatch() == GemmType::QBufferA_QBufferB_BufferC_2DGemm && QBufferDtype2BufferDtype(params.A.type()) == DataType::TYPE_FP8_E4M3) {
+    if (params.dispatch() == GemmType::QBufferA_QBufferB_BufferC_2DGemm
+        && QBufferDtype2BufferDtype(params.A.type()) == DataType::TYPE_FP8_E4M3) {
         BUFFER_DTYPE_CHECK(params.B, {DataType::TYPE_FP8_E4M3, TYPE_QFP8_E4M3});
-        float *A_scale = reinterpret_cast<const QBuffer&>(params.A).scalesData<float>();
-        float *B_scale = reinterpret_cast<const QBuffer&>(params.B).scalesData<float>();
+        float* A_scale = reinterpret_cast<const QBuffer&>(params.A).scalesData<float>();
+        float* B_scale = reinterpret_cast<const QBuffer&>(params.B).scalesData<float>();
 
         cublas_mm_wrapper_->Gemm(CUBLAS_OP_T,
                                  CUBLAS_OP_N,
@@ -283,7 +287,7 @@ void CudaDevice::InvokeGeneralGemm(const GemmParams& params,
         check_cuda_error();
     } else
 #endif
-    if (params.dispatch() == GemmType::BufferA_BufferB_BufferC_2DGemm) {
+        if (params.dispatch() == GemmType::BufferA_BufferB_BufferC_2DGemm) {
         BUFFER_DTYPE_CHECK(params.A, {DataType::TYPE_FP16, DataType::TYPE_BF16, DataType::TYPE_FP32});
         BUFFER_DTYPE_CHECK(params.B, {DataType::TYPE_FP16, DataType::TYPE_BF16, DataType::TYPE_FP32});
         cublas_mm_wrapper_->setGemmConfig(B_data_type, A_data_type, D_data_type, computeType);
@@ -328,18 +332,17 @@ void CudaDevice::InvokeGeneralGemm(const GemmParams& params,
     }
 }
 
-
-void CudaDevice::InvokeDeepGemm(const GemmParams& params,
-                                CudaGemmArguments arguments,
-                                BufferPtr&        output) {
+void CudaDevice::InvokeDeepGemm(const GemmParams& params, CudaGemmArguments arguments, BufferPtr& output) {
     RTP_LLM_LOG_DEBUG("use deep gemm.");
-    RTP_LLM_CHECK_WITH_INFO(params.activationType == ActivationType::Identity, "deep gemm activation type should be identity");
+    RTP_LLM_CHECK_WITH_INFO(params.activationType == ActivationType::Identity,
+                            "deep gemm activation type should be identity");
     RTP_LLM_CHECK_WITH_INFO(params.C == std::nullopt, "deep gemm bias should be nullopt");
-    BufferPtr      quanted_input;
-    BufferPtr      gemm_output = output;
+    BufferPtr quanted_input;
+    BufferPtr gemm_output = output;
     if (params.A.type() != DataType::TYPE_QFP8_E4M3) {
         auto padding_size = DeepGemmPlugin::getPaddingSize(params.A.shape()[0], DeepGemmType::Normal);
-        quanted_input = quantize(QuantizeParams(params.A, DataType::TYPE_QFP8_E4M3, params.A.dim()-1, QScheme::Qfp8PerTokenBlock, padding_size));
+        quanted_input     = quantize(QuantizeParams(
+            params.A, DataType::TYPE_QFP8_E4M3, params.A.dim() - 1, QScheme::Qfp8PerTokenBlock, padding_size));
         DeepGemmPlugin::gemmFp8(*quanted_input, params.B, *gemm_output, stream_);
         output = gemm_output->slice(0, params.A.shape()[0], false);
         output->updateParent(gemm_output);
@@ -363,28 +366,34 @@ BufferPtr CudaDevice::gemm(const GemmParams& params) {
         if (params.D) {
             output = params.D;
             RUNTIME_ASSERT_OP_ARG((arguments.DDtype == params.D->type()) && (arguments.Dshape == params.D->shape()),
-                                    "Gemm output D shape and dtype mismatch: expected [%d][%s] but got [%s]",
-                                    arguments.DDtype,
-                                    autil::StringUtil::toString(arguments.Dshape).c_str(),
-                                    params.D->debugString().c_str());
-        } else if (!(params.dispatch() == GemmType::BufferA_QBufferB_BufferC_2DGemm && params.A.type() != DataType::TYPE_QFP8_E4M3 && params.B.type() == DataType::TYPE_QFP8_E4M3)) {
+                                  "Gemm output D shape and dtype mismatch: expected [%d][%s] but got [%s]",
+                                  arguments.DDtype,
+                                  autil::StringUtil::toString(arguments.Dshape).c_str(),
+                                  params.D->debugString().c_str());
+        } else if (!(params.dispatch() == GemmType::BufferA_QBufferB_BufferC_2DGemm
+                     && params.A.type() != DataType::TYPE_QFP8_E4M3 && params.B.type() == DataType::TYPE_QFP8_E4M3)) {
             output = allocateBuffer({arguments.DDtype, arguments.Dshape, AllocationType::DEVICE}, {"gemm_output"});
         }
     }
 
     if (params.dispatch() == GemmType::QBufferA_QBufferB_BufferC_2DGemm && params.A.type() == DataType::TYPE_QINT8) {
         InvokeSmoothQaunt(params, arguments, output);
-    } else if (((params.dispatch() == GemmType::BufferA_QBufferB_BufferC_2DGemm && params.A.type() != DataType::TYPE_QFP8_E4M3) || (params.qscheme == QScheme::Qfp8PerTokenBlock)) && params.B.type() == DataType::TYPE_QFP8_E4M3) {
+    } else if (((params.dispatch() == GemmType::BufferA_QBufferB_BufferC_2DGemm
+                 && params.A.type() != DataType::TYPE_QFP8_E4M3)
+                || (params.qscheme == QScheme::Qfp8PerTokenBlock))
+               && params.B.type() == DataType::TYPE_QFP8_E4M3) {
         auto dshape = arguments.Dshape;
         // padding to 128
-        dshape[0] = (dshape[0] + 127) / 128 * 128;
+        dshape[0]          = (dshape[0] + 127) / 128 * 128;
         auto padded_output = allocateBuffer({arguments.DDtype, dshape, AllocationType::DEVICE}, {"gemm_output"});
         InvokeDeepGemm(params, arguments, padded_output);
         if (params.D) {
             auto d_shape_0 = params.D->shape()[0], padded_shape_0 = padded_output->shape()[0];
-            RUNTIME_ASSERT_OP_ARG(d_shape_0 <= padded_shape_0,
-                                "Gemm output D shape[0] should be less than output shape[0] in fp8 blockwise gemm case, but got [%ld] > [%ld]",
-                                d_shape_0, padded_shape_0);
+            RUNTIME_ASSERT_OP_ARG(
+                d_shape_0 <= padded_shape_0,
+                "Gemm output D shape[0] should be less than output shape[0] in fp8 blockwise gemm case, but got [%ld] > [%ld]",
+                d_shape_0,
+                padded_shape_0);
             copy({*params.D, *padded_output->slice(0, d_shape_0)});
             output = params.D;
         } else {
@@ -392,12 +401,11 @@ BufferPtr CudaDevice::gemm(const GemmParams& params) {
         }
     } else if (params.dispatch() == GemmType::BufferA_QBufferB_BufferC_2DGemm) {
         InvokeWeightOnlyGemm(params, arguments, output);
-    } else { 
+    } else {
         InvokeGeneralGemm(params, arguments, output);
     }
     check_cuda_error();
     return output;
 }
 
-} // namespace rtp_llm
-
+}  // namespace rtp_llm

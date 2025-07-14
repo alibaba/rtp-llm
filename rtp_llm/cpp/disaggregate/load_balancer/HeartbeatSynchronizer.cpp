@@ -20,12 +20,11 @@ int HeartbeatSynchronizer::getHostCnt(const std::map<std::string, std::shared_pt
     return total_host_cnt;
 }
 
-void HeartbeatSynchronizer::getStatusFromHost(
-    const std::string&                                                      spec,
-    std::shared_ptr<std::atomic_int>&                                       success_cnt,
-    int                                                                     total_count,
-    std::shared_ptr<std::shared_mutex>&                                     mutex,
-    std::shared_ptr<HeartbeatSynchronizer::NodeStatus>&                     result) {
+void HeartbeatSynchronizer::getStatusFromHost(const std::string&                                  spec,
+                                              std::shared_ptr<std::atomic_int>&                   success_cnt,
+                                              int                                                 total_count,
+                                              std::shared_ptr<std::shared_mutex>&                 mutex,
+                                              std::shared_ptr<HeartbeatSynchronizer::NodeStatus>& result) {
     http_server::HttpCallBack http_call_back =
         [this, spec, success_cnt, total_count, mutex, result](bool ok, const std::string& response_body) {
             if (!ok) {
@@ -58,9 +57,9 @@ HeartbeatSynchronizer::getHeartbeatFromHost(std::map<std::string, std::shared_pt
                                             int                                               timeout_ms) {
     // we need shared ptr because http call is async
     std::shared_ptr<HeartbeatSynchronizer::NodeStatus> worker_stat_map(new HeartbeatSynchronizer::NodeStatus);
-    std::shared_ptr<std::atomic_int>   success_cnt(new std::atomic_int(0));
-    std::shared_ptr<std::shared_mutex> mutex(new std::shared_mutex);
-    auto                               total_host_cnt = getHostCnt(biz_hosts);
+    std::shared_ptr<std::atomic_int>                   success_cnt(new std::atomic_int(0));
+    std::shared_ptr<std::shared_mutex>                 mutex(new std::shared_mutex);
+    auto                                               total_host_cnt = getHostCnt(biz_hosts);
     for (auto& hosts_in_one_biz : biz_hosts) {
         for (auto& host : hosts_in_one_biz.second->hosts) {
             const std::string spec = "tcp:" + host->ip + ":" + std::to_string(host->http_port);
@@ -68,14 +67,15 @@ HeartbeatSynchronizer::getHeartbeatFromHost(std::map<std::string, std::shared_pt
         }
     }
     bool part_failed = false;
-    bool all_failed = false;
+    bool all_failed  = false;
     if (!waitDone(success_cnt, total_host_cnt, timeout_ms)) {
         auto success_cnt_value = success_cnt->load();
         if (total_host_cnt > 0 && success_cnt_value * 1.0 / total_host_cnt < 0.9) {
-            RTP_LLM_LOG_WARNING("sync work status timeout, sync_worker_status_interval_ms:%d, success_cnt:%d, total_cnt:%d",
-                           timeout_ms,
-                           success_cnt_value,
-                           total_host_cnt);
+            RTP_LLM_LOG_WARNING(
+                "sync work status timeout, sync_worker_status_interval_ms:%d, success_cnt:%d, total_cnt:%d",
+                timeout_ms,
+                success_cnt_value,
+                total_host_cnt);
             part_failed = true;
         }
     }
@@ -84,7 +84,7 @@ HeartbeatSynchronizer::getHeartbeatFromHost(std::map<std::string, std::shared_pt
     }
     {
         std::unique_lock<std::shared_mutex> lock(*mutex);
-        HeartbeatSynchronizer::NodeStatus tmp_status;
+        HeartbeatSynchronizer::NodeStatus   tmp_status;
         std::swap(tmp_status, *worker_stat_map);
         ErrorResult<HeartbeatSynchronizer::NodeStatus> result(std::move(tmp_status));
         if (part_failed) {
@@ -98,10 +98,10 @@ HeartbeatSynchronizer::getHeartbeatFromHost(std::map<std::string, std::shared_pt
 }
 
 void HeartbeatSynchronizer::processWorkerStatusResponse(
-    const std::string&                                                            spec,
-    const std::string&                                                            response_body,
-    const std::shared_ptr<std::shared_mutex>&                                     sync_result_map_mutex,
-    const std::shared_ptr<HeartbeatSynchronizer::NodeStatus>&                     sync_result_map) {
+    const std::string&                                        spec,
+    const std::string&                                        response_body,
+    const std::shared_ptr<std::shared_mutex>&                 sync_result_map_mutex,
+    const std::shared_ptr<HeartbeatSynchronizer::NodeStatus>& sync_result_map) {
     try {
         WorkerStatusResponse worker_status_response;
         autil::legacy::FromJsonString(worker_status_response, response_body);
@@ -111,11 +111,12 @@ void HeartbeatSynchronizer::processWorkerStatusResponse(
         }
     } catch (const std::exception& e) {
         RTP_LLM_LOG_WARNING("response deserialize failed, address:%s, response: %s, error: %s",
-                       spec.c_str(),
-                       response_body.c_str(),
-                       e.what());
+                            spec.c_str(),
+                            response_body.c_str(),
+                            e.what());
     } catch (...) {
-        RTP_LLM_LOG_WARNING("response deserialize failed, address:%s, response: %s", spec.c_str(), response_body.c_str());
+        RTP_LLM_LOG_WARNING(
+            "response deserialize failed, address:%s, response: %s", spec.c_str(), response_body.c_str());
     }
 }
 

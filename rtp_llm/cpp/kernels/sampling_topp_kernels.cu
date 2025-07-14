@@ -55,8 +55,7 @@ template<typename T, int ELEMENTS_PER_WARP_LOAD>
 using Copy_t = Copy_half_t<sizeof(T) / sizeof(half) * ELEMENTS_PER_WARP_LOAD>;
 
 template<typename T>
-struct Float_as_int_ {
-};
+struct Float_as_int_ {};
 template<>
 struct Float_as_int_<float> {
     using Type = uint32_t;
@@ -73,15 +72,13 @@ using kernel_params_half_1  = Segmented_topk_kernel_params<__half, int32_t, 256,
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
-static inline __device__ float to_float(uint32_t src)
-{
+static inline __device__ float to_float(uint32_t src) {
     return __int_as_float(src);
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
-static inline __device__ float to_float(uint16_t src)
-{
+static inline __device__ float to_float(uint16_t src) {
     __half dst = __ushort_as_half(src);
     return __half2float(dst);
 }
@@ -97,8 +94,7 @@ __global__ void blockSortKernel(const T_SCORE* d_keys_in,
                                 const int32_t* active_counts,
                                 int            num_items_,
                                 int            stride_items,
-                                int            num_segments)
-{
+                                int            num_segments) {
     // Specialize BlockRadixSort for a 1D block
     typedef cub::BlockRadixSort<T_SCORE, BLOCK_THREADS, ELEMENTS_PER_THREAD, int32_t> BlockRadixSort;
 
@@ -144,8 +140,7 @@ void blockSort(const T_SCORE* d_keys_in,
                int            num_items,
                int            stride_items,
                int            num_segments,
-               cudaStream_t   stream)
-{
+               cudaStream_t   stream) {
     if (num_items == 0) {
         return;
     }
@@ -196,8 +191,7 @@ struct BlockPrefixCallbackOp {
     __device__ BlockPrefixCallbackOp(uint32_t running_total): running_total(running_total) {}
     // Callback operator to be entered by the first warp of threads in the block.
     // Thread-0 is responsible for returning a value for seeding the block-wide scan.
-    __device__ int operator()(uint32_t block_aggregate)
-    {
+    __device__ int operator()(uint32_t block_aggregate) {
         uint32_t old_prefix = running_total;
         running_total += block_aggregate;
         return old_prefix;
@@ -217,8 +211,7 @@ constexpr int WARP_SZ   = 32;
 
 template<typename Kernel_params, int ITEMS_PER_THREAD>
 __global__ __launch_bounds__(Kernel_params::BLOCK_THREADS,
-                             1) void segmented_top_p_single_pass(TopKPerSegmentParams params)
-{
+                             1) void segmented_top_p_single_pass(TopKPerSegmentParams params) {
 #if DO_DEBUG_PRINT
     constexpr int debug_block_id = 26;
 #endif
@@ -490,8 +483,7 @@ __global__ __launch_bounds__(Kernel_params::BLOCK_THREADS,
 
                 prefix_op.running_total = old_selected_count;
             }
-        }
-        else {
+        } else {
             // sc < num_top_k branch
             if (save_mask) {
                 select_mask = save_mask;
@@ -526,8 +518,7 @@ __global__ __launch_bounds__(Kernel_params::BLOCK_THREADS,
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
 template<typename Kernel_params>
-int getSmemSizeAndCheck(const TopKPerSegmentContext& context, const TopKPerSegmentParams& params)
-{
+int getSmemSizeAndCheck(const TopKPerSegmentContext& context, const TopKPerSegmentParams& params) {
     constexpr int BLOCK_THREADS         = Kernel_params::BLOCK_THREADS;
     using Key_Data_Type                 = typename Kernel_params::Key_Data_Type;
     int           num_items_per_segment = params.num_items / params.num_segments;
@@ -556,22 +547,18 @@ int getSmemSizeAndCheck(const TopKPerSegmentContext& context, const TopKPerSegme
 
 int getSmemSizeAndCheck(const TopKPerSegmentContext& context,
                         const TopKPerSegmentParams&  params,
-                        const DType_t                DT_SCORE)
-{
+                        const DType_t                DT_SCORE) {
     int num_items_per_segment = params.num_items / params.num_segments;
     if (DT_SCORE == kFLOAT) {
         if (num_items_per_segment % 2 == 0) {
             return getSmemSizeAndCheck<kernel_params_float>(context, params);
-        }
-        else {
+        } else {
             return getSmemSizeAndCheck<kernel_params_float_1>(context, params);
         }
-    }
-    else {
+    } else {
         if (num_items_per_segment % 4 == 0) {
             return getSmemSizeAndCheck<kernel_params_half>(context, params);
-        }
-        else {
+        } else {
             return getSmemSizeAndCheck<kernel_params_half_1>(context, params);
         }
     }
@@ -582,8 +569,7 @@ int getSmemSizeAndCheck(const TopKPerSegmentContext& context,
 template<typename Kernel_params>
 void segmentedTopPSinglePass_dispatch(const TopKPerSegmentParams&  params,
                                       const TopKPerSegmentContext& context,
-                                      cudaStream_t                 stream)
-{
+                                      cudaStream_t                 stream) {
 
     constexpr int BLOCK_THREADS = Kernel_params::BLOCK_THREADS;
     using Key_Data_Type         = typename Kernel_params::Key_Data_Type;
@@ -597,10 +583,10 @@ void segmentedTopPSinglePass_dispatch(const TopKPerSegmentParams&  params,
 #define KERNEL_RUN(INDEX)                                                                                              \
     {                                                                                                                  \
         if (smem_size > 0)                                                                                             \
-            check_cuda_value(                                                                                          \
-                cudaFuncSetAttribute((const void*)segmented_top_p_single_pass<Kernel_params, ITEMS_INCREMENT*(INDEX + 1)>,          \
-                                     cudaFuncAttributeMaxDynamicSharedMemorySize,                                      \
-                                     smem_size));                                                                      \
+            check_cuda_value(cudaFuncSetAttribute(                                                                     \
+                (const void*)segmented_top_p_single_pass<Kernel_params, ITEMS_INCREMENT*(INDEX + 1)>,                  \
+                cudaFuncAttributeMaxDynamicSharedMemorySize,                                                           \
+                smem_size));                                                                                           \
         segmented_top_p_single_pass<Kernel_params, ITEMS_INCREMENT*(INDEX + 1)>                                        \
             <<<grid_dim, Kernel_params::BLOCK_THREADS, smem_size, stream>>>(params);                                   \
     }
@@ -638,8 +624,7 @@ void topPPerSegment_dispatch(const TopKPerSegmentContext& context,
                              TopKPerSegmentParams&        params,
                              void*                        temp_storage,
                              size_t&                      temp_storage_bytes,
-                             cudaStream_t                 stream)
-{
+                             cudaStream_t                 stream) {
 
     using Key_Data_Type   = typename Kernel_params::Key_Data_Type;
     using Value_Data_Type = typename Kernel_params::Value_Data_Type;
@@ -659,8 +644,7 @@ void topPPerSegment_dispatch(const TopKPerSegmentContext& context,
                                                                0,
                                                                sizeof(Key_Data_Type) * 8,
                                                                stream);
-        }
-        else {
+        } else {
             cub::DeviceRadixSort::SortPairsDescending(temp_storage,
                                                       temp_storage_bytes,
                                                       reinterpret_cast<Key_Data_Type*>(params.gmem_src_keys),
@@ -713,8 +697,7 @@ void topPPerSegment_dispatch(const TopKPerSegmentContext& context,
                                                                0,
                                                                sizeof(Key_Data_Type) * 8,
                                                                stream);
-        }
-        else {
+        } else {
             cub::DeviceRadixSort::SortPairsDescending(cub_temp_storage,
                                                       cub_temp_storage_bytes,
                                                       reinterpret_cast<Key_Data_Type*>(params.gmem_src_keys),
@@ -726,8 +709,7 @@ void topPPerSegment_dispatch(const TopKPerSegmentContext& context,
                                                       sizeof(Key_Data_Type) * 8,
                                                       stream);
         }
-    }
-    else {
+    } else {
         // run at max supported value
         blockSort<Key_Data_Type>((const Key_Data_Type*)(params.gmem_dst_keys),
                                  (Key_Data_Type*)(params.gmem_dst_keys),
@@ -748,22 +730,18 @@ int topPPerSegment(const TopKPerSegmentContext& context,
                    const DType_t                DT_SCORE,
                    void*                        temp_storage,
                    size_t&                      temp_storage_bytes,
-                   cudaStream_t                 stream)
-{
+                   cudaStream_t                 stream) {
     int num_items_per_segment = params.num_items / params.num_segments;
     if (DT_SCORE == kFLOAT) {
         if (num_items_per_segment % 2 == 0) {
             topPPerSegment_dispatch<kernel_params_float>(context, params, temp_storage, temp_storage_bytes, stream);
-        }
-        else {
+        } else {
             topPPerSegment_dispatch<kernel_params_float_1>(context, params, temp_storage, temp_storage_bytes, stream);
         }
-    }
-    else {
+    } else {
         if (num_items_per_segment % 4 == 0) {
             topPPerSegment_dispatch<kernel_params_half>(context, params, temp_storage, temp_storage_bytes, stream);
-        }
-        else {
+        } else {
             topPPerSegment_dispatch<kernel_params_half_1>(context, params, temp_storage, temp_storage_bytes, stream);
         }
     }
@@ -776,8 +754,7 @@ int topPPerSegment(const TopKPerSegmentContext& context,
 }  // namespace segmented_topp_impl
 
 __global__ void topPInitialize(
-    int* topp_id_val_buf, int* topp_offset_buf, int* begin_topp_offset_buf_, const int batch_size, const int n)
-{
+    int* topp_id_val_buf, int* topp_offset_buf, int* begin_topp_offset_buf_, const int batch_size, const int n) {
     int tid = threadIdx.x;
     int bid = blockIdx.x;
 
@@ -801,8 +778,7 @@ void invokeTopPInitialize(int*         topp_id_val_buf,
                           int*         begin_topp_offset_buf_,
                           const size_t batch_size,
                           const int    n,
-                          cudaStream_t stream)
-{
+                          cudaStream_t stream) {
     // n: the column number of logits_buffer for top_p sampling
     topPInitialize<<<32, 512, 0, stream>>>(topp_id_val_buf, topp_offset_buf, begin_topp_offset_buf_, batch_size, n);
 }
@@ -816,8 +792,7 @@ __launch_bounds__(THREADBLOCK_SIZE) __global__ void topp_beam_topk_kernel(const 
                                                                           int*         begin_offset_buf,
                                                                           const float  top_p,
                                                                           const float* top_ps,
-                                                                          const bool*  skip_decode)
-{
+                                                                          const bool*  skip_decode) {
     int thread_id = threadIdx.x;
     int batch_id  = blockIdx.x;
     if (skip_decode != nullptr && skip_decode[batch_id]) {
@@ -875,8 +850,7 @@ struct BlockPrefixCallbackOp {
     __device__ BlockPrefixCallbackOp(float running_total): running_total(running_total) {}
     // Callback operator to be entered by the first warp of threads in the block.
     // Thread-0 is responsible for returning a value for seeding the block-wide scan.
-    __device__ float operator()(float block_aggregate)
-    {
+    __device__ float operator()(float block_aggregate) {
         float old_prefix = running_total;
         running_total += block_aggregate;
         return old_prefix;
@@ -884,10 +858,17 @@ struct BlockPrefixCallbackOp {
 };
 
 template<typename T, int BLOCK_SIZE>
-__global__ void set_out_prob_kernel(float* out_prob, const T* sorted_log_probs, const int* sorted_id_vals, const bool* skip_decode, const float* top_ps, const float top_p, const int batch_size, const int vocab_size) {    
-    __shared__ int   stop_shared;
-    const int tid      = threadIdx.x;
-    const int batch_id = blockIdx.x;
+__global__ void set_out_prob_kernel(float*       out_prob,
+                                    const T*     sorted_log_probs,
+                                    const int*   sorted_id_vals,
+                                    const bool*  skip_decode,
+                                    const float* top_ps,
+                                    const float  top_p,
+                                    const int    batch_size,
+                                    const int    vocab_size) {
+    __shared__ int stop_shared;
+    const int      tid      = threadIdx.x;
+    const int      batch_id = blockIdx.x;
     if (skip_decode != nullptr && skip_decode[batch_id]) {
         return;
     }
@@ -929,7 +910,8 @@ __global__ void set_out_prob_kernel(float* out_prob, const T* sorted_log_probs, 
         }
         if (i < vocab_size) {
             int token_idx = sorted_id_vals[offset + i];
-            out_prob[offset + token_idx] =  max(0.0, thread_count - max(0.0, thread_offset - prob_threshold)) / prob_threshold;
+            out_prob[offset + token_idx] =
+                max(0.0, thread_count - max(0.0, thread_offset - prob_threshold)) / prob_threshold;
         }
         __syncthreads();
         if (stop_shared > 0) {
@@ -954,8 +936,7 @@ __global__ void topp_sampling(T*             sorted_log_probs,
                               const float*   top_ps,
                               const int*     end_ids,
                               const int      batch_size,
-                              const bool*    skip_decode)
-{
+                              const bool*    skip_decode) {
     __shared__ int   stop_shared;
     __shared__ float rand_num_s;
 
@@ -1089,8 +1070,7 @@ void invokeBatchTopPSampling(void*           workspace,
                              float*          output_all_probs,
                              cudaStream_t    stream,
                              cudaDeviceProp* cuda_device_prop,
-                             const bool*     skip_decode)
-{
+                             const bool*     skip_decode) {
     // Here, we put batch size as an argument because the batch size of initialization
     // and inference may be different due to pipeline parallelism.
     const int vocab_size = vocab_size_padded;
@@ -1161,14 +1141,14 @@ void invokeBatchTopPSampling(void*           workspace,
         //
         if (!output_all_probs) {
             topp_beam_topk_kernel<T, 1, block_size><<<batch_size, block_size, 0, stream>>>(log_probs,
-                                                                                sorted_id_vals,
-                                                                                sorted_log_probs,
-                                                                                vocab_size,
-                                                                                offset_buf,
-                                                                                begin_offset_buf,
-                                                                                max_top_p,
-                                                                                top_ps,
-                                                                                skip_decode);
+                                                                                           sorted_id_vals,
+                                                                                           sorted_log_probs,
+                                                                                           vocab_size,
+                                                                                           offset_buf,
+                                                                                           begin_offset_buf,
+                                                                                           max_top_p,
+                                                                                           top_ps,
+                                                                                           skip_decode);
         }
 
         check_cuda_value(
@@ -1185,25 +1165,23 @@ void invokeBatchTopPSampling(void*           workspace,
                                                                0,              // begin_bit
                                                                sizeof(T) * 8,  // end_bit = sizeof(KeyT) * 8
                                                                stream));       // cudaStream_t
-    }
-    else {
+    } else {
         if (workspace == nullptr) {
             segmented_topp_impl::topPPerSegment(
                 context, params, dataTypeKind, cub_temp_storage, cub_temp_storage_size, stream);
             workspace_size = sorted_log_prob_buf_size + sorted_id_vals_buf_size + cub_temp_storage_size;
             return;
-        }
-        else {
+        } else {
             if (!output_all_probs) {
                 topp_beam_topk_kernel<T, 1, block_size><<<batch_size, block_size, 0, stream>>>(log_probs,
-                                                                                            sorted_id_vals,
-                                                                                            sorted_log_probs,
-                                                                                            vocab_size,
-                                                                                            offset_buf,
-                                                                                            begin_offset_buf,
-                                                                                            max_top_p,
-                                                                                            top_ps,
-                                                                                            skip_decode);
+                                                                                               sorted_id_vals,
+                                                                                               sorted_log_probs,
+                                                                                               vocab_size,
+                                                                                               offset_buf,
+                                                                                               begin_offset_buf,
+                                                                                               max_top_p,
+                                                                                               top_ps,
+                                                                                               skip_decode);
             }
             segmented_topp_impl::topPPerSegment(
                 context, params, dataTypeKind, cub_temp_storage, cub_temp_storage_size, stream);
@@ -1211,14 +1189,8 @@ void invokeBatchTopPSampling(void*           workspace,
     }
 
     if (output_all_probs) {
-        set_out_prob_kernel<T, 256><<<batch_size, 256, 0, stream>>>(output_all_probs,
-                                                                    sorted_log_probs,
-                                                                    sorted_id_vals,
-                                                                    skip_decode,
-                                                                    top_ps,
-                                                                    max_top_p,
-                                                                    batch_size,
-                                                                    vocab_size);
+        set_out_prob_kernel<T, 256><<<batch_size, 256, 0, stream>>>(
+            output_all_probs, sorted_log_probs, sorted_id_vals, skip_decode, top_ps, max_top_p, batch_size, vocab_size);
     }
 
     constexpr int SAMPLING_BLOCK_SIZE = 256;
@@ -1308,8 +1280,7 @@ void invokeTopPSampling(void*           workspace,
                         float*          output_all_probs,
                         cudaStream_t    stream,
                         cudaDeviceProp* cuda_device_prop,
-                        const bool*     skip_decode)
-{
+                        const bool*     skip_decode) {
     invokeBatchTopPSampling(workspace,
                             workspace_size,
                             cub_temp_storage_size,
@@ -1380,8 +1351,7 @@ template void invokeTopPSampling(void*           workspace,
 
 template<typename T>
 __global__ void
-addBiasSoftMax(T* logits, const T* bias, const int* end_ids, const bool* finished, const int n_padded, const int n)
-{
+addBiasSoftMax(T* logits, const T* bias, const int* end_ids, const bool* finished, const int n_padded, const int n) {
     int  bid    = blockIdx.x;
     bool finish = (finished != nullptr) ? finished[bid] : false;
     int  offset = bid * n_padded;
@@ -1396,13 +1366,11 @@ addBiasSoftMax(T* logits, const T* bias, const int* end_ids, const bool* finishe
         if (tid < n) {
             if (finish) {
                 logits[offset + tid] = (tid == end_ids[bid]) ? static_cast<T>(MAX_T_VAL) : static_cast<T>(-MAX_T_VAL);
-            }
-            else {
+            } else {
                 T bias_val = (bias != nullptr) ? bias[tid] : static_cast<T>(0.0f);
                 logits[offset + tid] += bias_val;
             }
-        }
-        else {
+        } else {
             logits[offset + tid] = static_cast<T>(-MAX_T_VAL);
         }
         max_val = max(max_val, (float)logits[offset + tid]);
@@ -1439,8 +1407,7 @@ void invokeAddBiasSoftMax(T*           logits,
                           const int    m,
                           const int    n_padded,
                           const int    n,
-                          cudaStream_t stream)
-{
+                          cudaStream_t stream) {
     dim3 grid(m);
     dim3 block(min(n, 1024));
     /*n is the vocab_size, e.g., 30000, 7000.... vocab_size is usually very big. */
@@ -1465,14 +1432,14 @@ template void invokeAddBiasSoftMax(half*        logits,
                                    const int    n,
                                    cudaStream_t stream);
 
-template void invokeAddBiasSoftMax(__nv_bfloat16*        logits,
-                                   const __nv_bfloat16*  bias,
-                                   const int*            end_ids,
-                                   const bool*           finished,
-                                   const int             m,
-                                   const int             n_padded,
-                                   const int             n,
-                                   cudaStream_t          stream);
+template void invokeAddBiasSoftMax(__nv_bfloat16*       logits,
+                                   const __nv_bfloat16* bias,
+                                   const int*           end_ids,
+                                   const bool*          finished,
+                                   const int            m,
+                                   const int            n_padded,
+                                   const int            n,
+                                   cudaStream_t         stream);
 
 __global__ void computeToppDecay(float*         runtime_top_p,
                                  const float*   runtime_initial_top_p,
@@ -1480,8 +1447,7 @@ __global__ void computeToppDecay(float*         runtime_top_p,
                                  const float*   top_p_decay,
                                  const float*   top_p_min,
                                  const int32_t* top_p_reset_ids,
-                                 const int      local_batch_size)
-{
+                                 const int      local_batch_size) {
     /**
      * @brief Compute the topp decay by https://arxiv.org/pdf/2206.04624.pdf
      *        In short, the formula is
@@ -1501,8 +1467,7 @@ __global__ void computeToppDecay(float*         runtime_top_p,
     int idx = blockDim.x * blockIdx.x + threadIdx.x;
     if (output_ids[idx] == top_p_reset_ids[idx]) {
         runtime_top_p[idx] = runtime_initial_top_p[idx];
-    }
-    else {
+    } else {
         runtime_top_p[idx] = max(runtime_top_p[idx] * top_p_decay[idx], top_p_min[idx]);
     }
 }
@@ -1514,14 +1479,12 @@ void invokeComputeToppDecay(float*         runtime_top_p,
                             const float*   top_p_min,
                             const int32_t* top_p_reset_ids,
                             const int      local_batch_size,
-                            cudaStream_t   stream)
-{
+                            cudaStream_t   stream) {
     dim3 block(min(local_batch_size, 512));
     dim3 grid((local_batch_size + block.x - 1) / block.x);
     computeToppDecay<<<grid, block, 0, stream>>>(
         runtime_top_p, runtime_initial_top_p, output_ids, top_p_decay, top_p_min, top_p_reset_ids, local_batch_size);
 }
-
 
 static __global__ void set_topp_runtime_args(int             batch_size,
                                              uint            top_k,
@@ -1537,8 +1500,7 @@ static __global__ void set_topp_runtime_args(int             batch_size,
                                              float*          top_p_min_buf,
                                              const float*    top_p_min,
                                              int32_t*        top_p_reset_ids_buf,
-                                             const uint32_t* top_p_reset_ids)
-{
+                                             const uint32_t* top_p_reset_ids) {
     /**
      * @brief Setup the runtime arguments for topp, broadcasting top_p to top_ps
                 and top_k to top_ks, copying top_p_decay/top_p_min/top_p_reset_ids
@@ -1588,20 +1550,20 @@ static __global__ void set_topp_runtime_args(int             batch_size,
         }
 
         if (top_p_decay_buf) {
-            top_p_decay_buf[i]   = top_p_decay == nullptr ? 1.0f : top_p_decay[i];
+            top_p_decay_buf[i] = top_p_decay == nullptr ? 1.0f : top_p_decay[i];
             if (top_p_decay_buf[i] > 1.0f || top_p_decay_buf[i] <= 0.0f) {
                 printf("[WARNING] top_p_decay_buf (%f) is out of range ([0.0, 1.0f]) for token %d,"
-                    " change to 1.0f.\n",
-                    top_p_decay_buf[i],
-                    i);
+                       " change to 1.0f.\n",
+                       top_p_decay_buf[i],
+                       i);
                 top_p_decay_buf[i] = 1.0f;
             }
             top_p_min_buf[i] = top_p_min == nullptr ? 1e-6f : top_p_min[i];  // prevent topp becoming 0.0
             if (top_p_min_buf[i] > 1.0f || top_p_min_buf[i] <= 0.0f) {
                 printf("[WARNING] top_p_min_buf (%f) is out of range ([0.0, 1.0f]) for token %d,"
-                    " change to 0.5f.\n",
-                    top_p_min_buf[i],
-                    i);
+                       " change to 0.5f.\n",
+                       top_p_min_buf[i],
+                       i);
                 top_p_min_buf[i] = 0.5f;
             }
             if (top_p_reset_ids == nullptr) {
@@ -1629,28 +1591,25 @@ void invokeSetupTopPRuntimeArgs(int             batch_size,
                                 const float*    top_p_min,
                                 int32_t*        top_p_reset_ids_buf,
                                 const uint32_t* top_p_reset_ids,
-                                cudaStream_t   stream)
-{
+                                cudaStream_t    stream) {
     dim3 block(std::min((int)batch_size, 256));
     dim3 grid(div_up((int)batch_size, (int)block.x));
 
     set_topp_runtime_args<<<grid, block, 0, stream>>>(batch_size,
-                                                       top_k,
-                                                       top_ks,
-                                                       top_ks_size,
-                                                       top_p,
-                                                       top_ps,
-                                                       top_ps_size,
-                                                       skip_decode,
-                                                       initial_top_p_buf,
-                                                       top_p_decay_buf,
-                                                       top_p_decay,
-                                                       top_p_min_buf,
-                                                       top_p_min,
-                                                       top_p_reset_ids_buf,
-                                                       top_p_reset_ids);
-
-
+                                                      top_k,
+                                                      top_ks,
+                                                      top_ks_size,
+                                                      top_p,
+                                                      top_ps,
+                                                      top_ps_size,
+                                                      skip_decode,
+                                                      initial_top_p_buf,
+                                                      top_p_decay_buf,
+                                                      top_p_decay,
+                                                      top_p_min_buf,
+                                                      top_p_min,
+                                                      top_p_reset_ids_buf,
+                                                      top_p_reset_ids);
 }
 
 }  // namespace rtp_llm

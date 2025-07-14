@@ -40,15 +40,15 @@
 #include <cuda_fp8.h>
 #endif
 
-#ifndef _WIN32 // Linux
+#ifndef _WIN32  // Linux
 #include <sys/sysinfo.h>
-#endif         // not WIN32
+#endif  // not WIN32
 #include <vector>
 #ifdef _WIN32  // Windows
 #include <windows.h>
-#undef ERROR   // A Windows header file defines ERROR as 0, but it's used in our logger.h enum. Logging breaks without
-               // this undef.
-#endif         // WIN32
+#undef ERROR  // A Windows header file defines ERROR as 0, but it's used in our logger.h enum. Logging breaks without
+              // this undef.
+#endif        // WIN32
 
 namespace rtp_llm {
 
@@ -57,8 +57,7 @@ namespace rtp_llm {
 
 typedef struct __align__(4) {
     half x, y, z, w;
-}
-half4;
+} half4;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -76,7 +75,7 @@ struct __align__(32) Float8_ {
     float2 w;
 };
 
-    ////////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////
 
 #ifdef ENABLE_BF16
 struct __align__(8) bf16_4_t {
@@ -132,15 +131,15 @@ enum class OperationType {
     FP8
 };
 
-
 inline int div_up(int a, int n) {
     return (a + n - 1) / n;
 }
 
-template <typename T, typename U, typename = std::enable_if_t<std::is_integral<T>::value>,
-    typename = std::enable_if_t<std::is_integral<U>::value>>
-auto constexpr ceilDiv(T numerator, U denominator)
-{
+template<typename T,
+         typename U,
+         typename = std::enable_if_t<std::is_integral<T>::value>,
+         typename = std::enable_if_t<std::is_integral<U>::value>>
+auto constexpr ceilDiv(T numerator, U denominator) {
     return (numerator + denominator - 1) / denominator;
 }
 
@@ -161,25 +160,26 @@ void check(T result, const char* const file, int const line);
 void syncAndCheckInDebug(const char* const file, int const line);
 #define check_cuda_error() rtp_llm::syncAndCheckInDebug(__FILE__, __LINE__)
 
-int get_sm();
+int  get_sm();
 bool is_sm70();
 bool is_sm8x();
 bool is_sm90();
 
-float timing_function(const std::function<void(cudaStream_t)>& operation, int64_t timing_iterations, cudaStream_t stream);
-int getDevice();
-int getDeviceCount();
-int currentDeviceId();
-void priorityRange(int *low_priority, int *high_priority, int device_id = -1);
+float                      timing_function(const std::function<void(cudaStream_t)>& operation,
+                                           int64_t                                  timing_iterations,
+                                           cudaStream_t                             stream);
+int                        getDevice();
+int                        getDeviceCount();
+int                        currentDeviceId();
+void                       priorityRange(int* low_priority, int* high_priority, int device_id = -1);
 std::tuple<size_t, size_t> getDeviceMemoryInfo(bool const useUvm);
-bool shared_mem_sufficient(int smem_size);
-std::string getDriverVersion();
-int getCudaVersion();
-bool checkAllNVLinks(std::vector<size_t> device_ids);
-bool checkOnSameNumaNodes(std::vector<size_t> device_ids);
-int getVisibleDeviceNum();
-bool checkP2PAvailable(const std::vector<size_t>& tp_ranks, size_t rank);
-
+bool                       shared_mem_sufficient(int smem_size);
+std::string                getDriverVersion();
+int                        getCudaVersion();
+bool                       checkAllNVLinks(std::vector<size_t> device_ids);
+bool                       checkOnSameNumaNodes(std::vector<size_t> device_ids);
+int                        getVisibleDeviceNum();
+bool                       checkP2PAvailable(const std::vector<size_t>& tp_ranks, size_t rank);
 
 template<typename T>
 T getCudaValue(const T* ptr, int index) {

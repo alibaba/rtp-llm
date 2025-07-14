@@ -16,15 +16,15 @@
 
 #pragma once
 
-#include <algorithm>   // min, max
-#include <assert.h>    // assert
-#include <float.h>     // FLT_MAX
-#include <iostream>    // snprintf
-#include <math.h>      // expf, log
-#include <limits>      // numeric_limits
-#include <stdlib.h>    // rand
-#include <string>      // string
-#include <vector>      // vector
+#include <algorithm>  // min, max
+#include <assert.h>   // assert
+#include <float.h>    // FLT_MAX
+#include <iostream>   // snprintf
+#include <math.h>     // expf, log
+#include <limits>     // numeric_limits
+#include <stdlib.h>   // rand
+#include <string>     // string
+#include <vector>     // vector
 
 #include "rtp_llm/cpp/cuda/cuda_utils.h"
 #include "rtp_llm/cpp/cuda/memory_utils.h"
@@ -34,37 +34,37 @@
 #define EPSILON (1e-20)
 #define EPSILON_FP16 (1e-10)
 
-
-
-class TestFailureError : public std::exception {
+class TestFailureError: public std::exception {
 private:
     std::string msg_;
+
 public:
     explicit TestFailureError() = default;
     explicit TestFailureError(std::string name, std::string msg = "") {
         msg_ = rtp_llm::fmtstr("TEST FAIL [%s] %s", name.c_str(), msg.c_str());
     }
-    const char* what () const throw () {
+    const char* what() const throw() {
         return msg_.c_str();
     }
 };
 
-#define EXPECT_TRUE(cond)                                  \
-    do { if(!(cond)) {                                     \
-        RTP_LLM_LOG_ERROR("TEST FAIL [%s]: %s at %s:%d",        \
-                     __func__, #cond, __FILE__, __LINE__); \
-        throw TestFailureError(__func__);                  \
-    } } while(false)
+#define EXPECT_TRUE(cond)                                                                                              \
+    do {                                                                                                               \
+        if (!(cond)) {                                                                                                 \
+            RTP_LLM_LOG_ERROR("TEST FAIL [%s]: %s at %s:%d", __func__, #cond, __FILE__, __LINE__);                     \
+            throw TestFailureError(__func__);                                                                          \
+        }                                                                                                              \
+    } while (false)
 
-#define EXPECT_FALSE(cond)                                 \
-    do { if(cond) {                                        \
-        RTP_LLM_LOG_ERROR("TEST FAIL [%s]: %s at %s:%d",        \
-                     __func__, #cond, __FILE__, __LINE__); \
-        throw TestFailureError(__func__);                  \
-    } } while(false)
+#define EXPECT_FALSE(cond)                                                                                             \
+    do {                                                                                                               \
+        if (cond) {                                                                                                    \
+            RTP_LLM_LOG_ERROR("TEST FAIL [%s]: %s at %s:%d", __func__, #cond, __FILE__, __LINE__);                     \
+            throw TestFailureError(__func__);                                                                          \
+        }                                                                                                              \
+    } while (false)
 
-bool almostEqual(float a, float b, float atol = 1e-5, float rtol = 1e-8)
-{
+bool almostEqual(float a, float b, float atol = 1e-5, float rtol = 1e-8) {
     // Params: a = value to compare and b = reference
     // This function follows implementation of numpy.isclose(), which checks
     //   abs(a - b) <= (atol + rtol * abs(b)).
@@ -80,9 +80,10 @@ bool almostEqual(float a, float b, float atol = 1e-5, float rtol = 1e-8)
 }
 
 template<typename T>
-bool checkResult(std::string name, T* out, T*ref, size_t size, float atol, float rtol) {
-    size_t failures = 0;
-    float relative_gap = 0.0f;;
+bool checkResult(std::string name, T* out, T* ref, size_t size, float atol, float rtol) {
+    size_t failures     = 0;
+    float  relative_gap = 0.0f;
+    ;
 
     for (size_t i = 0; i < size; ++i) {
         // The values for the output and the reference.
@@ -109,18 +110,20 @@ bool checkResult(std::string name, T* out, T*ref, size_t size, float atol, float
     // Allow not matched up to 1% elements.
     size_t tol_failures = (size_t)(0.01 * size);
     RTP_LLM_LOG_INFO("check...%6s : %-50s (failures: %.2f%% atol: %.2e rtol: %.2e rel_gap: %.2e%%)",
-                failures <= tol_failures ? "....OK" : "FAILED", name.c_str(),
-                100. * failures / size, atol, rtol, 100. * relative_gap);
+                     failures <= tol_failures ? "....OK" : "FAILED",
+                     name.c_str(),
+                     100. * failures / size,
+                     atol,
+                     rtol,
+                     100. * relative_gap);
     return failures <= tol_failures;
 }
 
 template<typename T>
-bool checkResult(std::string name, T* out, T* ref, size_t size,
-                 bool device_out = true, bool device_ref = false)
-{
-    bool is_fp32 = sizeof(T) == 4;
-    float atol = is_fp32 ? 1e-4f : 1e-3f;
-    float rtol = is_fp32 ? 1e-2f : 1e-1f;
+bool checkResult(std::string name, T* out, T* ref, size_t size, bool device_out = true, bool device_ref = false) {
+    bool  is_fp32 = sizeof(T) == 4;
+    float atol    = is_fp32 ? 1e-4f : 1e-3f;
+    float rtol    = is_fp32 ? 1e-2f : 1e-1f;
 
     T* h_out = nullptr;
     if (device_out) {
@@ -138,7 +141,7 @@ bool checkResult(std::string name, T* out, T* ref, size_t size,
     bool is_ok = checkResult(name, out, ref, size, atol, rtol);
     fflush(stdout);
 
-    if (h_out != nullptr){
+    if (h_out != nullptr) {
         delete[] h_out;
     }
     if (h_ref != nullptr) {

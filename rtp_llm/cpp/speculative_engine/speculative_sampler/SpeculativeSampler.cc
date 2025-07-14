@@ -3,15 +3,13 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 
-
 namespace rtp_llm {
 
-
 absl::StatusOr<SpeculativeSamplerOutput> SpeculativeSampler::sample(const std::list<GenerateStreamPtr>& streams) const {
-    bool contain_topp = false;
-    bool force_stream_sample = device_->initParams().sp_config.force_stream_sample;
-    torch::Device target_device = device_->getTorchDevice();
-    SpeculativeSamplerOutput     sample_output;
+    bool                     contain_topp        = false;
+    bool                     force_stream_sample = device_->initParams().sp_config.force_stream_sample;
+    torch::Device            target_device       = device_->getTorchDevice();
+    SpeculativeSamplerOutput sample_output;
 
     for (const GenerateStreamPtr& stream : streams) {
         contain_topp |= !stream->generateConfig()->top1();
@@ -31,7 +29,7 @@ void SpeculativeSampler::updateSampleStream(SpeculativeExecutorStreamOutputPtr& 
                                             BufferPtr&                          accept_tokens,
                                             const GenerateStreamPtr&            stream) const {
 
-    std::shared_ptr<GenerateConfig>&          stream_config         = stream->generateConfig();
+    std::shared_ptr<GenerateConfig>& stream_config = stream->generateConfig();
 
     RTP_LLM_LOG_DEBUG("stream [%d], topk = [%d], topp = [%f], propose_token_num = [%d], accept_token_num = [%d]",
                       stream->streamId(),
@@ -71,23 +69,29 @@ void SpeculativeSampler::updateSampleStream(SpeculativeExecutorStreamOutputPtr& 
             hidden_states = score_stream_output->hidden_states;
         }
         RTP_LLM_LOG_DEBUG("sample hidden states: %s", hidden_states->debugStringMeta().c_str());
-
     }
     if (score_stream_output->loss) {
         loss = device_->clone({*score_stream_output->loss, rtp_llm::AllocationType::HOST, {"return_loss"}});
     }
 
     if (score_stream_output->softmax_probs) {
-        softmax_probs =
-            device_->allocateBuffer({rtp_llm::DataType::TYPE_FP32, {1, accept_len}, rtp_llm::AllocationType::HOST}, {"return_softmax_probs"});
+        softmax_probs = device_->allocateBuffer(
+            {rtp_llm::DataType::TYPE_FP32, {1, accept_len}, rtp_llm::AllocationType::HOST}, {"return_softmax_probs"});
         device_->copy(
             {(*softmax_probs)[0].view(0, accept_len), (*score_stream_output->softmax_probs)[0].view(0, accept_len)});
     }
 
-
     stream->step();
     stream->spStep();
-    StreamUpdateInfo update_info{std::move(accept_tokens), (int)accept_len, hidden_states, std::move(logits), std::move(softmax_probs), nullptr, nullptr, std::move(loss), hidden_states};
+    StreamUpdateInfo update_info{std::move(accept_tokens),
+                                 (int)accept_len,
+                                 hidden_states,
+                                 std::move(logits),
+                                 std::move(softmax_probs),
+                                 nullptr,
+                                 nullptr,
+                                 std::move(loss),
+                                 hidden_states};
 
     stream->update(update_info);
     stream->setReuseLength(stream->seqLength() - 1);
@@ -106,26 +110,30 @@ void SpeculativeSampler::streamSample(SpeculativeSamplerOutput&           sample
         }
         // size_t stream_id = stream->streamId();
         SpeculativeExecutorStreamOutputPtr propose_stream_output = stream->getProposeStream()->getSPOutputBuffer();
-        SpeculativeExecutorStreamOutputPtr score_stream_output  = stream->getScoreStream()->getSPOutputBuffer();
+        SpeculativeExecutorStreamOutputPtr score_stream_output   = stream->getScoreStream()->getSPOutputBuffer();
         if (propose_stream_output == nullptr || score_stream_output == nullptr) {
             continue;
         }
 
-        size_t propose_step = propose_stream_output->propose_step;
-        std::shared_ptr<GenerateConfig>&          stream_config         = stream->generateConfig();
-        size_t                                    accept_len          = 0;
+        size_t                           propose_step  = propose_stream_output->propose_step;
+        std::shared_ptr<GenerateConfig>& stream_config = stream->generateConfig();
+        size_t                           accept_len    = 0;
 
         if (propose_step == 0) {
             accept_len = 1;
         } else if (stream_config->top1() || propose_stream_output->all_probs == nullptr) {
-            accept_len = top1Sample(propose_step, propose_stream_output, score_stream_output, stream->forceSpAccept()).value();
+            accept_len =
+                top1Sample(propose_step, propose_stream_output, score_stream_output, stream->forceSpAccept()).value();
         } else {
             // TODO(xyz): catch exception for specified stream
-            auto status = stochasticSample(propose_step, propose_stream_output, score_stream_output, stream->forceSpAccept());
+            auto status =
+                stochasticSample(propose_step, propose_stream_output, score_stream_output, stream->forceSpAccept());
             if (status.ok()) {
                 accept_len = status.value();
             } else {
-                stream->setStopWithoutLock(ErrorCode::OUT_OF_VOCAB_RANGE, "Multinomial sum deviates too much from 1.0, there maybe exist nan in model output");
+                stream->setStopWithoutLock(
+                    ErrorCode::OUT_OF_VOCAB_RANGE,
+                    "Multinomial sum deviates too much from 1.0, there maybe exist nan in model output");
                 continue;
             }
         }
@@ -133,8 +141,8 @@ void SpeculativeSampler::streamSample(SpeculativeSamplerOutput&           sample
         sample_output.propose_token_num += propose_step;
         sample_output.accept_token_num += accept_len;
 
-        rtp_llm::BufferPtr accept_tokens =
-            device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {1, accept_len}, rtp_llm::AllocationType::HOST}, {"accept_tokens"});
+        rtp_llm::BufferPtr accept_tokens = device_->allocateBuffer(
+            {rtp_llm::DataType::TYPE_INT32, {1, accept_len}, rtp_llm::AllocationType::HOST}, {"accept_tokens"});
 
         memcpy(accept_tokens->data(), score_stream_output->tokens->data(), sizeof(int32_t) * accept_len);
 
@@ -170,7 +178,8 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
             continue;
         }
 
-        if (stream->generateConfig()->top1() == true || (propose_stream_output->propose_step > 0 && !propose_stream_output->all_probs)) {
+        if (stream->generateConfig()->top1() == true
+            || (propose_stream_output->propose_step > 0 && !propose_stream_output->all_probs)) {
             top1_sample_streams.push_back(stream);
         } else {
             sample_streams.push_back(stream);
@@ -200,13 +209,11 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
             num_speculate_tokens = propose_step;
         } else if (num_speculate_tokens != propose_step) {
             RTP_LLM_LOG_DEBUG("fallback to propose step since there is no same propose step %d %d",
-                             num_speculate_tokens,
-                             propose_step);
+                              num_speculate_tokens,
+                              propose_step);
             fallback_to_stream_sample = true;
             break;
         }
-
-        
 
         draft_probs_buffer_list.push_back(Buffer2torchTensor(propose_stream_output->all_probs, false));
         draft_token_ids_buffer_list.push_back(Buffer2torchTensor(propose_stream_output->tokens, false));
@@ -284,16 +291,16 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
 }
 
 absl::StatusOr<size_t> SpeculativeSampler::top1Sample(size_t                                    propose_step,
-                                    const SpeculativeExecutorStreamOutputPtr& propose_stream_output,
-                                    const SpeculativeExecutorStreamOutputPtr& score_stream_output,
-                                    bool force_accept) const {
+                                                      const SpeculativeExecutorStreamOutputPtr& propose_stream_output,
+                                                      const SpeculativeExecutorStreamOutputPtr& score_stream_output,
+                                                      bool                                      force_accept) const {
     size_t accept_len = 0;
     while (accept_len < propose_step) {
         if (force_accept) {
             int32_t propose_token_id = *propose_stream_output->tokens->dataWithOffset<int32_t>(accept_len);
             *score_stream_output->tokens->dataWithOffset<int32_t>(accept_len) = propose_token_id;
         } else if ((*propose_stream_output->tokens->dataWithOffset<int32_t>(accept_len))
-            != (*score_stream_output->tokens->dataWithOffset<int32_t>(accept_len))) {
+                   != (*score_stream_output->tokens->dataWithOffset<int32_t>(accept_len))) {
             break;
         }
         accept_len++;
@@ -301,15 +308,16 @@ absl::StatusOr<size_t> SpeculativeSampler::top1Sample(size_t                    
     return accept_len + 1;
 }
 
-absl::StatusOr<size_t> SpeculativeSampler::stochasticSample(size_t                                    propose_step,
-                                            const SpeculativeExecutorStreamOutputPtr& propose_stream_output,
-                                            const SpeculativeExecutorStreamOutputPtr& score_stream_output,
-                                            bool force_accept) const {
+absl::StatusOr<size_t>
+SpeculativeSampler::stochasticSample(size_t                                    propose_step,
+                                     const SpeculativeExecutorStreamOutputPtr& propose_stream_output,
+                                     const SpeculativeExecutorStreamOutputPtr& score_stream_output,
+                                     bool                                      force_accept) const {
 
-    torch::Tensor score_all_probs   = Buffer2torchTensor(score_stream_output->all_probs, false);
-    size_t score_vocab_size   = score_all_probs.size(1);
-    torch::Tensor propose_all_probs = Buffer2torchTensor(propose_stream_output->all_probs, false);
-    size_t propose_vocab_size = propose_all_probs.size(1);
+    torch::Tensor score_all_probs    = Buffer2torchTensor(score_stream_output->all_probs, false);
+    size_t        score_vocab_size   = score_all_probs.size(1);
+    torch::Tensor propose_all_probs  = Buffer2torchTensor(propose_stream_output->all_probs, false);
+    size_t        propose_vocab_size = propose_all_probs.size(1);
 
     if (propose_vocab_size > score_vocab_size) {
         propose_all_probs = propose_all_probs.narrow(1, 0, score_vocab_size);
@@ -319,36 +327,36 @@ absl::StatusOr<size_t> SpeculativeSampler::stochasticSample(size_t              
         propose_all_probs  = torch::cat({propose_all_probs, zeros_padding}, 1);
     }
 
-    torch::Device host_device = torch::Device(torch::kCPU);
+    torch::Device host_device   = torch::Device(torch::kCPU);
     torch::Device target_device = device_->getTorchDevice();
 
-    torch::Tensor randoms      = torch::rand({(long)propose_step}, torch::Device(host_device)).to(torch::kFloat);
-    size_t        accept_len = 0;
-    torch::Tensor row_indices  = torch::arange((long)propose_step, torch::Device(target_device)).to(torch::kInt32);
-    torch::Tensor col_indices  = torch::from_blob(propose_stream_output->tokens->dataWithOffset<int32_t>(0),
-                                                    {(long)propose_step},
-                                                    torch::kInt32)
-                                    .to(torch::Device(target_device));
+    torch::Tensor randoms     = torch::rand({(long)propose_step}, torch::Device(host_device)).to(torch::kFloat);
+    size_t        accept_len  = 0;
+    torch::Tensor row_indices = torch::arange((long)propose_step, torch::Device(target_device)).to(torch::kInt32);
+    torch::Tensor col_indices =
+        torch::from_blob(propose_stream_output->tokens->dataWithOffset<int32_t>(0), {(long)propose_step}, torch::kInt32)
+            .to(torch::Device(target_device));
 
     torch::Tensor score_probs   = score_all_probs.index({row_indices, col_indices}).to(torch::Device(host_device));
     torch::Tensor propose_probs = propose_all_probs.index({row_indices, col_indices}).to(torch::Device(host_device));
     propose_probs = propose_probs.maximum(torch::full_like(propose_probs, 1e-7).to(torch::Device(host_device)));
-    torch::Tensor div_probs     = score_probs.div(propose_probs);
+    torch::Tensor div_probs = score_probs.div(propose_probs);
 
     while (accept_len < propose_step) {
         int32_t propose_token_id = *propose_stream_output->tokens->dataWithOffset<int32_t>(accept_len);
         if (randoms[accept_len].greater(div_probs[accept_len]).item<bool>() && !force_accept) {
             auto new_p = score_all_probs[accept_len]
-                                .subtract(propose_all_probs[accept_len])
-                                .maximum(torch::zeros_like(score_all_probs[accept_len], torch::Device(target_device)));
-            auto norm_p                                                          = new_p.div(new_p.sum(0));
+                             .subtract(propose_all_probs[accept_len])
+                             .maximum(torch::zeros_like(score_all_probs[accept_len], torch::Device(target_device)));
+            auto        norm_p    = new_p.div(new_p.sum(0));
             const float threshold = 0.01f;
-            auto check_sum = norm_p.sum(0).item<float>();
+            auto        check_sum = norm_p.sum(0).item<float>();
             if (std::isnan(check_sum) || std::isinf(check_sum) || (std::fabs(check_sum - 1.0f) > threshold)) {
-                return absl::StatusOr<float>(absl::InvalidArgumentError("Multinomial sum deviates too much from 1.0, there maybe exist nan in model output"));
+                return absl::StatusOr<float>(absl::InvalidArgumentError(
+                    "Multinomial sum deviates too much from 1.0, there maybe exist nan in model output"));
             }
 
-            auto new_token_tensor                                                = norm_p.multinomial(1);
+            auto new_token_tensor                                             = norm_p.multinomial(1);
             *score_stream_output->tokens->dataWithOffset<int32_t>(accept_len) = new_token_tensor.item<int32_t>();
             break;
         }
@@ -358,4 +366,4 @@ absl::StatusOr<size_t> SpeculativeSampler::stochasticSample(size_t              
     return accept_len + 1;
 }
 
-};
+};  // namespace rtp_llm

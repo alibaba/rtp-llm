@@ -46,10 +46,10 @@ protected:
                    const bool    per_column_scaling);
 
 public:
-    hipblasMMWrapper(hipblasHandle_t   hipblas_handle_,
-                     hipblasLtHandle_t hipblaslt_handle_,
-                     hipStream_t       stream,
-                     IAllocator*       allocator,
+    hipblasMMWrapper(hipblasHandle_t       hipblas_handle_,
+                     hipblasLtHandle_t     hipblaslt_handle_,
+                     hipStream_t           stream,
+                     IAllocator*           allocator,
                      const HWKernelConfig& hw_kernel_config);
 
     ~hipblasMMWrapper();
@@ -67,20 +67,20 @@ public:
               void*              C,
               const int          ldc,
               float              alpha_ = float(1.0f),
-              float              beta_ = float(0.0f));
+              float              beta_  = float(0.0f));
 
-    void GemmBiasAct(hipblasOperation_t transa,
-                     hipblasOperation_t transb,
-                     const int          m,
-                     const int          n,
-                     const int          k,
-                     const void*        A,
-                     const int          lda,
-                     const void*        B,
-                     const int          ldb,
-                     void*              C,
-                     const int          ldc,
-                     const void*        bias,
+    void GemmBiasAct(hipblasOperation_t        transa,
+                     hipblasOperation_t        transb,
+                     const int                 m,
+                     const int                 n,
+                     const int                 k,
+                     const void*               A,
+                     const int                 lda,
+                     const void*               B,
+                     const int                 ldb,
+                     void*                     C,
+                     const int                 ldc,
+                     const void*               bias,
                      const hipblasLtEpilogue_t epilogue);
 
     void setFP32GemmConfig();
@@ -88,12 +88,9 @@ public:
 #ifdef ENABLE_BF16
     void setBF16GemmConfig();
 #endif
-    void setGemmConfig(hipDataType aType,
-                       hipDataType bType,
-                       hipDataType cType,
-                       hipDataType computeType);
+    void setGemmConfig(hipDataType aType, hipDataType bType, hipDataType cType, hipDataType computeType);
 
-    hipblasDatatype_t getHipBlasDataType(hipDataType data_type);
+    hipblasDatatype_t    getHipBlasDataType(hipDataType data_type);
     hipblasComputeType_t getHipblasLtComputeType(hipDataType data_type);
 
     void stridedBatchedGemm(hipblasOperation_t transa,

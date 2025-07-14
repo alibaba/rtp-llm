@@ -3,6 +3,4 @@ class FrontendWorker(object):
         pass
 
     def inference(self):
-        return {
-            "resposne": "hello"
-        }
+        return {"resposne": "hello"}

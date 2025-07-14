@@ -22,11 +22,12 @@ class LocalRpcServer {
 public:
     LocalRpcServer() {}
     virtual ~LocalRpcServer() {}
-    virtual grpc::Status init(const EngineInitParams& maga_init_params, py::object mm_process_engine,
+    virtual grpc::Status init(const EngineInitParams&                                maga_init_params,
+                              py::object                                             mm_process_engine,
                               std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params);
-    grpc::Status GenerateStreamCall(grpc::ServerContext*                   context,
-                                    const GenerateInputPB*                 request,
-                                    grpc::ServerWriter<GenerateOutputsPB>* writer);
+    grpc::Status         GenerateStreamCall(grpc::ServerContext*                   context,
+                                            const GenerateInputPB*                 request,
+                                            grpc::ServerWriter<GenerateOutputsPB>* writer);
 
     ::grpc::Status RemoteGetCache(::grpc::ServerContext*              context,
                                   const ::BroadcastGetCacheRequestPB* request,
@@ -38,14 +39,18 @@ public:
 
     LoadBalanceInfo getLoadBalanceInfo();
 
-    void addLora(const std::string& adapter_name,
+    void addLora(const std::string&                        adapter_name,
                  const rtp_llm::lora::loraLayerWeightsMap& lora_a_weights,
                  const rtp_llm::lora::loraLayerWeightsMap& lora_b_weights);
 
     void removeLora(const std::string& adapter_name);
 
-    std::shared_ptr<EngineBase> getEngine() const { return engine_; }
-    std::shared_ptr<MultimodalProcessor> getMultimodalProcessor() const { return mm_processor_; }
+    std::shared_ptr<EngineBase> getEngine() const {
+        return engine_;
+    }
+    std::shared_ptr<MultimodalProcessor> getMultimodalProcessor() const {
+        return mm_processor_;
+    }
 
     int64_t tpSize() const {
         return maga_init_params_.gpt_init_parameter.tp_size_;
@@ -70,18 +75,18 @@ public:
 
 protected:
     grpc::Status serializeErrorMsg(const std::string& request_key, ErrorInfo error_info);
-    grpc::Status pollStreamOutput(grpc::ServerContext*              context,
-                                  const std::string&                request_key,
-                                  WriterInterface*                  writer,
-                                  std::shared_ptr<GenerateStream>&  stream);
+    grpc::Status pollStreamOutput(grpc::ServerContext*             context,
+                                  const std::string&               request_key,
+                                  WriterInterface*                 writer,
+                                  std::shared_ptr<GenerateStream>& stream);
 
 protected:
-    std::shared_ptr<EngineBase>             engine_;
-    std::shared_ptr<MultimodalProcessor>    mm_processor_;
-    EngineInitParams                        maga_init_params_;
-    ProposeModelEngineInitParams*           propose_maga_init_params_;
-    kmonitor::MetricsReporterPtr            metrics_reporter_;
-    std::atomic<size_t>                     onflight_requests_{0};
+    std::shared_ptr<EngineBase>          engine_;
+    std::shared_ptr<MultimodalProcessor> mm_processor_;
+    EngineInitParams                     maga_init_params_;
+    ProposeModelEngineInitParams*        propose_maga_init_params_;
+    kmonitor::MetricsReporterPtr         metrics_reporter_;
+    std::atomic<size_t>                  onflight_requests_{0};
 };
 
 }  // namespace rtp_llm

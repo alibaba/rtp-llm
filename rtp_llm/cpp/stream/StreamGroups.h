@@ -9,8 +9,6 @@
 #include <optional>
 #include <string>
 
-
-
 namespace rtp_llm {
 
 struct StreamGroups {
@@ -21,7 +19,7 @@ public:
                 context_streams_.push_back(stream);
                 total_context_batch_size_ += stream->batchSize();
                 max_context_seq_len_ = std::max(max_context_seq_len_, (size_t)stream->contextLength());
-                max_reuse_length_ = std::max(max_reuse_length_, (size_t)stream->reuseLength());
+                max_reuse_length_    = std::max(max_reuse_length_, (size_t)stream->reuseLength());
                 cum_context_seq_len_ += (size_t)stream->contextLength();
                 multimodal_features_len_ += stream->multimodalFeaturesLength();
                 if (!has_multimodal_input_ && multimodal_features_len_ > 0) {
@@ -29,21 +27,20 @@ public:
                 }
             } else {
                 decode_streams_.push_back(stream);
-                total_decode_batch_size_  += stream->batchSize();
+                total_decode_batch_size_ += stream->batchSize();
                 if (!has_multimodal_input_ && stream->multimodalFeaturesLength() > 0) {
                     has_multimodal_input_ = true;
                 }
             }
-            model_execute_token_size_ += stream->currentExecuteTokenSize();            
+            model_execute_token_size_ += stream->currentExecuteTokenSize();
             total_sampler_batch_size_ += stream->tileNum();
             max_block_size_ = std::max(max_block_size_, stream->maxBlockSize());
             max_seq_len_    = std::max(max_seq_len_, (size_t)stream->seqLength());
-            total_score_batch_size_   += stream->scoreLen();
+            total_score_batch_size_ += stream->scoreLen();
             adapter_names.push_back(stream->adapterName());
             gen_timeline_ |= stream->genTimeline();
         }
     }
-
 
     size_t totalDecodeBatchSize() const {
         return total_decode_batch_size_;

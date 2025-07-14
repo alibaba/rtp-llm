@@ -7,8 +7,9 @@ namespace rtp_llm_master {
 class LookupConfig: public autil::legacy::Jsonizable {
     void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override {
         json.Jsonize("machine_info", machine_info);
-        json.Jsonize("config_path", config_path);        
+        json.Jsonize("config_path", config_path);
     }
+
 public:
     std::string machine_info;
     std::string config_path;

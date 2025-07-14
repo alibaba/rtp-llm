@@ -3,11 +3,11 @@
 namespace http_server {
 AUTIL_LOG_SETUP(http_server, ANetApp);
 
-ANetApp::ANetApp(anet::Transport *transport) : _streamer(&_factory) {
+ANetApp::ANetApp(anet::Transport* transport): _streamer(&_factory) {
     _ownTransport = false;
 
     if (transport == NULL) {
-        _transport = new anet::Transport();
+        _transport    = new anet::Transport();
         _ownTransport = true;
     } else {
         _transport = transport;
@@ -22,8 +22,8 @@ ANetApp::~ANetApp() {
     }
 }
 
-anet::IOComponent *ANetApp::Listen(
-    const std::string &address, anet::IServerAdapter *serverAdapter, int timeout, int maxIdleTime, int backlog) {
+anet::IOComponent* ANetApp::Listen(
+    const std::string& address, anet::IServerAdapter* serverAdapter, int timeout, int maxIdleTime, int backlog) {
     return _transport->listen(address.c_str(), &_streamer, serverAdapter, timeout, maxIdleTime, backlog);
 }
 
@@ -46,4 +46,4 @@ bool ANetApp::StopPrivateTransport() {
     return true;
 }
 
-} // namespace http_server
+}  // namespace http_server

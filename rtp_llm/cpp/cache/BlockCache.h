@@ -13,12 +13,12 @@
 namespace rtp_llm {
 
 struct CacheItem {
-    std::vector<int32_t>    token_list;
-    std::vector<int32_t>    block_indices;
-    std::vector<int64_t>    cache_key;
-    std::vector<float>      loss;
-    bool                    is_resident = false;
-    size_t                  item_key;
+    std::vector<int32_t> token_list;
+    std::vector<int32_t> block_indices;
+    std::vector<int64_t> cache_key;
+    std::vector<float>   loss;
+    bool                 is_resident = false;
+    size_t               item_key;
 };
 
 const size_t kCacheMaxCapacity = 1000000;
@@ -26,8 +26,8 @@ const size_t kCacheMaxCapacity = 1000000;
 class BlockCache {
 public:
     struct MatchResult {
-        size_t matched_len = 0;
-        std::vector<int> block_indices;
+        size_t             matched_len = 0;
+        std::vector<int>   block_indices;
         std::vector<float> loss;
     };
 
@@ -56,10 +56,10 @@ private:
     bool hasHashKey(size_t item_key) const;
 
 private:
-    mutable LRUCache<size_t, CacheItem> lru_cache_;
-    mutable std::mutex mutex_;
+    mutable LRUCache<size_t, CacheItem>  lru_cache_;
+    mutable std::mutex                   mutex_;
     mutable std::unordered_map<int, int> hold_blocks_;
-    mutable int total_hold_blocks_ = 0;
+    mutable int                          total_hold_blocks_ = 0;
 };
 
 }  // namespace rtp_llm

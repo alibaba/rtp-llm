@@ -3,21 +3,22 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
-from collections import OrderedDict
 import math
-import requests
-from io import BytesIO
+from collections import OrderedDict
 from functools import partial
-from PIL import Image
-from typing import Callable, Optional, Sequence, Tuple, List, Union
-import numpy as np
+from io import BytesIO
+from typing import Callable, List, Optional, Sequence, Tuple, Union
 
+import numpy as np
+import requests
 import torch
+from PIL import Image
 from torch import nn
 from torch.nn import functional as F
 from torch.nn.init import trunc_normal_
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
+
 
 def get_abs_pos(abs_pos, tgt_size):
     # abs_pos: L, C
@@ -27,12 +28,17 @@ def get_abs_pos(abs_pos, tgt_size):
     # tgt_size = int(math.sqrt(tgt_size))
     dtype = abs_pos.dtype
 
-    return F.interpolate(
-        abs_pos.float().reshape(1, src_size, src_size, -1).permute(0, 3, 1, 2),
-        size=(tgt_size[0], tgt_size[1]),
-        mode="bicubic",
-        align_corners=False,
-    ).permute(0, 2, 3, 1).flatten(0, 2).to(dtype=dtype)
+    return (
+        F.interpolate(
+            abs_pos.float().reshape(1, src_size, src_size, -1).permute(0, 3, 1, 2),
+            size=(tgt_size[0], tgt_size[1]),
+            mode="bicubic",
+            align_corners=False,
+        )
+        .permute(0, 2, 3, 1)
+        .flatten(0, 2)
+        .to(dtype=dtype)
+    )
 
 
 # https://github.com/facebookresearch/mae/blob/efb2a8062c206524e35e47d04501ed4f544c0ae8/util/pos_embed.py#L20
@@ -78,11 +84,11 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
     """
     assert embed_dim % 2 == 0
     omega = np.arange(embed_dim // 2, dtype=np.float32)
-    omega /= embed_dim / 2.
-    omega = 1. / 10000 ** omega  # (D/2,)
+    omega /= embed_dim / 2.0
+    omega = 1.0 / 10000**omega  # (D/2,)
 
     pos = pos.reshape(-1)  # (M,)
-    out = np.einsum('m,d->md', pos, omega)  # (M, D/2), outer product
+    out = np.einsum("m,d->md", pos, omega)  # (M, D/2), outer product
 
     emb_sin = np.sin(out)  # (M, D/2)
     emb_cos = np.cos(out)  # (M, D/2)
@@ -100,16 +106,16 @@ class Resampler(nn.Module):
     """
 
     def __init__(
-            self,
-            grid_size,
-            embed_dim,
-            num_heads,
-            kv_dim=None,
-            norm_layer=partial(nn.LayerNorm, eps=1e-6),
-            adaptive=False
+        self,
+        grid_size,
+        embed_dim,
+        num_heads,
+        kv_dim=None,
+        norm_layer=partial(nn.LayerNorm, eps=1e-6),
+        adaptive=False,
     ):
         super().__init__()
-        self.num_queries = grid_size ** 2
+        self.num_queries = grid_size**2
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.adaptive = adaptive
@@ -119,7 +125,7 @@ class Resampler(nn.Module):
         ).requires_grad_(False)
 
         self.query = nn.Parameter(torch.zeros(self.num_queries, embed_dim))
-        trunc_normal_(self.query, std=.02)
+        trunc_normal_(self.query, std=0.02)
 
         if kv_dim is not None and kv_dim != embed_dim:
             self.kv_proj = nn.Linear(kv_dim, embed_dim, bias=False)
@@ -131,13 +137,13 @@ class Resampler(nn.Module):
         self.ln_kv = norm_layer(embed_dim)
 
         self.ln_post = norm_layer(embed_dim)
-        self.proj = nn.Parameter((embed_dim ** -0.5) * torch.randn(embed_dim, embed_dim))
+        self.proj = nn.Parameter((embed_dim**-0.5) * torch.randn(embed_dim, embed_dim))
 
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
-            trunc_normal_(m.weight, std=.02)
+            trunc_normal_(m.weight, std=0.02)
             if isinstance(m, nn.Linear) and m.bias is not None:
                 nn.init.constant_(m.bias, 0)
         elif isinstance(m, nn.LayerNorm):
@@ -148,7 +154,11 @@ class Resampler(nn.Module):
         if self.adaptive:
             # print("adaptive")
             # raise Exception
-            pos_embed = torch.Tensor(get_2d_sincos_pos_embed(self.embed_dim, tgt_size)).float().to(device=x.device, dtype=x.dtype)
+            pos_embed = (
+                torch.Tensor(get_2d_sincos_pos_embed(self.embed_dim, tgt_size))
+                .float()
+                .to(device=x.device, dtype=x.dtype)
+            )
         else:
             pos_embed = get_abs_pos(self.pos_embed, tgt_size)
 
@@ -161,7 +171,8 @@ class Resampler(nn.Module):
             self._repeat(q, N) + self.pos_embed.unsqueeze(1),
             x + pos_embed.unsqueeze(1),
             x,
-            attn_mask=attn_mask)[0]
+            attn_mask=attn_mask,
+        )[0]
         x = out.permute(1, 0, 2)
 
         x = self.ln_post(x)

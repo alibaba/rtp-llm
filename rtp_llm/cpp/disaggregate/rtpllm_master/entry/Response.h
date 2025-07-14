@@ -41,7 +41,7 @@ public:
     int         input_length;
     int64_t     request_id;
     int64_t     expect_execute_time_ms;
-    int64_t expect_wait_time_ms;
+    int64_t     expect_wait_time_ms;
     int64_t     tokenize_cost_time_ms;
     int64_t     estimate_cost_time_ms;
     std::string machine_info;

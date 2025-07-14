@@ -1,25 +1,38 @@
 import copy
 import json
-import re
 import logging
 import os
-from typing import Optional, List, Dict, Any, Union, Callable, Tuple, AsyncGenerator
+import re
+from dataclasses import dataclass
 from enum import Enum, auto
-from rtp_llm.config.py_config_modules import StaticConfig
+from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple, Union
+
 from transformers import PreTrainedTokenizerBase
 
-from dataclasses import dataclass
-
-from rtp_llm.openai.api_datatype import ChatMessage, GPTFunctionDefinition, \
-    ChatCompletionRequest, RoleEnum, FunctionCall
-from rtp_llm.openai.renderers.custom_renderer import CustomChatRenderer, RendererParams, \
-    StreamResponseObject, RenderedInputs
-from rtp_llm.openai.renderers.basic_renderer import BasicRenderer, PromptWithMMInput
-from rtp_llm.openai.api_datatype import ChatMessage, GPTFunctionDefinition, RoleEnum, \
-    ChatCompletionRequest, ChatCompletionResponseStreamChoice, DeltaMessage, FinisheReason, UsageInfo, \
-    ContentPart, ContentPartTypeEnum
+from rtp_llm.config.py_config_modules import StaticConfig
+from rtp_llm.openai.api_datatype import (
+    ChatCompletionRequest,
+    ChatCompletionResponseStreamChoice,
+    ChatMessage,
+    ContentPart,
+    ContentPartTypeEnum,
+    DeltaMessage,
+    FinisheReason,
+    FunctionCall,
+    GPTFunctionDefinition,
+    RoleEnum,
+    UsageInfo,
+)
 from rtp_llm.openai.renderer_factory_register import register_renderer
-from rtp_llm.utils.multimodal_util import MMUrlType, MMPreprocessConfig
+from rtp_llm.openai.renderers.basic_renderer import BasicRenderer, PromptWithMMInput
+from rtp_llm.openai.renderers.custom_renderer import (
+    CustomChatRenderer,
+    RenderedInputs,
+    RendererParams,
+    StreamResponseObject,
+)
+from rtp_llm.utils.multimodal_util import MMPreprocessConfig, MMUrlType
+
 
 class SeparatorStyle(Enum):
     SINGLE = auto()
@@ -34,16 +47,20 @@ class Conversation:
     sep_style: SeparatorStyle
     seps: List[str]
     connector: List[str]
-    image_sep: str = '<image>\n'
+    image_sep: str = "<image>\n"
 
-    def render_messages(self, messages: List[ChatMessage], tokenizer) -> PromptWithMMInput:
+    def render_messages(
+        self, messages: List[ChatMessage], tokenizer
+    ) -> PromptWithMMInput:
         prompt: str = ""
         images: List[str] = []
         mm_types: List[MMUrlType] = []
         preprocess_configs: List[MMPreprocessConfig] = []
 
         if self.sep_style == SeparatorStyle.LLAMA_3:
-            chat_template_messages = [{"role": "system", "content": self.system_content}]
+            chat_template_messages = [
+                {"role": "system", "content": self.system_content}
+            ]
             for message in messages:
                 role = self.roles[message.role]
                 content = message.content
@@ -53,50 +70,63 @@ class Conversation:
                     now_prompt = ""
                     for content_part in content:
                         if content_part.type == ContentPartTypeEnum.text:
-                            assert (isinstance(content_part.text, str))
+                            assert isinstance(content_part.text, str)
                             now_prompt += content_part.text
                         elif content_part.type == ContentPartTypeEnum.image_url:
-                            assert (content_part.image_url != None)
+                            assert content_part.image_url != None
                             images.append(content_part.image_url.url)
                             mm_types.append(MMUrlType.IMAGE)
                             now_prompt = f"<image>\n" + now_prompt
                     chat_template_messages.append({"role": role, "content": now_prompt})
 
-            return PromptWithMMInput(tokenizer.apply_chat_template(chat_template_messages, tokenize=False, add_generation_prompt=True),
-                                    images, mm_types)
+            return PromptWithMMInput(
+                tokenizer.apply_chat_template(
+                    chat_template_messages, tokenize=False, add_generation_prompt=True
+                ),
+                images,
+                mm_types,
+            )
 
         def get_preprocess_config(config):
-            return MMPreprocessConfig(width=config.resized_width or -1,
-                                      height=config.resized_height or -1,
-                                      fps=config.fps or -1,
-                                      min_frames=config.min_frames or -1,
-                                      max_frames=config.max_frames or -1)
+            return MMPreprocessConfig(
+                width=config.resized_width or -1,
+                height=config.resized_height or -1,
+                fps=config.fps or -1,
+                min_frames=config.min_frames or -1,
+                max_frames=config.max_frames or -1,
+            )
 
         if messages[0].role != RoleEnum.system:
             prompt = self.system_content + prompt + self.seps[0]
 
         for index, message in enumerate(messages):
             if isinstance(message.content, str):
-                prompt += f"{self.roles[message.role]}{self.connector[0]}{message.content}"
+                prompt += (
+                    f"{self.roles[message.role]}{self.connector[0]}{message.content}"
+                )
             elif isinstance(message.content, list):
                 now_prompt = ""
                 for content_part in message.content:
                     if content_part.type == ContentPartTypeEnum.text:
-                        assert (isinstance(content_part.text, str))
+                        assert isinstance(content_part.text, str)
                         now_prompt += content_part.text
                     elif content_part.type == ContentPartTypeEnum.image_url:
-                        assert (content_part.image_url != None)
+                        assert content_part.image_url != None
                         images.append(content_part.image_url.url)
                         mm_types.append(MMUrlType.IMAGE)
                         if content_part.preprocess_config:
-                            preprocess_configs.append(get_preprocess_config(content_part.preprocess_config))
+                            preprocess_configs.append(
+                                get_preprocess_config(content_part.preprocess_config)
+                            )
                         now_prompt = now_prompt + self.image_sep
                     elif content_part.type == ContentPartTypeEnum.video_url:
-                        assert (content_part.video_url != None)
+                        assert content_part.video_url != None
                         images.append(content_part.video_url.url)
                         mm_types.append(MMUrlType.VIDEO)
                         if content_part.preprocess_config:
-                            preprocess_configs.append(get_preprocess_config(content_part.preprocess_config))
+                            preprocess_configs.append(
+                                get_preprocess_config(content_part.preprocess_config)
+                            )
                         now_prompt = now_prompt + self.image_sep
                 prompt += f"{self.roles[message.role]}" + self.connector[0] + now_prompt
             if self.sep_style == SeparatorStyle.TWO:
@@ -106,47 +136,67 @@ class Conversation:
         prompt += self.roles[RoleEnum.assistant] + self.connector[1]
         return PromptWithMMInput(prompt, images, mm_types)
 
+
 conv_llava_v0 = Conversation(
     system_content="A chat between a curious human and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the human's questions.",
-    roles={RoleEnum.user: "Human", RoleEnum.assistant: "Assistant", RoleEnum.system: "System"},
+    roles={
+        RoleEnum.user: "Human",
+        RoleEnum.assistant: "Assistant",
+        RoleEnum.system: "System",
+    },
     sep_style=SeparatorStyle.SINGLE,
     seps=["###"],
-    connector=[": ", ":"]
+    connector=[": ", ":"],
 )
 
 conv_llava_v1 = Conversation(
     system_content="A chat between a curious human and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the human's questions.",
-    roles={RoleEnum.user: "USER", RoleEnum.assistant: "ASSISTANT", RoleEnum.system: "SYSTEM"},
+    roles={
+        RoleEnum.user: "USER",
+        RoleEnum.assistant: "ASSISTANT",
+        RoleEnum.system: "SYSTEM",
+    },
     sep_style=SeparatorStyle.TWO,
     seps=[" ", "</s>"],
-    connector=[": ", ":"]
+    connector=[": ", ":"],
 )
 
 conv_llava_llama = Conversation(
     system_content="You are a helpful language and vision assistant. You are able to understand the visual content that the user provides, and assist the user with a variety of tasks using natural language.",
-    roles={RoleEnum.user: "<|start_header_id|>user", RoleEnum.assistant: "<|start_header_id|>assistant", RoleEnum.system: "<|start_header_id|>system"},
+    roles={
+        RoleEnum.user: "<|start_header_id|>user",
+        RoleEnum.assistant: "<|start_header_id|>assistant",
+        RoleEnum.system: "<|start_header_id|>system",
+    },
     sep_style=SeparatorStyle.LLAMA_3,
     seps=[""],
-    connector=[": ", ":"]
+    connector=[": ", ":"],
 )
 
 conv_qwen = Conversation(
     system_content="<|im_start|>system\nYou are a helpful assistant.",
-    roles={RoleEnum.user: "<|im_start|>user", RoleEnum.assistant: "<|im_start|>assistant", RoleEnum.system: "<|im_start|>system"},
+    roles={
+        RoleEnum.user: "<|im_start|>user",
+        RoleEnum.assistant: "<|im_start|>assistant",
+        RoleEnum.system: "<|im_start|>system",
+    },
     sep_style=SeparatorStyle.SINGLE,
     seps=["<|im_end|>\n"],
-    connector=["\n", "\n"]
+    connector=["\n", "\n"],
 )
 
 conv_templates = {
     "llava_v0": conv_llava_v0,
     "llava_v1": conv_llava_v1,
     "llava_llama3": conv_llava_llama,
-    "llava_qwen": conv_qwen
+    "llava_qwen": conv_qwen,
 }
 
+
 class LlavaRenderer(CustomChatRenderer):
-    def __init__(self, tokenizer: PreTrainedTokenizerBase, renderer_params: RendererParams):
+    def __init__(
+        self, tokenizer: PreTrainedTokenizerBase, renderer_params: RendererParams
+    ):
         super().__init__(tokenizer, renderer_params)
 
     def _get_conv_template(self, model_name: str) -> Conversation:
@@ -162,10 +212,14 @@ class LlavaRenderer(CustomChatRenderer):
 
     def _render_messages(self, messages: List[ChatMessage]) -> PromptWithMMInput:
         ckpt_path: str = StaticConfig.model_config.checkpoint_path
-        model_name: str = ckpt_path.split('?')[0] # oss style path
-        model_name = model_name.strip('/').split('/')[-1]
-        llava_template_env: str = os.environ.get('LLAVA_CHAT_TEMPLATE', '')
-        conv_template = self._get_conv_template(model_name) if llava_template_env == '' else self._get_conv_template(llava_template_env)
+        model_name: str = ckpt_path.split("?")[0]  # oss style path
+        model_name = model_name.strip("/").split("/")[-1]
+        llava_template_env: str = os.environ.get("LLAVA_CHAT_TEMPLATE", "")
+        conv_template = (
+            self._get_conv_template(model_name)
+            if llava_template_env == ""
+            else self._get_conv_template(llava_template_env)
+        )
 
         return conv_template.render_messages(messages, self.tokenizer)
 
@@ -173,6 +227,13 @@ class LlavaRenderer(CustomChatRenderer):
         messages = copy.deepcopy(request.messages)
         prompt_and_mm_input = self._render_messages(messages)
         input_ids = self.tokenizer.encode(prompt_and_mm_input.prompt)
-        return RenderedInputs(input_ids=input_ids, input_urls=prompt_and_mm_input.urls, rendered_prompt=prompt_and_mm_input.prompt, input_urls_type=prompt_and_mm_input.mm_types, preprocess_configs=prompt_and_mm_input.preprocess_configs)
+        return RenderedInputs(
+            input_ids=input_ids,
+            input_urls=prompt_and_mm_input.urls,
+            rendered_prompt=prompt_and_mm_input.prompt,
+            input_urls_type=prompt_and_mm_input.mm_types,
+            preprocess_configs=prompt_and_mm_input.preprocess_configs,
+        )
 
-register_renderer('llava', LlavaRenderer)
+
+register_renderer("llava", LlavaRenderer)

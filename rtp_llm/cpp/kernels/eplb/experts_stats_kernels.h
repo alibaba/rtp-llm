@@ -3,8 +3,8 @@
 
 namespace rtp_llm {
 
-template <typename T>
-void launch_equal_expert_balance(T*         experts_ids,
+template<typename T>
+void launch_equal_expert_balance(T*           experts_ids,
                                  int*         log_stats,
                                  const int*   log2phy,
                                  const int*   logic_expert_cnt,

@@ -1,56 +1,65 @@
-import os
-import orjson
-import json
-import time
+import asyncio
 import copy
+import functools
+import json
 import logging
 import logging.config
-import traceback
-from typing import Union, Any, Dict, Callable
-from pydantic import BaseModel
-from fastapi.responses import StreamingResponse, ORJSONResponse
-from fastapi import Request
-from rtp_llm.config.py_config_modules import PyEnvConfigs
-import torch
-import asyncio
-import functools
+import os
 import threading
+import time
+import traceback
+from typing import Any, Callable, Dict, Union
 
+import orjson
+import torch
+from fastapi import Request
 from fastapi import Request as RawRequest
-from rtp_llm.ops import LoadBalanceInfo, EngineScheduleInfo
+from fastapi.responses import ORJSONResponse, StreamingResponse
+from pydantic import BaseModel
+
+from rtp_llm.access_logger.access_logger import AccessLogger
+from rtp_llm.async_decoder_engine.backend_rpc_server_visitor import (
+    BackendRPCServerVisitor,
+)
+from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.config.task_type import TaskType
+from rtp_llm.distribute.gang_server import GangServer
+from rtp_llm.distribute.worker_info import g_parallel_info
+from rtp_llm.embedding.embedding_endpoint import EmbeddingEndpoint
+from rtp_llm.lora.lora_manager import LoraManager
+from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
+from rtp_llm.model_factory import AsyncModel, ModelFactory
+from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
+from rtp_llm.ops import EngineScheduleInfo, LoadBalanceInfo
+from rtp_llm.server.misc import format_exception
+from rtp_llm.structure.request_extractor import request_id_field_name
+from rtp_llm.utils.concurrency_controller import (
+    ConcurrencyController,
+    ConcurrencyException,
+    get_global_controller,
+)
+from rtp_llm.utils.fuser import _nfs_manager
 from rtp_llm.utils.time_util import Timer, current_time_ms
 from rtp_llm.utils.util import AtomicCounter, check_with_info
-from rtp_llm.metrics import kmonitor, AccMetrics, GaugeMetrics
-from rtp_llm.distribute.worker_info import g_parallel_info
-from rtp_llm.distribute.gang_server import GangServer
-from rtp_llm.utils.concurrency_controller import ConcurrencyController, ConcurrencyException
 from rtp_llm.utils.version_info import VersionInfo
-from rtp_llm.access_logger.access_logger import AccessLogger
-from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
-from rtp_llm.embedding.embedding_endpoint import EmbeddingEndpoint
-from rtp_llm.server.misc import format_exception
-from rtp_llm.config.task_type import TaskType
-from rtp_llm.structure.request_extractor import request_id_field_name
-from rtp_llm.lora.lora_manager import LoraManager
-from rtp_llm.model_factory import AsyncModel
-from rtp_llm.model_factory import ModelFactory
-from rtp_llm.utils.fuser import _nfs_manager
-from rtp_llm.async_decoder_engine.backend_rpc_server_visitor import BackendRPCServerVisitor
-from rtp_llm.utils.concurrency_controller import ConcurrencyException, get_global_controller
 
 StreamObjectType = Union[Dict[str, Any], BaseModel]
 
 USAGE_HEADER = "USAGE"
 
+
 class BackendServer(object):
     def __init__(self, py_env_configs: PyEnvConfigs):
-        if 'LOAD_CKPT_NUM_PROCESS' not in os.environ:
-            os.environ['LOAD_CKPT_NUM_PROCESS'] = '0'
+        if "LOAD_CKPT_NUM_PROCESS" not in os.environ:
+            os.environ["LOAD_CKPT_NUM_PROCESS"] = "0"
         if torch.cuda.is_available():
-            if 'NCCL_P2P_DISABLE' not in os.environ and 'RTX' in torch.cuda.get_device_name(0):
-                os.environ['NCCL_P2P_DISABLE'] = '1'
+            if (
+                "NCCL_P2P_DISABLE" not in os.environ
+                and "RTX" in torch.cuda.get_device_name(0)
+            ):
+                os.environ["NCCL_P2P_DISABLE"] = "1"
         else:
-            os.environ['NCCL_P2P_DISABLE'] = '1'
+            os.environ["NCCL_P2P_DISABLE"] = "1"
         self._access_logger = AccessLogger()
         self._gang_server = GangServer()
         self._openai_endpoint = None
@@ -67,27 +76,34 @@ class BackendServer(object):
 
     def start(self, py_env_configs: PyEnvConfigs):
         self._gang_server.start(py_env_configs)
-        if os.environ.get('DEBUG_START_FAKE_PROCESS', None) is not None:
+        if os.environ.get("DEBUG_START_FAKE_PROCESS", None) is not None:
             # for debug online
             logging.info("DEBUG_START_FAKE_PROCESS is set, start fake backend server")
         else:
             self.model: AsyncModel = ModelFactory.create_from_env()
-            if self.model is not None and self.model.task_type != TaskType.LANGUAGE_MODEL:
+            if (
+                self.model is not None
+                and self.model.task_type != TaskType.LANGUAGE_MODEL
+            ):
                 self._embedding_endpoint = EmbeddingEndpoint(self.model)
             else:
-                self.backend_rpc_server_visitor = BackendRPCServerVisitor(self.model.config)
+                self.backend_rpc_server_visitor = BackendRPCServerVisitor(
+                    self.model.config
+                )
                 self._openai_endpoint = OpenaiEndpoint(
                     self.model.config,
                     self.model.tokenizer,
-                    self.backend_rpc_server_visitor)
+                    self.backend_rpc_server_visitor,
+                )
                 if isinstance(self.model, AsyncModel):
                     # uply hack :(
                     self.model.decoder_engine_.rtp_llm_op_.ft_op.start_http_server(
-                            self.model.model.model_weights_loader,
-                            self.model.model.config.lora_infos,
-                            self._gang_server._gang_info,
-                            self._openai_endpoint.tokenizer,
-                            self._openai_endpoint.chat_renderer)
+                        self.model.model.model_weights_loader,
+                        self.model.model.config.lora_infos,
+                        self._gang_server._gang_info,
+                        self._openai_endpoint.tokenizer,
+                        self._openai_endpoint.chat_renderer,
+                    )
                     self._lora_manager = LoraManager(self.model)
 
     def model_runtime_meta(self) -> str:
@@ -113,21 +129,31 @@ class BackendServer(object):
             start_time = time.time()
             if isinstance(request, str):
                 request = json.loads(request)
-            kmonitor.report(AccMetrics.QPS_METRIC, 1, {"source": request.get("source", "unknown")})
+            kmonitor.report(
+                AccMetrics.QPS_METRIC, 1, {"source": request.get("source", "unknown")}
+            )
             request[request_id_field_name] = self._global_controller.increment()
         except Exception as e:
             return self._handle_exception(request, e)
 
         try:
-            assert self._embedding_endpoint is not None, "embedding pipeline should not be None"
+            assert (
+                self._embedding_endpoint is not None
+            ), "embedding pipeline should not be None"
             result, logable_result = await self._embedding_endpoint.handle(request)
             # do not log result since too big
             if logable_result is not None:
                 self._access_logger.log_success_access(request, logable_result)
             end_time = time.time()
-            kmonitor.report(GaugeMetrics.LANTENCY_METRIC, (end_time - start_time) * 1000)
-            kmonitor.report(AccMetrics.SUCCESS_QPS_METRIC, 1, {"source": request.get("source", "unknown")})
-            usage = result.get('usage', {})
+            kmonitor.report(
+                GaugeMetrics.LANTENCY_METRIC, (end_time - start_time) * 1000
+            )
+            kmonitor.report(
+                AccMetrics.SUCCESS_QPS_METRIC,
+                1,
+                {"source": request.get("source", "unknown")},
+            )
+            usage = result.get("usage", {})
             if not isinstance(usage, dict):
                 usage = {}
             return ORJSONResponse(result, headers={USAGE_HEADER: json.dumps(usage)})
@@ -144,17 +170,25 @@ class BackendServer(object):
 
     def _handle_exception(self, request: Dict[str, Any], e: BaseException):
         exception_json = format_exception(e)
-        error_code_str = exception_json.get('error_code_str', "")
+        error_code_str = exception_json.get("error_code_str", "")
         if isinstance(e, ConcurrencyException):
             kmonitor.report(AccMetrics.CONFLICT_QPS_METRIC)
         elif isinstance(e, asyncio.CancelledError):
-            kmonitor.report(AccMetrics.CANCEL_QPS_METRIC, 1, {"source": request.get("source", "unknown")})
+            kmonitor.report(
+                AccMetrics.CANCEL_QPS_METRIC,
+                1,
+                {"source": request.get("source", "unknown")},
+            )
             self._access_logger.log_exception_access(request, e)
         else:
-            kmonitor.report(AccMetrics.ERROR_QPS_METRIC, 1, {
-                "source": request.get("source", "unknown"),
-                "error_code": error_code_str
-            })
+            kmonitor.report(
+                AccMetrics.ERROR_QPS_METRIC,
+                1,
+                {
+                    "source": request.get("source", "unknown"),
+                    "error_code": error_code_str,
+                },
+            )
             self._access_logger.log_exception_access(request, e)
 
         rep = ORJSONResponse(exception_json, status_code=500)
@@ -182,10 +216,10 @@ class BackendServer(object):
         return self.model.get_engine_schedule_info()
 
     # TODO(xinfei.sxf) use model
-    def set_log_level(self, req: Union[str,Dict[Any, Any]]) -> None:
+    def set_log_level(self, req: Union[str, Dict[Any, Any]]) -> None:
         if isinstance(req, str):
             req = json.loads(req)
-        return torch.ops.rtp_llm.set_log_level(req['log_level'])
+        return torch.ops.rtp_llm.set_log_level(req["log_level"])
 
     async def update(self, version_info: VersionInfo):
         try:
@@ -223,14 +257,14 @@ class BackendServer(object):
     def add_lora(self, req: Dict[str, str]):
         assert self._lora_manager is not None
         if g_parallel_info.is_master and g_parallel_info.world_size > 1:
-            self._gang_server.request_workers(req, 'add_lora_internal', True)
-        self._lora_manager.add_lora(req['adapter_name'], req['lora_path'])
+            self._gang_server.request_workers(req, "add_lora_internal", True)
+        self._lora_manager.add_lora(req["adapter_name"], req["lora_path"])
 
     def remove_lora(self, req: Dict[str, str]):
         assert self._lora_manager is not None
-        self._lora_manager.remove_lora(req['adapter_name'])
+        self._lora_manager.remove_lora(req["adapter_name"])
         if g_parallel_info.is_master and g_parallel_info.world_size > 1:
-            self._gang_server.request_workers(req, 'remove_lora_internal', True)
+            self._gang_server.request_workers(req, "remove_lora_internal", True)
 
     def update_scheduler_info(self, req: Union[str, Dict[str, str]]):
         if self.model is None:

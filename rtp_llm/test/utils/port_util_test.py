@@ -1,8 +1,10 @@
-import unittest
 import shutil
 import threading
+import unittest
 from contextlib import contextmanager
+
 from port_util import *
+
 
 class TestExpiredLockFile(unittest.TestCase):
     def setUp(self):
@@ -17,10 +19,10 @@ class TestExpiredLockFile(unittest.TestCase):
             self.assertTrue(lock_file.exists())
             with open(lock_file) as f:
                 data = json.load(f)
-                self.assertEqual(data['port'], 8080)
-                self.assertEqual(data['ttl'], 3600)
-                self.assertEqual(data['pid'], os.getpid())
-                self.assertAlmostEqual(time.time(), data['timestamp'], delta=1)
+                self.assertEqual(data["port"], 8080)
+                self.assertEqual(data["ttl"], 3600)
+                self.assertEqual(data["pid"], os.getpid())
+                self.assertAlmostEqual(time.time(), data["timestamp"], delta=1)
 
     def test_lock_file_cleanup(self):
         lock_file = self.test_dir / "port_8080.lock"
@@ -36,6 +38,7 @@ class TestExpiredLockFile(unittest.TestCase):
                 with ExpiredLockFile(lock_file, 8080):
                     pass
 
+
 class TestPortManager(unittest.TestCase):
     def setUp(self):
         self.test_dir = Path(tempfile.mkdtemp())
@@ -49,7 +52,7 @@ class TestPortManager(unittest.TestCase):
         """simulate port in use"""
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
-            sock.bind(('', port))
+            sock.bind(("", port))
             yield sock
         finally:
             sock.close()
@@ -62,15 +65,12 @@ class TestPortManager(unittest.TestCase):
             self.assertEqual(len(locks), num_ports)
 
             # check ports are consecutive
-            self.assertTrue(all(
-                b == a + 1
-                for a, b in zip(ports, ports[1:])
-            ))
+            self.assertTrue(all(b == a + 1 for a, b in zip(ports, ports[1:])))
 
             # check lock file exists
-            self.assertTrue(all(
-                (self.test_dir / f"port_{port}.lock").exists() for port in ports
-            ))
+            self.assertTrue(
+                all((self.test_dir / f"port_{port}.lock").exists() for port in ports)
+            )
         finally:
             for lock in locks:
                 lock.__exit__(None, None, None)
@@ -114,9 +114,7 @@ class TestPortManager(unittest.TestCase):
         results = []
 
         for _ in range(10):
-            thread = threading.Thread(
-                target=lambda: results.append(get_ports())
-            )
+            thread = threading.Thread(target=lambda: results.append(get_ports()))
             threads.append(thread)
 
         for thread in threads:
@@ -133,13 +131,13 @@ class TestPortManager(unittest.TestCase):
                     # make sure no overlapping ports
                     self.assertTrue(
                         all(port not in all_ports for port in ports),
-                        f"Found overlapping ports: {ports} in all_ports: {all_ports}"
+                        f"Found overlapping ports: {ports} in all_ports: {all_ports}",
                     )
                     # make sure all ports are consecutive
-                    self.assertTrue(all(
-                        b == a + 1
-                        for a, b in zip(ports, ports[1:])
-                    ), f"ports should be consecutive: {ports}")
+                    self.assertTrue(
+                        all(b == a + 1 for a, b in zip(ports, ports[1:])),
+                        f"ports should be consecutive: {ports}",
+                    )
                     all_ports.update(ports)
             self.assertEqual(len(all_ports), 200)
         finally:
@@ -149,19 +147,22 @@ class TestPortManager(unittest.TestCase):
                     for lock in locks:
                         lock.__exit__(None, None, None)
 
-
     def test_cleanup_stale_locks(self):
         lock_file = self.test_dir / "port_8080.lock"
-        with open(lock_file, 'w') as f:
-            json.dump({
-                'port': 8080,
-                'pid': os.getpid(),
-                'timestamp': time.time() - 7200,
-                'ttl': 3600
-            }, f)
+        with open(lock_file, "w") as f:
+            json.dump(
+                {
+                    "port": 8080,
+                    "pid": os.getpid(),
+                    "timestamp": time.time() - 7200,
+                    "ttl": 3600,
+                },
+                f,
+            )
 
         self.port_manager.cleanup_stale_locks()
         self.assertFalse(lock_file.exists())
+
 
 class TestPortsContext(unittest.TestCase):
     def setUp(self):
@@ -189,6 +190,7 @@ class TestPortsContext(unittest.TestCase):
     def test_concurrent_access(self):
         """test the case that concurrent allocates ports without conflict"""
         results = []
+
         def get_ports():
             try:
                 with PortsContext(self.test_dir, num_ports=2) as ports:
@@ -220,6 +222,7 @@ class TestPortsContext(unittest.TestCase):
 
     def test_exception_handling(self):
         """test the case that lock file is released when exception raised"""
+
         class TestException(Exception):
             pass
 
@@ -227,14 +230,16 @@ class TestPortsContext(unittest.TestCase):
         try:
             with PortsContext(self.test_dir, num_ports=2) as ports:
                 ports_obtained = ports
-                self.assertTrue(all(
-                    (self.test_dir / f"port_{port}.lock").exists() for port in ports
-                ))
+                self.assertTrue(
+                    all(
+                        (self.test_dir / f"port_{port}.lock").exists() for port in ports
+                    )
+                )
                 raise TestException("simulate exception raised")
         except TestException:
-            self.assertFalse(all(
-                (self.test_dir / f"port_{port}.lock").exists() for port in ports
-            ))
+            self.assertFalse(
+                all((self.test_dir / f"port_{port}.lock").exists() for port in ports)
+            )
 
     def test_multiple_contexts(self):
         """test multiple embedded PortsContext"""
@@ -244,14 +249,15 @@ class TestPortsContext(unittest.TestCase):
                 self.assertTrue(set(ports1).isdisjoint(set(ports2)))
 
                 # make sure all ports are consecutive
-                self.assertTrue(all(
-                    b == a + 1
-                    for a, b in zip(ports1, ports1[1:])
-                ), "ports1 should be consecutive")
-                self.assertTrue(all(
-                    b == a + 1
-                    for a, b in zip(ports2, ports2[1:])
-                ), "ports2 should be consecutive")
+                self.assertTrue(
+                    all(b == a + 1 for a, b in zip(ports1, ports1[1:])),
+                    "ports1 should be consecutive",
+                )
+                self.assertTrue(
+                    all(b == a + 1 for a, b in zip(ports2, ports2[1:])),
+                    "ports2 should be consecutive",
+                )
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     unittest.main()

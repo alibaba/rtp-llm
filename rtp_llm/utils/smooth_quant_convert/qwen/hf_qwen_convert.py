@@ -12,10 +12,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-'''
+"""
 Convert huggingface QWen-7B-Chat model to numpy file.
 Use https://huggingface.co/Qwen/Qwen-7B-Chat as demo.
-'''
+"""
 import argparse
 import configparser
 import dataclasses
@@ -23,17 +23,17 @@ import json
 import os
 from pathlib import Path
 
+import datasets
+import numpy as np
 import torch
 import torch.multiprocessing as multiprocessing
+
+# for debug
+from convert import split_and_save_weight
 from smoothquant import capture_activation_range, smooth_gemm, smooth_gemm_mlp
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM  # transformers-4.10.0-py3
 from transformers import AutoTokenizer, GenerationConfig
-# for debug
-from convert import split_and_save_weight
-import datasets
-import numpy as np
-
 from utils import str_dtype_to_torch, torch_to_numpy
 
 now_dir = os.path.dirname(os.path.abspath(__file__))
@@ -53,43 +53,47 @@ class ProgArgs:
     dataset_cache_dir: str = None
 
     @staticmethod
-    def parse(args=None) -> 'ProgArgs':
-        parser = argparse.ArgumentParser(
-            formatter_class=argparse.RawTextHelpFormatter)
-        parser.add_argument('--out-dir',
-                            '-o',
-                            type=str,
-                            help='file name of output directory',
-                            required=True)
-        parser.add_argument('--in-file',
-                            '-i',
-                            type=str,
-                            help='file name of input checkpoint file',
-                            required=True)
+    def parse(args=None) -> "ProgArgs":
+        parser = argparse.ArgumentParser(formatter_class=argparse.RawTextHelpFormatter)
         parser.add_argument(
-            '--max_input_len',
+            "--out-dir",
+            "-o",
+            type=str,
+            help="file name of output directory",
+            required=True,
+        )
+        parser.add_argument(
+            "--in-file",
+            "-i",
+            type=str,
+            help="file name of input checkpoint file",
+            required=True,
+        )
+        parser.add_argument(
+            "--max_input_len",
             type=int,
-            help=
-            "This should be consistent with the max_input_len you used when building engine.",
-            default=2048)
-        parser.add_argument('--tensor-parallelism',
-                            '-tp',
-                            type=int,
-                            help='Requested tensor parallelism for inference',
-                            default=1)
+            help="This should be consistent with the max_input_len you used when building engine.",
+            default=2048,
+        )
+        parser.add_argument(
+            "--tensor-parallelism",
+            "-tp",
+            type=int,
+            help="Requested tensor parallelism for inference",
+            default=1,
+        )
         parser.add_argument(
             "--processes",
             "-p",
             type=int,
-            help=
-            "How many processes to spawn for conversion (default: 1). Set it to a lower value to reduce RAM usage.",
-            default=1)
+            help="How many processes to spawn for conversion (default: 1). Set it to a lower value to reduce RAM usage.",
+            default=1,
+        )
         parser.add_argument(
             "--calibrate-kv-cache",
             "-kv",
             action="store_true",
-            help=
-            "Generate scaling factors for KV cache. Used for storing KV cache in int8."
+            help="Generate scaling factors for KV cache. Used for storing KV cache in int8.",
         )
         parser.add_argument(
             "--smoothquant",
@@ -98,22 +102,28 @@ class ProgArgs:
             default=None,
             help="Set the α parameter (see https://arxiv.org/pdf/2211.10438.pdf)"
             " to Smoothquant the model, and output int8 weights."
-            " A good first try is 0.5. Must be in [0, 1]")
+            " A good first try is 0.5. Must be in [0, 1]",
+        )
         parser.add_argument(
             "--model",
             default="qwen",
             type=str,
             help="Specify GPT variants to convert checkpoints correctly",
-            choices=["qwen", "gpt2", "santacoder", "starcoder"])
-        parser.add_argument("--storage-type",
-                            "-t",
-                            type=str,
-                            default="float16",
-                            choices=["float32", "float16", "bfloat16"])
-        parser.add_argument("--dataset-cache-dir",
-                            type=str,
-                            default=None,
-                            help="cache dir to load the hugging face dataset")
+            choices=["qwen", "gpt2", "santacoder", "starcoder"],
+        )
+        parser.add_argument(
+            "--storage-type",
+            "-t",
+            type=str,
+            default="float16",
+            choices=["float32", "float16", "bfloat16"],
+        )
+        parser.add_argument(
+            "--dataset-cache-dir",
+            type=str,
+            default=None,
+            help="cache dir to load the hugging face dataset",
+        )
         return ProgArgs(**vars(parser.parse_args(args)))
 
 
@@ -127,10 +137,12 @@ def smooth_qwen_model(model, scales, alpha, qwen_smoother):
 
         # qkv_proj
         layer_name = name + ".attn.c_attn"
-        smoother = smooth_gemm(module.attn.c_attn.weight,
-                               scales[layer_name]["x"],
-                               module.ln_1.weight,
-                               alpha=alpha)
+        smoother = smooth_gemm(
+            module.attn.c_attn.weight,
+            scales[layer_name]["x"],
+            module.ln_1.weight,
+            alpha=alpha,
+        )
         scales[layer_name]["x"] = scales[layer_name]["x"] / smoother
         scales[layer_name]["w"] = module.attn.c_attn.weight.abs().max(dim=1)[0]
 
@@ -150,11 +162,13 @@ def smooth_qwen_model(model, scales, alpha, qwen_smoother):
         # mlp w1 / w2, because then use some input hidden_states as input, so we need to smooth it with same scale
         mlp_w1_name = name + ".mlp.w1"
         mlp_w2_name = name + ".mlp.w2"
-        smoother2 = smooth_gemm_mlp(module.mlp.w1.weight,
-                                    module.mlp.w2.weight,
-                                    scales[mlp_w1_name]["x"],
-                                    module.ln_2.weight,
-                                    alpha=alpha)
+        smoother2 = smooth_gemm_mlp(
+            module.mlp.w1.weight,
+            module.mlp.w2.weight,
+            scales[mlp_w1_name]["x"],
+            module.ln_2.weight,
+            alpha=alpha,
+        )
         scales[mlp_w1_name]["x"] = scales[mlp_w1_name]["x"] / smoother2
         scales[mlp_w2_name]["x"] = scales[mlp_w2_name]["x"] / smoother2
         scales[mlp_w1_name]["w"] = module.mlp.w1.weight.abs().max(dim=1)[0]
@@ -162,10 +176,9 @@ def smooth_qwen_model(model, scales, alpha, qwen_smoother):
 
         # mlp c_proj
         layer_name = name + ".mlp.c_proj"
-        smoother4 = smooth_gemm(module.mlp.c_proj.weight,
-                                scales[layer_name]["x"],
-                                None,
-                                alpha=alpha)
+        smoother4 = smooth_gemm(
+            module.mlp.c_proj.weight, scales[layer_name]["x"], None, alpha=alpha
+        )
         qwen_smoother[layer_name] = smoother4.float()
         scales[layer_name]["x"] = scales[layer_name]["x"] / smoother4
         scales[layer_name]["w"] = module.mlp.c_proj.weight.abs().max(dim=1)[0]
@@ -180,7 +193,11 @@ def concat_qkv_weight_bias(q, hf_key, hf_model):
 # StarCoder uses nn.Linear for these following ops whose weight matrix is transposed compared to transformer.Conv1D
 def transpose_weights(hf_name, param):
     weight_to_transpose = [
-        "attn.c_attn", "attn.c_proj", "mlp.c_proj", "mlp.w1", "mlp.w2"
+        "attn.c_attn",
+        "attn.c_proj",
+        "mlp.c_proj",
+        "mlp.w1",
+        "mlp.w2",
     ]
     if any([k in hf_name for k in weight_to_transpose]):
         if len(param.shape) == 2:
@@ -192,7 +209,7 @@ def convert_qwen_name(orig_name):
     global_weights = {
         "transformer.wte.weight": "transformer.wte.weight",
         "transformer.ln_f.weight": "transformer.ln_f.weight",
-        "lm_head.weight": "lm_head.weight"
+        "lm_head.weight": "lm_head.weight",
     }
 
     if orig_name in global_weights:
@@ -218,38 +235,38 @@ def convert_qwen_name(orig_name):
 @torch.no_grad()
 def hf_qwen_converter(args: ProgArgs, ret):
     infer_tp = args.tensor_parallelism
-    multi_query_mode = True if args.model in ["santacoder", "starcoder"
-                                              ] else False
-    saved_dir = Path(args.out_dir) 
+    multi_query_mode = True if args.model in ["santacoder", "starcoder"] else False
+    saved_dir = Path(args.out_dir)
     saved_dir.mkdir(parents=True, exist_ok=True)
 
     # load position_embedding from rank 0
     model = AutoModelForCausalLM.from_pretrained(
         args.in_file,
-        device_map=
-        "auto",  # if you gpu memory is not enough, you can set device_map="cpu"
+        device_map="auto",  # if you gpu memory is not enough, you can set device_map="cpu"
         trust_remote_code=True,
         torch_dtype=str_dtype_to_torch(args.storage_type),
     ).half()  # if you gpu memory is not enough, you can set .half() to .float()
     model.generation_config = GenerationConfig.from_pretrained(
-        args.in_file, trust_remote_code=True)
+        args.in_file, trust_remote_code=True
+    )
     act_range = {}
     qwen_smoother = {}
     if args.smoothquant is not None or args.calibrate_kv_cache:
         os.environ["TOKENIZERS_PARALLELISM"] = os.environ.get(
-            "TOKENIZERS_PARALLELISM", "false")
+            "TOKENIZERS_PARALLELISM", "false"
+        )
 
         dataset = datasets.load_from_disk(args.dataset_cache_dir)
         tokenizer = AutoTokenizer.from_pretrained(
             args.in_file,
             legacy=False,
-            padding_side='left',
+            padding_side="left",
             trust_remote_code=True,
         )
-        gen_config_path = os.path.join(args.in_file, 'generation_config.json')
-        with open(gen_config_path, 'r') as f:
+        gen_config_path = os.path.join(args.in_file, "generation_config.json")
+        with open(gen_config_path, "r") as f:
             gen_config = json.load(f)
-        chat_format = gen_config['chat_format']
+        chat_format = gen_config["chat_format"]
         tokenizer.pad_token_id = tokenizer.im_end_id
         # use this prompt to make chat model do summarize
         system_prompt = "You are a useful assistant, please directly output the corresponding summary according to the article entered by the user."
@@ -272,12 +289,16 @@ def hf_qwen_converter(args: ProgArgs, ret):
         config["qwen"][k] = f"{v}"
     config["qwen"]["storage_dtype"] = args.storage_type
     config["qwen"]["multi_query_mode"] = str(multi_query_mode)
-    with open(saved_dir / "smoothquant.ini", 'w') as configfile:
+    with open(saved_dir / "smoothquant.ini", "w") as configfile:
         config.write(configfile)
 
     storage_type = str_dtype_to_torch(args.storage_type)
 
-    global_weights = ["transformer.wte.weight", "transformer.ln_f.weight", "lm_head.weight"]
+    global_weights = [
+        "transformer.wte.weight",
+        "transformer.ln_f.weight",
+        "lm_head.weight",
+    ]
 
     int8_outputs = None
     if args.calibrate_kv_cache:
@@ -287,10 +308,10 @@ def hf_qwen_converter(args: ProgArgs, ret):
 
     starmap_args = []
     for name, param in tqdm(
-            model.named_parameters(),
-            desc="convert and save",
-            total=len(list(model.parameters())),
-            ncols=80,
+        model.named_parameters(),
+        desc="convert and save",
+        total=len(list(model.parameters())),
+        ncols=80,
     ):
         if "weight" not in name and "bias" not in name:
             continue
@@ -322,23 +343,30 @@ def hf_qwen_converter(args: ProgArgs, ret):
             # torch_to_numpy(param.to(storage_type).cpu()).tofile(
             #     saved_dir / f"{converted_name}.bin")
             # ret[converted_name] = torch.from_numpy(np.asarray(param)).cpu()
-            ret[converted_name] = param.to(storage_type).cpu() 
+            ret[converted_name] = param.to(storage_type).cpu()
         else:
-            if 'q_attn' in name:
+            if "q_attn" in name:
                 param = concat_qkv_weight_bias(param, name, model)
-                converted_name = converted_name.replace("query",
-                                                        "query_key_value")
+                converted_name = converted_name.replace("query", "query_key_value")
             # Needed by QKV projection weight split. With multi_query_mode one does not simply take
             # out_dim and divide it by 3 to get local_dim because out_dim = local_dim + 2 * head_size
-            local_dim = model.transformer.h[
-                0].attn.embed_dim if multi_query_mode else None
-            starmap_arg = (0, saved_dir, infer_tp, converted_name,
-                           param.to(storage_type), storage_type,
-                           act_range.get(name.replace(".weight", "")), {
-                               "int8_outputs": int8_outputs,
-                               "multi_query_mode": multi_query_mode,
-                               "local_dim": local_dim
-                           })
+            local_dim = (
+                model.transformer.h[0].attn.embed_dim if multi_query_mode else None
+            )
+            starmap_arg = (
+                0,
+                saved_dir,
+                infer_tp,
+                converted_name,
+                param.to(storage_type),
+                storage_type,
+                act_range.get(name.replace(".weight", "")),
+                {
+                    "int8_outputs": int8_outputs,
+                    "multi_query_mode": multi_query_mode,
+                    "local_dim": local_dim,
+                },
+            )
             if args.processes > 1:
                 starmap_args.append(starmap_arg)
             else:

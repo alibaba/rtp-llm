@@ -2,9 +2,6 @@
 
 namespace torch_ext {
 
-void registerPyModuleOps(pybind11::module &m) {
+void registerPyModuleOps(pybind11::module& m) {}
 
-}
-
-}
-
+}  // namespace torch_ext

@@ -27,16 +27,14 @@ void* ICudaAllocator::reMalloc(void* ptr, size_t size) {
     }
 }
 
-PurePointerCudaAllocator::PurePointerCudaAllocator(int device_id)
-    : ICudaAllocator(device_id)
-    , pointer_mapping_(new std::unordered_map<void*, size_t>)
-    {}
+PurePointerCudaAllocator::PurePointerCudaAllocator(int device_id):
+    ICudaAllocator(device_id), pointer_mapping_(new std::unordered_map<void*, size_t>) {}
 
 PurePointerCudaAllocator::~PurePointerCudaAllocator() {}
 
 void PurePointerCudaAllocator::destroy() {
     while (!pointer_mapping_->empty()) {
-        auto it = pointer_mapping_->begin();
+        auto it  = pointer_mapping_->begin();
         auto ptr = it->first;
         free(&ptr);
     }
@@ -61,7 +59,7 @@ void* PurePointerCudaAllocator::malloc(size_t size) {
     if (size == 0) {
         return nullptr;
     }
-    void* ptr = doMalloc(size);
+    void*                       ptr = doMalloc(size);
     std::lock_guard<std::mutex> lock(lock_);
     pointer_mapping_->insert({ptr, size});
     return ptr;
@@ -71,7 +69,7 @@ void* PurePointerCudaAllocator::mallocSync(size_t size) {
     if (size == 0) {
         return nullptr;
     }
-    void* ptr = doMallocSync(size);
+    void*                       ptr = doMallocSync(size);
     std::lock_guard<std::mutex> lock(lock_);
     pointer_mapping_->insert({ptr, size});
     return ptr;
@@ -92,7 +90,6 @@ void PurePointerCudaAllocator::free(void** ptr) {
     return;
 }
 
-
 Allocator<AllocatorType::CUDA>::Allocator(int device_id): PurePointerCudaAllocator(device_id) {
     int device_count = 1;
     check_cuda_value(cudaGetDeviceCount(&device_count));
@@ -107,7 +104,7 @@ Allocator<AllocatorType::CUDA>::Allocator(int device_id): PurePointerCudaAllocat
         check_cuda_value(cudaDeviceCanAccessPeer(&peer_access_available, device_id, i));
         if (!peer_access_available) {
             RTP_LLM_LOG_WARNING("Device " + std::to_string(device_id) + " peer access Device " + std::to_string(i)
-                            + " is not available.");
+                                + " is not available.");
             continue;
         }
         desc.location.type = cudaMemLocationTypeDevice;
@@ -125,19 +122,20 @@ Allocator<AllocatorType::CUDA>::~Allocator() {
 }
 
 void* Allocator<AllocatorType::CUDA>::doMalloc(size_t size) {
-    void* ptr      = nullptr;
+    void* ptr = nullptr;
     check_cuda_value(cudaMalloc(&ptr, (size_t)(ceil(size / 128.)) * 128));
     return ptr;
 }
 
 void* Allocator<AllocatorType::CUDA>::doMallocSync(size_t size) {
-    void* ptr      = nullptr;
+    void* ptr = nullptr;
     check_cuda_value(cudaMalloc(&ptr, (size_t)(ceil(size / 128.)) * 128));
     return ptr;
 }
 
 void Allocator<AllocatorType::CUDA>::doFree(void* address) {
-    // tmp sync to avoid memory free before kernel run. cudaFree will not perform any implicit synchronization when the pointer was allocated with cudaMallocAsync or cudaMallocFromPoolAsync
+    // tmp sync to avoid memory free before kernel run. cudaFree will not perform any implicit synchronization when the
+    // pointer was allocated with cudaMallocAsync or cudaMallocFromPoolAsync
     cudaStreamSynchronize(stream_);
     check_cuda_value(cudaFree(address));
     return;

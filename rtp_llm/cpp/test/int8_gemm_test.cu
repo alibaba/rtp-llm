@@ -31,33 +31,25 @@
 #include <cuda_bf16.h>
 #endif
 
-
 #include "rtp_llm/cpp/cuda/cuda_utils.h"
 #include "rtp_llm/cpp/cuda/memory_utils.h"
 #include "rtp_llm/cpp/cuda/cublas/cublas.h"
 
 #include "cutlass/numeric_types.h"
 
-//using torch::Tensor;
+// using torch::Tensor;
 using torch_ext::get_ptr;
 
-namespace tk = tensorrt_llm::common;
+namespace tk  = tensorrt_llm::common;
 namespace tkc = tensorrt_llm::cutlass_extensions;
 
-
-
 template<typename T>
-void int8_gemm_test(
-    const int m, 
-    const int n, 
-    const int k, 
-    const int iters)
-{
-    tk::QuantMode quant_mode = tk::QuantMode::fromDescription(true, true, true, true, false, false, false, false);
-    const bool per_token_quant = quant_mode.hasPerTokenScaling();
-    const bool per_channel_quant = quant_mode.hasPerChannelScaling();
-    const int row_scale_size = per_token_quant ? m : 1;
-    const int col_scale_size = per_channel_quant ? n : 1;
+void int8_gemm_test(const int m, const int n, const int k, const int iters) {
+    tk::QuantMode quant_mode      = tk::QuantMode::fromDescription(true, true, true, true, false, false, false, false);
+    const bool    per_token_quant = quant_mode.hasPerTokenScaling();
+    const bool    per_channel_quant = quant_mode.hasPerChannelScaling();
+    const int     row_scale_size    = per_token_quant ? m : 1;
+    const int     col_scale_size    = per_channel_quant ? n : 1;
 
     const at::ScalarType at_int32 = at::ScalarType::Int;
     const at::ScalarType at_int8  = at::ScalarType::Char;
@@ -83,16 +75,16 @@ void int8_gemm_test(
     // Tensor{MEMORY_CPU, TYPE_INT32, {(size_t)k, (size_t)n}, get_ptr<int32_t>(w)}.saveNpy("w.npy");
     // Tensor{MEMORY_CPU, TYPE_INT32, {(size_t)m, (size_t)n}, get_ptr<int32_t>(y)}.saveNpy("y.npy");
 
-    auto x_gpu = x.to(at_int8).to(torch::kCUDA);
-    auto w_T_gpu = w.to(at_int8).to(torch::kCUDA).t().contiguous();
-    auto w_gpu = w.to(at_int8).to(torch::kCUDA);
-    auto y_gpu = torch::zeros({m, n}, torch::dtype(at_fp16).device(torch::kCUDA).requires_grad(false));
+    auto x_gpu       = x.to(at_int8).to(torch::kCUDA);
+    auto w_T_gpu     = w.to(at_int8).to(torch::kCUDA).t().contiguous();
+    auto w_gpu       = w.to(at_int8).to(torch::kCUDA);
+    auto y_gpu       = torch::zeros({m, n}, torch::dtype(at_fp16).device(torch::kCUDA).requires_grad(false));
     auto y_gpu_int32 = torch::zeros({m, n}, torch::dtype(at_int32).device(torch::kCUDA).requires_grad(false));
 
-    auto alpha_row_cultass = torch::ones({row_scale_size, 1}, torch::dtype(at_fp32).requires_grad(false)) * (1.0 / 100) *
-        torch::randint(1, 10, {row_scale_size, 1}, torch::dtype(at_fp32));
-    auto alpha_col_cutlass = torch::ones({1, col_scale_size}, torch::dtype(at_fp32).requires_grad(false)) * (1.0 / 100) *
-        torch::randint(1, 10, {1, col_scale_size}, torch::dtype(at_fp32));
+    auto alpha_row_cultass = torch::ones({row_scale_size, 1}, torch::dtype(at_fp32).requires_grad(false)) * (1.0 / 100)
+                             * torch::randint(1, 10, {row_scale_size, 1}, torch::dtype(at_fp32));
+    auto alpha_col_cutlass = torch::ones({1, col_scale_size}, torch::dtype(at_fp32).requires_grad(false)) * (1.0 / 100)
+                             * torch::randint(1, 10, {1, col_scale_size}, torch::dtype(at_fp32));
 
     auto alpha_row_torch = alpha_row_cultass.expand({m, 1});
     auto alpha_col_torch = alpha_col_cutlass.expand({1, n});
@@ -104,16 +96,39 @@ void int8_gemm_test(
     auto alpha_row_col_scale_gpu = torch::matmul(alpha_row_torch, alpha_col_torch).to(torch::kCUDA);
 
     tensorrt_llm::kernels::cutlass_kernels::CutlassInt8GemmRunner<T> runner;
-    char*       ws_ptr = nullptr;
-    const int   wsSize = runner.getWorkspaceSize(m, n, k);
+    char*                                                            ws_ptr = nullptr;
+    const int                                                        wsSize = runner.getWorkspaceSize(m, n, k);
     deviceMalloc(&ws_ptr, wsSize);
 
     // warm up
     cudaStream_t stream;
     cudaStreamCreate(&stream);
-    const auto gemmConfig = runner.getChosenConfig(get_ptr<int8_t>(x_gpu), get_ptr<int8_t>(w_T_gpu), quant_mode, get_ptr<float>(alpha_col_gpu), get_ptr<float>(alpha_row_gpu), get_ptr<T>(y_gpu), m, n, k, ws_ptr, wsSize, stream);
+    const auto gemmConfig = runner.getChosenConfig(get_ptr<int8_t>(x_gpu),
+                                                   get_ptr<int8_t>(w_T_gpu),
+                                                   quant_mode,
+                                                   get_ptr<float>(alpha_col_gpu),
+                                                   get_ptr<float>(alpha_row_gpu),
+                                                   get_ptr<T>(y_gpu),
+                                                   m,
+                                                   n,
+                                                   k,
+                                                   ws_ptr,
+                                                   wsSize,
+                                                   stream);
     printf("gemm run \n ");
-    runner.gemm(get_ptr<int8_t>(x_gpu), get_ptr<int8_t>(w_T_gpu), quant_mode, get_ptr<float>(alpha_col_gpu), get_ptr<float>(alpha_row_gpu), get_ptr<T>(y_gpu), m, n, k, gemmConfig, ws_ptr, wsSize, stream);
+    runner.gemm(get_ptr<int8_t>(x_gpu),
+                get_ptr<int8_t>(w_T_gpu),
+                quant_mode,
+                get_ptr<float>(alpha_col_gpu),
+                get_ptr<float>(alpha_row_gpu),
+                get_ptr<T>(y_gpu),
+                m,
+                n,
+                k,
+                gemmConfig,
+                ws_ptr,
+                wsSize,
+                stream);
 
     // Tensor{MEMORY_GPU, TYPE_INT8, {(size_t)m, (size_t)k}, get_ptr<int8_t>(x_gpu)}.saveNpy("x_gpu.npy");
     // Tensor{MEMORY_GPU, TYPE_INT8, {(size_t)n, (size_t)k}, get_ptr<int8_t>(w_T_gpu)}.saveNpy("w_T_gpu.npy");
@@ -125,7 +140,19 @@ void int8_gemm_test(
     auto start = high_resolution_clock::now();
 
     for (int i = 0; i < iters; ++i) {
-        runner.gemm(get_ptr<int8_t>(x_gpu), get_ptr<int8_t>(w_T_gpu), quant_mode, get_ptr<float>(alpha_col_gpu), get_ptr<float>(alpha_row_gpu), get_ptr<T>(y_gpu), m, n, k, gemmConfig, ws_ptr, wsSize, stream);
+        runner.gemm(get_ptr<int8_t>(x_gpu),
+                    get_ptr<int8_t>(w_T_gpu),
+                    quant_mode,
+                    get_ptr<float>(alpha_col_gpu),
+                    get_ptr<float>(alpha_row_gpu),
+                    get_ptr<T>(y_gpu),
+                    m,
+                    n,
+                    k,
+                    gemmConfig,
+                    ws_ptr,
+                    wsSize,
+                    stream);
     }
 
     check_cuda_value(cudaStreamSynchronize(stream));
@@ -133,26 +160,26 @@ void int8_gemm_test(
 
     auto duration = duration_cast<microseconds>(end - start);
 
-    if (torch::allclose((y.to(torch::kCUDA).to(at_fp32) * alpha_row_col_scale_gpu.to(torch::kCUDA)).to(at_fp16), y_gpu)) {
+    if (torch::allclose((y.to(torch::kCUDA).to(at_fp32) * alpha_row_col_scale_gpu.to(torch::kCUDA)).to(at_fp16),
+                        y_gpu)) {
         RTP_LLM_LOG_INFO("SUCCESS " + std::to_string((double(duration.count()) / iters) / 1000) + " ms");
     } else {
         RTP_LLM_LOG_ERROR("FAILED " + std::to_string((double(duration.count()) / iters) / 1000) + " ms");
-        // std::cout << "diff " << (y.to(torch::kCUDA).to(at_fp32) * alpha_row_col_scale_gpu.to(torch::kCUDA)).to(at_fp16) - y_gpu << std::endl;
+        // std::cout << "diff " << (y.to(torch::kCUDA).to(at_fp32) *
+        // alpha_row_col_scale_gpu.to(torch::kCUDA)).to(at_fp16) - y_gpu << std::endl;
     }
     deviceFree(ws_ptr);
-
 }
 
-int main(int argc, char **argv)
-{
+int main(int argc, char** argv) {
     if (argc != 5) {
         RTP_LLM_LOG_ERROR("arguments missing, needs m, n, k, iters.");
         return 0;
     }
 
-    const int m = atoi(argv[1]);
-    const int n = atoi(argv[2]);
-    const int k = atoi(argv[3]);
+    const int m     = atoi(argv[1]);
+    const int n     = atoi(argv[2]);
+    const int k     = atoi(argv[3]);
     const int iters = atoi(argv[4]);
     int8_gemm_test<half>(m, n, k, iters);
 

@@ -1,33 +1,32 @@
-from enum import Enum
+import functools
 import json
 import logging
-from typing import Optional, List, Tuple, Union
-import functools
-from rtp_llm.models.base_model import GenerateOutput
-from rtp_llm.tokenizer.tokenization_qwen import QWenTokenizer
+from enum import Enum
+from typing import List, Optional, Tuple, Union
+
+from jinja2 import BaseLoader, Environment
 from transformers import Qwen2Tokenizer
+
+from rtp_llm.models.base_model import GenerateOutput
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     DeltaMessage,
     FinisheReason,
+    FunctionCall,
     RoleEnum,
     ToolCall,
-    FunctionCall,
-)
-from rtp_llm.openai.renderers.custom_renderer import (
-    CustomChatRenderer,
-    RendererParams,
-    RenderedInputs,
-    StreamStatus,
-    OutputDelta,
-    ThinkStatus
 )
 from rtp_llm.openai.renderer_factory_register import register_renderer
-from rtp_llm.utils.word_util import (
-    is_truncated,
-    truncate_response_with_stop_words,
+from rtp_llm.openai.renderers.custom_renderer import (
+    CustomChatRenderer,
+    OutputDelta,
+    RenderedInputs,
+    RendererParams,
+    StreamStatus,
+    ThinkStatus,
 )
-from jinja2 import Environment, BaseLoader
+from rtp_llm.tokenizer.tokenization_qwen import QWenTokenizer
+from rtp_llm.utils.word_util import is_truncated, truncate_response_with_stop_words
 
 """
 TODO List
@@ -44,22 +43,22 @@ TODO List
 - 对某些异常情况的支持:
   • 例如:
         为了给您提供北京、上海和伦敦的当前温度，我将分别查询这三个城市的温度。请稍等。
-        <tool_call> 
+        <tool_call>
         {"name": "get_current_temperature", "arguments": {"location": "北京, China", "unit": "celsius"}}
-        </tool_call> 
+        </tool_call>
         {"name": "get_current_temperature", "arguments": {"location": "上海, China", "unit": "celsius"}}
-        </tool_call> 
+        </tool_call>
         {"name": "get_current_temperature", "arguments": {"location": "London, UK", "unit": "celsius"}}
         </tool_call>
     而非标准的:
-        <tool_call> 
+        <tool_call>
         {"name": "get_current_temperature", "arguments": {"location": "北京, China", "unit": "celsius"}}
-        </tool_call> 
-        <tool_call> 
+        </tool_call>
+        <tool_call>
         {"name": "get_current_temperature", "arguments": {"location": "上海, China", "unit": "celsius"}}
         </tool_call>
 
-- tool_choice的支持        
+- tool_choice的支持
 
 """
 
@@ -86,23 +85,25 @@ class QwenToolStreamStatus(StreamStatus):
     tool_call_message_extract_strategy: ToolCallMessageExtractStrategy = (
         ToolCallMessageExtractStrategy.DEFAULT
     )
-    
+
     def __str__(self):
-        return (f"QwenToolStreamStatus("
-                f"index={self.index}, "
-                f"request={self.request}, "
-                f"output={self.output}, "
-                f"origin_output_ids={self.origin_output_ids}, "
-                f"output_ids={self.output_ids}, "
-                f"last_output_ids={self.last_output_ids}, "
-                f"last_token_length={self.last_token_length}, "
-                f"finish_reason={self.finish_reason}, "
-                f"tokenizer={self.tokenizer}, "
-                f"responded_string={self.responded_string!r}, "
-                f"delta_output_string={self.delta_output_string!r})"
-                f"generating_tool_call={self.generating_tool_call}"
-                f"tool_call_index={self.tool_call_index}"
-                f"tool_call_responded_string={self.tool_call_responded_string}")
+        return (
+            f"QwenToolStreamStatus("
+            f"index={self.index}, "
+            f"request={self.request}, "
+            f"output={self.output}, "
+            f"origin_output_ids={self.origin_output_ids}, "
+            f"output_ids={self.output_ids}, "
+            f"last_output_ids={self.last_output_ids}, "
+            f"last_token_length={self.last_token_length}, "
+            f"finish_reason={self.finish_reason}, "
+            f"tokenizer={self.tokenizer}, "
+            f"responded_string={self.responded_string!r}, "
+            f"delta_output_string={self.delta_output_string!r})"
+            f"generating_tool_call={self.generating_tool_call}"
+            f"tool_call_index={self.tool_call_index}"
+            f"tool_call_responded_string={self.tool_call_responded_string}"
+        )
 
 
 QwenTokenizerTypes = Union[QWenTokenizer, Qwen2Tokenizer]
@@ -118,7 +119,7 @@ class QwenToolRenderer(CustomChatRenderer):
 
     def __init__(self, tokenizer: QwenTokenizerTypes, renderer_params: RendererParams):
         super().__init__(tokenizer, renderer_params)
-        if not tokenizer.chat_template or 'tool' not in tokenizer.chat_template:
+        if not tokenizer.chat_template or "tool" not in tokenizer.chat_template:
             self.chat_template = JINJA_TEMPLATE
         else:
             self.chat_template = tokenizer.chat_template
@@ -158,9 +159,12 @@ class QwenToolRenderer(CustomChatRenderer):
 
         if request.chat_template_kwargs is not None:
             context.update(request.chat_template_kwargs)
-        if request.extend_fields is not None and 'chat_template_kwargs' in request.extend_fields and \
-            isinstance(request.extend_fields['chat_template_kwargs'], dict):
-            context.update(request.extend_fields['chat_template_kwargs'])
+        if (
+            request.extend_fields is not None
+            and "chat_template_kwargs" in request.extend_fields
+            and isinstance(request.extend_fields["chat_template_kwargs"], dict)
+        ):
+            context.update(request.extend_fields["chat_template_kwargs"])
 
         env = Environment(loader=BaseLoader())
         # 重写tojson过滤器, 这里存在三个注意点
@@ -186,7 +190,7 @@ class QwenToolRenderer(CustomChatRenderer):
         if request.disable_thinking():
             return False
         return super().in_think_mode(request)
-    
+
     async def _update_single_status(
         self,
         status: StreamStatus,
@@ -492,7 +496,7 @@ class QwenToolRenderer(CustomChatRenderer):
         buffer_list: List[StreamStatus],
         stop_words_str: List[str],
         is_streaming: bool,
-        think_status: ThinkStatus
+        think_status: ThinkStatus,
     ):
         output_items: List[OutputDelta] = []
         for buffer in buffer_list:

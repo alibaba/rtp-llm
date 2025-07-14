@@ -12,10 +12,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-'''
+"""
 Utilities for SmoothQuant models
-'''
+"""
 
+import copy
 import functools
 import os
 import sys
@@ -26,20 +27,18 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 from transformers.pytorch_utils import Conv1D
-import copy
 
 project_dir = os.path.dirname(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
 sys.path.append(project_dir)
 from utils import make_context
 
 
 @torch.no_grad()
-def apply_smoothing(scales,
-                    gemm_weights,
-                    rmsnorm_weights=None,
-                    dtype=torch.float32,
-                    rmsnorm_1p=False):
+def apply_smoothing(
+    scales, gemm_weights, rmsnorm_weights=None, dtype=torch.float32, rmsnorm_1p=False
+):
     if not isinstance(gemm_weights, list):
         gemm_weights = [gemm_weights]
 
@@ -54,11 +53,9 @@ def apply_smoothing(scales,
 
 
 @torch.no_grad()
-def smooth_gemm(gemm_weights,
-                act_scales,
-                rmsnorm_weights=None,
-                alpha=0.5,
-                weight_scales=None):
+def smooth_gemm(
+    gemm_weights, act_scales, rmsnorm_weights=None, alpha=0.5, weight_scales=None
+):
     if not isinstance(gemm_weights, list):
         gemm_weights = [gemm_weights]
     orig_dtype = gemm_weights[0].dtype
@@ -69,12 +66,14 @@ def smooth_gemm(gemm_weights,
 
     if weight_scales is None:
         weight_scales = torch.cat(
-            [gemm.abs().max(dim=0, keepdim=True)[0] for gemm in gemm_weights],
-            dim=0)
+            [gemm.abs().max(dim=0, keepdim=True)[0] for gemm in gemm_weights], dim=0
+        )
         weight_scales = weight_scales.max(dim=0)[0]
     weight_scales.to(float).clamp(min=1e-5)
-    scales = (act_scales.to(gemm_weights[0].device).to(float).pow(alpha) /
-              weight_scales.pow(1 - alpha)).clamp(min=1e-5)
+    scales = (
+        act_scales.to(gemm_weights[0].device).to(float).pow(alpha)
+        / weight_scales.pow(1 - alpha)
+    ).clamp(min=1e-5)
 
     apply_smoothing(scales, gemm_weights, rmsnorm_weights, orig_dtype)
 
@@ -82,12 +81,14 @@ def smooth_gemm(gemm_weights,
 
 
 @torch.no_grad()
-def smooth_gemm_mlp(w1_weights,
-                    w2_weights,
-                    act_scales,
-                    rmsnorm_weights=None,
-                    alpha=0.5,
-                    weight_scales=None):
+def smooth_gemm_mlp(
+    w1_weights,
+    w2_weights,
+    act_scales,
+    rmsnorm_weights=None,
+    alpha=0.5,
+    weight_scales=None,
+):
     gemm_weights = []
     if not isinstance(w1_weights, list):
         w1_weights = [w1_weights]
@@ -106,15 +107,16 @@ def smooth_gemm_mlp(w1_weights,
 
     if weight_scales is None:
         weight_scales = torch.cat(
-            [gemm.abs().max(dim=0, keepdim=True)[0] for gemm in gemm_weights],
-            dim=0)
+            [gemm.abs().max(dim=0, keepdim=True)[0] for gemm in gemm_weights], dim=0
+        )
         weight_scales = weight_scales.max(dim=0)[0]
     weight_scales.to(float).clamp(min=1e-5)
-    scales = (act_scales.to(gemm_weights[0].device).to(float).pow(alpha) /
-              weight_scales.pow(1 - alpha)).clamp(min=1e-5)
+    scales = (
+        act_scales.to(gemm_weights[0].device).to(float).pow(alpha)
+        / weight_scales.pow(1 - alpha)
+    ).clamp(min=1e-5)
 
-    apply_smoothing(scales, w1_weights + w2_weights, rmsnorm_weights,
-                    orig_dtype)
+    apply_smoothing(scales, w1_weights + w2_weights, rmsnorm_weights, orig_dtype)
 
     return scales
 
@@ -130,11 +132,16 @@ def smooth_ln_fcs(ln, fcs, act_scales, alpha=0.5):
     device, dtype = fcs[0].weight.device, fcs[0].weight.dtype
     act_scales = act_scales.to(device=device, dtype=dtype)
     weight_scales = torch.cat(
-        [fc.weight.abs().max(dim=0, keepdim=True)[0] for fc in fcs], dim=0)
+        [fc.weight.abs().max(dim=0, keepdim=True)[0] for fc in fcs], dim=0
+    )
     weight_scales = weight_scales.max(dim=0)[0].clamp(min=1e-5)
 
-    scales = (act_scales.pow(alpha) /
-              weight_scales.pow(1 - alpha)).clamp(min=1e-5).to(device).to(dtype)
+    scales = (
+        (act_scales.pow(alpha) / weight_scales.pow(1 - alpha))
+        .clamp(min=1e-5)
+        .to(device)
+        .to(dtype)
+    )
 
     if ln is not None:
         ln.weight.div_(scales)
@@ -167,8 +174,7 @@ def capture_activation_range(
         if act_scales[name][key] is None:
             act_scales[name][key] = comming_max
         else:
-            act_scales[name][key] = torch.max(act_scales[name][key],
-                                              comming_max)
+            act_scales[name][key] = torch.max(act_scales[name][key], comming_max)
 
     def stat_input_hook(m, x, y, name):
         if isinstance(x, tuple):
@@ -177,31 +183,35 @@ def capture_activation_range(
         stat_tensor(name, y, act_scales, "y")
 
         if act_scales[name]["w"] is None:
-            act_scales[name]["w"] = m.weight.abs().clip(1e-8,
-                                                        None).max(dim=1)[0]
+            act_scales[name]["w"] = m.weight.abs().clip(1e-8, None).max(dim=1)[0]
 
     hooks = []
     for name, m in model.named_modules():
         if isinstance(m, nn.Linear) or isinstance(m, Conv1D):
             hooks.append(
-                m.register_forward_hook(
-                    functools.partial(stat_input_hook, name=name)))
+                m.register_forward_hook(functools.partial(stat_input_hook, name=name))
+            )
     num_samples = min(num_samples, len(dataset))
     for i in tqdm(range(num_samples), desc="calibrating model"):
-        datapoint = dataset['train'][i:i + 1]
-        line = copy.copy(datapoint['article'])
-        line[0] = line[0] + ' TL;DR: '
+        datapoint = dataset["train"][i : i + 1]
+        line = copy.copy(datapoint["article"])
+        line[0] = line[0] + " TL;DR: "
         line[0] = line[0].strip()
         line[0] = line[0].replace(" n't", "n't")
         # use make_content to generate prompt
-        _, input_id_list = make_context(tokenizer=tokenizer,
-                                        query=line[0],
-                                        history=[],
-                                        system=system_prompt,
-                                        chat_format=chat_format,
-                                        max_input_length=max_input_len)
-        line_encoded = torch.from_numpy(np.array(
-            input_id_list, dtype=np.int32)).type(torch.int32).unsqueeze(0)
+        _, input_id_list = make_context(
+            tokenizer=tokenizer,
+            query=line[0],
+            history=[],
+            system=system_prompt,
+            chat_format=chat_format,
+            max_input_length=max_input_len,
+        )
+        line_encoded = (
+            torch.from_numpy(np.array(input_id_list, dtype=np.int32))
+            .type(torch.int32)
+            .unsqueeze(0)
+        )
         line_encoded = line_encoded.to(device)
         model(line_encoded)
 

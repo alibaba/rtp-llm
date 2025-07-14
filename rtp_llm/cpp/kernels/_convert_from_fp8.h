@@ -151,4 +151,3 @@ inline __device__ Float8_ float_from_int8(int64_t u)
 }
 
 // clang-format on
-

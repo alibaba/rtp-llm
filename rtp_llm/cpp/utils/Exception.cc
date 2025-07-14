@@ -14,7 +14,6 @@
  * limitations under the License.
  */
 
-
 #include <cstdlib>
 #include <cxxabi.h>
 #include <dlfcn.h>
@@ -23,17 +22,14 @@
 
 #include "rtp_llm/cpp/utils/Exception.h"
 
-namespace rtp_llm
-{
+namespace rtp_llm {
 
-namespace
-{
+namespace {
 int constexpr VOID_PTR_SZ = 2 + sizeof(void*) * 2;
 }
 
-FTException::FTException(char const* file, std::size_t line, const std::string& msg)
-    : std::runtime_error{""} {
-    mNbFrames = backtrace(mCallstack.data(), MAX_FRAMES);
+FTException::FTException(char const* file, std::size_t line, const std::string& msg): std::runtime_error{""} {
+    mNbFrames        = backtrace(mCallstack.data(), MAX_FRAMES);
     auto const trace = getTrace();
     std::runtime_error::operator=(
         std::runtime_error{rtp_llm::fmtstr("%s (%s:%zu)\n%s", msg.c_str(), file, line, trace.c_str())});
@@ -42,16 +38,19 @@ FTException::FTException(char const* file, std::size_t line, const std::string& 
 FTException::~FTException() noexcept = default;
 
 std::string FTException::getTrace() const {
-    auto const trace = backtrace_symbols(mCallstack.data(), mNbFrames);
+    auto const         trace = backtrace_symbols(mCallstack.data(), mNbFrames);
     std::ostringstream buf;
     for (auto i = 1; i < mNbFrames; ++i) {
         Dl_info info;
         if (dladdr(mCallstack[i], &info) && info.dli_sname) {
             auto const clearName = demangle(info.dli_sname);
-            buf << rtp_llm::fmtstr("%-3d %*p %s + %zd", i, VOID_PTR_SZ, mCallstack[i], clearName.c_str(),
-                static_cast<char*>(mCallstack[i]) - static_cast<char*>(info.dli_saddr));
-        }
-        else {
+            buf << rtp_llm::fmtstr("%-3d %*p %s + %zd",
+                                   i,
+                                   VOID_PTR_SZ,
+                                   mCallstack[i],
+                                   clearName.c_str(),
+                                   static_cast<char*>(mCallstack[i]) - static_cast<char*>(info.dli_saddr));
+        } else {
             buf << rtp_llm::fmtstr("%-3d %*p %s", i, VOID_PTR_SZ, mCallstack[i], trace[i]);
         }
         if (i < mNbFrames - 1) {
@@ -68,8 +67,8 @@ std::string FTException::getTrace() const {
 
 std::string FTException::demangle(char const* name) {
     std::string clearName{name};
-    auto status = -1;
-    auto const demangled = abi::__cxa_demangle(name, nullptr, nullptr, &status);
+    auto        status    = -1;
+    auto const  demangled = abi::__cxa_demangle(name, nullptr, nullptr, &status);
     if (status == 0) {
         clearName = demangled;
         std::free(demangled);
@@ -77,5 +76,4 @@ std::string FTException::demangle(char const* name) {
     return clearName;
 }
 
-
-} 
+}  // namespace rtp_llm

@@ -18,7 +18,7 @@ struct ExpertStatsParams {
 };
 
 struct ExpertStatsBuffer {
-    BufferPtr log_stats_buf; // [layer, log_exp_num]
+    BufferPtr log_stats_buf;  // [layer, log_exp_num]
     BufferPtr gpu_loads_buf;  // [layer, ep_size]
 };
 
@@ -50,6 +50,6 @@ struct ExpertStats {
     }
 };
 
-using OptionalExpertStats     = std::optional<ExpertStats>;
+using OptionalExpertStats    = std::optional<ExpertStats>;
 using OptionalExpertStatsRef = std::optional<std::reference_wrapper<ExpertStats>>;
 }  // namespace rtp_llm

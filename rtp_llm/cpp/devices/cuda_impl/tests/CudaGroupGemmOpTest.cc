@@ -6,7 +6,6 @@ using namespace rtp_llm;
 
 class CudaGroupGemmOpTest: public GroupGemmOpTest {};
 
-
 TEST_F(CudaGroupGemmOpTest, GroupGemmOpTest) {
     std::vector<DataType> dtypes = {DataType::TYPE_FP16, DataType::TYPE_BF16, DataType::TYPE_FP32};
     for (auto dtype : dtypes) {
@@ -23,8 +22,4 @@ TEST_F(CudaGroupGemmOpTest, GroupGemmOpTest) {
         groupGemmOpTest({{1, 8}, {100, 64}}, {{8, 2048}, {64, 2048}}, dtype, atol, rtol);
         groupGemmOpTest({{1, 8}, {100, 64}, {3, 128}}, {{8, 2048}, {64, 2048}, {128, 128}}, dtype, atol, rtol);
     }
-
-
-
-
 }

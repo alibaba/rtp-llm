@@ -109,11 +109,11 @@ struct Multihead_attention_params_base {
     // Position id of rotary embedding for CogVlm2
     const int* position_ids = nullptr;
 
-    bool use_logn_attn          = false;
+    bool use_logn_attn = false;
 
-    const int* prefix_prompt_lengths     = nullptr;
-    int        max_prefix_prompt_length  = 0;
-    bool       count_prefix_length       = false;
+    const int* prefix_prompt_lengths    = nullptr;
+    int        max_prefix_prompt_length = 0;
+    bool       count_prefix_length      = false;
 
     // The current timestep. TODO Check that do we only this param in cross attention?
     int timestep = 0;
@@ -221,44 +221,44 @@ struct outputCrossAttentionParam {
 };
 
 template<typename T, typename KVCacheBuffer>
-void fusedQKV_masked_attention_dispatch(const T*      qkv_buf,
-                                        const T*      qkv_bias,
-                                        const T*      relative_attention_bias,
-                                        const int*    cache_indir,
-                                        T*            context_buf,
-                                        const bool*   finished,
-                                        const int*    sequence_lengths,
-                                        const int     inference_batch_size,
-                                        const int     beam_width,
-                                        const int     head_num,
-                                        const int     head_num_kv,
-                                        const int     size_per_head,
-                                        const RopeConfig rope_config,
-                                        const bool    use_logn_attn,
-                                        const int*    position_ids,
-                                        const int     memory_max_len,
-                                        const int*    prefix_prompt_lengths,
-                                        const int     max_prefix_prompt_length,
-                                        const bool    count_prefix_length,
-                                        const int*    input_lengths,
-                                        const int     step,
-                                        const float   q_scaling,
-                                        const int     relative_attention_bias_stride,
-                                        const float*  linear_bias_slopes,
-                                        const bool*   masked_tokens,
-                                        const float*  qkv_scale_out,
-                                        const float*  attention_out_scale,
-                                        const int     int8_mode,
+void fusedQKV_masked_attention_dispatch(const T*                    qkv_buf,
+                                        const T*                    qkv_bias,
+                                        const T*                    relative_attention_bias,
+                                        const int*                  cache_indir,
+                                        T*                          context_buf,
+                                        const bool*                 finished,
+                                        const int*                  sequence_lengths,
+                                        const int                   inference_batch_size,
+                                        const int                   beam_width,
+                                        const int                   head_num,
+                                        const int                   head_num_kv,
+                                        const int                   size_per_head,
+                                        const RopeConfig            rope_config,
+                                        const bool                  use_logn_attn,
+                                        const int*                  position_ids,
+                                        const int                   memory_max_len,
+                                        const int*                  prefix_prompt_lengths,
+                                        const int                   max_prefix_prompt_length,
+                                        const bool                  count_prefix_length,
+                                        const int*                  input_lengths,
+                                        const int                   step,
+                                        const float                 q_scaling,
+                                        const int                   relative_attention_bias_stride,
+                                        const float*                linear_bias_slopes,
+                                        const bool*                 masked_tokens,
+                                        const float*                qkv_scale_out,
+                                        const float*                attention_out_scale,
+                                        const int                   int8_mode,
                                         const trt_common::QuantMode kv_cache_quant_mode,
-                                        const bool    multi_block_mode,
-                                        int           max_seq_tile,
-                                        T*            partial_out,
-                                        float*        partial_sum,
-                                        float*        partial_max,
-                                        int*          block_counter,
-                                        const float   softmax_extra_scale,
-                                        KVCacheBuffer kv_cache_buffer,
-                                        cudaStream_t  stream);
+                                        const bool                  multi_block_mode,
+                                        int                         max_seq_tile,
+                                        T*                          partial_out,
+                                        float*                      partial_sum,
+                                        float*                      partial_max,
+                                        int*                        block_counter,
+                                        const float                 softmax_extra_scale,
+                                        KVCacheBuffer               kv_cache_buffer,
+                                        cudaStream_t                stream);
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 }  // namespace rtp_llm

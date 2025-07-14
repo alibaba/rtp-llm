@@ -11,7 +11,6 @@
 
 using namespace std;
 
-
 namespace rtp_llm {
 
 class PositionIdsGeneratorTest: public DeviceTestBase {};
@@ -37,19 +36,20 @@ TEST_F(PositionIdsGeneratorTest, testMMWithType) {
     EXPECT_EQ(1, pos_ids[1]);
     EXPECT_EQ(2, pos_ids[2]);
 
-    BufferPtr mm_locs = device_->allocateBuffer({DataType::TYPE_INT32, {(size_t)2}, AllocationType::HOST});
-    int32_t* mm_loc_vec = mm_locs->data<int32_t>();
-    mm_loc_vec[0] = 1; mm_loc_vec[1] = 5;
+    BufferPtr mm_locs    = device_->allocateBuffer({DataType::TYPE_INT32, {(size_t)2}, AllocationType::HOST});
+    int32_t*  mm_loc_vec = mm_locs->data<int32_t>();
+    mm_loc_vec[0]        = 1;
+    mm_loc_vec[1]        = 5;
 
     vector<BufferPtr> mm_position_ids;
-    
+
     mm_position_ids.emplace_back(device_->allocateBuffer({DataType::TYPE_INT32, {(size_t)2}, AllocationType::HOST}));
     int32_t* mm_pos_id_vec = mm_position_ids[0]->data<int32_t>();
-    mm_pos_id_vec[0] = 2;
-    mm_pos_id_vec[1] = 3;
+    mm_pos_id_vec[0]       = 2;
+    mm_pos_id_vec[1]       = 3;
 
     mm_position_ids.emplace_back(device_->allocateBuffer({DataType::TYPE_INT32, {(size_t)4}, AllocationType::HOST}));
-    mm_pos_id_vec = mm_position_ids[1]->data<int32_t>();
+    mm_pos_id_vec    = mm_position_ids[1]->data<int32_t>();
     mm_pos_id_vec[0] = 2;
     mm_pos_id_vec[1] = 2;
     mm_pos_id_vec[2] = 2;
@@ -69,7 +69,6 @@ TEST_F(PositionIdsGeneratorTest, testMMWithType) {
     EXPECT_EQ(24, now_pos);
 }
 
-
 TEST_F(PositionIdsGeneratorTest, testMrope) {
     BufferPtr res = PositionIdsGenerator::generatePositionIds(device_, 3, PositionIdsStyle::MROPE);
     EXPECT_EQ(9, res->size());
@@ -79,18 +78,23 @@ TEST_F(PositionIdsGeneratorTest, testMrope) {
     EXPECT_EQ(0, pos_ids[2]);
     EXPECT_EQ(9, res->size());
 
-    BufferPtr mm_locs = device_->allocateBuffer({DataType::TYPE_INT32, {(size_t)1}, AllocationType::HOST});
-    int32_t* mm_loc_vec = mm_locs->data<int32_t>();
-    mm_loc_vec[0] = 1;
+    BufferPtr mm_locs    = device_->allocateBuffer({DataType::TYPE_INT32, {(size_t)1}, AllocationType::HOST});
+    int32_t*  mm_loc_vec = mm_locs->data<int32_t>();
+    mm_loc_vec[0]        = 1;
 
     vector<BufferPtr> mm_position_ids;
-    
-    mm_position_ids.emplace_back(device_->allocateBuffer({DataType::TYPE_INT32, {(size_t)2, (size_t)3}, AllocationType::HOST}));
-    int32_t* mm_pos_id_vec = mm_position_ids[0]->data<int32_t>();
-    mm_pos_id_vec[0] = 1; mm_pos_id_vec[1] = 3; mm_pos_id_vec[2] = 2;
-    mm_pos_id_vec[3] = 1; mm_pos_id_vec[4] = 9; mm_pos_id_vec[5] = 4;
 
-    res = PositionIdsGenerator::generatePositionIds(device_, 10, PositionIdsStyle::MROPE, mm_locs, mm_position_ids);
+    mm_position_ids.emplace_back(
+        device_->allocateBuffer({DataType::TYPE_INT32, {(size_t)2, (size_t)3}, AllocationType::HOST}));
+    int32_t* mm_pos_id_vec = mm_position_ids[0]->data<int32_t>();
+    mm_pos_id_vec[0]       = 1;
+    mm_pos_id_vec[1]       = 3;
+    mm_pos_id_vec[2]       = 2;
+    mm_pos_id_vec[3]       = 1;
+    mm_pos_id_vec[4]       = 9;
+    mm_pos_id_vec[5]       = 4;
+
+    res     = PositionIdsGenerator::generatePositionIds(device_, 10, PositionIdsStyle::MROPE, mm_locs, mm_position_ids);
     pos_ids = res->data<int32_t>();
     // 0, 0, 0
     // 2, 4, 3
@@ -99,10 +103,18 @@ TEST_F(PositionIdsGeneratorTest, testMrope) {
     // 12, 12, 12
     // ...
     // 17, 17, 17
-    EXPECT_EQ(0, pos_ids[0]); EXPECT_EQ(0, pos_ids[1]); EXPECT_EQ(0, pos_ids[2]);
-    EXPECT_EQ(2, pos_ids[3]); EXPECT_EQ(4, pos_ids[4]); EXPECT_EQ(3, pos_ids[5]);
-    EXPECT_EQ(2, pos_ids[6]); EXPECT_EQ(10, pos_ids[7]); EXPECT_EQ(5, pos_ids[8]);
-    EXPECT_EQ(17, pos_ids[27]); EXPECT_EQ(17, pos_ids[28]); EXPECT_EQ(17, pos_ids[29]);
+    EXPECT_EQ(0, pos_ids[0]);
+    EXPECT_EQ(0, pos_ids[1]);
+    EXPECT_EQ(0, pos_ids[2]);
+    EXPECT_EQ(2, pos_ids[3]);
+    EXPECT_EQ(4, pos_ids[4]);
+    EXPECT_EQ(3, pos_ids[5]);
+    EXPECT_EQ(2, pos_ids[6]);
+    EXPECT_EQ(10, pos_ids[7]);
+    EXPECT_EQ(5, pos_ids[8]);
+    EXPECT_EQ(17, pos_ids[27]);
+    EXPECT_EQ(17, pos_ids[28]);
+    EXPECT_EQ(17, pos_ids[29]);
     EXPECT_EQ(30, res->size());
 
     int32_t now_pos[3];

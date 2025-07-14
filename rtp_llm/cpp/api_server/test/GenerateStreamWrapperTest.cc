@@ -12,16 +12,15 @@ using namespace ::testing;
 
 namespace rtp_llm {
 
-
 std::shared_ptr<MockGenerateStream> CreateMockGenerateStream() {
     auto input             = std::make_shared<GenerateInput>();
     input->generate_config = std::make_shared<GenerateConfig>();
 
-    auto fake_token_ids       = std::vector<int>{1, 2, 3, 4, 5};
-    std::vector<size_t> shape = {fake_token_ids.size()};
+    auto                fake_token_ids = std::vector<int>{1, 2, 3, 4, 5};
+    std::vector<size_t> shape          = {fake_token_ids.size()};
     // 由于 Buffer 内部不负责管理传入的地址数据(只是使用), 所以数据必须具有较久的生命周期
-    input->input_ids =
-        std::make_shared<rtp_llm::Buffer>(rtp_llm::MemoryType::MEMORY_CPU, rtp_llm::DataType::TYPE_INT32, shape, fake_token_ids.data());
+    input->input_ids = std::make_shared<rtp_llm::Buffer>(
+        rtp_llm::MemoryType::MEMORY_CPU, rtp_llm::DataType::TYPE_INT32, shape, fake_token_ids.data());
 
     rtp_llm::GptInitParameter param;
     param.max_seq_len_ = fake_token_ids.size();
@@ -35,13 +34,13 @@ class GenerateStreamWrapperTest: public Test {};
 TEST_F(GenerateStreamWrapperTest, generateResponse) {
 
     auto mock_engine_ = std::make_shared<MockEngineBase>();
-    auto engine  = std::dynamic_pointer_cast<EngineBase>(mock_engine_);
+    auto engine       = std::dynamic_pointer_cast<EngineBase>(mock_engine_);
 
     auto mock_token_processor_ = std::make_shared<MockTokenProcessor>();
-    auto token_processor  = std::dynamic_pointer_cast<TokenProcessor>(mock_token_processor_);
+    auto token_processor       = std::dynamic_pointer_cast<TokenProcessor>(mock_token_processor_);
 
     auto mock_metric_reporter_ = std::make_shared<MockApiServerMetricReporter>();
-    auto metric_reporter  = std::dynamic_pointer_cast<ApiServerMetricReporter>(mock_metric_reporter_);
+    auto metric_reporter       = std::dynamic_pointer_cast<ApiServerMetricReporter>(mock_metric_reporter_);
 
     auto mock_stream = CreateMockGenerateStream();
     auto stream      = std::dynamic_pointer_cast<GenerateStream>(mock_stream);
@@ -52,23 +51,21 @@ TEST_F(GenerateStreamWrapperTest, generateResponse) {
         .WillOnce(Return(ErrorResult<GenerateOutputs>(std::move(outputs))))
         .WillOnce(Return(ErrorResult<GenerateOutputs>(ErrorCode::OUTPUT_QUEUE_IS_EMPTY, "output queue is empty")));
 
-    EXPECT_CALL(*mock_stream, finished())
-        .Times(2)
-        .WillRepeatedly(Return(false));
+    EXPECT_CALL(*mock_stream, finished()).Times(2).WillRepeatedly(Return(false));
 
-    EXPECT_CALL(*mock_token_processor_, getTokenProcessorCtx(_,_,_)).WillOnce(Return(nullptr));
-    EXPECT_CALL(*mock_token_processor_, decodeTokens(_,_,_,_)).WillOnce(Return(std::vector<std::string>()));
+    EXPECT_CALL(*mock_token_processor_, getTokenProcessorCtx(_, _, _)).WillOnce(Return(nullptr));
+    EXPECT_CALL(*mock_token_processor_, decodeTokens(_, _, _, _)).WillOnce(Return(std::vector<std::string>()));
     EXPECT_CALL(*mock_metric_reporter_, reportFTPostTokenProcessorRtMetric).WillOnce(Invoke([](double val) {
         EXPECT_TRUE(val >= 0);
     }));
 
-    auto input = std::make_shared<GenerateInput>();
-    input->generate_config = std::make_shared<GenerateConfig>();
-    auto fake_token_ids = std::vector<int>{1, 2, 3, 4, 5};
-    std::vector<size_t> shape = {fake_token_ids.size()};
+    auto input                         = std::make_shared<GenerateInput>();
+    input->generate_config             = std::make_shared<GenerateConfig>();
+    auto                fake_token_ids = std::vector<int>{1, 2, 3, 4, 5};
+    std::vector<size_t> shape          = {fake_token_ids.size()};
     // 由于 Buffer 内部不负责管理传入的地址数据(只是使用), 所以数据必须具有较久的生命周期
-    input->input_ids =
-        std::make_shared<rtp_llm::Buffer>(rtp_llm::MemoryType::MEMORY_CPU, rtp_llm::DataType::TYPE_INT32, shape, fake_token_ids.data());
+    input->input_ids = std::make_shared<rtp_llm::Buffer>(
+        rtp_llm::MemoryType::MEMORY_CPU, rtp_llm::DataType::TYPE_INT32, shape, fake_token_ids.data());
 
     GenerateStreamWrapper stream_wrapper(metric_reporter, token_processor);
     stream_wrapper.init(input, engine);
@@ -76,9 +73,9 @@ TEST_F(GenerateStreamWrapperTest, generateResponse) {
     EXPECT_EQ(stream_wrapper.input_ids_->type(), rtp_llm::DataType::TYPE_INT32);
     EXPECT_EQ(stream_wrapper.input_ids_->size(), fake_token_ids.size());
     EXPECT_EQ(stream_wrapper.input_ids_->sizeBytes(), fake_token_ids.size() * sizeof(int));
-    EXPECT_TRUE(std::memcmp(stream_wrapper.input_ids_->data(),
-                            fake_token_ids.data(),
-                            stream_wrapper.input_ids_->sizeBytes()) == 0);
+    EXPECT_TRUE(
+        std::memcmp(stream_wrapper.input_ids_->data(), fake_token_ids.data(), stream_wrapper.input_ids_->sizeBytes())
+        == 0);
     {
         auto [response, finished] = stream_wrapper.generateResponse();
         ASSERT_EQ(finished, false);
@@ -97,14 +94,11 @@ TEST_F(GenerateStreamWrapperTest, formatResponse_NumBeams) {
     generate_texts.push_back("fake response");
     GenerateOutputs generate_outputs;
     generate_outputs.generate_outputs.push_back(GenerateOutput());
-    auto generate_config = std::make_shared<GenerateConfig>();
+    auto               generate_config = std::make_shared<GenerateConfig>();
     rtp_llm::BufferPtr input_ids;
 
     generate_config->num_beams = 2;
-    auto res = GenerateStreamWrapper::formatResponse(generate_texts,
-                                                     generate_outputs,
-                                                     generate_config,
-                                                     input_ids);
+    auto res = GenerateStreamWrapper::formatResponse(generate_texts, generate_outputs, generate_config, input_ids);
     ASSERT_EQ(res.response, generate_texts);
     ASSERT_EQ(res.aux_info[0].beam_responses, generate_texts);
 }
@@ -115,23 +109,18 @@ TEST_F(GenerateStreamWrapperTest, formatResponse_Logits) {
     std::vector<std::string> generate_texts;
     generate_texts.push_back("fake response");
 
-    GenerateOutput generate_output;
-    auto fake_token_ids       = std::vector<float>{1, 2, 3, 4, 5};
-    std::vector<size_t> shape = {fake_token_ids.size()};
-    generate_output.logits = std::make_shared<rtp_llm::Buffer>(rtp_llm::MemoryType::MEMORY_CPU,
-                                                          rtp_llm::DataType::TYPE_FP32,
-                                                          shape,
-                                                          fake_token_ids.data());
+    GenerateOutput      generate_output;
+    auto                fake_token_ids = std::vector<float>{1, 2, 3, 4, 5};
+    std::vector<size_t> shape          = {fake_token_ids.size()};
+    generate_output.logits             = std::make_shared<rtp_llm::Buffer>(
+        rtp_llm::MemoryType::MEMORY_CPU, rtp_llm::DataType::TYPE_FP32, shape, fake_token_ids.data());
     GenerateOutputs generate_outputs;
     generate_outputs.generate_outputs.push_back(generate_output);
 
-    auto generate_config = std::make_shared<GenerateConfig>();
+    auto generate_config           = std::make_shared<GenerateConfig>();
     generate_config->return_logits = true;
 
-    auto res = GenerateStreamWrapper::formatResponse(generate_texts,
-                                                     generate_outputs,
-                                                     generate_config,
-                                                     input_ids);
+    auto res = GenerateStreamWrapper::formatResponse(generate_texts, generate_outputs, generate_config, input_ids);
     ASSERT_EQ(res.response, generate_texts);
     ASSERT_EQ(res.logits.has_value(), true);
 
@@ -149,23 +138,18 @@ TEST_F(GenerateStreamWrapperTest, formatResponse_Loss) {
     std::vector<std::string> generate_texts;
     generate_texts.push_back("fake response");
 
-    GenerateOutput generate_output;
-    auto fake_token_ids       = std::vector<float>{1, 2, 3, 4, 5};
-    std::vector<size_t> shape = {fake_token_ids.size()};
-    generate_output.loss = std::make_shared<rtp_llm::Buffer>(rtp_llm::MemoryType::MEMORY_CPU,
-                                                        rtp_llm::DataType::TYPE_FP32,
-                                                        shape,
-                                                        fake_token_ids.data());
+    GenerateOutput      generate_output;
+    auto                fake_token_ids = std::vector<float>{1, 2, 3, 4, 5};
+    std::vector<size_t> shape          = {fake_token_ids.size()};
+    generate_output.loss               = std::make_shared<rtp_llm::Buffer>(
+        rtp_llm::MemoryType::MEMORY_CPU, rtp_llm::DataType::TYPE_FP32, shape, fake_token_ids.data());
     GenerateOutputs generate_outputs;
     generate_outputs.generate_outputs.push_back(generate_output);
 
-    auto generate_config = std::make_shared<GenerateConfig>();
+    auto generate_config            = std::make_shared<GenerateConfig>();
     generate_config->calculate_loss = true;
 
-    auto res = GenerateStreamWrapper::formatResponse(generate_texts,
-                                                     generate_outputs,
-                                                     generate_config,
-                                                     input_ids);
+    auto res = GenerateStreamWrapper::formatResponse(generate_texts, generate_outputs, generate_config, input_ids);
     ASSERT_EQ(res.response, generate_texts);
     ASSERT_EQ(res.loss.has_value(), true);
 
@@ -183,23 +167,18 @@ TEST_F(GenerateStreamWrapperTest, formatResponse_HiddenStates) {
     std::vector<std::string> generate_texts;
     generate_texts.push_back("fake response");
 
-    GenerateOutput generate_output;
-    auto fake_token_ids       = std::vector<float>{1, 2, 3, 4, 5};
-    std::vector<size_t> shape = {fake_token_ids.size()};
-    generate_output.hidden_states = std::make_shared<rtp_llm::Buffer>(rtp_llm::MemoryType::MEMORY_CPU,
-                                                                 rtp_llm::DataType::TYPE_FP32,
-                                                                 shape,
-                                                                 fake_token_ids.data());
+    GenerateOutput      generate_output;
+    auto                fake_token_ids = std::vector<float>{1, 2, 3, 4, 5};
+    std::vector<size_t> shape          = {fake_token_ids.size()};
+    generate_output.hidden_states      = std::make_shared<rtp_llm::Buffer>(
+        rtp_llm::MemoryType::MEMORY_CPU, rtp_llm::DataType::TYPE_FP32, shape, fake_token_ids.data());
     GenerateOutputs generate_outputs;
     generate_outputs.generate_outputs.push_back(generate_output);
 
-    auto generate_config = std::make_shared<GenerateConfig>();
+    auto generate_config                  = std::make_shared<GenerateConfig>();
     generate_config->return_hidden_states = true;
 
-    auto res = GenerateStreamWrapper::formatResponse(generate_texts,
-                                                     generate_outputs,
-                                                     generate_config,
-                                                     input_ids);
+    auto res = GenerateStreamWrapper::formatResponse(generate_texts, generate_outputs, generate_config, input_ids);
     ASSERT_EQ(res.response, generate_texts);
     ASSERT_EQ(res.hidden_states.has_value(), true);
 
@@ -217,23 +196,18 @@ TEST_F(GenerateStreamWrapperTest, formatResponse_OutputIds) {
     std::vector<std::string> generate_texts;
     generate_texts.push_back("fake response");
 
-    GenerateOutput generate_output;
-    auto fake_token_ids       = std::vector<int>{1, 2, 3, 4, 5};
-    std::vector<size_t> shape = {fake_token_ids.size()};
-    generate_output.output_ids = std::make_shared<rtp_llm::Buffer>(rtp_llm::MemoryType::MEMORY_CPU,
-                                                              rtp_llm::DataType::TYPE_INT32,
-                                                              shape,
-                                                              fake_token_ids.data());
+    GenerateOutput      generate_output;
+    auto                fake_token_ids = std::vector<int>{1, 2, 3, 4, 5};
+    std::vector<size_t> shape          = {fake_token_ids.size()};
+    generate_output.output_ids         = std::make_shared<rtp_llm::Buffer>(
+        rtp_llm::MemoryType::MEMORY_CPU, rtp_llm::DataType::TYPE_INT32, shape, fake_token_ids.data());
     GenerateOutputs generate_outputs;
     generate_outputs.generate_outputs.push_back(generate_output);
 
-    auto generate_config = std::make_shared<GenerateConfig>();
+    auto generate_config               = std::make_shared<GenerateConfig>();
     generate_config->return_output_ids = true;
 
-    auto res = GenerateStreamWrapper::formatResponse(generate_texts,
-                                                     generate_outputs,
-                                                     generate_config,
-                                                     input_ids);
+    auto res = GenerateStreamWrapper::formatResponse(generate_texts, generate_outputs, generate_config, input_ids);
     ASSERT_EQ(res.response, generate_texts);
     ASSERT_EQ(res.output_ids.has_value(), true);
 
@@ -249,23 +223,18 @@ TEST_F(GenerateStreamWrapperTest, formatResponse_InputIds) {
     std::vector<std::string> generate_texts;
     generate_texts.push_back("fake response");
 
-    auto fake_token_ids       = std::vector<int>{1, 2, 3, 4, 5};
-    std::vector<size_t> shape = {fake_token_ids.size()};
-    rtp_llm::BufferPtr input_ids = std::make_shared<rtp_llm::Buffer>(rtp_llm::MemoryType::MEMORY_CPU,
-                                                           rtp_llm::DataType::TYPE_INT32,
-                                                           shape,
-                                                           fake_token_ids.data());
-    GenerateOutput generate_output;
+    auto                fake_token_ids = std::vector<int>{1, 2, 3, 4, 5};
+    std::vector<size_t> shape          = {fake_token_ids.size()};
+    rtp_llm::BufferPtr  input_ids      = std::make_shared<rtp_llm::Buffer>(
+        rtp_llm::MemoryType::MEMORY_CPU, rtp_llm::DataType::TYPE_INT32, shape, fake_token_ids.data());
+    GenerateOutput  generate_output;
     GenerateOutputs generate_outputs;
     generate_outputs.generate_outputs.push_back(generate_output);
 
-    auto generate_config = std::make_shared<GenerateConfig>();
+    auto generate_config              = std::make_shared<GenerateConfig>();
     generate_config->return_input_ids = true;
 
-    auto res = GenerateStreamWrapper::formatResponse(generate_texts,
-                                                     generate_outputs,
-                                                     generate_config,
-                                                     input_ids);
+    auto res = GenerateStreamWrapper::formatResponse(generate_texts, generate_outputs, generate_config, input_ids);
     ASSERT_EQ(res.response, generate_texts);
     ASSERT_EQ(res.input_ids.has_value(), true);
 

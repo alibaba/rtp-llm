@@ -9,7 +9,6 @@
 
 using namespace std;
 
-
 namespace rtp_llm {
 
 class CacheManagerTest: public DeviceTestBase {
@@ -21,28 +20,32 @@ protected:
     }
 
     std::vector<int64_t> constructCacheKey(CacheManager& cache_manager, const vector<int>& token_ids) {
-        auto seq_size_per_block = cache_manager.config_.seq_size_per_block;
-        auto total_blocks = token_ids.size() / seq_size_per_block;
+        auto            seq_size_per_block = cache_manager.config_.seq_size_per_block;
+        auto            total_blocks       = token_ids.size() / seq_size_per_block;
         vector<int64_t> cache_keys;
-        int64_t hash = 0;
+        int64_t         hash = 0;
         for (int index = 0; index < total_blocks; index++) {
             auto start_pos = token_ids.begin() + index * seq_size_per_block;
-            hash = std::accumulate(start_pos, start_pos + seq_size_per_block, hash, std::plus<int>());
+            hash           = std::accumulate(start_pos, start_pos + seq_size_per_block, hash, std::plus<int>());
             cache_keys.push_back(hash);
         }
         return cache_keys;
     }
 
-    CacheManager::MatchInfo mallocWithCache(CacheManager& cache_manager, const vector<int>& token_ids,
-                                            const vector<vector<int>>& mm_bounds = {}, bool need_loss = false, int need_block_num = -1) {
+    CacheManager::MatchInfo mallocWithCache(CacheManager&              cache_manager,
+                                            const vector<int>&         token_ids,
+                                            const vector<vector<int>>& mm_bounds      = {},
+                                            bool                       need_loss      = false,
+                                            int                        need_block_num = -1) {
         if (need_block_num == -1) {
             need_block_num = token_ids.size();
         }
-        auto cache_keys = constructCacheKey(cache_manager, token_ids);
+        auto                             cache_keys = constructCacheKey(cache_manager, token_ids);
         CacheManager::AdvancedMallocInfo malloc_info(request_id, token_ids, cache_keys, mm_bounds, need_loss);
-        auto match_info = cache_manager.mallocWithCache(malloc_info);
+        auto                             match_info = cache_manager.mallocWithCache(malloc_info);
         if (match_info.cache_blocks.size() < need_block_num) {
-            auto [success, index] = cache_manager.mallocIndex({request_id, uint32_t(need_block_num - match_info.cache_blocks.size())});
+            auto [success, index] =
+                cache_manager.mallocIndex({request_id, uint32_t(need_block_num - match_info.cache_blocks.size())});
             if (success) {
                 match_info.cache_blocks.insert(match_info.cache_blocks.end(), index.begin(), index.end());
             } else {
@@ -53,16 +56,19 @@ protected:
         return match_info;
     }
 
-    void freeWithCache(CacheManager& cache_manager, const std::vector<int>& block_indices,
-                       const vector<int>& token_ids, const vector<float>& loss = {}) {
-        auto cache_keys = constructCacheKey(cache_manager, token_ids);
+    void freeWithCache(CacheManager&           cache_manager,
+                       const std::vector<int>& block_indices,
+                       const vector<int>&      token_ids,
+                       const vector<float>&    loss = {}) {
+        auto                   cache_keys = constructCacheKey(cache_manager, token_ids);
         CacheManager::FreeInfo free_info(request_id, token_ids, cache_keys, block_indices, loss);
         cache_manager.freeWithCache(free_info);
     }
 
-    void insertResidentCache(CacheManager& cache_manager, const std::vector<int>& block_indices,
-                             const vector<int>& token_ids) {
-        auto cache_keys = constructCacheKey(cache_manager, token_ids);
+    void insertResidentCache(CacheManager&           cache_manager,
+                             const std::vector<int>& block_indices,
+                             const vector<int>&      token_ids) {
+        auto                   cache_keys = constructCacheKey(cache_manager, token_ids);
         CacheManager::FreeInfo free_info(request_id, token_ids, cache_keys, block_indices);
         cache_manager.insertResidentCache(free_info);
     }
@@ -198,8 +204,8 @@ TEST_F(CacheManagerTest, testAllocateWithReuse) {
 }
 
 TEST_F(CacheManagerTest, testAllocateWithMultimodalReuse) {
-    auto         cache_config = initConfig();
-    cache_config.block_nums = 10;
+    auto cache_config               = initConfig();
+    cache_config.block_nums         = 10;
     cache_config.seq_size_per_block = 2;
     CacheManager cache_manager(cache_config, device_);
 
@@ -540,8 +546,8 @@ TEST_F(CacheManagerTest, testSetBlockValue) {
 
         for (size_t layer_id = 0; layer_id < cache_config.layer_num; layer_id++) {
             auto [kbuffer, vbuffer] = cache_manager.getKVBlockValue(block_index, layer_id);
-            auto host_kbuffer = device_->clone({*kbuffer, AllocationType::HOST});
-            auto host_vbuffer = device_->clone({*vbuffer, AllocationType::HOST});
+            auto host_kbuffer       = device_->clone({*kbuffer, AllocationType::HOST});
+            auto host_vbuffer       = device_->clone({*vbuffer, AllocationType::HOST});
             ASSERT_EQ(cache_config.k_block_stride, host_kbuffer->size());
             ASSERT_EQ(cache_config.k_block_stride, host_vbuffer->size());
             for (size_t i = 0; i < host_kbuffer->size(); i++) {

@@ -56,7 +56,7 @@ AddBiasOutput DeviceOps::addbias(const AddBiasParams& params) {
 }
 
 BufferPtr DeviceOps::loraLinearWithActivation(const LoraLinearWithActivationParams& params) {
-   throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
 BufferPtr DeviceOps::gemm(const GemmParams& params) {
@@ -267,11 +267,14 @@ torch::Tensor DeviceOps::packInt8TensorToPackedInt4(torch::Tensor weight) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-torch::Tensor DeviceOps::preprocessWeightsForMixedGemm(torch::Tensor weight, torch::ScalarType quant_type, const std::string &arch) {
+torch::Tensor
+DeviceOps::preprocessWeightsForMixedGemm(torch::Tensor weight, torch::ScalarType quant_type, const std::string& arch) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-std::vector<torch::Tensor> DeviceOps::symmetricQuantizeLastAxisOfBatchedMatrix(torch::Tensor weight, torch::ScalarType quant_type, const std::string &arch) {
+std::vector<torch::Tensor> DeviceOps::symmetricQuantizeLastAxisOfBatchedMatrix(torch::Tensor      weight,
+                                                                               torch::ScalarType  quant_type,
+                                                                               const std::string& arch) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
@@ -279,7 +282,7 @@ torch::Tensor DeviceOps::preprocessWeightScale(torch::Tensor weight, torch::Tens
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-void DeviceOps::maskLogits(Buffer &logits, const Buffer &mask) {
+void DeviceOps::maskLogits(Buffer& logits, const Buffer& mask) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
@@ -291,4 +294,4 @@ void DeviceOps::prepareCommBuffer(const PrepareCommBufferParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-} // namespace rtp_llm
+}  // namespace rtp_llm

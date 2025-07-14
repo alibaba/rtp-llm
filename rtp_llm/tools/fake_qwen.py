@@ -1,26 +1,28 @@
-import os
 import json
+import os
+
 from rtp_llm.tools.fake_model_base import *
 
-def save_config_func(model_type,
-                     dest_path: str,
-                     layer: int,
-                     head: int,
-                     head_kv: int,
-                     head_size: int,
-                     ffn_hidden_size: int,
-                     ffn_inter_padding_size: int,
-                     vocab_size: int):
+
+def save_config_func(
+    model_type,
+    dest_path: str,
+    layer: int,
+    head: int,
+    head_kv: int,
+    head_size: int,
+    ffn_hidden_size: int,
+    ffn_inter_padding_size: int,
+    vocab_size: int,
+):
     config = {
         "activation": "swiglu",
         "apply_residual_connection_post_layernorm": False,
-        "architectures": [
-            "QWenLMHeadModel"
-        ],
+        "architectures": ["QWenLMHeadModel"],
         "attn_pdrop": 0.0,
         "auto_map": {
             "AutoConfig": "configuration_qwen.QWenConfig",
-            "AutoModelForCausalLM": "modeling_qwen.QWenLMHeadModel"
+            "AutoModelForCausalLM": "modeling_qwen.QWenLMHeadModel",
         },
         "bf16": True,
         "bias_dropout_fusion": True,
@@ -55,10 +57,11 @@ def save_config_func(model_type,
         "use_dynamic_ntk": True,
         "use_flash_attn": True,
         "use_logn_attn": True,
-        "vocab_size": vocab_size
+        "vocab_size": vocab_size,
     }
     # save to config.json
-    json.dump(config, open(os.path.join(dest_path, 'config.json'), 'w'), indent=2)
+    json.dump(config, open(os.path.join(dest_path, "config.json"), "w"), indent=2)
+
 
 def fake_qwen():
     default_config = DefaultModelConfig()
@@ -66,13 +69,18 @@ def fake_qwen():
     default_config.head_num = 2
     default_config.head_kv_num = 2
     default_config.head_size = 128
-    default_config.ffn_hidden_size = 4 * default_config.head_size * default_config.head_num
-    default_config.ffn_inter_padding_size = 4 * default_config.head_size * default_config.head_num
+    default_config.ffn_hidden_size = (
+        4 * default_config.head_size * default_config.head_num
+    )
+    default_config.ffn_inter_padding_size = (
+        4 * default_config.head_size * default_config.head_num
+    )
     default_config.ffn_gate_active = True
     default_config.ffn_w1_w3_independ = True
     default_config.vocab_size = 151936
 
     fake_model("qwen_7b", default_config, save_config_func)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     fake_qwen()

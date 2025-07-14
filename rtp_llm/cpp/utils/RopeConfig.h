@@ -6,14 +6,14 @@
 namespace rtp_llm {
 
 enum class RopeStyle {
-    No = 0,
-    Base = 1,
-    Glm2 = 2,
-    DynamicNTK = 3,
+    No             = 0,
+    Base           = 1,
+    Glm2           = 2,
+    DynamicNTK     = 3,
     QwenDynamicNTK = 4,
-    Yarn = 5,
-    Llama3 = 6,
-    Mrope = 7,
+    Yarn           = 5,
+    Llama3         = 6,
+    Mrope          = 7,
 };
 
 // low_freq_factor, high_freq_factor for llama3
@@ -37,18 +37,18 @@ struct RopeConfig {
     int   mrope_dim3           = 0;
 };
 
-#define FT_ROPE_SWITCH(COND, CONST_NAME, ...)                           \
-    [&] {                                                               \
-        switch (COND) {                                                 \
-            FT_SWITCH_ONE_CASE(CONST_NAME, RopeStyle::No, __VA_ARGS__)  \
-            FT_SWITCH_ONE_CASE(CONST_NAME, RopeStyle::Base, __VA_ARGS__) \
-            FT_SWITCH_ONE_CASE(CONST_NAME, RopeStyle::Glm2, __VA_ARGS__) \
-            FT_SWITCH_ONE_CASE(CONST_NAME, RopeStyle::DynamicNTK,  __VA_ARGS__) \
-            FT_SWITCH_ONE_CASE(CONST_NAME, RopeStyle::QwenDynamicNTK, __VA_ARGS__) \
-            FT_SWITCH_ONE_CASE(CONST_NAME, RopeStyle::Yarn, __VA_ARGS__) \
-            FT_SWITCH_ONE_CASE(CONST_NAME, RopeStyle::Llama3, __VA_ARGS__) \
-            FT_SWITCH_ONE_CASE(CONST_NAME, RopeStyle::Mrope, __VA_ARGS__) \
-        }                                                               \
+#define FT_ROPE_SWITCH(COND, CONST_NAME, ...)                                                                          \
+    [&] {                                                                                                              \
+        switch (COND) {                                                                                                \
+            FT_SWITCH_ONE_CASE(CONST_NAME, RopeStyle::No, __VA_ARGS__)                                                 \
+            FT_SWITCH_ONE_CASE(CONST_NAME, RopeStyle::Base, __VA_ARGS__)                                               \
+            FT_SWITCH_ONE_CASE(CONST_NAME, RopeStyle::Glm2, __VA_ARGS__)                                               \
+            FT_SWITCH_ONE_CASE(CONST_NAME, RopeStyle::DynamicNTK, __VA_ARGS__)                                         \
+            FT_SWITCH_ONE_CASE(CONST_NAME, RopeStyle::QwenDynamicNTK, __VA_ARGS__)                                     \
+            FT_SWITCH_ONE_CASE(CONST_NAME, RopeStyle::Yarn, __VA_ARGS__)                                               \
+            FT_SWITCH_ONE_CASE(CONST_NAME, RopeStyle::Llama3, __VA_ARGS__)                                             \
+            FT_SWITCH_ONE_CASE(CONST_NAME, RopeStyle::Mrope, __VA_ARGS__)                                              \
+        }                                                                                                              \
     }()
 
-} // namespace rtp_llm
+}  // namespace rtp_llm

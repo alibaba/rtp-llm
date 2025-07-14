@@ -7,11 +7,11 @@
 namespace rtp_llm {
 
 std::unique_ptr<::google::protobuf::Service>
-createEmbeddingArpcService(const rtp_llm::GptInitParameter&               gpt_init_params,
-                           py::object                                py_render,
+createEmbeddingArpcService(const rtp_llm::GptInitParameter&              gpt_init_params,
+                           py::object                                    py_render,
                            std::shared_ptr<rtp_llm::MultimodalProcessor> mm_processor,
-                           std::shared_ptr<rtp_llm::EmbeddingEngine> engine,
-                           kmonitor::MetricsReporterPtr              reporter) {    
+                           std::shared_ptr<rtp_llm::EmbeddingEngine>     engine,
+                           kmonitor::MetricsReporterPtr                  reporter) {
     return nullptr;
 }
 

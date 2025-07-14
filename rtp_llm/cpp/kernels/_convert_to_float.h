@@ -109,4 +109,3 @@ inline __device__ Float8_ convert_to_float(bf16_8_t u) {
     return f8;
 }
 #endif
-

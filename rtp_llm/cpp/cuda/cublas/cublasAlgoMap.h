@@ -85,7 +85,7 @@ private:
     std::map<std::string, int>                                                               sp_algo_map_;
 
 public:
-    cublasAlgoMap(){};
+    cublasAlgoMap() {};
     explicit cublasAlgoMap(const std::string filename, const std::string sp_config_filename = "");
     cublasAlgoMap(const cublasAlgoMap& map);
     ~cublasAlgoMap();

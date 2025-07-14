@@ -10,11 +10,12 @@ class RemoteTokenizeModule {
 public:
     RemoteTokenizeModule() = default;
     // maybe should use seperate subscribe config;
-    bool init(std::shared_ptr<PrefillLoadBalancer> load_balancer);
-    absl::StatusOr<std::shared_ptr<TaskDescription>> encodeRequest(const std::string& request, const std::string& biz_name);
+    bool                                             init(std::shared_ptr<PrefillLoadBalancer> load_balancer);
+    absl::StatusOr<std::shared_ptr<TaskDescription>> encodeRequest(const std::string& request,
+                                                                   const std::string& biz_name);
 
 private:
-    std::shared_ptr<PrefillLoadBalancer> load_balancer_;
+    std::shared_ptr<PrefillLoadBalancer>           load_balancer_;
     std::shared_ptr<http_server::SimpleHttpClient> http_client_;
 };
 

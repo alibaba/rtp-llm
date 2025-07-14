@@ -88,4 +88,4 @@ inline ErrorCodePB transErrorCodeToRPC(ErrorCode error_code) {
         return ErrorCodePB::UNKNOWN_ERROR;
     }
 }
-}
+}  // namespace rtp_llm

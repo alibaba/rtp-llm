@@ -26,7 +26,7 @@ TEST_F(ConcurrencyControllerTest, testBlocking) {
     controller.increment();
     controller.increment();
 
-    int flag = 0;
+    int         flag = 0;
     std::thread t([&controller, &flag] {
         controller.increment();
         flag = 1;

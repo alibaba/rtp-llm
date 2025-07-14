@@ -1,12 +1,12 @@
 import json
 import os
 import re
-from typing import List, Optional, Union, Dict
+from typing import Dict, List, Optional, Union
+
 from sentencepiece import SentencePieceProcessor
 from transformers import PreTrainedTokenizer
-from transformers.utils import logging, PaddingStrategy
-from transformers.tokenization_utils_base import EncodedInput, BatchEncoding
-
+from transformers.tokenization_utils_base import BatchEncoding, EncodedInput
+from transformers.utils import PaddingStrategy, logging
 
 logger = logging.get_logger(__name__)
 
@@ -24,15 +24,28 @@ class SPTokenizer:
         self.pad_id: int = self.sp_model.unk_id()
         assert self.sp_model.vocab_size() == self.sp_model.get_piece_size()
 
-        role_special_tokens = ["<|system|>", "<|user|>", "<|assistant|>", "<|observation|>"]
-        special_tokens = ["[MASK]", "[gMASK]", "[sMASK]", "sop", "eop"] + role_special_tokens
+        role_special_tokens = [
+            "<|system|>",
+            "<|user|>",
+            "<|assistant|>",
+            "<|observation|>",
+        ]
+        special_tokens = [
+            "[MASK]",
+            "[gMASK]",
+            "[sMASK]",
+            "sop",
+            "eop",
+        ] + role_special_tokens
         self.special_tokens = {}
         self.index_special_tokens = {}
         for token in special_tokens:
             self.special_tokens[token] = self.n_words
             self.index_special_tokens[self.n_words] = token
             self.n_words += 1
-        self.special_token_expression = "|".join([re.escape(token) for token in special_tokens])
+        self.special_token_expression = "|".join(
+            [re.escape(token) for token in special_tokens]
+        )
 
     def tokenize(self, s: str, encode_special_tokens=False):
         if encode_special_tokens:
@@ -40,8 +53,10 @@ class SPTokenizer:
             t = []
             for match in re.finditer(self.special_token_expression, s):
                 if last_index < match.start():
-                    t.extend(self.sp_model.EncodeAsPieces(s[last_index:match.start()]))
-                t.append(s[match.start():match.end()])
+                    t.extend(
+                        self.sp_model.EncodeAsPieces(s[last_index : match.start()])
+                    )
+                t.append(s[match.start() : match.end()])
                 last_index = match.end()
             if last_index < len(s):
                 t.extend(self.sp_model.EncodeAsPieces(s[last_index:]))
@@ -77,7 +92,7 @@ class SPTokenizer:
         return text
 
     def convert_token_to_id(self, token):
-        """ Converts a token (str) in an id using the vocab. """
+        """Converts a token (str) in an id using the vocab."""
         if token in self.special_tokens:
             return self.special_tokens[token]
         return self.sp_model.PieceToId(token)
@@ -86,7 +101,11 @@ class SPTokenizer:
         """Converts an index (integer) in a token (str) using the vocab."""
         if index in self.index_special_tokens:
             return self.index_special_tokens[index]
-        if index in [self.eos_id, self.bos_id, self.pad_id] or index < 0 or index > self.sp_model.vocab_size():
+        if (
+            index in [self.eos_id, self.bos_id, self.pad_id]
+            or index < 0
+            or index > self.sp_model.vocab_size()
+        ):
             return ""
         return self.sp_model.IdToPiece(index)
 
@@ -101,7 +120,7 @@ class ChatGLMTokenizer(PreTrainedTokenizer):
         vocab_file,
         clean_up_tokenization_spaces=False,
         encode_special_tokens=False,
-        **kwargs
+        **kwargs,
     ):
         self.name = "GLMTokenizer"
         self.vocab_file = vocab_file
@@ -110,19 +129,20 @@ class ChatGLMTokenizer(PreTrainedTokenizer):
             "<bos>": self.tokenizer.bos_id,
             "<eos>": self.tokenizer.eos_id,
             "<unk>": self.tokenizer.pad_id,
-            "<pad>": self.tokenizer.pad_id
+            "<pad>": self.tokenizer.pad_id,
         }
         self.encode_special_tokens = encode_special_tokens
 
         super().__init__(
-            clean_up_tokenization_spaces=clean_up_tokenization_spaces,
-            **kwargs
+            clean_up_tokenization_spaces=clean_up_tokenization_spaces, **kwargs
         )
 
     def get_command(self, token):
         if token in self.special_tokens:
             return self.special_tokens[token]
-        assert token in self.tokenizer.special_tokens, f"{token} is not a special token for {self.name}"
+        assert (
+            token in self.tokenizer.special_tokens
+        ), f"{token} is not a special token for {self.name}"
         return self.tokenizer.special_tokens[token]
 
     @property
@@ -166,16 +186,18 @@ class ChatGLMTokenizer(PreTrainedTokenizer):
         return self.tokenizer.n_words
 
     def get_vocab(self):
-        """ Returns vocab as a dict """
+        """Returns vocab as a dict"""
         vocab = {self._convert_id_to_token(i): i for i in range(self.vocab_size)}
         vocab.update(self.added_tokens_encoder)
         return vocab
 
     def _tokenize(self, text, **kwargs):
-        return self.tokenizer.tokenize(text, encode_special_tokens=self.encode_special_tokens)
+        return self.tokenizer.tokenize(
+            text, encode_special_tokens=self.encode_special_tokens
+        )
 
     def _convert_token_to_id(self, token):
-        """ Converts a token (str) in an id using the vocab. """
+        """Converts a token (str) in an id using the vocab."""
         return self.tokenizer.convert_token_to_id(token)
 
     def _convert_id_to_token(self, index):
@@ -205,7 +227,7 @@ class ChatGLMTokenizer(PreTrainedTokenizer):
         else:
             vocab_file = save_directory
 
-        with open(self.vocab_file, 'rb') as fin:
+        with open(self.vocab_file, "rb") as fin:
             proto_str = fin.read()
 
         with open(vocab_file, "wb") as writer:
@@ -219,7 +241,9 @@ class ChatGLMTokenizer(PreTrainedTokenizer):
 
     def build_single_message(self, role, metadata, message):
         assert role in ["system", "user", "assistant", "observation"], role
-        role_tokens = [self.get_command(f"<|{role}|>")] + self.tokenizer.encode(f"{metadata}\n")
+        role_tokens = [self.get_command(f"<|{role}|>")] + self.tokenizer.encode(
+            f"{metadata}\n"
+        )
         message_tokens = self.tokenizer.encode(message)
         tokens = role_tokens + message_tokens
         return tokens
@@ -231,11 +255,21 @@ class ChatGLMTokenizer(PreTrainedTokenizer):
         for item in history:
             content = item["content"]
             if item["role"] == "system" and "tools" in item:
-                content = content + "\n" + json.dumps(item["tools"], indent=4, ensure_ascii=False)
-            input_ids.extend(self.build_single_message(item["role"], item.get("metadata", ""), content))
+                content = (
+                    content
+                    + "\n"
+                    + json.dumps(item["tools"], indent=4, ensure_ascii=False)
+                )
+            input_ids.extend(
+                self.build_single_message(
+                    item["role"], item.get("metadata", ""), content
+                )
+            )
         input_ids.extend(self.build_single_message(role, "", query))
         input_ids.extend([self.get_command("<|assistant|>")])
-        return self.batch_encode_plus([input_ids], return_tensors="pt", is_split_into_words=True)
+        return self.batch_encode_plus(
+            [input_ids], return_tensors="pt", is_split_into_words=True
+        )
 
     def build_inputs_with_special_tokens(
         self, token_ids_0: List[int], token_ids_1: Optional[List[int]] = None
@@ -303,10 +337,17 @@ class ChatGLMTokenizer(PreTrainedTokenizer):
         if padding_strategy == PaddingStrategy.LONGEST:
             max_length = len(required_input)
 
-        if max_length is not None and pad_to_multiple_of is not None and (max_length % pad_to_multiple_of != 0):
+        if (
+            max_length is not None
+            and pad_to_multiple_of is not None
+            and (max_length % pad_to_multiple_of != 0)
+        ):
             max_length = ((max_length // pad_to_multiple_of) + 1) * pad_to_multiple_of
 
-        needs_to_be_padded = padding_strategy != PaddingStrategy.DO_NOT_PAD and len(required_input) != max_length
+        needs_to_be_padded = (
+            padding_strategy != PaddingStrategy.DO_NOT_PAD
+            and len(required_input) != max_length
+        )
 
         # Initialize attention mask if not present.
         if "attention_mask" not in encoded_inputs:
@@ -319,10 +360,16 @@ class ChatGLMTokenizer(PreTrainedTokenizer):
             difference = max_length - len(required_input)
 
             if "attention_mask" in encoded_inputs:
-                encoded_inputs["attention_mask"] = [0] * difference + encoded_inputs["attention_mask"]
+                encoded_inputs["attention_mask"] = [0] * difference + encoded_inputs[
+                    "attention_mask"
+                ]
             if "position_ids" in encoded_inputs:
-                encoded_inputs["position_ids"] = [0] * difference + encoded_inputs["position_ids"]
-            encoded_inputs[self.model_input_names[0]] = [self.pad_token_id] * difference + required_input
+                encoded_inputs["position_ids"] = [0] * difference + encoded_inputs[
+                    "position_ids"
+                ]
+            encoded_inputs[self.model_input_names[0]] = [
+                self.pad_token_id
+            ] * difference + required_input
 
         return encoded_inputs
 
@@ -334,13 +381,13 @@ class ChatGLMTokenizer(PreTrainedTokenizer):
 
         return (
             "{% for message in messages %}"
-                "{% if loop.first %}"
-                    "[gMASK]sop<|{{ message['role'] }}|> \n {{ message['content'] }}"
-                "{% else %}"
-                    "<|{{ message['role'] }}|> \n {{ message['content'] }}"
-                "{% endif %}"
+            "{% if loop.first %}"
+            "[gMASK]sop<|{{ message['role'] }}|> \n {{ message['content'] }}"
+            "{% else %}"
+            "<|{{ message['role'] }}|> \n {{ message['content'] }}"
+            "{% endif %}"
             "{% endfor %}"
             "{% if add_generation_prompt %}"
-                "<|assistant|>"
+            "<|assistant|>"
             "{% endif %}"
         )

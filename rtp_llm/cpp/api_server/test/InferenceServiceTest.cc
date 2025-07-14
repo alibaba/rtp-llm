@@ -34,16 +34,11 @@ protected:
         auto metric_reporter  = std::dynamic_pointer_cast<ApiServerMetricReporter>(mock_metric_reporter_);
 
         rtp_llm::GptInitParameter params;
-        auto                 request_counter = std::make_shared<autil::AtomicCounter>();
-        auto                 controller      = std::make_shared<ConcurrencyController>(1, false);
+        auto                      request_counter = std::make_shared<autil::AtomicCounter>();
+        auto                      controller      = std::make_shared<ConcurrencyController>(1, false);
 
-        inference_service_ = std::make_shared<InferenceService>(engine,
-                                                                nullptr,
-                                                                request_counter,
-                                                                token_processor,
-                                                                controller,
-                                                                params,
-                                                                metric_reporter);
+        inference_service_ = std::make_shared<InferenceService>(
+            engine, nullptr, request_counter, token_processor, controller, params, metric_reporter);
     }
     void TearDown() override {}
 
@@ -62,8 +57,8 @@ protected:
         data_                     = std::vector<int>{1, 2, 3, 4, 5};
         std::vector<size_t> shape = {data_.size()};
         // 由于 Buffer 内部不负责管理传入的地址数据(只是使用), 所以数据必须具有较久的生命周期
-        input->input_ids =
-            std::make_shared<rtp_llm::Buffer>(rtp_llm::MemoryType::MEMORY_CPU, rtp_llm::DataType::TYPE_INT32, shape, data_.data());
+        input->input_ids = std::make_shared<rtp_llm::Buffer>(
+            rtp_llm::MemoryType::MEMORY_CPU, rtp_llm::DataType::TYPE_INT32, shape, data_.data());
 
         rtp_llm::GptInitParameter param;
         param.max_seq_len_ = data_.size();
@@ -188,14 +183,14 @@ TEST_F(InferenceServiceTest, InferResponseFailed_ControllerIncrementFailed) {
     std::unique_ptr<http_server::HttpResponseWriter> writer_ptr(writer);
 
     http_server::HttpRequest request;
-    const std::string body = R"({"prompt": "hello"})";
-    request._request = CreateHttpPacket(body);
+    const std::string        body = R"({"prompt": "hello"})";
+    request._request              = CreateHttpPacket(body);
 
     EXPECT_CALL(*mock_metric_reporter_, reportQpsMetric(StrEq("unknown")));
     EXPECT_CALL(*mock_metric_reporter_, reportConflictQpsMetric());
 
     // 将 max_concurrency_ 置为 0, 模拟 controller increment 失败
-    auto saved = inference_service_->controller_->get_available_concurrency();
+    auto saved                                        = inference_service_->controller_->get_available_concurrency();
     inference_service_->controller_->max_concurrency_ = 0;
     try {
         inference_service_->inferResponse(10086, writer_ptr, request);
@@ -232,14 +227,14 @@ TEST_F(InferenceServiceTest, InferResponseFailed_NoPromptInRequest) {
 
     // 模拟请求中没有 prompt 字段
     http_server::HttpRequest request;
-    const std::string body = R"del({
+    const std::string        body = R"del({
     "no_prompt": "hello, what is your age",
     "generate_config": {
         "max_new_tokens": 20
     },
     "source": "test_source"
     })del";
-    request._request = CreateHttpPacket(body);
+    request._request              = CreateHttpPacket(body);
 
     try {
         inference_service_->inferResponse(10086, writer_ptr, request);
@@ -261,7 +256,7 @@ TEST_F(InferenceServiceTest, InferResponseSuccess) {
     std::unique_ptr<http_server::HttpResponseWriter> writer_ptr(writer);
 
     http_server::HttpRequest request;
-    const std::string body = R"del(
+    const std::string        body = R"del(
         {
             "prompt": "hello request",
             "generate_config": {
@@ -271,13 +266,14 @@ TEST_F(InferenceServiceTest, InferResponseSuccess) {
             "source": "test_source"
         }
     )del";
-    request._request = CreateHttpPacket(body);
+    request._request              = CreateHttpPacket(body);
 
     // engine
-    auto mock_stream = CreateMockGenerateStream();
-    auto stream      = std::dynamic_pointer_cast<GenerateStream>(mock_stream);
+    auto                           mock_stream = CreateMockGenerateStream();
+    auto                           stream      = std::dynamic_pointer_cast<GenerateStream>(mock_stream);
     std::vector<GenerateStreamPtr> streams({stream});
-    EXPECT_CALL(*mock_engine_, batchEnqueue(Matcher<const std::vector<std::shared_ptr<GenerateInput>>&>(_))).WillOnce(Return(streams));
+    EXPECT_CALL(*mock_engine_, batchEnqueue(Matcher<const std::vector<std::shared_ptr<GenerateInput>>&>(_)))
+        .WillOnce(Return(streams));
 
     // stream
     GenerateOutputs outputs;
@@ -312,8 +308,8 @@ TEST_F(InferenceServiceTest, InferResponseSuccess) {
     // token processor
     std::vector<std::string> texts;
     texts.emplace_back("hello response");
-    EXPECT_CALL(*mock_token_processor_, getTokenProcessorCtx(_,_,_)).WillOnce(Return(nullptr));
-    EXPECT_CALL(*mock_token_processor_, decodeTokens(_,_,_,_)).WillOnce(Return(texts));
+    EXPECT_CALL(*mock_token_processor_, getTokenProcessorCtx(_, _, _)).WillOnce(Return(nullptr));
+    EXPECT_CALL(*mock_token_processor_, decodeTokens(_, _, _, _)).WillOnce(Return(texts));
     EXPECT_CALL(*mock_token_processor_, encode(StrEq("hello request")));
 
     EXPECT_NO_THROW(inference_service_->inferResponse(10086, writer_ptr, request));
@@ -337,11 +333,11 @@ TEST_F(InferenceServiceTest, fillGenerateInput) {
     std::vector<int> token_ids = {1, 2, 3, 4, 5};
     EXPECT_CALL(*mock_token_processor_, encode(_)).WillOnce(Return(token_ids));
 
-    int64_t request_id = 10086;
-    std::string text;
+    int64_t                  request_id = 10086;
+    std::string              text;
     std::vector<std::string> urls;
-    auto generate_config = std::make_shared<GenerateConfig>();
-    auto input = inference_service_->fillGenerateInput(request_id, text, urls, generate_config);
+    auto                     generate_config = std::make_shared<GenerateConfig>();
+    auto                     input = inference_service_->fillGenerateInput(request_id, text, urls, generate_config);
 
     EXPECT_EQ(input->request_id, request_id);
     EXPECT_TRUE(input->generate_config != nullptr);
@@ -362,7 +358,7 @@ TEST_F(InferenceServiceTest, iterateStreams) {
     EXPECT_CALL(*mock_metric_reporter_, reportResponseIterateQpsMetric()).Times(2);
 
     auto mock_stream_wrapper = std::make_shared<MockGenerateStreamWrapper>(nullptr, nullptr);
-    auto stream_ptr  = std::dynamic_pointer_cast<GenerateStreamWrapper>(mock_stream_wrapper);
+    auto stream_ptr          = std::dynamic_pointer_cast<GenerateStreamWrapper>(mock_stream_wrapper);
     std::vector<std::shared_ptr<GenerateStreamWrapper>> streams;
     streams.push_back(stream_ptr);
     EXPECT_CALL(*mock_stream_wrapper, generateResponse)
@@ -372,13 +368,13 @@ TEST_F(InferenceServiceTest, iterateStreams) {
 
     auto writer = dynamic_cast<http_server::HttpResponseWriter*>(mock_writer_.get());
     ASSERT_TRUE(writer != nullptr);
-    std::unique_ptr<http_server::HttpResponseWriter> writer_ptr(writer); // remember to release
+    std::unique_ptr<http_server::HttpResponseWriter> writer_ptr(writer);  // remember to release
     EXPECT_CALL(*mock_writer_, Write).WillRepeatedly(Return(true));
 
-    autil::StageTime timer;
+    autil::StageTime  timer;
     const std::string body = R"({"prompt": "hello"})";
-    auto req = InferenceParsedRequest::extractRequest(body, inference_service_->params_, nullptr);
-    auto [cnt, res] = inference_service_->iterateStreams(streams, writer_ptr, req, timer);
+    auto              req  = InferenceParsedRequest::extractRequest(body, inference_service_->params_, nullptr);
+    auto [cnt, res]        = inference_service_->iterateStreams(streams, writer_ptr, req, timer);
 
     ASSERT_EQ(cnt, 2);
     ASSERT_EQ(res.size(), 2);
@@ -392,20 +388,19 @@ TEST_F(InferenceServiceTest, iterateStreams_CancelError) {
     EXPECT_CALL(*mock_metric_reporter_, reportCancelQpsMetric(StrEq("unknown")));
 
     auto mock_stream_wrapper = std::make_shared<MockGenerateStreamWrapper>(nullptr, nullptr);
-    auto stream_ptr  = std::dynamic_pointer_cast<GenerateStreamWrapper>(mock_stream_wrapper);
+    auto stream_ptr          = std::dynamic_pointer_cast<GenerateStreamWrapper>(mock_stream_wrapper);
     std::vector<std::shared_ptr<GenerateStreamWrapper>> streams;
     streams.push_back(stream_ptr);
-    EXPECT_CALL(*mock_stream_wrapper, generateResponse)
-        .WillOnce(Return(std::make_pair(MultiSeqsResponse(), false)));
+    EXPECT_CALL(*mock_stream_wrapper, generateResponse).WillOnce(Return(std::make_pair(MultiSeqsResponse(), false)));
 
     auto writer = dynamic_cast<http_server::HttpResponseWriter*>(mock_writer_.get());
     ASSERT_TRUE(writer != nullptr);
-    std::unique_ptr<http_server::HttpResponseWriter> writer_ptr(writer); // remember to release
+    std::unique_ptr<http_server::HttpResponseWriter> writer_ptr(writer);  // remember to release
     EXPECT_CALL(*mock_writer_, Write).WillOnce(Return(false));
 
-    autil::StageTime timer;
+    autil::StageTime  timer;
     const std::string body = R"({"prompt": "hello"})";
-    auto req = InferenceParsedRequest::extractRequest(body, inference_service_->params_, nullptr);
+    auto              req  = InferenceParsedRequest::extractRequest(body, inference_service_->params_, nullptr);
     try {
         auto [cnt, res] = inference_service_->iterateStreams(streams, writer_ptr, req, timer);
         FAIL() << "should throw HttpApiServerException::CANCELLED_ERROR";
@@ -422,7 +417,7 @@ TEST_F(InferenceServiceTest, iterateStreams_CancelError) {
 
 TEST_F(InferenceServiceTest, StreamingResponse_MultiSeqsResponse) {
     MultiSeqsResponse var = MultiSeqsResponse();
-    std::string res = inference_service_->streamingResponse(var);
+    std::string       res = inference_service_->streamingResponse(var);
     ASSERT_TRUE(res.find(R"("response":)") != std::string::npos);
     ASSERT_TRUE(res.find(R"("finished":)") != std::string::npos);
     ASSERT_TRUE(res.find(R"("aux_info":)") != std::string::npos);
@@ -438,7 +433,7 @@ TEST_F(InferenceServiceTest, StreamingResponse_BatchResponse) {
     batch_state.push_back(MultiSeqsResponse());
     batch_state.push_back(MultiSeqsResponse());
     BatchResponse batch(batch_state);
-    std::string res = inference_service_->streamingResponse(batch);
+    std::string   res = inference_service_->streamingResponse(batch);
     ASSERT_TRUE(res.find(R"("response_batch":[)") != std::string::npos);
 }
 
@@ -463,7 +458,7 @@ TEST_F(InferenceServiceTest, FormatResponse) {
 
 TEST_F(InferenceServiceTest, ExtractRequest_PromptBatch) {
     std::string jsonStr = R"({"prompt_batch": ["prompt1", "prompt2", "prompt3"]})";
-    auto req = InferenceParsedRequest::extractRequest(jsonStr, inference_service_->params_, nullptr);
+    auto        req     = InferenceParsedRequest::extractRequest(jsonStr, inference_service_->params_, nullptr);
     ASSERT_EQ(req.batch_infer, true);
     ASSERT_EQ(req.is_streaming, false);
     ASSERT_EQ(req.input_texts.size(), 3);
@@ -473,7 +468,7 @@ TEST_F(InferenceServiceTest, ExtractRequest_PromptBatch) {
 
 TEST_F(InferenceServiceTest, ExtractRequest_Prompt) {
     std::string jsonStr = R"({"prompt": "prompt1"})";
-    auto req = InferenceParsedRequest::extractRequest(jsonStr, inference_service_->params_, nullptr);
+    auto        req     = InferenceParsedRequest::extractRequest(jsonStr, inference_service_->params_, nullptr);
     ASSERT_EQ(req.batch_infer, false);
     ASSERT_EQ(req.is_streaming, false);
     ASSERT_EQ(req.input_texts.size(), 1);
@@ -482,7 +477,8 @@ TEST_F(InferenceServiceTest, ExtractRequest_Prompt) {
 }
 
 TEST_F(InferenceServiceTest, ExtractRequest_AdapterName) {
-    std::string jsonStr = R"({"prompt_batch": ["prompt1", "prompt2", "prompt3"], "generate_config": {"adapter_name": ["test0", "test1", "test2"]}})";
+    std::string jsonStr =
+        R"({"prompt_batch": ["prompt1", "prompt2", "prompt3"], "generate_config": {"adapter_name": ["test0", "test1", "test2"]}})";
     auto req = InferenceParsedRequest::extractRequest(jsonStr, inference_service_->params_, nullptr);
     ASSERT_EQ(req.batch_infer, true);
     ASSERT_EQ(req.is_streaming, false);

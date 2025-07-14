@@ -17,5 +17,4 @@ void LogitsProcessorStates::insert(const BaseLogitsProcessorPtr& ptr, size_t sta
     intervals_.push_back(std::make_pair(start, finish));
 }
 
-
-} // namespace rtp_llm
+}  // namespace rtp_llm

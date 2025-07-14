@@ -1,6 +1,8 @@
 from typing import Any
 from unittest import TestCase, main
+
 from transformers.models.qwen2.tokenization_qwen2 import Qwen2Tokenizer
+
 
 class AllFakeModelTest(TestCase):
     def __init__(self, *args: Any, **kwargs: Any):
@@ -13,6 +15,7 @@ class AllFakeModelTest(TestCase):
         # test special tokens
         res = tokenizer.encode("<|im_start|>hello<|im_end|>")
         self.assertEqual(res, [151644, 14990, 151645])
-        
-if __name__ == '__main__':
+
+
+if __name__ == "__main__":
     main()

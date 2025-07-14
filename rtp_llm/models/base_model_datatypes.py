@@ -1,17 +1,20 @@
-import torch
+from typing import Any, Dict, List, NamedTuple, Optional
 
+import torch
 from pydantic import BaseModel as PyBaseModel
-from typing import Any, Dict, List, Optional, NamedTuple
 
 from rtp_llm.config.generate_config import GenerateConfig
-from rtp_llm.utils.weight_type import WEIGHT_TYPE
 from rtp_llm.utils.multimodal_util import MultimodalInput
+from rtp_llm.utils.weight_type import WEIGHT_TYPE
+
 
 class EmbeddingOutput:
     text_embedding: torch.Tensor
     extra_input: Optional[torch.Tensor]
 
-    def __init__(self, text_embedding: torch.Tensor, extra_input: Optional[List[torch.Tensor]]):
+    def __init__(
+        self, text_embedding: torch.Tensor, extra_input: Optional[List[torch.Tensor]]
+    ):
         self.text_embedding = text_embedding
         if extra_input:
             try:
@@ -22,13 +25,14 @@ class EmbeddingOutput:
         else:
             self.extra_input = None
 
+
 # single batch prompt input
 class GenerateInput(PyBaseModel):
     request_id: int
     token_ids: torch.Tensor
     mm_inputs: List[MultimodalInput]
     generate_config: GenerateConfig
-    tokenizer: Any = None # TODO: remove this
+    tokenizer: Any = None  # TODO: remove this
     prefix_length: int = 0
     token_type_ids: List[int] = []
 
@@ -47,6 +51,7 @@ class GenerateInput(PyBaseModel):
         self.token_ids = torch.concat([prefix_tokens, self.token_ids], dim=0)
         self.prefix_length = prefix_tokens.nelement()
 
+
 class AuxInfo(PyBaseModel):
     cost_time: float = 0
     iter_count: int = 0
@@ -61,6 +66,7 @@ class AuxInfo(PyBaseModel):
     cum_log_probs: List[float] = []
     beam_responses: List[str] = []
 
+
 class GenerateOutput(PyBaseModel):
     hidden_states: Optional[torch.Tensor] = None
     output_ids: Optional[torch.Tensor] = None
@@ -74,12 +80,15 @@ class GenerateOutput(PyBaseModel):
     class Config:
         arbitrary_types_allowed = True
 
+
 class GenerateOutputs(PyBaseModel):
     generate_outputs: List[GenerateOutput] = []
+
 
 class GenerateResponse(PyBaseModel):
     generate_outputs: GenerateOutputs
     generate_texts: List[str]
+
 
 class GenerateContext(NamedTuple):
     inputs: Any
@@ -101,23 +110,24 @@ class GenerateContext(NamedTuple):
     cache_indirection: Any
     output_token_ids: Any
 
+
 class ModelConfig:
     def __init__(
-            self,
-            model_type: str = "",
-            ckpt_path: str = "",
-            tokenizer_path: str = "",
-            weight_type: WEIGHT_TYPE = WEIGHT_TYPE.FP16,
-            act_type: WEIGHT_TYPE = WEIGHT_TYPE.FP16,
-            max_seq_len: int = 0,
-            seq_size_per_block: int = 8,
-            gen_num_per_circle: int = 1,
-            ptuning_path: Optional[str] = None,
-            lora_infos: Optional[Dict[str, str]] = None,
-            ref_module: Optional[torch.nn.Module] = None,
-            ref_dict: Dict[str, torch.Tensor] = {},
-            sp_type: str = "",
-        ):
+        self,
+        model_type: str = "",
+        ckpt_path: str = "",
+        tokenizer_path: str = "",
+        weight_type: WEIGHT_TYPE = WEIGHT_TYPE.FP16,
+        act_type: WEIGHT_TYPE = WEIGHT_TYPE.FP16,
+        max_seq_len: int = 0,
+        seq_size_per_block: int = 8,
+        gen_num_per_circle: int = 1,
+        ptuning_path: Optional[str] = None,
+        lora_infos: Optional[Dict[str, str]] = None,
+        ref_module: Optional[torch.nn.Module] = None,
+        ref_dict: Dict[str, torch.Tensor] = {},
+        sp_type: str = "",
+    ):
         self.model_type: str = model_type
         self.ckpt_path: str = ckpt_path
         self.tokenizer_path: str = tokenizer_path

@@ -26,23 +26,21 @@ public:
         normal_executor_(params, cache_manager, device_, lora_manager, warm_up) {
         const auto& cache_config = cache_manager ? cache_manager->cacheConfig() : CacheConfig();
         score_normal_executor_.setBatchProcessor(
-            std::move(std::make_unique<ScoreBatchStreamProcessor>(
-            params.gpt_init_parameter, cache_config, warm_up)));
+            std::move(std::make_unique<ScoreBatchStreamProcessor>(params.gpt_init_parameter, cache_config, warm_up)));
     }
 
     absl::Status normalProcess(const std::list<GenerateStreamPtr>& streams) {
         return normal_executor_.process(streams);
     }
 
-    absl::Status score(const std::list<GenerateStreamPtr>& streams,
-                       bool                                skip_check = false);
+    absl::Status score(const std::list<GenerateStreamPtr>& streams, bool skip_check = false);
 
     bool updateEplbConfig(const EplbConfig& config);
 
 private:
     rtp_llm::DeviceBase* device_;
-    NormalExecutor  score_normal_executor_;
-    NormalExecutor  normal_executor_;
+    NormalExecutor       score_normal_executor_;
+    NormalExecutor       normal_executor_;
 };
 
 }  // namespace rtp_llm

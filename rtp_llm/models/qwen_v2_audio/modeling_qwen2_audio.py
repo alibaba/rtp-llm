@@ -21,8 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import torch
 import torch.utils.checkpoint
 from torch import nn
-
-from transformers import PreTrainedModel
+from transformers import AutoModel, AutoModelForCausalLM, PreTrainedModel
 from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache, StaticCache
 from transformers.modeling_outputs import BaseModelOutput, ModelOutput
@@ -34,8 +33,11 @@ from transformers.utils import (
     logging,
     replace_return_docstrings,
 )
-from transformers import AutoModel, AutoModelForCausalLM
-from rtp_llm.models.qwen_v2_audio.configuration_qwen2_audio import Qwen2AudioConfig, Qwen2AudioEncoderConfig
+
+from rtp_llm.models.qwen_v2_audio.configuration_qwen2_audio import (
+    Qwen2AudioConfig,
+    Qwen2AudioEncoderConfig,
+)
 
 if is_flash_attn_2_available():
     pass
@@ -45,6 +47,7 @@ if is_flash_attn_2_available():
 logger = logging.get_logger(__name__)
 
 _CONFIG_FOR_DOC = "Qwen2AudioConfig"
+
 
 # Copied from transformers.models.whisper.modeling_whisper.WhisperAttention with Whisper->Qwen2Audio
 class Qwen2AudioAttention(nn.Module):
@@ -92,7 +95,11 @@ class Qwen2AudioAttention(nn.Module):
 
     # Copied from transformers.models.bart.modeling_bart.BartAttention._shape with BART->whisper
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
-        return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
+        return (
+            tensor.view(bsz, seq_len, self.num_heads, self.head_dim)
+            .transpose(1, 2)
+            .contiguous()
+        )
 
     def forward(
         self,
@@ -112,7 +119,9 @@ class Qwen2AudioAttention(nn.Module):
         bsz, tgt_len, _ = hidden_states.size()
 
         # get query proj
-        query_states = self._shape(self.q_proj(hidden_states) * self.scaling, tgt_len, bsz)
+        query_states = self._shape(
+            self.q_proj(hidden_states) * self.scaling, tgt_len, bsz
+        )
 
         if past_key_value is not None:
             is_updated = past_key_value.is_updated.get(self.layer_idx)
@@ -124,7 +133,9 @@ class Qwen2AudioAttention(nn.Module):
                 past_key_value = past_key_value.self_attention_cache
 
         # use key_value_states if cross attention
-        current_states = key_value_states if key_value_states is not None else hidden_states
+        current_states = (
+            key_value_states if key_value_states is not None else hidden_states
+        )
         if is_cross_attention and past_key_value and is_updated:
             # reuse k,v, cross_attentions
             key_states = past_key_value.key_cache[self.layer_idx]
@@ -136,7 +147,10 @@ class Qwen2AudioAttention(nn.Module):
                 # save all key/value_states to cache to be re-used for fast auto-regressive generation
                 cache_position = cache_position if not is_cross_attention else None
                 key_states, value_states = past_key_value.update(
-                    key_states, value_states, self.layer_idx, {"cache_position": cache_position}
+                    key_states,
+                    value_states,
+                    self.layer_idx,
+                    {"cache_position": cache_position},
                 )
 
         attn_weights = torch.matmul(query_states, key_states.transpose(2, 3))
@@ -155,7 +169,9 @@ class Qwen2AudioAttention(nn.Module):
                 )
             attn_weights = layer_head_mask.view(1, -1, 1, 1) * attn_weights
 
-        attn_probs = nn.functional.dropout(attn_weights, p=self.dropout, training=self.training)
+        attn_probs = nn.functional.dropout(
+            attn_weights, p=self.dropout, training=self.training
+        )
         attn_output = torch.matmul(attn_probs, value_states)
 
         if attn_output.size() != (bsz, self.num_heads, tgt_len, self.head_dim):
@@ -173,9 +189,9 @@ class Qwen2AudioAttention(nn.Module):
 
         return attn_output, attn_weights, past_key_value
 
-QWEN2AUDIO_ATTENTION_CLASSES = {
-    "eager": Qwen2AudioAttention
-}
+
+QWEN2AUDIO_ATTENTION_CLASSES = {"eager": Qwen2AudioAttention}
+
 
 # Copied from transformers.models.whisper.modeling_whisper.WhisperEncoderLayer with Whisper->Qwen2Audio, WHISPER->QWEN2AUDIO
 class Qwen2AudioEncoderLayer(nn.Module):
@@ -216,29 +232,37 @@ class Qwen2AudioEncoderLayer(nn.Module):
                 returned tensors for more detail.
         """
         residual = hidden_states
-        hidden_states = self.self_attn_layer_norm(hidden_states)        
+        hidden_states = self.self_attn_layer_norm(hidden_states)
         hidden_states, attn_weights, _ = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             layer_head_mask=layer_head_mask,
             output_attentions=output_attentions,
         )
-        hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
+        hidden_states = nn.functional.dropout(
+            hidden_states, p=self.dropout, training=self.training
+        )
         hidden_states = residual + hidden_states
 
         residual = hidden_states
         hidden_states = self.final_layer_norm(hidden_states)
         hidden_states = self.activation_fn(self.fc1(hidden_states))
-        hidden_states = nn.functional.dropout(hidden_states, p=self.activation_dropout, training=self.training)
+        hidden_states = nn.functional.dropout(
+            hidden_states, p=self.activation_dropout, training=self.training
+        )
         hidden_states = self.fc2(hidden_states)
-        hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
+        hidden_states = nn.functional.dropout(
+            hidden_states, p=self.dropout, training=self.training
+        )
         hidden_states = residual + hidden_states
 
         if hidden_states.dtype == torch.float16 and (
             torch.isinf(hidden_states).any() or torch.isnan(hidden_states).any()
         ):
             clamp_value = torch.finfo(hidden_states.dtype).max - 1000
-            hidden_states = torch.clamp(hidden_states, min=-clamp_value, max=clamp_value)
+            hidden_states = torch.clamp(
+                hidden_states, min=-clamp_value, max=clamp_value
+            )
 
         outputs = (hidden_states,)
 
@@ -280,7 +304,11 @@ class Qwen2AudioPreTrainedModel(PreTrainedModel):
     def _init_weights(self, module):
         # important: this ported version of Qwen2Audio isn't meant for training from scratch - only
         # inference and fine-tuning - so the proper init weights code has been removed
-        std = self.config.init_std if hasattr(self.config, "init_std") else self.config.audio_config.init_std
+        std = (
+            self.config.init_std
+            if hasattr(self.config, "init_std")
+            else self.config.audio_config.init_std
+        )
 
         if isinstance(module, (nn.Linear, nn.Conv1d)):
             module.weight.data.normal_(mean=0.0, std=std)
@@ -353,7 +381,9 @@ class Qwen2AudioEncoder(Qwen2AudioPreTrainedModel):
         self.embed_positions = nn.Embedding(self.max_source_positions, embed_dim)
         self.embed_positions.requires_grad_(False)
 
-        self.layers = nn.ModuleList([Qwen2AudioEncoderLayer(config) for _ in range(config.encoder_layers)])
+        self.layers = nn.ModuleList(
+            [Qwen2AudioEncoderLayer(config) for _ in range(config.encoder_layers)]
+        )
         self.layer_norm = nn.LayerNorm(config.d_model)
         # Ignore copy
         self.avg_pooler = nn.AvgPool1d(2, stride=2)
@@ -407,20 +437,34 @@ class Qwen2AudioEncoder(Qwen2AudioPreTrainedModel):
             return_dict (`bool`, *optional*):
                 Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
         """
-        expected_seq_length = self.config.max_source_positions * self.conv1.stride[0] * self.conv2.stride[0]
+        expected_seq_length = (
+            self.config.max_source_positions
+            * self.conv1.stride[0]
+            * self.conv2.stride[0]
+        )
         if input_features.shape[-1] != expected_seq_length:
             raise ValueError(
                 f"Qwen2Audio expects the mel input features to be of length {expected_seq_length}, but found {input_features.shape[-1]}. Make sure to pad the input mel features to {expected_seq_length}."
             )
 
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        output_attentions = (
+            output_attentions
+            if output_attentions is not None
+            else self.config.output_attentions
         )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        output_hidden_states = (
+            output_hidden_states
+            if output_hidden_states is not None
+            else self.config.output_hidden_states
+        )
+        return_dict = (
+            return_dict if return_dict is not None else self.config.use_return_dict
+        )
 
         # Ignore copy
-        input_features = input_features.to(dtype=self.conv1.weight.dtype, device=self.conv1.weight.device)
+        input_features = input_features.to(
+            dtype=self.conv1.weight.dtype, device=self.conv1.weight.device
+        )
 
         inputs_embeds = nn.functional.gelu(self.conv1(input_features))
         inputs_embeds = nn.functional.gelu(self.conv2(inputs_embeds))
@@ -429,7 +473,9 @@ class Qwen2AudioEncoder(Qwen2AudioPreTrainedModel):
         embed_pos = self.embed_positions.weight
 
         hidden_states = inputs_embeds + embed_pos
-        hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
+        hidden_states = nn.functional.dropout(
+            hidden_states, p=self.dropout, training=self.training
+        )
 
         encoder_states = () if output_hidden_states else None
         all_attentions = () if output_attentions else None
@@ -466,7 +512,9 @@ class Qwen2AudioEncoder(Qwen2AudioPreTrainedModel):
                     layer_outputs = encoder_layer(
                         hidden_states,
                         attention_mask,
-                        layer_head_mask=(head_mask[idx] if head_mask is not None else None),
+                        layer_head_mask=(
+                            head_mask[idx] if head_mask is not None else None
+                        ),
                         output_attentions=output_attentions,
                     )
 
@@ -484,9 +532,15 @@ class Qwen2AudioEncoder(Qwen2AudioPreTrainedModel):
             encoder_states = encoder_states + (hidden_states,)
 
         if not return_dict:
-            return tuple(v for v in [hidden_states, encoder_states, all_attentions] if v is not None)
+            return tuple(
+                v
+                for v in [hidden_states, encoder_states, all_attentions]
+                if v is not None
+            )
         return BaseModelOutput(
-            last_hidden_state=hidden_states, hidden_states=encoder_states, attentions=all_attentions
+            last_hidden_state=hidden_states,
+            hidden_states=encoder_states,
+            attentions=all_attentions,
         )
 
     # Ignore copy
@@ -497,13 +551,15 @@ class Qwen2AudioEncoder(Qwen2AudioPreTrainedModel):
         input_lengths = (input_lengths - 1) // 2 + 1
         output_lengths = (input_lengths - 2) // 2 + 1
         return input_lengths, output_lengths
-    
+
+
 class Qwen2AudioMultiModalProjector(nn.Module):
     def __init__(self, config: Qwen2AudioConfig):
         super().__init__()
-        self.linear = nn.Linear(config.audio_config.d_model, config.text_config.hidden_size, bias=True)
+        self.linear = nn.Linear(
+            config.audio_config.d_model, config.text_config.hidden_size, bias=True
+        )
 
     def forward(self, audio_features):
         hidden_states = self.linear(audio_features)
         return hidden_states
-

@@ -67,22 +67,22 @@ void CudaDevice::copy(const CopyParams& params) {
 }
 
 void CudaDevice::multiMergeCopy(const MultiMergeCopyParams& params) {
-    std::vector<void*> multi_src_ptrs(params.src_ptrs.size());
+    std::vector<void*>  multi_src_ptrs(params.src_ptrs.size());
     std::vector<size_t> multi_src_copy_sizes(params.src_ptrs.size());
     for (size_t i = 0; i < params.src_ptrs.size(); i++) {
-        multi_src_ptrs[i] = params.src_ptrs[i];
+        multi_src_ptrs[i]       = params.src_ptrs[i];
         multi_src_copy_sizes[i] = params.copy_size[i];
     }
     InvokeMultiMergeCopyKernel(params.dst_ptr, multi_src_ptrs, multi_src_copy_sizes, params.dst_offsets, stream_);
 }
 
 void CudaDevice::multiCopy(const MultiCopyParams& params) {
-    std::vector<void*> multi_src_ptrs(params.multi_src.size());
-    std::vector<void*> multi_dst_ptrs(params.multi_dst.size());
+    std::vector<void*>  multi_src_ptrs(params.multi_src.size());
+    std::vector<void*>  multi_dst_ptrs(params.multi_dst.size());
     std::vector<size_t> multi_copy_sizes(params.multi_src.size());
     for (size_t i = 0; i < params.multi_src.size(); i++) {
-        multi_src_ptrs[i] = params.multi_src[i]->data();
-        multi_dst_ptrs[i] = params.multi_dst[i]->data();
+        multi_src_ptrs[i]   = params.multi_src[i]->data();
+        multi_dst_ptrs[i]   = params.multi_dst[i]->data();
         multi_copy_sizes[i] = params.multi_src[i]->sizeBytes();
     }
     InvokeMultiCopyKernel(multi_src_ptrs, multi_dst_ptrs, multi_copy_sizes, stream_);
@@ -188,24 +188,23 @@ SelectOutput CudaDevice::select(const SelectParams& params) {
 
     RUNTIME_ASSERT_OP_ARG(params.index.type() == DataType::TYPE_INT32, "Select index must be int32.");
     RUNTIME_ASSERT_OP_ARG(params.dim == 0, "select op tmp only support dim == 0");
-    const auto& input = params.input;
-    auto output_shape = input.shape();
-    output_shape[0] = params.index.size();
-    auto output = allocateBuffer({input.type(), output_shape});
-    if (output_shape[0] == 0 || input.shape()[0] ==0) {
+    const auto& input        = params.input;
+    auto        output_shape = input.shape();
+    output_shape[0]          = params.index.size();
+    auto output              = allocateBuffer({input.type(), output_shape});
+    if (output_shape[0] == 0 || input.shape()[0] == 0) {
         return output;
     }
     auto num_selected_element = input.size() / input.shape()[0];
-    DISPATCH_CUDA_FUNCTION_GENERAL_TYPE(
-        input.type(),
-        invokeLookupHiddenStateOfLastToken,
-        output->data(),
-        input.data(),
-        (int*)params.index.data(),
-        (int)params.index.size(),
-        num_selected_element,
-        0,
-        stream_);
+    DISPATCH_CUDA_FUNCTION_GENERAL_TYPE(input.type(),
+                                        invokeLookupHiddenStateOfLastToken,
+                                        output->data(),
+                                        input.data(),
+                                        (int*)params.index.data(),
+                                        (int)params.index.size(),
+                                        num_selected_element,
+                                        0,
+                                        stream_);
     return output;
 }
 
@@ -236,11 +235,12 @@ MultiplyOutput CudaDevice::multiply(const MultiplyParams& params) {
         output = params.output;
         RUNTIME_ASSERT_OP_ARG(output->type() == data_type,
                               "Output type must be same as A and B, but got %d vs %d",
-                              output->type(), data_type);
-        RUNTIME_ASSERT_OP_ARG(output->shape()[0] == m,
-                              "Output 0-d size must be %d, but got %ld", n, output->shape()[0]);
-        RUNTIME_ASSERT_OP_ARG(output->size() == B.size(),
-                              "Output size must be %ld, but got %ld", B.size(), output->size());
+                              output->type(),
+                              data_type);
+        RUNTIME_ASSERT_OP_ARG(
+            output->shape()[0] == m, "Output 0-d size must be %d, but got %ld", n, output->shape()[0]);
+        RUNTIME_ASSERT_OP_ARG(
+            output->size() == B.size(), "Output size must be %ld, but got %ld", B.size(), output->size());
     } else {
         output = allocateBuffer({data_type, B.shape()});
     }
@@ -253,14 +253,14 @@ MultiplyOutput CudaDevice::multiply(const MultiplyParams& params) {
 }
 
 SliceOutput CudaDevice::slice(const SliceParams& params) {
-    const auto& input = params.input;
-    const auto& starts = params.start;
-    const auto& step = params.step;
-    auto input_t = Buffer2torchTensor(params.input, false);
-    auto sliceTensor = input_t.slice(params.dim, starts, params.end, step);
-    auto buffer_shape = torchShapeToBufferShape(sliceTensor.sizes());
-    auto out = allocateBuffer({input.type(), buffer_shape});
-    auto out_t = Buffer2torchTensor(out, false);
+    const auto& input        = params.input;
+    const auto& starts       = params.start;
+    const auto& step         = params.step;
+    auto        input_t      = Buffer2torchTensor(params.input, false);
+    auto        sliceTensor  = input_t.slice(params.dim, starts, params.end, step);
+    auto        buffer_shape = torchShapeToBufferShape(sliceTensor.sizes());
+    auto        out          = allocateBuffer({input.type(), buffer_shape});
+    auto        out_t        = Buffer2torchTensor(out, false);
     out_t.copy_(sliceTensor, false);
     return out;
 }
@@ -364,10 +364,10 @@ cudaStream_t CudaDevice::getCommStream(ParallelMode mode, bool overlap) {
 
 void CudaDevice::broadcast(const BroadcastParams& params) {
     RTP_LLM_CHECK_WITH_INFO(params.mode == ParallelMode::TP || params.mode == ParallelMode::DP_AND_TP,
-                       "broadcast not support mode [%d]",
-                       params.mode);
+                            "broadcast not support mode [%d]",
+                            params.mode);
 
-    bool overlapped = params.overlapped;
+    bool       overlapped = params.overlapped;
     const auto nccl_param = getNcclParam(params.mode);
     const auto stream     = getCommStream(params.mode, overlapped);
 
@@ -391,8 +391,8 @@ AllReduceOutput CudaDevice::allReduce(const AllReduceParams& params) {
         return AllReduceOutput{params.buffer};
     }
 
-    bool overlapped = params.overlapped && params.mode == ParallelMode::DP_AND_TP;
-    const auto stream = getCommStream(params.mode, overlapped);
+    bool       overlapped = params.overlapped && params.mode == ParallelMode::DP_AND_TP;
+    const auto stream     = getCommStream(params.mode, overlapped);
     if (stream == communication_stream_) {
         // NOTE: before starting communication, we need to make sure that the previous computation
         // has been finished. Otherwise, the communication may overlap with the computation.
@@ -423,8 +423,8 @@ AllReduceOutput CudaDevice::allReduce(const AllReduceParams& params) {
     RUNTIME_ASSERT_OP_ARG((int32_t)params.op < ncclRedOp_t::ncclNumOps, "Invalid reduce op: %d", int(params.op));
 
     auto& dest_buffer = params.dest ? params.dest : buffer;
-    NCCLCHECK(ncclAllReduce(buffer->data(), dest_buffer->data(), buffer->size(), nccl_data_type,
-                            nccl_op, nccl_param.nccl_comm_, stream));
+    NCCLCHECK(ncclAllReduce(
+        buffer->data(), dest_buffer->data(), buffer->size(), nccl_data_type, nccl_op, nccl_param.nccl_comm_, stream));
     return AllReduceOutput{dest_buffer};
 }
 
@@ -470,21 +470,21 @@ void computeLengthsAndOffsets(const std::vector<size_t>& split_sizes,
 
 AllToAllOutput CudaDevice::allToAll(const AllToAllParams& params) {
     RTP_LLM_CHECK_WITH_INFO(params.mode == ParallelMode::DP_AND_TP,
-                       "all to all just support ParallelMode::DP_AND_TP but got [%d]",
-                       params.mode);
+                            "all to all just support ParallelMode::DP_AND_TP but got [%d]",
+                            params.mode);
     auto&      nccl_param = dp_tp_nccl_param_;
     const auto world_size = nccl_param.world_size_;
     assert(params.buffers.size() > 0);
     if (world_size < 2) {
         return {{params.buffers}};
     }
-    auto stream = params.overlapped ? communication_stream_ : stream_;
-    const size_t dims       = params.buffers[0]->dim();
-    const auto   batch_size = params.buffers[0]->shape()[0];
+    auto              stream     = params.overlapped ? communication_stream_ : stream_;
+    const size_t      dims       = params.buffers[0]->dim();
+    const auto        batch_size = params.buffers[0]->shape()[0];
     vector<BufferPtr> byte_buffers;
     RTP_LLM_CHECK_WITH_INFO(dims == 2 || dims == 1,
-                       "alltoall just support dims 2 or 1 but got [%s] ",
-                       params.buffers[0]->debugString().c_str());
+                            "alltoall just support dims 2 or 1 but got [%s] ",
+                            params.buffers[0]->debugString().c_str());
     size_t         dim1_size = 0;
     vector<size_t> dim1_split_size;
     for (const auto& buffer : params.buffers) {
@@ -553,7 +553,7 @@ AllToAllOutput CudaDevice::allToAll(const AllToAllParams& params) {
             output = allocateBufferLike(*input_buffer);
         } else {
             RTP_LLM_CHECK_WITH_INFO(params.output_split_sizes.size() == world_size,
-                               "alltoall output_split_sizes is not valid");
+                                    "alltoall output_split_sizes is not valid");
             size_t output_batch_size =
                 std::accumulate(params.output_split_sizes.begin(), params.output_split_sizes.end(), (size_t)0);
             auto new_shape = input_buffer->shape();
@@ -578,9 +578,9 @@ AllToAllOutput CudaDevice::allToAll(const AllToAllParams& params) {
                                      stream);
     } else {
         RTP_LLM_CHECK_WITH_INFO(input_buffer->shape()[0] % world_size == 0,
-                           "all2all_single_equal_split batch size [%d] must divide world size [%d]",
-                           input_buffer->shape()[0],
-                           world_size);
+                                "all2all_single_equal_split batch size [%d] must divide world size [%d]",
+                                input_buffer->shape()[0],
+                                world_size);
         output = allocateBufferLike(*input_buffer);
         all2all_single_equal_split(
             input_buffer->data(), output->data(), output->sizeBytes(), nccl_param.nccl_comm_, stream);
@@ -620,41 +620,45 @@ AllToAllOutput CudaDevice::allToAll(const AllToAllParams& params) {
 }
 
 void CudaDevice::allGather(const AllGatherParams& params) {
-    cudaStream_t stream = (params.overlapped && init_params_.enable_comm_overlap) ? communication_stream_ : stream_;
-    NcclParam nccl_param = getNcclParam(params.mode);
+    cudaStream_t stream     = (params.overlapped && init_params_.enable_comm_overlap) ? communication_stream_ : stream_;
+    NcclParam    nccl_param = getNcclParam(params.mode);
     if (nccl_param.world_size_ < 2) {
         return;
     }
     NCCLCHECK(ncclGroupStart());
     for (auto i = 0; i < params.recv_buffers.size(); ++i) {
-        auto& recv_buffer = params.recv_buffers[i];
+        auto&      recv_buffer    = params.recv_buffers[i];
         const auto nccl_data_type = getNcclDataType(recv_buffer->type());
-        const auto data_num = recv_buffer->size() / nccl_param.world_size_;
+        const auto data_num       = recv_buffer->size() / nccl_param.world_size_;
         RUNTIME_ASSERT_OP_ARG(data_num * nccl_param.world_size_ == recv_buffer->size(),
-                            "Buffer size %ld must be divisible by world size %d",
-                            recv_buffer->size(), nccl_param.world_size_);
+                              "Buffer size %ld must be divisible by world size %d",
+                              recv_buffer->size(),
+                              nccl_param.world_size_);
         if (params.inplace) {
             const auto data_size = data_num * recv_buffer->typeSize();
-            NCCLCHECK(ncclAllGather((char*)(recv_buffer->data()) + nccl_param.rank_ * data_size, recv_buffer->data(),
-                                    data_num, nccl_data_type, nccl_param.nccl_comm_, stream));
+            NCCLCHECK(ncclAllGather((char*)(recv_buffer->data()) + nccl_param.rank_ * data_size,
+                                    recv_buffer->data(),
+                                    data_num,
+                                    nccl_data_type,
+                                    nccl_param.nccl_comm_,
+                                    stream));
         } else {
             auto& send_buffer = params.send_buffers[i];
-            NCCLCHECK(ncclAllGather(send_buffer->data(), recv_buffer->data(),
-                                    data_num, nccl_data_type, nccl_param.nccl_comm_, stream));
+            NCCLCHECK(ncclAllGather(
+                send_buffer->data(), recv_buffer->data(), data_num, nccl_data_type, nccl_param.nccl_comm_, stream));
         }
     }
     NCCLCHECK(ncclGroupEnd());
 }
 
 void CudaDevice::reduceScatter(const ReduceScatterParams& params) {
-    RTP_LLM_CHECK_WITH_INFO(params.mode == ParallelMode::TP || params.mode == ParallelMode::FFN_TP, "reduce scatter only support mode TP or FFN TP");
+    RTP_LLM_CHECK_WITH_INFO(params.mode == ParallelMode::TP || params.mode == ParallelMode::FFN_TP,
+                            "reduce scatter only support mode TP or FFN TP");
     auto nccl_param = getNcclParam(params.mode);
     if (nccl_param.world_size_ < 2) {
         return;
     }
-    const auto stream = (params.overlapped && init_params_.enable_comm_overlap)
-                      ? communication_stream_
-                      : stream_;
+    const auto stream = (params.overlapped && init_params_.enable_comm_overlap) ? communication_stream_ : stream_;
     if (stream == communication_stream_) {
         // NOTE: before starting communication, we need to make sure that the previous computation
         // has been finished. Otherwise, the communication may overlap with the computation.
@@ -663,14 +667,20 @@ void CudaDevice::reduceScatter(const ReduceScatterParams& params) {
     }
     const auto nccl_op = static_cast<ncclRedOp_t>(params.op);
 
-    auto& send_buffer = params.send_buffer;
+    auto&      send_buffer    = params.send_buffer;
     const auto nccl_data_type = getNcclDataType(send_buffer->type());
-    const auto data_num = send_buffer->size() / nccl_param.world_size_;
+    const auto data_num       = send_buffer->size() / nccl_param.world_size_;
     RUNTIME_ASSERT_OP_ARG(data_num * nccl_param.world_size_ == send_buffer->size(),
-                            "Buffer size %ld must be divisible by world size %d",
-                            send_buffer->size(), nccl_param.world_size_);
-    NCCLCHECK(ncclReduceScatter(send_buffer->data(), params.recv_buffer->data(),
-                            data_num, nccl_data_type, nccl_op, nccl_param.nccl_comm_, stream));
+                          "Buffer size %ld must be divisible by world size %d",
+                          send_buffer->size(),
+                          nccl_param.world_size_);
+    NCCLCHECK(ncclReduceScatter(send_buffer->data(),
+                                params.recv_buffer->data(),
+                                data_num,
+                                nccl_data_type,
+                                nccl_op,
+                                nccl_param.nccl_comm_,
+                                stream));
 }
 
-} // namespace rtp_llm
+}  // namespace rtp_llm

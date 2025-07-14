@@ -14,25 +14,24 @@ struct BatchDecodeSchedulerConfigLocal: public autil::legacy::Jsonizable {
         json.Jsonize("batch_size", batch_size_);
         json.Jsonize("mode", mode_, "decode");
     }
-    uint32_t batch_size_;
+    uint32_t    batch_size_;
     std::string mode_;
 };
-class BatchDecodeScheduler : public SchedulerBase {
+class BatchDecodeScheduler: public SchedulerBase {
 public:
     enum SchedulerType : std::uint8_t {
-        kBatchDecode = 0,
+        kBatchDecode  = 0,
         kBatchPrefill = 1
     };
-    BatchDecodeScheduler(const rtp_llm::GptInitParameter&          params,
+    BatchDecodeScheduler(const rtp_llm::GptInitParameter&     params,
                          const std::shared_ptr<CacheManager>& cache_manager,
                          const kmonitor::MetricsReporterPtr   metrics_reporter,
-                         rtp_llm::DeviceBase*  device) {
+                         rtp_llm::DeviceBase*                 device) {
         cache_manager_    = cache_manager;
         device_           = device;
         metrics_reporter_ = metrics_reporter;
-        batch_size_ = params.batch_decode_scheduler_config.batch_decode_scheduler_batch_size;
-        scheduler_type_ = SchedulerType::kBatchDecode;
-
+        batch_size_       = params.batch_decode_scheduler_config.batch_decode_scheduler_batch_size;
+        scheduler_type_   = SchedulerType::kBatchDecode;
     }
     virtual ~BatchDecodeScheduler() = default;
 
@@ -41,7 +40,8 @@ public:
             std::lock_guard<std::mutex> lock(lock_);
             waiting_streams_.emplace_back(stream);
             if (waiting_streams_.size() % 16 == 0) {
-                RTP_LLM_LOG_DEBUG("BatchDecodeScheduler::enqueue: waiting_streams_.size() = %d", waiting_streams_.size());
+                RTP_LLM_LOG_DEBUG("BatchDecodeScheduler::enqueue: waiting_streams_.size() = %d",
+                                  waiting_streams_.size());
             }
         }
         cond_.notify_all();
@@ -85,7 +85,8 @@ public:
             (*it)->resetBeginTime(autil::TimeUtility::currentTimeInMicroSeconds());
             auto result = (*it)->initKVBlock(0, 0);
             if (!result.ok()) {
-                (*it)->setStop(ErrorCode::MALLOC_FAILED, "BatchDecodeScheduler::initRunningStreams: initKVBlock failed");
+                (*it)->setStop(ErrorCode::MALLOC_FAILED,
+                               "BatchDecodeScheduler::initRunningStreams: initKVBlock failed");
             }
         }
         // incr kvcache block to decode
@@ -112,7 +113,7 @@ public:
 
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule(size_t reserve_step = 0) override {
         std::unique_lock<std::mutex> lock(lock_);
-        cond_.wait_for(lock, std::chrono::seconds(300), [this]{
+        cond_.wait_for(lock, std::chrono::seconds(300), [this] {
             return waiting_streams_.size() >= batch_size_ || running_streams_.size() > 0;
         });
         if (running_streams_.size() == 0 && waiting_streams_.size() >= batch_size_) {
@@ -121,7 +122,8 @@ public:
             running_streams_.insert(running_streams_.end(), waiting_streams_.begin(), it);
             waiting_streams_.erase(waiting_streams_.begin(), it);
             initRunningStreams();
-            RTP_LLM_LOG_INFO("BatchDecodeScheduler::schedule: running_streams_.size() = %d, start run", running_streams_.size());
+            RTP_LLM_LOG_INFO("BatchDecodeScheduler::schedule: running_streams_.size() = %d, start run",
+                             running_streams_.size());
         } else {
             incrRunningStream();
         }
@@ -153,8 +155,8 @@ public:
     }
 
 private:
-    std::mutex lock_;
-    std::condition_variable cond_;
+    std::mutex                   lock_;
+    std::condition_variable      cond_;
     std::list<GenerateStreamPtr> waiting_streams_;
     std::list<GenerateStreamPtr> running_streams_;
 
@@ -163,10 +165,9 @@ private:
     uint32_t current_step_ = 0;
 
     std::shared_ptr<CacheManager> cache_manager_;
-    kmonitor::MetricsReporterPtr metrics_reporter_;
-    rtp_llm::DeviceBase* device_;
-    SchedulerType scheduler_type_;
+    kmonitor::MetricsReporterPtr  metrics_reporter_;
+    rtp_llm::DeviceBase*          device_;
+    SchedulerType                 scheduler_type_;
 };
-
 
 }  // namespace rtp_llm

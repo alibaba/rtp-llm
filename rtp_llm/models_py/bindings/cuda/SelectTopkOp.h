@@ -12,9 +12,9 @@ public:
     void forward(torch::Tensor router_logits, torch::Tensor expert_ids, torch::Tensor expert_scales);
 
 private:
-    GptInitParameter configs_;
+    GptInitParameter                                     configs_;
     std::unique_ptr<trt_plugins::MixtureOfExpertsPlugin> moe_plugin_;
 };
 
 void registerSelectTopkOp(const py::module& m);
-}
+}  // namespace rtp_llm

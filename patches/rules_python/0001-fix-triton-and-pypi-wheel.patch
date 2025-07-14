@@ -5,7 +5,7 @@ index fe8b8ef..a64f7f8 100644
 @@ -79,14 +79,17 @@ def main() -> None:
      )
      args = parser.parse_args()
- 
+
 -    pip_args = [sys.executable, "-m", "pip", "--isolated", "wheel", "-r", args.requirements]
 +    requirement_files = args.requirements.split(",")
 +    pip_args = [sys.executable, "-m", "pip", "--isolated", "wheel"]
@@ -13,13 +13,13 @@ index fe8b8ef..a64f7f8 100644
 +        pip_args.extend(['-r', requirement_file])
      if args.extra_pip_args:
          pip_args += json.loads(args.extra_pip_args)["args"]
- 
+
      # Assumes any errors are logged by pip so do nothing. This command will fail if pip fails
      subprocess.run(pip_args, check=True)
- 
+
 -    extras = requirements.parse_extras(args.requirements)
 +    extras = requirements.parse_extras(requirement_files)
- 
+
      if args.pip_data_exclude:
          pip_data_exclude = json.loads(args.pip_data_exclude)["exclude"]
 diff --git python/pip_install/extract_wheels/lib/bazel.py python/pip_install/extract_wheels/lib/bazel.py
@@ -30,11 +30,11 @@ index ef0d6e8..10c193d 100644
      sanitised_wheel_file_dependencies = [
          '"//%s:%s"' % (sanitise_name(d), WHEEL_FILE_LABEL) for d in whl_deps
      ]
-+    
++
 +    if whl.name == "triton":
 +        sanitised_dependencies = [s for s in sanitised_dependencies if 'torch' not in s]
 +        sanitised_wheel_file_dependencies = [s for s in sanitised_wheel_file_dependencies if 'torch' not in s]
- 
+
      with open(os.path.join(directory, "BUILD"), "w") as build_file:
          contents = generate_build_file_contents(
 diff --git python/pip_install/extract_wheels/lib/requirements.py python/pip_install/extract_wheels/lib/requirements.py
@@ -45,16 +45,16 @@ index e246379..583796c 100644
  import re
 -from typing import Dict, Set, Tuple, Optional
 +from typing import Dict, Set, Tuple, Optional, List
- 
- 
+
+
 -def parse_extras(requirements_path: str) -> Dict[str, Set[str]]:
 +def parse_extras(requirements_path: List[str]) -> Dict[str, Set[str]]:
      """Parse over the requirements.txt file to find extras requested.
- 
+
      Args:
 @@ -13,12 +13,13 @@ def parse_extras(requirements_path: str) -> Dict[str, Set[str]]:
      """
- 
+
      extras_requested = {}
 -    with open(requirements_path, "r") as requirements:
 -        # Merge all backslash line continuations so we parse each requirement as a single line.
@@ -69,9 +69,9 @@ index e246379..583796c 100644
 +                requirement, extras = _parse_requirement_for_extra(line)
 +                if requirement and extras:
 +                    extras_requested[requirement] = extras
- 
+
      return extras_requested
- 
+
 diff --git python/pip_install/pip_repository.bzl python/pip_install/pip_repository.bzl
 index b2cb0a8..5da37b9 100644
 --- python/pip_install/pip_repository.bzl
@@ -79,7 +79,7 @@ index b2cb0a8..5da37b9 100644
 @@ -25,12 +25,14 @@ def _pip_repository_impl(rctx):
      separator = ":" if not "windows" in rctx.os.name.lower() else ";"
      pypath = separator.join([str(p) for p in [rules_root] + thirdparty_roots])
- 
+
 +    requirements_files = [str(rctx.path(requirement)) for requirement in rctx.attr.requirements]
 +
      args = [
@@ -131,7 +131,7 @@ index 828ab53..2067e1e 100644
 +        "b60533f3f5d530e971d6737ca6d58681ee434818fab630c83a734bb10c083ce8",
      ),
  ]
- 
+
 diff --git python/requirements.txt python/requirements.txt
 index 164fa26..743bc87 100644
 --- python/requirements.txt
@@ -142,6 +142,6 @@ index 164fa26..743bc87 100644
 -wheel==0.30.0a0
 +setuptools==69.0.3
 +wheel==0.38.4
- 
+
  # For tests
  mock==2.0.0

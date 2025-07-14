@@ -9,7 +9,7 @@ namespace rtp_llm {
 
 class WRRLoadBalancer: public WorkerAwaredLoadBalancer {
 public:
-    WRRLoadBalancer(CacheStoreConfig &cache_store_config);
+    WRRLoadBalancer(CacheStoreConfig& cache_store_config);
     virtual ~WRRLoadBalancer();
 
 public:
@@ -18,12 +18,12 @@ public:
 private:
     std::shared_ptr<const Host> chooseHostByWeight(const std::shared_ptr<BizHosts>& biz_hosts) const;
     double                      calculateThreshold(std::vector<std::shared_ptr<const Host>> biz_hosts) const;
-    virtual void updateWorkerStatusImpl(ErrorResult<HeartbeatSynchronizer::NodeStatus>& result) override;
+    virtual void                updateWorkerStatusImpl(ErrorResult<HeartbeatSynchronizer::NodeStatus>& result) override;
 
-    mutable std::shared_mutex                   host_load_balance_info_map_mutex_;
-    mutable HeartbeatSynchronizer::NodeStatus   host_load_balance_info_map_;
-    int available_ratio_ = 0;
-    int rank_factor_     = 0;
+    mutable std::shared_mutex                 host_load_balance_info_map_mutex_;
+    mutable HeartbeatSynchronizer::NodeStatus host_load_balance_info_map_;
+    int                                       available_ratio_ = 0;
+    int                                       rank_factor_     = 0;
 };
 
 }  // namespace rtp_llm

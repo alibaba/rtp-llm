@@ -61,7 +61,7 @@ public:
         return result;
     }
 
-    std::shared_ptr<at::hip::HIPCachingAllocator::AllocatorState> getCheckpointState(c10::DeviceIndex device,
+    std::shared_ptr<at::hip::HIPCachingAllocator::AllocatorState> getCheckpointState(c10::DeviceIndex     device,
                                                                                      at::hip::MempoolId_t id) override {
         return nullptr;
     }
@@ -79,7 +79,8 @@ public:
      * functions for all allocated blocks in the new checkpoint state.
      */
     at::hip::HIPCachingAllocator::CheckpointDelta
-    setCheckpointPoolState(c10::DeviceIndex device, std::shared_ptr<at::hip::HIPCachingAllocator::AllocatorState> pps) override {
+    setCheckpointPoolState(c10::DeviceIndex                                              device,
+                           std::shared_ptr<at::hip::HIPCachingAllocator::AllocatorState> pps) override {
         at::hip::HIPCachingAllocator::CheckpointDelta cpd;
         return cpd;
     }
@@ -110,9 +111,7 @@ public:
 
     void* raw_alloc_with_stream(size_t nbytes, hipStream_t stream) override;
 
-    void enablePeerAccess(
-      c10::DeviceIndex dev,
-      c10::DeviceIndex dev_to_access) override {}
+    void enablePeerAccess(c10::DeviceIndex dev, c10::DeviceIndex dev_to_access) override {}
 
     hipError_t memcpyAsync(void*       dst,
                            int         dstDevice,
@@ -148,14 +147,11 @@ public:
 
     void copy_data(void* dest, const void* src, std::size_t count) const override {}
 
-    void beginAllocateToPool(
-      c10::DeviceIndex device,
-      c10::hip::MempoolId_t mempool_id,
-      std::function<bool(hipStream_t)> filter) override {};
-    
-    virtual void endAllocateToPool(
-      c10::DeviceIndex device,
-      c10::hip::MempoolId_t mempool_id) override {}
+    void beginAllocateToPool(c10::DeviceIndex                 device,
+                             c10::hip::MempoolId_t            mempool_id,
+                             std::function<bool(hipStream_t)> filter) override {};
+
+    virtual void endAllocateToPool(c10::DeviceIndex device, c10::hip::MempoolId_t mempool_id) override {}
 
     void attachAllocatorTraceTracker(c10::hip::HIPCachingAllocator::AllocatorTraceTracker tracker) override {};
 

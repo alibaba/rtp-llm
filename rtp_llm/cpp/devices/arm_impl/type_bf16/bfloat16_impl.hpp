@@ -83,7 +83,7 @@ struct HIE_ALIGN(2) __Bf16Impl {
 
     // from float to bf16, round to nearest even
     static __Bf16Impl float2bfloat16(float v) {
-        uint32_t bits; // = reinterpret_cast<uint32_t&>(v);
+        uint32_t bits;  // = reinterpret_cast<uint32_t&>(v);
         std::memcpy(&bits, &v, sizeof(v));
         if ((bits & 0x7fffffff) > 0x7f800000) {
             return __Bf16Impl::from_bits(0x7fffU);

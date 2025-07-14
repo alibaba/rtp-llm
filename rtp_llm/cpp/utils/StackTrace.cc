@@ -8,7 +8,6 @@
 #include <unistd.h>
 #include <sstream>
 
-
 namespace rtp_llm {
 
 static constexpr int kMaxStackDepth = 64;
@@ -37,4 +36,4 @@ void printStackTrace() {
     fflush(stderr);
 }
 
-}
+}  // namespace rtp_llm

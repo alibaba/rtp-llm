@@ -2,41 +2,60 @@ from typing import List, Tuple
 
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerBase
 
-from rtp_llm.openai.api_datatype import (ChatCompletionRequest,
-                                                  ChatMessage,
-                                                  ContentPartTypeEnum,
-                                                  RendererInfo, RoleEnum)
+from rtp_llm.openai.api_datatype import (
+    ChatCompletionRequest,
+    ChatMessage,
+    ContentPartTypeEnum,
+    RendererInfo,
+    RoleEnum,
+)
 from rtp_llm.openai.renderer_factory_register import register_renderer
 from rtp_llm.openai.renderers.custom_renderer import (
-    CustomChatRenderer, RenderedInputs, RendererParams)
+    CustomChatRenderer,
+    RenderedInputs,
+    RendererParams,
+)
 from rtp_llm.openai.renderers.llama_template import (
-    Template, get_template_and_fix_tokenizer)
+    Template,
+    get_template_and_fix_tokenizer,
+)
 
 
 class ChatGlm4Renderer(CustomChatRenderer):
-    def __init__(self, tokenizer: PreTrainedTokenizerBase, renderer_params: RendererParams):
+    def __init__(
+        self, tokenizer: PreTrainedTokenizerBase, renderer_params: RendererParams
+    ):
         super().__init__(tokenizer, renderer_params)
 
     def get_renderer_info(self) -> RendererInfo:
         renderer_info = super().get_renderer_info()
         return renderer_info
 
-    def build_single_message(self, role: str, metadata: str, message: str, prefix_message_list: List[str]) -> Tuple[List[int], str]:
+    def build_single_message(
+        self, role: str, metadata: str, message: str, prefix_message_list: List[str]
+    ) -> Tuple[List[int], str]:
         assert isinstance(self.tokenizer, PreTrainedTokenizer)
         assert role in ["system", "user", "assistant", "observation"], role
-        role_tokens = [self.tokenizer.convert_tokens_to_ids(f"<|{role}|>")] + self.tokenizer.tokenizer.encode(f"{metadata}\n", disallowed_special=())
+        role_tokens = [
+            self.tokenizer.convert_tokens_to_ids(f"<|{role}|>")
+        ] + self.tokenizer.tokenizer.encode(f"{metadata}\n", disallowed_special=())
         prefix_message_tokens = []
-        prefix_message = ''
+        prefix_message = ""
         if prefix_message_list is not None:
-            prefix_message_tokens = self.tokenizer.convert_tokens_to_ids(prefix_message_list)
-            prefix_message = ''.join(prefix_message_list)
+            prefix_message_tokens = self.tokenizer.convert_tokens_to_ids(
+                prefix_message_list
+            )
+            prefix_message = "".join(prefix_message_list)
         message_tokens = self.tokenizer.tokenizer.encode(message, disallowed_special=())
         tokens: List[int] = role_tokens + prefix_message_tokens + message_tokens
-        
+
         return tokens, str(f"<|{role}|>{metadata}\n{prefix_message + message}")
 
     def handle_single_conversation(self, conversation: List[ChatMessage]):
-        input_ids = [self.tokenizer.convert_tokens_to_ids("[gMASK]"), self.tokenizer.convert_tokens_to_ids("<sop>")]
+        input_ids = [
+            self.tokenizer.convert_tokens_to_ids("[gMASK]"),
+            self.tokenizer.convert_tokens_to_ids("<sop>"),
+        ]
         input_message = "[gMASK]<sop>"
         input_image = []
         for item in conversation:
@@ -47,8 +66,12 @@ class ChatGlm4Renderer(CustomChatRenderer):
                 for tool in tools:
                     if tool.type == "function":
                         function = tool.function
-                        content += f"\n\n## {function.name}\n\n{function.model_dump_json()}"
-                        content += "\n在调用上述函数时，请使用 Json 格式表示调用的参数。"
+                        content += (
+                            f"\n\n## {function.name}\n\n{function.model_dump_json()}"
+                        )
+                        content += (
+                            "\n在调用上述函数时，请使用 Json 格式表示调用的参数。"
+                        )
                     elif tool.type == "python":
                         content += "\n\n## python\n\n当你向 `python` 发送包含 Python 代码的消息时，该代码将会在一个有状态的 Jupyter notebook 环境中执行。\n`python` 返回代码执行的输出，或在执行 60 秒后返回超时。\n`/mnt/data` 将会持久化存储你的文件。在此会话中，`python` 无法访问互联网。不要使用 `python` 进行任何网络请求或者在线 API 调用，这些在线内容的访问将不会成功。"
                     elif tool.type == "simple_browser":
@@ -68,21 +91,24 @@ class ChatGlm4Renderer(CustomChatRenderer):
             elif isinstance(item.content, list):
                 for content_part in item.content:
                     if content_part.type == ContentPartTypeEnum.text:
-                        assert (isinstance(content_part.text, str))
+                        assert isinstance(content_part.text, str)
                         message += content_part.text
                     elif content_part.type == ContentPartTypeEnum.image_url:
-                        assert len(input_image) == 0 and message_prefix is None, "Multiple images are not supported"
+                        assert (
+                            len(input_image) == 0 and message_prefix is None
+                        ), "Multiple images are not supported"
                         input_image.append(content_part.image_url.url)
-                        message_prefix = ["<|begin_of_image|>", "<|endoftext|>", "<|end_of_image|>"]
+                        message_prefix = [
+                            "<|begin_of_image|>",
+                            "<|endoftext|>",
+                            "<|end_of_image|>",
+                        ]
             else:
                 raise Exception(f"unkown chat message: {item.model_dump()}")
-            
+
             if message or message_prefix:
                 part_ids, part_messages = self.build_single_message(
-                    item.role,
-                    "",
-                    message,
-                    message_prefix
+                    item.role, "", message, message_prefix
                 )
                 input_ids.extend(part_ids)
                 input_message += part_messages
@@ -95,9 +121,13 @@ class ChatGlm4Renderer(CustomChatRenderer):
 
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         assert isinstance(self.tokenizer, PreTrainedTokenizerBase)
-        input_ids, input_message, input_image = self.handle_single_conversation(request.messages)
-        return RenderedInputs(input_ids=input_ids, rendered_prompt=input_message, input_urls=input_image)
+        input_ids, input_message, input_image = self.handle_single_conversation(
+            request.messages
+        )
+        return RenderedInputs(
+            input_ids=input_ids, rendered_prompt=input_message, input_urls=input_image
+        )
 
 
-register_renderer('chatglm4', ChatGlm4Renderer)
-register_renderer('chatglm4v', ChatGlm4Renderer)
+register_renderer("chatglm4", ChatGlm4Renderer)
+register_renderer("chatglm4v", ChatGlm4Renderer)

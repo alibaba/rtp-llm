@@ -1,10 +1,10 @@
-
+import weakref
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import Any, Dict,List
+from typing import Any, Dict, List
 
-import weakref
 import torch
+
 
 class QuantizationType(str, Enum):
     """
@@ -14,17 +14,19 @@ class QuantizationType(str, Enum):
     INT = "int"
     FLOAT = "float"
 
+
 class QuantizationConfig(ABC):
     """Base class for quantization configs."""
+
     _registry = weakref.WeakValueDictionary()
-    def __init__(self, bits: int, group_size: int, is_quanted:bool, **kwargs: Any):
+
+    def __init__(self, bits: int, group_size: int, is_quanted: bool, **kwargs: Any):
         super().__init__()
         # mapping is updated by models as they initialize
         self.packed_modules_mapping: Dict[str, List[str]] = dict()
         self._bits = bits
         self._group_size = group_size
         self._is_quanted = is_quanted
-
 
     @classmethod
     @abstractmethod
@@ -49,7 +51,6 @@ class QuantizationConfig(ABC):
         """Create a config class from the model's quantization config."""
         raise NotImplementedError
 
-
     def __init_subclass__(cls, **kwargs: Any):
         super().__init_subclass__(**kwargs)
         cls._registry[cls.__name__] = cls
@@ -57,23 +58,28 @@ class QuantizationConfig(ABC):
     @classmethod
     def from_config(cls, config: Dict[str, Any]):
         for _, c in cls._registry.items():
-            if c.get_method().upper() == config.get("method", config.get("quant_algo")).upper():
+            if (
+                c.get_method().upper()
+                == config.get("method", config.get("quant_algo")).upper()
+            ):
                 return c._from_config(config)
-        raise ValueError(f"config: {config}'s method is not support in {cls._registry.keys()}")
+        raise ValueError(
+            f"config: {config}'s method is not support in {cls._registry.keys()}"
+        )
 
-    def bits(self)-> int:
+    def bits(self) -> int:
         return self._bits
 
     def is_quanted(self) -> bool:
         return self._is_quanted
 
-    def group_size(self)-> int:
+    def group_size(self) -> int:
         return self._group_size
-    
+
 
 class WeightOnlyInt8PerChannelQuantConfig(QuantizationConfig):
     def __init__(self):
-        super().__init__(bits = 8, group_size=0, is_quanted=False)
+        super().__init__(bits=8, group_size=0, is_quanted=False)
         pass
 
     @classmethod
@@ -91,11 +97,23 @@ class WeightOnlyInt8PerChannelQuantConfig(QuantizationConfig):
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
         return WeightOnlyInt8PerChannelQuantConfig()
 
-DEFAULT_WEIGHT_ONLY_INT8_PER_CHANNEL_QUANT_CONFIG = WeightOnlyInt8PerChannelQuantConfig()
+
+DEFAULT_WEIGHT_ONLY_INT8_PER_CHANNEL_QUANT_CONFIG = (
+    WeightOnlyInt8PerChannelQuantConfig()
+)
+
 
 class Fp8PerTensorQuantConfig(QuantizationConfig):
-    def __init__(self, bits: int=8, group_size: int=0, is_quanted: bool=False, **kwargs: Any):
-        assert bits == 8 and group_size == 0, f"invalid params {bits} != 8 or {group_size} != 0"
+    def __init__(
+        self,
+        bits: int = 8,
+        group_size: int = 0,
+        is_quanted: bool = False,
+        **kwargs: Any,
+    ):
+        assert (
+            bits == 8 and group_size == 0
+        ), f"invalid params {bits} != 8 or {group_size} != 0"
         super().__init__(bits=8, group_size=0, is_quanted=is_quanted)
 
     @classmethod
@@ -113,11 +131,20 @@ class Fp8PerTensorQuantConfig(QuantizationConfig):
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
         return Fp8PerTensorQuantConfig(**config)
 
+
 DEFAULT_FP8_PER_TENSOR_QUANT_CONFIG = Fp8PerTensorQuantConfig(is_quanted=False)
 
+
 class Fp8BlockWiseQuantConfig(QuantizationConfig):
-    DEFAULT_FP8_QUANT_BLOCK_SIZE=128
-    def __init__(self, bits: int=8, group_size: int=128, is_quanted: bool=False, **kwargs: Any):
+    DEFAULT_FP8_QUANT_BLOCK_SIZE = 128
+
+    def __init__(
+        self,
+        bits: int = 8,
+        group_size: int = 128,
+        is_quanted: bool = False,
+        **kwargs: Any,
+    ):
         super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
 
     @classmethod
@@ -135,8 +162,9 @@ class Fp8BlockWiseQuantConfig(QuantizationConfig):
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
         return Fp8BlockWiseQuantConfig(**config)
 
+
 class CompressedTensorsQuantConfig(QuantizationConfig):
-    def __init__(self, bits: int=0, is_quanted: bool=False):
+    def __init__(self, bits: int = 0, is_quanted: bool = False):
         super().__init__(bits=bits, group_size=0, is_quanted=is_quanted)
 
     @classmethod
@@ -154,14 +182,15 @@ class CompressedTensorsQuantConfig(QuantizationConfig):
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
         return CompressedTensorsQuantConfig()
 
+
 class Fp8PerChannelCompressedQuantConfig(CompressedTensorsQuantConfig):
-    def __init__(self, bits: int=8, is_quanted: bool=False, **kwargs: Any):
+    def __init__(self, bits: int = 8, is_quanted: bool = False, **kwargs: Any):
         super().__init__(bits=bits, is_quanted=is_quanted)
 
     @classmethod
     def get_method(cls) -> str:
         return "FP8_PER_CHANNEL_COMPRESSED"
-    
+
     @classmethod
     def get_algo(cls) -> str:
         return "fp8-perchannel-compressed-tensors"
@@ -172,6 +201,7 @@ class Fp8PerChannelCompressedQuantConfig(CompressedTensorsQuantConfig):
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
         return Fp8PerChannelCompressedQuantConfig(**config)
+
 
 class SmoothQuantConfig(QuantizationConfig):
     def __init__(self):
@@ -191,6 +221,7 @@ class SmoothQuantConfig(QuantizationConfig):
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
         return SmoothQuantConfig()
+
 
 class OmniQuantConfig(QuantizationConfig):
     def __init__(self):
@@ -214,6 +245,7 @@ class OmniQuantConfig(QuantizationConfig):
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
         return OmniQuantConfig()
 
+
 class Int8PerTensorQuantConfig(QuantizationConfig):
     def __init__(self):
         super().__init__(bits=0, group_size=0, is_quanted=True)
@@ -233,10 +265,10 @@ class Int8PerTensorQuantConfig(QuantizationConfig):
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
         return Int8PerTensorQuantConfig()
 
+
 class AWQConfig(QuantizationConfig):
     def __init__(self, bits: int, group_size: int, is_quanted: bool, **kwargs: Any):
         super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
-
 
     @classmethod
     def get_method(cls) -> str:
@@ -252,6 +284,7 @@ class AWQConfig(QuantizationConfig):
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
         return AWQConfig(**config)
+
 
 class GPTQConfig(QuantizationConfig):
     def __init__(self, bits: int, group_size: int, is_quanted: bool, **kwargs: Any):
@@ -273,12 +306,18 @@ class GPTQConfig(QuantizationConfig):
         return GPTQConfig(**config)
 
 
-DEFAULT_FP8_BLOCK_WISE_QUANT_CONFIG = Fp8BlockWiseQuantConfig(bits=8, group_size=Fp8BlockWiseQuantConfig.DEFAULT_FP8_QUANT_BLOCK_SIZE, is_quanted=False)
-DEFAULT_FP8_PER_CHANNEL_COMPRESSED_QUANT_CONFIG = Fp8PerChannelCompressedQuantConfig(bits=8, is_quanted=False)
+DEFAULT_FP8_BLOCK_WISE_QUANT_CONFIG = Fp8BlockWiseQuantConfig(
+    bits=8,
+    group_size=Fp8BlockWiseQuantConfig.DEFAULT_FP8_QUANT_BLOCK_SIZE,
+    is_quanted=False,
+)
+DEFAULT_FP8_PER_CHANNEL_COMPRESSED_QUANT_CONFIG = Fp8PerChannelCompressedQuantConfig(
+    bits=8, is_quanted=False
+)
 
 preset_quant_config = {
     "INT8": DEFAULT_WEIGHT_ONLY_INT8_PER_CHANNEL_QUANT_CONFIG,
     "FP8": DEFAULT_FP8_PER_TENSOR_QUANT_CONFIG,
     "FP8_PER_BLOCK": DEFAULT_FP8_BLOCK_WISE_QUANT_CONFIG,
-    "FP8_PER_CHANNEL_COMPRESSED": DEFAULT_FP8_PER_CHANNEL_COMPRESSED_QUANT_CONFIG
+    "FP8_PER_CHANNEL_COMPRESSED": DEFAULT_FP8_PER_CHANNEL_COMPRESSED_QUANT_CONFIG,
 }

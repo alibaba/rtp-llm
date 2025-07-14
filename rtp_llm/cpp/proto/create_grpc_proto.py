@@ -1,6 +1,7 @@
 # create_grpc_proto.py
-import sys
 import subprocess
+import sys
+
 
 def main():
     if len(sys.argv) != 3:
@@ -10,7 +11,19 @@ def main():
     proto_file = sys.argv[1]
     output_dir = sys.argv[2]
 
-    subprocess.run([sys.executable, "-m", "grpc_tools.protoc", "-I.", f"--python_out={output_dir}", f"--grpc_python_out={output_dir}", proto_file], check=True)
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "grpc_tools.protoc",
+            "-I.",
+            f"--python_out={output_dir}",
+            f"--grpc_python_out={output_dir}",
+            proto_file,
+        ],
+        check=True,
+    )
+
 
 if __name__ == "__main__":
     main()

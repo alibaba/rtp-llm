@@ -46,7 +46,7 @@
 #define CUTE_ARCH_RED_BF16_SM90_ENABLED
 #endif
 
-#define CUTE_INVALID_CONTROL_PATH(x) 
+#define CUTE_INVALID_CONTROL_PATH(x)
 
 namespace cute
 {

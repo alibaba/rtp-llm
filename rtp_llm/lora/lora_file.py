@@ -1,13 +1,15 @@
-from typing import Any, Dict, List, Set, Union, Optional, NamedTuple
-from pathlib import PosixPath, Path
 import json
-import os
 import logging
+import os
 import re
+from pathlib import Path, PosixPath
+from typing import Any, Dict, List, NamedTuple, Optional, Set, Union
+
 import torch
 
 from rtp_llm.utils.ckpt_file_info import CkptFileInfo, FinetuneType
 from rtp_llm.utils.dump_config_utils import dump_lora_infos_to_table
+
 
 class LoraConfig:
 
@@ -16,19 +18,19 @@ class LoraConfig:
     rank: int = 0
     lora_alpha: int = 0
     lora_dropout: float = 0.0
-    target_modules: Union[List[str],str] = []
+    target_modules: Union[List[str], str] = []
     is_merge: bool = False
 
-    def __init__(self, name: str = '', json_path: str = '') -> None:
+    def __init__(self, name: str = "", json_path: str = "") -> None:
 
-        if json_path.endswith('.json'):
-            with open(json_path, 'r') as f:
+        if json_path.endswith(".json"):
+            with open(json_path, "r") as f:
                 f = json.load(f)
                 self.path = json_path
-                self.rank = f['r']
-                self.lora_alpha = f['lora_alpha']
-                self.lora_dropout = f['lora_dropout']
-                self.target_modules = f['target_modules']
+                self.rank = f["r"]
+                self.lora_alpha = f["lora_alpha"]
+                self.lora_dropout = f["lora_dropout"]
+                self.target_modules = f["target_modules"]
                 self.name = name
 
         return
@@ -45,23 +47,23 @@ class LoraInfos:
         target_modules: Union[List[str], str]
         tensor_nums: int
 
-
     lora_infos: List[LoraInfo]
 
     def __init__(self) -> None:
         self.lora_infos = []
 
-    def add_lora_infos(self, LoraFileList : Dict[LoraConfig, List[CkptFileInfo]]):
+    def add_lora_infos(self, LoraFileList: Dict[LoraConfig, List[CkptFileInfo]]):
         for key, value in LoraFileList.items():
-            lora_name       = key.name
-            path            = key.path
-            target_modules  = key.target_modules
-            tensor_nums     = sum([ckpt_file.tensor_num for ckpt_file in value])
-            lora_info       = LoraInfos.LoraInfo(lora_name, path, target_modules, tensor_nums)
+            lora_name = key.name
+            path = key.path
+            target_modules = key.target_modules
+            tensor_nums = sum([ckpt_file.tensor_num for ckpt_file in value])
+            lora_info = LoraInfos.LoraInfo(lora_name, path, target_modules, tensor_nums)
             self.lora_infos.append(lora_info)
 
     def dump(self):
         dump_lora_infos_to_table("DATABASE LORA INFOS", self.lora_infos)
+
 
 class LoraCkpt:
     LoraFileList: Dict[LoraConfig, List[CkptFileInfo]]
@@ -92,7 +94,12 @@ class LoraCkpt:
             if key.name == config_name:
                 raise Exception(f"load same name lora")
         # standard HF safetensors
-        patterns = ["adapter_model.safetensors", "adapter_model.bin", "adapter_model.pth", "adapter_model.pt"]
+        patterns = [
+            "adapter_model.safetensors",
+            "adapter_model.bin",
+            "adapter_model.pth",
+            "adapter_model.pt",
+        ]
         lora_ckpt_paths = []
         for pattern in patterns:
             lora_model_path = os.path.join(lora_path, pattern)
@@ -109,7 +116,9 @@ class LoraCkpt:
 
         logging.info(f"lora_config_path is {lora_config_path}")
         lora_config = LoraConfig(config_name, lora_config_path)
-        ckpt = CkptFileInfo(file_name=str(lora_ckpt_paths[0]), finetune_type=FinetuneType.lora)
+        ckpt = CkptFileInfo(
+            file_name=str(lora_ckpt_paths[0]), finetune_type=FinetuneType.lora
+        )
         self.LoraFileList[lora_config] = [ckpt]
         self.lora_check()
 
@@ -126,11 +135,11 @@ class LoraCkpt:
     def lora_tensor_check(self, tensor_name: str):
         # check lora tensor names. the lora tensor name should match
         # the format which is "base_model.model.{}.{}.weight"
-        pattern = r'base_model\.model\.(.*)\.(lora_A|lora_B)\.weight'
+        pattern = r"base_model\.model\.(.*)\.(lora_A|lora_B)\.weight"
         if re.fullmatch(pattern, tensor_name) == None:
             raise Exception(f"invalid lora tensor name : {tensor_name}")
 
-    def remove_lora(self, name:str):
+    def remove_lora(self, name: str):
         for key, _ in self.LoraFileList.items():
             if key.name == name:
                 del self.LoraFileList[key]

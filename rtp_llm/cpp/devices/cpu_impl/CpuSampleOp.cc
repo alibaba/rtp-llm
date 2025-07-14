@@ -199,64 +199,60 @@ void setup_topp(int    batch_size,
     }
 }
 
+void applyTemperaturePenalty(
+    float* logits, const float* temperatures, int batch_size, int vocab_size, int vocab_size_padd) {
+    // Prepare inverse temperatures with padding
+    std::vector<float> inv_temperatures(batch_size);
+    const float        epsilon = 1e-6f;
 
-void applyTemperaturePenalty(float* logits,  
-                             const float* temperatures,  
-                             int batch_size,  
-                             int vocab_size,  
-                             int vocab_size_padd) {  
-    // Prepare inverse temperatures with padding  
-    std::vector<float> inv_temperatures(batch_size);  
-    const float epsilon = 1e-6f;  
-    
-    // Calculating inverse temperatures  
-    int i = 0;  
-    // Process full vectors when possible  
-    for (; i <= batch_size - 16; i += 16) {   
-        __m512 temperatures_vec = _mm512_loadu_ps(&temperatures[i]);  
+    // Calculating inverse temperatures
+    int i = 0;
+    // Process full vectors when possible
+    for (; i <= batch_size - 16; i += 16) {
+        __m512 temperatures_vec = _mm512_loadu_ps(&temperatures[i]);
 
-        // Add a small epsilon to avoid division by zero  
-        __m512 epsilon_vec = _mm512_set1_ps(epsilon);  
-        __m512 adjusted_temps = _mm512_add_ps(temperatures_vec, epsilon_vec);  
-        __m512 inv_temp_vec = _mm512_div_ps(_mm512_set1_ps(1.0f), adjusted_temps);  
+        // Add a small epsilon to avoid division by zero
+        __m512 epsilon_vec    = _mm512_set1_ps(epsilon);
+        __m512 adjusted_temps = _mm512_add_ps(temperatures_vec, epsilon_vec);
+        __m512 inv_temp_vec   = _mm512_div_ps(_mm512_set1_ps(1.0f), adjusted_temps);
 
-        _mm512_storeu_ps(&inv_temperatures[i], inv_temp_vec);  
-    }  
+        _mm512_storeu_ps(&inv_temperatures[i], inv_temp_vec);
+    }
 
-    // Handle remaining temperatures using masking if batch_size is not a multiple of 16  
-    if (i < batch_size) {  
-        // Load the remaining temperatures  
-        __m512 temperatures_vec = _mm512_loadu_ps(&temperatures[i]);  
-        __m512 epsilon_vec = _mm512_set1_ps(epsilon);  
-        __m512 adjusted_temps = _mm512_add_ps(temperatures_vec, epsilon_vec);  
-        
-        // Calculate the inverse  
-        __m512 inv_temp_vec = _mm512_div_ps(_mm512_set1_ps(1.0f), adjusted_temps);  
-        
-        // Determine how many elements to store  
-        int remainder = batch_size - i;  
-        __mmask16 mask = (1 << remainder) - 1; // Create a mask for remaining elements  
+    // Handle remaining temperatures using masking if batch_size is not a multiple of 16
+    if (i < batch_size) {
+        // Load the remaining temperatures
+        __m512 temperatures_vec = _mm512_loadu_ps(&temperatures[i]);
+        __m512 epsilon_vec      = _mm512_set1_ps(epsilon);
+        __m512 adjusted_temps   = _mm512_add_ps(temperatures_vec, epsilon_vec);
 
-        // Store results back to inv_temperatures using the mask  
-        _mm512_mask_storeu_ps(&inv_temperatures[i], mask, inv_temp_vec);  
-    }  
+        // Calculate the inverse
+        __m512 inv_temp_vec = _mm512_div_ps(_mm512_set1_ps(1.0f), adjusted_temps);
 
-    // Apply temperature penalty  
-    for (int batch_idx = 0; batch_idx < batch_size; ++batch_idx) {  
-        float inv_temp = inv_temperatures[batch_idx]; // Cache inverse temperature for current batch  
+        // Determine how many elements to store
+        int       remainder = batch_size - i;
+        __mmask16 mask      = (1 << remainder) - 1;  // Create a mask for remaining elements
 
-        for (int vocab_idx = 0; vocab_idx < vocab_size_padd; ++vocab_idx) {  
-            int index = batch_idx * vocab_size_padd + vocab_idx;  
-            float logit = (vocab_idx < vocab_size) ? logits[index] : -FLT_MAX;  
+        // Store results back to inv_temperatures using the mask
+        _mm512_mask_storeu_ps(&inv_temperatures[i], mask, inv_temp_vec);
+    }
 
-            // Apply penalty only for valid vocab indices  
-            if (vocab_idx < vocab_size) {  
-                logit *= inv_temp;  
-            }  
-            logits[index] = logit;  
-        }  
-    }  
-}  
+    // Apply temperature penalty
+    for (int batch_idx = 0; batch_idx < batch_size; ++batch_idx) {
+        float inv_temp = inv_temperatures[batch_idx];  // Cache inverse temperature for current batch
+
+        for (int vocab_idx = 0; vocab_idx < vocab_size_padd; ++vocab_idx) {
+            int   index = batch_idx * vocab_size_padd + vocab_idx;
+            float logit = (vocab_idx < vocab_size) ? logits[index] : -FLT_MAX;
+
+            // Apply penalty only for valid vocab indices
+            if (vocab_idx < vocab_size) {
+                logit *= inv_temp;
+            }
+            logits[index] = logit;
+        }
+    }
+}
 
 void batchTopKSampling(const float* log_probs,
                        int*         ids,
@@ -464,11 +460,8 @@ GreedyOutput CpuDevice::sampleGreedy(const GreedyParams& params) {
     // 3.2. compute logits penalty
     if (std::any_of(
             temperature.data<float>(), temperature.data<float>() + batch_size, [&](auto t) { return t != 1.0f; })) {
-        applyTemperaturePenalty(logits.data<float>(),
-                                temperature.data<float>(),
-                                batch_size,
-                                vocab_size_padded,
-                                vocab_size_padded);
+        applyTemperaturePenalty(
+            logits.data<float>(), temperature.data<float>(), batch_size, vocab_size_padded, vocab_size_padded);
     }
 
     const auto decoder_batch_size = params.sequence_lengths.shape()[0];

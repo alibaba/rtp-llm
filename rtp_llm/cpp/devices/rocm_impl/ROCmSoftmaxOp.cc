@@ -12,10 +12,7 @@ using namespace std;
 namespace rtp_llm {
 
 template<typename In, typename Out>
-void mixedTypeSoftmaxWrapper(const SoftmaxParams& params,
-                             const Buffer& output,
-                             hipStream_t stream)
-{
+void mixedTypeSoftmaxWrapper(const SoftmaxParams& params, const Buffer& output, hipStream_t stream) {
     MaskedSoftmaxParam<Out, In> param;
     auto&                       input = params.input;
 

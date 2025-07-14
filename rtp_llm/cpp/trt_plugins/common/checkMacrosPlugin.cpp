@@ -19,17 +19,14 @@
 
 #include "rtp_llm/cpp/utils/Logger.h"
 
-namespace tensorrt_llm::plugins
-{
+namespace tensorrt_llm::plugins {
 
-void caughtError(const std::exception& e)
-{
-   TLLM_LOG_EXCEPTION(e);
+void caughtError(const std::exception& e) {
+    TLLM_LOG_EXCEPTION(e);
 }
 
-void logError(const char* msg, const char* file, const char* fn, int line)
-{
+void logError(const char* msg, const char* file, const char* fn, int line) {
     TLLM_LOG_ERROR("Parameter check failed at: %s::%s::%d, condition: %s", file, fn, line, msg);
 }
 
-} // namespace tensorrt_llm::plugins
+}  // namespace tensorrt_llm::plugins

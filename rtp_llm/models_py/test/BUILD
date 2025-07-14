@@ -126,7 +126,7 @@ py_test (
     env = test_envs,
     exec_properties = {'gpu':'H20'},
 )
- 
+
 py_test (
     name = "fused_moe_op_test",
     srcs = ["fused_moe_op_test.py"],

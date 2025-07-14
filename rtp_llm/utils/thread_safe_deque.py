@@ -1,7 +1,8 @@
-from collections import deque
 import threading
+from collections import deque
 
-class ThreadSafeDeque():
+
+class ThreadSafeDeque:
     def __init__(self):
         self.deque = deque()
         self.lock = threading.Lock()
@@ -29,7 +30,7 @@ class ThreadSafeDeque():
     def __len__(self):
         with self.lock:
             return len(self.deque)
-    
+
     def copy(self):
         with self.lock:
             return self.deque.copy()

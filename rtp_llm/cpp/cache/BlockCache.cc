@@ -49,8 +49,7 @@ BlockCache::MatchResult BlockCache::match(const std::vector<int64_t>& cache_key)
     return {matched_len, matched_item.block_indices, matched_item.loss};
 }
 
-std::vector<int>
-BlockCache::put(CacheItem& item) {
+std::vector<int> BlockCache::put(CacheItem& item) {
     if (item.token_list.empty() || item.block_indices.empty()) {
         return {};
     }

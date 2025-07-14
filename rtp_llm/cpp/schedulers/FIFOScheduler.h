@@ -13,7 +13,7 @@ namespace rtp_llm {
 
 class FIFOScheduler: public SchedulerBase {
 public:
-    explicit FIFOScheduler(const rtp_llm::GptInitParameter&          params,
+    explicit FIFOScheduler(const rtp_llm::GptInitParameter&     params,
                            const std::shared_ptr<CacheManager>& cache_manager,
                            const kmonitor::MetricsReporterPtr   metrics_reporter = nullptr);
 
@@ -36,17 +36,19 @@ public:
     int64_t runningQueryLen() override;
 
 private:
-    void evictDoneStreams(std::list<GenerateStreamPtr>& streams) const;
-    bool evaluateNewStream(const std::list<GenerateStreamPtr>& streams,
-                            const GenerateStreamPtr& new_stream, size_t reserve_step);
+    void                 evictDoneStreams(std::list<GenerateStreamPtr>& streams) const;
+    bool                 evaluateNewStream(const std::list<GenerateStreamPtr>& streams,
+                                           const GenerateStreamPtr&            new_stream,
+                                           size_t                              reserve_step);
     std::tuple<int, int> evaluateRunningNext(size_t reserve_step);
-    void evaluateRunningRemote();
-    int64_t lastScheduleTime() override;
-    int  runningNextBlockNum(size_t reserve_step) const;
+    void                 evaluateRunningRemote();
+    int64_t              lastScheduleTime() override;
+    int                  runningNextBlockNum(size_t reserve_step) const;
     bool evaluateRunningMemory(const std::list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream) const;
-    void accountBatchMetrics(const std::list<GenerateStreamPtr>& new_streams, const std::list<GenerateStreamPtr>& running_streams);
+    void accountBatchMetrics(const std::list<GenerateStreamPtr>& new_streams,
+                             const std::list<GenerateStreamPtr>& running_streams);
     std::list<GenerateStreamPtr> scheduleNew(size_t reserve_step);
-    bool waitPredicate();
+    bool                         waitPredicate();
 
 private:
     rtp_llm::GptInitParameter     params_;

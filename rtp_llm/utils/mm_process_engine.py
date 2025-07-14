@@ -1,24 +1,29 @@
-import os
-import gc
-import torch
 import asyncio
+import gc
+import os
+from concurrent.futures import Future, ThreadPoolExecutor
 from io import BytesIO
-from typing import List, Optional, Dict, Any
-from concurrent.futures import ThreadPoolExecutor, Future
+from typing import Any, Dict, List, Optional
 
-from rtp_llm.utils.util import to_torch_dtype, check_with_info
-from rtp_llm.utils.multimodal_util import (vit_emb_cache_,
-                                                    get_bytes_io_from_url,
-                                                    MMUrlType,
-                                                    MMPreprocessConfig)
+import torch
+
+from rtp_llm.utils.multimodal_util import (
+    MMPreprocessConfig,
+    MMUrlType,
+    get_bytes_io_from_url,
+    vit_emb_cache_,
+)
+from rtp_llm.utils.util import check_with_info, to_torch_dtype
+
 
 class MMEmbeddingRes:
     embeddings: List[torch.Tensor] = []
     position_ids: Optional[List[torch.Tensor]] = None
 
-    def __init__(self, embeddings, position_ids = None):
+    def __init__(self, embeddings, position_ids=None):
         self.embeddings = embeddings
         self.position_ids = position_ids
+
 
 class MMProcessEngine:
     def __init__(self, model):
@@ -32,7 +37,13 @@ class MMProcessEngine:
         else:
             return [tensor]
 
-    def submit(self, urls: List[str], types: Optional[List[MMUrlType]] = None, tensors: Optional[List[torch.Tensor]] = None, preprocess_configs: Optional[List[List[int]]] = None):
+    def submit(
+        self,
+        urls: List[str],
+        types: Optional[List[MMUrlType]] = None,
+        tensors: Optional[List[torch.Tensor]] = None,
+        preprocess_configs: Optional[List[List[int]]] = None,
+    ):
         if self.run_batch:
             res, pos = self.model.mm_part.mm_embedding(urls, types, tensors)
             return MMEmbeddingRes(res, pos)
@@ -46,7 +57,9 @@ class MMProcessEngine:
             res: List[torch.Tensor] = []
             pos: Optional[List[torch.Tensor]] = [] if self.contains_pos else None
             for index in range(len(urls)):
-                embedding, pos_ids = self.model.mm_part.mm_embedding(urls[index], types[index], configs=configs[index])
+                embedding, pos_ids = self.model.mm_part.mm_embedding(
+                    urls[index], types[index], configs=configs[index]
+                )
                 res.extend(self._maybe_tensor_to_list(embedding))
                 if self.contains_pos:
                     check_with_info(pos_ids is not None, "pos_ids should not be None")

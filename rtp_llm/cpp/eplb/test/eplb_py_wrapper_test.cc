@@ -31,10 +31,7 @@ PYBIND11_MODULE(libth_eplb_py_wrapper_test, m) {
     py::class_<EplbPyWrapperOP>(m, "EplbPyWrapperOP")
         .def(py::init<>())
         .def("init", &EplbPyWrapperOP::init)
-        .def("create_balance_plan",
-             &EplbPyWrapperOP::createBalancePlan,
-             py::arg("log_stats"),
-             py::arg("gpu_loads"))
+        .def("create_balance_plan", &EplbPyWrapperOP::createBalancePlan, py::arg("log_stats"), py::arg("gpu_loads"))
         .def("load_moe_weight", &EplbPyWrapperOP::loadMoeWeight, py::arg("ep_rank"), py::arg("ep_size"))
         .def("get_result", &EplbPyWrapperOP::getResult);
 }

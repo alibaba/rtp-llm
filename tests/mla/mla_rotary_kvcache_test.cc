@@ -24,16 +24,24 @@ public:
                        int64_t hidden_size,
                        double  softmax_extra_scale);
 
-    AttentionConfigs                     attn_configs = AttentionConfigs({});
-    void init(torch::Tensor prefix_length, torch::Tensor sequence_length, torch::Tensor input_length, int64_t page_size,
-              torch::Tensor block_id_map, torch::Tensor block_id_map_device);
-    void applyRotaryKVCache(
-        torch::Tensor q, torch::Tensor fused_qkv, int64_t kv_offset, torch::Tensor ckv_cache, torch::Tensor kpe_cache, torch::Tensor cos_sin_cache);
-    DeviceBase* device_;
-    ParamsPtr context_params_;
-    ParamsPtr decode_params_;
-    int64_t context_batch_size_;
-    int64_t decoder_batch_size_;
+    AttentionConfigs attn_configs = AttentionConfigs({});
+    void             init(torch::Tensor prefix_length,
+                          torch::Tensor sequence_length,
+                          torch::Tensor input_length,
+                          int64_t       page_size,
+                          torch::Tensor block_id_map,
+                          torch::Tensor block_id_map_device);
+    void             applyRotaryKVCache(torch::Tensor q,
+                                        torch::Tensor fused_qkv,
+                                        int64_t       kv_offset,
+                                        torch::Tensor ckv_cache,
+                                        torch::Tensor kpe_cache,
+                                        torch::Tensor cos_sin_cache);
+    DeviceBase*      device_;
+    ParamsPtr        context_params_;
+    ParamsPtr        decode_params_;
+    int64_t          context_batch_size_;
+    int64_t          decoder_batch_size_;
 };
 
 MlaRotaryKVCacheOp::MlaRotaryKVCacheOp(int64_t mla_type,
@@ -47,7 +55,7 @@ MlaRotaryKVCacheOp::MlaRotaryKVCacheOp(int64_t mla_type,
                                        double  softmax_extra_scale) {
     rtp_llm::initLogger();
 
-    auto gpt_params = GptInitParameter();
+    auto gpt_params          = GptInitParameter();
     gpt_params.mla_ops_type_ = MlaOpsType(mla_type);
     rtp_llm::DeviceFactory::initDevices(gpt_params);
     device_      = rtp_llm::DeviceFactory::getDefaultDevice();
@@ -73,64 +81,75 @@ MlaRotaryKVCacheOp::MlaRotaryKVCacheOp(int64_t mla_type,
     });
 }
 
-void MlaRotaryKVCacheOp::init(torch::Tensor prefix_length, torch::Tensor sequence_length, torch::Tensor input_length, int64_t page_size,
-                              torch::Tensor block_id_map, torch::Tensor block_id_map_device) {
+void MlaRotaryKVCacheOp::init(torch::Tensor prefix_length,
+                              torch::Tensor sequence_length,
+                              torch::Tensor input_length,
+                              int64_t       page_size,
+                              torch::Tensor block_id_map,
+                              torch::Tensor block_id_map_device) {
     attn_configs.tokens_per_block = page_size;
-    context_batch_size_ = input_length.size(0) - sequence_length.size(0);
-    decoder_batch_size_ = sequence_length.size(0);
+    context_batch_size_           = input_length.size(0) - sequence_length.size(0);
+    decoder_batch_size_           = sequence_length.size(0);
 #ifdef USING_ROCM
     context_params_ = FlashInferAttnParams::preparePrefillFlashInferAttnParams(device_,
-                                                    attn_configs,
-                                                    torchTensor2Buffer(prefix_length),
-                                                    torchTensor2Buffer(sequence_length),
-                                                    torchTensor2Buffer(input_length),
-                                                    torchTensor2Buffer(block_id_map),
-                                                    DataType::TYPE_FP16);
-    decode_params_ = FlashInferAttnParams::prepareDecodeFlashInferAttnParams(device_,
-                                                    attn_configs,
-                                                    torchTensor2Buffer(sequence_length),
-                                                    torchTensor2Buffer(input_length),
-                                                    torchTensor2Buffer(block_id_map),
-                                                    DataType::TYPE_FP16);
+                                                                               attn_configs,
+                                                                               torchTensor2Buffer(prefix_length),
+                                                                               torchTensor2Buffer(sequence_length),
+                                                                               torchTensor2Buffer(input_length),
+                                                                               torchTensor2Buffer(block_id_map),
+                                                                               DataType::TYPE_FP16);
+    decode_params_  = FlashInferAttnParams::prepareDecodeFlashInferAttnParams(device_,
+                                                                             attn_configs,
+                                                                             torchTensor2Buffer(sequence_length),
+                                                                             torchTensor2Buffer(input_length),
+                                                                             torchTensor2Buffer(block_id_map),
+                                                                             DataType::TYPE_FP16);
 #else
-    context_params_ = FlashInferAttnParams::prepare(device_,
-                                                    attn_configs,
-                                                    torchTensor2Buffer(prefix_length),
-                                                    nullptr,
-                                                    torchTensor2Buffer(input_length)->slice(decoder_batch_size_, context_batch_size_, false),
-                                                    torchTensor2Buffer(block_id_map)->slice(decoder_batch_size_, context_batch_size_, false),
-                                                    torchTensor2Buffer(block_id_map_device)->slice(decoder_batch_size_, context_batch_size_, false),
-                                                    DataType::TYPE_FP16);
-    decode_params_ = FlashInferAttnParams::prepare(device_,
-                                                   attn_configs,
-                                                   nullptr,
-                                                   torchTensor2Buffer(sequence_length)->slice(0, decoder_batch_size_, false),
-                                                   torchTensor2Buffer(input_length)->slice(0, decoder_batch_size_, false),
-                                                   torchTensor2Buffer(block_id_map)->slice(0, decoder_batch_size_, false),
-                                                   torchTensor2Buffer(block_id_map_device)->slice(0, decoder_batch_size_, false),
-                                                   DataType::TYPE_FP16);
+    context_params_ = FlashInferAttnParams::prepare(
+        device_,
+        attn_configs,
+        torchTensor2Buffer(prefix_length),
+        nullptr,
+        torchTensor2Buffer(input_length)->slice(decoder_batch_size_, context_batch_size_, false),
+        torchTensor2Buffer(block_id_map)->slice(decoder_batch_size_, context_batch_size_, false),
+        torchTensor2Buffer(block_id_map_device)->slice(decoder_batch_size_, context_batch_size_, false),
+        DataType::TYPE_FP16);
+    decode_params_ =
+        FlashInferAttnParams::prepare(device_,
+                                      attn_configs,
+                                      nullptr,
+                                      torchTensor2Buffer(sequence_length)->slice(0, decoder_batch_size_, false),
+                                      torchTensor2Buffer(input_length)->slice(0, decoder_batch_size_, false),
+                                      torchTensor2Buffer(block_id_map)->slice(0, decoder_batch_size_, false),
+                                      torchTensor2Buffer(block_id_map_device)->slice(0, decoder_batch_size_, false),
+                                      DataType::TYPE_FP16);
 #endif
 }
 
-void MlaRotaryKVCacheOp::applyRotaryKVCache(
-    torch::Tensor q, torch::Tensor fused_qkv, int64_t kv_offset, torch::Tensor ckv_cache, torch::Tensor kpe_cache, torch::Tensor cos_sin_cache) {
+void MlaRotaryKVCacheOp::applyRotaryKVCache(torch::Tensor q,
+                                            torch::Tensor fused_qkv,
+                                            int64_t       kv_offset,
+                                            torch::Tensor ckv_cache,
+                                            torch::Tensor kpe_cache,
+                                            torch::Tensor cos_sin_cache) {
 
     auto attn_layer_weight                = AttentionLayerWeights();
-    attn_layer_weight.rope_cos_sin_cache = torchTensor2Buffer(cos_sin_cache);
+    attn_layer_weight.rope_cos_sin_cache  = torchTensor2Buffer(cos_sin_cache);
     auto attn_common_inputs               = AttentionCommonInputs();
     attn_common_inputs.context_batch_size = context_batch_size_;
     attn_common_inputs.decoder_batch_size = decoder_batch_size_;
-    attn_common_inputs.kv_cache =
-            std::make_optional<KvCacheInfo>({1, nullptr, torchTensor2Buffer(ckv_cache), torchTensor2Buffer(kpe_cache), nullptr, nullptr});
+    attn_common_inputs.kv_cache           = std::make_optional<KvCacheInfo>(
+        {1, nullptr, torchTensor2Buffer(ckv_cache), torchTensor2Buffer(kpe_cache), nullptr, nullptr});
 
-    auto q_buf = torchTensor2Buffer(q);
+    auto q_buf         = torchTensor2Buffer(q);
     auto fused_qkv_buf = torchTensor2Buffer(fused_qkv);
 
     RTP_LLM_LOG_INFO("before run");
     if (context_params_ != nullptr) {
         RTP_LLM_LOG_INFO("run context");
         auto context_q_buf = q_buf->slice(decoder_batch_size_, q_buf->shape()[0] - decoder_batch_size_);
-        auto context_fused_qkv_buf = fused_qkv_buf->slice(decoder_batch_size_, fused_qkv_buf->shape()[0] - decoder_batch_size_);
+        auto context_fused_qkv_buf =
+            fused_qkv_buf->slice(decoder_batch_size_, fused_qkv_buf->shape()[0] - decoder_batch_size_);
 
         MlaRotaryWriteKVCacheParams context_params = {
             *context_q_buf,
@@ -147,7 +166,7 @@ void MlaRotaryKVCacheOp::applyRotaryKVCache(
     }
     if (decode_params_ != nullptr) {
         RTP_LLM_LOG_INFO("run decode");
-        auto decode_q_buf = q_buf->slice(0, decoder_batch_size_);
+        auto decode_q_buf         = q_buf->slice(0, decoder_batch_size_);
         auto decode_fused_qkv_buf = fused_qkv_buf->slice(0, decoder_batch_size_);
 
         MlaRotaryWriteKVCacheParams decode_params = {

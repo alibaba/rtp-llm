@@ -2,10 +2,8 @@
 #include <pybind11/embed.h>
 #include <torch/extension.h>
 
-
 namespace torch_ext {
 
-void registerPyModuleOps(pybind11::module &m);
+void registerPyModuleOps(pybind11::module& m);
 
 }
-

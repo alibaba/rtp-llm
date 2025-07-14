@@ -19,12 +19,12 @@ public:
     };
 
 public:
-    std::pair<LoadBalancerInitParams, std::shared_ptr<http_server::HttpServer>> makeConfig(const std::vector<int>& token_ids) {
+    std::pair<LoadBalancerInitParams, std::shared_ptr<http_server::HttpServer>>
+    makeConfig(const std::vector<int>& token_ids) {
         LocalSubscribeServiceConfig local_config;
         uint32_t                    http_port = 8088;
-        local_config.nodes.emplace_back(
-            LocalNodeJsonize("test-biz", "0.0.0.0", http_port, http_port));
-        auto server = initServer("tcp:0.0.0.0:" + std::to_string(http_port), token_ids);
+        local_config.nodes.emplace_back(LocalNodeJsonize("test-biz", "0.0.0.0", http_port, http_port));
+        auto                   server = initServer("tcp:0.0.0.0:" + std::to_string(http_port), token_ids);
         SubscribeServiceConfig config;
         config.local_configs.push_back(local_config);
         LoadBalancerInitParams params;
@@ -50,7 +50,7 @@ TEST_F(RemoteTokenizeModuleTest, testSimple) {
     ASSERT_TRUE(module.init(load_balancer));
     std::string request = "{\"prompt\": \"hello\"}";
     sleep(3);
-    auto res            = module.encodeRequest(request, "test-biz");
+    auto res = module.encodeRequest(request, "test-biz");
     ASSERT_TRUE(res.ok());
     ASSERT_EQ(res.value()->token_ids, std::vector<int>({1, 2, 3, 4, 5}));
     ASSERT_EQ(res.value()->input_length, 5);

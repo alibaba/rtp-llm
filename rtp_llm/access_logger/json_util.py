@@ -1,7 +1,8 @@
-import numpy
+import json
 from typing import Any
 
-import json
+import numpy
+
 
 def response_encoder(element: Any) -> Any:
     if isinstance(element, numpy.ndarray):
@@ -11,6 +12,7 @@ def response_encoder(element: Any) -> Any:
     elif isinstance(element, bytes):
         return f"bytes[{len(element)}]"
     return element.__dict__
+
 
 def dump_json(obj: Any) -> str:
     return json.dumps(obj, default=response_encoder, ensure_ascii=False)

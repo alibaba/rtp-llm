@@ -1,7 +1,8 @@
-from typing import Any, Dict
+import json
 import secrets
 import string
-import json
+from typing import Any, Dict
+
 
 def _generate_random_call_id(length: int = 24) -> str:
     """生成随机调用ID"""
@@ -9,13 +10,14 @@ def _generate_random_call_id(length: int = 24) -> str:
     random_string = "".join(secrets.choice(characters) for _ in range(length))
     return "call_" + random_string
 
+
 def convert_function_to_tool_response(delta_msg: Dict[str, Any]) -> Dict[str, Any]:
     """
     Convert a response with function_call to one with tool_calls.
-    
+
     Args:
         delta_msg: Original delta message dict with function_call
-        
+
     Returns:
         dict: Converted delta message with tool_calls instead of function_call
     """
@@ -30,8 +32,8 @@ def convert_function_to_tool_response(delta_msg: Dict[str, Any]) -> Dict[str, An
                 "index": 0,
                 "function": {
                     "name": func_call["name"],
-                    "arguments": func_call["arguments"]
-                }
+                    "arguments": func_call["arguments"],
+                },
             }
         ]
         new_delta.pop("function_call", None)
@@ -45,8 +47,8 @@ def test_convert_function_to_tool_response():
         "content": "让我帮你查询北京的天气信息。",
         "function_call": {
             "name": "get_weather",
-            "arguments": '{"location": "北京", "unit": "celsius"}'
-        }
+            "arguments": '{"location": "北京", "unit": "celsius"}',
+        },
     }
 
     converted = convert_function_to_tool_response(delta_msg)

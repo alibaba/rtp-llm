@@ -2,7 +2,6 @@
 #include "rtp_llm/cpp/devices/base_tests/SoftmaxOpTest.hpp"
 #include "rtp_llm/cpp/devices/rocm_impl/ROCmDevice.h"
 
-
 using namespace std;
 using namespace rtp_llm;
 
@@ -16,4 +15,3 @@ TEST_F(RocmSoftmaxOpTest, MixtureSoftmaxOpTest) {
     // MixtureSofmaxTest(16, 32, 128, 128, 1.0f, DataType::TYPE_BF16, DataType::TYPE_BF16);
     // MixtureSofmaxTest(16, 32, 128, 128, 2.0f, DataType::TYPE_BF16, DataType::TYPE_BF16);
 }
-

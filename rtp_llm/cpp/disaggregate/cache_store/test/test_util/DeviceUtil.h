@@ -3,8 +3,6 @@
 #include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 
-
-
 namespace rtp_llm {
 
 class DeviceUtil {
@@ -23,6 +21,7 @@ public:
 public:
     rtp_llm::DeviceBase*                          device_;
     std::unordered_map<void*, rtp_llm::BufferPtr> buffer_map_;
+
 private:
     std::mutex mutex_;
 };

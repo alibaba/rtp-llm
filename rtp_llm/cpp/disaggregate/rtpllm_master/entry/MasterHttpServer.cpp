@@ -40,7 +40,6 @@ void MasterHttpServer::stop() {
     }
 }
 
-
 void MasterHttpServer::handleError(const http_server::HttpRequest&                  request,
                                    std::unique_ptr<http_server::HttpResponseWriter> writer,
                                    const std::string&                               error_msg) {
@@ -50,37 +49,38 @@ void MasterHttpServer::handleError(const http_server::HttpRequest&              
 
 void MasterHttpServer::handleRequest(const http_server::HttpRequest&                  request,
                                      std::unique_ptr<http_server::HttpResponseWriter> writer) {
-    auto start_time = autil::TimeUtility::currentTimeInMilliSeconds();
+    auto       start_time = autil::TimeUtility::currentTimeInMilliSeconds();
     MasterInfo info;
     writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
     writer->AddHeader("Content-Type", "application/json");
     const auto body = request.GetBody();
     try {
-        auto res = tokenize_service_->encodeRequest(body, biz_name_);
-        auto tokenize_end_time = autil::TimeUtility::currentTimeInMilliSeconds();
+        auto res                   = tokenize_service_->encodeRequest(body, biz_name_);
+        auto tokenize_end_time     = autil::TimeUtility::currentTimeInMilliSeconds();
         info.tokenize_cost_time_ms = tokenize_end_time - start_time;
         if (!res.ok()) {
             handleError(request, std::move(writer), std::string(res.status().message()));
             return;
         }
         // info.request_id = generator_.getRandomString();
-        info.request_id = request_id_counter_.fetch_add(1);
-        info.input_length = res.value()->input_length;
-        info.prefix_length = res.value()->prefix_length;
+        info.request_id      = request_id_counter_.fetch_add(1);
+        info.input_length    = res.value()->input_length;
+        info.prefix_length   = res.value()->prefix_length;
         res.value()->task_id = std::to_string(info.request_id);
-        auto ret = load_balancer_->chooseHostWithTask(biz_name_, *res.value());
+        auto ret             = load_balancer_->chooseHostWithTask(biz_name_, *res.value());
         if (!ret.ok()) {
             handleError(request, std::move(writer), std::string(ret.status().message()));
             return;
-        }        
+        }
         writer->SetStatus(200, "OK");
         info.expect_execute_time_ms = ret.value().expect_execute_time_ms;
-        info.expect_wait_time_ms = ret.value().expect_wait_time_ms;
-        info.estimate_cost_time_ms = autil::TimeUtility::currentTimeInMilliSeconds() - tokenize_end_time;
-        info.machine_info = ret.value().machine_info;
+        info.expect_wait_time_ms    = ret.value().expect_wait_time_ms;
+        info.estimate_cost_time_ms  = autil::TimeUtility::currentTimeInMilliSeconds() - tokenize_end_time;
+        info.machine_info           = ret.value().machine_info;
         writer->Write(MasterSuccessResponse::CreateJsonString(ret.value().host->ip, ret.value().host->http_port, info));
     } catch (std::exception& e) {
-        std::string error_msg = autil::StringUtil::formatString("MasterHttpServer handle request failed with exception: %s", e.what());
+        std::string error_msg =
+            autil::StringUtil::formatString("MasterHttpServer handle request failed with exception: %s", e.what());
         handleError(request, std::move(writer), error_msg);
     }
 }
@@ -99,7 +99,8 @@ bool MasterHttpServer::registerHealthService() {
 }
 
 bool MasterHttpServer::registerHandleService() {
-    auto callback = [this](std::unique_ptr<http_server::HttpResponseWriter> writer, const http_server::HttpRequest& request) {
+    auto callback = [this](std::unique_ptr<http_server::HttpResponseWriter> writer,
+                           const http_server::HttpRequest&                  request) {
         this->handleRequest(request, std::move(writer));
     };
 

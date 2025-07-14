@@ -12,51 +12,51 @@ namespace rtp_llm {
 
 // ChatService::ChatService() {}
 
-std::shared_ptr<GenerateInput> ChatService::fillGenerateInput(int64_t request_id,
+std::shared_ptr<GenerateInput> ChatService::fillGenerateInput(int64_t                      request_id,
                                                               const ChatCompletionRequest& chat_request,
-                                                              const RenderedInputs& rendered_input) {
+                                                              const RenderedInputs&        rendered_input) {
     std::shared_ptr<GenerateInput> input = std::make_shared<GenerateInput>();
-    input->request_id = request_id;
-    input->begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-    input->generate_config = openai_endpoint_->extract_generation_config(chat_request);
+    input->request_id                    = request_id;
+    input->begin_time_us                 = autil::TimeUtility::currentTimeInMicroSeconds();
+    input->generate_config               = openai_endpoint_->extract_generation_config(chat_request);
     metric_reporter_->reportFTInputTokenLengthMetric(input->generate_config->select_tokens_id.size());
     metric_reporter_->reportFTNumBeansMetric(input->generate_config->num_beams);
 
-    const auto& vec            = rendered_input.input_ids;
-    auto        device         = rtp_llm::DeviceFactory::getDefaultDevice();
+    const auto& vec    = rendered_input.input_ids;
+    auto        device = rtp_llm::DeviceFactory::getDefaultDevice();
     input->input_ids =
         device->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {vec.size()}, rtp_llm::AllocationType::HOST}, {});
     memcpy(input->input_ids->data(), vec.data(), input->input_ids->sizeBytes());
 
-    input->multimodal_inputs   = std::move(rendered_input.multimodal_inputs);
+    input->multimodal_inputs = std::move(rendered_input.multimodal_inputs);
     if (mm_processor_ != nullptr && input->multimodal_inputs) {
         auto mm_res = mm_processor_->updateMultimodalFeatures(input);
         if (!mm_res.ok()) {
             throw HttpApiServerException(HttpApiServerException::MULTIMODAL_ERROR,
-                    "mm_processor updateMultimodalFeatures failed: " + mm_res.ToString());
+                                         "mm_processor updateMultimodalFeatures failed: " + mm_res.ToString());
         }
     }
 
     return input;
 }
 
-void ChatService::generateResponse(const std::shared_ptr<GenerateConfig>& config,
-                                   const GenerateStreamPtr& stream,
-                                   const RenderedInputs& rendered_input,
-                                   autil::StageTime& iterate_stage_timer,
+void ChatService::generateResponse(const std::shared_ptr<GenerateConfig>&                  config,
+                                   const GenerateStreamPtr&                                stream,
+                                   const RenderedInputs&                                   rendered_input,
+                                   autil::StageTime&                                       iterate_stage_timer,
                                    const std::unique_ptr<http_server::HttpResponseWriter>& writer,
-                                   const ChatCompletionRequest& chat_request,
-                                   const std::string& body,
-                                   int64_t request_id,
-                                   int64_t start_time_us) {
-    int index = 0;
-    int iterate_counter = 0;
-    int token_counter   = 0;
+                                   const ChatCompletionRequest&                            chat_request,
+                                   const std::string&                                      body,
+                                   int64_t                                                 request_id,
+                                   int64_t                                                 start_time_us) {
+    int                      index           = 0;
+    int                      iterate_counter = 0;
+    int                      token_counter   = 0;
     std::vector<std::string> complete_response;
-    int num_return_sequences = config->num_return_sequences;
+    int                      num_return_sequences = config->num_return_sequences;
 
-    auto chat_render = openai_endpoint_->getChatRender();
-    std::shared_ptr<RenderContext> ctx = chat_render->getRenderContext();
+    auto                           chat_render = openai_endpoint_->getChatRender();
+    std::shared_ptr<RenderContext> ctx         = chat_render->getRenderContext();
     ctx->init(num_return_sequences, body, chat_render);
 
     GenerateOutputs outputs;
@@ -68,7 +68,7 @@ void ChatService::generateResponse(const std::shared_ptr<GenerateConfig>& config
         }
         outputs = result.value();
         RTP_LLM_CHECK_WITH_INFO(outputs.generate_outputs.size() == num_return_sequences,
-                "generate_outputs.size() != num_return_sequences");
+                                "generate_outputs.size() != num_return_sequences");
 
         iterate_stage_timer.end_stage();
         if (iterate_counter++ == 0) {
@@ -82,7 +82,6 @@ void ChatService::generateResponse(const std::shared_ptr<GenerateConfig>& config
         }
         ctx->render_stream_response_blocking(outputs, config, chat_request.stream.value_or(false));
         index += 1;
-
     }
     if (index != 0) {
         ctx->render_stream_response_flush_blocking(outputs, config, chat_request.stream.value_or(false));
@@ -105,23 +104,23 @@ void ChatService::generateResponse(const std::shared_ptr<GenerateConfig>& config
     AccessLogWrapper::logSuccessAccess(body, request_id, complete_response, chat_request.private_request);
 }
 
-void ChatService::generateStreamingResponse(const std::shared_ptr<GenerateConfig>& config,
-                                            const GenerateStreamPtr& stream,
-                                            const RenderedInputs& rendered_input,
-                                            autil::StageTime& iterate_stage_timer,
+void ChatService::generateStreamingResponse(const std::shared_ptr<GenerateConfig>&                  config,
+                                            const GenerateStreamPtr&                                stream,
+                                            const RenderedInputs&                                   rendered_input,
+                                            autil::StageTime&                                       iterate_stage_timer,
                                             const std::unique_ptr<http_server::HttpResponseWriter>& writer,
-                                            const ChatCompletionRequest& chat_request,
-                                            const std::string& body,
-                                            int64_t request_id,
-                                            int64_t start_time_us) {
-    int index = 0;
-    int iterate_counter = 0;
-    int token_counter   = 0;
+                                            const ChatCompletionRequest&                            chat_request,
+                                            const std::string&                                      body,
+                                            int64_t                                                 request_id,
+                                            int64_t                                                 start_time_us) {
+    int                      index           = 0;
+    int                      iterate_counter = 0;
+    int                      token_counter   = 0;
     std::vector<std::string> complete_response;
-    int num_return_sequences = config->num_return_sequences;
+    int                      num_return_sequences = config->num_return_sequences;
 
-    auto chat_render = openai_endpoint_->getChatRender();
-    std::shared_ptr<RenderContext> ctx = chat_render->getRenderContext();
+    auto                           chat_render = openai_endpoint_->getChatRender();
+    std::shared_ptr<RenderContext> ctx         = chat_render->getRenderContext();
     ctx->init(num_return_sequences, body, chat_render);
 
     auto write_sse_response = [&](std::string json_response) {
@@ -141,7 +140,7 @@ void ChatService::generateStreamingResponse(const std::shared_ptr<GenerateConfig
         }
         outputs = output_status.value();
         RTP_LLM_CHECK_WITH_INFO(outputs.generate_outputs.size() == num_return_sequences,
-                "generate_outputs.size() != num_return_sequences");
+                                "generate_outputs.size() != num_return_sequences");
 
         iterate_stage_timer.end_stage();
         if (iterate_counter++ == 0) {
@@ -150,19 +149,17 @@ void ChatService::generateStreamingResponse(const std::shared_ptr<GenerateConfig
         metric_reporter_->reportResponseIterateLatencyMs(iterate_stage_timer.last_ms());
 
         if (index == 0) {
-            std::string debug_info = openai_endpoint_->getDebugInfo(chat_request, rendered_input);
+            std::string debug_info    = openai_endpoint_->getDebugInfo(chat_request, rendered_input);
             std::string json_response = ctx->render_stream_response_first(num_return_sequences, debug_info);
             write_sse_response(json_response);
         }
-        std::string json_response = ctx->render_stream_response(output_status.value(),
-                                                                config,
-                                                                chat_request.stream.value_or(false));
+        std::string json_response =
+            ctx->render_stream_response(output_status.value(), config, chat_request.stream.value_or(false));
         write_sse_response(json_response);
     }
     if (index != 0) {
-        std::string json_response = ctx->render_stream_response_flush(outputs,
-                                                                      config,
-                                                                      chat_request.stream.value_or(false));
+        std::string json_response =
+            ctx->render_stream_response_flush(outputs, config, chat_request.stream.value_or(false));
         write_sse_response(json_response);
         json_response = ctx->render_stream_response_final(outputs);
         write_sse_response(json_response);
@@ -179,39 +176,53 @@ void ChatService::generateStreamingResponse(const std::shared_ptr<GenerateConfig
 void ChatService::chatCompletions(const std::unique_ptr<http_server::HttpResponseWriter>& writer,
                                   const http_server::HttpRequest&                         request,
                                   int64_t                                                 request_id) {
-    auto start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    auto             start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     autil::StageTime iterate_stage_timer;
 
-    const auto body = request.GetBody();
+    const auto            body = request.GetBody();
     ChatCompletionRequest chat_request;
     FromJsonString(chat_request, body);
 
     AccessLogWrapper::logQueryAccess(body, request_id, chat_request.private_request);
 
-    auto chat_render          = openai_endpoint_->getChatRender();
+    auto       chat_render    = openai_endpoint_->getChatRender();
     const auto rendered_input = chat_render->render_chat_request(body);
 
-    auto input = fillGenerateInput(request_id, chat_request, rendered_input);
+    auto input  = fillGenerateInput(request_id, chat_request, rendered_input);
     auto stream = engine_->enqueue(input);
 
     if (chat_request.stream.value_or(false) == false) {
-        generateResponse(input->generate_config, stream, rendered_input,
-                iterate_stage_timer, writer, chat_request, body, request_id, start_time_us);
+        generateResponse(input->generate_config,
+                         stream,
+                         rendered_input,
+                         iterate_stage_timer,
+                         writer,
+                         chat_request,
+                         body,
+                         request_id,
+                         start_time_us);
     } else {
-        generateStreamingResponse(input->generate_config, stream, rendered_input,
-                iterate_stage_timer, writer, chat_request, body, request_id, start_time_us);
+        generateStreamingResponse(input->generate_config,
+                                  stream,
+                                  rendered_input,
+                                  iterate_stage_timer,
+                                  writer,
+                                  chat_request,
+                                  body,
+                                  request_id,
+                                  start_time_us);
     }
 }
 
 void ChatService::chatRender(const std::unique_ptr<http_server::HttpResponseWriter>& writer,
                              const http_server::HttpRequest&                         request) {
-    const auto body = request.GetBody();
+    const auto            body = request.GetBody();
     ChatCompletionRequest chat_request;
     FromJsonString(chat_request, body);
 
-    auto chat_render          = openai_endpoint_->getChatRender();
-    const auto rendered_input = chat_render->render_chat_request(body);
-    std::string debug_info    = openai_endpoint_->getDebugInfo(chat_request, rendered_input);
+    auto        chat_render    = openai_endpoint_->getChatRender();
+    const auto  rendered_input = chat_render->render_chat_request(body);
+    std::string debug_info     = openai_endpoint_->getDebugInfo(chat_request, rendered_input);
 
     writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
     writer->Write(debug_info);

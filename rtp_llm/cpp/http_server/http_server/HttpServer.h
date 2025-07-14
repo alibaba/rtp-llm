@@ -18,7 +18,7 @@ class HttpServerAdapter;
 /**
  * Default time span to break idle connections.
  */
-const int MAX_IDLE_TIME = 900000; // 15 minutes
+const int MAX_IDLE_TIME = 900000;  // 15 minutes
 
 /**
  * Default backlog for server's listen socket
@@ -27,12 +27,12 @@ const int LISTEN_BACKLOG = 256;
 
 class HttpServer {
 public:
-    HttpServer(anet::Transport *transport = nullptr, size_t threadNum = 2, size_t queueSize = 50);
+    HttpServer(anet::Transport* transport = nullptr, size_t threadNum = 2, size_t queueSize = 50);
     ~HttpServer();
 
 public:
-    using ResponseHandler = std::function<void(std::unique_ptr<HttpResponseWriter>, const HttpRequest &)>;
-    bool RegisterRoute(const std::string &method, const std::string &endpoint, const ResponseHandler &func);
+    using ResponseHandler = std::function<void(std::unique_ptr<HttpResponseWriter>, const HttpRequest&)>;
+    bool RegisterRoute(const std::string& method, const std::string& endpoint, const ResponseHandler& func);
 
     /**
      * Start listening a specific port according to the address string.
@@ -47,10 +47,10 @@ public:
      * @param maxIdleTime This parameter determines after how long time idle, server
      *        will break the idle connections intentinally.
      */
-    bool Start(const std::string &address,
-               int timeout = 5000,
-               int maxIdleTime = MAX_IDLE_TIME,
-               int backlog = LISTEN_BACKLOG);
+    bool Start(const std::string& address,
+               int                timeout     = 5000,
+               int                maxIdleTime = MAX_IDLE_TIME,
+               int                backlog     = LISTEN_BACKLOG);
 
     /**
      * Stops HttpServer. Will terminate all the ongoing threads and destroy all
@@ -60,16 +60,16 @@ public:
     bool Stop();
 
 private:
-    ANetApp _anetApp;
-    std::shared_ptr<HttpRouter> _router;
+    ANetApp                            _anetApp;
+    std::shared_ptr<HttpRouter>        _router;
     std::shared_ptr<HttpServerAdapter> _serverAdapter;
-    anet::IOComponent *_listenIoc{nullptr};
-    bool _isStopped{false};
+    anet::IOComponent*                 _listenIoc{nullptr};
+    bool                               _isStopped{false};
 
 private:
     AUTIL_LOG_DECLARE();
 };
 
-} // namespace http_server
+}  // namespace http_server
 
-#endif // HTTP_SERVER_HTTPSERVER_H
+#endif  // HTTP_SERVER_HTTPSERVER_H

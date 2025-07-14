@@ -1,13 +1,17 @@
 import torch
+
 from rtp_llm.cpp.proto.model_rpc_service_pb2 import TensorPB
+
 
 def trans_option(pb_object, py_object, name):
     if getattr(py_object, name):
         getattr(pb_object, name).value = getattr(py_object, name)
 
+
 def trans_option_cast(pb_object, py_object, name, func):
     if getattr(py_object, name):
         getattr(pb_object, name).value = func(getattr(py_object, name))
+
 
 def trans_grpc_dtype(type: TensorPB.DataType):
     if type == TensorPB.DataType.FP32:
@@ -21,6 +25,7 @@ def trans_grpc_dtype(type: TensorPB.DataType):
     else:
         raise Exception("unkown error type")
 
+
 def trans_tensor(t: TensorPB):
     if not (len(t.shape) > 0 and t.shape[0] > 0):
         return torch.tensor([], dtype=trans_grpc_dtype(t.data_type))
@@ -31,9 +36,12 @@ def trans_tensor(t: TensorPB):
     elif t.data_type == TensorPB.DataType.FP16:
         return torch.frombuffer(t.fp16_data, dtype=torch.float16).reshape(list(t.shape))
     elif t.data_type == TensorPB.DataType.BF16:
-        return torch.frombuffer(t.bf16_data, dtype=torch.bfloat16).reshape(list(t.shape))
+        return torch.frombuffer(t.bf16_data, dtype=torch.bfloat16).reshape(
+            list(t.shape)
+        )
     else:
         raise Exception("unkown error type")
+
 
 def trans_from_tensor(t: torch.Tensor):
     res = TensorPB()

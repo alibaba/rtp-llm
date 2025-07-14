@@ -12,13 +12,16 @@
 namespace rtp_llm {
 class AllEmbeddingRpcServiceImpl: public AllEmbeddingRpcService::Service {
 public:
-    explicit AllEmbeddingRpcServiceImpl(std::shared_ptr<EmbeddingEngine> engine, py::object pyRenderer): embedding_engine_(engine), pyRenderer_(pyRenderer) {}
+    explicit AllEmbeddingRpcServiceImpl(std::shared_ptr<EmbeddingEngine> engine, py::object pyRenderer):
+        embedding_engine_(engine), pyRenderer_(pyRenderer) {}
     grpc::Status decode(grpc::ServerContext* context, const AllEmbeddingInput* request, AllEmbeddingOutput* writer);
+
 protected:
     void fill(AllEmbeddingOutput* writer, torch::Tensor result);
+
 private:
     std::shared_ptr<EmbeddingEngine> embedding_engine_ = nullptr;
-    pybind11::object pyRenderer_;
+    pybind11::object                 pyRenderer_;
 };
 
 }  // namespace rtp_llm

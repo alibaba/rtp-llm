@@ -24,8 +24,7 @@ cublasFP8MMWrapper::cublasFP8MMWrapper(cublasLtHandle_t cublaslt_handle,
                                        cublasAlgoMap*   cublas_algo_map,
                                        std::mutex*      mu,
                                        IAllocator*      allocator):
-    cublasMMWrapper(nullptr, cublaslt_handle, stream, cublas_algo_map, mu, allocator)
-{
+    cublasMMWrapper(nullptr, cublaslt_handle, stream, cublas_algo_map, mu, allocator) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     RTP_LLM_CHECK_WITH_INFO(allocator != nullptr, "must pass allocator to cublasFP8MMWrapper");
     cublasVersionCheck();
@@ -41,8 +40,7 @@ cublasFP8MMWrapper::cublasFP8MMWrapper(cublasHandle_t   cublas_handle,
                                        cublasAlgoMap*   cublas_algo_map,
                                        std::mutex*      mu,
                                        IAllocator*      allocator):
-    cublasMMWrapper(cublas_handle, cublaslt_handle, stream, cublas_algo_map, mu, allocator)
-{
+    cublasMMWrapper(cublas_handle, cublaslt_handle, stream, cublas_algo_map, mu, allocator) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     RTP_LLM_CHECK_WITH_INFO(allocator != nullptr, "must pass allocator to cublasFP8MMWrapper");
     cublasVersionCheck();
@@ -51,8 +49,7 @@ cublasFP8MMWrapper::cublasFP8MMWrapper(cublasHandle_t   cublas_handle,
     }
 }
 
-cublasFP8MMWrapper::~cublasFP8MMWrapper()
-{
+cublasFP8MMWrapper::~cublasFP8MMWrapper() {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     mu_ = nullptr;
     if (allocator_ != nullptr) {
@@ -66,21 +63,20 @@ cublasFP8MMWrapper::cublasFP8MMWrapper(const cublasFP8MMWrapper& wrapper):
                     wrapper.stream_,
                     wrapper.cublas_algo_map_,
                     wrapper.mu_,
-                    wrapper.allocator_)
-{
+                    wrapper.allocator_) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     cublasVersionCheck();
 }
 
-void cublasFP8MMWrapper::cublasVersionCheck()
-{
+void cublasFP8MMWrapper::cublasVersionCheck() {
     cublasGetProperty(MAJOR_VERSION, &version_major_);
     cublasGetProperty(MINOR_VERSION, &version_minor_);
     cublasGetProperty(PATCH_LEVEL, &version_patch_);
     size_t cublasVersion = (version_major_ * 10000 + version_minor_ * 100 + version_patch_);
 #if defined(FP8_MHA) || !defined(FP8_GEMM_OUTPUT_QUANT_DISABLE)
-    RTP_LLM_CHECK_WITH_INFO((version_major_ > 11) || (version_major_ == 11 && version_minor_ == 11 && version_patch_ >= 4),
-                       "FP8 MHA needs d-scale, which is only supported after cublas 11.11.4 !");
+    RTP_LLM_CHECK_WITH_INFO((version_major_ > 11)
+                                || (version_major_ == 11 && version_minor_ == 11 && version_patch_ >= 4),
+                            "FP8 MHA needs d-scale, which is only supported after cublas 11.11.4 !");
 
 #endif
 }
@@ -98,8 +94,7 @@ void cublasFP8MMWrapper::Gemm(__nv_bfloat16*       res,
                               const __nv_fp8_e4m3* input,
                               const __nv_fp8_e4m3* kernel,
                               const float*         input_scale,
-                              const float*         kernel_scale)
-{
+                              const float*         kernel_scale) {
     Gemm(res,
          batchCount,
          m,
@@ -132,8 +127,7 @@ void cublasFP8MMWrapper::Gemm(__nv_bfloat16*       res,
                               const float*         input_scale,
                               const float*         kernel_scale,
                               cudaStream_t         stream,
-                              bool                 fastAccum)
-{
+                              bool                 fastAccum) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     mu_->lock();
 
@@ -221,8 +215,7 @@ void cublasFP8MMWrapper::Gemm(__nv_bfloat16*       res,
     if (findAlgo) {
         if (info.workspaceSize > workspaceSize) {
             findAlgo = false;
-        }
-        else {
+        } else {
             cublasLtMatmulAlgoInit(
                 cublaslt_handle_, computeType, scaleType, aType, bType, dType, dType, info.algoId, &algo);
             cublasLtMatmulAlgoConfigSetAttribute(
@@ -306,8 +299,7 @@ void cublasFP8MMWrapper::Gemm(__nv_fp8_e4m3*       res,
                               const __nv_fp8_e4m3* kernel,
                               const float*         input_scale,
                               const float*         kernel_scale,
-                              const float*         output_scale)
-{
+                              const float*         output_scale) {
     Gemm(res,
          batchCount,
          m,
@@ -342,8 +334,7 @@ void cublasFP8MMWrapper::Gemm(__nv_fp8_e4m3*       res,
                               const float*         kernel_scale,
                               const float*         output_scale,
                               cudaStream_t         stream,
-                              bool                 fastAccum)
-{
+                              bool                 fastAccum) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     mu_->lock();
 
@@ -446,8 +437,7 @@ void cublasFP8MMWrapper::Gemm(__nv_fp8_e4m3*       res,
     if (findAlgo) {
         if (info.workspaceSize > workspaceSize) {
             findAlgo = false;
-        }
-        else {
+        } else {
             cublasLtMatmulAlgoInit(
                 cublaslt_handle_, computeType, scaleType, aType, bType, cType, dType, info.algoId, &algo);
             cublasLtMatmulAlgoConfigSetAttribute(
@@ -531,8 +521,7 @@ void cublasFP8MMWrapper::Conv1x1Gemm(__nv_fp8_e4m3*       res,
                                      const float          input_scale,
                                      const float          kernel_scale,
                                      const float          output_scale,
-                                     cudaStream_t         stream)
-{
+                                     cudaStream_t         stream) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     mu_->lock();
     size_t workspace_size = 0;
@@ -612,8 +601,7 @@ void cublasFP8MMWrapper::Gemm_Bias_Act(__nv_bfloat16*       res,
                                        const float*         kernel_scale,
                                        const __nv_bfloat16* bias,
                                        const float*         output_scale,
-                                       cudaStream_t         stream)
-{
+                                       cudaStream_t         stream) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     mu_->lock();
 
@@ -659,8 +647,7 @@ void cublasFP8MMWrapper::Gemm_Bias_Act(__nv_bfloat16*       res,
         cublasLtEpilogue_t epi = CUBLASLT_EPILOGUE_BIAS;
         if (RELU == true) {
             epi = CUBLASLT_EPILOGUE_RELU_BIAS;
-        }
-        else if (GELU == true) {
+        } else if (GELU == true) {
             epi = CUBLASLT_EPILOGUE_GELU_BIAS;
         }
         // cublasLtEpilogue_t epi = CUBLASLT_EPILOGUE_BIAS;
@@ -774,8 +761,7 @@ void cublasFP8MMWrapper::Gemm_Bias_Act(__nv_fp8_e4m3*       res,
                                        const float*         kernel_scale,
                                        const __nv_bfloat16* bias,
                                        const float*         output_scale,
-                                       cudaStream_t         stream)
-{
+                                       cudaStream_t         stream) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     mu_->lock();
 

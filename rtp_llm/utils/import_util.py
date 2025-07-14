@@ -1,9 +1,12 @@
 import importlib.util
 
-def load_module(module_path: str):    
-    module_spec = importlib.util.spec_from_file_location('inference_module', module_path)
+
+def load_module(module_path: str):
+    module_spec = importlib.util.spec_from_file_location(
+        "inference_module", module_path
+    )
     if module_spec is None:
-        raise ModuleNotFoundError(f'failed to load module from [{module_path}]')
+        raise ModuleNotFoundError(f"failed to load module from [{module_path}]")
 
     imported_module = importlib.util.module_from_spec(module_spec)
 

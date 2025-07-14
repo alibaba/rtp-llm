@@ -44,6 +44,6 @@ cc_binary(
     deps = [
         ":entry",
     ],
-    linkshared = 1,    
+    linkshared = 1,
     visibility = ["//visibility:public"],
 )

@@ -77,7 +77,7 @@ curl -XPOST http://localhost:8088 -d '{"prompt": "hello, what is your name", "ge
 
 ### 常见问题
 1. libcufft.so
-    
+
     **Error log**: `OSError: libcufft.so.11: cannot open shared object file: No such file or directory`
 
     **Resolution**: 检查cuda和rtp-llm版本是否匹配

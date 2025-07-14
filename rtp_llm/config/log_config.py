@@ -1,5 +1,6 @@
 import os
-world_rank = os.environ.get('WORLD_RANK', '0')
+
+world_rank = os.environ.get("WORLD_RANK", "0")
 LOGGING_CONFIG = {
     "version": 1,
     "disable_existing_loggers": False,

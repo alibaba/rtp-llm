@@ -3,7 +3,6 @@
 
 using namespace std;
 
-
 namespace rtp_llm {
 
 DeviceUtil::DeviceUtil(const DeviceResourceConfig device_resource_config) {
@@ -17,14 +16,14 @@ DeviceUtil::~DeviceUtil() {}
 
 void* DeviceUtil::mallocCPU(size_t size) {
     std::unique_lock<std::mutex> lock(mutex_);
-    auto buffer = device_->allocateBuffer({DataType::TYPE_UINT8, {size}, AllocationType::HOST});
+    auto                         buffer = device_->allocateBuffer({DataType::TYPE_UINT8, {size}, AllocationType::HOST});
     buffer_map_.insert({buffer->data(), buffer});
     return buffer->data();
 }
 
-void  DeviceUtil::freeCPU(void* ptr) {
+void DeviceUtil::freeCPU(void* ptr) {
     std::unique_lock<std::mutex> lock(mutex_);
-    auto iter = buffer_map_.find(ptr);
+    auto                         iter = buffer_map_.find(ptr);
     if (iter != buffer_map_.end()) {
         buffer_map_.erase(iter);
     } else {
@@ -39,9 +38,9 @@ void* DeviceUtil::mallocGPU(size_t size) {
     return buffer->data();
 }
 
-void  DeviceUtil::freeGPU(void* ptr) {
+void DeviceUtil::freeGPU(void* ptr) {
     std::unique_lock<std::mutex> lock(mutex_);
-    auto iter = buffer_map_.find(ptr);
+    auto                         iter = buffer_map_.find(ptr);
     if (iter != buffer_map_.end()) {
         buffer_map_.erase(iter);
     } else {

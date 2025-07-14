@@ -4,4 +4,4 @@
 namespace rtp_llm {
 
 RTP_LLM_REGISTER_DEVICE(Cuda);
-}; // namespace rtp_llm
+};  // namespace rtp_llm

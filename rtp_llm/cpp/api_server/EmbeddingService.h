@@ -13,29 +13,32 @@ namespace rtp_llm {
 
 class EmbeddingService {
 public:
-    EmbeddingService(const std::shared_ptr<EmbeddingEndpoint>&       embedding_endpoint,
-                     const std::shared_ptr<autil::AtomicCounter>&    request_counter,
-                     const std::shared_ptr<ConcurrencyController>&   controller,
-                     const kmonitor::MetricsReporterPtr&             metrics_reporter,
-                     bool py_inference_log_response = false);
+    EmbeddingService(const std::shared_ptr<EmbeddingEndpoint>&     embedding_endpoint,
+                     const std::shared_ptr<autil::AtomicCounter>&  request_counter,
+                     const std::shared_ptr<ConcurrencyController>& controller,
+                     const kmonitor::MetricsReporterPtr&           metrics_reporter,
+                     bool                                          py_inference_log_response = false);
     ~EmbeddingService() = default;
+
 public:
     void embedding(const std::unique_ptr<http_server::HttpResponseWriter>& writer,
                    const http_server::HttpRequest&                         request,
                    std::optional<EmbeddingEndpoint::EmbeddingType>         type = std::nullopt);
+
 private:
     std::string getSource(const std::string& raw_request);
     std::string getUsage(const std::string& raw_request);
-    void report(const double value,
-                const std::string& name,
-                const kmonitor::MetricsTags& tags = kmonitor::MetricsTags(),
-                const kmonitor::MetricType type = kmonitor::MetricType::QPS);
+    void        report(const double                 value,
+                       const std::string&           name,
+                       const kmonitor::MetricsTags& tags = kmonitor::MetricsTags(),
+                       const kmonitor::MetricType   type = kmonitor::MetricType::QPS);
+
 private:
-    std::shared_ptr<EmbeddingEndpoint>       embedding_endpoint_;
-    std::shared_ptr<autil::AtomicCounter>    request_counter_;
-    std::shared_ptr<ConcurrencyController>   controller_;
-    kmonitor::MetricsReporterPtr             metrics_reporter_;
-    bool                                     py_inference_log_response_;
+    std::shared_ptr<EmbeddingEndpoint>     embedding_endpoint_;
+    std::shared_ptr<autil::AtomicCounter>  request_counter_;
+    std::shared_ptr<ConcurrencyController> controller_;
+    kmonitor::MetricsReporterPtr           metrics_reporter_;
+    bool                                   py_inference_log_response_;
 };
 
 }  // namespace rtp_llm

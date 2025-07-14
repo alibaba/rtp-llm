@@ -367,7 +367,7 @@ void kernelLaunchConfig(CustomAllReduceParameters* param, size_t& blocks_per_gri
                     half_mod = true;
                 }
                 elts_total_num += (mod - remain);
-                elts_total_num        = std::min(elts_total_num, max_elts_num);
+                elts_total_num = std::min(elts_total_num, max_elts_num);
             }
 
             assert(elts_total_num / (elts_per_thread * ranks_per_node) == 0);
@@ -425,7 +425,7 @@ void invokeCustomAllReduceDispatch(CustomAllReduceParameters* param, uint32_t ba
             invokeCustomAllReduceKernel<T, 16>(param, barrier_flag, stream);
             break;
         default:
-	    throw std::runtime_error("not support custom ar world size: " + std::to_string(param->elts_per_rank));
+            throw std::runtime_error("not support custom ar world size: " + std::to_string(param->elts_per_rank));
             break;
     }
 }

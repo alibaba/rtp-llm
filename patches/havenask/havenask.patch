@@ -4,16 +4,16 @@ index 03ff7ce5..bdaff505 100644
 +++ bazel/defs.bzl
 @@ -5,7 +5,6 @@
  load("//bazel:tf_proto.bzl", "tf_proto_library")
- 
+
  load("@rules_cc//examples:experimental_cc_shared_library.bzl", "cc_shared_library")
 -load("@pip//:requirements.bzl", "requirement")
- 
+
  def if_clang(a, b=[]):
      return select({
 @@ -952,36 +951,6 @@ def perf_test(group_name,
      )
      return full_suite_name
- 
+
 -def rtp_perf_test(group_name, suite_name, data=[], tags=[]):
 -    deps = [
 -        "//aios/tools/turing_local_debug:serverlib",

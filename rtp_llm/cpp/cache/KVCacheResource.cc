@@ -2,7 +2,6 @@
 
 using namespace std;
 
-
 namespace rtp_llm {
 
 void KVCacheResource::clear() {

@@ -2,7 +2,7 @@
 #include "rtp_llm/cpp/cuda/launch_utils.h"
 
 namespace rtp_llm {
-template <typename T>
+template<typename T>
 __global__ void euqal_expert_balance_kernel(T*         experts_ids,
                                             int*       log_stats,
                                             const int* log2phy,
@@ -22,8 +22,8 @@ __global__ void euqal_expert_balance_kernel(T*         experts_ids,
 
     int log_exp_id = experts_ids[i];
 
-    int cnt = logic_expert_cnt[log_exp_id];
-    int idx = log_exp_id * max_exp_num + (i + ep_rank) % cnt;
+    int cnt        = logic_expert_cnt[log_exp_id];
+    int idx        = log_exp_id * max_exp_num + (i + ep_rank) % cnt;
     int phy_exp_id = log2phy[idx];
     experts_ids[i] = phy_exp_id;
 
@@ -36,7 +36,7 @@ update_gpu_loads_kernel(int* experts_ids, int* gpu_loads, int total_token_num, i
     __shared__ int shared_sum[256];
 
     int tid = threadIdx.x;
-    int i = blockIdx.x * blockDim.x + tid;
+    int i   = blockIdx.x * blockDim.x + tid;
 
     int contribute = 0;
     if (i < total_token_num) {
@@ -92,9 +92,7 @@ __global__ void update_gpu_loads_deepep_kernel(int64_t* experts_ids, int* gpu_lo
     }
 }
 
-__global__ void
-update_gpu_loads_ll(int* experts_cnts, int* gpu_loads, int local_experts_num, int ep_rank)
-{
+__global__ void update_gpu_loads_ll(int* experts_cnts, int* gpu_loads, int local_experts_num, int ep_rank) {
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
     asm volatile("griddepcontrol.wait;");
 #endif
@@ -109,8 +107,8 @@ update_gpu_loads_ll(int* experts_cnts, int* gpu_loads, int local_experts_num, in
 #endif
 }
 
-template <typename T>
-void launch_equal_expert_balance(T*         experts_ids,
+template<typename T>
+void launch_equal_expert_balance(T*           experts_ids,
                                  int*         log_stats,
                                  const int*   log2phy,
                                  const int*   logic_expert_cnt,
@@ -124,7 +122,7 @@ void launch_equal_expert_balance(T*         experts_ids,
     int grid_size   = (total_tokens + block_size - 1) / block_size;
     if (grid_size > 0) {
         euqal_expert_balance_kernel<T><<<grid_size, block_size, 0, stream>>>(
-                experts_ids, log_stats, log2phy, logic_expert_cnt, max_exp_num, total_tokens, ep_rank);
+            experts_ids, log_stats, log2phy, logic_expert_cnt, max_exp_num, total_tokens, ep_rank);
     }
 }
 
@@ -138,17 +136,15 @@ template void launch_equal_expert_balance(int64_t*     experts_ids,
                                           int          ep_rank,
                                           cudaStream_t stream);
 
-template
-void launch_equal_expert_balance(int*     experts_ids,
-                                 int*         log_stats,
-                                 const int*   log2phy,
-                                 const int*   logic_expert_cnt,
-                                 int          log_exp_num,
-                                 int          phy_exp_num,
-                                 int          total_tokens,
-                                 int          ep_rank,
-                                 cudaStream_t stream);
-
+template void launch_equal_expert_balance(int*         experts_ids,
+                                          int*         log_stats,
+                                          const int*   log2phy,
+                                          const int*   logic_expert_cnt,
+                                          int          log_exp_num,
+                                          int          phy_exp_num,
+                                          int          total_tokens,
+                                          int          ep_rank,
+                                          cudaStream_t stream);
 
 void launch_update_gpu_loads(int*         experts_ids,
                              int*         gpu_loads,
@@ -162,7 +158,7 @@ void launch_update_gpu_loads(int*         experts_ids,
     int grid_size       = (total_token_num + block_size - 1) / block_size;
     if (grid_size > 0) {
         update_gpu_loads_kernel<<<grid_size, block_size, sizeof(int) * block_size, stream>>>(
-                experts_ids, gpu_loads, total_token_num, experts_per_gpu, ep_rank);
+            experts_ids, gpu_loads, total_token_num, experts_per_gpu, ep_rank);
     }
 }
 
@@ -172,7 +168,7 @@ void update_gpu_loads_deepep_kernel(
     int grid_size  = (total_token_num + block_size - 1) / block_size;
     if (grid_size > 0) {
         update_gpu_loads_deepep_kernel<<<grid_size, block_size, sizeof(int) * block_size, stream>>>(
-                experts_ids, gpu_loads, total_token_num, ep_rank);
+            experts_ids, gpu_loads, total_token_num, ep_rank);
     }
 }
 
@@ -180,7 +176,8 @@ void launch_update_gpu_loads_ll(
     int* experts_cnts, int* gpu_loads, int local_experts_num, int ep_rank, cudaStream_t stream) {
     int block_size = 128;
     int grid_size  = (local_experts_num + block_size - 1) / block_size;
-    LAUNCH_KERNEL_WITH_PDL(update_gpu_loads_ll, grid_size, block_size, 0, stream, experts_cnts, gpu_loads, local_experts_num, ep_rank);
+    LAUNCH_KERNEL_WITH_PDL(
+        update_gpu_loads_ll, grid_size, block_size, 0, stream, experts_cnts, gpu_loads, local_experts_num, ep_rank);
 }
 
 };  // namespace rtp_llm

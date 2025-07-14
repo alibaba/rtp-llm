@@ -4,8 +4,6 @@
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 
-
-
 namespace rtp_llm {
 #define TRANS_OPTIONAL(name)                                                                                           \
     if (config_proto->has_##name()) {                                                                                  \
@@ -37,7 +35,9 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->gen_timeline                   = config_proto->gen_timeline();
     generate_config->profile_step                   = config_proto->profile_step();
     generate_config->select_tokens_id.resize(config_proto->select_tokens_id_size());
-    memcpy(generate_config->select_tokens_id.data(), config_proto->select_tokens_id().data(), config_proto->select_tokens_id_size() * sizeof(int));
+    memcpy(generate_config->select_tokens_id.data(),
+           config_proto->select_tokens_id().data(),
+           config_proto->select_tokens_id_size() * sizeof(int));
     for (const auto& stop_words_proto : config_proto->stop_words_list().rows()) {
         std::vector<int> stop_words;
         for (const int value : stop_words_proto.values()) {
@@ -50,9 +50,9 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
         generate_config->sp_advice_prompt_token_ids.push_back(token_id);
     }
 
-    generate_config->top_k = config_proto->top_k();
-    generate_config->top_p = config_proto->top_p();
-    generate_config->temperature = config_proto->temperature();
+    generate_config->top_k              = config_proto->top_k();
+    generate_config->top_p              = config_proto->top_p();
+    generate_config->temperature        = config_proto->temperature();
     generate_config->repetition_penalty = config_proto->repetition_penalty();
     TRANS_OPTIONAL(no_repeat_ngram_size);
     TRANS_OPTIONAL(random_seed);
@@ -61,7 +61,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     TRANS_OPTIONAL(top_p_reset_ids);
     TRANS_OPTIONAL(task_id);
     TRANS_OPTIONAL(adapter_name);
-    generate_config->in_think_mode = config_proto->in_think_mode();
+    generate_config->in_think_mode       = config_proto->in_think_mode();
     generate_config->max_thinking_tokens = config_proto->max_thinking_tokens();
     for (const auto& token_id : config_proto->end_think_token_ids()) {
         generate_config->end_think_token_ids.push_back(token_id);
@@ -71,23 +71,30 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
 
 std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB* input) {
     std::shared_ptr<GenerateInput> generate_input = std::make_shared<GenerateInput>();
-    generate_input->request_id = input->request_id();
-    generate_input->begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    generate_input->request_id                    = input->request_id();
+    generate_input->begin_time_us                 = autil::TimeUtility::currentTimeInMicroSeconds();
     if (input->has_generate_config()) {
         generate_input->generate_config = transGenerateConfig(&(input->generate_config()));
     }
-    auto device                   = rtp_llm::DeviceFactory::getDefaultDevice();
-    generate_input->input_ids     = device->allocateBuffer(
+    auto device               = rtp_llm::DeviceFactory::getDefaultDevice();
+    generate_input->input_ids = device->allocateBuffer(
         {rtp_llm::DataType::TYPE_INT32, {(size_t)input->token_ids_size()}, rtp_llm::AllocationType::HOST}, {});
     memcpy(generate_input->input_ids->data(), input->token_ids().data(), generate_input->input_ids->sizeBytes());
     if (input->multimodal_inputs_size() > 0) {
         std::vector<MultimodalInput> mm_inputs;
-        for (int i = 0;i < input->multimodal_inputs_size();i++) {
-            auto mm_input = &input->multimodal_inputs(i);
+        for (int i = 0; i < input->multimodal_inputs_size(); i++) {
+            auto mm_input             = &input->multimodal_inputs(i);
             auto mm_preprocess_config = &mm_input->mm_preprocess_config();
-            mm_inputs.emplace_back(mm_input->multimodal_url(), torch::empty(1), mm_input->multimodal_type(), mm_preprocess_config->width(),
-                mm_preprocess_config->height(), mm_preprocess_config->min_pixels(), mm_preprocess_config->max_pixels(), mm_preprocess_config->fps(),
-                mm_preprocess_config->min_frames(), mm_preprocess_config->max_frames());
+            mm_inputs.emplace_back(mm_input->multimodal_url(),
+                                   torch::empty(1),
+                                   mm_input->multimodal_type(),
+                                   mm_preprocess_config->width(),
+                                   mm_preprocess_config->height(),
+                                   mm_preprocess_config->min_pixels(),
+                                   mm_preprocess_config->max_pixels(),
+                                   mm_preprocess_config->fps(),
+                                   mm_preprocess_config->min_frames(),
+                                   mm_preprocess_config->max_frames());
         }
         generate_input->multimodal_inputs = std::move(mm_inputs);
     }
@@ -97,19 +104,26 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
 
 std::vector<MultimodalInput> QueryConverter::transMMInput(const MultimodalInputsPB* mm_inputs) {
     std::vector<MultimodalInput> inputs_vec;
-    for (int i = 0;i < mm_inputs->multimodal_inputs_size();i++) {
-        auto mm_input = &mm_inputs->multimodal_inputs(i);
+    for (int i = 0; i < mm_inputs->multimodal_inputs_size(); i++) {
+        auto mm_input             = &mm_inputs->multimodal_inputs(i);
         auto mm_preprocess_config = &mm_input->mm_preprocess_config();
-        // tensor should also converted from input pb, however it is only used in some embedding model, so just empty for now
-        inputs_vec.emplace_back(mm_input->multimodal_url(), torch::empty(1), mm_input->multimodal_type(), mm_preprocess_config->width(),
-            mm_preprocess_config->height(), mm_preprocess_config->min_pixels(), mm_preprocess_config->max_pixels(), mm_preprocess_config->fps());
+        // tensor should also converted from input pb, however it is only used in some embedding model, so just empty
+        // for now
+        inputs_vec.emplace_back(mm_input->multimodal_url(),
+                                torch::empty(1),
+                                mm_input->multimodal_type(),
+                                mm_preprocess_config->width(),
+                                mm_preprocess_config->height(),
+                                mm_preprocess_config->min_pixels(),
+                                mm_preprocess_config->max_pixels(),
+                                mm_preprocess_config->fps());
     }
     return inputs_vec;
 }
 
 MultimodalInputsPB QueryConverter::transMMInputsPB(const std::vector<MultimodalInput> mm_inputs) {
     MultimodalInputsPB mm_inputs_pb;
-    for (auto& mm_input: mm_inputs) {
+    for (auto& mm_input : mm_inputs) {
         auto now_input = mm_inputs_pb.add_multimodal_inputs();
         now_input->set_multimodal_url(mm_input.url);
         now_input->set_multimodal_type(mm_input.mm_type);
@@ -129,7 +143,7 @@ void QueryConverter::transMMPreprocessConfig(MMPreprocessConfigPB* config_pb, co
 
 MultimodalOutput QueryConverter::transMMOutput(const MultimodalOutputsPB* outputs_pb) {
     MultimodalOutput mm_output;
-    for (int i = 0;i < outputs_pb->multimodal_outputs_size();i++) {
+    for (int i = 0; i < outputs_pb->multimodal_outputs_size(); i++) {
         auto output_pb = outputs_pb->multimodal_outputs(i);
         mm_output.mm_features.emplace_back(transTensor(output_pb.multimodal_embedding()));
         if (output_pb.has_multimodal_pos_id()) {
@@ -144,25 +158,25 @@ MultimodalOutput QueryConverter::transMMOutput(const MultimodalOutputsPB* output
 
 torch::Tensor QueryConverter::transTensor(const TensorPB& tensor_pb) {
     std::vector<int64_t> shape(tensor_pb.shape().begin(), tensor_pb.shape().end());
-    void* data_ptr = nullptr;
+    void*                data_ptr = nullptr;
     switch (tensor_pb.data_type()) {
         case TensorPB::FP32: {
-            data_ptr = const_cast<char*>(tensor_pb.fp32_data().data());
+            data_ptr     = const_cast<char*>(tensor_pb.fp32_data().data());
             auto options = torch::TensorOptions().dtype(torch::kFloat32);
             return torch::from_blob(data_ptr, shape, options).clone();
         }
         case TensorPB::INT32: {
-            data_ptr = const_cast<char*>(tensor_pb.int32_data().data());
+            data_ptr     = const_cast<char*>(tensor_pb.int32_data().data());
             auto options = torch::TensorOptions().dtype(torch::kInt32);
             return torch::from_blob(data_ptr, shape, options).clone();
         }
         case TensorPB::FP16: {
-            data_ptr = const_cast<char*>(tensor_pb.fp16_data().data());
+            data_ptr     = const_cast<char*>(tensor_pb.fp16_data().data());
             auto options = torch::TensorOptions().dtype(torch::kFloat16);
             return torch::from_blob(data_ptr, shape, options).clone();
         }
         case TensorPB::BF16: {
-            data_ptr = const_cast<char*>(tensor_pb.bf16_data().data());
+            data_ptr     = const_cast<char*>(tensor_pb.bf16_data().data());
             auto options = torch::TensorOptions().dtype(torch::kBFloat16);
             return torch::from_blob(data_ptr, shape, options).clone();
         }
@@ -170,7 +184,6 @@ torch::Tensor QueryConverter::transTensor(const TensorPB& tensor_pb) {
             throw std::runtime_error("Unsupported data type.");
     }
 }
-
 
 void QueryConverter::transTensorPB(TensorPB* t, const rtp_llm::Buffer* buffer) {
     RTP_LLM_CHECK(t != nullptr);
@@ -180,7 +193,7 @@ void QueryConverter::transTensorPB(TensorPB* t, const rtp_llm::Buffer* buffer) {
     memcpy(shape->mutable_data(), shape_array.data(), shape_array.size() * sizeof(int64_t));
 
     TensorPB_DataType data_type;
-    switch(buffer->type()) {
+    switch (buffer->type()) {
         case rtp_llm::DataType::TYPE_FP32:
             data_type = TensorPB_DataType::TensorPB_DataType_FP32;
             t->set_fp32_data(reinterpret_cast<const char*>(buffer->data()), buffer->sizeBytes());
@@ -208,8 +221,8 @@ void QueryConverter::transResponse(GenerateOutputsPB* outputs, const GenerateOut
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     outputs->set_request_id(responses->request_id);
     for (size_t i = 0; i < responses->generate_outputs.size(); i++) {
-        const auto& response = responses->generate_outputs[i];
-        GenerateOutputPB* output = outputs->add_generate_outputs();
+        const auto&       response = responses->generate_outputs[i];
+        GenerateOutputPB* output   = outputs->add_generate_outputs();
         output->set_finished(response.finished);
         auto aux_info = output->mutable_aux_info();
         aux_info->set_cost_time_us(response.aux_info.cost_time_us);

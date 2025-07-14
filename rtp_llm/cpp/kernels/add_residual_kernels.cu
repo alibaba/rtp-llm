@@ -23,7 +23,7 @@
 #endif
 
 // wont't support new features
-namespace rtp_llm{
+namespace rtp_llm {
 #if USING_ROCM
 using namespace rocm;
 #endif
@@ -37,8 +37,7 @@ __global__ void addBiasResidual(T*           output,
                                 const float* scale_inter,
                                 const float* scale_out,
                                 const int    m,
-                                const int    n)
-{
+                                const int    n) {
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
     asm volatile("griddepcontrol.wait;");
 #endif
@@ -48,15 +47,13 @@ __global__ void addBiasResidual(T*           output,
         T in;
         if (std::is_same<T, T2>::value) {
             in = cuda_cast<T>(input[blockIdx.x * n + col_index]);  // cast required for compilation when T != T2
-        }
-        else {
+        } else {
             in = cuda_cast<float>(input[blockIdx.x * n + col_index]) * (*scale_inter) * (*scale_out);
         }
 
         if (RESIDUAL_NUM == 1) {
             output[blockIdx.x * n + col_index] = in + residual1[blockIdx.x * n + col_index] + bias_val;
-        }
-        else if (RESIDUAL_NUM == 2) {
+        } else if (RESIDUAL_NUM == 2) {
             output[blockIdx.x * n + col_index] =
                 in + residual1[blockIdx.x * n + col_index] + residual2[blockIdx.x * n + col_index] + bias_val;
         }
@@ -76,35 +73,83 @@ void invokeAddBiasResidual(T*           output,
                            const float* scale_out,
                            const int    m,
                            const int    n,
-                           cudaStream_t stream)
-{
+                           cudaStream_t stream) {
     RTP_LLM_CHECK_WITH_INFO(!((scale_inter == nullptr) ^ (scale_out == nullptr)),
-                       "Cannot use `scale_inter` without `scale_out`");
+                            "Cannot use `scale_inter` without `scale_out`");
     const bool should_scale_input = scale_inter != nullptr;
     int        blocks_per_row     = ceil(float(n) / 1024);
     dim3       grid(m, blocks_per_row);
     dim3       block(std::min(n, 1024));
     if (residual2 == nullptr) {
         if (should_scale_input) {
-            LAUNCH_KERNEL_WITH_PDL((addBiasResidual<T, 1>), grid, block, 0, stream, output, reinterpret_cast<const T*>(input), residual1, residual2, bias, scale_inter, scale_out, m, n);
+            LAUNCH_KERNEL_WITH_PDL((addBiasResidual<T, 1>),
+                                   grid,
+                                   block,
+                                   0,
+                                   stream,
+                                   output,
+                                   reinterpret_cast<const T*>(input),
+                                   residual1,
+                                   residual2,
+                                   bias,
+                                   scale_inter,
+                                   scale_out,
+                                   m,
+                                   n);
+        } else {
+            LAUNCH_KERNEL_WITH_PDL((addBiasResidual<T, 1>),
+                                   grid,
+                                   block,
+                                   0,
+                                   stream,
+                                   output,
+                                   reinterpret_cast<const T*>(input),
+                                   residual1,
+                                   residual2,
+                                   bias,
+                                   nullptr,
+                                   nullptr,
+                                   m,
+                                   n);
         }
-        else {
-            LAUNCH_KERNEL_WITH_PDL((addBiasResidual<T, 1>), grid, block, 0, stream, output, reinterpret_cast<const T*>(input), residual1, residual2, bias, nullptr, nullptr, m, n);
-        }
-    }
-    else {
+    } else {
         if (should_scale_input) {
-            LAUNCH_KERNEL_WITH_PDL((addBiasResidual<T, 2>), grid, block, 0, stream, output, reinterpret_cast<const T*>(input), residual1, residual2, bias, scale_inter, scale_out, m, n);
-        }
-        else {
-            LAUNCH_KERNEL_WITH_PDL((addBiasResidual<T, 2>), grid, block, 0, stream, output, reinterpret_cast<const T*>(input), residual1, residual2, bias, nullptr, nullptr, m, n);
+            LAUNCH_KERNEL_WITH_PDL((addBiasResidual<T, 2>),
+                                   grid,
+                                   block,
+                                   0,
+                                   stream,
+                                   output,
+                                   reinterpret_cast<const T*>(input),
+                                   residual1,
+                                   residual2,
+                                   bias,
+                                   scale_inter,
+                                   scale_out,
+                                   m,
+                                   n);
+        } else {
+            LAUNCH_KERNEL_WITH_PDL((addBiasResidual<T, 2>),
+                                   grid,
+                                   block,
+                                   0,
+                                   stream,
+                                   output,
+                                   reinterpret_cast<const T*>(input),
+                                   residual1,
+                                   residual2,
+                                   bias,
+                                   nullptr,
+                                   nullptr,
+                                   m,
+                                   n);
         }
     }
 }
 
 template<typename T>
-__global__ void alphaAddBiasResidual(T* output, const T* input, const T* bias, const T alpha, const int m, const int n)
-{
+__global__ void
+alphaAddBiasResidual(T* output, const T* input, const T* bias, const T alpha, const int m, const int n) {
     const int col_index = blockIdx.y * blockDim.x + threadIdx.x;
     if (col_index < n) {
         T bias_val = (bias == nullptr) ? (T)(0.0f) : bias[col_index];
@@ -114,8 +159,8 @@ __global__ void alphaAddBiasResidual(T* output, const T* input, const T* bias, c
 }
 
 template<typename T>
-__global__ void alphaAddBiasResidual(T* output, const T* input, const T* residual, const T* bias, const T alpha, const int m, const int n)
-{
+__global__ void alphaAddBiasResidual(
+    T* output, const T* input, const T* residual, const T* bias, const T alpha, const int m, const int n) {
     const int col_index = blockIdx.y * blockDim.x + threadIdx.x;
     if (col_index < n) {
         T bias_val = (bias == nullptr) ? (T)(0.0f) : bias[col_index];
@@ -125,9 +170,14 @@ __global__ void alphaAddBiasResidual(T* output, const T* input, const T* residua
 }
 
 template<typename T>
-void invokeAlphaAddBiasResidual(
-    T* output, const T* input, const T* residual, const T* bias, const T alpha, const int m, const int n, cudaStream_t stream)
-{
+void invokeAlphaAddBiasResidual(T*           output,
+                                const T*     input,
+                                const T*     residual,
+                                const T*     bias,
+                                const T      alpha,
+                                const int    m,
+                                const int    n,
+                                cudaStream_t stream) {
     int  blocks_per_row = ceil(float(n) / 1024);
     dim3 grid(m, blocks_per_row);
     dim3 block(std::min(n, 1024));
@@ -146,8 +196,7 @@ __global__ void addBiasAttentionFfnResidual(T*        block_output,
                                             const T*  bias,
                                             const int m,
                                             const int n,
-                                            const int block_input_tp_split)
-{
+                                            const int block_input_tp_split) {
     const int col_index = blockIdx.y * blockDim.x + threadIdx.x;
     if (col_index < n) {
         block_output[blockIdx.x * n + col_index] =
@@ -165,8 +214,7 @@ __global__ void addBiasAttentionFfnResidual(T*        block_output,
                                             const T*  bias,
                                             const int m,
                                             const int n,
-                                            const int block_input_tp_split)
-{
+                                            const int block_input_tp_split) {
     const int col_index = blockIdx.y * blockDim.x + threadIdx.x;
     if (col_index < n) {
         const int global_index     = blockIdx.x * n + col_index;
@@ -186,16 +234,14 @@ void invokeAddBiasAttentionFfnResidual(T*           block_output,
                                        const int    m,
                                        const int    n,
                                        const int    block_input_tp_split,
-                                       cudaStream_t stream)
-{
+                                       cudaStream_t stream) {
     int  blocks_per_row = ceil(float(n) / 1024);
     dim3 grid(m, blocks_per_row);
     dim3 block(std::min(n, 1024));
     if (block_output == block_input) {
         addBiasAttentionFfnResidual<<<grid, block, 0, stream>>>(
             block_output, ffn_output, attn_output, bias, m, n, block_input_tp_split);
-    }
-    else {
+    } else {
         addBiasAttentionFfnResidual<<<grid, block, 0, stream>>>(
             block_output, ffn_output, attn_output, block_input, bias, m, n, block_input_tp_split);
     }
@@ -228,24 +274,24 @@ template void invokeAlphaAddBiasResidual(float*       output,
                                          const int    n,
                                          cudaStream_t stream);
 
-template void invokeAlphaAddBiasResidual(half* output,
-                                         const half* input,
-                                         const half* residual,
-                                         const half* bias,
-                                         const half alpha,
-                                         const int m,
-                                         const int n,
+template void invokeAlphaAddBiasResidual(half*        output,
+                                         const half*  input,
+                                         const half*  residual,
+                                         const half*  bias,
+                                         const half   alpha,
+                                         const int    m,
+                                         const int    n,
                                          cudaStream_t stream);
 
 #ifdef ENABLE_BF16
-template void invokeAlphaAddBiasResidual(__nv_bfloat16* output,
-                                    const __nv_bfloat16* input,
-                                    const __nv_bfloat16* residual,
-                                    const __nv_bfloat16* bias,
-                                    const __nv_bfloat16 alpha,
-                                    const int m,
-                                    const int n,
-                                    cudaStream_t stream);
+template void invokeAlphaAddBiasResidual(__nv_bfloat16*       output,
+                                         const __nv_bfloat16* input,
+                                         const __nv_bfloat16* residual,
+                                         const __nv_bfloat16* bias,
+                                         const __nv_bfloat16  alpha,
+                                         const int            m,
+                                         const int            n,
+                                         cudaStream_t         stream);
 #endif
 
 template void invokeAddBiasAttentionFfnResidual(float*       block_output,
@@ -280,15 +326,13 @@ template void invokeAddBiasAttentionFfnResidual(__nv_bfloat16*       block_outpu
                                                 cudaStream_t         stream);
 #endif
 
-
 /*******************  invokeAddBiasResidualCol32  ***********************/
 // input1/input2/out matrix with layout of cublasLt CUBLASLT_ORDER_COL32 (m*n)
 //(grid, block) must be (m, n/4)
 // using char4
 template<typename T>
 __global__ void add_bias_input_COL32_int8I_DataTypeO(
-    T* output, const int8_t* input1, const T* input2, const T* bias, int m, int n, const float* input1_deQFactor_ptr)
-{
+    T* output, const int8_t* input1, const T* input2, const T* bias, int m, int n, const float* input1_deQFactor_ptr) {
     const float input1_deQFactor = __ldg(input1_deQFactor_ptr);
     int         col_start        = threadIdx.x << 2;
 
@@ -322,8 +366,7 @@ __global__ void add_bias_input_COL32_int8I_DataTypeO(half4*        output,
                                                      const half4*  bias,
                                                      int           m,
                                                      int           n,
-                                                     const float*  input1_deQFactor_ptr)
-{
+                                                     const float*  input1_deQFactor_ptr) {
     const float input1_deQFactor = __ldg(input1_deQFactor_ptr);
     int         col_start        = (blockIdx.x << 5) + (threadIdx.x << 2);
     int         row_start        = (blockIdx.y << 5) + (threadIdx.y);
@@ -352,16 +395,14 @@ void invokeAddBiasResidualCol32(T*            output,
                                 int           m,
                                 int           n,
                                 cudaStream_t  stream,
-                                const float*  input1_deQFactor_ptr)
-{
+                                const float*  input1_deQFactor_ptr) {
     dim3 grid((n + 31) / 32, (m + 31) / 32);
     dim3 block(8, 32);
     assert(block.x <= 1024);
     if (sizeof(T) == 2) {
         add_bias_input_COL32_int8I_DataTypeO<<<grid, block, 0, stream>>>(
             (half4*)output, input1, (const half4*)input2, (const half4*)bias, m, n, input1_deQFactor_ptr);
-    }
-    else {
+    } else {
         add_bias_input_COL32_int8I_DataTypeO<T>
             <<<grid, block, 0, stream>>>(output, input1, input2, bias, m, n, input1_deQFactor_ptr);
     }
@@ -398,8 +439,7 @@ __global__ void add_bias_input_COL32_int32I_DataTypeO(T*             output,
                                                       int            n,
                                                       const float*   weight_amax,
                                                       const float*   input1_amax_ptr,
-                                                      const int      scale_is_vector)
-{
+                                                      const int      scale_is_vector) {
     int           col_start        = threadIdx.x << 2;
     const float4* weight_scale_ptr = (const float4*)weight_amax;
     const float4  weight_scale     = __ldg(weight_scale_ptr + threadIdx.x * scale_is_vector);
@@ -441,8 +481,7 @@ __global__ void add_bias_input_COL32_int32I_DataTypeO(half4*         output,
                                                       int            n,
                                                       const float*   weight_amax,
                                                       const float*   input1_amax_ptr,
-                                                      const int      scale_is_vector)
-{
+                                                      const int      scale_is_vector) {
     int           col_start           = threadIdx.x << 2;
     const float4* weight_scale_ptr    = (const float4*)weight_amax;
     const float   weight_scale_single = __ldg(weight_amax);
@@ -491,8 +530,7 @@ void invokeAddBiasResidualCol32(T*             output,
                                 cudaStream_t   stream,
                                 const float*   weight_amax,
                                 const float*   input1_amax_ptr,
-                                const int      scale_is_vector)
-{
+                                const int      scale_is_vector) {
     dim3 grid(m);
     dim3 block(n / 4);
     assert(block.x <= 1024);
@@ -506,8 +544,7 @@ void invokeAddBiasResidualCol32(T*             output,
                                                                           weight_amax,
                                                                           input1_amax_ptr,
                                                                           scale_is_vector);
-    }
-    else {
+    } else {
         add_bias_input_COL32_int32I_DataTypeO<T><<<grid, block, 0, stream>>>(
             output, input1, input2, bias, m, n, weight_amax, input1_amax_ptr, scale_is_vector);
     }

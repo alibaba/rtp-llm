@@ -6,13 +6,13 @@
 
 namespace rtp_llm {
 
-
-template<AllocatorType AType, MemoryType MType,
-         hipError_t (*Alloc)(void**, size_t), hipError_t (*Free)(void*)>
+template<AllocatorType AType, MemoryType MType, hipError_t (*Alloc)(void**, size_t), hipError_t (*Free)(void*)>
 class ROCmAllocator: public TypedAllocator<AType> {
 public:
     ROCmAllocator() {}
-    ~ROCmAllocator() { RTP_LLM_LOG_INFO("rocm allocator destroyed"); /* TODO(rocm): Free all memory? */ }
+    ~ROCmAllocator() {
+        RTP_LLM_LOG_INFO("rocm allocator destroyed"); /* TODO(rocm): Free all memory? */
+    }
 
     MemoryType memoryType() const {
         return MType;
@@ -44,8 +44,7 @@ public:
 };
 
 template<>
-class Allocator<AllocatorType::ROCM>:
-    public ROCmAllocator<AllocatorType::ROCM, MEMORY_GPU, hipMalloc, hipFree> {};
+class Allocator<AllocatorType::ROCM>: public ROCmAllocator<AllocatorType::ROCM, MEMORY_GPU, hipMalloc, hipFree> {};
 
 template<>
 class Allocator<AllocatorType::ROCM_HOST>:

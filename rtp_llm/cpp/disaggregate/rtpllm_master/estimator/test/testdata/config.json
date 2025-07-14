@@ -41,7 +41,7 @@
             },
             "map_items": [
                 {"prefix_length": 4, "input_length": 2, "cost_time_ms": 24},
-                {"prefix_length": 4, "input_length": 4, "cost_time_ms": 44},                
+                {"prefix_length": 4, "input_length": 4, "cost_time_ms": 44},
                 {"prefix_length": 6, "input_length": 2, "cost_time_ms": 26},
                 {"prefix_length": 6, "input_length": 4, "cost_time_ms": 46},
                 {"prefix_length": 0, "input_length": 6, "cost_time_ms": 60},
@@ -50,7 +50,7 @@
                 {"prefix_length": 2, "input_length": 8, "cost_time_ms": 82},
                 {"prefix_length": 4, "input_length": 6, "cost_time_ms": 64},
                 {"prefix_length": 4, "input_length": 8, "cost_time_ms": 84},
-                {"prefix_length": 6, "input_length": 6, "cost_time_ms": 66}, 
+                {"prefix_length": 6, "input_length": 6, "cost_time_ms": 66},
                 {"prefix_length": 6, "input_length": 8, "cost_time_ms": 86}
             ],
             "estimate_func_str": "MEAN"

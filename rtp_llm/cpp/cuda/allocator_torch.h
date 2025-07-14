@@ -34,7 +34,7 @@ public:
 
     void* malloc(size_t size);
     void* mallocSync(size_t size);
-    void free(void** ptr);
+    void  free(void** ptr);
 
     virtual ~Allocator();
 
@@ -42,4 +42,4 @@ private:
     std::unique_ptr<std::unordered_map<void*, torch::Tensor>> pointer_mapping_;
 };
 
-}
+}  // namespace rtp_llm

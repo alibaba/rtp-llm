@@ -8,4 +8,4 @@ inline int64_t currentTimeUs() {
     return autil::TimeUtility::currentTimeInMicroSeconds();
 }
 
-}
+}  // namespace rtp_llm

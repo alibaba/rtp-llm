@@ -58,7 +58,7 @@ template<typename T>
 std::string vectorsToString(const std::vector<std::vector<T>>& vecs) {
     std::string result;
     result += "[";
-    for (const auto& vec: vecs) {
+    for (const auto& vec : vecs) {
         result += "[" + vectorToString(vec) + "], ";
     }
     if (!vecs.empty()) {
@@ -70,14 +70,15 @@ std::string vectorsToString(const std::vector<std::vector<T>>& vecs) {
 }
 
 inline bool startsWith(const std::string& str, const std::string& prefix) {
-    if (str.size() < prefix.size()) return false;
+    if (str.size() < prefix.size())
+        return false;
     return str.compare(0, prefix.size(), prefix) == 0;
 }
 
 inline std::vector<std::string> split(const std::string& s, char delimiter) {
     std::vector<std::string> tokens;
-    std::string token;
-    std::istringstream tokenStream(s);
+    std::string              token;
+    std::istringstream       tokenStream(s);
     while (getline(tokenStream, token, delimiter)) {
         if (!token.empty()) {
             token.erase(token.find_last_not_of(" \t") + 1);
@@ -90,7 +91,7 @@ inline std::vector<std::string> split(const std::string& s, char delimiter) {
 
 inline std::pair<std::string, std::string> split_ip_port(const std::string& addr) {
     size_t colon_pos = addr.find_last_of(':');
-    if (colon_pos == std::string::npos || colon_pos == 0 || colon_pos == addr.length()-1) {
+    if (colon_pos == std::string::npos || colon_pos == 0 || colon_pos == addr.length() - 1) {
         return {"", ""};
     }
     return {addr.substr(0, colon_pos), addr.substr(colon_pos + 1)};
@@ -105,4 +106,4 @@ inline uint32_t parse_port(const std::string& port_str) {
     }
 }
 
-}
+}  // namespace rtp_llm

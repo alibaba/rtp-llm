@@ -13,7 +13,7 @@ public:
     bool init();
 
 private:
-    static bool parseKMonitorTags(const std::string &tagsStr, std::map<std::string, std::string> &tagsMap);
+    static bool parseKMonitorTags(const std::string& tagsStr, std::map<std::string, std::string>& tagsMap);
 
 public:
     std::string serviceName;
@@ -22,19 +22,19 @@ public:
     std::string partId;
     std::string hippoSlaveIp;
 
-    std::string kmonitorPort;
-    std::string kmonitorServiceName;
-    std::string kmonitorSinkAddress;
-    bool kmonitorEnableLogFileSink = false;
-    bool kmonitorEnablePrometheusSink = false;
-    bool kmonitorManuallyMode = false;
-    std::string kmonitorTenant;
-    std::string kmonitorMetricsPrefix;
-    std::string kmonitorGlobalTableMetricsPrefix;
-    std::string kmonitorTableMetricsPrefix;
-    std::string kmonitorMetricsReporterCacheLimit;
+    std::string                        kmonitorPort;
+    std::string                        kmonitorServiceName;
+    std::string                        kmonitorSinkAddress;
+    bool                               kmonitorEnableLogFileSink    = false;
+    bool                               kmonitorEnablePrometheusSink = false;
+    bool                               kmonitorManuallyMode         = false;
+    std::string                        kmonitorTenant;
+    std::string                        kmonitorMetricsPrefix;
+    std::string                        kmonitorGlobalTableMetricsPrefix;
+    std::string                        kmonitorTableMetricsPrefix;
+    std::string                        kmonitorMetricsReporterCacheLimit;
     std::map<std::string, std::string> kmonitorTags;
-    int kmonitorNormalSamplePeriod;
+    int                                kmonitorNormalSamplePeriod;
 };
 
-} // namespace rtp_llm
+}  // namespace rtp_llm

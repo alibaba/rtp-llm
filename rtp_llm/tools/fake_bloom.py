@@ -1,17 +1,20 @@
-
-import os
 import json
+import os
+
 from rtp_llm.tools.fake_model_base import *
 
-def save_config_func(model_type,
-                dest_path: str,
-                layer: int,
-                head: int,
-                head_kv: int,
-                head_size: int,
-                ffn_hidden_size: int,
-                ffn_inter_padding_size: int,
-                vocab_size: int):
+
+def save_config_func(
+    model_type,
+    dest_path: str,
+    layer: int,
+    head: int,
+    head_kv: int,
+    head_size: int,
+    ffn_hidden_size: int,
+    ffn_inter_padding_size: int,
+    vocab_size: int,
+):
     config = {
         "model_type": model_type,
         "add_bias_linear": False,
@@ -41,10 +44,10 @@ def save_config_func(model_type,
         "torch_dtype": "float16",
         "tie_word_embeddings": False,
         "eos_token_id": 2,
-        "pad_token_id": 0
+        "pad_token_id": 0,
     }
     # save to config.json
-    json.dump(config, open(os.path.join(dest_path, 'config.json'), 'w'), indent=2)
+    json.dump(config, open(os.path.join(dest_path, "config.json"), "w"), indent=2)
 
 
 def fake_bloom():
@@ -53,13 +56,18 @@ def fake_bloom():
     default_config.head_num = 2
     default_config.head_kv_num = 2
     default_config.head_size = 64
-    default_config.ffn_hidden_size = 4 * default_config.head_size * default_config.head_num
-    default_config.ffn_inter_padding_size = 4 * default_config.head_size * default_config.head_num
+    default_config.ffn_hidden_size = (
+        4 * default_config.head_size * default_config.head_num
+    )
+    default_config.ffn_inter_padding_size = (
+        4 * default_config.head_size * default_config.head_num
+    )
     default_config.ffn_gate_active = True
     default_config.ffn_w1_w3_independ = False
     default_config.vocab_size = 250682
 
     fake_model("bloom", default_config, save_config_func)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     fake_bloom()

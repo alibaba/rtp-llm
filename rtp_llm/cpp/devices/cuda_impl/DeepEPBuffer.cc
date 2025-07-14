@@ -11,7 +11,8 @@ namespace rtp_llm {
  * @brief Initialize the communication buffer.
  */
 bool DeepEPBuffer::init() {
-    buffer_.reset(deep_ep::createDeepEPBuffer(world_rank_, local_world_size_, world_size_, num_nvl_bytes_, num_rdma_bytes_, low_latency_mode_, true));
+    buffer_.reset(deep_ep::createDeepEPBuffer(
+        world_rank_, local_world_size_, world_size_, num_nvl_bytes_, num_rdma_bytes_, low_latency_mode_, true));
 
     int              local_device_id = buffer_->get_local_device_id();
     std::vector<int> device_ids      = allGatherDeviceIds(local_device_id);
@@ -326,7 +327,8 @@ DeepEPDispatchOutput DeepEPBuffer::dispatch(const torch::Tensor&                
         RTP_LLM_CHECK(x.scalar_type() == c10::kBFloat16);  // [num_tokens, hidden]
     }
     RTP_LLM_CHECK(num_tokens_per_rank.has_value() == false || num_tokens_per_expert->scalar_type() == c10::kInt);
-    RTP_LLM_CHECK(num_tokens_per_rdma_rank.has_value() == false || num_tokens_per_rdma_rank->scalar_type() == c10::kInt);
+    RTP_LLM_CHECK(num_tokens_per_rdma_rank.has_value() == false
+                  || num_tokens_per_rdma_rank->scalar_type() == c10::kInt);
     RTP_LLM_CHECK(is_token_in_rank.has_value() == false || is_token_in_rank->scalar_type() == c10::kBool);
     RTP_LLM_CHECK(num_tokens_per_expert.has_value() == false || num_tokens_per_expert->scalar_type() == c10::kInt);
     RTP_LLM_CHECK(topk_idx.has_value() == false || topk_idx->scalar_type() == c10::kLong);
@@ -745,10 +747,10 @@ DeepEPDispatchOutputLowLatency DeepEPBuffer::lowLatencyDispatch(const torch::Ten
                                                                 bool                 return_recv_hook) {
     // only several hidden shapes are supported 2560 / 5120 / 7168(r1)
     RTP_LLM_CHECK_WITH_INFO(x.scalar_type() == torch::kBFloat16 && x.size(0) <= num_max_dispatch_tokens_per_rank,
-                       "x should be bf16, acutal: %d; num_tokens should <= %d, actual: %d in lowLatencyDispatch",
-                       (int)x.scalar_type(),
-                       num_max_dispatch_tokens_per_rank,
-                       (int)x.size(0));
+                            "x should be bf16, acutal: %d; num_tokens should <= %d, actual: %d in lowLatencyDispatch",
+                            (int)x.scalar_type(),
+                            num_max_dispatch_tokens_per_rank,
+                            (int)x.size(0));
 
     // only several top-k shapes are supported
     RTP_LLM_CHECK(topk_idx.scalar_type() == torch::kLong);

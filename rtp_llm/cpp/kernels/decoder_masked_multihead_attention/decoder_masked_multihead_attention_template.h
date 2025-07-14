@@ -43,7 +43,6 @@
 #include <float.h>
 #include <type_traits>
 
-
 namespace rtp_llm {
 
 template<typename T>
@@ -82,16 +81,14 @@ inline __device__ void print_floats(const char* hint, const T* value, const size
 
 template<typename T>
 __inline__ __host__ __device__ T constexpr flat_index_strided3(
-    T const& index_0, T const& index_1, T const& index_2, T const& stride_1, T const& stride_2)
-{
+    T const& index_0, T const& index_1, T const& index_2, T const& stride_1, T const& stride_2) {
     assert(index_1 < stride_1 / stride_2);
     assert(index_2 < stride_2);
     return index_0 * stride_1 + index_1 * stride_2 + index_2;
 }
 
 template<typename T>
-__inline__ __host__ __device__ T constexpr flat_index2(T const& index_0, T const& index_1, T const& dim_1)
-{
+__inline__ __host__ __device__ T constexpr flat_index2(T const& index_0, T const& index_1, T const& dim_1) {
     assert(index_1 < dim_1);
     return index_0 * dim_1 + index_1;
 }
@@ -625,15 +622,13 @@ struct V_vec_accum_fp32_<fp8_4_t> {
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template<typename Tout, typename Tin>
-__inline__ __device__ constexpr Tout vec_conversion(const Tin& x)
-{
+__inline__ __device__ constexpr Tout vec_conversion(const Tin& x) {
     static_assert(std::is_same<Tout, Tin>::value, "Type mismatch");
     return x;
 }
 
 template<>
-__inline__ __device__ Float8_ vec_conversion<Float8_, uint4>(const uint4& a)
-{
+__inline__ __device__ Float8_ vec_conversion<Float8_, uint4>(const uint4& a) {
     Float8_ fc;
     fc.x = half2_to_float2(a.x);
     fc.y = half2_to_float2(a.y);
@@ -644,8 +639,7 @@ __inline__ __device__ Float8_ vec_conversion<Float8_, uint4>(const uint4& a)
 
 #ifdef ENABLE_BF16
 template<>
-__inline__ __device__ Float8_ vec_conversion<Float8_, bf16_8_t>(const bf16_8_t& a)
-{
+__inline__ __device__ Float8_ vec_conversion<Float8_, bf16_8_t>(const bf16_8_t& a) {
     Float8_ fc;
     fc.x = bf1622float2(a.x);
     fc.y = bf1622float2(a.y);
@@ -658,40 +652,34 @@ __inline__ __device__ Float8_ vec_conversion<Float8_, bf16_8_t>(const bf16_8_t& 
 #ifdef ENABLE_FP8
 // fp8_t
 template<>
-__inline__ __device__ float vec_conversion<float, __nv_fp8_e4m3>(const __nv_fp8_e4m3& a)
-{
+__inline__ __device__ float vec_conversion<float, __nv_fp8_e4m3>(const __nv_fp8_e4m3& a) {
     return float(a);
 }
 
 template<>
-__inline__ __device__ __nv_fp8_e4m3 vec_conversion<__nv_fp8_e4m3, float>(const float& a)
-{
+__inline__ __device__ __nv_fp8_e4m3 vec_conversion<__nv_fp8_e4m3, float>(const float& a) {
     return __nv_fp8_e4m3(a);
 }
 
 // fp8_2_t
 template<>
-__inline__ __device__ float2 vec_conversion<float2, fp8_2_t>(const fp8_2_t& a)
-{
+__inline__ __device__ float2 vec_conversion<float2, fp8_2_t>(const fp8_2_t& a) {
     return float2(a);
 }
 
 template<>
-__inline__ __device__ fp8_2_t vec_conversion<fp8_2_t, float2>(const float2& a)
-{
+__inline__ __device__ fp8_2_t vec_conversion<fp8_2_t, float2>(const float2& a) {
     return fp8_2_t(a);
 }
 
 // fp8_4_t
 template<>
-__inline__ __device__ float4 vec_conversion<float4, fp8_4_t>(const fp8_4_t& a)
-{
+__inline__ __device__ float4 vec_conversion<float4, fp8_4_t>(const fp8_4_t& a) {
     return float4(a);
 }
 
 template<>
-__inline__ __device__ fp8_4_t vec_conversion<fp8_4_t, float4>(const float4& a)
-{
+__inline__ __device__ fp8_4_t vec_conversion<fp8_4_t, float4>(const float4& a) {
     return fp8_4_t(a);
 }
 #endif  // ENABLE_FP8
@@ -699,8 +687,7 @@ __inline__ __device__ fp8_4_t vec_conversion<fp8_4_t, float4>(const float4& a)
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template<int THREADS_PER_KEY, typename Q_vec, typename K_vec, int N>
-inline __device__ float qk_dot_(const Q_vec (&q)[N], const K_vec (&k)[N])
-{
+inline __device__ float qk_dot_(const Q_vec (&q)[N], const K_vec (&k)[N]) {
 #ifdef MMHA_USE_FP32_ACCUM_FOR_FMA
     using K_vec_accum = typename K_vec_accum_fp32_<K_vec>::Type;
 #else
@@ -723,8 +710,7 @@ inline __device__ float qk_dot_(const Q_vec (&q)[N], const K_vec (&k)[N])
 }
 
 template<int THREADS_PER_KEY, typename Q_vec, typename K_vec, int N>
-inline __device__ float qk_scale_dot_(const Q_vec (&q)[N], const K_vec (&k)[N], const float k_scale)
-{
+inline __device__ float qk_scale_dot_(const Q_vec (&q)[N], const K_vec (&k)[N], const float k_scale) {
 #ifdef MMHA_USE_FP32_ACCUM_FOR_FMA
     using K_vec_accum = typename K_vec_accum_fp32_<K_vec>::Type;
 #else
@@ -753,14 +739,12 @@ inline __device__ float qk_scale_dot_(const Q_vec (&q)[N], const K_vec (&k)[N], 
 template<typename T, int THREADS_PER_KEY>
 struct Qk_dot {
     template<typename Q_vec, typename K_vec, int N>
-    static inline __device__ float dot(const Q_vec (&q)[N], const K_vec (&k)[N])
-    {
+    static inline __device__ float dot(const Q_vec (&q)[N], const K_vec (&k)[N]) {
         return qk_dot_<THREADS_PER_KEY>(q, k);
     }
 
     template<typename Q_vec, typename K_vec, int N>
-    static inline __device__ float scale_dot(const Q_vec (&q)[N], const K_vec (&k)[N], const float k_scale)
-    {
+    static inline __device__ float scale_dot(const Q_vec (&q)[N], const K_vec (&k)[N], const float k_scale) {
 #ifdef MMHA_USE_HMMA
         static_assert("HMMA doesn't support k scales");
 #endif  // MMHA_USE_HMMA
@@ -768,8 +752,7 @@ struct Qk_dot {
     }
 
     template<int WARP_SIZE = 32>
-    static inline __device__ bool is_leader(const int tidx)
-    {
+    static inline __device__ bool is_leader(const int tidx) {
         return (tidx % THREADS_PER_KEY) == 0;
     }
 };
@@ -777,15 +760,13 @@ struct Qk_dot {
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template<typename K_vec>
-inline __device__ void hmma_fp32(float4& c, const K_vec& a, K_vec b)
-{
+inline __device__ void hmma_fp32(float4& c, const K_vec& a, K_vec b) {
     // Not supported.
     assert(false);
 }
 #if USING_CUDA
 template<>
-inline __device__ void hmma_fp32(float4& c, const uint32_t& a, uint32_t b)
-{
+inline __device__ void hmma_fp32(float4& c, const uint32_t& a, uint32_t b) {
     asm volatile("mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 \n"
                  "    {%0, %1, %2, %3}, \n"
                  "    {%4, %5}, \n"
@@ -796,15 +777,13 @@ inline __device__ void hmma_fp32(float4& c, const uint32_t& a, uint32_t b)
 }
 #endif
 template<>
-inline __device__ void hmma_fp32(float4& c, const uint2& a, uint2 b)
-{
+inline __device__ void hmma_fp32(float4& c, const uint2& a, uint2 b) {
     hmma_fp32(c, a.x, b.x);
     hmma_fp32(c, a.y, b.y);
 }
 
 template<>
-inline __device__ void hmma_fp32(float4& c, const uint4& a, uint4 b)
-{
+inline __device__ void hmma_fp32(float4& c, const uint4& a, uint4 b) {
     hmma_fp32(c, a.x, b.x);
     hmma_fp32(c, a.y, b.y);
     hmma_fp32(c, a.z, b.z);
@@ -814,8 +793,7 @@ inline __device__ void hmma_fp32(float4& c, const uint4& a, uint4 b)
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template<typename K_vec, int THREADS_PER_KEY, int N>
-inline __device__ float qk_hmma_dot_(const K_vec (&q)[N], const K_vec (&k)[N])
-{
+inline __device__ float qk_hmma_dot_(const K_vec (&q)[N], const K_vec (&k)[N]) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 750
 
     // Each quad computes its partial result.
@@ -870,8 +848,7 @@ inline __device__ float qk_hmma_dot_(const K_vec (&q)[N], const K_vec (&k)[N])
 template<int THREADS_PER_KEY>
 struct Qk_dot<uint16_t, THREADS_PER_KEY> {
     template<typename Q_vec, typename K_vec, int N>
-    static inline __device__ float dot(const Q_vec (&q)[N], const K_vec (&k)[N])
-    {
+    static inline __device__ float dot(const Q_vec (&q)[N], const K_vec (&k)[N]) {
 #if __CUDA_ARCH__ >= 750 && defined(MMHA_USE_HMMA)
         return qk_hmma_dot_<K_vec, THREADS_PER_KEY, N>(q, k);
 #else
@@ -880,8 +857,7 @@ struct Qk_dot<uint16_t, THREADS_PER_KEY> {
     }
 
     template<typename Q_vec, typename K_vec, int N>
-    static inline __device__ float scale_dot(const Q_vec (&q)[N], const K_vec (&k)[N], const float k_scale)
-    {
+    static inline __device__ float scale_dot(const Q_vec (&q)[N], const K_vec (&k)[N], const float k_scale) {
 #ifdef MMHA_USE_HMMA
         static_assert("HMMA doesn't support k scales");
 #endif  // MMHA_USE_HMMA
@@ -889,8 +865,7 @@ struct Qk_dot<uint16_t, THREADS_PER_KEY> {
     }
 
     template<int WARP_SIZE = 32>
-    static inline __device__ bool is_leader(const int tidx)
-    {
+    static inline __device__ bool is_leader(const int tidx) {
         // Use HMMA.FP32, leader threads are in the diagonal roughly (0, 4, 9, 13, 18, 22, 27, 31).
 #if __CUDA_ARCH__ >= 750 && defined(MMHA_USE_HMMA)
         int leader = 0;
@@ -898,8 +873,7 @@ struct Qk_dot<uint16_t, THREADS_PER_KEY> {
         int lane = tidx % WARP_SIZE;
         if (THREADS_PER_KEY == 4) {
             leader = int(lane / 8);
-        }
-        else {
+        } else {
             leader = int(lane / THREADS_PER_KEY) * int(THREADS_PER_KEY / 8);
         }
 #else
@@ -912,8 +886,7 @@ struct Qk_dot<uint16_t, THREADS_PER_KEY> {
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template<int WARPS_PER_BLOCK, int WARP_SIZE = 32>
-inline __device__ float block_sum(float* red_smem, float sum)
-{
+inline __device__ float block_sum(float* red_smem, float sum) {
 
     // Decompose the thread index into warp / lane.
     int warp = threadIdx.x / WARP_SIZE;
@@ -952,50 +925,43 @@ inline __device__ float block_sum(float* red_smem, float sum)
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-inline __device__ float cast_to_float(float u)
-{
+inline __device__ float cast_to_float(float u) {
     return u;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-inline __device__ float2 cast_to_float(float2 u)
-{
+inline __device__ float2 cast_to_float(float2 u) {
     return u;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-inline __device__ float4 cast_to_float(float4 u)
-{
+inline __device__ float4 cast_to_float(float4 u) {
     return u;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-inline __device__ Float4_ cast_to_float(Float4_ u)
-{
+inline __device__ Float4_ cast_to_float(Float4_ u) {
     return u;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-inline __device__ Float8_ cast_to_float(Float8_ u)
-{
+inline __device__ Float8_ cast_to_float(Float8_ u) {
     return u;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-inline __device__ float2 cast_to_float(uint32_t u)
-{
+inline __device__ float2 cast_to_float(uint32_t u) {
     return half2_to_float2(u);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-inline __device__ Float4_ cast_to_float(uint2 u)
-{
+inline __device__ Float4_ cast_to_float(uint2 u) {
     Float4_ tmp;
     tmp.x = half2_to_float2(u.x);
     tmp.y = half2_to_float2(u.y);
@@ -1004,8 +970,7 @@ inline __device__ Float4_ cast_to_float(uint2 u)
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-inline __device__ Float8_ cast_to_float(uint4 u)
-{
+inline __device__ Float8_ cast_to_float(uint4 u) {
     Float8_ tmp;
     tmp.x = half2_to_float2(u.x);
     tmp.y = half2_to_float2(u.y);
@@ -1016,8 +981,7 @@ inline __device__ Float8_ cast_to_float(uint4 u)
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-inline __device__ float2 cast_to_float(__nv_bfloat162 u)
-{
+inline __device__ float2 cast_to_float(__nv_bfloat162 u) {
     float2 tmp;
     tmp = __bfloat1622float2(u);
     return tmp;
@@ -1025,8 +989,7 @@ inline __device__ float2 cast_to_float(__nv_bfloat162 u)
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-inline __device__ Float4_ cast_to_float(bf16_4_t u)
-{
+inline __device__ Float4_ cast_to_float(bf16_4_t u) {
     Float4_ tmp;
     tmp.x = __bfloat1622float2(u.x);
     tmp.y = __bfloat1622float2(u.y);
@@ -1035,8 +998,7 @@ inline __device__ Float4_ cast_to_float(bf16_4_t u)
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-inline __device__ Float8_ cast_to_float(bf16_8_t u)
-{
+inline __device__ Float8_ cast_to_float(bf16_8_t u) {
     Float8_ tmp;
     tmp.x = __bfloat1622float2(u.x);
     tmp.y = __bfloat1622float2(u.y);
@@ -1050,16 +1012,14 @@ inline __device__ Float8_ cast_to_float(bf16_8_t u)
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template<typename T>
-inline __device__ __host__ T divUp(T m, T n)
-{
+inline __device__ __host__ T divUp(T m, T n) {
     return (m + n - 1) / n;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template<typename T>
-inline __device__ __host__ T div(T m, T n)
-{
+inline __device__ __host__ T div(T m, T n) {
     return m / n;
 }
 
@@ -1074,24 +1034,21 @@ struct kernel_type_t {
 
 // Compute the largest supported head size (dh_max). It must be the smallest power-of-2 that is not strictly smaller
 // than the head size (dh).
-inline __device__ __host__ constexpr unsigned dh_max(unsigned dh)
-{
+inline __device__ __host__ constexpr unsigned dh_max(unsigned dh) {
     return next_power_of_two(const_max(dh, 32u));
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template<typename T>
-inline __device__ __host__ constexpr unsigned threads_per_value(unsigned dh_max)
-{
+inline __device__ __host__ constexpr unsigned threads_per_value(unsigned dh_max) {
     return dh_max * sizeof(T) / 16;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template<typename T, unsigned Dh_MAX>
-inline __device__ __host__ constexpr unsigned threads_per_key()
-{
+inline __device__ __host__ constexpr unsigned threads_per_key() {
     // Since we want to perform the reduction entirely within a warp, the number of threads per key
     // is capped at 32.
     constexpr unsigned threads = (unsigned)(Dh_MAX * sizeof(T) / 16u);
@@ -1103,14 +1060,12 @@ inline __device__ __host__ constexpr unsigned threads_per_key()
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-inline __device__ constexpr uint32_t shfl_mask(int threads)
-{
+inline __device__ constexpr uint32_t shfl_mask(int threads) {
     assert(threads <= 32);
     return threads == 32 ? -1u : (1u << threads) - 1u;
 }
 
-inline __device__ constexpr uint32_t shfl_mask_and_index(int threads, int index)
-{
+inline __device__ constexpr uint32_t shfl_mask_and_index(int threads, int index) {
     assert(threads <= 32);
     assert((index + 1) * threads <= 32);
     return threads == 32 ? -1u : ((1u << threads) - 1u) << (index * threads);
@@ -1119,8 +1074,7 @@ inline __device__ constexpr uint32_t shfl_mask_and_index(int threads, int index)
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template<typename T, typename T_VEC, unsigned VECS_PER_CHUNK>
-__device__ inline constexpr uint2 chunk_index(unsigned tidx)
-{
+__device__ inline constexpr uint2 chunk_index(unsigned tidx) {
     // The chunk associated with the thread.
     auto const idx_chunk = tidx / VECS_PER_CHUNK;
 
@@ -1135,24 +1089,21 @@ __device__ inline constexpr uint2 chunk_index(unsigned tidx)
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template<typename Tk, typename V_vec_accum, typename V_vec_m, bool INT8_KV_CACHE, bool FP8_KV_CACHE>
-inline __device__ void
-Logit_value_fma(V_vec_accum& out, const Tk* logits_smem, const V_vec_m& v_vec, const float v_scale, const bool is_mask)
-{
+inline __device__ void Logit_value_fma(
+    V_vec_accum& out, const Tk* logits_smem, const V_vec_m& v_vec, const float v_scale, const bool is_mask) {
 #if defined(MMHA_USE_FP32_ACCUM_FOR_LOGITS)
     float logit = is_mask ? 0.f : reinterpret_cast<float*>(const_cast<Tk*>(logits_smem))[0];
     if constexpr (INT8_KV_CACHE) {
         V_vec_accum v_vec_ = mul<V_vec_accum, float, V_vec_m>(v_scale, v_vec);
         out                = fma(logit, cast_to_float(v_vec_), out);
-    }
-    else if constexpr (FP8_KV_CACHE) {
+    } else if constexpr (FP8_KV_CACHE) {
 #ifdef MMHA_FP8_SCALE_P_INSTEAD_OF_V
         out = fma(logit, cast_to_float(v_vec), out);
 #else
         V_vec_accum v_vec_ = mul<V_vec_accum, float, V_vec_m>(v_scale, v_vec);
         out                = fma(logit, cast_to_float(v_vec_), out);
 #endif  // MMHA_FP8_SCALE_P_INSTEAD_OF_V
-    }
-    else {
+    } else {
         out = fma(logit, cast_to_float(v_vec), out);
     }
 #else  // MMHA_USE_FP32_ACCUM_FOR_LOGITS
@@ -1160,16 +1111,14 @@ Logit_value_fma(V_vec_accum& out, const Tk* logits_smem, const V_vec_m& v_vec, c
     if constexpr (INT8_KV_CACHE) {
         V_vec_accum v_vec_ = mul<V_vec_accum, float, V_vec_m>(v_scale, v_vec);
         out                = fma(logit, v_vec_, out);
-    }
-    else if constexpr (FP8_KV_CACHE) {
+    } else if constexpr (FP8_KV_CACHE) {
 #ifdef MMHA_FP8_SCALE_P_INSTEAD_OF_V
         out = fma(logit, v_vec, out);
 #else
         V_vec_accum v_vec_ = mul<V_vec_accum, float, V_vec_m>(v_scale, v_vec);
         out                = fma(logit, v_vec_, out);
 #endif  // MMHA_FP8_SCALE_P_INSTEAD_OF_V
-    }
-    else {
+    } else {
         out = fma(logit, v_vec, out);
     }
 #endif  // MMHA_USE_FP32_ACCUM_FOR_LOGITS
@@ -1206,8 +1155,7 @@ template<
     // The unroll factor for loading from V cache.
     unsigned V_LOOP_UNROLL = 8>
 __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, DO_CROSS_ATTENTION> params,
-                                                  KVCacheBuffer                                     kvCacheBuffer)
-{
+                                                  KVCacheBuffer                                     kvCacheBuffer) {
 
     using Tk = typename kernel_type_t<T>::Type;
     // Use 8bit cache.
@@ -1378,11 +1326,12 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
 
     // The actual sequence length excluding the paddings.
     // minus 1 because it includes the current timestep while tlength denotes the kv cache length.
-    const int tlength             = DO_CROSS_ATTENTION ? params.memory_length_per_sample[batch_beam_idx] - 1 :
-                                                         (params.length_per_sample ?
-                                                              (params.length_per_sample[batch_beam_idx] + params.max_prefix_prompt_length) :
-                                                              static_cast<int>(timestep));
-    bool      count_prefix_length = params.count_prefix_length;
+    const int tlength =
+        DO_CROSS_ATTENTION ?
+            params.memory_length_per_sample[batch_beam_idx] - 1 :
+            (params.length_per_sample ? (params.length_per_sample[batch_beam_idx] + params.max_prefix_prompt_length) :
+                                        static_cast<int>(timestep));
+    bool count_prefix_length = params.count_prefix_length;
     // We will use cyclic kv cache when it exceeds the limit.
     // The length position for storing new key and value.
     int const cyclic_tlength = tlength % cyclic_kv_cache_len;
@@ -1405,9 +1354,12 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
     // Quant/Dequant scales for 8bits kv cache.
     using T_scale = typename kv_cache_scale_type_t<T, Tcache>::Type;
     T_scale     kv_scale_orig_quant, kv_scale_quant_orig;
-    const float kv_scale_quant_orig_f = (ENABLE_8BITS_CACHE && params.kv_scale_quant_orig != nullptr ? params.kv_scale_quant_orig[0] : 1.0f);
+    const float kv_scale_quant_orig_f =
+        (ENABLE_8BITS_CACHE && params.kv_scale_quant_orig != nullptr ? params.kv_scale_quant_orig[0] : 1.0f);
     convert_from_float(&kv_scale_quant_orig, kv_scale_quant_orig_f);
-    convert_from_float(&kv_scale_orig_quant, (ENABLE_8BITS_CACHE && params.kv_scale_quant_orig != nullptr ? params.kv_scale_orig_quant[0] : 1.0f));
+    convert_from_float(
+        &kv_scale_orig_quant,
+        (ENABLE_8BITS_CACHE && params.kv_scale_quant_orig != nullptr ? params.kv_scale_orig_quant[0] : 1.0f));
 
     // Up to QK_VECS_PER_Dh_MAX threads load Q and K + the bias values for the current timestep.
     // Trigger the loads from the Q and K buffers.
@@ -1430,8 +1382,7 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
             const auto q_quant =
                 *reinterpret_cast<const Packed_Int8_t*>(&reinterpret_cast<const int8_t*>(params.q)[q_offset]);
             convert_from_float(&q, mul<Packed_Float_t, float>(q_scaling, float_from_int8(q_quant)));
-        }
-        else {
+        } else {
             q = vec_conversion<Qk_vec_k, Qk_vec_m>(*reinterpret_cast<const Qk_vec_m*>(&params.q[q_offset]));
         }
 
@@ -1441,8 +1392,7 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
             Tcache*    k_cache = reinterpret_cast<Tcache*>(kvCacheBuffer.getKBlockPtr(batch_beam_idx, cyclic_tlength));
 
             k = vec_conversion<Qk_vec_k, Qk_vec_m>(*reinterpret_cast<const Qk_vec_m*>(&k_cache[inBlockIdx]));
-        }
-        else {
+        } else {
             // Key
             // The stride between tokens. We may be able to always use params.stride.
             uint32_t k_stride = params.stride ? static_cast<uint32_t>(params.stride) : (num_heads_kv * Dh);
@@ -1457,8 +1407,7 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
                     *reinterpret_cast<const Packed_Int8_t*>(&reinterpret_cast<const int8_t*>(params.k)[k_offset]);
 
                 convert_from_float(&k, mul<Packed_Float_t, float>(k_scaling, float_from_int8(k_quant)));
-            }
-            else {
+            } else {
                 k = vec_conversion<Qk_vec_k, Qk_vec_m>(*reinterpret_cast<const Qk_vec_m*>(&params.k[k_offset]));
             }
         }
@@ -1495,23 +1444,24 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
                                               vec_conversion<Qk_vec_k, Qk_vec_m>(*reinterpret_cast<const Qk_vec_m*>(
                                                   &params.ia3_key_weights[flat_index2(ia3_ti_hi, qk_vec_idx, Dh)])));
     }
-    const int input_len            = (params.input_lengths == nullptr) ? 0 : params.input_lengths[batch_beam_idx];
-    int       prefix_prompt_length = (params.prefix_prompt_lengths == nullptr) ? 0 : params.prefix_prompt_lengths[batch_beam_idx];
-    const int position_id = params.position_ids == nullptr ? -1 : params.position_ids[batch_beam_idx * params.rope_config.index_factor];
-    attention_rope<T, Qk_vec_k, ROPE_STYLE>(
-            params.rope_config,
-            q,
-            k,
-            reinterpret_cast<T*>(smem_),
-            tidx,
-            tlength,
-            timestep,
-            params.length_per_sample[batch_beam_idx],
-            position_id,
-            input_len,
-            prefix_prompt_length,
-            count_prefix_length,
-            HANDLE_KV);
+    const int input_len = (params.input_lengths == nullptr) ? 0 : params.input_lengths[batch_beam_idx];
+    int       prefix_prompt_length =
+        (params.prefix_prompt_lengths == nullptr) ? 0 : params.prefix_prompt_lengths[batch_beam_idx];
+    const int position_id =
+        params.position_ids == nullptr ? -1 : params.position_ids[batch_beam_idx * params.rope_config.index_factor];
+    attention_rope<T, Qk_vec_k, ROPE_STYLE>(params.rope_config,
+                                            q,
+                                            k,
+                                            reinterpret_cast<T*>(smem_),
+                                            tidx,
+                                            tlength,
+                                            timestep,
+                                            params.length_per_sample[batch_beam_idx],
+                                            position_id,
+                                            input_len,
+                                            prefix_prompt_length,
+                                            count_prefix_length,
+                                            HANDLE_KV);
 
     __syncthreads();
 
@@ -1534,8 +1484,7 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
                 scaled_q = mul<Qk_vec_k, Tk, Qk_vec_k>(kv_scale_quant_orig, q);
             }
             reinterpret_cast<Qk_vec_k*>(&q_smem[qk_vec_idx])[0] = scaled_q;
-        }
-        else
+        } else
 #endif
         {
             // Set padded Dh to 0 for the correctness of QK (when Dh != Dh_Max).
@@ -1594,8 +1543,7 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
         // Store Q*K^T to shared memory.
         if (MULTI_BLOCK_FLAG) {
             qk_current_smem[0] = qk;
-        }
-        else {
+        } else {
             // We need to store the qk result to the end of the qk_smem for cyclic kv cache (+ 1 for smem memory
             // allocation) because the previous cache will still write to the new_cache_pos of qk_smem.
             qk_smem[kv_loop_length] = qk;
@@ -1772,15 +1720,12 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
 #ifdef MMHA_FP8_SCALE_Q_INSTEAD_OF_K
             if constexpr (FP8_KV_CACHE) {
                 qk_ = Qk_dot<T, THREADS_PER_KEY>::dot(q_vec, k_vec) * params.inv_sqrt_dh;
-            }
-            else
+            } else
 #endif  // MMHA_FP8_SCALE_Q_INSTEAD_OF_K
             {
                 if constexpr (ENABLE_8BITS_CACHE) {
-                    qk_ =
-                        Qk_dot<T, THREADS_PER_KEY>::scale_dot(q_vec, k_vec, k_scale) * params.inv_sqrt_dh;
-                }
-                else {
+                    qk_ = Qk_dot<T, THREADS_PER_KEY>::scale_dot(q_vec, k_vec, k_scale) * params.inv_sqrt_dh;
+                } else {
                     qk_ = Qk_dot<T, THREADS_PER_KEY>::dot(q_vec, k_vec) * params.inv_sqrt_dh;
                 }
             }
@@ -1845,8 +1790,7 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
                     int    inScaleIdx  = kvCacheBuffer.getKVScaleLocalIdx(valid_time_now, hi_kv);
                     load_8bits_kv_cache_vec(
                         &k_vec[k_vec_i], k_cache_batch, inBlockIdx, k_scale_ptr[inBlockIdx - inScaleIdx]);
-                }
-                else {
+                } else {
                     k_vec[k_vec_i] = (*reinterpret_cast<const K_vec_m*>(&k_cache_batch[inBlockIdx]));
                 }
             }
@@ -1891,15 +1835,13 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
 #ifdef MMHA_FP8_SCALE_Q_INSTEAD_OF_K
             if constexpr (FP8_KV_CACHE) {
                 qk_ = Qk_dot<T, THREADS_PER_KEY>::dot(q_vec, k_vec) * params.inv_sqrt_dh;
-            }
-            else
+            } else
 #endif  // MMHA_FP8_SCALE_Q_INSTEAD_OF_K
             {
                 if constexpr (ENABLE_8BITS_CACHE) {
                     qk_ =
                         Qk_dot<T, THREADS_PER_KEY>::scale_dot(q_vec, k_vec, kv_scale_quant_orig_f) * params.inv_sqrt_dh;
-                }
-                else {
+                } else {
                     qk_ = Qk_dot<T, THREADS_PER_KEY>::dot(q_vec, k_vec) * params.inv_sqrt_dh;
                 }
             }
@@ -1987,7 +1929,7 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
             if constexpr (std::is_same<Tcache, int8_t>::value) {
 #pragma unroll
                 for (int mask = QK_VECS_PER_Dh_MAX / 2; mask >= 1; mask /= 2) {
-                   k_max = fmaxf(k_max, __shfl_xor_sync(shfl_mask(QK_VECS_PER_Dh_MAX), k_max, mask));
+                    k_max = fmaxf(k_max, __shfl_xor_sync(shfl_mask(QK_VECS_PER_Dh_MAX), k_max, mask));
                 }
                 scale = float(1 << (8 - 1)) / k_max;
             }
@@ -1997,8 +1939,7 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
                 int    inScaleIdx  = kvCacheBuffer.getKVScaleLocalIdx(tlength, hi_kv);
                 *reinterpret_cast<float*>(&k_scale_ptr[inScaleIdx]) = 1.0f / scale;
             }
-        }
-        else {
+        } else {
             *reinterpret_cast<Qk_vec_m*>(&k_cache[inBlockIdx]) = vec_conversion<Qk_vec_m, Qk_vec_k>(k_vec);
         }
     }
@@ -2027,15 +1968,13 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
             float logit = __expf(qk_smem[time_now] - qk_max);
             sum += logit;
             qk_smem[time_now] = logit;
-        }
-        else {
+        } else {
             // Not supported yet: multi-block mode with FP8_MHA
             if (time_now < kv_loop_length && ti != timesteps_per_block) {
                 float logit = __expf(qk_smem[ti] - qk_max);
                 sum += logit;
                 qk_smem[ti] = logit;
-            }
-            else if (time_now == kv_loop_length) {
+            } else if (time_now == kv_loop_length) {
                 float logit = __expf(qk_current_smem[0] - qk_max);
                 sum += logit;
                 qk_current_smem[0] = logit;
@@ -2061,13 +2000,11 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
 
         if (!MULTI_BLOCK_FLAG) {
             convert_from_float(&logits_smem[ti], qk_smem[ti] * inv_sum);
-        }
-        else {
+        } else {
             // no scaling factor inv_sum applied here, will apply the scaling factor after all blocks finished
             if (time_now < kv_loop_length && ti != timesteps_per_block) {
                 convert_from_float(&logits_smem[ti], qk_smem[ti]);
-            }
-            else if (time_now == kv_loop_length) {
+            } else if (time_now == kv_loop_length) {
                 convert_from_float(&logits_current_smem[0], qk_current_smem[0]);
             }
         }
@@ -2149,12 +2086,12 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
 
 #pragma unroll
             for (int v_loop = 0; v_loop < V_LOOP_UNROLL; v_loop++) {
-                float v_scale = 1.f;
-                V_vec_m v_vec = reinterpret_cast<V_vec_m*>(&v_vec_cache[v_loop])[0];
-                int rowIdx   = batch_idx * beam_width;
+                float   v_scale = 1.f;
+                V_vec_m v_vec   = reinterpret_cast<V_vec_m*>(&v_vec_cache[v_loop])[0];
+                int     rowIdx  = batch_idx * beam_width;
 
-                int local_time_idx = ti + v_loop * V_PER_ITER;
-                int time_idx       = local_time_idx + (MULTI_BLOCK_FLAG ? c_tile_times_timesteps_per_block : 0);
+                int        local_time_idx = ti + v_loop * V_PER_ITER;
+                int        time_idx       = local_time_idx + (MULTI_BLOCK_FLAG ? c_tile_times_timesteps_per_block : 0);
                 const bool is_mask =
                     (MULTI_BLOCK_FLAG && local_time_idx >= timesteps_per_block) || (time_idx >= context_length);
 
@@ -2191,12 +2128,12 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
                     // The base pointer for the value in the cache buffer.
                     Tcache* v_cache_batch = reinterpret_cast<Tcache*>(kvCacheBuffer.getVBlockPtr(rowIdx, time_idx));
                     // V_vec_m v_vec;
-                    V_vec_m    v_vec = reinterpret_cast<const V_vec_m*>(&v_cache_batch[inBlockIdx])[0];
-                    float v_scale = 1.f;
+                    V_vec_m v_vec   = reinterpret_cast<const V_vec_m*>(&v_cache_batch[inBlockIdx])[0];
+                    float   v_scale = 1.f;
                     if (ENABLE_8BITS_CACHE) {
                         float* v_scale_ptr = reinterpret_cast<float*>(kvCacheBuffer.getVScalePtr(rowIdx, time_idx));
                         int    inScaleIdx  = kvCacheBuffer.getKVScaleLocalIdx(time_idx, hi_kv);
-                        v_scale =  v_scale_ptr[inScaleIdx];
+                        v_scale            = v_scale_ptr[inScaleIdx];
                     }
 
                     // Load the logits from shared memory.
@@ -2224,8 +2161,7 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
         V_vec_k v;
         if (DO_CROSS_ATTENTION) {
             v = vec_conversion<V_vec_k, V_vec_k>(*reinterpret_cast<const V_vec_k*>(&v_cache_base[inBlockIdx]));
-        }
-        else {
+        } else {
             // Trigger the loads from the V buffer.
             // The stride between tokens. We may be able to always use params.stride.
             uint32_t v_stride = params.stride ? static_cast<uint32_t>(params.stride) : (num_heads_kv * Dh);
@@ -2240,8 +2176,7 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
                     *reinterpret_cast<const Packed_Int8_t*>(&reinterpret_cast<const int8_t*>(params.v)[v_offset]);
 
                 convert_from_float(&v, mul<Packed_Float_t, float>(v_scaling, float_from_int8(v_quant)));
-            }
-            else {
+            } else {
                 v = *reinterpret_cast<const V_vec_k*>(&params.v[v_offset]);
             }
         }
@@ -2265,11 +2200,11 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
                 float scale = 1.0f;
                 if constexpr (std::is_same<Tcache, int8_t>::value) {
 #pragma unroll
-                   for (int mask = THREADS_PER_VALUE / 2; mask >= 1; mask /= 2) {
-                    v_max =
-                        fmaxf(v_max,
-                              __shfl_xor_sync(
-                                  shfl_mask_and_index(THREADS_PER_VALUE, vo % (32 / THREADS_PER_VALUE)), v_max, mask));
+                    for (int mask = THREADS_PER_VALUE / 2; mask >= 1; mask /= 2) {
+                        v_max = fmaxf(
+                            v_max,
+                            __shfl_xor_sync(
+                                shfl_mask_and_index(THREADS_PER_VALUE, vo % (32 / THREADS_PER_VALUE)), v_max, mask));
                     }
                     scale = float(1 << (8 - 1)) / v_max;
                 }
@@ -2291,16 +2226,14 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
         // out = fma(logits_smem[params.timestep], cast_to_float(v), out);
         if (!MULTI_BLOCK_FLAG) {
             out = fma(logits_smem[kv_loop_length], cast_to_float(v), out);
-        }
-        else {
+        } else {
             out = fma(logits_current_smem[0], cast_to_float(v), out);
         }
 #else   // MMHA_USE_FP32_ACCUM_FOR_LOGITS
         // out = fma(logits_smem[params.timestep], v, out);
         if (!MULTI_BLOCK_FLAG) {
             out = fma(logits_smem[kv_loop_length], v, out);
-        }
-        else {  // MULTI_BLOCK_FLAG // Not supported yet: multi-block mode with FP8_MHA
+        } else {  // MULTI_BLOCK_FLAG // Not supported yet: multi-block mode with FP8_MHA
             out = fma(logits_current_smem[0], v, out);
         }
 #endif  // MMHA_USE_FP32_ACCUM_FOR_LOGITS
@@ -2333,7 +2266,7 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
     }
 #ifdef ENABLE_FP8
     // Quantized output only supports fp8 currently, which should be used together with FP8 Context FMHA.
-    using Quantized_t = __nv_fp8_e4m3;
+    using Quantized_t   = __nv_fp8_e4m3;
     using Quantized_vec = typename packed_type<__nv_fp8_e4m3, num_elems<V_vec_accum>::value>::type;
 #endif
     const auto bhi              = flat_index2(batch_beam_idx, hi, num_heads);
@@ -2342,27 +2275,21 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
     if (vo == 0 && (Dh == Dh_MAX || vi < Dh)) {
         const auto bhvi = flat_index2(bhi, vi, Dh);
 #ifdef MMHA_USE_FP32_ACCUM_FOR_OUT
-	if (!MULTI_BLOCK_FLAG)
-        {
-            if (write_attention_quant)
-            {
+        if (!MULTI_BLOCK_FLAG) {
+            if (write_attention_quant) {
                 out = mul<V_vec_accum, float>(*params.attention_out_scale_orig_quant, out);
 #ifdef ENABLE_FP8
                 Quantized_vec final_out;
                 convert_to_fp8(&final_out, out);
                 *reinterpret_cast<Quantized_vec*>(reinterpret_cast<Quantized_t*>(params.out) + bhvi) = final_out;
 #endif
-            }
-            else
-            {
+            } else {
                 // This makes sure we have coalesced memory access.
                 V_vec_k final_out;
                 convert_from_float(&final_out, out);
                 *reinterpret_cast<V_vec_k*>(&params.out[bhvi]) = final_out;
             }
-        }
-        else
-        {
+        } else {
             // for write partial output to partial_out
             int partial_out_offset = c_tile * params.batch_size * num_heads * params.hidden_size_per_head;
             // for write partial statistics to partial_max and partial_sum
@@ -2516,18 +2443,16 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
                 convert_from_float(&inv_sum_compute, inv_sum);
 
                 thread_partial_out = mul<V_vec_k, Tk, V_vec_k>(inv_sum_compute, thread_partial_out);
-                if (write_attention_quant)
-                {
-                    thread_partial_out = mul<V_vec_k, float>(*params.attention_out_scale_orig_quant, thread_partial_out);
+                if (write_attention_quant) {
+                    thread_partial_out =
+                        mul<V_vec_k, float>(*params.attention_out_scale_orig_quant, thread_partial_out);
 #ifdef ENABLE_FP8
                     Quantized_vec final_out;
                     convert_to_fp8(&final_out, thread_partial_out);
-                    *reinterpret_cast<Quantized_vec*>(reinterpret_cast<Quantized_t*>(params.out) + bhi * Dh + oi)
-                        = final_out;
+                    *reinterpret_cast<Quantized_vec*>(reinterpret_cast<Quantized_t*>(params.out) + bhi * Dh + oi) =
+                        final_out;
 #endif
-                }
-                else
-                {
+                } else {
                     *reinterpret_cast<V_vec_k*>(&params.out[bhi * Dh + oi]) = thread_partial_out;
                 }
             }
@@ -2541,4 +2466,4 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
 #endif  // ENABLE_MULTI_BLOCK_OPTION
 }
 
-} // namespace rtp_llm
+}  // namespace rtp_llm

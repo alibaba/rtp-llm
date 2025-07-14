@@ -1,14 +1,18 @@
 import os
 import unittest
+
 import torch
 
-os.environ['DEVICE_RESERVE_MEMORY_BYTES'] = '128000000'
+os.environ["DEVICE_RESERVE_MEMORY_BYTES"] = "128000000"
+
 
 class TestRope(unittest.TestCase):
 
     def __init__(self, methodName: str = "runTest") -> None:
         super().__init__(methodName)
-        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/rtp_llm/tests/libtest_ops.so")
+        torch.classes.load_library(
+            os.environ["TEST_SRCDIR"] + "/rtp_llm/tests/libtest_ops.so"
+        )
         self.merge_transpose_op = torch.classes.unittest.MergeTransposeOP()
 
     def test_merge_transpose(self):
@@ -32,7 +36,9 @@ class TestRope(unittest.TestCase):
                 q_rope = rope_transpose(q_rope)
                 k_rope = rope_transpose(k_rope)
 
-                qkv_expected = torch.zeros(token_num, 3 * head_num, (nope + rope)).cuda()
+                qkv_expected = torch.zeros(
+                    token_num, 3 * head_num, (nope + rope)
+                ).cuda()
                 query_states = q.new_empty(token_num, head_num, nope + rope)
                 query_states[:, :, :nope] = q_nope
                 query_states[:, :, nope:] = q_rope
@@ -42,10 +48,11 @@ class TestRope(unittest.TestCase):
                 key_state[:, :, nope:] = k_rope
 
                 qkv_expected[:, :head_num, :] = query_states
-                qkv_expected[:, head_num:2 * head_num, :] = key_state
-                qkv_expected[:, 2 * head_num:, :vhead] = v
+                qkv_expected[:, head_num : 2 * head_num, :] = key_state
+                qkv_expected[:, 2 * head_num :, :vhead] = v
 
                 torch.testing.assert_close(qkv, qkv_expected, atol=1e-3, rtol=1e-5)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     unittest.main()

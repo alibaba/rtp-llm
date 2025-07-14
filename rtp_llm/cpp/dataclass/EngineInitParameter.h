@@ -18,32 +18,33 @@ namespace th = torch;
 
 namespace rtp_llm {
 
-using TensorMap  = std::unordered_map<std::string, th::Tensor>;
-using TensorMaps = std::vector<TensorMap>;
+using TensorMap          = std::unordered_map<std::string, th::Tensor>;
+using TensorMaps         = std::vector<TensorMap>;
 using ConstBufferPtrMap  = std::unordered_map<std::string, rtp_llm::ConstBufferPtr>;
 using ConstBufferPtrMaps = std::vector<ConstBufferPtrMap>;
 
 struct EngineInitParams: public th::jit::CustomClassHolder {
     EngineInitParams() {};
-   // This class is the only one that holds gpt_weights object globally.
+    // This class is the only one that holds gpt_weights object globally.
     EngineInitParams(size_t                           model_id,
                      const rtp_llm::GptInitParameter& gpt_init_parameter,
                      rtp_llm::Weights&&               gpt_weights,
-                     py::object                       py_model = py::none())
-    : model_id(model_id)
-    , gpt_init_parameter(gpt_init_parameter)
-    , gpt_weights(std::move(gpt_weights))
-    , py_model(py_model)
-    {
+                     py::object                       py_model = py::none()):
+        model_id(model_id),
+        gpt_init_parameter(gpt_init_parameter),
+        gpt_weights(std::move(gpt_weights)),
+        py_model(py_model) {
         StaticConfig::user_deep_gemm_num_sm = gpt_init_parameter.hw_kernel_config.deep_gemm_num_sm;
         StaticConfig::user_arm_gemm_use_kai = gpt_init_parameter.hw_kernel_config.arm_gemm_use_kai;
-        StaticConfig::user_ft_core_dump_on_exception = gpt_init_parameter.profiling_debug_logging_config.ft_core_dump_on_exception;
+        StaticConfig::user_ft_core_dump_on_exception =
+            gpt_init_parameter.profiling_debug_logging_config.ft_core_dump_on_exception;
         StaticConfig::user_disable_pdl = gpt_init_parameter.misc_config.disable_pdl;
-        StaticConfig::user_torch_cuda_profiler_dir = gpt_init_parameter.profiling_debug_logging_config.torch_cuda_profiler_dir;
+        StaticConfig::user_torch_cuda_profiler_dir =
+            gpt_init_parameter.profiling_debug_logging_config.torch_cuda_profiler_dir;
         // default 1 minute and 1000
         StepRecorder::STEP_RECORDS_TIME_RANGE = gpt_init_parameter.misc_config.step_records_time_range;
-        StepRecorder::STEP_RECORDS_MAX_SIZE = gpt_init_parameter.misc_config.step_records_max_size;
-        ParallelInfo& global_parallel_info = ParallelInfo::globalParallelInfo();
+        StepRecorder::STEP_RECORDS_MAX_SIZE   = gpt_init_parameter.misc_config.step_records_max_size;
+        ParallelInfo& global_parallel_info    = ParallelInfo::globalParallelInfo();
         global_parallel_info.setTpSize(gpt_init_parameter.parallelism_distributed_config.tp_size);
         global_parallel_info.setPpSize(gpt_init_parameter.parallelism_distributed_config.pp_size);
         global_parallel_info.setEpSize(gpt_init_parameter.parallelism_distributed_config.ep_size);
@@ -55,12 +56,13 @@ struct EngineInitParams: public th::jit::CustomClassHolder {
         gpt_init_parameter.showDebugInfo();
     }
 
-    size_t model_id;
-    rtp_llm::GptInitParameter         gpt_init_parameter;
-    rtp_llm::Weights                  gpt_weights;
-    py::object                        py_model;
+    size_t                    model_id;
+    rtp_llm::GptInitParameter gpt_init_parameter;
+    rtp_llm::Weights          gpt_weights;
+    py::object                py_model;
 
     kmonitor::MetricsReporterPtr metrics_reporter = nullptr;
+
 public:
     void showGptInitParameter() {
         gpt_init_parameter.showDebugInfo();
@@ -81,13 +83,13 @@ struct ProposeModelEngineInitParams: public th::jit::CustomClassHolder {
         vanilla_model_params(new EngineInitParams(model_id, gpt_init_parameter, std::move(gpt_weights))) {}
 
     // Consturctor for deterministic propose model
-    ProposeModelEngineInitParams(std::string sp_type, size_t gen_num_per_circle) :
-                    sp_type(sp_type), gen_num_per_circle(gen_num_per_circle) {}
+    ProposeModelEngineInitParams(std::string sp_type, size_t gen_num_per_circle):
+        sp_type(sp_type), gen_num_per_circle(gen_num_per_circle) {}
 
     // Consturctor for mtp propose model
-    ProposeModelEngineInitParams(std::string sp_type,
-                                 size_t gen_num_per_circle,
-                                 std::unique_ptr<std::vector<std::unique_ptr<EngineInitParams>>> mtp_model_params) :
+    ProposeModelEngineInitParams(std::string                                                     sp_type,
+                                 size_t                                                          gen_num_per_circle,
+                                 std::unique_ptr<std::vector<std::unique_ptr<EngineInitParams>>> mtp_model_params):
         sp_type(sp_type),
         gen_num_per_circle(gen_num_per_circle),
         vanilla_model_params(nullptr),
@@ -109,28 +111,24 @@ struct ProposeModelEngineInitParams: public th::jit::CustomClassHolder {
         }
     }
 
-
     std::string                       sp_type;
-    size_t                            gen_num_per_circle = 0;
+    size_t                            gen_num_per_circle   = 0;
     std::unique_ptr<EngineInitParams> vanilla_model_params = nullptr;
 
     std::unique_ptr<std::vector<std::unique_ptr<EngineInitParams>>> mtp_model_params_;
-    py::object                        eagle_model;
-    kmonitor::MetricsReporterPtr      metrics_reporter = nullptr;
+    py::object                                                      eagle_model;
+    kmonitor::MetricsReporterPtr                                    metrics_reporter = nullptr;
 };
 
 struct WarmUpResult {
-    size_t device_reserved_bytes  = 0;
-    size_t max_used_memory        = 0;
+    size_t device_reserved_bytes = 0;
+    size_t max_used_memory       = 0;
 };
 
 class WeightsConverter {
 public:
-    WeightsConverter(bool need_copy,
-                     rtp_llm::QuantAlgo quant_alog = rtp_llm::QuantAlgo()) :
-                     need_copy_(need_copy),
-                     quant_algo_(quant_alog)
-    {
+    WeightsConverter(bool need_copy, rtp_llm::QuantAlgo quant_alog = rtp_llm::QuantAlgo()):
+        need_copy_(need_copy), quant_algo_(quant_alog) {
         if (need_copy_) {
             device_ = rtp_llm::DeviceFactory::getDefaultDevice();
         }
@@ -143,69 +141,58 @@ public:
     // this used for cpp unittest.
     // 3rd. interface is to convert BufferPtr to rtp_llm::weights,
     // this is the core impl, above 2 interface invoke this interface.
-    std::unique_ptr<rtp_llm::Weights>
-    createGptWeights(py::object layer_weights,
-                     py::object  global_weight);
+    std::unique_ptr<rtp_llm::Weights> createGptWeights(py::object layer_weights, py::object global_weight);
 
-    std::unique_ptr<rtp_llm::Weights>
-    createGptWeights(std::unique_ptr<TensorMaps> layer_weights,
-                     std::unique_ptr<TensorMap>  global_weight);
+    std::unique_ptr<rtp_llm::Weights> createGptWeights(std::unique_ptr<TensorMaps> layer_weights,
+                                                       std::unique_ptr<TensorMap>  global_weight);
 
-    std::unique_ptr<rtp_llm::Weights>
-    createGptWeights(std::unique_ptr<ConstBufferPtrMaps> layer_weights,
-                     std::unique_ptr<ConstBufferPtrMap>  global_weight);
-
+    std::unique_ptr<rtp_llm::Weights> createGptWeights(std::unique_ptr<ConstBufferPtrMaps> layer_weights,
+                                                       std::unique_ptr<ConstBufferPtrMap>  global_weight);
 
     // TODO(): rm old impl init
     std::unique_ptr<ConstBufferPtrMaps> convertLayerWeights_(py::object py_layer_weights);
 
-    std::unique_ptr<ConstBufferPtrMap>  convertGlobalWeight_(py::object py_global_weight);
+    std::unique_ptr<ConstBufferPtrMap> convertGlobalWeight_(py::object py_global_weight);
 
 private:
-
     std::unique_ptr<TensorMaps> convertLayerWeights(py::object py_layer_weights);
     std::unique_ptr<TensorMap>  convertGlobalWeight(py::object py_global_weight);
 
-    std::unique_ptr<ConstBufferPtrMaps>
-    convertLayerWeights(std::unique_ptr<TensorMaps> tensor_layer_weights);
+    std::unique_ptr<ConstBufferPtrMaps> convertLayerWeights(std::unique_ptr<TensorMaps> tensor_layer_weights);
 
-    std::unique_ptr<ConstBufferPtrMap>
-    convertGlobalWeight(std::unique_ptr<TensorMap> tensor_global_weight);
+    std::unique_ptr<ConstBufferPtrMap> convertGlobalWeight(std::unique_ptr<TensorMap> tensor_global_weight);
 
     // helper function
 
-    rtp_llm::ConstBufferPtr mayFindBuffer(const ConstBufferPtrMap& map,
-                                     const std::string& key);
+    rtp_llm::ConstBufferPtr mayFindBuffer(const ConstBufferPtrMap& map, const std::string& key);
 
     rtp_llm::DenseWeightsPtr mayCreateDenseWeights(const ConstBufferPtrMap& map,
-                                              const std::string& kernel_key,
-                                              const std::string& bias_key = "",
-                                              const std::string& scales_key = "",
-                                              const std::string& zeros_key = "");
+                                                   const std::string&       kernel_key,
+                                                   const std::string&       bias_key   = "",
+                                                   const std::string&       scales_key = "",
+                                                   const std::string&       zeros_key  = "");
 
-    rtp_llm::LayerNormWeightsPtr
-    mayCreateLayerNormWeights(const ConstBufferPtrMap& map,
-                              const std::string& gamma_key,
-                              const std::string& beta_key = "",
-                              const std::string& scale_key = "",
-                              const std::string& scale_reciprocal_key = "");
+    rtp_llm::LayerNormWeightsPtr mayCreateLayerNormWeights(const ConstBufferPtrMap& map,
+                                                           const std::string&       gamma_key,
+                                                           const std::string&       beta_key             = "",
+                                                           const std::string&       scale_key            = "",
+                                                           const std::string&       scale_reciprocal_key = "");
 
-    rtp_llm::FfnLayerWeights
-    createFfnWeights(const ConstBufferPtrMap& map);
+    rtp_llm::FfnLayerWeights createFfnWeights(const ConstBufferPtrMap& map);
 
-    rtp_llm::AttentionLayerWeights
-    createAttentionWeights(const ConstBufferPtrMap& map);
+    rtp_llm::AttentionLayerWeights createAttentionWeights(const ConstBufferPtrMap& map);
 
     rtp_llm::ConstBufferPtr CopyTensorToBufferPtr(const torch::Tensor& tensor);
 
 private:
-    bool            need_copy_;
+    bool                 need_copy_;
     rtp_llm::QuantAlgo   quant_algo_;
     rtp_llm::DeviceBase* device_;
-    bool use_linear_bias_slopes_;
+    bool                 use_linear_bias_slopes_;
 };
 
-std::tuple<rtp_llm::GptInitParameter, std::unique_ptr<rtp_llm::Weights>> prepareEngineInitParams(py::object model, bool sp_model = false);
+std::tuple<rtp_llm::GptInitParameter, std::unique_ptr<rtp_llm::Weights>> prepareEngineInitParams(py::object model,
+                                                                                                 bool sp_model = false);
 
 std::unique_ptr<ProposeModelEngineInitParams> prepareMTPEngineInitParams(size_t model_id, py::object model);
 

@@ -36,20 +36,19 @@ private:
         return HIP_IPC_HANDLE_SIZE * world_size;
     }
 
-    std::vector<std::string> prepareP2PBuffer_(const NcclParam& nccl_para,
-                                               torch::Tensor&   local_buffer,
-                                               hipStream_t      stream);
+    std::vector<std::string>
+    prepareP2PBuffer_(const NcclParam& nccl_para, torch::Tensor& local_buffer, hipStream_t stream);
 
-    const size_t                   rank_               = 0;
-    const size_t                   rank_index_         = 0;
-    const size_t                   world_size_         = 0;
-    bool                           support_nv_link_    = false;
-    const int64_t                  comm_buf_threshold_ = 0;
-    std::vector<size_t>            tp_ranks_;
-    torch::Tensor                  meta_;
-    torch::Tensor                  buffer_;
-    torch::Tensor                  rank_data_;
-    int64_t                        fa_;
+    const size_t        rank_               = 0;
+    const size_t        rank_index_         = 0;
+    const size_t        world_size_         = 0;
+    bool                support_nv_link_    = false;
+    const int64_t       comm_buf_threshold_ = 0;
+    std::vector<size_t> tp_ranks_;
+    torch::Tensor       meta_;
+    torch::Tensor       buffer_;
+    torch::Tensor       rank_data_;
+    int64_t             fa_;
 };
 
 std::unique_ptr<CustomAllReduceComm>

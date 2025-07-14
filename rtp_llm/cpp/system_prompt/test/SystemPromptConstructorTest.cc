@@ -15,24 +15,23 @@
 
 using namespace std;
 
-
 namespace rtp_llm {
 
-class SystemPromptConstructorTest : public DeviceTestBase {
-};
+class SystemPromptConstructorTest: public DeviceTestBase {};
 
 TEST_F(SystemPromptConstructorTest, testMultiTaskPromptConstruct) {
     SystemPromptConstructor constructor;
-    GptInitParameter params;
-    vector<int> prompt_1 = {1, 2, 3};
-    vector<int> prompt_2 = {4, 5, 6, 7};
+    GptInitParameter        params;
+    vector<int>             prompt_1 = {1, 2, 3};
+    vector<int>             prompt_2 = {4, 5, 6, 7};
     params.multi_task_prompt_tokens_ = {{"1", prompt_1}, {"2", prompt_2}};
     CustomConfig config;
-    auto gpt_init_params = GptInitParameter();
-    auto engine = createMockEngine(device_, config, gpt_init_params);
+    auto         gpt_init_params = GptInitParameter();
+    auto         engine          = createMockEngine(device_, config, gpt_init_params);
     ASSERT_EQ(engine->resourceContext().cache_manager->freeBlockNums(), 99);
     const_cast<ResourceContext*>(&engine->resourceContext())->reuse_cache = true;
-    auto result_status = constructor.construct(params, engine.get(), engine->resourceContext().cache_manager.get(), true);
+    auto result_status =
+        constructor.construct(params, engine.get(), engine->resourceContext().cache_manager.get(), true);
     ASSERT_EQ(result_status.ok(), true);
     auto result = result_status.value();
     ASSERT_EQ(result.size(), 2);
@@ -49,4 +48,4 @@ TEST_F(SystemPromptConstructorTest, testMultiTaskPromptConstruct) {
     ASSERT_EQ(item2.prompt_tokens, prompt_2);
 }
 
-}
+}  // namespace rtp_llm

@@ -11,19 +11,20 @@ public:
     RtpLLMMasterEntry();
     ~RtpLLMMasterEntry();
     bool init(const MasterInitParameter& param);
+
 protected:
-    bool initLoadBalancer(const MasterInitParameter& param);
-    bool initHttpServer();    
-    bool initTokenizeService();
+    bool                   initLoadBalancer(const MasterInitParameter& param);
+    bool                   initHttpServer();
+    bool                   initTokenizeService();
     LoadBalancerInitParams createLoadBalancerInitParams(const MasterInitParameter& param);
-    EstimatorConfig createEstimatorConfig(const PyEstimatorConfig& py_config);    
+    EstimatorConfig        createEstimatorConfig(const PyEstimatorConfig& py_config);
 
 private:
-    MasterInitParameter param_;
-    std::shared_ptr<PrefillLoadBalancer> load_balancer_;
+    MasterInitParameter                   param_;
+    std::shared_ptr<PrefillLoadBalancer>  load_balancer_;
     std::shared_ptr<RemoteTokenizeModule> tokenize_service_;
-    std::shared_ptr<MasterHttpServer> http_server_;
-    std::string biz_name_;
+    std::shared_ptr<MasterHttpServer>     http_server_;
+    std::string                           biz_name_;
 };
 
 void registerRtpLLMMasterEntry(py::module m);

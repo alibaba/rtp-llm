@@ -1,13 +1,17 @@
 import os
-import torch
-import numpy as np
 from typing import Dict
+
+import numpy as np
+import torch
 
 # This file helps exporting tensor to file so that they can be loaded from cpp world.
 # DO NOT REMOVE THIS FILE
 
+
 # method 1: torch.jit.save
-def export_tensors_to_jit_module(tensor_map: Dict[str, torch.Tensor], file_name: str) -> None:
+def export_tensors_to_jit_module(
+    tensor_map: Dict[str, torch.Tensor], file_name: str
+) -> None:
     class Container(torch.nn.Module):
         def __init__(self, values):
             super().__init__()
@@ -17,14 +21,18 @@ def export_tensors_to_jit_module(tensor_map: Dict[str, torch.Tensor], file_name:
     container = torch.jit.script(Container(tensor_map).cpu())
     container.save(file_name)
 
+
 # method 2: export to numpy dir
-def export_tensors_to_numpy_dir(tensor_map: Dict[str, torch.Tensor], dir_name: str) -> None:
+def export_tensors_to_numpy_dir(
+    tensor_map: Dict[str, torch.Tensor], dir_name: str
+) -> None:
     try:
         os.mkdir(dir_name)
     except FileExistsError:
         pass
     for key in tensor_map:
         np.save(dir_name + "/" + key + ".npy", tensor_map[key].cpu().numpy())
+
 
 # use example:
 #
@@ -43,4 +51,3 @@ def export_tensors_to_numpy_dir(tensor_map: Dict[str, torch.Tensor], dir_name: s
 # for key, p in model.named_parameters():
 #     params.update({key: p.data})
 # export_tensors_to_jit_module(params, "model.pt")
-

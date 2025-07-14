@@ -26,19 +26,20 @@ using namespace rtp_llm;
 
 namespace rtp_llm {
 
-BufferPtr genNormalCosSin(CudaDevice* device, int rope_dim, int rope_theta, float rope_scale, int max_position_embeddings) {
-    auto inv_freq = 1.0 / torch::pow(rope_theta, torch::arange(0, rope_dim, 2, torch::kInt64).to(torch::kFloat32) / rope_dim);
+BufferPtr
+genNormalCosSin(CudaDevice* device, int rope_dim, int rope_theta, float rope_scale, int max_position_embeddings) {
+    auto inv_freq =
+        1.0 / torch::pow(rope_theta, torch::arange(0, rope_dim, 2, torch::kInt64).to(torch::kFloat32) / rope_dim);
     auto t = torch::arange(max_position_embeddings, torch::kInt64).to(torch::kFloat32);
     t.div_(rope_scale);
-    auto freqs = torch::outer(t, inv_freq);
-    auto cos = freqs.cos().to(torch::kFloat32);
-    auto sin = freqs.sin().to(torch::kFloat32);
+    auto freqs   = torch::outer(t, inv_freq);
+    auto cos     = freqs.cos().to(torch::kFloat32);
+    auto sin     = freqs.sin().to(torch::kFloat32);
     auto cos_sin = torch::stack({cos, sin}, 0).permute({1, 2, 0}).reshape({cos.size(0), -1}).contiguous();
 
-    BufferPtr cos_sin_d = device->allocateBuffer({DataType::TYPE_FP32,
-                                                 {static_cast<size_t>(rope_dim * max_position_embeddings)},
-                                                 AllocationType::DEVICE},
-                                                 {"cos_sin_d"});
+    BufferPtr cos_sin_d = device->allocateBuffer(
+        {DataType::TYPE_FP32, {static_cast<size_t>(rope_dim * max_position_embeddings)}, AllocationType::DEVICE},
+        {"cos_sin_d"});
     check_cuda_value(cudaMemcpyAsync(cos_sin_d->data(),
                                      cos_sin.data_ptr(),
                                      rope_dim * max_position_embeddings * sizeof(float),
@@ -51,23 +52,27 @@ BufferPtr genNormalCosSin(CudaDevice* device, int rope_dim, int rope_theta, floa
 
 /**
  * @brief Get the Rope Cos Sin object, TODO: move to python
- * 
- * @param device 
- * @param rope_style 
- * @param rope_dim 
- * @param rope_theta 
- * @param rope_scale 
- * @param max_position_embeddings 
- * @return BufferPtr 
+ *
+ * @param device
+ * @param rope_style
+ * @param rope_dim
+ * @param rope_theta
+ * @param rope_scale
+ * @param max_position_embeddings
+ * @return BufferPtr
  */
 BufferPtr getRopeCosSin(CudaDevice* device,
-                        RopeStyle rope_style,
-                        int rope_dim,
-                        int rope_theta,
-                        float rope_scale,
-                        int max_position_embeddings = 128000) {
+                        RopeStyle   rope_style,
+                        int         rope_dim,
+                        int         rope_theta,
+                        float       rope_scale,
+                        int         max_position_embeddings = 128000) {
     RTP_LLM_LOG_INFO("rope: style = %d, dim = %d, theta = %d, scale = %f, max_position_embeddings = %d",
-                     rope_style, rope_dim, rope_theta, rope_scale, max_position_embeddings);
+                     rope_style,
+                     rope_dim,
+                     rope_theta,
+                     rope_scale,
+                     max_position_embeddings);
     BufferPtr cos_sin = nullptr;
 
     switch (rope_style) {
@@ -87,31 +92,30 @@ BufferPtr getRopeCosSin(CudaDevice* device,
 }
 
 ParamsPtr CudaDevice::prepareTrtAttn(const AttentionConfigs& configs,
-                                     const BufferPtr &k_cache,
-                                     const BufferPtr &kv_cache_block_id,
-                                     int batch_size)
-{
+                                     const BufferPtr&        k_cache,
+                                     const BufferPtr&        kv_cache_block_id,
+                                     int                     batch_size) {
     if (!k_cache || !kv_cache_block_id || 0 == batch_size) {
         return nullptr;
     }
 
     auto trt_attn = std::make_shared<TRTAttn>();
 
-    const int layer_num = k_cache->shape()[0];
-    const int block_num = k_cache->shape()[1];
+    const int layer_num       = k_cache->shape()[0];
+    const int block_num       = k_cache->shape()[1];
     const int kv_block_offset = block_num * layer_num;
 
-    int ele_size = 2;
+    int             ele_size   = 2;
     KvCacheDataType cache_type = KvCacheDataType::BASE;
 #ifdef ENABLE_FP8
     if (use_fp8_fmha_) {
         cache_type = KvCacheDataType::FP8;
-        ele_size = 1;
+        ele_size   = 1;
     } else
 #endif
-    if (configs.kv_cache_dtype == KvCacheDataType::INT8) {
+        if (configs.kv_cache_dtype == KvCacheDataType::INT8) {
         cache_type = KvCacheDataType::INT8;
-        ele_size = 1;
+        ele_size   = 1;
     }
 
     RUNTIME_ASSERT_OP_ARG(kv_cache_block_id->shape()[0] == batch_size,
@@ -120,19 +124,19 @@ ParamsPtr CudaDevice::prepareTrtAttn(const AttentionConfigs& configs,
                           kv_cache_block_id->debugString().c_str());
     const size_t max_blocks_per_batch = kv_cache_block_id->shape()[1];
 
-    trt_attn->kv_cache_offset = allocateBuffer(
-            {DataType::TYPE_INT32, {size_t(batch_size), 1, 2, max_blocks_per_batch}, AllocationType::DEVICE},
-            {"kv_cache_offset"});
-    trt_attn->kv_block_array = KVBlockArray(batch_size,
+    trt_attn->kv_cache_offset =
+        allocateBuffer({DataType::TYPE_INT32, {size_t(batch_size), 1, 2, max_blocks_per_batch}, AllocationType::DEVICE},
+                       {"kv_cache_offset"});
+    trt_attn->kv_block_array                     = KVBlockArray(batch_size,
                                             max_blocks_per_batch,
                                             configs.tokens_per_block,
                                             configs.kv_head_num * configs.size_per_head * ele_size,
                                             0,
                                             0,
-                                            nullptr, // (uint64_t*)k_cache.data(),
+                                            nullptr,  // (uint64_t*)k_cache.data(),
                                             nullptr,
                                             (rtp_llm::KVCacheIndex*)trt_attn->kv_cache_offset->data<int>());
-    trt_attn->kv_block_array.cache_type = cache_type;
+    trt_attn->kv_block_array.cache_type          = cache_type;
     trt_attn->kv_block_array.mScaleBytesPerBlock = configs.tokens_per_block * configs.kv_head_num * sizeof(float);
 
     invokeConvertOffsetToBlockArrayData(trt_attn->kv_cache_offset->data<int>(),
@@ -144,8 +148,8 @@ ParamsPtr CudaDevice::prepareTrtAttn(const AttentionConfigs& configs,
 
     if (is_sm90() && fmha_type_ == FMHAType::PAGED_TRT_V2) {
         trt_attn->kv_cache_offset_h = allocateBuffer(
-                {DataType::TYPE_INT32, {size_t(batch_size), 1, 2, max_blocks_per_batch}, AllocationType::HOST},
-                {"kv_cache_offset_h"});
+            {DataType::TYPE_INT32, {size_t(batch_size), 1, 2, max_blocks_per_batch}, AllocationType::HOST},
+            {"kv_cache_offset_h"});
         copy({*trt_attn->kv_cache_offset_h, *trt_attn->kv_cache_offset});
         trt_attn->kv_block_array.pagedKVBlockOffsetsOnHost = trt_attn->kv_cache_offset_h->data();
     }
@@ -159,41 +163,35 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
     KVBlockArray kv_block_array;
 
     if (params.common.kv_cache) {
-        auto trt_attn = ((TRTAttn*)params.common.prefill_trt_attn.get());
+        auto trt_attn  = ((TRTAttn*)params.common.prefill_trt_attn.get());
         kv_block_array = trt_attn->kv_block_array;
         TRTAttn::setKvCache(kv_block_array, *params.common.kv_cache);
     }
 
-    auto datatype       = params.input.type();
-    auto token_num      = params.input.shape()[0];
-    auto batch_size     = params.common.context_batch_size;
-    auto decoder_batch_size = params.common.decoder_batch_size;
-    auto seq_len        = params.common.context_max_seq_len;
+    auto datatype            = params.input.type();
+    auto token_num           = params.input.shape()[0];
+    auto batch_size          = params.common.context_batch_size;
+    auto decoder_batch_size  = params.common.decoder_batch_size;
+    auto seq_len             = params.common.context_max_seq_len;
     auto seq_len_with_prefix = seq_len + params.common.max_prefix_length;
-    auto head_num       = params.configs.head_num;
-    auto kv_head_num    = params.configs.kv_head_num;
-    auto size_per_head  = params.configs.size_per_head;
+    auto head_num            = params.configs.head_num;
+    auto kv_head_num         = params.configs.kv_head_num;
+    auto size_per_head       = params.configs.size_per_head;
 
     // for flashinfer
-    auto q_no_transpose_output = allocateBuffer({params.input.type(),
-                                                {token_num, head_num, size_per_head},
-                                                AllocationType::DEVICE},
-                                                {"q_no_transpose_output"});
+    auto q_no_transpose_output = allocateBuffer(
+        {params.input.type(), {token_num, head_num, size_per_head}, AllocationType::DEVICE}, {"q_no_transpose_output"});
 
-    auto q_output = allocateBuffer({params.input.type(),
-                                    {batch_size, head_num, seq_len, size_per_head},
-                                    AllocationType::DEVICE},
-                                    {"q_output"});
+    auto q_output = allocateBuffer(
+        {params.input.type(), {batch_size, head_num, seq_len, size_per_head}, AllocationType::DEVICE}, {"q_output"});
 
-    auto k_output = allocateBuffer({params.input.type(),
-                                    {batch_size, kv_head_num, seq_len_with_prefix, size_per_head},
-                                    AllocationType::DEVICE},
+    auto k_output = allocateBuffer(
+        {params.input.type(), {batch_size, kv_head_num, seq_len_with_prefix, size_per_head}, AllocationType::DEVICE},
         {"k_output"});
 
-    auto v_output = allocateBuffer({params.input.type(),
-                                    {batch_size, kv_head_num, seq_len_with_prefix, size_per_head},
-                                    AllocationType::DEVICE},
-                                    {"v_output"});
+    auto v_output = allocateBuffer(
+        {params.input.type(), {batch_size, kv_head_num, seq_len_with_prefix, size_per_head}, AllocationType::DEVICE},
+        {"v_output"});
 
     BufferPtr qkv_buf_fp8;
     if (use_fp8_fmha_) {
@@ -209,7 +207,6 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
         cudaMemsetAsync(k_output->data(), 0, k_output->sizeBytes(), stream_);
         cudaMemsetAsync(v_output->data(), 0, v_output->sizeBytes(), stream_);
     }
-
 
     PrefixPromptBatchWeightsParam prefix_prompt_param;
 
@@ -235,8 +232,8 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
                                          head_num,
                                          kv_head_num,
                                          size_per_head,
-                                         nullptr, // scale_out_ptr,
-                                         0, //int8_mode,
+                                         nullptr,  // scale_out_ptr,
+                                         0,        // int8_mode,
                                          stream_);
         check_cuda_error();
     }
@@ -253,37 +250,41 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
         // if use mla cache, no need to store cache
         bool store_cache = params.common.kv_cache.has_value();
 
-        DISPATCH_CUDA_FUNCTION_DATA_TYPE(
-            datatype,
-            invokeAddFusedQKVBiasTranspose,
-            q_no_transpose_output->data(),
-            q_output->data(),
-            k_output->data(),
-            v_output->data(),
-            &prefix_prompt_param,
-            params.input.data(),
-            qkv_buf_fp8 != nullptr ? qkv_buf_fp8->data() : nullptr,
-            params.common.position_ids ? params.common.position_ids->dataWithOffset<int>(decoder_batch_size * params.configs.rope_config.index_factor): nullptr,
-            params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias ? params.weights.qkv_weight->bias->data() : nullptr,
-            params.common.padding_offset->data<int>(),
-            params.common.cu_seqlens->data<int>(),
-            batch_size,
-            seq_len,
-            token_num,
-            head_num,
-            kv_head_num,
-            size_per_head,
-            params.configs.rope_config,
-            params.configs.use_logn_attn,
-            nullptr, // scale_out_ptr,
-            0, // int8_mode,
-            fmha_type_ == FMHAType::PAGED_TRT_V2,
-            store_qkv,
-            store_q_no_transpose,
-            store_q,
-            store_kv,
-            store_cache,
-            stream_);
+        DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
+                                         invokeAddFusedQKVBiasTranspose,
+                                         q_no_transpose_output->data(),
+                                         q_output->data(),
+                                         k_output->data(),
+                                         v_output->data(),
+                                         &prefix_prompt_param,
+                                         params.input.data(),
+                                         qkv_buf_fp8 != nullptr ? qkv_buf_fp8->data() : nullptr,
+                                         params.common.position_ids ?
+                                             params.common.position_ids->dataWithOffset<int>(
+                                                 decoder_batch_size * params.configs.rope_config.index_factor) :
+                                             nullptr,
+                                         params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias ?
+                                             params.weights.qkv_weight->bias->data() :
+                                             nullptr,
+                                         params.common.padding_offset->data<int>(),
+                                         params.common.cu_seqlens->data<int>(),
+                                         batch_size,
+                                         seq_len,
+                                         token_num,
+                                         head_num,
+                                         kv_head_num,
+                                         size_per_head,
+                                         params.configs.rope_config,
+                                         params.configs.use_logn_attn,
+                                         nullptr,  // scale_out_ptr,
+                                         0,        // int8_mode,
+                                         fmha_type_ == FMHAType::PAGED_TRT_V2,
+                                         store_qkv,
+                                         store_q_no_transpose,
+                                         store_q,
+                                         store_kv,
+                                         store_cache,
+                                         stream_);
         check_cuda_error();
 
         if (!qkv_buf_fp8) {
@@ -311,26 +312,25 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
 
 template<typename T>
 void selfAttentionwrapper(const AttentionModuleParams params,
-                          bool use_multi_block_mode,
-                          bool use_fp8_fmha,
-                          size_t max_seq_len_tile,
-                          void* partial_out,
-                          float* partial_sum,
-                          float* partial_max,
-                          int* block_counter,
-                          KVBlockArray kv_block_array,
-                          cudaStream_t stream,
-                          CudaDevice *device)
-{
-    size_t batch_size           = params.common.decoder_batch_size;
-    size_t step                 = params.common.decoder_max_seq_len + 1;
-    size_t local_head_num       = params.configs.head_num;
-    size_t local_head_num_kv    = params.configs.kv_head_num;
-    size_t size_per_head        = params.configs.size_per_head;
-    const auto& output = params.output;
+                          bool                        use_multi_block_mode,
+                          bool                        use_fp8_fmha,
+                          size_t                      max_seq_len_tile,
+                          void*                       partial_out,
+                          float*                      partial_sum,
+                          float*                      partial_max,
+                          int*                        block_counter,
+                          KVBlockArray                kv_block_array,
+                          cudaStream_t                stream,
+                          CudaDevice*                 device) {
+    size_t      batch_size        = params.common.decoder_batch_size;
+    size_t      step              = params.common.decoder_max_seq_len + 1;
+    size_t      local_head_num    = params.configs.head_num;
+    size_t      local_head_num_kv = params.configs.kv_head_num;
+    size_t      size_per_head     = params.configs.size_per_head;
+    const auto& output            = params.output;
 
-    const T* qkv_buf_ptr = params.input.data<T>();
-    void* attn_out_ptr = nullptr;
+    const T*  qkv_buf_ptr  = params.input.data<T>();
+    void*     attn_out_ptr = nullptr;
     BufferPtr f16_out;
     if (use_fp8_fmha) {
         f16_out = device->allocateBuffer({params.input.type(), output.shape(), AllocationType::DEVICE}, {"f16_out"});
@@ -340,20 +340,24 @@ void selfAttentionwrapper(const AttentionModuleParams params,
     }
 
     const T* bias_ptr = (params.weights.qkv_weight->bias == nullptr || !params.configs.fuse_qkv_add_bias) ?
-                        nullptr :
-                        params.weights.qkv_weight->bias->data<T>();
+                            nullptr :
+                            params.weights.qkv_weight->bias->data<T>();
 
-    const auto* input_lengths = params.common.input_lengths->data<int>();
+    const auto* input_lengths    = params.common.input_lengths->data<int>();
     const auto* sequence_lengths = params.common.sequence_lengths->data<int>();
 
-    float q_scaling = params.configs.q_scaling;
-    const float* linear_bias_slopes = params.common.linear_bias_slopes ? params.common.linear_bias_slopes->data<float>() : nullptr;
+    float        q_scaling = params.configs.q_scaling;
+    const float* linear_bias_slopes =
+        params.common.linear_bias_slopes ? params.common.linear_bias_slopes->data<float>() : nullptr;
 
-    tensorrt_llm::common::QuantMode kv_cache_quant_mode = trt_common::QuantMode::fromDescription(false, false, false, false, false, false, false, false);
+    tensorrt_llm::common::QuantMode kv_cache_quant_mode =
+        trt_common::QuantMode::fromDescription(false, false, false, false, false, false, false, false);
     if (params.configs.kv_cache_dtype == KvCacheDataType::INT8) {
-        kv_cache_quant_mode = trt_common::QuantMode::fromDescription(true, true, false, false, false, true, false, true);
+        kv_cache_quant_mode =
+            trt_common::QuantMode::fromDescription(true, true, false, false, false, true, false, true);
     } else if (params.configs.kv_cache_dtype == KvCacheDataType::FP8 && use_fp8_fmha) {
-        kv_cache_quant_mode = trt_common::QuantMode::fromDescription(true, true, false, false, false, false, true, true);
+        kv_cache_quant_mode =
+            trt_common::QuantMode::fromDescription(true, true, false, false, false, false, true, true);
     }
 
     const float* attention_output_orig_quant_scale = nullptr;
@@ -362,44 +366,44 @@ void selfAttentionwrapper(const AttentionModuleParams params,
     }
 
     fusedQKV_masked_attention_dispatch<T, KVBlockArray>(
-            qkv_buf_ptr,
-            bias_ptr,
-            nullptr, // relative_attention_bias
-            nullptr, // cache_indir
-            reinterpret_cast<T*>(attn_out_ptr),
-            nullptr, // finished
-            sequence_lengths,
-            batch_size,
-            1, // beam_width
-            local_head_num,
-            local_head_num_kv,
-            size_per_head,
-            params.configs.rope_config,
-            params.configs.use_logn_attn,
-            params.common.position_ids ? params.common.position_ids->data<int>() : nullptr,
-            step,
-            nullptr, // prefix_prompt_lengths
-            0, // max_prefix_prompt_length
-            true, // count_prefix_length
-            input_lengths,
-            step,
-            q_scaling,
-            0, // relative_attention_bias_stride,
-            linear_bias_slopes,
-            nullptr, // masked_tokens,
-            nullptr, // query_weight_scale_out
-            attention_output_orig_quant_scale,
-            0, // int8_mode,
-            kv_cache_quant_mode,
-            use_multi_block_mode,
-            (int)max_seq_len_tile,
-            reinterpret_cast<T*>(partial_out),
-            partial_sum,
-            partial_max,
-            block_counter,
-            params.configs.softmax_extra_scale,
-            kv_block_array,
-            stream);
+        qkv_buf_ptr,
+        bias_ptr,
+        nullptr,  // relative_attention_bias
+        nullptr,  // cache_indir
+        reinterpret_cast<T*>(attn_out_ptr),
+        nullptr,  // finished
+        sequence_lengths,
+        batch_size,
+        1,  // beam_width
+        local_head_num,
+        local_head_num_kv,
+        size_per_head,
+        params.configs.rope_config,
+        params.configs.use_logn_attn,
+        params.common.position_ids ? params.common.position_ids->data<int>() : nullptr,
+        step,
+        nullptr,  // prefix_prompt_lengths
+        0,        // max_prefix_prompt_length
+        true,     // count_prefix_length
+        input_lengths,
+        step,
+        q_scaling,
+        0,  // relative_attention_bias_stride,
+        linear_bias_slopes,
+        nullptr,  // masked_tokens,
+        nullptr,  // query_weight_scale_out
+        attention_output_orig_quant_scale,
+        0,  // int8_mode,
+        kv_cache_quant_mode,
+        use_multi_block_mode,
+        (int)max_seq_len_tile,
+        reinterpret_cast<T*>(partial_out),
+        partial_sum,
+        partial_max,
+        block_counter,
+        params.configs.softmax_extra_scale,
+        kv_block_array,
+        stream);
     check_cuda_error();
     if (f16_out) {
         cudaMemcpyAsync(output.data(), f16_out->data(), output.size(), cudaMemcpyDeviceToDevice, stream);
@@ -414,12 +418,12 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
         params.output.updateTypeAndShape(DataType::TYPE_FP8_E4M3, params.output.shape());
     }
 
-    auto datatype = params.input.type();
-    size_t max_seq_len_tile = 0;
-    BufferPtr partial_out = nullptr;
-    BufferPtr partial_sum = nullptr;
-    BufferPtr partial_max = nullptr;
-    BufferPtr block_counter = nullptr;
+    auto      datatype         = params.input.type();
+    size_t    max_seq_len_tile = 0;
+    BufferPtr partial_out      = nullptr;
+    BufferPtr partial_sum      = nullptr;
+    BufferPtr partial_max      = nullptr;
+    BufferPtr block_counter    = nullptr;
 
     size_t batch_size        = params.common.decoder_batch_size;
     size_t local_head_num    = params.configs.head_num;
@@ -427,18 +431,16 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
     size_t size_per_head     = params.configs.size_per_head;
 
     RUNTIME_ASSERT_OP_ARG(params.common.kv_cache, "kv cache can not be null for decoder self-attention");
-    auto trt_attn = ((TRTAttn*)params.common.decode_trt_attn.get());
+    auto trt_attn       = ((TRTAttn*)params.common.decode_trt_attn.get());
     auto kv_block_array = trt_attn->kv_block_array;
     TRTAttn::setKvCache(kv_block_array, *params.common.kv_cache);
 
     BufferPtr q_output;
-    auto flash_infer = (FlashInferAttnParams*)params.common.decode_flash_infer_attn.get();
-    bool use_flashinfer = flash_infer && flash_infer->plan.numel() > 0;
+    auto      flash_infer    = (FlashInferAttnParams*)params.common.decode_flash_infer_attn.get();
+    bool      use_flashinfer = flash_infer && flash_infer->plan.numel() > 0;
     if (use_xqa || use_flashinfer) {
-        q_output = allocateBuffer({params.input.type(),
-                                  {batch_size, local_head_num, size_per_head},
-                                  AllocationType::DEVICE},
-                                  {"q_output"});
+        q_output = allocateBuffer(
+            {params.input.type(), {batch_size, local_head_num, size_per_head}, AllocationType::DEVICE}, {"q_output"});
 
         static BufferPtr cos_sin_cache = getRopeCosSin(this,
                                                        params.configs.rope_config.style,
@@ -449,12 +451,14 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(params.input.type(),
                                          invokeDecodeAddFusedQKVBiasTranspose,
                                          q_output->data(),
-                                         nullptr, // k_buf
-                                         nullptr, // v_buf
+                                         nullptr,  // k_buf
+                                         nullptr,  // v_buf
                                          kv_block_array,
                                          params.input.data(),
                                          params.common.sequence_lengths->data<int>(),
-                                         params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias ? params.weights.qkv_weight->bias->data() : nullptr,
+                                         params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias ?
+                                             params.weights.qkv_weight->bias->data() :
+                                             nullptr,
                                          cos_sin_cache ? cos_sin_cache->data<float>() : nullptr,
                                          batch_size,
                                          local_head_num,
@@ -462,9 +466,9 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
                                          size_per_head,
                                          params.configs.rope_config,
                                          params.configs.use_logn_attn,
-                                         true, // store_q,
-                                         false, // store_kv,
-                                         true, // store_cache,
+                                         true,   // store_q,
+                                         false,  // store_kv,
+                                         true,   // store_cache,
                                          stream_);
 
         check_cuda_error();
@@ -474,12 +478,13 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
 
 #ifdef USING_CUDA12
     size_t local_tokens_per_block = params.configs.tokens_per_block;
-    if (use_xqa && supportXqa(params.input.type(),
-                              params.output.type(),
-                              params.common.kv_cache->k_cache_buffer->type(),
-                              local_head_num / local_kv_head_num,
-                              size_per_head,
-                              local_tokens_per_block)) {
+    if (use_xqa
+        && supportXqa(params.input.type(),
+                      params.output.type(),
+                      params.common.kv_cache->k_cache_buffer->type(),
+                      local_head_num / local_kv_head_num,
+                      size_per_head,
+                      local_tokens_per_block)) {
 
         runXqa(q_output->data(),
                params.output.data(),
@@ -511,29 +516,24 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
         const int threads_per_value = pow2roundup(size_per_head) * getTypeSize(datatype) / 16;
         // for allocate partial output results memory. Regardless to THDS_PER_BLOCK
         max_seq_len_tile = 256 / threads_per_value;
-        partial_out = allocateBuffer({datatype,
-                                     {batch_size, max_seq_len_tile, local_head_num, size_per_head},
-                                     AllocationType::DEVICE},
+        partial_out      = allocateBuffer(
+            {datatype, {batch_size, max_seq_len_tile, local_head_num, size_per_head}, AllocationType::DEVICE},
             {"partial_out"});
-        partial_sum = allocateBuffer({DataType::TYPE_FP32,
-                                     {batch_size, max_seq_len_tile, local_head_num},
-                                     AllocationType::DEVICE},
+        partial_sum = allocateBuffer(
+            {DataType::TYPE_FP32, {batch_size, max_seq_len_tile, local_head_num}, AllocationType::DEVICE},
             {"partial_sum"});
-        partial_max = allocateBuffer({DataType::TYPE_FP32,
-                                     {batch_size, max_seq_len_tile, local_head_num},
-                                     AllocationType::DEVICE},
+        partial_max = allocateBuffer(
+            {DataType::TYPE_FP32, {batch_size, max_seq_len_tile, local_head_num}, AllocationType::DEVICE},
             {"partial_max"});
-        block_counter = allocateBuffer({DataType::TYPE_INT32,
-                                      {batch_size, local_head_num},
-                                      AllocationType::DEVICE},
+        block_counter = allocateBuffer({DataType::TYPE_INT32, {batch_size, local_head_num}, AllocationType::DEVICE},
                                        {"block_counter"});
         // TODO(lidongjin) use fill op to set zeros.
         cudaMemsetAsync(block_counter->data(), 0, sizeof(int) * batch_size * local_head_num, stream_);
     }
-    void* partial_out_data = (partial_out == nullptr) ? nullptr : partial_out->data();
-    float* partial_sum_data = (partial_sum == nullptr) ? nullptr : partial_sum->data<float>();
-    float* partial_max_data = (partial_max == nullptr) ? nullptr : partial_max->data<float>();
-    int* block_counter_data = (block_counter == nullptr) ? nullptr : block_counter->data<int>();
+    void*  partial_out_data   = (partial_out == nullptr) ? nullptr : partial_out->data();
+    float* partial_sum_data   = (partial_sum == nullptr) ? nullptr : partial_sum->data<float>();
+    float* partial_max_data   = (partial_max == nullptr) ? nullptr : partial_max->data<float>();
+    int*   block_counter_data = (block_counter == nullptr) ? nullptr : block_counter->data<int>();
 
     DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
                                      selfAttentionwrapper,

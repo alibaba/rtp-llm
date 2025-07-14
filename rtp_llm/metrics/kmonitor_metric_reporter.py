@@ -1,7 +1,9 @@
 import logging
 from enum import Enum
-from typing import Dict, Any, Union
+from typing import Any, Dict, Union
+
 from rtp_llm.distribute.worker_info import g_parallel_info
+
 
 class AccMetrics(Enum):
     CANCEL_QPS_METRIC = "py_rtp_cancal_qps_metric"
@@ -12,6 +14,7 @@ class AccMetrics(Enum):
     ITER_QPS_METRIC = "py_rtp_response_iterate_qps"
     UPDATE_QPS_METRIC = "py_rtp_update_qps_metric"
     ERROR_UPDATE_QPS_METRIC = "py_rtp_error_update_target_qps"
+
 
 class GaugeMetrics(Enum):
     RESPONSE_FIRST_TOKEN_RT_METRIC = "py_rtp_response_first_token_rt"
@@ -28,6 +31,7 @@ class GaugeMetrics(Enum):
 
     UPDATE_LANTENCY_METRIC = "py_rtp_update_framework_rt"
 
+
 class MetricReporter(object):
     def __init__(self, kmonitor: Any):
         self._kmon = kmonitor
@@ -36,10 +40,15 @@ class MetricReporter(object):
         ## we will update this for every FrontedServer in `start_frontend_server_impl`
         self.frontend_server_id = 0
 
-    def report(self, metric: Union[AccMetrics,GaugeMetrics], value: float = 1, tags: Dict[str, Any] = {}):
+    def report(
+        self,
+        metric: Union[AccMetrics, GaugeMetrics],
+        value: float = 1,
+        tags: Dict[str, Any] = {},
+    ):
         if g_parallel_info.dp_size > 1:
-            tags['dp_rank'] = str(g_parallel_info.dp_rank)
-        tags['frontend_server_id'] = str(self.frontend_server_id)
+            tags["dp_rank"] = str(g_parallel_info.dp_rank)
+        tags["frontend_server_id"] = str(self.frontend_server_id)
         kmon_metric = self._matic_map.get(metric.value, None)
         if kmon_metric is None:
             logging.warn(f"no metric named {metric.name}")
@@ -53,7 +62,11 @@ class MetricReporter(object):
         if not self._inited:
             self._inited = True
             for metric in AccMetrics:
-                self._matic_map[metric.value] = self._kmon.register_acc_metric(metric.value)
+                self._matic_map[metric.value] = self._kmon.register_acc_metric(
+                    metric.value
+                )
 
             for metric in GaugeMetrics:
-                self._matic_map[metric.value] = self._kmon.register_gauge_metric(metric.value)
+                self._matic_map[metric.value] = self._kmon.register_gauge_metric(
+                    metric.value
+                )

@@ -1,13 +1,13 @@
 """Tokenization classes for ChatGLM."""
-from typing import List, Optional, Union
-import os
 
-from transformers.tokenization_utils import PreTrainedTokenizer
-from transformers.utils import logging, PaddingStrategy
-from transformers.tokenization_utils_base import EncodedInput, BatchEncoding
-from typing import Dict
-import sentencepiece as spm
+import os
+from typing import Dict, List, Optional, Union
+
 import numpy as np
+import sentencepiece as spm
+from transformers.tokenization_utils import PreTrainedTokenizer
+from transformers.tokenization_utils_base import BatchEncoding, EncodedInput
+from transformers.utils import PaddingStrategy, logging
 
 logger = logging.get_logger(__name__)
 
@@ -49,16 +49,25 @@ class TextTokenizer:
 
 class SPTokenizer:
     def __init__(
-            self,
-            vocab_file,
-            num_image_tokens=20000,
-            max_blank_length=80,
-            byte_fallback=True,
+        self,
+        vocab_file,
+        num_image_tokens=20000,
+        max_blank_length=80,
+        byte_fallback=True,
     ):
         assert vocab_file is not None
         self.vocab_file = vocab_file
         self.num_image_tokens = num_image_tokens
-        self.special_tokens = ["[MASK]", "[gMASK]", "[sMASK]", "<unused_0>", "<sop>", "<eop>", "<ENC>", "<dBLOCK>"]
+        self.special_tokens = [
+            "[MASK]",
+            "[gMASK]",
+            "[sMASK]",
+            "<unused_0>",
+            "<sop>",
+            "<eop>",
+            "<ENC>",
+            "<dBLOCK>",
+        ]
         self.max_blank_length = max_blank_length
         self.byte_fallback = byte_fallback
         self.text_tokenizer = TextTokenizer(vocab_file)
@@ -98,7 +107,7 @@ class SPTokenizer:
         return text
 
     def encode(
-            self, text: str, linebreak=True, whitespaces=True, add_dummy_prefix=True
+        self, text: str, linebreak=True, whitespaces=True, add_dummy_prefix=True
     ) -> List[int]:
         """
         @param text: Text to encode.
@@ -134,7 +143,7 @@ class SPTokenizer:
         return text
 
     def tokenize(
-            self, text: str, linebreak=True, whitespaces=True, add_dummy_prefix=True
+        self, text: str, linebreak=True, whitespaces=True, add_dummy_prefix=True
     ) -> List[str]:
         """
         @param text: Text to encode.
@@ -154,12 +163,16 @@ class SPTokenizer:
             if x < self.num_image_tokens:
                 return "<image_{}>".format(x)
             else:
-                return self.text_tokenizer.convert_id_to_token(x - self.num_image_tokens)
+                return self.text_tokenizer.convert_id_to_token(
+                    x - self.num_image_tokens
+                )
         elif isinstance(x, str):
             if x.startswith("<image_") and x.endswith(">") and x[7:-1].isdigit():
                 return int(x[7:-1])
             else:
-                return self.text_tokenizer.convert_token_to_id(x) + self.num_image_tokens
+                return (
+                    self.text_tokenizer.convert_token_to_id(x) + self.num_image_tokens
+                )
         else:
             raise ValueError("The key should be str or int.")
 
@@ -178,20 +191,20 @@ class ChatGLMTokenizer(PreTrainedTokenizer):
     model_input_names = ["input_ids", "attention_mask", "position_ids"]
 
     def __init__(
-            self,
-            vocab_file,
-            do_lower_case=False,
-            remove_space=False,
-            bos_token='<sop>',
-            eos_token='<eop>',
-            end_token='</s>',
-            mask_token='[MASK]',
-            gmask_token='[gMASK]',
-            padding_side="left",
-            pad_token="<pad>",
-            unk_token="<unk>",
-            num_image_tokens=20000,
-            **kwargs
+        self,
+        vocab_file,
+        do_lower_case=False,
+        remove_space=False,
+        bos_token="<sop>",
+        eos_token="<eop>",
+        end_token="</s>",
+        mask_token="[MASK]",
+        gmask_token="[gMASK]",
+        padding_side="left",
+        pad_token="<pad>",
+        unk_token="<unk>",
+        num_image_tokens=20000,
+        **kwargs,
     ) -> None:
 
         self.sp_tokenizer = SPTokenizer(vocab_file, num_image_tokens=num_image_tokens)
@@ -208,7 +221,7 @@ class ChatGLMTokenizer(PreTrainedTokenizer):
             pad_token=pad_token,
             unk_token=unk_token,
             num_image_tokens=num_image_tokens,
-            **kwargs
+            **kwargs,
         )
 
         self.do_lower_case = do_lower_case
@@ -241,11 +254,11 @@ class ChatGLMTokenizer(PreTrainedTokenizer):
 
     @property
     def vocab_size(self):
-        """ Returns vocab size """
+        """Returns vocab size"""
         return self.sp_tokenizer.num_tokens
 
     def get_vocab(self):
-        """ Returns vocab as a dict """
+        """Returns vocab as a dict"""
         vocab = {self._convert_id_to_token(i): i for i in range(self.vocab_size)}
         vocab.update(self.added_tokens_encoder)
         return vocab
@@ -262,7 +275,7 @@ class ChatGLMTokenizer(PreTrainedTokenizer):
         return outputs
 
     def _tokenize(self, text, **kwargs):
-        """ Returns a tokenized string. """
+        """Returns a tokenized string."""
         text = self.preprocess_text(text)
 
         seq = self.sp_tokenizer.tokenize(text)
@@ -272,11 +285,7 @@ class ChatGLMTokenizer(PreTrainedTokenizer):
     def convert_tokens_to_string(self, tokens: List[str]) -> str:
         return self.sp_tokenizer.decode_tokens(tokens)
 
-    def _decode(
-            self,
-            token_ids: Union[int, List[int]],
-            **kwargs
-    ) -> str:
+    def _decode(self, token_ids: Union[int, List[int]], **kwargs) -> str:
         if isinstance(token_ids, int):
             token_ids = [token_ids]
         if len(token_ids) == 0:
@@ -286,7 +295,7 @@ class ChatGLMTokenizer(PreTrainedTokenizer):
         return super()._decode(token_ids, **kwargs)
 
     def _convert_token_to_id(self, token):
-        """ Converts a token (str) in an id using the vocab. """
+        """Converts a token (str) in an id using the vocab."""
         return self.sp_tokenizer[token]
 
     def _convert_id_to_token(self, index):
@@ -313,7 +322,7 @@ class ChatGLMTokenizer(PreTrainedTokenizer):
         else:
             vocab_file = save_directory
 
-        with open(self.vocab_file, 'rb') as fin:
+        with open(self.vocab_file, "rb") as fin:
             proto_str = fin.read()
 
         with open(vocab_file, "wb") as writer:
@@ -322,7 +331,7 @@ class ChatGLMTokenizer(PreTrainedTokenizer):
         return (vocab_file,)
 
     def build_inputs_with_special_tokens(
-            self, token_ids_0: List[int], token_ids_1: Optional[List[int]] = None
+        self, token_ids_0: List[int], token_ids_1: Optional[List[int]] = None
     ) -> List[int]:
         """
         Build model inputs from a sequence or a pair of sequence for sequence classification tasks by concatenating and
@@ -348,12 +357,12 @@ class ChatGLMTokenizer(PreTrainedTokenizer):
         return token_ids_0
 
     def _pad(
-            self,
-            encoded_inputs: Union[Dict[str, EncodedInput], BatchEncoding],
-            max_length: Optional[int] = None,
-            padding_strategy: PaddingStrategy = PaddingStrategy.DO_NOT_PAD,
-            pad_to_multiple_of: Optional[int] = None,
-            return_attention_mask: Optional[bool] = None,
+        self,
+        encoded_inputs: Union[Dict[str, EncodedInput], BatchEncoding],
+        max_length: Optional[int] = None,
+        padding_strategy: PaddingStrategy = PaddingStrategy.DO_NOT_PAD,
+        pad_to_multiple_of: Optional[int] = None,
+        return_attention_mask: Optional[bool] = None,
     ) -> dict:
         """
         Pad encoded inputs (on left/right and up to predefined length or max length in the batch)
@@ -389,10 +398,17 @@ class ChatGLMTokenizer(PreTrainedTokenizer):
         if padding_strategy == PaddingStrategy.LONGEST:
             max_length = len(required_input)
 
-        if max_length is not None and pad_to_multiple_of is not None and (max_length % pad_to_multiple_of != 0):
+        if (
+            max_length is not None
+            and pad_to_multiple_of is not None
+            and (max_length % pad_to_multiple_of != 0)
+        ):
             max_length = ((max_length // pad_to_multiple_of) + 1) * pad_to_multiple_of
 
-        needs_to_be_padded = padding_strategy != PaddingStrategy.DO_NOT_PAD and len(required_input) != max_length
+        needs_to_be_padded = (
+            padding_strategy != PaddingStrategy.DO_NOT_PAD
+            and len(required_input) != max_length
+        )
 
         # Initialize attention mask if not present.
         if max_length is not None:
@@ -413,31 +429,46 @@ class ChatGLMTokenizer(PreTrainedTokenizer):
                 else:
                     context_length = seq_length
                 position_ids = np.arange(seq_length, dtype=np.int64)
-                mask_token = mask_token_id if mask_token_id in required_input else gmask_token_id
+                mask_token = (
+                    mask_token_id if mask_token_id in required_input else gmask_token_id
+                )
                 if mask_token in required_input:
                     mask_position = required_input.index(mask_token)
                     position_ids[context_length:] = mask_position
                 block_position_ids = np.concatenate(
-                    [np.zeros(context_length, dtype=np.int64),
-                     np.arange(1, seq_length - context_length + 1, dtype=np.int64)])
-                encoded_inputs["position_ids"] = np.stack([position_ids, block_position_ids], axis=0)
+                    [
+                        np.zeros(context_length, dtype=np.int64),
+                        np.arange(1, seq_length - context_length + 1, dtype=np.int64),
+                    ]
+                )
+                encoded_inputs["position_ids"] = np.stack(
+                    [position_ids, block_position_ids], axis=0
+                )
 
         if needs_to_be_padded:
             difference = max_length - len(required_input)
 
             if "attention_mask" in encoded_inputs:
-                encoded_inputs["attention_mask"] = np.pad(encoded_inputs["attention_mask"],
-                                                          pad_width=[(0, 0), (difference, 0), (difference, 0)],
-                                                          mode='constant', constant_values=True)
+                encoded_inputs["attention_mask"] = np.pad(
+                    encoded_inputs["attention_mask"],
+                    pad_width=[(0, 0), (difference, 0), (difference, 0)],
+                    mode="constant",
+                    constant_values=True,
+                )
             if "token_type_ids" in encoded_inputs:
-                encoded_inputs["token_type_ids"] = [self.pad_token_type_id] * difference + encoded_inputs[
-                    "token_type_ids"
-                ]
+                encoded_inputs["token_type_ids"] = [
+                    self.pad_token_type_id
+                ] * difference + encoded_inputs["token_type_ids"]
             if "special_tokens_mask" in encoded_inputs:
-                encoded_inputs["special_tokens_mask"] = [1] * difference + encoded_inputs["special_tokens_mask"]
+                encoded_inputs["special_tokens_mask"] = [
+                    1
+                ] * difference + encoded_inputs["special_tokens_mask"]
             if "position_ids" in encoded_inputs:
-                encoded_inputs["position_ids"] = np.pad(encoded_inputs["position_ids"],
-                                                        pad_width=[(0, 0), (difference, 0)])
-            encoded_inputs[self.model_input_names[0]] = [self.pad_token_id] * difference + required_input
+                encoded_inputs["position_ids"] = np.pad(
+                    encoded_inputs["position_ids"], pad_width=[(0, 0), (difference, 0)]
+                )
+            encoded_inputs[self.model_input_names[0]] = [
+                self.pad_token_id
+            ] * difference + required_input
 
         return encoded_inputs

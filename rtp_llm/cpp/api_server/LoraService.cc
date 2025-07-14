@@ -53,22 +53,20 @@ void LoraService::update(const std::unique_ptr<http_server::HttpResponseWriter>&
     if (!ParallelInfo::globalParallelInfo().isMaster()) {
         RTP_LLM_LOG_WARNING("gang worker should not access /update api directly");
         throw HttpApiServerException(HttpApiServerException::UNSUPPORTED_OPERATION,
-                "gang worker should not access /update api directly");
+                                     "gang worker should not access /update api directly");
     }
     if (!engine_) {
         RTP_LLM_LOG_WARNING("update failed, engine is null");
-        throw HttpApiServerException(HttpApiServerException::UNKNOWN_ERROR,
-                "update failed, engine is null");
+        throw HttpApiServerException(HttpApiServerException::UNKNOWN_ERROR, "update failed, engine is null");
     }
     auto lora_manager = engine_->getLoraManager();
     if (!lora_manager) {
         RTP_LLM_LOG_WARNING("update failed, lora manager is null");
-        throw HttpApiServerException(HttpApiServerException::UNKNOWN_ERROR,
-                "update failed, lora manager is null");
+        throw HttpApiServerException(HttpApiServerException::UNKNOWN_ERROR, "update failed, lora manager is null");
     }
 
-    const auto body = request.GetBody();
-    auto start_time_ms = autil::TimeUtility::currentTimeInMilliSeconds();
+    const auto body          = request.GetBody();
+    auto       start_time_ms = autil::TimeUtility::currentTimeInMilliSeconds();
 
     VersionInfo version_info;
     FromJsonString(version_info, body);
@@ -90,9 +88,8 @@ void LoraService::update(const std::unique_ptr<http_server::HttpResponseWriter>&
         if (lora_infos.count(adapter_name) == 0 || lora_infos.at(adapter_name) != lora_path) {
             if (!removeLora(adapter_name)) {
                 RTP_LLM_LOG_WARNING("called update route but remove lora failed, adapter name: %s",
-                               adapter_name.c_str());
-                throw HttpApiServerException(HttpApiServerException::UNKNOWN_ERROR,
-                        "update remove lora failed");
+                                    adapter_name.c_str());
+                throw HttpApiServerException(HttpApiServerException::UNKNOWN_ERROR, "update remove lora failed");
             }
         }
     }
@@ -101,10 +98,9 @@ void LoraService::update(const std::unique_ptr<http_server::HttpResponseWriter>&
         if (!hasLora(adapter_name, lora_path)) {
             if (!addLora(adapter_name, lora_path)) {
                 RTP_LLM_LOG_WARNING("called update route but add lora failed, adapter name: %s, lora path: %s",
-                               adapter_name.c_str(),
-                               lora_path.c_str());
-                throw HttpApiServerException(HttpApiServerException::UNKNOWN_ERROR,
-                        "update add lora failed");
+                                    adapter_name.c_str(),
+                                    lora_path.c_str());
+                throw HttpApiServerException(HttpApiServerException::UNKNOWN_ERROR, "update add lora failed");
             }
         }
     }
@@ -124,31 +120,29 @@ void LoraService::addLoraInternal(const std::unique_ptr<http_server::HttpRespons
     if (!ParallelInfo::globalParallelInfo().isWorker()) {
         RTP_LLM_LOG_WARNING("gang master should not access /add_lora_internal api directly");
         throw HttpApiServerException(HttpApiServerException::UNSUPPORTED_OPERATION,
-                "gang master should not access /add_lora_internal api directly");
+                                     "gang master should not access /add_lora_internal api directly");
     }
 
     if (!engine_) {
         RTP_LLM_LOG_WARNING("add lora internal failed, engine is null");
-        throw HttpApiServerException(HttpApiServerException::UNKNOWN_ERROR,
-                "add lora internal failed, engine is null");
+        throw HttpApiServerException(HttpApiServerException::UNKNOWN_ERROR, "add lora internal failed, engine is null");
     }
 
-    const auto body = request.GetBody();
-    auto body_map        = AnyCast<JsonMap>(ParseJson(body));
-    auto adapter_name_it = body_map.find("adapter_name");
-    auto lora_path_it    = body_map.find("lora_path");
+    const auto body            = request.GetBody();
+    auto       body_map        = AnyCast<JsonMap>(ParseJson(body));
+    auto       adapter_name_it = body_map.find("adapter_name");
+    auto       lora_path_it    = body_map.find("lora_path");
     if (adapter_name_it == body_map.end() || lora_path_it == body_map.end()) {
         RTP_LLM_LOG_WARNING("add lora internal failed, request has no adapter_name or lora_path, request body: %s",
-                       body.c_str());
+                            body.c_str());
         throw HttpApiServerException(HttpApiServerException::UNKNOWN_ERROR,
-                "add lora internal failed, request has no adapter_name or lora_path");
+                                     "add lora internal failed, request has no adapter_name or lora_path");
     }
     auto adapter_name = AnyCast<std::string>(adapter_name_it->second);
     auto lora_path    = AnyCast<std::string>(lora_path_it->second);
     if (!addLora(adapter_name, lora_path)) {
         RTP_LLM_LOG_WARNING("add lora internal failed, add lora failed, request body: %s", body.c_str());
-        throw HttpApiServerException(HttpApiServerException::UNKNOWN_ERROR,
-                "add lora internal failed");
+        throw HttpApiServerException(HttpApiServerException::UNKNOWN_ERROR, "add lora internal failed");
     }
     writer->Write(R"("null")");
     return;
@@ -161,27 +155,26 @@ void LoraService::removeLoraInternal(const std::unique_ptr<http_server::HttpResp
     if (!ParallelInfo::globalParallelInfo().isWorker()) {
         RTP_LLM_LOG_WARNING("gang master should not access /remove_lora_internal api directly");
         throw HttpApiServerException(HttpApiServerException::UNSUPPORTED_OPERATION,
-                "gang master should not access /remove_lora_internal api directly");
+                                     "gang master should not access /remove_lora_internal api directly");
     }
     if (!engine_) {
         RTP_LLM_LOG_WARNING("remove lora internal failed, engine is null");
         throw HttpApiServerException(HttpApiServerException::UNKNOWN_ERROR,
-                "remove lora internal failed, engine is null");
+                                     "remove lora internal failed, engine is null");
     }
 
-    const auto body = request.GetBody();
-    auto body_map        = AnyCast<JsonMap>(ParseJson(body));
-    auto adapter_name_it = body_map.find("adapter_name");
+    const auto body            = request.GetBody();
+    auto       body_map        = AnyCast<JsonMap>(ParseJson(body));
+    auto       adapter_name_it = body_map.find("adapter_name");
     if (adapter_name_it == body_map.end()) {
         RTP_LLM_LOG_WARNING("remove lora internal failed, request has no adapter_name, request body: %s", body.c_str());
         throw HttpApiServerException(HttpApiServerException::UNKNOWN_ERROR,
-                "remove lora internal failed, request has no adapter_name or lora_path");
+                                     "remove lora internal failed, request has no adapter_name or lora_path");
     }
     auto adapter_name = AnyCast<std::string>(adapter_name_it->second);
     if (!removeLora(adapter_name)) {
         RTP_LLM_LOG_WARNING("remove lora internal failed, add lora failed, request body: %s", body.c_str());
-        throw HttpApiServerException(HttpApiServerException::UNKNOWN_ERROR,
-                "remove lora internal failed");
+        throw HttpApiServerException(HttpApiServerException::UNKNOWN_ERROR, "remove lora internal failed");
     }
     writer->Write(R"("null")");
     return;

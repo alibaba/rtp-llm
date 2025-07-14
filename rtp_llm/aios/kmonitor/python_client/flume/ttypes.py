@@ -6,10 +6,16 @@
 #  options string: py
 #
 
-from thrift.Thrift import TType, TMessageType, TFrozenDict, TException, TApplicationException
-from thrift.protocol.TProtocol import TProtocolException
 import sys
 
+from thrift.protocol.TProtocol import TProtocolException
+from thrift.Thrift import (
+    TApplicationException,
+    TException,
+    TFrozenDict,
+    TMessageType,
+    TType,
+)
 from thrift.transport import TTransport
 
 
@@ -43,16 +49,36 @@ class ThriftFlumeEvent(object):
 
     thrift_spec = (
         None,  # 0
-        (1, TType.MAP, 'headers', (TType.STRING, 'UTF8', TType.STRING, 'UTF8', False), None, ),  # 1
-        (2, TType.STRING, 'body', 'BINARY', None, ),  # 2
+        (
+            1,
+            TType.MAP,
+            "headers",
+            (TType.STRING, "UTF8", TType.STRING, "UTF8", False),
+            None,
+        ),  # 1
+        (
+            2,
+            TType.STRING,
+            "body",
+            "BINARY",
+            None,
+        ),  # 2
     )
 
-    def __init__(self, headers=None, body=None,):
+    def __init__(
+        self,
+        headers=None,
+        body=None,
+    ):
         self.headers = headers
         self.body = body
 
     def read(self, iprot):
-        if iprot._fast_decode is not None and isinstance(iprot.trans, TTransport.CReadableTransport) and self.thrift_spec is not None:
+        if (
+            iprot._fast_decode is not None
+            and isinstance(iprot.trans, TTransport.CReadableTransport)
+            and self.thrift_spec is not None
+        ):
             iprot._fast_decode(self, iprot, (self.__class__, self.thrift_spec))
             return
         iprot.readStructBegin()
@@ -65,8 +91,16 @@ class ThriftFlumeEvent(object):
                     self.headers = {}
                     (_ktype1, _vtype2, _size0) = iprot.readMapBegin()
                     for _i4 in range(_size0):
-                        _key5 = iprot.readString().decode('utf-8') if sys.version_info[0] == 2 else iprot.readString()
-                        _val6 = iprot.readString().decode('utf-8') if sys.version_info[0] == 2 else iprot.readString()
+                        _key5 = (
+                            iprot.readString().decode("utf-8")
+                            if sys.version_info[0] == 2
+                            else iprot.readString()
+                        )
+                        _val6 = (
+                            iprot.readString().decode("utf-8")
+                            if sys.version_info[0] == 2
+                            else iprot.readString()
+                        )
                         self.headers[_key5] = _val6
                     iprot.readMapEnd()
                 else:
@@ -83,19 +117,25 @@ class ThriftFlumeEvent(object):
 
     def write(self, oprot):
         if oprot._fast_encode is not None and self.thrift_spec is not None:
-            oprot.trans.write(oprot._fast_encode(self, (self.__class__, self.thrift_spec)))
+            oprot.trans.write(
+                oprot._fast_encode(self, (self.__class__, self.thrift_spec))
+            )
             return
-        oprot.writeStructBegin('ThriftFlumeEvent')
+        oprot.writeStructBegin("ThriftFlumeEvent")
         if self.headers is not None:
-            oprot.writeFieldBegin('headers', TType.MAP, 1)
+            oprot.writeFieldBegin("headers", TType.MAP, 1)
             oprot.writeMapBegin(TType.STRING, TType.STRING, len(self.headers))
             for kiter7, viter8 in list(self.headers.items()):
-                oprot.writeString(kiter7.encode('utf-8') if sys.version_info[0] == 2 else kiter7)
-                oprot.writeString(viter8.encode('utf-8') if sys.version_info[0] == 2 else viter8)
+                oprot.writeString(
+                    kiter7.encode("utf-8") if sys.version_info[0] == 2 else kiter7
+                )
+                oprot.writeString(
+                    viter8.encode("utf-8") if sys.version_info[0] == 2 else viter8
+                )
             oprot.writeMapEnd()
             oprot.writeFieldEnd()
         if self.body is not None:
-            oprot.writeFieldBegin('body', TType.STRING, 2)
+            oprot.writeFieldBegin("body", TType.STRING, 2)
             oprot.writeBinary(self.body)
             oprot.writeFieldEnd()
         oprot.writeFieldStop()
@@ -103,15 +143,14 @@ class ThriftFlumeEvent(object):
 
     def validate(self):
         if self.headers is None:
-            raise TProtocolException(message='Required field headers is unset!')
+            raise TProtocolException(message="Required field headers is unset!")
         if self.body is None:
-            raise TProtocolException(message='Required field body is unset!')
+            raise TProtocolException(message="Required field body is unset!")
         return
 
     def __repr__(self):
-        L = ['%s=%r' % (key, value)
-             for key, value in list(self.__dict__.items())]
-        return '%s(%s)' % (self.__class__.__name__, ', '.join(L))
+        L = ["%s=%r" % (key, value) for key, value in list(self.__dict__.items())]
+        return "%s(%s)" % (self.__class__.__name__, ", ".join(L))
 
     def __eq__(self, other):
         return isinstance(other, self.__class__) and self.__dict__ == other.__dict__

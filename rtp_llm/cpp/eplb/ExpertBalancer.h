@@ -10,23 +10,22 @@
 
 namespace rtp_llm {
 
-
 struct EplbPlanBuffers {
-    int           layer_id = -1;
+    int       layer_id = -1;
     BufferPtr layer_id_buf;      // [1]
     BufferPtr logic_expert_cnt;  // [log_exp_num]
     BufferPtr logic_expert_cnt_host;
-    BufferPtr log2phy;           // [layer, log_exp_num, phy_exp_num - log_exp_num + 1]
+    BufferPtr log2phy;  // [layer, log_exp_num, phy_exp_num - log_exp_num + 1]
     BufferPtr log2phy_host;
-    BufferPtr phy2log;           // [layer, phy_exp_num]
-    BufferPtr moe_weight_1;      // w1 & w3
-    BufferPtr moe_weight_2;      // w2
+    BufferPtr phy2log;       // [layer, phy_exp_num]
+    BufferPtr moe_weight_1;  // w1 & w3
+    BufferPtr moe_weight_2;  // w2
 
-    void init(size_t          log_exp_num,
-              size_t          phy_exp_num,
-              size_t          hidden_size,
-              size_t          moe_size,
-              size_t          ep_size,
+    void init(size_t      log_exp_num,
+              size_t      phy_exp_num,
+              size_t      hidden_size,
+              size_t      moe_size,
+              size_t      ep_size,
               DataType    dtype,
               QuantAlgo   quant_algo,
               DeviceBase* device);
@@ -58,8 +57,7 @@ struct LoadFlags {
     bool isReady(DeviceBase* device);
 };
 
-enum class EplbPlanStatus
-{
+enum class EplbPlanStatus {
     INIT,
     PREPARING,
     LOADING,
@@ -68,38 +66,38 @@ enum class EplbPlanStatus
 
 class EplbController {
 private:
-    std::mutex      eplb_control_mutex;
+    std::mutex eplb_control_mutex;
     EplbConfig eplb_control_data;
 
-    BufferPtr   eplb_control_data_buf_host;
-    BufferPtr   eplb_control_data_buf_device;
+    BufferPtr eplb_control_data_buf_host;
+    BufferPtr eplb_control_data_buf_device;
 
     int control_step = 100;
-    int cur_step = 0;
+    int cur_step     = 0;
 
 public:
-    void            init(const EplbConfig& eplb_control_data, DeviceBase* device);
-    void            setData(const EplbConfig& updated_control_data);
-    bool            stepAndCheckSyncStep();
-    EplbConfig  getAndSyncData(DeviceBase* device);
+    void       init(const EplbConfig& eplb_control_data, DeviceBase* device);
+    void       setData(const EplbConfig& updated_control_data);
+    bool       stepAndCheckSyncStep();
+    EplbConfig getAndSyncData(DeviceBase* device);
 };
 
 class ExpertBalancer {
 public:
     ExpertBalancer() = default;
-    ExpertBalancer(size_t          log_exp_num,
-                   size_t          phy_exp_num,
-                   size_t          num_layers,
-                   size_t          moe_size,
-                   size_t          hidden_size,
-                   size_t          update_time,
-                   size_t          ep_rank,
-                   size_t          ep_size,
-                   py::object      py_eplb,
-                   DataType    dtype,
-                   DeviceBase* device,
-                   EplbMode    eplb_mode,
-                   QuantAlgo   quant_algo,
+    ExpertBalancer(size_t                       log_exp_num,
+                   size_t                       phy_exp_num,
+                   size_t                       num_layers,
+                   size_t                       moe_size,
+                   size_t                       hidden_size,
+                   size_t                       update_time,
+                   size_t                       ep_rank,
+                   size_t                       ep_size,
+                   py::object                   py_eplb,
+                   DataType                     dtype,
+                   DeviceBase*                  device,
+                   EplbMode                     eplb_mode,
+                   QuantAlgo                    quant_algo,
                    kmonitor::MetricsReporterPtr metrics_reporter);
     ~ExpertBalancer();
 
@@ -112,7 +110,7 @@ private:
     void reportStats(OverallExpertStats& stats);
     void excuteEplbPlan(OverallExpertStats& stats, GptModel& model);
 
-    void setPlanStatus(EplbPlanStatus status);
+    void           setPlanStatus(EplbPlanStatus status);
     EplbPlanStatus getPlanStatus() const;
 
     void resetPlan(bool force_clean = false);
@@ -135,14 +133,14 @@ private:
 
     EplbPlanStatus eplb_plan_status_ = EplbPlanStatus::INIT;
 
-    size_t update_cnt_  = 0;
+    size_t update_cnt_ = 0;
 
     size_t eplb_plan_cnt_ = 0;
 
-    size_t ep_rank_     = 0;
-    size_t ep_size_     = 1;
+    size_t ep_rank_ = 0;
+    size_t ep_size_ = 1;
 
-    size_t balance_layer_cnt_ = 0;
+    size_t balance_layer_cnt_      = 0;
     size_t balance_layer_per_step_ = 1;
 
     BalanceStatsBuffers stats_;
@@ -150,8 +148,8 @@ private:
     EplbPlanTensors     eplb_plan_tensors_;
     LoadFlags           load_flags_;
 
-    EplbController  eplb_controller_;
-    EplbConfig  eplb_control_data_;
+    EplbController eplb_controller_;
+    EplbConfig     eplb_control_data_;
 
     RtpLLmEplbMetricsCollector   executor_collector_;
     kmonitor::MetricsReporterPtr metrics_reporter_;

@@ -24,7 +24,6 @@
 
 namespace rtp_llm {
 
-
 template<typename T,
          typename T_cache,
          typename KVCacheBuffer,
@@ -54,7 +53,7 @@ void mmha_launch_kernel_ex(KernelParamsType&    params,
             }                                                                                                          \
         } else {                                                                                                       \
             if (params.int8_kv_cache || params.fp8_kv_cache) {                                                         \
-                RTP_LLM_FAIL("unsupported float type mmha with quant kvcache");                                             \
+                RTP_LLM_FAIL("unsupported float type mmha with quant kvcache");                                        \
             }                                                                                                          \
             typedef T NAME;                                                                                            \
             return __VA_ARGS__();                                                                                      \
@@ -73,7 +72,7 @@ void mmha_launch_kernel_ex(KernelParamsType&    params,
             }                                                                                                          \
         } else {                                                                                                       \
             if (params.int8_kv_cache) {                                                                                \
-                RTP_LLM_FAIL("unsupported float type mmha with quant kvcache");                                             \
+                RTP_LLM_FAIL("unsupported float type mmha with quant kvcache");                                        \
             }                                                                                                          \
             typedef T NAME;                                                                                            \
             return __VA_ARGS__();                                                                                      \
@@ -81,18 +80,18 @@ void mmha_launch_kernel_ex(KernelParamsType&    params,
     }()
 #endif
 
-#define FT_HEADN_SWITCH(COND, ...)                      \
- [&] {                                                  \
-     switch (COND) {                                    \
-         FT_SWITCH_ONE_CASE(Dh, 64, __VA_ARGS__)        \
-         FT_SWITCH_ONE_CASE(Dh, 96, __VA_ARGS__)        \
-         FT_SWITCH_ONE_CASE(Dh, 128, __VA_ARGS__)       \
-         FT_SWITCH_ONE_CASE(Dh, 192, __VA_ARGS__)       \
-         FT_SWITCH_ONE_CASE(Dh, 256,  __VA_ARGS__)      \
-     default:                                           \
-         RTP_LLM_FAIL("unsupported head_size: %d", COND);    \
-     }                                                  \
- }()
+#define FT_HEADN_SWITCH(COND, ...)                                                                                     \
+    [&] {                                                                                                              \
+        switch (COND) {                                                                                                \
+            FT_SWITCH_ONE_CASE(Dh, 64, __VA_ARGS__)                                                                    \
+            FT_SWITCH_ONE_CASE(Dh, 96, __VA_ARGS__)                                                                    \
+            FT_SWITCH_ONE_CASE(Dh, 128, __VA_ARGS__)                                                                   \
+            FT_SWITCH_ONE_CASE(Dh, 192, __VA_ARGS__)                                                                   \
+            FT_SWITCH_ONE_CASE(Dh, 256, __VA_ARGS__)                                                                   \
+            default:                                                                                                   \
+                RTP_LLM_FAIL("unsupported head_size: %d", COND);                                                       \
+        }                                                                                                              \
+    }()
 
 template<typename T, typename KVCacheBuffer, typename KernelParamsType>
 void mmha_launch_kernel(KernelParamsType& params, const KVCacheBuffer& kv_cache_buffer, const cudaStream_t& stream) {
@@ -126,45 +125,44 @@ struct SATypeConverter<half> {
 };
 
 template<typename T, typename KVCacheBuffer>
-void fusedQKV_masked_attention_dispatch(const T*            qkv_buf,
-                                        const T*            qkv_bias,
-                                        const T*            relative_attention_bias,
-                                        const int*          cache_indir,
-                                        T*                  context_buf,
-                                        const bool*         finished,
-                                        const int*          sequence_lengths,
-                                        const int           inference_batch_size,
-                                        const int           beam_width,
-                                        const int           head_num,
-                                        const int           head_num_kv,
-                                        const int           size_per_head,
-                                        const RopeConfig    rope_config,
-                                        const bool    use_logn_attn,
-                                        const int*    position_ids,
-                                        const int     memory_max_len,
-                                        const int*    prefix_prompt_lengths,
-                                        const int     max_prefix_prompt_length,
-                                        const bool    count_prefix_length,
-                                        const int*    input_lengths,
-                                        const int     step,
-                                        const float   q_scaling,
-                                        const int     relative_attention_bias_stride,
-                                        const float*  linear_bias_slopes,
-                                        const bool*   masked_tokens,
-                                        const float*  qkv_scale_out,
-                                        const float*  attention_out_scale,
-                                        const int     int8_mode,
+void fusedQKV_masked_attention_dispatch(const T*                    qkv_buf,
+                                        const T*                    qkv_bias,
+                                        const T*                    relative_attention_bias,
+                                        const int*                  cache_indir,
+                                        T*                          context_buf,
+                                        const bool*                 finished,
+                                        const int*                  sequence_lengths,
+                                        const int                   inference_batch_size,
+                                        const int                   beam_width,
+                                        const int                   head_num,
+                                        const int                   head_num_kv,
+                                        const int                   size_per_head,
+                                        const RopeConfig            rope_config,
+                                        const bool                  use_logn_attn,
+                                        const int*                  position_ids,
+                                        const int                   memory_max_len,
+                                        const int*                  prefix_prompt_lengths,
+                                        const int                   max_prefix_prompt_length,
+                                        const bool                  count_prefix_length,
+                                        const int*                  input_lengths,
+                                        const int                   step,
+                                        const float                 q_scaling,
+                                        const int                   relative_attention_bias_stride,
+                                        const float*                linear_bias_slopes,
+                                        const bool*                 masked_tokens,
+                                        const float*                qkv_scale_out,
+                                        const float*                attention_out_scale,
+                                        const int                   int8_mode,
                                         const trt_common::QuantMode kv_cache_quant_mode,
-                                        const bool    multi_block_mode,
-                                        int           max_seq_len_tile,
-                                        T*            partial_out,
-                                        float*        partial_sum,
-                                        float*        partial_max,
-                                        int*          block_counter,
-                                        const float   softmax_extra_scale,
-                                        KVCacheBuffer kv_cache_buffer,
-                                        cudaStream_t  stream)
-{
+                                        const bool                  multi_block_mode,
+                                        int                         max_seq_len_tile,
+                                        T*                          partial_out,
+                                        float*                      partial_sum,
+                                        float*                      partial_max,
+                                        int*                        block_counter,
+                                        const float                 softmax_extra_scale,
+                                        KVCacheBuffer               kv_cache_buffer,
+                                        cudaStream_t                stream) {
     using DataType = typename SATypeConverter<T>::Type;
     Masked_multihead_attention_params<DataType> params;
     memset(&params, 0, sizeof(params));
@@ -256,45 +254,45 @@ void fusedQKV_masked_attention_dispatch(const T*            qkv_buf,
     check_cuda_error();
 }
 
-#define INSTANTIATE_FUSEDQKV_MASKED_ATTENTION_DISPATCH(T, KVCacheBuffer) \
-    template void fusedQKV_masked_attention_dispatch(const T*      qkv_buf, \
-                                                     const T*      qkv_bias, \
-                                                     const T*      relative_attention_bias, \
-                                                     const int*    cache_indir, \
-                                                     T*            context_buf, \
-                                                     const bool*   finished, \
-                                                     const int*    sequence_lengths, \
-                                                     const int     inference_batch_size, \
-                                                     const int     beam_width, \
-                                                     const int     head_num, \
-                                                     const int     head_num_kv, \
-                                                     const int     size_per_head, \
-                                                     const RopeConfig rope_config, \
-                                                     const bool    use_logn_attn, \
-                                                     const int*    position_ids, \
-                                                     const int     memory_max_len, \
-                                                     const int*    prefix_prompt_lengths, \
-                                                     const int     max_prefix_prompt_length, \
-                                                     const bool    count_prefix_length, \
-                                                     const int*    input_lengths, \
-                                                     const int     step, \
-                                                     const float   q_scaling, \
-                                                     const int     relative_attention_bias_stride, \
-                                                     const float*  linear_bias_slopes, \
-                                                     const bool*   masked_tokens, \
-                                                     const float*  qkv_scale_out, \
-                                                     const float*  attention_out_scale, \
-                                                     const int     int8_mode, \
-                                                     const trt_common::QuantMode kv_cache_quant_mode, \
-                                                     const bool    multi_block_mode, \
-                                                     int           max_seq_tile, \
-                                                     T*            partial_out, \
-                                                     float*        partial_sum, \
-                                                     float*        partial_max, \
-                                                     int*          block_counter, \
-                                                     const float   softmax_extra_scale, \
-                                                     KVCacheBuffer kv_cache_buffer, \
-                                                     cudaStream_t  stream)
+#define INSTANTIATE_FUSEDQKV_MASKED_ATTENTION_DISPATCH(T, KVCacheBuffer)                                               \
+    template void fusedQKV_masked_attention_dispatch(const T*                    qkv_buf,                              \
+                                                     const T*                    qkv_bias,                             \
+                                                     const T*                    relative_attention_bias,              \
+                                                     const int*                  cache_indir,                          \
+                                                     T*                          context_buf,                          \
+                                                     const bool*                 finished,                             \
+                                                     const int*                  sequence_lengths,                     \
+                                                     const int                   inference_batch_size,                 \
+                                                     const int                   beam_width,                           \
+                                                     const int                   head_num,                             \
+                                                     const int                   head_num_kv,                          \
+                                                     const int                   size_per_head,                        \
+                                                     const RopeConfig            rope_config,                          \
+                                                     const bool                  use_logn_attn,                        \
+                                                     const int*                  position_ids,                         \
+                                                     const int                   memory_max_len,                       \
+                                                     const int*                  prefix_prompt_lengths,                \
+                                                     const int                   max_prefix_prompt_length,             \
+                                                     const bool                  count_prefix_length,                  \
+                                                     const int*                  input_lengths,                        \
+                                                     const int                   step,                                 \
+                                                     const float                 q_scaling,                            \
+                                                     const int                   relative_attention_bias_stride,       \
+                                                     const float*                linear_bias_slopes,                   \
+                                                     const bool*                 masked_tokens,                        \
+                                                     const float*                qkv_scale_out,                        \
+                                                     const float*                attention_out_scale,                  \
+                                                     const int                   int8_mode,                            \
+                                                     const trt_common::QuantMode kv_cache_quant_mode,                  \
+                                                     const bool                  multi_block_mode,                     \
+                                                     int                         max_seq_tile,                         \
+                                                     T*                          partial_out,                          \
+                                                     float*                      partial_sum,                          \
+                                                     float*                      partial_max,                          \
+                                                     int*                        block_counter,                        \
+                                                     const float                 softmax_extra_scale,                  \
+                                                     KVCacheBuffer               kv_cache_buffer,                      \
+                                                     cudaStream_t                stream)
 
 INSTANTIATE_FUSEDQKV_MASKED_ATTENTION_DISPATCH(float, KVBlockArray);
 INSTANTIATE_FUSEDQKV_MASKED_ATTENTION_DISPATCH(half, KVBlockArray);

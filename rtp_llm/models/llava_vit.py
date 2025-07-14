@@ -1,25 +1,29 @@
-from typing import Optional, Tuple, Union, Dict, List, Any
+import copy
+import logging
+import math
 import os
 import re
-import math
 from dataclasses import dataclass
 from functools import partial, reduce
+from typing import Any, Dict, List, Optional, Tuple, Union
+
 import numpy as np
-
 import torch
-import torch.utils.checkpoint
 import torch.nn as nn
-
-import logging
-
-import copy
+import torch.utils.checkpoint
 from PIL import Image
-from transformers import CLIPVisionModel, CLIPImageProcessor, CLIPVisionConfig
+from transformers import CLIPImageProcessor, CLIPVisionConfig, CLIPVisionModel
+
+from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.distribute.worker_info import g_parallel_info
+from rtp_llm.models.llava_utils import (
+    expand2square,
+    get_anyres_image_grid_shape,
+    process_anyres_image,
+    unpad_image,
+)
 from rtp_llm.models.multimodal.multimodal_common import MultiModalEmbeddingInterface
 from rtp_llm.utils.multimodal_util import MMUrlType
-from rtp_llm.models.llava_utils import expand2square, process_anyres_image, unpad_image, get_anyres_image_grid_shape
-from rtp_llm.distribute.worker_info import g_parallel_info
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 
 try:
     import av
@@ -27,6 +31,8 @@ try:
 except ImportError:
     print("Please install pyav to use video processing functions.")
 
+from transformers import PretrainedConfig
+from transformers.activations import ACT2FN
 from transformers.image_processing_utils import BatchFeature, get_size_dict
 from transformers.image_transforms import (
     convert_to_rgb,
@@ -40,11 +46,10 @@ from transformers.image_utils import (
     PILImageResampling,
     to_numpy_array,
 )
-from transformers.activations import ACT2FN
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling
 from transformers.modeling_utils import PreTrainedModel
-from transformers import PretrainedConfig
 from transformers.utils import ModelOutput
+
 
 class LlavaImageEmbedding(MultiModalEmbeddingInterface):
     def __init__(self, config: GptInitModelParameters):
@@ -54,7 +59,9 @@ class LlavaImageEmbedding(MultiModalEmbeddingInterface):
         else:
             self.vision_tower = self.build_vision_tower(config.mm_related_params.config)
         self.mm_projector = self.build_vision_projector(config.mm_related_params.config)
-        if "unpad" in self.config.mm_related_params.config.get("mm_patch_merge_type", "flat"):
+        if "unpad" in self.config.mm_related_params.config.get(
+            "mm_patch_merge_type", "flat"
+        ):
             self.image_newline = nn.Parameter(
                 torch.empty(self.config.mm_related_params.config["hidden_size"])
             )
@@ -128,21 +135,26 @@ class LlavaImageEmbedding(MultiModalEmbeddingInterface):
         return self.vision_tower.device
 
     @torch.no_grad()
-    def image_embedding(self, images: List[Image.Image], mm_type = MMUrlType.IMAGE):
+    def image_embedding(self, images: List[Image.Image], mm_type=MMUrlType.IMAGE):
         config = self.config.mm_related_params.config
         image_aspect_ratio = config["image_aspect_ratio"]
         mm_patch_merge_type = config.get("mm_patch_merge_type", "flat")
         mm_newline_position = config.get("mm_newline_position", "one_token")
 
-        processed_images = process_images(images,
-                                          image_aspect_ratio,
-                                          self.vision_tower.image_processor,
-                                          self._device,
-                                          self._data_type,
-                                          mm_type,
-                                          image_grid_pinpoints = config.get("image_grid_pinpoints", []))
+        processed_images = process_images(
+            images,
+            image_aspect_ratio,
+            self.vision_tower.image_processor,
+            self._device,
+            self._data_type,
+            mm_type,
+            image_grid_pinpoints=config.get("image_grid_pinpoints", []),
+        )
 
-        processed_images = [image.unsqueeze(0) if image.ndim == 3 else image for image in processed_images]
+        processed_images = [
+            image.unsqueeze(0) if image.ndim == 3 else image
+            for image in processed_images
+        ]
         split_sizes = [processed_image.shape[0] for processed_image in processed_images]
         processed_images = torch.cat(processed_images)
         image_features = self.encode_images(processed_images)
@@ -178,16 +190,21 @@ class LlavaImageEmbedding(MultiModalEmbeddingInterface):
                     elif mm_newline_position == "one_token":
                         # one-token
                         image_feature = image_feature.flatten(0, 1)
-                        if 'unpad' in mm_patch_merge_type:
-                            image_feature = torch.cat((
-                                image_feature,
-                                self.image_newline[None].to(image_feature.device)
-                            ), dim=0)
+                        if "unpad" in mm_patch_merge_type:
+                            image_feature = torch.cat(
+                                (
+                                    image_feature,
+                                    self.image_newline[None].to(image_feature.device),
+                                ),
+                                dim=0,
+                            )
                         new_image_features.append(image_feature)
                     elif mm_newline_position == "no_token":
                         new_image_features.append(image_feature.flatten(0, 1))
                     else:
-                        raise ValueError(f"Unexpected mm_newline_position: {mm_newline_position}")
+                        raise ValueError(
+                            f"Unexpected mm_newline_position: {mm_newline_position}"
+                        )
 
                 elif image_feature.shape[0] > 1:
                     base_image_feature = image_feature[0]
@@ -196,61 +213,116 @@ class LlavaImageEmbedding(MultiModalEmbeddingInterface):
                     assert height * width == base_image_feature.shape[0]
 
                     if "anyres_max" in image_aspect_ratio:
-                            matched_anyres_max_num_patches = re.match(r"anyres_max_(\d+)", image_aspect_ratio)
-                            if matched_anyres_max_num_patches:
-                                max_num_patches = int(matched_anyres_max_num_patches.group(1))
+                        matched_anyres_max_num_patches = re.match(
+                            r"anyres_max_(\d+)", image_aspect_ratio
+                        )
+                        if matched_anyres_max_num_patches:
+                            max_num_patches = int(
+                                matched_anyres_max_num_patches.group(1)
+                            )
 
-                    if image_aspect_ratio == "anyres" or "anyres_max" in image_aspect_ratio:
+                    if (
+                        image_aspect_ratio == "anyres"
+                        or "anyres_max" in image_aspect_ratio
+                    ):
                         try:
-                            num_patch_width, num_patch_height = get_anyres_image_grid_shape(image_sizes[image_idx], config["image_grid_pinpoints"], self.vision_tower.config.image_size)
+                            num_patch_width, num_patch_height = (
+                                get_anyres_image_grid_shape(
+                                    image_sizes[image_idx],
+                                    config["image_grid_pinpoints"],
+                                    self.vision_tower.config.image_size,
+                                )
+                            )
                         except Exception as e:
-                            logging.error(f"exception {str(e)}, set num_path_width and num_patch_height to 2")
+                            logging.error(
+                                f"exception {str(e)}, set num_path_width and num_patch_height to 2"
+                            )
                             num_patch_width, num_patch_height = 2, 2
-                        image_feature = image_feature.view(num_patch_height, num_patch_width, height, width, -1)
+                        image_feature = image_feature.view(
+                            num_patch_height, num_patch_width, height, width, -1
+                        )
                     else:
                         image_feature = image_feature.view(2, 2, height, width, -1)
 
                     if "maxpool2x2" in mm_patch_merge_type:
-                        image_feature = image_feature.permute(4, 0, 2, 1, 3).contiguous()
+                        image_feature = image_feature.permute(
+                            4, 0, 2, 1, 3
+                        ).contiguous()
                         image_feature = image_feature.flatten(1, 2).flatten(2, 3)
                         image_feature = nn.functional.max_pool2d(image_feature, 2)
                         image_feature = image_feature.flatten(1, 2).transpose(0, 1)
-                    elif "unpad" in mm_patch_merge_type and "anyres_max" in image_aspect_ratio and matched_anyres_max_num_patches:
+                    elif (
+                        "unpad" in mm_patch_merge_type
+                        and "anyres_max" in image_aspect_ratio
+                        and matched_anyres_max_num_patches
+                    ):
                         unit = image_feature.shape[2]
-                        image_feature = image_feature.permute(4, 0, 2, 1, 3).contiguous()
+                        image_feature = image_feature.permute(
+                            4, 0, 2, 1, 3
+                        ).contiguous()
                         image_feature = image_feature.flatten(1, 2).flatten(2, 3)
-                        image_feature = unpad_image(image_feature, image_sizes[image_idx])
+                        image_feature = unpad_image(
+                            image_feature, image_sizes[image_idx]
+                        )
                         c, h, w = image_feature.shape
                         times = math.sqrt(h * w / (max_num_patches * unit**2))
                         if times > 1.1:
                             image_feature = image_feature[None]
-                            image_feature = nn.functional.interpolate(image_feature, [int(h // times), int(w // times)], mode="bilinear")[0]
-                        image_feature = torch.cat((image_feature, self.image_newline[:, None, None].expand(*image_feature.shape[:-1], 1).to(image_feature.device)), dim=-1)
+                            image_feature = nn.functional.interpolate(
+                                image_feature,
+                                [int(h // times), int(w // times)],
+                                mode="bilinear",
+                            )[0]
+                        image_feature = torch.cat(
+                            (
+                                image_feature,
+                                self.image_newline[:, None, None]
+                                .expand(*image_feature.shape[:-1], 1)
+                                .to(image_feature.device),
+                            ),
+                            dim=-1,
+                        )
                         image_feature = image_feature.flatten(1, 2).transpose(0, 1)
-                    elif 'unpad' in mm_patch_merge_type:
-                        image_feature = image_feature.permute(4, 0, 2, 1, 3).contiguous()
+                    elif "unpad" in mm_patch_merge_type:
+                        image_feature = image_feature.permute(
+                            4, 0, 2, 1, 3
+                        ).contiguous()
                         image_feature = image_feature.flatten(1, 2).flatten(2, 3)
-                        image_feature = unpad_image(image_feature, image_sizes[image_idx])
-                        image_feature = torch.cat((
-                            image_feature,
-                            self.image_newline[:, None, None].expand(*image_feature.shape[:-1], 1).to(image_feature.device)
-                        ), dim=-1)
+                        image_feature = unpad_image(
+                            image_feature, image_sizes[image_idx]
+                        )
+                        image_feature = torch.cat(
+                            (
+                                image_feature,
+                                self.image_newline[:, None, None]
+                                .expand(*image_feature.shape[:-1], 1)
+                                .to(image_feature.device),
+                            ),
+                            dim=-1,
+                        )
                         image_feature = image_feature.flatten(1, 2).transpose(0, 1)
                     else:
-                        image_feature = image_feature.permute(0, 2, 1, 3, 4).contiguous()
+                        image_feature = image_feature.permute(
+                            0, 2, 1, 3, 4
+                        ).contiguous()
                         image_feature = image_feature.flatten(0, 3)
 
                     if "nobase" in mm_patch_merge_type:
                         pass
                     else:
-                        image_feature = torch.cat((base_image_feature, image_feature), dim=0)
+                        image_feature = torch.cat(
+                            (base_image_feature, image_feature), dim=0
+                        )
                 else:
                     image_feature = image_feature[0]
-                    if 'unpad' in mm_patch_merge_type:
-                        image_feature = torch.cat((
-                            image_feature,
-                            self.image_newline[None].to(image_feature.device)
-                        ), dim=0)
+                    if "unpad" in mm_patch_merge_type:
+                        image_feature = torch.cat(
+                            (
+                                image_feature,
+                                self.image_newline[None].to(image_feature.device),
+                            ),
+                            dim=0,
+                        )
                 new_image_features.append(image_feature)
             image_features = new_image_features
 
@@ -271,9 +343,17 @@ class LlavaImageEmbedding(MultiModalEmbeddingInterface):
         image_feature = image_feature.view(num_frames, 1, resize_h, resize_h, -1)
         image_feature = image_feature.permute(4, 0, 2, 1, 3).contiguous()
         image_feature = image_feature.flatten(1, 2).flatten(2, 3)
-        image_feature = torch.cat((image_feature, self.image_newline[:, None, None].expand(*image_feature.shape[:-1], 1).to(image_feature.device)), dim=-1)
+        image_feature = torch.cat(
+            (
+                image_feature,
+                self.image_newline[:, None, None]
+                .expand(*image_feature.shape[:-1], 1)
+                .to(image_feature.device),
+            ),
+            dim=-1,
+        )
         if self.config.mm_related_params.config["add_faster_video"]:
-            image_feature = image_feature.view(feature_dim, num_frames,resize_h, -1)
+            image_feature = image_feature.view(feature_dim, num_frames, resize_h, -1)
             image_feature = image_feature.permute(1, 2, 3, 0).contiguous()
             image_feature = image_feature.flatten(1, 2)
             return image_feature
@@ -286,7 +366,9 @@ class LlavaImageEmbedding(MultiModalEmbeddingInterface):
         image_feature = image_feature.view(num_frames, height, width, -1)
         image_feature = image_feature.permute(0, 3, 1, 2).contiguous()
         # image_feature = nn.functional.max_pool2d(image_feature, self.config.mm_spatial_pool_stride)
-        mm_spatial_pool_mode = self.config.mm_related_params.config["mm_spatial_pool_mode"]
+        mm_spatial_pool_mode = self.config.mm_related_params.config[
+            "mm_spatial_pool_mode"
+        ]
         if mm_spatial_pool_mode == "average":
             image_feature = nn.functional.avg_pool2d(image_feature, stride)
         elif mm_spatial_pool_mode == "max":
@@ -294,60 +376,82 @@ class LlavaImageEmbedding(MultiModalEmbeddingInterface):
         elif mm_spatial_pool_mode == "bilinear":
             height, width = image_feature.shape[2:]
             scaled_shape = [math.ceil(height / stride), math.ceil(width / stride)]
-            image_feature = nn.functional.interpolate(image_feature, size=scaled_shape, mode='bilinear')
+            image_feature = nn.functional.interpolate(
+                image_feature, size=scaled_shape, mode="bilinear"
+            )
 
         else:
-            raise ValueError(f"Unexpected mm_spatial_pool_mode: {self.config.mm_spatial_pool_mode}")
+            raise ValueError(
+                f"Unexpected mm_spatial_pool_mode: {self.config.mm_spatial_pool_mode}"
+            )
         image_feature = image_feature.permute(0, 2, 3, 1)
         image_feature = image_feature.view(num_frames, -1, num_dim)
         return image_feature
-
 
     def build_vision_tower(self, vision_tower_cfg: Dict[str, Any], **kwargs: Any):
         vision_tower_name = self.config.py_env_configs.model_config.extra_data_path
         vision_tower = self.config.py_env_configs.model_config.local_extra_data_path
         if vision_tower is None:
-            vision_tower_name = vision_tower_cfg['vit_tower_path']
-            vision_tower = vision_tower_cfg['vit_tower_path']
+            vision_tower_name = vision_tower_cfg["vit_tower_path"]
+            vision_tower = vision_tower_cfg["vit_tower_path"]
         if "siglip" in vision_tower_name:
-            return SigLipVisionTower(vision_tower, vision_tower_cfg=vision_tower_cfg, **kwargs)
+            return SigLipVisionTower(
+                vision_tower, vision_tower_cfg=vision_tower_cfg, **kwargs
+            )
         else:
-            return CLIPVisionTower(vision_tower,
-                    select_layer=vision_tower_cfg.get("mm_vision_select_layer", -2),
-                    select_feature=vision_tower_cfg.get("mm_vision_select_feature", "patch"),
-                    **kwargs)
+            return CLIPVisionTower(
+                vision_tower,
+                select_layer=vision_tower_cfg.get("mm_vision_select_layer", -2),
+                select_feature=vision_tower_cfg.get(
+                    "mm_vision_select_feature", "patch"
+                ),
+                **kwargs,
+            )
 
-        raise ValueError(f'Unknown vision tower: {vision_tower}')
+        raise ValueError(f"Unknown vision tower: {vision_tower}")
 
     def add_token_per_frame(self, image_feature):
         image_feature = image_feature.permute(2, 0, 1).contiguous()
-        image_feature =  torch.cat((image_feature, self.image_newline[:, None, None].expand(*image_feature.shape[:-1], 1).to(image_feature.device)), dim=-1)
+        image_feature = torch.cat(
+            (
+                image_feature,
+                self.image_newline[:, None, None]
+                .expand(*image_feature.shape[:-1], 1)
+                .to(image_feature.device),
+            ),
+            dim=-1,
+        )
         image_feature = image_feature.permute(1, 2, 0).contiguous()
         return image_feature
 
     def build_vision_projector(self, config, delay_load=False, **kwargs):
-        projector_type = config.get('mm_projector_type', 'linear')
+        projector_type = config.get("mm_projector_type", "linear")
 
-        if projector_type == 'linear':
-            return torch.nn.Linear(config['mm_hidden_size'], config['hidden_size'])
+        if projector_type == "linear":
+            return torch.nn.Linear(config["mm_hidden_size"], config["hidden_size"])
 
-        mlp_gelu_match = re.match(r'^mlp(\d+)x_gelu$', projector_type)
+        mlp_gelu_match = re.match(r"^mlp(\d+)x_gelu$", projector_type)
         if mlp_gelu_match:
             mlp_depth = int(mlp_gelu_match.group(1))
-            modules = [torch.nn.Linear(config['mm_hidden_size'], config['hidden_size'])]
+            modules = [torch.nn.Linear(config["mm_hidden_size"], config["hidden_size"])]
             for _ in range(1, mlp_depth):
                 modules.append(torch.nn.GELU())
-                modules.append(torch.nn.Linear(config['hidden_size'], config['hidden_size']))
+                modules.append(
+                    torch.nn.Linear(config["hidden_size"], config["hidden_size"])
+                )
             return torch.nn.Sequential(*modules)
 
-        if projector_type == 'identity':
+        if projector_type == "identity":
             return IdentityMap()
 
-        raise ValueError(f'Unknown projector type: {projector_type}')
+        raise ValueError(f"Unknown projector type: {projector_type}")
+
 
 # ViT
 class CLIPVisionTower(nn.Module):
-    def __init__(self, vision_tower, select_layer=-2, select_feature="patch", delay_load=False):
+    def __init__(
+        self, vision_tower, select_layer=-2, select_feature="patch", delay_load=False
+    ):
         super().__init__()
 
         self.is_loaded = False
@@ -362,7 +466,9 @@ class CLIPVisionTower(nn.Module):
             self.cfg_only = CLIPVisionConfig.from_pretrained(self.vision_tower_name)
 
     def load_model(self):
-        self.image_processor = CLIPImageProcessor.from_pretrained(self.vision_tower_name)
+        self.image_processor = CLIPImageProcessor.from_pretrained(
+            self.vision_tower_name
+        )
         self.vision_tower = CLIPVisionModel.from_pretrained(self.vision_tower_name)
         self.vision_tower.requires_grad_(False)
 
@@ -370,12 +476,12 @@ class CLIPVisionTower(nn.Module):
 
     def feature_select(self, image_forward_outs):
         image_features = image_forward_outs.hidden_states[self.select_layer]
-        if self.select_feature == 'patch':
+        if self.select_feature == "patch":
             image_features = image_features[:, 1:]
-        elif self.select_feature == 'cls_patch':
+        elif self.select_feature == "cls_patch":
             image_features = image_features
         else:
-            raise ValueError(f'Unexpected select feature: {self.select_feature}')
+            raise ValueError(f"Unexpected select feature: {self.select_feature}")
         return image_features
 
     @torch.no_grad()
@@ -383,11 +489,17 @@ class CLIPVisionTower(nn.Module):
         if type(images) is list:
             image_features = []
             for image in images:
-                image_forward_out = self.vision_tower(image.to(device=self.device, dtype=self.dtype).unsqueeze(0), output_hidden_states=True)
+                image_forward_out = self.vision_tower(
+                    image.to(device=self.device, dtype=self.dtype).unsqueeze(0),
+                    output_hidden_states=True,
+                )
                 image_feature = self.feature_select(image_forward_out).to(image.dtype)
                 image_features.append(image_feature)
         else:
-            image_forward_outs = self.vision_tower(images.to(device=self.device, dtype=self.dtype), output_hidden_states=True)
+            image_forward_outs = self.vision_tower(
+                images.to(device=self.device, dtype=self.dtype),
+                output_hidden_states=True,
+            )
             image_features = self.feature_select(image_forward_outs).to(images.dtype)
         return image_features
 
@@ -422,6 +534,7 @@ class CLIPVisionTower(nn.Module):
     def num_patches(self):
         return (self.config.image_size // self.config.patch_size) ** 2
 
+
 # Projector
 class IdentityMap(torch.nn.Module):
     def __init__(self):
@@ -432,24 +545,43 @@ class IdentityMap(torch.nn.Module):
 
     @property
     def config(self):
-        return {"mm_projector_type": 'identity'}
+        return {"mm_projector_type": "identity"}
 
-def process_images(images, image_aspect_ratio, image_processor, device, data_type, mm_type = MMUrlType.IMAGE, **kwargs):
+
+def process_images(
+    images,
+    image_aspect_ratio,
+    image_processor,
+    device,
+    data_type,
+    mm_type=MMUrlType.IMAGE,
+    **kwargs,
+):
     if mm_type == MMUrlType.VIDEO:
-        return image_processor.preprocess(images, return_tensors='pt')['pixel_values'].to(device, dtype=data_type)
+        return image_processor.preprocess(images, return_tensors="pt")[
+            "pixel_values"
+        ].to(device, dtype=data_type)
 
     new_images = []
     if image_aspect_ratio == "pad":
         for image in images:
-            image = expand2square(image, tuple(int(x*255) for x in image_processor.image_mean))
-            image = image_processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
+            image = expand2square(
+                image, tuple(int(x * 255) for x in image_processor.image_mean)
+            )
+            image = image_processor.preprocess(image, return_tensors="pt")[
+                "pixel_values"
+            ][0]
             new_images.append(image)
     elif "anyres" in image_aspect_ratio:
         for image in images:
-            image = process_anyres_image(image, image_processor, kwargs.get('image_grid_pinpoints', []))
+            image = process_anyres_image(
+                image, image_processor, kwargs.get("image_grid_pinpoints", [])
+            )
             new_images.append(image)
     else:
-        return image_processor.preprocess(images, return_tensors='pt')['pixel_values'].to(device, dtype=data_type)
+        return image_processor.preprocess(images, return_tensors="pt")[
+            "pixel_values"
+        ].to(device, dtype=data_type)
 
     if type(new_images) is list:
         new_images = [image.to(device, dtype=data_type) for image in new_images]
@@ -458,10 +590,24 @@ def process_images(images, image_aspect_ratio, image_processor, device, data_typ
 
     return new_images
 
+
 class SigLipImageProcessor:
-    def __init__(self, image_mean=(0.5, 0.5, 0.5), image_std=(0.5, 0.5, 0.5), size=(384, 384), crop_size: Dict[str, int] = None, resample=PILImageResampling.BICUBIC, rescale_factor=1 / 255, data_format=ChannelDimension.FIRST):
-        crop_size = crop_size if crop_size is not None else {"height": 384, "width": 384}
-        crop_size = get_size_dict(crop_size, default_to_square=True, param_name="crop_size")
+    def __init__(
+        self,
+        image_mean=(0.5, 0.5, 0.5),
+        image_std=(0.5, 0.5, 0.5),
+        size=(384, 384),
+        crop_size: Dict[str, int] = None,
+        resample=PILImageResampling.BICUBIC,
+        rescale_factor=1 / 255,
+        data_format=ChannelDimension.FIRST,
+    ):
+        crop_size = (
+            crop_size if crop_size is not None else {"height": 384, "width": 384}
+        )
+        crop_size = get_size_dict(
+            crop_size, default_to_square=True, param_name="crop_size"
+        )
 
         self.image_mean = image_mean
         self.image_std = image_std
@@ -482,10 +628,24 @@ class SigLipImageProcessor:
         transforms = [
             convert_to_rgb,
             to_numpy_array,
-            partial(resize, size=self.size, resample=self.resample, data_format=self.data_format),
+            partial(
+                resize,
+                size=self.size,
+                resample=self.resample,
+                data_format=self.data_format,
+            ),
             partial(rescale, scale=self.rescale_factor, data_format=self.data_format),
-            partial(normalize, mean=self.image_mean, std=self.image_std, data_format=self.data_format),
-            partial(to_channel_dimension_format, channel_dim=self.data_format, input_channel_dim=self.data_format),
+            partial(
+                normalize,
+                mean=self.image_mean,
+                std=self.image_std,
+                data_format=self.data_format,
+            ),
+            partial(
+                to_channel_dimension_format,
+                channel_dim=self.data_format,
+                input_channel_dim=self.data_format,
+            ),
         ]
 
         images = reduce(lambda x, f: [*map(f, x)], transforms, images)
@@ -527,17 +687,28 @@ class SigLipVisionConfig(PretrainedConfig):
         self.image_mean = image_mean
 
     @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path: Union[str, os.PathLike], **kwargs) -> "PretrainedConfig":
+    def from_pretrained(
+        cls, pretrained_model_name_or_path: Union[str, os.PathLike], **kwargs
+    ) -> "PretrainedConfig":
         cls._set_token_in_kwargs(kwargs)
 
-        config_dict, kwargs = cls.get_config_dict(pretrained_model_name_or_path, **kwargs)
+        config_dict, kwargs = cls.get_config_dict(
+            pretrained_model_name_or_path, **kwargs
+        )
 
         # get the vision config dict if we are loading from SigLipConfig
         if config_dict.get("model_type") == "siglip":
             config_dict = config_dict["vision_config"]
 
-        if "model_type" in config_dict and hasattr(cls, "model_type") and config_dict["model_type"] != cls.model_type:
-            print(f"You are using a model of type {config_dict['model_type']} to instantiate a model of type " f"{cls.model_type}. This is not supported for all configurations of models and can yield errors.")
+        if (
+            "model_type" in config_dict
+            and hasattr(cls, "model_type")
+            and config_dict["model_type"] != cls.model_type
+        ):
+            print(
+                f"You are using a model of type {config_dict['model_type']} to instantiate a model of type "
+                f"{cls.model_type}. This is not supported for all configurations of models and can yield errors."
+            )
 
         return cls.from_dict(config_dict, **kwargs)
 
@@ -591,10 +762,16 @@ class SigLipVisionEmbeddings(nn.Module):
         self.num_patches = (self.image_size // self.patch_size) ** 2
         self.num_positions = self.num_patches
         self.position_embedding = nn.Embedding(self.num_positions, self.embed_dim)
-        self.register_buffer("position_ids", torch.arange(self.num_positions).expand((1, -1)), persistent=False)
+        self.register_buffer(
+            "position_ids",
+            torch.arange(self.num_positions).expand((1, -1)),
+            persistent=False,
+        )
 
     def forward(self, pixel_values: torch.FloatTensor) -> torch.Tensor:
-        patch_embeds = self.patch_embedding(pixel_values)  # shape = [*, width, grid, grid]
+        patch_embeds = self.patch_embedding(
+            pixel_values
+        )  # shape = [*, width, grid, grid]
         embeddings = patch_embeds.flatten(2).transpose(1, 2)
 
         embeddings = embeddings + self.position_embedding(self.position_ids)
@@ -612,7 +789,10 @@ class SigLipAttention(nn.Module):
         self.num_heads = config.num_attention_heads
         self.head_dim = self.embed_dim // self.num_heads
         if self.head_dim * self.num_heads != self.embed_dim:
-            raise ValueError(f"embed_dim must be divisible by num_heads (got `embed_dim`: {self.embed_dim} and `num_heads`:" f" {self.num_heads}).")
+            raise ValueError(
+                f"embed_dim must be divisible by num_heads (got `embed_dim`: {self.embed_dim} and `num_heads`:"
+                f" {self.num_heads})."
+            )
         self.scale = self.head_dim**-0.5
         self.dropout = config.attention_dropout
 
@@ -635,28 +815,48 @@ class SigLipAttention(nn.Module):
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
 
-        query_states = query_states.view(batch_size, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(batch_size, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        value_states = value_states.view(batch_size, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        query_states = query_states.view(
+            batch_size, q_len, self.num_heads, self.head_dim
+        ).transpose(1, 2)
+        key_states = key_states.view(
+            batch_size, q_len, self.num_heads, self.head_dim
+        ).transpose(1, 2)
+        value_states = value_states.view(
+            batch_size, q_len, self.num_heads, self.head_dim
+        ).transpose(1, 2)
 
         k_v_seq_len = key_states.shape[-2]
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) * self.scale
+        attn_weights = (
+            torch.matmul(query_states, key_states.transpose(2, 3)) * self.scale
+        )
 
         if attn_weights.size() != (batch_size, self.num_heads, q_len, k_v_seq_len):
-            raise ValueError(f"Attention weights should be of size {(batch_size, self.num_heads, q_len, k_v_seq_len)}, but is" f" {attn_weights.size()}")
+            raise ValueError(
+                f"Attention weights should be of size {(batch_size, self.num_heads, q_len, k_v_seq_len)}, but is"
+                f" {attn_weights.size()}"
+            )
 
         if attention_mask is not None:
             if attention_mask.size() != (batch_size, 1, q_len, k_v_seq_len):
-                raise ValueError(f"Attention mask should be of size {(batch_size, 1, q_len, k_v_seq_len)}, but is {attention_mask.size()}")
+                raise ValueError(
+                    f"Attention mask should be of size {(batch_size, 1, q_len, k_v_seq_len)}, but is {attention_mask.size()}"
+                )
             attn_weights = attn_weights + attention_mask
 
         # upcast attention to fp32
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-        attn_weights = nn.functional.dropout(attn_weights, p=self.dropout, training=self.training)
+        attn_weights = nn.functional.softmax(
+            attn_weights, dim=-1, dtype=torch.float32
+        ).to(query_states.dtype)
+        attn_weights = nn.functional.dropout(
+            attn_weights, p=self.dropout, training=self.training
+        )
         attn_output = torch.matmul(attn_weights, value_states)
 
         if attn_output.size() != (batch_size, self.num_heads, q_len, self.head_dim):
-            raise ValueError(f"`attn_output` should be of size {(batch_size, self.num_heads, q_len, self.head_dim)}, but is" f" {attn_output.size()}")
+            raise ValueError(
+                f"`attn_output` should be of size {(batch_size, self.num_heads, q_len, self.head_dim)}, but is"
+                f" {attn_output.size()}"
+            )
 
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(batch_size, q_len, self.embed_dim)
@@ -760,7 +960,9 @@ class SigLipEncoder(nn.Module):
     def __init__(self, config: SigLipVisionConfig):
         super().__init__()
         self.config = config
-        self.layers = nn.ModuleList([SigLipEncoderLayer(config) for _ in range(config.num_hidden_layers)])
+        self.layers = nn.ModuleList(
+            [SigLipEncoderLayer(config) for _ in range(config.num_hidden_layers)]
+        )
         self.gradient_checkpointing = False
 
     # Ignore copy
@@ -794,9 +996,19 @@ class SigLipEncoder(nn.Module):
             return_dict (`bool`, *optional*):
                 Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
         """
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        output_attentions = (
+            output_attentions
+            if output_attentions is not None
+            else self.config.output_attentions
+        )
+        output_hidden_states = (
+            output_hidden_states
+            if output_hidden_states is not None
+            else self.config.output_hidden_states
+        )
+        return_dict = (
+            return_dict if return_dict is not None else self.config.use_return_dict
+        )
 
         encoder_states = () if output_hidden_states else None
         all_attentions = () if output_attentions else None
@@ -828,8 +1040,16 @@ class SigLipEncoder(nn.Module):
             encoder_states = encoder_states + (hidden_states,)
 
         if not return_dict:
-            return tuple(v for v in [hidden_states, encoder_states, all_attentions] if v is not None)
-        return BaseModelOutput(last_hidden_state=hidden_states, hidden_states=encoder_states, attentions=all_attentions)
+            return tuple(
+                v
+                for v in [hidden_states, encoder_states, all_attentions]
+                if v is not None
+            )
+        return BaseModelOutput(
+            last_hidden_state=hidden_states,
+            hidden_states=encoder_states,
+            attentions=all_attentions,
+        )
 
 
 class SigLipVisionTransformer(nn.Module):
@@ -854,9 +1074,19 @@ class SigLipVisionTransformer(nn.Module):
         Returns:
 
         """
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        output_attentions = (
+            output_attentions
+            if output_attentions is not None
+            else self.config.output_attentions
+        )
+        output_hidden_states = (
+            output_hidden_states
+            if output_hidden_states is not None
+            else self.config.output_hidden_states
+        )
+        return_dict = (
+            return_dict if return_dict is not None else self.config.use_return_dict
+        )
 
         hidden_states = self.embeddings(pixel_values)
 
@@ -890,7 +1120,9 @@ class SigLipMultiheadAttentionPoolingHead(nn.Module):
         super().__init__()
 
         self.probe = nn.Parameter(torch.randn(1, 1, config.hidden_size))
-        self.attention = torch.nn.MultiheadAttention(config.hidden_size, config.num_attention_heads, batch_first=True)
+        self.attention = torch.nn.MultiheadAttention(
+            config.hidden_size, config.num_attention_heads, batch_first=True
+        )
         self.layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.mlp = SigLipMLP(config)
 
@@ -952,7 +1184,9 @@ class SigLipVisionModel(SigLipPreTrainedModel):
         >>> last_hidden_state = outputs.last_hidden_state
         >>> pooled_output = outputs.pooler_output  # pooled features
         ```"""
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = (
+            return_dict if return_dict is not None else self.config.use_return_dict
+        )
 
         return self.vision_model(
             pixel_values=pixel_values,
@@ -978,7 +1212,10 @@ class SigLipVisionTower(nn.Module):
             self.load_model()
         elif getattr(vision_tower_cfg, "unfreeze_mm_vision_tower", False):
             self.load_model()
-        elif hasattr(vision_tower_cfg, "mm_tunable_parts") and "mm_vision_tower" in vision_tower_cfg.mm_tunable_parts:
+        elif (
+            hasattr(vision_tower_cfg, "mm_tunable_parts")
+            and "mm_vision_tower" in vision_tower_cfg.mm_tunable_parts
+        ):
             self.load_model()
         else:
             self.cfg_only = self.config
@@ -987,7 +1224,9 @@ class SigLipVisionTower(nn.Module):
         if self.is_loaded:
             return
 
-        self.vision_tower = SigLipVisionModel.from_pretrained(self.vision_tower_name, device_map=device_map)
+        self.vision_tower = SigLipVisionModel.from_pretrained(
+            self.vision_tower_name, device_map=device_map
+        )
 
         del self.vision_tower.vision_model.encoder.layers[-1:]
         self.vision_tower.vision_model.head = nn.Identity()
@@ -999,12 +1238,18 @@ class SigLipVisionTower(nn.Module):
         if type(images) is list:
             image_features = []
             for image in images:
-                image_forward_out = self.vision_tower(image.to(device=self.device, dtype=self.dtype).unsqueeze(0), output_hidden_states=True)
+                image_forward_out = self.vision_tower(
+                    image.to(device=self.device, dtype=self.dtype).unsqueeze(0),
+                    output_hidden_states=True,
+                )
                 image_feature = image_forward_out.hidden_states[-1].to(image.dtype)
                 assert image_features.shape[-2] == 729
                 image_features.append(image_feature)
         else:
-            image_forward_outs = self.vision_tower(images.to(device=self.device, dtype=self.dtype), output_hidden_states=True)
+            image_forward_outs = self.vision_tower(
+                images.to(device=self.device, dtype=self.dtype),
+                output_hidden_states=True,
+            )
             image_features = image_forward_outs.hidden_states[-1].to(images.dtype)
             assert image_features.shape[-2] == 729
 

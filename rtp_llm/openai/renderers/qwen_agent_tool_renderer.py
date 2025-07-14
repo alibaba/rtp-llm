@@ -1,27 +1,30 @@
-from typing import AsyncGenerator, Optional, List, Union
 import logging
+from typing import AsyncGenerator, List, Optional, Union
+
+from transformers import Qwen2Tokenizer
+
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.models.base_model import GenerateOutputs
-from rtp_llm.openai.renderers.qwen_agent_renderer import QwenAgentRenderer
-from rtp_llm.tokenizer.tokenization_qwen import QWenTokenizer
-from transformers import Qwen2Tokenizer
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     DeltaMessage,
     FinisheReason,
 )
+from rtp_llm.openai.renderer_factory_register import register_renderer
 from rtp_llm.openai.renderers.custom_renderer import (
-    StreamResponseObject,
     RenderedInputs,
+    StreamResponseObject,
     StreamStatus,
 )
-from rtp_llm.openai.renderer_factory_register import register_renderer
 from rtp_llm.openai.renderers.qwen_agent.utils.tool_function_converter import (
-    convert_tool_to_function_request,
     convert_function_to_tool_response,
+    convert_tool_to_function_request,
 )
+from rtp_llm.openai.renderers.qwen_agent_renderer import QwenAgentRenderer
+from rtp_llm.tokenizer.tokenization_qwen import QWenTokenizer
 
 QwenTokenizerTypes = Union[QWenTokenizer, Qwen2Tokenizer]
+
 
 class QwenAgentToolRenderer(QwenAgentRenderer):
 

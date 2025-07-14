@@ -19,8 +19,7 @@
 
 namespace rtp_llm {
 
-__device__ __host__ int index_CUBLASLT_ORDER_COL4_4R2_8C(int col_id, int row_id, int m_32)
-{
+__device__ __host__ int index_CUBLASLT_ORDER_COL4_4R2_8C(int col_id, int row_id, int m_32) {
     int new_col = col_id >> 5;
     int new_row =  // CUBLASLT_ORDER_COL4_4R2_8C
                    ////row_id/8 is the number of tile of (8 rows 32 columns) -- column-major
@@ -35,8 +34,7 @@ __device__ __host__ int index_CUBLASLT_ORDER_COL4_4R2_8C(int col_id, int row_id,
     return new_col * m_32 + new_row;
 }
 
-__device__ __host__ int index_CUBLASLT_ORDER_COL32_2R_4R4(int col_id, int row_id, int m_32)
-{
+__device__ __host__ int index_CUBLASLT_ORDER_COL32_2R_4R4(int col_id, int row_id, int m_32) {
     int new_col     = col_id >> 5;
     int row_in_tile = row_id & 31;
     int col_in_tile = col_id & 31;
@@ -53,19 +51,16 @@ __global__ void quantize_weight_kernel(int8_t*      dst,
                                        const int    n,
                                        const int    k,
                                        const int    format,
-                                       const int    scale_is_vector)
-{
+                                       const int    scale_is_vector) {
     int tid     = (blockIdx.x * blockDim.x + threadIdx.x);
     int col_idx = tid / n;
     int row_idx = tid - col_idx * n;
     int new_idx;
     if (format == 0) {
         new_idx = row_idx * k + col_idx;
-    }
-    else if (format == 1) {
+    } else if (format == 1) {
         new_idx = index_CUBLASLT_ORDER_COL32_2R_4R4(col_idx, row_idx, 32 * n);
-    }
-    else if (format == 2) {
+    } else if (format == 2) {
         new_idx = index_CUBLASLT_ORDER_COL4_4R2_8C(col_idx, row_idx, 32 * n);
     }
     if (tid < n * k) {
@@ -80,19 +75,16 @@ __global__ void quantize_weight_kernel(int8_t*      dst,
                                        const int    n,
                                        const int    k,
                                        const int    format,
-                                       const int    scale_is_vector)
-{
+                                       const int    scale_is_vector) {
     int tid     = (blockIdx.x * blockDim.x + threadIdx.x);
     int col_idx = tid / n;
     int row_idx = tid - col_idx * n;
     int new_idx;
     if (format == 0) {
         new_idx = row_idx * k + col_idx;
-    }
-    else if (format == 1) {
+    } else if (format == 1) {
         new_idx = index_CUBLASLT_ORDER_COL32_2R_4R4(col_idx, row_idx, 32 * n);
-    }
-    else if (format == 2) {
+    } else if (format == 2) {
         new_idx = index_CUBLASLT_ORDER_COL4_4R2_8C(col_idx, row_idx, 32 * n);
     }
     if (tid < n * k) {
@@ -109,8 +101,7 @@ void invokeQuantizeWeight(int8_t*      dst,
                           const int    k,
                           const int    format,
                           cudaStream_t stream,
-                          const int    scale_is_vector)
-{
+                          const int    scale_is_vector) {
     if (format != 0 && format != 1 & format != 2) {
         printf("[ERROR][invokeQuantizeWeight] format must be one of 0, 1, 2. current value: %d\n", format);
         exit(-1);
@@ -124,8 +115,7 @@ void invokeQuantizeWeight(int8_t*      dst,
     dim3 block(256);
     if (sizeof(T) == sizeof(float)) {
         quantize_weight_kernel<<<grid, block, 0, stream>>>(dst, (const float*)src, amax, n, k, format, scale_is_vector);
-    }
-    else if (sizeof(T) == sizeof(half)) {
+    } else if (sizeof(T) == sizeof(half)) {
         quantize_weight_kernel<<<grid, block, 0, stream>>>(dst, (const half*)src, amax, n, k, format, scale_is_vector);
     }
 }

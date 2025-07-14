@@ -43,4 +43,4 @@ inline NormType getNormType(std::string norm_type_str) {
     return NormType::invalid_type;
 }
 
-} // namespace rtp_llm
+}  // namespace rtp_llm

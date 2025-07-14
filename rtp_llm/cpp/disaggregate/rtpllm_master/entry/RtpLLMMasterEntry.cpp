@@ -31,24 +31,24 @@ LoadBalancerInitParams RtpLLMMasterEntry::createLoadBalancerInitParams(const Mas
     LoadBalancerInitParams load_balance_params;
     load_balance_params.sync_status_interval_ms = param.load_balance_config.sync_status_interval_ms;
     load_balance_params.update_interval_ms      = param.load_balance_config.update_interval_ms;
-        const PySubscribeConfig& py_config = param.load_balance_config.subscribe_config;
-        if (py_config.type == PySubscribeConfigType::CM2) {
-            CM2SubscribeServiceConfig config;
-            config.zk_host       = py_config.zk_host;
-            config.zk_path       = py_config.zk_path;
-            config.zk_timeout_ms = py_config.zk_timeout_ms;
-            config.clusters      = {py_config.cluster_name};
-            load_balance_params.subscribe_config.cm2_configs.push_back(config);
-            biz_name_ = py_config.cluster_name;
-        } else if (py_config.type == PySubscribeConfigType::LOCAL) {
-            LocalNodeJsonize node("local", py_config.local_ip, py_config.local_rpc_port, py_config.local_http_port);
-            LocalSubscribeServiceConfig local_config;
-            local_config.nodes.push_back(node);
-            load_balance_params.subscribe_config.local_configs.push_back(local_config);
-            biz_name_ = "local";
-        } else {
-            RTP_LLM_LOG_ERROR("unsupported subscribe config type %d", py_config.type);
-        }
+    const PySubscribeConfig& py_config          = param.load_balance_config.subscribe_config;
+    if (py_config.type == PySubscribeConfigType::CM2) {
+        CM2SubscribeServiceConfig config;
+        config.zk_host       = py_config.zk_host;
+        config.zk_path       = py_config.zk_path;
+        config.zk_timeout_ms = py_config.zk_timeout_ms;
+        config.clusters      = {py_config.cluster_name};
+        load_balance_params.subscribe_config.cm2_configs.push_back(config);
+        biz_name_ = py_config.cluster_name;
+    } else if (py_config.type == PySubscribeConfigType::LOCAL) {
+        LocalNodeJsonize node("local", py_config.local_ip, py_config.local_rpc_port, py_config.local_http_port);
+        LocalSubscribeServiceConfig local_config;
+        local_config.nodes.push_back(node);
+        load_balance_params.subscribe_config.local_configs.push_back(local_config);
+        biz_name_ = "local";
+    } else {
+        RTP_LLM_LOG_ERROR("unsupported subscribe config type %d", py_config.type);
+    }
     return load_balance_params;
 }
 

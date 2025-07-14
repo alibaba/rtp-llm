@@ -35,4 +35,4 @@ void invokeMlaQKVMerge(T*           q,
                        int          rope_head_dim,
                        int          v_head_dim,
                        cudaStream_t stream);
-}
+}  // namespace rtp_llm

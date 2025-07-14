@@ -42,9 +42,9 @@ protected:
         while (iter != finished_streams_.end()) {
             if (iter->first > current) {
                 RTP_LLM_LOG_WARNING("find task: %ld end time: %d bigger than current time: %d",
-                               iter->second.request_id,
-                               iter->first,
-                               current);
+                                    iter->second.request_id,
+                                    iter->first,
+                                    current);
                 iter = finished_streams_.erase(iter);
             } else if (iter->first + timeout_ms_ <= current) {
                 iter = finished_streams_.erase(iter);

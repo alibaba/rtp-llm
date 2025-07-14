@@ -1,5 +1,6 @@
-from typing import Any, Dict
 import json
+from typing import Any, Dict
+
 
 def convert_tool_to_function_request(request: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -37,7 +38,7 @@ def convert_tool_to_function_request(request: Dict[str, Any]) -> Dict[str, Any]:
                 tool_call = msg["tool_calls"][0]
                 new_msg["function_call"] = {
                     "name": tool_call["function"]["name"],
-                    "arguments": tool_call["function"]["arguments"]
+                    "arguments": tool_call["function"]["arguments"],
                 }
                 new_msg.pop("tool_calls", None)
 

@@ -11,19 +11,18 @@ using namespace std;
 
 namespace rtp_llm {
 
-NormalExecutor::NormalExecutor(const EngineInitParams& params,
-                               const std::shared_ptr<CacheManager>& cache_manager,
-                               rtp_llm::DeviceBase* device,
+NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
+                               const std::shared_ptr<CacheManager>&      cache_manager,
+                               rtp_llm::DeviceBase*                      device,
                                const std::shared_ptr<lora::LoraManager>& lora_manager,
-                               bool warm_up):
+                               bool                                      warm_up):
     Executor(device),
     cache_manager_(cache_manager),
     lora_manager_(lora_manager),
     warm_up_(warm_up),
     use_all_gather_(params.gpt_init_parameter.use_all_gather_),
     metrics_reporter_(params.metrics_reporter),
-    tps_reporter_(MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(metrics_reporter_))
-{
+    tps_reporter_(MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(metrics_reporter_)) {
     auto& gpt_param = params.gpt_init_parameter;
     if (gpt_param.enable_eplb_ && gpt_param.moe_style_ != 0) {
         // use first moe layer weight as moe weight type
@@ -46,17 +45,19 @@ NormalExecutor::NormalExecutor(const EngineInitParams& params,
                                                        metrics_reporter_);
     }
 
-    int eos_id = params.gpt_init_parameter.special_tokens_.eos_token_id_;
-    SamplerInitParams sampler_params{device_, eos_id, device->initParams().max_batch_size}; // set static max batch size to avoid sampler reset memory
+    int               eos_id = params.gpt_init_parameter.special_tokens_.eos_token_id_;
+    SamplerInitParams sampler_params{
+        device_,
+        eos_id,
+        device->initParams().max_batch_size};  // set static max batch size to avoid sampler reset memory
     sampler_.reset(new Sampler(sampler_params));
 
-    GptModelInitParams model_init_params({
-        device_,
-        params.gpt_weights,
-        genModelDescription(params.gpt_init_parameter),
-        cache_manager ? ((optional<CacheManager::KVCacheBuffer>)cache_manager->kvCacheBuffer()) : nullopt,
-        params.model_id
-    });
+    GptModelInitParams model_init_params(
+        {device_,
+         params.gpt_weights,
+         genModelDescription(params.gpt_init_parameter),
+         cache_manager ? ((optional<CacheManager::KVCacheBuffer>)cache_manager->kvCacheBuffer()) : nullopt,
+         params.model_id});
 
     if (!params.py_model.is_none()) {
         RTP_LLM_LOG_INFO("init executor with python model");
@@ -68,28 +69,28 @@ NormalExecutor::NormalExecutor(const EngineInitParams& params,
 
     // when warmup, cache manager maybe nullptr
     const auto& cache_config = cache_manager ? cache_manager->cacheConfig() : CacheConfig();
-    batch_stream_processor_.reset(new NormalBatchStreamProcessor(
-        params.gpt_init_parameter, cache_config, warm_up_));
-    PrefixToCandidateTokens::instance()->reloadPrefixDictWithPrefix(params.gpt_init_parameter.ckpt_path_,params.gpt_init_parameter.sp_config.tree_decode_config);
+    batch_stream_processor_.reset(new NormalBatchStreamProcessor(params.gpt_init_parameter, cache_config, warm_up_));
+    PrefixToCandidateTokens::instance()->reloadPrefixDictWithPrefix(
+        params.gpt_init_parameter.ckpt_path_, params.gpt_init_parameter.sp_config.tree_decode_config);
 }
 
 absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams) {
-    StreamGroups stream_groups(streams);
+    StreamGroups                   stream_groups(streams);
     RtpLLMExecutorMetricsCollector executor_collector;
-    RtpLLMTokenPSMetricsCollector tps_collector;
-    GptModelInputs model_input;
-    GptModelOutputs model_output;
-    SamplerOutput sampler_output;
+    RtpLLMTokenPSMetricsCollector  tps_collector;
+    GptModelInputs                 model_input;
+    GptModelOutputs                model_output;
+    SamplerOutput                  sampler_output;
     {
-        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        auto model_input_status = batch_stream_processor_->gatherModelInput(stream_groups);
+        int64_t start_time_us      = autil::TimeUtility::currentTimeInMicroSeconds();
+        auto    model_input_status = batch_stream_processor_->gatherModelInput(stream_groups);
         RETURN_IF_STATUS_OR_ERROR(model_input_status);
-        model_input = std::move(model_input_status.value());
+        model_input                              = std::move(model_input_status.value());
         executor_collector.gather_model_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
     {
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        model_input.skip_run = streams.empty();
+        model_input.skip_run  = streams.empty();
         tpSyncModelInputs(model_input, device_);
         if (model_input.skip_run) {
             return absl::OkStatus();
@@ -98,13 +99,13 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     }
     // get lora input
     if (lora_manager_) {
-        model_input.lora_model_input = lora_manager_->makeLoraModelInput(model_input.lora_ids,
-                                                                         model_input.lora_input_lengths);
+        model_input.lora_model_input =
+            lora_manager_->makeLoraModelInput(model_input.lora_ids, model_input.lora_input_lengths);
     }
     {
         RTP_LLM_LOG_DEBUG("model_input: %s", model_input.debugString().c_str());
-        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        model_output = std::move(model_->forward(model_input));
+        int64_t start_time_us               = autil::TimeUtility::currentTimeInMicroSeconds();
+        model_output                        = std::move(model_->forward(model_input));
         executor_collector.model_forward_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
         RTP_LLM_LOG_DEBUG("model forward done");
     }
@@ -118,23 +119,25 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     }
     {
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        CHECK_AND_RETURN_REF(sampler_input, batch_stream_processor_->gatherSamplerInput(stream_groups, model_input, model_output));
+        CHECK_AND_RETURN_REF(sampler_input,
+                             batch_stream_processor_->gatherSamplerInput(stream_groups, model_input, model_output));
         sampler_output = std::move(sampler_->forward(sampler_input));
         RTP_LLM_LOG_DEBUG("sampler forward done");
         executor_collector.sample_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
     {
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        auto result = batch_stream_processor_->dispatch(stream_groups, {std::move(model_output), std::move(sampler_output)});
+        auto    result =
+            batch_stream_processor_->dispatch(stream_groups, {std::move(model_output), std::move(sampler_output)});
         executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
         reportMetrics(stream_groups, executor_collector, tps_collector);
         return result;
     }
 }
 
-void NormalExecutor::reportMetrics(const StreamGroups& stream_groups,
+void NormalExecutor::reportMetrics(const StreamGroups&             stream_groups,
                                    RtpLLMExecutorMetricsCollector& executor_collector,
-                                   RtpLLMTokenPSMetricsCollector& tps_collector) {
+                                   RtpLLMTokenPSMetricsCollector&  tps_collector) {
     if (device_->getDeviceProperties().tp_rank > 0) {
         return;
     }
@@ -144,22 +147,21 @@ void NormalExecutor::reportMetrics(const StreamGroups& stream_groups,
         executor_collector.execute_token_size  = stream_groups.modelExecuteTokenSize();
         executor_collector.max_seq_len         = stream_groups.maxSeqLen();
         if (executor_collector.context_batch_size != 0) {
-            executor_collector.context_batch_size_when_has_context = executor_collector.context_batch_size;
+            executor_collector.context_batch_size_when_has_context  = executor_collector.context_batch_size;
             executor_collector.generate_batch_size_when_has_context = executor_collector.generate_batch_size;
-            executor_collector.execute_token_size_when_has_context = executor_collector.execute_token_size;
-            executor_collector.max_seq_len_when_has_context = executor_collector.max_seq_len;
+            executor_collector.execute_token_size_when_has_context  = executor_collector.execute_token_size;
+            executor_collector.max_seq_len_when_has_context         = executor_collector.max_seq_len;
         }
         metrics_reporter_->report<RtpLLMExecutorMetrics, RtpLLMExecutorMetricsCollector>(nullptr, &executor_collector);
 
-        tps_collector.context_tps = stream_groups.modelExecuteTokenSize() - stream_groups.totalDecodeBatchSize();
+        tps_collector.context_tps  = stream_groups.modelExecuteTokenSize() - stream_groups.totalDecodeBatchSize();
         tps_collector.generate_tps = stream_groups.totalDecodeBatchSize();
-        tps_collector.total_tps = stream_groups.modelExecuteTokenSize();
+        tps_collector.total_tps    = stream_groups.modelExecuteTokenSize();
         tps_reporter_.report(&tps_collector);
     }
 }
 
-bool NormalExecutor::updateEplbConfig(const EplbConfig& config)
-{
+bool NormalExecutor::updateEplbConfig(const EplbConfig& config) {
     if (expert_balancer_) {
         return expert_balancer_->updateEplbConfig(config);
     }

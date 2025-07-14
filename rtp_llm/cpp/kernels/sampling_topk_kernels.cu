@@ -36,10 +36,9 @@ using namespace rtp_llm::rocm;
 #include "rtp_llm/cpp/cuda/reduce_kernel_utils.cuh"
 #include "rtp_llm/cpp/kernels/sampling_topk_kernels.h"
 
-    namespace rtp_llm {
+namespace rtp_llm {
 
-__global__ void curandInitialize(curandState_t* state, const int size, const unsigned long long random_seed)
-{
+__global__ void curandInitialize(curandState_t* state, const int size, const unsigned long long random_seed) {
     if (threadIdx.x + blockIdx.x * blockDim.x < size) {
         curand_init(random_seed, 0, 0, &state[blockIdx.x * blockDim.x + threadIdx.x]);
     }
@@ -48,15 +47,13 @@ __global__ void curandInitialize(curandState_t* state, const int size, const uns
 void invokeCurandInitialize(curandState_t*           state,
                             const size_t             batch_size,
                             const unsigned long long random_seed,
-                            cudaStream_t             stream)
-{
+                            cudaStream_t             stream) {
     dim3 block(256);
     dim3 grid((int)(ceil(batch_size * 1.0 / 256)));
     curandInitialize<<<grid, block, 0, stream>>>(state, batch_size, random_seed);
 }
 
-__global__ void curandBatchInitialize(curandState_t* states, const int size, const unsigned long long* random_seeds)
-{
+__global__ void curandBatchInitialize(curandState_t* states, const int size, const unsigned long long* random_seeds) {
     int idx = threadIdx.x + blockIdx.x * blockDim.x;
     if (idx < size) {
         curand_init(random_seeds[idx], 0, 0, &states[idx]);
@@ -66,8 +63,7 @@ __global__ void curandBatchInitialize(curandState_t* states, const int size, con
 void invokeCurandBatchInitialize(curandState_t*            states,
                                  const size_t              batch_size,
                                  const unsigned long long* random_seeds,
-                                 cudaStream_t              stream)
-{
+                                 cudaStream_t              stream) {
     dim3 block(256);
     dim3 grid((int)(ceil(batch_size * 1.0 / 256)));
     curandBatchInitialize<<<grid, block, 0, stream>>>(states, batch_size, random_seeds);
@@ -79,8 +75,7 @@ __global__ void addBiasEndMask(T*          logits,
                                const int*  end_ids,
                                const bool* finished,
                                const int   vocab_size,
-                               const int   vocab_size_padded)
-{
+                               const int   vocab_size_padded) {
     int  bid    = blockIdx.x;
     bool finish = finished != nullptr ? finished[bid] : false;
     int  offset = bid * vocab_size_padded;
@@ -90,11 +85,9 @@ __global__ void addBiasEndMask(T*          logits,
     for (int tid = threadIdx.x; tid < vocab_size_padded; tid += blockDim.x) {
         if (tid >= vocab_size) {
             logits[offset + tid] = -MAX_T_VAL;
-        }
-        else if (finish) {
+        } else if (finish) {
             logits[offset + tid] = (tid == end_ids[bid]) ? MAX_T_VAL : -MAX_T_VAL;
-        }
-        else {
+        } else {
             if (bias != nullptr) {
                 logits[offset + tid] += bias[tid];
             }
@@ -110,8 +103,7 @@ void invokeAddBiasEndMask(T*           logits,
                           const int    batch_size,
                           const int    vocab_size,
                           const int    vocab_size_padded,
-                          cudaStream_t stream)
-{
+                          cudaStream_t stream) {
     dim3 grid(batch_size);
     dim3 block(min(vocab_size_padded, 1024));
     /*n is the vocab_size, e.g., 30000, 7000.... vocab_size is usually very big. */
@@ -146,8 +138,7 @@ __global__ void topk_stage1(const T* __restrict log_probs,
                             const int*  top_ks,
                             const int   vocab_size,
                             const int*  end_ids,
-                            const bool* skip_decode)
-{
+                            const bool* skip_decode) {
     typedef cub::BlockReduce<TopK_2<T>, BLOCK_SIZE_> BlockReduce;
     __shared__ typename BlockReduce::TempStorage     temp_storage;
 
@@ -175,8 +166,7 @@ __global__ void topk_stage1(const T* __restrict log_probs,
                 const int end_id        = end_ids[batch_id];
                 topk_tmp_id_buf[index]  = tmp_log_buf_index + end_id;
                 topk_tmp_val_buf[index] = log_probs[tmp_log_buf_index + end_id];
-            }
-            else {
+            } else {
                 topk_tmp_id_buf[index]  = -1;
                 topk_tmp_val_buf[index] = -MAX_T_VAL;
             }
@@ -206,7 +196,7 @@ __global__ void topk_stage1(const T* __restrict log_probs,
             topk_tmp_id_buf[index]  = total.p;
             topk_tmp_val_buf[index] = total.u;
             if (total.p >= 0) {
-                tmp_log_probs[total.p]  = -MAX_T_VAL;
+                tmp_log_probs[total.p] = -MAX_T_VAL;
             }
         }
         __syncthreads();
@@ -229,8 +219,7 @@ __global__ void topk_stage2_sampling(const int* __restrict topk_tmp_id_buf,
                                      curandState_t* curandstate,
                                      const int*     end_ids,
                                      const int      vocab_size,
-                                     const bool*    skip_decode)
-{
+                                     const bool*    skip_decode) {
     const bool IS_FP16   = std::is_same<T, half>::value;
     const T    MAX_T_VAL = (IS_FP16) ? HALF_FLT_MAX : FLT_MAX;
 
@@ -282,7 +271,7 @@ __global__ void topk_stage2_sampling(const int* __restrict topk_tmp_id_buf,
 
             // when cum_log_probs are computed, topk_tmp_val_buf (logits_buf_) are already pre-processed by
             // softmax_kernel
-            total.u = __expf(total.u - s_max);
+            total.u     = __expf(total.u - s_max);
             s_val2[ite] = total.u;
             s_sum += total.u;
         }
@@ -290,14 +279,15 @@ __global__ void topk_stage2_sampling(const int* __restrict topk_tmp_id_buf,
     }
 
     //@miji TODO: use block sum to make it faster
-    if constexpr(RECORD_PROB) {        
+    if constexpr (RECORD_PROB) {
         float prob_sum = 0;
         if (threadIdx.x == 0) {
             for (int i = 0; i < k; i++) {
-                int token_idx = topk_tmp_id_buf[batch_id * stride + s_id[i]] % vocab_size;
+                int   token_idx   = topk_tmp_id_buf[batch_id * stride + s_id[i]] % vocab_size;
                 float origin_prob = __expf(logf(s_val2[i]) - logf(s_sum));
                 prob_sum += origin_prob;
-                output_all_probs[batch_id * vocab_size + token_idx] = max(0.0, origin_prob - max(0.0, prob_sum - prob_threshold)) / prob_threshold;
+                output_all_probs[batch_id * vocab_size + token_idx] =
+                    max(0.0, origin_prob - max(0.0, prob_sum - prob_threshold)) / prob_threshold;
                 if (prob_sum >= prob_threshold) {
                     break;
                 }
@@ -337,7 +327,7 @@ __global__ void topk_stage2_sampling(const int* __restrict topk_tmp_id_buf,
     }
 }
 
-#define CASE_K(K_MIN, K_MAX, BLOCK_SIZE_1_, BLOCK_SIZE_2_, BLOCKS_PER_BEAM_, RECORD_PROB)                                           \
+#define CASE_K(K_MIN, K_MAX, BLOCK_SIZE_1_, BLOCK_SIZE_2_, BLOCKS_PER_BEAM_, RECORD_PROB)                              \
     case K_MIN ... K_MAX:                                                                                              \
         topk_stage1<T, BLOCK_SIZE_1_, BLOCKS_PER_BEAM_>                                                                \
             <<<batch_size * BLOCKS_PER_BEAM_, BLOCK_SIZE_1_, 0, stream>>>(log_probs,                                   \
@@ -388,8 +378,7 @@ void invokeBatchTopKSampling(void*          workspace,
                              float*         output_all_probs,
                              cudaStream_t   stream,
                              const int      batch_size,
-                             const bool*    skip_decode)
-{
+                             const bool*    skip_decode) {
     // Not allow an ambiguous inputs top_p and top_ps.
     assert(top_p == 1.0f || top_ps == nullptr);
     const int vocab_size              = vocab_size_padded;
@@ -419,7 +408,7 @@ void invokeBatchTopKSampling(void*          workspace,
         CASE_K(33, 64, 256, 256, 8, LOG_PROB);                                                                         \
         CASE_K(65, 1024, 256, 256, 8, LOG_PROB);                                                                       \
         default:                                                                                                       \
-            throw std::domain_error(rtp_llm::fmtstr("top-k kernel supports 1<=k<=1024 but got k=%d", max_top_k));               \
+            throw std::domain_error(rtp_llm::fmtstr("top-k kernel supports 1<=k<=1024 but got k=%d", max_top_k));      \
     }
     if (output_all_probs) {
         SWITCH_MAX_K(true);
@@ -487,8 +476,7 @@ void invokeTopKSampling(void*          workspace,
                         float*         output_all_probs,
                         cudaStream_t   stream,
                         const int      batch_size,
-                        const bool*    skip_decode)
-{
+                        const bool*    skip_decode) {
     invokeBatchTopKSampling(workspace,
                             workspace_size,
                             log_probs,
@@ -554,8 +542,7 @@ __global__ void setup_topk_runtime_args(int    batch_size,
                                         float  top_p,
                                         float* top_ps,
                                         int    top_ps_size,
-                                        bool*  skip_decode)
-{
+                                        bool*  skip_decode) {
     int index = blockIdx.x * blockDim.x + threadIdx.x;
     for (int i = index; i < batch_size; i += gridDim.x * blockDim.x) {
         uint  k = top_ks_size > 1 ? top_ks[i] : top_k;
@@ -597,28 +584,20 @@ __global__ void setup_topk_runtime_args(int    batch_size,
     }
 }
 
-void invokeSetupTopKRuntimeArgs(int    batch_size,
-                                uint   top_k,
-                                uint*  top_ks,
-                                int    top_ks_size,
-                                float  top_p,
-                                float* top_ps,
-                                int    top_ps_size,
-                                bool*  skip_decode,
-                                cudaStream_t stream)
-{
+void invokeSetupTopKRuntimeArgs(int          batch_size,
+                                uint         top_k,
+                                uint*        top_ks,
+                                int          top_ks_size,
+                                float        top_p,
+                                float*       top_ps,
+                                int          top_ps_size,
+                                bool*        skip_decode,
+                                cudaStream_t stream) {
     dim3 block(std::min((int)batch_size, 256));
     dim3 grid(div_up((int)batch_size, (int)block.x));
     // support top_k up to 1024.
-    setup_topk_runtime_args<1024><<<grid, block, 0, stream>>>(batch_size,
-                                top_k,
-                                top_ks,
-                                top_ks_size,
-                                top_p,
-                                top_ps,
-                                top_ps_size,
-                                skip_decode);
-
+    setup_topk_runtime_args<1024>
+        <<<grid, block, 0, stream>>>(batch_size, top_k, top_ks, top_ks_size, top_p, top_ps, top_ps_size, skip_decode);
 }
 
 }  // namespace rtp_llm

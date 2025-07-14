@@ -58,4 +58,3 @@ TEST_F(CpuGemmOpTest, BasicGemmOpTestBF16) {
         GemmOp(DataType::TYPE_BF16, f, 1024, 2048, TransposeOperation::TRANSPOSE, TransposeOperation::TRANSPOSE);
     }
 }
-

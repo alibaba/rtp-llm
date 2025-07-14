@@ -8,23 +8,25 @@
 
 namespace rtp_llm {
 
-#define JSONIZE_OPTIONAL(field) try { \
-                                    using Type = decltype(field)::value_type; \
-                                    Type field##Tmp; \
-                                    json.Jsonize(#field, field##Tmp); \
-                                    field = field##Tmp; \
-                                } catch (autil::legacy::ExceptionBase &e) { \
-                                    if (field.has_value() == false) { \
-                                        field = std::nullopt; \
-                                    } \
-                                }
+#define JSONIZE_OPTIONAL(field)                                                                                        \
+    try {                                                                                                              \
+        using Type = decltype(field)::value_type;                                                                      \
+        Type field##Tmp;                                                                                               \
+        json.Jsonize(#field, field##Tmp);                                                                              \
+        field = field##Tmp;                                                                                            \
+    } catch (autil::legacy::ExceptionBase & e) {                                                                       \
+        if (field.has_value() == false) {                                                                              \
+            field = std::nullopt;                                                                                      \
+        }                                                                                                              \
+    }
 
 void TokenizerEncodeRequest::Jsonize(Jsonizable::JsonWrapper& json) {
     JSONIZE_OPTIONAL(prompt);
     JSONIZE_OPTIONAL(return_offsets_mapping);
 }
 
-TokenizerService::TokenizerService(const std::shared_ptr<TokenProcessor>& token_processor): token_processor_(token_processor) {}
+TokenizerService::TokenizerService(const std::shared_ptr<TokenProcessor>& token_processor):
+    token_processor_(token_processor) {}
 
 void TokenizerService::tokenizerEncode(const std::unique_ptr<http_server::HttpResponseWriter>& writer,
                                        const http_server::HttpRequest&                         request) {
@@ -45,12 +47,12 @@ void TokenizerService::tokenizerEncode(const std::unique_ptr<http_server::HttpRe
         if (req.prompt.has_value() == false) {
             RTP_LLM_LOG_WARNING("tokenizer encode failed, request has no prompt, request body: %s", body.c_str());
             writer->SetStatus(500, "Internal Server Error");
-            auto msg = ErrorResponse::CreateErrorResponseJsonString(514,
-                    "tokenizer encode failed, request has no prompt");
+            auto msg =
+                ErrorResponse::CreateErrorResponseJsonString(514, "tokenizer encode failed, request has no prompt");
             writer->Write(msg);
             return;
         }
-        auto prompt = req.prompt.value();
+        auto prompt         = req.prompt.value();
         bool offset_mapping = false;
         if (req.return_offsets_mapping.has_value()) {
             offset_mapping = req.return_offsets_mapping.value();

@@ -10,7 +10,8 @@ namespace rtp_llm {
 
 EngineBase::EngineBase(const EngineInitParams& params) {
     initDevices(params);
-    lora_manager_ = std::make_shared<lora::LoraManager>(params.gpt_init_parameter.model_specific_config.max_lora_model_size);
+    lora_manager_ =
+        std::make_shared<lora::LoraManager>(params.gpt_init_parameter.model_specific_config.max_lora_model_size);
 }
 
 EngineBase::~EngineBase() {}
@@ -24,15 +25,15 @@ std::shared_ptr<GenerateStream> EngineBase::makeStream(const std::shared_ptr<Gen
 }
 
 void EngineBase::initDevices(const EngineInitParams& params) {
-    const auto rank = params.gpt_init_parameter.dp_rank_ * params.gpt_init_parameter.tp_size_ +
-                      params.gpt_init_parameter.tp_rank_;
+    const auto rank =
+        params.gpt_init_parameter.dp_rank_ * params.gpt_init_parameter.tp_size_ + params.gpt_init_parameter.tp_rank_;
     Logger::getEngineLogger().setRank(rank);
     Logger::getEngineLogger().flush();
     rtp_llm::DeviceFactory::initDevices(params.gpt_init_parameter);
-    device_       = rtp_llm::DeviceFactory::getDefaultDevice();
+    device_ = rtp_llm::DeviceFactory::getDefaultDevice();
 }
 
-void EngineBase::addLora(const std::string&            adapter_name,
+void EngineBase::addLora(const std::string&                 adapter_name,
                          rtp_llm::lora::loraLayerWeightsMap lora_a,
                          rtp_llm::lora::loraLayerWeightsMap lora_b) {
     lora_manager_->addLora(adapter_name, lora_a, lora_b);

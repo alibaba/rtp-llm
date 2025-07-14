@@ -18,11 +18,10 @@
 
 #include "rtp_llm/cpp/cuda/trt_utils.h"
 
-namespace tensorrt_llm::plugins
-{
+namespace tensorrt_llm::plugins {
 
 void logError(const char* msg, const char* file, const char* fn, int line);
 
 void caughtError(const std::exception& e);
 
-} // namespace tensorrt_llm::plugins
+}  // namespace tensorrt_llm::plugins

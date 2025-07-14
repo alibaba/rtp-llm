@@ -11,8 +11,8 @@ namespace rtp_llm {
 class CacheStore: public std::enable_shared_from_this<CacheStore> {
 
 public:
-    CacheStore(){};
-    virtual ~CacheStore(){};
+    CacheStore() {};
+    virtual ~CacheStore() {};
 
     virtual void store(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer,
                        CacheStoreStoreDoneCallback                callback) = 0;

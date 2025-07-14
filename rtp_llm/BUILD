@@ -387,7 +387,7 @@ py_library(
     ] + select({
         "@//:using_rocm": [":aiter",],
         "//conditions:default": [],
-    }), 
+    }),
     data = [
         "//rtp_llm/libs:libs"
     ]

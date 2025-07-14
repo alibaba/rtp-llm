@@ -3,7 +3,7 @@
 // #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 // #include "rtp_llm/cpp/devices/OpData.h"
 
-// 
+//
 
 // namespace unittest {
 

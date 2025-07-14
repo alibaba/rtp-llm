@@ -24,25 +24,33 @@ using tensorrt_llm::plugins::WeightOnlyGroupwiseQuantMatmulPlugin;
 
 static constexpr int PRE_QUANT_SCALE = int(1) << 2;
 
-WeightOnlyGroupwiseQuantMatmulPlugin::WeightOnlyGroupwiseQuantMatmulPlugin(nvinfer1::DataType type, bool has_zeros,
-                                                                           int group_size, int weight_bits)
-{
+WeightOnlyGroupwiseQuantMatmulPlugin::WeightOnlyGroupwiseQuantMatmulPlugin(nvinfer1::DataType type,
+                                                                           bool               has_zeros,
+                                                                           int                group_size,
+                                                                           int                weight_bits) {
     init(type, has_zeros, group_size, weight_bits);
 }
 
-void WeightOnlyGroupwiseQuantMatmulPlugin::init(nvinfer1::DataType type, bool has_zeros,int group_size, int weight_bits)
-{
-    mArch = rtp_llm::get_sm();
-    mType = type;
+void WeightOnlyGroupwiseQuantMatmulPlugin::init(nvinfer1::DataType type,
+                                                bool               has_zeros,
+                                                int                group_size,
+                                                int                weight_bits) {
+    mArch      = rtp_llm::get_sm();
+    mType      = type;
     mGroupSize = group_size;
-    mHasZeros = has_zeros;
-    FT_SWITCH_T(mType == nvinfer1::DataType::kHALF, T, half, __nv_bfloat16, [&]{
-        FT_SWITCH_V(has_zeros, Q, cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_AND_ZEROS, cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_ONLY, [&]{
-            FT_SWITCH_T(weight_bits == 4, WT, cutlass::uint4b_t, uint8_t, [&] {
-                m_weightOnlyGroupwiseGemmRunner
-                    = std::make_shared<tensorrt_llm::kernels::cutlass_kernels::CutlassFpAIntBGemmRunner<T, WT, Q>>();
+    mHasZeros  = has_zeros;
+    FT_SWITCH_T(mType == nvinfer1::DataType::kHALF, T, half, __nv_bfloat16, [&] {
+        FT_SWITCH_V(
+            has_zeros,
+            Q,
+            cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_AND_ZEROS,
+            cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_ONLY,
+            [&] {
+                FT_SWITCH_T(weight_bits == 4, WT, cutlass::uint4b_t, uint8_t, [&] {
+                    m_weightOnlyGroupwiseGemmRunner =
+                        std::make_shared<tensorrt_llm::kernels::cutlass_kernels::CutlassFpAIntBGemmRunner<T, WT, Q>>();
+                });
             });
-        });
     });
 
     if (weight_bits == 4) {
@@ -64,8 +72,7 @@ void WeightOnlyGroupwiseQuantMatmulPlugin::init(nvinfer1::DataType type, bool ha
     }
 }
 
-size_t WeightOnlyGroupwiseQuantMatmulPlugin::getWorkspaceSize(const int m, const int n, const int k)
-{
+size_t WeightOnlyGroupwiseQuantMatmulPlugin::getWorkspaceSize(const int m, const int n, const int k) {
     m_workspaceMaxSize = m_weightOnlyGroupwiseGemmRunner->getWorkspaceSize(m, n, k);
     return m_workspaceMaxSize;
 }
@@ -80,8 +87,7 @@ int WeightOnlyGroupwiseQuantMatmulPlugin::enqueue(const void*  inputs,
                                                   const int    m,
                                                   const int    n,
                                                   const int    k,
-                                                  cudaStream_t stream)
-{
+                                                  cudaStream_t stream) {
     // inputs
     //   0 activations      [M, K]
     //   1 weights          [K, N/2]
@@ -91,12 +97,12 @@ int WeightOnlyGroupwiseQuantMatmulPlugin::enqueue(const void*  inputs,
     // outputs
     //   mat                [M, N]
 
-    bool use_cuda_kernel = m < SMALL_M_FAST_PATH && mCudaKernelEnabled;
-    const void* act_ptr = reinterpret_cast<const void*>(inputs);
+    bool        use_cuda_kernel = m < SMALL_M_FAST_PATH && mCudaKernelEnabled;
+    const void* act_ptr         = reinterpret_cast<const void*>(inputs);
 
 #if defined(ENABLE_BF16)
     TLLM_CHECK_WITH_INFO(mType == nvinfer1::DataType::kHALF || mType == nvinfer1::DataType::kBF16,
-        "No valid weightOnlyGropwiseQuantMatmul configuration");
+                         "No valid weightOnlyGropwiseQuantMatmul configuration");
 #else
     TLLM_CHECK_WITH_INFO(mType == nvinfer1::DataType::kHALF, "No valid weightOnlyGropwiseQuantMatmul configuration");
 #endif

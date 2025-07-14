@@ -34,8 +34,7 @@ __global__ void gen_relative_pos_bias(T*            relative_position_bias,
                                       const T*      relative_position_bias_table,
                                       const Tindex* relative_position_bias_index,
                                       const int     window_size,
-                                      const int     head_num)
-{
+                                      const int     head_num) {
     const int    h_in_window           = blockIdx.x / window_size;
     const int    w_in_window           = blockIdx.x % window_size;
     const int    h_in_token            = threadIdx.x / window_size;
@@ -58,8 +57,7 @@ void invokeGenRelativePosBias(T*            relative_position_bias,
                               const Tindex* relative_position_bias_index,
                               const int     window_size,
                               const int     head_num,
-                              cudaStream_t  stream)
-{
+                              cudaStream_t  stream) {
     dim3 grid(window_size * window_size, head_num);
     dim3 block(window_size * window_size);
 
@@ -84,8 +82,7 @@ void invokeGenRelativePosBiasV2(T*            relative_position_bias,
                                 const int     cpb_mlp_in_dim,
                                 const int     cpb_mlp_out_dim,
                                 const int     head_num,
-                                cudaStream_t  stream)
-{
+                                cudaStream_t  stream) {
 
     dim3 grid(window_size * window_size, head_num);
     dim3 block(window_size * window_size);
@@ -134,8 +131,19 @@ void invokeGenRelativePosBiasV2(T*            relative_position_bias,
                                   compute_type,
                                   algo));
 
-    invokeGenericActivation<ReluActivation, T, T>(
-        cpb_mlp_1, cpb_mlp_bias1, nullptr, nullptr, nullptr, nullptr, m, cpb_mlp_out_dim, 0, nullptr, nullptr, nullptr, stream);
+    invokeGenericActivation<ReluActivation, T, T>(cpb_mlp_1,
+                                                  cpb_mlp_bias1,
+                                                  nullptr,
+                                                  nullptr,
+                                                  nullptr,
+                                                  nullptr,
+                                                  m,
+                                                  cpb_mlp_out_dim,
+                                                  0,
+                                                  nullptr,
+                                                  nullptr,
+                                                  nullptr,
+                                                  stream);
 
     check_cuda_value(cublasGemmEx(cublas_handle,
                                   CUBLAS_OP_T,
@@ -197,8 +205,7 @@ template void invokeGenRelativePosBias(half*          relative_position_bias,
                                        const int      head_num,
                                        cudaStream_t   stream);
 
-__host__ __device__ uint32_t pow2_rounddown(uint32_t x)
-{
+__host__ __device__ uint32_t pow2_rounddown(uint32_t x) {
     x |= x >> 1;
     x |= x >> 2;
     x |= x >> 4;
@@ -209,8 +216,7 @@ __host__ __device__ uint32_t pow2_rounddown(uint32_t x)
 }
 
 template<typename T>
-__global__ void generate_alibi_slopes(T* alibi_slopes, const size_t num_heads)
-{
+__global__ void generate_alibi_slopes(T* alibi_slopes, const size_t num_heads) {
     if (threadIdx.x < num_heads) {
         // The nearest power of 2 greater than num_heads followed by HF's implementation.
         int num_heads_pow2 = pow2_rounddown(num_heads);
@@ -218,8 +224,7 @@ __global__ void generate_alibi_slopes(T* alibi_slopes, const size_t num_heads)
         for (int h = threadIdx.x; h < num_heads; h += blockDim.x) {
             if (h < num_heads_pow2) {
                 alibi_slopes[h] = static_cast<T>(powf(powf(0.5f, powf(0.5f, log2f(num_heads_pow2) - 3.f)), h + 1));
-            }
-            else {
+            } else {
                 alibi_slopes[h] = static_cast<T>(
                     powf(powf(0.5f, powf(0.5f, log2f(num_heads_pow2 << 1) - 3.f)), (h - num_heads_pow2) * 2 + 1));
             }
@@ -228,8 +233,7 @@ __global__ void generate_alibi_slopes(T* alibi_slopes, const size_t num_heads)
 }
 
 template<typename T>
-void invokeBuildAlibiSlopes(T* alibi_slopes, const size_t num_heads, cudaStream_t stream)
-{
+void invokeBuildAlibiSlopes(T* alibi_slopes, const size_t num_heads, cudaStream_t stream) {
     // Generate the slopes of a linear attention linear bias.
     //
     // Paper: https://arxiv.org/abs/2108.12409

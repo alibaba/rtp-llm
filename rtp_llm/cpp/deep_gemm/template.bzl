@@ -42,11 +42,11 @@ QWEN_NORMAL_CASES = [
     ("2304", "4096", "1", "DeepGemmType::Normal"),
     ("4096", "2048", "1", "DeepGemmType::Normal"),
 
-    # qwen3-30b-a3b tp=1/2 
+    # qwen3-30b-a3b tp=1/2
     ("5120", "2048", "1", "DeepGemmType::Normal"),
     ("2048", "4096", "1", "DeepGemmType::Normal"),
     ("2560", "2048", "1", "DeepGemmType::Normal"),
-    ("2048", "2048", "1", "DeepGemmType::Normal"),    
+    ("2048", "2048", "1", "DeepGemmType::Normal"),
 ]
 
 QWEN_CONTIGUOUS_CASES = [
