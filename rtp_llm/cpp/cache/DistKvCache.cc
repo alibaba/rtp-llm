@@ -1,35 +1,47 @@
 #include "rtp_llm/cpp/cache/DistKvCache.h"
 
+#include "rtp_llm/cpp/cache/CacheManager.h"
+#include "rtp_llm/cpp/cache/DistKvCacheMetrics.h"
+
+using namespace rtp_llm::threefs;
+
 namespace rtp_llm {
 
 DistKvCache::DistKvCache(CacheManager*                       cache_manager,
-                         const GptInitParameter&             params,
+                         const GptInitParameter&             gpt_init_params,
                          const kmonitor::MetricsReporterPtr& metrics_reporter):
-    cache_manager_(cache_manager), params_(params), metrics_reporter_(metrics_reporter) {}
+    cache_manager_(cache_manager), gpt_init_params_(gpt_init_params), metrics_reporter_(metrics_reporter) {}
 
 DistKvCache::~DistKvCache() {}
 
 bool DistKvCache::init(const DistKvCacheInitParams& init_params) {
+    // TODO(LXQ): 打印 params
     init_params_ = init_params;
 
-    planner_.reset(new DefaultDistKvCachePlanner(cache_manager_, params_, metrics_reporter_));
+    // default 3fs planner
+    if (!init_params_.storage_manager_params.init_params_3fs.has_value()) {
+        RTP_LLM_LOG_WARNING("init failed, 3fs init params is empty");
+        return false;
+    }
+    const auto& storage_3fs_init_params = init_params_.storage_manager_params.init_params_3fs.value();
+    planner_                            = std::make_unique<DefaultDistKvCachePlanner>(
+        cache_manager_, gpt_init_params_, storage_3fs_init_params, metrics_reporter_);
 
     storage_ = std::make_unique<DistStorageManager>(metrics_reporter_);
-    if (!storage_->init(init_params_.manager_params)) {
-        RTP_LLM_LOG_WARNING("dist kv cache init, init storage failed");
+    if (!storage_->init(init_params_.storage_manager_params)) {
+        RTP_LLM_LOG_WARNING("init failed, init storage failed");
         return false;
     }
 
     rpc_pool_ = std::make_shared<rtp_llm::RPCPool>();
-    RTP_LLM_LOG_INFO("dist kv cache init");
+    RTP_LLM_LOG_INFO("dist kv cache init success");
     return true;
 }
 
-int32_t DistKvCache::matchCacheForAllRank(const std::vector<int64_t>&        cache_keys,
-                                          const std::vector<int32_t>&        block_indices,
-                                          int64_t                            request_id,
-                                          std::map<std::string, std::string> extra_metas) const {
-    if (cache_keys.empty() || block_indices.empty()) {
+int32_t DistKvCache::matchForAllRank(const std::vector<int64_t>&        cache_keys,
+                                     int64_t                            request_id,
+                                     std::map<std::string, std::string> extra_metas) const {
+    if (cache_keys.empty()) {
         return 0;
     }
 
@@ -37,10 +49,14 @@ int32_t DistKvCache::matchCacheForAllRank(const std::vector<int64_t>&        cac
         return 0;
     }
 
+    auto metrics = DistKvCacheMetricsFactory::createMetrics(metrics_reporter_);
+    DistKvCacheMetrics::markMatchBeginUs(metrics);
+
     auto match_len = cache_keys.size();
-    for (int i = 0; i < params_.tp_size_; i++) {
+    for (int i = 0; i < gpt_init_params_.tp_size_; i++) {
         std::vector<int64_t> cache_keys_to_match(cache_keys.begin(), cache_keys.begin() + match_len);
-        auto                 ret = matchCache(cache_keys_to_match, block_indices, request_id, extra_metas, i);
+        extra_metas["TP_RANK"] = std::to_string(i);
+        auto ret               = match(cache_keys_to_match, request_id, extra_metas);
         if (ret < match_len) {
             match_len = ret;
         }
@@ -48,29 +64,26 @@ int32_t DistKvCache::matchCacheForAllRank(const std::vector<int64_t>&        cac
             break;
         }
     }
+
+    DistKvCacheMetrics::markMatchDoneUs(metrics);
     RTP_LLM_LOG_DEBUG("dist kv cache match cache for all rank, matched len %d, input cache keys len %d",
                       match_len,
                       cache_keys.size());
     return match_len;
 }
 
-int32_t DistKvCache::matchCache(const std::vector<int64_t>&        cache_keys,
-                                const std::vector<int32_t>&        block_indices,
-                                int64_t                            request_id,
-                                std::map<std::string, std::string> extra_metas,
-                                int                                tp_rank) const {
-
-    if (!extra_metas.empty()) {
-        for (auto& [key, value] : default_metas_) {
-            extra_metas[key] = value;
-        }
+int32_t DistKvCache::match(const std::vector<int64_t>&        cache_keys,
+                           int64_t                            request_id,
+                           std::map<std::string, std::string> extra_metas) const {
+    for (auto& [key, value] : default_metas_) {
+        extra_metas[key] = value;
     }
+    extra_metas["SKIP_IOV"] = "1";
+
     int match_len = cache_keys.size();
     for (; match_len > 0; --match_len) {
         std::vector<int64_t> cache_keys_to_match(cache_keys.begin(), cache_keys.begin() + match_len);
-
-        auto layout_items = planner_->layout(
-            cache_keys_to_match, block_indices, extra_metas.empty() ? default_metas_ : extra_metas, tp_rank, true);
+        auto                 layout_items = planner_->layout(cache_keys_to_match, {}, extra_metas);
         if (layout_items.empty()) {
             continue;
         }
@@ -87,53 +100,75 @@ int32_t DistKvCache::matchCache(const std::vector<int64_t>&        cache_keys,
         }
     }
     RTP_LLM_LOG_DEBUG("dist kv cache match cache for rank %d, matched len %d, input cache keys len %d",
-                      params_.tp_rank_,
+                      gpt_init_params_.tp_rank_,
                       match_len,
                       cache_keys.size());
     return match_len;
 }
 
-bool DistKvCache::getCacheForAllRank(const std::vector<int64_t>&        cache_keys,
-                                     const std::vector<int32_t>&        block_indices,
-                                     int64_t                            request_id,
-                                     std::map<std::string, std::string> extra_metas) const {
-    auto match_len = matchCacheForAllRank(cache_keys, block_indices, request_id, extra_metas);
-    if (match_len == 0) {
-        return false;
-    }
-    std::vector<int64_t> cache_keys_to_match(cache_keys.begin(), cache_keys.begin() + match_len);
-    std::vector<int32_t> block_indices_to_match(block_indices.begin(), block_indices.begin() + match_len);
-    return syncCallAllRank(cache_keys_to_match, block_indices_to_match, request_id, extra_metas, OpType::OP_GET);
+bool DistKvCache::getForAllRank(const std::vector<int64_t>&        cache_keys,
+                                const std::vector<int32_t>&        block_indices,
+                                int64_t                            request_id,
+                                std::map<std::string, std::string> extra_metas) {
+    auto metrics = DistKvCacheMetricsFactory::createMetrics(metrics_reporter_);
+    DistKvCacheMetrics::markTotalGetCacheBeginUs(metrics);
+
+    std::vector<int64_t> cache_keys_to_match(cache_keys.begin(), cache_keys.begin());
+    std::vector<int32_t> block_indices_to_match(block_indices.begin(), block_indices.begin());
+    bool result = syncCallAllRank(cache_keys_to_match, block_indices_to_match, request_id, extra_metas, OpType::OP_GET);
+
+    DistKvCacheMetrics::markTotalGetCacheDoneUs(metrics);
+    DistKvCacheMetrics::setGetCacheFailedQps(metrics, result == false);
+
+    const auto  matched_len  = result ? static_cast<int32_t>(cache_keys.size()) : 0;
+    const auto& cache_config = cache_manager_->cacheConfig();
+    total_matched_len_.fetch_add(matched_len);
+    int64_t total_matched_len = total_matched_len_.load();
+    total_input_len_.fetch_add(std::stoi(extra_metas.at("SEQ_CACHE_KEY_NUM")));
+    int64_t total_input_len = total_input_len_.load();
+
+    DistKvCacheMetrics::setCacheReuseLength(metrics, matched_len * cache_config.seq_size_per_block);
+    DistKvCacheMetrics::setTotalCacheReuseLength(metrics, total_matched_len * cache_config.seq_size_per_block);
+    DistKvCacheMetrics::setTotalCacheInputLength(metrics, total_input_len * cache_config.seq_size_per_block);
+    DistKvCacheMetrics::setTotalCacheHitRate(metrics, total_matched_len * 100.0 / total_input_len);
+
+    return result;
 }
 
-bool DistKvCache::getCache(const std::vector<int64_t>&        cache_keys,
-                           const std::vector<int32_t>&        block_indices,
-                           int64_t                            request_id,
-                           std::map<std::string, std::string> extra_metas) const {
-    if (!extra_metas.empty()) {
-        for (auto& [key, value] : default_metas_) {
-            extra_metas[key] = value;
-        }
+bool DistKvCache::get(const std::vector<int64_t>&        cache_keys,
+                      const std::vector<int32_t>&        block_indices,
+                      int64_t                            request_id,
+                      std::map<std::string, std::string> extra_metas) const {
+    for (auto& [key, value] : default_metas_) {
+        extra_metas[key] = value;
     }
+    extra_metas["GET"]     = "1";
+    extra_metas["TP_RANK"] = std::to_string(gpt_init_params_.tp_rank_);
 
-    auto layout_items = planner_->layout(
-        cache_keys, block_indices, extra_metas.empty() ? default_metas_ : extra_metas, params_.tp_rank_);
+    auto layout_items = planner_->layout(cache_keys, block_indices, extra_metas);
     if (layout_items.empty()) {
         RTP_LLM_LOG_DEBUG("dist kv cache get cache, layout iovs is empty");
         return false;
     }
 
+    auto metrics = DistKvCacheMetricsFactory::createMetrics(metrics_reporter_);
+    DistKvCacheMetrics::markGetCacheBeginUs(metrics);
+
     for (auto& item : layout_items) {
         if (!storage_->get(item)) {
             RTP_LLM_LOG_WARNING("dist kv cache get cache, get cache failed, key: %s", item.key.c_str());
+            DistKvCacheMetrics::markGetCacheDoneUs(metrics);
             return false;
         }
     }
+
+    DistKvCacheMetrics::markGetCacheDoneUs(metrics);
+
     if (!planner_->verify(layout_items,
                           cache_keys,
                           block_indices,
                           extra_metas.empty() ? default_metas_ : extra_metas,
-                          params_.tp_rank_)) {
+                          gpt_init_params_.tp_rank_)) {
         RTP_LLM_LOG_WARNING("dist kv cache get cache, verify cache failed, request key: %s", request_id);
         return false;
     }
@@ -145,32 +180,43 @@ bool DistKvCache::putForAllRank(const std::vector<int64_t>&        cache_keys,
                                 const std::vector<int32_t>&        block_indices,
                                 int64_t                            request_id,
                                 std::map<std::string, std::string> extra_metas) const {
-    return syncCallAllRank(cache_keys, block_indices, request_id, extra_metas, OpType::OP_PUT);
+    auto metrics = DistKvCacheMetricsFactory::createMetrics(metrics_reporter_);
+    DistKvCacheMetrics::markTotalPutCacheBeginUs(metrics);
+
+    bool result = syncCallAllRank(cache_keys, block_indices, request_id, extra_metas, OpType::OP_PUT);
+
+    DistKvCacheMetrics::markTotalPutCacheDoneUs(metrics);
+    DistKvCacheMetrics::setPutCacheFailedQps(metrics, result == false);
+    return result;
 }
 
-bool DistKvCache::putCache(const std::vector<int64_t>&        cache_keys,
-                           const std::vector<int32_t>&        block_indices,
-                           int64_t                            request_id,
-                           std::map<std::string, std::string> extra_metas) const {
-    if (!extra_metas.empty()) {
-        for (auto& [key, value] : default_metas_) {
-            extra_metas[key] = value;
-        }
+bool DistKvCache::put(const std::vector<int64_t>&        cache_keys,
+                      const std::vector<int32_t>&        block_indices,
+                      int64_t                            request_id,
+                      std::map<std::string, std::string> extra_metas) const {
+    for (auto& [key, value] : default_metas_) {
+        extra_metas[key] = value;
     }
+    extra_metas["TP_RANK"] = std::to_string(gpt_init_params_.tp_rank_);
 
-    auto layout_items = planner_->layout(
-        cache_keys, block_indices, extra_metas.empty() ? default_metas_ : extra_metas, params_.tp_rank_);
+    auto layout_items = planner_->layout(cache_keys, block_indices, extra_metas);
     if (layout_items.empty()) {
         RTP_LLM_LOG_DEBUG("dist kv cache put cache, layout iovs is empty");
         return false;
     }
 
+    auto metrics = DistKvCacheMetricsFactory::createMetrics(metrics_reporter_);
+    DistKvCacheMetrics::markPutCacheBeginUs(metrics);
+
     for (auto& item : layout_items) {
         if (!storage_->put(item)) {
             RTP_LLM_LOG_WARNING("dist kv cache put cache, put cache failed, key: %s", item.key.c_str());
+            DistKvCacheMetrics::markPutCacheDoneUs(metrics);
             return false;
         }
     }
+
+    DistKvCacheMetrics::markPutCacheDoneUs(metrics);
     return true;
 }
 
@@ -193,7 +239,7 @@ bool DistKvCache::syncCallAllRank(const std::vector<int64_t>&        cache_keys,
                                   int64_t                            request_id,
                                   std::map<std::string, std::string> extra_metas,
                                   DistKvCache::OpType                op_type) const {
-    const auto& grpc_workers = params_.worker_grpc_addrs_;
+    const auto& grpc_workers = gpt_init_params_.worker_grpc_addrs_;
     if (grpc_workers.empty()) {
         RTP_LLM_LOG_WARNING("rpc get cache failed, grpc workers is empty, request: %ld", request_id);
         return false;

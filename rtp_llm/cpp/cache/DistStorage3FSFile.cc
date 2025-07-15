@@ -4,6 +4,7 @@
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 
+#include "rtp_llm/cpp/cache/DistKvCacheMetrics.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -18,13 +19,20 @@ inline struct timespec createTimeoutTimeSpec(int timeout_ms) {
     return timeout;
 }
 
+inline float calcMiBs(int64_t len_byte, int64_t cost_us) {
+    if (cost_us == 0) {
+        return 0;
+    }
+    return len_byte * 1.0 / 1024 / 1024 * 1000 * 1000 / cost_us;
+}
+
 DistStorage3FSFile::DistStorage3FSFile(const ThreeFSFileConfig& config,
                                        const ThreeFSIovHandle&  read_iov_handle,
                                        const ThreeFSIovHandle&  write_iov_handle):
     config_(config),
     read_iov_handle_(read_iov_handle),
     write_iov_handle_(write_iov_handle),
-    full_path_file_name_(config.mountpoint + config.folder_name + config.filename) {}
+    filepath_(config.filepath) {}
 
 DistStorage3FSFile::~DistStorage3FSFile() {
     close();
@@ -32,7 +40,7 @@ DistStorage3FSFile::~DistStorage3FSFile() {
 
 bool DistStorage3FSFile::isExist() {
     struct stat file_stat;
-    return ::stat(full_path_file_name_.c_str(), &file_stat) == 0;
+    return ::stat(filepath_.c_str(), &file_stat) == 0;
 }
 
 bool DistStorage3FSFile::open(bool write) {
@@ -41,7 +49,7 @@ bool DistStorage3FSFile::open(bool write) {
     }
 
     if (fd_ != -1) {
-        RTP_LLM_LOG_DEBUG("file already opened, filename: %s", config_.filename.c_str());
+        RTP_LLM_LOG_DEBUG("file already opened, file: %s", filepath_.c_str());
         return true;
     }
 
@@ -51,22 +59,19 @@ bool DistStorage3FSFile::open(bool write) {
     }
 
     int fd = -1;
-    fd     = ::open(full_path_file_name_.c_str(), flags, 0666);
+    fd     = ::open(filepath_.c_str(), flags, 0666);
     if (fd == -1) {
         RTP_LLM_LOG_WARNING(
-            "open file failed, filepath: %s, fd: %d, errno: %s", full_path_file_name_.c_str(), fd, strerror(errno));
+            "open file failed, filepath: %s, fd: %d, errno: %s", filepath_.c_str(), fd, strerror(errno));
         return false;
     }
 
-    // note: must register fd after create ior/iov
     auto ret = hf3fs_reg_fd(fd, 0);
     if (ret > 0) {
         // 直接失败, reopen放在外面做. TODO:
         close();
-        RTP_LLM_LOG_WARNING("open file failed, hf3fs_reg_fd failed, errno: %s, file: %s, fd: %d",
-                            strerror(ret),
-                            full_path_file_name_.c_str(),
-                            fd);
+        RTP_LLM_LOG_WARNING(
+            "open file failed, hf3fs_reg_fd failed, errno: %s, file: %s, fd: %d", strerror(ret), filepath_.c_str(), fd);
         return false;
     }
     fd_ = fd;
@@ -74,51 +79,67 @@ bool DistStorage3FSFile::open(bool write) {
 }
 
 bool DistStorage3FSFile::write(const std::vector<DistStorage::Iov>& iovs) {
-    size_t file_len = 0;
-    for (const auto& iov : iovs) {
-        file_len += iov.len;
+    if (iovs.empty()) {
+        return true;
     }
 
-    auto handle = initIovIor(write_iov_handle_, file_len, kDefaultWriteSizePerIo, false);
+    size_t write_len = 0;
+    for (const auto& iov : iovs) {
+        write_len += iov.len;
+    }
+
+    auto metrics = DistKvCacheMetricsFactory::createMetrics(config_.metrics_reporter);
+    DistKvCacheMetrics::markTotalWriteBeginUs(metrics);
+
+    auto handle = initIovIor(write_iov_handle_, write_len, kDefaultWriteSizePerIo, false);
     if (handle == nullptr) {
-        RTP_LLM_LOG_WARNING("write failed, init iov/ior failed, filename: %s", config_.filename.c_str());
+        DistKvCacheMetrics::markTotalWriteDoneUs(metrics);
+        RTP_LLM_LOG_WARNING("write failed, init iov/ior failed, file: %s", filepath_.c_str());
         return false;
     }
 
-    auto& ior      = handle->ior_handle.ior;
-    auto& iov      = handle->iov_handle.iov;
-    auto  iov_base = handle->iov_handle.iov_base;
-
     // copy blocks
     int64_t iov_offset = 0;
+    auto    iov_base   = handle->iov_handle.iov_base;
     auto    cuda_util  = handle->iov_handle.cuda_util;
+    DistKvCacheMetrics::markWriteCudaCopyBeginUs(metrics);
     for (const auto& iov : iovs) {
-        iov_offset += iov.len;
         if (iov.gpu_mem) {
             cuda_util->copyAsyncDeviceToHost(iov_base + iov_offset, iov.data.get(), iov.len);
         } else {
             memcpy(iov_base + iov_offset, iov.data.get(), iov.len);
         }
+        iov_offset += iov.len;
     }
     cuda_util->sync();
+    DistKvCacheMetrics::markWriteCudaCopyDoneUs(metrics);
 
-    // 读时预先打开文件, 写时推迟到实际写时再打开文件, 因为写时需要创建文件
     if (!open(true)) {
-        RTP_LLM_LOG_WARNING("write failed, open file failed, filename: %s", config_.filename.c_str());
+        DistKvCacheMetrics::markTotalWriteDoneUs(metrics);
+        RTP_LLM_LOG_WARNING("write failed, open file failed, file: %s", filepath_.c_str());
         return false;
     }
 
-    auto result = doWrite(handle, iovs, file_len);
-    if (!result) {
-        RTP_LLM_LOG_WARNING("write failed, do write failed, filename: %s", config_.filename.c_str());
+    if (!doWrite(handle, iovs, write_len, metrics)) {
+        DistKvCacheMetrics::markTotalWriteDoneUs(metrics);
+        RTP_LLM_LOG_WARNING("write failed, do write failed, file: %s", filepath_.c_str());
+        return false;
     }
-    releaseIovIor(handle);
-    return result;
+
+    DistKvCacheMetrics::markTotalWriteDoneUs(metrics);
+    DistKvCacheMetrics::setTotalWriteLen(metrics, write_len);
+    if (metrics) {
+        DistKvCacheMetrics::setTotalWriteThroughput(metrics, calcMiBs(write_len, metrics->TotalWriteCostUs()));
+    }
+
+    // 由于是异步写, 所以不能在此处 release iov/ior
+    return true;
 }
 
 bool DistStorage3FSFile::doWrite(const std::shared_ptr<ThreeFSHandle>& handle,
                                  const std::vector<DistStorage::Iov>&  iovs,
-                                 size_t                                write_total_size) {
+                                 size_t                                write_total_size,
+                                 std::shared_ptr<DistKvCacheMetrics>   metrics) {
     auto& ior      = handle->ior_handle.ior;
     auto& iov      = handle->iov_handle.iov;
     auto  iov_base = handle->iov_handle.iov_base;
@@ -128,6 +149,9 @@ bool DistStorage3FSFile::doWrite(const std::shared_ptr<ThreeFSHandle>& handle,
     int64_t    remaining_size  = write_total_size;
     int64_t    iov_offset      = 0;
     int        submit_io_count = 0;
+
+    DistKvCacheMetrics::markWriteBlockBeginUs(metrics);
+
     while (remaining_size > 0) {
         uint64_t cur_write_len = 0;
         if (iov_block_size > 0) {
@@ -138,11 +162,12 @@ bool DistStorage3FSFile::doWrite(const std::shared_ptr<ThreeFSHandle>& handle,
 
         auto ret = hf3fs_prep_io(ior, iov, false, iov_base + iov_offset, fd_, iov_offset, cur_write_len, nullptr);
         if (ret < 0) {
+            DistKvCacheMetrics::markWriteBlockDoneUs(metrics);
             // TODO(LXQ): 需要处理掉之前已提交的io请求(submit然后wait)
             RTP_LLM_LOG_WARNING(
-                "write to 3fs failed, hf3fs_prep_io failed, errno: %s, filename: %s, submit_io_count: %d, ior_entries: %d, cur_write_len: %lu, iov_block_size: %lu, remaining_size: %ld, total size: %ld",
+                "write to 3fs failed, hf3fs_prep_io failed, errno: %s, file: %s, submit_io_count: %d, ior_entries: %d, cur_write_len: %lu, iov_block_size: %lu, remaining_size: %ld, total size: %ld",
                 strerror(-ret),
-                config_.filename.c_str(),
+                filepath_.c_str(),
                 submit_io_count,
                 ior_entries,
                 cur_write_len,
@@ -161,6 +186,7 @@ bool DistStorage3FSFile::doWrite(const std::shared_ptr<ThreeFSHandle>& handle,
 
         ret = hf3fs_submit_ios(ior);
         if (ret != 0) {
+            DistKvCacheMetrics::markWriteBlockDoneUs(metrics);
             RTP_LLM_LOG_WARNING("write to 3fs failed, hf3fs_submit_ios failed, errno: %s", strerror(-ret));
             return false;
         }
@@ -169,27 +195,29 @@ bool DistStorage3FSFile::doWrite(const std::shared_ptr<ThreeFSHandle>& handle,
         bool last_io       = remaining_size <= 0;
         if (config_.write_thread_pool) {
             // async wait io
-            auto work_item = [this, handle, submit_io_count, write_total_size, last_io]() {
-                waitForWriteIos(handle, submit_io_count, write_total_size, last_io);
-                releaseIovIor(handle);
-            };
-            if (auto error_code = config_.write_thread_pool->pushTask(work_item, false);
+            auto task =
+                [shared_this = shared_from_this(), handle, submit_io_count, write_total_size, last_io, metrics]() {
+                    shared_this->waitForWriteIos(handle, submit_io_count, write_total_size, last_io, metrics);
+                };
+            if (auto error_code = config_.write_thread_pool->pushTask(task, false);
                 error_code != autil::ThreadPool::ERROR_NONE) {
                 RTP_LLM_LOG_WARNING("write to 3fs failed, push work item failed, error code: %d, file: %s",
                                     error_code,
-                                    config_.filename.c_str());
+                                    filepath_.c_str());
                 async_wait_io = false;
                 // return false;
             } else {
                 async_wait_io = true;
             }
+            DistKvCacheMetrics::setWriteThreadPoolWorkItemCount(metrics, config_.write_thread_pool->getItemCount());
         }
         if (!async_wait_io) {
             // sync wait io
-            if (!waitForWriteIos(handle, submit_io_count, write_total_size, last_io)) {
+            if (!waitForWriteIos(handle, submit_io_count, write_total_size, last_io, metrics)) {
+                DistKvCacheMetrics::markWriteBlockDoneUs(metrics);
                 RTP_LLM_LOG_WARNING(
                     "write to 3fs failed, wait for write ios failed, file: %s, cur_write_len: %lu, iov_block_size: %lu",
-                    config_.filename.c_str(),
+                    filepath_.c_str(),
                     cur_write_len,
                     iov_block_size);
                 return false;
@@ -197,14 +225,19 @@ bool DistStorage3FSFile::doWrite(const std::shared_ptr<ThreeFSHandle>& handle,
         }
         submit_io_count = 0;  // reset submit io count
     }
+
     // file sync?
     return true;
 }
 bool DistStorage3FSFile::waitForWriteIos(const std::shared_ptr<ThreeFSHandle>& handle,
                                          int32_t                               submit_io_count,
                                          int64_t                               write_total_len,
-                                         bool                                  last_io) const {
+                                         bool                                  last_io,
+                                         std::shared_ptr<DistKvCacheMetrics>   metrics) const {
     if (submit_io_count <= 0) {
+        if (last_io) {
+            DistKvCacheMetrics::markWriteBlockDoneUs(metrics);
+        }
         return true;
     }
     if (handle == nullptr || handle->ior_handle.ior == nullptr) {
@@ -221,7 +254,7 @@ bool DistStorage3FSFile::waitForWriteIos(const std::shared_ptr<ThreeFSHandle>& h
             "wait write io failed, hf3fs_wait_for_ios failed, errno: %s, submit io count: %d, file: %s, write total len: %ld",
             strerror(-completed_io_count),
             submit_io_count,
-            config_.filename.c_str(),
+            filepath_.c_str(),
             write_total_len);
         return false;
     } else if (completed_io_count == 0) {
@@ -229,7 +262,7 @@ bool DistStorage3FSFile::waitForWriteIos(const std::shared_ptr<ThreeFSHandle>& h
             "wait write io but hf3fs_wait_for_ios return 0, maybe timeout(%d ms), submit io count: %d, file: %s, write total len: %ld",
             timeout_ms,
             submit_io_count,
-            config_.filename.c_str(),
+            filepath_.c_str(),
             write_total_len);
     }
 
@@ -240,7 +273,7 @@ bool DistStorage3FSFile::waitForWriteIos(const std::shared_ptr<ThreeFSHandle>& h
                 strerror(-cqes[i].result),
                 submit_io_count,
                 completed_io_count,
-                config_.filename.c_str(),
+                filepath_.c_str(),
                 write_total_len);
             return false;
         }
@@ -249,6 +282,13 @@ bool DistStorage3FSFile::waitForWriteIos(const std::shared_ptr<ThreeFSHandle>& h
     if (last_io) {
         if (fd_ != -1) {
             ::fsync(fd_);
+        }
+        releaseIovIor(handle);
+
+        DistKvCacheMetrics::markWriteBlockDoneUs(metrics);
+        if (metrics) {
+            DistKvCacheMetrics::setWriteBlockThroughput(metrics,
+                                                        calcMiBs(write_total_len, metrics->WriteBlockCostUs()));
         }
     }
     return true;
@@ -267,33 +307,37 @@ bool DistStorage3FSFile::read(const std::vector<DistStorage::Iov>& iovs) {
         return false;
     }
 
-    size_t file_len = 0;
+    size_t read_len = 0;
     for (const auto& iov : iovs) {
-        file_len += iov.len;
+        read_len += iov.len;
     }
 
-    auto handle = initIovIor(write_iov_handle_, file_len, kDefaultWriteSizePerIo, false);
+    auto metrics = DistKvCacheMetricsFactory::createMetrics(config_.metrics_reporter);
+    DistKvCacheMetrics::markTotalReadBeginUs(metrics);
+
+    auto handle = initIovIor(read_iov_handle_, read_len, kDefaultReadSizePerIo, true);
     if (handle == nullptr) {
-        RTP_LLM_LOG_WARNING("write failed, init iov/ior failed, filename: %s", config_.filename.c_str());
+        DistKvCacheMetrics::markTotalReadDoneUs(metrics);
+        RTP_LLM_LOG_WARNING("read failed, init iov/ior failed, file: %s", filepath_.c_str());
         return false;
     }
 
-    if (file_len > handle->iov_handle.iov_size) {
-        RTP_LLM_LOG_WARNING("read failed, read size exceed iov size, read size: %lu, iov size: %lu",
-                            file_len,
-                            handle->iov_handle.iov_size,
-                            file_len);
-        return false;
-    }
-
-    bool result = doRead(handle, iovs, file_len);
+    bool result = doRead(handle, iovs, read_len, metrics);
     releaseIovIor(handle);
+
+    DistKvCacheMetrics::markTotalReadDoneUs(metrics);
+    DistKvCacheMetrics::setTotalReadLen(metrics, read_len);
+    if (metrics) {
+        DistKvCacheMetrics::setTotalReadThroughput(metrics, calcMiBs(read_len, metrics->TotalReadCostUs()));
+    }
+
     return result;
 }
 
 bool DistStorage3FSFile::doRead(const std::shared_ptr<ThreeFSHandle>& handle,
                                 const std::vector<DistStorage::Iov>&  iovs,
-                                size_t                                file_len) {
+                                size_t                                read_total_len,
+                                std::shared_ptr<DistKvCacheMetrics>   metrics) {
     if (handle == nullptr) {
         RTP_LLM_LOG_WARNING("read failed, handle is nullptr");
         return false;
@@ -304,29 +348,37 @@ bool DistStorage3FSFile::doRead(const std::shared_ptr<ThreeFSHandle>& handle,
 
     const auto ior_entries     = handle->ior_handle.ior_entries;
     int64_t    iov_offset      = 0;
-    int64_t    file_offset     = 0;
     int32_t    submit_io_count = 0;
+
+    DistKvCacheMetrics::markReadBlockBeginUs(metrics);
 
     // 目前的实现是一次读完, 可以改成边读边Copy到显存
     for (auto& recv_iov : iovs) {
-        // read one iov
-        const auto iov_block_size = recv_iov.len;
-        uint64_t   remaining_size = iov_block_size;
+        const auto iov_block_size = handle->iov_handle.iov_block_size;
+        uint64_t   remaining_size = recv_iov.len;
+        uint64_t   file_offset    = recv_iov.offset;
         while (remaining_size > 0) {
-            uint64_t cur_read_len = std::min(remaining_size, (uint64_t)calcLeftSizeInBlock(iov_block_size, iov_offset));
+            uint64_t cur_read_len = 0;
+            if (iov_block_size > 0) {
+                cur_read_len = std::min(remaining_size, (uint64_t)calcLeftSizeInBlock(iov_block_size, iov_offset));
+            } else {
+                cur_read_len = remaining_size > kDefaultReadSizePerIo ? kDefaultReadSizePerIo : remaining_size;
+            }
+
             auto ret = hf3fs_prep_io(ior, iov, true, iov_base + iov_offset, fd_, file_offset, cur_read_len, nullptr);
             if (ret < 0) {
+                DistKvCacheMetrics::markReadBlockDoneUs(metrics);
                 RTP_LLM_LOG_WARNING(
-                    "read block failed, hf3fs_prep_io failed, errno: %s, filename: %s, fd: %d, submit_io_count: %d, ior_entries: %d, cur_read_len: %lu, iov_block_size: %lu, remaining_size: %ld, total size: %ld",
+                    "read failed, hf3fs_prep_io failed, errno: %s, file: %s, fd: %d, submit_io_count: %d, ior_entries: %d, cur_read_len: %lu, iov_block_size: %lu, remaining_size: %ld, total size: %ld",
                     strerror(-ret),
-                    config_.filename.c_str(),
+                    filepath_.c_str(),
                     fd_,
                     submit_io_count,
                     ior_entries,
                     cur_read_len,
                     iov_block_size,
                     remaining_size,
-                    file_len);
+                    read_total_len);
                 return false;
             }
             ++submit_io_count;
@@ -338,9 +390,10 @@ bool DistStorage3FSFile::doRead(const std::shared_ptr<ThreeFSHandle>& handle,
             if (submit_io_count >= ior_entries) {
                 // 没得读或者submit_io_count 达到最大
                 if (!submitAndWaitForReadIos(handle, submit_io_count)) {
+                    DistKvCacheMetrics::markReadBlockDoneUs(metrics);
                     RTP_LLM_LOG_WARNING(
-                        "read block failed, read submit/wait io failed. file: %s, cur_read_len: %lu, iov_block_size: %lu",
-                        config_.filename.c_str(),
+                        "read failed, read submit/wait io failed. file: %s, cur_read_len: %lu, iov_block_size: %lu",
+                        filepath_.c_str(),
                         cur_read_len,
                         iov_block_size);
                     return false;
@@ -351,10 +404,19 @@ bool DistStorage3FSFile::doRead(const std::shared_ptr<ThreeFSHandle>& handle,
     }
     if (submit_io_count > 0) {  // last io
         if (!submitAndWaitForReadIos(handle, submit_io_count)) {
-            RTP_LLM_LOG_WARNING("read block failed, read submit/wait io failed. file: %s", config_.filename.c_str());
+            DistKvCacheMetrics::markReadBlockDoneUs(metrics);
+            // DistKvCacheMetrics::markTotalReadDoneUs(metrics);
+            RTP_LLM_LOG_WARNING("read failed, read submit/wait io failed. file: %s", filepath_.c_str());
             return false;
         }
     }
+
+    DistKvCacheMetrics::markReadBlockDoneUs(metrics);
+    DistKvCacheMetrics::setReadBlockLen(metrics, read_total_len);
+    if (metrics) {
+        DistKvCacheMetrics::setReadBlockThroughput(metrics, calcMiBs(read_total_len, metrics->ReadBlockCostUs()));
+    }
+    DistKvCacheMetrics::markReadCudaCopyBeginUs(metrics);
 
     iov_offset     = 0;
     auto cuda_util = handle->iov_handle.cuda_util;
@@ -369,6 +431,8 @@ bool DistStorage3FSFile::doRead(const std::shared_ptr<ThreeFSHandle>& handle,
         iov_offset += iov.len;
     }
     cuda_util->sync();
+
+    DistKvCacheMetrics::markReadCudaCopyDoneUs(metrics);
     return true;
 }
 
@@ -421,14 +485,11 @@ bool DistStorage3FSFile::submitAndWaitForReadIos(const std::shared_ptr<ThreeFSHa
 }
 
 bool DistStorage3FSFile::del() {
-    if (fd_ != -1) {
-        hf3fs_dereg_fd(fd_);
-        ::close(fd_);
-        fd_ = -1;
-    }
+    close();
     // TODO: should check result?
-    ::remove(full_path_file_name_.c_str());
-    RTP_LLM_LOG_DEBUG("remove 3fs file: %s", full_path_file_name_.c_str());
+    ::remove(filepath_.c_str());
+    RTP_LLM_LOG_DEBUG("remove 3fs file: %s", filepath_.c_str());
+    return true;
 }
 
 bool DistStorage3FSFile::close() {
@@ -437,6 +498,7 @@ bool DistStorage3FSFile::close() {
         ::close(fd_);
         fd_ = -1;
     }
+    return true;
 }
 
 std::shared_ptr<ThreeFSHandle>
@@ -447,7 +509,7 @@ DistStorage3FSFile::initIovIor(ThreeFSIovHandle& iov_handle, int64_t file_len, i
             "init iov/ior failed, mempool alloc failed, alloc len: %zu, mempool free size: %zu, file: %s",
             file_len,
             iov_handle.iov_mempool->freeSize(),
-            config_.filename.c_str());
+            filepath_.c_str());
         return nullptr;
     }
 
@@ -460,8 +522,8 @@ DistStorage3FSFile::initIovIor(ThreeFSIovHandle& iov_handle, int64_t file_len, i
     struct hf3fs_ior* ior{nullptr};
     if (!createIor(ior, for_read, ior_handle.ior_entries, ior_handle.ior_io_depth, ior_handle.ior_timeout_ms)) {
         RTP_LLM_LOG_WARNING(
-            "init iov/ior failed, create ior failed, filename: %s, ior entries: %d, ior io depth: %d, ior timeout ms: %d",
-            config_.filename.c_str(),
+            "init iov/ior failed, create ior failed, file: %s, ior entries: %d, ior io depth: %d, ior timeout ms: %d",
+            filepath_.c_str(),
             ior_handle.ior_entries,
             ior_handle.ior_io_depth,
             ior_handle.ior_timeout_ms);
@@ -476,7 +538,6 @@ DistStorage3FSFile::initIovIor(ThreeFSIovHandle& iov_handle, int64_t file_len, i
     handle->ior_handle.ior      = ior;
 
     return handle;
-    return nullptr;
 }
 
 bool DistStorage3FSFile::createIor(
@@ -506,7 +567,7 @@ bool DistStorage3FSFile::createIor(
     return true;
 }
 
-void DistStorage3FSFile::releaseIovIor(const std::shared_ptr<ThreeFSHandle>& handle) {
+void DistStorage3FSFile::releaseIovIor(const std::shared_ptr<ThreeFSHandle>& handle) const {
     if (handle == nullptr) {
         return;
     }
@@ -522,6 +583,63 @@ void DistStorage3FSFile::releaseIovIor(const std::shared_ptr<ThreeFSHandle>& han
         hf3fs_iordestroy(ior_handle.ior);
         delete ior_handle.ior;
         ior_handle.ior = nullptr;
+    }
+}
+
+void DistStorage3FSFile::verify(const std::vector<DistStorage::Iov>&    write_iovs,
+                                const std::shared_ptr<ThreeFSCudaUtil>& cuda_util) {
+    // wait for 3fs write finished
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    std::vector<DistStorage::Iov> read_iovs = write_iovs;
+    for (auto& iov : read_iovs) {
+        auto buf    = malloc(iov.len);
+        iov.data    = std::shared_ptr<void>(buf, [](void* p) { free(p); });
+        iov.gpu_mem = false;
+    }
+
+    if (!read(read_iovs)) {
+        RTP_LLM_LOG_WARNING("verify failed, read failed after write");
+        return;
+    }
+
+    if (write_iovs.size() != read_iovs.size()) {
+        RTP_LLM_LOG_WARNING(
+            "verify failed, write iovs size not equal to read iovs size, write iovs size: %zu, read iovs size: %zu",
+            write_iovs.size(),
+            read_iovs.size());
+        return;
+    }
+
+    bool success = true;
+    for (int i = 0; i < write_iovs.size(); ++i) {
+        const auto write_iov = write_iovs[i];
+        const auto read_iov  = read_iovs[i];
+        if (write_iov.len != read_iov.len) {
+            RTP_LLM_LOG_WARNING(
+                "[%d]verify failed, write iov len not equal to read iov len, write iov len: %lu, read iov len: %lu",
+                i,
+                write_iov.len,
+                read_iov.len);
+            success = false;
+            break;
+        }
+        auto write_iov_buf = write_iov.data;
+        if (write_iov.gpu_mem) {
+            write_iov_buf = std::shared_ptr<void>(malloc(write_iov.len), [](void* p) { free(p); });
+            cuda_util->copyAsyncDeviceToHost(write_iov_buf.get(), write_iov.data.get(), write_iov.len);
+        }
+        if (std::memcmp(write_iov_buf.get(), read_iov.data.get(), write_iov.len) != 0) {
+            RTP_LLM_LOG_WARNING("[%d]verify failed, write iov not equal to read iov", i);
+            success = false;
+            break;
+        }
+    }
+
+    if (success) {
+        RTP_LLM_LOG_INFO("verify success, iovs size: %zu", write_iovs.size());
+    } else {
+        RTP_LLM_LOG_WARNING("verify failed, iovs size: %zu", write_iovs.size());
     }
 }
 

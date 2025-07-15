@@ -1,21 +1,19 @@
 #include "rtp_llm/cpp/cache/DistStorage3FS.h"
-#include "rtp_llm/cpp/cache/ThreeFSMempool.h"
 
 #include <filesystem>
+#include <sys/stat.h>
+#include <sys/statvfs.h>
 
-using rtp_llm::threefs::DistStorage3FSFile;
-using rtp_llm::threefs::ThreeFSCudaUtil;
-using rtp_llm::threefs::ThreeFSIovHandle;
-using rtp_llm::threefs::ThreeFSFileConfig;
-using rtp_llm::threefs::ThreeFSMempool;
+#include "rtp_llm/cpp/cache/ThreeFSMempool.h"
+#include "rtp_llm/cpp/cache/DistKvCacheMetrics.h"
 
-namespace rtp_llm {
+namespace rtp_llm::threefs {
 
 DistStorage3FS::DistStorage3FS(const kmonitor::MetricsReporterPtr& metrics_reporter):
     metrics_reporter_(metrics_reporter) {}
 
 DistStorage3FS::~DistStorage3FS() {
-    // TODO: 为什么是这个顺序
+    RTP_LLM_LOG_INFO("dist storage 3fs destructor");
     {
         std::unique_lock<std::shared_mutex> lock(file_map_mutex_);
         file_map_.clear();
@@ -38,42 +36,51 @@ DistStorage3FS::~DistStorage3FS() {
 bool DistStorage3FS::init(const DistStorage3FSInitParams& init_params) {
     init_params_ = init_params;
 
-    if (!init_params_.mountpoint.empty() && init_params_.mountpoint.back() != '/') {
-        init_params_.mountpoint += '/';
+    const auto& mountpoint = init_params_.mountpoint;
+    if (mountpoint.empty()) {
+        RTP_LLM_LOG_WARNING("init failed, 3fs mountpoint is empty");
+        return false;
+    }
+    if (!std::filesystem::exists(mountpoint)) {
+        RTP_LLM_LOG_WARNING("init failed, 3fs mountpoint not exists: %s", mountpoint.c_str());
+        return false;
     }
 
-    if (!init_params_.folder_name.empty() && init_params_.folder_name.back() != '/') {
-        init_params_.folder_name += '/';
+    const auto& folder_name = init_params_.folder_name;
+    if (folder_name.empty()) {
+        RTP_LLM_LOG_WARNING("init failed, 3fs folder name is empty");
+        return false;
+    }
+    const auto folder_path = std::filesystem::path(mountpoint) / folder_name;
+    if (!std::filesystem::exists(folder_path)) {
+        RTP_LLM_LOG_WARNING("init failed, 3fs folder path not exists: %s", folder_path.c_str());
+        return false;
     }
 
     if (init_params_.enable_async_write) {
         write_thread_pool_ = std::make_shared<autil::LockFreeThreadPool>(
-            init_params_.async_write_thread_num, init_params_.async_write_queue_size, nullptr, "3FSWriteThread");
+            init_params_.write_thread_num, init_params_.write_queue_size, nullptr, "3FSWriteThread");
         if (!write_thread_pool_->start()) {
-            RTP_LLM_LOG_INFO(
-                "dist storage 3fs init failed, start async thread pool failed, thread num: %lu, queue size: %lu",
-                init_params_.async_write_thread_num,
-                init_params_.async_write_queue_size);
+            RTP_LLM_LOG_INFO("init failed, start async thread pool failed, thread num: %lu, queue size: %lu",
+                             init_params_.write_thread_num,
+                             init_params_.write_queue_size);
             return false;
         }
         RTP_LLM_LOG_INFO("3fs enable async write, thread num: %lu, queue size: %lu",
-                         init_params_.async_write_thread_num,
-                         init_params_.async_write_queue_size);
+                         init_params_.write_thread_num,
+                         init_params_.write_queue_size);
     }
 
-    if (!std::filesystem::exists(init_params_.mountpoint)) {
-        RTP_LLM_LOG_WARNING("init failed, 3fs mountpoint not exists: %s", init_params_.mountpoint.c_str());
-        return false;
-    }
-
-    auto cuda_util_ = std::make_shared<ThreeFSCudaUtil>();
-    if (!cuda_util_->init()) {
+    auto cuda_util = std::make_shared<ThreeFSCudaUtil>();
+    if (!cuda_util->init()) {
         RTP_LLM_LOG_WARNING("dist storage 3fs init failed, cuda util init failed");
         return false;
     }
 
+    removeOldIov();
+
     // read iov
-    if (!initIovHandle(read_iov_handle_, init_params_.read_iov_block_size, init_params_.read_iov_size)) {
+    if (!initIovHandle(read_iov_handle_, init_params_.read_iov_block_size, init_params_.read_iov_size, cuda_util)) {
         RTP_LLM_LOG_WARNING("init read iov handle failed");
         return false;
     }
@@ -81,8 +88,10 @@ bool DistStorage3FS::init(const DistStorage3FSInitParams& init_params) {
                      init_params_.read_iov_size,
                      init_params_.read_iov_block_size);
 
-    if (!initIovHandle(write_iov_handle_, init_params.write_iov_block_size, init_params_.write_iov_size)) {
+    // write iov
+    if (!initIovHandle(write_iov_handle_, init_params.write_iov_block_size, init_params_.write_iov_size, cuda_util)) {
         RTP_LLM_LOG_WARNING("init write iov handle failed");
+        releaseIovHandle(read_iov_handle_);
         return false;
     }
     RTP_LLM_LOG_INFO("3fs write iov size: %zu, write iov block size: %zu",
@@ -91,16 +100,16 @@ bool DistStorage3FS::init(const DistStorage3FSInitParams& init_params) {
 
     if (metrics_reporter_) {
         stop_report_metrics_.store(false);
-        // TODO: report_metrics_thread_ = std::thread(&ThreeFSBlockCache::reportMetrics, this);
+        report_metrics_thread_ = std::thread(&DistStorage3FS::reportMetrics, this);
     } else {
         stop_report_metrics_.store(true);
     }
 
-    RTP_LLM_LOG_INFO("3fs init done, mountpoint: %s, folder name: %s",
-                     init_params_.mountpoint.c_str(),
-                     init_params_.folder_name.c_str());
+    RTP_LLM_LOG_INFO(
+        "3fs init done, mountpoint: %s, folder name: %s", mountpoint.c_str(), init_params_.folder_name.c_str());
     return true;
 }
+
 bool DistStorage3FS::lookup(const DistStorage::Item& item) {
     auto file = getFile(item);
     if (file == nullptr || !file->isExist()) {
@@ -118,7 +127,7 @@ bool DistStorage3FS::get(const DistStorage::Item& item) {
 }
 
 bool DistStorage3FS::put(const DistStorage::Item& item) {
-    auto file = getFile(item);
+    auto file = getFile(item, false);
     if (file) {
         return file->write(item.iovs);
     }
@@ -136,20 +145,24 @@ bool DistStorage3FS::del(const DistStorage::Item& item) {
     return true;
 }
 
-std::shared_ptr<DistStorage3FSFile> DistStorage3FS::getFile(const DistStorage::Item& item) {
+std::shared_ptr<DistStorage3FSFile> DistStorage3FS::getFile(const DistStorage::Item& item, bool read) {
     // TODO: 轮转
     auto key = item.key;
 
-    std::unique_lock<std::shared_mutex> lock(file_map_mutex_);
-    auto                                iter = file_map_.find(key);
-    if (iter != file_map_.end()) {
-        return iter->second;
+    if (read) {
+        std::shared_lock<std::shared_mutex> lock(file_map_mutex_);
+        auto                                iter = file_map_.find(key);
+        if (iter != file_map_.end()) {
+            return iter->second;
+        }
     }
 
-    // TODO: config
-    ThreeFSFileConfig config;
+    ThreeFSFileConfig config   = {init_params_.mountpoint, item.key, write_thread_pool_, metrics_reporter_};
     auto              new_file = std::make_shared<DistStorage3FSFile>(config, read_iov_handle_, write_iov_handle_);
-    file_map_[key]             = new_file;
+    if (read) {
+        std::unique_lock<std::shared_mutex> lock(file_map_mutex_);
+        file_map_[key] = new_file;
+    }
     return new_file;
 }
 
@@ -204,7 +217,10 @@ void DistStorage3FS::removeOldIov() const {
     }
 }
 
-bool DistStorage3FS::initIovHandle(ThreeFSIovHandle& handle, size_t iov_block_size, size_t iov_size) {
+bool DistStorage3FS::initIovHandle(ThreeFSIovHandle&                                handle,
+                                   size_t                                           iov_block_size,
+                                   size_t                                           iov_size,
+                                   const std::shared_ptr<threefs::ThreeFSCudaUtil>& cuda_util) {
     if (iov_block_size != 0 && iov_size % iov_block_size != 0) {
         iov_size = (iov_size / iov_block_size + 1) * iov_block_size;
     }
@@ -225,12 +241,12 @@ bool DistStorage3FS::initIovHandle(ThreeFSIovHandle& handle, size_t iov_block_si
         return false;
     }
 
-    if (!cuda_util_->registerHost(iov->base, iov_size)) {
+    if (!cuda_util->registerHost(iov->base, iov_size)) {
         RTP_LLM_LOG_WARNING("cuda register iov failed, iov base: %p, iov size: %zu", iov->base, iov_size);
         releaseIov(iov);
         return false;
     }
-    handle = {iov, nullptr, iov_size, iov_block_size, mempool, cuda_util_};
+    handle = {iov, nullptr, iov_size, iov_block_size, mempool, cuda_util};
     return true;
 }
 
@@ -259,7 +275,6 @@ DistStorage3FS::createIov(const std::string& mountpoint, size_t iov_size, size_t
         return nullptr;
     }
     return iov;
-    return nullptr;
 }
 
 void DistStorage3FS::releaseIov(struct hf3fs_iov* iov) const {
@@ -282,4 +297,51 @@ void DistStorage3FS::releaseIovHandle(ThreeFSIovHandle& iov_handle) {
     iov_handle.cuda_util.reset();
 }
 
-}  // namespace rtp_llm
+void DistStorage3FS::reportMetrics() const {
+    while (!stop_report_metrics_.load()) {
+        if (metrics_reporter_) {
+            auto metrics          = DistKvCacheMetricsFactory::createMetrics(metrics_reporter_);
+            auto read_iov_mempool = read_iov_handle_.iov_mempool;
+            if (read_iov_mempool) {
+                DistKvCacheMetrics::setReadIovAllocatedSize(metrics, read_iov_mempool->allocatedSize());
+                DistKvCacheMetrics::setReadIovAllocatedCount(metrics, read_iov_mempool->allocatedBlockCount());
+                DistKvCacheMetrics::setReadIovFreeSize(metrics, read_iov_mempool->freeSize());
+            }
+
+            auto write_iov_mempool = write_iov_handle_.iov_mempool;
+            if (write_iov_mempool) {
+                DistKvCacheMetrics::setWriteIovAllocatedSize(metrics, write_iov_mempool->allocatedSize());
+                DistKvCacheMetrics::setWriteIovAllocatedCount(metrics, write_iov_mempool->allocatedBlockCount());
+                DistKvCacheMetrics::setWriteIovFreeSize(metrics, write_iov_mempool->freeSize());
+            }
+
+            const auto [_, used_bytes, available_bytes] = getFileSystemInfo();
+            DistKvCacheMetrics::setFSUsedSize(metrics, used_bytes);
+            DistKvCacheMetrics::setFSFreeSize(metrics, available_bytes);
+        }
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+}
+
+std::tuple<size_t, size_t, size_t> DistStorage3FS::getFileSystemInfo() const {
+    struct statvfs stat;
+    if (::statvfs(init_params_.mountpoint.c_str(), &stat) != 0) {
+        RTP_LLM_LOG_WARNING("get 3fs file system info failed, statvfs failed, mountpoint: %s",
+                            init_params_.mountpoint.c_str());
+        return {};
+    }
+
+    // stat.f_bsize: 文件系统块大小 (基本块大小，可能不是实际物理块大小)
+    // stat.f_frsize: 片段大小 (文件系统分配的最小单位，通常等于 f_bsize)
+    // stat.f_blocks: 文件系统中的总块数
+    // stat.f_bfree: 文件系统中的空闲块数 (包括保留给root的)
+    // stat.f_bavail: 文件系统中的非特权用户可用块数
+
+    const size_t total_bytes     = stat.f_blocks * stat.f_frsize;
+    const size_t free_bytes      = stat.f_bfree * stat.f_frsize;
+    const size_t available_bytes = stat.f_bavail * stat.f_frsize;
+    const size_t used_bytes      = total_bytes - free_bytes;
+    return std::make_tuple(total_bytes, used_bytes, available_bytes);
+}
+
+}  // namespace rtp_llm::threefs

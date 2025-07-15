@@ -48,6 +48,11 @@ config_setting(
     define_values = {"use_3fs": "true",},
 )
 
+config_setting(
+    name = "enable_3fs",
+    values = {"copt": "-DENABLE_3FS=1"},
+)
+
 cc_library(
     name = "config_modules",
     srcs = [

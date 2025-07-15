@@ -19,10 +19,7 @@
 
 namespace rtp_llm {
 
-namespace threefs {
-class ThreeFSCacheManager;
-}  // namespace threefs
-using namespace rtp_llm::threefs;
+class DistKvCache;
 
 class CacheManager {
 public:
@@ -139,12 +136,14 @@ public:
 
     void                                    regUserMr(size_t model_id);
 
-    bool getCacheFrom3FSForRank(const std::vector<int64_t>& cache_keys,
-                                const std::vector<int32_t>& block_indices,
-                                int64_t                     request_id) const;
-    bool putCacheTo3FSForRank(const std::vector<int64_t>& cache_keys,
-                              const std::vector<int32_t>& block_indices,
-                              int64_t                     request_id) const;
+    bool getCacheForRank(const std::vector<int64_t>& cache_keys,
+                         const std::vector<int32_t>& block_indices,
+                         int64_t                     request_id,
+                         const std::map<std::string, std::string>& extra_metas) const;
+    bool putCacheForRank(const std::vector<int64_t>& cache_keys,
+                         const std::vector<int32_t>& block_indices,
+                         int64_t                     request_id,
+                         const std::map<std::string, std::string>& extra_metas) const;
 
 protected:
     const BlockCache&                  blockCache() const;
@@ -183,13 +182,12 @@ protected:
     void reportMetricsLoop();
 
 private:
-#ifdef ENABLE_3FS
-    bool                    init3FS();
-    BlockCache::MatchResult matchIn3FS(const std::vector<int64_t>& cache_keys, int64_t request_id);
-    bool                    putCacheTo3FSForAllRank(const std::vector<int64_t>& cache_keys,
-                                                    const std::vector<int32_t>& block_indices,
-                                                    int64_t                     request_id) const;
-#endif
+    bool initDistKvCache();
+    BlockCache::MatchResult
+         matchInDistKvCache(const std::vector<int64_t>& cache_keys, int32_t seq_cache_key_num, int64_t request_id);
+    bool putCacheForAllRank(const std::vector<int64_t>& cache_keys,
+                            const std::vector<int32_t>& block_indices,
+                            int64_t                     request_id) const;
 
 protected:
     CacheConfig          config_;
@@ -214,10 +212,10 @@ protected:
 
     std::mutex mutex_;
 
-    // for 3fs
-    const GptInitParameter               params_;
-    bool                                 enable_3fs_{false};
-    std::shared_ptr<ThreeFSCacheManager> threefs_cache_manager_;
+    const GptInitParameter       params_;
+    bool                         enable_dist_kvcache_{true};
+    bool                         enable_3fs_{true};
+    std::unique_ptr<DistKvCache> dist_kvcache_;
 };
 
 typedef std::shared_ptr<CacheManager> CacheManagerPtr;

@@ -4,13 +4,14 @@
 #include "rtp_llm/cpp/cache/DistStorage3FSFile.h"
 #include "rtp_llm/cpp/cache/ThreeFSCudaUtil.h"
 
-namespace rtp_llm {
+namespace rtp_llm::threefs {
 
 class DistStorage3FS: public DistStorage {
 public:
     DistStorage3FS(const kmonitor::MetricsReporterPtr& metrics_reporter);
     virtual ~DistStorage3FS();
 
+public:
     bool init(const DistStorage3FSInitParams& init_params);
 
     bool lookup(const DistStorage::Item& item) override;
@@ -19,22 +20,25 @@ public:
     bool del(const DistStorage::Item& item) override;
 
 private:
-    std::shared_ptr<threefs::DistStorage3FSFile> getFile(const DistStorage::Item& item);
+    std::shared_ptr<threefs::DistStorage3FSFile> getFile(const DistStorage::Item& item, bool read = true);
     void                                         removeFile(const DistStorage::Item& item);
 
-    bool initIovHandle(threefs::ThreeFSIovHandle& handle, size_t iov_block_size, size_t iov_size);
+    bool initIovHandle(threefs::ThreeFSIovHandle&                       handle,
+                       size_t                                           iov_block_size,
+                       size_t                                           iov_size,
+                       const std::shared_ptr<threefs::ThreeFSCudaUtil>& cuda_util);
     void releaseIovHandle(threefs::ThreeFSIovHandle& handle);
     void removeOldIov() const;
 
     struct hf3fs_iov* createIov(const std::string& mountpoint, size_t iov_size, size_t iov_block_size) const;
     void              releaseIov(struct hf3fs_iov* iov) const;
 
+    void                               reportMetrics() const;
+    std::tuple<size_t, size_t, size_t> getFileSystemInfo() const;
+
 private:
     kmonitor::MetricsReporterPtr metrics_reporter_;
-
-    DistStorage3FSInitParams init_params_;
-
-    std::shared_ptr<threefs::ThreeFSCudaUtil> cuda_util_;
+    DistStorage3FSInitParams     init_params_;
 
     // for read & write
     threefs::ThreeFSIovHandle read_iov_handle_;
@@ -58,4 +62,4 @@ private:
     const size_t kDefaultWriteIovBlockSize{1ULL << 20};  // 1MB
 };
 
-}  // namespace rtp_llm
+}  // namespace rtp_llm::threefs

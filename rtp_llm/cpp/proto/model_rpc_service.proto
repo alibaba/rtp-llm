@@ -283,8 +283,9 @@ message RemoteStoreResponsePB {
 }
 
 enum DistKvCacheOp {
-    GET = 0;
-    PUT = 1;
+    UNKNOWN = 0;
+    GET = 1;
+    PUT = 2;
 }
 
 message DistKvCacheRequestPB {

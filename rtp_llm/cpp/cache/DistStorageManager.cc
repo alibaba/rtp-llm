@@ -13,18 +13,19 @@ bool DistStorageManager::init(const DistStorageManagerInitParams& init_params) {
     init_params_ = init_params;
     if (init_params_.init_params_3fs.has_value()) {
 #ifdef ENABLE_3FS
-        auto storage = std::make_shared<DistStorage3FS>(init_params_.metrics_reporter);
+        auto storage = std::make_shared<threefs::DistStorage3FS>(metrics_reporter_);
         if (!storage->init(init_params_.init_params_3fs.value())) {
             RTP_LLM_LOG_WARNING("init failed, 3fs storage init failed");
             return false;
         }
         storage_3fs_ = storage;
-#else RTP_LLM_LOG_WARNING("init failed, 3fs storage init failed");
+#else
+        RTP_LLM_LOG_WARNING("init failed, 3fs not enabled");
         return false;
 #endif
     }
     if (init_params_.init_params_local_mem.has_value()) {
-        auto storage = std::make_shared<DistStorageLocalMem>(init_params_.metrics_reporter);
+        auto storage = std::make_shared<DistStorageLocalMem>(metrics_reporter_);
         if (!storage->init(init_params_.init_params_local_mem.value())) {
             RTP_LLM_LOG_WARNING("init failed, local mem storage init failed");
             return false;
@@ -34,7 +35,7 @@ bool DistStorageManager::init(const DistStorageManagerInitParams& init_params) {
     return true;
 }
 
-const std::shared_ptr<DistStorage>& DistStorageManager::getStorage(const DistStorage::Item& item) {
+const std::shared_ptr<DistStorage> DistStorageManager::getStorage(const DistStorage::Item& item) {
     switch (item.type) {
         case DistStorage::ST_3FS: {
             return storage_3fs_;

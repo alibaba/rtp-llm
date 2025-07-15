@@ -206,33 +206,52 @@ EngineScheduleInfo LocalRpcServer::getEngineScheduleInfo(int64_t latest_finised_
     return grpc::Status::OK;
 }
 
-::grpc::Status LocalRpcServer::DistKvCache(::grpc::ServerContext*              context,
-                                              const ::DistKvCacheRequestPB* request,
-                                              ::DistKvCacheResponsePB*      response) {
-    RTP_LLM_LOG_DEBUG("receive put cache rpc request from client: %s, request: [%s]",
+::grpc::Status LocalRpcServer::DistKvCache(::grpc::ServerContext*        context,
+                                           const ::DistKvCacheRequestPB* request,
+                                           ::DistKvCacheResponsePB*      response) {
+    RTP_LLM_LOG_DEBUG("receive dist kvcache request from client: %s, request: [%s]",
                       context->peer().c_str(),
                       request->DebugString().c_str());
 
     const int64_t request_id = request->request_id();
-    if (!engine_) {
-        RTP_LLM_LOG_WARNING("put cache failed, receive put cache rpc request but engine is null, request: %ld",
-                            request_id);
-        return grpc::Status(grpc::StatusCode::INTERNAL, "engine is null");
+    const auto    op_code    = request->op();
+    if (op_code == ::DistKvCacheOp::UNKNOWN) {
+        RTP_LLM_LOG_WARNING("dist kvcache failed, op code is unknown, request: %ld", request_id);
+        return grpc::Status(grpc::StatusCode::INTERNAL, "op code is unknown");
     }
 
+    if (!engine_) {
+        RTP_LLM_LOG_WARNING("dist kvcache failed, engine is null, request: %ld", request_id);
+        return grpc::Status(grpc::StatusCode::INTERNAL, "engine is null");
+    }
     auto cache_manager = engine_->getCacheManager();
     if (!cache_manager) {
-        RTP_LLM_LOG_WARNING("put cache failed, receive put cache rpc request but cache manager is null, request: %ld",
-                            request_id);
+        RTP_LLM_LOG_WARNING("dist kvcache failed, cache manager is null, request: %ld, op: %s",
+                            request_id,
+                            ::DistKvCacheOp_Name(op_code).c_str());
         return grpc::Status(grpc::StatusCode::INTERNAL, "cache manager is null");
     }
 
-    std::vector<int64_t> cache_keys(request->cache_keys().begin(), request->cache_keys().end());
-    std::vector<int32_t> block_ids(request->block_ids().begin(), request->block_ids().end());
-    if (!cache_manager->putCacheTo3FSForRank(cache_keys, block_ids, request_id)) {
-        RTP_LLM_LOG_DEBUG("put cache failed, receive put cache rpc request but put cache failed, request: [%s]",
-                          request->ShortDebugString().c_str());
-        return grpc::Status(grpc::StatusCode::INTERNAL, "cache manager put cache failed");
+    std::vector<int64_t>               cache_keys(request->cache_keys().begin(), request->cache_keys().end());
+    std::vector<int32_t>               block_ids(request->block_ids().begin(), request->block_ids().end());
+    std::map<std::string, std::string> extra_metas;
+    for (const auto& meta : request->extra_metas()) {
+        extra_metas[meta.key()] = meta.value();
+    }
+
+    bool result = false;
+    if (op_code == ::DistKvCacheOp::GET) {
+        result = cache_manager->getCacheForRank(cache_keys, block_ids, request_id, extra_metas);
+    } else {
+        result = cache_manager->putCacheForRank(cache_keys, block_ids, request_id, extra_metas);
+    }
+
+    if (!result) {
+        RTP_LLM_LOG_WARNING("dist kvcache failed, %s cache failed, request: [%s]",
+                            ::DistKvCacheOp_Name(op_code).c_str(),
+                            request->ShortDebugString().c_str());
+        const std::string error_msg = "cache manager " + ::DistKvCacheOp_Name(op_code) + " failed";
+        return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
     }
     return grpc::Status::OK;
 }

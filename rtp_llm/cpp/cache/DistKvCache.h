@@ -11,7 +11,7 @@ namespace rtp_llm {
 class CacheManager;
 
 struct DistKvCacheInitParams {
-    DistStorageManagerInitParams manager_params;
+    DistStorageManagerInitParams storage_manager_params;
 };
 
 /**
@@ -21,43 +21,40 @@ struct DistKvCacheInitParams {
 class DistKvCache {
 public:
     DistKvCache(CacheManager*                       cache_manager,
-                const GptInitParameter&             params,
+                const GptInitParameter&             gpt_init_params,
                 const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr);
     ~DistKvCache();
 
     bool init(const DistKvCacheInitParams& init_params);
 
 public:
-    int32_t matchCacheForAllRank(const std::vector<int64_t>&        cache_keys,
-                                 const std::vector<int32_t>&        block_indices,
-                                 int64_t                            request_id,
-                                 std::map<std::string, std::string> extra_metas) const;
-
-    int32_t matchCache(const std::vector<int64_t>&        cache_keys,
-                       const std::vector<int32_t>&        block_indices,
-                       int64_t                            request_id,
-                       std::map<std::string, std::string> extra_metas,
-                       int                                tp_rank) const;
-
-    bool getCacheForAllRank(const std::vector<int64_t>&        cache_keys,
-                            const std::vector<int32_t>&        block_indices,
+    int32_t matchForAllRank(const std::vector<int64_t>&        cache_keys,
                             int64_t                            request_id,
                             std::map<std::string, std::string> extra_metas) const;
 
-    bool getCache(const std::vector<int64_t>&        cache_keys,
-                  const std::vector<int32_t>&        block_indices,
+    int32_t match(const std::vector<int64_t>&        cache_keys,
                   int64_t                            request_id,
                   std::map<std::string, std::string> extra_metas) const;
+
+    bool getForAllRank(const std::vector<int64_t>&        cache_keys,
+                       const std::vector<int32_t>&        block_indices,
+                       int64_t                            request_id,
+                       std::map<std::string, std::string> extra_metas);
+
+    bool get(const std::vector<int64_t>&        cache_keys,
+             const std::vector<int32_t>&        block_indices,
+             int64_t                            request_id,
+             std::map<std::string, std::string> extra_metas) const;
 
     bool putForAllRank(const std::vector<int64_t>&        cache_keys,
                        const std::vector<int32_t>&        block_indices,
                        int64_t                            request_id,
                        std::map<std::string, std::string> extra_metas) const;
 
-    bool putCache(const std::vector<int64_t>&        cache_keys,
-                  const std::vector<int32_t>&        block_indices,
-                  int64_t                            request_id,
-                  std::map<std::string, std::string> extra_metas) const;
+    bool put(const std::vector<int64_t>&        cache_keys,
+             const std::vector<int32_t>&        block_indices,
+             int64_t                            request_id,
+             std::map<std::string, std::string> extra_metas) const;
 
 private:
     enum OpType {
@@ -71,8 +68,8 @@ private:
                          DistKvCache::OpType                      op_type) const;
 
 private:
-    CacheManager*                cache_manager_ = 0;
-    const GptInitParameter       params_;
+    CacheManager*                cache_manager_{nullptr};
+    const GptInitParameter       gpt_init_params_;
     kmonitor::MetricsReporterPtr metrics_reporter_;
 
     std::map<std::string, std::string> default_metas_;
@@ -81,6 +78,9 @@ private:
     std::unique_ptr<DistKvCachePlanner> planner_;
     std::unique_ptr<DistStorageManager> storage_;
     std::shared_ptr<RPCPool>            rpc_pool_;
+
+    std::atomic<int64_t> total_matched_len_{0};
+    std::atomic<int64_t> total_input_len_{0};
 };
 
 }  // namespace rtp_llm

@@ -7,7 +7,7 @@ namespace rtp_llm {
 // for multiple storage
 class DistStorageManager {
 public:
-    DistStorageManager(const kmonitor::MetricsReporterPtr& metrics_reporter): metrics_reporter_(metrics_reporter){};
+    DistStorageManager(const kmonitor::MetricsReporterPtr& metrics_reporter): metrics_reporter_(metrics_reporter) {};
     bool init(const DistStorageManagerInitParams& init_params);
 
 public:
@@ -17,7 +17,7 @@ public:
     bool del(const DistStorage::Item& item);
 
 private:
-    const std::shared_ptr<DistStorage>& getStorage(const DistStorage::Item& item);
+    const std::shared_ptr<DistStorage> getStorage(const DistStorage::Item& item);
 
 private:
     kmonitor::MetricsReporterPtr metrics_reporter_;

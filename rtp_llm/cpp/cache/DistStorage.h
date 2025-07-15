@@ -13,7 +13,8 @@ public:
 
     struct Iov {
         std::shared_ptr<void> data;
-        size_t                len     = 0;
+        size_t                len = 0;
+        int64_t               offset;  // used for 3fs read/write
         bool                  gpu_mem = true;
     };
 
@@ -44,22 +45,20 @@ struct DistStorageLocalMemInitParams {
 };
 
 struct DistStorage3FSInitParams {
-    bool   enable_async_write     = true;
-    size_t async_write_thread_num = 4;
-    size_t async_write_queue_size = 1000;
+    bool   enable_async_write = true;
+    size_t write_thread_num   = 4;
+    size_t write_queue_size   = 1000;
 
     size_t read_iov_block_size  = 0;
     size_t read_iov_size        = 1ULL << 32;  // 4GB
     size_t write_iov_block_size = 1ULL << 20;  // 1MB
     size_t write_iov_size       = 1ULL << 32;  // 4GB
 
-    std::string mountpoint;
-    std::string folder_name;
+    std::string mountpoint{"/3fs/stage/3fs/"};
+    std::string folder_name{"rtp_llm/"};
 };
 
 struct DistStorageManagerInitParams {
-    kmonitor::MetricsReporterPtr metrics_reporter;
-
     std::optional<DistStorage3FSInitParams>      init_params_3fs;
     std::optional<DistStorageLocalMemInitParams> init_params_local_mem;
 };

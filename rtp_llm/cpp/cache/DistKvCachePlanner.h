@@ -9,9 +9,7 @@ class DistKvCachePlanner {
 public:
     virtual std::vector<DistStorage::Item> layout(const std::vector<int64_t>&               cache_keys,
                                                   const std::vector<int32_t>&               block_indices,
-                                                  const std::map<std::string, std::string>& metas,
-                                                  int32_t tp_rank,  // TODO: rank is meta
-                                                  bool    skip_iov = false) = 0;
+                                                  const std::map<std::string, std::string>& metas) = 0;
 
     virtual bool verify(const std::vector<DistStorage::Item>&     buffers,
                         const std::vector<int64_t>&               cache_keys,
@@ -26,15 +24,14 @@ class CacheManager;
 class DefaultDistKvCachePlanner: public DistKvCachePlanner {
 public:
     DefaultDistKvCachePlanner(CacheManager*                       cache_manager,
-                              const GptInitParameter&             params,
+                              const GptInitParameter&             gpt_init_params,
+                              const DistStorage3FSInitParams&     storage_3fs_init_params,
                               const kmonitor::MetricsReporterPtr& metrics_reporter);
 
 public:
     std::vector<DistStorage::Item> layout(const std::vector<int64_t>&               cache_keys,
                                           const std::vector<int32_t>&               block_indices,
-                                          const std::map<std::string, std::string>& metas,
-                                          int32_t                                   tp_rank,
-                                          bool                                      skip_iov) override;
+                                          const std::map<std::string, std::string>& metas) override;
 
     bool verify(const std::vector<DistStorage::Item>&     buffers,
                 const std::vector<int64_t>&               cache_keys,
@@ -50,9 +47,10 @@ private:
                             int32_t                     tp_rank);
 
 private:
-    CacheManager*                cache_manager_ = nullptr;
-    GptInitParameter             params_;
-    kmonitor::MetricsReporterPtr metrics_reporter_;
+    CacheManager*                  cache_manager_ = nullptr;
+    const GptInitParameter         gpt_init_params_;
+    const DistStorage3FSInitParams storage_3fs_init_params_;
+    kmonitor::MetricsReporterPtr   metrics_reporter_;
 };
 
 }  // namespace rtp_llm

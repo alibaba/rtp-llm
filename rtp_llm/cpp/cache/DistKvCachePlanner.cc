@@ -1,34 +1,38 @@
 #include "rtp_llm/cpp/cache/DistKvCachePlanner.h"
 
+#include <filesystem>
+
 #include "rtp_llm/cpp/cache/CacheManager.h"
 
 namespace rtp_llm {
 
 const int32_t kReservedLength = 1024;  // 1KB
 
-// DefaultDistKvCacheMeta 与 block 文件存储格式有关, 谨慎修改!
+// 以下与文件存储格式有关, 谨慎修改!
 #pragma pack(push, 1)
 struct DefaultDistKvCacheMetaInfo {
     int64_t cache_key{0};
     int64_t offset{0};
 };
-#pragma pack(pop)
 
 struct DefaultDistKvCacheMeta {
-    char     reserved[kReservedLength];
+    char     reserved[kReservedLength]{};
     uint32_t meta_count{0};
 };
+#pragma pack(pop)
 
 DefaultDistKvCachePlanner::DefaultDistKvCachePlanner(CacheManager*                       cache_manager,
-                                                     const GptInitParameter&             params,
+                                                     const GptInitParameter&             gpt_init_params,
+                                                     const DistStorage3FSInitParams&     storage_3fs_init_params,
                                                      const kmonitor::MetricsReporterPtr& metrics_reporter):
-    cache_manager_(cache_manager), params_(params), metrics_reporter_(metrics_reporter) {}
+    cache_manager_(cache_manager),
+    gpt_init_params_(gpt_init_params),
+    storage_3fs_init_params_(storage_3fs_init_params),
+    metrics_reporter_(metrics_reporter) {}
 
 std::vector<DistStorage::Item> DefaultDistKvCachePlanner::layout(const std::vector<int64_t>& cache_keys,
                                                                  const std::vector<int32_t>& block_indices,
-                                                                 const std::map<std::string, std::string>& metas,
-                                                                 int32_t                                   tp_rank,
-                                                                 bool                                      skip_iov) {
+                                                                 const std::map<std::string, std::string>& metas) {
     /**
      * File layout:
      * +----------+------------+--------+--------+-----+--------+----------+----------+-----+----------+
@@ -45,28 +49,38 @@ std::vector<DistStorage::Item> DefaultDistKvCachePlanner::layout(const std::vect
      *                         +-----------+--------+
      * Total size (Byte): 1024 + 4 + (16 * N) + (Len * N)
      */
-    const auto& cache_config = cache_manager_->cacheConfig();
-
     DistStorage::Item item;
+    item.type = DistStorage::ST_3FS;
+
+    if (metas.count("TP_RANK") == 0) {
+        RTP_LLM_LOG_WARNING("cache planner metas missing TP_RANK");
+        return {};
+    }
+    const int32_t tp_rank = std::stoi(metas.at("TP_RANK"));
 
     // use last cache key construct item key
     item.key = constructKvCacheKey(cache_keys[cache_keys.size() - 1], tp_rank);
 
-    if (skip_iov) {
+    if (metas.count("SKIP_IOV") != 0 && metas.at("SKIP_IOV") == "1") {
         return {item};
     }
 
-    // meta_iov + layer_num * block_num * 2[k & v]
-    item.iovs.reserve(1 + cache_keys.size() * cache_config.layer_num * 2);
+    const auto& cache_config = cache_manager_->cacheConfig();
+    const auto  k_block_len  = cache_config.k_block_stride;
+    const auto  v_block_len  = cache_config.v_block_stride;
 
-    DistStorage::Iov meta_iov;
-    if (!makeMetaIov(meta_iov, cache_keys, block_indices, tp_rank)) {
-        return {};
+    int64_t file_offset = 0;
+    if (metas.count("GET") != 0 && metas.at("GET") == "1") {
+        if (metas.count("SEQ_CACHE_KEY_NUM") == 0) {
+            RTP_LLM_LOG_WARNING("cache planner metas missing SEQ_CACHE_KEY_NUM when get");
+            return {};
+        }
+        const auto seq_cache_key_num = std::stoi(metas.at("SEQ_CACHE_KEY_NUM"));
+        file_offset = (seq_cache_key_num - cache_keys.size()) * cache_config.layer_num * (k_block_len + v_block_len);
     }
-    item.iovs.push_back(meta_iov);
 
-    const auto k_block_len = cache_config.k_block_stride;
-    const auto v_block_len = cache_config.v_block_stride;
+    // layer_num * block_num * 2[k & v]
+    item.iovs.reserve(cache_keys.size() * cache_config.layer_num * 2);
 
     for (int i = 0; i < cache_keys.size(); i++) {
         auto block_id = block_indices[i];
@@ -75,59 +89,73 @@ std::vector<DistStorage::Item> DefaultDistKvCachePlanner::layout(const std::vect
             if (!block_addrs.k_addr || !block_addrs.v_addr) {
                 return {};
             }
-            item.iovs.push_back(
-                DistStorage::Iov{std::shared_ptr<void>(block_addrs.k_addr, [](void* p) {}), k_block_len, true});
-            item.iovs.push_back(
-                DistStorage::Iov{std::shared_ptr<void>(block_addrs.v_addr, [](void* p) {}), v_block_len, true});
+            item.iovs.push_back(DistStorage::Iov{
+                std::shared_ptr<void>(block_addrs.k_addr, [](void* p) {}), k_block_len, file_offset, true});
+            file_offset += k_block_len;
+            item.iovs.push_back(DistStorage::Iov{
+                std::shared_ptr<void>(block_addrs.v_addr, [](void* p) {}), v_block_len, file_offset, true});
+            file_offset += v_block_len;
         }
     }
+
     return {item};
 }
 
 std::string DefaultDistKvCachePlanner::constructKvCacheKey(int64_t last_cache_key, int32_t rank) const {
     // 3fs use the following string as filename:
-    // kv_<model_name>_<layer_num>_<local_head_num_kv>_<size_per_head>_<seq_size_per_block>_<dtype>_<last_cache_key>_<rank>
+    // <path>/kv_<model_name>_<layer_num>_<local_head_num_kv>_<size_per_head>_<seq_size_per_block>_<dtype>_<last_cache_key>_<rank>
+
     if (rank == -1) {
-        rank = static_cast<int32_t>(params_.tp_rank_);
+        rank = static_cast<int32_t>(gpt_init_params_.tp_rank_);
     }
 
+    auto path = std::filesystem::path(storage_3fs_init_params_.mountpoint) / storage_3fs_init_params_.folder_name;
     const auto& cache_config = cache_manager_->cacheConfig();
 
     std::ostringstream oss;
-    oss << "default_kv_" << params_.model_name_ << "_" << cache_config.layer_num << "_"
+    oss << "kv_" << gpt_init_params_.model_name_ << "_" << cache_config.layer_num << "_"
         << cache_config.local_head_num_kv << "_" << cache_config.size_per_head << "_" << cache_config.seq_size_per_block
         << "_" << static_cast<int>(cache_config.dtype) << "_" << last_cache_key << "_" << rank;
-    return oss.str();
+
+    path /= oss.str();
+    return path.lexically_normal().string();
 }
 
 bool DefaultDistKvCachePlanner::makeMetaIov(DistStorage::Iov&           meta_iov,
                                             const std::vector<int64_t>& cache_keys,
                                             const std::vector<int32_t>& block_indices,
                                             int32_t                     tp_rank) {
-    const auto& cache_config = cache_manager_->cacheConfig();
-
-    const auto k_block_len = cache_config.k_block_stride;
-    const auto v_block_len = cache_config.v_block_stride;
-
+    const auto   cache_key_count = static_cast<int32_t>(cache_keys.size());
     const size_t meta_iov_len =
-        kReservedLength + sizeof(int32_t) + cache_keys.size() * sizeof(DefaultDistKvCacheMetaInfo);
+        kReservedLength + sizeof(int32_t) + cache_key_count * sizeof(DefaultDistKvCacheMetaInfo);
     void* meta_iov_buffer = malloc(meta_iov_len);
     if (!meta_iov_buffer) {
         RTP_LLM_LOG_WARNING("default dist cache planner malloc meta iov len %d failed", meta_iov_len);
         return false;
     }
+
+    // copy reserved len and cache key count
     struct DefaultDistKvCacheMeta meta;
-    meta.meta_count = cache_keys.size();
+    meta.meta_count = cache_key_count;
     memcpy(meta_iov_buffer, &meta, sizeof(meta));
 
-    int32_t offset = sizeof(meta);
-    for (int i = 0; i < cache_keys.size(); i++) {
-        DefaultDistKvCacheMetaInfo meta_info;
-        meta_info.cache_key = cache_keys[i];
-        meta_info.offset    = offset;
-        memcpy(static_cast<char*>(meta_iov_buffer) + offset, &meta_info, sizeof(meta_info));
-        offset += sizeof(meta_info);
+    const auto& cache_config = cache_manager_->cacheConfig();
+    const auto  k_block_len  = cache_config.k_block_stride;
+    const auto  v_block_len  = cache_config.v_block_stride;
+
+    // file offset of kvcache
+    std::vector<DefaultDistKvCacheMetaInfo> meta_infos(cache_key_count);
+    int64_t                                 cache_offset = meta_iov_len;
+    for (int i = 0; i < cache_key_count; ++i) {
+        meta_infos[i].cache_key = cache_keys[i];
+        meta_infos[i].offset    = cache_offset;
+        cache_offset += cache_config.layer_num * (k_block_len + v_block_len);
     }
+
+    // copy cache keys
+    std::memcpy(static_cast<char*>(meta_iov_buffer) + sizeof(meta),
+                meta_infos.data(),
+                cache_key_count * sizeof(DefaultDistKvCacheMetaInfo));
 
     meta_iov.data    = std::shared_ptr<void>(meta_iov_buffer, [](void* p) { free(p); });
     meta_iov.len     = meta_iov_len;
@@ -142,7 +170,7 @@ bool DefaultDistKvCachePlanner::verify(const std::vector<DistStorage::Item>&    
                                        const std::map<std::string, std::string>& metas,
                                        int32_t                                   tp_rank) {
     // TODO: need verify?
-    return false;
+    return true;
 }
 
 }  // namespace rtp_llm

@@ -7,7 +7,7 @@ namespace rtp_llm::threefs {
 
 #define PROPERTY(PropertyType, property_name, MethodName, default_value)                                               \
 public:                                                                                                                \
-    static inline void set##MethodName(std::shared_ptr<ThreeFSMetrics>& metrics, PropertyType value) {                 \
+    static inline void set##MethodName(std::shared_ptr<DistKvCacheMetrics>& metrics, PropertyType value) {             \
         if (metrics) {                                                                                                 \
             metrics->property_name = value;                                                                            \
         }                                                                                                              \
@@ -21,12 +21,12 @@ private:                                                                        
 
 #define TIME_FIELD(field_name, MethodName)                                                                             \
 public:                                                                                                                \
-    static inline void mark##MethodName(std::shared_ptr<ThreeFSMetrics>& metrics) {                                    \
+    static inline void mark##MethodName(std::shared_ptr<DistKvCacheMetrics>& metrics) {                                \
         if (metrics) {                                                                                                 \
             metrics->field_name = autil::TimeUtility::currentTimeInMicroSeconds();                                     \
         }                                                                                                              \
     }                                                                                                                  \
-    static inline void mark##MethodName(std::shared_ptr<ThreeFSMetrics>& metrics, int64_t value) {                     \
+    static inline void mark##MethodName(std::shared_ptr<DistKvCacheMetrics>& metrics, int64_t value) {                 \
         if (metrics) {                                                                                                 \
             metrics->field_name = value;                                                                               \
         }                                                                                                              \
@@ -44,9 +44,9 @@ public:                                                                         
         return done_field_name - begin_field_name;                                                                     \
     }
 
-class ThreeFSMetricsReporter;
+class DistKvCacheMetricsReporter;
 
-class ThreeFSMetrics final {
+class DistKvCacheMetrics final {
 public:
     // for single query
     TIME_FIELD(match_begin_us, MatchBeginUs);
@@ -88,10 +88,10 @@ public:
     TIME_COST_GETTER(ReadBlockCostUs, read_block_begin_us, read_block_done_us);  // only 3FS read
     PROPERTY(int64_t, read_block_len, ReadBlockLen, -1);                         // byte
     PROPERTY(float, read_block_throughput, ReadBlockThroughput, -1);             // MiB/s
-    TIME_FIELD(read_meta_begin_us, ReadMetaBeginUs);
-    TIME_FIELD(read_meta_done_us, ReadMetaDoneUs);
-    TIME_COST_GETTER(ReadMetaCostUs, read_meta_begin_us, read_meta_done_us);
-    PROPERTY(int64_t, read_meta_len, ReadMetaLen, -1);  // byte
+    // TIME_FIELD(read_meta_begin_us, ReadMetaBeginUs);
+    // TIME_FIELD(read_meta_done_us, ReadMetaDoneUs);
+    // TIME_COST_GETTER(ReadMetaCostUs, read_meta_begin_us, read_meta_done_us);
+    // PROPERTY(int64_t, read_meta_len, ReadMetaLen, -1);  // byte
     TIME_FIELD(read_cuda_copy_begin_us, ReadCudaCopyBeginUs);
     TIME_FIELD(read_cuda_copy_done_us, ReadCudaCopyDoneUs);
     TIME_COST_GETTER(ReadCudaCopyCostUs, read_cuda_copy_begin_us, read_cuda_copy_done_us);
@@ -139,7 +139,7 @@ public:
         REPORT_MUTABLE_QPS(_GET_METRIC(metric_name));                                                                  \
     }
 
-class ThreeFSMetricsReporter: public kmonitor::MetricsGroup {
+class DistKvCacheMetricsReporter: public kmonitor::MetricsGroup {
 public:
     bool init(kmonitor::MetricsGroupManager* manager) override {
         REGISTER_METRIC(match_cost_us);
@@ -163,8 +163,8 @@ public:
         REGISTER_METRIC(read_block_cost_us);
         REGISTER_METRIC(read_block_len);
         REGISTER_METRIC(read_block_throughput);
-        REGISTER_METRIC(read_meta_cost_us);
-        REGISTER_METRIC(read_meta_len);
+        // REGISTER_METRIC(read_meta_cost_us);
+        // REGISTER_METRIC(read_meta_len);
         REGISTER_METRIC(read_cuda_copy_cost_us);
 
         REGISTER_METRIC(total_write_cost_us);
@@ -186,7 +186,7 @@ public:
         REGISTER_METRIC(fs_free_size);
         return true;
     }
-    void report(const kmonitor::MetricsTags* tags, ThreeFSMetrics* metrics) {
+    void report(const kmonitor::MetricsTags* tags, DistKvCacheMetrics* metrics) {
         REPORT_METRIC(match_cost_us, MatchCostUs);
         REPORT_METRIC(cache_reuse_length, CacheReuseLength);
         REPORT_QPS_METRIC(get_cache_failed_qps, GetCacheFailedQps);
@@ -208,8 +208,8 @@ public:
         REPORT_METRIC(read_block_cost_us, ReadBlockCostUs);
         REPORT_METRIC(read_block_len, ReadBlockLen);
         REPORT_METRIC(read_block_throughput, ReadBlockThroughput);
-        REPORT_METRIC(read_meta_cost_us, ReadMetaCostUs);
-        REPORT_METRIC(read_meta_len, ReadMetaLen);
+        // REPORT_METRIC(read_meta_cost_us, ReadMetaCostUs);
+        // REPORT_METRIC(read_meta_len, ReadMetaLen);
         REPORT_METRIC(read_cuda_copy_cost_us, ReadCudaCopyCostUs);
 
         REPORT_METRIC(total_write_cost_us, TotalWriteCostUs);
@@ -251,8 +251,8 @@ private:
     METRIC(read_block_cost_us);
     METRIC(read_block_len);
     METRIC(read_block_throughput);
-    METRIC(read_meta_cost_us);
-    METRIC(read_meta_len);
+    // METRIC(read_meta_cost_us);
+    // METRIC(read_meta_len);
     METRIC(read_cuda_copy_cost_us);
 
     METRIC(total_write_cost_us);
@@ -274,16 +274,16 @@ private:
     METRIC(fs_free_size);
 };
 
-class ThreeFSMetricsFactory final {
+class DistKvCacheMetricsFactory final {
 public:
-    static std::shared_ptr<ThreeFSMetrics> createMetrics(const kmonitor::MetricsReporterPtr& metrics_reporter) {
-        auto deleter = [metrics_reporter](ThreeFSMetrics* metrics) {
+    static std::shared_ptr<DistKvCacheMetrics> createMetrics(const kmonitor::MetricsReporterPtr& metrics_reporter) {
+        auto deleter = [metrics_reporter](DistKvCacheMetrics* metrics) {
             if (metrics_reporter) {
-                metrics_reporter->report<ThreeFSMetricsReporter, ThreeFSMetrics>(nullptr, metrics);
+                metrics_reporter->report<DistKvCacheMetricsReporter, DistKvCacheMetrics>(nullptr, metrics);
             }
             delete metrics;
         };
-        return std::shared_ptr<ThreeFSMetrics>(new ThreeFSMetrics(), deleter);
+        return std::shared_ptr<DistKvCacheMetrics>(new DistKvCacheMetrics(), deleter);
     }
 };
 

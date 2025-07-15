@@ -4,6 +4,7 @@
 #include <memory>
 #include <unistd.h>
 #include "rtp_llm/cpp/cache/CacheManager.h"
+#include "rtp_llm/cpp/cache/DistKvCache.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/StringUtil.h"
@@ -16,10 +17,6 @@
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #ifdef ENABLE_FP8
 #include <cuda_fp8.h>
-#endif
-
-#ifdef ENABLE_3FS
-#include "rtp_llm/cpp/cache/ThreeFSCacheManager.h"
 #endif
 
 using namespace std;
@@ -50,12 +47,10 @@ CacheManager::CacheManager(const CacheConfig&                 config,
         }
     }
 
-#ifdef ENABLE_3FS
-    if (params_.enable_3fs_) {
-        enable_3fs_ = init3FS();
+    if (enable_dist_kvcache_) {
+        enable_dist_kvcache_ = initDistKvCache();
     }
-    RTP_LLM_LOG_INFO("enable 3fs: %d", enable_3fs_);
-#endif
+    RTP_LLM_LOG_INFO("enable dist kvcache: %d", enable_dist_kvcache_);
 }
 
 void CacheManager::regUserMr(size_t model_id) {
@@ -404,20 +399,19 @@ CacheManager::MatchInfo CacheManager::matchImpl(const AdvancedMallocInfo& malloc
     auto match_result = block_cache_.match(malloc_info.cache_keys);
     incrRefCounter(match_result.block_indices);
 
-#ifdef ENABLE_3FS
-    // match in 3fs if cache keys not fully matched
-    if (enable_3fs_ && match_result.matched_len < malloc_info.cache_keys.size()) {
+    // match in dist kvcache if cache keys not fully matched
+    if (enable_dist_kvcache_ && match_result.matched_len < malloc_info.cache_keys.size()) {
         std::vector<int64_t> need_match_cache_keys(malloc_info.cache_keys.begin() + match_result.matched_len,
                                                    malloc_info.cache_keys.end());
-        const auto           threefs_match_result = matchIn3FS(need_match_cache_keys, malloc_info.request_id);
-        if (threefs_match_result.matched_len != 0) {
-            match_result.matched_len += threefs_match_result.matched_len;
+        const auto           dist_match_result =
+            matchInDistKvCache(need_match_cache_keys, malloc_info.cache_keys.size(), malloc_info.request_id);
+        if (dist_match_result.matched_len != 0) {
+            match_result.matched_len += dist_match_result.matched_len;
             match_result.block_indices.insert(match_result.block_indices.end(),
-                                              threefs_match_result.block_indices.begin(),
-                                              threefs_match_result.block_indices.end());
+                                              dist_match_result.block_indices.begin(),
+                                              dist_match_result.block_indices.end());
         }
     }
-#endif
 
     int cache_block_num = match_result.block_indices.size();
     int reuse_block_num = std::min(
@@ -573,11 +567,9 @@ void CacheManager::insertIntoCache(FreeInfo& free_info) {
                                   std::vector<float>{free_info.loss.begin(), free_info.loss.begin() + token_len},
                        free_info.is_resident};
         std::vector<int> indices = block_cache_.put(item);
-#ifdef ENABLE_3FS
-        if (enable_3fs_) {
-            putCacheTo3FSForAllRank(item.cache_key, item.block_indices, free_info.request_id);
+        if (enable_dist_kvcache_) {
+            putCacheForAllRank(item.cache_key, item.block_indices, free_info.request_id);
         }
-#endif
         freeImpl(indices);
         freeImpl(std::vector<int>(free_info.block_indices.begin() + block_len, free_info.block_indices.end()));
     } else {
@@ -760,31 +752,37 @@ void CacheManager::beamSearchKvUpdate(rtp_llm::BufferPtr src_block_offset, rtp_l
     }
 };
 
-#ifdef ENABLE_3FS
-bool CacheManager::init3FS() {
-    auto threefs_cache_manager = std::make_shared<ThreeFSCacheManager>(
-        kv_cache_.k_blocks, kv_cache_.v_blocks, config_, params_, metrics_reporter_);
-    if (!threefs_cache_manager->init()) {
-        RTP_LLM_LOG_WARNING("3fs init failed, 3fs cache manager init failed");
+bool CacheManager::initDistKvCache() {
+    DistKvCacheInitParams dist_kvcache_init_params;
+    if (enable_3fs_) {
+        RTP_LLM_LOG_INFO("dist kvcache enable 3fs");
+        dist_kvcache_init_params.storage_manager_params.init_params_3fs = DistStorage3FSInitParams{};
+    }
+    dist_kvcache_ = std::make_unique<DistKvCache>(this, params_, metrics_reporter_);
+    if (!dist_kvcache_->init(dist_kvcache_init_params)) {
+        RTP_LLM_LOG_WARNING("dist kvcache init failed");
         return false;
     }
-    threefs_cache_manager_ = threefs_cache_manager;
     return true;
 }
 
-BlockCache::MatchResult CacheManager::matchIn3FS(const std::vector<int64_t>& cache_keys, int64_t request_id) {
+BlockCache::MatchResult CacheManager::matchInDistKvCache(const std::vector<int64_t>& cache_keys,
+                                                         int32_t                     seq_cache_key_num,
+                                                         int64_t                     request_id) {
     BlockCache::MatchResult match_result;
     match_result.matched_len = 0;
 
     if (cache_keys.empty()) {
         return match_result;
     }
-    if (!threefs_cache_manager_) {
-        RTP_LLM_LOG_WARNING("match in 3fs failed, 3fs cache manager is nullptr");
+    if (!dist_kvcache_) {
+        RTP_LLM_LOG_WARNING("match in 3fs failed, dist kvcache is nullptr");
         return match_result;
     }
 
-    auto matched_len = threefs_cache_manager_->matchCache(cache_keys);
+    std::map<std::string, std::string> extra_metas;
+    extra_metas["SEQ_CACHE_KEY_NUM"] = std::to_string(seq_cache_key_num);
+    auto matched_len                 = dist_kvcache_->matchForAllRank(cache_keys, request_id, extra_metas);
     if (matched_len <= 0) {
         return match_result;
     }
@@ -792,15 +790,14 @@ BlockCache::MatchResult CacheManager::matchIn3FS(const std::vector<int64_t>& cac
     auto [success, resource] = malloc(SimpleMallocInfo(-1, matched_len, true));
     if (!success) {
         RTP_LLM_LOG_WARNING(
-            "prefix matched in 3fs but free block index not enough, matched len: %d, free block index len: %lu",
+            "prefix matched in dist kvcache but free block index not enough, matched len: %d, free block index len: %lu",
             matched_len,
             freeBlockNums());
         return match_result;
     }
 
     std::vector<int64_t> matched_cache_keys(cache_keys.begin(), cache_keys.begin() + matched_len);
-    const auto           input_len = static_cast<int32_t>(cache_keys.size());
-    if (!threefs_cache_manager_->getCacheForAllRank(matched_cache_keys, resource.block_id, input_len, request_id)) {
+    if (!dist_kvcache_->getForAllRank(matched_cache_keys, resource.block_id, request_id, extra_metas)) {
         free(resource.block_id);
         return match_result;
     }
@@ -810,44 +807,33 @@ BlockCache::MatchResult CacheManager::matchIn3FS(const std::vector<int64_t>& cac
     return match_result;
 }
 
-bool CacheManager::putCacheTo3FSForAllRank(const std::vector<int64_t>& cache_keys,
-                                           const std::vector<int32_t>& block_indices,
-                                           int64_t                     request_id) const {
-    if (!threefs_cache_manager_) {
-        RTP_LLM_LOG_WARNING("put cache to 3fs failed, 3fs cache manager is nullptr");
-        return false;
+bool CacheManager::putCacheForAllRank(const std::vector<int64_t>& cache_keys,
+                                      const std::vector<int32_t>& block_indices,
+                                      int64_t                     request_id) const {
+    if (dist_kvcache_) {
+        return dist_kvcache_->putForAllRank(cache_keys, block_indices, request_id, {});
     }
-    return threefs_cache_manager_->putCacheForAllRank(cache_keys, block_indices, request_id);
-}
-#endif
-
-bool CacheManager::getCacheFrom3FSForRank(const std::vector<int64_t>& cache_keys,
-                                          const std::vector<int32_t>& block_indices,
-                                          int64_t                     request_id) const {
-#ifdef ENABLE_3FS
-    if (!threefs_cache_manager_) {
-        RTP_LLM_LOG_WARNING("get cache from 3fs for rank failed, 3fs cache manager is nullptr, request: %ld",
-                            request_id);
-        return false;
-    }
-    return threefs_cache_manager_->getCacheForRank(cache_keys, block_indices, request_id);
-#else
     return false;
-#endif
 }
 
-bool CacheManager::putCacheTo3FSForRank(const std::vector<int64_t>& cache_keys,
-                                        const std::vector<int32_t>& block_indices,
-                                        int64_t                     request_id) const {
-#ifdef ENABLE_3FS
-    if (!threefs_cache_manager_) {
-        RTP_LLM_LOG_WARNING("put cache to 3fs for rank failed, 3fs cache manager is nullptr, request: %ld", request_id);
-        return false;
+bool CacheManager::getCacheForRank(const std::vector<int64_t>&               cache_keys,
+                                   const std::vector<int32_t>&               block_indices,
+                                   int64_t                                   request_id,
+                                   const std::map<std::string, std::string>& extra_metas) const {
+    if (dist_kvcache_) {
+        return dist_kvcache_->get(cache_keys, block_indices, request_id, extra_metas);
     }
-    return threefs_cache_manager_->putCacheForRank(cache_keys, block_indices, request_id);
-#else
     return false;
-#endif
+}
+
+bool CacheManager::putCacheForRank(const std::vector<int64_t>&               cache_keys,
+                                   const std::vector<int32_t>&               block_indices,
+                                   int64_t                                   request_id,
+                                   const std::map<std::string, std::string>& extra_metas) const {
+    if (dist_kvcache_) {
+        return dist_kvcache_->put(cache_keys, block_indices, request_id, extra_metas);
+    }
+    return false;
 }
 
 }  // namespace rtp_llm

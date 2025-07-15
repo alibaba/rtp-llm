@@ -8,11 +8,6 @@ requirement([
     "grpcio"
 ])
 
-config_setting(
-    name = "enable_3fs",
-    values = {"copt": "-DENABLE_3FS=1"},
-)
-
 embedding_arpc_deps()
 # load("//bazel:tf_proto.bzl", "tf_proto_library")
 
@@ -173,22 +168,8 @@ cc_library(
         "cache/DistStorageManager.h",
         "cache/DistKvCachePlanner.h",
         "cache/DistKvCache.h",
-        "cache/DistStorage3FSFile.h",
-            "cache/ThreeFSCudaUtil.h",
-            "cache/DistStorage3FS.h",
-            "cache/ThreeFSMempool.h",
-    ] + select({
-        ":enable_3fs": [
-            "model_rpc/RPCPool.h",
-            "cache/ThreeFSBlockCache.h",
-            "cache/ThreeFSCacheManager.h",
-            "cache/ThreeFSMempool.h",
-            "cache/ThreeFSCudaUtil.h",
-            "cache/ThreeFSFile.h",
-            "cache/ThreeFSMetrics.h",
-        ],
-        "//conditions:default": [],
-    }),
+        "cache/DistKvCacheMetrics.h",
+    ],
     srcs = [
         "cache/BatchKVCacheResource.cc",
         "cache/BlockCache.cc",
@@ -199,18 +180,7 @@ cc_library(
         "cache/DistStorageManager.cc",
         "cache/DistKvCachePlanner.cc",
         "cache/DistKvCache.cc",
-        "cache/DistStorage3FSFile.cc",
-            "cache/DistStorage3FS.cc",
-            "cache/ThreeFSMempool.cc",
-    ] + select({
-        ":enable_3fs": [
-            "cache/ThreeFSBlockCache.cc",
-            "cache/ThreeFSCacheManager.cc",
-            "cache/ThreeFSFile.cc",
-            "cache/ThreeFSMempool.cc",
-        ],
-        "//conditions:default": [],
-    }),
+    ],
     deps = torch_deps() + [
         ":utils",
         ":metrics",
@@ -222,13 +192,37 @@ cc_library(
         "//rtp_llm/cpp/devices:devices_base",
         "//rtp_llm/cpp/devices:device_utils",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store",
-            "//3rdparty/3fs:hf3fs",
     ] + select({
-        ":enable_3fs": [
-            "//3rdparty/3fs:hf3fs",
+        "//:enable_3fs": [
+            ":storage_3fs",
         ],
         "//conditions:default": [],
     }),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "storage_3fs",
+    hdrs = [
+        "cache/DistStorage.h",
+        "cache/DistStorage3FS.h",
+        "cache/DistStorage3FSFile.h",
+        "cache/ThreeFSCudaUtil.h",
+        "cache/ThreeFSMempool.h",
+        "cache/DistKvCacheMetrics.h",
+    ],
+    srcs = [
+        "cache/DistStorage3FS.cc",
+        "cache/DistStorage3FSFile.cc",
+        "cache/ThreeFSMempool.cc",
+    ],
+    deps = [
+        "//rtp_llm/cpp:utils",
+        "//3rdparty/3fs:hf3fs",
+        "@havenask//aios/autil:lock_free",
+        "@havenask//aios/kmonitor:kmonitor_client_cpp",
+        "@local_config_cuda//cuda:cuda_headers",
+    ],
     visibility = ["//visibility:public"],
 )
 
