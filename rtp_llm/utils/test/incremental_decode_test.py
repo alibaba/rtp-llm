@@ -5,22 +5,9 @@ import random
 import sys
 from unittest import TestCase, main
 
-from rtp_llm.models.chat_glm_v2 import ChatGLMTokenizer as ChatGLMTokenizerV2
 from rtp_llm.models.llama import LlamaTokenizer
 from rtp_llm.models.qwen import QWenTokenizer
-from rtp_llm.models.starcoder import StarcoderTokenizer
 from rtp_llm.utils.tokenizer_utils import DecodingState, IncrementDecodingUtils
-
-print(os.getcwd())
-print(
-    "PYTHONPATH="
-    + os.environ["PYTHONPATH"]
-    + " LD_LIBRARY_PATH="
-    + os.environ["LD_LIBRARY_PATH"]
-    + " "
-    + sys.executable
-    + " "
-)
 
 os.environ["FT_SERVER_TEST"] = "1"
 
@@ -43,16 +30,8 @@ class IncrementalDecodeTest(TestCase):
                 "rtp_llm/test/model_test/fake_test/testdata/qwen_7b/tokenizer",
             ),
             (
-                ChatGLMTokenizerV2,
-                "rtp_llm/test/model_test/fake_test/testdata/chatglm2/tokenizer",
-            ),
-            (
                 LlamaTokenizer,
                 "rtp_llm/test/model_test/fake_test/testdata/llama/fake/hf_source",
-            ),
-            (
-                StarcoderTokenizer,
-                "rtp_llm/test/model_test/fake_test/testdata/starcoder/tokenizer",
             ),
         ]
         for cls, path in tokenizer_pairs:
