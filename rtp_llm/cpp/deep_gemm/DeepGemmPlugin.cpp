@@ -88,7 +88,6 @@ inline int DeepGemmPlugin::getNumSms() {
     check_cuda_value(cudaGetDeviceProperties(&properties, device_idx));
 
     num_sms = properties.multiProcessorCount;
-    RTP_LLM_LOG_INFO("cuda device property has sm num %d", num_sms);
 
     int num_sms_from_config = StaticConfig::user_deep_gemm_num_sm;
     if (num_sms_from_config != -1) {

@@ -1,5 +1,8 @@
 #pragma once
+
+#include <mutex>
 #include <cuda_runtime_api.h>
+#include "rtp_llm/cpp/utils/utils.h"
 
 namespace rtp_llm {
 
@@ -33,7 +36,6 @@ public:
 private:
     int sm_;
     int multi_processor_count_;
-
 };
 
 }  // namespace rtp_llm

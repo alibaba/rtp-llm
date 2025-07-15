@@ -28,6 +28,7 @@
 #endif
 #if USING_ROCM
 #include "rtp_llm/cpp/rocm/hip_utils.h"
+using namespace rtp_llm::rocm;
 #endif
 #include <stdint.h>
 #include <stdio.h>

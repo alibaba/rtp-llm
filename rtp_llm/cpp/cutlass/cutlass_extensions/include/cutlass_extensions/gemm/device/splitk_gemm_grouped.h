@@ -318,24 +318,7 @@ public:
     {
         // Determine the number of blocks that would be launched to fill up a single
         // wave on the GPU with each SM having maximum occupancy.
-        int device_idx;
-        cudaError_t result = cudaGetDevice(&device_idx);
-        if (result != cudaSuccess)
-        {
-            // Call cudaGetLastError() to clear the error bit
-            result = cudaGetLastError();
-            CUTLASS_TRACE_HOST("  cudaGetDevice() returned error " << cudaGetErrorString(result));
-            return 0;
-        }
-
-        int multiprocessor_count;
-        result = cudaDeviceGetAttribute(&multiprocessor_count, cudaDevAttrMultiProcessorCount, device_idx);
-        if (result != cudaSuccess)
-        {
-            CUTLASS_TRACE_HOST("  cudaDeviceGetAttribute() returned error " << cudaGetErrorString(result));
-            return 0;
-        }
-
+        int multiprocessor_count = getMultiProcessorCount();
         bool override_sm_count = (available_sm_count < 0 || available_sm_count > multiprocessor_count);
         if (override_sm_count)
         {

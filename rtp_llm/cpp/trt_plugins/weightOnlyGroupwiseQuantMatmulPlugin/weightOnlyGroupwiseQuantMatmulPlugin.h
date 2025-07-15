@@ -67,6 +67,7 @@ private:
     int                                            mArch;
 
     int                  mGroupSize;
+    int                  mWeightBits;
     static constexpr int SMALL_M_FAST_PATH = 4;
 };
 

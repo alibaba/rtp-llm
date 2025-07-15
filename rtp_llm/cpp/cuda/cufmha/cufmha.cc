@@ -272,10 +272,6 @@ void cufmha::runOpenSourceFmhaPaged(void*            q,
     flash_fwd_params.block_table_batch_stride = block_table_batch_stride;
     flash_fwd_params.page_block_size          = seq_size_per_block;
 
-    int device_id;
-    int multi_processor_count = 1;
-    cudaGetDevice(&device_id);
-    cudaDeviceGetAttribute(&multi_processor_count, cudaDevAttrMultiProcessorCount, device_id);
     flash_fwd_params.num_splits = getNumSplits(batch_size, seq_len, seq_size_per_block * block_table_batch_stride);
 
     RTP_LLM_CHECK_WITH_INFO(flash_fwd_params.num_splits <= 128, "open source not support split head 128");
@@ -476,13 +472,10 @@ int cufmha::getNumSplits(size_t batch_size, size_t seqlen_q, size_t seqlen_k) co
     if (seqlen_q > 1) {
         return 0;
     }
-    int device_id;
-    int multi_processor_count = 1;
-    cudaGetDevice(&device_id);
-    cudaDeviceGetAttribute(&multi_processor_count, cudaDevAttrMultiProcessorCount, device_id);
-    const int block_n      = size_per_head_ <= 64 ? 256 : (size_per_head_ <= 128 ? 128 : 64);
-    const int num_n_blocks = (seqlen_k + block_n - 1) / block_n;
-    const int num_m_blocks = (seqlen_q + 64 - 1) / 64;
+    int       multi_processor_count = getMultiProcessorCount();
+    const int block_n               = size_per_head_ <= 64 ? 256 : (size_per_head_ <= 128 ? 128 : 64);
+    const int num_n_blocks          = (seqlen_k + block_n - 1) / block_n;
+    const int num_m_blocks          = (seqlen_q + 64 - 1) / 64;
     return num_splits_heuristic(batch_size * head_num_ * num_m_blocks, multi_processor_count, num_n_blocks, 128);
 }
 

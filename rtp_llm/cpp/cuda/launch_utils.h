@@ -1,5 +1,13 @@
 #pragma once
 
+#if USING_CUDA
+#include "rtp_llm/cpp/cuda/cuda_utils.h"
+#endif
+#if USING_ROCM
+#include "rtp_llm/cpp/rocm/hip_utils.h"
+using namespace rtp_llm::rocm;
+#endif
+
 namespace rtp_llm {
 
 bool getEnvEnablePDL();
@@ -7,10 +15,7 @@ bool getEnvEnablePDL();
 #if USING_CUDA
 #define LAUNCH_KERNEL_WITH_PDL(kernel, grid_dim, block_dim, smem_size, stream, ...)                                     \
     do {                                                                                                                \
-        int device__;                                                                                                   \
-        cudaGetDevice(&device__);                                                                                       \
-        int cc_major__;                                                                                                 \
-        cudaDeviceGetAttribute(&cc_major__, cudaDeviceAttr::cudaDevAttrComputeCapabilityMajor, device__);               \
+        int cc_major__ = getComputeCapabilityMajor();                                                                  \
         if (cc_major__ >= 9) {                                                                                          \
             cudaLaunchConfig_t config__;                                                                                \
             config__.gridDim          = (grid_dim);                                                                     \

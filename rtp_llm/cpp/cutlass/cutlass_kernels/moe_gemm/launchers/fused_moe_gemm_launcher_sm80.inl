@@ -27,6 +27,7 @@
 #include "cutlass_extensions/gemm/kernel/fused_moe_kernel.cuh"
 
 #include "rtp_llm/cpp/cuda/trt_utils.h"
+#include "rtp_llm/cpp/cuda/cuda_utils.h"
 
 namespace tensorrt_llm::kernels::cutlass_kernels
 {
@@ -49,11 +50,7 @@ void sm80_generic_fused_moe_gemm_kernelLauncher(ElementType_ const* A, CutlassWe
         if (smem_size > (48 << 10))
         {
             cudaFuncAttributes attr{};
-            int device = 0;
-            int max_smem_per_block = 0;
-            check_cuda_value(cudaGetDevice(&device));
-            check_cuda_value(
-                cudaDeviceGetAttribute(&max_smem_per_block, cudaDevAttrMaxSharedMemoryPerBlockOptin, device));
+            int max_smem_per_block = rtp_llm::getMaxSharedMemoryPerBlockOptin();
             check_cuda_value(cudaFuncGetAttributes(&attr, fused_moe::run_global<GemmType>));
             if (smem_size + attr.sharedSizeBytes >= static_cast<size_t>(max_smem_per_block))
             {

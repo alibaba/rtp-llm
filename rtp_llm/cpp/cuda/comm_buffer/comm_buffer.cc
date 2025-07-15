@@ -29,7 +29,7 @@ CommBuffer::CommBuffer(const NcclParam&           nccl_para,
     // 110 sec wait time by default
     int sec_timeout = 110;
     int cur_dev;
-    check_cuda_value(cudaGetDevice(&cur_dev));
+    cur_dev = getDevice();
     check_cuda_value(cudaDeviceGetAttribute(&device_clock, cudaDevAttrClockRate, cur_dev));
     comm->ub_timeout = 1000ull * device_clock * sec_timeout;
     RTP_LLM_LOG_DEBUG(

@@ -210,11 +210,10 @@ void groupedGemm_(cutlassType** A, cutlassType** B, cutlassType** C,
 template<typename T>
 CutlassGroupGemmRunner<T>::CutlassGroupGemmRunner()
 {
+
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
-    int device{-1};
-    check_cuda_value(cudaGetDevice(&device));
     sm_ = get_sm();
-    check_cuda_value(cudaDeviceGetAttribute(&multi_processor_count_, cudaDevAttrMultiProcessorCount, device));
+    multi_processor_count_ = getMultiProcessorCount();
 }
 
 template<typename T>

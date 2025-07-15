@@ -25,10 +25,15 @@ WeightOnlyQuantMatmulPlugin::WeightOnlyQuantMatmulPlugin(nvinfer1::DataType type
     init(type, weightTypeId);
 }
 
-void WeightOnlyQuantMatmulPlugin::init(nvinfer1::DataType type, WeightTypeId weightTypeId) {
-    mArch         = rtp_llm::get_sm();
-    mType         = type;
+void WeightOnlyQuantMatmulPlugin::init(nvinfer1::DataType type, WeightTypeId weightTypeId)
+{
+    if (m_weightOnlyGemmRunner != nullptr && mType == type && mWeightTypeId == weightTypeId) {
+        return;
+    }
+    mArch = rtp_llm::get_sm();
+    mType = type;
     mWeightTypeId = weightTypeId;
+    
     if (mWeightTypeId == WeightTypeId::INT8) {
         if (mType == nvinfer1::DataType::kHALF) {
             m_weightOnlyGemmRunner = std::make_shared<

@@ -29,6 +29,7 @@
 #include "cutlass_extensions/gemm/kernel/fpA_intB_gemm.h"
 #include "cutlass_extensions/gemm/threadblock/default_mma.h"
 #include "rtp_llm/cpp/cutlass/cutlass_kernels/gemm_configs.h"
+#include "rtp_llm/cpp/cuda/cuda_utils.h"
 
 #ifndef _WIN32
 #pragma GCC diagnostic pop
@@ -368,10 +369,8 @@ template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp>
 CutlassFpAIntBGemmRunner<T, WeightType, QuantOp>::CutlassFpAIntBGemmRunner()
 {
     RTP_LLM_LOG_TRACE(__PRETTY_FUNCTION__);
-    int device{-1};
-    check_cuda_value(cudaGetDevice(&device));
     sm_ = rtp_llm::get_sm();
-    check_cuda_value(cudaDeviceGetAttribute(&multi_processor_count_, cudaDevAttrMultiProcessorCount, device));
+    multi_processor_count_ = rtp_llm::getMultiProcessorCount();
     gemm_lut_ = get_gemm_lut<T, WeightType>();
 }
 

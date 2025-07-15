@@ -180,6 +180,14 @@ bool                       checkAllNVLinks(std::vector<size_t> device_ids);
 bool                       checkOnSameNumaNodes(std::vector<size_t> device_ids);
 int                        getVisibleDeviceNum();
 bool                       checkP2PAvailable(const std::vector<size_t>& tp_ranks, size_t rank);
+int                        getMultiProcessorCount(int device_id = -1);
+int                        getMaxSharedMemoryPerMultiprocessor(int device_id = -1);
+int                        getMaxSharedMemoryPerBlockOptin(int device_id = -1);
+int                        getMaxThreadsPerMultiprocessor(int device_id = -1);
+int                        getMaxBlocksPerMultiprocessor(int device_id = -1);
+int                        getComputeCapabilityMajor(int device_id = -1);
+int                        getComputeCapabilityMinor(int device_id = -1);
+std::pair<int, int>        getComputeCapability(int device_id = -1);
 
 template<typename T>
 T getCudaValue(const T* ptr, int index) {

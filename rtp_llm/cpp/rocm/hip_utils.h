@@ -73,6 +73,8 @@ inline int div_up(int a, int n) {
 int get_sm();
 int getDevice();
 int getDeviceCount();
+int getMultiProcessorCount(int device_id = -1);
+int getMaxSharedMemoryPerMultiprocessor(int device_id = -1);
 
 typedef struct __attribute__((aligned(4))) {
     half x, y, z, w;

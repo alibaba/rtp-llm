@@ -80,26 +80,72 @@ template void check<hipblasStatus_t>(hipblasStatus_t result, const char* const f
 template void check<hipError_t>(hipError_t result, const char* const file, int const line);
 
 int get_sm() {
-    int device{-1};
-    ROCM_CHECK(hipGetDevice(&device));
-    int sm_major = 0;
-    int sm_minor = 0;
-    ROCM_CHECK(hipDeviceGetAttribute(&sm_major, hipDeviceAttributeComputeCapabilityMajor, device));
-    ROCM_CHECK(hipDeviceGetAttribute(&sm_minor, hipDeviceAttributeComputeCapabilityMinor, device));
-    return sm_major * 10 + sm_minor;
+    static int sm = []() {
+	int device{-1};
+        ROCM_CHECK(hipGetDevice(&device));
+        int sm_major = 0;
+        int sm_minor = 0;
+        ROCM_CHECK(hipDeviceGetAttribute(&sm_major, hipDeviceAttributeComputeCapabilityMajor, device));
+        ROCM_CHECK(hipDeviceGetAttribute(&sm_minor, hipDeviceAttributeComputeCapabilityMinor, device));
+        return sm_major * 10 + sm_minor;
+    }();
+    return sm;
 }
 
 int getDevice() {
-    int current_dev_id = 0;
-    ROCM_CHECK(hipGetDevice(&current_dev_id));
-    return current_dev_id;
+    static int device_id = []() {
+	    int current_dev_id = 0;
+            ROCM_CHECK(hipGetDevice(&current_dev_id));
+            return current_dev_id;
+    }();
+    return device_id;
 }
 
 int getDeviceCount() {
-    int count = 0;
-    ROCM_CHECK(hipGetDeviceCount(&count));
-    return count;
+    static int device_count = []() {
+	    int count = 0;
+            ROCM_CHECK(hipGetDeviceCount(&count));
+            return count;
+    }();
+    return device_count;
 }
 
+int getMultiProcessorCount(int device_id) {
+    static std::unordered_map<int, int> mp_count_cache;
+    static std::mutex cache_mutex;
+    
+    if (device_id < 0) {
+        device_id = getDevice();
+    }
+    
+    std::lock_guard<std::mutex> lock(cache_mutex);
+    auto it = mp_count_cache.find(device_id);
+    if (it == mp_count_cache.end()) {
+        int mp_count;
+        ROCM_CHECK(hipDeviceGetAttribute(&mp_count, hipDeviceAttributeMultiprocessorCount, device_id));
+        mp_count_cache[device_id] = mp_count;
+        return mp_count;
+    }
+    return it->second;
+}
+
+int getMaxSharedMemoryPerMultiprocessor(int device_id) {
+    static std::unordered_map<int, int> max_smem_cache;
+    static std::mutex cache_mutex;
+    
+    if (device_id < 0) {
+        device_id = getDevice();
+    }
+    
+    std::lock_guard<std::mutex> lock(cache_mutex);
+    auto it = max_smem_cache.find(device_id);
+    if (it == max_smem_cache.end()) {
+        int max_smem;
+        ROCM_CHECK(hipDeviceGetAttribute(&max_smem, hipDeviceAttributeMaxSharedMemoryPerMultiprocessor, device_id));
+        max_smem_cache[device_id] = max_smem;
+        return max_smem;
+    }
+    return it->second;
+}
 }  // namespace rocm
 }  // namespace rtp_llm

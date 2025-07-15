@@ -252,14 +252,7 @@ void mmha_launch_kernel_ex(KernelParamsType&    params,
         MMHA_1024_BLOCKSIZE_CHECK();
     }
 
-    // check smem to decide if force enable multi block mode
-    int device;
-    check_cuda_value(cudaGetDevice(&device));
-
-    // max smem on device
-    int max_dsmem_sz_on_device = -1;
-    check_cuda_value(
-        cudaDeviceGetAttribute(&max_dsmem_sz_on_device, cudaDevAttrMaxSharedMemoryPerMultiprocessor, device));
+    int max_dsmem_sz_on_device = getMaxSharedMemoryPerMultiprocessor();
 
     // reserve 1KB for static smem.
     // CUDA reserves 1 KB of shared memory per thread block.

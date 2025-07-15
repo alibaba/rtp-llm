@@ -34,11 +34,7 @@ inline int compute_occupancy_for_kernel()
     if (smem_size > (48 << 10))
     {
         cudaFuncAttributes attr;
-        int device = 0;
-        int max_smem_per_block = 0;
-        check_cuda_value(cudaGetDevice(&device));
-        check_cuda_value(
-            cudaDeviceGetAttribute(&max_smem_per_block, cudaDevAttrMaxSharedMemoryPerBlockOptin, device));
+        int max_smem_per_block = rtp_llm::getMaxSharedMemoryPerBlockOptin();
         if constexpr (enable_cutlass_3x)
         {
             check_cuda_value(cudaFuncGetAttributes(&attr, cutlass::device_kernel<GemmKernel>));

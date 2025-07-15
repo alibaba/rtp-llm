@@ -21,6 +21,7 @@
 
 #include "rtp_llm/cpp/th_op/ConfigModules.h"
 #include <mutex>
+#include <unordered_map>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -151,22 +152,29 @@ float timing_function(const std::function<void(cudaStream_t)>& operation,
 }
 
 int getDevice() {
-    int current_dev_id = 0;
-    check_cuda_value(cudaGetDevice(&current_dev_id));
-    return current_dev_id;
+    // Note: Device ID could change if cudaSetDevice is called, but in many applications it's fixed
+    // Use thread_local static to cache per thread
+    static thread_local int device_id = []() {
+        int current_dev_id = 0;
+        check_cuda_value(cudaGetDevice(&current_dev_id));
+        return current_dev_id;
+    }();
+    return device_id;
 }
 
 int getDeviceCount() {
-    int count = 0;
-    check_cuda_value(cudaGetDeviceCount(&count));
-    return count;
+    // Device count is hardware fixed and never changes during program execution
+    static int device_count = []() {
+        int count = 0;
+        check_cuda_value(cudaGetDeviceCount(&count));
+        return count;
+    }();
+    return device_count;
 }
 
 int currentDeviceId() {
-    // Query device from CUDA runtime
-    int device_id;
-    check_cuda_value(cudaGetDevice(&device_id));
-    return device_id;
+    // Use the same caching strategy as getDevice()
+    return getDevice();
 }
 
 void priorityRange(int* low_priority, int* high_priority, int device_id) {
@@ -194,43 +202,51 @@ void priorityRange(int* low_priority, int* high_priority, int device_id) {
 }
 
 std::string getDriverVersion() {
-    nvmlReturn_t result;
-    nvmlDevice_t device;
-    size_t       device_count = getDeviceCount();
-    if (device_count == 0) {
-        throw std::runtime_error("no cuda device");
-    }
+    // Driver version is system-wide and doesn't change during program execution
+    static std::string driver_version = []() {
+        nvmlReturn_t result;
+        nvmlDevice_t device;
+        size_t       device_count = getDeviceCount();
+        if (device_count == 0) {
+            throw std::runtime_error("no cuda device");
+        }
 
-    result = nvmlInit();
-    if (NVML_SUCCESS != result) {
-        throw std::runtime_error("Failed to initialize NVML, Error code: " + std::to_string(result));
-    }
+        result = nvmlInit();
+        if (NVML_SUCCESS != result) {
+            throw std::runtime_error("Failed to initialize NVML, Error code: " + std::to_string(result));
+        }
 
-    char pci_bus_id[NVML_DEVICE_PCI_BUS_ID_BUFFER_SIZE];
-    check_cuda_value(cudaDeviceGetPCIBusId(pci_bus_id, sizeof(pci_bus_id), 0));
-    result = nvmlDeviceGetHandleByPciBusId(pci_bus_id, &device);
-    if (NVML_SUCCESS != result) {
-        throw std::runtime_error("Failed to call nvmlDeviceGetHandleByIndex() API, Error code:"
-                                 + std::to_string(result));
-    }
+        char pci_bus_id[NVML_DEVICE_PCI_BUS_ID_BUFFER_SIZE];
+        check_cuda_value(cudaDeviceGetPCIBusId(pci_bus_id, sizeof(pci_bus_id), 0));
+        result = nvmlDeviceGetHandleByPciBusId(pci_bus_id, &device);
+        if (NVML_SUCCESS != result) {
+            throw std::runtime_error("Failed to call nvmlDeviceGetHandleByIndex() API, Error code:"
+                                    + std::to_string(result));
+        }
 
-    char driverVersion[NVML_SYSTEM_DRIVER_VERSION_BUFFER_SIZE];
-    result = nvmlSystemGetDriverVersion(driverVersion, NVML_SYSTEM_DRIVER_VERSION_BUFFER_SIZE);
-    if (NVML_SUCCESS != result) {
-        throw std::runtime_error("Failed to call nvmlSystemGetDriverVersion() API, Error code: "
-                                 + std::to_string(result));
-    }
-    result = nvmlShutdown();
-    if (NVML_SUCCESS != result) {
-        RTP_LLM_LOG_INFO("Failed to shutdown NVML, Error code: %s", std::to_string(result).c_str());
-    }
-    return std::string(driverVersion);
+        char driverVersion[NVML_SYSTEM_DRIVER_VERSION_BUFFER_SIZE];
+        result = nvmlSystemGetDriverVersion(driverVersion, NVML_SYSTEM_DRIVER_VERSION_BUFFER_SIZE);
+        if (NVML_SUCCESS != result) {
+            throw std::runtime_error("Failed to call nvmlSystemGetDriverVersion() API, Error code: "
+                                    + std::to_string(result));
+        }
+        result = nvmlShutdown();
+        if (NVML_SUCCESS != result) {
+            RTP_LLM_LOG_INFO("Failed to shutdown NVML, Error code: %s", std::to_string(result).c_str());
+        }
+        return std::string(driverVersion);
+    }();
+    return driver_version;
 }
 
 int getCudaVersion() {
-    int cuda_driver_version;
-    check_cuda_value(cudaDriverGetVersion(&cuda_driver_version));
-    return cuda_driver_version;
+    // CUDA version is system-wide and doesn't change during program execution
+    static int cuda_version = []() {
+        int cuda_driver_version;
+        check_cuda_value(cudaDriverGetVersion(&cuda_driver_version));
+        return cuda_driver_version;
+    }();
+    return cuda_version;
 }
 
 bool checkP2PAvailable(const std::vector<size_t>& tp_ranks, size_t rank) {
@@ -350,9 +366,7 @@ bool checkOnSameNumaNodes(std::vector<size_t> device_ids) {
 }
 
 int getVisibleDeviceNum() {
-    int device_count;
-    check_cuda_value(cudaGetDeviceCount(&device_count));
-    return device_count;
+    return getDeviceCount();
 }
 
 std::tuple<size_t, size_t> getDeviceMemoryInfo(bool const useUvm) {
@@ -386,19 +400,22 @@ std::tuple<size_t, size_t> getDeviceMemoryInfo(bool const useUvm) {
 }
 
 bool shared_mem_sufficient(int smem_size) {
-    //
-    // Determine SMEM requirements and waive if not satisfied
-    //
-    cudaDeviceProp properties;
-    int            device_idx;
-    check_cuda_value(cudaGetDevice(&device_idx));
-    check_cuda_value(cudaGetDeviceProperties(&properties, device_idx));
-
-    if (int(properties.sharedMemPerMultiprocessor) < smem_size) {
-        return false;
+    // Cache device properties per device since they're hardware fixed
+    static std::unordered_map<int, cudaDeviceProp> device_props_cache;
+    static std::mutex cache_mutex;
+    
+    int device_idx = getDevice();
+    
+    std::lock_guard<std::mutex> lock(cache_mutex);
+    auto it = device_props_cache.find(device_idx);
+    if (it == device_props_cache.end()) {
+        cudaDeviceProp properties;
+        check_cuda_value(cudaGetDeviceProperties(&properties, device_idx));
+        device_props_cache[device_idx] = properties;
+        return int(properties.sharedMemPerMultiprocessor) >= smem_size;
+    } else {
+        return int(it->second.sharedMemPerMultiprocessor) >= smem_size;
     }
-
-    return true;
 }
 
 bool should_print() {
@@ -409,6 +426,147 @@ bool should_print() {
 
     return rtp_llm::Logger::getEngineLogger().isTraceMode();
 }
+
+// Device property utility functions with static caching
+int getMultiProcessorCount(int device_id) {
+    static std::unordered_map<int, int> mp_count_cache;
+    static std::mutex cache_mutex;
+    
+    if (device_id < 0) {
+        device_id = getDevice();
+    }
+    
+    std::lock_guard<std::mutex> lock(cache_mutex);
+    auto it = mp_count_cache.find(device_id);
+    if (it == mp_count_cache.end()) {
+        int mp_count;
+        check_cuda_value(cudaDeviceGetAttribute(&mp_count, cudaDevAttrMultiProcessorCount, device_id));
+        mp_count_cache[device_id] = mp_count;
+        return mp_count;
+    }
+    return it->second;
+}
+
+int getMaxSharedMemoryPerMultiprocessor(int device_id) {
+    static std::unordered_map<int, int> max_smem_cache;
+    static std::mutex cache_mutex;
+    
+    if (device_id < 0) {
+        device_id = getDevice();
+    }
+    
+    std::lock_guard<std::mutex> lock(cache_mutex);
+    auto it = max_smem_cache.find(device_id);
+    if (it == max_smem_cache.end()) {
+        int max_smem;
+        check_cuda_value(cudaDeviceGetAttribute(&max_smem, cudaDevAttrMaxSharedMemoryPerMultiprocessor, device_id));
+        max_smem_cache[device_id] = max_smem;
+        return max_smem;
+    }
+    return it->second;
+}
+
+int getMaxSharedMemoryPerBlockOptin(int device_id) {
+    static std::unordered_map<int, int> max_smem_block_cache;
+    static std::mutex cache_mutex;
+    
+    if (device_id < 0) {
+        device_id = getDevice();
+    }
+    
+    std::lock_guard<std::mutex> lock(cache_mutex);
+    auto it = max_smem_block_cache.find(device_id);
+    if (it == max_smem_block_cache.end()) {
+        int max_smem_block;
+        check_cuda_value(cudaDeviceGetAttribute(&max_smem_block, cudaDevAttrMaxSharedMemoryPerBlockOptin, device_id));
+        max_smem_block_cache[device_id] = max_smem_block;
+        return max_smem_block;
+    }
+    return it->second;
+}
+
+int getMaxThreadsPerMultiprocessor(int device_id) {
+    static std::unordered_map<int, int> max_threads_cache;
+    static std::mutex cache_mutex;
+    
+    if (device_id < 0) {
+        device_id = getDevice();
+    }
+    
+    std::lock_guard<std::mutex> lock(cache_mutex);
+    auto it = max_threads_cache.find(device_id);
+    if (it == max_threads_cache.end()) {
+        int max_threads;
+        check_cuda_value(cudaDeviceGetAttribute(&max_threads, cudaDevAttrMaxThreadsPerMultiProcessor, device_id));
+        max_threads_cache[device_id] = max_threads;
+        return max_threads;
+    }
+    return it->second;
+}
+
+int getMaxBlocksPerMultiprocessor(int device_id) {
+    static std::unordered_map<int, int> max_blocks_cache;
+    static std::mutex cache_mutex;
+    
+    if (device_id < 0) {
+        device_id = getDevice();
+    }
+    
+    std::lock_guard<std::mutex> lock(cache_mutex);
+    auto it = max_blocks_cache.find(device_id);
+    if (it == max_blocks_cache.end()) {
+        int max_blocks;
+        check_cuda_value(cudaDeviceGetAttribute(&max_blocks, cudaDevAttrMaxBlocksPerMultiprocessor, device_id));
+        max_blocks_cache[device_id] = max_blocks;
+        return max_blocks;
+    }
+    return it->second;
+}
+
+
+int getComputeCapabilityMajor(int device_id) {
+    static std::unordered_map<int, int> cc_major_cache;
+    static std::mutex cache_mutex;
+    
+    if (device_id < 0) {
+        device_id = getDevice();
+    }
+    
+    std::lock_guard<std::mutex> lock(cache_mutex);
+    auto it = cc_major_cache.find(device_id);
+    if (it == cc_major_cache.end()) {
+        int cc_major;
+        check_cuda_value(cudaDeviceGetAttribute(&cc_major, cudaDevAttrComputeCapabilityMajor, device_id));
+        cc_major_cache[device_id] = cc_major;
+        return cc_major;
+    }
+    return it->second;
+}
+
+int getComputeCapabilityMinor(int device_id) {
+    static std::unordered_map<int, int> cc_minor_cache;
+    static std::mutex cache_mutex;
+    
+    if (device_id < 0) {
+        device_id = getDevice();
+    }
+    
+    std::lock_guard<std::mutex> lock(cache_mutex);
+    auto it = cc_minor_cache.find(device_id);
+    if (it == cc_minor_cache.end()) {
+        int cc_minor;
+        check_cuda_value(cudaDeviceGetAttribute(&cc_minor, cudaDevAttrComputeCapabilityMinor, device_id));
+        cc_minor_cache[device_id] = cc_minor;
+        return cc_minor;
+    }
+    return it->second;
+}
+
+std::pair<int, int> getComputeCapability(int device_id) {
+    // Return both major and minor in one call to avoid double caching overhead
+    return std::make_pair(getComputeCapabilityMajor(device_id), getComputeCapabilityMinor(device_id));
+}
+
 
 /*
   b = batch_szie

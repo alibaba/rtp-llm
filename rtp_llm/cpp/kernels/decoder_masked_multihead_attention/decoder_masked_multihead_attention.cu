@@ -247,9 +247,7 @@ void fusedQKV_masked_attention_dispatch(const T*                    qkv_buf,
     }
 
     // get device attributes
-    int device_id;
-    cudaGetDevice(&device_id);
-    cudaDeviceGetAttribute(&params.multi_processor_count, cudaDevAttrMultiProcessorCount, device_id);
+    params.multi_processor_count = getMultiProcessorCount();
     mmha_launch_kernel<DataType>(params, kv_cache_buffer, stream);
     check_cuda_error();
 }

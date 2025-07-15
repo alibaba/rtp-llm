@@ -51,7 +51,7 @@
 #include "cutlass/gemm/kernel/default_gemm_universal.h"
 
 #include "cutlass/trace.h"
-
+#include "rtp_llm/cpp/cuda/cuda_utils.h"
 ////////////////////////////////////////////////////////////////////////////////
 
 namespace cutlass
@@ -259,23 +259,7 @@ public:
 
             if (smem_capacity < 0)
             {
-                int device_idx = 0;
-                result = cudaGetDevice(&device_idx);
-
-                if (result != cudaSuccess)
-                {
-                    return -1;
-                }
-
-                cudaDeviceProp properties;
-                result = cudaGetDeviceProperties(&properties, device_idx);
-
-                if (result != cudaSuccess)
-                {
-                    return -1;
-                }
-
-                smem_capacity = static_cast<int>(properties.sharedMemPerMultiprocessor);
+                smem_capacity = rtp_llm::getMaxSharedMemoryPerMultiprocessor();
             }
 
             int occupancy = std::min(max_active_blocks, smem_capacity / smem_size);
