@@ -186,10 +186,34 @@ deep_ep::Config DeepEPBuffer::getDispatchConfig(int num_ranks) {
             return deep_ep::Config(num_sms_, 8, 288, 32, 128);
         case 32:
             return deep_ep::Config(num_sms_, 8, 288, 32, 128);
+        case 40:
+            return deep_ep::Config(num_sms_, 10, 288, 32, 128);
+        case 48:
+            return deep_ep::Config(num_sms_, 12, 288, 32, 128);
+        case 56:
+            return deep_ep::Config(num_sms_, 14, 288, 32, 128);
         case 64:
             return deep_ep::Config(num_sms_, 20, 288, 28, 128);
+        case 72:
+            return deep_ep::Config(num_sms_, 24, 288, 28, 128);
+        case 80:
+            return deep_ep::Config(num_sms_, 28, 288, 28, 128);
+        case 88:
+            return deep_ep::Config(num_sms_, 32, 288, 28, 128);
+        case 96:
+            return deep_ep::Config(num_sms_, 24, 560, 24, 128);
+        case 104:
+            return deep_ep::Config(num_sms_, 26, 560, 24, 128);
+        case 112:
+            return deep_ep::Config(num_sms_, 28, 560, 24, 128);
+        case 120:
+            return deep_ep::Config(num_sms_, 30, 560, 24, 128);
         case 128:
             return deep_ep::Config(num_sms_, 20, 560, 32, 128);
+        case 136:
+            return deep_ep::Config(num_sms_, 22, 720, 12, 128);
+        case 152:
+            return deep_ep::Config(num_sms_, 34, 720, 12, 128);
         case 144:
             return deep_ep::Config(num_sms_, 32, 720, 12, 128);
         case 160:
@@ -222,11 +246,35 @@ deep_ep::Config DeepEPBuffer::getCombineConfig(int num_ranks) {
             return deep_ep::Config(num_sms_, 1, 288, 20, 128);
         case 32:
             return deep_ep::Config(num_sms_, 1, 288, 20, 128);
+        case 40:
+            return deep_ep::Config(num_sms_, 1, 288, 20, 128);
+        case 48:
+            return deep_ep::Config(num_sms_, 1, 288, 20, 128);
+        case 56:
+            return deep_ep::Config(num_sms_, 1, 288, 20, 128);
         case 64:
             return deep_ep::Config(num_sms_, 1, 288, 20, 128);
+        case 72:
+            return deep_ep::Config(num_sms_, 1, 288, 16, 128);
+        case 80:
+            return deep_ep::Config(num_sms_, 1, 288, 16, 128);
+        case 88:
+            return deep_ep::Config(num_sms_, 1, 288, 16, 128);
+        case 96:
+            return deep_ep::Config(num_sms_, 1, 288, 16, 128);
+        case 104:
+            return deep_ep::Config(num_sms_, 1, 288, 16, 128);
+        case 112:
+            return deep_ep::Config(num_sms_, 1, 288, 16, 128);
+        case 120:
+            return deep_ep::Config(num_sms_, 1, 288, 16, 128);
         case 128:
             return deep_ep::Config(num_sms_, 1, 560, 12, 128);
+        case 136:
+            return deep_ep::Config(num_sms_, 1, 720, 12, 128);
         case 144:
+            return deep_ep::Config(num_sms_, 2, 720, 8, 128);
+        case 152:
             return deep_ep::Config(num_sms_, 2, 720, 8, 128);
         case 160:
             return deep_ep::Config(num_sms_, 2, 720, 8, 128);
