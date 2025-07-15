@@ -41,18 +41,17 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
         // TODO(xinfei.sxf) optimize this copy : only copy last token
         complete_token_ids_->copyTokensTo(i, generate_output.output_ids->data(), last_output_pos_, output_len);
         if (returnLogits() && update_info.logits) {
-            rtp_llm::BufferPtr host_logits;
-            if (update_info.logits->shape()[0] == 1) {
-                host_logits = device_->clone({*update_info.logits, rtp_llm::AllocationType::HOST});
-            } else {
-                host_logits = device_->clone({update_info.logits->view(i, 1), rtp_llm::AllocationType::HOST});
-            }
+            rtp_llm::BufferPtr logits_result;
             if (!generate_input_->generate_config->select_tokens_id.empty()) {
-                auto select_buf        = rtp_llm::vector2Buffer(generate_input_->generate_config->select_tokens_id);
-                generate_output.logits = device_->select({*host_logits, *select_buf, 1});
+                auto select_buf = rtp_llm::vector2Buffer(generate_input_->generate_config->select_tokens_id);
+                logits_result = device_->select({*update_info.logits, *select_buf, 1});
             } else {
-                // TODO(xinfei.sxf) not set logits in middle step for streaming
-                generate_output.logits = host_logits;
+                logits_result = update_info.logits;
+            }
+            if (logits_result->shape()[0] == 1) {
+                generate_output.logits = device_->clone({*logits_result, rtp_llm::AllocationType::HOST});
+            } else {
+                generate_output.logits = device_->clone({logits_result->view(i, 1), rtp_llm::AllocationType::HOST});
             }
         }
 
