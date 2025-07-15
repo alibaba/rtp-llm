@@ -197,11 +197,11 @@ void StreamCacheResource::setKVCache(const BatchKVCacheResource& kv_cache_resour
     batch_resource_ = kv_cache_resource;
 }
 
-void StreamCacheResource::generateKVBlockUpdateMapping(const std::vector<int>& block_src_batch) {
+bool StreamCacheResource::generateKVBlockUpdateMapping(const std::vector<int>& block_src_batch) {
     block_update_mapping_.clear();
 
     if (!resource_context_.cache_manager || block_src_batch.size() == 0) {
-        return;
+        return true;
     }
 
     // collect forking count for all old batches
@@ -216,50 +216,73 @@ void StreamCacheResource::generateKVBlockUpdateMapping(const std::vector<int>& b
         ++batch_fork_count[old_batch_idx];
     }
 
-    // free all kv cache blocks of disused batches
+    // collect free and malloc infos of kv cache blocks
     // TODO(zhangjianning.zjn): might be possible to repurpose disused blocks for new batches?
+    bool        unaligned_seq_length = stream_->seqLength() % seqSizePerBlock() != 0;
     vector<int> disused_kv_blocks;
+    uint32_t    num_new_blocks = 0;
     for (int old_batch_idx = 0; old_batch_idx < old_batch_size; ++old_batch_idx) {
-        if (batch_fork_count[old_batch_idx] == 0) {
-            for (const auto& disused_block : batch_resource_.batch_block_id[old_batch_idx]) {
-                disused_kv_blocks.push_back(disused_block);
-            }
+        int fork_count = batch_fork_count[old_batch_idx];
+
+        if (fork_count == 0) {
+            const auto& blocks = batch_resource_.batch_block_id[old_batch_idx];
+            disused_kv_blocks.insert(disused_kv_blocks.end(), blocks.begin(), blocks.end());
+        } else if (fork_count > 1 && unaligned_seq_length) {
+            num_new_blocks += fork_count - 1;
         }
     }
-    resource_context_.cache_manager->free(disused_kv_blocks);
 
-    // TODO(zhangjianning.zjn): reuse last kv cache block if already full
-    // last_block_aligned_ = stream_->seqLength() % seqSizePerBlock() == 0 ? true : false;
+    // check kv cache capacity
+    size_t available_blocks = resource_context_.cache_manager->availableBlockNums()
+                              + resource_context_.cache_manager->newFreeBlocks(disused_kv_blocks);
+    if (available_blocks < num_new_blocks) {
+        RTP_LLM_LOG_WARNING(
+            "no enough available blocks for kv cache update of stream %lld, need %llu, but only %llu remained",
+            stream_->streamId(),
+            num_new_blocks,
+            available_blocks);
+        return false;
+    }
+
+    // do free and malloc
+    if (disused_kv_blocks.size() > 0) {
+        resource_context_.cache_manager->free(disused_kv_blocks);
+    }
+    std::vector<int> new_blocks;
+    if (num_new_blocks > 0) {
+        auto [malloc_status, cache_resource] =
+            resource_context_.cache_manager->malloc({stream_->streamId(), num_new_blocks});
+        RTP_LLM_CHECK_WITH_INFO(malloc_status,
+                                "failed to malloc %u new blocks during kv cache update of stream %lld",
+                                num_new_blocks,
+                                stream_->streamId());
+        new_blocks = std::move(cache_resource.block_id);
+    }
 
     // increase ref count of shared blocks
     for (int old_batch_idx = 0; old_batch_idx < old_batch_size; ++old_batch_idx) {
         if (batch_fork_count[old_batch_idx] > 1) {
             auto& batch_blocks = batch_resource_.batch_block_id[old_batch_idx];
 
-            // no shared blocks, skip
-            if (batch_blocks.size() <= 1)
-                continue;
+            // need to exclude last block
+            const bool exclude_last_block = unaligned_seq_length && batch_blocks.size() > 1;
 
-            int last_block = batch_blocks.back();
-            batch_blocks.pop_back();
+            int last_block;
+            if (exclude_last_block) {
+                last_block = batch_blocks.back();
+                batch_blocks.pop_back();
+            }
+
             // TODO(zhangjianning.zjn): would be better to pass the ref increment directly
             for (int i = 1; i < batch_fork_count[old_batch_idx]; ++i) {
                 resource_context_.cache_manager->incrRefCounter(batch_blocks);
             }
-            batch_blocks.push_back(last_block);
-        }
-    }
 
-    // malloc blocks for new batches
-    uint32_t num_new_blocks = 0;
-    for (const auto& fork_count : batch_fork_count) {
-        if (fork_count > 1) {
-            num_new_blocks += fork_count - 1;
+            if (exclude_last_block) {
+                batch_blocks.push_back(last_block);
+            }
         }
     }
-    auto [malloc_status, new_blocks] = resource_context_.cache_manager->malloc({stream_->streamId(), num_new_blocks});
-    // TODO(zhangjianning.zjn): handle malloc failure properly
-    RTP_LLM_CHECK_WITH_INFO(malloc_status, "failed to malloc %d new blocks during kv cache update", num_new_blocks);
 
     // generate update mapping for block ids
     vector<vector<int32_t>> old_block_ids = std::move(batch_resource_.batch_block_id);
@@ -276,12 +299,12 @@ void StreamCacheResource::generateKVBlockUpdateMapping(const std::vector<int>& b
             // copy from old blocks
             batch_resource_.batch_block_id.emplace_back(old_block_ids[old_batch_idx]);
             auto& blocks = batch_resource_.batch_block_id.back();
-            if (blocks.size() > 0) {
+            if (unaligned_seq_length && blocks.size() > 0) {
                 int old_block = blocks.back();
                 blocks.pop_back();
 
-                int new_block = new_blocks.block_id.back();
-                new_blocks.block_id.pop_back();
+                int new_block = new_blocks.back();
+                new_blocks.pop_back();
                 blocks.push_back(new_block);
 
                 block_update_mapping_.push_back(BlockIdPair{old_block, new_block});
@@ -289,6 +312,8 @@ void StreamCacheResource::generateKVBlockUpdateMapping(const std::vector<int>& b
         }
         --fork_count;
     }
+
+    return true;
 }
 
 // TODO(xinfei.sxf) move code to batch resource class

@@ -139,7 +139,7 @@ class GenerateConfig(BaseModel):
         self.md5_value = hashlib.md5(cp.__str__().encode()).hexdigest()
 
     def has_num_beams(self):
-        return self.num_beams > 1 or max(self.variable_num_beams) > 1
+        return max([self.num_beams, *self.variable_num_beams]) > 1 
 
     def is_same(self, config: "GenerateConfig") -> bool:
         return self.md5_value == config.md5_value

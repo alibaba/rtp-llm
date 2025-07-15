@@ -551,6 +551,26 @@ void CacheManager::freeImpl(const std::vector<int>& block_indices) {
     }
 }
 
+size_t CacheManager::newFreeBlocks(const std::vector<int>& indices) {
+    std::unordered_map<int, int> decrement_counts;
+    for (int i: indices) {
+        decrement_counts[i]++;
+    }
+    size_t new_free_blocks = 0;
+    {
+        std::lock_guard<std::mutex> guard(mutex_);
+        for (const auto& pair : decrement_counts) {
+            int block_id = pair.first;
+            int decrement_count = pair.second;
+            int current_ref_count = query_ref_counter_.getRefCounter(block_id);
+            if (current_ref_count == decrement_count) {
+                new_free_blocks++;
+            }
+        }
+    }
+    return new_free_blocks;
+}
+
 void CacheManager::maybeFreeBlockFromCache(int nums) {
     while (int(freeBlockNums()) < nums && !block_cache_.empty()) {
         std::vector<int> indices = block_cache_.pop();

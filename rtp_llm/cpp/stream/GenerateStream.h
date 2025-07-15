@@ -103,7 +103,7 @@ public:
 
     virtual void updateOutput(const StreamUpdateInfo& update_info) = 0;
     void         update(const StreamUpdateInfo& update_info);
-    void         updateKvCacheBlocks(const rtp_llm::BufferPtr& src_batch_indices);
+    bool         updateKvCacheBlocks(const rtp_llm::BufferPtr& src_batch_indices);
 
     virtual size_t scoreLen() const {
         return 1;

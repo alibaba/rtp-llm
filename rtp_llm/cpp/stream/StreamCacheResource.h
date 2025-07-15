@@ -71,7 +71,9 @@ public:
     // old batch 2 --------+--- new batch 2
     //                      \-- new batch 3
     //
-    void generateKVBlockUpdateMapping(const std::vector<int>& block_src_batch);
+    // @returns true if success, false if failed
+    //
+    bool generateKVBlockUpdateMapping(const std::vector<int>& block_src_batch);
 
     // get block copy mapping of last kv cache update
     const std::vector<BlockIdPair>& getKVBlockUpdateMapping() {

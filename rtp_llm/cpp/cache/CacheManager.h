@@ -141,6 +141,8 @@ public:
     void free(const std::vector<KVCacheResource>& resource);
     void free(const std::vector<int>& indice);
     void freeWithCache(FreeInfo& free_info);
+    // returns the number of new available blocks if given blocks are freed
+    size_t newFreeBlocks(const std::vector<int>& indice);
     void insertResidentCache(FreeInfo& free_info);
 
     virtual void setKVBlockValue(int block_index, int layer_id, rtp_llm::Buffer& k_buffer, rtp_llm::Buffer& v_buffer);

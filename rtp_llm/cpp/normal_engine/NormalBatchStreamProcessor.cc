@@ -541,7 +541,9 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_gro
                             all_hidden_states});
         }
 
-        stream->updateKvCacheBlocks(src_batch_indices);
+        if (!stream->updateKvCacheBlocks(src_batch_indices)) {
+            stream->setStop(ErrorCode::MALLOC_FAILED, "update kv cache blocks failed");
+        }
 
         batch_idx_in += cur_batch_size_in;
         batch_idx_out += cur_batch_size_out;
