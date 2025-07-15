@@ -1,6 +1,7 @@
 import logging
 import os
-import platform
+import subprocess
+import sys
 import time
 import traceback
 from contextlib import ExitStack
@@ -9,20 +10,24 @@ from typing import Any, List, Tuple
 import torch
 from filelock import FileLock, Timeout
 
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
+
 
 class DeviceResource:
     def __init__(self, required_gpu_count: int):
         self.required_gpu_count = required_gpu_count
-
-        if platform.processor() != "aarch64":
+        if not torch.cuda.is_available():
+            self.total_gpus = list(range(128))
+        else:
             self.total_gpus = list(range(torch.cuda.device_count()))
-            gpus = os.environ.get("CUDA_VISIBLE_DEVICES")
+            gpus = os.environ.get(
+                "CUDA_VISIBLE_DEVICES", os.environ.get("HIP_VISIBLE_DEVICES")
+            )
             if gpus is not None:
                 self.total_gpus = [int(id) for id in gpus.split(",")]
-        else:
-            # TODO: for arm cpu device, how to simulate gpu ?
-            self.total_gpus = [0, 1]
-        logging.info(f"total gpu: {self.total_gpus}")
+                logging.info(f"{torch.cuda.get_device_name()}: {self.total_gpus}")
         if required_gpu_count > len(self.total_gpus):
             raise ValueError(
                 f"required gpu count {required_gpu_count} is greater than total gpu count {len(self.total_gpus)}"
@@ -68,3 +73,20 @@ class DeviceResource:
             self.gpu_ids = []
             self.gpu_locks.close()
             logging.info("release done")
+
+
+if __name__ == "__main__":
+    if not torch.cuda.is_available():
+        logging.info("no gpu, continue")
+        result = subprocess.run(sys.argv[1:])
+        sys.exit(result.returncode)
+    else:
+        require_count = int(os.environ.get("WORLD_SIZE", "1"))
+        with DeviceResource(require_count) as gpu_resource:
+            if "308" in torch.cuda.get_device_name():
+                env_name = "HIP_VISIBLE_DEVICES"
+            else:
+                env_name = "CUDA_VISIBLE_DEVICES"
+            os.environ[env_name] = ",".join(gpu_resource.gpu_ids)
+            result = subprocess.run(sys.argv[1:])
+            sys.exit(result.returncode)
