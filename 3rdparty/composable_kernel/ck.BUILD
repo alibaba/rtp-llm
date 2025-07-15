@@ -98,7 +98,10 @@ cc_library(
 genrule(
     name = "ck_fmha_rmsnorm2d_libraries",
     outs = ["libtile_example_fmha_fwd.so", "libtile_rmsnorm2d_fwd.so"],
+    srcs = glob(["**/*"]),
     cmd = """
+        echo "pwd=";
+        pwd;
         cd external/composable_kernel_archive;
         sh cmake_build.sh;
         cd ../..;
@@ -106,6 +109,7 @@ genrule(
         cp external/composable_kernel_archive/build/lib/libtile_rmsnorm2d_fwd.so $(location libtile_rmsnorm2d_fwd.so);
     """,
     visibility = ["//visibility:public"],
+    tags = ["rocm","local"],
 )
 
 genrule(
@@ -132,6 +136,8 @@ genrule(
              gsub(/^#cmakedefine CK_USE_WMMA @CK_USE_WMMA@/, "/* #undef CK_USE_WMMA*/");
              gsub(/^#cmakedefine/, "//cmakedefine");print;}' $(<) > $(@)
     """,
+    visibility = ["//visibility:public"],
+    tags = ["rocm","local"],
 )
 
 exports_files(["example/ck_tile/01_fmha/generate.py"])

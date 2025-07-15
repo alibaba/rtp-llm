@@ -2,7 +2,7 @@ genrule(
     name = "cpp_libraries",
     srcs = glob([
         "**/*",
-    ]),
+    ]) + ["@composable_kernel_archive//:config_h",],
     outs = [
         "aiter/jit/libmodule_aiter_enum.so",
         "aiter/jit/libmodule_custom_all_reduce.so",
@@ -60,7 +60,8 @@ genrule(
         cp external/aiter/aiter/jit/module_gemm_a8w8_bpreshuffle.so $(location aiter/jit/libmodule_gemm_a8w8_bpreshuffle.so);
         cp external/aiter/aiter/jit/module_activation.so $(location aiter/jit/libmodule_activation.so);
     """,
-    visibility = ["//visibility:public"]
+    visibility = ["//visibility:public"],
+    tags = ["rocm","local"],
 )
 
 cc_library(
