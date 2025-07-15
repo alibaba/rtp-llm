@@ -81,7 +81,9 @@ if __name__ == "__main__":
         result = subprocess.run(sys.argv[1:])
         sys.exit(result.returncode)
     else:
-        require_count = int(os.environ.get("WORLD_SIZE", "1"))
+        require_count = int(
+            os.environ.get("WORLD_SIZE", os.environ.get("GPU_COUNT", "1"))
+        )
         with DeviceResource(require_count) as gpu_resource:
             if "308" in torch.cuda.get_device_name():
                 env_name = "HIP_VISIBLE_DEVICES"
