@@ -2,6 +2,8 @@
 
 #include <algorithm>
 
+#include <pybind11/numpy.h>
+
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/api_server/Exception.h"
 
@@ -115,9 +117,9 @@ std::vector<std::string> TokenProcessorPerStream::decodeTokens(GenerateOutputs& 
     py::gil_scoped_acquire   acquire;
     std::vector<std::string> texts;
     for (size_t i = 0; i < responses.generate_outputs.size(); i++) {
-        auto&     response  = responses.generate_outputs[i];
-        auto      token_ids = rtp_llm::Buffer2torchTensor(response.output_ids, true);
-        py::tuple result    = token_processor_stream_.attr("decode_tokens")(i,
+        auto&            response = responses.generate_outputs[i];
+        py::array_t<int> token_ids(response.output_ids->size(), response.output_ids->data<int>());
+        py::tuple        result = token_processor_stream_.attr("decode_tokens")(i,
                                                                          token_ids,
                                                                          response.finished,
                                                                          config->print_stop_words,

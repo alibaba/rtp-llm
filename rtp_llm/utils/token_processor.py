@@ -1,15 +1,18 @@
 from typing import Any, List, Optional, Union
 
 import torch
+import numpy as np
+import numpy.typing as npt
+
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 from rtp_llm.utils.tokenizer_utils import DecodingState, IncrementDecodingUtils
 from rtp_llm.utils.word_util import (
+    remove_padding_eos_with_numpy,
     get_stop_word_slices,
-    match_stop_words,
-    remove_padding_eos,
     truncate_response_with_stop_words,
     truncate_token_with_stop_word_id,
+    match_stop_words,
 )
 
 
@@ -38,7 +41,7 @@ class TokenProcessor:
 
 class TokenProcessorPerStream:
     decoding_states: List[DecodingState]
-    ouput_tokens_list: List[torch.Tensor]
+    ouput_tokens_list: List[npt.NDArray[np.int32]]
     token_buffers: List[str]
     has_num_beams: bool
 
@@ -52,14 +55,12 @@ class TokenProcessorPerStream:
             # num_beams不等于1的情况下，不能进行增量decode，因为过去的token id会变化
             self.decoding_states = [None] * size
         self.token_buffers = [""] * size
-        self.ouput_tokens_list = [
-            torch.empty(0, dtype=torch.int32) for _ in range(size)
-        ]
+        self.ouput_tokens_list = [np.empty(0, dtype=np.int32) for _ in range(size)]
 
     def decode_tokens(
         self,
         i: int,
-        tokens: torch.Tensor,
+        tokens: npt.NDArray[np.int32],
         finished: bool,
         print_stop_words: bool,
         stop_word_str_list: List[str],
@@ -67,15 +68,15 @@ class TokenProcessorPerStream:
         return_incremental: bool = False,
     ):
         if not self.has_num_beams:
-            self.ouput_tokens_list[i] = torch.cat(
-                (self.ouput_tokens_list[i], tokens), dim=1
+            self.ouput_tokens_list[i] = np.concatenate(
+                (self.ouput_tokens_list[i], tokens), axis=1
             )
             tokens = self.ouput_tokens_list[i]
-        tokens = remove_padding_eos(tokens, self.special_tokens.eos_token_id)
-        output_len = tokens.nelement()
-        tokens = self.process_stop_id(
-            print_stop_words, finished, tokens.tolist(), stop_word_ids
-        )
+        tokens = remove_padding_eos_with_numpy(
+            tokens, self.special_tokens.eos_token_id
+        ).tolist()
+        output_len = len(tokens)
+        tokens = self.process_stop_id(print_stop_words, finished, tokens, stop_word_ids)
         text, all_text = self.tokenids_decode(
             tokens, self.decoding_states[i], return_incremental
         )

@@ -4,11 +4,12 @@ import numpy as np
 import torch
 
 
-def remove_padding_eos(token_ids: torch.Tensor, eos_token_id: int) -> torch.Tensor:
+def remove_padding_eos_with_numpy(token_ids: np.ndarray, eos_token_id: int) -> np.ndarray:
     # token_ids shape: [max_length]
-    out_token_ids = token_ids.cpu().numpy()
-    out_token_ids = out_token_ids[out_token_ids != eos_token_id].tolist()
-    return torch.IntTensor(out_token_ids)
+    return token_ids[token_ids != eos_token_id]
+
+def remove_padding_eos(token_ids: torch.Tensor, eos_token_id: int) -> torch.Tensor:
+    return torch.IntTensor(remove_padding_eos_with_numpy(token_ids.cpu().numpy(), eos_token_id).tolist())
 
 
 def remove_padding_eos_for_list(
