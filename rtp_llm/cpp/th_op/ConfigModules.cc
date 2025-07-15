@@ -156,23 +156,23 @@ void register_kvcache_config(pybind11::module& m) {
 
 // ProfilingDebugLoggingConfig
 void ProfilingDebugLoggingConfig::update_from_env_for_test() {
-    ft_nvtx                    = bool_from_env_for_test("FT_NVTX", false);
-    py_inference_log_response  = bool_from_env_for_test("PY_INFERENCE_LOG_RESPONSE", false);
-    rtp_llm_trace_memory       = bool_from_env_for_test("RTP_LLM_TRACE_MEMORY", false);
-    rtp_llm_trace_malloc_stack = bool_from_env_for_test("RTP_LLM_TRACE_MALLOC_STACK", false);
-    enable_device_perf         = bool_from_env_for_test("ENABLE_DEVICE_PERF", false);
-    ft_core_dump_on_exception  = bool_from_env_for_test("FT_CORE_DUMP_ON_EXCEPTION", false);
-    ft_alog_conf_path          = autil::EnvUtil::getEnv("FT_ALOG_CONF_PATH", "");
-    log_level                  = autil::EnvUtil::getEnv("LOG_LEVEL", "INFO");
-    gen_timeline_sync          = bool_from_env_for_test("GEN_TIMELINE_SYNC", false);
-    torch_cuda_profiler_dir    = autil::EnvUtil::getEnv("TORCH_CUDA_PROFILER_DIR", "");
-    log_path                   = autil::EnvUtil::getEnv("LOG_PATH", "logs");
-    log_file_backup_count      = autil::EnvUtil::getEnv("LOG_FILE_BACKUP_COUNT", 16);
-    nccl_debug_file            = autil::EnvUtil::getEnv("NCCL_DEBUG_FILE", "");
-    debug_load_server          = autil::EnvUtil::getEnv("DEBUG_LOAD_SERVER", false);
-    hack_layer_num             = autil::EnvUtil::getEnv("HACK_LAYER_NUM", 0);
-    test_layer_num             = autil::EnvUtil::getEnv("TEST_LAYER_NUM", 0);
-    debug_start_fake_process   = autil::EnvUtil::getEnv("DEBUG_START_FAKE_PROCESS", false);
+    ft_nvtx                   = bool_from_env_for_test("FT_NVTX", false);
+    py_inference_log_response = bool_from_env_for_test("PY_INFERENCE_LOG_RESPONSE", false);
+    trace_memory              = bool_from_env_for_test("RTP_LLM_TRACE_MEMORY", false);
+    trace_malloc_stack        = bool_from_env_for_test("RTP_LLM_TRACE_MALLOC_STACK", false);
+    enable_device_perf        = bool_from_env_for_test("ENABLE_DEVICE_PERF", false);
+    ft_core_dump_on_exception = bool_from_env_for_test("FT_CORE_DUMP_ON_EXCEPTION", false);
+    ft_alog_conf_path         = autil::EnvUtil::getEnv("FT_ALOG_CONF_PATH", "");
+    log_level                 = autil::EnvUtil::getEnv("LOG_LEVEL", "INFO");
+    gen_timeline_sync         = bool_from_env_for_test("GEN_TIMELINE_SYNC", false);
+    torch_cuda_profiler_dir   = autil::EnvUtil::getEnv("TORCH_CUDA_PROFILER_DIR", "");
+    log_path                  = autil::EnvUtil::getEnv("LOG_PATH", "logs");
+    log_file_backup_count     = autil::EnvUtil::getEnv("LOG_FILE_BACKUP_COUNT", 16);
+    nccl_debug_file           = autil::EnvUtil::getEnv("NCCL_DEBUG_FILE", "");
+    debug_load_server         = autil::EnvUtil::getEnv("DEBUG_LOAD_SERVER", false);
+    hack_layer_num            = autil::EnvUtil::getEnv("HACK_LAYER_NUM", 0);
+    test_layer_num            = autil::EnvUtil::getEnv("TEST_LAYER_NUM", 0);
+    debug_start_fake_process  = autil::EnvUtil::getEnv("DEBUG_START_FAKE_PROCESS", false);
 }
 
 void register_profiling_debug_logging_config(pybind11::module& m) {
@@ -194,29 +194,29 @@ void register_profiling_debug_logging_config(pybind11::module& m) {
                             int,
                             int,
                             bool>(),
-             pybind11::arg("ft_nvtx")                    = false,
-             pybind11::arg("py_inference_log_response")  = false,
-             pybind11::arg("rtp_llm_trace_memory")       = false,
-             pybind11::arg("rtp_llm_trace_malloc_stack") = false,
-             pybind11::arg("enable_device_perf")         = false,
-             pybind11::arg("ft_core_dump_on_exception")  = false,
-             pybind11::arg("ft_alog_conf_path")          = "",
-             pybind11::arg("log_level")                  = "INFO",
-             pybind11::arg("gen_timeline_sync")          = false,
-             pybind11::arg("torch_cuda_profiler_dir")    = "",
-             pybind11::arg("log_path")                   = "logs",
-             pybind11::arg("log_file_backup_count")      = 16,
-             pybind11::arg("nccl_debug_file")            = "",
-             pybind11::arg("debug_load_server")          = false,
-             pybind11::arg("hack_layer_num")             = 0,
-             pybind11::arg("test_layer_num")             = 0,
-             pybind11::arg("debug_start_fake_process")   = false)
+             pybind11::arg("ft_nvtx")                   = false,
+             pybind11::arg("py_inference_log_response") = false,
+             pybind11::arg("trace_memory")              = false,
+             pybind11::arg("trace_malloc_stack")        = false,
+             pybind11::arg("enable_device_perf")        = false,
+             pybind11::arg("ft_core_dump_on_exception") = false,
+             pybind11::arg("ft_alog_conf_path")         = "",
+             pybind11::arg("log_level")                 = "INFO",
+             pybind11::arg("gen_timeline_sync")         = false,
+             pybind11::arg("torch_cuda_profiler_dir")   = "",
+             pybind11::arg("log_path")                  = "logs",
+             pybind11::arg("log_file_backup_count")     = 16,
+             pybind11::arg("nccl_debug_file")           = "",
+             pybind11::arg("debug_load_server")         = false,
+             pybind11::arg("hack_layer_num")            = 0,
+             pybind11::arg("test_layer_num")            = 0,
+             pybind11::arg("debug_start_fake_process")  = false)
         .def("to_string", &ProfilingDebugLoggingConfig::to_string)
         .def("update_from_env", &ProfilingDebugLoggingConfig::update_from_env_for_test)
         .def_readwrite("ft_nvtx", &ProfilingDebugLoggingConfig::ft_nvtx)
         .def_readwrite("py_inference_log_response", &ProfilingDebugLoggingConfig::py_inference_log_response)
-        .def_readwrite("rtp_llm_trace_memory", &ProfilingDebugLoggingConfig::rtp_llm_trace_memory)
-        .def_readwrite("rtp_llm_trace_malloc_stack", &ProfilingDebugLoggingConfig::rtp_llm_trace_malloc_stack)
+        .def_readwrite("trace_memory", &ProfilingDebugLoggingConfig::trace_memory)
+        .def_readwrite("trace_malloc_stack", &ProfilingDebugLoggingConfig::trace_malloc_stack)
         .def_readwrite("enable_device_perf", &ProfilingDebugLoggingConfig::enable_device_perf)
         .def_readwrite("ft_core_dump_on_exception", &ProfilingDebugLoggingConfig::ft_core_dump_on_exception)
         .def_readwrite("ft_alog_conf_path", &ProfilingDebugLoggingConfig::ft_alog_conf_path)
@@ -407,29 +407,28 @@ void register_speculative_execution_config(pybind11::module& m) {
 
 // ServiceDiscoveryConfig
 void ServiceDiscoveryConfig::update_from_env_for_test() {
-    use_local                          = bool_from_env_for_test("USE_LOCAL", false);
-    remote_rpc_server_ip               = autil::EnvUtil::getEnv("REMOTE_RPC_SERVER_IP", "");
-    rtp_llm_decode_cm2_config          = autil::EnvUtil::getEnv("RTP_LLM_DECODE_CM2_CONFIG", "");
-    remote_vit_server_ip               = autil::EnvUtil::getEnv("REMOTE_VIT_SERVER_IP", "");
-    rtp_llm_multimodal_part_cm2_config = autil::EnvUtil::getEnv("RTP_LLM_MULTIMODAL_PART_CM2_CONFIG", "");
+    use_local                  = bool_from_env_for_test("USE_LOCAL", false);
+    remote_rpc_server_ip       = autil::EnvUtil::getEnv("REMOTE_RPC_SERVER_IP", "");
+    decode_cm2_config          = autil::EnvUtil::getEnv("RTP_LLM_DECODE_CM2_CONFIG", "");
+    remote_vit_server_ip       = autil::EnvUtil::getEnv("REMOTE_VIT_SERVER_IP", "");
+    multimodal_part_cm2_config = autil::EnvUtil::getEnv("RTP_LLM_MULTIMODAL_PART_CM2_CONFIG", "");
 }
 
 void register_service_discovery_config(pybind11::module& m) {
     pybind11::class_<ServiceDiscoveryConfig>(m, "ServiceDiscoveryConfig")
         .def(pybind11::init<bool, std::string, std::string, std::string, std::string>(),
-             pybind11::arg("use_local")                          = false,
-             pybind11::arg("remote_rpc_server_ip")               = "",
-             pybind11::arg("rtp_llm_decode_cm2_config")          = "",
-             pybind11::arg("remote_vit_server_ip")               = "",
-             pybind11::arg("rtp_llm_multimodal_part_cm2_config") = "")
+             pybind11::arg("use_local")                  = false,
+             pybind11::arg("remote_rpc_server_ip")       = "",
+             pybind11::arg("decode_cm2_config")          = "",
+             pybind11::arg("remote_vit_server_ip")       = "",
+             pybind11::arg("multimodal_part_cm2_config") = "")
         .def("to_string", &ServiceDiscoveryConfig::to_string)
         .def("update_from_env", &ServiceDiscoveryConfig::update_from_env_for_test)
         .def_readwrite("use_local", &ServiceDiscoveryConfig::use_local)
         .def_readwrite("remote_rpc_server_ip", &ServiceDiscoveryConfig::remote_rpc_server_ip)
-        .def_readwrite("rtp_llm_decode_cm2_config", &ServiceDiscoveryConfig::rtp_llm_decode_cm2_config)
+        .def_readwrite("decode_cm2_config", &ServiceDiscoveryConfig::decode_cm2_config)
         .def_readwrite("remote_vit_server_ip", &ServiceDiscoveryConfig::remote_vit_server_ip)
-        .def_readwrite("rtp_llm_multimodal_part_cm2_config",
-                       &ServiceDiscoveryConfig::rtp_llm_multimodal_part_cm2_config);
+        .def_readwrite("multimodal_part_cm2_config", &ServiceDiscoveryConfig::multimodal_part_cm2_config);
 }
 
 // CacheStoreConfig
@@ -589,8 +588,8 @@ inline std::string ProfilingDebugLoggingConfig::to_string() const {
     std::ostringstream oss;
     oss << "ft_nvtx: " << ft_nvtx << "\n"
         << "py_inference_log_response: " << py_inference_log_response << "\n"
-        << "rtp_llm_trace_memory: " << rtp_llm_trace_memory << "\n"
-        << "rtp_llm_trace_malloc_stack: " << rtp_llm_trace_malloc_stack << "\n"
+        << "trace_memory: " << trace_memory << "\n"
+        << "trace_malloc_stack: " << trace_malloc_stack << "\n"
         << "enable_device_perf: " << enable_device_perf << "\n"
         << "ft_core_dump_on_exception: " << ft_core_dump_on_exception << "\n"
         << "ft_alog_conf_path: " << ft_alog_conf_path << "\n"
@@ -682,9 +681,11 @@ inline std::string ServiceDiscoveryConfig::to_string() const {
     std::ostringstream oss;
     oss << "use_local: " << use_local << "\n"
         << "remote_rpc_server_ip: " << remote_rpc_server_ip << "\n"
-        << "rtp_llm_decode_cm2_config: " << rtp_llm_decode_cm2_config << "\n"
+        << "decode_cm2_config: " << decode_cm2_config << "\n"
         << "remote_vit_server_ip: " << remote_vit_server_ip << "\n"
-        << "rtp_llm_multimodal_part_cm2_config: " << rtp_llm_multimodal_part_cm2_config;
+        << "multimodal_part_cm2_config: " << multimodal_part_cm2_config << "\n"
+        << "remote_backend_ip: " << remote_backend_ip << "\n"
+        << "backend_cm2_config: " << backend_cm2_config;
     return oss.str();
 }
 

@@ -41,12 +41,12 @@ public:
         return local_server_->RemotePutCache(context, request, response);
     }
 
-    LoadBalanceInfo getLoadBalanceInfo() {
-        return local_server_->getLoadBalanceInfo();
+    LoadBalanceInfo getLoadBalanceInfo(int64_t latest_version) {
+        return local_server_->getLoadBalanceInfo(latest_version);
     }
 
-    EngineScheduleInfo getEngineScheduleInfo() {
-        return local_server_->getEngineScheduleInfo();
+    EngineScheduleInfo getEngineScheduleInfo(int64_t latest_finised_version) {
+        return local_server_->getEngineScheduleInfo(latest_finised_version);
     }
 
     void addLora(const std::string&                        adapter_name,

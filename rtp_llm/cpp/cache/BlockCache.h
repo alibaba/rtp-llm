@@ -30,6 +30,7 @@ public:
         std::vector<int>   block_indices;
         std::vector<float> loss;
     };
+    using CacheSnapshot = typename LRUCache<size_t, CacheItem>::CacheSnapshot;
 
 public:
     BlockCache(): lru_cache_(kCacheMaxCapacity) {}
@@ -51,6 +52,8 @@ public:
     bool isResident(const std::vector<int>& token_list) const;
 
     int holdBlockNums() const;
+
+    CacheSnapshot cacheSnapshot(int64_t latest_version) const;
 
 private:
     bool hasHashKey(size_t item_key) const;

@@ -62,7 +62,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     model_input.v_block_size       = v_block_size_;
     model_input.seq_size_per_block = seq_size_per_block_;
     model_input.scale_block_size   = scale_block_size_;
-    model_input.pd_separation      = pd_separation_;
+    model_input.pd_separation      = role_type_ == RoleType::PREFILL;
     model_input.warmup             = warm_up_;
 
     int* merged_tokens      = (int*)model_input.combo_tokens->data();
@@ -189,7 +189,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
                 std::memcpy((*model_input.kv_cache_block_id)[batch_idx].data(),
                             kv_cache.batch_block_id[i].data(),
                             kv_cache.batch_block_id[i].size() * sizeof(int));
-                if (pd_separation_ && stream->hasCacheKeys()) {
+                if (role_type_ == RoleType::PREFILL && stream->hasCacheKeys()) {
                     std::memcpy((*model_input.cache_keys)[batch_idx - total_decode_batch_size].data(),
                                 stream->cacheKeys(i).data(),
                                 stream->cacheKeys(i).size() * sizeof(int64_t));
@@ -244,10 +244,10 @@ absl::StatusOr<SamplerInputs> NormalBatchStreamProcessor::gatherSamplerInput(
         }
         return_logits |= stream->returnLogits();
         calculate_softmax_probs |= stream->calculateSoftmaxProbs();
-        RTP_LLM_LOG_DEBUG("stream [%d], complete token ids = [%s]",
+        RTP_LLM_LOG_DEBUG("stream [%ld], complete token ids = [%s]",
                           stream->streamId(),
                           complete_token_ids->debugStringWithData<int32_t>(sampler_inputs.step).c_str());
-        RTP_LLM_LOG_DEBUG("stream [%d], sampler inputs token ids = [%s]",
+        RTP_LLM_LOG_DEBUG("stream [%ld], sampler inputs token ids = [%s]",
                           stream->streamId(),
                           sampler_inputs.token_ids->debugStringWithData<int32_t>().c_str());
     }
@@ -475,7 +475,7 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_gro
             batch_idx += 1;
         }
         RTP_LLM_LOG_DEBUG(
-            "stream [%d], new_tokens = [%s]", stream->streamId(), new_tokens->debugStringWithData<int32_t>().c_str());
+            "stream [%ld], new_tokens = [%s]", stream->streamId(), new_tokens->debugStringWithData<int32_t>().c_str());
         if (stream->numBeams() > 1 && beam_index != nullptr) {
             auto             batch_new_all_token_ids = new_all_token_ids->slice(old_batch_idx, current_batch_size);
             StreamUpdateInfo update_info{batch_new_all_token_ids,

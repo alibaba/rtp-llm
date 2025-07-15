@@ -27,11 +27,13 @@ class BaseEngine:
         raise NotImplementedError()
 
     @abstractmethod
-    def get_load_balance_info(self) -> LoadBalanceInfo:
+    def get_load_balance_info(self, latest_cache_version: int) -> LoadBalanceInfo:
         raise NotImplementedError()
 
     @abstractmethod
-    def get_engine_schedule_info(self) -> EngineScheduleInfo:
+    def get_engine_schedule_info(
+        self, latest_finised_version: int
+    ) -> EngineScheduleInfo:
         raise NotImplementedError()
 
     @abstractmethod

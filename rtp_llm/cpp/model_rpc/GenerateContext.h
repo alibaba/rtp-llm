@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/stream/GenerateStream.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include "rtp_llm/cpp/model_rpc/RpcServerRuntimeMeta.h"
 
 namespace rtp_llm {
 
@@ -12,15 +13,17 @@ const int64_t MAX_GRPC_TIMEOUT_MS = 3600 * 1000;
 
 class GenerateContext {
 public:
-    GenerateContext(int64_t                       request_id,
-                    int64_t                       request_timeout_ms,
-                    grpc::ServerContext*          server_context,
-                    kmonitor::MetricsReporterPtr& metrics_reporter):
+    GenerateContext(int64_t                               request_id,
+                    int64_t                               request_timeout_ms,
+                    grpc::ServerContext*                  server_context,
+                    kmonitor::MetricsReporterPtr&         metrics_reporter,
+                    std::shared_ptr<RpcServerRuntimeMeta> meta):
         request_id(request_id),
         request_key(std::to_string(request_id)),
         request_timeout_ms(request_timeout_ms),
         server_context(server_context),
-        metrics_reporter(metrics_reporter) {
+        metrics_reporter(metrics_reporter),
+        meta(meta) {
         request_begin_time_us = currentTimeUs();
     }
     virtual ~GenerateContext();
@@ -36,21 +39,25 @@ public:
     virtual std::shared_ptr<GenerateStream>& getStream();
 
 public:
-    int64_t                      request_id;
-    std::string                  request_key;
-    int64_t                      retry_times           = 0;
-    int64_t                      retry_cost_time_ms    = 0;
-    int64_t                      onflight_requests     = 0;
-    int64_t                      request_timeout_ms    = 0;
-    bool                         finished              = false;
-    int64_t                      request_begin_time_us = 0;
-    ErrorInfo                    error_info;
-    grpc::Status                 error_status = grpc::Status::OK;
-    grpc::ServerContext*         server_context;
-    kmonitor::MetricsReporterPtr metrics_reporter;
+    int64_t                               request_id;
+    std::string                           request_key;
+    int64_t                               retry_times           = 0;
+    int64_t                               retry_cost_time_ms    = 0;
+    int64_t                               onflight_requests     = 0;
+    int64_t                               request_timeout_ms    = 0;
+    bool                                  finished              = false;
+    int64_t                               request_begin_time_us = 0;
+    ErrorInfo                             error_info;
+    grpc::Status                          error_status = grpc::Status::OK;
+    grpc::ServerContext*                  server_context;
+    kmonitor::MetricsReporterPtr          metrics_reporter;
+    std::shared_ptr<RpcServerRuntimeMeta> meta;
 
 protected:
     std::shared_ptr<GenerateStream> stream_;
+
+protected:
+    void stopStream();
 };
 
 #define CHECK_ERROR_STATUS(generate_context)                                                                           \

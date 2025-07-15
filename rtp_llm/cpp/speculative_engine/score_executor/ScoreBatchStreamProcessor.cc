@@ -75,10 +75,10 @@ absl::StatusOr<SamplerInputs> ScoreBatchStreamProcessor::gatherSamplerInput(cons
             batch_idx += 1;
         }
 
-        RTP_LLM_LOG_DEBUG("stream [%d], complete token ids = [%s]",
+        RTP_LLM_LOG_DEBUG("stream [%ld], complete token ids = [%s]",
                           stream->streamId(),
                           complete_token_ids->debugStringWithData<int32_t>(sampler_inputs.step).c_str());
-        RTP_LLM_LOG_DEBUG("stream [%d], sampler inputs token ids = [%s]",
+        RTP_LLM_LOG_DEBUG("stream [%ld], sampler inputs token ids = [%s]",
                           stream->streamId(),
                           sampler_inputs.token_ids->debugStringWithData<int32_t>().c_str());
     }
@@ -171,7 +171,7 @@ absl::Status ScoreBatchStreamProcessor::dispatch(const StreamGroups& stream_grou
             batch_idx += 1;
         }
         RTP_LLM_LOG_DEBUG(
-            "stream [%d], new_tokens = [%s]", stream->streamId(), new_tokens->debugStringWithData<int32_t>().c_str());
+            "stream [%ld], new_tokens = [%s]", stream->streamId(), new_tokens->debugStringWithData<int32_t>().c_str());
         auto update_info = StreamUpdateInfo{new_tokens,
                                             1,
                                             batch_hidden_states,

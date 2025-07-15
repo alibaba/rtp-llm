@@ -401,14 +401,14 @@ def setup_args():
         help="控制是否在Python推理的access log中记录响应内容。可选值: `True` (记录), `False` (不记录)。默认为 `False`",
     )
     profile_debug_logging_group.add_argument(
-        "--rtp_llm_trace_memory",
+        "--trace_memory",
         env_name="RTP_LLM_TRACE_MEMORY",
         type=str2bool,
         default=False,
         help="控制是否在BufferManager中启用内存追踪功能。可选值: True (启用), False (禁用)。默认为 False",
     )
     profile_debug_logging_group.add_argument(
-        "--rtp_llm_trace_malloc_stack",
+        "--trace_malloc_stack",
         env_name="RTP_LLM_TRACE_MALLOC_STACK",
         type=str2bool,
         default=False,
@@ -914,7 +914,7 @@ def setup_args():
     )
 
     rpc_discovery_group.add_argument(
-        "--rtp_llm_decode_cm2_config",
+        "--decode_cm2_config",
         env_name="RTP_LLM_DECODE_CM2_CONFIG",
         type=str,
         default=None,
@@ -930,7 +930,7 @@ def setup_args():
     )
 
     rpc_discovery_group.add_argument(
-        "--rtp_llm_multimodal_part_cm2_config",
+        "--multimodal_part_cm2_config",
         env_name="RTP_LLM_MULTIMODAL_PART_CM2_CONFIG",
         type=str,
         default=None,
@@ -1561,6 +1561,18 @@ def setup_args():
         type=str2bool,
         default=False,
         help="是否启用 3FS 管理 KVCache",
+    )
+
+    ##############################################################################################################
+    #  Role配置
+    ##############################################################################################################
+    role_group = parser.add_argument_group("Role")
+    role_group.add_argument(
+        "--role_type",
+        env_name="ROLE_TYPE",
+        type=str,
+        default="PDFUSION",
+        help="role的类型: 包含PDFUSION / PREFILL / DECODE / VIT / FRONTEND 几种类型",
     )
 
     parser.parse_args()

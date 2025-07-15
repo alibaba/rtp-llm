@@ -1,6 +1,7 @@
 import copy
 import hashlib
 from dataclasses import dataclass, field, fields
+from enum import Enum
 from typing import Any, Dict, List, Optional, Union
 
 from pydantic import BaseModel
@@ -14,6 +15,21 @@ from rtp_llm.utils.util import check_with_info
 class RequestFormat:
     RAW = "raw"
     CHAT_API = "chatapi"
+
+
+class RoleType(Enum):
+    PDFUSION = 0
+    PREFILL = 1
+    DECODE = 2
+    VIT = 3
+    FRONTEND = 4
+
+
+class RoleAddr(BaseModel):
+    role: RoleType
+    ip: str
+    http_port: int
+    grpc_port: int
 
 
 class GenerateConfig(BaseModel):
@@ -75,6 +91,12 @@ class GenerateConfig(BaseModel):
     gen_timeline: bool = False
     profile_step: int = 3
     out_prefix: str = ""
+
+    # for load balance
+    role_addrs: List[RoleAddr] = []
+
+    # inter request id, from master
+    inter_request_id: int = -1
 
     # lora
     adapter_name: Optional[Union[str, List[str]]] = None

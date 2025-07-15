@@ -32,7 +32,7 @@ public:
     absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>& generate_input,
                                              preRunMode                            mode) override;
     absl::Status                      stop() override;
-    LoadBalanceInfo                   getLoadBalanceInfo() override;
+    LoadBalanceInfo                   getLoadBalanceInfo(int64_t latest_version) override;
     absl::Status                      step();
     absl::Status                      startLoop();
     int64_t                           getLastScheduleTime() override;

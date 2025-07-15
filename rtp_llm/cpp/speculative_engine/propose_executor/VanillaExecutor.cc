@@ -10,7 +10,7 @@ absl::Status VanillaExecutor::propose(const std::list<GenerateStreamPtr>& stream
     std::list<GenerateStreamPtr> propose_streams;
 
     for (auto& stream : streams) {
-        RTP_LLM_LOG_DEBUG("before create vanilla stream [%d]: %s", stream->streamId(), stream->debugString().c_str());
+        RTP_LLM_LOG_DEBUG("before create vanilla stream [%ld]: %s", stream->streamId(), stream->debugString().c_str());
     }
 
     for (auto& stream : streams) {
@@ -32,7 +32,7 @@ absl::Status VanillaExecutor::propose(const std::list<GenerateStreamPtr>& stream
     }
 
     for (auto& stream : propose_streams) {
-        RTP_LLM_LOG_DEBUG("before propose stream [%d]: %s", stream->streamId(), stream->debugString().c_str());
+        RTP_LLM_LOG_DEBUG("before propose stream [%ld]: %s", stream->streamId(), stream->debugString().c_str());
     }
 
     for (size_t i = 0; i < propose_step_; i++) {
@@ -44,7 +44,7 @@ absl::Status VanillaExecutor::propose(const std::list<GenerateStreamPtr>& stream
     }
 
     for (auto& stream : propose_streams) {
-        RTP_LLM_LOG_DEBUG("after propose stream [%d]: %s", stream->streamId(), stream->debugString().c_str());
+        RTP_LLM_LOG_DEBUG("after propose stream [%ld]: %s", stream->streamId(), stream->debugString().c_str());
     }
 
     RTP_LLM_LOG_DEBUG("propose done");

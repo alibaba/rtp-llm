@@ -15,6 +15,12 @@ class AccMetrics(Enum):
     UPDATE_QPS_METRIC = "py_rtp_update_qps_metric"
     ERROR_UPDATE_QPS_METRIC = "py_rtp_error_update_target_qps"
 
+    # route:
+    ROUTE_QPS_METRIC = "py_rtp_route_qps"
+    MASTER_ROUTE_QPS_METRIC = "py_rtp_master_route_qps"
+    DOMAIN_ROUTE_QPS_METRIC = "py_rtp_domain_route_qps"
+    MASTER_ROUTE_ERROR_QPS_METRIC = "py_rtp_master_route_error_qps"
+
 
 class GaugeMetrics(Enum):
     RESPONSE_FIRST_TOKEN_RT_METRIC = "py_rtp_response_first_token_rt"
@@ -30,6 +36,11 @@ class GaugeMetrics(Enum):
     NUM_BEAMS_METRIC = "ft_num_beams"
 
     UPDATE_LANTENCY_METRIC = "py_rtp_update_framework_rt"
+
+    # route:
+    ROUTE_RT_METRIC = "py_rtp_route_rt"
+    MASTER_ROUTE_RT_METRIC = "py_rtp_master_route_rt"
+    DOMAIN_ROUTE_RT_METRIC = "py_rtp_domain_route_rt"
 
 
 class MetricReporter(object):
@@ -51,7 +62,7 @@ class MetricReporter(object):
         tags["frontend_server_id"] = str(self.frontend_server_id)
         kmon_metric = self._matic_map.get(metric.value, None)
         if kmon_metric is None:
-            logging.warn(f"no metric named {metric.name}")
+            logging.warning(f"no metric named {metric.name}")
             return
         kmon_metric.report(value, tags)
 

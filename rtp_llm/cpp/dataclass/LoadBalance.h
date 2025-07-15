@@ -9,6 +9,7 @@
 #include <chrono>
 #include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/utils/PyUtils.h"
+#include "rtp_llm/cpp/dataclass/KvCacheInfo.h"
 
 namespace rtp_llm {
 
@@ -79,14 +80,13 @@ private:
 };
 
 struct LoadBalanceInfo {
-    int64_t step_latency_us    = 0;
-    int64_t iterate_count      = 0;
-    int64_t step_per_minute    = 0;
-    int64_t available_kv_cache = 0;
-    int64_t total_kv_cache     = 0;
-    int64_t onflight_requests  = 0;
-    int64_t waiting_query_len  = 0;
-    int64_t running_query_len  = 0;
+    int64_t     step_latency_us   = 0;
+    int64_t     iterate_count     = 0;
+    int64_t     step_per_minute   = 0;
+    int64_t     onflight_requests = 0;
+    int64_t     waiting_query_len = 0;
+    int64_t     running_query_len = 0;
+    KVCacheInfo cache_status;
 };
 
 struct Host {

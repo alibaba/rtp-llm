@@ -31,7 +31,7 @@ void SpeculativeSampler::updateSampleStream(SpeculativeExecutorStreamOutputPtr& 
 
     std::shared_ptr<GenerateConfig>& stream_config = stream->generateConfig();
 
-    RTP_LLM_LOG_DEBUG("stream [%d], topk = [%d], topp = [%f], propose_token_num = [%d], accept_token_num = [%d]",
+    RTP_LLM_LOG_DEBUG("stream [%ld], topk = [%d], topp = [%f], propose_token_num = [%d], accept_token_num = [%d]",
                       stream->streamId(),
                       stream_config->top_k,
                       stream_config->top_p,

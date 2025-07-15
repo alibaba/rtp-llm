@@ -341,6 +341,7 @@ class OpenaiEndpoint(object):
             if chat_request.debug_info
             else None
         )
+
         choice_generator = renderer.generate_choice(
             request_id,
             rendered_input.input_ids,

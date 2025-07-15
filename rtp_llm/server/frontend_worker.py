@@ -27,7 +27,6 @@ current_file_path = pathlib.Path(__file__).parent.absolute()
 sys.path.append(str(current_file_path.parent.absolute()))
 
 from pydantic import BaseModel
-from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.model_factory import ModelFactory
@@ -68,7 +67,7 @@ class TokenizerEncodeResponse(BaseModel):
 
 
 class FrontendWorker:
-    def __init__(self) -> None:
+    def __init__(self, separated_frontend: bool) -> None:
         logging.info("starting frontend worker")
         self.model_cls, self.model_config = ModelFactory.create_gpt_init_config(
             ModelFactory.create_normal_model_config()
@@ -81,7 +80,9 @@ class FrontendWorker:
                     self.tokenizer.eos_token_id
                 )
             self.model_config.update_task_prompt_tokens_id(self.tokenizer)
-        self.pipeline = Pipeline(self.model_cls, self.model_config, self.tokenizer)
+        self.pipeline = Pipeline(
+            self.model_cls, self.model_config, self.tokenizer, separated_frontend
+        )
         self.backend_rpc_server_visitor = self.pipeline.backend_rpc_server_visitor
         logging.info("frontend worker start done.")
 

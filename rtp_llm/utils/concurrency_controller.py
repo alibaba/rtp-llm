@@ -2,6 +2,7 @@ import logging
 import os
 import time
 from multiprocessing import Lock, Process, Value
+from typing import Optional
 
 from rtp_llm.distribute.worker_info import g_parallel_info
 
@@ -48,7 +49,7 @@ class ConcurrencyController:
         self.decrement()
 
 
-global_controller = None
+global_controller: Optional[ConcurrencyController] = None
 
 
 def init_controller():
@@ -61,16 +62,16 @@ def init_controller():
     return controller
 
 
-def set_global_controller(_global_controller):
+def set_global_controller(_global_controller: ConcurrencyController):
     global global_controller
     global_controller = _global_controller
 
 
-def get_global_controller():
+def get_global_controller() -> ConcurrencyController:
     if global_controller:
         return global_controller
 
     if int(os.environ.get("FT_SERVER_TEST", 0)) == 1:
         set_global_controller(init_controller())
 
-    return global_controller
+    return global_controller  # type: ignore

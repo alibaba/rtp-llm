@@ -61,23 +61,23 @@ struct KVCacheConfig {
 };
 
 struct ProfilingDebugLoggingConfig {
-    bool        ft_nvtx                    = false;
-    bool        py_inference_log_response  = false;
-    bool        rtp_llm_trace_memory       = false;
-    bool        rtp_llm_trace_malloc_stack = false;
-    bool        enable_device_perf         = false;
-    bool        ft_core_dump_on_exception  = false;
-    std::string ft_alog_conf_path          = "";
-    std::string log_level                  = "INFO";
-    bool        gen_timeline_sync          = false;
-    std::string torch_cuda_profiler_dir    = "";
-    std::string log_path                   = "logs";
-    int         log_file_backup_count      = 16;
-    std::string nccl_debug_file            = "";
-    bool        debug_load_server          = false;
-    int         hack_layer_num             = 0;
-    int         test_layer_num             = 0;
-    int         debug_start_fake_process   = false;
+    bool        ft_nvtx                   = false;
+    bool        py_inference_log_response = false;
+    bool        trace_memory              = false;
+    bool        trace_malloc_stack        = false;
+    bool        enable_device_perf        = false;
+    bool        ft_core_dump_on_exception = false;
+    std::string ft_alog_conf_path         = "";
+    std::string log_level                 = "INFO";
+    bool        gen_timeline_sync         = false;
+    std::string torch_cuda_profiler_dir   = "";
+    std::string log_path                  = "logs";
+    int         log_file_backup_count     = 16;
+    std::string nccl_debug_file           = "";
+    bool        debug_load_server         = false;
+    int         hack_layer_num            = 0;
+    int         test_layer_num            = 0;
+    int         debug_start_fake_process  = false;
     std::string to_string() const;
     void        update_from_env_for_test();
 };
@@ -151,9 +151,11 @@ struct SpeculativeExecutionConfig {
 struct ServiceDiscoveryConfig {
     bool        use_local = false;
     std::string remote_rpc_server_ip;
-    std::string rtp_llm_decode_cm2_config;
+    std::string decode_cm2_config;
     std::string remote_vit_server_ip;
-    std::string rtp_llm_multimodal_part_cm2_config;
+    std::string multimodal_part_cm2_config;
+    std::string remote_backend_ip;
+    std::string backend_cm2_config;
     std::string to_string() const;
     void        update_from_env_for_test();
 };

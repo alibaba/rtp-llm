@@ -79,6 +79,7 @@ filegroup(
     srcs = [
         "//rtp_llm/cpp:th_op/common/NcclOp.h",
         "//rtp_llm/cpp:th_op/common/InitEngineOps.h",
+        "//rtp_llm/cpp:th_op/common/blockUtil.h",
         "//rtp_llm/cpp:th_op/multi_gpu_gpt/EmbeddingHandlerOp.h",
         "//rtp_llm/cpp:th_op/multi_gpu_gpt/RtpEmbeddingOp.h",
         "//rtp_llm/cpp:th_op/multi_gpu_gpt/RtpLLMOp.h",
@@ -102,6 +103,7 @@ filegroup(
         "//rtp_llm/cpp:th_op/multi_gpu_gpt/RtpEmbeddingOp.cc",
         "//rtp_llm/cpp:th_op/multi_gpu_gpt/EmbeddingHandlerOp.cc",
         "//rtp_llm/cpp:th_op/multi_gpu_gpt/RtpLLMOp.cc",
+        "//rtp_llm/cpp:th_op/common/blockUtil.cc",
     ] + select({
         "@//:using_cuda": [
             "//rtp_llm/cpp:th_op/common/NcclOp.cc",

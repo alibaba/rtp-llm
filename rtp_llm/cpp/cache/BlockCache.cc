@@ -147,4 +147,9 @@ int BlockCache::holdBlockNums() const {
     return total_hold_blocks_;
 }
 
+BlockCache::CacheSnapshot BlockCache::cacheSnapshot(int64_t latest_version) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return lru_cache_.cacheSnapshot(latest_version);
+}
+
 }  // namespace rtp_llm

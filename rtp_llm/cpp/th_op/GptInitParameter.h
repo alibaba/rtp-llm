@@ -28,6 +28,25 @@ enum TaskType {
     BGE_M3             = 8
 };
 
+enum RoleType {
+    PDFUSION = 0,
+    PREFILL  = 1,
+    DECODE   = 2,
+    VIT      = 3,
+    FRONTEND = 4
+};
+
+class RoleAddr {
+public:
+    RoleType    role;
+    std::string ip;
+    int         http_port;
+    int         grpc_port;
+
+    RoleAddr(RoleType type, std::string ip, int http_port, int grpc_port):
+        role(type), ip(ip), http_port(http_port), grpc_port(grpc_port) {}
+};
+
 struct RoleSpecialTokens {
 public:
     std::vector<int64_t> token_ids_;
@@ -213,8 +232,7 @@ public:
     int64_t world_size_ = 1;
 
     // pd speration
-    bool        pd_separation_                   = false;
-    bool        use_cache_store_                 = false;
+    RoleType    role_type_                       = RoleType::PDFUSION;
     bool        cache_store_rdma_mode_           = true;
     int64_t     cache_store_listen_port_         = 0;
     int64_t     cache_store_connect_port_        = 0;
@@ -310,12 +328,6 @@ public:
     AttentionConfigs getAttentionConfigs() const;
     bool             isKvCacheQuant() const;
 
-    // is not pd-sep
-    bool isPDFusion() const;
-    // is prefill in p-d sep
-    bool isPrefillRole() const;
-    // is decode in p-d sep
-    bool isDecodeRole() const;
 };
 
 }  // namespace rtp_llm

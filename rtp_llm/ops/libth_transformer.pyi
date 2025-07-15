@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import typing
-from typing import Optional
 
 import torch
 
@@ -10,6 +9,7 @@ __all__ = [
     "AttentionCommonInputs",
     "BatchDecodeSchedulerConfig",
     "CacheStoreConfig",
+    "Cm2ServiceClient",
     "ConcurrencyConfig",
     "DeviceExporter",
     "DeviceResourceConfig",
@@ -24,7 +24,9 @@ __all__ = [
     "FlashInferOp",
     "GptInitParameter",
     "HWKernelConfig",
+    "Host",
     "KVCacheConfig",
+    "KVCacheInfo",
     "LoadBalanceInfo",
     "MiscellaneousConfig",
     "MlaOpsType",
@@ -35,6 +37,7 @@ __all__ = [
     "ProfilingDebugLoggingConfig",
     "QuantAlgo",
     "RoleSpecialTokens",
+    "RoleType",
     "RtpEmbeddingOp",
     "RtpLLMOp",
     "SamplerConfig",
@@ -43,6 +46,7 @@ __all__ = [
     "SpecialTokens",
     "SpeculativeExecutionConfig",
     "create_linear_softmax_handler",
+    "get_block_cache_keys",
     "get_device",
 ]
 
@@ -82,6 +86,16 @@ class CacheStoreConfig:
     ) -> None: ...
     def to_string(self) -> str: ...
     def update_from_env(self) -> None: ...
+
+class Cm2ServiceClient:
+    def __init__(
+        self, config_str: str, load_balance_policy_name: str, use_local: bool = False
+    ) -> None: ...
+    def __repr__(self) -> str: ...
+    def choose_host(self) -> Host:
+        """
+        Choose a host from the cm2 and load balancer
+        """
 
 class ConcurrencyConfig:
     concurrency_limit: int
@@ -188,8 +202,10 @@ class EngineScheduleInfo:
 
 class EngineTaskInfo:
     input_length: int
+    iterate_count: int
     prefix_length: int
     request_id: int
+    waiting_time_ms: int
     def __init__(self) -> None: ...
 
 class EplbConfig:
@@ -279,6 +295,17 @@ class FMHAConfig:
     ) -> None: ...
     def to_string(self) -> str: ...
     def update_from_env(self) -> None: ...
+
+class FlashInferOp:
+    def __init__(self, gpt_init_parameter: GptInitParameter) -> None: ...
+    def forward(
+        self,
+        input: torch.Tensor,
+        output: torch.Tensor,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+        attn_params: typing.Any,
+    ) -> None: ...
 
 class FlashInferOp:
     def __init__(self, gpt_init_parameter: GptInitParameter) -> None: ...
@@ -396,7 +423,6 @@ class GptInitParameter:
     org_embedding_max_pos: int
     parallelism_distributed_config: ParallelismDistributedConfig
     pd_sep_enable_fallback: bool
-    pd_separation: bool
     phy_exp_num: int
     position_id_len_factor: int
     position_ids_style: int
@@ -418,6 +444,7 @@ class GptInitParameter:
     residual_scalar: float
     reuse_cache: bool
     reverse_e_h_norm: bool
+    role_type: RoleType
     rope_head_dim: int
     rotary_embedding_base: float
     rotary_embedding_dim: int
@@ -445,7 +472,6 @@ class GptInitParameter:
     type_vocab_size: int
     use_all_gather: bool
     use_attention_linear_bias: bool
-    use_cache_store: bool
     use_cross_attn: bool
     use_fp32_to_compute_logit: bool
     use_kvcache: bool
@@ -504,6 +530,13 @@ class HWKernelConfig:
     def to_string(self) -> str: ...
     def update_from_env(self) -> None: ...
 
+class Host:
+    http_port: int
+    ip: str
+    rpc_port: int
+    def __init__(self, ip: str, http_port: int, rpc_port: int) -> None: ...
+    def __repr__(self) -> str: ...
+
 class KVCacheConfig:
     multi_task_prompt: str
     multi_task_prompt_str: str
@@ -517,14 +550,20 @@ class KVCacheConfig:
     def to_string(self) -> str: ...
     def update_from_env(self) -> None: ...
 
-class LoadBalanceInfo:
+class KVCacheInfo:
     available_kv_cache: int
+    block_size: int
+    cached_keys: list[int]
+    total_kv_cache: int
+    version: int
+    def __init__(self) -> None: ...
+
+class LoadBalanceInfo:
+    cache_status: KVCacheInfo
     iterate_count: int
     onflight_requests: int
     step_latency_us: int
     step_per_minute: int
-    total_kv_cache: int
-    onflight_requests: int
     waiting_query_len: int
     running_query_len: int
 
@@ -659,16 +698,16 @@ class ProfilingDebugLoggingConfig:
     log_path: str
     nccl_debug_file: str
     py_inference_log_response: bool
-    rtp_llm_trace_malloc_stack: bool
-    rtp_llm_trace_memory: bool
+    trace_memory: bool
+    trace_malloc_stack: bool
     test_layer_num: int
     torch_cuda_profiler_dir: str
     def __init__(
         self,
         ft_nvtx: bool = False,
         py_inference_log_response: bool = False,
-        rtp_llm_trace_memory: bool = False,
-        rtp_llm_trace_malloc_stack: bool = False,
+        trace_memory: bool = False,
+        trace_malloc_stack: bool = False,
         enable_device_perf: bool = False,
         ft_core_dump_on_exception: bool = False,
         ft_alog_conf_path: str = "",
@@ -709,6 +748,44 @@ class RoleSpecialTokens:
     token_ids: list[int]
     def __init__(self) -> None: ...
 
+class RoleType:
+    """
+    Members:
+
+      PDFUSION
+
+      PREFILL
+
+      DECODE
+
+      VIT
+    """
+
+    DECODE: typing.ClassVar[RoleType]  # value = <RoleType.DECODE: 2>
+    PDFUSION: typing.ClassVar[RoleType]  # value = <RoleType.PDFUSION: 0>
+    PREFILL: typing.ClassVar[RoleType]  # value = <RoleType.PREFILL: 1>
+    VIT: typing.ClassVar[RoleType]  # value = <RoleType.VIT: 3>
+    __members__: typing.ClassVar[
+        dict[str, RoleType]
+    ]  # value = {'PDFUSION': <RoleType.PDFUSION: 0>, 'PREFILL': <RoleType.PREFILL: 1>, 'DECODE': <RoleType.DECODE: 2>, 'VIT': <RoleType.VIT: 3>}
+    def __eq__(self, other: typing.Any) -> bool: ...
+    def __getstate__(self) -> int: ...
+    def __hash__(self) -> int: ...
+    def __index__(self) -> int: ...
+    def __init__(self, value: int) -> None: ...
+    def __int__(self) -> int: ...
+    def __ne__(self, other: typing.Any) -> bool: ...
+    def __repr__(self) -> str: ...
+    def __setstate__(self, state: int) -> None: ...
+    @typing.overload
+    def __str__(self) -> str: ...
+    @typing.overload
+    def __str__(self) -> str: ...
+    @property
+    def name(self) -> str: ...
+    @property
+    def value(self) -> int: ...
+
 class RtpEmbeddingOp:
     def __init__(self) -> None: ...
     def decode(
@@ -728,7 +805,7 @@ class RtpLLMOp:
         self, adapter_name: str, lora_a_weights: typing.Any, lora_b_weights: typing.Any
     ) -> None: ...
     def get_engine_schedule_info(self) -> EngineScheduleInfo: ...
-    def get_load_balance_info(self) -> LoadBalanceInfo: ...
+    def get_load_balance_info(self, arg0: int) -> LoadBalanceInfo: ...
     def init(
         self,
         model: typing.Any,
@@ -766,18 +843,18 @@ class SchedulerConfig:
     def update_from_env(self) -> None: ...
 
 class ServiceDiscoveryConfig:
+    decode_cm2_config: str
+    multimodal_part_cm2_config: str
     remote_rpc_server_ip: str
     remote_vit_server_ip: str
-    rtp_llm_decode_cm2_config: str
-    rtp_llm_multimodal_part_cm2_config: str
     use_local: bool
     def __init__(
         self,
         use_local: bool = False,
         remote_rpc_server_ip: str = "",
-        rtp_llm_decode_cm2_config: str = "",
+        decode_cm2_config: str = "",
         remote_vit_server_ip: str = "",
-        rtp_llm_multimodal_part_cm2_config: str = "",
+        multimodal_part_cm2_config: str = "",
     ) -> None: ...
     def to_string(self) -> str: ...
     def update_from_env(self) -> None: ...
@@ -820,6 +897,7 @@ class SpeculativeExecutionConfig:
 def create_linear_softmax_handler(
     gpt_init_params: GptInitParameter,
 ) -> EmbeddingHandlerOp: ...
+def get_block_cache_keys(token_ids_list: list[list[int]]) -> list[int]: ...
 def get_device() -> DeviceExporter: ...
 
 class PyModelInitResources:

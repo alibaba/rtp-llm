@@ -11,6 +11,7 @@ enum class ErrorCode {
     ERROR_GENERATE_CONFIG_FORMAT = 604,
     INVALID_PARAMS               = 605,
     EXECUTION_EXCEPTION          = 606,
+    EXCEEDS_KV_CACHE_MAX_LEN     = 607,
 
     // multimodal error
     MM_LONG_PROMPT_ERROR   = 901,
@@ -21,12 +22,11 @@ enum class ErrorCode {
     MM_DOWNLOAD_FAILED     = 906,
 
     // Error codes starting from 8000 can be retried
-    CANCELLED                = 8100,
-    OUT_OF_VOCAB_RANGE       = 8101,
-    OUTPUT_QUEUE_FULL        = 8102,
-    OUTPUT_QUEUE_IS_EMPTY    = 8103,
-    FINISHED                 = 8104,
-    EXCEEDS_KV_CACHE_MAX_LEN = 8105,
+    CANCELLED             = 8100,
+    OUT_OF_VOCAB_RANGE    = 8101,
+    OUTPUT_QUEUE_FULL     = 8102,
+    OUTPUT_QUEUE_IS_EMPTY = 8103,
+    FINISHED              = 8104,
 
     // rpc error
     GET_HOST_FAILED                       = 8200,

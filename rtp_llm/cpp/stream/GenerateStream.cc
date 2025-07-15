@@ -28,7 +28,6 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     stream_cache_resource_(std::make_shared<StreamCacheResource>(this, resource_context, input->need_release_resource)),
     need_release_resource_(input->need_release_resource),
     enable_fast_gen_(params.enable_fast_gen_),
-    use_cache_store_(params.use_cache_store_),
     gen_timeline_(input->generate_config->gen_timeline),
     metrics_reporter_(metrics_reporter),
     special_tokens_(params.special_tokens_),
@@ -190,6 +189,9 @@ bool GenerateStream::isStreaming() const {
     return generate_input_->generate_config->is_streaming;
 }
 int64_t GenerateStream::streamId() const {
+    if (generate_input_->generate_config->inter_request_id != -1) {
+        return generate_input_->generate_config->inter_request_id;
+    }
     return generate_input_->request_id;
 }
 int GenerateStream::loraId() const {
@@ -482,7 +484,7 @@ void GenerateStream::checkTimeout() {
 
 void GenerateStream::setStopWithoutLock(ErrorCode error_code, const std::string& error_msg) {
     auto cost_time_ms = (autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_) / 1000;
-    RTP_LLM_LOG_WARNING("stop stream [%d], error msg: [%s], current state [%s], "
+    RTP_LLM_LOG_WARNING("stop stream [%ld], error msg: [%s], current state [%s], "
                         "input len [%d], seq len [%d], timeout [%ld] ms, running [%ld] ms",
                         streamId(),
                         error_msg.c_str(),
@@ -573,7 +575,7 @@ void GenerateStream::cancelIfNotRunning() {
     std::lock_guard<std::mutex> lock(*output_mutex_);
     if (generate_status_->status == StreamState::WAITING || generate_status_->status == StreamState::REMOTE_RUNNING) {
         auto cost_time_ms = (autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_) / 1000;
-        RTP_LLM_LOG_WARNING("stop stream: %d %s, input len [%d], seq len [%d], timeout: [%ld] ms, running [%ld] ms",
+        RTP_LLM_LOG_WARNING("stop stream: %ld %s, input len [%d], seq len [%d], timeout: [%ld] ms, running [%ld] ms",
                             streamId(),
                             "cancel stream in waiting or remote running",
                             inputLength(),

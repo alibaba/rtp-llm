@@ -8,9 +8,11 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Union
 
+import aiohttp
 import pynvml
 import requests
 import torch
+from aiohttp import ClientConnectorError, ClientTimeout, ServerTimeoutError
 
 from rtp_llm import _ft_pickler
 
@@ -213,17 +215,69 @@ def has_overlap_kmp(a: str, b: str) -> bool:
     return prefix[-1] > 0
 
 
-def request_server(
-    method: str, server_port: int, uri: str = "", req: Dict[str, Any] = {}
-):
+async def async_request_server(
+    method: str, server_port: int, uri: str = "", req: Dict[str, Any] = None
+) -> Dict[str, Any]:
+    """
+    异步HTTP请求服务 (基于aiohttp实现)
+
+    :param method: 请求方法，支持 GET/POST（不区分大小写）
+    :param server_port: 服务端口号
+    :param uri: 请求路径（自动处理首尾斜杠）
+    :param req: 请求参数（GET=URL参数，POST=JSON body）
+    :return: 包含响应数据或错误信息的字典
+    """
+    req = req or {}
+    url = f"http://localhost:{server_port}/{uri.strip('/')}"
+    # timeout = aiohttp.ClientTimeout(total=50, connect=30)  # 总超时50s，连接超时30s
+
     try:
-        if method == "get":
-            response = requests.get(f"http://localhost:{server_port}/{uri}", json=req)
-            return response.json()
-        elif method == "post":
-            response = requests.post(f"http://localhost:{server_port}/{uri}", json=req)
-            return response.json()
-        else:
-            return {"error": "error method"}
-    except requests.RequestException as e:
-        return {"error": f"Failed to call {uri}", "details": str(e)}
+        async with aiohttp.ClientSession() as session:
+            # 统一转换为小写方法名
+            method = method.lower()
+
+            if method == "get":
+                async with session.get(url, params=req) as response:
+                    return await _handle_response(response)
+            elif method == "post":
+                async with session.post(url, json=req) as response:
+                    return await _handle_response(response)
+            else:
+                return {"error": f"Unsupported HTTP method: {method}"}
+    # 明确区分错误类型
+    except ClientConnectorError as e:
+        # 连接失败（如DNS解析错误、TCP连接拒绝）
+        return {"error": "Connection failed", "details": str(e)}
+    except ServerTimeoutError as e:
+        # 超时错误（连接或响应超时）
+        return {"error": "Request timeout", "details": str(e)}
+    except aiohttp.ClientError as e:
+        # 其他客户端错误（如无效URL、HTTP协议错误）
+        return {"error": "Client error", "details": str(e)}
+    except Exception as e:
+        # 未知错误
+        return {"error": "Unexpected error", "details": str(e)}
+
+
+async def _handle_response(response: aiohttp.ClientResponse) -> Dict[str, Any]:
+    """统一处理HTTP响应"""
+    try:
+        # 处理非200状态码
+        if response.status != 200:
+            error_text = await response.text()
+            return {
+                "error": f"HTTP Error {response.status}",
+                "details": error_text,
+            }
+
+        # 尝试解析JSON
+        return await response.json()
+
+    except (aiohttp.ContentTypeError, ValueError) as e:
+        # JSON解析失败时返回原始文本
+        text = await response.text()
+        return {
+            "error": "Invalid JSON response",
+            "details": str(e),
+            "raw_response": text,
+        }

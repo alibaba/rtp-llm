@@ -92,10 +92,13 @@ int64_t NormalEngine::getLastScheduleTime() {
 }
 
 WarmUpResult NormalEngine::warmUp(const EngineInitParams& params) {
-    if (params_.isPDFusion() || params_.isPrefillRole()) {
+    if (params_.role_type_ == RoleType::PDFUSION || params_.role_type_ == RoleType::PREFILL) {
         return prefillWarmUp(params);
-    } else {
+    } else if (params_.role_type_ == RoleType::DECODE) {
         return decodeWarmUp(params);
+    } else {
+        RTP_LLM_CHECK_WITH_INFO(false, "invalid role type");
+        return {};
     }
 }
 
@@ -198,16 +201,15 @@ absl::Status NormalEngine::initSystemPrompt() {
     return absl::OkStatus();
 }
 
-LoadBalanceInfo NormalEngine::getLoadBalanceInfo() {
-    auto kv_cache_info = resource_context_.cache_manager->getKVCacheInfo();
-    return {(int64_t)step_recorder_.getStepLatency(),
-            (int64_t)step_recorder_.getStepCount(),
-            (int64_t)step_recorder_.getStepPerMin(),
-            (int64_t)kv_cache_info.available_kv_cache,
-            (int64_t)kv_cache_info.total_kv_cache,
-            (int64_t)scheduler_->onflightStreams(),
-            (int64_t)scheduler_->waitingQueryLen(),
-            (int64_t)scheduler_->runningQueryLen()};
+LoadBalanceInfo NormalEngine::getLoadBalanceInfo(int64_t latest_version) {
+    auto kv_cache_info = resource_context_.cache_manager->getKVCacheInfo(latest_version);
+    return LoadBalanceInfo{(int64_t)step_recorder_.getStepLatency(),
+                           (int64_t)step_recorder_.getStepCount(),
+                           (int64_t)step_recorder_.getStepPerMin(),
+                           (int64_t)scheduler_->onflightStreams(),
+                           (int64_t)scheduler_->waitingQueryLen(),
+                           (int64_t)scheduler_->runningQueryLen(),
+                           std::move(kv_cache_info)};
 }
 
 absl::Status NormalEngine::startLoop() {

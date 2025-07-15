@@ -10,7 +10,7 @@ absl::Status ScoreExecutor::score(const std::list<GenerateStreamPtr>& streams, b
     RTP_LLM_LOG_DEBUG("score begin");
 
     for (const GenerateStreamPtr& stream : streams) {
-        RTP_LLM_LOG_DEBUG("before create score stream [%d]: %s", stream->streamId(), stream->debugString().c_str());
+        RTP_LLM_LOG_DEBUG("before create score stream [%ld]: %s", stream->streamId(), stream->debugString().c_str());
     }
 
     for (const GenerateStreamPtr& stream : streams) {
@@ -32,13 +32,13 @@ absl::Status ScoreExecutor::score(const std::list<GenerateStreamPtr>& streams, b
     }
 
     for (const GenerateStreamPtr& stream : score_streams) {
-        RTP_LLM_LOG_DEBUG("before score stream [%d]: %s", stream->streamId(), stream->debugString().c_str());
+        RTP_LLM_LOG_DEBUG("before score stream [%ld]: %s", stream->streamId(), stream->debugString().c_str());
     }
 
     RETURN_IF_STATUS_ERROR(score_normal_executor_.process(score_streams));
 
     for (auto& stream : score_streams) {
-        RTP_LLM_LOG_DEBUG("post score stream [%d]: %s", stream->streamId(), stream->debugString().c_str());
+        RTP_LLM_LOG_DEBUG("post score stream [%ld]: %s", stream->streamId(), stream->debugString().c_str());
     }
 
     RTP_LLM_LOG_DEBUG("score done");

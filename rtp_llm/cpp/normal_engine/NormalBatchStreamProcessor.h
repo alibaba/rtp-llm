@@ -20,7 +20,7 @@ public:
         is_multimodal_(params.is_multimodal_),
         mm_position_ids_style_((PositionIdsStyle)params.mm_position_ids_style_),
         position_id_len_factor_(params.position_id_len_factor_),
-        pd_separation_(params.pd_separation_),
+        role_type_(params.role_type_),
         k_block_size_(cache_config.k_block_stride),
         v_block_size_(cache_config.v_block_stride),
         scale_block_size_(cache_config.kv_scale_block_stride),
@@ -53,7 +53,7 @@ protected:
     bool             is_multimodal_;
     PositionIdsStyle mm_position_ids_style_;
     size_t           position_id_len_factor_;
-    bool             pd_separation_;
+    RoleType         role_type_;
     // size_t           block_size_;
     size_t               k_block_size_;
     size_t               v_block_size_;

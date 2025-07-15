@@ -328,7 +328,7 @@ else
 fi
 
 ## 执行完脚本杀死进程
-ps xauww  | grep maga_ft | awk '{print $2}' | xargs kill -9;
+ps xauww  | grep rtp_llm | awk '{print $2}' | xargs kill -9;
 ```
 ### 2.4 运行结果
 可以看到下面类似的相应返回即可视为成功

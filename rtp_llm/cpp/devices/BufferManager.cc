@@ -18,8 +18,8 @@ BufferManager::BufferManager(IAllocator*                        device_allocator
                              const ProfilingDebugLoggingConfig& config):
     device_allocator_(device_allocator),
     host_allocator_(host_allocator),
-    trace_memory_(config.rtp_llm_trace_memory),
-    trace_malloc_stack_(config.rtp_llm_trace_malloc_stack),
+    trace_memory_(config.trace_memory),
+    trace_malloc_stack_(config.trace_malloc_stack),
     profiling_debug_logging_config_(config) {
     if (trace_memory_) {
         autil::EnvUtil::setEnv("STACK_TRACER_LOG", "true");

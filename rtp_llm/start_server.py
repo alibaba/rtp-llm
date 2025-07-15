@@ -131,9 +131,10 @@ def main():
     frontend_process = None
 
     try:
-        logging.info("start backend server")
-        backend_process = start_backend_server_impl(global_controller)
-        logging.info(f"backend server process = {backend_process}")
+        if os.environ.get("ROLE_TYPE", "") != "FRONTEND":
+            logging.info("start backend server")
+            backend_process = start_backend_server_impl(global_controller)
+            logging.info(f"backend server process = {backend_process}")
 
         logging.info("start frontend server")
         frontend_process = start_frontend_server_impl(

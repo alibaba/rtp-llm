@@ -214,19 +214,6 @@ AttentionConfigs GptInitParameter::getAttentionConfigs() const {
     return attention_config;
 }
 
-// is not pd-sep
-bool GptInitParameter::isPDFusion() const {
-    return !pd_separation_ && !use_cache_store_;
-}
-// is prefill in p-d sep
-bool GptInitParameter::isPrefillRole() const {
-    return pd_separation_ && use_cache_store_;
-}
-// is decode in p-d sep
-bool GptInitParameter::isDecodeRole() const {
-    return !pd_separation_ && use_cache_store_;
-}
-
 void registerGptInitParameter(py::module m) {
     py::enum_<MlaOpsType>(m, "MlaOpsType")
         .value("AUTO", MlaOpsType::AUTO)
@@ -301,6 +288,29 @@ void registerGptInitParameter(py::module m) {
                                       int(quant_algo.getActivationBits()));
             },
             [](py::tuple t) { return QuantAlgo(QuantMethod(t[0].cast<int>()), t[1].cast<int>(), t[2].cast<int>()); }));
+
+    pybind11::enum_<RoleType>(m, "RoleType")
+        .value("PDFUSION", RoleType::PDFUSION)
+        .value("PREFILL", RoleType::PREFILL)
+        .value("DECODE", RoleType::DECODE)
+        .value("VIT", RoleType::VIT)
+        .value("FRONTEND", RoleType::FRONTEND)
+        .def("__str__", [](RoleType role) {
+            switch (role) {
+                case RoleType::PDFUSION:
+                    return "pd_fusion";
+                case RoleType::PREFILL:
+                    return "prefill";
+                case RoleType::DECODE:
+                    return "decode";
+                case RoleType::VIT:
+                    return "vit";
+                case RoleType::FRONTEND:
+                    return "FRONTEND";
+                default:
+                    return "invalid";
+            }
+        });
 
 #define DEF_PROPERTY(name, member) .def_readwrite(#name, &GptInitParameter::member)
 
@@ -418,8 +428,7 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(worker_addrs, worker_addrs_)                                                                          \
     DEF_PROPERTY(worker_grpc_addrs, worker_grpc_addrs_)                                                                \
     DEF_PROPERTY(remote_rpc_server_port, remote_rpc_server_port_)                                                      \
-    DEF_PROPERTY(pd_separation, pd_separation_)                                                                        \
-    DEF_PROPERTY(use_cache_store, use_cache_store_)                                                                    \
+    DEF_PROPERTY(role_type, role_type_)                                                                                \
     DEF_PROPERTY(cache_store_rdma_mode, cache_store_rdma_mode_)                                                        \
     DEF_PROPERTY(prefill_retry_times, prefill_retry_times_)                                                            \
     DEF_PROPERTY(prefill_retry_timeout_ms, prefill_retry_timeout_ms_)                                                  \

@@ -64,12 +64,10 @@ void RemoteRpcServer::initLocalPeerInfo() {
 
 void RemoteRpcServer::initCacheStore(const GptInitParameter&                init_params,
                                      rtp_llm::ProposeModelEngineInitParams* propose_params) {
-    RTP_LLM_LOG_INFO("init_params.use_cache_store = %d, init_params.pd_separation = %d",
-                     init_params.use_cache_store_,
-                     init_params.pd_separation_);
+    RTP_LLM_LOG_INFO("init_params.role_type : %d", init_params.role_type_);
 
-    if (!init_params.use_cache_store_) {
-        RTP_LLM_FAIL("cache store not used in RemoteRpcServer is unexpected");
+    if (init_params.role_type_ != RoleType::PREFILL && init_params.role_type_ != RoleType::DECODE) {
+        RTP_LLM_FAIL("role_type must be prefill or decode, but it is %d", init_params.role_type_);
     }
     const_cast<ResourceContext*>(&engine_->resourceContext())->use_cache_store = true;
     auto device                                                                = engine_->getDevice();

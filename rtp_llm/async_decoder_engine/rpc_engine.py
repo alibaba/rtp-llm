@@ -52,12 +52,14 @@ class RPCEngine(BaseEngine):
         return self.model_rpc_client.enqueue(input)
 
     @override
-    def get_load_balance_info(self) -> LoadBalanceInfo:
-        return self.rtp_llm_op_.get_load_balance_info()
+    def get_load_balance_info(self, latest_cache_version: int) -> LoadBalanceInfo:
+        return self.rtp_llm_op_.get_load_balance_info(latest_cache_version)
 
     @override
-    def get_engine_schedule_info(self) -> EngineScheduleInfo:
-        return self.rtp_llm_op_.get_engine_schedule_info()
+    def get_engine_schedule_info(
+        self, latest_finised_version: int
+    ) -> EngineScheduleInfo:
+        return self.rtp_llm_op_.get_engine_schedule_info(latest_finised_version)
 
     @override
     def update_scheduler_info(self, scheduler_info: str) -> None:

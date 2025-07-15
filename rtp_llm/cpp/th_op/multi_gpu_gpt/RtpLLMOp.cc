@@ -103,28 +103,28 @@ void RtpLLMOp::removeLora(const std::string& adapter_name) {
     model_rpc_service_->removeLora(adapter_name);
 }
 
-rtp_llm::LoadBalanceInfo RtpLLMOp::getLoadBalanceInfo() {
-    return model_rpc_service_->getLoadBalanceInfo();
+rtp_llm::LoadBalanceInfo RtpLLMOp::getLoadBalanceInfo(int64_t latest_version) {
+    return model_rpc_service_->getLoadBalanceInfo(latest_version);
 }
 
-rtp_llm::EngineScheduleInfo RtpLLMOp::getEngineScheduleInfo() {
-    return model_rpc_service_->getEngineScheduleInfo();
+rtp_llm::EngineScheduleInfo RtpLLMOp::getEngineScheduleInfo(int64_t latest_finised_version) {
+    return model_rpc_service_->getEngineScheduleInfo(latest_finised_version);
 }
 
 void RtpLLMOp::initRPCServer(const rtp_llm::EngineInitParams                        maga_init_params,
                              py::object                                             mm_process_engine,
                              std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
                              py::object                                             token_processor) {
-    auto http_port       = maga_init_params.gpt_init_parameter.http_port_;
-    auto model_rpc_port  = maga_init_params.gpt_init_parameter.model_rpc_port_;
-    auto use_cache_store = maga_init_params.gpt_init_parameter.use_cache_store_;
+    auto http_port      = maga_init_params.gpt_init_parameter.http_port_;
+    auto model_rpc_port = maga_init_params.gpt_init_parameter.model_rpc_port_;
+    auto role_type      = maga_init_params.gpt_init_parameter.role_type_;
     auto py_inference_log_response =
         maga_init_params.gpt_init_parameter.profiling_debug_logging_config.py_inference_log_response;
     // NOTE: ip/ip段可自定义为所需范围。
     std::string server_address("0.0.0.0:" + std::to_string(model_rpc_port));
     {
         pybind11::gil_scoped_acquire acquire;
-        if (use_cache_store) {
+        if (role_type == rtp_llm::RoleType::PREFILL || role_type == rtp_llm::RoleType::DECODE) {
             model_rpc_service_.reset(new rtp_llm::RemoteRpcServiceImpl());
         } else {
             model_rpc_service_.reset(new rtp_llm::LocalRpcServiceImpl());
@@ -251,9 +251,9 @@ void registerRtpLLMOp(const py::module& m) {
              py::arg("lora_a_weights"),
              py::arg("lora_b_weights"))
         .def("remove_lora", &torch_ext::RtpLLMOp::removeLora, py::arg("adapter_name"))
-        .def("get_load_balance_info", &torch_ext::RtpLLMOp::getLoadBalanceInfo)
+        .def("get_load_balance_info", &torch_ext::RtpLLMOp::getLoadBalanceInfo, py::arg("latest_version"))
         .def("get_engine_schedule_info", &torch_ext::RtpLLMOp::getEngineScheduleInfo)
-        .def("update_scheduler_info", &torch_ext::RtpLLMOp::updateSchedulerInfo)
+        .def("update_scheduler_info", &torch_ext::RtpLLMOp::updateSchedulerInfo, py::arg("scheduler_info"))
         .def("stop", &torch_ext::RtpLLMOp::stop)
         .def("ready", &torch_ext::RtpLLMOp::ready)
         .def("update_eplb_config", &torch_ext::RtpLLMOp::updateEplbConfig, py::arg("config"));

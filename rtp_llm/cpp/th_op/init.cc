@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/dataclass/LoadBalance.h"
 #include "rtp_llm/cpp/dataclass/EngineScheduleInfo.h"
 #include "rtp_llm/cpp/th_op/GptInitParameterRegister.h"
+#include "rtp_llm/cpp/th_op/common/blockUtil.h"
 #include "rtp_llm/cpp/th_op/multi_gpu_gpt/RtpLLMOp.h"
 #include "rtp_llm/cpp/th_op/multi_gpu_gpt/RtpEmbeddingOp.h"
 #include "rtp_llm/cpp/th_op/multi_gpu_gpt/EmbeddingHandlerOp.h"
@@ -11,7 +12,6 @@
 
 #include "rtp_llm/models_py/bindings/RegisterOps.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
-
 using namespace rtp_llm;
 
 namespace torch_ext {
@@ -19,8 +19,10 @@ namespace torch_ext {
 // TODO(wangyin.yx): organize these regsiter function into classified registration functions
 
 PYBIND11_MODULE(libth_transformer, m) {
-    rtp_llm::registerLoadBalanceInfo(m);
-    rtp_llm::registerEngineScheduleInfo(m);
+
+    registerKvCacheInfo(m);
+    registerLoadBalanceInfo(m);
+    registerEngineScheduleInfo(m);
     register_parallelism_distributed_config(m);
     register_concurrency_config(m);
     register_fmha_config(m);
@@ -46,6 +48,7 @@ PYBIND11_MODULE(libth_transformer, m) {
     registerRtpEmbeddingOp(m);
     registerEmbeddingHandler(m);
     registerDeviceOps(m);
+    registerCommon(m);
     registerPyOpDefs(m);
 
     py::module rtp_ops_m = m.def_submodule("rtp_llm_ops", "rtp llm custom ops");

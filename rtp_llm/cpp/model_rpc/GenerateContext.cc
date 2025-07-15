@@ -6,6 +6,7 @@ GenerateContext::~GenerateContext() {
     if (stream_ && !stream_->finished() && !stream_->stopped()) {
         stream_->cancel();
     }
+    stopStream();
     reportTime();
 }
 
@@ -51,6 +52,23 @@ void GenerateContext::reportMetrics(RpcMetricsCollector& collector) {
 
 void GenerateContext::setStream(const std::shared_ptr<GenerateStream>& stream) {
     stream_ = stream;
+    if (stream) {
+        meta->enqueue(request_id, stream_);
+    }
+}
+
+void GenerateContext::stopStream() {
+    if (stream_) {
+        // if is waiting, cancel it
+        meta->dequeue(request_id, stream_);
+        stream_->cancelIfNotRunning();
+        // if is running, waiting util done
+        while (stream_->running()) {
+            RTP_LLM_LOG_DEBUG("waiting stream [%d] running done to cancel", stream_->generateInput()->request_id);
+            usleep(1000);
+        }
+        stream_.reset();
+    }
 }
 
 std::shared_ptr<GenerateStream>& GenerateContext::getStream() {

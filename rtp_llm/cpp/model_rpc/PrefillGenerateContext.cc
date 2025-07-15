@@ -69,13 +69,6 @@ PrefillGenerateContext::~PrefillGenerateContext() {
     stopStream();
 }
 
-void PrefillGenerateContext::setStream(const std::shared_ptr<GenerateStream>& stream) {
-    if (stream) {
-        stream_ = stream;
-        meta->enqueue(request_id, stream_);
-    }
-}
-
 void PrefillGenerateContext::stopStream() {
     if (stream_) {
         // if is waiting, cancel it
@@ -88,9 +81,9 @@ void PrefillGenerateContext::stopStream() {
             usleep(1000);
         }
         markRequestEnd();
+        stream_.reset();
     }
 }
-
 grpc::Status PrefillGenerateContext::closeGrpcStream() {
     if (grpc_stream_closed) {
         return last_grpc_stream_closed_status;
@@ -126,19 +119,23 @@ void PrefillGenerateContext::nextStage() {
 }
 
 void PrefillGenerateContext::markRequestEnd() {
+    int64_t real_id = request_id;
+    if (stream_) {
+        real_id = stream_->streamId();
+    }
     if (!resource->isTensorParallel()) {
-        resource->cache_store->markRequestEnd(std::to_string(request_id));
+        resource->cache_store->markRequestEnd(std::to_string(real_id));
         return;
     }
     const auto&           prefill_workers = resource->grpc_workers;
     RemoteFinishRequestPB finish_request;
-    finish_request.set_request_id(request_id);
+    finish_request.set_request_id(real_id);
     for (int i = 0; i < prefill_workers.size(); i++) {
         auto& prefill_worker = prefill_workers[i];
         auto  connect_status = resource->rpc_pool.getConnection(prefill_worker);
         if (!connect_status.ok()) {
             RTP_LLM_LOG_WARNING("request [%d], get grpc connection for ip %s failed, ignore markRequestEnd for it",
-                                request_id,
+                                real_id,
                                 prefill_worker.c_str());
             continue;
         }
@@ -148,7 +145,7 @@ void PrefillGenerateContext::markRequestEnd() {
         auto          grpc_status = stub->RemoteFinish(&client_context, finish_request, &response);
         if (!grpc_status.ok()) {
             RTP_LLM_LOG_WARNING("request [%d], remote finish for ip %s failed, ignore markRequestEnd for it",
-                                request_id,
+                                real_id,
                                 prefill_worker.c_str());
             continue;
         }

@@ -33,7 +33,7 @@ void WorkerStatusService::workerStatus(const std::unique_ptr<http_server::HttpRe
 
     LoadBalanceInfo load_balance_info;
     if (engine_) {
-        load_balance_info = engine_->getLoadBalanceInfo();
+        load_balance_info = engine_->getLoadBalanceInfo(-1);
     } else {
         RTP_LLM_LOG_WARNING("worker status service call worker status error, engine is null");
     }
@@ -52,7 +52,7 @@ void WorkerStatusService::workerStatus(const std::unique_ptr<http_server::HttpRe
     }
     WorkerStatusResponse worker_status_response;
     worker_status_response.available_concurrency = available_concurrency;
-    worker_status_response.load_balance_info     = load_balance_info;
+    worker_status_response.load_balance_info     = std::move(load_balance_info);
     worker_status_response.load_balance_version  = load_balance_version;
     worker_status_response.alive                 = true;
     auto response_json_str                       = ToJsonString(worker_status_response, /*isCompact=*/true);

@@ -259,17 +259,17 @@ $PYTHON_BIN ${USER_HOME}/backend_front/fronted.py
 查看相关启动进程如下:
 ```shell
 [tanboyu.tby@mainse-buffer011161048115.na132 /hio_disk/tanboyu.tby/FasterTransformer]
-$ps aux | grep maga_ft
-tanboyu+  21090  5.7  0.1 41536432 1105896 pts/20 Sl+ 23:55   0:15 maga_ft_backend_server
-tanboyu+  21251 54.8  0.8 136379296 6902104 pts/20 Sl+ 23:55   2:24 maga_ft_rank-0
-tanboyu+  21252  122  0.8 142631432 6953340 pts/20 Sl+ 23:55   5:22 maga_ft_rank-1
-tanboyu+  22451  5.8  0.1 50260920 1167256 pts/20 Sl+ 23:56   0:11 maga_ft_frontend_server_0
-tanboyu+  22452  5.8  0.1 50260936 1175892 pts/20 Sl+ 23:56   0:11 maga_ft_frontend_server_1
-tanboyu+  22453  5.6  0.1 50260920 1172820 pts/20 Sl+ 23:56   0:11 maga_ft_frontend_server_2
-tanboyu+  22454  5.5  0.1 50259900 1167200 pts/20 Sl+ 23:56   0:10 maga_ft_frontend_server_3
-tanboyu+  23916  0.0  0.0   7996   900 pts/16   S+   23:59   0:00 grep --color=auto maga_ft
+$ps aux | grep rtp_llm
+tanboyu+  21090  5.7  0.1 41536432 1105896 pts/20 Sl+ 23:55   0:15 rtp_llm_backend_server
+tanboyu+  21251 54.8  0.8 136379296 6902104 pts/20 Sl+ 23:55   2:24 rtp_llm_rank-0
+tanboyu+  21252  122  0.8 142631432 6953340 pts/20 Sl+ 23:55   5:22 rtp_llm_rank-1
+tanboyu+  22451  5.8  0.1 50260920 1167256 pts/20 Sl+ 23:56   0:11 rtp_llm_frontend_server_0
+tanboyu+  22452  5.8  0.1 50260936 1175892 pts/20 Sl+ 23:56   0:11 rtp_llm_frontend_server_1
+tanboyu+  22453  5.6  0.1 50260920 1172820 pts/20 Sl+ 23:56   0:11 rtp_llm_frontend_server_2
+tanboyu+  22454  5.5  0.1 50259900 1167200 pts/20 Sl+ 23:56   0:10 rtp_llm_frontend_server_3
+tanboyu+  23916  0.0  0.0   7996   900 pts/16   S+   23:59   0:00 grep --color=auto rtp_llm
 ```
-服务启动之后，我们会发现存在一个maga_ft_backend_server进程，这是推理服务启动的主进程，而maga_ft_rank-0和maga_ft_rank-1则是对应的子进程，这个数量是由我们的配置决定的，我们设置了TP_SIZE = 2所以这个地方会有对应的两个进程。另外还会默认启动四个maga_ft_frontend_server前端服务进程，用于接受外部请求。
+服务启动之后，我们会发现存在一个rtp_llm_backend_server进程，这是推理服务启动的主进程，而rtp_llm_rank-0和rtp_llm_rank-1则是对应的子进程，这个数量是由我们的配置决定的，我们设置了TP_SIZE = 2所以这个地方会有对应的两个进程。另外还会默认启动四个rtp_llm_frontend_server前端服务进程，用于接受外部请求。
 
 接下来我们开始进行gdb调试: gdb -p 21251，打完断点后，执行bash fronted.sh ，就会命中断点， 然后我们可以根据堆栈查看代码路径。
 ![](./pics/rtp-llm_backend_gdb_debug.png)

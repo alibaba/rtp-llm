@@ -40,11 +40,12 @@ struct DecodeRpcContext {
 
 class DecodeGenerateContext: public GenerateContext {
 public:
-    DecodeGenerateContext(DecodeRpcContext&             rpc_context,
-                          int64_t                       timeout_ms,
-                          grpc::ServerContext*          server_context,
-                          kmonitor::MetricsReporterPtr& metrics_reporter):
-        GenerateContext(0, timeout_ms, server_context, metrics_reporter), rpc_context(rpc_context) {}
+    DecodeGenerateContext(DecodeRpcContext&                     rpc_context,
+                          int64_t                               timeout_ms,
+                          grpc::ServerContext*                  server_context,
+                          kmonitor::MetricsReporterPtr&         metrics_reporter,
+                          std::shared_ptr<RpcServerRuntimeMeta> meta):
+        GenerateContext(0, timeout_ms, server_context, metrics_reporter, meta), rpc_context(rpc_context) {}
     ~DecodeGenerateContext();
     void reportTime();
     struct TimeInfo {

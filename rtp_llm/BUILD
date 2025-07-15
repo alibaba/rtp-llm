@@ -216,6 +216,13 @@ py_library(
     }),
 )
 
+py_library(
+    name = "vipserver",
+    srcs = glob([
+        "vipserver/*.py",
+    ]),
+)
+
 filegroup(
     name = "alog_config",
     srcs = ["config/alog.conf"],

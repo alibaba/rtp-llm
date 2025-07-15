@@ -37,7 +37,7 @@ public:
                                   const ::BroadcastPutCacheRequestPB* request,
                                   ::BroadcastPutCacheResponsePB*      response);
 
-    LoadBalanceInfo getLoadBalanceInfo();
+    LoadBalanceInfo getLoadBalanceInfo(int64_t latest_version);
 
     void addLora(const std::string&                        adapter_name,
                  const rtp_llm::lora::loraLayerWeightsMap& lora_a_weights,
@@ -66,9 +66,7 @@ public:
         (void)engine_->stop();
     }
 
-    virtual EngineScheduleInfo getEngineScheduleInfo() {
-        return EngineScheduleInfo();
-    }
+    virtual EngineScheduleInfo getEngineScheduleInfo(int64_t latest_finised_version);
 
 public:
     typedef grpc::internal::WriterInterface<GenerateOutputsPB> WriterInterface;
@@ -81,12 +79,13 @@ protected:
                                   std::shared_ptr<GenerateStream>& stream);
 
 protected:
-    std::shared_ptr<EngineBase>          engine_;
-    std::shared_ptr<MultimodalProcessor> mm_processor_;
-    EngineInitParams                     maga_init_params_;
-    ProposeModelEngineInitParams*        propose_maga_init_params_;
-    kmonitor::MetricsReporterPtr         metrics_reporter_;
-    std::atomic<size_t>                  onflight_requests_{0};
+    std::shared_ptr<EngineBase>           engine_;
+    std::shared_ptr<MultimodalProcessor>  mm_processor_;
+    EngineInitParams                      maga_init_params_;
+    ProposeModelEngineInitParams*         propose_maga_init_params_;
+    kmonitor::MetricsReporterPtr          metrics_reporter_;
+    std::atomic<size_t>                   onflight_requests_{0};
+    std::shared_ptr<RpcServerRuntimeMeta> meta_;
 };
 
 }  // namespace rtp_llm

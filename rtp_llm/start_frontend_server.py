@@ -29,7 +29,7 @@ def start_frontend_server(server_id: int, global_controller: ConcurrencyControll
     py_env_configs = PyEnvConfigs()
     py_env_configs.update_from_env()
     py_env_configs.server_config.fronted_server_id = server_id
-    setproctitle(f"maga_ft_frontend_server_{server_id}")
+    setproctitle(f"rtp_llm_frontend_server_{server_id}")
     app = None
     g_frontend_server_info = FrontendServerInfo(
         py_env_configs.server_config.fronted_server_id
@@ -37,7 +37,8 @@ def start_frontend_server(server_id: int, global_controller: ConcurrencyControll
     try:
         logging.info(f"g_frontend_server_info = {g_frontend_server_info}")
         set_global_controller(global_controller)
-        app = FrontendApp(py_env_configs)
+        separated_frontend = os.environ.get("ROLE_TYPE", "") == "FRONTEND"
+        app = FrontendApp(py_env_configs, separated_frontend)
         app.start()
     except BaseException as e:
         logging.error(

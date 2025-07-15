@@ -238,7 +238,6 @@ def report_throughput_test_res(
 
 
 if __name__ == "__main__":
-    os.environ["LOAD_CKPT_NUM_PROCESS"] = "0"
     logging.basicConfig(
         level="INFO", format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     )

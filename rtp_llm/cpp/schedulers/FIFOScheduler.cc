@@ -18,8 +18,8 @@ FIFOScheduler::FIFOScheduler(const rtp_llm::GptInitParameter&     params,
     max_generate_batch_size_(params.max_generate_batch_size_),
     reserve_block_num_(params.scheduler_reserve_resource_ratio_ * cache_manager->availableBlockNums() / 100),
     // not support fallback when use pd_speration:use_cache_store
-    enable_partial_fallback_(params.enable_partial_fallback_ && params.use_cache_store_ == false),
-    enable_whole_fallback_(params.use_cache_store_ == false),
+    enable_partial_fallback_(params.enable_partial_fallback_ && params.role_type_ == RoleType::PDFUSION),
+    enable_whole_fallback_(params.role_type_ == RoleType::PDFUSION),
     enable_fast_gen_(params.enable_fast_gen_),
     need_fill_fake_stream_(params.dp_size_ > 1 && params.tp_rank_ == 0),
     fast_gen_max_context_len_(params.fast_gen_max_context_len_),
@@ -179,7 +179,7 @@ tuple<int, int> FIFOScheduler::evaluateRunningNext(size_t reserve_step) {
             if (enable_fast_gen_) {
                 token_capacity_ -= result.value();
                 RTP_LLM_LOG_DEBUG(
-                    "after stream [%d] acquireCapacity, token_capacity is %d", (*it)->streamId(), token_capacity_);
+                    "after stream [%ld] acquireCapacity, token_capacity is %d", (*it)->streamId(), token_capacity_);
             }
             it++;
         }
@@ -189,7 +189,7 @@ tuple<int, int> FIFOScheduler::evaluateRunningNext(size_t reserve_step) {
 
 bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams,
                                           const GenerateStreamPtr&       new_stream) const {
-    if (params_.isDecodeRole()) {
+    if (params_.role_type_ == RoleType::DECODE) {
         if (running_streams_.size() + streams.size() + 1 < max_generate_batch_size_) {
             return true;
         }
@@ -229,7 +229,7 @@ bool FIFOScheduler::evaluateNewStream(const list<GenerateStreamPtr>& streams,
     if (result.ok() && enable_fast_gen_) {
         token_capacity_ -= result.value();
         RTP_LLM_LOG_DEBUG(
-            "after stream [%d] acquireCapacity, token_capacity is %d", new_stream->streamId(), token_capacity_);
+            "after stream [%ld] acquireCapacity, token_capacity is %d", new_stream->streamId(), token_capacity_);
     }
     return result.ok() && cache_manager_->availableBlockNums() >= reserve_block_num_;
 }

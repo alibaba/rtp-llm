@@ -14,7 +14,8 @@ import requests
 import uvicorn
 from anyio import CapacityLimiter
 from anyio.lowlevel import RunVar
-from fastapi import FastAPI, HTTPException
+from fastapi import Body, FastAPI, HTTPException
+from fastapi import Request
 from fastapi import Request as RawRequest
 from fastapi import status
 from fastapi.middleware import Middleware
@@ -36,7 +37,7 @@ from rtp_llm.openai.api_datatype import (
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.server.frontend_server import FrontendServer
 from rtp_llm.utils.concurrency_controller import ConcurrencyController
-from rtp_llm.utils.util import AtomicCounter, request_server
+from rtp_llm.utils.util import AtomicCounter, async_request_server
 from rtp_llm.utils.version_info import VersionInfo
 
 # make buffer larger to avoid throw exception "RemoteProtocolError Receive buffer too long"
@@ -49,7 +50,7 @@ server_shutdown = False
 
 
 class GracefulShutdownServer(Server):
-    def set_server(self, frontend_server):
+    def set_server(self, frontend_server: FrontendServer):
         self.frontend_server = frontend_server
 
     @override
@@ -65,9 +66,14 @@ class GracefulShutdownServer(Server):
 
 
 class FrontendApp(object):
-    def __init__(self, py_env_configs: PyEnvConfigs = StaticConfig):
+    def __init__(
+        self,
+        py_env_configs: PyEnvConfigs = StaticConfig,
+        separated_frontend: bool = False,
+    ):
         self.py_env_configs = py_env_configs
-        self.frontend_server = FrontendServer()
+        self.frontend_server = FrontendServer(separated_frontend)
+        self.separated_frontend = separated_frontend
 
     def start(self):
         self.frontend_server.start()
@@ -124,6 +130,13 @@ class FrontendApp(object):
                 )
             )
 
+        async def check_all_health():
+            if not self.frontend_server.check_health():
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="inference service is not ready",
+                )
+
         @app.get("/health")
         @app.post("/health")
         @app.get("/GraphService/cm2_status")
@@ -133,19 +146,35 @@ class FrontendApp(object):
         @app.get("/status")
         @app.post("/status")
         @app.post("/health_check")
-        async def health():
-            return request_server(
+        async def health_check():
+            if self.separated_frontend:
+                await check_all_health()
+                return "ok"
+            return await async_request_server(
                 "post", g_worker_info.backend_server_port, "health_check", {}
             )
 
         @app.get("/")
         async def health():
-            return request_server("get", g_worker_info.backend_server_port, "", {})
+            if self.separated_frontend:
+                await check_all_health()
+                return {"status": "home"}
+            return await async_request_server(
+                "get", g_worker_info.backend_server_port, "", {}
+            )
 
         @app.get("/worker_status")
-        def worker_status():
-            response = request_server(
-                "get", g_worker_info.backend_server_port, "worker_status", {}
+        @app.post("/worker_status")
+        @app.get("/rtp_llm/worker_status")
+        @app.post("/rtp_llm/worker_status")
+        async def worker_status(
+            request: Request, data: Optional[Dict[Any, Any]] = Body(None)
+        ):
+            query_params = (
+                dict(request.query_params) if request.method == "GET" else (data or {})
+            )
+            response = await async_request_server(
+                "post", g_worker_info.backend_server_port, "worker_status", query_params
             )
             if "error" not in response:
                 response["frontend_available_concurrency"] = (
@@ -155,8 +184,8 @@ class FrontendApp(object):
 
         # example : {"peft_info": {"lora_info": {"lora_0": "/lora/llama-lora-test/""}}}
         @app.post("/update")
-        def update(version_info: VersionInfo):
-            return request_server(
+        async def update(version_info: VersionInfo):
+            return await async_request_server(
                 "post",
                 g_worker_info.backend_server_port,
                 "update",
@@ -171,14 +200,14 @@ class FrontendApp(object):
         # request format: {"log_level": "DEBUG"}, {"log_level": "info"}
         @app.post("/set_log_level")
         async def set_log_level(req: Union[str, Dict[Any, Any]]):
-            return request_server(
+            return await async_request_server(
                 "post", g_worker_info.backend_server_port, "set_log_level", req
             )
 
         # request format: {"mode": "NONE", "update_time": 5000}
         @app.post("/update_eplb_config")
         async def update_eplb_config(req: Dict[Any, Any]):
-            return request_server(
+            return await async_request_server(
                 "post", g_worker_info.backend_server_port, "update_eplb_config", req
             )
 
@@ -189,7 +218,7 @@ class FrontendApp(object):
             active_requests.increment()
             try:
                 if self.frontend_server.is_embedding:
-                    return request_server(
+                    return await async_request_server(
                         "post", g_worker_info.backend_server_port, "v1/embeddings", req
                     )
                 else:
@@ -221,7 +250,7 @@ class FrontendApp(object):
 
         # example {"prompt": "abcde"}
         @app.post("/tokenizer/encode")
-        async def encode(req: Union[str, Dict[Any, Any]]):
+        async def tokenizer_encode(req: Union[str, Dict[Any, Any]]):
             return self.frontend_server.tokenizer_encode(req)
 
         # example {"prompt": "abcde"}

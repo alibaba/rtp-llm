@@ -72,8 +72,8 @@ namespace rtp_llm {
 grpc::Status PrefillRpcServer::init(const EngineInitParams&                                maga_init_params,
                                     py::object                                             mm_process_engine,
                                     std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params) {
-    meta_.reset(new PrefillRpcServerRuntimeMeta());
-    RTP_LLM_CHECK_WITH_INFO(maga_init_params.gpt_init_parameter.pd_separation_, "prefill's pd_separation must be true");
+    RTP_LLM_CHECK_WITH_INFO(maga_init_params.gpt_init_parameter.role_type_ == RoleType::PREFILL,
+                            "prefill's role_type must be PREFILL");
     auto ret = RemoteRpcServer::init(maga_init_params, mm_process_engine, std::move(propose_params));
     if (!ret.ok()) {
         return ret;
@@ -146,15 +146,14 @@ LoadBalancerInitParams PrefillRpcServer::makeConfig() {
         decode_cluster_name_ = domain_service_config.domain;
         subscribe_config.domain_configs.push_back(domain_service_config);
     } else {
-        string decode_cm2_config_str =
-            maga_init_params_.gpt_init_parameter.service_discovery_config.rtp_llm_decode_cm2_config;
+        string decode_cm2_config_str = maga_init_params_.gpt_init_parameter.service_discovery_config.decode_cm2_config;
         RTP_LLM_CHECK_WITH_INFO(!decode_cm2_config_str.empty(), "decode_cm2_config must be not empty");
 
         Cm2ClusterConfig decode_cm2_config;
         try {
             FromJsonString(decode_cm2_config, decode_cm2_config_str);
         } catch (autil::legacy::ExceptionBase& e) {
-            RTP_LLM_CHECK_WITH_INFO("create json from str[%s] failed", decode_cm2_config_str.c_str());
+            RTP_LLM_CHECK_WITH_INFO(false, "create json from str[%s] failed", decode_cm2_config_str.c_str());
         }
         decode_cluster_name_ = decode_cm2_config.cluster_name;
         CM2SubscribeServiceConfig cm2_service_config;
@@ -191,9 +190,32 @@ ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> 
 }
 
 void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context) {
+    RTP_LLM_LOG_DEBUG("request [%ld] trans query", prefill_context.request_id);
+    auto input                            = QueryConverter::transQuery(prefill_context.rpc_context.request);
+    input->generate_config->pd_separation = true;
+    if (engine_->isMTPEagle()) {
+        input->generate_config->force_disable_sp_run = false;
+    } else {
+        input->generate_config->force_disable_sp_run = true;
+    }
+    prefill_context.generate_input = input;
+
     RTP_LLM_LOG_DEBUG("request [%ld] get rpc connection", prefill_context.request_id);
-    auto host = load_balancer_->chooseHost(decode_cluster_name_,
-                                           prefill_context.rpc_context.request->generate_config().global_request_id());
+
+    auto&                       role_addrs = prefill_context.generate_input->generate_config->role_addrs;
+    std::shared_ptr<const Host> host;
+    for (auto& role_addr : role_addrs) {
+        if (role_addr.role == RoleType::DECODE) {
+            host = std::make_shared<const Host>(role_addr.ip, role_addr.grpc_port, role_addr.http_port);
+            break;
+        }
+    }
+
+    if (!host) {
+        host = load_balancer_->chooseHost(decode_cluster_name_,
+                                          prefill_context.rpc_context.request->generate_config().global_request_id());
+    }
+
     if (!host || host->ip.empty()) {
         prefill_context.error_info =
             ErrorInfo(ErrorCode::GET_HOST_FAILED, "get host for decode cluster " + decode_cluster_name_ + " failed");
@@ -215,15 +237,7 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
 }
 
 void PrefillRpcServer::multimodalProcess(PrefillGenerateContext& prefill_context) {
-    auto input                            = QueryConverter::transQuery(prefill_context.rpc_context.request);
-    input->generate_config->pd_separation = true;
-    if (engine_->isMTPEagle()) {
-        input->generate_config->force_disable_sp_run = false;
-    } else {
-        input->generate_config->force_disable_sp_run = true;
-    }
-    prefill_context.generate_input = input;
-
+    auto& input = prefill_context.generate_input;
     if (mm_processor_ != nullptr && input->multimodal_inputs) {
         auto result = mm_processor_->updateMultimodalFeatures(input);
         CLIENT_GRPC_RET_IF_ERROR(prefill_context, result.ok(), result.code());
@@ -253,7 +267,11 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     GenerateRequestPB alloc_request;
     alloc_request.set_stage(RemoteStage::ALLOCATE);
     alloc_request.set_client_id(process_id_);
-    alloc_request.set_request_id(prefill_context.request_id);
+    // alloc_request.set_request_id(prefill_context.request_id);
+    auto inter_request_id = prefill_context.generate_input->generate_config->inter_request_id;
+    auto real_request_id  = inter_request_id != -1 ? inter_request_id : prefill_context.request_id;
+    RTP_LLM_LOG_DEBUG("inter_request_id is %d, real_request_id is %d", inter_request_id, real_request_id);
+    alloc_request.set_request_id(real_request_id);
     // TODO(xinfei.sxf) reduce copy
     GenerateInputPB* new_request = new GenerateInputPB(*prefill_context.rpc_context.request);
     alloc_request.set_allocated_input(new_request);
@@ -326,7 +344,7 @@ void PrefillRpcServer::remoteLoadCacheEnd(PrefillGenerateContext& prefill_contex
 void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
     RTP_LLM_LOG_DEBUG("request [%ld] start to remote generate", prefill_context.request_id);
     std::shared_ptr<GenerateStream> stream = prefill_context.getStream();
-    RTP_LLM_LOG_DEBUG("remote generate stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
+    RTP_LLM_LOG_DEBUG("remote generate stream[%ld]: %s", stream->streamId(), stream->debugString().c_str());
     vector<int> all_token   = stream->currentExecuteTokens();
     int         first_token = all_token[all_token.size() - 1];
     RTP_LLM_LOG_DEBUG("first token token id %d", first_token);
@@ -385,15 +403,6 @@ grpc::Status PrefillRpcServer::prepareAllocateResource(PrefillGenerateContext& p
     return grpc::Status::OK;
 }
 
-EngineScheduleInfo PrefillRpcServer::getEngineScheduleInfo() {
-    auto info               = meta_->getEngineScheduleInfo();
-    auto last_schedule_time = engine_->getLastScheduleTime();
-    // in case last_schedule_delta is negative
-    info.last_schedule_delta =
-        std::max((int64_t)0, autil::TimeUtility::currentTimeInMilliSeconds() - last_schedule_time);
-    return info;
-}
-
 grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*                   server_context,
                                                   const GenerateInputPB*                 request,
                                                   grpc::ServerWriter<GenerateOutputsPB>* writer) {
@@ -439,8 +448,8 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
         EXECUTE_STAGE_FUNC(enqueueRequest, prefill_context);
         EXECUTE_STAGE_FUNC(remoteLoadCacheStart, prefill_context);
         EXECUTE_STAGE_FUNC(pollLocalOutput, prefill_context);
-        meta_->dequeue(prefill_context.request_id, prefill_context.getStream());
         EXECUTE_STAGE_FUNC(remoteLoadCacheEnd, prefill_context);
+        meta_->dequeue(prefill_context.request_id, prefill_context.getStream());
         EXECUTE_STAGE_FUNC(remoteGenerate, prefill_context);
         EXECUTE_STAGE_FUNC(pollRemoteOutput, prefill_context);
         prefill_context.stat_info.nextStage();

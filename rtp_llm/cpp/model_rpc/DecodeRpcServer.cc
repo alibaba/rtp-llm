@@ -88,11 +88,11 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
 
 void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
     RTP_LLM_LOG_DEBUG("request [%s] start to allocate resource", decode_context.request_key.c_str());
-    auto input           = QueryConverter::transQuery(&decode_context.allocate_request.input());
-    auto generate_stream = engine_->makeStream(input);
-    decode_context.setStream(generate_stream);
+    auto input                        = QueryConverter::transQuery(&decode_context.allocate_request.input());
+    auto generate_stream              = engine_->makeStream(input);
     decode_context.request_timeout_ms = generate_stream->getTimeoutMs();
     auto status                       = generate_stream->initKVBlock(0);
+    decode_context.setStream(generate_stream);
     if (!status.ok()) {
         string error_msg = "request: [" + decode_context.request_key + "] malloc kv cache block failed at decode node";
         RTP_LLM_LOG_ERROR(error_msg);
@@ -178,6 +178,8 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                          dynamic_cast<grpc::internal::WriterInterface<GenerateOutputsPB>*>(grpc_stream),
                          generate_stream);
     decode_context.time_info.updateGenerateEndTime();
+    meta_->dequeue(decode_context.request_id, decode_context.getStream());
+
     RTP_LLM_LOG_DEBUG("request [%s] local generate done", decode_context.request_key.c_str());
 }
 
@@ -540,6 +542,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     for (int i = 0; i < load_context.peer_addrs.size(); i++) {
         auto&                                            peer_addr = load_context.peer_addrs[i];
         std::vector<std::shared_ptr<RequestBlockBuffer>> layer_caches;
+        RTP_LLM_LOG_DEBUG("load context request id is %d", load_context.request_id);
 
         for (size_t layer_id = 0; layer_id < layer_num; layer_id++) {
             auto request_key = std::to_string(load_context.request_id) + "-" + std::to_string(layer_id);
@@ -708,8 +711,8 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
     AtomicGuard      request_guard(onflight_requests_);
     DecodeRpcContext rpc_context{grpc_stream};
     // TODO(xinfei.sxf) request id is 0 here
-    auto decode_context                   = DecodeGenerateContext(rpc_context, 0, server_context, metrics_reporter_);
-    decode_context.onflight_requests      = onflight_requests_;
+    auto decode_context              = DecodeGenerateContext(rpc_context, 0, server_context, metrics_reporter_, meta_);
+    decode_context.onflight_requests = onflight_requests_;
     decode_context.loading_cache_requests = loading_cache_requests_;
 
     auto max_retry_times      = maga_init_params_.gpt_init_parameter.decode_retry_times_;

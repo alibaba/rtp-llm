@@ -8,7 +8,7 @@ namespace rtp_llm {
 grpc::Status RemoteRpcServiceImpl::init(const EngineInitParams&                                maga_init_params,
                                         py::object                                             mm_process_engine,
                                         std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params) {
-    if (maga_init_params.gpt_init_parameter.pd_separation_ == true) {
+    if (maga_init_params.gpt_init_parameter.role_type_ == RoleType::PREFILL) {
         prefill_server_ = std::make_shared<PrefillRpcServer>();
         local_server_   = prefill_server_;
         return prefill_server_->init(maga_init_params, mm_process_engine, std::move(propose_params));

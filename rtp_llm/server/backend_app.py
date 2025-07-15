@@ -18,6 +18,7 @@ from fastapi import Request as RawRequest
 from fastapi import status
 from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import ORJSONResponse
 from typing_extensions import override
 from uvicorn import Config, Server
 from uvicorn.loops.auto import auto_loop_setup
@@ -25,12 +26,13 @@ from uvicorn.loops.auto import auto_loop_setup
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.py_config_modules import PyEnvConfigs, StaticConfig
 from rtp_llm.config.uvicorn_config import UVICORN_LOGGING_CONFIG
-from rtp_llm.distribute.worker_info import g_parallel_info, g_worker_info
+from rtp_llm.distribute.worker_info import WorkerInfo, g_parallel_info, g_worker_info
 from rtp_llm.embedding.backend_embedding_app import register_backend_embedding_api
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.server.backend_server import BackendServer
 from rtp_llm.server.misc import check_is_master, check_is_worker
+from rtp_llm.server.worker_status import CacheStatus, TaskInfo, WorkStatus
 from rtp_llm.utils.util import AtomicCounter
 from rtp_llm.utils.version_info import VersionInfo
 
@@ -64,9 +66,9 @@ class BackendApp(object):
         self.py_env_configs = py_env_configs
         self.backend_server = BackendServer(py_env_configs)
 
-    def start(self):
+    def start(self, worker_info: WorkerInfo):
         self.backend_server.start(self.py_env_configs)
-        app = self.create_app()
+        app = self.create_app(worker_info)
         self.backend_server.wait_all_worker_ready()
 
         timeout_keep_alive = self.py_env_configs.server_config.timeout_keep_alive
@@ -82,7 +84,7 @@ class BackendApp(object):
             app,
             host="0.0.0.0",
             loop=loop,
-            port=g_worker_info.backend_server_port,
+            port=worker_info.backend_server_port,
             log_config=UVICORN_LOGGING_CONFIG,
             timeout_keep_alive=timeout_keep_alive,
             h11_max_incomplete_event_size=MAX_INCOMPLETE_EVENT_SIZE,
@@ -96,7 +98,7 @@ class BackendApp(object):
             self.backend_server.stop()
             raise e
 
-    def create_app(self):
+    def create_app(self, worker_info: WorkerInfo):
         middleware = [
             Middleware(
                 CORSMiddleware,
@@ -141,7 +143,7 @@ class BackendApp(object):
         @app.get("/status")
         @app.post("/status")
         @app.post("/health_check")
-        async def health():
+        async def health_check():
             check_shutdown()
             return "ok"
 
@@ -150,12 +152,18 @@ class BackendApp(object):
             check_shutdown()
             return {"status": "home"}
 
-        @app.get("/worker_status")
-        def worker_status():
+        @app.post("/worker_status")
+        def worker_status(req: Dict[str, Any]):
             check_shutdown()
+            latest_cache_version: int = int(req.get("latest_cache_version", -1))
+            latest_finised_version: int = int(req.get("latest_finised_version", -1))
             load_balance_version = 0
-            load_balance_info = self.backend_server.get_load_balance_info()
-            engine_schedule_info = self.backend_server.get_engine_schedule_info()
+            load_balance_info = self.backend_server.get_load_balance_info(
+                latest_cache_version
+            )
+            engine_schedule_info = self.backend_server.get_engine_schedule_info(
+                latest_finised_version
+            )
             available_concurrency = (
                 self.backend_server._global_controller.get_available_concurrency()
             )
@@ -169,39 +177,68 @@ class BackendApp(object):
                 available_concurrency = load_balance_info.step_per_minute
                 # when use new version available_concurrency need set new load_balance_version
                 load_balance_version = 1
+            cache_status = load_balance_info.cache_status
 
-            return {
-                "backend_available_concurrency": backend_available_concurrency,
-                "available_concurrency": available_concurrency,
-                "available_kv_cache": load_balance_info.available_kv_cache,
-                "total_kv_cache": load_balance_info.total_kv_cache,
-                "step_latency_ms": load_balance_info.step_latency_us / 1000,
-                "step_per_minute": load_balance_info.step_per_minute,
-                "onflight_requests": load_balance_info.onflight_requests,
-                "iterate_count": load_balance_info.iterate_count,
-                "waiting_query_len": load_balance_info.waiting_query_len,
-                "running_query_len": load_balance_info.running_query_len,
-                "version": load_balance_version,
-                "alive": True,
-                "running_task_list": [
-                    {
-                        "request_id": task.request_id,
-                        "prefix_length": task.prefix_length,
-                        "input_length": task.input_length,
-                    }
+            worker_status: WorkStatus = WorkStatus(
+                role=self.backend_server.role_type,
+                server_port=worker_info.server_port,
+                http_port=worker_info.http_port,
+                grpc_port=worker_info.rpc_server_port,
+                available_concurrency=available_concurrency,
+                cache_status=CacheStatus(
+                    # cached_keys=(
+                    #     cache_status.cached_keys
+                    #     if latest_cache_version < cache_status.version
+                    #     else None
+                    # ),
+                    available_kv_cache=cache_status.available_kv_cache,
+                    total_kv_cache=cache_status.total_kv_cache,
+                    block_size=cache_status.block_size,
+                    version=cache_status.version,
+                ),
+                running_task_info=[
+                    TaskInfo(
+                        **{
+                            "request_id": task.request_id,
+                            "inter_request_id": task.inter_request_id,
+                            "prefix_length": task.prefix_length,
+                            "input_length": task.input_length,
+                            "waiting_time_ms": task.waiting_time_ms,
+                            "iterate_count": task.iterate_count,
+                            "end_time_ms": task.end_time_ms,
+                            "dp_rank": self.backend_server.dp_rank,
+                        }
+                    )
                     for task in engine_schedule_info.running_task_info_list
                 ],
-                "finished_task_list": [
-                    {
-                        "request_id": task.request_id,
-                        "prefix_length": task.prefix_length,
-                        "input_length": task.input_length,
-                    }
+                finished_task_list=[
+                    TaskInfo(
+                        **{
+                            "request_id": task.request_id,
+                            "inter_request_id": task.inter_request_id,
+                            "prefix_length": task.prefix_length,
+                            "input_length": task.input_length,
+                            "waiting_time_ms": task.waiting_time_ms,
+                            "iterate_count": task.iterate_count,
+                            "end_time_ms": task.end_time_ms,
+                            "dp_rank": self.backend_server.dp_rank,
+                        }
+                    )
                     for task in engine_schedule_info.finished_task_info_list
+                    if task.end_time_ms > latest_finised_version
                 ],
-                "last_schedule_delta": engine_schedule_info.last_schedule_delta,
-                "machine_info": self.backend_server.model_runtime_meta(),
-            }
+                profile_meta=None,
+                waiting_query_len=load_balance_info.waiting_query_len,
+                running_query_len=load_balance_info.running_query_len,
+                step_latency_ms=float(load_balance_info.step_latency_us / 1000),
+                iterate_count=load_balance_info.iterate_count,
+                dp_size=self.backend_server.dp_size,
+                tp_size=self.backend_server.tp_size,
+                version=load_balance_version,
+                status_version=int(time.time() * 1000),
+                alive=True,
+            )
+            return ORJSONResponse(content=worker_status.model_dump(exclude_none=True))
 
         # entry for worker RANK != 0
         @app.post("/inference_internal")

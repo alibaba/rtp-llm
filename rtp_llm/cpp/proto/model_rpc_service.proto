@@ -26,6 +26,20 @@ message IntMatrix {
   repeated IntVector rows = 1;
 }
 
+message RoleAddrPB {
+    enum RoleType {
+        PDFUSION = 0;
+        PREFILL = 1;
+        DECODE = 2;
+        VIT = 3;
+        FRONTEND = 4;
+    }
+    RoleType role = 1;
+    string ip = 2;
+    int32 http_port = 3;
+    int32 grpc_port = 4;
+}
+
 message GenerateConfigPB {
     int32 max_new_tokens = 1;
     int32 num_beams = 2;
@@ -68,6 +82,9 @@ message GenerateConfigPB {
     int32 hidden_states_cut_dim = 38;
     bool normalized_hidden_states = 39;
     int32 profile_step = 40;
+
+    repeated RoleAddrPB role_addrs = 41;
+    int64 inter_request_id = 42;
 }
 
 message MMPreprocessConfigPB {

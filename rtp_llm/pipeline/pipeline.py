@@ -65,6 +65,7 @@ class Pipeline(object):
         model_cls: Union["BaseModel", BaseModel],
         model_config: GptInitModelParameters,
         tokenizer: Optional[PreTrainedTokenizerBase],
+        separated_frontend: bool = False,
     ):
         self.model_cls = model_cls
         self.model_config = model_config
@@ -74,7 +75,9 @@ class Pipeline(object):
             "default_mm_token", ""
         )
         self.piple_funcs: PipelineCustomFunc = get_piple_custom_func(self.model_cls)
-        self.backend_rpc_server_visitor = BackendRPCServerVisitor(model_config)
+        self.backend_rpc_server_visitor = BackendRPCServerVisitor(
+            model_config, separated_frontend
+        )
 
     def stop(self):
         if isinstance(self.model_cls, AsyncModel):
@@ -401,7 +404,7 @@ class Pipeline(object):
         stop_word_id_slices = get_stop_word_slices(stop_word_ids)
 
         stream: AsyncGenerator[GenerateOutputs, None] = (
-            self.backend_rpc_server_visitor.enqueue(input)
+            await self.backend_rpc_server_visitor.enqueue(input)
         )
 
         decoding_states: List[DecodingState] = []

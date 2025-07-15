@@ -15,6 +15,7 @@
 #include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "kmonitor/client/MetricsReporter.h"
+#include "rtp_llm/cpp/dataclass/KvCacheInfo.h"
 
 namespace rtp_llm {
 
@@ -22,11 +23,6 @@ namespace threefs {
 class ThreeFSCacheManager;
 }  // namespace threefs
 using namespace rtp_llm::threefs;
-
-struct KVCacheInfo {
-    size_t available_kv_cache;
-    size_t total_kv_cache;
-};
 
 class CacheManager {
 public:
@@ -117,7 +113,7 @@ public:
     const CacheConfig&   cacheConfig() const;
     size_t               freeBlockNums() const;
     size_t               availableBlockNums() const;
-    KVCacheInfo          getKVCacheInfo() const;
+    KVCacheInfo          getKVCacheInfo(int64_t latest_version) const;
     uint32_t             maxSeqLen() const;
     const KVCacheBuffer& kvCacheBuffer() const;
 

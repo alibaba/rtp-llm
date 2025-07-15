@@ -188,7 +188,8 @@ void DeviceBase::writeCacheStore(const WriteCacheParams& params) {
                         / seq_size_per_block;
         auto request_id     = *(param.request_id->dataWithOffset<int64_t>(batch_id));
         auto request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), createEvent());
-        RTP_LLM_LOG_DEBUG("write cache store, blocks num is %ld", block_num + reuse_block_num);
+        RTP_LLM_LOG_DEBUG(
+            "write cache store, request id is %d, blocks num is %ld", request_id, block_num + reuse_block_num);
         for (size_t index = 0; index < block_num + reuse_block_num; index++) {
             auto cache_key = makeCacheKey(
                 params.common.model_id, param.cache_keys[batch_id * max_blocks_per_batch + index], param.layer_id);

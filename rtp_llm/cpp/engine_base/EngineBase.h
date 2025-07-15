@@ -61,7 +61,7 @@ public:
     virtual absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>& generate_input,
                                                      preRunMode                            mode) = 0;
 
-    virtual LoadBalanceInfo getLoadBalanceInfo() {
+    virtual LoadBalanceInfo getLoadBalanceInfo(int64_t latest_version) {
         return LoadBalanceInfo();
     }
 

@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, Optional
+from typing import AsyncGenerator, Dict, List, Optional
 
 import torch
 
@@ -7,17 +7,116 @@ from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient
-from rtp_llm.models.base_model import GenerateInput
+from rtp_llm.metrics import kmonitor
+from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
+from rtp_llm.models.base_model import GenerateInput, GenerateOutputs
+from rtp_llm.ops.rtp_llm.rtp_llm_op import get_block_cache_keys
+from rtp_llm.server.host_service import HostService
+from rtp_llm.server.master_client import MasterClient
+from rtp_llm.server.misc import format_exception
+from rtp_llm.utils.time_util import Timer
+
+route_logger = logging.getLogger("route_logger")
 
 
 class BackendRPCServerVisitor:
-    def __init__(self, model_config: GptInitModelParameters) -> None:
+    def __init__(
+        self, model_config: GptInitModelParameters, separated_frontend: bool = False
+    ) -> None:
         self.config = model_config
         assert self.config.max_seq_len > 0
         self.model_rpc_client = ModelRpcClient(self.config)
+        self.host_service = HostService()
+        self.master_client = MasterClient()
+        self.separated_frontend = separated_frontend
 
-    @torch.no_grad()
-    def enqueue(self, input: GenerateInput):
+    async def get_master_route_addrs(self, master_addr: str, input: GenerateInput):
+        token_ids = []
+        if len(input.token_ids.shape) == 2:
+            token_ids: List[int] = input.token_ids.tolist()[0]  # type: ignore
+        else:
+            token_ids: List[int] = input.token_ids.tolist()  # type: ignore
+        block_cache_keys = get_block_cache_keys(
+            token_ids, self.config.seq_size_per_block
+        )
+
+        try:
+            # TODO(yinzhi): support debug
+            role_addrs, inter_request_id = (
+                await self.master_client.get_backend_role_addrs(
+                    master_addr=master_addr,
+                    block_cache_keys=block_cache_keys,
+                    seq_len=input.prompt_length,
+                    debug=False,
+                )
+            )
+        except BaseException as e:
+            exception_json = format_exception(e)
+            error_code_str = exception_json.get("error_code_str", "")
+            kmonitor.report(
+                AccMetrics.MASTER_ROUTE_ERROR_QPS_METRIC,
+                1,
+                {"error_code": error_code_str},
+            )
+            raise e
+
+        if not role_addrs:
+            route_logger.error(
+                f"master route failed, request <{input.request_id}> no role addresses returned"
+            )
+        else:
+            input.generate_config.role_addrs = role_addrs
+            input.generate_config.inter_request_id = inter_request_id
+            route_logger.info(
+                f"master route success, request <{input.request_id}> route to address: {role_addrs}, inter_request_id: {inter_request_id}"
+            )
+            kmonitor.report(AccMetrics.MASTER_ROUTE_QPS_METRIC, 1)
+
+    async def get_domain_route_addrs(self, input: GenerateInput):
+        role_addrs = self.host_service.get_backend_role_addrs()
+        if role_addrs:
+            input.generate_config.role_addrs = role_addrs
+            route_logger.info(
+                f"fallback to host service, request <{input.request_id}> route to address: {role_addrs}"
+            )
+            kmonitor.report(
+                AccMetrics.DOMAIN_ROUTE_QPS_METRIC,
+                1,
+            )
+
+    async def route_ips(self, input: GenerateInput):
+        with Timer() as route_timer:
+            master_addr = self.host_service.get_master_addr()
+            route_logger.info(f"routing to master: {master_addr}")
+            # master don't support schedule batched input yet
+            input_token_batched = False
+            if len(input.token_ids.shape) == 2 and input.token_ids.size(0) != 1:
+                input_token_batched = True
+
+            if master_addr and not input_token_batched:
+                with Timer() as master_route_timer:
+                    await self.get_master_route_addrs(master_addr, input)
+                kmonitor.report(
+                    GaugeMetrics.MASTER_ROUTE_RT_METRIC, master_route_timer.cost_ms()
+                )
+            if not input.generate_config.role_addrs:
+                with Timer() as domain_route_timer:
+                    await self.get_domain_route_addrs(input)
+                kmonitor.report(
+                    GaugeMetrics.DOMAIN_ROUTE_RT_METRIC, domain_route_timer.cost_ms()
+                )
+            route_logger.info(f"routing to master done")
+        kmonitor.report(GaugeMetrics.ROUTE_RT_METRIC, route_timer.cost_ms())
+        if self.separated_frontend and not input.generate_config.role_addrs:
+            raise FtRuntimeException(
+                ExceptionType.ROUTE_ERROR,
+                f"request <{input.request_id}> no backend role addresses found after routing",
+            )
+
+    @torch.inference_mode()
+    async def enqueue(
+        self, input: GenerateInput
+    ) -> AsyncGenerator[GenerateOutputs, None]:
         if input.prompt_length <= 0:
             raise FtRuntimeException(
                 ExceptionType.LONG_PROMPT_ERROR,
@@ -33,4 +132,8 @@ class BackendRPCServerVisitor:
                 f"model max tokens is {self.config.max_seq_len}, "
                 f"request length is {input.prompt_length}, max_new_tokens is {max_new_tokens}",
             )
+
+        if self.host_service.service_available:
+            await self.route_ips(input)
+
         return self.model_rpc_client.enqueue(input)

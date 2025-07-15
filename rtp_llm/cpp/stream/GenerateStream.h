@@ -371,6 +371,10 @@ public:
         return generate_input_->generate_config->force_sp_accept;
     }
 
+    int64_t interRequestId() const {
+        return generate_input_->generate_config->inter_request_id;
+    }
+
     ThinkModeLogitsProcessorPtr getThinkLogitsProcessor() {
         return think_logits_processor_ptr_;
     }
@@ -476,7 +480,6 @@ protected:
 
     bool          last_block_aligned_   = false;
     volatile bool need_remote_generate_ = false;
-    bool          use_cache_store_      = false;
 
     bool gen_timeline_ = false;
 

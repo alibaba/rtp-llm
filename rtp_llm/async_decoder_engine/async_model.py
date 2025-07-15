@@ -23,6 +23,7 @@ class AsyncModel:
         self.propose_model = propose_model
         self.config = model.config
         self.model_runtime_meta = self._model_runtime_meta()
+        self.role_type = str(model.config.role_type)
 
         assert self.config.max_seq_len > 0
         self.tokenizer = model.tokenizer
@@ -78,8 +79,10 @@ class AsyncModel:
             )
         return self.decoder_engine_.decode(input)
 
-    def get_load_balance_info(self) -> LoadBalanceInfo:
-        return self.decoder_engine_.get_load_balance_info()
+    def get_load_balance_info(self, latest_cache_version: int) -> LoadBalanceInfo:
+        return self.decoder_engine_.get_load_balance_info(latest_cache_version)
 
-    def get_engine_schedule_info(self) -> EngineScheduleInfo:
-        return self.decoder_engine_.get_engine_schedule_info()
+    def get_engine_schedule_info(
+        self, latest_finised_version: int
+    ) -> EngineScheduleInfo:
+        return self.decoder_engine_.get_engine_schedule_info(latest_finised_version)

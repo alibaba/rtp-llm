@@ -1,7 +1,7 @@
 #pragma once
 
 #include "grpc++/grpc++.h"
-#include "rtp_llm/cpp/model_rpc/PrefillRpcServerRuntimeMeta.h"
+#include "rtp_llm/cpp/model_rpc/RpcServerRuntimeMeta.h"
 #include "rtp_llm/cpp/disaggregate/load_balancer/RRLoadBalancer.h"
 #include "rtp_llm/cpp/disaggregate/load_balancer/WRRLoadBalancer.h"
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServer.h"
@@ -24,8 +24,6 @@ public:
     grpc::Status RemoteFinish(grpc::ServerContext* context, const RemoteFinishRequestPB* request, EmptyPB* response);
     bool         ready();
 
-    EngineScheduleInfo getEngineScheduleInfo() override;
-
 private:
     void                   initLoadBalancer();
     LoadBalancerInitParams makeConfig();
@@ -42,9 +40,8 @@ private:
     void                   pollRemoteOutput(PrefillGenerateContext& prefill_context);
 
 private:
-    std::shared_ptr<BaseLoadBalancer>            load_balancer_;
-    std::string                                  decode_cluster_name_;
-    std::shared_ptr<PrefillRpcServerRuntimeMeta> meta_;
+    std::shared_ptr<BaseLoadBalancer> load_balancer_;
+    std::string                       decode_cluster_name_;
 };
 
 }  // namespace rtp_llm

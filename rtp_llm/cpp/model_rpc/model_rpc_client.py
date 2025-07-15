@@ -18,6 +18,7 @@ from rtp_llm.cpp.proto.model_rpc_service_pb2 import (
     GenerateOutputsPB,
     MMPreprocessConfigPB,
     MultimodalInputPB,
+    RoleAddrPB,
     TensorPB,
 )
 from rtp_llm.cpp.proto.model_rpc_service_pb2_grpc import RpcServiceStub
@@ -34,6 +35,7 @@ from rtp_llm.models.base_model import (
     GenerateInput,
     GenerateOutput,
     GenerateOutputs,
+    RoleType,
 )
 from rtp_llm.utils.concurrency_controller import (
     ConcurrencyException,
@@ -48,6 +50,19 @@ MAX_GRPC_TIMEOUT_SECONDS = 3600
 class StreamState:
     def __init__(self):
         self.cached_logits_dict = {}
+
+
+def trans_role_type(role_type: RoleType) -> RoleAddrPB.RoleType:
+    if role_type == RoleType.PDFUSION:
+        return RoleAddrPB.RoleType.PDFUSION
+    elif role_type == RoleType.PREFILL:
+        return RoleAddrPB.RoleType.PREFILL
+    elif role_type == RoleType.DECODE:
+        return RoleAddrPB.RoleType.DECODE
+    elif role_type == RoleType.VIT:
+        return RoleAddrPB.RoleType.VIT
+    elif role_type == RoleType.FRONTEND:
+        return RoleAddrPB.RoleType.FRONTEND
 
 
 def trans_input(input_py: GenerateInput):
@@ -126,10 +141,20 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.gen_timeline = input_py.generate_config.gen_timeline
     generate_config_pb.profile_step = input_py.generate_config.profile_step
     generate_config_pb.global_request_id = input_py.generate_config.global_request_id
+    generate_config_pb.inter_request_id = input_py.generate_config.inter_request_id
 
     for i in range(len(input_py.generate_config.stop_words_list)):
         stop_words = generate_config_pb.stop_words_list.rows.add()
         stop_words.values.extend(input_py.generate_config.stop_words_list[i])
+
+    for role_addr in input_py.generate_config.role_addrs:
+        role_addr_pb = RoleAddrPB()
+        role_addr_pb.role = trans_role_type(role_addr.role)
+        role_addr_pb.ip = role_addr.ip
+        role_addr_pb.http_port = role_addr.http_port
+        role_addr_pb.grpc_port = role_addr.grpc_port
+
+        generate_config_pb.role_addrs.append(role_addr_pb)
 
     return input_pb
 
@@ -269,13 +294,23 @@ class ModelRpcClient(object):
         input_pb = trans_input(input_py)
         response_iterator = None
         stream_state = StreamState()
+
+        address_list = self._addresses
+        for role_addr in input_py.generate_config.role_addrs:
+            if (
+                role_addr.role == RoleType.PREFILL
+                or role_addr.role == RoleType.PDFUSION
+            ):
+                if role_addr.ip != "":
+                    address_list = [role_addr.ip + ":" + str(role_addr.grpc_port)]
+                    break
+
         try:
             options = [
                 ("grpc.max_metadata_size", 1024 * 1024 * 1024),
             ]
             async with grpc.aio.insecure_channel(
-                self._addresses[input_py.request_id % len(self._addresses)],
-                options=options,
+                address_list[input_py.request_id % len(address_list)], options=options
             ) as channel:
                 stub = RpcServiceStub(channel)
                 response_iterator = stub.GenerateStreamCall(

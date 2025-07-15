@@ -14,6 +14,7 @@ namespace rtp_llm {
 grpc::Status LocalRpcServer::init(const EngineInitParams&                       maga_init_params,
                                   py::object                                    mm_process_engine,
                                   std::unique_ptr<ProposeModelEngineInitParams> propose_params) {
+    meta_.reset(new RpcServerRuntimeMeta());
     maga_init_params_ = maga_init_params;
     metrics_reporter_ = maga_init_params.metrics_reporter;
 
@@ -123,7 +124,7 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     auto        request_id = request->request_id();
     RTP_LLM_LOG_DEBUG("receive request %ld", request_id);
     auto generate_context =
-        GenerateContext(request_id, request->generate_config().timeout_ms(), context, metrics_reporter_);
+        GenerateContext(request_id, request->generate_config().timeout_ms(), context, metrics_reporter_, meta_);
     auto input = QueryConverter::transQuery(request);
 
     // need to check client has buffer at first
@@ -139,15 +140,17 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     auto lora_guard = lora::LoraResourceGuard(engine_->getLoraManager(), input->generate_config->adapter_name);
     RTP_LLM_LOG_DEBUG("request [%ld] trans to stream success", request_id);
     generate_context.setStream(engine_->enqueue(input));
+
     RTP_LLM_LOG_DEBUG("request [%ld] enqueue success", request_id);
 
     generate_context.error_status =
         pollStreamOutput(context, generate_context.request_key, writer, generate_context.getStream());
+    meta_->dequeue(generate_context.request_id, generate_context.getStream());
     return generate_context.error_status;
 }
 
-LoadBalanceInfo LocalRpcServer::getLoadBalanceInfo() {
-    return engine_->getLoadBalanceInfo();
+LoadBalanceInfo LocalRpcServer::getLoadBalanceInfo(int64_t latest_version) {
+    return engine_->getLoadBalanceInfo(latest_version);
 }
 
 void LocalRpcServer::addLora(const std::string&                        adapter_name,
@@ -161,6 +164,15 @@ void LocalRpcServer::removeLora(const std::string& adapter_name) {
 
 size_t LocalRpcServer::onflightRequestNum() {
     return onflight_requests_;
+}
+
+EngineScheduleInfo LocalRpcServer::getEngineScheduleInfo(int64_t latest_finised_version) {
+    auto info               = meta_->getEngineScheduleInfo(latest_finised_version);
+    auto last_schedule_time = engine_->getLastScheduleTime();
+    // in case last_schedule_delta is negative
+    info.last_schedule_delta =
+        std::max((int64_t)0, autil::TimeUtility::currentTimeInMilliSeconds() - last_schedule_time);
+    return info;
 }
 
 ::grpc::Status LocalRpcServer::RemoteGetCache(::grpc::ServerContext*              context,

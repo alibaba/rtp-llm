@@ -4,7 +4,7 @@
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/RPCPool.h"
 #include "rtp_llm/cpp/model_rpc/GenerateContext.h"
-#include "rtp_llm/cpp/model_rpc/PrefillRpcServerRuntimeMeta.h"
+#include "rtp_llm/cpp/model_rpc/RpcServerRuntimeMeta.h"
 #include "rtp_llm/cpp/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/model_rpc/RemoteServerResource.h"
@@ -55,23 +55,21 @@ struct RPCContext {
 
 class PrefillGenerateContext: public GenerateContext {
 public:
-    PrefillGenerateContext(RemoteServerResource*                        resource,
-                           RPCContext&                                  rpc_context,
-                           int64_t                                      timeout_ms,
-                           grpc::ServerContext*                         server_context,
-                           kmonitor::MetricsReporterPtr&                metrics_reporter,
-                           std::shared_ptr<PrefillRpcServerRuntimeMeta> meta):
-        GenerateContext(rpc_context.requestID(), timeout_ms, server_context, metrics_reporter),
+    PrefillGenerateContext(RemoteServerResource*                 resource,
+                           RPCContext&                           rpc_context,
+                           int64_t                               timeout_ms,
+                           grpc::ServerContext*                  server_context,
+                           kmonitor::MetricsReporterPtr&         metrics_reporter,
+                           std::shared_ptr<RpcServerRuntimeMeta> meta):
+        GenerateContext(rpc_context.requestID(), timeout_ms, server_context, metrics_reporter, meta),
         resource(resource),
-        rpc_context(rpc_context),
-        meta(meta) {
+        rpc_context(rpc_context) {
         for (auto& worker : resource->workers) {
             prefill_worker_cache_store_addrs.push_back(worker);
         }
     }
     ~PrefillGenerateContext();
     void         reset() override;
-    void         setStream(const std::shared_ptr<GenerateStream>& stream) override;
     void         nextStage();
     grpc::Status closeGrpcStream();
     void         closeGrpcConnection();
@@ -84,11 +82,9 @@ private:
 public:
     typedef grpc::ClientReaderWriter<GenerateRequestPB, GenerateOutputsPB> ClientStream;
 
-    RemoteServerResource*                        resource;
-    RPCContext                                   rpc_context;
-    std::shared_ptr<GenerateInput>               generate_input;
-    std::shared_ptr<PrefillRpcServerRuntimeMeta> meta;
-
+    RemoteServerResource*                resource;
+    RPCContext                           rpc_context;
+    std::shared_ptr<GenerateInput>       generate_input;
     std::string                          decode_addr;
     std::vector<std::string>             prefill_worker_cache_store_addrs;
     GrpcConnection                       grpc_connection;

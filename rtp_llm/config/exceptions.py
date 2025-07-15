@@ -17,6 +17,7 @@ class ExceptionType(IntEnum):
     ERROR_GENERATE_CONFIG_FORMAT = 604
     INVALID_PARAMS = 605
     EXECUTION_EXCEPTION = 606
+    EXCEEDS_KV_CACHE_MAX_LEN = 607
 
     # Error codes starting from 8000 can be retried
     CANCELLED = 8100
@@ -24,7 +25,6 @@ class ExceptionType(IntEnum):
     OUTPUT_QUEUE_FULL = 8102
     OUTPUT_QUEUE_IS_EMPTY = 8103
     FINISHED = 8104
-    EXCEEDS_KV_CACHE_MAX_LEN = 8105
 
     # rpc error
     GET_HOST_FAILED = 8200
@@ -53,6 +53,12 @@ class ExceptionType(IntEnum):
     CACHE_STORE_LOAD_BUFFER_TIMEOUT = 8307
     CACHE_STORE_LOAD_UNKNOWN_ERROR = 8308
     CACHE_STORE_STORE_FAILED = 8309
+
+    # master error
+    MASTER_NO_AVAILABLE_WORKER = 8400
+
+    # route error
+    ROUTE_ERROR = 8500
 
     # multimodal error
     MM_LONG_PROMPT_ERROR = 901

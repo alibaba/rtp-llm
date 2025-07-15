@@ -325,8 +325,13 @@ size_t CacheManager::availableBlockNums() const {
     return available_blocks_;
 }
 
-KVCacheInfo CacheManager::getKVCacheInfo() const {
-    return {availableBlockNums() * seq_size_per_block_, totalBlocks() * seq_size_per_block_};
+KVCacheInfo CacheManager::getKVCacheInfo(int64_t latest_version) const {
+    auto snapshot = block_cache_.cacheSnapshot(latest_version);
+    return {(size_t)availableBlockNums() * seq_size_per_block_,
+            (size_t)totalBlocks() * seq_size_per_block_,
+            (size_t)seq_size_per_block_,
+            std::move(snapshot.keys),
+            snapshot.version};
 }
 
 size_t CacheManager::cacheItemNum() const {

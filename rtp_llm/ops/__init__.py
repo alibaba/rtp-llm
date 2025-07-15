@@ -115,6 +115,7 @@ try:
         HWKernelConfig,
         KVCache,
         KVCacheConfig,
+        KVCacheInfo,
         LoadBalanceInfo,
         MiscellaneousConfig,
         MlaOpsType,
@@ -130,6 +131,7 @@ try:
         PyModelInputs,
         PyModelOutputs,
         QuantAlgo,
+        RoleType,
         RtpEmbeddingOp,
         RtpLLMOp,
         SamplerConfig,
@@ -137,8 +139,10 @@ try:
         ServiceDiscoveryConfig,
         SpecialTokens,
         SpeculativeExecutionConfig,
+        get_block_cache_keys,
         get_device,
     )
+
 except BaseException as e:
     import traceback
 

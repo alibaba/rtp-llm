@@ -1,11 +1,18 @@
 #pragma once
 #include <iostream>
 #include <list>
+#include <vector>
 #include <unordered_map>
 #include <utility>
 
 template<typename KeyType, typename ValueType>
 class LRUCache {
+public:
+    struct CacheSnapshot {
+        int64_t              version;
+        std::vector<KeyType> keys;
+    };
+
 public:
     typedef typename std::list<std::pair<KeyType, ValueType>>::const_iterator CacheIterator;
     explicit LRUCache(size_t capacity): capacity_(capacity) {}
@@ -18,7 +25,7 @@ public:
 
     bool contains(const KeyType& key) const;
 
-    void printCache();
+    void printCache() const;
 
     CacheIterator begin() {
         return items_list_.begin();
@@ -40,10 +47,13 @@ public:
         return items_list_.empty();
     }
 
+    CacheSnapshot cacheSnapshot(int64_t latest_version) const;
+
 private:
     size_t                                                                                   capacity_;
     std::list<std::pair<KeyType, ValueType>>                                                 items_list_;
     std::unordered_map<KeyType, typename std::list<std::pair<KeyType, ValueType>>::iterator> cache_items_map_;
+    int64_t                                                                                  version = -1;
 };
 
 template<typename KeyType, typename ValueType>
@@ -63,6 +73,7 @@ void LRUCache<KeyType, ValueType>::put(const KeyType& key, const ValueType& valu
         // 插入新项到列表前端
         items_list_.emplace_front(key, value);
         cache_items_map_[key] = items_list_.begin();
+        version++;
     }
 }
 
@@ -86,6 +97,7 @@ std::tuple<bool, ValueType> LRUCache<KeyType, ValueType>::pop() {
     auto value = items_list_.back().second;
     items_list_.pop_back();
     cache_items_map_.erase(last);
+    version++;
     return {true, value};
 }
 
@@ -96,8 +108,21 @@ bool LRUCache<KeyType, ValueType>::contains(const KeyType& key) const {
 }
 
 template<typename KeyType, typename ValueType>
-void LRUCache<KeyType, ValueType>::printCache() {
+void LRUCache<KeyType, ValueType>::printCache() const {
     for (auto it = items_list_.begin(); it != items_list_.end(); ++it) {
         std::cout << it->first << " : " << it->second << std::endl;
     }
+}
+
+template<typename KeyType, typename ValueType>
+typename LRUCache<KeyType, ValueType>::CacheSnapshot
+LRUCache<KeyType, ValueType>::cacheSnapshot(int64_t latest_version) const {
+    std::vector<KeyType> keys;
+    keys.reserve(items_list_.size());
+    if (latest_version < version) {
+        for (const auto& item : items_list_) {
+            keys.push_back(item.first);
+        }
+    }
+    return CacheSnapshot{version, std::move(keys)};  // 移动构造避免拷贝
 }

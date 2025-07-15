@@ -45,11 +45,11 @@ def local_rank_start(global_controller: ConcurrencyController):
         g_parallel_info.reload()
         g_worker_info.reload()
         if g_parallel_info.world_size > 1:
-            setproctitle(f"maga_ft_rank-{g_parallel_info.local_rank}")
+            setproctitle(f"rtp_llm_rank-{g_parallel_info.local_rank}")
         logging.info(f"start local {g_worker_info}, {g_parallel_info}")
         set_global_controller(global_controller)
         app = BackendApp(py_env_configs)
-        app.start()
+        app.start(g_worker_info)
     except BaseException as e:
         logging.error(f"start server error: {e}, trace: {traceback.format_exc()}")
         raise e
@@ -182,7 +182,7 @@ def clear_jit_filelock():
 
 
 def start_backend_server(global_controller: ConcurrencyController):
-    setproctitle("maga_ft_backend_server")
+    setproctitle("rtp_llm_backend_server")
     os.makedirs("logs", exist_ok=True)
     load_gpu_nic_affinity()
 

@@ -100,7 +100,7 @@ class ConcurrencyLimitTest(TestCase):
         t.start()
 
     def start_backend_server(self):
-        t = Thread(target=self.backend_app.start, daemon=True)
+        t = Thread(target=self.backend_app.start, args=(g_worker_info,), daemon=True)
         t.start()
 
     def wait_server_start(self, port):

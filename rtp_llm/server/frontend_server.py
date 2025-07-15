@@ -18,6 +18,7 @@ from fastapi.responses import ORJSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from rtp_llm.access_logger.access_logger import AccessLogger
+from rtp_llm.config.generate_config import RoleType
 from rtp_llm.config.task_type import TaskType
 from rtp_llm.embedding.embedding_endpoint import EmbeddingEndpoint
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
@@ -44,12 +45,13 @@ USAGE_HEADER = "USAGE"
 
 
 class FrontendServer(object):
-    def __init__(self):
+    def __init__(self, separated_frontend: bool = False):
         self._access_logger = AccessLogger()
         self._frontend_worker = None
         self._openai_endpoint = None
         self.thread_lock_ = threading.Lock()
         self._global_controller = get_global_controller()
+        self.separated_frontend = separated_frontend
         kmonitor.init()
 
     def start(self):
@@ -58,7 +60,7 @@ class FrontendServer(object):
             logging.info("DEBUG_START_FAKE_PROCESS is set, start fake server")
             self._frontend_worker = None
         else:
-            self._frontend_worker = FrontendWorker()
+            self._frontend_worker = FrontendWorker(self.separated_frontend)
             self._openai_endpoint = None
             self.is_embedding = False
             if (
@@ -195,7 +197,6 @@ class FrontendServer(object):
             ), f"error type: {type(response)}"
             return response
 
-        is_streaming = False
         try:
             request_dict = request.model_dump(exclude_none=True)
             request_dict[request_id_field_name] = request_id
@@ -336,7 +337,7 @@ class FrontendServer(object):
         )
         return ORJSONResponse(content=complete_response)
 
-    def tokenize(self, req: Dict[str, Any]):
+    def tokenize(self, req: str | Dict[str, Any]):
         try:
             if isinstance(req, str):
                 req = json.loads(req)
@@ -369,3 +370,25 @@ class FrontendServer(object):
             return ORJSONResponse(content=response.model_dump(exclude_none=True))
         except Exception as e:
             return ORJSONResponse(format_exception(e), status_code=500)
+
+    def check_health(self):
+        assert self._frontend_worker is not None
+        backend_role_addrs = self._frontend_worker.backend_rpc_server_visitor.host_service.get_backend_role_addrs(
+            refresh=True
+        )
+        has_pdfusion = False
+        has_prefill = False
+        has_decode = False
+
+        for role_addr in backend_role_addrs:
+            if role_addr.role == RoleType.PDFUSION:
+                has_pdfusion = True
+            elif role_addr.role == RoleType.PREFILL:
+                has_prefill = True
+            elif role_addr.role == RoleType.DECODE:
+                has_decode = True
+
+        if has_pdfusion or (has_prefill and has_decode):
+            return True
+
+        return False

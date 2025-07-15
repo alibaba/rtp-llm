@@ -4,5 +4,8 @@ py_library(
     name = "server",
     srcs = glob([
         "*.py",
-    ])
+    ]),
+    deps = [
+        "//rtp_llm:vipserver"
+    ]
 )

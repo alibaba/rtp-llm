@@ -244,14 +244,15 @@ absl::Status SpeculativeEngine::initSystemPrompt() {
     return absl::OkStatus();
 }
 
-LoadBalanceInfo SpeculativeEngine::getLoadBalanceInfo() {
-    auto kv_cache_info = resource_context_.cache_manager->getKVCacheInfo();
+LoadBalanceInfo SpeculativeEngine::getLoadBalanceInfo(int64_t latest_version) {
+    auto kv_cache_info = resource_context_.cache_manager->getKVCacheInfo(latest_version);
     return LoadBalanceInfo{(int64_t)step_recorder_.getStepLatency(),
                            (int64_t)step_recorder_.getStepCount(),
                            (int64_t)step_recorder_.getStepPerMin(),
-                           (int64_t)kv_cache_info.available_kv_cache,
-                           (int64_t)kv_cache_info.total_kv_cache,
-                           (int64_t)scheduler_->onflightStreams()};
+                           (int64_t)scheduler_->onflightStreams(),
+                           (int64_t)scheduler_->waitingQueryLen(),
+                           (int64_t)scheduler_->runningQueryLen(),
+                           kv_cache_info};
 }
 
 absl::Status SpeculativeEngine::startLoop() {
@@ -343,7 +344,7 @@ absl::Status SpeculativeEngine::step() {
 
         if (streams.empty()) {
             if (score_model_params_.gpt_init_parameter.dp_size_ > 1) {
-                if (score_model_params_.gpt_init_parameter.pd_separation_ == 1) {
+                if (score_model_params_.gpt_init_parameter.role_type_ == RoleType::PREFILL) {
                     enqueueMinFakeQuery(1, false);
                 } else {
                     enqueueMinFakeQuery(1, true);
@@ -352,7 +353,7 @@ absl::Status SpeculativeEngine::step() {
             return absl::OkStatus();
         }
         if (score_model_params_.gpt_init_parameter.dp_size_ > 1
-            && score_model_params_.gpt_init_parameter.pd_separation_ == 0) {
+            && score_model_params_.gpt_init_parameter.role_type_ != RoleType::PREFILL) {
             bool has_hidden_states = false;
             for (auto stream : streams) {
                 if (stream->getLastHiddenStates() != nullptr) {
@@ -368,7 +369,7 @@ absl::Status SpeculativeEngine::step() {
     }
 
     for (auto& stream : streams) {
-        RTP_LLM_LOG_DEBUG("pre stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
+        RTP_LLM_LOG_DEBUG("pre stream[%ld]: %s", stream->streamId(), stream->debugString().c_str());
     }
 
     bool all_streams_disable_sp_run =
@@ -430,7 +431,7 @@ absl::Status SpeculativeEngine::normStep(std::list<GenerateStreamPtr>& streams) 
     int64_t score_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
 
     for (auto& stream : streams) {
-        RTP_LLM_LOG_DEBUG("before normal process stream [%d]: %s", stream->streamId(), stream->debugString().c_str());
+        RTP_LLM_LOG_DEBUG("before normal process stream [%ld]: %s", stream->streamId(), stream->debugString().c_str());
     }
 
     THROW_IF_STATUS_ERROR(score_executor_->normalProcess(streams));
@@ -440,12 +441,12 @@ absl::Status SpeculativeEngine::normStep(std::list<GenerateStreamPtr>& streams) 
         stream->setReuseLength(stream->seqLength() - 1);
         stream->setFallbackPrefixLength(stream->reuseLength());
         stream->setSpEditRun(false);
-        RTP_LLM_LOG_DEBUG("stream [%d], topk = [%d], topp = [%f], propose_tokens = 0, accept_tokens = 1",
+        RTP_LLM_LOG_DEBUG("stream [%ld], topk = [%d], topp = [%f], propose_tokens = 0, accept_tokens = 1",
                           stream->streamId(),
                           stream->generateConfig()->top_k,
                           stream->generateConfig()->top_p);
 
-        RTP_LLM_LOG_DEBUG("after normal process stream [%d]: %s", stream->streamId(), stream->debugString().c_str());
+        RTP_LLM_LOG_DEBUG("after normal process stream [%ld]: %s", stream->streamId(), stream->debugString().c_str());
     }
 
     metrics_.score_time_us    = autil::TimeUtility::currentTimeInMicroSeconds() - score_begin_time_us;
@@ -460,7 +461,7 @@ absl::Status SpeculativeEngine::spStep(std::list<GenerateStreamPtr>& streams) {
     int64_t sampler_begin_time_us = 0;
 
     for (auto& stream : streams) {
-        RTP_LLM_LOG_DEBUG("before sp step stream [%d]: %s", stream->streamId(), stream->debugString().c_str());
+        RTP_LLM_LOG_DEBUG("before sp step stream [%ld]: %s", stream->streamId(), stream->debugString().c_str());
     }
 
     THROW_IF_STATUS_ERROR(propose_executor_->propose(streams));
@@ -479,7 +480,7 @@ absl::Status SpeculativeEngine::spStep(std::list<GenerateStreamPtr>& streams) {
     }
 
     for (auto& stream : streams) {
-        RTP_LLM_LOG_DEBUG("post sp step stream [%d]: %s", stream->streamId(), stream->debugString().c_str());
+        RTP_LLM_LOG_DEBUG("post sp step stream [%ld]: %s", stream->streamId(), stream->debugString().c_str());
     }
 
     metrics_.propose_time_us = score_begin_time_us - propose_begin_time_us;
@@ -494,7 +495,7 @@ absl::Status SpeculativeEngine::prefillMtpStep(std::list<GenerateStreamPtr>& str
     int64_t score_begin_time_us   = 0;
 
     for (auto& stream : streams) {
-        RTP_LLM_LOG_DEBUG("before mtp prefill stream [%d]: %s", stream->streamId(), stream->debugString().c_str());
+        RTP_LLM_LOG_DEBUG("before mtp prefill stream [%ld]: %s", stream->streamId(), stream->debugString().c_str());
     }
 
     {
@@ -521,7 +522,7 @@ absl::Status SpeculativeEngine::prefillMtpStep(std::list<GenerateStreamPtr>& str
         }
 
         for (auto& stream : streams) {
-            RTP_LLM_LOG_DEBUG("after update stream [%d]: %s", stream->streamId(), stream->debugString().c_str());
+            RTP_LLM_LOG_DEBUG("after update stream [%ld]: %s", stream->streamId(), stream->debugString().c_str());
         }
 
         propose_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -546,7 +547,7 @@ absl::Status SpeculativeEngine::prefillMtpStep(std::list<GenerateStreamPtr>& str
     }
 
     for (auto& stream : streams) {
-        RTP_LLM_LOG_DEBUG("post mtp prefill stream [%d]: %s", stream->streamId(), stream->debugString().c_str());
+        RTP_LLM_LOG_DEBUG("post mtp prefill stream [%ld]: %s", stream->streamId(), stream->debugString().c_str());
     }
 
     metrics_.propose_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - propose_begin_time_us;
@@ -556,7 +557,7 @@ absl::Status SpeculativeEngine::prefillMtpStep(std::list<GenerateStreamPtr>& str
 }
 
 absl::Status SpeculativeEngine::mtpStep(std::list<GenerateStreamPtr>& streams) {
-    if (score_model_params_.gpt_init_parameter.pd_separation_ == 1) {
+    if (score_model_params_.gpt_init_parameter.role_type_ == RoleType::PREFILL) {
         return prefillMtpStep(streams);
     }
 
@@ -579,15 +580,15 @@ absl::Status SpeculativeEngine::mtpStep(std::list<GenerateStreamPtr>& streams) {
         }
 
         for (auto& stream : propose_streams) {
-            RTP_LLM_LOG_DEBUG("begin propose stream [%d]: %s", stream->streamId(), stream->debugString().c_str());
+            RTP_LLM_LOG_DEBUG("begin propose stream [%ld]: %s", stream->streamId(), stream->debugString().c_str());
         }
 
         for (auto& stream : prefill_streams) {
-            RTP_LLM_LOG_DEBUG("begin prefill stream [%d]: %s", stream->streamId(), stream->debugString().c_str());
+            RTP_LLM_LOG_DEBUG("begin prefill stream [%ld]: %s", stream->streamId(), stream->debugString().c_str());
         }
 
         for (auto& stream : pre_propose_streams) {
-            RTP_LLM_LOG_DEBUG("begin pre propose stream [%d]: %s", stream->streamId(), stream->debugString().c_str());
+            RTP_LLM_LOG_DEBUG("begin pre propose stream [%ld]: %s", stream->streamId(), stream->debugString().c_str());
         }
     }
 
@@ -648,7 +649,7 @@ absl::Status SpeculativeEngine::mtpStep(std::list<GenerateStreamPtr>& streams) {
         }
 
         for (auto& stream : streams) {
-            RTP_LLM_LOG_DEBUG("post stream [%d]: %s", stream->streamId(), stream->debugString().c_str());
+            RTP_LLM_LOG_DEBUG("post stream [%ld]: %s", stream->streamId(), stream->debugString().c_str());
         }
     }
 

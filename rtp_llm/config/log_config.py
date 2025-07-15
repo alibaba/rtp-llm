@@ -18,12 +18,24 @@ LOGGING_CONFIG = {
             "maxBytes": 256 * 1024 * 1024,
             "backupCount": 20,
         },
+        "route_file_handler": {
+            "formatter": "default",
+            "class": "logging.handlers.RotatingFileHandler",
+            "filename": f"logs/route.log",
+            "maxBytes": 256 * 1024 * 1024,
+            "backupCount": 20,
+        },
     },
     "loggers": {
         "": {
             "handlers": ["file_handler"],
             "level": "INFO",
             "propagate": True,
+        },
+        "route_logger": {
+            "handlers": ["route_file_handler"],
+            "level": "INFO",
+            "propagate": False,
         },
     },
 }

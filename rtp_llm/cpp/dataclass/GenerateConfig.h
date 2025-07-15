@@ -78,6 +78,9 @@ public:
         return top_k == 1;
     }
 
+    std::vector<RoleAddr> role_addrs;
+    int64_t               inter_request_id = -1;  // used for master scheduling
+
     void addSpecialTokens(const rtp_llm::SpecialTokens& special_tokens) {
         for (const auto& vec : special_tokens.stop_words_id_list_) {
             std::vector<int> tmpVec;

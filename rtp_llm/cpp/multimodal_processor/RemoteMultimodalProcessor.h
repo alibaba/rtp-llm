@@ -59,15 +59,14 @@ private:
             local_config.nodes.push_back(node1);
             subscribe_config.local_configs.push_back(local_config);
         } else {
-            std::string vit_cm2_config_str =
-                gpt_init_parameter_.service_discovery_config.rtp_llm_multimodal_part_cm2_config;
+            std::string vit_cm2_config_str = gpt_init_parameter_.service_discovery_config.multimodal_part_cm2_config;
             RTP_LLM_CHECK_WITH_INFO(!vit_cm2_config_str.empty(), "vit_cm2_config must be not empty");
 
             Cm2ClusterConfig vit_cm2_config;
             try {
                 FromJsonString(vit_cm2_config, vit_cm2_config_str);
             } catch (autil::legacy::ExceptionBase& e) {
-                RTP_LLM_CHECK_WITH_INFO("create json from str[%s] failed", vit_cm2_config_str.c_str());
+                RTP_LLM_CHECK_WITH_INFO(false, "create json from str[%s] failed", vit_cm2_config_str.c_str());
             }
             vit_cluster_name_ = vit_cm2_config.cluster_name;
             CM2SubscribeServiceConfig cm2_service_config;

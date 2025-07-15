@@ -51,6 +51,7 @@ from rtp_llm.ops import (
     ParallelismDistributedConfig,
     ProfilingDebugLoggingConfig,
     QuantAlgo,
+    RoleType,
     SamplerConfig,
     SchedulerConfig,
     ServiceDiscoveryConfig,
@@ -191,6 +192,22 @@ class ConfigMode(Enum):
     ComplexMode = 2
 
 
+def trans_role_type(role_type: str) -> RoleType:
+    role_type = role_type.upper()
+    if role_type == "PDFUSION":
+        return RoleType.PDFUSION
+    elif role_type == "PREFILL":
+        return RoleType.PREFILL
+    elif role_type == "DECODE":
+        return RoleType.DECODE
+    elif role_type == "VIT":
+        return RoleType.VIT
+    elif role_type == "FRONTEND":
+        return RoleType.FRONTEND
+    else:
+        return RoleType.PDFUSION
+
+
 class GptInitModelParameters:
     __slots__ = {
         "gpt_init_params",
@@ -313,7 +330,6 @@ class GptInitModelParameters:
     num_valid_layer: int
     org_embedding_max_pos: int
     pd_sep_enable_fallback: bool
-    pd_separation: bool
     phy_exp_num: int
     position_id_len_factor: int
     position_ids_style: int
@@ -357,7 +373,7 @@ class GptInitModelParameters:
     type_vocab_size: int
     use_all_gather: bool
     use_attention_linear_bias: bool
-    use_cache_store: bool
+
     use_cross_attn: bool
     use_fp32_to_compute_logit: bool
     use_kvcache: bool
@@ -375,6 +391,7 @@ class GptInitModelParameters:
     worker_grpc_addrs: list[str]
     worker_port_offset: int
     world_size: int
+    role_type: RoleType
     quant_config: QuantizationConfig
     enable_3fs: bool
 
@@ -461,6 +478,7 @@ class GptInitModelParameters:
         self.use_qk_norm = False
         self.enable_merge_w13 = False
         self.quant_config = None
+        self.role_type = RoleType.PDFUSION
 
         ## For cpp, we use `gpt_init_params`, `py_env_configs` for python.
         ## There are some common envs in cpp and python, so they will
@@ -585,10 +603,8 @@ class GptInitModelParameters:
                 py_inference_log_response=get_env_bool(
                     "PY_INFERENCE_LOG_RESPONSE", False
                 ),
-                rtp_llm_trace_memory=get_env_bool("RTP_LLM_TRACE_MEMORY", False),
-                rtp_llm_trace_malloc_stack=get_env_bool(
-                    "RTP_LLM_TRACE_MALLOC_STACK", False
-                ),
+                trace_memory=get_env_bool("RTP_LLM_TRACE_MEMORY", False),
+                trace_malloc_stack=get_env_bool("RTP_LLM_TRACE_MALLOC_STACK", False),
                 enable_device_perf=get_env_bool("ENABLE_DEVICE_PERF", False),
                 ft_core_dump_on_exception=get_env_bool(
                     "FT_CORE_DUMP_ON_EXCEPTION", False
@@ -660,11 +676,14 @@ class GptInitModelParameters:
         self.gpt_init_params.service_discovery_config = ServiceDiscoveryConfig(
             use_local=get_env_bool("USE_LOCAL"),
             remote_rpc_server_ip=get_env_str("REMOTE_RPC_SERVER_IP"),
-            rtp_llm_decode_cm2_config=get_env_str("RTP_LLM_DECODE_CM2_CONFIG"),
+            decode_cm2_config=get_env_str("RTP_LLM_DECODE_CM2_CONFIG"),
             remote_vit_server_ip=get_env_str("REMOTE_VIT_SERVER_IP"),
-            rtp_llm_multimodal_part_cm2_config=get_env_str(
+            multimodal_part_cm2_config=get_env_str(
                 "RTP_LLM_MULTIMODAL_PART_CM2_CONFIG"
             ),
+            # TODO(yinzhi): fix it
+            # remote_backend_ip=get_env_str("REMOTE_BACKEND_IP"),
+            # backend_cm2_config=get_env_str("RTP_LLM_BACKEND_CM2_CONFIG"),
         )
 
         # SchedulerConfig
@@ -962,9 +981,12 @@ class GptInitModelParameters:
         self.max_rpc_timeout_ms = int(os.environ.get("MAX_RPC_TIMEOUT_MS", 0))
         logging.info(f"max_rpc_timeout_ms: {self.max_rpc_timeout_ms}")
 
-        self.pd_separation = bool(int(os.environ.get("PD_SEPARATION", 0)))
-        logging.info(f"pd_separation: {self.pd_separation}")
-        if self.pd_separation:
+        role_type = os.environ.get("ROLE_TYPE", "PDFUSION").upper()
+        if self.vit_separation == 1:
+            role_type = "VIT"
+        self.role_type = trans_role_type(role_type)
+        logging.info(f"role_type: {self.role_type}")
+        if self.role_type in [RoleType.PREFILL]:
             self.prefill_retry_times = int(os.environ.get("PREFILL_RETRY_TIMES", 0))
             logging.info(f"prefill_retry_times: {self.prefill_retry_times}")
             self.prefill_retry_timeout_ms = int(
@@ -996,9 +1018,7 @@ class GptInitModelParameters:
             )
             logging.info(f"sync_status_interval_ms: {self.sync_status_interval_ms}")
 
-        self.use_cache_store = bool(int(os.environ.get("USE_CACHE_STORE", 0)))
-        logging.info(f"use_cache_store: {self.use_cache_store}")
-        if self.use_cache_store:
+        if self.role_type in [RoleType.PREFILL, RoleType.DECODE]:
             self.cache_store_rdma_mode = bool(
                 int(os.environ.get("CACHE_STORE_RDMA_MODE", 1))
             )

@@ -50,8 +50,6 @@ USAGE_HEADER = "USAGE"
 
 class BackendServer(object):
     def __init__(self, py_env_configs: PyEnvConfigs):
-        if "LOAD_CKPT_NUM_PROCESS" not in os.environ:
-            os.environ["LOAD_CKPT_NUM_PROCESS"] = "0"
         if torch.cuda.is_available():
             if (
                 "NCCL_P2P_DISABLE" not in os.environ
@@ -73,6 +71,9 @@ class BackendServer(object):
         self._openai_endpoint = None
         self._embedding_endpoint = None
         self.py_env_configs = py_env_configs
+        self.dp_rank = g_parallel_info.dp_rank
+        self.dp_size = g_parallel_info.dp_size
+        self.tp_size = g_parallel_info.tp_size
 
     def start(self, py_env_configs: PyEnvConfigs):
         self._gang_server.start(py_env_configs)
@@ -123,6 +124,10 @@ class BackendServer(object):
     @property
     def is_embedding(self):
         return self._embedding_endpoint is not None
+
+    @property
+    def role_type(self) -> str:
+        return self.model.role_type
 
     async def embedding(self, request: Dict[str, Any], raw_request: Request):
         try:
@@ -205,15 +210,17 @@ class BackendServer(object):
                     logging.warn("worker not all ready, error_msg: " + str(e))
                     time.sleep(5)
 
-    def get_load_balance_info(self) -> LoadBalanceInfo:
+    def get_load_balance_info(self, latest_cache_version: int) -> LoadBalanceInfo:
         if self.model is None:
             return LoadBalanceInfo()
-        return self.model.get_load_balance_info()
+        return self.model.get_load_balance_info(latest_cache_version)
 
-    def get_engine_schedule_info(self) -> EngineScheduleInfo:
+    def get_engine_schedule_info(
+        self, latest_finised_version: int
+    ) -> EngineScheduleInfo:
         if self.model is None:
             return EngineScheduleInfo()
-        return self.model.get_engine_schedule_info()
+        return self.model.get_engine_schedule_info(latest_finised_version)
 
     # TODO(xinfei.sxf) use model
     def set_log_level(self, req: Union[str, Dict[Any, Any]]) -> None:

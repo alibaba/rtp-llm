@@ -65,6 +65,7 @@ class ModelFactory:
             parallel_info=g_parallel_info,
             config_mode=ConfigMode.SimpleMode,
         )
+        config.seq_size_per_block = model_config.seq_size_per_block
         config.model_name = model_cls.__name__
         if issubclass(model_cls, MultiModalMixin):
             config.is_multimodal = True
