@@ -4,10 +4,11 @@ cc_library(
     name = "subscribe",
     srcs = [
         "TopoNode.cpp",
-        "SubscribeServiceConfig.cpp",        
+        "SubscribeServiceConfig.cpp",
         "LocalSubscribeService.cpp",
         "SubscribeServiceManager.cpp",
         "NacosSubscribeService.cpp",
+        "DomainSubscribeService.cpp",
     ],
     hdrs = [
         "TopoNode.h",
@@ -17,6 +18,7 @@ cc_library(
         "SubscribeServiceManager.h",
         "SubscribeServiceCreator.h",
         "NacosSubscribeService.h",
+        "DomainSubscribeService.h",
     ],
     deps = [
         "@nacos_sdk_cpp//:nacos_sdk",

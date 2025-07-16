@@ -61,16 +61,28 @@ public:
     std::vector<LocalNodeJsonize> nodes;
 };
 
+class DomainSubscribeServiceConfig: public autil::legacy::Jsonizable {
+public:
+    void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override;
+    bool validate() const;
+
+public:
+    std::string domain;
+    int         http_port;
+    int         rpc_port;
+};
+
 class SubscribeServiceConfig: public autil::legacy::Jsonizable {
 public:
     void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override;
     bool validate() const;
 
 public:
-    std::vector<CM2SubscribeServiceConfig>   cm2_configs;
-    std::vector<LocalSubscribeServiceConfig> local_configs;
-    std::vector<NacosSubscribeServiceConfig> nacos_configs;
-    std::vector<VIPSubscribeServiceConfig>   vip_configs;
+    std::vector<CM2SubscribeServiceConfig>    cm2_configs;
+    std::vector<LocalSubscribeServiceConfig>  local_configs;
+    std::vector<NacosSubscribeServiceConfig>  nacos_configs;
+    std::vector<VIPSubscribeServiceConfig>    vip_configs;
+    std::vector<DomainSubscribeServiceConfig> domain_configs;
 };
 
 }  // namespace rtp_llm

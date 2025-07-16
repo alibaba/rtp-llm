@@ -70,3 +70,13 @@ cc_test(
         "TEST_USING_DEVICE": "CUDA",
     },
 )
+
+cc_test(
+    name = "net_util_test",
+    srcs = [
+        "NetUtilTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps,
+)

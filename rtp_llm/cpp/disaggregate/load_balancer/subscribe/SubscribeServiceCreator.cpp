@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/disaggregate/load_balancer/subscribe/SubscribeService.h"
 #include "rtp_llm/cpp/disaggregate/load_balancer/subscribe/LocalSubscribeService.h"
 #include "rtp_llm/cpp/disaggregate/load_balancer/subscribe/NacosSubscribeService.h"
+#include "rtp_llm/cpp/disaggregate/load_balancer/subscribe/DomainSubscribeService.h"
 
 namespace rtp_llm {
 
@@ -26,6 +27,14 @@ std::shared_ptr<SubscribeService> createInstanceFromNacosConfig(const NacosSubsc
 
 std::shared_ptr<SubscribeService> createInstanceFromVIPConfig(const VIPSubscribeServiceConfig& config) {
     throw std::runtime_error("not support to create service from VIPSubscribeServiceConfig");
+}
+
+std::shared_ptr<SubscribeService> createInstanceFromDomainConfig(const DomainSubscribeServiceConfig& config) {
+    auto service = std::make_shared<DomainSubscribeService>();
+    if (service->init(config)) {
+        return service;
+    }
+    return nullptr;
 }
 
 }  // namespace rtp_llm

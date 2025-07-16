@@ -61,11 +61,22 @@ bool LocalSubscribeServiceConfig::validate() const {
     return true;
 }
 
+void DomainSubscribeServiceConfig::Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) {
+    json.Jsonize("domain", domain, domain);
+    json.Jsonize("httpPort", http_port, http_port);
+    json.Jsonize("rpcPort", rpc_port, rpc_port);
+}
+
+bool DomainSubscribeServiceConfig::validate() const {
+    return !domain.empty() && http_port > 0 && rpc_port > 0;
+}
+
 void SubscribeServiceConfig::Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) {
     json.Jsonize("cm2", cm2_configs, cm2_configs);
     json.Jsonize("local", local_configs, local_configs);
     json.Jsonize("nacos", nacos_configs, nacos_configs);
     json.Jsonize("vip", vip_configs, vip_configs);
+    json.Jsonize("domain", domain_configs, domain_configs);
 }
 
 bool SubscribeServiceConfig::validate() const {
@@ -85,6 +96,11 @@ bool SubscribeServiceConfig::validate() const {
         }
     }
     for (auto& config : vip_configs) {
+        if (!config.validate()) {
+            return false;
+        }
+    }
+    for (auto& config : domain_configs) {
         if (!config.validate()) {
             return false;
         }
