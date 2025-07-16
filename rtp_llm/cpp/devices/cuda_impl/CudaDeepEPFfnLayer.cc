@@ -123,14 +123,15 @@ MoeDispatchOutput CudaDevice::deepEpDispatch(const MoeDispatchParams& params) {
     std::optional<torch::Tensor> x_scales;
 
     if (params.qscheme == QScheme::Qfp8PerTokenBlock) {
-        quantized_hidden =
-            hidden->isQBuffer() ? hidden : quantize({*hidden, DataType::TYPE_QFP8_E4M3, 1, params.qscheme});
-        auto kernel_ptr = reinterpret_cast<const QBuffer&>(*quantized_hidden).kernelPtr();
-        auto scales_ptr = reinterpret_cast<const QBuffer&>(*quantized_hidden).scalesPtr();
-        x               = Buffer2torchTensor(kernel_ptr, false);  // [num_tokens, hidden_size]
-        x_scales        = Buffer2torchTensor(scales_ptr, false);  // [num_tokens, hidden_size / 128]
+        quantized_hidden = hidden->isQBuffer()
+                         ? hidden
+                         : quantize({*hidden, DataType::TYPE_QFP8_E4M3, 1, params.qscheme});
+        auto kernel_ptr  = reinterpret_cast<const QBuffer&>(*quantized_hidden).kernelPtr();
+        auto scales_ptr  = reinterpret_cast<const QBuffer&>(*quantized_hidden).scalesPtr();
+        x                = Buffer2torchTensorWithDstType(kernel_ptr, false, TORCH_FP8_E4M3_TYPE);  // [num_tokens, hidden_size]
+        x_scales         = Buffer2torchTensorWithDstType(scales_ptr, false, dataTypeToTorchType(scales_ptr->type()));  // [num_tokens, hidden_size / 128]
     } else {
-        x = Buffer2torchTensor(hidden, false);  // [num_tokens, hidden_size]
+        x = Buffer2torchTensorWithDstType(hidden, false, dataTypeToTorchType(hidden->type()));  // [num_tokens, hidden_size]
     }
 
     std::shared_ptr<EventOverlap> dispatch_begin_event;

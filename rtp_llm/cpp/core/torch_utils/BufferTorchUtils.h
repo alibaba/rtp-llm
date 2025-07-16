@@ -194,8 +194,16 @@ inline torch::Tensor Buffer2torchTensorWithDstType(const Buffer& buf, bool copyD
     return tensor.toType(dst_type);
 }
 
-inline torch::Tensor
-Buffer2torchTensorWithStride(const Buffer& buf, const std::vector<int64_t>& new_shape, const size_t offset = 0) {
+inline torch::Tensor Buffer2torchTensorWithDstType(const ConstBufferPtr& buf, bool copyData, c10::ScalarType dst_type) {
+    if (buf == nullptr) {
+        throw std::runtime_error("buf is nullptr");
+    }
+    return Buffer2torchTensorWithDstType(*buf, copyData, dst_type);
+}
+
+inline torch::Tensor Buffer2torchTensorWithStride(const Buffer& buf,
+                                                  const std::vector<int64_t>& new_shape,
+                                                  const size_t offset = 0) {
     if (buf.isQBuffer()) {
         throw std::runtime_error("not support qbuffer!");
     }
