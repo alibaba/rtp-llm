@@ -455,7 +455,8 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
                                          nullptr,  // v_buf
                                          kv_block_array,
                                          params.input.data(),
-                                         params.common.sequence_lengths->data<int>(),
+                                         params.common.position_ids ? params.common.position_ids->data<int>() :
+                                                                      +params.common.sequence_lengths->data<int>(),
                                          params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias ?
                                              params.weights.qkv_weight->bias->data() :
                                              nullptr,
