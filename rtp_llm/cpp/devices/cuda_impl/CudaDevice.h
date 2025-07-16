@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/cuda/custom_ar/custom_ar_comm.h"
 #include "rtp_llm/cpp/cuda/nccl/nccl_utils.h"
 #include "rtp_llm/cpp/cuda/comm_buffer/comm_buffer.h"
+#include "rtp_llm/cpp/utils/AttentionConfig.h"
 #ifdef ENABLE_DEEP_EP
 #include "rtp_llm/cpp/devices/cuda_impl/DeepEPBuffer.h"
 #endif
@@ -21,17 +22,6 @@
 namespace trt_plugins = tensorrt_llm::plugins;
 
 namespace rtp_llm {
-
-enum class FMHAType {
-    NONE,
-    PAGED_TRT_V2,
-    TRT_V2,
-    PAGED_OPEN_SOURCE,
-    OPEN_SOURCE,
-    TRT_V1,
-    FLASH_INFER,
-    XQA
-};
 
 nvinfer1::DataType nvinfer1DtypeConvert(rtp_llm::DataType dtype);
 
@@ -70,6 +60,15 @@ struct TRTAttn {
     BufferPtr    kv_cache_offset;
     BufferPtr    kv_cache_offset_h;
 
+    torch::Tensor cu_seqlens;
+    torch::Tensor cu_kv_seqlens;
+    torch::Tensor input_lengths;
+    torch::Tensor sequence_lengths;
+    int           max_seq_len;
+    bool          decode_plan;
+
+    DataType attn_type;
+
     static void setKvCache(KVBlockArray& kv_block_array, const KvCacheInfo& kv_cache) {
         kv_block_array.mPrimaryPoolPtr = kv_cache.k_cache_buffer->data();
         if (kv_cache.k_scale_buffer) {
@@ -77,6 +76,8 @@ struct TRTAttn {
         }
     }
 };
+
+using TRTAttnPtr = std::shared_ptr<TRTAttn>;
 
 class CudaDevice: public DeviceBase {
 public:
@@ -229,9 +230,17 @@ public:
 
 public:
     ParamsPtr prepareTrtAttn(const AttentionConfigs& configs,
+                             int                     kv_block_offset,
+                             const BufferPtr&        kv_cache_block_id,
+                             int                     batch_size);
+
+    ParamsPtr prepareTrtAttn(const AttentionConfigs& configs,
                              const BufferPtr&        k_cache,
                              const BufferPtr&        kv_cache_block_id,
                              int                     batch_size);
+
+    std::shared_ptr<cufmha>
+    selectCuFMHARunner(const AttentionConfigs& configs, DataType attn_dtype, bool has_alibi_slopes);
 
 protected:
     DevicePrepOutput prepareModelRunCommon(const DevicePrepParams& params);
@@ -240,7 +249,6 @@ protected:
     void InvokeWeightOnlyGemm(const GemmParams& params, const CudaGemmArguments arguments, BufferPtr output);
     void InvokeGeneralGemm(const GemmParams& params, const CudaGemmArguments arguments, BufferPtr output);
     void InvokeDeepGemm(const GemmParams& params, const CudaGemmArguments arguments, BufferPtr& output);
-    void selectCuFMHARunner(const DevicePrepParams& params);
 
     void prefillAttention(const AttentionModuleParams& params,
                           KVBlockArray                 kv_block_array,
@@ -339,5 +347,8 @@ protected:
     bool                                        hack_moe_expert_ = false;
     std::shared_ptr<c10::cuda::CUDAStreamGuard> guard_;
 };
+
+torch::Tensor getRopeCosSin(
+    RopeStyle rope_style, int rope_dim, int rope_theta, float rope_scale, int max_position_embeddings = 128000);
 
 }  // namespace rtp_llm

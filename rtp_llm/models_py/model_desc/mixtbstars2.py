@@ -9,10 +9,11 @@ from typing_extensions import Unpack
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
-from rtp_llm.models_py.modules.attention import FlashInferAttention
+from rtp_llm.models_py.modules.attention import CausalAttention
 from rtp_llm.models_py.modules.embedding import Embedding
+from rtp_llm.models_py.modules.fmha import FMHAImplBase
 from rtp_llm.models_py.modules.linear import Linear
-from rtp_llm.ops import PyAttentionInputs, PyModelInputs, PyModelOutputs
+from rtp_llm.ops import KVCache, PyAttentionInputs, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
 try:
@@ -90,7 +91,7 @@ class TBStars2MoEDecoderLayer(nn.Module):
         super().__init__()
 
         self.layer_idx = layer_idx
-        self.self_attn = FlashInferAttention(config, weights, layer_idx)
+        self.self_attn = CausalAttention(config, weights)
 
         if len(config.moe_layer_index) > 0 and layer_idx < config.moe_layer_index[0]:
             self.is_dense_layer = True
@@ -112,19 +113,15 @@ class TBStars2MoEDecoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        k_cache_base: Optional[torch.Tensor] = None,
-        v_cache_base: Optional[torch.Tensor] = None,
-        attention_inputs: Optional[PyAttentionInputs] = None,
+        fmha_impl: FMHAImplBase,
+        kv_cache: Optional[KVCache] = None,
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
 
         # Self Attention
         hidden_states = self.self_attn(
-            hidden_states=hidden_states,
-            k_cache_base=k_cache_base,
-            v_cache_base=v_cache_base,
-            attention_inputs=attention_inputs,
+            hidden_states=hidden_states, fmha_impl=fmha_impl, kv_cache=kv_cache
         )
         hidden_states = residual + hidden_states
 
@@ -174,12 +171,13 @@ class TBStars2MoEModel(GptModelBase):
 
         attention_inputs: PyAttentionInputs = inputs.attention_inputs
 
+        fmha_impl = self.get_fmha_impl(attention_inputs)
+
         for decoder_layer in self.layers[: self.layer_num]:
             hidden_states = decoder_layer(
                 hidden_states,
-                self.k_cache_base,
-                self.v_cache_base,
-                attention_inputs,
+                fmha_impl,
+                kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
             )
         hidden_states = self.norm(hidden_states)
 

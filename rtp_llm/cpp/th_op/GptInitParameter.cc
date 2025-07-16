@@ -180,6 +180,40 @@ RopeConfig GptInitParameter::getRopeConfig() const {
     return rope_config;
 }
 
+KvCacheDataType loadKvCacheDataTypeFromDataType(rtp_llm::DataType type) {
+    if (type == rtp_llm::DataType::TYPE_INT8) {
+        return KvCacheDataType::INT8;
+    } else if (type == rtp_llm::DataType::TYPE_FP8_E4M3) {
+        return KvCacheDataType::FP8;
+    } else {
+        return KvCacheDataType::BASE;
+    }
+}
+
+AttentionConfigs GptInitParameter::getAttentionConfigs() const {
+    AttentionConfigs attention_config{head_num_ > 1 ? (size_t)head_num_ / tp_size_ : 1,
+                                      head_num_kv_ > 1 ? (size_t)head_num_kv_ / tp_size_ : 1,
+                                      (size_t)size_per_head_,
+                                      (size_t)hidden_size_,
+                                      getRopeConfig(),
+                                      (size_t)seq_size_per_block_,
+                                      is_causal_ ? rtp_llm::AttentionMaskType::causalMask :
+                                                   rtp_llm::AttentionMaskType::noMask,
+                                      1.0,
+                                      // if qk_norm or use embedding model, fuse add bias in gemm
+                                      qk_norm_ || (rotary_embedding_style_ == 0 && !use_kvcache_) ? false : true,
+                                      false,
+                                      use_mla_,
+                                      (size_t)q_lora_rank_,
+                                      (size_t)kv_lora_rank_,
+                                      (size_t)nope_head_dim_,
+                                      (size_t)rope_head_dim_,
+                                      (size_t)v_head_dim_,
+                                      softmax_extra_scale_,
+                                      loadKvCacheDataTypeFromDataType(kv_cache_data_type_)};
+    return attention_config;
+}
+
 // is not pd-sep
 bool GptInitParameter::isPDFusion() const {
     return !pd_separation_ && !use_cache_store_;

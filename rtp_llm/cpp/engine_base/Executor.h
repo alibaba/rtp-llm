@@ -14,29 +14,8 @@ public:
     virtual absl::Status process(const std::list<GenerateStreamPtr>& streams) = 0;
 
     static GptModelDescription genModelDescription(const rtp_llm::GptInitParameter& params) {
-        rtp_llm::RopeConfig       rope_config    = params.getRopeConfig();
-        int                       moe_tp_size    = params.tp_size_ * params.dp_size_ / params.ep_size_;
-        KvCacheDataType           kv_cache_dtype = loadKvCacheDataTypeFromDataType(params.kv_cache_data_type_);
-        rtp_llm::AttentionConfigs attention_config{
-            params.head_num_ > 1 ? (size_t)params.head_num_ / params.tp_size_ : 1,
-            params.head_num_kv_ > 1 ? (size_t)params.head_num_kv_ / params.tp_size_ : 1,
-            (size_t)params.size_per_head_,
-            (size_t)params.hidden_size_,
-            rope_config,
-            (size_t)params.seq_size_per_block_,
-            params.is_causal_ ? rtp_llm::AttentionMaskType::causalMask : rtp_llm::AttentionMaskType::noMask,
-            1.0,
-            // if qk_norm or use embedding model, fuse add bias in gemm
-            params.qk_norm_ || (params.rotary_embedding_style_ == 0 && !params.use_kvcache_) ? false : true,
-            false,
-            params.use_mla_,
-            (size_t)params.q_lora_rank_,
-            (size_t)params.kv_lora_rank_,
-            (size_t)params.nope_head_dim_,
-            (size_t)params.rope_head_dim_,
-            (size_t)params.v_head_dim_,
-            params.softmax_extra_scale_,
-            kv_cache_dtype};
+        AttentionConfigs attention_config = params.getAttentionConfigs();
+        int              moe_tp_size      = params.tp_size_ * params.dp_size_ / params.ep_size_;
         // TP在init的时候处理，认为每个MOE Plugin只看到一个TP rank；EP在MOE Plugin中处理；
         auto                moe_configs = params.moe_style_ ? (std::optional<rtp_llm::MoeConfigs>)rtp_llm::MoeConfigs(
                                                    {(size_t)params.expert_num_,

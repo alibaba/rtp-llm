@@ -54,6 +54,17 @@ public:
     torch::Tensor plan;
     DataType      dtype = DataType::TYPE_INVALID;
 
+    static bool check(rtp_llm::DeviceBase* device, const rtp_llm::AttentionConfigs& attn_configs, DataType dtype);
+
+    static bool checkPrefill(rtp_llm::DeviceBase*             device,
+                             const rtp_llm::AttentionConfigs& attn_configs,
+                             const BufferPtr&                 prefix_lengths_host,
+                             const BufferPtr&                 input_lengths_host,
+                             DataType                         dtype,
+                             bool                             skip_no_prefix);
+
+    static bool checkDecode(rtp_llm::DeviceBase* device, const rtp_llm::AttentionConfigs& attn_configs, DataType dtype);
+
     static ParamsPtr prepare(rtp_llm::DeviceBase*             device,
                              const rtp_llm::AttentionConfigs& attn_configs,
                              const BufferPtr&                 prefix_lengths_host,
@@ -95,5 +106,7 @@ private:
     static void                  recycle(void* p);
     static FlashInferAttnParams* get(int batch_size, int input_token_num);
 };
+
+using FlashInferAttnParamsPtr = std::shared_ptr<FlashInferAttnParams>;
 
 }  // namespace rtp_llm

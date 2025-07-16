@@ -7,12 +7,6 @@
 
 namespace rtp_llm {
 
-enum AttentionMaskType {
-    // ones matrix, for bert model.
-    noMask,
-    causalMask,
-};
-
 typedef enum memorytype_enum {
     MEMORY_CPU,
     MEMORY_CPU_PINNED,

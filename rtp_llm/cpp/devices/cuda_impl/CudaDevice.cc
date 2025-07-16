@@ -349,20 +349,21 @@ DeviceProperties CudaDevice::getDeviceProperties() {
     return *prop;
 }
 
-void CudaDevice::selectCuFMHARunner(const DevicePrepParams& params) {
+std::shared_ptr<cufmha>
+CudaDevice::selectCuFMHARunner(const AttentionConfigs& configs, DataType attn_dtype, bool has_alibi_slopes) {
     bool     found_cufmha_runner = false;
-    DataType fmha_datatype       = use_fp8_fmha_ ? DataType::TYPE_FP8_E4M3 : params.attn_dtype;
+    DataType fmha_datatype       = use_fp8_fmha_ ? DataType::TYPE_FP8_E4M3 : attn_dtype;
     for (auto& runner : cufmha_runner_pool_) {
         if (runner->checkSignature(fmha_datatype,
-                                   params.configs.mask_type,
-                                   params.configs.head_num,
-                                   params.configs.kv_head_num,
-                                   params.configs.size_per_head,
-                                   params.configs.q_scaling / params.configs.softmax_extra_scale,
-                                   params.has_alibi_slopes)) {
+                                   configs.mask_type,
+                                   configs.head_num,
+                                   configs.kv_head_num,
+                                   configs.size_per_head,
+                                   configs.q_scaling / configs.softmax_extra_scale,
+                                   has_alibi_slopes)) {
             cufmha_runner_      = runner;
             found_cufmha_runner = true;
-            return;
+            return cufmha_runner_;
         }
     }
 
@@ -370,12 +371,12 @@ void CudaDevice::selectCuFMHARunner(const DevicePrepParams& params) {
         cufmha_runner_pool_.emplace_back();
         cufmha_runner_pool_.back().reset(
             new cufmha(fmha_datatype,
-                       params.configs.mask_type,
-                       params.configs.head_num,
-                       params.configs.kv_head_num,
-                       params.configs.size_per_head,
-                       params.configs.q_scaling / params.configs.softmax_extra_scale,  // div scale for DeepSeek V2
-                       params.has_alibi_slopes,
+                       configs.mask_type,
+                       configs.head_num,
+                       configs.kv_head_num,
+                       configs.size_per_head,
+                       configs.q_scaling / configs.softmax_extra_scale,  // div scale for DeepSeek V2
+                       has_alibi_slopes,
                        use_trtv1_fmha,
                        use_trtv2_fmha,
                        use_trtv2_fmha_paged,
@@ -384,6 +385,7 @@ void CudaDevice::selectCuFMHARunner(const DevicePrepParams& params) {
                        stream_));
         cufmha_runner_ = cufmha_runner_pool_.back();
     }
+    return cufmha_runner_;
 }
 
 DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
@@ -398,7 +400,7 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
         fmha_type_       = FMHAType::NONE;
         output.need_mask = true;
     } else if (params.context_batch_size) {
-        selectCuFMHARunner(params);
+        selectCuFMHARunner(params.configs, params.attn_dtype, params.has_alibi_slopes);
         bool paged_kv_fmha =
             params.diff_qkv_len && params.k_cache && (params.configs.kv_cache_dtype == KvCacheDataType::BASE);
         if (output.prefill_flash_infer_attn != nullptr && !params.configs.use_mla) {
@@ -434,64 +436,30 @@ DevicePrepOutput CudaDevice::prepareModelRunCommon(const DevicePrepParams& param
         params.kv_cache_block_id_d ?
             params.kv_cache_block_id_d->slice(params.decoder_batch_size, params.context_batch_size) :
             nullptr;
-
-    if (init_params_.model_specific_config.load_python_model) {
-        if (params.decoder_batch_size) {
-            output.decode_flash_infer_attn = FlashInferAttnParams::prepare(
-                this,
-                params.configs,
-                nullptr,
-                params.sequence_lengths->slice(0, params.decoder_batch_size),
-                params.input_lengths->slice(0, params.decoder_batch_size),
-                params.kv_cache_block_id ? params.kv_cache_block_id->slice(0, params.decoder_batch_size) : nullptr,
-                decode_kv_cache_block_id_d,
-                params.attn_dtype,
-                false);
-            output.decode_trt_attn =
-                prepareTrtAttn(params.configs, params.k_cache, decode_kv_cache_block_id_d, params.decoder_batch_size);
-        }
-        if (params.context_batch_size) {
-            output.prefill_flash_infer_attn = FlashInferAttnParams::prepare(
-                this,
-                params.configs,
-                params.prefix_lengths,
-                nullptr,
-                params.input_lengths->slice(params.decoder_batch_size, params.context_batch_size),
-                params.kv_cache_block_id ?
-                    params.kv_cache_block_id->slice(params.decoder_batch_size, params.context_batch_size) :
-                    nullptr,
-                prefill_kv_cache_block_id_d,
-                params.attn_dtype,
-                false);
-            output.prefill_trt_attn =
-                prepareTrtAttn(params.configs, params.k_cache, prefill_kv_cache_block_id_d, params.context_batch_size);
-        }
-    } else {
-        output.decode_flash_infer_attn = FlashInferAttnParams::prepare(
-            this,
-            params.configs,
+    output.decode_flash_infer_attn = FlashInferAttnParams::prepare(
+        this,
+        params.configs,
+        nullptr,
+        params.sequence_lengths->slice(0, params.decoder_batch_size),
+        params.input_lengths->slice(0, params.decoder_batch_size),
+        params.kv_cache_block_id ? params.kv_cache_block_id->slice(0, params.decoder_batch_size) : nullptr,
+        decode_kv_cache_block_id_d,
+        params.attn_dtype);
+    output.prefill_flash_infer_attn = FlashInferAttnParams::prepare(
+        this,
+        params.configs,
+        params.prefix_lengths,
+        nullptr,
+        params.input_lengths->slice(params.decoder_batch_size, params.context_batch_size),
+        params.kv_cache_block_id ?
+            params.kv_cache_block_id->slice(params.decoder_batch_size, params.context_batch_size) :
             nullptr,
-            params.sequence_lengths->slice(0, params.decoder_batch_size),
-            params.input_lengths->slice(0, params.decoder_batch_size),
-            params.kv_cache_block_id ? params.kv_cache_block_id->slice(0, params.decoder_batch_size) : nullptr,
-            decode_kv_cache_block_id_d,
-            params.attn_dtype);
-        output.prefill_flash_infer_attn = FlashInferAttnParams::prepare(
-            this,
-            params.configs,
-            params.prefix_lengths,
-            nullptr,
-            params.input_lengths->slice(params.decoder_batch_size, params.context_batch_size),
-            params.kv_cache_block_id ?
-                params.kv_cache_block_id->slice(params.decoder_batch_size, params.context_batch_size) :
-                nullptr,
-            prefill_kv_cache_block_id_d,
-            params.attn_dtype);
-        output.decode_trt_attn =
-            prepareTrtAttn(params.configs, params.k_cache, decode_kv_cache_block_id_d, params.decoder_batch_size);
-        output.prefill_trt_attn =
-            prepareTrtAttn(params.configs, params.k_cache, prefill_kv_cache_block_id_d, params.context_batch_size);
-    }
+        prefill_kv_cache_block_id_d,
+        params.attn_dtype);
+    output.decode_trt_attn =
+        prepareTrtAttn(params.configs, params.k_cache, decode_kv_cache_block_id_d, params.decoder_batch_size);
+    output.prefill_trt_attn =
+        prepareTrtAttn(params.configs, params.k_cache, prefill_kv_cache_block_id_d, params.context_batch_size);
     return output;
 }
 

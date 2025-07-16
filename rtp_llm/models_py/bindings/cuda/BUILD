@@ -18,11 +18,24 @@ cc_library(
     ],
 )
 
-# These bindings are to be reused by ppu bindings.
 cc_library(
     name = "cuda_bindings_base",
     hdrs = [
         "RegisterBaseBindings.hpp",
+    ],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/models_py/bindings:register_ops_hdr",
+        ":cuda_bindings",
+    ],
+    visibility = ["//visibility:public"],
+    alwayslink = 1,
+)
+
+cc_library(
+    name = "cuda_attn_bindings_base",
+    hdrs = [
+        "RegisterAttnOpBindings.hpp"
     ],
     copts = copts(),
     deps = [
@@ -42,6 +55,7 @@ cc_library(
     deps = [
         "//rtp_llm/models_py/bindings:register_ops_hdr",
         ":cuda_bindings_base",
+        ":cuda_attn_bindings_base"
     ],
     visibility = ["//visibility:public"],
     alwayslink = 1,

@@ -26,8 +26,7 @@ using namespace rtp_llm;
 
 namespace rtp_llm {
 
-BufferPtr
-genNormalCosSin(CudaDevice* device, int rope_dim, int rope_theta, float rope_scale, int max_position_embeddings) {
+torch::Tensor genNormalCosSin(int rope_dim, int rope_theta, float rope_scale, int max_position_embeddings) {
     auto inv_freq =
         1.0 / torch::pow(rope_theta, torch::arange(0, rope_dim, 2, torch::kInt64).to(torch::kFloat32) / rope_dim);
     auto t = torch::arange(max_position_embeddings, torch::kInt64).to(torch::kFloat32);
@@ -36,18 +35,7 @@ genNormalCosSin(CudaDevice* device, int rope_dim, int rope_theta, float rope_sca
     auto cos     = freqs.cos().to(torch::kFloat32);
     auto sin     = freqs.sin().to(torch::kFloat32);
     auto cos_sin = torch::stack({cos, sin}, 0).permute({1, 2, 0}).reshape({cos.size(0), -1}).contiguous();
-
-    BufferPtr cos_sin_d = device->allocateBuffer(
-        {DataType::TYPE_FP32, {static_cast<size_t>(rope_dim * max_position_embeddings)}, AllocationType::DEVICE},
-        {"cos_sin_d"});
-    check_cuda_value(cudaMemcpyAsync(cos_sin_d->data(),
-                                     cos_sin.data_ptr(),
-                                     rope_dim * max_position_embeddings * sizeof(float),
-                                     cudaMemcpyHostToDevice,
-                                     device->getStream()));
-    check_cuda_value(cudaStreamSynchronize(device->getStream()));
-
-    return cos_sin_d;
+    return cos_sin.cuda();
 }
 
 /**
@@ -61,26 +49,22 @@ genNormalCosSin(CudaDevice* device, int rope_dim, int rope_theta, float rope_sca
  * @param max_position_embeddings
  * @return BufferPtr
  */
-BufferPtr getRopeCosSin(CudaDevice* device,
-                        RopeStyle   rope_style,
-                        int         rope_dim,
-                        int         rope_theta,
-                        float       rope_scale,
-                        int         max_position_embeddings = 128000) {
+torch::Tensor
+getRopeCosSin(RopeStyle rope_style, int rope_dim, int rope_theta, float rope_scale, int max_position_embeddings) {
     RTP_LLM_LOG_INFO("rope: style = %d, dim = %d, theta = %d, scale = %f, max_position_embeddings = %d",
                      rope_style,
                      rope_dim,
                      rope_theta,
                      rope_scale,
                      max_position_embeddings);
-    BufferPtr cos_sin = nullptr;
+    torch::Tensor cos_sin;
 
     switch (rope_style) {
         case RopeStyle::No:
             break;
 
         case RopeStyle::Base:
-            cos_sin = genNormalCosSin(device, rope_dim, rope_theta, rope_scale, max_position_embeddings);
+            cos_sin = genNormalCosSin(rope_dim, rope_theta, rope_scale, max_position_embeddings);
             break;
 
         default:
@@ -95,15 +79,19 @@ ParamsPtr CudaDevice::prepareTrtAttn(const AttentionConfigs& configs,
                                      const BufferPtr&        k_cache,
                                      const BufferPtr&        kv_cache_block_id,
                                      int                     batch_size) {
-    if (!k_cache || !kv_cache_block_id || 0 == batch_size) {
+    return prepareTrtAttn(
+        configs, k_cache ? k_cache->shape()[0] * k_cache->shape()[1] : 0, kv_cache_block_id, batch_size);
+}
+
+ParamsPtr CudaDevice::prepareTrtAttn(const AttentionConfigs& configs,
+                                     int                     kv_block_offset,
+                                     const BufferPtr&        kv_cache_block_id,
+                                     int                     batch_size) {
+    if (!kv_block_offset || !kv_cache_block_id || 0 == batch_size) {
         return nullptr;
     }
 
     auto trt_attn = std::make_shared<TRTAttn>();
-
-    const int layer_num       = k_cache->shape()[0];
-    const int block_num       = k_cache->shape()[1];
-    const int kv_block_offset = block_num * layer_num;
 
     int             ele_size   = 2;
     KvCacheDataType cache_type = KvCacheDataType::BASE;
@@ -115,6 +103,9 @@ ParamsPtr CudaDevice::prepareTrtAttn(const AttentionConfigs& configs,
 #endif
         if (configs.kv_cache_dtype == KvCacheDataType::INT8) {
         cache_type = KvCacheDataType::INT8;
+        ele_size   = 1;
+    } else if (configs.kv_cache_dtype == KvCacheDataType::FP8) {
+        cache_type = KvCacheDataType::FP8;
         ele_size   = 1;
     }
 
@@ -243,7 +234,8 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
                                     && !params.configs.fuse_qkv_add_bias && fmha_type_ != FMHAType::NONE);
     RTP_LLM_LOG_DEBUG("skip_add_bias_transpose: %d", skip_add_bias_transpose);
     if (!skip_add_bias_transpose) {
-        bool store_qkv            = fmha_type_ != FMHAType::PAGED_TRT_V2 && fmha_type_ != FMHAType::NONE;
+        bool store_qkv =
+            fmha_type_ != FMHAType::PAGED_TRT_V2 && fmha_type_ != FMHAType::NONE && fmha_type_ != FMHAType::FLASH_INFER;
         bool store_q_no_transpose = fmha_type_ == FMHAType::FLASH_INFER;
         bool store_q              = fmha_type_ == FMHAType::PAGED_TRT_V2 || fmha_type_ == FMHAType::NONE;
         bool store_kv             = fmha_type_ == FMHAType::NONE;
@@ -442,11 +434,10 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
         q_output = allocateBuffer(
             {params.input.type(), {batch_size, local_head_num, size_per_head}, AllocationType::DEVICE}, {"q_output"});
 
-        static BufferPtr cos_sin_cache = getRopeCosSin(this,
-                                                       params.configs.rope_config.style,
-                                                       params.configs.rope_config.dim,
-                                                       params.configs.rope_config.base,
-                                                       params.configs.rope_config.scale);
+        static torch::Tensor cos_sin_cache = getRopeCosSin(params.configs.rope_config.style,
+                                                           params.configs.rope_config.dim,
+                                                           params.configs.rope_config.base,
+                                                           params.configs.rope_config.scale);
 
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(params.input.type(),
                                          invokeDecodeAddFusedQKVBiasTranspose,
@@ -460,7 +451,7 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
                                          params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias ?
                                              params.weights.qkv_weight->bias->data() :
                                              nullptr,
-                                         cos_sin_cache ? cos_sin_cache->data<float>() : nullptr,
+                                         cos_sin_cache.defined() ? cos_sin_cache.data_ptr<float>() : nullptr,
                                          batch_size,
                                          local_head_num,
                                          local_kv_head_num,

@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/th_op/multi_gpu_gpt/RtpEmbeddingOp.h"
 #include "rtp_llm/cpp/th_op/multi_gpu_gpt/EmbeddingHandlerOp.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
+#include "rtp_llm/cpp/utils/AttentionConfig.h"
 
 #include "rtp_llm/models_py/bindings/RegisterOps.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
@@ -38,6 +39,8 @@ PYBIND11_MODULE(libth_transformer, m) {
     register_fifo_scheduler_config(m);
     register_misc_config(m);
     register_arpc_config(m);
+
+    registerFMHAType(m);
     registerGptInitParameter(m);
     registerRtpLLMOp(m);
     registerRtpEmbeddingOp(m);

@@ -6,9 +6,15 @@ from torch import nn
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_loader.model_weight_info import ModelWeights
+from rtp_llm.models_py.modules.fmha import (
+    DECODE_MHA_IMPS,
+    PREFILL_MHA_IMPS,
+    FMHAImplBase,
+)
 from rtp_llm.ops import (
     DeviceExporter,
     DeviceType,
+    KVCache,
     PyAttentionInputs,
     PyModelInitResources,
     PyModelInputs,
@@ -26,9 +32,7 @@ class GptModelBase(nn.Module):
         self.layer_num: int = config.layer_num
         self.vocab_size: int = config.vocab_size
 
-        self.k_cache_base: Optional[torch.Tensor] = None
-        self.v_cache_base: Optional[torch.Tensor] = None
-
+        self.kv_cache: Optional[KVCache] = None
         self.device_type: DeviceType = get_device().get_device_type()
 
         logging.info(
@@ -37,14 +41,23 @@ class GptModelBase(nn.Module):
         )
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
-        self.k_cache_base = init_resource.k_cache_base
-        self.v_cache_base = init_resource.v_cache_base
+        self.kv_cache = init_resource.kv_cache
         logging.info(
             f"GptModelBase initialized with "
-            f"k_cache_base={self.k_cache_base.shape if self.k_cache_base is not None else None}, "
-            f"v_cache_base={self.v_cache_base.shape if self.v_cache_base is not None else None}"
+            f"k_cache_base={self.kv_cache.k_cache_base.shape if self.kv_cache.k_cache_base is not None else None}, "
+            f"v_cache_base={self.kv_cache.v_cache_base.shape if self.kv_cache.v_cache_base is not None else None}"
+            f"k_scale_base={self.kv_cache.k_scale_base.shape if self.kv_cache.k_scale_base is not None else None}"
+            f"v_scale_base={self.kv_cache.v_scale_base.shape if self.kv_cache.v_scale_base is not None else None}"
         )
         return True
 
     def forward(self, inputs: PyModelInputs) -> PyModelOutputs:
         raise NotImplementedError("forward method must be implemented in subclass")
+
+    def get_fmha_impl(self, attn_inputs: PyAttentionInputs) -> FMHAImplBase:
+        mha_impls = PREFILL_MHA_IMPS if attn_inputs.is_prefill else DECODE_MHA_IMPS
+        for fmha_impl in mha_impls:
+            impl = fmha_impl(self.config, attn_inputs)
+            if impl.support():
+                return impl
+        raise Exception(f"can not find fmha type: {attn_inputs.fmha_type}")

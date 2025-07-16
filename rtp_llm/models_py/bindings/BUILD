@@ -9,7 +9,9 @@ cc_library(
     srcs = [
         "OpDefs.cc",
     ],
-    deps = torch_deps(),
+    deps = torch_deps() + [
+        "//rtp_llm/cpp:utils",
+    ],
     visibility = ["//visibility:public"],
 )
 

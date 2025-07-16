@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/utils/utils.h"
+#include "rtp_llm/cpp/utils/AttentionConfig.h"
 #include <stdexcept>
 #include <mutex>
 #include "rtp_llm/cpp/utils/PyUtils.h"
@@ -38,17 +39,20 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
 
         py::object py_forward_method = py_instance_.attr("forward");
 
-        const BufferPtr combo_position_ids =
-            inputs.combo_position_ids ? device_->clone({*inputs.combo_position_ids}) : nullptr;
-        auto attention_common_inputs = prepareAttentionInputs(inputs, DataType::TYPE_FP16, combo_position_ids);
-
         torch::Tensor token_ids = Buffer2torchTensor(inputs.combo_tokens).cuda();
 
         PyAttentionInputs attention_inputs;
-        attention_inputs.prefill_flash_infer_attn = attention_common_inputs.prefill_flash_infer_attn;
-        attention_inputs.decode_flash_infer_attn  = attention_common_inputs.decode_flash_infer_attn;
-
-        auto py_model_inputs = PyModelInputs({token_ids, attention_inputs});
+        attention_inputs.prefix_lengths   = Buffer2torchTensor(inputs.prefix_lengths);
+        attention_inputs.sequence_lengths = Buffer2torchTensor(inputs.sequence_lengths);
+        attention_inputs.input_lengths    = Buffer2torchTensor(inputs.input_lengths);
+        auto kv_cache_block_id_device =
+            device_->clone({*inputs.kv_cache_block_id, AllocationType::DEVICE, {"kv_cache_block_id"}});
+        attention_inputs.kv_cache_block_id_host   = Buffer2torchTensor(inputs.kv_cache_block_id);
+        attention_inputs.kv_cache_block_id_device = Buffer2torchTensor(kv_cache_block_id_device, false);
+        attention_inputs.dtype                    = torch::kHalf;
+        attention_inputs.is_prefill               = !attention_inputs.sequence_lengths.size(0);
+        attention_inputs.kv_block_offset          = k_cache_buffer_->shape()[0] * k_cache_buffer_->shape()[1];
+        auto py_model_inputs                      = PyModelInputs({token_ids, attention_inputs});
 
         py::object py_outputs_obj = py_forward_method(py_model_inputs);
 

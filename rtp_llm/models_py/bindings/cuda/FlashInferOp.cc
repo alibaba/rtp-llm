@@ -1,149 +1,189 @@
 #include "rtp_llm/models_py/bindings/cuda/FlashInferOp.h"
+#include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "3rdparty/flashinfer/flashinfer.h"
 #include "rtp_llm/cpp/devices/cuda_impl/CudaFlashInfer.h"
 #include "rtp_llm/cpp/devices/OpData.h"
+#include "rtp_llm/cpp/devices/DeviceFactory.h"
+#include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/EnumUtils.h"
 
 using namespace torch_ext;
 
 namespace rtp_llm {
 
-FlashInferOp::FlashInferOp(const GptInitParameter& gpt_init_parameter):
-    configs(gpt_init_parameter), rope_config(gpt_init_parameter.getRopeConfig()) {}
+FlashInferPrefillOp::FlashInferPrefillOp(const GptInitParameter& gpt_init_parameter):
+    FMHACudaBase(gpt_init_parameter) {}
 
-void FlashInferOp::forward(torch::Tensor     input,
-                           torch::Tensor     output,
-                           torch::Tensor     k_cache,
-                           torch::Tensor     v_cache,
-                           PyAttentionInputs attn_params) {
-    FlashInferAttnParams* params;
-    if (attn_params.prefill_flash_infer_attn) {
-        params = (FlashInferAttnParams*)attn_params.prefill_flash_infer_attn.get();
-    } else {
-        params = (FlashInferAttnParams*)attn_params.decode_flash_infer_attn.get();
+bool FlashInferPrefillOp::support(torch_ext::PyAttentionInputs attn_inputs) {
+    if (fmha_config_.disable_flash_infer || attn_configs_.kv_cache_dtype == KvCacheDataType::INT8) {
+        return false;
     }
-    assert(params);
+    auto prefix_lengths_host   = torchTensor2Buffer(attn_inputs.prefix_lengths);
+    auto sequence_lengths_host = torchTensor2Buffer(attn_inputs.sequence_lengths);
+    auto input_lengths_host    = torchTensor2Buffer(attn_inputs.input_lengths);
+    return FlashInferAttnParams::checkPrefill(device_,
+                                              attn_configs_,
+                                              prefix_lengths_host,
+                                              input_lengths_host,
+                                              torchDTypeToDataType(attn_inputs.dtype),
+                                              false);
+}
 
-    const int local_head_num    = configs.head_num_;
-    const int local_head_num_kv = configs.head_num_kv_;
-    const int size_per_head     = configs.size_per_head_;
-
-    const int                  bs      = input.size(0);
-    const std::vector<int64_t> strides = {(local_head_num + 2 * local_head_num_kv) * size_per_head, size_per_head, 1};
-    // const auto cuda_option = torch::dtype(input.dtype()).device(torch::DeviceType::CUDA).requires_grad(false);
-    std::vector<torch::Tensor> qkv = input.split_with_sizes(
-        {local_head_num * size_per_head, local_head_num_kv * size_per_head, local_head_num_kv * size_per_head}, -1);
-    auto         q        = qkv[0].reshape({bs, local_head_num, size_per_head});
-    auto         append_k = qkv[1].reshape({bs, local_head_num_kv, size_per_head});
-    auto         append_v = qkv[2].reshape({bs, local_head_num_kv, size_per_head});
-    cudaStream_t stream   = 0;
-
-    if (rope_config.style == RopeStyle::Base) {
-        apply_rope_pos_ids(q,
-                           append_k,
-                           q,
-                           append_k,
-                           params->positions_d,
-                           (int64_t)rope_config.dim,
-                           false,
-                           (double)rope_config.scale,
-                           (double)rope_config.base,
-                           (int64_t)stream);
-        check_cuda_error();
+FlashInferAttnParamsPtr FlashInferPrefillOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
+    auto      prefix_lengths_host   = torchTensor2Buffer(attn_inputs.prefix_lengths);
+    auto      sequence_lengths_host = torchTensor2Buffer(attn_inputs.sequence_lengths);
+    auto      input_lengths_host    = torchTensor2Buffer(attn_inputs.input_lengths);
+    BufferPtr kv_cache_block_id_host, kv_cache_block_id_device;
+    if (attn_inputs.kv_cache_block_id_host.size(0)) {
+        kv_cache_block_id_host   = torchTensor2Buffer(attn_inputs.kv_cache_block_id_host);
+        kv_cache_block_id_device = torchTensor2Buffer(attn_inputs.kv_cache_block_id_device);
     }
-
-    // Note: skip_append_kv_cache is only used for unit test
-    bool skip_append_kv_cache = false;
-    if (!skip_append_kv_cache) {
-        if (append_k.type() != k_cache.type()) {
-            append_k = append_k.to(k_cache.type());
-            append_v = append_v.to(k_cache.type());
-        }
-        append_paged_kv_cache(append_k,
-                              append_v,
-                              params->batch_indice_d,
-                              params->positions_d,
-                              k_cache,
-                              v_cache,
-                              params->page_indice_d,
-                              params->page_indptr_d,
-                              params->paged_kv_last_page_len_d,
-                              1,
-                              (int64_t)stream);
+    DataType dtype = torchDTypeToDataType(attn_inputs.dtype);
+    if (attn_configs_.kv_cache_dtype == KvCacheDataType::FP8) {
+        dtype = DataType::TYPE_FP8_E4M3;
     }
+    auto                    params = FlashInferAttnParams::prepare(device_,
+                                                attn_configs_,
+                                                prefix_lengths_host,
+                                                sequence_lengths_host,
+                                                input_lengths_host,
+                                                kv_cache_block_id_host,
+                                                kv_cache_block_id_device,
+                                                dtype,  // torchDTypeToDataType(attn_inputs.dtype),
+                                                false);
+    FlashInferAttnParamsPtr attn_params(params, (FlashInferAttnParams*)params.get());
+    RTP_LLM_CHECK_WITH_INFO(!attn_params->decode_plan, "flash infer params should gen prefill plan");
+    return attn_params;
+}
 
-    // moe_insertion_callback();
+torch::Tensor FlashInferPrefillOp::forward(const torch::Tensor&              q,
+                                           std::optional<torch_ext::KVCache> kv_cache,
+                                           const FlashInferAttnParamsPtr&    params) {
+    RTP_LLM_CHECK_WITH_INFO(params != nullptr, "flash infer op should have params");
 
-    check_cuda_error();
-
-    auto softmax_scale = (1.0f / sqrtf(size_per_head * 1.0f)) * configs.softmax_extra_scale_;
-
-    if (params->decode_plan) {
-        RTP_LLM_LOG_DEBUG("decode flashinfer");
-        BatchDecodeWithPagedKVCacheRun(params->float_workspace_d,         // float_workspace_buffer
-                                       params->int_workspace_d,           // int_workspace_buffer
-                                       params->plan,                      // plan_info_vec
-                                       q,                                 // q
-                                       k_cache,                           // paged_k_cache
-                                       v_cache,                           // paged_v_cache
-                                       params->page_indptr_d,             // paged_kv_indptr
-                                       params->page_indice_d,             // paged_kv_indices
-                                       params->paged_kv_last_page_len_d,  // paged_kv_last_page_len
-                                       output,
-                                       std::nullopt,  // maybe_lse
-                                       1,             // kv_layout_code
-                                       -1,            // window_left
-                                       std::nullopt,  // maybe_alibi_slopes
-                                       0,             // logits_soft_cap
-                                       softmax_scale,
-                                       0,
-                                       0,
-                                       (int64_t)stream);
-    } else {
-        RTP_LLM_LOG_DEBUG("prefill flashinfer");
-        BatchPrefillWithPagedKVCacheRun(params->float_workspace_d,         // float_workspace_buffer
-                                        params->int_workspace_d,           // int_workspace_buffer
-                                        params->plan,                      // plan_info_vec
-                                        q,                                 // q
-                                        k_cache,                           // paged_k_cache
-                                        v_cache,                           // paged_v_cache
-                                        params->qo_indptr_d,               // qo_indptr
-                                        params->page_indptr_d,             // paged_kv_indptr
-                                        params->page_indice_d,             // paged_kv_indices
-                                        params->paged_kv_last_page_len_d,  // paged_kv_last_page_len
-                                        output,
-                                        std::nullopt,  // maybe_lse
-                                        1,             // mask_mode_code,
-                                        1,             // layout
-                                        -1,            // window_left
-                                        std::nullopt,  // maybe_custom_mask
-                                        std::nullopt,  // maybe_mask_indptr
-                                        std::nullopt,  // maybe_alibi_slopes
-                                        0,             // logits_soft_cap
-                                        softmax_scale,
-                                        rope_config.scale,
-                                        rope_config.base,
-                                        (int64_t)stream);
+    const int     local_head_num = attn_configs_.head_num;
+    const int     size_per_head  = attn_configs_.size_per_head;
+    const int     bs             = q.size(0);
+    torch::Tensor output =
+        torch::empty({bs, local_head_num * size_per_head}, torch::TensorOptions(q.dtype()).device(q.device()));
+    auto softmax_scale = (1.0f / sqrtf(size_per_head * 1.0f)) * attn_configs_.softmax_extra_scale;
+    RTP_LLM_LOG_DEBUG("prefill flashinfer");
+    torch::Tensor k_cache, v_cache;
+    if (kv_cache.has_value()) {
+        k_cache = kv_cache.value().k_cache_base;
+        v_cache = kv_cache.value().v_cache_base;
     }
-    // if (params.configs.kv_cache_dtype == KvCacheDataType::FP8) {
-    //     const auto &scale = params.weights.static_scale_reciprocal_weight;
-    //     RTP_LLM_CHECK_WITH_INFO(scale != nullptr, "static_scale_reciprocal_weight is not set");
-    //     auto scale_t = Buffer2torchTensor(scale->kernel, false);
-    //     auto fp8_out = Buffer2torchTensor(params.output, false);
-    //     fp8_out.copy_((scale_t * out).to(torch::kFloat8_e4m3fn));
-    // }
+    BatchPrefillWithPagedKVCacheRun(params->float_workspace_d,         // float_workspace_buffer
+                                    params->int_workspace_d,           // int_workspace_buffer
+                                    params->plan,                      // plan_info_vec
+                                    q,                                 // q
+                                    k_cache,                           // paged_k_cache
+                                    v_cache,                           // paged_v_cache
+                                    params->qo_indptr_d,               // qo_indptr
+                                    params->page_indptr_d,             // paged_kv_indptr
+                                    params->page_indice_d,             // paged_kv_indices
+                                    params->paged_kv_last_page_len_d,  // paged_kv_last_page_len
+                                    output,
+                                    std::nullopt,  // maybe_lse
+                                    1,             // mask_mode_code,
+                                    1,             // layout
+                                    -1,            // window_left
+                                    std::nullopt,  // maybe_custom_mask
+                                    std::nullopt,  // maybe_mask_indptr
+                                    std::nullopt,  // maybe_alibi_slopes
+                                    0,             // logits_soft_cap
+                                    softmax_scale,
+                                    attn_configs_.rope_config.scale,
+                                    attn_configs_.rope_config.base,
+                                    (int64_t)device_->getStream());
+    return output;
+}
+
+FlashInferDecodeOp::FlashInferDecodeOp(const GptInitParameter& gpt_init_parameter): FMHACudaBase(gpt_init_parameter) {}
+
+bool FlashInferDecodeOp::support(torch_ext::PyAttentionInputs attn_inputs) {
+    if (fmha_config_.disable_flash_infer || attn_configs_.kv_cache_dtype == KvCacheDataType::INT8
+        || attn_configs_.kv_cache_dtype == KvCacheDataType::FP8) {
+        return false;
+    }
+    return FlashInferAttnParams::checkDecode(device_, attn_configs_, torchDTypeToDataType(attn_inputs.dtype));
+}
+
+FlashInferAttnParamsPtr FlashInferDecodeOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
+    auto      sequence_lengths_host = torchTensor2Buffer(attn_inputs.sequence_lengths);
+    auto      input_lengths_host    = torchTensor2Buffer(attn_inputs.input_lengths);
+    BufferPtr kv_cache_block_id_host, kv_cache_block_id_device;
+    if (attn_inputs.kv_cache_block_id_host.size(0)) {
+        kv_cache_block_id_host   = torchTensor2Buffer(attn_inputs.kv_cache_block_id_host);
+        kv_cache_block_id_device = torchTensor2Buffer(attn_inputs.kv_cache_block_id_device);
+    }
+    auto                    params = FlashInferAttnParams::prepare(device_,
+                                                attn_configs_,
+                                                nullptr,
+                                                sequence_lengths_host,
+                                                input_lengths_host,
+                                                kv_cache_block_id_host,
+                                                kv_cache_block_id_device,
+                                                torchDTypeToDataType(attn_inputs.dtype),
+                                                false);
+    FlashInferAttnParamsPtr attn_params(params, (FlashInferAttnParams*)params.get());
+    RTP_LLM_CHECK_WITH_INFO(attn_params->decode_plan, "flash infer params should gen decode plan");
+    return attn_params;
+}
+
+torch::Tensor FlashInferDecodeOp::forward(const torch::Tensor&              q,
+                                          std::optional<torch_ext::KVCache> kv_cache,
+                                          const FlashInferAttnParamsPtr&    params) {
+    RTP_LLM_CHECK_WITH_INFO(params != nullptr, "flash infer op should have params");
+
+    const int     local_head_num = attn_configs_.head_num;
+    const int     size_per_head  = attn_configs_.size_per_head;
+    const int     bs             = q.size(0);
+    torch::Tensor output =
+        torch::empty({bs, local_head_num * size_per_head}, torch::TensorOptions(q.dtype()).device(q.device()));
+    auto softmax_scale = (1.0f / sqrtf(size_per_head * 1.0f)) * attn_configs_.softmax_extra_scale;
+    RTP_LLM_LOG_DEBUG("decode flashinfer");
+    torch::Tensor k_cache, v_cache;
+    if (kv_cache.has_value()) {
+        k_cache = kv_cache.value().k_cache_base;
+        v_cache = kv_cache.value().v_cache_base;
+    }
+    BatchDecodeWithPagedKVCacheRun(params->float_workspace_d,         // float_workspace_buffer
+                                   params->int_workspace_d,           // int_workspace_buffer
+                                   params->plan,                      // plan_info_vec
+                                   q,                                 // q
+                                   k_cache,                           // paged_k_cache
+                                   v_cache,                           // paged_v_cache
+                                   params->page_indptr_d,             // paged_kv_indptr
+                                   params->page_indice_d,             // paged_kv_indices
+                                   params->paged_kv_last_page_len_d,  // paged_kv_last_page_len
+                                   output,
+                                   std::nullopt,  // maybe_lse
+                                   1,             // kv_layout_code
+                                   -1,            // window_left
+                                   std::nullopt,  // maybe_alibi_slopes
+                                   0,             // logits_soft_cap
+                                   softmax_scale,
+                                   0,
+                                   0,
+                                   (int64_t)device_->getStream());
+    return output;
 }
 
 void registerFlashInferOp(const py::module& m) {
-    pybind11::class_<FlashInferOp>(m, "FlashInferOp")
+    pybind11::class_<FlashInferAttnParams, std::shared_ptr<FlashInferAttnParams>>(m, "FlashInferAttnParams")
+        .def(pybind11::init<>());
+    pybind11::class_<FlashInferPrefillOp>(m, "FlashInferPrefillOp")
         .def(pybind11::init<GptInitParameter>(), py::arg("gpt_init_parameter"))
-        .def("forward",
-             &FlashInferOp::forward,
-             py::arg("input"),
-             py::arg("output"),
-             py::arg("k_cache"),
-             py::arg("v_cache"),
-             py::arg("attn_params"));
+        .def("support", &FlashInferPrefillOp::support, py::arg("attn_inputs"))
+        .def("prepare", &FlashInferPrefillOp::prepare, py::arg("attn_inputs"))
+        .def("forward", &FlashInferPrefillOp::forward, py::arg("q"), py::arg("kv_cache"), py::arg("params"));
+    pybind11::class_<FlashInferDecodeOp>(m, "FlashInferDecodeOp")
+        .def(pybind11::init<GptInitParameter>(), py::arg("gpt_init_parameter"))
+        .def("support", &FlashInferDecodeOp::support, py::arg("attn_inputs"))
+        .def("prepare", &FlashInferDecodeOp::prepare, py::arg("attn_inputs"))
+        .def("forward", &FlashInferDecodeOp::forward, py::arg("q"), py::arg("kv_cache"), py::arg("params"));
 }
 
 }  // namespace rtp_llm

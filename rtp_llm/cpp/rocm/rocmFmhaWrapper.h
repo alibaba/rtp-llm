@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rtp_llm/cpp/core/Types.h"
+#include "rtp_llm/cpp/utils/AttentionConfig.h"
 
 namespace rtp_llm {
 class rocmFmhaWrapper {

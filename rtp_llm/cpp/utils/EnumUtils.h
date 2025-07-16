@@ -1,6 +1,5 @@
 #pragma once
 #include <string>
-#include "rtp_llm/cpp/core/Types.h"
 
 // corresponds to cublasOperation_t
 enum TransposeOperation {
@@ -28,16 +27,6 @@ KvCacheDataType inline loadKvCacheDataTypeFromString(const std::string& str) {
     } else if (str == "int8") {
         return KvCacheDataType::INT8;
     } else if (str == "fp8") {
-        return KvCacheDataType::FP8;
-    } else {
-        return KvCacheDataType::BASE;
-    }
-}
-
-KvCacheDataType inline loadKvCacheDataTypeFromDataType(rtp_llm::DataType type) {
-    if (type == rtp_llm::DataType::TYPE_INT8) {
-        return KvCacheDataType::INT8;
-    } else if (type == rtp_llm::DataType::TYPE_FP8_E4M3) {
         return KvCacheDataType::FP8;
     } else {
         return KvCacheDataType::BASE;

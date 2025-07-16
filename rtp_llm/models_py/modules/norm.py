@@ -133,7 +133,7 @@ class FusedQKRMSNorm(nn.Module):
         self.q_size = self.head_num * self.size_per_head
         self.kv_size = self.kv_head_num * self.size_per_head
 
-    def forward(self, hidden_states):
+    def forward(self, hidden_states: torch.Tensor):
         m, n = hidden_states.shape
         rtp_llm_ops.fused_qk_rmsnorm(
             hidden_states,

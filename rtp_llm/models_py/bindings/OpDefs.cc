@@ -3,31 +3,30 @@
 namespace torch_ext {
 
 void registerPyOpDefs(pybind11::module& m) {
+    pybind11::class_<KVCache>(m, "KVCache")
+        .def(pybind11::init<>())
+        .def_readonly("k_cache_base", &KVCache::k_cache_base, "Key cache base tensor")
+        .def_readonly("v_cache_base", &KVCache::v_cache_base, "Value cache base tensor")
+        .def_readonly("k_scale_base", &KVCache::k_scale_base, "Key cache scale tensor")
+        .def_readonly("v_scale_base", &KVCache::v_scale_base, "Value cache scale tensor")
+        .def("get_layer_cache", &KVCache::getLayerCache);
+
     pybind11::class_<PyModelInitResources>(m, "PyModelInitResources")
         .def(pybind11::init<>())
-        .def_readwrite("k_cache_base", &PyModelInitResources::k_cache_base, "Key cache base tensor")
-        .def_readwrite("v_cache_base", &PyModelInitResources::v_cache_base, "Value cache base tensor");
+        .def_readonly("kv_cache", &PyModelInitResources::kv_cache, "kv cache");
+
+    pybind11::class_<caffe2::TypeMeta>(m, "TypeMeta").def(pybind11::init<>());
 
     pybind11::class_<PyAttentionInputs>(m, "PyAttentionInputs")
         .def(pybind11::init<>())
-        .def(
-            "get_prefill_flash_infer_attn",
-            [](const PyAttentionInputs& self) -> pybind11::capsule {
-                if (self.prefill_flash_infer_attn) {
-                    return pybind11::capsule(self.prefill_flash_infer_attn.get(), "prefill_flash_infer_attn");
-                }
-                return pybind11::capsule(nullptr, "prefill_flash_infer_attn");
-            },
-            "Get prefill flash infer attention as capsule")
-        .def(
-            "get_decode_flash_infer_attn",
-            [](const PyAttentionInputs& self) -> pybind11::capsule {
-                if (self.decode_flash_infer_attn) {
-                    return pybind11::capsule(self.decode_flash_infer_attn.get(), "decode_flash_infer_attn");
-                }
-                return pybind11::capsule(nullptr, "decode_flash_infer_attn");
-            },
-            "Get decode flash infer attention as capsule");
+        .def_readonly("is_prefill", &PyAttentionInputs::is_prefill)
+        .def_readonly("prefix_lengths", &PyAttentionInputs::prefix_lengths)
+        .def_readonly("sequence_lengths", &PyAttentionInputs::sequence_lengths)
+        .def_readonly("input_lengths", &PyAttentionInputs::input_lengths)
+        .def_readonly("kv_cache_block_id_host", &PyAttentionInputs::kv_cache_block_id_host)
+        .def_readonly("kv_cache_block_id_device", &PyAttentionInputs::kv_cache_block_id_device)
+        .def_readonly("kv_block_offset", &PyAttentionInputs::kv_block_offset)
+        .def_readonly("dtype", &PyAttentionInputs::dtype);
 
     pybind11::class_<PyModelInputs>(m, "PyModelInputs")
         .def(pybind11::init<>())

@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/utils/MlaConfig.h"
 #include "rtp_llm/cpp/utils/EplbConfig.h"
 #include "rtp_llm/cpp/utils/QuantInfo.h"
+#include "rtp_llm/cpp/utils/AttentionConfig.h"
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/th_op/GptInitParameterRegister.h"
 #include "rtp_llm/cpp/th_op/ConfigModules.h"
@@ -297,16 +298,17 @@ public:
         misc_config.update_from_env_for_test();
     }
 
-    void       showDebugInfo() const;
-    void       insertMultiTaskPromptTokens(std::string task_id, std::vector<int64_t> tokens_id);
-    void       setLayerNormType();
-    void       setNormType();
-    void       setTaskType(std::string task);
-    void       setActivationType();
-    void       setKvCacheDataType();
-    bool       isGatedActivation() const;
-    RopeConfig getRopeConfig() const;
-    bool       isKvCacheQuant() const;
+    void             showDebugInfo() const;
+    void             insertMultiTaskPromptTokens(std::string task_id, std::vector<int64_t> tokens_id);
+    void             setLayerNormType();
+    void             setNormType();
+    void             setTaskType(std::string task);
+    void             setActivationType();
+    void             setKvCacheDataType();
+    bool             isGatedActivation() const;
+    RopeConfig       getRopeConfig() const;
+    AttentionConfigs getAttentionConfigs() const;
+    bool             isKvCacheQuant() const;
 
     // is not pd-sep
     bool isPDFusion() const;

@@ -4,6 +4,15 @@
 
 namespace rtp_llm {
 
+struct XQAParams {
+    KVBlockArray  kv_block_array;
+    size_t        batch_size;
+    size_t        max_seq_len;
+    torch::Tensor sequence_lengths;
+};
+
+using XQAParamsPtr = std::shared_ptr<XQAParams>;
+
 /**
  * @brief
  *
