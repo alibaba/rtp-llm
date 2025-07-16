@@ -15,19 +15,24 @@ logging.basicConfig(
 )
 
 
+def get_gpu_ids():
+    if not torch.cuda.is_available():
+        return list(range(128))
+    else:
+        total_gpus = list(range(torch.cuda.device_count()))
+        gpus = os.environ.get(
+            "CUDA_VISIBLE_DEVICES", os.environ.get("HIP_VISIBLE_DEVICES")
+        )
+        if gpus is not None:
+            total_gpus = [int(id) for id in gpus.split(",")]
+        logging.info(f"{torch.cuda.get_device_name()}: {total_gpus}")
+        return total_gpus
+
+
 class DeviceResource:
     def __init__(self, required_gpu_count: int):
         self.required_gpu_count = required_gpu_count
-        if not torch.cuda.is_available():
-            self.total_gpus = list(range(128))
-        else:
-            self.total_gpus = list(range(torch.cuda.device_count()))
-            gpus = os.environ.get(
-                "CUDA_VISIBLE_DEVICES", os.environ.get("HIP_VISIBLE_DEVICES")
-            )
-            if gpus is not None:
-                self.total_gpus = [int(id) for id in gpus.split(",")]
-                logging.info(f"{torch.cuda.get_device_name()}: {self.total_gpus}")
+        self.total_gpus = get_gpu_ids()
         if required_gpu_count > len(self.total_gpus):
             raise ValueError(
                 f"required gpu count {required_gpu_count} is greater than total gpu count {len(self.total_gpus)}"
