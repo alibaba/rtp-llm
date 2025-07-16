@@ -4,12 +4,14 @@ from unittest import SkipTest, TestCase, main
 
 import torch
 import torch.nn.functional as F
-from libth_transformer.rtp_llm_ops import SelectTopkOp
 from torch import dtype as _dtype
 from torch.profiler import ProfilerActivity, profile, record_function
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.utils.model_weight import W
+
+import rtp_llm.ops  # isort:skip
+from libth_transformer.rtp_llm_ops import SelectTopkOp  # isort:skip
 
 
 class SelectTopkOpTest(TestCase):
