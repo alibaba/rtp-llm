@@ -1,5 +1,6 @@
 import logging
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -15,6 +16,10 @@ logging.basicConfig(
 )
 
 
+def get_ip():
+    return socket.gethostbyname(socket.gethostname())
+
+
 def get_gpu_ids():
     if not torch.cuda.is_available():
         return list(range(128))
@@ -25,7 +30,7 @@ def get_gpu_ids():
         )
         if gpus is not None:
             total_gpus = [int(id) for id in gpus.split(",")]
-        logging.info(f"{torch.cuda.get_device_name()}: {total_gpus}")
+        logging.info(f"{get_ip()} {torch.cuda.get_device_name()}: {total_gpus}")
         return total_gpus
 
 
@@ -53,7 +58,7 @@ class DeviceResource:
                     logging.info(f"lock device {id} failed")
                     continue
                 gpu_ids.append(str(id))
-                logging.info(f"lock device {id} done")
+                logging.info(f"{get_ip()} lock device {id} done")
                 if len(gpu_ids) >= self.required_gpu_count:
                     logging.info(f"use gpus:[{gpu_ids}]")
                     self.gpu_locks = stack.pop_all()
