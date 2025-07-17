@@ -26,6 +26,15 @@
 
 namespace rtp_llm {
 
+struct AiterAttnParams {
+  BufferPtr sequence_lengths;
+  BufferPtr sequence_lengths_host;
+  torch::Tensor sequence_lengths_t;
+
+  static ParamsPtr prepareDecodeAiterAttnParams(
+      rtp_llm::DeviceBase* device, const BufferPtr& sequence_lengths_host);
+};
+
 struct FlashInferAttnParams {
     BufferPtr float_workspace;
     BufferPtr int_workspace;
@@ -191,7 +200,8 @@ public:
     KVBlockArray getKVBlockArray(const AttentionModuleParams& params,
                                  const Buffer&                kv_cache_offset_pointers,
                                  int                          batch_size,
-                                 bool                         use_fp8_fmha);
+                                 bool                         use_fp8_fmha,
+                                 bool                         use_offset_array = false);
 
 protected:
     void InvokeROCmDeepGemm(const GemmParams& params, BufferPtr output);

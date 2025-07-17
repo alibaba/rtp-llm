@@ -209,6 +209,8 @@ DevicePrepOutput ROCmDevice::prepareModelRun(const DevicePrepParams& params) {
                                                                                                params.input_lengths,
                                                                                                params.kv_cache_block_id,
                                                                                                params.attn_dtype);
+    output.decode_aiter_attn = AiterAttnParams::prepareDecodeAiterAttnParams(
+        this, params.sequence_lengths);
     return std::move(output);
 }
 

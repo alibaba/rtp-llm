@@ -262,6 +262,7 @@ rtp_llm::AttentionCommonInputs GptModel::prepareAttentionInputs(const GptModelIn
     attention_inputs.prefill_flash_infer_attn.swap(prep_output.prefill_flash_infer_attn);
     attention_inputs.decode_trt_attn.swap(prep_output.decode_trt_attn);
     attention_inputs.prefill_trt_attn.swap(prep_output.prefill_trt_attn);
+    attention_inputs.decode_aiter_attn.swap(prep_output.decode_aiter_attn);
     attention_inputs.request_id            = inputs.request_id;
     attention_inputs.request_pd_separation = inputs.request_pd_separation;
     attention_inputs.k_block_size          = inputs.k_block_size;

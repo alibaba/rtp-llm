@@ -359,6 +359,13 @@ void AttentionOpTest::selfAttentionOpTest(size_t batch_size,
         attention_config, kv_cache_buffer.k_blocks, common_inputs.kv_cache->kv_cache_block_id, batch_size);
 #endif
 
+#ifdef USING_ROCM
+    ROCmDevice* device = dynamic_cast<ROCmDevice*>(device_);
+    common_inputs.decode_aiter_attn =
+        AiterAttnParams::prepareDecodeAiterAttnParams(
+            device, torchTensor2Buffer(sequence_lengths_host));
+#endif
+
     auto qkv_output = device_->allocateBuffer({qkv_states_device->type(), {token_num, num_heads, head_dim}});
     device_->decoderSelfAttention(
         {0, *qkv_states_device, *qkv_output, common_inputs, attention_weight, attention_config});
@@ -465,6 +472,9 @@ void AttentionOpTest::aiterPageAttentionOpTest(size_t batch_size,
     common_inputs.decoder_batch_size  = batch_size;
     common_inputs.decoder_max_seq_len = step - 1;
     common_inputs.max_prefix_length   = 0;
+    common_inputs.decode_aiter_attn =
+        AiterAttnParams::prepareDecodeAiterAttnParams(
+            device, torchTensor2Buffer(sequence_lengths_host));
     auto buffer_nullptr               = BufferPtr(nullptr);
     auto attention_weight             = AttentionLayerWeights();
     attention_weight.qkv_weight       = make_shared<const DenseWeights>(DenseWeights(buffer_nullptr, bias_device));
@@ -479,7 +489,9 @@ void AttentionOpTest::aiterPageAttentionOpTest(size_t batch_size,
         device->allocateBuffer({DataType::TYPE_INT32, {batch_size, 1, 2, max_blocks_per_batch}, AllocationType::DEVICE},
                                {"kv_cache_page_List"});
     KVBlockArray kv_block_array = device->getKVBlockArray(params, *kv_cache_page_List, batch_size, false);
+
     runAiterPA(params, device, *qkv_states_device);
+
     device->syncAndCheck();
     auto q_host_fp32 = query_states_host.to(tensor_options);
     auto k_host_fp32 = k_cache_host.to(tensor_options);

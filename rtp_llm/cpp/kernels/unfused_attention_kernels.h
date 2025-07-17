@@ -110,6 +110,9 @@ struct PrefixPromptBatchWeightsParam {
     int          max_prefix_prompt_length = 0;
     bool         count_length             = false;
     KVBlockArray kv_block_array           = KVBlockArray();
+#if USING_ROCM
+    OffsetIndexedKVBlockArray offset_kv_block_array = OffsetIndexedKVBlockArray();
+#endif
 };
 
 void float_to_half(const void* input, void* output, int size);

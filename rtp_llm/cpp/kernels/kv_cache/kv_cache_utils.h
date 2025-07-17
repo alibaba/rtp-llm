@@ -112,6 +112,10 @@ struct KVBlockArrayForContextFMHA {
 // functions for accessing blocks of in K and V caches
 // and elements inside these blocks
 struct KVBlockArray: public KVBlockArrayForContextFMHA {
+#if USING_ROCM
+    friend class OffsetIndexedKVBlockArray;
+#endif
+
     // Pointer to beginning of pool.
     void* mSecondaryPoolPtr;
     // Maximum kv cache length per sequence
@@ -259,6 +263,45 @@ private:
         return offset.isPrimary() ? mPrimaryPoolPtr : mSecondaryPoolPtr;
     }
 };
+
+#if USING_ROCM
+// Use raw offset (kv_block_offset) to index KV blocks (skip
+// invokeConvertOffsetToBlockArrayData)
+struct OffsetIndexedKVBlockArray : public KVBlockArray {
+  int32_t kv_block_offset_;
+  OffsetIndexedKVBlockArray() = default;
+  OffsetIndexedKVBlockArray(KVBlockArray& base, DataType* raw_block_table,
+                            int32_t kv_block_offset)
+      : KVBlockArray(base), kv_block_offset_(kv_block_offset) {
+    data = raw_block_table;
+  }
+  __host__ __device__ inline DataType const* getRowPtr(KVIdxType kvIdx,
+                                                       int32_t seqIdx) const {
+    return data + seqIdx * mMaxBlocksPerSeq;
+  }
+  __host__ __device__ inline void* getBlockPtr(DataType const* offsets,
+                                               int32_t tokenIdx,
+                                               KVIdxType kvIdx) const {
+    auto const offset = offsets[tokenIdx >> mTokensPerBlockLog2];
+    return reinterpret_cast<void*>(
+        reinterpret_cast<char*>(getPoolPtr(offset)) +
+        (offset.get() + static_cast<int32_t>(kvIdx) * kv_block_offset_) *
+            static_cast<uint64_t>(mBytesPerBlock));
+  }
+  __host__ __device__ inline void* getBlockPtr(int32_t seqIdx, int32_t tokenIdx,
+                                               KVIdxType kvIdx) const {
+    return getBlockPtr(getRowPtr(kvIdx, seqIdx), tokenIdx, kvIdx);
+  }
+  __host__ __device__ inline void* getKBlockPtr(int32_t seqIdx,
+                                                int32_t tokenIdx) const {
+    return getBlockPtr(seqIdx, tokenIdx, KVIdxType::K_IDX);
+  }
+  __host__ __device__ inline void* getVBlockPtr(int32_t seqIdx,
+                                                int32_t tokenIdx) const {
+    return getBlockPtr(seqIdx, tokenIdx, KVIdxType::V_IDX);
+  }
+};
+#endif
 
 // MLA KVBlockArray
 

@@ -156,6 +156,8 @@ void flashInferAttnParamsDeleter(void* p) {
     delete (FlashInferAttnParams*)p;
 }
 
+void aiterAttnParamsDeleter(void* p) { delete (AiterAttnParams*)p; }
+
 void prepareDecodeFlashInferAttnParamsImpl(FlashInferAttnParams*            params,
                                            rtp_llm::DeviceBase*             device,
                                            const rtp_llm::AttentionConfigs& attn_configs,
@@ -310,6 +312,26 @@ void prepareContextMLAFlashInferAttnParamsImpl(FlashInferAttnParams*            
     params->page_indptr_t              = Buffer2torchTensor(params->page_indptr, false);
 }
 
+void prepareDecodeAiterAttnParamsImpl(AiterAttnParams* params,
+                                      rtp_llm::DeviceBase* device,
+                                      const BufferPtr& sequence_lengths_host,
+                                      const uint64_t batch_size) {
+  params->sequence_lengths_host = device->allocateBuffer(
+      {DataType::TYPE_INT32, {batch_size}, AllocationType::HOST},
+      {"sequence_lengths_host"});
+
+  for (int i = 0; i < int(batch_size); i++) {
+    params->sequence_lengths_host->data<int>()[i] =
+        sequence_lengths_host->data<int>()[i] + 1;
+  }
+
+  params->sequence_lengths =
+      device->clone({*params->sequence_lengths_host, AllocationType::DEVICE});
+
+  params->sequence_lengths_t =
+      Buffer2torchTensor(params->sequence_lengths, false);
+}
+
 ParamsPtr FlashInferAttnParams::preparePrefillFlashInferAttnParams(rtp_llm::DeviceBase*             device,
                                                                    const rtp_llm::AttentionConfigs& attn_configs,
                                                                    const BufferPtr&                 prefix_lengths_host,
@@ -398,10 +420,30 @@ ParamsPtr FlashInferAttnParams::prepareDecodeFlashInferAttnParams(rtp_llm::Devic
     return ret;
 }
 
+ParamsPtr AiterAttnParams::prepareDecodeAiterAttnParams(
+    rtp_llm::DeviceBase* device, const BufferPtr& sequence_lengths_host) {
+  if (!bool(autil::EnvUtil::getEnv("USE_AITER_PA", 0L))) {
+    return nullptr;
+  }
+
+  const size_t batch_size = sequence_lengths_host->shape()[0];
+  if (batch_size == 0) {
+    return nullptr;
+  }
+
+  auto ret = ParamsPtr(new AiterAttnParams, aiterAttnParamsDeleter);
+  auto params = (AiterAttnParams*)ret.get();
+
+  prepareDecodeAiterAttnParamsImpl(params, device, sequence_lengths_host,
+                                   batch_size);
+  return ret;
+}
+
 KVBlockArray ROCmDevice::getKVBlockArray(const AttentionModuleParams& params,
                                          const Buffer&                kv_cache_offset_pointers,
                                          int                          batch_size,
-                                         bool                         use_fp8_fmha) {
+                                         bool                         use_fp8_fmha,
+                                         bool                         use_offset_array) {
     const auto& kv_cache         = params.common.kv_cache;
     const auto& kv_blocks_offset = *(kv_cache->kv_cache_block_id);
     const auto& kv_block_offset  = (kv_cache->k_cache_buffer)->shape()[0] * kv_cache->layer_num;
@@ -438,12 +480,15 @@ KVBlockArray ROCmDevice::getKVBlockArray(const AttentionModuleParams& params,
                      (uint64_t*)k_cache.data(),
                      nullptr,
                      (rtp_llm::KVBlockArrayForContextFMHA::DataType*)kv_cache_offset_pointers.data());
-    invokeConvertOffsetToBlockArrayData((int32_t*)kv_cache_offset_pointers.data(),
-                                        (int*)kv_blocks_offset.data(),
-                                        batch_size,
-                                        max_blocks_per_batch,
-                                        kv_block_offset,
-                                        stream_);
+
+    if(!use_offset_array) {
+        invokeConvertOffsetToBlockArrayData((int32_t*)kv_cache_offset_pointers.data(),
+                                            (int*)kv_blocks_offset.data(),
+                                            batch_size,
+                                            max_blocks_per_batch,
+                                            kv_block_offset,
+                                            stream_);
+    }
     check_cuda_error();
     if (kv_cache->k_scale_buffer) {
         RUNTIME_ASSERT_OP_ARG(kv_cache->v_scale_buffer,
@@ -841,11 +886,18 @@ AttentionModuleOutput ROCmDevice::decoderSelfAttention(const AttentionModulePara
     const auto max_blocks_per_batch = params.common.kv_cache->kv_cache_block_id->shape()[1];
     auto       kv_cache_offset      = allocateBuffer(
         {DataType::TYPE_INT32, {batch_size, 1, 2, max_blocks_per_batch}, AllocationType::DEVICE}, {"kv_cache_offset"});
-    KVBlockArray kv_block_array = getKVBlockArray(params, *kv_cache_offset, batch_size, false);
 
     if (bool(autil::EnvUtil::getEnv("USE_AITER_PA", 0L))) {
+        KVBlockArray kv_block_array =
+            getKVBlockArray(params, *kv_cache_offset, batch_size, false, true);
         PrefixPromptBatchWeightsParam prefix_prompt_param;
-        prefix_prompt_param.kv_block_array = kv_block_array;
+        auto offset_kv_block_array = OffsetIndexedKVBlockArray(
+            kv_block_array,
+            (rtp_llm::KVBlockArrayForContextFMHA::DataType*)
+                params.common.kv_cache->kv_cache_block_id->data(),
+            params.common.kv_cache->k_cache_buffer->shape()[0] *
+                params.common.kv_cache->layer_num);
+        prefix_prompt_param.offset_kv_block_array = offset_kv_block_array;
 
         if (params.common.prefix_prompt_lengths) {
             prefix_prompt_param.d_prefix_prompt_lengths  = params.common.prefix_prompt_lengths->data<int>();
@@ -907,6 +959,8 @@ AttentionModuleOutput ROCmDevice::decoderSelfAttention(const AttentionModulePara
             check_cuda_error();
         }
     } else {
+        KVBlockArray kv_block_array = getKVBlockArray(params, *kv_cache_offset, batch_size, false);
+        
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
                                          selfAttentionwrapper,
                                          params,
