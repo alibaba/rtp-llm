@@ -173,7 +173,7 @@ class TBStars2MoEModel(GptModelBase):
 
         fmha_impl = self.get_fmha_impl(attention_inputs)
 
-        for decoder_layer in self.layers[: self.layer_num]:
+        for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             hidden_states = decoder_layer(
                 hidden_states,
                 fmha_impl,
