@@ -158,14 +158,6 @@ def monitor_and_release_process(backend_process, frontend_process):
     while any(proc.is_alive() for proc in all_process):
         if not all(proc.is_alive() for proc in all_process):
             logging.error(f"server monitor : some process is not alive, exit!")
-            if backend_process:
-                try:
-                    os.killpg(os.getpgid(backend_process.pid), signal.SIGTERM)
-                except Exception as e:
-                    logging.error(
-                        f"catch exception when kill backend process : {str(e)}"
-                    )
-
             for proc in all_process:
                 try:
                     proc.terminate()
