@@ -32,6 +32,7 @@ cc_library(
 interface_includes = [
     "CommonDefine.h",
     "CacheStore.h",
+    "CacheStoreMetricsCollector.h",
     "MemoryUtil.h",
     "RequestBlockBuffer.h",
     "LoadContext.h",

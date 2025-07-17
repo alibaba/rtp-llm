@@ -3,10 +3,13 @@
 namespace rtp_llm {
 
 RemoteStoreTaskImpl::RemoteStoreTaskImpl(const std::shared_ptr<RemoteStoreRequest>& request,
+                                         const std::shared_ptr<CacheStoreRemoteStoreMetricsCollector>& collector,
                                          CheckCancelFunc                            check_cancel_func):
     RemoteStoreTask(request, check_cancel_func) {
     to_load_buffers_          = request_->buffer_pairs;
     expect_done_buffer_count_ = to_load_buffers_.size();
+    collector_ = collector;
+    collector_->markStart();
 }
 
 RemoteStoreTaskImpl::~RemoteStoreTaskImpl() {}
@@ -67,6 +70,16 @@ RemoteStoreTaskImpl::makeAvailableRequest(const std::shared_ptr<RequestBlockBuff
         }
 
         auto blocks = request_block_buffer->getBlocks();
+
+        if (!blocks.empty()) {
+            int block_size  = 0;
+            for (auto [key, block] : blocks) {
+                block_size = block->len;
+                break;
+            }
+            collector_->setBlockSize(block_size * expect_done_buffer_count_);
+        }
+
         for (auto [key, block] : blocks) {
             auto iter = to_load_buffers_.find(key);
             if (iter == to_load_buffers_.end()) {
@@ -122,6 +135,14 @@ RemoteStoreTaskImpl::makeAvailableRequest(const std::vector<std::shared_ptr<Bloc
             }
             transfer_request->buffer_pairs[key] = iter->second;
             loading_buffers_[key]               = iter->second;
+            if (to_load_buffers_.size() == expect_done_buffer_count_) {
+                // first block ready
+                collector_->markFirstBlockReady();
+            } 
+            if (to_load_buffers_.size() == 1) {
+                // all blocks ready
+                collector_->markAllBlocksReady();
+            }
             to_load_buffers_.erase(iter);
         }
     }
@@ -180,6 +201,7 @@ void RemoteStoreTaskImpl::notifyRequestDone(const std::map<std::string, std::str
         }
     }
     if (done_) {
+        collector_->markEnd(all_success_);
         cond_.notify_all();
     }
 }

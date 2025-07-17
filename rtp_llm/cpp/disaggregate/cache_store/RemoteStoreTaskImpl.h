@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/RemoteStoreTask.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/CacheStoreMetricsCollector.h"
 
 #include <mutex>
 #include <condition_variable>
@@ -7,7 +8,9 @@ namespace rtp_llm {
 
 class RemoteStoreTaskImpl: public RemoteStoreTask, public std::enable_shared_from_this<RemoteStoreTaskImpl> {
 public:
-    RemoteStoreTaskImpl(const std::shared_ptr<RemoteStoreRequest>& request, CheckCancelFunc check_cancel_func);
+    RemoteStoreTaskImpl(const std::shared_ptr<RemoteStoreRequest>& request, 
+                        const std::shared_ptr<CacheStoreRemoteStoreMetricsCollector >& collector,
+                        CheckCancelFunc check_cancel_func);
     ~RemoteStoreTaskImpl();
 
 public:
@@ -28,6 +31,8 @@ private:
     std::map<std::string, std::string> to_load_buffers_;
     std::map<std::string, std::string> loading_buffers_;
     std::map<std::string, std::string> done_buffers_;
+
+    std::shared_ptr<CacheStoreRemoteStoreMetricsCollector> collector_;
 
     mutable std::mutex      mutex_;
     std::condition_variable cond_;

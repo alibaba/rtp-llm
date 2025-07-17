@@ -428,7 +428,11 @@ grpc::Status PrefillRpcServerNew::RemoteStore(grpc::ServerContext*        server
                 }
             }
         }
-        auto task = resource_.cache_store->submitRemoteStoreTask(store_request, cancel_check_func);
+        
+        auto collector = std::make_shared<CacheStoreRemoteStoreMetricsCollector>(metrics_reporter_, 
+            request->decode_block_ids_size());
+
+        auto task = resource_.cache_store->submitRemoteStoreTask(store_request, collector, cancel_check_func);
         if (!task) {
             RTP_LLM_LOG_WARNING("submit remote store task failed");
             // TODO: detail error

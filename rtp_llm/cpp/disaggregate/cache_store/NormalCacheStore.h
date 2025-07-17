@@ -47,6 +47,7 @@ public:
                  int64_t                                                 timeout_ms) override;
 
     std::shared_ptr<RemoteStoreTask> submitRemoteStoreTask(const std::shared_ptr<RemoteStoreRequest>& request,
+                                                           const std::shared_ptr<CacheStoreRemoteStoreMetricsCollector>& collector,
                                                            RemoteStoreTask::CheckCancelFunc check_cancel_func) override;
     void                             releaseRemoteStoreTask(const std::shared_ptr<RemoteStoreTask>& task) override;
 

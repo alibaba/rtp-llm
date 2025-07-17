@@ -100,4 +100,52 @@ private:
     int64_t                                    end_time_us_               = 0;
     std::mutex                                 write_mutex_;
 };
+
+class CacheStoreRemoteStoreMetricsCollector {
+public:
+    CacheStoreRemoteStoreMetricsCollector(const kmonitor::MetricsReporterPtr& reporter,
+                                          int64_t                             block_count);
+    ~CacheStoreRemoteStoreMetricsCollector();
+public:
+    void markStart() {
+        start_time_us_ = currentTimeUs();
+    }
+    void markEnd(bool success = true) {
+        collector_.success = success;
+        end_time_us_       = currentTimeUs();
+    }
+    void markFirstBlockReady() {
+        first_block_ready_time_us_ = currentTimeUs();
+    }
+    void markAllBlocksReady() {
+        all_block_ready_time_us_ = currentTimeUs();
+    }   
+    void setBlockSize(int total_block_size) {
+        collector_.total_block_size = total_block_size;
+    }
+
+private:
+    kmonitor::MetricsReporterPtr                reporter_;
+    RtpLLMCacheStoreRemoteStoreMetricsCollector collector_;
+    int64_t                                     start_time_us_             = 0;
+    int64_t                                     first_block_ready_time_us_ = 0;
+    int64_t                                     all_block_ready_time_us_   = 0;
+    int64_t                                     end_time_us_               = 0;
+    std::mutex                                  write_mutex_;
+};
+
+class CacheStoreTransferMetricsCollector {
+public:
+    CacheStoreTransferMetricsCollector(const kmonitor::MetricsReporterPtr& reporter,
+                                       int64_t                             block_count,
+                                       int64_t                             total_block_size);
+    ~CacheStoreTransferMetricsCollector();
+private:
+    kmonitor::MetricsReporterPtr                reporter_;
+    RtpLLMCacheStoreTransferMetricsCollector    collector_;
+    int64_t                                     start_time_us_             = 0;
+    int64_t                                     end_time_us_               = 0;
+};
+
+
 }  // namespace rtp_llm

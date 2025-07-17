@@ -217,8 +217,9 @@ NormalCacheStore::loadBuffers(const std::vector<std::shared_ptr<RequestBlockBuff
 
 std::shared_ptr<RemoteStoreTask>
 NormalCacheStore::submitRemoteStoreTask(const std::shared_ptr<RemoteStoreRequest>& request,
+                                        const std::shared_ptr<CacheStoreRemoteStoreMetricsCollector>& collector,
                                         RemoteStoreTask::CheckCancelFunc           check_cancel_func) {
-    auto                                task = std::make_shared<RemoteStoreTaskImpl>(request, check_cancel_func);
+    auto                                task = std::make_shared<RemoteStoreTaskImpl>(request, collector, check_cancel_func);
     std::unique_lock<std::shared_mutex> lock(remote_store_tasks_mutex_);
     auto&                               tasks = remote_store_tasks_[request->request_id];
     tasks.push_back(task);

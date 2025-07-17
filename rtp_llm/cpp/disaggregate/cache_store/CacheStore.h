@@ -4,6 +4,8 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/LoadContext.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/RemoteStoreTask.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/CacheStoreMetricsCollector.h"
+
 
 #include <memory>
 
@@ -42,6 +44,7 @@ public:
 
     virtual std::shared_ptr<RemoteStoreTask>
                  submitRemoteStoreTask(const std::shared_ptr<RemoteStoreRequest>& request,
+                                       const std::shared_ptr<CacheStoreRemoteStoreMetricsCollector>& collector,
                                        RemoteStoreTask::CheckCancelFunc           check_cancel_func) = 0;
     virtual void releaseRemoteStoreTask(const std::shared_ptr<RemoteStoreTask>& task)      = 0;
 

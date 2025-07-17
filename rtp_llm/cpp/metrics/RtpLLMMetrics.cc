@@ -406,10 +406,23 @@ bool RtpLLMCacheStoreMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(store_block_count_metric, "rtp_llm.cache_store.store.block_count");
     REGISTER_GAUGE_MUTABLE_METRIC(store_total_block_size_metric, "rtp_llm.cache_store.store.total_block_size");
     REGISTER_GAUGE_MUTABLE_METRIC(store_latency_us_metric, "rtp_llm.cache_store.store.latency_us");
-    REGISTER_GAUGE_MUTABLE_METRIC(store_wait_task_run_latency_us_metric,
-                                  "rtp_llm.cache_store.store.wait_task_run_latency_us");
-    REGISTER_GAUGE_MUTABLE_METRIC(store_wait_event_sync_latency_us_metric,
-                                  "rtp_llm.cache_store.store.wait_event_sync_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(store_wait_task_run_latency_us_metric, "rtp_llm.cache_store.store.wait_task_run_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(store_wait_event_sync_latency_us_metric, "rtp_llm.cache_store.store.wait_event_sync_latency_us");
+
+    REGISTER_QPS_MUTABLE_METRIC(remote_store_qps_metric, "rtp_llm.cache_store.remote_store.qps");
+    REGISTER_QPS_MUTABLE_METRIC(remote_store_error_qps_metric, "rtp_llm.cache_store.remote_store.error_qps");
+    REGISTER_GAUGE_MUTABLE_METRIC(remote_store_block_count_metric, "rtp_llm.cache_store.remote_store.block_count");
+    REGISTER_GAUGE_MUTABLE_METRIC(remote_store_total_block_size_metric, "rtp_llm.cache_store.remote_store.total_block_size");
+    REGISTER_GAUGE_MUTABLE_METRIC(remote_store_latency_us_metric, "rtp_llm.cache_store.remote_store.latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(remote_store_first_block_ready_latency_us_metric, "rtp_llm.cache_store.remote_store.first_block_ready_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(remote_store_all_block_ready_latency_us_metric, "rtp_llm.cache_store.remote_store.all_block_ready_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(remote_store_transfer_gap_latency_us_metric, "rtp_llm.cache_store.remote_store.transfer_gap_latency_us");
+
+    REGISTER_GAUGE_MUTABLE_METRIC(transfer_qps_metric, "rtp_llm.cache_store.transfer.qps");
+    REGISTER_GAUGE_MUTABLE_METRIC(transfer_block_count_metric, "rtp_llm.cache_store.transfer.block_count");
+    REGISTER_GAUGE_MUTABLE_METRIC(transfer_total_block_size_metric, "rtp_llm.cache_store.transfer.total_block_size");
+    REGISTER_GAUGE_MUTABLE_METRIC(transfer_latency_us_metric, "rtp_llm.cache_store.transfer.latency_us");
+
     return true;
 }
 
@@ -465,6 +478,27 @@ void RtpLLMCacheStoreMetrics::report(const kmonitor::MetricsTags*           tags
     REPORT_NON_ZERO_MUTABLE_METRIC(store_wait_task_run_latency_us_metric, collector->wait_task_run_latency_us);
     REPORT_NON_ZERO_MUTABLE_METRIC(store_wait_event_sync_latency_us_metric, collector->wait_event_sync_latency_us);
 }
+
+void RtpLLMCacheStoreMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCacheStoreRemoteStoreMetricsCollector* collector) {
+    REPORT_MUTABLE_QPS(remote_store_qps_metric);
+    if (!collector->success) {
+        REPORT_MUTABLE_QPS(remote_store_error_qps_metric);
+    }
+    REPORT_NON_ZERO_MUTABLE_METRIC(remote_store_block_count_metric, collector->block_count);
+    REPORT_NON_ZERO_MUTABLE_METRIC(remote_store_total_block_size_metric, collector->total_block_size);
+    REPORT_NON_ZERO_MUTABLE_METRIC(remote_store_latency_us_metric, collector->latency_us);
+    REPORT_NON_ZERO_MUTABLE_METRIC(remote_store_first_block_ready_latency_us_metric, collector->first_block_ready_latency_us);
+    REPORT_NON_ZERO_MUTABLE_METRIC(remote_store_all_block_ready_latency_us_metric, collector->all_block_ready_latency_us);
+    REPORT_NON_ZERO_MUTABLE_METRIC(remote_store_transfer_gap_latency_us_metric, collector->transfer_gap_latency_us);
+}
+
+void RtpLLMCacheStoreMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCacheStoreTransferMetricsCollector* collector) {
+    REPORT_MUTABLE_QPS(transfer_qps_metric);
+    REPORT_NON_ZERO_MUTABLE_METRIC(transfer_block_count_metric, collector->block_count);
+    REPORT_NON_ZERO_MUTABLE_METRIC(transfer_total_block_size_metric, collector->total_block_size);
+    REPORT_NON_ZERO_MUTABLE_METRIC(transfer_latency_us_metric, collector->latency_us);
+}
+
 
 #undef REPORT_NON_ZERO_MUTABLE_METRIC
 #undef REPORT_QPS

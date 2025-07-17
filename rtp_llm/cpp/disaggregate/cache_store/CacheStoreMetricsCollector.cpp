@@ -76,4 +76,39 @@ void CacheStoreServerLoadMetricsCollector::setWriteInfo(int64_t write_block_coun
     collector_.write_total_block_size.push_back(write_total_block_size);
     collector_.write_latency_us.push_back(write_latency_us);
 }
+
+
+CacheStoreRemoteStoreMetricsCollector::CacheStoreRemoteStoreMetricsCollector(
+    const kmonitor::MetricsReporterPtr& reporter, int64_t block_count):
+    reporter_(reporter), start_time_us_(currentTimeUs()) {
+    collector_.block_count          = block_count;
+}
+
+CacheStoreRemoteStoreMetricsCollector::~CacheStoreRemoteStoreMetricsCollector() {
+    collector_.latency_us = subZeroOrAbove(end_time_us_, start_time_us_);
+    collector_.first_block_ready_latency_us = subZeroOrAbove(all_block_ready_time_us_, start_time_us_);
+    collector_.all_block_ready_latency_us   = subZeroOrAbove(all_block_ready_time_us_, start_time_us_);
+    collector_.transfer_gap_latency_us      = subZeroOrAbove(end_time_us_, all_block_ready_time_us_);
+
+
+    if (reporter_ != nullptr) {
+        reporter_->report<RtpLLMCacheStoreMetrics, RtpLLMCacheStoreRemoteStoreMetricsCollector>(nullptr, &collector_);
+    }
+}
+
+CacheStoreTransferMetricsCollector::CacheStoreTransferMetricsCollector(
+    const kmonitor::MetricsReporterPtr& reporter, int64_t block_count, int64_t total_block_size):
+    reporter_(reporter), start_time_us_(currentTimeUs()) {
+    collector_.block_count      = block_count;
+    collector_.total_block_size = total_block_size;
+}
+
+CacheStoreTransferMetricsCollector::~CacheStoreTransferMetricsCollector() {
+    end_time_us_ = currentTimeUs();
+    collector_.latency_us = subZeroOrAbove(end_time_us_, start_time_us_);
+    if (reporter_ != nullptr) {
+        reporter_->report<RtpLLMCacheStoreMetrics, RtpLLMCacheStoreTransferMetricsCollector>(nullptr, &collector_);
+    }
+}
+
 }  // namespace rtp_llm
