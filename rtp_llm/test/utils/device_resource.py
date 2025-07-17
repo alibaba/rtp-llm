@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import socket
@@ -8,12 +9,40 @@ import traceback
 from contextlib import ExitStack
 from typing import Any, List, Tuple
 
-import torch
 from filelock import FileLock, Timeout
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
+
+python_code = """
+import torch
+import json
+import sys
+
+try:
+    if torch.cuda.is_available():
+        device_info = {torch.cuda.get_device_name(0): torch.cuda.device_count()}
+    else:
+        device_info = {}
+    print(json.dumps(device_info))
+except Exception as e:
+    # 捕获并打印内部错误，避免子进程静默失败
+    print(json.dumps({"error": str(e), "note": "Failed to get CUDA info"}), file=sys.stderr)
+    sys.exit(1) # 告知外部进程执行失败
+"""
+
+
+def get_cuda_info():
+    result = subprocess.run(
+        [sys.executable, "-c", python_code], capture_output=True, text=True, check=False
+    )
+    cuda_info = json.loads(result.stdout)
+    if not cuda_info:
+        return None
+    name = list(cuda_info.keys())[0]
+    count = cuda_info[name]
+    return name, count
 
 
 def get_ip():
@@ -21,17 +50,19 @@ def get_ip():
 
 
 def get_gpu_ids():
-    if not torch.cuda.is_available():
+    cuda_info = get_cuda_info()
+    logging.info(f"{cuda_info}")
+
+    if not cuda_info:
         return list(range(128))
-    else:
-        total_gpus = list(range(torch.cuda.device_count()))
-        gpus = os.environ.get(
-            "CUDA_VISIBLE_DEVICES", os.environ.get("HIP_VISIBLE_DEVICES")
-        )
-        if gpus is not None:
-            total_gpus = [int(id) for id in gpus.split(",")]
-        logging.info(f"{get_ip()} {torch.cuda.get_device_name()}: {total_gpus}")
-        return total_gpus
+    device_name = cuda_info[0]
+    total_gpus = range(cuda_info[1])
+
+    gpus = os.environ.get("CUDA_VISIBLE_DEVICES", os.environ.get("HIP_VISIBLE_DEVICES"))
+    if gpus is not None:
+        total_gpus = [int(id) for id in gpus.split(",")]
+    logging.info(f"{get_ip()} {device_name}: {total_gpus}")
+    return total_gpus
 
 
 class DeviceResource:
@@ -86,19 +117,24 @@ class DeviceResource:
 
 
 if __name__ == "__main__":
-    if not torch.cuda.is_available():
+    cuda_info = get_cuda_info()
+
+    if not cuda_info:
         logging.info("no gpu, continue")
         result = subprocess.run(sys.argv[1:])
+        logging.info("exitcode: %d", result.returncode)
         sys.exit(result.returncode)
     else:
+        device_name, _ = cuda_info
         require_count = int(
             os.environ.get("WORLD_SIZE", os.environ.get("GPU_COUNT", "1"))
         )
         with DeviceResource(require_count) as gpu_resource:
-            if "308" in torch.cuda.get_device_name():
+            if "308" in device_name:
                 env_name = "HIP_VISIBLE_DEVICES"
             else:
                 env_name = "CUDA_VISIBLE_DEVICES"
             os.environ[env_name] = ",".join(gpu_resource.gpu_ids)
             result = subprocess.run(sys.argv[1:])
+            logging.info("exitcode: %d", result.returncode)
             sys.exit(result.returncode)
