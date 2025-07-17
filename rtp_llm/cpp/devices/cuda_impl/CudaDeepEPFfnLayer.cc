@@ -25,6 +25,8 @@ bool CudaDevice::initDeepEPBuffer() {
 
     int num_experts = init_params_.num_experts + init_params_.extra_experts;
 
+    int deep_ep_num_sm = init_params_.moe_config.deep_ep_num_sm > 0 ? init_params_.moe_config.deep_ep_num_sm : 24;
+
     // TODO: check if get right
     ll_num_max_token_per_rank =
         (init_params_.max_generate_batch_size + init_params_.tp_size - 1) / init_params_.tp_size;
@@ -36,7 +38,7 @@ bool CudaDevice::initDeepEPBuffer() {
         num_qps_per_rank = num_experts / init_params_.ep_size;
     } else if (init_params_.use_deepep_internode) {  // normal-kernel internode
         num_rdma_bytes   = int(1e9);
-        num_qps_per_rank = std::max(12, (int)(num_experts / init_params_.ep_size));
+        num_qps_per_rank = std::max(deep_ep_num_sm / 2, (int)(num_experts / init_params_.ep_size));
     } else {
         num_rdma_bytes   = 0;  // normal-kernel intranode
         num_qps_per_rank = 1;
@@ -47,17 +49,6 @@ bool CudaDevice::initDeepEPBuffer() {
                          num_rdma_bytes,
                          world_rank,
                          world_size);
-#if USE_ACCL_EP
-        num_qps_per_rank = num_experts / init_params_.ep_size;
-        deepep_buffer_.reset(new DeepEPBuffer(this,
-                                              world_rank,
-                                              local_world_size,
-                                              world_size,
-                                              int(1e9),
-                                              num_rdma_bytes,
-                                              init_params_.use_deepep_low_latency,
-                                              num_qps_per_rank));
-#else
         deepep_buffer_.reset(new DeepEPBuffer(this,
                                               world_rank,
                                               local_world_size,
@@ -66,16 +57,16 @@ bool CudaDevice::initDeepEPBuffer() {
                                               num_rdma_bytes,
                                               init_params_.use_deepep_low_latency || init_params_.use_deepep_internode,
                                               num_qps_per_rank));
-#endif
         bool success = deepep_buffer_->init();
         if (!success) {
             RTP_LLM_LOG_ERROR("Failed to initialize DeepEPBuffer");
             return false;
         }
-        auto deep_ep_num_sm = init_params_.moe_config.deep_ep_num_sm;
-        if (deep_ep_num_sm) {
-            RTP_LLM_LOG_INFO("Set DEEP_EP_NUM_SM to %ld", deep_ep_num_sm);
-            deepep_buffer_->setNumSMs(deep_ep_num_sm);
+
+        if (init_params_.moe_config.deep_ep_num_sm > 0) {
+            int new_num_sms = init_params_.moe_config.deep_ep_num_sm;
+            RTP_LLM_LOG_INFO("Set DEEP_EP_NUM_SM to %ld", new_num_sms);
+            deepep_buffer_->setNumSMs(new_num_sms);
         } else {
             RTP_LLM_LOG_INFO("Deep EP use default sm num");
         }
