@@ -430,7 +430,7 @@ grpc::Status PrefillRpcServerNew::RemoteStore(grpc::ServerContext*        server
         }
         
         auto collector = std::make_shared<CacheStoreRemoteStoreMetricsCollector>(metrics_reporter_, 
-            request->decode_block_ids_size());
+            store_request->buffer_pairs.size());
 
         auto task = resource_.cache_store->submitRemoteStoreTask(store_request, collector, cancel_check_func);
         if (!task) {

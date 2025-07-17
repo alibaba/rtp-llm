@@ -71,15 +71,6 @@ RemoteStoreTaskImpl::makeAvailableRequest(const std::shared_ptr<RequestBlockBuff
 
         auto blocks = request_block_buffer->getBlocks();
 
-        if (!blocks.empty()) {
-            int block_size  = 0;
-            for (auto [key, block] : blocks) {
-                block_size = block->len;
-                break;
-            }
-            collector_->setBlockSize(block_size * expect_done_buffer_count_);
-        }
-
         for (auto [key, block] : blocks) {
             auto iter = to_load_buffers_.find(key);
             if (iter == to_load_buffers_.end()) {
@@ -124,6 +115,15 @@ RemoteStoreTaskImpl::makeAvailableRequest(const std::vector<std::shared_ptr<Bloc
         if (done_) {
             // 已经完成过了或是已经失败, 不需要继续或是重复发送
             return nullptr;
+        }
+
+        if (!blocks.empty()) {
+            int block_size  = 0;
+            for (auto block : blocks) {
+                block_size = block->len;
+                break;
+            }
+            collector_->setBlockSize(block_size * expect_done_buffer_count_);
         }
 
         for (auto block : blocks) {
