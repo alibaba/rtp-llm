@@ -3,7 +3,6 @@ import logging.config
 import os
 
 from rtp_llm.config.log_config import LOGGING_CONFIG
-from rtp_llm.config.py_config_modules import PyEnvConfigs
 
 LOG_PATH = os.environ.get("LOG_PATH", "logs")
 os.makedirs(LOG_PATH, exist_ok=True)
@@ -40,7 +39,6 @@ if not file_logger_init_success:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-
 # try auto set alog config path
 if os.environ.get("FT_ALOG_CONF_PATH") is None:
 
@@ -66,8 +64,6 @@ if os.environ.get("FT_ALOG_CONF_PATH") is None:
 logging.info("init logger end")
 
 import transformers
-
-from rtp_llm.config.py_config_modules import PyEnvConfigs
 
 logging.info(f"transformers version: {transformers.__version__}")
 
