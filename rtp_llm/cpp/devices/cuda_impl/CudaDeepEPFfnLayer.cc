@@ -35,13 +35,13 @@ bool CudaDevice::initDeepEPBuffer() {
     if (init_params_.use_deepep_low_latency) {  // low-latency mode
         num_rdma_bytes = DeepEPBuffer::getLowLatencyRdmaSizeHint(
             ll_num_max_token_per_rank, init_params_.hidden_size, world_size, num_experts);
-        num_qps_per_rank = num_experts / init_params_.ep_size;
+        num_qps_per_rank = autil::EnvUtil::getEnv("NVSHMEM_IBGDA_NUM_RC_PER_PE", num_experts / init_params_.ep_size);
     } else if (init_params_.use_deepep_internode) {  // normal-kernel internode
         num_rdma_bytes   = int(1e9);
-        num_qps_per_rank = std::max(deep_ep_num_sm / 2, (int)(num_experts / init_params_.ep_size));
+        num_qps_per_rank = autil::EnvUtil::getEnv("NVSHMEM_IBGDA_NUM_RC_PER_PE", std::max(deep_ep_num_sm / 2, (int)(num_experts / init_params_.ep_size)));
     } else {
         num_rdma_bytes   = 0;  // normal-kernel intranode
-        num_qps_per_rank = 1;
+        num_qps_per_rank = autil::EnvUtil::getEnv("NVSHMEM_IBGDA_NUM_RC_PER_PE", 1);
     }
 
     try {
