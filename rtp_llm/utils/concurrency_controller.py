@@ -4,6 +4,7 @@ import time
 from multiprocessing import Lock, Process, Value
 from typing import Optional
 
+from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.distribute.worker_info import g_parallel_info
 
 
@@ -53,7 +54,7 @@ global_controller: Optional[ConcurrencyController] = None
 
 
 def init_controller():
-    concurrency_limit = int(os.environ.get("CONCURRENCY_LIMIT", 32))
+    concurrency_limit = StaticConfig.concurrency_config.concurrency_limit
     global_concurrency_limit = concurrency_limit * g_parallel_info.dp_size
     logging.info(
         f"concurrency_limit : {concurrency_limit}, global_concurrency_limit : {global_concurrency_limit}"

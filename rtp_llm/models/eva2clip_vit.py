@@ -7,6 +7,7 @@ import torch
 from torch import nn
 from transformers.activations import ACT2FN
 
+from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.models.multimodal.multimodal_common import (
     ImageEmbeddingInterface,
     ImageTransform,
@@ -77,7 +78,7 @@ class Attention(nn.Module):
         # Here we maintain two versions of scaled_dot_product_attention, the original math attention is for tensorrt/
         # the optimized scaled_dot_product_attention is for users who don't want to use tensorrt, it's much faster and
         # memory efficient than the original version.
-        if os.environ.get("VIT_TRT", "0") == "1":
+        if StaticConfig.vit_config.vit_trt == 1:
             attn_weights = torch.matmul(q / math.sqrt(q.shape[-1]), k.transpose(-1, -2))
             attn_weights = attn_weights.softmax(dim=-1)
             attn_out = torch.matmul(attn_weights, v)

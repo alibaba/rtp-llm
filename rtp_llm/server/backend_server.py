@@ -59,7 +59,7 @@ class BackendServer(object):
         else:
             os.environ["NCCL_P2P_DISABLE"] = "1"
         self._access_logger = AccessLogger()
-        self._gang_server = GangServer()
+        self._gang_server = GangServer(py_env_configs)
         self._openai_endpoint = None
         self._lora_manager = None
         self.thread_lock_ = threading.Lock()
@@ -76,8 +76,8 @@ class BackendServer(object):
         self.tp_size = g_parallel_info.tp_size
 
     def start(self, py_env_configs: PyEnvConfigs):
-        self._gang_server.start(py_env_configs)
-        if os.environ.get("DEBUG_START_FAKE_PROCESS", None) is not None:
+        self._gang_server.start()
+        if py_env_configs.profiling_debug_config.debug_start_fake_process == 1:
             # for debug online
             logging.info("DEBUG_START_FAKE_PROCESS is set, start fake backend server")
         else:

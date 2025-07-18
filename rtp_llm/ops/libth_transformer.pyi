@@ -77,7 +77,7 @@ class CacheStoreConfig:
     rdma_qp_count_per_connection: int
     def __init__(
         self,
-        cache_store_rdma_mode: bool = False,
+        cache_store_rdma_mode: bool = True,
         wrr_available_ratio: int = 80,
         rank_factor: int = 0,
         thread_count: int = 16,
@@ -518,6 +518,7 @@ class HWKernelConfig:
     enable_stable_scatter_add: bool
     ft_disable_custom_ar: bool
     rocm_hipblaslt_config: str
+    enable_merge_w13: bool
     def __init__(
         self,
         deep_gemm_num_sm: int = -1,
@@ -526,6 +527,7 @@ class HWKernelConfig:
         enable_multi_block_mode: bool = True,
         ft_disable_custom_ar: bool = True,
         rocm_hipblaslt_config: str = "gemm_config.csv",
+        enable_merge_w13: bool = False,
     ) -> None: ...
     def to_string(self) -> str: ...
     def update_from_env(self) -> None: ...
@@ -702,6 +704,9 @@ class ProfilingDebugLoggingConfig:
     trace_malloc_stack: bool
     test_layer_num: int
     torch_cuda_profiler_dir: str
+    dg_print_reg_reuse: bool
+    qwen_agent_debug: bool
+    disable_dpc_random: bool
     def __init__(
         self,
         ft_nvtx: bool = False,
@@ -721,6 +726,9 @@ class ProfilingDebugLoggingConfig:
         hack_layer_num: int = 0,
         test_layer_num: int = 0,
         debug_start_fake_process: bool = False,
+        dg_print_reg_reuse: bool = False,
+        qwen_agent_debug: bool = False,
+        disable_dpc_random: bool = False,
     ) -> None: ...
     def to_string(self) -> str: ...
     def update_from_env(self) -> None: ...

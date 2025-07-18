@@ -170,7 +170,7 @@ class BackendApp(object):
             backend_available_concurrency = available_concurrency
 
             if (
-                int(os.environ.get("LOAD_BALANCE", 0))
+                StaticConfig.misc_config.load_balance
                 and load_balance_info.step_per_minute > 0
                 and load_balance_info.step_latency_us > 0
             ):

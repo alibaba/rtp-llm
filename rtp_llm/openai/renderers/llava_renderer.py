@@ -214,7 +214,7 @@ class LlavaRenderer(CustomChatRenderer):
         ckpt_path: str = StaticConfig.model_config.checkpoint_path
         model_name: str = ckpt_path.split("?")[0]  # oss style path
         model_name = model_name.strip("/").split("/")[-1]
-        llava_template_env: str = os.environ.get("LLAVA_CHAT_TEMPLATE", "")
+        llava_template_env: str = self.py_env_configs.render_config.llava_chat_template
         conv_template = (
             self._get_conv_template(model_name)
             if llava_template_env == ""

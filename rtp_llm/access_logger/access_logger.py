@@ -5,12 +5,13 @@ from typing import Any, Dict, Union
 from rtp_llm.access_logger.json_util import dump_json
 from rtp_llm.access_logger.log_utils import get_handler
 from rtp_llm.access_logger.py_access_log import PyAccessLog, RequestLog, ResponseLog
+from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.structure.request_extractor import request_id_field_name
 
 ACCESS_LOGGER_NAME = "access_logger"
 QUERY_ACCESS_LOGGER_NAME = "query_access_logger"
 
-LOG_RESPONSE = int(os.environ.get("PY_INFERENCE_LOG_RESPONSE", "0")) == 1
+LOG_RESPONSE = StaticConfig.profiling_debug_config.py_inference_log_response == 1
 
 
 def init_access_logger() -> None:

@@ -5,6 +5,7 @@ import re
 import psutil
 import torch
 
+from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.device.device_base import DeviceBase, DeviceType, MemInfo
 from rtp_llm.ops import DeviceExporter, DeviceType
 from rtp_llm.utils.model_weight import W
@@ -139,7 +140,7 @@ class GpuImpl(DeviceBase):
 
     @property
     def specify_gpu_arch(self):
-        return os.environ.get("SPECIFY_GPU_ARCH", "")
+        return self.py_env_configs.py_device_resource_config.specify_gpu_arch
 
     def apply_int8(self, tensor: torch.Tensor, device: str):
         shape = tensor.shape
@@ -345,7 +346,10 @@ class RocmImpl(GpuImpl):
             except Exception as e:
                 logging.warn(f"Cannot get ROCm device gfx version: {e}")
         # 如果无法获取，则使用环境变量或默认值
-        return os.environ.get("SPECIFY_GPU_ARCH", "900")
+        specify_gpu_arch = (
+            self.py_env_configs.py_device_resource_config.specify_gpu_arch
+        )
+        return "900" if specify_gpu_arch == "" else specify_gpu_arch
 
     def preprocess_groupwise_weight_params(
         self,
@@ -433,7 +437,10 @@ class RocmImpl(GpuImpl):
             except Exception as e:
                 logging.warn(f"Cannot get ROCm device gfx version: {e}")
         # 如果无法获取，则使用环境变量或默认值
-        return os.environ.get("SPECIFY_GPU_ARCH", "900")
+        specify_gpu_arch = (
+            self.py_env_configs.py_device_resource_config.specify_gpu_arch
+        )
+        return "900" if specify_gpu_arch == "" else specify_gpu_arch
 
     def shuffle_moe_weight(
         self, x: torch.Tensor, datatype: torch.dtype, name: str

@@ -5,6 +5,7 @@ from typing import Any, Callable, Dict, List, Optional, Union
 
 from transformers import PreTrainedTokenizerBase
 
+from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.openai.renderer_factory_register import _renderer_factory
 from rtp_llm.openai.renderers.basic_renderer import BasicRenderer
 from rtp_llm.openai.renderers.custom_renderer import CustomChatRenderer, RendererParams
@@ -46,7 +47,7 @@ class ChatRendererFactory:
         #                    > try get template from `MODEL_TYPE`
         #                    > transformers default chat template
 
-        model_template_type = os.environ.get("MODEL_TEMPLATE_TYPE", None)
+        model_template_type = StaticConfig.render_config.model_template_type
         if model_template_type:
             new_params = copy.deepcopy(params)
             new_params.model_type = model_template_type

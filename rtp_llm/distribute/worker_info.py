@@ -21,9 +21,7 @@ from rtp_llm.config.py_config_modules import (
 def get_worker_port_num():
     global WORKER_INFO_PORT_NUM
     global MIN_WORKER_INFO_PORT_NUM
-    WORKER_INFO_PORT_NUM = int(
-        os.environ.get("WORKER_INFO_PORT_NUM", MIN_WORKER_INFO_PORT_NUM)
-    )
+    WORKER_INFO_PORT_NUM = int(StaticConfig.worker_config.worker_info_port_num)
     logging.info(f"env WORKER_INFO_PORT_NUM: {WORKER_INFO_PORT_NUM}")
     if WORKER_INFO_PORT_NUM < MIN_WORKER_INFO_PORT_NUM:
         raise Exception(

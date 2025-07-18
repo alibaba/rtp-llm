@@ -1,11 +1,13 @@
 import logging
 import os
 
+from rtp_llm.config.py_config_modules import StaticConfig
+
 
 def setup_logger(level=None):
 
     if level is None:
-        if int(os.getenv("QWEN_AGENT_DEBUG", "0").strip()):
+        if StaticConfig.profiling_debug_config.qwen_agent_debug:
             level = logging.DEBUG
         else:
             level = logging.INFO

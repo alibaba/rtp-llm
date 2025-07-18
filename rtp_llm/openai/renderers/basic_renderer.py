@@ -12,6 +12,7 @@ from jinja2.sandbox import ImmutableSandboxedEnvironment
 from packaging import version
 from transformers import PreTrainedTokenizerBase
 
+from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.models.base_model import GenerateOutput
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
@@ -119,11 +120,11 @@ class BasicRenderer(CustomChatRenderer):
         #     pass
 
         logging.info(f"found chat template to use: {self.chat_template}")
-        self.default_template_key = os.environ.get(
-            "DEFAULT_CHAT_TEMPLATE_KEY", "default"
+        self.default_template_key = (
+            self.py_env_configs.render_config.default_chat_template_key
         )
-        self.default_tool_use_template_key = os.environ.get(
-            "DEFAULT_TOOL_USE_TEMPLATE_KEY", "tool_use"
+        self.default_tool_use_template_key = (
+            self.py_env_configs.render_config.default_tool_use_template_key
         )
         self.compiled_template_map: Dict[str, jinja2.Template] = {}
 

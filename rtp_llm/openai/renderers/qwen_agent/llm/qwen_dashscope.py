@@ -23,6 +23,8 @@ from qwen_agent.log import logger
 from qwen_agent.settings import DEFAULT_MAX_INPUT_TOKENS
 from qwen_agent.utils.utils import has_chinese_messages, merge_generate_cfgs
 
+from rtp_llm.config.py_config_modules import StaticConfig
+
 # end region
 
 
@@ -242,11 +244,11 @@ def initialize_dashscope(cfg: Optional[Dict] = None) -> None:
     base_websocket_api_url = cfg.get("base_websocket_api_url", None)
 
     if not api_key:
-        api_key = os.getenv("DASHSCOPE_API_KEY", "EMPTY")
+        api_key = StaticConfig.model_config.dashscope_api_key
     if not base_http_api_url:
-        base_http_api_url = os.getenv("DASHSCOPE_HTTP_URL", None)
+        base_http_api_url = StaticConfig.model_config.dashscope_http_url
     if not base_websocket_api_url:
-        base_websocket_api_url = os.getenv("DASHSCOPE_WEBSOCKET_URL", None)
+        base_websocket_api_url = StaticConfig.model_config.dashscope_websocket_url
 
     api_key = api_key.strip()
     dashscope.api_key = api_key

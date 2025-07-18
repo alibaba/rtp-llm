@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import torch
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.config.quant_config import QuantizationConfig
 from rtp_llm.distribute.worker_info import ParallelInfo
 from rtp_llm.model_loader.attn_weight import AttnConfig
@@ -204,7 +205,7 @@ class ModelDeployWeightInfo:
             head_num=self._head_num,
             head_num_kv=self._head_num_kv,
             use_fp8_kv_cache=self.kv_cache_data_type == WEIGHT_TYPE.FP8.to_str()
-            and os.environ.get("BLOCKWISE_USE_FP8_KV_CACHE", "0") == "1",
+            and StaticConfig.py_kv_cache_config.blockwise_use_fp8_kv_cache == 1,
         )
         return attn_config
 
@@ -463,7 +464,10 @@ class ModelDeployWeightInfo:
         merge_lora = False
 
         if not database.is_ft_style:
-            merge_lora = database.has_lora() and bool(os.environ.get("MERGE_LORA", 1))
+            merge_lora = (
+                database.has_lora()
+                and self.config.py_env_configs.lora_config.merge_lora
+            )
 
         if database.has_lora() and not self.support_lora:
             raise Exception(

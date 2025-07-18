@@ -173,6 +173,9 @@ void ProfilingDebugLoggingConfig::update_from_env_for_test() {
     hack_layer_num            = autil::EnvUtil::getEnv("HACK_LAYER_NUM", 0);
     test_layer_num            = autil::EnvUtil::getEnv("TEST_LAYER_NUM", 0);
     debug_start_fake_process  = autil::EnvUtil::getEnv("DEBUG_START_FAKE_PROCESS", false);
+    dg_print_reg_reuse        = bool_from_env_for_test("DG_PRINT_REG_REUSE", false);
+    qwen_agent_debug          = bool_from_env_for_test("QWEN_AGENT_DEBUG", false);
+    disable_dpc_random        = bool_from_env_for_test("DISABLE_DPC_RANDOM", false);
 }
 
 void register_profiling_debug_logging_config(pybind11::module& m) {
@@ -193,6 +196,9 @@ void register_profiling_debug_logging_config(pybind11::module& m) {
                             bool,
                             int,
                             int,
+                            bool,
+                            bool,
+                            bool,
                             bool>(),
              pybind11::arg("ft_nvtx")                   = false,
              pybind11::arg("py_inference_log_response") = false,
@@ -210,7 +216,10 @@ void register_profiling_debug_logging_config(pybind11::module& m) {
              pybind11::arg("debug_load_server")         = false,
              pybind11::arg("hack_layer_num")            = 0,
              pybind11::arg("test_layer_num")            = 0,
-             pybind11::arg("debug_start_fake_process")  = false)
+             pybind11::arg("debug_start_fake_process")  = false,
+             pybind11::arg("dg_print_reg_reuse")        = false,
+             pybind11::arg("qwen_agent_debug")          = false,
+             pybind11::arg("disable_dpc_random")        = false)
         .def("to_string", &ProfilingDebugLoggingConfig::to_string)
         .def("update_from_env", &ProfilingDebugLoggingConfig::update_from_env_for_test)
         .def_readwrite("ft_nvtx", &ProfilingDebugLoggingConfig::ft_nvtx)
@@ -229,7 +238,10 @@ void register_profiling_debug_logging_config(pybind11::module& m) {
         .def_readwrite("debug_load_server", &ProfilingDebugLoggingConfig::debug_load_server)
         .def_readwrite("hack_layer_num", &ProfilingDebugLoggingConfig::hack_layer_num)
         .def_readwrite("test_layer_num", &ProfilingDebugLoggingConfig::test_layer_num)
-        .def_readwrite("debug_start_fake_process", &ProfilingDebugLoggingConfig::debug_start_fake_process);
+        .def_readwrite("debug_start_fake_process", &ProfilingDebugLoggingConfig::debug_start_fake_process)
+        .def_readwrite("dg_print_reg_reuse", &ProfilingDebugLoggingConfig::dg_print_reg_reuse)
+        .def_readwrite("qwen_agent_debug", &ProfilingDebugLoggingConfig::qwen_agent_debug)
+        .def_readwrite("disable_dpc_random", &ProfilingDebugLoggingConfig::disable_dpc_random);
 }
 
 // HWKernelConfig
@@ -240,17 +252,19 @@ void HWKernelConfig::update_from_env_for_test() {
     enable_multi_block_mode   = bool_from_env_for_test("ENABLE_MULTI_BLOCK_MODE", true);
     ft_disable_custom_ar      = bool_from_env_for_test("FT_DISABLE_CUSTOM_AR", true);
     rocm_hipblaslt_config     = autil::EnvUtil::getEnv("ROCM_HIPBLASLT_CONFIG", "gemm_config.csv");
+    enable_merge_w13          = bool_from_env_for_test("ENABLE_MERGE_W13", false);
 }
 
 void register_hwkernel_config(pybind11::module& m) {
     pybind11::class_<HWKernelConfig>(m, "HWKernelConfig")
-        .def(pybind11::init<int, bool, bool, bool, bool, std::string>(),
+        .def(pybind11::init<int, bool, bool, bool, bool, std::string, bool>(),
              pybind11::arg("deep_gemm_num_sm")          = -1,
              pybind11::arg("arm_gemm_use_kai")          = false,
              pybind11::arg("enable_stable_scatter_add") = false,
              pybind11::arg("enable_multi_block_mode")   = true,
              pybind11::arg("ft_disable_custom_ar")      = true,
-             pybind11::arg("rocm_hipblaslt_config")     = "gemm_config.csv")
+             pybind11::arg("rocm_hipblaslt_config")     = "gemm_config.csv",
+             pybind11::arg("enable_merge_w13")          = false)
         .def("to_string", &HWKernelConfig::to_string)
         .def("update_from_env", &HWKernelConfig::update_from_env_for_test)
         .def_readwrite("deep_gemm_num_sm", &HWKernelConfig::deep_gemm_num_sm)
@@ -258,7 +272,8 @@ void register_hwkernel_config(pybind11::module& m) {
         .def_readwrite("enable_stable_scatter_add", &HWKernelConfig::enable_stable_scatter_add)
         .def_readwrite("enable_multi_block_mode", &HWKernelConfig::enable_multi_block_mode)
         .def_readwrite("ft_disable_custom_ar", &HWKernelConfig::ft_disable_custom_ar)
-        .def_readwrite("rocm_hipblaslt_config", &HWKernelConfig::rocm_hipblaslt_config);
+        .def_readwrite("rocm_hipblaslt_config", &HWKernelConfig::rocm_hipblaslt_config)
+        .def_readwrite("enable_merge_w13", &HWKernelConfig::enable_merge_w13);
 }
 
 // DeviceResourceConfig
@@ -433,7 +448,7 @@ void register_service_discovery_config(pybind11::module& m) {
 
 // CacheStoreConfig
 void CacheStoreConfig::update_from_env_for_test() {
-    cache_store_rdma_mode        = bool_from_env_for_test("CACHE_STORE_RDMA_MODE", false);
+    cache_store_rdma_mode        = bool_from_env_for_test("CACHE_STORE_RDMA_MODE", true);
     wrr_available_ratio          = autil::EnvUtil::getEnv("WRR_AVAILABLE_RATIO", 80);
     rank_factor                  = autil::EnvUtil::getEnv("RANK_FACTOR", 0);
     thread_count                 = autil::EnvUtil::getEnv("CACHE_STORE_THREAD_COUNT", 16);
@@ -444,7 +459,7 @@ void CacheStoreConfig::update_from_env_for_test() {
 void register_cache_store_config(pybind11::module& m) {
     pybind11::class_<CacheStoreConfig>(m, "CacheStoreConfig")
         .def(pybind11::init<bool, int, int, int, int, int>(),
-             pybind11::arg("cache_store_rdma_mode")        = false,
+             pybind11::arg("cache_store_rdma_mode")        = true,
              pybind11::arg("wrr_available_ratio")          = 80,
              pybind11::arg("rank_factor")                  = 0,
              pybind11::arg("thread_count")                 = 16,
@@ -602,7 +617,10 @@ inline std::string ProfilingDebugLoggingConfig::to_string() const {
         << "debug_load_server: " << debug_load_server << "\n"
         << "hack_layer_num: " << hack_layer_num << "\n"
         << "test_layer_num: " << test_layer_num << "\n"
-        << "debug_start_fake_process: " << debug_start_fake_process;
+        << "debug_start_fake_process: " << debug_start_fake_process << "\n"
+        << "dg_print_reg_reuse: " << dg_print_reg_reuse << "\n"
+        << "qwen_agent_debug" << qwen_agent_debug << "\n"
+        << "disable_dpc_random" << disable_dpc_random << "\n";
     return oss.str();
 }
 
@@ -614,7 +632,8 @@ inline std::string HWKernelConfig::to_string() const {
         << "enable_stable_scatter_add: " << enable_stable_scatter_add << "\n"
         << "enable_multi_block_mode: " << enable_multi_block_mode << "\n"
         << "ft_disable_custom_ar: " << ft_disable_custom_ar << "\n"
-        << "rocm_hipblaslt_config: " << rocm_hipblaslt_config;
+        << "rocm_hipblaslt_config: " << rocm_hipblaslt_config << "\n"
+        << "enable_merge_w13: " << enable_merge_w13 << "\n";
     return oss.str();
 }
 

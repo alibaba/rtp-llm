@@ -70,6 +70,9 @@ class ServerArgsDefaultTest(TestCase):
         self.assertEqual(env.get("HACK_LAYER_NUM"), "0")
         self.assertIsNone(env.get("TEST_LAYER_NUM"))
         self.assertIsNone(env.get("DEBUG_START_FAKE_PROCESS"))
+        self.assertIsNone(env.get("DG_PRINT_REG_REUSE"))
+        self.assertIsNone(env.get("DISABLE_DPC_RANDOM"))
+        self.assertEqual(env.get("QWEN_AGENT_DEBUG"), "0")
 
         # 6. 硬件/Kernel 特定优化
         self.assertIsNone(env.get("DEEP_GEMM_NUM_SM"))
@@ -78,6 +81,7 @@ class ServerArgsDefaultTest(TestCase):
         self.assertEqual(env.get("ENABLE_MULTI_BLOCK_MODE"), "1")
         self.assertEqual(env.get("ROCM_HIPBLASLT_CONFIG"), "gemm_config.csv")
         self.assertEqual(env.get("FT_DISABLE_CUSTOM_AR"), "1")
+        self.assertEqual(env.get("ENABLE_MERGE_W13"), "0")
 
         # 7. 采样
         self.assertEqual(env.get("MAX_BATCH_SIZE"), "0")
@@ -92,9 +96,10 @@ class ServerArgsDefaultTest(TestCase):
         self.assertEqual(env.get("ENABLE_COMM_OVERLAP"), "1")
         self.assertEqual(env.get("ENABLE_LAYER_MICRO_BATCH"), "0")
         self.assertEqual(env.get("NOT_USE_DEFAULT_STREAM"), "0")
-        self.assertEqual(env.get("RESERVER_RUNTIME_MEM_MB"), "128")
+        self.assertEqual(env.get("RESERVER_RUNTIME_MEM_MB"), "1024")
         self.assertEqual(env.get("SPECIFY_GPU_ARCH"), "")
         self.assertIsNone(env.get("ACEXT_GEMM_CONFIG_DIR"))
+        self.assertEqual(env.get("DEVICE_RESERVE_MEMORY_BYTES"), "0")
 
         # 9. MOE 专家并行
         self.assertEqual(env.get("USE_DEEPEP_MOE"), "0")
@@ -138,7 +143,7 @@ class ServerArgsDefaultTest(TestCase):
         self.assertIsNone(env.get("RTP_LLM_MULTIMODAL_PART_CM2_CONFIG"))
 
         # 13. Cache Store 配置
-        self.assertEqual(env.get("CACHE_STORE_RDMA_MODE"), "0")
+        self.assertEqual(env.get("CACHE_STORE_RDMA_MODE"), "1")
         self.assertEqual(env.get("WRR_AVAILABLE_RATIO"), "80")
         self.assertEqual(env.get("RANK_FACTOR"), "0")
 
@@ -174,6 +179,7 @@ class ServerArgsDefaultTest(TestCase):
         )
         self.assertEqual(env.get("DOWNLOAD_HEADERS"), "")
         self.assertEqual(env.get("MM_CACHE_ITEM_NUM"), "10")
+        self.assertEqual(env.get("URL_CACHE_ITEM_NUM"), "100")
 
         # 19. Server Configuration
         self.assertEqual(env.get("FRONTEND_SERVER_COUNT"), "4")
@@ -205,6 +211,7 @@ class ServerArgsDefaultTest(TestCase):
 
         # 24. Embedding Configuration
         self.assertEqual(env.get("EMBEDDING_MODEL"), "0")
+        self.assertIsNone(env.get("EXTRA_INPUT_IN_MM_EMBEDDING"))
 
         # 25. Worker Configuration
         self.assertEqual(env.get("WORKER_INFO_PORT_NUM"), "7")
@@ -225,6 +232,10 @@ class ServerArgsDefaultTest(TestCase):
         self.assertIsNone(env.get("CHECKPOINT_PATH"))
         self.assertIsNone(env.get("OSS_ENDPOINT"))
         self.assertIsNone(env.get("PTUNING_PATH"))
+        self.assertEqual(env.get("DASHSCOPE_API_KEY"), "EMPTY")
+        self.assertIsNone(env.get("DASHSCOPE_HTTP_URL"))
+        self.assertIsNone(env.get("DASHSCOPE_WEBSOCKET_URL"))
+        self.assertEqual(env.get("OPENAI_API_KEY"), "EMPTY")
 
         # 27. Lora Configuration
         self.assertEqual(env.get("LORA_INFO"), "{}")
@@ -353,6 +364,12 @@ class ServerArgsSetTest(TestCase):
             "4",
             "--debug_start_fake_process",
             "True",
+            "--dg_print_reg_reuse",
+            "True",
+            "--qwen_agent_debug",
+            "1",
+            "--disable_dpc_random",
+            "True",
             # 6. 硬件/Kernel 特定优化
             "--deep_gemm_num_sm",
             "16",
@@ -366,6 +383,8 @@ class ServerArgsSetTest(TestCase):
             "another_gemm_config.csv",
             "--ft_disable_custom_ar",
             "False",
+            "--enable_merge_w13",
+            "True",
             # 7. 采样
             "--max_batch_size",
             "128",
@@ -466,7 +485,7 @@ class ServerArgsSetTest(TestCase):
             '{"cm2": "multi2"}',
             # 13. Cache Store 配置
             "--cache_store_rdma_mode",
-            "True",
+            "False",
             "--wrr_available_ratio",
             "95",
             "--rank_factor",
@@ -524,6 +543,8 @@ class ServerArgsSetTest(TestCase):
             '{"X-Test": "True"}',
             "--mm_cache_item_num",
             "20",
+            "--url_cache_item_num",
+            "120",
             # 19. Server Configuration
             "--frontend_server_count",
             "8",
@@ -568,6 +589,8 @@ class ServerArgsSetTest(TestCase):
             # 24. Embedding Configuration
             "--embedding_model",
             "1",
+            "--extra_input_in_mm_embedding",
+            "INDEX",
             # 25. Worker Configuration
             "--worker_info_port_num",
             "10",
@@ -602,6 +625,14 @@ class ServerArgsSetTest(TestCase):
             "test.oss.endpoint",
             "--ptuning_path",
             "/path/to/ptuning",
+            "--dashscope_api_key",
+            "test_key",
+            "--dashscope_http_url",
+            "http://test.url",
+            "--dashscope_websocket_url",
+            "ws://test.url",
+            "--openai_api_key",
+            "test_openai_key",
             # 27. Lora Configuration
             "--lora_info",
             '{"lora1": "/path/to/lora1"}',
@@ -695,6 +726,9 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env["HACK_LAYER_NUM"], "2")
         self.assertEqual(env["TEST_LAYER_NUM"], "4")
         self.assertEqual(env["DEBUG_START_FAKE_PROCESS"], "1")
+        self.assertEqual(env["DG_PRINT_REG_REUSE"], "1")
+        self.assertEqual(env["QWEN_AGENT_DEBUG"], "1")
+        self.assertEqual(env["DISABLE_DPC_RANDOM"], "1")
 
         # 6. 硬件/Kernel 特定优化
         self.assertEqual(env["DEEP_GEMM_NUM_SM"], "16")
@@ -703,6 +737,7 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env["ENABLE_MULTI_BLOCK_MODE"], "0")
         self.assertEqual(env["ROCM_HIPBLASLT_CONFIG"], "another_gemm_config.csv")
         self.assertEqual(env["FT_DISABLE_CUSTOM_AR"], "0")
+        self.assertEqual(env["ENABLE_MERGE_W13"], "1")
 
         # 7. 采样
         self.assertEqual(env["MAX_BATCH_SIZE"], "128")
@@ -763,7 +798,7 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env["RTP_LLM_MULTIMODAL_PART_CM2_CONFIG"], '{"cm2": "multi2"}')
 
         # 13. Cache Store 配置
-        self.assertEqual(env["CACHE_STORE_RDMA_MODE"], "1")
+        self.assertEqual(env["CACHE_STORE_RDMA_MODE"], "0")
         self.assertEqual(env["WRR_AVAILABLE_RATIO"], "95")
         self.assertEqual(env["RANK_FACTOR"], "1")
         self.assertEqual(env["CACHE_STORE_THREAD_COUNT"], "8")
@@ -800,7 +835,7 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env["TRT_CACHE_PATH"], "/tmp/trt_cache")
         self.assertEqual(env["DOWNLOAD_HEADERS"], '{"X-Test": "True"}')
         self.assertEqual(env["MM_CACHE_ITEM_NUM"], "20")
-
+        self.assertEqual(env["URL_CACHE_ITEM_NUM"], "120")
         # 19. Server Configuration
         self.assertEqual(env["FRONTEND_SERVER_COUNT"], "8")
         self.assertEqual(env["START_PORT"], "9099")
@@ -831,6 +866,7 @@ class ServerArgsSetTest(TestCase):
 
         # 24. Embedding Configuration
         self.assertEqual(env["EMBEDDING_MODEL"], "1")
+        self.assertEqual(env["EXTRA_INPUT_IN_MM_EMBEDDING"], "INDEX")
 
         # 25. Worker Configuration
         self.assertEqual(env["WORKER_INFO_PORT_NUM"], "10")
@@ -851,6 +887,10 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env["CHECKPOINT_PATH"], "/path/to/checkpoint")
         self.assertEqual(env["OSS_ENDPOINT"], "test.oss.endpoint")
         self.assertEqual(env["PTUNING_PATH"], "/path/to/ptuning")
+        self.assertEqual(env["DASHSCOPE_API_KEY"], "test_key")
+        self.assertEqual(env["DASHSCOPE_HTTP_URL"], "http://test.url")
+        self.assertEqual(env["DASHSCOPE_WEBSOCKET_URL"], "ws://test.url")
+        self.assertEqual(env["OPENAI_API_KEY"], "test_openai_key")
 
         # 27. Lora Configuration
         self.assertEqual(env["LORA_INFO"], '{"lora1": "/path/to/lora1"}')

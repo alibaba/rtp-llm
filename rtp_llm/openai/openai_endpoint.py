@@ -100,16 +100,22 @@ class OpenaiEndpoint(object):
             if len(word):
                 self.stop_words_str_list.append(word)
 
-        env_stop_words_str = os.environ.get("STOP_WORDS_STR", None)
-        env_stop_words_id = os.environ.get("STOP_WORDS_LIST", None)
+        env_stop_words_str = (
+            self.model_config.py_env_configs.generate_env_config.stop_words_str
+        )
+        env_stop_words_id = (
+            self.model_config.py_env_configs.generate_env_config.stop_words_list
+        )
         env_stop_words_str_list = (
             json.loads(env_stop_words_str) if env_stop_words_str else []
         )
         env_stop_words_id_list = (
             json.loads(env_stop_words_id) if env_stop_words_id else []
         )
-        env_force_stop = os.environ.get("FORCE_STOP_WORDS", None)
-        if env_force_stop and str_to_bool(env_force_stop):
+        env_force_stop = (
+            self.model_config.py_env_configs.generate_env_config.force_stop_words
+        )
+        if env_force_stop:
             self.stop_words_str_list = env_stop_words_str_list
             self.stop_words_id_list = env_stop_words_id_list
         else:

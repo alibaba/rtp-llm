@@ -19,6 +19,7 @@ from pydantic import BaseModel
 
 from rtp_llm.access_logger.access_logger import AccessLogger
 from rtp_llm.config.generate_config import RoleType
+from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.config.task_type import TaskType
 from rtp_llm.embedding.embedding_endpoint import EmbeddingEndpoint
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
@@ -55,7 +56,7 @@ class FrontendServer(object):
         kmonitor.init()
 
     def start(self):
-        if os.environ.get("DEBUG_START_FAKE_PROCESS", None) is not None:
+        if StaticConfig.profiling_debug_config.debug_start_fake_process == 1:
             # for debug online
             logging.info("DEBUG_START_FAKE_PROCESS is set, start fake server")
             self._frontend_worker = None

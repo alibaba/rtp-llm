@@ -40,6 +40,7 @@ def extract_ffma(sass):
                 collected.append((f"{arch_name}::{func_name}", current))
             current = []
 
+    ## reserve this env
     if os.getenv("DG_PRINT_REG_REUSE", None):
         print(f"Found {len(collected)} FFMA segments")
     return collected

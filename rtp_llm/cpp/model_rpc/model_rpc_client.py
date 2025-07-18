@@ -257,7 +257,7 @@ class ModelRpcClient(object):
             address = f"localhost:{g_worker_info.rpc_server_port}"
         self._addresses = []
         # for test usage
-        hack_ep_single_entry = bool(int(os.environ.get("HACK_EP_SINGLE_ENTRY", 0)))
+        hack_ep_single_entry = config.py_env_configs.py_eplb_config.hack_ep_single_entry
         logging.info(f"hack ep single entry: {hack_ep_single_entry}")
         if (g_parallel_info.dp_size > 1) and (not hack_ep_single_entry):
             members_info_str = (

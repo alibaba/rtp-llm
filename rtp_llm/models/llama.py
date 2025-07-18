@@ -195,7 +195,7 @@ class Baichuan2(Baichuan):
 
 class Gemma(Llama):
     def __init__(self, config: GptInitModelParameters):
-        if os.environ.get("ENABLE_OPENSOURCE_FMHA", None) != "OFF":
+        if config.py_env_configs.fmha_config.enable_open_source_fmha:
             logging.warn(
                 "opensource fmha does not support head dim 256, thus disabled for gemma model"
             )

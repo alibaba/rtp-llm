@@ -4,6 +4,7 @@ import os
 
 from rtp_llm.config.log_config import LOGGING_CONFIG
 
+## for `__init__.py`, we reserve the envs, don't use StaticConfig.
 LOG_PATH = os.environ.get("LOG_PATH", "logs")
 os.makedirs(LOG_PATH, exist_ok=True)
 LOGLEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()

@@ -32,7 +32,9 @@ class LoraManager:
     def __init__(self, model: AsyncModel) -> None:
         self.model_ = model
         self.lora_infos_ = {}
-        self.max_lora_model_size_ = int(os.environ.get("MAX_LORA_MODEL_SIZE", "-1"))
+        self.max_lora_model_size_ = (
+            model.config.py_env_configs.model_specific_config.max_lora_model_size
+        )
         self.device: str = self.model_.model.device
         assert isinstance(self.model_.decoder_engine_, RPCEngine)
         self.lora_cpp_wrapper_ = self.model_.decoder_engine_.rtp_llm_op_.ft_op

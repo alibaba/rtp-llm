@@ -6,6 +6,7 @@ from typing import Any, List, Optional, Union
 import torch
 from pydantic import BaseModel, field_validator, model_validator
 
+from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.device.device_base import DeviceBase
 from rtp_llm.utils.database import BaseDatabase
 from rtp_llm.utils.fuser import fetch_remote_file_to_local
@@ -150,7 +151,7 @@ class LoadConfig(BaseModel):
         layer_num = layer_num
 
         phy2log: List[List[int]] = []
-        phy2log_path = fetch_remote_file_to_local(os.environ.get(PHY2LOG_PATH_KEY, ""))
+        phy2log_path = fetch_remote_file_to_local(StaticConfig.load_config.phy2log_path)
 
         if phy2log_path:
             with open(phy2log_path, "r") as f:

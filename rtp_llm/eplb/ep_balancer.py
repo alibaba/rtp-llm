@@ -79,12 +79,12 @@ class ExpertBalancer:
 
         self.time_prefix = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         self.queue: Queue[int] = Queue()
-        select_layer_method = os.environ.get("BALANCE_METHOD", "mix")
+        select_layer_method = py_env_configs.py_eplb_config.balance_method
         self.select_layer_method = SelectLayerMethod(select_layer_method)
         self.phy2log = phy2log
         self.update_cnt = 0
 
-        window_size = int(os.environ.get("EPLB_STATS_WINDOW_SIZE", 10))
+        window_size = py_env_configs.py_eplb_config.eplb_stats_window_size
         self.history_log_stats = HistoryStats(
             window_size=window_size,
             shape=(self._load_config.num_layers, self._load_config.expert_num),
@@ -98,7 +98,7 @@ class ExpertBalancer:
             dtype=torch.int32,
         )
 
-        self.force_repack = os.environ.get("EPLB_FORCE_REPACK", "0") == "1"
+        self.force_repack = py_env_configs.py_eplb_config.eplb_force_repack == 1
 
     @torch.inference_mode()
     def get_balanced_layer(self, gpu_loads: torch.Tensor) -> int:

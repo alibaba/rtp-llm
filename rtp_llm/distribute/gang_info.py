@@ -5,10 +5,13 @@ import os
 import socket
 from typing import Any, Dict, List, NamedTuple, Optional
 
+from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.distribute.worker_info import WorkerInfo, g_parallel_info, g_worker_info
 
 CONFIG_FILE_ENV = "DISTRIBUTE_CONFIG_FILE"
 JSON_GANG_PARTS_ENV = "JSON_GANG_PARTS"
+from rtp_llm.config.py_config_modules import StaticConfig
+from rtp_llm.distribute.worker_info import WorkerInfo, g_parallel_info, g_worker_info
 
 
 def members_from_json(gang_info_json: Dict[str, Any]) -> List[WorkerInfo]:
@@ -35,7 +38,7 @@ def members_from_json(gang_info_json: Dict[str, Any]) -> List[WorkerInfo]:
                 info=info,
             )
         )
-    zone_name = os.environ.get("ZONE_NAME", "")
+    zone_name = StaticConfig.gang_config.zone_name
     if zone_name:
         members = [
             member for member in members if member.name.split("_")[-2] == zone_name
@@ -96,7 +99,7 @@ app.c2.io/biz-detail-ganginfo="{\"llama13B_2A10_PCIE_1_inference_part0\":{\"name
 
 
 def get_c2_members():
-    file_name = os.environ.get("GANG_ANNOCATION_PATH", "/etc/podinfo/annotations")
+    file_name = StaticConfig.gang_config.gang_annocation_path
     if not os.path.exists(file_name):
         raise Exception(f"not found file: {file_name}")
 
@@ -125,7 +128,7 @@ def get_leader_ip(leader_address: str) -> str:
 def get_leader_members(env_str: str) -> List[WorkerInfo]:
     ip_str = get_leader_ip(env_str)
     members: List[WorkerInfo] = []
-    zone_name = os.environ.get("ZONE_NAME", "")
+    zone_name = StaticConfig.gang_config.zone_name
     member_info = {}
     member_info["name"] = "part0"
     if zone_name:
@@ -183,7 +186,7 @@ def get_leader_members(env_str: str) -> List[WorkerInfo]:
 
 
 def get_members_from_file():
-    file = os.environ[CONFIG_FILE_ENV]
+    file = StaticConfig.gang_config.distribute_config_file
     with open(file, "r") as reader:
         config_json = json.loads(reader.read())
     return members_from_json(config_json)
@@ -208,20 +211,28 @@ def get_gang_info() -> GangInfo:
     only_leader = False
     if g_parallel_info.local_world_size < g_parallel_info.world_size:
         # from config file
-        if os.environ.get(CONFIG_FILE_ENV):
+        if StaticConfig.gang_config.distribute_config_file:
             members = get_members_from_file()
         # for distributed test
-        elif os.environ.get("GANG_CONFIG_STRING"):
-            logging.info(f"use GANG_CONFIG_STRING: {os.environ['GANG_CONFIG_STRING']}")
-            members = members_from_test_env(os.environ["GANG_CONFIG_STRING"])
+        elif StaticConfig.gang_config.gang_config_string:
+            logging.info(
+                f"use GANG_CONFIG_STRING: {StaticConfig.gang_config.gang_config_string}"
+            )
+            members = members_from_test_env(StaticConfig.gang_config.gang_config_string)
         # from env json
-        elif os.environ.get(JSON_GANG_PARTS_ENV):
-            logging.info(f"use JSON_GANG_PARTS_ENV: {os.environ[JSON_GANG_PARTS_ENV]}")
-            members = get_members_from_json_env(os.environ[JSON_GANG_PARTS_ENV])
+        elif StaticConfig.gang_config.json_gang_parts:
+            logging.info(
+                f"use JSON_GANG_PARTS_ENV: {StaticConfig.gang_config.json_gang_parts}"
+            )
+            members = get_members_from_json_env(
+                StaticConfig.gang_config.json_gang_parts
+            )
         # for lws
-        elif os.environ.get("LEADER_ADDRESS"):
-            logging.info(f"use LEADER_ADDRESS: {os.environ['LEADER_ADDRESS']}")
-            members = get_leader_members(os.environ["LEADER_ADDRESS"])
+        elif StaticConfig.gang_config.leader_address:
+            logging.info(
+                f"use LEADER_ADDRESS: {StaticConfig.gang_config.leader_address}"
+            )
+            members = get_leader_members(StaticConfig.gang_config.leader_address)
         # from c2 annotation
         else:
             members = get_c2_members()
@@ -245,7 +256,7 @@ def get_gang_info() -> GangInfo:
                 None,
             )
         ]
-    if os.environ.get("LEADER_ADDRESS"):
+    if StaticConfig.gang_config.leader_address:
         only_leader = True
 
     # 假设 GPU 均匀分布，可以整除

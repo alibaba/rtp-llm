@@ -7,6 +7,7 @@ from transformers.models.qwen2.tokenization_qwen2 import Qwen2Tokenizer
 
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.models.starcoder import StarcoderTokenizer
 from rtp_llm.pipeline.pipeline import Pipeline
 from rtp_llm.tokenizer.tokenization_qwen import QWenTokenizer
@@ -158,8 +159,8 @@ class GenerateConfigTest(TestCase):
         self.assertTrue(a.is_same(b))
 
     def test_add_thinking_params(self):
-        os.environ["THINK_MODE"] = "1"
-        os.environ["THINK_END_TOKEN_ID"] = "102"
+        StaticConfig.generate_env_config.think_mode = 1
+        StaticConfig.generate_env_config.think_end_token_id = 102
         parameter = GptInitModelParameters(0, 0, 0, 0, 0)
         tokenizer = QWenTokenizer(
             f"{self.test_data_path}/model_test/fake_test/testdata/qwen_7b/tokenizer/qwen.tiktoken"
@@ -177,9 +178,9 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(generate_config.end_think_token_ids, [102])
 
     def test_add_thinking_params_with_think_token(self):
-        os.environ["THINK_MODE"] = "1"
-        os.environ["THINK_END_TOKEN_ID"] = "-1"
-        os.environ["THINK_END_TAG"] = "</think>"
+        StaticConfig.generate_env_config.think_mode = 1
+        StaticConfig.generate_env_config.think_end_token_id = -1
+        StaticConfig.generate_env_config.think_end_tag = "</think>"
         parameter = GptInitModelParameters(0, 0, 0, 0, 0)
         tokenizer_path = f"{self.test_data_path}/model_test/fake_test/testdata/deepseek_r1_qwen_14b_tokenizer"
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
@@ -196,9 +197,9 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(generate_config.end_think_token_ids, [151649])
 
     def test_add_thinking_params_with_think_token_2(self):
-        os.environ["THINK_MODE"] = "1"
-        os.environ["THINK_END_TOKEN_ID"] = "-1"
-        os.environ["THINK_END_TAG"] = "</think>\n\n"
+        StaticConfig.generate_env_config.think_mode = 1
+        StaticConfig.generate_env_config.think_end_token_id = -1
+        StaticConfig.generate_env_config.think_end_tag = "</think>\n\n"
         parameter = GptInitModelParameters(0, 0, 0, 0, 0)
         tokenizer_path = f"{self.test_data_path}/model_test/fake_test/testdata/deepseek_r1_qwen_14b_tokenizer"
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)

@@ -555,7 +555,7 @@ class GptInitModelParameters:
 
         # CacheStoreConfig
         self.gpt_init_params.cache_store_config = CacheStoreConfig(
-            cache_store_rdma_mode=get_env_bool("CACHE_STORE_RDMA_MODE", False),
+            cache_store_rdma_mode=get_env_bool("CACHE_STORE_RDMA_MODE", True),
             wrr_available_ratio=get_env_int("WRR_AVAILABLE_RATIO", 80),
             rank_factor=get_env_int("RANK_FACTOR", 0),
             thread_count=get_env_int("CACHE_STORE_THREAD_COUNT", 16),
@@ -622,6 +622,9 @@ class GptInitModelParameters:
                 debug_start_fake_process=get_env_bool(
                     "DEBUG_START_FAKE_PROCESS", False
                 ),
+                disable_dpc_random=get_env_bool("DISABLE_DPC_RANDOM", False),
+                qwen_agent_debug=get_env_bool("QWEN_AGENT_DEBUG", False),
+                dg_print_reg_reuse=get_env_bool("DG_PRINT_REG_REUSE", False),
             )
         )
         # HWKernelConfig
@@ -634,6 +637,7 @@ class GptInitModelParameters:
                 "ROCM_HIPBLASLT_CONFIG", "gemm_config.csv"
             ),
             ft_disable_custom_ar=get_env_bool("FT_DISABLE_CUSTOM_AR", True),
+            enable_merge_w13=get_env_bool("ENABLE_MERGE_W13", False),
         )
 
         # DeviceResourceConfig
@@ -756,8 +760,8 @@ class GptInitModelParameters:
         sparse_config = None
         if os.path.exists(os.path.join(ckpt_path, "config.json")):
             sparse_config_file = os.path.join(ckpt_path, "config.json")
-        if os.environ.get("SPARSE_CONFIG_FILE", None) is not None:
-            sparse_config_file = os.environ["SPARSE_CONFIG_FILE"]
+        if self.py_env_configs.sparse_config.sparse_config_file:
+            sparse_config_file = self.py_env_configs.sparse_config.sparse_config_file
 
         if sparse_config_file is not None:
             logging.info(f"read sparse config from: {sparse_config_file}")
@@ -828,8 +832,8 @@ class GptInitModelParameters:
                 self.insertMultiTaskPromptTokens(task_id, tokens_id)
 
     def update_task_prompt_config(self):
-        prompt_file_path = os.environ.get("MULTI_TASK_PROMPT", None)
-        if not prompt_file_path:
+        prompt_file_path = self.kv_cache_config.multi_task_prompt
+        if prompt_file_path == "":
             self.multi_task_prompt = None
         else:
             with open(prompt_file_path, "r") as reader:
@@ -837,8 +841,8 @@ class GptInitModelParameters:
                 self.multi_task_prompt = multi_task_prompt
                 return
 
-        prompt_str = os.environ.get("MULTI_TASK_PROMPT_STR", None)
-        if not prompt_str:
+        prompt_str = self.kv_cache_config.multi_task_prompt_str
+        if prompt_str == "":
             self.multi_task_prompt = None
         else:
             self.multi_task_prompt = json.loads(prompt_str, strict=False)
@@ -884,12 +888,16 @@ class GptInitModelParameters:
         self.use_all_gather = self.dp_size == 1
         logging.info(f"use_all_gather: {self.use_all_gather}")
 
-        self.eplb_update_time = int(os.environ.get("EPLB_UPDATE_TIME", 5000))
-        self.eplb_mode = EplbMode.__members__[os.environ.get("EPLB_MODE", "NONE")]
+        self.eplb_update_time = self.py_env_configs.py_eplb_config.eplb_update_time
+        self.eplb_mode = EplbMode.__members__[
+            self.py_env_configs.py_eplb_config.eplb_mode
+        ]
         self.enable_eplb = self.eplb_mode != EplbMode.NONE
 
-        self.phy_exp_num = int(os.environ.get("REDUNDANT_EXPERT", 0)) + self.expert_num
-        self.enable_merge_w13 = os.getenv("ENABLE_MERGE_W13", "0").lower() == "1"
+        self.phy_exp_num = (
+            self.py_env_configs.py_eplb_config.redundant_expert + self.expert_num
+        )
+        self.enable_merge_w13 = self.hw_kernel_config.enable_merge_w13
         logging.info(
             f"phy_exp_num: {self.phy_exp_num}, use merge w13: {self.enable_merge_w13}"
         )
@@ -930,7 +938,7 @@ class GptInitModelParameters:
 
         load_cutlass_gemm_config(self.quant_algo)
 
-        hack_layer_num = int(os.environ.get("HACK_LAYER_NUM", 0))
+        hack_layer_num = self.profiling_debug_logging_config.hack_layer_num
         if hack_layer_num:
             logging.info(f"hack layernum to {hack_layer_num}")
             self.layer_num = hack_layer_num
@@ -938,43 +946,58 @@ class GptInitModelParameters:
         self.seq_size_per_block = closest_power_of_2(
             int(max(seq_size_per_block, self.max_seq_len // 128))
         )  # must be 2^n
-        self.seq_size_per_block = int(
-            os.environ.get("SEQ_SIZE_PER_BLOCK", self.seq_size_per_block)
-        )
+        if self.py_env_configs.py_kv_cache_config.seq_size_per_block == 8:
+            self.seq_size_per_block = self.seq_size_per_block
+        else:
+            self.seq_size_per_block = (
+                self.py_env_configs.py_kv_cache_config.seq_size_per_block
+            )
         logging.info(f"seq_size_per_block: {self.seq_size_per_block}")
-        self.max_generate_batch_size = int(os.environ.get("CONCURRENCY_LIMIT", 128))
+        if self.py_env_configs.concurrency_config.concurrency_limit == 32:
+            self.max_generate_batch_size = 128
+        else:
+            self.max_generate_batch_size = (
+                self.py_env_configs.concurrency_config.concurrency_limit
+            )
         logging.info(f"max_generate_batch_size: {self.max_generate_batch_size}")
-        self.max_context_batch_size = int(os.environ.get("MAX_CONTEXT_BATCH_SIZE", 1))
+        self.max_context_batch_size = self.fifo_scheduler_config.max_context_batch_size
         logging.info(f"max_context_batch_size: {self.max_context_batch_size}")
-        self.reserve_runtime_mem_mb = int(
-            os.environ.get("RESERVER_RUNTIME_MEM_MB", 1024)
+        self.reserve_runtime_mem_mb = (
+            self.py_env_configs.py_device_resource_config.reserver_runtime_mem_mb
         )
         logging.info(f"reserve_runtime_mem_mb: {self.reserve_runtime_mem_mb}")
-        self.kv_cache_mem_mb = int(os.environ.get("KV_CACHE_MEM_MB", -1))
+        self.kv_cache_mem_mb = self.py_env_configs.py_kv_cache_config.kv_cache_mem_mb
         logging.info(f"kv_cache_mem_mb: {self.kv_cache_mem_mb}")
-        self.block_nums = int(os.environ.get("TEST_BLOCK_NUM", 0))
+        self.block_nums = self.py_env_configs.py_kv_cache_config.test_block_num
         logging.info(f"block_nums: {self.block_nums}")
-        if os.environ.get("TEST_LAYER_NUM"):
+        if self.profiling_debug_logging_config.test_layer_num:
             logging.info(
-                f'replace model layer with TEST_LAYER_NUM: {os.environ.get("TEST_LAYER_NUM")}'
+                f"replace model layer with TEST_LAYER_NUM: {self.profiling_debug_logging_config.test_layer_num}"
             )
-            self.layer_num = int(os.environ.get("TEST_LAYER_NUM", self.layer_num))
-        self.enable_partial_fallback = bool(
-            int(os.environ.get("ENABLE_PARTIAL_FALLBACK", 0))
+            if self.profiling_debug_logging_config.test_layer_num == 0:
+                self.layer_num = self.layer_num
+            else:
+                self.layer_num = self.profiling_debug_logging_config.test_layer_num
+        self.enable_partial_fallback = (
+            self.fifo_scheduler_config.enable_partial_fallback
         )
         logging.info(f"enable_partial_fallback: {self.enable_partial_fallback}")
-        self.enable_fast_gen = bool(int(os.environ.get("ENABLE_FAST_GEN", 0)))
+        self.enable_fast_gen = self.fifo_scheduler_config.enable_fast_gen
         logging.info(f"enable_fast_gen: {self.enable_fast_gen}")
-        self.warm_up = bool(int(os.environ.get("WARM_UP", 1)))
+        self.warm_up = bool(self.py_env_configs.engine_config.warm_up)
         logging.info(f"warm_up: {self.warm_up}")
-        self.warm_up_with_loss = bool(int(os.environ.get("WARM_UP_WITH_LOSS", 0)))
+        self.warm_up_with_loss = bool(
+            self.py_env_configs.engine_config.warm_up_with_loss
+        )
         logging.info(f"warm_up_with_loss: {self.warm_up_with_loss}")
 
-        self.vit_separation = int(os.environ.get("VIT_SEPARATION", 0))
+        self.vit_separation = self.py_env_configs.vit_config.vit_separation
         logging.info(f"vit_separation: {self.vit_separation}")
 
-        self.fast_gen_max_context_len = int(
-            os.environ.get("FAST_GEN_MAX_CONTEXT_LEN", 1024)
+        self.fast_gen_max_context_len = (
+            1024
+            if self.fifo_scheduler_config.fast_gen_context_budget == -1
+            else self.fifo_scheduler_config.fast_gen_context_budget
         )
         logging.info(f"fast_gen_max_context_len: {self.fast_gen_max_context_len}")
 
@@ -999,7 +1022,7 @@ class GptInitModelParameters:
             logging.info(
                 f"prefill_max_wait_timeout_ms: {self.prefill_max_wait_timeout_ms}"
             )
-        
+
 
         if self.role_type in [RoleType.PREFILL, RoleType.DECODE]:
             self.cache_store_rdma_mode = bool(
@@ -1058,7 +1081,7 @@ class GptInitModelParameters:
                     os.environ.get("SYNC_STATUS_INTERVAL_MS", 50)
                 )
                 logging.info(f"sync_status_interval_ms: {self.sync_status_interval_ms}")
-            
+
 
 
         self.scheduler_reserve_resource_ratio = int(os.environ.get('SCHEDUlER_RESERVE_RESOURCE_RATIO', 5))
@@ -1068,11 +1091,13 @@ class GptInitModelParameters:
         self.pre_allocate_op_mem = bool(int(os.environ.get('PRE_ALLOCATE_OP_MEM', 1)))
         logging.info(f'pre_allocate_op_mem: {self.pre_allocate_op_mem}')
         self.kv_cache_data_type = self.data_type
-        if bool(int(os.environ.get("INT8_KV_CACHE", 0))):
+        if bool(self.py_env_configs.py_kv_cache_config.int8_kv_cache):
             self.kv_cache_data_type = WEIGHT_TYPE.INT8.to_str()
         elif self.quant_algo.isFp8():
             if self.quant_algo.isGroupwise():
-                if os.environ.get("BLOCKWISE_USE_FP8_KV_CACHE", "0") == "1":
+                if bool(
+                    self.py_env_configs.py_kv_cache_config.blockwise_use_fp8_kv_cache
+                ):
                     self.kv_cache_data_type = WEIGHT_TYPE.FP8.to_str()
             else:
                 self.kv_cache_data_type = WEIGHT_TYPE.FP8.to_str()
@@ -1080,16 +1105,16 @@ class GptInitModelParameters:
         logging.info(f"tp_split_emb_and_lm_head: {self.tp_split_emb_and_lm_head}")
 
         # use environment variables to update stop_words_str and stop_words_id
-        env_stop_words_str = os.environ.get("STOP_WORDS_STR", None)
-        env_stop_words_id = os.environ.get("STOP_WORDS_LIST", None)
+        env_stop_words_str = self.py_env_configs.generate_env_config.stop_words_str
+        env_stop_words_id = self.py_env_configs.generate_env_config.stop_words_list
         env_stop_words_str_list = (
             json.loads(env_stop_words_str) if env_stop_words_str else []
         )
         env_stop_words_id_list = (
             json.loads(env_stop_words_id) if env_stop_words_id else []
         )
-        env_force_stop = os.environ.get("FORCE_STOP_WORDS", None)
-        if env_force_stop and str_to_bool(env_force_stop):
+        env_force_stop = self.py_env_configs.generate_env_config.force_stop_words
+        if env_force_stop:
             self.special_tokens.stop_words_str_list = env_stop_words_str_list
             self.special_tokens.stop_words_id_list = env_stop_words_id_list
         else:

@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.utils.check_util import *
 from rtp_llm.utils.util import check_with_info
 
@@ -168,20 +169,18 @@ class GenerateConfig(BaseModel):
         self.stop_words_str += special_tokens.stop_words_str_list
 
     def add_thinking_params(self, tokenizer):
-        end_think_token_id = int(os.environ.get("THINK_END_TOKEN_ID", "-1"))
+        end_think_token_id = StaticConfig.generate_env_config.think_end_token_id
         self.end_think_token_ids = (
             [end_think_token_id] if end_think_token_id != -1 else []
         )
         if (
-            bool(int(os.environ.get("THINK_MODE", 0)))
+            bool(StaticConfig.generate_env_config.think_mode)
             and tokenizer
             and end_think_token_id == -1
         ):
-            think_end_tag: str = (
-                os.environ.get("THINK_END_TAG", "</think>\n\n")
-                .encode("utf-8")
-                .decode("unicode_escape")
-            )
+            think_end_tag: str = StaticConfig.generate_env_config.think_end_tag.encode(
+                "utf-8"
+            ).decode("unicode_escape")
             if isinstance(tokenizer, PreTrainedTokenizerBase):
                 tokenized_result: List[int] = tokenizer.encode(
                     think_end_tag, add_special_tokens=False
@@ -190,7 +189,7 @@ class GenerateConfig(BaseModel):
                 tokenized_result: List[int] = tokenizer.encode(think_end_tag)
             self.end_think_token_ids = tokenized_result
         self.in_think_mode = (
-            bool(int(os.environ.get("THINK_MODE", 0)))
+            bool(StaticConfig.generate_env_config.think_mode)
             and len(self.end_think_token_ids) >= 0
         )
 

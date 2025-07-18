@@ -12,6 +12,7 @@ from rtp_llm.config.gpt_init_model_parameters import (
     GptInitModelParameters,
     VitParameters,
 )
+from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.model_loader.model_weight_info import (
     ModelDeployWeightInfo,
     ModelWeightInfo,
@@ -103,6 +104,7 @@ class MultiModalMixin:
         return get_vit_compute_dtype(self.config.data_type)
 
     def init_multimodal(self, config: GptInitModelParameters, device: str) -> None:
+        self.vit_config = config.py_env_configs.vit_config
         if config.vit_separation != 2:
             with torch.device(device):
                 torch_default_dtype = torch.get_default_dtype()
@@ -239,7 +241,7 @@ class MultiModalMixin:
             # TRT engine doesn't support TP, here we only generate trt engine on rank0 if trt engine is not cached
             if tp_rank == 0 and (
                 (not MultiModalTRTEngine.trt_engine_cached(model_name_path, dtype))
-                or os.environ.get("TRT_CACHE_ENABLED", "0") == "0"
+                or self.vit_config.trt_cache_enabled == 0
             ):
                 self._load_mm_weight(vit_params, dtype, device)
 
@@ -281,7 +283,7 @@ class MultiModalMixin:
 
     def load_mm_weight(self, ctype: str, tp_size: int, tp_rank: int, device: str):
 
-        if os.environ.get("VIT_TRT", "0") == "1":
+        if StaticConfig.vit_config.vit_trt == 1:
             self.init_mm_trt(
                 self.config.ckpt_path,
                 self.config.mm_related_params,

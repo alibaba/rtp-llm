@@ -47,7 +47,7 @@ def check_task_type(ckpt_path: str):
             return False
 
         return (
-            os.environ.get("EMBEDDING_MODEL", "0") == "1"
+            StaticConfig.embedding_config.embedding_model == 1
             or _check_is_sentence_transformer_repo()
         )
 

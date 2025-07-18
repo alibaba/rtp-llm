@@ -16,7 +16,12 @@ import torch
 import uvicorn
 from setproctitle import setproctitle
 
-from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.config.py_config_modules import (
+    GangConfig,
+    PyEnvConfigs,
+    StaticConfig,
+    VitConfig,
+)
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
@@ -99,7 +104,9 @@ def multi_rank_start(global_controller: ConcurrencyController):
         proc.start()
         procs.append(proc)
 
-    if os.environ.get("FAKE_GANG_ENV", None) is not None:
+    gang_config = GangConfig()
+    gang_config.update_from_env()
+    if gang_config.fake_gang_env:
         return procs
 
     first_dead_time = 0
@@ -189,10 +196,10 @@ def start_backend_server(global_controller: ConcurrencyController):
     clear_jit_filelock()
 
     ## collect all args and envs.
-    py_env_configs = PyEnvConfigs()
-    py_env_configs.update_from_env()
+    vit_config = VitConfig()
+    vit_config.update_from_env()
     # TODO(xinfei.sxf) fix this
-    if int(os.environ.get("VIT_SEPARATION", 0)) == 1:
+    if vit_config.vit_separation == 1:
         return vit_start_server()
 
     if not torch.cuda.is_available():

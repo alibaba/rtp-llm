@@ -218,7 +218,7 @@ class ModelFactory:
         if StaticConfig.model_config.act_type:
             act_type = WEIGHT_TYPE.from_str(StaticConfig.model_config.act_type)
 
-        quantization = os.environ.get(ModelConfig.QUANTIZATION_KEY, None)
+        quantization = StaticConfig.quantization_config.quantization
         model_config = ModelConfig(
             model_type=model_type,
             ckpt_path=ckpt_path,
@@ -238,12 +238,18 @@ class ModelFactory:
     def create_propose_model_config(normal_model_config: ModelConfig):
         propose_model_config = None
 
-        sp_type = os.environ.get("SP_TYPE", None)
+        sp_type = StaticConfig.py_speculative_execution_config.sp_type
         if sp_type == "vanilla" or sp_type == "mtp" or sp_type == "eagle3":
             logging.info("use vanilla speculative model")
-            propose_model_type = os.environ.get("SP_MODEL_TYPE", None)
-            gen_num_per_circle = int(os.environ.get("GEN_NUM_PER_CIRCLE", "5"))
-            origin_ckpt_path = os.environ.get("SP_CHECKPOINT_PATH", None)
+            propose_model_type = (
+                StaticConfig.py_speculative_execution_config.sp_model_type
+            )
+            gen_num_per_circle = (
+                StaticConfig.py_speculative_execution_config.gen_num_per_circle
+            )
+            origin_ckpt_path = (
+                StaticConfig.py_speculative_execution_config.sp_checkpoint_path
+            )
             if origin_ckpt_path is None:
                 logging.error("sp is disabled since SP_CHECKPOINT_PATH is not set")
                 return None
@@ -275,7 +281,9 @@ class ModelFactory:
                 quantization=quantization,
             )
         elif sp_type == "deterministic":
-            gen_num_per_circle = int(os.environ.get("GEN_NUM_PER_CIRCLE", "5"))
+            gen_num_per_circle = (
+                StaticConfig.py_speculative_execution_config.gen_num_per_circle
+            )
             propose_model_config = ModelConfig(
                 sp_type=sp_type, gen_num_per_circle=gen_num_per_circle
             )
@@ -285,19 +293,15 @@ class ModelFactory:
 
     @staticmethod
     def load_default_generate_config(model: Union[BaseModel, AsyncModel]):
-        if "GENERATION_CONFIG_PATH" in os.environ:
+        generation_config_path = StaticConfig.generate_env_config.generation_config_path
+        if generation_config_path:
             model.default_generate_config.update(
                 json.load(
-                    open(
-                        os.path.join(
-                            os.environ["GENERATION_CONFIG_PATH"],
-                            "generation_config.json",
-                        )
-                    )
+                    open(os.path.join(generation_config_path, "generation_config.json"))
                 )
             )
             logging.info(
-                f"load generate config:{os.environ['GENERATION_CONFIG_PATH']}/generation_config.json: \n\
+                f"load generate config:{generation_config_path}/generation_config.json: \n\
                          {json.dumps(model.default_generate_config.model_dump(), indent=4)}"
             )
 

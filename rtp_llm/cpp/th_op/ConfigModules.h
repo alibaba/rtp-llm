@@ -78,6 +78,9 @@ struct ProfilingDebugLoggingConfig {
     int         hack_layer_num            = 0;
     int         test_layer_num            = 0;
     int         debug_start_fake_process  = false;
+    bool        dg_print_reg_reuse        = false;
+    bool        qwen_agent_debug          = false;
+    bool        disable_dpc_random        = false;
     std::string to_string() const;
     void        update_from_env_for_test();
 };
@@ -89,6 +92,7 @@ struct HWKernelConfig {
     bool        enable_multi_block_mode   = true;
     bool        ft_disable_custom_ar      = true;
     std::string rocm_hipblaslt_config     = "gemm_config.csv";
+    bool        enable_merge_w13          = false;
     std::string to_string() const;
     void        update_from_env_for_test();
 };
@@ -161,7 +165,7 @@ struct ServiceDiscoveryConfig {
 };
 
 struct CacheStoreConfig {
-    bool        cache_store_rdma_mode        = false;
+    bool        cache_store_rdma_mode        = true;
     int         wrr_available_ratio          = 80;
     int         rank_factor                  = 0;
     int         thread_count                 = 16;

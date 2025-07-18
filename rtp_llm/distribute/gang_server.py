@@ -15,7 +15,7 @@ import torch.distributed as dist
 import uvicorn
 from fastapi import FastAPI
 
-from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.config.py_config_modules import PyEnvConfigs, StaticConfig
 from rtp_llm.config.uvicorn_config import UVICORN_LOGGING_CONFIG
 from rtp_llm.distribute.gang_info import JSON_GANG_PARTS_ENV, GangInfo, get_gang_info
 
@@ -80,7 +80,7 @@ class FailedRankInfo:
 
 
 class GangServer:
-    def __init__(self):
+    def __init__(self, py_env_configs: PyEnvConfigs):
         self._initialized: bool = False
         self._gang_status: Dict[str, str] = {}
         self._gang_parts: Dict[str, str] = {}
@@ -89,6 +89,7 @@ class GangServer:
         self._failure_events: Dict[int, FailedRankInfo] = {}
         self._delay_exit_loops: int = 0
         self._max_delay_times: int = 3
+        self.py_env_configs = py_env_configs
 
     def _start_server(self):
         app = FastAPI()
@@ -208,8 +209,8 @@ class GangServer:
             )
 
     def _wait_ready(self):
-        timeout_minutes = int(os.environ.get("GANG_TIMEOUT_MIN", "30"))
-        sleep_time = int(os.environ.get("GANG_SLEEP_TIME", "10"))
+        timeout_minutes = self.py_env_configs.gang_config.gang_timeout_min
+        sleep_time = self.py_env_configs.gang_config.gang_sleep_time
         start_time = datetime.datetime.now()
         retry_time = 0
         while True:
@@ -381,7 +382,7 @@ class GangServer:
             logging.error(f"first failure node is {first_failure_info}")
 
     def start_health_check(self):
-        sleep_time = int(os.environ.get("GANG_SLEEP_TIME", "10"))
+        sleep_time = self.py_env_configs.gang_config.gang_sleep_time
 
         def wrapper():
             while True:
@@ -408,10 +409,10 @@ class GangServer:
             timeout=timedelta(seconds=timeout),
         )
 
-    def start(self, py_env_configs: PyEnvConfigs):
+    def start(self):
         if g_parallel_info.world_size == 1:
             logging.info("world_size==1, do not start gang_server")
-            update_master_info("", py_env_configs.server_config.start_port)
+            update_master_info("", self.py_env_configs.server_config.start_port)
             return
         self._start()
         self._wait_ready()
@@ -423,7 +424,7 @@ class GangServer:
             f"tcp://{g_master_info.ip}:{self._gang_info.master.server_port - 1}"
         )
         logging.info(f"gang worker {g_parallel_info} memory_barrier {master_url}")
-        init_process_timeout = int(os.environ.get("DIST_BARRIER_TIMEOUT", 45))
+        init_process_timeout = self.py_env_configs.gang_config.dist_barrier_timeout
         self.memory_barrier(master_url, timeout=init_process_timeout)
 
         logging.info(f"gang worker {g_parallel_info} start_health_check")

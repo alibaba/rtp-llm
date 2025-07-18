@@ -31,6 +31,8 @@ from tqdm import tqdm
 from transformers import LlamaForCausalLM, LlamaTokenizer
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer
 
+from rtp_llm.config.py_config_modules import StaticConfig
+
 
 def merge_qkv_scales(q_name, hf_model, scales, llama_qkv_para):
     layer_name_q = q_name.replace(".weight", "")
@@ -206,6 +208,7 @@ def hf_gpt_converter(args, ret):
     llama_smoother = {}
 
     if args.smoothquant is not None or args.calibrate_kv_cache:
+        ## reserve this env
         os.environ["TOKENIZERS_PARALLELISM"] = os.environ.get(
             "TOKENIZERS_PARALLELISM", "false"
         )

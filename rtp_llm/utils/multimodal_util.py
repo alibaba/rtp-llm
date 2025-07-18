@@ -14,6 +14,7 @@ import requests
 import torch
 from PIL import Image
 
+from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.utils.lru_dict import LruDict
 from rtp_llm.utils.oss_util import get_bytes_io_from_oss_path
 
@@ -36,8 +37,8 @@ def request_get(url, headers):
     return REQUEST_GET(url, headers)
 
 
-if os.environ.get("DOWNLOAD_HEADERS", "") != "":
-    HTTP_HEADS = json.loads(os.environ["DOWNLOAD_HEADERS"])
+if StaticConfig.vit_config.download_headers != "":
+    HTTP_HEADS = json.loads(StaticConfig.vit_config.download_headers)
 else:
     HTTP_HEADS = {
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0",
@@ -45,8 +46,8 @@ else:
     }
 
 BASE64_PREFIX = "data:image/jpeg;base64,"
-URL_CACHE_SIZE = int(os.environ.get("URL_CACHE_ITEM_NUM", "100"))
-MM_CACHE_SIZE = int(os.environ.get("MM_CACHE_ITEM_NUM", "10"))
+URL_CACHE_SIZE = StaticConfig.vit_config.url_cache_item_num
+MM_CACHE_SIZE = StaticConfig.vit_config.mm_cache_item_num
 
 
 def get_base64_prefix(s):

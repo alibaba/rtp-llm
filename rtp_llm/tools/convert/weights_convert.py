@@ -14,6 +14,7 @@ import torch
 from safetensors import safe_open
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.distribute.worker_info import ParallelInfo
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models.base_model import ModelConfig
@@ -104,7 +105,7 @@ class WeightConverter:
         return self.world_size if max_pool_size > self.world_size else max_pool_size
 
     def _estimate_max_convert_parallel_num(self):
-        converter_num_per_gpu = int(os.environ.get("CONVERTER_NUM_PER_GPU", "4"))
+        converter_num_per_gpu = StaticConfig.load_config.converter_num_per_gpu
         try:
             cuda_count = torch.cuda.device_count()
             assert cuda_count >= 1

@@ -505,6 +505,27 @@ def setup_args():
         default=None,
         help="开启启动Fake进程的Debug模式",
     )
+    profile_debug_logging_group.add_argument(
+        "--dg_print_reg_reuse",
+        env_name="DG_PRINT_REG_REUSE",
+        type=str2bool,
+        default=None,
+        help="控制是否打印 DeepGEMM 中的寄存器重用信息。",
+    )
+    profile_debug_logging_group.add_argument(
+        "--qwen_agent_debug",
+        env_name="QWEN_AGENT_DEBUG",
+        type=int,
+        default=0,
+        help="控制是 Qwen Agent 的调试模式。0: Info, 其他： Debug。",
+    )
+    profile_debug_logging_group.add_argument(
+        "--disable_dpc_random",
+        env_name="DISABLE_DPC_RANDOM",
+        type=str2bool,
+        default=None,
+        help="控制是否禁用 DPC 的随机性",
+    )
 
     ##############################################################################################################
     # 硬件/Kernel 特定优化
@@ -557,6 +578,13 @@ def setup_args():
         type=str2bool,
         default=True,
         help="设置为 `True` 时，禁用自定义的 AllReduce (AR) 实现，可能回退到标准库（如 NCCL）的 AllReduce。",
+    )
+    hw_kernel_group.add_argument(
+        "--enable_merge_w13",
+        env_name="ENABLE_MERGE_W13",
+        type=str2bool,
+        default=False,
+        help="设置为 `True` 时，启用FFN W13 的合并操作。",
     )
 
     ##############################################################################################################
@@ -652,7 +680,7 @@ def setup_args():
         "--reserver_runtime_mem_mb",
         env_name="RESERVER_RUNTIME_MEM_MB",
         type=int,
-        default=128,
+        default=1024,
         help="设备保留的运行时显存大小",
     )
     device_resource_group.add_argument(
@@ -947,7 +975,7 @@ def setup_args():
         "--cache_store_rdma_mode",
         env_name="CACHE_STORE_RDMA_MODE",
         type=str2bool,
-        default=False,
+        default=True,
         help="控制 cache store 是否使用 RDMA 模式。",
     )
 
@@ -967,7 +995,6 @@ def setup_args():
         choices=[0, 1],
         help="指定 WRR 负载均衡器使用的排序因子。`0` 表示基于 KV_CACHE 使用情况排序，`1` 表示基于正在处理的请求数 (ONFLIGHT_REQUESTS) 排序。",
     )
-
     cache_store_group.add_argument(
         "--cache_store_thread_count",
         env_name="CACHE_STORE_THREAD_COUNT",
@@ -1013,7 +1040,7 @@ def setup_args():
         env_name="MAX_CONTEXT_BATCH_SIZE",
         type=int,
         default=1,
-        help="（设备参数）为设备参数设置的最大 context batch size，影响默认调度器的凑批决策。",
+        help="max_context_batch_size * max_seq_len 表示限制prefill请求的凑批大小。",
     )
     fifo_scheduler_group.add_argument(
         "--scheduler_reserve_resource_ratio",
@@ -1155,6 +1182,13 @@ def setup_args():
         type=int,
         default=10,
         help="多模态开启的Cache的大小",
+    )
+    vit_group.add_argument(
+        "--url_cache_item_num",
+        env_name="URL_CACHE_ITEM_NUM",
+        type=int,
+        default=100,
+        help="多模态开启的用于URL的Cache的大小",
     )
 
     ##############################################################################################################
@@ -1320,6 +1354,13 @@ def setup_args():
         default=0,
         help="嵌入模型的具体类型",
     )
+    embedding_group.add_argument(
+        "--extra_input_in_mm_embedding",
+        env_name="EXTRA_INPUT_IN_MM_EMBEDDING",
+        type=str,
+        default=None,
+        help='在多模态嵌入中使用额外的输入，可选值"INDEX"',
+    )
 
     ##############################################################################################################
     # Worker Configuration
@@ -1433,6 +1474,34 @@ def setup_args():
         type=str,
         default=None,
         help="PTuning路径",
+    )
+    model_group.add_argument(
+        "--dashscope_api_key",
+        env_name="DASHSCOPE_API_KEY",
+        type=str,
+        default="EMPTY",
+        help="Dashscope API Key",
+    )
+    model_group.add_argument(
+        "--dashscope_http_url",
+        env_name="DASHSCOPE_HTTP_URL",
+        type=str,
+        default=None,
+        help="Dashscope HTTP URL",
+    )
+    model_group.add_argument(
+        "--dashscope_websocket_url",
+        env_name="DASHSCOPE_WEBSOCKET_URL",
+        type=str,
+        default=None,
+        help="Dashscope WebSocket URL",
+    )
+    model_group.add_argument(
+        "--openai_api_key",
+        env_name="OPENAI_API_KEY",
+        type=str,
+        default="EMPTY",
+        help="OpenAI API Key",
     )
 
     ##############################################################################################################

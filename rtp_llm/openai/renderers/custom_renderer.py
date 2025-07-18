@@ -17,6 +17,7 @@ from rtp_llm.async_decoder_engine.backend_rpc_server_visitor import (
 )
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.gpt_init_model_parameters import TemplateType
+from rtp_llm.config.py_config_modules import PyEnvConfigs, StaticConfig
 from rtp_llm.models.base_model import (
     AuxInfo,
     BaseModel,
@@ -53,16 +54,13 @@ from rtp_llm.utils.word_util import (
     truncate_response_with_stop_words,
 )
 
-THINK_MODE = bool(int(os.environ.get("THINK_MODE", 0)))
-THINK_START_TAG = (
-    os.environ.get("THINK_START_TAG", "<think>\n")
-    .encode("utf-8")
-    .decode("unicode_escape")
-)
-THINK_END_TAG = (
-    os.environ.get("THINK_END_TAG", "</think>\n\n")
-    .encode("utf-8")
-    .decode("unicode_escape")
+THINK_MODE = StaticConfig.generate_env_config.think_mode
+
+THINK_START_TAG = StaticConfig.generate_env_config.think_start_tag.encode(
+    "utf-8"
+).decode("unicode_escape")
+THINK_END_TAG = StaticConfig.generate_env_config.think_end_tag.encode("utf-8").decode(
+    "unicode_escape"
 )
 
 
@@ -265,6 +263,8 @@ class CustomChatRenderer:
         tokenizer: PreTrainedTokenizerBase,
         renderer_params: RendererParams,
     ):
+        self.py_env_configs = PyEnvConfigs()
+        self.py_env_configs.update_from_env()
         self.tokenizer = tokenizer
         self.model_type = renderer_params.model_type
         self.max_seq_len = renderer_params.max_seq_len

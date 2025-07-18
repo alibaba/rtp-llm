@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional, Set, Union
 
 import torch
 
+from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.ops import DeviceExporter, DeviceType
 
 
@@ -19,6 +20,8 @@ class MemInfo:
 class DeviceBase:
     def __init__(self, exported_device: DeviceExporter):
         self.exported_device = exported_device
+        self.py_env_configs = PyEnvConfigs()
+        self.py_env_configs.update_from_env()
 
     def get_device_type(self) -> DeviceType:
         return self.exported_device.get_device_type()
