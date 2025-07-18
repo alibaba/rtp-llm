@@ -1,5 +1,6 @@
 import fcntl
 import json
+import logging
 import os
 import random
 import socket
@@ -7,6 +8,51 @@ import tempfile
 import time
 from contextlib import closing
 from pathlib import Path
+
+
+def get_linux_random_port_range():
+    """
+    获取 Linux 系统的随机端口（临时端口）范围。
+    该信息存储在 /proc/sys/net/ipv4/ip_local_port_range 文件中。
+
+    Returns:
+        tuple: (min_port, max_port) 如果成功获取；
+               (None, None) 如果文件不存在、权限不足或内容格式不正确。
+    """
+    file_path = "/proc/sys/net/ipv4/ip_local_port_range"
+
+    if not os.path.exists(file_path):
+        logging.warning(
+            f"错误: 文件 '{file_path}' 不存在。请确认您在 Linux 系统上运行此脚本。"
+        )
+        return None, None
+
+    try:
+        with open(file_path, "r") as f:
+            content = f.read().strip()
+            parts = content.split()
+            if len(parts) == 2:
+                min_port = int(parts[0])
+                max_port = int(parts[1])
+                return min_port, max_port
+            else:
+                logging.warning(
+                    f"错误: 文件 '{file_path}' 内容格式不正确: '{content}'。预期格式为 'min_port max_port'。"
+                )
+                return None, None
+    except PermissionError:
+        logging.warning(
+            f"错误: 没有权限读取文件 '{file_path}'。请尝试以 root 权限运行或检查文件权限。"
+        )
+        return None, None
+    except ValueError:
+        logging.warning(
+            f"错误: 无法将文件 '{file_path}' 中的内容 '{content}' 解析为整数端口范围。"
+        )
+        return None, None
+    except Exception as e:
+        logging.warning(f"发生未知错误: {e}")
+        return None, None
 
 
 class PortInUseError(Exception):
@@ -55,10 +101,12 @@ class ExpiredLockFile:
 
 class PortManager:
     def __init__(self, lock_dir: Path = None, start_port: int = None, ttl: int = 3600):
-        self.start_port = start_port or get_random_start_port()
+        self.start_port = start_port or 10000
+        self.port_range = (self.start_port, get_linux_random_port_range()[0])
         self.ttl = ttl
         self.lock_dir = lock_dir or Path(tempfile.gettempdir()) / "test_port_locks"
         self.lock_dir.mkdir(parents=True, exist_ok=True)
+        logging.info(f"port_range: {self.port_range} lock: {self.lock_dir}")
 
     def cleanup_stale_locks(self):
         """clean up the potential stale lock files"""
@@ -91,7 +139,7 @@ class PortManager:
         # try best to reuse all the available ports
         self.cleanup_stale_locks()
 
-        for base_port in range(self.start_port, 65536 - num_ports):
+        for base_port in range(self.port_range[0], self.port_range[1]):
             locks = []
             try:
                 ports = list(range(base_port, base_port + num_ports))
@@ -107,6 +155,7 @@ class PortManager:
                     if not self.is_port_available(port):
                         raise PortInUseError(f"Port {port} is in use")
 
+                logging.info(f"alloc ports: {base_port}-{base_port + num_ports}")
                 return ports, locks
 
             except PortInUseError:
