@@ -6,7 +6,7 @@ NORMAL_GEMM_CASES = [
     ("2048", "7168", "1", "DeepGemmType::Normal"),
     ("16384", "512", "1", "DeepGemmType::Normal"),
     ("24576", "1536", "1", "DeepGemmType::Normal"),
-    #("7168", "16384", "1", "DeepGemmType::Normal"),
+    ("7168", "16384", "1", "DeepGemmType::Normal"),
     ("18432", "7168", "1", "DeepGemmType::Normal"),
     ("36864", "7168", "1", "DeepGemmType::Normal"),
     ("7168", "18432", "1", "DeepGemmType::Normal"),
