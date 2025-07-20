@@ -47,6 +47,7 @@ XQAAttnOp::forward(const torch::Tensor& input, std::optional<torch_ext::KVCache>
     RTP_LLM_CHECK_WITH_INFO(kv_cache.has_value(), "decode should have kv cache.");
 
     runXqa(input.data_ptr(),
+           true,
            output.data_ptr(),
            local_head_num,
            local_head_num_kv,
@@ -56,6 +57,7 @@ XQAAttnOp::forward(const torch::Tensor& input, std::optional<torch_ext::KVCache>
            attn_configs_.tokens_per_block,
            kv_cache.value().k_cache_base.data_ptr(),  // params->kv_block_array.mPrimaryPoolPtr,
            reinterpret_cast<int32_t*>(const_cast<KVCacheIndex*>(params->kv_block_array.data)),
+           true,
            reinterpret_cast<uint32_t*>(params->sequence_lengths.data_ptr()),
            device_);
     return output;
