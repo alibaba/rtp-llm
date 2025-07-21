@@ -57,8 +57,7 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=str, required=True, help="Output path")
     args = parser.parse_args()
 
-    os.makedirs(args.output, exist_ok=True)
-    with open(args.output + '/mha_sm90.h', 'w') as f:
+    with open(args.output, 'w') as f:
         f.write(gen_inc())
         for head_dim in [64, 128, 256]:
             for page_size in [16, 32, 64, 128]:
