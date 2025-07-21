@@ -90,13 +90,13 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
         generate_output.aux_info.input_len                = generate_input_->promptLength();
         generate_output.aux_info.prefix_len               = generate_input_->prefix_length;
         // TODO(xinfei.sxf) 提前结束的query，output len要设置正确
-        generate_output.aux_info.output_len      = seqLength() - generate_input_->inputLength();
-        generate_output.aux_info.step_output_len = output_len;
-        generate_output.aux_info.reuse_len       = reuse_length_;
-        generate_output.aux_info.pd_sep          = queryPdSep();
-        generate_output.aux_info.cum_log_probs   = SAFE_CACHED_HOST_BUF(TYPE_FP32, {1lu});
+        generate_output.aux_info.output_len         = seqLength() - generate_input_->inputLength();
+        generate_output.aux_info.step_output_len    = output_len;
+        generate_output.aux_info.reuse_len          = reuse_length_;
+        generate_output.aux_info.pd_sep             = queryPdSep();
 
         if (update_info.cum_log_probs) {
+            generate_output.aux_info.cum_log_probs = SAFE_CACHED_HOST_BUF(TYPE_FP32, {1lu});
             memcpy(generate_output.aux_info.cum_log_probs.value()->data(),
                    cum_log_probs_->dataWithOffset<float>(i),
                    sizeof(float));
