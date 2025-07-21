@@ -51,19 +51,35 @@ void* getScratch(CudaDevice* device, size_t group_size, uint32_t beam_width) {
     return real_scratch;
 }
 
+static std::once_flag xqa_info_flag;
+
 bool supportXqa(DataType input_type,
                 DataType output_type,
                 DataType kv_cache_type,
                 size_t   group_size,
                 size_t   head_dim,
                 size_t   page_size) {
-    return (input_type == DataType::TYPE_BF16 || input_type == DataType::TYPE_FP16)
-           && (output_type == DataType::TYPE_BF16 || output_type == DataType::TYPE_FP16
-               || output_type == DataType::TYPE_FP8_E4M3)
-           && (kv_cache_type == DataType::TYPE_BF16 || kv_cache_type == DataType::TYPE_FP16
-               || kv_cache_type == DataType::TYPE_FP8_E4M3)
-           && (group_size <= 16) && (head_dim == 64 || head_dim == 128 || head_dim == 256)
-           && (page_size == 16 || page_size == 32 || page_size == 64 || page_size == 128);
+    bool support = (input_type == DataType::TYPE_BF16 || input_type == DataType::TYPE_FP16)
+                   && (output_type == DataType::TYPE_BF16 || output_type == DataType::TYPE_FP16
+                       || output_type == DataType::TYPE_FP8_E4M3)
+                   && (kv_cache_type == DataType::TYPE_BF16 || kv_cache_type == DataType::TYPE_FP16
+                       || kv_cache_type == DataType::TYPE_FP8_E4M3)
+                   && (group_size <= 16) && (head_dim == 64 || head_dim == 128 || head_dim == 256)
+                   && (page_size == 16 || page_size == 32 || page_size == 64 || page_size == 128);
+    if (!support) {
+        std::call_once(xqa_info_flag, [&]() {
+            RTP_LLM_LOG_WARNING(
+                "xqa not supported, in_type:%d out_type:%d kv_cache_type:%d, group_size:%d head_dim:%d page_size:%d",
+                int(input_type),
+                int(output_type),
+                int(kv_cache_type),
+                int(group_size),
+                int(head_dim),
+                int(page_size));
+        });
+    }
+
+    return support;
 }
 
 void runXqa(void*       input,
