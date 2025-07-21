@@ -67,6 +67,8 @@ class BackendRPCServerVisitor:
         else:
             input.generate_config.role_addrs = role_addrs
             input.generate_config.inter_request_id = inter_request_id
+            if inter_request_id != -1:
+                input.request_id = inter_request_id
             route_logger.info(
                 f"master route success, request <{input.request_id}> route to address: {role_addrs}, inter_request_id: {inter_request_id}"
             )
