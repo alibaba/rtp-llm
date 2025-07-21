@@ -201,6 +201,7 @@ void cufmha::runTrtV2Fmha(void*        input,
                                   1,
                                   0);
 
+        check_cuda_error();
         trtv2_fmha_runner_->run(input,
                                 kv_block_array,
                                 cu_seqlens,
