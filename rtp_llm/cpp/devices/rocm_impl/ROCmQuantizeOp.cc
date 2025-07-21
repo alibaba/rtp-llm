@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/kernels/rocm/quantization_rocm.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "quant.h"
+// #include "aiter_meta/csrc/include/quant.h"
 
 namespace rtp_llm {
 using namespace rocm;

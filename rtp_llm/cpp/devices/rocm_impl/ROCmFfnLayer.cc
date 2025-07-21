@@ -13,6 +13,12 @@
 #include "moe_sorting.h"
 #include "moe_ck.h"
 
+// #include "aiter_meta/csrc/include/aiter_enum.h"
+// #include "aiter_meta/csrc/include/moe_op.h"
+// #include "aiter_meta/csrc/include/quant.h"
+// #include "aiter_meta/csrc/include/moe_sorting.h"
+// #include "aiter_meta/csrc/include/moe_ck.h"
+
 using namespace std;
 
 namespace rtp_llm {

@@ -1,5 +1,7 @@
 #include "layernorm2d_fwd.hpp"
 #include "rmsnorm2d_fwd.hpp"
+// #include "aiter_meta/3rdparty/composable_kernel/example/ck_tile/10_rmsnorm2d/rmsnorm2d_fwd.hpp"
+// #include "aiter_meta/3rdparty/composable_kernel/example/ck_tile/02_layernorm2d/layernorm2d_fwd.hpp"
 #include "rtp_llm/cpp/devices/rocm_impl/ROCmDevice.h"
 #include "rtp_llm/cpp/devices/rocm_impl/ROCmAllocator.h"
 #include "rtp_llm/cpp/core/TrackerAllocator.h"

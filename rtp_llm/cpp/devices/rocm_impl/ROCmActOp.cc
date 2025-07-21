@@ -7,6 +7,7 @@
 
 // aiter kernels
 #include "activation.h"
+// #include "aiter_meta/csrc/include/activation.h"
 
 using namespace std;
 

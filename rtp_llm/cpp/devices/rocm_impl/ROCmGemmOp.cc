@@ -18,6 +18,9 @@
 #include "gemm_a8w8_blockscale.h"
 #include "gemm_a8w8_bpreshuffle.h"
 
+// #include "aiter_meta/csrc/ck_gemm_a8w8_blockscale/include/gemm_a8w8_blockscale.h"
+// #include "aiter_meta/csrc/ck_gemm_a8w8_bpreshuffle/include/gemm_a8w8_bpreshuffle.h"
+
 using namespace std;
 
 namespace rtp_llm {

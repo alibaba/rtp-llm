@@ -1,0 +1,168 @@
+cc_library(
+    name = "aiter_so",
+    srcs = glob([
+        "aiter/jit/*.so",
+    ]),
+    visibility = ["//visibility:public"],
+    tags = ["rocm"],
+)
+
+cc_library(
+    name = "aiter_headers",
+    hdrs = glob([
+        "aiter_meta/**/*.h",
+        "aiter_meta/**/*.hpp",
+    ]),
+    visibility = ["//visibility:public"],
+    tags = ["rocm"],
+)
+
+cc_library(
+    name = "module_custom_all_reduce",
+    srcs = ["aiter/jit/module_custom_all_reduce.so"],
+    hdrs = ["aiter_meta/csrc/include/custom_all_reduce.h"],
+    deps = [
+        ":aiter_so",
+        ":aiter_headers",
+    ],
+    copts = [],
+    linkopts = [],
+    strip_include_prefix = "aiter_meta/csrc/include/",
+    visibility = ["//visibility:public"],
+    tags = ["rocm"],
+)
+
+cc_library(
+    name = "module_aiter_enum",
+    srcs = ["aiter/jit/module_aiter_enum.so"],
+    hdrs = ["aiter_meta/csrc/include/aiter_enum.h"],
+    deps = [
+        ":aiter_so",
+        ":aiter_headers",
+    ],
+    copts = [],
+    linkopts = [],
+    strip_include_prefix = "aiter_meta/csrc/include/",
+    visibility = ["//visibility:public"],
+    tags = ["rocm"],
+)
+
+cc_library(
+    name = "module_quant",
+    srcs = ["aiter/jit/module_quant.so"],
+    hdrs = ["aiter_meta/csrc/include/quant.h"],
+    deps = [
+        ":aiter_so",
+        ":aiter_headers",
+    ],
+    copts = [],
+    linkopts = [],
+    strip_include_prefix = "aiter_meta/csrc/include/",
+    visibility = ["//visibility:public"],
+    tags = ["rocm"],
+)
+
+cc_library(
+    name = "module_gemm_a8w8_blockscale",
+    srcs = ["aiter/jit/module_gemm_a8w8_blockscale.so"],
+    hdrs = ["aiter_meta/csrc/ck_gemm_a8w8_blockscale/include/gemm_a8w8_blockscale.h"],
+    deps = [
+        ":aiter_so",
+        ":aiter_headers",
+    ],
+    copts = [],
+    linkopts = [],
+    strip_include_prefix = "aiter_meta/csrc/ck_gemm_a8w8_blockscale/include/",
+    visibility = ["//visibility:public"],
+    tags = ["rocm"],
+)
+
+cc_library(
+    name = "module_moe",
+    srcs = ["aiter/jit/module_moe.so"],
+    hdrs = ["aiter_meta/csrc/include/moe_ck.h"],
+    deps = [
+        ":aiter_so",
+        ":aiter_headers",
+    ],
+    copts = [],
+    linkopts = [],
+    strip_include_prefix = "aiter_meta/csrc/include/",
+    visibility = ["//visibility:public"],
+    tags = ["rocm"],
+)
+
+cc_library(
+    name = "module_gemm_a8w8_bpreshuffle",
+    srcs = ["aiter/jit/module_gemm_a8w8_bpreshuffle.so"],
+    hdrs = ["aiter_meta/csrc/ck_gemm_a8w8_bpreshuffle/include/gemm_a8w8_bpreshuffle.h"],
+    deps = [
+        ":aiter_so",
+        ":aiter_headers",
+    ],
+    copts = [],
+    linkopts = [],
+    strip_include_prefix = "aiter_meta/csrc/ck_gemm_a8w8_bpreshuffle/include/",
+    visibility = ["//visibility:public"],
+    tags = ["rocm"],
+)
+
+cc_library(
+    name = "module_moe_sorting",
+    srcs = ["aiter/jit/module_moe_sorting.so"],
+    hdrs = ["aiter_meta/csrc/include/moe_sorting.h"],
+    deps = [
+        ":aiter_so",
+        ":aiter_headers",
+    ],
+    copts = [],
+    linkopts = [],
+    strip_include_prefix = "aiter_meta/csrc/include/",
+    visibility = ["//visibility:public"],
+    tags = ["rocm"],
+)
+
+cc_library(
+    name = "module_moe_asm",
+    srcs = ["aiter/jit/module_moe_asm.so"],
+    hdrs = ["aiter_meta/csrc/include/moe_op.h", "aiter_meta/csrc/include/aiter_enum.h"],
+    deps = [
+        ":aiter_so",
+        ":aiter_headers",
+    ],
+    copts = [],
+    linkopts = [],
+    strip_include_prefix = "aiter_meta/csrc/include/",
+    visibility = ["//visibility:public"],
+    tags = ["rocm"],
+)
+
+cc_library(
+    name = "module_pa",
+    srcs = ["aiter/jit/module_pa.so"],
+    hdrs = ["aiter_meta/csrc/include/attention.h"],
+    deps = [
+        ":aiter_so",
+        ":aiter_headers",
+    ],
+    copts = [],
+    linkopts = [],
+    strip_include_prefix = "aiter_meta/csrc/include/",
+    visibility = ["//visibility:public"],
+    tags = ["rocm"],
+)
+
+cc_library(
+    name = "module_activation",
+    srcs = ["aiter/jit/module_activation.so"],
+    hdrs = ["aiter_meta/csrc/include/activation.h"],
+    deps = [
+        ":aiter_so",
+        ":aiter_headers",
+    ],
+    copts = [],
+    linkopts = [],
+    strip_include_prefix = "aiter_meta/csrc/include/",
+    visibility = ["//visibility:public"],
+    tags = ["rocm"],
+)

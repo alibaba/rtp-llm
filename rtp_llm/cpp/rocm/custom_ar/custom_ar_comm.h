@@ -13,6 +13,7 @@
 
 // aiter custom all reduce kernel
 #include "custom_all_reduce.h"
+// #include "aiter_meta/csrc/include/custom_all_reduce.h"
 
 namespace rtp_llm {
 class CustomAllReduceComm {
