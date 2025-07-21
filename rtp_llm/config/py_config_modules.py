@@ -360,6 +360,7 @@ class QuantizationConfig:
 
     def update_from_env(self):
         self.int8_mode = int(os.environ.get("INT8_MODE", self.int8_mode))
+        self.quantization = os.environ.get("QUANTIZATION", self.quantization)
 
     def to_string(self):
         return f"int8_mode: {self.int8_mode}\n" f"quantization: {self.quantization}"
