@@ -19,6 +19,10 @@ TransposeOutput DeviceOps::transpose(const TransposeParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
+void DeviceOps::batchSendRecv(const BatchSendRecvParams& params, const ParallelMode& mode) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
 ConvertOutput DeviceOps::convert(const ConvertParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
@@ -100,6 +104,18 @@ BufferPtr DeviceOps::mhaQKVGemm(const AttentionLayerParams& params) {
 }
 
 BufferPtr DeviceOps::mlaQKVGemm(const AttentionLayerParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
+BufferPtr DeviceOps::attentionQKVGemm(const AttentionLayerParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
+BufferPtr DeviceOps::attentionAttn(const AttentionLayerParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
+BufferPtr DeviceOps::attentionOutGemm(const AttentionLayerParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 

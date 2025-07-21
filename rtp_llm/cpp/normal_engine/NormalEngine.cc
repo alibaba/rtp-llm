@@ -28,7 +28,7 @@ NormalEngine::NormalEngine(const EngineInitParams& params):
     gen_timeline_sync_(params.gpt_init_parameter.profiling_debug_logging_config.gen_timeline_sync) {
     RTP_LLM_LOG_INFO(__PRETTY_FUNCTION__);
     std::optional<WarmUpResult> warm_up_result = std::nullopt;
-    if (params_.warm_up_ && (!params_.is_multimodal_)) {
+    if (params_.warm_up_ && (!params_.is_multimodal_) && !params_.ffn_disaggregate_config.enable_ffn_disaggregate) {
         // warm up
         RTP_LLM_LOG_INFO("warm up (max_context_batch_size %d, max_seq_len %d calculate_loss %d) query begin",
                          params_.max_context_batch_size_,
@@ -50,7 +50,8 @@ NormalEngine::NormalEngine(const EngineInitParams& params):
     RTP_LLM_LOG_INFO("create normal executor done");
     initScheduler();
     (void)startLoop();
-    if (device_->getDeviceProperties().tp_rank == 0 && scheduler_->canLoadBalance()) {
+    if (device_->getDeviceProperties().tp_rank == 0 && !params_.ffn_disaggregate_config.is_ffn_service()
+        && scheduler_->canLoadBalance()) {
         initLoadBalance();
     }
 }
@@ -277,7 +278,7 @@ NormalEngine::batchEnqueue(const std::vector<std::shared_ptr<GenerateInput>>& in
 
 absl::Status NormalEngine::step() {
     list<GenerateStreamPtr> streams;
-    if (device_->getDeviceProperties().tp_rank == 0) {
+    if (device_->getDeviceProperties().tp_rank == 0 && !params_.ffn_disaggregate_config.is_ffn_service()) {
         if (scheduler_->empty() || step_recorder_.empty()) {
             step_recorder_.reset();
             step_recorder_.registerStep(autil::TimeUtility::currentTimeInMicroSeconds());

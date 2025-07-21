@@ -156,6 +156,8 @@ public:
     cudaDeviceProp getDeviceProp() const {
         return device_prop_;
     }
+    void profileStart() override;
+    void profileStop() override;
 
 public:
     void                          copy(const CopyParams& params);
@@ -192,6 +194,7 @@ public:
     AllReduceOutput        allReduce(const AllReduceParams& params) override;
     void                   allGather(const AllGatherParams& params) override;
     AllToAllOutput         allToAll(const AllToAllParams& params) override;
+    void                   batchSendRecv(const BatchSendRecvParams& params, const ParallelMode& mode) override;
     void                   reduceScatter(const ReduceScatterParams& params) override;
     PrepareAllReduceOutput prepareAllReduce(const PrepareAllReduceParams& params) override;
     BufferPtr              mlaQKVGemm(const AttentionLayerParams& params) override;

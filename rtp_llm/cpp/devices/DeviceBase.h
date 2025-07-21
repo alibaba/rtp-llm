@@ -132,25 +132,34 @@ public:
     virtual const std::unique_ptr<MoEInsertionReturns>& getMoEInsertionRet();
     virtual void                                        computeInsertedMoE();
 
+    // for cuda profiler
+    virtual void profileStart();
+    virtual void profileStop();
+
     virtual void
     updateExpertGpuLoads(const MoeConfigs& moe_conf, const OptionalExpertStats& expert_stats, BufferPtr expert_ids);
 
 public:
     // device-independence op implementations
-    CloneOutput          clone(const CloneParams& params) override;
-    SelectOutput         select(const SelectParams& params) override;
-    ConcatOutput         concat(const ConcatParams& params) override;
-    SplitOutput          split(const SplitParams& params) override;
+    CloneOutput  clone(const CloneParams& params) override;
+    SelectOutput select(const SelectParams& params) override;
+    ConcatOutput concat(const ConcatParams& params) override;
+    SplitOutput  split(const SplitParams& params) override;
+    // attention layer
     AttentionLayerOutput attentionLayer(const AttentionLayerParams& params) override;
-    FfnLayerOutput       ffnLayer(const FfnLayerParams& params) override;
-    FfnLayerOutput       moeFfnLayer(const FfnLayerParams& params) override;
-    FfnLayerOutput       epMoeFfnLayer(const FfnLayerParams& params, const MoeGateSelectOutput& gate_output) override;
-    FfnLayerOutput       moeSharedExpert(const FfnLayerParams& params) override;
-    LoraLinearOutput     loraLinear(const LoraLinearParams& params) override;
-    AllReduceOutput      allReduce(const AllReduceParams& params) override;
-    LossOutput           loss(const LossParams& params) override;
-    MaskOutput           attentionMask(const MaskParams& params) override;
-    BufferPtr            loraLinearWithActivation(const LoraLinearWithActivationParams& params) override;
+    BufferPtr            attentionQKVGemm(const AttentionLayerParams& params) override;
+    BufferPtr            attentionAttn(const AttentionLayerParams& params) override;
+    BufferPtr            attentionOutGemm(const AttentionLayerParams& params) override;
+    // ffn layer
+    FfnLayerOutput   ffnLayer(const FfnLayerParams& params) override;
+    FfnLayerOutput   moeFfnLayer(const FfnLayerParams& params) override;
+    FfnLayerOutput   epMoeFfnLayer(const FfnLayerParams& params, const MoeGateSelectOutput& gate_output) override;
+    FfnLayerOutput   moeSharedExpert(const FfnLayerParams& params) override;
+    LoraLinearOutput loraLinear(const LoraLinearParams& params) override;
+    AllReduceOutput  allReduce(const AllReduceParams& params) override;
+    LossOutput       loss(const LossParams& params) override;
+    MaskOutput       attentionMask(const MaskParams& params) override;
+    BufferPtr        loraLinearWithActivation(const LoraLinearWithActivationParams& params) override;
     ReduceScatterLoraLinearOutput loraLinearReduceScatter(const LoraLinearReduceScatterParams& params) override;
     AllGatherLoraLinearOutput     allGatherloraLinear(const AllGatherLoraLinearParams& params) override;
     BufferPtr                     mhaQKVGemm(const AttentionLayerParams& params) override;

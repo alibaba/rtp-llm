@@ -321,6 +321,24 @@ class FlashInferOp:
         v_cache: torch.Tensor,
         attn_params: typing.Any,
     ) -> None: ...
+class FfnDisAggregateConfig:
+    attention_dp_size: int
+    attention_tp_size: int
+    enable_ffn_disaggregate: bool
+    ffn_dp_size: int
+    ffn_tp_size: int
+    is_ffn_rank: bool
+    def __init__(
+        self,
+        enable_ffn_disaggregate: bool = False,
+        attention_tp_size: int = 1,
+        attention_dp_size: int = 1,
+        ffn_tp_size: int = 1,
+        ffn_dp_size: int = 1,
+        is_ffn_rank: int = False,
+    ) -> None: ...
+    def is_ffn_service(self) -> bool: ...
+    def to_string(self) -> str: ...
 
 class GptInitParameter:
     activation_type: str
@@ -348,6 +366,7 @@ class GptInitParameter:
     dp_size: int
     dp_tp_nccl_port: int
     embedding_size: int
+    enable_3fs: bool
     enable_eplb: bool
     enable_fast_gen: bool
     enable_partial_fallback: bool
@@ -359,6 +378,7 @@ class GptInitParameter:
     eplb_update_time: int
     expert_num: int
     fast_gen_max_context_len: int
+    ffn_disaggregate_config: FfnDisAggregateConfig
     ffn_tp_nccl_port: int
     ffn_tp_rank: int
     ffn_tp_size: int
@@ -571,11 +591,12 @@ class LoadBalanceInfo:
     cache_status: KVCacheInfo
     iterate_count: int
     onflight_requests: int
+    running_query_len: int
     step_latency_us: int
     step_per_minute: int
+    total_kv_cache: int
     waiting_query_len: int
-    running_query_len: int
-
+    def __init__(self) -> None: ...
     def __init__(self) -> None: ...
 
 class MiscellaneousConfig:

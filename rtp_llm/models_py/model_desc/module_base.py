@@ -35,6 +35,10 @@ class GptModelBase(nn.Module):
         self.kv_cache: Optional[KVCache] = None
         self.device_type: DeviceType = get_device().get_device_type()
 
+        self.micro_batch_size: int = (
+            1 if config.device_resource_config.enable_layer_micro_batch == 0 else 2
+        )
+
         logging.info(
             f"GptModelBase initialized with layer_num={self.layer_num}, "
             f"vocab_size={self.vocab_size}, device_type={self.device_type}"

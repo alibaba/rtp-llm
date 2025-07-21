@@ -522,6 +522,22 @@ struct MlaAttentionModuleParams {
     bool                         is_prefill = false;
 };
 
+enum class SendRecvType {
+    kSend,
+    kRecv,
+};
+
+struct P2pSendRecvParams {
+    SendRecvType type;
+    BufferPtr    buffer;
+    int          dest_rank;
+};
+
+struct BatchSendRecvParams {
+    std::vector<P2pSendRecvParams> p2p_params;
+    ParallelMode                   mode = ParallelMode::DP_AND_TP;
+};
+
 struct WriteCacheParams {
     AttentionCommonInputs&  common;
     const AttentionConfigs& configs;

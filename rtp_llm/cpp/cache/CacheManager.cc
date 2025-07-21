@@ -201,7 +201,11 @@ void CacheManager::allocateAndSync() {
         device_->allGather({{block_num_infos}, ParallelMode::DP_AND_TP});
         device_->syncCommunication(false);
         device_->syncAndCheck();
-        config_.block_nums = *std::min_element(block_num_ptr, block_num_ptr + world_size);
+        if (properties.ffn_as_service) {
+            config_.block_nums = 1;
+        } else {
+            config_.block_nums = *std::min_element(block_num_ptr, block_num_ptr + world_size);
+        }
     }
     config_.refresh();
     cache_aligned_buffer_ = device_->allocateBuffer({rtp_llm::DataType::TYPE_INT8, {config_.total_size}});

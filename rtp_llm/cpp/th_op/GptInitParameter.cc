@@ -156,7 +156,9 @@ void GptInitParameter::showDebugInfo() const {
         << "========== MiscellaneousConfig ==========\n"
         << misc_config.to_string() << "\n"
         << "========== ArpcConfig ==========\n"
-        << arpc_config.to_string() << "\n";
+        << arpc_config.to_string() << "\n"
+        << "========== FfnDisAggregateConfig ==========\n"
+        << ffn_disaggregate_config.to_string() << "\n";
     RTP_LLM_LOG_INFO(oss.str());
 }
 
@@ -519,7 +521,8 @@ void registerGptInitParameter(py::module m) {
         .def_readwrite("batch_decode_scheduler_config", &GptInitParameter::batch_decode_scheduler_config)
         .def_readwrite("fifo_scheduler_config", &GptInitParameter::fifo_scheduler_config)
         .def_readwrite("misc_config", &GptInitParameter::misc_config)
-        .def_readwrite("arpc_config", &GptInitParameter::arpc_config) REGISTER_PROPERTYS;
+        .def_readwrite("arpc_config", &GptInitParameter::arpc_config)
+        .def_readwrite("ffn_disaggregate_config", &GptInitParameter::ffn_disaggregate_config) REGISTER_PROPERTYS;
 }
 
 }  // namespace rtp_llm

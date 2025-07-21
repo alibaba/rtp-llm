@@ -31,12 +31,84 @@ PyWrappedModel::~PyWrappedModel() {
     }
 }
 
+GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs) {
+    py::object py_forward_method = py_instance_.attr("forward_mirco_batch");
+    if (device_props_.ffn_as_service) {
+        py::object py_outputs_obj = py_forward_method(std::vector<PyModelInputs>{});
+        return GptModelOutputs({nullptr, nullptr, nullptr, nullptr, nullptr});
+    }
+
+    auto micro_batch_plan = planMicroBatches(inputs);
+    auto micro_batch_inputs =
+        prepareMicroBatchInputs(inputs, nullptr, nullptr, description_.data_type, micro_batch_plan);
+    std::vector<PyModelInputs> input_list;
+    for (auto& input : micro_batch_inputs) {
+        input_list.emplace_back(
+            PyModelInputs{Buffer2torchTensor(input.token_ids).cuda(),
+                          PyAttentionInputs{input.attention_common_inputs.prefill_flash_infer_attn,
+                                            input.attention_common_inputs.decode_flash_infer_attn}});
+    }
+    py::object py_outputs_obj   = py_forward_method(input_list);
+    auto       py_model_outputs = py_outputs_obj.cast<std::vector<PyModelOutputs>>();
+    RTP_LLM_CHECK_WITH_INFO(py_model_outputs.size() == micro_batch_inputs.size(),
+                            "py_model_outputs.size:%d != micro_batch_inputs.size:%d",
+                            py_model_outputs.size(),
+                            micro_batch_inputs.size());
+
+    // TODO: merge hidden states in one buffer
+    BufferPtr hidden_states = nullptr;
+    if (!micro_batch_plan.enable) {
+        RTP_LLM_CHECK_WITH_INFO(py_model_outputs[0].hidden_states.size(0) == inputs.combo_tokens->shape()[0],
+                                "py_model_outputs[0].hidden_states.size(0):%d != inputs.combo_tokens->shape()[0]:%d",
+                                py_model_outputs[0].hidden_states.size(0),
+                                inputs.combo_tokens->shape()[0]);
+        hidden_states = torchTensor2Buffer(py_model_outputs[0].hidden_states);
+
+    } else {
+        hidden_states =
+            device_->allocateBuffer({description_.data_type,
+                                     {inputs.combo_tokens->shape()[0], description_.attention_conf.hidden_size},
+                                     AllocationType::DEVICE});
+        int offset = 0;
+        for (int i = 0; i < py_model_outputs.size(); i++) {
+            RTP_LLM_CHECK_WITH_INFO(
+                offset + py_model_outputs[i].hidden_states.size(0) <= inputs.combo_tokens->shape()[0],
+                "offset + py_model_outputs[i].hidden_states.size(0):%d > inputs.combo_tokens->shape()[0]:%d",
+                offset + py_model_outputs[i].hidden_states.size(0),
+                inputs.combo_tokens->shape()[0]);
+            auto hidden_states_slice = hidden_states->slice(offset, offset + py_model_outputs[i].hidden_states.size(0));
+            auto py_model_output     = py_model_outputs[i];
+            device_->copy({*hidden_states_slice, *torchTensor2Buffer(py_model_output.hidden_states)});
+            offset += py_model_outputs[i].hidden_states.size(0);
+        }
+        RTP_LLM_CHECK_WITH_INFO(offset == inputs.combo_tokens->shape()[0],
+                                "total out hidden size:%d != inputs.combo_tokens->shape()[0]:%d",
+                                offset,
+                                inputs.combo_tokens->shape()[0]);
+    }
+
+    RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
+
+    return forwardPostLayers(hidden_states,
+                             inputs.input_lengths->shape()[0] != inputs.sequence_lengths->shape()[0],
+                             false,
+                             inputs.lm_output_indexes,
+                             false,
+                             inputs.combo_tokens->shape()[0],
+                             inputs,
+                             nullptr);
+}
+
 GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
 
     py::gil_scoped_acquire gil;
 
     try {
         RTP_LLM_LOG_INFO("Calling forward method on Python object instance.");
+
+        if (int(device_props_.enable_layer_micro_batch)) {
+            return forwardMicroBatched(inputs);
+        }
 
         torch::Tensor token_ids = Buffer2torchTensor(inputs.combo_tokens).cuda();
 

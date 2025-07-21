@@ -468,4 +468,12 @@ void DeviceBase::updateExpertGpuLoads(const MoeConfigs&          moe_conf,
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
+void DeviceBase::profileStart() {
+    return;
+}
+
+void DeviceBase::profileStop() {
+    return;
+}
+
 }  // namespace rtp_llm

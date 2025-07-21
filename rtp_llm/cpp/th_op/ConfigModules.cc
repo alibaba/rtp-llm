@@ -77,6 +77,25 @@ void register_arpc_config(pybind11::module& m) {
         .def_readwrite("ioThreadNum", &ArpcConfig::ioThreadNum);
 }
 
+void register_ffn_disaggregate_config(pybind11::module& m) {
+    pybind11::class_<FfnDisAggregateConfig>(m, "FfnDisAggregateConfig")
+        .def(pybind11::init<bool, int, int, int, int, int>(),
+             pybind11::arg("enable_ffn_disaggregate") = false,
+             pybind11::arg("attention_tp_size")       = 1,
+             pybind11::arg("attention_dp_size")       = 1,
+             pybind11::arg("ffn_tp_size")             = 1,
+             pybind11::arg("ffn_dp_size")             = 1,
+             pybind11::arg("is_ffn_rank")             = false)
+        .def("to_string", &FfnDisAggregateConfig::to_string)
+        .def("is_ffn_service", &FfnDisAggregateConfig::is_ffn_service)
+        .def_readwrite("enable_ffn_disaggregate", &FfnDisAggregateConfig::enable_ffn_disaggregate)
+        .def_readwrite("attention_tp_size", &FfnDisAggregateConfig::attention_tp_size)
+        .def_readwrite("attention_dp_size", &FfnDisAggregateConfig::attention_dp_size)
+        .def_readwrite("ffn_tp_size", &FfnDisAggregateConfig::ffn_tp_size)
+        .def_readwrite("ffn_dp_size", &FfnDisAggregateConfig::ffn_dp_size)
+        .def_readwrite("is_ffn_rank", &FfnDisAggregateConfig::is_ffn_rank);
+}
+
 // ConcurrencyConfig
 void ConcurrencyConfig::update_from_env_for_test() {
     concurrency_with_block = bool_from_env_for_test("CONCURRENCY_WITH_BLOCK", false);
@@ -763,6 +782,18 @@ inline std::string ArpcConfig::to_string() const {
     oss << "threadNum: " << threadNum << "\n"
         << "queueNum: " << queueNum << "\n"
         << "ioThreadNum: " << ioThreadNum;
+    return oss.str();
+}
+
+// FfnDisAggregateConfig
+inline std::string FfnDisAggregateConfig::to_string() const {
+    std::ostringstream oss;
+    oss << "enable_ffn_disaggregate: " << enable_ffn_disaggregate << "\n";
+    if (enable_ffn_disaggregate) {
+        oss << "attention_tp_size: " << attention_tp_size << " attention_dp_size: " << attention_dp_size << "\n"
+            << "ffn_tp_size: " << ffn_tp_size << " ffn_dp_size: " << ffn_dp_size << "\n"
+            << "is_ffn_rank: " << is_ffn_rank;
+    }
     return oss.str();
 }
 

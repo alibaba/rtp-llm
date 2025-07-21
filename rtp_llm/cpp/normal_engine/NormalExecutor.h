@@ -19,6 +19,9 @@ public:
                             rtp_llm::DeviceBase*                      device,
                             const std::shared_ptr<lora::LoraManager>& lora_manager = nullptr,
                             bool                                      warm_up      = false);
+    ~NormalExecutor() {
+        device_->profileStop();
+    }
     absl::Status process(const std::list<GenerateStreamPtr>& streams) override;
     void         reportMetrics(const StreamGroups&             stream_groups,
                                RtpLLMExecutorMetricsCollector& executor_collector,
@@ -45,6 +48,7 @@ private:
     bool                                                                     use_all_gather_;
     kmonitor::MetricsReporterPtr                                             metrics_reporter_ = nullptr;
     MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector> tps_reporter_;
+    bool                                                                     enable_ffn_disaggregate_ = false;
 };
 
 }  // namespace rtp_llm

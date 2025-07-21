@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/cuda/nccl/nccl_utils.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/core/torch_utils/TorchEvent.h"
+#include <cuda_profiler_api.h>
 #include <memory>
 #include <unistd.h>
 
@@ -466,6 +467,47 @@ void computeLengthsAndOffsets(const std::vector<size_t>& split_sizes,
         // TODO: see if we should add overflow protection for offset
         offset += length;
     }
+}
+
+void CudaDevice::batchSendRecv(const BatchSendRecvParams& params, const ParallelMode& mode) {
+    RTP_LLM_CHECK_WITH_INFO(mode == ParallelMode::DP_AND_TP,
+                            "batch send recv just support ParallelMode::DP_AND_TP but got [%d]",
+                            int(mode));
+    RTP_LLM_CHECK_WITH_INFO(params.p2p_params.size() > 0, "send_params is empty");
+    NCCLCHECK(ncclGroupStart());
+    for (const auto& params : params.p2p_params) {
+        RTP_LLM_CHECK_WITH_INFO(params.dest_rank >= 0 && params.dest_rank < dp_tp_nccl_param_.world_size_,
+                                "dest_rank [%d] must be in range [0, %d)",
+                                params.dest_rank,
+                                dp_tp_nccl_param_.world_size_);
+        if (params.type == SendRecvType::kSend) {
+            NCCLCHECK(ncclSend(params.buffer->data(),
+                               params.buffer->size(),
+                               getNcclDataType(params.buffer->type()),
+                               params.dest_rank,
+                               dp_tp_nccl_param_.nccl_comm_,
+                               stream_));
+        } else if (params.type == SendRecvType::kRecv) {
+            NCCLCHECK(ncclRecv(params.buffer->data(),
+                               params.buffer->size(),
+                               getNcclDataType(params.buffer->type()),
+                               params.dest_rank,
+                               dp_tp_nccl_param_.nccl_comm_,
+                               stream_));
+        } else {
+            RTP_LLM_CHECK_WITH_INFO(false, "invalid send_param type: %d", int(params.type));
+        }
+    }
+    NCCLCHECK(ncclGroupEnd());
+    check_cuda_error();
+}
+
+void CudaDevice::profileStart() {
+    check_cuda_value(cudaProfilerStart());
+}
+
+void CudaDevice::profileStop() {
+    check_cuda_value(cudaProfilerStop());
 }
 
 AllToAllOutput CudaDevice::allToAll(const AllToAllParams& params) {

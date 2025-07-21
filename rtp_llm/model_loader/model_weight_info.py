@@ -208,6 +208,10 @@ class ModelDeployWeightInfo:
 
         self.kv_cache_data_type = config.kv_cache_data_type
 
+        self.is_ffn_service = (
+            config.gpt_init_params.ffn_disaggregate_config.is_ffn_service()
+        )
+
     @property
     def support_lora(self):
         return False

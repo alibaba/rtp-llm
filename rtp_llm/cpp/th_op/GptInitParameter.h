@@ -289,6 +289,7 @@ public:
     FIFOSchedulerConfig          fifo_scheduler_config;
     MiscellaneousConfig          misc_config;
     ArpcConfig                   arpc_config;
+    FfnDisAggregateConfig        ffn_disaggregate_config;
 
     GptInitParameter();
 

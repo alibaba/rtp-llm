@@ -13,6 +13,7 @@ from rtp_llm.model_loader.model_weight_info import (
 )
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
 from rtp_llm.models.base_model import BaseModel
+from rtp_llm.models_py.model_desc.disaggregate_qwen3 import Qwen3DisaggregateModel
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.model_desc.qwen3 import Qwen3Model
 from rtp_llm.tokenizer.tokenization_qwen import QWenTokenizer as QwenTokenizerOrigin
@@ -212,7 +213,10 @@ class QWenBase(BaseModel):
         return QWenWeight
 
     def _create_python_model(self) -> Optional[GptModelBase]:
-        self.py_model = Qwen3Model(self.config, self.weight)
+        if self.config.gpt_init_params.ffn_disaggregate_config.enable_ffn_disaggregate:
+            self.py_model = Qwen3DisaggregateModel(self.config, self.weight)
+        else:
+            self.py_model = Qwen3Model(self.config, self.weight)
 
     @staticmethod
     def _common_config(config, ckpt_path: str) -> GptInitModelParameters:

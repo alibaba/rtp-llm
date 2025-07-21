@@ -7,58 +7,10 @@
 using namespace std;
 
 namespace rtp_llm {
-AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& params) {
-    const auto& input            = params.input;
-    const auto& input_lengths    = *params.common.input_lengths;
-    const auto& sequence_lengths = *params.common.sequence_lengths;
 
-    const auto& output_weight = params.weights.output_weight;
-
-    const auto generate_batch_size = sequence_lengths.shape()[0];
-    const auto context_batch_size  = input_lengths.shape()[0] - generate_batch_size;
-    const auto context_token_num   = params.common.context_token_num;
-    const auto pad_token_num = params.enable_sp ? params.pad_token_num : (context_token_num + generate_batch_size);
-
-    RUNTIME_ASSERT_OP_ARG(!params.residual, "default attention layer impl does not support residual!");
-
-    const auto& layer_kv_cache = params.common.kv_cache;
-    if (layer_kv_cache) {
-        const auto& kv_cache          = layer_kv_cache.value();
-        const auto& kv_cache_block_id = *kv_cache.kv_cache_block_id;
-        const auto& shape             = kv_cache.kv_cache_block_id->shape();
-        RUNTIME_ASSERT_OP_ARG(((shape.size() == 2) && (shape[0] == input_lengths.shape()[0])),
-                              "kv_cache_block_id shape in attention layer should be [batch_size, block_length]"
-                              ", but got %s",
-                              kv_cache_block_id.debugString().c_str());
-        RUNTIME_ASSERT_OP_ARG(kv_cache.k_cache_buffer && kv_cache.v_cache_buffer,
-                              "kv cache buffer should has value when use kv_cache_block_id");
-        const auto& k_cache_shape = kv_cache.k_cache_buffer->shape();
-        const auto& v_cache_shape = kv_cache.v_cache_buffer->shape();
-        RUNTIME_ASSERT_OP_ARG(((k_cache_shape.size() == 4) && (v_cache_shape.size() == 4)
-                               && (k_cache_shape[0] == v_cache_shape[0]) && (k_cache_shape[1] == v_cache_shape[1])
-                               && (k_cache_shape[2] == v_cache_shape[2]) && (k_cache_shape[3] == v_cache_shape[3])
-                               && (k_cache_shape[1] == params.configs.kv_head_num)
-                               && (k_cache_shape[2] == params.configs.tokens_per_block)
-                               && (k_cache_shape[3] == params.configs.size_per_head)),
-                              "kv cache buffer check shape failed. k_cache_buffer: %s, v_cache_buffer: %s",
-                              kv_cache.k_cache_buffer->debugString().c_str(),
-                              kv_cache.v_cache_buffer->debugString().c_str());
-        if (kv_cache.k_scale_buffer) {
-            const auto& k_scale_shape = kv_cache.k_scale_buffer->shape();
-            const auto& v_scale_shape = kv_cache.v_scale_buffer->shape();
-            RUNTIME_ASSERT_OP_ARG(((k_scale_shape.size() == 3) && (v_scale_shape.size() == 3)
-                                   && (k_scale_shape[0] == v_scale_shape[0]) && (k_scale_shape[1] == v_scale_shape[1])
-                                   && (k_scale_shape[2] == v_scale_shape[2]) && (k_cache_shape[0] == k_scale_shape[0])
-                                   && (k_scale_shape[1] == params.configs.kv_head_num)
-                                   && (k_scale_shape[2] == params.configs.tokens_per_block)),
-                                  "kv scale check buffer failed. k_scale_buffer: %s, v_scale_buffer: %s",
-                                  kv_cache.k_scale_buffer->debugString().c_str(),
-                                  kv_cache.v_scale_buffer->debugString().c_str());
-        }
-    }
-
-    // typically local_head_num * size_per_head
-    const auto qkv_hidden_size = output_weight->kernel->shape()[0];
+BufferPtr DeviceBase::attentionQKVGemm(const AttentionLayerParams& params) {
+    const auto token_num     = params.input.shape()[0];
+    const auto pad_token_num = params.enable_sp ? params.pad_token_num : token_num;
 
     BufferPtr qkv = nullptr;
     if (params.enable_sp && params.layer_id > 0) {
@@ -111,12 +63,58 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
         qkv = params.configs.use_mla ? mlaQKVGemm(params) : mhaQKVGemm(params);
     }
     printBufferData(*qkv, "qkv");
+    return qkv;
+}
 
-    // attention layer output is preallocated to avoid memory fragmentation
-    // note that this output is returned and further used as residual
-    auto      qscheme    = params.qscheme;
-    auto      dtype      = (input.isQBuffer() && qscheme != QScheme::Qfp8PerTensor ? qkv->type() : input.type());
-    BufferPtr qkv_output = nullptr;
+BufferPtr DeviceBase::attentionAttn(const AttentionLayerParams& params) {
+    const auto& input_lengths    = *params.common.input_lengths;
+    const auto& sequence_lengths = *params.common.sequence_lengths;
+
+    const auto generate_batch_size = sequence_lengths.shape()[0];
+    const auto context_batch_size  = input_lengths.shape()[0] - generate_batch_size;
+    const auto context_token_num   = params.common.context_token_num;
+    const auto pad_token_num = params.enable_sp ? params.pad_token_num : (context_token_num + generate_batch_size);
+
+    const auto& layer_kv_cache = params.common.kv_cache;
+    if (layer_kv_cache) {
+        const auto& kv_cache          = layer_kv_cache.value();
+        const auto& kv_cache_block_id = *kv_cache.kv_cache_block_id;
+        const auto& shape             = kv_cache.kv_cache_block_id->shape();
+        RUNTIME_ASSERT_OP_ARG(((shape.size() == 2) && (shape[0] == input_lengths.shape()[0])),
+                              "kv_cache_block_id shape in attention layer should be [batch_size, block_length]"
+                              ", but got %s",
+                              kv_cache_block_id.debugString().c_str());
+        RUNTIME_ASSERT_OP_ARG(kv_cache.k_cache_buffer && kv_cache.v_cache_buffer,
+                              "kv cache buffer should has value when use kv_cache_block_id");
+        const auto& k_cache_shape = kv_cache.k_cache_buffer->shape();
+        const auto& v_cache_shape = kv_cache.v_cache_buffer->shape();
+        RUNTIME_ASSERT_OP_ARG(((k_cache_shape.size() == 4) && (v_cache_shape.size() == 4)
+                               && (k_cache_shape[0] == v_cache_shape[0]) && (k_cache_shape[1] == v_cache_shape[1])
+                               && (k_cache_shape[2] == v_cache_shape[2]) && (k_cache_shape[3] == v_cache_shape[3])
+                               && (k_cache_shape[1] == params.configs.kv_head_num)
+                               && (k_cache_shape[2] == params.configs.tokens_per_block)
+                               && (k_cache_shape[3] == params.configs.size_per_head)),
+                              "kv cache buffer check shape failed. k_cache_buffer: %s, v_cache_buffer: %s",
+                              kv_cache.k_cache_buffer->debugString().c_str(),
+                              kv_cache.v_cache_buffer->debugString().c_str());
+        if (kv_cache.k_scale_buffer) {
+            const auto& k_scale_shape = kv_cache.k_scale_buffer->shape();
+            const auto& v_scale_shape = kv_cache.v_scale_buffer->shape();
+            RUNTIME_ASSERT_OP_ARG(((k_scale_shape.size() == 3) && (v_scale_shape.size() == 3)
+                                   && (k_scale_shape[0] == v_scale_shape[0]) && (k_scale_shape[1] == v_scale_shape[1])
+                                   && (k_scale_shape[2] == v_scale_shape[2]) && (k_cache_shape[0] == k_scale_shape[0])
+                                   && (k_scale_shape[1] == params.configs.kv_head_num)
+                                   && (k_scale_shape[2] == params.configs.tokens_per_block)),
+                                  "kv scale check buffer failed. k_scale_buffer: %s, v_scale_buffer: %s",
+                                  kv_cache.k_scale_buffer->debugString().c_str(),
+                                  kv_cache.v_scale_buffer->debugString().c_str());
+        }
+    }
+
+    const auto qkv_hidden_size = params.configs.head_num * params.configs.size_per_head;
+    auto       qscheme         = params.qscheme;
+    auto&      qkv             = params.input;
+    BufferPtr  qkv_output      = nullptr;
     if (qscheme == QScheme::Qfp8PerTensor) {
         auto scales = params.weights.static_quant_weight->kernel;
         qkv_output  = BufferPtr(
@@ -128,13 +126,13 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
         // Arm attention op only support fp32 data type
         qkv_output = allocateBuffer({DataType::TYPE_FP32, {pad_token_num, qkv_hidden_size}}, {"qkv_output"});
 #else
-        qkv_output = allocateBuffer({dtype, {pad_token_num, qkv_hidden_size}}, {"qkv_output"});
+        qkv_output = allocateBuffer({qkv.type(), {pad_token_num, qkv_hidden_size}}, {"qkv_output"});
 #endif
     }
 
     auto kv_cache_block_id = layer_kv_cache ? layer_kv_cache->kv_cache_block_id : nullptr;
     if (generate_batch_size) {
-        auto generate_qkv    = qkv->view(0, generate_batch_size);
+        auto generate_qkv    = qkv.view(0, generate_batch_size);
         auto generate_output = qkv_output->view(0, generate_batch_size);
         if (layer_kv_cache) {
             params.common.kv_cache->kv_cache_block_id = kv_cache_block_id->slice(0, generate_batch_size);
@@ -148,7 +146,7 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
                               params.qscheme});
     }
     if (context_batch_size) {
-        auto context_qkv    = qkv->view(generate_batch_size, context_token_num);
+        auto context_qkv    = qkv.view(generate_batch_size, context_token_num);
         auto context_output = qkv_output->view(generate_batch_size, context_token_num);
         if (layer_kv_cache) {
             params.common.kv_cache->kv_cache_block_id =
@@ -166,18 +164,24 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
         params.common.kv_cache->kv_cache_block_id = kv_cache_block_id;
     }
     printBufferData(*qkv_output, "qkv_output");
+    return qkv_output;
+}
 
-    BufferPtr gemm_output = nullptr;
-    BufferPtr attn_output = nullptr;
+BufferPtr DeviceBase::attentionOutGemm(const AttentionLayerParams& params) {
+    auto&       qkv_output    = params.input;
+    BufferPtr   gemm_output   = nullptr;
+    BufferPtr   attn_output   = nullptr;
+    const auto& output_weight = params.weights.output_weight;
     if (params.enable_sp) {
-        gemm_output =
-            allocateBuffer({qkv->type(), {pad_token_num, output_weight->kernel->shape()[1]}}, {"attn_layer_out"});
+        gemm_output = allocateBuffer({qkv_output.type(), {params.pad_token_num, output_weight->kernel->shape()[1]}},
+                                     {"attn_layer_out"});
         attn_output = params.output;
     } else if (params.output) {
         gemm_output = params.output;
         attn_output = gemm_output;
     }
 
+    BufferPtr quanted_attn_input = nullptr;
     if (params.qscheme == QScheme::Qint8PerTensor || params.qscheme == QScheme::Qint8PerToken) {
         OptionalConstBufferRef smoother_weight =
             params.weights.smoother_weight ? (OptionalConstBufferRef) * (params.weights.smoother_weight->kernel) :
@@ -197,7 +201,7 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
                 (OptionalConstBufferRef) * (params.weights.static_scale_reciprocal_weight->kernel) :
                 std::nullopt;
         auto quant_data_type = DataType::TYPE_INT8;
-        auto quant_params    = QuantizeParams(*qkv_output,
+        auto quant_params    = QuantizeParams(qkv_output,
                                            quant_data_type,
                                            1,
                                            params.qscheme,
@@ -206,17 +210,18 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
                                            static_scale_weight,
                                            static_scale_reciprocal_weight);
 
-        qkv_output = quantize(quant_params);
+        quanted_attn_input = quantize(quant_params);
     }
+    auto& output_gemm_input = quanted_attn_input ? *quanted_attn_input : qkv_output;
 #if defined(__aarch64__)
     // Arm attention op only support fp32 data type, convert to original dtype
-    GemmParams output_gemm_params = GemmParams(*qkv_output, *(output_weight->kernel), nullopt, gemm_output, dtype);
+    GemmParams output_gemm_params =
+        GemmParams(output_gemm_input, *(output_weight->kernel), nullopt, gemm_output, dtype);
 #else
-    GemmParams output_gemm_params = GemmParams(*qkv_output, *(output_weight->kernel), nullopt, gemm_output);
+    GemmParams output_gemm_params = GemmParams(output_gemm_input, *(output_weight->kernel), nullopt, gemm_output);
 #endif
-
     if (params.enable_sp) {
-        printBufferData(*qkv_output, "attn_rs_input");
+        printBufferData(output_gemm_input, "attn_rs_input");
         ReduceScatterLoraLinearOutput reduce_scatter_output =
             loraLinearReduceScatter({LoraLinearParams(output_gemm_params, params.common.lora_input.out_lora_input),
                                      params.output,
@@ -231,6 +236,32 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
         attn_output = loraLinear(LoraLinearParams(output_gemm_params, params.common.lora_input.out_lora_input)).output;
     }
     return {std::move(attn_output)};
+}
+
+AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& params) {
+    auto      qkv      = attentionQKVGemm(params);
+    BufferPtr attn_out = attentionAttn({params.layer_id,
+                                        *qkv,
+                                        params.output,
+                                        params.configs,
+                                        params.weights,
+                                        params.common,
+                                        params.residual,
+                                        params.ln_params,
+                                        params.qscheme,
+                                        params.enable_sp,
+                                        params.pad_token_num});
+    return {attentionOutGemm({params.layer_id,
+                              *attn_out,
+                              params.output,
+                              params.configs,
+                              params.weights,
+                              params.common,
+                              params.residual,
+                              params.ln_params,
+                              params.qscheme,
+                              params.enable_sp,
+                              params.pad_token_num})};
 }
 
 };  // namespace rtp_llm

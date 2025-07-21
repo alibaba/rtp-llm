@@ -19,6 +19,7 @@ public:
     ~PyWrappedModel();
 
     GptModelOutputs forward(const GptModelInputs& inputs) override;
+    GptModelOutputs forwardMicroBatched(const GptModelInputs& inputs);
 
 private:
     GraphBase*    graph_runner_;

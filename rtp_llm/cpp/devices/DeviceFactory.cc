@@ -91,7 +91,8 @@ void DeviceFactory::initDevices(const GptInitParameter& params) {
     device_params.concurrency_config             = params.concurrency_config;
     size_t max_batch_size                        = params.max_context_batch_size_ + params.max_generate_batch_size_
                             + std::max((long)0, params.gen_num_per_circle_) * 32;
-    device_params.max_seq_len = params.max_seq_len_;
+    device_params.ffn_as_service = params.ffn_disaggregate_config.is_ffn_service();
+    device_params.max_seq_len    = params.max_seq_len_;
     RTP_LLM_LOG_INFO("set overlap type to be %d", device_params.device_resource_config.overlap_comm_type);
     device_params.m_split                 = params.device_resource_config.m_split;
     device_params.max_generate_batch_size = params.max_generate_batch_size_;

@@ -62,10 +62,11 @@ struct DeviceInitParams {
     size_t m_split   = 0;
 
     // to init deepep
-    int64_t max_seq_len   = 0;
-    int64_t hidden_size   = 0;
-    int64_t num_experts   = 0;
-    int64_t extra_experts = 0;
+    int64_t max_seq_len    = 0;
+    int64_t hidden_size    = 0;
+    int64_t num_experts    = 0;
+    int64_t extra_experts  = 0;
+    bool    ffn_as_service = false;
 
     bool                         use_deepep_moe         = false;
     bool                         use_deepep_internode   = false;
@@ -123,6 +124,7 @@ struct DeviceProperties {
     bool          is_eagle3              = false;
     std::set<int> eagle3_selected_layer{1, 46, 90};
     // std::set<int> eagle3_selected_layer{0,1,2};
+    bool ffn_as_service = false;
 };
 
 struct MemoryStatus {

@@ -44,6 +44,9 @@ public:
     // QKV ops
     virtual BufferPtr mhaQKVGemm(const AttentionLayerParams& params);
     virtual BufferPtr mlaQKVGemm(const AttentionLayerParams& params);
+    virtual BufferPtr attentionQKVGemm(const AttentionLayerParams& params);
+    virtual BufferPtr attentionAttn(const AttentionLayerParams& params);
+    virtual BufferPtr attentionOutGemm(const AttentionLayerParams& params);
 
     // dedicated attention ops
     virtual AttentionModuleOutput contextAttention(const AttentionModuleParams& params);
@@ -81,6 +84,7 @@ public:
 
     // for device communication
     virtual void                   broadcast(const BroadcastParams& params);
+    virtual void                   batchSendRecv(const BatchSendRecvParams& params, const ParallelMode& mode);
     virtual AllReduceOutput        allReduce(const AllReduceParams& params);
     virtual void                   allGather(const AllGatherParams& params);
     virtual AllToAllOutput         allToAll(const AllToAllParams& params);

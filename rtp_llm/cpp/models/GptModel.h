@@ -16,6 +16,7 @@ struct GptModelDescription {
     rtp_llm::AttentionConfigs attention_conf;
     rtp_llm::FfnConfigs       ffn_conf;
     rtp_llm::NormType         norm_type;
+    DataType                  data_type;
     rtp_llm::QScheme          act_qscheme            = rtp_llm::QScheme::NoQuantize;
     double                    layernorm_eps          = 1e-5;
     size_t                    vocab_size             = 0;
@@ -147,6 +148,7 @@ struct MicroBatchPlan {
 };
 
 struct LayerMicroBatchInputs {
+    rtp_llm::BufferPtr             token_ids;
     rtp_llm::BufferPtr             hidden;
     rtp_llm::BufferPtr             pre_decoder_residual;
     rtp_llm::AttentionCommonInputs attention_common_inputs;

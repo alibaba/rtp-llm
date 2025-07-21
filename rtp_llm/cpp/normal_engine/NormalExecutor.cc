@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/models/GptModel.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
+#include "rtp_llm/cpp/models/FfnDisaggregateModel.h"
 #include "rtp_llm/cpp/models/Sampler.h"
 #include "rtp_llm/cpp/th_op/GptInitParameter.h"
 
@@ -62,6 +63,15 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
     if (!params.py_model.is_none()) {
         RTP_LLM_LOG_INFO("init executor with python model");
         model_.reset(new PyWrappedModel(model_init_params, params.py_model));
+    } else if (params.gpt_init_parameter.ffn_disaggregate_config.enable_ffn_disaggregate) {
+        RTP_LLM_LOG_INFO("using FfnDisaggregateModel for ffn as service");
+        enable_ffn_disaggregate_ = true;
+        model_.reset(new FfnDisaggregateModel(
+            {device_,
+             params.gpt_weights,
+             genModelDescription(params.gpt_init_parameter),
+             cache_manager ? ((optional<CacheManager::KVCacheBuffer>)cache_manager->kvCacheBuffer()) : nullopt,
+             params.model_id}));
     } else {
         RTP_LLM_LOG_INFO("init legacy c++ gpt model");
         model_.reset(new GptModel(model_init_params));
@@ -72,6 +82,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
     batch_stream_processor_.reset(new NormalBatchStreamProcessor(params.gpt_init_parameter, cache_config, warm_up_));
     PrefixToCandidateTokens::instance()->reloadPrefixDictWithPrefix(
         params.gpt_init_parameter.ckpt_path_, params.gpt_init_parameter.sp_config.tree_decode_config);
+    device_->profileStart();
 }
 
 absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams) {
@@ -90,7 +101,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     }
     {
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        model_input.skip_run  = streams.empty();
+        model_input.skip_run  = streams.empty() && !enable_ffn_disaggregate_;
         tpSyncModelInputs(model_input, device_);
         if (model_input.skip_run) {
             return absl::OkStatus();
@@ -114,7 +125,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         expert_balancer_->stepForward(*model_, executor_collector);
         executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
-    if (device_->getDeviceProperties().tp_rank > 0 || warm_up_) {
+    if (device_->getDeviceProperties().tp_rank > 0 || warm_up_ || streams.size() == 0) {
         return absl::OkStatus();
     }
     {

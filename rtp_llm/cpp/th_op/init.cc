@@ -41,8 +41,7 @@ PYBIND11_MODULE(libth_transformer, m) {
     register_fifo_scheduler_config(m);
     register_misc_config(m);
     register_arpc_config(m);
-
-    registerFMHAType(m);
+    register_ffn_disaggregate_config(m);
     registerGptInitParameter(m);
     registerRtpLLMOp(m);
     registerRtpEmbeddingOp(m);

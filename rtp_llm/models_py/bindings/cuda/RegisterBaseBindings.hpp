@@ -6,6 +6,7 @@
 #include "rtp_llm/models_py/bindings/cuda/FlashInferOp.h"
 #include "rtp_llm/models_py/bindings/cuda/FusedMoEOp.h"
 #include "rtp_llm/models_py/bindings/cuda/SelectTopkOp.h"
+#include "rtp_llm/models_py/bindings/cuda/RtpProcessGroup.h"
 #include "3rdparty/flashinfer/flashinfer.h"
 
 using namespace rtp_llm;
@@ -78,6 +79,7 @@ void registerBaseCudaBindings(py::module& rtp_ops_m) {
     registerBasicCudaOps(rtp_ops_m);
     registerFusedMoEOp(rtp_ops_m);
     registerSelectTopkOp(rtp_ops_m);
+    registerRtpProcessGroup(rtp_ops_m);
 }
 
 }

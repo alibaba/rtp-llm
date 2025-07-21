@@ -316,6 +316,19 @@ private:
     int local_world_size_;
 };
 
+struct FfnDisAggregateConfig {
+    bool        enable_ffn_disaggregate = false;
+    int         attention_tp_size       = 1;
+    int         attention_dp_size       = 1;
+    int         ffn_tp_size             = 1;
+    int         ffn_dp_size             = 1;
+    bool        is_ffn_rank             = false;
+    std::string to_string() const;
+    bool        is_ffn_service() const {
+        return enable_ffn_disaggregate && is_ffn_rank;
+    }
+};
+
 struct ArpcConfig {
     int         threadNum   = 10;
     int         queueNum    = 50;
@@ -343,4 +356,5 @@ void        register_batch_decode_scheduler_config(pybind11::module& m);
 void        register_fifo_scheduler_config(pybind11::module& m);
 void        register_misc_config(pybind11::module& m);
 void        register_arpc_config(pybind11::module& m);
+void        register_ffn_disaggregate_config(pybind11::module& m);
 }  // namespace rtp_llm

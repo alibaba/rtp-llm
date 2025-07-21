@@ -201,6 +201,10 @@ class BaseModel(object):
 
         self.task_type: TaskType = TaskType.LANGUAGE_MODEL
         self.custom_module: Optional[CustomModule] = None
+        self.is_attn_model = (
+            config.gpt_init_params.ffn_disaggregate_config.enable_ffn_disaggregate
+            and not config.gpt_init_params.ffn_disaggregate_config.is_ffn_service()
+        )
 
         self.default_generate_config: GenerateConfig = GenerateConfig()
         self.load_tokenizer()
@@ -224,6 +228,7 @@ class BaseModel(object):
         raise NotImplementedError("Python Model is not implemented for this model.")
 
     def _load(self, device: str):
+        # set empty weights for attention service
         self.weight: ModelWeights = self.model_weights_loader.load_weights(
             device=self.device
         )
@@ -437,6 +442,7 @@ class BaseModel(object):
             misc_weights_info,
             self.compute_dtype,
             self.database,
+            self.is_attn_model,
         )
 
     @staticmethod

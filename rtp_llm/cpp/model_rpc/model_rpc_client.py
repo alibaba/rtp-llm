@@ -278,6 +278,13 @@ class ModelRpcClient(object):
             logging.info(f"{members_info_str}")
         else:
             self._addresses = [address]
+        # last rank as ffn service, no be entry
+        if config.gpt_init_params.ffn_disaggregate_config.enable_ffn_disaggregate:
+            serving_ranks = (
+                config.gpt_init_params.ffn_disaggregate_config.attention_tp_size
+                * config.gpt_init_params.ffn_disaggregate_config.attention_dp_size
+            )
+            self._addresses = self._addresses[:serving_ranks]
         logging.info(f"client connect to rpc addresses: {self._addresses}")
         self.model_config = config
 

@@ -56,6 +56,7 @@ public:
         return {attention_config,
                 ffn_config,
                 rtp_llm::getNormType(params.norm_type_str_),
+                rtp_llm::getDataType(params.data_type_),
                 act_qscheme,
                 params.layernorm_eps_,
                 (size_t)params.vocab_size_,
