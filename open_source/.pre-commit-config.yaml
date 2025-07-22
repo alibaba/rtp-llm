@@ -7,8 +7,6 @@ repos:
       - id: check-symlinks
       - id: mixed-line-ending
         exclude: ^3rdparty/
-      - id: requirements-txt-fixer
-        exclude: ^3rdparty/
       - id: trailing-whitespace
         exclude: ^3rdparty/
 
