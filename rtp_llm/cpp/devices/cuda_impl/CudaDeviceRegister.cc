@@ -4,4 +4,5 @@
 namespace rtp_llm {
 
 RTP_LLM_REGISTER_DEVICE(Cuda);
+RTP_LLM_REGISTER_DEVICE_GRAPH_RUNNER(Cuda);
 };  // namespace rtp_llm
