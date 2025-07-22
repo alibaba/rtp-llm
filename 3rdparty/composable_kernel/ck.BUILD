@@ -95,21 +95,11 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-genrule(
+filegroup(
     name = "ck_fmha_rmsnorm2d_libraries",
-    outs = ["libtile_example_fmha_fwd.so", "libtile_rmsnorm2d_fwd.so"],
-    srcs = glob(["**/*"]),
-    cmd = """
-        echo "pwd=";
-        pwd;
-        cd external/composable_kernel_archive;
-        sh cmake_build.sh;
-        cd ../..;
-        cp external/composable_kernel_archive/build/lib/libtile_example_fmha_fwd.so $(location libtile_example_fmha_fwd.so);
-        cp external/composable_kernel_archive/build/lib/libtile_rmsnorm2d_fwd.so $(location libtile_rmsnorm2d_fwd.so);
-    """,
+    srcs = glob(["**/*.so"]),
     visibility = ["//visibility:public"],
-    tags = ["rocm","local"],
+    tags = ["rocm", "local"],
 )
 
 genrule(

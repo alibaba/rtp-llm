@@ -9,7 +9,7 @@ alias(
 
 cc_library(
     name = "ck_fmha_example",
-    srcs = ["@composable_kernel_archive//:libtile_example_fmha_fwd.so"],
+    srcs = ["@composable_kernel_archive//:ck_fmha_rmsnorm2d_libraries"],
     copts = rocm_copts(),
     deps = [
         "@composable_kernel_archive//:ck_fmha_example_headers",
@@ -34,7 +34,7 @@ cc_library(
 
 cc_library(
     name = "ck_rmsnorm2d_example",
-    srcs = ["@composable_kernel_archive//:libtile_rmsnorm2d_fwd.so"],
+    srcs = ["@composable_kernel_archive//:ck_fmha_rmsnorm2d_libraries"],
     copts = rocm_copts(),
     deps = [
         "@composable_kernel_archive//:ck_rmsnorm2d_example_headers",

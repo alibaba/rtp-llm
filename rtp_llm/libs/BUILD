@@ -41,8 +41,8 @@ genrule(
         cp external/aiter/aiter/jit/module_gemm_a8w8_blockscale.so $(location module_gemm_a8w8_blockscale.so);
         cp external/aiter/aiter/jit/module_quant.so $(location module_quant.so);
         cp external/aiter/aiter/jit/module_pa.so $(location module_pa.so);
-        cp ./bazel-out/k8-opt/bin/external/composable_kernel_archive/libtile_example_fmha_fwd.so $(location libtile_example_fmha_fwd.so);
-        cp ./bazel-out/k8-opt/bin/external/composable_kernel_archive/libtile_rmsnorm2d_fwd.so $(location libtile_rmsnorm2d_fwd.so);
+        cp external/composable_kernel_archive/libtile_example_fmha_fwd.so $(location libtile_example_fmha_fwd.so);
+        cp external/composable_kernel_archive/libtile_rmsnorm2d_fwd.so $(location libtile_rmsnorm2d_fwd.so);
         cp external/aiter/aiter/jit/module_activation.so $(location module_activation.so);
     """,
 )
