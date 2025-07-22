@@ -157,14 +157,16 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
 
     std::list<GenerateStreamPtr> top1_sample_streams;
     for (const GenerateStreamPtr& stream : streams) {
-        SpeculativeExecutorStreamOutputPtr propose_stream_output = stream->getProposeStream()->getSPOutputBuffer();
-        SpeculativeExecutorStreamOutputPtr score_stream_output   = stream->getScoreStream()->getSPOutputBuffer();
-
-        if (stream->finishedWithoutLock() || stream->stoppedWithoutLock() || propose_stream_output == nullptr
-            || score_stream_output == nullptr) {
+        if (stream->finishedWithoutLock() || stream->stoppedWithoutLock()) {
             continue;
         }
 
+        SpeculativeExecutorStreamOutputPtr propose_stream_output = stream->getProposeStream()->getSPOutputBuffer();
+        SpeculativeExecutorStreamOutputPtr score_stream_output   = stream->getScoreStream()->getSPOutputBuffer();
+
+        if (propose_stream_output == nullptr || score_stream_output == nullptr) {
+            continue;
+        }
         if (propose_stream_output->propose_step == 0) {
             size_t accept_len = 1;
             sample_output.accept_token_num += accept_len;

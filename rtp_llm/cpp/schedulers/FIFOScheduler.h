@@ -15,7 +15,8 @@ class FIFOScheduler: public SchedulerBase {
 public:
     explicit FIFOScheduler(const rtp_llm::GptInitParameter&     params,
                            const std::shared_ptr<CacheManager>& cache_manager,
-                           const kmonitor::MetricsReporterPtr   metrics_reporter = nullptr);
+                           const kmonitor::MetricsReporterPtr   metrics_reporter = nullptr,
+                           const int                            max_score_len    = 1);
 
     ~FIFOScheduler() override;
 

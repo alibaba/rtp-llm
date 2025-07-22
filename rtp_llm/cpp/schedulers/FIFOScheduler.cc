@@ -10,7 +10,8 @@ namespace rtp_llm {
 
 FIFOScheduler::FIFOScheduler(const rtp_llm::GptInitParameter&     params,
                              const std::shared_ptr<CacheManager>& cache_manager,
-                             const kmonitor::MetricsReporterPtr   metrics_reporter):
+                             const kmonitor::MetricsReporterPtr   metrics_reporter,
+                             const int                            max_score_len):
     params_(params),
     cache_manager_(cache_manager),
     max_seq_len_(params.max_seq_len_),
@@ -23,7 +24,12 @@ FIFOScheduler::FIFOScheduler(const rtp_llm::GptInitParameter&     params,
     enable_fast_gen_(params.enable_fast_gen_),
     need_fill_fake_stream_(params.dp_size_ > 1 && params.tp_rank_ == 0),
     fast_gen_max_context_len_(params.fast_gen_max_context_len_),
-    metrics_reporter_(metrics_reporter) {}
+    metrics_reporter_(metrics_reporter) {
+    if (params.enable_speculative_decoding_) {
+        max_generate_batch_size_ = params.max_generate_batch_size_ / max_score_len;
+    }
+    RTP_LLM_LOG_INFO("max_generate_batch_size %d", max_generate_batch_size_);
+}
 
 FIFOScheduler::~FIFOScheduler() {
     (void)stop();
