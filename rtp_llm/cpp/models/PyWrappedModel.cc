@@ -17,7 +17,7 @@ namespace rtp_llm {
 PyWrappedModel::~PyWrappedModel() {
     try {
         py::gil_scoped_acquire gil;
-        cuda_graph_runner_.py_instance_.release();  // Release the Python object
+        graph_runner_->py_instance_.release();  // Release the Python object
         RTP_LLM_LOG_INFO("PyWrappedModel destroyed, Python object instance released.");
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python error during PyWrappedModel destruction: %s", e.what());
@@ -47,10 +47,24 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         attention_inputs.dtype                    = torch::kHalf;
         attention_inputs.is_prefill               = !attention_inputs.sequence_lengths.size(0);
         attention_inputs.kv_block_offset          = k_cache_buffer_->shape()[0] * k_cache_buffer_->shape()[1];
-        auto py_model_inputs                      = PyModelInputs({token_ids, attention_inputs});
+        if (!device_->initParams().hw_kernel_config.enable_cuda_graph && !attention_inputs.is_prefill) {
+            int           decode_bacth_szie = attention_inputs.sequence_lengths.size(0);
+            torch::Tensor cu_seqlens =
+                torch::zeros({decode_bacth_szie + 1}, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
+            cu_seqlens.pin_memory();
+            attention_inputs.cu_seqlens = cu_seqlens;
+        }
+
+        auto           py_model_inputs = PyModelInputs({token_ids, attention_inputs});
+        PyModelOutputs py_model_outputs;
         // Cast the Python object to PyModelOutputs and extract hidden states
-        auto py_model_outputs = cuda_graph_runner_.forward(py_model_inputs);
-        // std::cout << "py_model_outputs:\n " << py_model_outputs.hidden_states << std::endl;
+        if (device_->initParams().hw_kernel_config.enable_cuda_graph) {
+            py_model_outputs = graph_runner_->forward(py_model_inputs);
+        } else {
+            auto py_model_forward = py_model_.attr("forward");
+            auto outputs          = py_model_forward(py_model_inputs);
+            py_model_outputs      = outputs.cast<PyModelOutputs>();
+        }
         auto hidden_states_tensor = py_model_outputs.hidden_states;
         auto hidden_states        = torchTensor2Buffer(hidden_states_tensor);
 

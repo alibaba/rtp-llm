@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/models/test/CudaGraphDecodePaddingOp.h"
+#include "rtp_llm/cpp/devices/cuda_impl/tests/CudaGraphDecodePaddingOp.h"
 #include "rtp_llm/cpp/cache/CacheManager.h"
 namespace cuda_graph {
 using namespace rtp_llm;
@@ -6,11 +6,11 @@ using namespace rtp_llm;
 void CudaGraphDecodePaddingOp::init(py::object py_instance) {
     cuda_graph_runner_ = createCudaGraphRunner(std::move(py_instance));
     // initializeResource();
-    cuda_graph_runner_->init_capture();
+    cuda_graph_runner_->initCapture();
 }
 
 int CudaGraphDecodePaddingOp::getCurrentRealGraphSize() {
-    return cuda_graph_runner_->get_current_real_graph_bs();
+    return cuda_graph_runner_->getCurrentRealGraphBs();
 }
 
 CudaGraphRunnerPtr CudaGraphDecodePaddingOp::createCudaGraphRunner(py::object py_instance) {

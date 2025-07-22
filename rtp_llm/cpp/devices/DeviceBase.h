@@ -7,7 +7,7 @@
 #include "rtp_llm/cpp/core/Event.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
 #include "rtp_llm/cpp/stats/ExpertStats.h"
-
+#include "rtp_llm/cpp/devices/GraphBase.h"
 namespace rtp_llm {
 
 #define CACHED_BUF(dtype, atype, ...)                                                                                  \

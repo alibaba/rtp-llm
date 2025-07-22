@@ -50,6 +50,8 @@ cc_library(
     hdrs = [
         "CudaDevice.h",
         "CudaFlashInfer.h",
+        "CudaGraphUtils.h",
+        "CudaGraphRunner.h",
     ] + select({
         "@//:using_cuda12": [
             "CudaXqa.h"
@@ -71,6 +73,7 @@ cc_library(
         "CudaDeepEPLLFfnLayer.cc",
         "CudaDeepEPFfnLayer.cc",
         "CudaFlashInfer.cc",
+        "CudaGraphRunner.cc",
     ] + select({
         "@//:using_cuda12": [
             "CudaXqa.cc"

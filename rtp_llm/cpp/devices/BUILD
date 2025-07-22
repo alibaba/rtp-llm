@@ -19,6 +19,7 @@ cc_library(
         "//rtp_llm/cpp/models_weight:weights_define",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
         "//rtp_llm/cpp/stats:stats",
+        "//rtp_llm/models_py/bindings:op_defs"
     ],
     visibility = ["//visibility:public"],
     copts = copts(),

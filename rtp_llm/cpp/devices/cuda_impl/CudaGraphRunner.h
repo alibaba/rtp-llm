@@ -2,20 +2,21 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/embed.h>
 #include "rtp_llm/cpp/utils/Logger.h"
-#include "rtp_llm/cpp/models/CudaGraphUtils.h"
+#include "rtp_llm/cpp/devices/cuda_impl/CudaGraphUtils.h"
 #include <ATen/cuda/CUDAEvent.h>
 #include <ATen/cuda/CUDAGraph.h>
+#include "rtp_llm/cpp/devices/GraphBase.h"
 
 namespace py = pybind11;
 namespace rtp_llm {
-class CudaGraphRunner {
+class CudaGraphRunner: public GraphBase {
 public:
     CudaGraphRunner(const DeviceInitParams& params,
                     py::object              py_instance,
                     int                     kv_cache_block_offset,
                     DeviceBase*             device,
                     bool                    in_test = false):
-        py_instance_(std::move(py_instance)),
+        GraphBase(py_instance),
         enable_cuda_graph_(params.hw_kernel_config.enable_cuda_graph),
         concurrency_limit_(params.concurrency_config.concurrency_limit),
         capture_stream_(at::cuda::getStreamFromPool()),
@@ -39,19 +40,18 @@ public:
             delete instance.mem_hold_.params_;
         }
     }
-    void           Capture();
-    void           CaptureOneBatchSize(int bs);
-    void           PrepareInputs(PyModelInputs& inputs);
-    bool           CanRun(PyModelInputs& inputs);
-    void           replay(int bs);
-    void           init_capture();
-    void           init_kernel_internal_memory();
-    int            get_current_real_graph_bs();
-    PyModelOutputs forward(PyModelInputs& inputs);
-    py::object     py_instance_;
+    void           capture() override;
+    void           captureOneBatchSize(int bs) override;
+    void           prepareInputs(PyModelInputs& inputs) override;
+    bool           canRun(PyModelInputs& inputs) override;
+    void           replay(int bs) override;
+    void           initCapture() override;
+    void           initKernelInternalMemory();
+    int            getCurrentRealGraphBs();
+    PyModelOutputs forward(PyModelInputs& inputs) override;
 
 private:
-    std::vector<int>                       get_batch_sizes_to_capture(int concurrency_limit);
+    std::vector<int>                       getBatchSizesToCapture(int concurrency_limit);
     py::object                             py_forward_method_;
     bool                                   enable_cuda_graph_{false};
     int                                    concurrency_limit_{32};

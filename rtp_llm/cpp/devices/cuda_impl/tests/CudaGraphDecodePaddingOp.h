@@ -1,9 +1,8 @@
 #pragma once
 #include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
-#include "rtp_llm//cpp/models/CudaGraphRunner.h"
+#include "rtp_llm/cpp/devices/cuda_impl/CudaGraphRunner.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #include "rtp_llm/cpp/models/GptModel.h"
-#include "rtp_llm/cpp/models/CudaGraphRunner.h"
 #include <pybind11/pybind11.h>
 #include "rtp_llm/cpp/utils/PyUtils.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"

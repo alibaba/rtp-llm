@@ -198,6 +198,20 @@ std::shared_ptr<DeviceExporter> DeviceFactory::getDeviceExporter() {
     return exporter;
 }
 
+std::shared_ptr<GraphBase> DeviceFactory::getDeviceGraphRunner(const DeviceInitParams& params,
+                                                               py::object              py_instance,
+                                                               int                     kv_cache_block_offset,
+                                                               DeviceBase*             device,
+                                                               bool                    in_test) {
+    static std::shared_ptr<GraphBase> graph_runner = nullptr;
+    if (!graph_runner) {
+        const auto global_device_params = getDefaultGlobalDeviceParams();
+        const auto registration         = getRegistrationMap()[global_device_params.device_params[0].first];
+        graph_runner = registration.graph_creator(params, py_instance, kv_cache_block_offset, device, in_test);
+    }
+    return graph_runner;
+}
+
 void DeviceFactory::registerDevice(DeviceType type, DeviceCreatorType creator) {
     auto& registrationMap = getRegistrationMap();
     RTP_LLM_CHECK_WITH_INFO((registrationMap.find(type) == registrationMap.end()), "Can not find device: %d", type);
