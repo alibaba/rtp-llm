@@ -696,7 +696,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                                 seq_len,
                                 // context_token_num,
                                 params.common.cu_seqlens->data(),
-                                params.common.cu_kv_seqlens->data(),
+                                params.common.cu_seqlens->data(),
                                 lse_acc_buf->data(),
                                 params.common.linear_bias_slopes ? params.common.linear_bias_slopes->data() : nullptr,
                                 nullptr)) {
