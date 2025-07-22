@@ -91,10 +91,16 @@ def truncate_response_with_stop_words(
     response: str, stop_word_strs: List[str], is_streaming: bool = True
 ):
     if is_streaming:
+        first_pos = len(response)
         for stop_word in stop_word_strs:
-            if stop_word and response.endswith(stop_word):
-                response = response[: (-len(stop_word))]
-                break
+            if stop_word:
+                pos = response.find(stop_word)
+                if pos == 0:
+                    first_pos = 0
+                    break
+                if pos != -1 and pos < first_pos:
+                    first_pos = pos
+        response = response[:first_pos]
     else:
         min_index = len(response)
         for stop_word in stop_word_strs:

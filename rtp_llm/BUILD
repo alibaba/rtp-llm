@@ -81,6 +81,7 @@ requirement([
     "oss2",
     "pyOpenSSL",
     "nest_asyncio",
+    "blobfile",
     "librosa",
     "matplotlib", # required by qwen vl tokenizer
     "flash_attn",
@@ -457,6 +458,7 @@ whl_reqs = [
     "jieba",
     "openai",
     "nest_asyncio",
+    "blobfile",
     "librosa",
     "matplotlib",
     "av",
