@@ -203,7 +203,12 @@ rtp_llm::SpecialTokens GenerateStream::specialTokens() const {
 }
 
 int GenerateStream::tileNum(int iter_count) const {
-    return generate_input_->generate_config->hasNumBeams() ? numBeams(iter_count) : numReturnSequences();
+    int num_beams = numBeams(iter_count);
+    if (generate_input_->generate_config->hasNumBeams()) {
+        return num_beams;
+    } else {
+        return std::max(numReturnSequences(), num_beams);
+    }
 }
 
 int GenerateStream::tileNumIn() const {
@@ -215,7 +220,12 @@ int GenerateStream::tileNumOut() const {
 }
 
 int GenerateStream::tileNumMax() const {
-    return generate_input_->generate_config->hasNumBeams() ? numBeamsMax() : numReturnSequences();
+    int num_beams_max = numBeamsMax();
+    if (generate_input_->generate_config->hasNumBeams()) {
+        return num_beams_max;
+    } else {
+        return std::max(numReturnSequences(), num_beams_max);
+    }
 }
 
 int GenerateStream::batchSize(int iter_count) const {
