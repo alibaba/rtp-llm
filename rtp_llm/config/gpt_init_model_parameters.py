@@ -639,7 +639,9 @@ class GptInitModelParameters:
             ft_disable_custom_ar=get_env_bool("FT_DISABLE_CUSTOM_AR", True),
             enable_merge_w13=get_env_bool("ENABLE_MERGE_W13", False),
             enable_cuda_graph=get_env_bool("ENABLE_CUDA_GRAPH", False),
-            disable_padding=get_env_bool("DISABLE_PADDING", True),
+            enable_cuda_graph_debug_mode=get_env_bool(
+                "ENABLE_CUDA_GRAPH_DEBUG_MODE", False
+            ),
         )
 
         # DeviceResourceConfig

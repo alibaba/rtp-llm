@@ -15,17 +15,17 @@ class CudaGraphDecodePaddingOp: public torch::jit::CustomClassHolder {
 public:
     void init(py::object py_instance);
 
-    int get_current_real_graph_size();
+    int getCurrentRealGraphSize();
 
     CudaGraphRunnerPtr createCudaGraphRunner(py::object py_instance);
 
     PyModelOutputs forward(PyModelInputs inputs) {
-        return cuda_graph_runner->forward(inputs);
+        return cuda_graph_runner_->forward(inputs);
     }
     PyModelInputs
-    build_inputs(int64_t batch_size, int64_t max_seq_len, int64_t num_tokens_per_bs, int64_t seq_size_per_block);
+    buildInputs(int64_t batch_size, int64_t max_seq_len, int64_t num_tokens_per_bs, int64_t seq_size_per_block);
 
 private:
-    CudaGraphRunnerPtr cuda_graph_runner;
+    CudaGraphRunnerPtr cuda_graph_runner_;
 };
 }  // namespace cuda_graph

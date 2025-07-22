@@ -40,12 +40,12 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
         max_seq_len = 64
         num_tokens_per_bs = 1
         seq_size_per_block = 64
-        inputs = self.op.build_inputs(
+        inputs = self.op.buildInputs(
             batch_size, max_seq_len, num_tokens_per_bs, seq_size_per_block
         )
         outputs1 = self.op.forward(inputs)
         outputs2 = self.model.forward(inputs)
-        current_real_graph_size = self.op.get_current_real_graph_size()
+        current_real_graph_size = self.op.getCurrentRealGraphSize()
         assert (
             current_real_graph_size == batch_size
             if batch_size % 2 == 0

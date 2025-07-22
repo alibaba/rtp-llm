@@ -246,29 +246,29 @@ void register_profiling_debug_logging_config(pybind11::module& m) {
 
 // HWKernelConfig
 void HWKernelConfig::update_from_env_for_test() {
-    deep_gemm_num_sm          = autil::EnvUtil::getEnv("DEEP_GEMM_NUM_SM", -1);
-    arm_gemm_use_kai          = bool_from_env_for_test("ARM_GEMM_USE_KAI", false);
-    enable_stable_scatter_add = bool_from_env_for_test("ENABLE_STABLE_SCATTER_ADD", false);
-    enable_multi_block_mode   = bool_from_env_for_test("ENABLE_MULTI_BLOCK_MODE", true);
-    ft_disable_custom_ar      = bool_from_env_for_test("FT_DISABLE_CUSTOM_AR", true);
-    rocm_hipblaslt_config     = autil::EnvUtil::getEnv("ROCM_HIPBLASLT_CONFIG", "gemm_config.csv");
-    enable_merge_w13          = bool_from_env_for_test("ENABLE_MERGE_W13", false);
-    enable_cuda_graph         = bool_from_env_for_test("ENABLE_CUDA_GRAPH", false);
-    disable_padding           = bool_from_env_for_test("DISABLE_PADDING", true);
+    deep_gemm_num_sm             = autil::EnvUtil::getEnv("DEEP_GEMM_NUM_SM", -1);
+    arm_gemm_use_kai             = bool_from_env_for_test("ARM_GEMM_USE_KAI", false);
+    enable_stable_scatter_add    = bool_from_env_for_test("ENABLE_STABLE_SCATTER_ADD", false);
+    enable_multi_block_mode      = bool_from_env_for_test("ENABLE_MULTI_BLOCK_MODE", true);
+    ft_disable_custom_ar         = bool_from_env_for_test("FT_DISABLE_CUSTOM_AR", true);
+    rocm_hipblaslt_config        = autil::EnvUtil::getEnv("ROCM_HIPBLASLT_CONFIG", "gemm_config.csv");
+    enable_merge_w13             = bool_from_env_for_test("ENABLE_MERGE_W13", false);
+    enable_cuda_graph            = bool_from_env_for_test("ENABLE_CUDA_GRAPH", false);
+    enable_cuda_graph_debug_mode = bool_from_env_for_test("ENABLE_CUDA_GRAPH_DEBUG_MODE", false);
 }
 
 void register_hwkernel_config(pybind11::module& m) {
     pybind11::class_<HWKernelConfig>(m, "HWKernelConfig")
         .def(pybind11::init<int, bool, bool, bool, bool, std::string, bool, bool, bool>(),
-             pybind11::arg("deep_gemm_num_sm")          = -1,
-             pybind11::arg("arm_gemm_use_kai")          = false,
-             pybind11::arg("enable_stable_scatter_add") = false,
-             pybind11::arg("enable_multi_block_mode")   = true,
-             pybind11::arg("ft_disable_custom_ar")      = true,
-             pybind11::arg("rocm_hipblaslt_config")     = "gemm_config.csv",
-             pybind11::arg("enable_merge_w13")          = false,
-             pybind11::arg("enable_cuda_graph")         = false,
-             pybind11::arg("disable_padding")           = true)
+             pybind11::arg("deep_gemm_num_sm")             = -1,
+             pybind11::arg("arm_gemm_use_kai")             = false,
+             pybind11::arg("enable_stable_scatter_add")    = false,
+             pybind11::arg("enable_multi_block_mode")      = true,
+             pybind11::arg("ft_disable_custom_ar")         = true,
+             pybind11::arg("rocm_hipblaslt_config")        = "gemm_config.csv",
+             pybind11::arg("enable_merge_w13")             = false,
+             pybind11::arg("enable_cuda_graph")            = false,
+             pybind11::arg("enable_cuda_graph_debug_mode") = false)
         .def("to_string", &HWKernelConfig::to_string)
         .def("update_from_env", &HWKernelConfig::update_from_env_for_test)
         .def_readwrite("deep_gemm_num_sm", &HWKernelConfig::deep_gemm_num_sm)
@@ -279,7 +279,7 @@ void register_hwkernel_config(pybind11::module& m) {
         .def_readwrite("rocm_hipblaslt_config", &HWKernelConfig::rocm_hipblaslt_config)
         .def_readwrite("enable_merge_w13", &HWKernelConfig::enable_merge_w13)
         .def_readwrite("enable_cuda_graph", &HWKernelConfig::enable_cuda_graph)
-        .def_readwrite("disable_padding", &HWKernelConfig::disable_padding);
+        .def_readwrite("enable_cuda_graph_debug_mode", &HWKernelConfig::enable_cuda_graph_debug_mode);
 }
 
 // DeviceResourceConfig
@@ -641,7 +641,7 @@ inline std::string HWKernelConfig::to_string() const {
         << "rocm_hipblaslt_config: " << rocm_hipblaslt_config << "\n"
         << "enable_merge_w13: " << enable_merge_w13 << "\n"
         << "enable_cuda_graph: " << enable_cuda_graph << "\n"
-        << "disable_padding" << disable_padding << "\n";
+        << "enable_cuda_graph_debug_mode" << enable_cuda_graph_debug_mode << "\n";
     return oss.str();
 }
 

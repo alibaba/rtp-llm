@@ -8,50 +8,50 @@ using namespace torch_ext;
 namespace rtp_llm {
 
 void CudaGraphRunner::CaptureOneBatchSize(int bs) {
-    auto inputs = graph_instances[bs].mem_hold.py_model_inputs;
+    auto inputs = graph_instances_[bs].mem_hold_.py_model_inputs_;
     // WarmUp twice
-    py_forward_method(inputs);
+    py_forward_method_(inputs);
 
-    py_forward_method(inputs);
+    py_forward_method_(inputs);
     {
-        CudaGraphStreamLife  stream_life(capture_stream, device_);
-        at::cuda::CUDAGraph& graph = graph_instances[bs].graph;
+        CudaGraphStreamLife  stream_life(capture_stream_, device_);
+        at::cuda::CUDAGraph& graph = graph_instances_[bs].graph_;
         graph.enable_debug_mode();
         auto output_dot_filename = "cuda_graph_visualization.dot";
         graph.capture_begin();
-        auto py_outputs_obj = py_forward_method(inputs);
+        auto py_outputs_obj = py_forward_method_(inputs);
         auto outputs        = py_outputs_obj.cast<PyModelOutputs>();
-        graph_instances[bs].mem_hold.decoder_layer_hidden_states.copy_(outputs.hidden_states);
+        graph_instances_[bs].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
         graph.capture_end();
-        graph_instances[bs].mem_hold.params_ =
+        graph_instances_[bs].mem_hold_.params_ =
             FlashInferAttnParams::retrieveCaptureParam(std::max(MIN_CACHE_INPUT_TOKEN_NUM, bs));
-        RTP_LLM_CHECK_WITH_INFO(graph_instances[bs].mem_hold.params_ != nullptr, "capture params can't be nullptr");
+        RTP_LLM_CHECK_WITH_INFO(graph_instances_[bs].mem_hold_.params_ != nullptr, "capture params can't be nullptr");
         graph.debug_dump(output_dot_filename);
     }
 }
 
 void CudaGraphRunner::Capture() {
     RTP_LLM_LOG_INFO("Capture Start");
-    int capture_range_size = capture_range.size();
+    int capture_range_size = capture_range_.size();
     for (int i = capture_range_size - 1; i >= 0; i--) {
-        int           bs = capture_range[i];
+        int           bs = capture_range_[i];
         PyModelInputs inputs;
-        inputs.input_ids = capture_mem_hold.py_model_inputs.input_ids.slice(0, 0, bs * num_tokens_per_bs);
+        inputs.input_ids = capture_mem_hold_.py_model_inputs_.input_ids.slice(0, 0, bs * num_tokens_per_bs_);
         inputs.attention_inputs.input_lengths =
-            capture_mem_hold.py_model_inputs.attention_inputs.input_lengths.slice(0, 0, bs);
+            capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths.slice(0, 0, bs);
         inputs.attention_inputs.sequence_lengths =
-            capture_mem_hold.py_model_inputs.attention_inputs.sequence_lengths.slice(0, 0, bs);
+            capture_mem_hold_.py_model_inputs_.attention_inputs.sequence_lengths.slice(0, 0, bs);
         // we capture the max_block_ids
         inputs.attention_inputs.kv_cache_block_id_device =
-            capture_mem_hold.py_model_inputs.attention_inputs.kv_cache_block_id_device.slice(0, 0, bs);
+            capture_mem_hold_.py_model_inputs_.attention_inputs.kv_cache_block_id_device.slice(0, 0, bs);
         inputs.attention_inputs.kv_cache_block_id_host =
-            capture_mem_hold.py_model_inputs.attention_inputs.kv_cache_block_id_host.slice(0, 0, bs);
+            capture_mem_hold_.py_model_inputs_.attention_inputs.kv_cache_block_id_host.slice(0, 0, bs);
         // pinned memory
         inputs.attention_inputs.cu_seqlens =
-            capture_mem_hold.py_model_inputs.attention_inputs.cu_seqlens.slice(0, 0, bs + 1);
-        inputs.attention_inputs.prefix_lengths = capture_mem_hold.py_model_inputs.attention_inputs.prefix_lengths;
-        graph_instances[bs].mem_hold =
-            CaptureMemoryHold(capture_mem_hold.decoder_layer_hidden_states.slice(0, 0, bs * num_tokens_per_bs),
+            capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens.slice(0, 0, bs + 1);
+        inputs.attention_inputs.prefix_lengths = capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths;
+        graph_instances_[bs].mem_hold_ =
+            CaptureMemoryHold(capture_mem_hold_.decoder_layer_hidden_states_.slice(0, 0, bs * num_tokens_per_bs_),
                               inputs,
                               kv_cache_block_offset_);
         CaptureOneBatchSize(bs);
@@ -61,52 +61,40 @@ void CudaGraphRunner::Capture() {
 }
 
 void CudaGraphRunner::PrepareInputs(PyModelInputs& inputs) {
-    auto py_model_inputs = graph_instances[current_real_graph_bs].mem_hold.py_model_inputs;
-    py_model_inputs.input_ids.slice(0, 0, current_batch_size * num_tokens_per_bs) = inputs.input_ids;
-    py_model_inputs.attention_inputs.input_lengths.slice(0, 0, current_batch_size) =
+    auto py_model_inputs_ = graph_instances_[current_real_graph_bs_].mem_hold_.py_model_inputs_;
+    py_model_inputs_.input_ids.slice(0, 0, current_batch_size_ * num_tokens_per_bs_) = inputs.input_ids;
+    py_model_inputs_.attention_inputs.input_lengths.slice(0, 0, current_batch_size_) =
         inputs.attention_inputs.input_lengths;
-    py_model_inputs.attention_inputs.sequence_lengths.slice(0, 0, current_batch_size) =
+    py_model_inputs_.attention_inputs.sequence_lengths.slice(0, 0, current_batch_size_) =
         inputs.attention_inputs.sequence_lengths;
-    py_model_inputs.attention_inputs.kv_cache_block_id_device.slice(0, 0, current_batch_size) =
+    py_model_inputs_.attention_inputs.kv_cache_block_id_device.slice(0, 0, current_batch_size_) =
         inputs.attention_inputs.kv_cache_block_id_device;
     // pinned memory
     inputs.attention_inputs.cu_seqlens =
-        py_model_inputs.attention_inputs.cu_seqlens.slice(0, 0, current_batch_size + 1);
+        py_model_inputs_.attention_inputs.cu_seqlens.slice(0, 0, current_batch_size_ + 1);
 
-    graph_instances[current_real_graph_bs].mem_hold.params_->fillFlashInfer(
+    graph_instances_[current_real_graph_bs_].mem_hold_.params_->fillFlashInfer(
         nullptr,
         torchTensor2Buffer(inputs.attention_inputs.sequence_lengths),
         torchTensor2Buffer(inputs.attention_inputs.input_lengths),
         torchTensor2Buffer(inputs.attention_inputs.kv_cache_block_id_host),
-        current_batch_size,
-        seq_size_per_block);
+        current_batch_size_,
+        seq_size_per_block_);
 }
 
 PyModelOutputs CudaGraphRunner::forward(PyModelInputs& inputs) {
     PyModelOutputs outputs;
     // decode only
-    if (enable_cuda_graph && !inputs.attention_inputs.is_prefill && CanRun(inputs)) {
+    if (enable_cuda_graph_ && !inputs.attention_inputs.is_prefill && CanRun(inputs)) {
         RTP_LLM_LOG_INFO("Replay Start");
         PrepareInputs(inputs);
-        // std::cout<<"replay params->qo_indptr_d: \n"<<params_->qo_indptr_d<<std::endl;
-        // std::cout<<"replay params->plan: \n"<<params_->plan<<std::endl;
-        // std::cout<<"replay params->page_indptr_d: \n"<<params_->page_indptr_d<<std::endl;
-        // std::cout<<"replay params->page_indice_d: \n"<<params_->page_indice_d.slice(0,0,10)<<std::endl;
-        // std::cout<<"replay params->paged_kv_last_page_len_d: \n"<<params_->paged_kv_last_page_len_d<<std::endl;
-        replay(current_real_graph_bs);
-        // std::cout<<"replay after params->qo_indptr_d: \n"<<params_->qo_indptr_d<<std::endl;
-        // std::cout<<"replay after params->plan: \n"<<params_->plan<<std::endl;
-        // std::cout<<"replay after params->page_indptr_d: \n"<<params_->page_indptr_d<<std::endl;
-        // std::cout<<"replay after params->page_indice_d: \n"<<params_->page_indice_d.slice(0,0,10)<<std::endl;
-        // std::cout<<"replay after params->paged_kv_last_page_len_d:
-        // \n"<<params_->paged_kv_last_page_len_d.slice(0,0,10)<<std::endl;
-        outputs.hidden_states = graph_instances[current_real_graph_bs].mem_hold.decoder_layer_hidden_states;
+        replay(current_real_graph_bs_);
+        outputs.hidden_states = graph_instances_[current_real_graph_bs_].mem_hold_.decoder_layer_hidden_states_;
         RTP_LLM_LOG_INFO("Replay End");
-        // std::cout<<"qkv: "<<RopeParmas::params->qkv<<std::endl;
     } else {
         // we need to set `cu_seq_lengths`
-        inputs.attention_inputs.cu_seqlens = capture_mem_hold.py_model_inputs.attention_inputs.cu_seqlens;
-        auto py_outputs_obj                = py_forward_method(inputs);
+        inputs.attention_inputs.cu_seqlens = capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens;
+        auto py_outputs_obj                = py_forward_method_(inputs);
         // Cast the Python object to PyModelOutputs and extract hidden states
         outputs = py_outputs_obj.cast<PyModelOutputs>();
     }
@@ -114,23 +102,18 @@ PyModelOutputs CudaGraphRunner::forward(PyModelInputs& inputs) {
 }
 
 void CudaGraphRunner::replay(int bs) {
-    CudaGraphStreamLife life(capture_stream, device_);
-    // https://github.com/pytorch/pytorch/blob/release/2.6/aten/src/ATen/cuda/CUDAGraph.cpp#L221C1-L243C2
-    // our cuda version is 12.6 (> 11.4), so we need to synchronize reference to above.
-    graph_instances[bs].graph.replay();
-    capture_stream.synchronize();
+    graph_instances_[bs].graph_.replay();
 }
 
 bool CudaGraphRunner::CanRun(PyModelInputs& inputs) {
-    int cuda_graph_bs  = inputs.attention_inputs.sequence_lengths.size(0);
-    current_batch_size = cuda_graph_bs;
+    int cuda_graph_bs   = inputs.attention_inputs.sequence_lengths.size(0);
+    current_batch_size_ = cuda_graph_bs;
     RTP_LLM_LOG_INFO("CanRun judge for batch size: %d", cuda_graph_bs);
-    bool is_bs_supported =
-        (disable_padding) ? (graph_instances.find(cuda_graph_bs) != graph_instances.end()) : (cuda_graph_bs <= max_bs);
+    bool is_bs_supported = (cuda_graph_bs <= max_bs_);
     if (is_bs_supported) {
-        auto it               = std::lower_bound(capture_range.begin(), capture_range.end(), current_batch_size);
-        current_real_graph_bs = *it;
-        RTP_LLM_CHECK_WITH_INFO(it != capture_range.end(), "batch size used in replay: %d", current_real_graph_bs);
+        auto it                = std::lower_bound(capture_range_.begin(), capture_range_.end(), current_batch_size_);
+        current_real_graph_bs_ = *it;
+        RTP_LLM_CHECK_WITH_INFO(it != capture_range_.end(), "batch size used in replay: %d", current_real_graph_bs_);
     }
     RTP_LLM_LOG_INFO("can run cuda graph: %d", is_bs_supported);
     return is_bs_supported;
@@ -138,14 +121,14 @@ bool CudaGraphRunner::CanRun(PyModelInputs& inputs) {
 
 void CudaGraphRunner::init_kernel_internal_memory() {
     // for `FusedRopeKVCacheDecodeOp`, cached in pinned memory.
-    BufferPtr cu_seqlens_buf = device_->allocateBuffer({DataType::TYPE_INT32, {max_bs + 1}, AllocationType::HOST});
-    capture_mem_hold.py_model_inputs.attention_inputs.cu_seqlens = Buffer2torchTensor(cu_seqlens_buf, false);
-    RTP_LLM_CHECK_WITH_INFO(capture_mem_hold.py_model_inputs.attention_inputs.cu_seqlens.is_pinned(),
-                            "capture_mem_hold sequence_lengths is not pinned memory");
+    BufferPtr cu_seqlens_buf = device_->allocateBuffer({DataType::TYPE_INT32, {max_bs_ + 1}, AllocationType::HOST});
+    capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens = Buffer2torchTensor(cu_seqlens_buf, false);
+    RTP_LLM_CHECK_WITH_INFO(capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens.is_pinned(),
+                            "capture_mem_hold_ sequence_lengths is not pinned memory");
 }
 
 int CudaGraphRunner::get_current_real_graph_bs() {
-    return current_real_graph_bs;
+    return current_real_graph_bs_;
 }
 
 std::vector<int> CudaGraphRunner::get_batch_sizes_to_capture(int concurrency_limit) {
@@ -165,35 +148,35 @@ std::vector<int> CudaGraphRunner::get_batch_sizes_to_capture(int concurrency_lim
 }
 
 void CudaGraphRunner::init_capture() {
-    if (enable_cuda_graph) {
+    if (enable_cuda_graph_) {
         RTP_LLM_LOG_INFO("CUDA graph capture is enabled");
         // Capture
         at::cuda::CUDAGraph graph;
-        capture_range = CudaGraphRunner::get_batch_sizes_to_capture(concurrency_limit);
-        max_bs        = *(std::max_element(capture_range.begin(), capture_range.end()));
-        max_num_token = max_bs * num_tokens_per_bs;
-        auto options1 = torch::TensorOptions().dtype(torch::kFloat16).device(torch::kCUDA).requires_grad(false);
-        auto output   = torch::zeros({max_num_token, hidden_size_}, options1);
-        auto options2 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
-        auto options3 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
+        capture_range_ = CudaGraphRunner::get_batch_sizes_to_capture(concurrency_limit_);
+        max_bs_        = *(std::max_element(capture_range_.begin(), capture_range_.end()));
+        max_num_token_ = max_bs_ * num_tokens_per_bs_;
+        auto options1  = torch::TensorOptions().dtype(torch::kFloat16).device(torch::kCUDA).requires_grad(false);
+        auto output    = torch::zeros({max_num_token_, hidden_size_}, options1);
+        auto options2  = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
+        auto options3  = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
         PyModelInputs inputs;
         inputs.attention_inputs.is_prefill = false;
         // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
-        inputs.input_ids = torch::zeros({max_num_token}, options3);
+        inputs.input_ids = torch::zeros({max_num_token_}, options3);
         // prefix_lengths [batch_size, int32] (for attention `prepare`)
         inputs.attention_inputs.prefix_lengths = torch::empty(0, options2);
         // input_lengths [batch_size, int32] (decode only)
-        inputs.attention_inputs.input_lengths = torch::ones({int(max_bs)}, options2);
+        inputs.attention_inputs.input_lengths = torch::ones({int(max_bs_)}, options2);
         // sequence_lengths [batch_size, int32] (decode only)
         // sequence_length should in pinned memory
-        inputs.attention_inputs.sequence_lengths = torch::ones({int(max_bs)}, options2);
+        inputs.attention_inputs.sequence_lengths = torch::ones({int(max_bs_)}, options2);
         inputs.attention_inputs.sequence_lengths = inputs.attention_inputs.sequence_lengths.pin_memory();
         // kv_cache_block_id_device [batch_size, block_num]
         inputs.attention_inputs.kv_cache_block_id_device =
-            torch::zeros({int(max_bs), ((max_seq_len + seq_size_per_block - 1) / seq_size_per_block)}, options3);
+            torch::zeros({int(max_bs_), ((max_seq_len_ + seq_size_per_block_ - 1) / seq_size_per_block_)}, options3);
         inputs.attention_inputs.kv_cache_block_id_host =
-            torch::zeros({int(max_bs), ((max_seq_len + seq_size_per_block - 1) / seq_size_per_block)}, options2);
-        capture_mem_hold = CaptureMemoryHold(output, inputs, kv_cache_block_offset_);
+            torch::zeros({int(max_bs_), ((max_seq_len_ + seq_size_per_block_ - 1) / seq_size_per_block_)}, options2);
+        capture_mem_hold_ = CaptureMemoryHold(output, inputs, kv_cache_block_offset_);
         init_kernel_internal_memory();
         Capture();
     } else {

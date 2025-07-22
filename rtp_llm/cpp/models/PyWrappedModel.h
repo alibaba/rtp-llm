@@ -22,21 +22,20 @@ public:
     GptModelOutputs forward(const GptModelInputs& inputs) override;
 
 private:
-    CudaGraphRunner cuda_graph_runner;
-
-    torch::Tensor k_cache_base_tensor_;
-    torch::Tensor v_cache_base_tensor_;
-    torch::Tensor k_scale_base_tensor_;
-    torch::Tensor v_scale_base_tensor_;
+    CudaGraphRunner cuda_graph_runner_;
+    py::object      py_model_;
+    torch::Tensor   k_cache_base_tensor_;
+    torch::Tensor   v_cache_base_tensor_;
+    torch::Tensor   k_scale_base_tensor_;
+    torch::Tensor   v_scale_base_tensor_;
 };
 
 // NOTE(wangyin): constructor can not be compiled correctly when placed in cc file.
 inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params, py::object py_instance):
     GptModel(params),
-    cuda_graph_runner(params.device->initParams(),
-                      std::move(py_instance),
-                      k_cache_buffer_->shape()[0] * k_cache_buffer_->shape()[1],
-                      device_) {
+    cuda_graph_runner_(
+        params.device->initParams(), py_instance, k_cache_buffer_->shape()[0] * k_cache_buffer_->shape()[1], device_),
+    py_model_(py_instance) {
     if (setenv("PYTHONUNBUFFERED", "TRUE", 1) != 0) {
         RTP_LLM_LOG_WARNING("Failed to set PYTHONUNBUFFERED environment variable on POSIX.");
     } else {
@@ -50,9 +49,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params, py::obje
         v_scale_base_tensor_ = Buffer2torchTensor(v_scale_buffer_, false);
     }
 
-    py::gil_scoped_acquire gil;
-
-    auto                            py_initialize_method = cuda_graph_runner.py_instance_.attr("initialize");
+    py::gil_scoped_acquire          gil;
+    bool                            enable_cuda_graph = params.device->initParams().hw_kernel_config.enable_cuda_graph;
     torch_ext::PyModelInitResources init_resources;
     init_resources.kv_cache.k_cache_base = k_cache_base_tensor_;
     init_resources.kv_cache.v_cache_base = v_cache_base_tensor_;
@@ -60,14 +58,22 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params, py::obje
         init_resources.kv_cache.k_scale_base = k_scale_base_tensor_;
         init_resources.kv_cache.v_scale_base = v_scale_base_tensor_;
     }
-    auto py_init_result  = py_initialize_method(init_resources);
+    py::object py_init_result;
+    if (enable_cuda_graph) {
+        auto py_initialize_method = cuda_graph_runner_.py_instance_.attr("initialize");
+        py_init_result            = py_initialize_method(init_resources);
+        cuda_graph_runner_.init_capture();
+    } else {
+        auto py_initialize_method = py_model_.attr("initialize");
+        py_init_result            = py_initialize_method(init_resources);
+    }
+
     auto py_init_success = py_init_result.cast<bool>();
     auto kv_block_offset = k_cache_buffer_->shape()[0] * k_cache_buffer_->shape()[1];
     std::cout << "attention_inputs.kv_block_offset: " << kv_block_offset << std::endl;
     if (!py_init_success) {
         throw std::runtime_error("PyWrappedModel constructor: Python model initialization failed.");
     }
-    cuda_graph_runner.init_capture();
     RTP_LLM_LOG_INFO("PyWrappedModel initialized done.");
 }
 

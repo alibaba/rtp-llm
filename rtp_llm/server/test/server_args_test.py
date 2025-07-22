@@ -83,7 +83,7 @@ class ServerArgsDefaultTest(TestCase):
         self.assertEqual(env.get("FT_DISABLE_CUSTOM_AR"), "1")
         self.assertEqual(env.get("ENABLE_MERGE_W13"), "0")
         self.assertEqual(env.get("ENABLE_CUDA_GRAPH"), "0")
-        self.assertEqual(env.get("DISABLE_PADDING"), "1")
+        self.assertEqual(env.get("ENABLE_CUDA_GRAPH_DEBUG_MODE"), "0")
 
         # 7. 采样
         self.assertEqual(env.get("MAX_BATCH_SIZE"), "0")
@@ -389,8 +389,8 @@ class ServerArgsSetTest(TestCase):
             "True",
             "--enable_cuda_graph",
             "True",
-            "--disable_padding",
-            "False",
+            "--enable_cuda_graph_debug_mode",
+            "True",
             # 7. 采样
             "--max_batch_size",
             "128",
@@ -745,7 +745,7 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env["FT_DISABLE_CUSTOM_AR"], "0")
         self.assertEqual(env["ENABLE_MERGE_W13"], "1")
         self.assertEqual(env.get("ENABLE_CUDA_GRAPH"), "1")
-        self.assertEqual(env.get("DISABLE_PADDING"), "0")
+        self.assertEqual(env.get("ENABLE_CUDA_GRAPH_DEBUG_MODE"), "1")
 
         # 7. 采样
         self.assertEqual(env["MAX_BATCH_SIZE"], "128")

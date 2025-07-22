@@ -172,10 +172,6 @@ torch::Tensor FlashInferDecodeOp::forward(const torch::Tensor&              q,
                                    0,
                                    0,
                                    (int64_t)device_->getStream());
-    // std::cout<<"normal after params->plan: \n"<<params->plan<<std::endl;
-    // std::cout<<"normal after params->page_indptr_d: \n"<<params->page_indptr_d<<std::endl;
-    // std::cout<<"normal after params->page_indice_d: \n"<<params->page_indice_d.slice(0,0,10)<<std::endl;
-    // std::cout<<"normal after params->paged_kv_last_page_len_d: \n"<<params->paged_kv_last_page_len_d<<std::endl;
     return output;
 }
 

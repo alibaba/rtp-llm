@@ -17,7 +17,7 @@ namespace rtp_llm {
 PyWrappedModel::~PyWrappedModel() {
     try {
         py::gil_scoped_acquire gil;
-        cuda_graph_runner.py_instance_.release();  // Release the Python object
+        cuda_graph_runner_.py_instance_.release();  // Release the Python object
         RTP_LLM_LOG_INFO("PyWrappedModel destroyed, Python object instance released.");
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python error during PyWrappedModel destruction: %s", e.what());
@@ -48,9 +48,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         attention_inputs.is_prefill               = !attention_inputs.sequence_lengths.size(0);
         attention_inputs.kv_block_offset          = k_cache_buffer_->shape()[0] * k_cache_buffer_->shape()[1];
         auto py_model_inputs                      = PyModelInputs({token_ids, attention_inputs});
-
         // Cast the Python object to PyModelOutputs and extract hidden states
-        auto py_model_outputs = cuda_graph_runner.forward(py_model_inputs);
+        auto py_model_outputs = cuda_graph_runner_.forward(py_model_inputs);
         // std::cout << "py_model_outputs:\n " << py_model_outputs.hidden_states << std::endl;
         auto hidden_states_tensor = py_model_outputs.hidden_states;
         auto hidden_states        = torchTensor2Buffer(hidden_states_tensor);

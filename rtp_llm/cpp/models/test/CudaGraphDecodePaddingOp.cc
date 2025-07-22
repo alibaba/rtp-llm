@@ -4,35 +4,34 @@ namespace cuda_graph {
 using namespace rtp_llm;
 
 void CudaGraphDecodePaddingOp::init(py::object py_instance) {
-    cuda_graph_runner = createCudaGraphRunner(std::move(py_instance));
+    cuda_graph_runner_ = createCudaGraphRunner(std::move(py_instance));
     // initializeResource();
-    cuda_graph_runner->init_capture();
+    cuda_graph_runner_->init_capture();
 }
 
-int CudaGraphDecodePaddingOp::get_current_real_graph_size() {
-    return cuda_graph_runner->get_current_real_graph_bs();
+int CudaGraphDecodePaddingOp::getCurrentRealGraphSize() {
+    return cuda_graph_runner_->get_current_real_graph_bs();
 }
 
 CudaGraphRunnerPtr CudaGraphDecodePaddingOp::createCudaGraphRunner(py::object py_instance) {
     DeviceInitParams params;
-    DeviceBase*      device                     = rtp_llm::DeviceFactory::getDefaultDevice();
-    params.hw_kernel_config.enable_cuda_graph   = true;
-    params.concurrency_config.concurrency_limit = 8;
-    params.hw_kernel_config.enable_cuda_graph   = true;
-    params.hw_kernel_config.disable_padding     = false;
-    params.hidden_size                          = 896;
-    params.max_seq_len                          = 64;
-    params.tokens_per_block                     = 64;
+    DeviceBase*      device                              = rtp_llm::DeviceFactory::getDefaultDevice();
+    params.hw_kernel_config.enable_cuda_graph            = true;
+    params.concurrency_config.concurrency_limit          = 8;
+    params.hw_kernel_config.enable_cuda_graph_debug_mode = false;
+    params.hidden_size                                   = 896;
+    params.max_seq_len                                   = 64;
+    params.tokens_per_block                              = 64;
     // int  layer_num                              = 24;
     // int  block_num                              = 26037;
     auto runner_ptr = std::make_shared<CudaGraphRunner>(params, std::move(py_instance), 663676, device, true);
     return runner_ptr;
 }
 
-PyModelInputs CudaGraphDecodePaddingOp::build_inputs(int64_t batch_size,
-                                                     int64_t max_seq_len,
-                                                     int64_t num_tokens_per_bs,
-                                                     int64_t seq_size_per_block) {
+PyModelInputs CudaGraphDecodePaddingOp::buildInputs(int64_t batch_size,
+                                                    int64_t max_seq_len,
+                                                    int64_t num_tokens_per_bs,
+                                                    int64_t seq_size_per_block) {
     PyModelInputs inputs;
     inputs.attention_inputs.is_prefill = false;
     // int  hidden_size                   = 896;
@@ -59,12 +58,10 @@ PyModelInputs CudaGraphDecodePaddingOp::build_inputs(int64_t batch_size,
     inputs.attention_inputs.is_prefill      = false;
     inputs.attention_inputs.dtype           = caffe2::TypeMeta::Make<c10::Half>();
     inputs.attention_inputs.kv_block_offset = 663676;
-    std::cout << "kv_cache_block_id_device addr: "
-              << reinterpret_cast<int64_t>(inputs.attention_inputs.kv_cache_block_id_device.data_ptr()) << std::endl;
     // max_bs = 8
     size_t    cu_len = batch_size + 1;
     BufferPtr cu_seqlens_buf =
-        cuda_graph_runner->device_->allocateBuffer({DataType::TYPE_INT32, {cu_len}, AllocationType::HOST});
+        cuda_graph_runner_->device_->allocateBuffer({DataType::TYPE_INT32, {cu_len}, AllocationType::HOST});
     inputs.attention_inputs.cu_seqlens = Buffer2torchTensor(cu_seqlens_buf, false);
     return inputs;
 }
@@ -74,8 +71,8 @@ PYBIND11_MODULE(libtest_cuda_graph_ops, m) {
         .def(py::init<>())
         .def("init", &CudaGraphDecodePaddingOp::init)
         .def("forward", &cuda_graph::CudaGraphDecodePaddingOp::forward)
-        .def("get_current_real_graph_size", &cuda_graph::CudaGraphDecodePaddingOp::get_current_real_graph_size)
-        .def("build_inputs", &cuda_graph::CudaGraphDecodePaddingOp::build_inputs);
+        .def("getCurrentRealGraphSize", &cuda_graph::CudaGraphDecodePaddingOp::getCurrentRealGraphSize)
+        .def("buildInputs", &cuda_graph::CudaGraphDecodePaddingOp::buildInputs);
 }
 
 }  // namespace cuda_graph
