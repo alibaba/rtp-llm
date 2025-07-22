@@ -27,5 +27,5 @@ class Embedding(nn.Module):
         output = torch.empty(
             (tokens, hidden_size), dtype=self.weight.dtype, device=input.device
         )
-        rtp_llm_ops.embedding(output, input, self.weight.data, 0)
+        rtp_llm_ops.embedding(output, input, self.weight.data)
         return output

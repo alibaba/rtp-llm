@@ -30,4 +30,10 @@ public:
 
 void registerFusedRopeKVCacheOp(const py::module& m);
 
+struct RopeParmas {
+    static inline torch::Tensor qkv;
+    static inline FMHAType      fmha_type;
+    static inline TRTAttnPtr    params;
+};
+
 }  // namespace rtp_llm

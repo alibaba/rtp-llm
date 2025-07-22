@@ -8,12 +8,14 @@
 #include <iostream>
 #include <type_traits>
 #include <vector>
+#include <ATen/cuda/CUDAContext.h>
 using namespace std;
 namespace th = torch;
 using namespace rtp_llm;
+
 namespace torch_ext {
 
-void embedding(at::Tensor& output, at::Tensor& input, at::Tensor& weight, int64_t cuda_stream) {
+void embedding(at::Tensor& output, at::Tensor& input, at::Tensor& weight) {
     CHECK_INPUT(input);
     CHECK_INPUT(weight);
     auto device = input.device();
@@ -24,9 +26,9 @@ void embedding(at::Tensor& output, at::Tensor& input, at::Tensor& weight, int64_
     const int hidden_size = weight.size(1);
     CHECK_EQ(output.size(0), tokens);
     CHECK_EQ(output.size(1), hidden_size);
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream(at::cuda::current_device()).stream();
     DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FP16(weight.scalar_type(), c_type, [&] {
-        cudaStream_t stream  = reinterpret_cast<cudaStream_t>(cuda_stream);
-        const int    vecSize = sizeof(float4) / sizeof(c_type);
+        const int vecSize = sizeof(float4) / sizeof(c_type);
         if (hidden_size % vecSize == 0) {
             invokeEmebeddingLookupVec(static_cast<c_type*>(output.data_ptr()),
                                       static_cast<const c_type*>(weight.data_ptr()),

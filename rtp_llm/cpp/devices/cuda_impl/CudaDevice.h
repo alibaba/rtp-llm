@@ -126,6 +126,7 @@ private:
                                const std::string& tp_group_name,
                                NcclParam&         nccl_param);
     bool         initDeepEPBuffer();
+    void         updateCurrentTorchStream() override;
     void         checkUseGroupGemm();
     NcclParam    getNcclParam(ParallelMode mode);
     cudaStream_t getCommStream(ParallelMode mode, bool overlap);
@@ -137,6 +138,9 @@ private:
     void completeSampleGreedy(const GreedyParams& params, const BufferPtr& transposed_tokens);
 
 public:
+    void setStream(cudaStream_t stream) {
+        stream_ = stream;
+    }
     cudaStream_t getStream() {
         return stream_;
     }

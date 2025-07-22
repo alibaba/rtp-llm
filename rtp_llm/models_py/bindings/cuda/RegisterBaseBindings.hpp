@@ -49,8 +49,7 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("k_group_num"),
                   py::arg("m"),
                   py::arg("n"),
-                  py::arg("norm_size"),
-                  py::arg("cuda_stream") = 0);
+                  py::arg("norm_size"));
 
     rtp_ops_m.def("layernorm",
                   &layernorm,
@@ -59,8 +58,7 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("input"),
                   py::arg("weight"),
                   py::arg("beta"),
-                  py::arg("eps"),
-                  py::arg("cuda_stream") = 0);
+                  py::arg("eps"));
 
     rtp_ops_m.def("fused_add_layernorm",
                   &fused_add_layernorm,
@@ -70,16 +68,10 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("bias"),
                   py::arg("weight"),
                   py::arg("beta"),
-                  py::arg("eps"),
-                  py::arg("cuda_stream") = 0);
+                  py::arg("eps"));
 
-    rtp_ops_m.def("embedding",
-                  &embedding,
-                  "Embedding lookup kernel",
-                  py::arg("output"),
-                  py::arg("input"),
-                  py::arg("weight"),
-                  py::arg("cuda_stream") = 0);
+    rtp_ops_m.def(
+        "embedding", &embedding, "Embedding lookup kernel", py::arg("output"), py::arg("input"), py::arg("weight"));
 }
 
 void registerBaseCudaBindings(py::module& rtp_ops_m) {

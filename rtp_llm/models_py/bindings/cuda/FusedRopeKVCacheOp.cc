@@ -3,7 +3,7 @@
 #include "rtp_llm/cpp/cuda/Dispatch.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
-
+#include "rtp_llm/cpp/devices/cuda_impl/CudaFlashInfer.h"
 namespace rtp_llm {
 FusedRopeKVCachePrefillOp::FusedRopeKVCachePrefillOp(const GptInitParameter& gpt_init_parameter):
     FMHACudaBase(gpt_init_parameter) {}
@@ -126,21 +126,19 @@ TRTAttnPtr FusedRopeKVCacheDecodeOp::prepare(torch_ext::PyAttentionInputs attn_i
         kv_cache_block_id_device = torchTensor2Buffer(attn_inputs.kv_cache_block_id_device);
     }
     // not support has_alibi_slopes
-
-    torch::Tensor cu_seqlens = torch::zeros({batch_size + 1}, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
-    cu_seqlens.slice(0, 1, batch_size + 1) = attn_inputs.input_lengths.cumsum(0);
-    cu_seqlens                             = cu_seqlens.cuda();
-    torch::Tensor cu_kv_seqlens            = cu_seqlens;
+    attn_inputs.cu_seqlens.slice(0, 1, batch_size + 1) = attn_inputs.input_lengths.cumsum(0);
+    auto          cu_seqlens                           = attn_inputs.cu_seqlens;
+    torch::Tensor cu_kv_seqlens                        = cu_seqlens;
     TRTAttnPtr    attn_params;
     auto          params = device_->prepareTrtAttn(
         attn_configs_, attn_inputs.kv_block_offset, kv_cache_block_id_device, attn_inputs.sequence_lengths.size(0));
-
+    RTP_LLM_CHECK_WITH_INFO(params != nullptr, "TRTAttnPtr Build Failed");
     attn_params                            = TRTAttnPtr(params, (TRTAttn*)params.get());
     attn_params->decode_plan               = true;
     attn_params->attn_type                 = torchDTypeToDataType(attn_inputs.dtype);
     attn_params->cu_seqlens                = cu_seqlens;
     attn_params->cu_kv_seqlens             = cu_kv_seqlens;
-    attn_params->sequence_lengths          = attn_inputs.sequence_lengths.cuda();
+    attn_params->sequence_lengths          = attn_inputs.sequence_lengths;
     attn_params->kv_block_array.cache_type = attn_configs_.kv_cache_dtype;
     return attn_params;
 }
@@ -168,7 +166,7 @@ torch::Tensor FusedRopeKVCacheDecodeOp::forward(const torch::Tensor&            
                                                        attn_configs_.rope_config.dim,
                                                        attn_configs_.rope_config.base,
                                                        attn_configs_.rope_config.scale);
-
+    RTP_LLM_CHECK_WITH_INFO(params->sequence_lengths.is_pinned(), "sequence_lengths is not pinned memory");
     DISPATCH_CUDA_FUNCTION_DATA_TYPE(torchDTypeToDataType(qkv.dtype()),
                                      invokeDecodeAddFusedQKVBiasTranspose,
                                      q_output.data_ptr(),
@@ -179,7 +177,7 @@ torch::Tensor FusedRopeKVCacheDecodeOp::forward(const torch::Tensor&            
                                      params->sequence_lengths.data_ptr<int>(),
                                      nullptr,  // params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias ?
                                                // params.weights.qkv_weight->bias->data() : nullptr,
-                                     // cos_sin_cache.size(0) ? cos_sin_cache.data_ptr<float>() : nullptr,
+                                               // cos_sin_cache.size(0) ? cos_sin_cache.data_ptr<float>() : nullptr,
                                      cos_sin_cache.data_ptr<float>(),
                                      batch_size,
                                      local_head_num,

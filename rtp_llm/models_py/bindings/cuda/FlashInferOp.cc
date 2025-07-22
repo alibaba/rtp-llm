@@ -136,7 +136,6 @@ torch::Tensor FlashInferDecodeOp::forward(const torch::Tensor&              q,
                                           std::optional<torch_ext::KVCache> kv_cache,
                                           const FlashInferAttnParamsPtr&    params) {
     RTP_LLM_CHECK_WITH_INFO(params != nullptr, "flash infer op should have params");
-
     const int     local_head_num = attn_configs_.head_num;
     const int     size_per_head  = attn_configs_.size_per_head;
     const int     bs             = q.size(0);
@@ -149,6 +148,11 @@ torch::Tensor FlashInferDecodeOp::forward(const torch::Tensor&              q,
         k_cache = kv_cache.value().k_cache_base;
         v_cache = kv_cache.value().v_cache_base;
     }
+
+    // std::cout<<"normal before params->plan: \n"<<params->plan<<std::endl;
+    // std::cout<<"normal before params->page_indptr_d: \n"<<params->page_indptr_d<<std::endl;
+    // std::cout<<"normal before params->page_indice_d: \n"<<params->page_indice_d.slice(0,0,10)<<std::endl;
+    // std::cout<<"normal before params->paged_kv_last_page_len_d: \n"<<params->paged_kv_last_page_len_d<<std::endl;
     BatchDecodeWithPagedKVCacheRun(params->float_workspace_d,         // float_workspace_buffer
                                    params->int_workspace_d,           // int_workspace_buffer
                                    params->plan,                      // plan_info_vec
@@ -168,6 +172,10 @@ torch::Tensor FlashInferDecodeOp::forward(const torch::Tensor&              q,
                                    0,
                                    0,
                                    (int64_t)device_->getStream());
+    // std::cout<<"normal after params->plan: \n"<<params->plan<<std::endl;
+    // std::cout<<"normal after params->page_indptr_d: \n"<<params->page_indptr_d<<std::endl;
+    // std::cout<<"normal after params->page_indice_d: \n"<<params->page_indice_d.slice(0,0,10)<<std::endl;
+    // std::cout<<"normal after params->paged_kv_last_page_len_d: \n"<<params->paged_kv_last_page_len_d<<std::endl;
     return output;
 }
 

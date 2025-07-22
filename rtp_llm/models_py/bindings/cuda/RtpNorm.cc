@@ -10,12 +10,12 @@
 #include <iostream>
 #include <type_traits>
 #include <vector>
+#include <ATen/cuda/CUDAContext.h>
 using namespace std;
 namespace th = torch;
 using namespace rtp_llm;
 namespace torch_ext {
-void layernorm(
-    at::Tensor& output, at::Tensor& input, at::Tensor& weight, at::Tensor& beta, double eps, int64_t cuda_stream) {
+void layernorm(at::Tensor& output, at::Tensor& input, at::Tensor& weight, at::Tensor& beta, double eps) {
     CHECK_INPUT(input);
     CHECK_INPUT(weight);
     auto device = input.device();
@@ -29,8 +29,8 @@ void layernorm(
     unsigned int hidden_size = input.size(1);
     CHECK_EQ(output.size(0), batch_size);
     CHECK_EQ(output.size(1), hidden_size);
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream(at::cuda::current_device()).stream();
     DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FP16(input.scalar_type(), c_type, [&] {
-        cudaStream_t stream = reinterpret_cast<cudaStream_t>(cuda_stream);
         invokeGeneralLayerNorm(static_cast<c_type*>(nullptr),
                                static_cast<c_type*>(output.data_ptr()),
                                static_cast<c_type*>(input.data_ptr()),
@@ -45,13 +45,8 @@ void layernorm(
     });
 }
 
-void fused_add_layernorm(at::Tensor& input,
-                         at::Tensor& residual,
-                         at::Tensor& bias,
-                         at::Tensor& weight,
-                         at::Tensor& beta,
-                         double      eps,
-                         int64_t     cuda_stream) {
+void fused_add_layernorm(
+    at::Tensor& input, at::Tensor& residual, at::Tensor& bias, at::Tensor& weight, at::Tensor& beta, double eps) {
     CHECK_INPUT(input);
     CHECK_INPUT(residual);
     CHECK_INPUT(bias);
@@ -70,8 +65,8 @@ void fused_add_layernorm(at::Tensor& input,
     CHECK_EQ(input.size(1), weight.size(0));
     unsigned int batch_size  = input.size(0);
     unsigned int hidden_size = input.size(1);
+    cudaStream_t stream      = at::cuda::getCurrentCUDAStream(at::cuda::current_device()).stream();
     DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FP16(input.scalar_type(), c_type, [&] {
-        cudaStream_t stream = reinterpret_cast<cudaStream_t>(cuda_stream);
         invokeGeneralAddBiasResidualLayerNorm(static_cast<c_type*>(residual.data_ptr()),
                                               static_cast<c_type*>(input.data_ptr()),
                                               static_cast<c_type*>(input.data_ptr()),

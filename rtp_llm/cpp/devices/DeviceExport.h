@@ -1,7 +1,6 @@
 #pragma once
 
 #include "rtp_llm/cpp/devices/DeviceBase.h"
-// #include "rtp_llm/cpp/devices/DeviceFactory.h"
 
 #include "torch/extension.h"
 #include <cstdio>
@@ -19,6 +18,8 @@ public:
 
     rtp_llm::DeviceType getDeviceType();
     int64_t             getDeviceId();
+
+    void updateCurrentTorchStream();
 
     virtual torch::Tensor preprocessGemmWeightByKey(const std::string& key, torch::Tensor weight) = 0;
     virtual torch::Tensor packInt8TensorToPackedInt4(torch::Tensor weight)                        = 0;

@@ -533,6 +533,22 @@ def setup_args():
     hw_kernel_group = parser.add_argument_group("硬件/Kernel 特定优化")
 
     hw_kernel_group.add_argument(
+        "--enable_cuda_graph",
+        env_name="ENABLE_CUDA_GRAPH",
+        type=str2bool,
+        default=False,
+        help="系统是否允许使用Cuda Graph",
+    )
+
+    hw_kernel_group.add_argument(
+        "--disable_padding",
+        env_name="DISABLE_PADDING",
+        type=str2bool,
+        default=True,
+        help="系统是否允许使用Cuda Graph开启Padding模式",
+    )
+
+    hw_kernel_group.add_argument(
         "--deep_gemm_num_sm",
         env_name="DEEP_GEMM_NUM_SM",
         type=int,

@@ -675,6 +675,12 @@ DeviceEventPtr CudaDevice::createTorchEvent() {
     return std::make_unique<TorchEvent>(*torch_default_stream_);
 }
 
+void CudaDevice::updateCurrentTorchStream() {
+    torch_default_stream_ =
+        std::make_unique<at::cuda::CUDAStream>(at::cuda::getCurrentCUDAStream(at::cuda::current_device()));
+    stream_ = torch_default_stream_->stream();
+}
+
 CudaEvent::CudaEvent(cudaStream_t stream): stream_(stream) {
     check_cuda_value(cudaEventCreate(&event_));
     check_cuda_value(cudaEventRecord(event_, stream));

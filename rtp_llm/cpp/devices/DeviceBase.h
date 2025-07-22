@@ -105,6 +105,7 @@ public:
     virtual DevicePrepOutput prepareModelRun(const DevicePrepParams& params);
     virtual DeviceEventPtr   createEvent();
     virtual DeviceEventPtr   createTorchEvent();
+    virtual void             updateCurrentTorchStream();
     void                     setCacheStore(std::shared_ptr<rtp_llm::CacheStore> cache_store);
 
     void writeCacheStore(const WriteCacheParams& params);

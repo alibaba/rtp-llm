@@ -44,6 +44,7 @@ class FMHAImplBase(object):
         fmha_input = self.rope_kvcache_impl.forward(
             qkv, self.fmha_type(), kv_cache, self.rope_params
         )
+        return fmha_input
         assert self.fmha_impl is not None and self.fmha_params is not None
         return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
 

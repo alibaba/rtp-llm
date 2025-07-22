@@ -17,7 +17,7 @@ namespace rtp_llm {
 PyWrappedModel::~PyWrappedModel() {
     try {
         py::gil_scoped_acquire gil;
-        py_instance_.release();  // Release the Python object
+        cuda_graph_runner.py_instance_.release();  // Release the Python object
         RTP_LLM_LOG_INFO("PyWrappedModel destroyed, Python object instance released.");
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python error during PyWrappedModel destruction: %s", e.what());
@@ -33,17 +33,12 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
     try {
         RTP_LLM_LOG_INFO("Calling forward method on Python object instance.");
 
-        if (!py_instance_ || py_instance_.is_none()) {
-            throw std::runtime_error("Python instance is not initialized.");
-        }
-
-        py::object py_forward_method = py_instance_.attr("forward");
-
         torch::Tensor token_ids = Buffer2torchTensor(inputs.combo_tokens).cuda();
 
         PyAttentionInputs attention_inputs;
-        attention_inputs.prefix_lengths   = Buffer2torchTensor(inputs.prefix_lengths);
-        attention_inputs.sequence_lengths = Buffer2torchTensor(inputs.sequence_lengths);
+        attention_inputs.prefix_lengths = Buffer2torchTensor(inputs.prefix_lengths);
+        // `sequence_lengths`: pinned memory
+        attention_inputs.sequence_lengths = Buffer2torchTensor(inputs.sequence_lengths, false);
         attention_inputs.input_lengths    = Buffer2torchTensor(inputs.input_lengths);
         auto kv_cache_block_id_device =
             device_->clone({*inputs.kv_cache_block_id, AllocationType::DEVICE, {"kv_cache_block_id"}});
@@ -54,10 +49,9 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         attention_inputs.kv_block_offset          = k_cache_buffer_->shape()[0] * k_cache_buffer_->shape()[1];
         auto py_model_inputs                      = PyModelInputs({token_ids, attention_inputs});
 
-        py::object py_outputs_obj = py_forward_method(py_model_inputs);
-
         // Cast the Python object to PyModelOutputs and extract hidden states
-        auto py_model_outputs     = py_outputs_obj.cast<PyModelOutputs>();
+        auto py_model_outputs = cuda_graph_runner.forward(py_model_inputs);
+        // std::cout << "py_model_outputs:\n " << py_model_outputs.hidden_states << std::endl;
         auto hidden_states_tensor = py_model_outputs.hidden_states;
         auto hidden_states        = torchTensor2Buffer(hidden_states_tensor);
 

@@ -321,7 +321,6 @@ class FlashInferOp:
 class GptInitParameter:
     activation_type: str
     add_bias_linear: bool
-    arpc_config: ArpcConfig
     batch_decode_scheduler_config: BatchDecodeSchedulerConfig
     block_nums: int
     cache_store_config: CacheStoreConfig
@@ -519,6 +518,8 @@ class HWKernelConfig:
     ft_disable_custom_ar: bool
     rocm_hipblaslt_config: str
     enable_merge_w13: bool
+    enable_cuda_graph: bool
+    disable_padding: bool
     def __init__(
         self,
         deep_gemm_num_sm: int = -1,
@@ -528,6 +529,8 @@ class HWKernelConfig:
         ft_disable_custom_ar: bool = True,
         rocm_hipblaslt_config: str = "gemm_config.csv",
         enable_merge_w13: bool = False,
+        enable_cuda_graph: bool = False,
+        disable_padding: bool = True,
     ) -> None: ...
     def to_string(self) -> str: ...
     def update_from_env(self) -> None: ...
@@ -572,7 +575,6 @@ class LoadBalanceInfo:
     def __init__(self) -> None: ...
 
 class MiscellaneousConfig:
-    disable_pdl: bool
     load_balance: int
     step_records_max_size: int
     step_records_time_range: int
@@ -880,8 +882,6 @@ class SpecialTokens:
     def __init__(self) -> None: ...
 
 class SpeculativeExecutionConfig:
-    force_score_context_attention: bool
-    force_stream_sample: bool
     gen_num_per_cycle: int
     sp_max_token_match: int
     sp_min_token_match: int

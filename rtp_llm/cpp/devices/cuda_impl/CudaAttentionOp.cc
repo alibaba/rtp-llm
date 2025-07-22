@@ -136,7 +136,6 @@ ParamsPtr CudaDevice::prepareTrtAttn(const AttentionConfigs& configs,
                                         max_blocks_per_batch,
                                         kv_block_offset,
                                         stream_);
-
     if (is_sm90() && fmha_type_ == FMHAType::PAGED_TRT_V2) {
         trt_attn->kv_cache_offset_h = allocateBuffer(
             {DataType::TYPE_INT32, {size_t(batch_size), 1, 2, max_blocks_per_batch}, AllocationType::HOST},

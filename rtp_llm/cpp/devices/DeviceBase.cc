@@ -138,6 +138,10 @@ DeviceEventPtr DeviceBase::createTorchEvent() {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
+void DeviceBase::updateCurrentTorchStream() {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
 void DeviceBase::setCacheStore(std::shared_ptr<rtp_llm::CacheStore> cache_store) {
     cache_store_ = cache_store;
 }

@@ -88,6 +88,7 @@ void DeviceFactory::initDevices(const GptInitParameter& params) {
     device_params.parallelism_distributed_config = params.parallelism_distributed_config;
     device_params.profile_debug_logging_config   = params.profiling_debug_logging_config;
     device_params.hw_kernel_config               = params.hw_kernel_config;
+    device_params.concurrency_config             = params.concurrency_config;
     size_t max_batch_size                        = params.max_context_batch_size_ + params.max_generate_batch_size_
                             + std::max((long)0, params.gen_num_per_circle_) * 32;
     device_params.max_seq_len = params.max_seq_len_;
@@ -161,8 +162,7 @@ unordered_map<DeviceType, DeviceCreatorType>& DeviceFactory::getRegistrationMap(
 }
 
 vector<DeviceBase*>& DeviceFactory::getCurrentDevices() {
-    static vector<DeviceBase*> devices;
-    return devices;
+    return DeviceFactory::devices;
 }
 
 DeviceBase* DeviceFactory::getDevice(DeviceType type, int device_id) {
@@ -189,10 +189,13 @@ DeviceBase* DeviceFactory::getDefaultDevice() {
 }
 
 std::shared_ptr<DeviceExporter> DeviceFactory::getDeviceExporter() {
-    const auto params       = getDefaultGlobalDeviceParams();
-    const auto registration = getRegistrationMap()[params.device_params[0].first];
-    const auto exporter     = registration.createExporter(params.device_params[0].second);
-    return std::shared_ptr<DeviceExporter>(exporter);
+    static std::shared_ptr<DeviceExporter> exporter = nullptr;
+    if (!exporter) {
+        const auto params       = getDefaultGlobalDeviceParams();
+        const auto registration = getRegistrationMap()[params.device_params[0].first];
+        exporter.reset(registration.createExporter(params.device_params[0].second));
+    }
+    return exporter;
 }
 
 void DeviceFactory::registerDevice(DeviceType type, DeviceCreatorType creator) {
@@ -213,6 +216,7 @@ void registerDeviceOps(py::module& m) {
     pybind11::class_<DeviceExporter, std::shared_ptr<DeviceExporter>>(m, "DeviceExporter")
         .def("get_device_type", &DeviceExporter::getDeviceType)
         .def("get_device_id", &DeviceExporter::getDeviceId)
+        .def("update_current_torch_stream", &DeviceExporter::updateCurrentTorchStream)
         .def("preprocess_gemm_weight_by_key",
              &DeviceExporter::preprocessGemmWeightByKey,
              py::arg("key"),

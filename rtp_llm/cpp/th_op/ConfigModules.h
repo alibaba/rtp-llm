@@ -93,6 +93,8 @@ struct HWKernelConfig {
     bool        ft_disable_custom_ar      = true;
     std::string rocm_hipblaslt_config     = "gemm_config.csv";
     bool        enable_merge_w13          = false;
+    bool        enable_cuda_graph         = false;
+    bool        disable_padding           = true;
     std::string to_string() const;
     void        update_from_env_for_test();
 };

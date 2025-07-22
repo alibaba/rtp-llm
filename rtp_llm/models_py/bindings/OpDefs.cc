@@ -30,6 +30,9 @@ void registerPyOpDefs(pybind11::module& m) {
 
     pybind11::class_<PyModelInputs>(m, "PyModelInputs")
         .def(pybind11::init<>())
+        .def(pybind11::init<torch::Tensor, PyAttentionInputs>(),
+             pybind11::arg("input_ids")        = torch::empty(0),
+             pybind11::arg("attention_inputs") = PyAttentionInputs())
         .def_readwrite("input_ids", &PyModelInputs::input_ids, "Input token IDs tensor")
         .def_readwrite("attention_inputs", &PyModelInputs::attention_inputs, "Attention inputs structure");
 

@@ -83,6 +83,7 @@ struct DeviceInitParams {
     ParallelismDistributedConfig parallelism_distributed_config;
     ProfilingDebugLoggingConfig  profile_debug_logging_config;
     ModelSpecificConfig          model_specific_config;
+    ConcurrencyConfig            concurrency_config;
 };
 
 // immutable device properties. Can not change since device is initialized.

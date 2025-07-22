@@ -27,9 +27,6 @@ namespace rtp_llm {
 using Slice          = torch::indexing::Slice;
 constexpr auto TNone = torch::indexing::None;
 
-static std::deque<FlashInferAttnParams*> DECODE_PARAMS_CACHE;
-static std::deque<FlashInferAttnParams*> PREFILL_PARAMS_CACHE;
-
 static const int MIN_CACHE_BATCH_SIZE      = 256;
 static const int MIN_CACHE_INPUT_TOKEN_NUM = 512;
 static const int MIN_CACHE_PAGE_NUM        = 48 * 1024;
@@ -38,17 +35,32 @@ bool FlashInferAttnParams::isDecode(int input_token_num) {
     return input_token_num <= MIN_CACHE_INPUT_TOKEN_NUM * 2;
 }
 
+FlashInferAttnParams* FlashInferAttnParams::retrieveCaptureParam(int input_token_num) {
+    FlashInferAttnParams* params = nullptr;
+    if (isDecode(input_token_num)) {
+        if (ParamsCache::DECODE_PARAMS_CACHE.empty()) {
+            return nullptr;
+        }
+        params = ParamsCache::DECODE_PARAMS_CACHE.back();
+        ParamsCache::DECODE_PARAMS_CACHE.pop_back();
+    } else if (!ParamsCache::PREFILL_PARAMS_CACHE.empty()) {
+        params = ParamsCache::PREFILL_PARAMS_CACHE.back();
+        ParamsCache::PREFILL_PARAMS_CACHE.pop_back();
+    }
+    return params;
+}
+
 void FlashInferAttnParams::recycle(void* p) {
     auto flashinfer = (FlashInferAttnParams*)p;
     if (isDecode(flashinfer->input_token_num)) {
-        DECODE_PARAMS_CACHE.push_back(flashinfer);
+        ParamsCache::DECODE_PARAMS_CACHE.push_back(flashinfer);
     } else {
-        PREFILL_PARAMS_CACHE.push_back(flashinfer);
+        ParamsCache::PREFILL_PARAMS_CACHE.push_back(flashinfer);
     }
 }
 
 FlashInferAttnParams* FlashInferAttnParams::get(int batch_size, int input_token_num) {
-    auto cache = isDecode(input_token_num) ? &DECODE_PARAMS_CACHE : &PREFILL_PARAMS_CACHE;
+    auto cache = isDecode(input_token_num) ? &ParamsCache::DECODE_PARAMS_CACHE : &ParamsCache::PREFILL_PARAMS_CACHE;
     if (!cache->empty()) {
         auto params = cache->back();
         cache->pop_back();
@@ -91,7 +103,6 @@ FlashInferAttnParams::create(CudaDevice* device, int batch_size, int input_token
     if (auto params = get(batch_size, input_token_num)) {
         return params;
     }
-
     RTP_LLM_LOG_DEBUG("new FlashInferAttnParams batch_size(%d) input_token_num(%d)", batch_size, input_token_num);
     auto params             = make_unique<FlashInferAttnParams>();
     params->batch_size      = batch_size;
@@ -148,7 +159,6 @@ void FlashInferAttnParams::fillFlashInfer(const BufferPtr& prefix_lengths_host,
     const int max_batch_blocks = kv_cache_block_id_host ? kv_cache_block_id_host->shape()[1] : -1;
     RTP_LLM_CHECK_WITH_INFO(
         batch_size <= this->batch_size, "batch_size exceed reserved %d > %d", batch_size, this->batch_size);
-
     auto qo_indptr              = qo_indptr_h.data_ptr<int>();
     auto page_indptr            = page_indptr_h.data_ptr<int>();
     auto batch_indice           = batch_indice_h.data_ptr<int>();
@@ -156,18 +166,16 @@ void FlashInferAttnParams::fillFlashInfer(const BufferPtr& prefix_lengths_host,
     auto paged_kv_last_page_len = paged_kv_last_page_len_h.data_ptr<int>();
     auto kvlen                  = kvlen_h.data_ptr<int>();
     auto page_indice            = page_indice_h.data_ptr<int>();
-
-    auto input_lengths     = input_lengths_host->data<int>();
-    auto sequence_lengths  = sequence_lengths_host ? sequence_lengths_host->data<int>() : nullptr;
-    auto prefix_lengths    = prefix_lengths_host ? prefix_lengths_host->data<int>() : nullptr;
-    auto kv_cache_block_id = kv_cache_block_id_host ? kv_cache_block_id_host->data<int>() : nullptr;
-
-    int offset         = 0;
-    int total_page_idx = 0;
-    qo_indptr[0]       = 0;
-    page_indptr[0]     = 0;
-    max_q_len          = 1;
-    accu_q_len         = 0;
+    auto input_lengths          = input_lengths_host->data<int>();
+    auto prefix_lengths         = prefix_lengths_host ? prefix_lengths_host->data<int>() : nullptr;
+    auto sequence_lengths       = sequence_lengths_host ? sequence_lengths_host->data<int>() : nullptr;
+    auto kv_cache_block_id      = kv_cache_block_id_host ? kv_cache_block_id_host->data<int>() : nullptr;
+    int  offset                 = 0;
+    int  total_page_idx         = 0;
+    qo_indptr[0]                = 0;
+    page_indptr[0]              = 0;
+    max_q_len                   = 1;
+    accu_q_len                  = 0;
     for (int i = 0; i < batch_size; i++) {
         int seq_len = 0;
         if (prefix_lengths) {
@@ -191,7 +199,6 @@ void FlashInferAttnParams::fillFlashInfer(const BufferPtr& prefix_lengths_host,
             seq_len         = sequence_lengths[i] + 1;
             accu_q_len += 1;
         }
-
         paged_kv_last_page_len[i] = (seq_len - 1) % tokens_per_block + 1;
         kvlen[i]                  = seq_len;
         max_kv_len                = max(seq_len, max_kv_len);
@@ -255,7 +262,8 @@ void FlashInferAttnParams::genPlan(int     batch_size,
                                    int     tokens_per_block,
                                    int     kv_lora_rank,
                                    bool    use_mla,
-                                   int64_t stream) {
+                                   int64_t stream,
+                                   bool    enable_cuda_graph) {
     if (use_mla) {
         if (mla_ops_type == MlaOpsType::FLASH_INFER) {
             plan = BatchMLAPagedAttentionPlan(float_workspace_d,
@@ -283,7 +291,7 @@ void FlashInferAttnParams::genPlan(int     batch_size,
                                                    local_head_num,     // num_qo_heads
                                                    local_head_num_kv,  // num_kv_heads
                                                    tokens_per_block,   // page_size
-                                                   false,              // enable_cuda_graph,
+                                                   enable_cuda_graph,  // enable_cuda_graph,
                                                    -1,                 // window_left
                                                    -1,                 // logits_soft_cap
                                                    size_per_head,      // head_dim_qk
@@ -291,6 +299,7 @@ void FlashInferAttnParams::genPlan(int     batch_size,
                                                    torch::empty(0, dataTypeToTorchType(dtype)),  // empty_q_data
                                                    torch::empty(0, dataTypeToTorchType(dtype)),  // empty_kv_data
                                                    stream);
+
         } else {
             plan = BatchPrefillWithKVCachePlan(
                 float_workspace_d,                                           // float_workspace_buffer
@@ -469,7 +478,7 @@ ParamsPtr FlashInferAttnParams::prepare(rtp_llm::DeviceBase*             device,
     } else {
         params->decode_plan = true;
     }
-
+    bool enable_cuda_graph = device->initParams().hw_kernel_config.enable_cuda_graph;
     params->genPlan(batch_size,
                     q_length,
                     local_head_num,
@@ -478,7 +487,8 @@ ParamsPtr FlashInferAttnParams::prepare(rtp_llm::DeviceBase*             device,
                     tokens_per_block,
                     attn_configs.kv_lora_rank,
                     attn_configs.use_mla,
-                    reinterpret_cast<int64_t>(cuda_device->getStream()));  // cuda_stream
+                    reinterpret_cast<int64_t>(cuda_device->getStream()),
+                    enable_cuda_graph);  // cuda_stream
 
     return ret;
 }

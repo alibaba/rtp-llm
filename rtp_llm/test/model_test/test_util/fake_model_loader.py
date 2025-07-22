@@ -16,9 +16,12 @@ class FakeModelLoader(object):
         model_type: str,
         tokenizer_path: str,
         ckpt_path: str,
-        weight_type: WEIGHT_TYPE,
+        weight_type: WEIGHT_TYPE = WEIGHT_TYPE.FP16,
         max_seq_len: int = 0,
         quantization: str = "",
+        load_py_model: bool = False,
+        device_reserve_memory_bytes: int = 0,
+        warm_up: bool = False,
     ) -> None:
         self.model_type = model_type
         self.tokenizer_path = tokenizer_path
@@ -26,7 +29,9 @@ class FakeModelLoader(object):
         self.weight_type = weight_type
         self.max_seq_len = max_seq_len
         self.quantization = quantization
-
+        self.load_py_model = load_py_model
+        self.device_reserve_memory_bytes = device_reserve_memory_bytes
+        self.warm_up = warm_up
         logging.info(f"tokenizer path: {self.tokenizer_path}")
         logging.info(f"check point path: {self.ckpt_path}")
 
@@ -52,6 +57,11 @@ class FakeModelLoader(object):
         )
 
         raw_config: GptInitModelParameters = model_cls.create_config(model_config)
+        raw_config.model_specific_config.load_python_model = self.load_py_model
+        raw_config.device_resource_config.device_reserve_memory_bytes = (
+            self.device_reserve_memory_bytes
+        )
+        raw_config.warm_up = self.warm_up
         raw_config.head_num = config_json.get(
             "num_attention_heads", raw_config.head_num
         )

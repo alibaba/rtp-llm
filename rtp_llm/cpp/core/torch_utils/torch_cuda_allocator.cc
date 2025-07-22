@@ -168,9 +168,7 @@ std::string TorchCudaAllocator::name() {
     return "torch_cuda_allocator";
 }
 
-void TorchCudaAllocator::releasePool(TORCH_CUDA_ALLOCATOR_INDEX_DTYPE device, at::cuda::MempoolId_t mempool_id) {
-    throw std::runtime_error("not implemented.");
-}
+void TorchCudaAllocator::releasePool(TORCH_CUDA_ALLOCATOR_INDEX_DTYPE device, at::cuda::MempoolId_t mempool_id) {}
 
 void TorchCudaAllocator::enablePeerAccess(TORCH_CUDA_ALLOCATOR_INDEX_DTYPE dev,
                                           TORCH_CUDA_ALLOCATOR_INDEX_DTYPE dev_to_access) {

@@ -15,5 +15,4 @@ void FusedQKRMSNorm(at::Tensor&   input,
                     const int64_t k_group_num,
                     const int64_t m,
                     const int64_t n,
-                    const int64_t norm_size,
-                    int64_t       stream);
+                    const int64_t norm_size);

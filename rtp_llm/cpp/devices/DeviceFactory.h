@@ -28,6 +28,7 @@ public:
 
     // This function exports default device to python world.
     static std::shared_ptr<torch_ext::DeviceExporter> getDeviceExporter();
+    static inline std::vector<DeviceBase*>            devices;
 
 private:
     static DeviceBase*                                        getDevice(DeviceType type, int device_id = 0);

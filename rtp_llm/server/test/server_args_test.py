@@ -82,6 +82,8 @@ class ServerArgsDefaultTest(TestCase):
         self.assertEqual(env.get("ROCM_HIPBLASLT_CONFIG"), "gemm_config.csv")
         self.assertEqual(env.get("FT_DISABLE_CUSTOM_AR"), "1")
         self.assertEqual(env.get("ENABLE_MERGE_W13"), "0")
+        self.assertEqual(env.get("ENABLE_CUDA_GRAPH"), "0")
+        self.assertEqual(env.get("DISABLE_PADDING"), "1")
 
         # 7. 采样
         self.assertEqual(env.get("MAX_BATCH_SIZE"), "0")
@@ -385,6 +387,10 @@ class ServerArgsSetTest(TestCase):
             "False",
             "--enable_merge_w13",
             "True",
+            "--enable_cuda_graph",
+            "True",
+            "--disable_padding",
+            "False",
             # 7. 采样
             "--max_batch_size",
             "128",
@@ -738,6 +744,8 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env["ROCM_HIPBLASLT_CONFIG"], "another_gemm_config.csv")
         self.assertEqual(env["FT_DISABLE_CUSTOM_AR"], "0")
         self.assertEqual(env["ENABLE_MERGE_W13"], "1")
+        self.assertEqual(env.get("ENABLE_CUDA_GRAPH"), "1")
+        self.assertEqual(env.get("DISABLE_PADDING"), "0")
 
         # 7. 采样
         self.assertEqual(env["MAX_BATCH_SIZE"], "128")

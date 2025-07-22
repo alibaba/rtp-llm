@@ -82,12 +82,6 @@ private:
 
     static FlashInferAttnParams* create(CudaDevice* device, int batch_size, int token_num, int page_num);
 
-    void fillFlashInfer(const BufferPtr& prefix_lengths_host,
-                        const BufferPtr& sequence_lengths_host,
-                        const BufferPtr& input_lengths_host,
-                        const BufferPtr& kv_cache_block_id_host,
-                        const int        batch_size,
-                        const int        tokens_per_block);
     void refreshFlashInferBuf(CudaDevice* device, int batch_size, int token_num);
 
     void genPlan(int     batch_size,
@@ -98,15 +92,31 @@ private:
                  int     tokens_per_block,
                  int     kv_lora_rank,
                  bool    use_mla,
-                 int64_t stream);
+                 int64_t stream,
+                 bool    enable_cuda_graph);
 
     static bool sameQLength(const BufferPtr& input_lengths_host, int context_batch_size, int& q_length);
 
-    static bool                  isDecode(int input_token_num);
+    static bool isDecode(int input_token_num);
+
+public:
     static void                  recycle(void* p);
+    void                         fillFlashInfer(const BufferPtr& prefix_lengths_host,
+                                                const BufferPtr& sequence_lengths_host,
+                                                const BufferPtr& input_lengths_host,
+                                                const BufferPtr& kv_cache_block_id_host,
+                                                const int        batch_size,
+                                                const int        tokens_per_block);
+    static FlashInferAttnParams* retrieveCaptureParam(int input_token_num);
     static FlashInferAttnParams* get(int batch_size, int input_token_num);
 };
 
 using FlashInferAttnParamsPtr = std::shared_ptr<FlashInferAttnParams>;
+
+struct ParamsCache {
+    // use inline to make sure the static params unique globally.
+    static inline std::deque<FlashInferAttnParams*> DECODE_PARAMS_CACHE;
+    static inline std::deque<FlashInferAttnParams*> PREFILL_PARAMS_CACHE;
+};
 
 }  // namespace rtp_llm

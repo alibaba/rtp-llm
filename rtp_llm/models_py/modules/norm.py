@@ -31,10 +31,14 @@ class RMSNorm(BaseNorm):
     def __init__(self, weight: torch.Tensor, eps: float = 1e-6):
         super().__init__(weight, eps)
 
-    def forward(self, hidden_states: torch.Tensor):
-        output = torch.empty_like(hidden_states)
+    def forward(
+        self, hidden_states: torch.Tensor, output: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        stream_id = torch.cuda.current_stream().cuda_stream
+        if output is None:
+            output = torch.empty_like(hidden_states)
         rtp_llm_ops.rmsnorm(
-            output, hidden_states, self.weight.data, self.variance_epsilon, 0
+            output, hidden_states, self.weight.data, self.variance_epsilon, stream_id
         )
         return output
 
@@ -56,10 +60,11 @@ class RMSResNormTorch(BaseResNorm):
         super().__init__(weight, eps)
 
     def forward(self, hidden_states: torch.Tensor, residual: torch.Tensor):
+        stream_id = torch.cuda.current_stream().cuda_stream
         hidden_states = hidden_states + residual
         output = torch.empty_like(hidden_states)
         rtp_llm_ops.rmsnorm(
-            output, hidden_states, self.weight.data, self.variance_epsilon, 0
+            output, hidden_states, self.weight.data, self.variance_epsilon, stream_id
         )
         return output
 
@@ -69,8 +74,9 @@ class RMSResNorm(BaseResNorm):
         super().__init__(weight, eps)
 
     def forward(self, hidden_states: torch.Tensor, residual: torch.Tensor):
+        stream_id = torch.cuda.current_stream().cuda_stream
         rtp_llm_ops.fused_add_rmsnorm(
-            hidden_states, residual, self.weight.data, self.variance_epsilon, 0
+            hidden_states, residual, self.weight.data, self.variance_epsilon, stream_id
         )
         return hidden_states
 
@@ -145,7 +151,6 @@ class FusedQKRMSNorm(nn.Module):
             m,
             n,
             self.size_per_head,
-            0,
         )
         return hidden_states
 
@@ -184,7 +189,11 @@ class LayerNorm(BaseLayerNorm):
     def forward(self, hidden_states: torch.Tensor):
         output = torch.empty_like(hidden_states)
         rtp_llm_ops.layernorm(
-            output, hidden_states, self.weight.data, self.beta, self.variance_epsilon, 0
+            output,
+            hidden_states,
+            self.weight.data,
+            self.beta,
+            self.variance_epsilon,
         )
         return output
 
@@ -235,6 +244,5 @@ class AddBiasResLayerNorm(BaseAddBiasResLayerNorm):
             self.weight.data,
             self.beta,
             self.variance_epsilon,
-            0,
         )
         return hidden_states

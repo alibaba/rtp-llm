@@ -38,6 +38,8 @@ struct PyAttentionInputs {
     torch::Tensor    kv_cache_block_id_device;
     caffe2::TypeMeta dtype;
     int              kv_block_offset;
+    // for `FusedRopeKVCacheDecodeOp`.
+    torch::Tensor cu_seqlens;
 };
 
 struct PyModelInputs {
