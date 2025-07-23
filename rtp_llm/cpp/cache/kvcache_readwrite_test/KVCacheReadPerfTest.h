@@ -79,7 +79,7 @@ public:
         const auto kvcache = cache_manager->kvCacheBuffer();
 
         DistStorage3FSInitParams storage_3fs_init_params;
-        storage_3fs_init_params.folder_name = "test/";
+        storage_3fs_init_params.root_dir = "test/";
         DistKvCacheInitParams dist_kvcache_init_params;
         dist_kvcache_init_params.storage_manager_params.init_params_3fs = storage_3fs_init_params;
 
@@ -119,7 +119,10 @@ public:
                     block_indices[i] = i + 1;
                 }
 
-                const auto matched_len = dist_kvcache->matchForAllRank(cache_keys, request_id, {});
+                std::map<std::string, std::string> metas;
+                metas["IGNORE_CACHE_KEY_NUM"] = "0";
+
+                const auto matched_len = dist_kvcache->matchForAllRank(cache_keys, request_id, metas);
                 if (matched_len != cache_keys.size()) {
                     RTP_LLM_LOG_ERROR("not fully match, request: %ld, cache key: %ld, matched len: %d|%lu",
                                       request_id,
@@ -129,12 +132,9 @@ public:
                     ++request_id;
                     continue;
                 }
-
-                std::map<std::string, std::string> extra_metas;
-                extra_metas["SEQ_CACHE_KEY_NUM"] = std::to_string(cache_keys.size());
-
-                RTP_LLM_LOG_INFO("read to get cache, request id: %ld, cache key num: %d", request_id, matched_len);
-                if (!dist_kvcache->get(cache_keys, block_indices, request_id, extra_metas)) {
+                
+                RTP_LLM_LOG_INFO("get cache, request id: %ld, cache key num: %d", request_id, matched_len);
+                if (!dist_kvcache->get(cache_keys, block_indices, request_id, {})) {
                     RTP_LLM_LOG_ERROR(
                         "get cache from 3fs failed, request: %ld, cache key: %ld", request_id, cache_keys.back());
                 }

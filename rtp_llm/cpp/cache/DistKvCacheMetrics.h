@@ -52,12 +52,18 @@ public:
     TIME_FIELD(match_begin_us, MatchBeginUs);
     TIME_FIELD(match_done_us, MatchDoneUs);
     TIME_COST_GETTER(MatchCostUs, match_begin_us, match_done_us);
-    PROPERTY(int64_t, cache_reuse_length, CacheReuseLength, -1);
+    PROPERTY(int64_t, cache_input_length, CacheInputLength, -1);
+    PROPERTY(int64_t, cache_match_length, CacheMatchLength, -1);
+    PROPERTY(int64_t, cache_get_length, CacheGetLength, -1);
+    PROPERTY(int64_t, cache_put_length, CachePutLength, -1);
+    PROPERTY(int64_t, cache_hit_rate, CacheHitRate, -1);
+    PROPERTY(bool, match_qps, MatchQps, false);
+    PROPERTY(bool, match_success_qps, MatchSuccessQps, false);
     PROPERTY(bool, get_cache_failed_qps, GetCacheFailedQps, false);
     PROPERTY(bool, put_cache_failed_qps, PutCacheFailedQps, false);
 
     // for all query
-    PROPERTY(int64_t, total_cache_reuse_length, TotalCacheReuseLength, -1);
+    PROPERTY(int64_t, total_cache_match_length, TotalCacheMatchLength, -1);
     PROPERTY(int64_t, total_cache_input_length, TotalCacheInputLength, -1);
     PROPERTY(float, total_cache_hit_rate, TotalCacheHitRate, -1);
 
@@ -143,11 +149,17 @@ class DistKvCacheMetricsReporter: public kmonitor::MetricsGroup {
 public:
     bool init(kmonitor::MetricsGroupManager* manager) override {
         REGISTER_METRIC(match_cost_us);
-        REGISTER_METRIC(cache_reuse_length);
+        REGISTER_METRIC(cache_input_length);
+        REGISTER_METRIC(cache_match_length);
+        REGISTER_METRIC(cache_get_length);
+        REGISTER_METRIC(cache_put_length);
+        REGISTER_METRIC(cache_hit_rate);
+        REGISTER_QPS_METRIC(match_qps);
+        REGISTER_QPS_METRIC(match_success_qps);
         REGISTER_QPS_METRIC(get_cache_failed_qps);
         REGISTER_QPS_METRIC(put_cache_failed_qps);
 
-        REGISTER_METRIC(total_cache_reuse_length);
+        REGISTER_METRIC(total_cache_match_length);
         REGISTER_METRIC(total_cache_input_length);
         REGISTER_METRIC(total_cache_hit_rate);
 
@@ -188,11 +200,17 @@ public:
     }
     void report(const kmonitor::MetricsTags* tags, DistKvCacheMetrics* metrics) {
         REPORT_METRIC(match_cost_us, MatchCostUs);
-        REPORT_METRIC(cache_reuse_length, CacheReuseLength);
+        REPORT_METRIC(cache_input_length, CacheInputLength);
+        REPORT_METRIC(cache_match_length, CacheMatchLength);
+        REPORT_METRIC(cache_get_length, CacheGetLength);
+        REPORT_METRIC(cache_put_length, CachePutLength);
+        REPORT_METRIC(cache_hit_rate, CacheHitRate);
+        REPORT_QPS_METRIC(match_qps, MatchQps);
+        REPORT_QPS_METRIC(match_success_qps, MatchSuccessQps);
         REPORT_QPS_METRIC(get_cache_failed_qps, GetCacheFailedQps);
         REPORT_QPS_METRIC(put_cache_failed_qps, PutCacheFailedQps);
 
-        REPORT_METRIC(total_cache_reuse_length, TotalCacheReuseLength);
+        REPORT_METRIC(total_cache_match_length, TotalCacheMatchLength);
         REPORT_METRIC(total_cache_input_length, TotalCacheInputLength);
         REPORT_METRIC(total_cache_hit_rate, TotalCacheHitRate);
 
@@ -233,14 +251,20 @@ public:
 
 private:
     METRIC(match_cost_us);
-    METRIC(cache_reuse_length);
+    METRIC(cache_input_length);
+    METRIC(cache_match_length);
+    METRIC(cache_get_length);
+    METRIC(cache_put_length);
+    METRIC(cache_hit_rate);
     METRIC(get_cache_cost_us);
     METRIC(put_cache_cost_us);
+    METRIC(match_qps);
+    METRIC(match_success_qps);
     METRIC(get_cache_failed_qps);
     METRIC(put_cache_failed_qps);
 
     METRIC(total_cache_hit_rate);
-    METRIC(total_cache_reuse_length);
+    METRIC(total_cache_match_length);
     METRIC(total_cache_input_length);
     METRIC(total_get_cache_cost_us);
     METRIC(total_put_cache_cost_us);

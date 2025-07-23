@@ -54,9 +54,12 @@ struct FMHAConfig {
 };
 
 struct KVCacheConfig {
-    bool        reuse_cache           = false;
-    std::string multi_task_prompt     = "";
-    std::string multi_task_prompt_str = "";
+    bool        reuse_cache              = false;
+    std::string multi_task_prompt        = "";
+    std::string multi_task_prompt_str    = "";
+    bool        enable_3fs               = false;
+    int         rpc_get_cache_timeout_ms = 5000;
+    int         rpc_put_cache_timeout_ms = 5000;
     std::string to_string() const;
     void        update_from_env_for_test();
 };

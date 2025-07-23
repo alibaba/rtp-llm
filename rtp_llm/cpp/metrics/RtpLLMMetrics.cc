@@ -323,12 +323,14 @@ void RtpLLMCacheMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCacheMe
 bool RtpLLMCacheReuseMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(match_cost_time_us, "rtp_llm_match_cost_time_us");
     REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_reuse_length, "rtp_llm_kv_cache_reuse_length");
+    REGISTER_GAUGE_MUTABLE_METRIC(gpu_reuse_length, "rtp_llm_gpu_reuse_length");
     return true;
 }
 
 void RtpLLMCacheReuseMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCacheReuseMetricsCollector* collector) {
     REPORT_MUTABLE_METRIC(match_cost_time_us, collector->match_cost_time_us);
     REPORT_MUTABLE_METRIC(kv_cache_reuse_length, collector->kv_cache_reuse_length);
+    REPORT_MUTABLE_METRIC(gpu_reuse_length, collector->gpu_reuse_length);
 }
 
 bool RtpLLMKernelMetrics::init(kmonitor::MetricsGroupManager* manager) {

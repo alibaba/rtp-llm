@@ -24,8 +24,12 @@ class StreamCacheResource {
 public:
     StreamCacheResource(GenerateStream*        stream,
                         const ResourceContext& resource_context,
-                        bool                   need_release_resource = true):
-        stream_(stream), resource_context_(resource_context), need_release_resource_(need_release_resource) {}
+                        bool                   need_release_resource = true,
+                        const std::string&     adapter_name          = ""):
+        stream_(stream),
+        resource_context_(resource_context),
+        need_release_resource_(need_release_resource),
+        adapter_name_(adapter_name) {}
     ~StreamCacheResource() {
         releaseResource();
     }
@@ -90,6 +94,7 @@ private:
     bool                 last_block_aligned_    = false;
     bool                 need_release_resource_ = true;
     int                  malloc_failed_times_   = 0;
+    const std::string    adapter_name_;
 };
 
 }  // namespace rtp_llm

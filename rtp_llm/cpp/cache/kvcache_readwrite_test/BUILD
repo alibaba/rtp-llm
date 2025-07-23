@@ -13,7 +13,14 @@ cc_binary(
         "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
         "@havenask//aios/autil:option_parser",
     ],
-    copts = [
-        "-fno-access-control"
+)
+
+cc_binary(
+    name = "storage_3fs_perf",
+    srcs = [
+        "DistStorage3FSTest.cc",
+    ],
+    deps = [
+        "//rtp_llm/cpp:storage_3fs",
     ],
 )

@@ -13,7 +13,7 @@ DistStorage3FS::DistStorage3FS(const kmonitor::MetricsReporterPtr& metrics_repor
     metrics_reporter_(metrics_reporter) {}
 
 DistStorage3FS::~DistStorage3FS() {
-    RTP_LLM_LOG_INFO("dist storage 3fs destructor");
+    RTP_LLM_LOG_INFO("DistStorage3FS destructor");
     {
         std::unique_lock<std::shared_mutex> lock(file_map_mutex_);
         file_map_.clear();
@@ -46,14 +46,18 @@ bool DistStorage3FS::init(const DistStorage3FSInitParams& init_params) {
         return false;
     }
 
-    const auto& folder_name = init_params_.folder_name;
-    if (folder_name.empty()) {
-        RTP_LLM_LOG_WARNING("init failed, 3fs folder name is empty");
+    // root dir env only used for debug
+    if (auto root_dir_env = autil::EnvUtil::getEnv("THREEFS_ROOT_DIR", std::string("")); !root_dir_env.empty()) {
+        init_params_.root_dir = root_dir_env;
+    };
+    const auto& root_dir = init_params_.root_dir;
+    if (root_dir.empty()) {
+        RTP_LLM_LOG_WARNING("init failed, 3fs root dir is empty");
         return false;
     }
-    const auto folder_path = std::filesystem::path(mountpoint) / folder_name;
-    if (!std::filesystem::exists(folder_path)) {
-        RTP_LLM_LOG_WARNING("init failed, 3fs folder path not exists: %s", folder_path.c_str());
+    const auto root_dir_path = std::filesystem::path(mountpoint) / root_dir;
+    if (!std::filesystem::exists(root_dir_path)) {
+        RTP_LLM_LOG_WARNING("init failed, 3fs root dir not exists: %s", root_dir_path.c_str());
         return false;
     }
 
@@ -77,7 +81,7 @@ bool DistStorage3FS::init(const DistStorage3FSInitParams& init_params) {
         return false;
     }
 
-    removeOldIov();
+    deleteIovShm();
 
     // read iov
     if (!initIovHandle(read_iov_handle_, init_params_.read_iov_block_size, init_params_.read_iov_size, cuda_util)) {
@@ -105,14 +109,17 @@ bool DistStorage3FS::init(const DistStorage3FSInitParams& init_params) {
         stop_report_metrics_.store(true);
     }
 
-    RTP_LLM_LOG_INFO(
-        "3fs init done, mountpoint: %s, folder name: %s", mountpoint.c_str(), init_params_.folder_name.c_str());
+    RTP_LLM_LOG_INFO("3fs init done, mountpoint: %s, root dir: %s", mountpoint.c_str(), init_params_.root_dir.c_str());
     return true;
 }
 
 bool DistStorage3FS::lookup(const DistStorage::Item& item) {
     auto file = getFile(item);
-    if (file == nullptr || !file->isExist()) {
+    if (file == nullptr) {
+        return false;
+    }
+    if (!file->isExist()) {
+        removeFile(item);
         return false;
     }
     return true;
@@ -157,7 +164,12 @@ std::shared_ptr<DistStorage3FSFile> DistStorage3FS::getFile(const DistStorage::I
         }
     }
 
-    ThreeFSFileConfig config   = {init_params_.mountpoint, item.key, write_thread_pool_, metrics_reporter_};
+    const auto filepath = makeFilepath(item.metas);
+    if (filepath.empty()) {
+        return nullptr;
+    }
+
+    ThreeFSFileConfig config   = {init_params_.mountpoint, filepath, write_thread_pool_, metrics_reporter_};
     auto              new_file = std::make_shared<DistStorage3FSFile>(config, read_iov_handle_, write_iov_handle_);
     if (read) {
         std::unique_lock<std::shared_mutex> lock(file_map_mutex_);
@@ -166,13 +178,33 @@ std::shared_ptr<DistStorage3FSFile> DistStorage3FS::getFile(const DistStorage::I
     return new_file;
 }
 
+std::string DistStorage3FS::makeFilepath(const std::map<std::string, std::string>& metas) const {
+    // kvcache filename format:
+    // /mountpoint/root_dir/biz_name/ckpt_path_hash(/lora_path_hash)/seq_size_per_block/dtype/use_mla/tp_size/tp_rank/last_cache_key
+    try {
+        const auto filepath = std::filesystem::path(init_params_.mountpoint) / init_params_.root_dir
+                              / metas.at("BIZ_NAME") / metas.at("CKPT_PATH") / metas.at("LORA_CKPT_PATH")
+                              / metas.at("SEQ_SIZE_PER_BLOCK") / metas.at("DTYPE") / metas.at("USE_MLA")
+                              / metas.at("TP_SIZE") / metas.at("TP_RANK") / metas.at("LAST_CACHE_KEY");
+        return filepath.lexically_normal().string();
+    } catch (const std::exception& e) {
+        std::ostringstream oss;
+        for (const auto& [key, value] : metas) {
+            oss << key << ":" << value << ", ";
+        }
+        RTP_LLM_LOG_WARNING(
+            "found exception when make kvcache filepath. metas: [%s], exception: [%s]", oss.str().c_str(), e.what());
+    }
+    return "";
+}
+
 void DistStorage3FS::removeFile(const DistStorage::Item& item) {
     auto                                key = item.key;
     std::unique_lock<std::shared_mutex> lock(file_map_mutex_);
     file_map_.erase(key);
 }
 
-void DistStorage3FS::removeOldIov() const {
+void DistStorage3FS::deleteIovShm() const {
     // 删除旧的 shm iov , 避免 shm 空间不够用
     namespace fs = std::filesystem;
 

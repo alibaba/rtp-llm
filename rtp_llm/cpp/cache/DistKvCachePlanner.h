@@ -9,13 +9,17 @@ class DistKvCachePlanner {
 public:
     virtual std::vector<DistStorage::Item> layout(const std::vector<int64_t>&               cache_keys,
                                                   const std::vector<int32_t>&               block_indices,
-                                                  const std::map<std::string, std::string>& metas) = 0;
+                                                  const std::map<std::string, std::string>& metas,
+                                                  bool                                      skip_iov = false) = 0;
 
     virtual bool verify(const std::vector<DistStorage::Item>&     buffers,
                         const std::vector<int64_t>&               cache_keys,
                         const std::vector<int32_t>&               block_indices,
                         const std::map<std::string, std::string>& metas,
                         int32_t                                   tp_rank) = 0;
+
+protected:
+    std::optional<std::string> generateKvCacheKey(const std::map<std::string, std::string>& metas) const;
 };
 
 class CacheManager;
@@ -31,7 +35,8 @@ public:
 public:
     std::vector<DistStorage::Item> layout(const std::vector<int64_t>&               cache_keys,
                                           const std::vector<int32_t>&               block_indices,
-                                          const std::map<std::string, std::string>& metas) override;
+                                          const std::map<std::string, std::string>& metas,
+                                          bool                                      skip_iov) override;
 
     bool verify(const std::vector<DistStorage::Item>&     buffers,
                 const std::vector<int64_t>&               cache_keys,

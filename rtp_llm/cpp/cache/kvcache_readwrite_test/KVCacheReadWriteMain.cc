@@ -34,6 +34,9 @@ int main(int argc, char* argv[]) {
 
     setenv("DEVICE_RESERVE_MEMORY_BYTES", "1073741824", 0);
     setenv("ENABLE_3FS", "0", 0);
+    setenv("BIZ_NAME", "test_biz", 0);
+    setenv("CHECKPOINT_PATH", "test_ckpt_path", 0);
+    setenv("LORA_CKPT_PATH", "test_lora_ckpt_path", 0);
 
     if (option_base.read) {
         KVCacheReadOption read_option;

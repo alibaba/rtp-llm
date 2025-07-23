@@ -101,7 +101,7 @@ public:
         fillKVCache(cache_manager, cache_config);
 
         DistStorage3FSInitParams storage_3fs_init_params;
-        storage_3fs_init_params.folder_name = "test/";
+        storage_3fs_init_params.root_dir = "test/";
         DistKvCacheInitParams dist_kvcache_init_params;
         dist_kvcache_init_params.storage_manager_params.init_params_3fs = storage_3fs_init_params;
 
@@ -142,7 +142,7 @@ public:
                     cache_keys.back() = option.last_cache_key;
                 }
 
-                RTP_LLM_LOG_DEBUG("ready to put cache, request: %ld, cache key: %lu", request_id, cache_keys.back());
+                RTP_LLM_LOG_DEBUG("put cache, request: %ld, cache key: %lu", request_id, cache_keys.back());
                 if (!dist_kvcache->put(cache_keys, block_indices, request_id, {})) {
                     RTP_LLM_LOG_ERROR(
                         "put cache to 3fs failed, request: %ld, cache key: %lu", request_id, cache_keys.back());

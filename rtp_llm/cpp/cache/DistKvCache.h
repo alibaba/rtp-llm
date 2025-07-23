@@ -12,6 +12,8 @@ class CacheManager;
 
 struct DistKvCacheInitParams {
     DistStorageManagerInitParams storage_manager_params;
+    int                          rpc_get_cache_timeout_ms;
+    int                          rpc_put_cache_timeout_ms;
 };
 
 /**
@@ -30,7 +32,7 @@ public:
 public:
     int32_t matchForAllRank(const std::vector<int64_t>&        cache_keys,
                             int64_t                            request_id,
-                            std::map<std::string, std::string> extra_metas) const;
+                            std::map<std::string, std::string> extra_metas);
 
     int32_t match(const std::vector<int64_t>&        cache_keys,
                   int64_t                            request_id,
@@ -39,7 +41,7 @@ public:
     bool getForAllRank(const std::vector<int64_t>&        cache_keys,
                        const std::vector<int32_t>&        block_indices,
                        int64_t                            request_id,
-                       std::map<std::string, std::string> extra_metas);
+                       std::map<std::string, std::string> extra_metas) const;
 
     bool get(const std::vector<int64_t>&        cache_keys,
              const std::vector<int32_t>&        block_indices,
@@ -55,6 +57,8 @@ public:
              const std::vector<int32_t>&        block_indices,
              int64_t                            request_id,
              std::map<std::string, std::string> extra_metas) const;
+
+    bool initDefaultMetas(const DistStorage3FSInitParams& storage_3fs_init_params);
 
 private:
     enum OpType {
@@ -79,7 +83,7 @@ private:
     std::unique_ptr<DistStorageManager> storage_;
     std::shared_ptr<RPCPool>            rpc_pool_;
 
-    std::atomic<int64_t> total_matched_len_{0};
+    std::atomic<int64_t> total_match_len_{0};
     std::atomic<int64_t> total_input_len_{0};
 };
 

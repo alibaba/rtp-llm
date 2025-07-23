@@ -22,13 +22,14 @@ public:
 private:
     std::shared_ptr<threefs::DistStorage3FSFile> getFile(const DistStorage::Item& item, bool read = true);
     void                                         removeFile(const DistStorage::Item& item);
+    std::string                                  makeFilepath(const std::map<std::string, std::string>& metas) const;
 
     bool initIovHandle(threefs::ThreeFSIovHandle&                       handle,
                        size_t                                           iov_block_size,
                        size_t                                           iov_size,
                        const std::shared_ptr<threefs::ThreeFSCudaUtil>& cuda_util);
     void releaseIovHandle(threefs::ThreeFSIovHandle& handle);
-    void removeOldIov() const;
+    void deleteIovShm() const;
 
     struct hf3fs_iov* createIov(const std::string& mountpoint, size_t iov_size, size_t iov_block_size) const;
     void              releaseIov(struct hf3fs_iov* iov) const;

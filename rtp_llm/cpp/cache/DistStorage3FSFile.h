@@ -77,9 +77,9 @@ private:
                          std::shared_ptr<DistKvCacheMetrics>   metrics) const;
 
     bool doRead(const std::shared_ptr<ThreeFSHandle>& handle,
-                const std::vector<DistStorage::Iov>&  iovs,
+                int64_t                               file_offset,
                 size_t                                read_total_len,
-                std::shared_ptr<DistKvCacheMetrics>   metrics);
+                std::shared_ptr<DistKvCacheMetrics>   metrics) const;
     bool submitAndWaitForReadIos(const std::shared_ptr<ThreeFSHandle>& handle, int32_t submit_io_count) const;
 
     std::shared_ptr<ThreeFSHandle>

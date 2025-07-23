@@ -25,7 +25,7 @@ void StreamCacheResource::freeBatchBlocks(size_t batch_id, vector<int>& blocks) 
             loss = rtp_llm::buffer2vector<float>(*(stream_->getLoss()));
         }
         // TODO(xinfei.sxf) 一些场景调用了cancel的地方，是否应该free with cache
-        CacheManager::FreeInfo free_info(stream_->streamId(), tokens_id, cache_keys, blocks, loss);
+        CacheManager::FreeInfo free_info(stream_->streamId(), tokens_id, cache_keys, blocks, loss, adapter_name_);
         resource_context_.cache_manager->freeWithCache(free_info);
     } else {
         resource_context_.cache_manager->free(blocks);
@@ -103,7 +103,7 @@ absl::StatusOr<int> StreamCacheResource::initKVBlock(int token_capacity, size_t 
         auto mm_bounds_vec     = stream_->multimodalIntervals();
         // TODO(xinfei.sxf) fix need loss param
         CacheManager::AdvancedMallocInfo malloc_info(
-            stream_->streamId(), common_tokens_vec, common_cache_keys, mm_bounds_vec);
+            stream_->streamId(), common_tokens_vec, common_cache_keys, mm_bounds_vec, false, false, adapter_name_);
         auto match_info = resource_context_.cache_manager->mallocWithCache(malloc_info);
         if (stream_->calculateLoss() && match_info.loss.empty()) {
             match_info = CacheManager::MatchInfo{0, {}, {}};

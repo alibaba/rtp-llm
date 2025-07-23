@@ -504,7 +504,6 @@ class GptInitParameter:
     worker_grpc_addrs: list[str]
     worker_port_offset: int
     world_size: int
-    enable_3fs: bool
     def __init__(
         self,
         head_num: int,
@@ -562,11 +561,17 @@ class KVCacheConfig:
     multi_task_prompt: str
     multi_task_prompt_str: str
     reuse_cache: bool
+    enable_3fs: bool
+    rpc_get_cache_timeout_ms: int
+    rpc_put_cache_timeout_ms: int
     def __init__(
         self,
         reuse_cache: bool = False,
         multi_task_prompt: str = "",
         multi_task_prompt_str: str = "",
+        enable_3fs: bool = False
+        rpc_get_cache_timeout_ms: int = 5000,
+        rpc_put_cache_timeout_ms: int = 5000,
     ) -> None: ...
     def to_string(self) -> str: ...
     def update_from_env(self) -> None: ...

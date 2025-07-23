@@ -396,6 +396,27 @@ def setup_args():
         default=0,
         help="在测试时强制指定BLOCK的数量",
     )
+    kv_cache_group.add_argument(
+        "--enable_3fs",
+        env_name="ENABLE_3FS",
+        type=str2bool,
+        default=False,
+        help="是否启用 3FS 存储 KVCache. 打开此开关需要先打开 REUSE_CACHE",
+    )
+    kv_cache_group.add_argument(
+        "--rpc_get_cache_timeout_ms",
+        env_name="RPC_GET_CACHE_TIMEOUT_MS",
+        type=int,
+        default=5000,
+        help="所有 RANK 从远端拉取 KVCache 的超时时间, 单位为毫秒",
+    )
+    kv_cache_group.add_argument(
+        "--rpc_put_cache_timeout_ms",
+        env_name="RPC_PUT_CACHE_TIMEOUT_MS",
+        type=int,
+        default=5000,
+        help="所有 RANK 向远端存储 KVCache 的超时时间, 单位为毫秒",
+    )
 
     ##############################################################################################################
     # Profiling、Debugging、Logging
@@ -1630,18 +1651,6 @@ def setup_args():
         type=str2bool,
         default=False,
         help="是否禁用PDL",
-    )
-
-    ##############################################################################################################
-    # 3FS 配置
-    ##############################################################################################################
-    threefs_group = parser.add_argument_group("3FS")
-    threefs_group.add_argument(
-        "--enable_3fs",
-        env_name="ENABLE_3FS",
-        type=str2bool,
-        default=False,
-        help="是否启用 3FS 管理 KVCache",
     )
 
     ##############################################################################################################

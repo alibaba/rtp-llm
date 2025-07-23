@@ -51,6 +51,7 @@ class ServerArgsDefaultTest(TestCase):
         self.assertEqual(env.get("KV_CACHE_MEM_MB"), "-1")
         # self.assertIsNone(env.get("SEQ_SIZE_PER_BLOCK"))
         self.assertEqual(env.get("TEST_BLOCK_NUM"), "0")
+        self.assertEqual(env["ENABLE_3FS"], "0")
 
         # 5. Profiling、Debugging、Logging
         self.assertEqual(env.get("RTP_LLM_TRACE_MEMORY"), "0")
@@ -328,6 +329,8 @@ class ServerArgsSetTest(TestCase):
             "64",
             "--test_block_num",
             "128",
+            "--enable_3fs",
+            "True",
             # 5. Profiling、Debugging、Logging
             "--trace_memory",
             "True",
@@ -704,6 +707,7 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env["KV_CACHE_MEM_MB"], "2048")
         self.assertEqual(env["SEQ_SIZE_PER_BLOCK"], "64")
         self.assertEqual(env["TEST_BLOCK_NUM"], "128")
+        self.assertEqual(env["ENABLE_3FS"], "1")
 
         # 5. Profiling、Debugging、Logging
         self.assertEqual(env["RTP_LLM_TRACE_MEMORY"], "1")

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <optional>
+
 #include "kmonitor/client/MetricsReporter.h"
 
 namespace rtp_llm {
@@ -13,9 +15,9 @@ public:
 
     struct Iov {
         std::shared_ptr<void> data;
-        size_t                len = 0;
-        int64_t               offset;  // used for 3fs read/write
-        bool                  gpu_mem = true;
+        size_t                len{0};
+        bool                  gpu_mem{true};
+        bool                  ignore{false};
     };
 
     struct Item {
@@ -55,7 +57,7 @@ struct DistStorage3FSInitParams {
     size_t write_iov_size       = 1ULL << 32;  // 4GB
 
     std::string mountpoint{"/3fs/stage/3fs/"};
-    std::string folder_name{"rtp_llm/"};
+    std::string root_dir{"rtp_llm/"};
 };
 
 struct DistStorageManagerInitParams {

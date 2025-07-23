@@ -157,22 +157,31 @@ void register_fmha_config(pybind11::module& m) {
 
 // KVCacheConfig
 void KVCacheConfig::update_from_env_for_test() {
-    reuse_cache           = bool_from_env_for_test("REUSE_CACHE", false);
-    multi_task_prompt     = autil::EnvUtil::getEnv("MULTI_TASK_PROMPT", "");
-    multi_task_prompt_str = autil::EnvUtil::getEnv("MULTI_TASK_PROMPT_STR", "");
+    reuse_cache              = bool_from_env_for_test("REUSE_CACHE", false);
+    multi_task_prompt        = autil::EnvUtil::getEnv("MULTI_TASK_PROMPT", "");
+    multi_task_prompt_str    = autil::EnvUtil::getEnv("MULTI_TASK_PROMPT_STR", "");
+    enable_3fs               = bool_from_env_for_test("ENABLE_3FS", false);
+    rpc_get_cache_timeout_ms = autil::EnvUtil::getEnv("RPC_GET_CACHE_TIMEOUT_MS", 5000);
+    rpc_put_cache_timeout_ms = autil::EnvUtil::getEnv("RPC_PUT_CACHE_TIMEOUT_MS", 5000);
 }
 
 void register_kvcache_config(pybind11::module& m) {
     pybind11::class_<KVCacheConfig>(m, "KVCacheConfig")
-        .def(pybind11::init<bool, std::string, std::string>(),
-             pybind11::arg("reuse_cache")           = false,
-             pybind11::arg("multi_task_prompt")     = "",
-             pybind11::arg("multi_task_prompt_str") = "")
+        .def(pybind11::init<bool, std::string, std::string, bool, int, int>(),
+             pybind11::arg("reuse_cache")              = false,
+             pybind11::arg("multi_task_prompt")        = "",
+             pybind11::arg("multi_task_prompt_str")    = "",
+             pybind11::arg("enable_3fs")               = false,
+             pybind11::arg("rpc_get_cache_timeout_ms") = 5000,
+             pybind11::arg("rpc_put_cache_timeout_ms") = 5000)
         .def("to_string", &KVCacheConfig::to_string)
         .def("update_from_env", &KVCacheConfig::update_from_env_for_test)
         .def_readwrite("reuse_cache", &KVCacheConfig::reuse_cache)
         .def_readwrite("multi_task_prompt", &KVCacheConfig::multi_task_prompt)
-        .def_readwrite("multi_task_prompt_str", &KVCacheConfig::multi_task_prompt_str);
+        .def_readwrite("multi_task_prompt_str", &KVCacheConfig::multi_task_prompt_str)
+        .def_readwrite("enable_3fs", &KVCacheConfig::enable_3fs)
+        .def_readwrite("rpc_get_cache_timeout_ms", &KVCacheConfig::rpc_get_cache_timeout_ms)
+        .def_readwrite("rpc_put_cache_timeout_ms", &KVCacheConfig::rpc_put_cache_timeout_ms);
 }
 
 // ProfilingDebugLoggingConfig
@@ -615,7 +624,10 @@ inline std::string KVCacheConfig::to_string() const {
     std::ostringstream oss;
     oss << "reuse_cache: " << reuse_cache << "\n"
         << "multi_task_prompt: " << multi_task_prompt << "\n"
-        << "multi_task_prompt_str: " << multi_task_prompt_str << "\n";
+        << "multi_task_prompt_str: " << multi_task_prompt_str << "\n"
+        << "enable_3fs: " << enable_3fs << "\n"
+        << "rpc_get_cache_timeout_ms: " << rpc_get_cache_timeout_ms << "\n"
+        << "rpc_put_cache_timeout_ms: " << rpc_put_cache_timeout_ms;
     return oss.str();
 }
 

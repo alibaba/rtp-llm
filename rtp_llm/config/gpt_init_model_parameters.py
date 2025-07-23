@@ -393,7 +393,6 @@ class GptInitModelParameters:
     world_size: int
     role_type: RoleType
     quant_config: QuantizationConfig
-    enable_3fs: bool
 
     batch_decode_scheduler_config: BatchDecodeSchedulerConfig
     cache_store_config: CacheStoreConfig
@@ -597,6 +596,9 @@ class GptInitModelParameters:
             reuse_cache=get_env_bool("REUSE_CACHE", False),
             multi_task_prompt=get_env_str("MULTI_TASK_PROMPT"),
             multi_task_prompt_str=get_env_str("MULTI_TASK_PROMPT_STR"),
+            enable_3fs=get_env_bool("ENABLE_3FS", False),
+            rpc_get_cache_timeout_ms=int(os.environ.get("RPC_GET_CACHE_TIMEOUT_MS", 5000)),
+            rpc_put_cache_timeout_ms=int(os.environ.get("RPC_PUT_CACHE_TIMEOUT_MS", 5000)),
         )
 
         # ProfilingDebugLoggingConfig
@@ -753,9 +755,6 @@ class GptInitModelParameters:
             queueNum=get_env_int("ARPC_QUEUE_NUM", 50),
             ioThreadNum=get_env_int("ARPC_IO_THREAD_NUM", 2),
         )
-
-        # 3FS
-        self.gpt_init_params.enable_3fs = get_env_bool("ENABLE_3FS", False)
 
         # PD Seperation
         self.decode_entrance = get_env_bool("DECODE_ENTRANCE", False)

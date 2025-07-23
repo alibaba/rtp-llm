@@ -61,15 +61,17 @@ public:
         AdvancedMallocInfo(int64_t                                  request_id,
                            const std::vector<int32_t>&              token_ids,
                            const std::vector<int64_t>&              cache_keys,
-                           const std::vector<std::vector<int32_t>>& mm_bounds = {},
-                           bool                                     need_loss = false,
-                           bool                                     verbose   = false):
+                           const std::vector<std::vector<int32_t>>& mm_bounds    = {},
+                           bool                                     need_loss    = false,
+                           bool                                     verbose      = false,
+                           const std::string                        adapter_name = ""):
             request_id(request_id),
             token_ids(token_ids),
             cache_keys(cache_keys),
             mm_bounds(mm_bounds),
             need_loss(need_loss),
-            verbose(verbose) {}
+            verbose(verbose),
+            adapter_name(adapter_name) {}
 
         int64_t                                 request_id;
         const std::vector<int32_t>&             token_ids;
@@ -77,6 +79,7 @@ public:
         const std::vector<std::vector<int32_t>> mm_bounds = {};
         bool                                    need_loss = false;
         bool                                    verbose   = false;
+        const std::string                       adapter_name;
     };
 
     struct FreeInfo {
@@ -84,12 +87,14 @@ public:
                  const std::vector<int32_t>& token_ids,
                  const std::vector<int64_t>& cache_keys,
                  const std::vector<int32_t>& block_indices,
-                 const std::vector<float>    loss = {}):
+                 const std::vector<float>    loss         = {},
+                 const std::string           adapter_name = ""):
             request_id(request_id),
             token_ids(token_ids),
             cache_keys(cache_keys),
             block_indices(block_indices),
-            loss(loss) {}
+            loss(loss),
+            adapter_name(adapter_name) {}
 
         int64_t                     request_id;
         const std::vector<int32_t>& token_ids;
@@ -97,6 +102,7 @@ public:
         const std::vector<int32_t>& block_indices;
         const std::vector<float>    loss;
         bool                        is_resident = false;
+        const std::string           adapter_name;
     };
 
 public:
@@ -183,11 +189,13 @@ protected:
 
 private:
     bool initDistKvCache();
-    BlockCache::MatchResult
-         matchInDistKvCache(const std::vector<int64_t>& cache_keys, int32_t seq_cache_key_num, int64_t request_id);
+    void matchInDistKvCache(const AdvancedMallocInfo& malloc_info, BlockCache::MatchResult& match_result);
     bool putCacheForAllRank(const std::vector<int64_t>& cache_keys,
                             const std::vector<int32_t>& block_indices,
-                            int64_t                     request_id) const;
+                            int64_t                     request_id,
+                            const std::string&          adapter_name) const;
+    std::map<std::string, std::string> getLoraInfo() const;
+    std::string                        getLoraCkptPath(const std::string& adapter_name) const;
 
 protected:
     CacheConfig          config_;
@@ -212,10 +220,10 @@ protected:
 
     std::mutex mutex_;
 
-    const GptInitParameter       params_;
-    bool                         enable_dist_kvcache_{true};
-    bool                         enable_3fs_{true};
-    std::unique_ptr<DistKvCache> dist_kvcache_;
+    const GptInitParameter             params_;
+    std::map<std::string, std::string> lora_info_map_;
+    bool                               enable_dist_kvcache_{false};
+    std::unique_ptr<DistKvCache>       dist_kvcache_;
 };
 
 typedef std::shared_ptr<CacheManager> CacheManagerPtr;
