@@ -29,6 +29,10 @@ void embedding(at::Tensor& output, at::Tensor& input, at::Tensor& weight) {
     cudaStream_t stream = at::cuda::getCurrentCUDAStream(at::cuda::current_device()).stream();
     DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FP16(weight.scalar_type(), c_type, [&] {
         const int vecSize = sizeof(float4) / sizeof(c_type);
+        // std::cout << "vecSize: " << vecSize << ", weight shape: " << weight.sizes() << std::endl;
+        // std::cout << "tokens: " << tokens << std::endl;
+        // std::cout << "hidden_size: " << hidden_size << std::endl;
+        // std::cout << "input: " << input << std::endl;
         if (hidden_size % vecSize == 0) {
             invokeEmebeddingLookupVec(static_cast<c_type*>(output.data_ptr()),
                                       static_cast<const c_type*>(weight.data_ptr()),

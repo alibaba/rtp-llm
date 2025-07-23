@@ -65,6 +65,7 @@ void CudaGraphRunner::capture() {
 
 void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
     auto py_model_inputs_ = graph_instances_[current_real_graph_bs_].mem_hold_.py_model_inputs_;
+    py_model_inputs_.input_ids.fill_(0);
     py_model_inputs_.input_ids.slice(0, 0, current_batch_size_ * num_tokens_per_bs_) = inputs.input_ids;
     py_model_inputs_.attention_inputs.input_lengths.slice(0, 0, current_batch_size_) =
         inputs.attention_inputs.input_lengths;
@@ -75,7 +76,6 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
     // pinned memory
     inputs.attention_inputs.cu_seqlens =
         py_model_inputs_.attention_inputs.cu_seqlens.slice(0, 0, current_batch_size_ + 1);
-
     graph_instances_[current_real_graph_bs_].mem_hold_.params_->fillFlashInfer(
         nullptr,
         torchTensor2Buffer(inputs.attention_inputs.sequence_lengths),

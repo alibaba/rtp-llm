@@ -40,8 +40,16 @@ PyModelInputs CudaGraphDecodePaddingOp::buildInputs(int64_t batch_size,
     int  max_num_token = batch_size * num_tokens_per_bs;
     auto options2      = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
     auto options3      = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
+    RTP_LLM_LOG_INFO(
+        "buildInputs check, batch_size: %d, max_seq_len: %d, num_tokens_per_bs: %d, seq_size_per_block: %d, max_num_token: %d",
+        batch_size,
+        max_seq_len,
+        num_tokens_per_bs,
+        seq_size_per_block,
+        max_num_token);
     // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
     inputs.input_ids = torch::zeros({max_num_token}, options3);
+    RTP_LLM_LOG_INFO("build input_ids shapes: %d\n", inputs.input_ids.sizes());
     // prefix_lengths [batch_size, int32] (for attention `prepare`)
     inputs.attention_inputs.prefix_lengths = torch::empty(0);
     // input_lengths [batch_size, int32] (decode only)
