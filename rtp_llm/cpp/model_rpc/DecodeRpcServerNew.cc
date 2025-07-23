@@ -45,7 +45,7 @@ bool DecodeRpcServerNew::initLoadBalancer() {
     init_params.update_interval_ms      = 100;
     init_params.sync_status_interval_ms = maga_init_params_.gpt_init_parameter.sync_status_interval_ms_;
 
-    if (std::getenv("USE_LOCAL")) {
+    if (maga_init_params_.gpt_init_parameter.service_discovery_config.use_local) {
         char* remote_rpc_server_ip_env = std::getenv("REMOTE_RPC_SERVER_IP");
         RTP_LLM_CHECK_WITH_INFO(remote_rpc_server_ip_env, "rpc server ip must be not empty");
 
