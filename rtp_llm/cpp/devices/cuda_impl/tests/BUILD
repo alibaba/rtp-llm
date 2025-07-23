@@ -361,5 +361,5 @@ py_test(
         # "TORCH_USE_CUDA_DSA" : "1"
     },
     exec_properties = {'gpu':'A10'},
-    tags = ["manual"],
+    # tags = ["manual"],
 )
