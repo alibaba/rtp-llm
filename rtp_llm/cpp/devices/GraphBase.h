@@ -6,7 +6,8 @@ namespace rtp_llm {
 using namespace torch_ext;
 class GraphBase {
 public:
-    GraphBase(py::object py_instance): py_instance_(py_instance) {}
+    GraphBase(py::object py_instance): py_instance_(std::move(py_instance)) {}
+    virtual ~GraphBase() {}
     virtual void           capture()                            = 0;
     virtual void           captureOneBatchSize(int bs)          = 0;
     virtual void           prepareInputs(PyModelInputs& inputs) = 0;

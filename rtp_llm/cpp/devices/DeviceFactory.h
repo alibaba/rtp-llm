@@ -14,11 +14,11 @@ struct GlobalDeviceParams {
 
 DeviceType getDeviceType(const std::string& device_name);
 
-using GraphCreatorFunc = std::function<std::shared_ptr<GraphBase>(const DeviceInitParams& params,
-                                                                  py::object              py_instance,
-                                                                  int                     kv_cache_block_offset,
-                                                                  DeviceBase*             device,
-                                                                  bool                    in_test)>;
+using GraphCreatorFunc = std::function<GraphBase*(const DeviceInitParams& params,
+                                                  py::object              py_instance,
+                                                  int                     kv_cache_block_offset,
+                                                  DeviceBase*             device,
+                                                  bool                    in_test)>;
 
 class DeviceCreatorType {
 public:
@@ -35,7 +35,7 @@ public:
     static void        registerGraphRunner(DeviceType type, GraphCreatorFunc graph_creator_func);
     // This function exports default device to python world.
     static std::shared_ptr<torch_ext::DeviceExporter> getDeviceExporter();
-    static std::shared_ptr<GraphBase>                 getDeviceGraphRunner(const DeviceInitParams& params,
+    static GraphBase*                                 getDeviceGraphRunner(const DeviceInitParams& params,
                                                                            py::object              py_instance,
                                                                            int                     kv_cache_block_offset,
                                                                            DeviceBase*             device,
@@ -76,7 +76,7 @@ void registerDeviceOps(py::module& m);
                                                int                     kv_cache_block_offset,                    \
                                                DeviceBase*             device,                                   \
                                                bool                    in_test) {                                                   \
-                                               return std::make_shared<type##GraphRunner>(                       \
+                                               return new type##GraphRunner(                                     \
                                                    params, py_instance, kv_cache_block_offset, device, in_test); \
                                            }});                                                                  \
         return true;                                                                                             \

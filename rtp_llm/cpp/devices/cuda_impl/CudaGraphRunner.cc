@@ -140,7 +140,7 @@ std::vector<int> CudaGraphRunner::getBatchSizesToCapture(int concurrency_limit) 
     RTP_LLM_LOG_INFO("max_generate_batch_size for cuda graph: %d", max_generate_batch_size);
     // Add range 1 to 32 (inclusive)
     int step = in_test_ ? 2 : 1;
-    for (int i = 1; i <= std::min(32, 1); i += step) {
+    for (int i = 1; i <= std::min(32, concurrency_limit); i += step) {
         capture_bs.push_back(i);
     }
     // Add range from 48 to max_generate_batch_size (exclusive), stepping by 16

@@ -357,7 +357,7 @@ py_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
         "HACK_LAYER_NUM" : "1",
-        # "CUDA_LAUNCH_BLOCKING" : "1",
+        "CUDA_LAUNCH_BLOCKING" : "1",
         # "TORCH_USE_CUDA_DSA" : "1"
     },
     exec_properties = {'gpu':'A10'},

@@ -21,23 +21,16 @@ public:
     GptModelOutputs forward(const GptModelInputs& inputs) override;
 
 private:
-    std::shared_ptr<GraphBase> graph_runner_;
-    py::object                 py_model_;
-    torch::Tensor              k_cache_base_tensor_;
-    torch::Tensor              v_cache_base_tensor_;
-    torch::Tensor              k_scale_base_tensor_;
-    torch::Tensor              v_scale_base_tensor_;
+    GraphBase*    graph_runner_;
+    py::object    py_model_;
+    torch::Tensor k_cache_base_tensor_;
+    torch::Tensor v_cache_base_tensor_;
+    torch::Tensor k_scale_base_tensor_;
+    torch::Tensor v_scale_base_tensor_;
 };
 
 // NOTE(wangyin): constructor can not be compiled correctly when placed in cc file.
-inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params, py::object py_instance):
-    GptModel(params),
-    graph_runner_(DeviceFactory::getDeviceGraphRunner(params.device->initParams(),
-                                                      py_instance,
-                                                      k_cache_buffer_->shape()[0] * k_cache_buffer_->shape()[1],
-                                                      device_,
-                                                      false)),
-    py_model_(py_instance) {
+inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params, py::object py_instance): GptModel(params) {
     if (setenv("PYTHONUNBUFFERED", "TRUE", 1) != 0) {
         RTP_LLM_LOG_WARNING("Failed to set PYTHONUNBUFFERED environment variable on POSIX.");
     } else {
@@ -62,10 +55,16 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params, py::obje
     }
     py::object py_init_result;
     if (enable_cuda_graph) {
+        graph_runner_             = DeviceFactory::getDeviceGraphRunner(params.device->initParams(),
+                                                            std::move(py_instance),
+                                                            k_cache_buffer_->shape()[0] * k_cache_buffer_->shape()[1],
+                                                            device_,
+                                                            false);
         auto py_initialize_method = graph_runner_->py_instance_.attr("initialize");
         py_init_result            = py_initialize_method(init_resources);
         graph_runner_->initCapture();
     } else {
+        py_model_                 = std::move(py_instance);
         auto py_initialize_method = py_model_.attr("initialize");
         py_init_result            = py_initialize_method(init_resources);
     }

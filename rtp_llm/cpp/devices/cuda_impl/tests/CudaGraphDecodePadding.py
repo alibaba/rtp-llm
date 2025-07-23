@@ -5,7 +5,9 @@ import unittest
 import torch
 from numpy import append
 
-from rtp_llm.cpp.models.test.libtest_cuda_graph_ops import CudaGraphDecodePaddingOp
+from rtp_llm.cpp.devices.cuda_impl.tests.libtest_cuda_graph_ops import (
+    CudaGraphDecodePaddingOp,
+)
 
 # from rtp_llm.ops.libth_transformer import PyModelInputs
 from rtp_llm.models_py.model_desc.module_base import (  # load libth_transformer by default
@@ -58,7 +60,7 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
 
     def test_bacth_decode(self):
         # batch_range = append(range(0,33) ,[37, 47, 48, 55, 64, 76, 80, 87, 96, 102, 112, 125, 128])
-        # batch_range = [1, 2, 3, 4, 5, 6, 7, 8]
+        # batch_range = [1, 2, 3, 4, 5, 6, 7]
         batch_range = [1]
         for bs in batch_range:
             self._test_single(bs)

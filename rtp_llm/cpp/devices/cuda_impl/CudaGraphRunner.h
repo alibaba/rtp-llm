@@ -34,11 +34,15 @@ public:
         py_forward_method_ = py_instance_.attr("forward");
     }
     ~CudaGraphRunner() {
-        for (auto& element : graph_instances_) {
-            GraphInstance& instance = element.second;
-            RTP_LLM_CHECK_WITH_INFO(instance.mem_hold_.params_ != nullptr, "cuda graph instance params_ can't be null");
-            delete instance.mem_hold_.params_;
-        }
+        RTP_LLM_LOG_INFO("Release CudaGraphRunner .....");
+        py::gil_scoped_acquire gil;
+        py_instance_.release();
+        // for (auto& element : graph_instances_) {
+        //     GraphInstance& instance = element.second;
+        //     RTP_LLM_CHECK_WITH_INFO(instance.mem_hold_.params_ != nullptr, "cuda graph instance params_ can't be
+        //     null"); delete instance.mem_hold_.params_;
+        // }
+        RTP_LLM_LOG_INFO("Release CudaGraphRunner Successfully");
     }
     void           capture() override;
     void           captureOneBatchSize(int bs) override;

@@ -1,5 +1,4 @@
 #include "rtp_llm/cpp/devices/cuda_impl/tests/CudaGraphDecodePaddingOp.h"
-#include "rtp_llm/cpp/cache/CacheManager.h"
 namespace cuda_graph {
 using namespace rtp_llm;
 
@@ -24,8 +23,9 @@ CudaGraphRunnerPtr CudaGraphDecodePaddingOp::createCudaGraphRunner(py::object py
     params.tokens_per_block                              = 64;
     // int  layer_num                              = 24;
     // int  block_num                              = 26037;
-    auto runner_ptr = std::make_shared<CudaGraphRunner>(params, std::move(py_instance), 663676, device, true);
-    return runner_ptr;
+    auto runner_ptr = DeviceFactory::getDeviceGraphRunner(params, std::move(py_instance), 663676, device, true);
+    CudaGraphRunnerPtr cuda_graph_runner_ptr = dynamic_cast<CudaGraphRunner*>(runner_ptr);
+    return cuda_graph_runner_ptr;
 }
 
 PyModelInputs CudaGraphDecodePaddingOp::buildInputs(int64_t batch_size,
