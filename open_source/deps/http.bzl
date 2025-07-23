@@ -1,4 +1,5 @@
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive", "http_file")
+load("//3rdparty/composable_kernel:repo.bzl", "ck_repo")
 
 def clean_dep(dep):
     return str(Label(dep))
@@ -49,6 +50,16 @@ def http_deps():
     )
 
     http_archive(
+        name = "composable_kernel_archive",
+        sha256 = "b31d8b9b1ebf6d1937198b257a2c36c18c394895bce6325630669f957d583094",
+        urls = [
+	        "https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/amd_pkgs/composable_kernel_archive.tar.gz",
+	    ],
+        build_file = clean_dep("//3rdparty/composable_kernel:ck.BUILD"),
+        strip_prefix = "composable_kernel_archive",
+    )
+
+    http_archive(
         name = "torch_rocm",
         sha256 = "8ccd35611d0f761e570f7904ecbbe27cfa4f48253abc48884b95e7bfaa936e7c",
         urls = [
@@ -56,6 +67,16 @@ def http_deps():
         ],
         type = "zip",
         build_file = clean_dep("//:BUILD.pytorch"),
+    )
+
+    http_archive(
+        name = "aiter",
+        sha256 = "88178ba538a58fd82e2fbccfd9dcb3dbcc85eb5d75814ea5b4243b048beb5898",
+        urls = [
+	        "https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/amd_pkgs/aiter-0.1.0-py3-none-any.whl",
+	    ],
+        type = "zip",
+        build_file = clean_dep("//:BUILD.aiter"),
     )
 
     http_archive(
@@ -110,3 +131,5 @@ def http_deps():
         urls = ["https://271332.oss-cn-hangzhou-zmf.aliyuncs.com/3fs/rpm/hf3fs-1.1.0-1.alios7.x86_64.rpm"],
         sha256 = "ebe51a157d0315e1b1c65d61e22401fac92cfd26fe331aaa37beed86cf08a01f"
     )
+
+    ck_repo(name = "composable_kernel")

@@ -113,6 +113,9 @@ aiosignal==1.3.1 \
     --hash=sha256:54cd96e15e1649b75d6c87526a6ff0b6c1b0dd3459f43d9ca11d48c339b68cfc \
     --hash=sha256:f8376fb07dd1e86a584e4fcdec80b36b7f81aac666ebc724e2c090300dd83b17
     # via aiohttp
+aiter @ https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/amd_pkgs/aiter-0.1.0-py3-none-any.whl \
+    --hash=sha256:88178ba538a58fd82e2fbccfd9dcb3dbcc85eb5d75814ea5b4243b048beb5898
+    # via -r open_source/deps/requirements_rocm.txt
 aliyun-python-sdk-core==2.15.2 \
     --hash=sha256:54f66a53e193c61c5e16ea4505a0cab43543f8ad2ef22833f69c4d5e5151c17d
     # via
@@ -122,10 +125,6 @@ aliyun-python-sdk-kms==2.16.5 \
     --hash=sha256:24b6cdc4fd161d2942619479c8d050c63ea9cd22b044fe33b60bbb60153786f0 \
     --hash=sha256:f328a8a19d83ecbb965ffce0ec1e9930755216d104638cd95ecd362753b813b3
     # via oss2
-# amdsmi==6.2.4 \
-#     --hash=sha256:02429befc9f138c3a6bfd0359b44d5f31976804f9818c560f480dab05ac7937a \
-#     --hash=sha256:5c1b34138038686c1e1b1c6b90708b858f8dc5d2d6af009fa5bd35fa3aa3bdfb
-    # via -r open_source/deps/requirements_rocm.txt
 annotated-types==0.7.0 \
     --hash=sha256:1f02e8b43a8fbbc3f3e0d4f0f4bfc8131bcb4eebe8849b8e5c773f3a1c582a53 \
     --hash=sha256:aff07c09a53a08bc8cfccb9c85b05f1aa9a2a6f23728d790723543408344ce89
@@ -193,6 +192,11 @@ av==13.0.0 \
     --hash=sha256:ee01c38677ad51795556d9eea26d56035a85dac0a358dd80382757fde15be429 \
     --hash=sha256:f4c0639acb37ae6369fb088dcf408e87182b1c087af2ac60149ccb5c109bd9f1 \
     --hash=sha256:f9cea8906abf010f6d4894c7cad52e257667d0a498d4eec7e5beb4eff519d3ff
+    # via -r open_source/deps/requirements_base.txt
+bitsandbytes==0.46.1 \
+    --hash=sha256:21b349f776d04c6c1380405961081de29c84f49640b79d3d199b6d719818da84 \
+    --hash=sha256:9f6f61376bd0e9780c5dc4ddee7d1f52cb10fe8034a1ea588611f4e8b87eb6a7 \
+    --hash=sha256:b0ee4a204fb926d4eae02bc2f5468ae3c11c011cfa849a4c771d4c6b201f57ae
     # via -r open_source/deps/requirements_base.txt
 certifi==2024.8.30 \
     --hash=sha256:922820b53db7a7257ffbda3f597266d435245903d80737e34f8a45ff3e3230d8 \
@@ -364,18 +368,14 @@ charset-normalizer==3.3.2 \
     --hash=sha256:fd1abc0d89e30cc4e02e4064dc67fcc51bd941eb395c502aac3ec19fab46b519 \
     --hash=sha256:ff8fa367d09b717b2a17a052544193ad76cd49979c805768879cb63d9ca50561
     # via requests
-clang==17.0.6 \
-    --hash=sha256:d05ad6dddc9b360e94b9420e239c639a9117902cce8a57fd288a5226eea3092e \
-    --hash=sha256:d228511e6a29e866dcbe99e10ed10649317b9b3e636ba805f6867b7afb6e8c44
-    # via amdsmi
 click==8.1.7 \
     --hash=sha256:ae74fb96c20a0277a1d615f1e4d73c8414f5a98db8b799a7931d1582f3390c28 \
     --hash=sha256:ca9853ad459e787e2192211578cc907e7594e294c7ccc834310722b41b9ca6de
-    # via -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    # via uvicorn
 concurrent-log-handler==0.9.25 \
     --hash=sha256:157bee12914aa2a72246d1d0641ce07c1aa7a55faa3322bed02f21e60395eb82 \
     --hash=sha256:1e2c6f021414e214d3dac66107894827a3e78db63018304a4f29e55ba549ac22
-    # via uvicorn
+    # via -r open_source/deps/requirements_base.txt
 contourpy==1.3.0 \
     --hash=sha256:00ccd0dbaad6d804ab259820fa7cb0b8036bda0686ef844d24125d8287178ce0 \
     --hash=sha256:0be4d8425bfa755e0fd76ee1e019636ccc7c29f77a7c86b4328a9eb6a26d0639 \
@@ -513,7 +513,9 @@ distro==1.9.0 \
 einops==0.8.0 \
     --hash=sha256:63486517fed345712a8385c100cb279108d9d47e6ae59099b07657e983deae85 \
     --hash=sha256:9572fb63046264a862693b0a87088af3bdc8c068fde03de63453cbbde245465f
-    # via -r open_source/deps/requirements_base.txt
+    # via
+    #   -r open_source/deps/requirements_base.txt
+    #   aiter
 exceptiongroup==1.2.2 \
     --hash=sha256:3111b9d131c238bec2f8f516e123e14ba243563fb135d3fe885990585aa7795b \
     --hash=sha256:47c2edf7c6738fafb49fd34290706d1a1a2f4d1c6df275526b62cbb4aa5393cc
@@ -1431,12 +1433,14 @@ numpy==1.24.1 \
     # via
     #   -r open_source/deps/requirements_base.txt
     #   accelerate
+    #   bitsandbytes
     #   contourpy
     #   decord
     #   librosa
     #   matplotlib
     #   numba
     #   onnx
+    #   pandas
     #   pyarrow
     #   scikit-learn
     #   scipy
@@ -1553,6 +1557,50 @@ packaging==24.1 \
     #   matplotlib
     #   pooch
     #   transformers
+pandas==2.3.1 \
+    --hash=sha256:025e92411c16cbe5bb2a4abc99732a6b132f439b8aab23a59fa593eb00704232 \
+    --hash=sha256:09e3b1587f0f3b0913e21e8b32c3119174551deb4a4eba4a89bc7377947977e7 \
+    --hash=sha256:0a95b9ac964fe83ce317827f80304d37388ea77616b1425f0ae41c9d2d0d7bb2 \
+    --hash=sha256:0f951fbb702dacd390561e0ea45cdd8ecfa7fb56935eb3dd78e306c19104b9b0 \
+    --hash=sha256:1b916a627919a247d865aed068eb65eb91a344b13f5b57ab9f610b7716c92de1 \
+    --hash=sha256:1c78cf43c8fde236342a1cb2c34bcff89564a7bfed7e474ed2fffa6aed03a956 \
+    --hash=sha256:1d12f618d80379fde6af007f65f0c25bd3e40251dbd1636480dfffce2cf1e6da \
+    --hash=sha256:22c2e866f7209ebc3a8f08d75766566aae02bcc91d196935a1d9e59c7b990ac9 \
+    --hash=sha256:2323294c73ed50f612f67e2bf3ae45aea04dce5690778e08a09391897f35ff88 \
+    --hash=sha256:2b0540963d83431f5ce8870ea02a7430adca100cec8a050f0811f8e31035541b \
+    --hash=sha256:2ba6aff74075311fc88504b1db890187a3cd0f887a5b10f5525f8e2ef55bfdb9 \
+    --hash=sha256:2eb789ae0274672acbd3c575b0598d213345660120a257b47b5dafdc618aec83 \
+    --hash=sha256:2f4d6feeba91744872a600e6edbbd5b033005b431d5ae8379abee5bcfa479fab \
+    --hash=sha256:342e59589cc454aaff7484d75b816a433350b3d7964d7847327edda4d532a2e3 \
+    --hash=sha256:3462c3735fe19f2638f2c3a40bd94ec2dc5ba13abbb032dd2fa1f540a075509d \
+    --hash=sha256:3583d348546201aff730c8c47e49bc159833f971c2899d6097bce68b9112a4f1 \
+    --hash=sha256:4645f770f98d656f11c69e81aeb21c6fca076a44bed3dcbb9396a4311bc7f6d8 \
+    --hash=sha256:4d544806b485ddf29e52d75b1f559142514e60ef58a832f74fb38e48d757b299 \
+    --hash=sha256:56a342b231e8862c96bdb6ab97170e203ce511f4d0429589c8ede1ee8ece48b8 \
+    --hash=sha256:5db9637dbc24b631ff3707269ae4559bce4b7fd75c1c4d7e13f40edc42df4444 \
+    --hash=sha256:689968e841136f9e542020698ee1c4fbe9caa2ed2213ae2388dc7b81721510d3 \
+    --hash=sha256:6de8547d4fdb12421e2d047a2c446c623ff4c11f47fddb6b9169eb98ffba485a \
+    --hash=sha256:6f3bf5ec947526106399a9e1d26d40ee2b259c66422efdf4de63c848492d91bb \
+    --hash=sha256:782647ddc63c83133b2506912cc6b108140a38a37292102aaa19c81c83db2928 \
+    --hash=sha256:7dcb79bf373a47d2a40cf7232928eb7540155abbc460925c2c96d2d30b006eb4 \
+    --hash=sha256:8dfc17328e8da77be3cf9f47509e5637ba8f137148ed0e9b5241e1baf526e20a \
+    --hash=sha256:9026bd4a80108fac2239294a15ef9003c4ee191a0f64b90f170b40cfb7cf2d22 \
+    --hash=sha256:911580460fc4884d9b05254b38a6bfadddfcc6aaef856fb5859e7ca202e45275 \
+    --hash=sha256:98bcc8b5bf7afed22cc753a28bc4d9e26e078e777066bc53fac7904ddef9a678 \
+    --hash=sha256:9b7ff55f31c4fcb3e316e8f7fa194566b286d6ac430afec0d461163312c5841e \
+    --hash=sha256:ac942bfd0aca577bef61f2bc8da8147c4ef6879965ef883d8e8d5d2dc3e744b8 \
+    --hash=sha256:b3cd4273d3cb3707b6fffd217204c52ed92859533e31dc03b7c5008aa933aaab \
+    --hash=sha256:b4b0de34dc8499c2db34000ef8baad684cfa4cbd836ecee05f323ebfba348c7d \
+    --hash=sha256:ca7ed14832bce68baef331f4d7f294411bed8efd032f8109d690df45e00c4679 \
+    --hash=sha256:cd05b72ec02ebfb993569b4931b2e16fbb4d6ad6ce80224a3ee838387d83a191 \
+    --hash=sha256:dd71c47a911da120d72ef173aeac0bf5241423f9bfea57320110a978457e069e \
+    --hash=sha256:e5635178b387bd2ba4ac040f82bc2ef6e6b500483975c4ebacd34bec945fda12 \
+    --hash=sha256:e6723a27ad7b244c0c79d8e7007092d7c8f0f11305770e2f4cd778b3ad5f9f85 \
+    --hash=sha256:ec6c851509364c59a5344458ab935e6451b31b818be467eb24b0fe89bd05b6b9 \
+    --hash=sha256:fe37e757f462d31a9cd7580236a82f353f5713a80e059a29753cf938c6775d96 \
+    --hash=sha256:fe67dc676818c186d5a3d5425250e40f179c2a89145df477dd82945eaea89e97 \
+    --hash=sha256:fe7317f578c6a153912bd2292f02e40c1d8f253e93c599e82620c7f69755c74f
+    # via aiter
 pillow==10.4.0 \
     --hash=sha256:02a2be69f9c9b8c1e97cf2713e789d4e398c751ecfd9967c18d0ce304efbf885 \
     --hash=sha256:030abdbe43ee02e0de642aee345efa443740aa4d828bfe8e2eb11922ea6a21ea \
@@ -1772,11 +1820,13 @@ platformdirs==4.2.2 \
 pooch==1.8.2 \
     --hash=sha256:3529a57096f7198778a5ceefd5ac3ef0e4d06a6ddaf9fc2d609b806f25302c47 \
     --hash=sha256:76561f0de68a01da4df6af38e9955c4c9d1a5c90da73f7e40276a5728ec83d10
-    # via -r internal_source/deps/../../open_source/deps/requirements_base.txt
+    # via librosa
 portalocker==3.1.1 \
     --hash=sha256:80e984e24de292ff258a5bea0e4f3f778fff84c0ae1275dbaebc4658de4aacb3 \
     --hash=sha256:ec20f6dda2ad9ce89fa399a5f31f4f1495f515958f0cb7ca6543cef7bb5a749e
-    # via librosa
+    # via
+    #   -r open_source/deps/requirements_base.txt
+    #   concurrent-log-handler
 prettytable==3.11.0 \
     --hash=sha256:7e23ca1e68bbfd06ba8de98bf553bf3493264c96d5e8a615c0471025deeba722 \
     --hash=sha256:aa17083feb6c71da11a68b2c213b04675c4af4ce9c541762632ca3f2cb3546dd
@@ -1865,6 +1915,10 @@ pyarrow==17.0.0 \
     --hash=sha256:f7ae2de664e0b158d1607699a16a488de3d008ba99b3a7aa5de1cbc13574d047 \
     --hash=sha256:fa3c246cc58cb5a4a5cb407a18f193354ea47dd0648194e6265bd24177982fe8
     # via pyodps
+pybind11==2.13.6 \
+    --hash=sha256:237c41e29157b962835d356b370ededd57594a26d5894a795960f0047cb5caf5 \
+    --hash=sha256:ba6af10348c12b24e92fa086b39cfba0eff619b61ac77c406167d813b096d39a
+    # via aiter
 pycparser==2.22 \
     --hash=sha256:491c8be9c040f5390f5bf44a5b07752bd07f56edf992381b05c701439eec10f6 \
     --hash=sha256:c3702b6d3dd8c7abc1afa565d7e63d53a1d0bd86cdc24edd75470f4de499cfcc
@@ -2057,12 +2111,18 @@ pyrsmi==0.2.0 \
 python-dateutil==2.9.0.post0 \
     --hash=sha256:37dd54208da7e1cd875388217d5e00ebd4179249f90fb72437e91a35459a0ad3 \
     --hash=sha256:a8b2bc7bffae282281c8140a97d3aa9c14da0b136dfe83f850eea9a5f7470427
-    # via matplotlib
+    # via
+    #   matplotlib
+    #   pandas
 pytorch-triton-rocm @ https://repo.radeon.com/rocm/manylinux/rocm-rel-6.3/pytorch_triton_rocm-3.0.0%2Brocm6.3.0.75cc27c26a-cp310-cp310-linux_x86_64.whl \
     --hash=sha256:aa87bc8a5b62a0cd6a3170fda1924c19e7c9801a0f868fad1035e1f8e0a8b0dc
     # via
     #   -r open_source/deps/requirements_rocm.txt
     #   torch
+pytz==2025.2 \
+    --hash=sha256:360b9e3dbb49a209c21ad61809c7fb453643e048b38924c765813546746e81c3 \
+    --hash=sha256:5ddf76296dd8c44c26eb8f4b6f35488f3ccbf6fbbd7adee0b7262d43f0ec2f00
+    # via pandas
 pyyaml==6.0.2 \
     --hash=sha256:01179a4a8559ab5de078078f37e5c1a30d76bb88519906844fd7bdea1b7729ff \
     --hash=sha256:0833f8694549e586547b576dcfaba4a6b55b9e96098b36cdc7ebefe667dfed48 \
@@ -2120,7 +2180,6 @@ pyyaml==6.0.2 \
     # via
     #   -r open_source/deps/requirements_rocm.txt
     #   accelerate
-    #   amdsmi
     #   huggingface-hub
     #   timm
     #   transformers
@@ -2455,7 +2514,7 @@ sentencepiece==0.2.0 \
     --hash=sha256:f4d158189eb2ecffea3a51edf6d25e110b3678ec47f1a40f2d541eafbd8f6250 \
     --hash=sha256:fb89f811e5efd18bab141afc3fea3de141c3f69f3fe9e898f710ae7fe3aab251 \
     --hash=sha256:ff88712338b01031910e8e61e7239aff3ce8869ee31a47df63cb38aadd591bea
-    # via importlib-metadata
+    # via -r open_source/deps/requirements_base.txt
 setproctitle==1.3.5 \
     --hash=sha256:02870e0cb0de7f68a7a8a5b23c2bc0ce63821cab3d9b126f9be80bb6cd674c80 \
     --hash=sha256:0424e1d33232322541cb36fb279ea5242203cd6f20de7b4fb2a11973d8e8c2ce \
@@ -2542,14 +2601,6 @@ setproctitle==1.3.5 \
     --hash=sha256:fb0500e1bc6f00b8ba696c3743ddff14c8679e3c2ca9d292c008ac51488d17cf \
     --hash=sha256:fe3bfd5e51c24349d022e062a96c316a1b8862ea9a0cf5ea2a8b2ae008b77cec \
     --hash=sha256:fec8340ab543144d04a9d805d80a0aad73fdeb54bea6ff94e70d39a676ea4ec0
-    # via
-    #   -r internal_source/deps/../../open_source/deps/requirements_base.txt
-    #   concurrent-log-handler
-
-# The following packages are considered to be unsafe in a requirements file:
-setuptools==60.5.0 \
-    --hash=sha256:2404879cda71495fc4d5cbc445ed52fdaddf352b36e40be8dcc63147cb4edabe \
-    --hash=sha256:68eb94073fc486091447fcb0501efd6560a0e5a1839ba249e5ff3c4c93f05f90
     # via -r open_source/deps/requirements_base.txt
 six==1.16.0 \
     --hash=sha256:1e61c37477a1626458e36f7b1d82aa5c9b094fa4802892072e49de9c60c4c926 \
@@ -2776,6 +2827,7 @@ torch @ https://repo.radeon.com/rocm/manylinux/rocm-rel-6.3/torch-2.4.0%2Brocm6.
     # via
     #   -r open_source/deps/requirements_rocm.txt
     #   accelerate
+    #   bitsandbytes
     #   sentence-transformers
     #   timm
     #   torchvision
@@ -2812,6 +2864,10 @@ typing-extensions==4.12.2 \
     #   pydantic-core
     #   torch
     #   uvicorn
+tzdata==2025.2 \
+    --hash=sha256:1a403fada01ff9221ca8044d701868fa132215d84beb92242d9acd2147f667a8 \
+    --hash=sha256:b60a638fcc0daffadf82fe0f57e53d06bdec2f36c4df66280ae79bce6bd6f2b9
+    # via pandas
 urllib3==2.2.2 \
     --hash=sha256:a448b2f64d686155468037e1ace9f2d2199776e17f0a46610480d311f73e3472 \
     --hash=sha256:dd505485549a7a552833da5e6063639d0d177c04f23bc3864e41e5dc5f612168
@@ -2931,6 +2987,12 @@ yarl==1.9.7 \
 zipp==3.20.1 \
     --hash=sha256:9960cd8967c8f85a56f920d5d507274e74f9ff813a0ab8889a5b5be2daf44064 \
     --hash=sha256:c22b14cc4763c5a5b04134207736c107db42e9d3ef2d9779d465f5f1bcba572b
+    # via importlib-metadata
+
+# The following packages are considered to be unsafe in a requirements file:
+setuptools==60.5.0 \
+    --hash=sha256:2404879cda71495fc4d5cbc445ed52fdaddf352b36e40be8dcc63147cb4edabe \
+    --hash=sha256:68eb94073fc486091447fcb0501efd6560a0e5a1839ba249e5ff3c4c93f05f90
     # via
     #   -r open_source/deps/requirements_base.txt
     #   grpcio-tools

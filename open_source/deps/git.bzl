@@ -1,106 +1,12 @@
 load('@bazel_tools//tools/build_defs/repo:git.bzl', "git_repository", "new_git_repository")
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive", "http_file")
-load("//3rdparty/composable_kernel:repo.bzl", "ck_repo")
 
 # Sanitize a dependency so that it works correctly from code that includes
 # TensorFlow as a submodule.
 def clean_dep(dep):
     return str(Label(dep))
 
-def amd_ck_dep():
-    new_git_repository(
-        name = "composable_kernel_archive",
-        remote = "https://github.com/ROCm/composable_kernel.git",
-        commit = "c42b957d654826bd9c218ccb66225865019a5140", # CommitTag: [CK_TILE] For FMHA forward kernels, assign block indices reversely if using mask (#2209)
-        patches = ["//3rdparty/composable_kernel:ck.patch", "//3rdparty/composable_kernel:fmhaCMakeLists.patch", "//3rdparty/composable_kernel:rmsnorm2dCMakeLists.patch"],
-        patch_cmds = [
-            "echo 'rm -rf build' >> cmake_build.sh",
-            "echo 'mkdir -p build && cd build' >> cmake_build.sh",
-            "echo 'export ROCM_PATH=/opt/rocm' >> cmake_build.sh",
-            "echo 'export PATH=/opt/cmake/cmake-3.26.4/bin:$ROCM_PATH/bin:$PATH' >> cmake_build.sh",
-            "echo 'export LD_LIBRARY_PATH=$ROCM_PATH/lib:$LD_LIBRARY_PATH' >> cmake_build.sh",
-            "echo 'export CMAKE_PREFIX_PATH=$ROCM_PATH:$CMAKE_PREFIX_PATH' >> cmake_build.sh",
-            "echo 'sh ../script/cmake-ck-dev.sh ../ gfx942 -DBUILD_TESTING=OFF -DFMHA_FWD_ENABLE_APIS=fwd -DCK_USE_ALTERNATIVE_PYTHON=/opt/conda310/bin/python -DCMAKE_PREFIX_PATH=$ROCM_PATH -DROCM_PATH=$ROCM_PATH' >> cmake_build.sh",
-            "echo 'make -j100 tile_example_fmha_fwd tile_rmsnorm2d_fwd' >> cmake_build.sh"
-        ],
-        build_file = "//3rdparty/composable_kernel:ck.BUILD",
-        shallow_since = "1719582646 -0700",
-    )
-
-    ck_repo(name = "composable_kernel")
-
-
 def git_deps():
-    git_repository(
-        name = "aiter",
-        remote = "https://github.com/ROCm/aiter.git",
-        commit = "0884818336b46c458440cb7572c9ecff02b7034e", # MLA merge to main (#496)
-        recursive_init_submodules = True,
-        patches = ["//3rdparty/aiter:rtp-llm.patch", "//3rdparty/aiter:0003-gemm_tune.patch"],
-        patch_cmds = [
-            "echo 'from aiter.jit.core import compile_ops, get_args_of_build, build_module, get_module' >> build_aiter_module.py",
-            "echo 'from typing import Dict' >> build_aiter_module.py",
-            "echo 'import os' >> build_aiter_module.py",
-            "echo '' >> build_aiter_module.py",
-            "echo 'def build_aiter_module(md_name: str, custom_build_args: Dict = {}):' >> build_aiter_module.py",
-            "echo '    if os.path.exists(f\"aiter/jit/{md_name}.so\"):' >> build_aiter_module.py",
-            "echo '        return' >> build_aiter_module.py",
-            "echo '' >> build_aiter_module.py",
-            "echo '    d_args = get_args_of_build(md_name)' >> build_aiter_module.py",
-            "echo '    d_args.update(custom_build_args)' >> build_aiter_module.py",
-            "echo '' >> build_aiter_module.py",
-            "echo '    md_name = custom_build_args.get(\"md_name\", md_name)' >> build_aiter_module.py",
-            "echo '' >> build_aiter_module.py",
-
-            "echo '    srcs = d_args[\"srcs\"]' >> build_aiter_module.py",
-            "echo '    flags_extra_cc = d_args[\"flags_extra_cc\"]' >> build_aiter_module.py",
-            "echo '    flags_extra_hip = d_args[\"flags_extra_hip\"]' >> build_aiter_module.py",
-            "echo '    blob_gen_cmd = d_args[\"blob_gen_cmd\"]' >> build_aiter_module.py",
-            "echo '    extra_include = d_args[\"extra_include\"]' >> build_aiter_module.py",
-            "echo '    extra_ldflags = d_args[\"extra_ldflags\"]' >> build_aiter_module.py",
-            "echo '    verbose = d_args[\"verbose\"]' >> build_aiter_module.py",
-            "echo '    is_python_module = d_args[\"is_python_module\"]' >> build_aiter_module.py",
-            "echo '    is_standalone = d_args[\"is_standalone\"]' >> build_aiter_module.py",
-            "echo '    torch_exclude = d_args[\"torch_exclude\"]' >> build_aiter_module.py",
-            "echo '    module = build_module(' >> build_aiter_module.py",
-            "echo '                         md_name,' >> build_aiter_module.py",
-            "echo '                         srcs,' >> build_aiter_module.py",
-            "echo '                         flags_extra_cc,' >> build_aiter_module.py",
-            "echo '                         flags_extra_hip,' >> build_aiter_module.py",
-            "echo '                         blob_gen_cmd,' >> build_aiter_module.py",
-            "echo '                         extra_include,' >> build_aiter_module.py",
-            "echo '                         extra_ldflags,' >> build_aiter_module.py",
-            "echo '                         verbose,' >> build_aiter_module.py",
-            "echo '                         is_python_module,' >> build_aiter_module.py",
-            "echo '                         is_standalone,' >> build_aiter_module.py",
-            "echo '                         torch_exclude,' >> build_aiter_module.py",
-            "echo '    )' >> build_aiter_module.py",
-            "echo 'if __name__ == \"__main__\":' >> build_aiter_module.py",
-            "echo '    build_aiter_module(\"module_custom_all_reduce\")' >> build_aiter_module.py",
-            "echo '    # build_aiter_module(\"module_attention\")' >> build_aiter_module.py",
-            "echo '    # build_aiter_module(\"module_norm\")' >> build_aiter_module.py",
-            "echo '    # build_aiter_module(\"module_cache\")' >> build_aiter_module.py",
-            "echo '    # build_aiter_module(\"module_mha_fwd\")' >> build_aiter_module.py",
-            "echo '    build_aiter_module(\"module_gemm_a8w8_blockscale\")' >> build_aiter_module.py",
-            "echo '    build_aiter_module(\"module_quant\")' >> build_aiter_module.py",
-            "echo '    build_aiter_module(\"module_moe_sorting\")' >> build_aiter_module.py",
-            "echo '    build_aiter_module(\"module_moe_asm\")' >> build_aiter_module.py",
-            "echo '    build_aiter_module(\"module_pa\")' >> build_aiter_module.py",
-            "echo '    build_aiter_module(\"module_moe\")' >> build_aiter_module.py",
-            "echo 'echo \"building mla kernel\"' >> build_mla_kernel.sh",
-            "echo 'so_file=\"./csrc/cpp_itfs/mla/asm_mla_decode_fwd_torch_lib.so\"' >> build_mla_kernel.sh",
-            "echo 'if [ -f $so_file ]; then' >> build_mla_kernel.sh",
-            "echo '    exit 0' >> build_mla_kernel.sh",
-            "echo 'else' >> build_mla_kernel.sh",
-            "echo '    export PYTHONPATH=`pwd`:$PYTHONPATH' >> build_mla_kernel.sh",
-            "echo '    /opt/conda310/bin/python aiter/aot/asm_mla_decode_fwd.py' >> build_mla_kernel.sh",
-            "echo '    cd ./csrc/cpp_itfs/mla' >> build_mla_kernel.sh",
-            "echo '    make asm_mla_decode_fwd_torch_lib.so' >> build_mla_kernel.sh",
-            "echo 'fi' >> build_mla_kernel.sh",
-        ],
-        build_file = "//3rdparty/aiter:BUILD",
-    )
-
     git_repository(
         name = "rules_cc",
         remote = "https://github.com/bazelbuild/rules_cc.git",
@@ -381,5 +287,3 @@ def git_deps():
         name = "zlib",
         actual = "@zlib_archive//:zlib",
     )
-
-    amd_ck_dep()
