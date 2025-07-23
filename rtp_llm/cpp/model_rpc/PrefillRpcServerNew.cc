@@ -68,6 +68,9 @@ grpc::Status PrefillRpcServerNew::RemoteGenerateNew(grpc::ServerContext*        
     //        !request->mtp_hidden_states_key.empty()) {
     //}
 
+    // clear request block buffer
+    resource_.cache_store->markRequestEnd(std::to_string(prefill_context.request_id));
+
     RTP_LLM_LOG_DEBUG("request [%s] RemoteGenerateNew success, response is %s",
                      prefill_context.request_key.c_str(),
                      response->ShortDebugString().c_str());

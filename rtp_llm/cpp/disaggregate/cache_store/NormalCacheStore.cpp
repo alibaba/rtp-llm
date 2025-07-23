@@ -228,14 +228,21 @@ NormalCacheStore::submitRemoteStoreTask(const std::shared_ptr<RemoteStoreRequest
                      request->toString().c_str());
 
     auto                          request_id = request->request_id;
+    std::weak_ptr<RemoteStoreTaskImpl> weak_task = task;
     RequestBlockBuffer::WatchFunc watchFunc =
-        [this, request_id, task](bool ok, const std::vector<std::shared_ptr<BlockBuffer>>& blocks) {
+        [this, request_id, weak_task](bool ok, const std::vector<std::shared_ptr<BlockBuffer>>& blocks) {
             if (!ok) {
                 RTP_LLM_LOG_WARNING("normal cache store run store task watch func failed, request id is %s",
                                     request_id.c_str());
                 return;
             }
 
+            auto task = weak_task.lock();
+            if (!task) {
+                RTP_LLM_LOG_DEBUG("task has been released, request id is %s", request_id.c_str());
+                return;
+            }
+            
             auto transfer_request = task->makeAvailableRequest(blocks);
 
             if (transfer_request == nullptr) {
@@ -243,6 +250,7 @@ NormalCacheStore::submitRemoteStoreTask(const std::shared_ptr<RemoteStoreRequest
                                     request_id.c_str());
                 return;
             }
+
             this->messager_->transfer(transfer_request);
         };
 
