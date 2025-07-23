@@ -1,15 +1,5 @@
 load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
-load("//rtp_llm/cpp/devices:device_defs.bzl",
-    "device_impl_target", "device_test_envs", "device_linkopts")
-
-test_linkopts = [
-    "-lpython3.10",
-    "-ltorch",
-    "-lc10",
-    # "-ltorch_cpu",
-    "-ltorch_python",
-] + device_linkopts()
 
 test_copts = [
     "-fno-access-control",

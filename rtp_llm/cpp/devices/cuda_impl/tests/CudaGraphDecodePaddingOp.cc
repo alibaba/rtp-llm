@@ -23,7 +23,7 @@ CudaGraphRunnerPtr CudaGraphDecodePaddingOp::createCudaGraphRunner(py::object py
     params.tokens_per_block                              = 64;
     // int  layer_num                              = 24;
     // int  block_num                              = 26037;
-    auto runner_ptr = DeviceFactory::getDeviceGraphRunner(params, std::move(py_instance), 663676, device, true);
+    auto               runner_ptr = device->getDeviceGraphRunner(params, std::move(py_instance), 663676, true);
     CudaGraphRunnerPtr cuda_graph_runner_ptr = dynamic_cast<CudaGraphRunner*>(runner_ptr);
     return cuda_graph_runner_ptr;
 }

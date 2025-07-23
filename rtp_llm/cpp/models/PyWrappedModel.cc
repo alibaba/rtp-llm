@@ -53,9 +53,9 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         attention_inputs.is_prefill               = !attention_inputs.sequence_lengths.size(0);
         attention_inputs.kv_block_offset          = k_cache_buffer_->shape()[0] * k_cache_buffer_->shape()[1];
         if (!device_->initParams().hw_kernel_config.enable_cuda_graph && !attention_inputs.is_prefill) {
-            int           decode_bacth_szie = attention_inputs.sequence_lengths.size(0);
-            torch::Tensor cu_seqlens =
-                torch::zeros({decode_bacth_szie + 1}, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
+            static torch::Tensor cu_seqlens =
+                torch::zeros({device_->initParams().concurrency_config.concurrency_limit + 1},
+                             torch::TensorOptions(torch::kInt32).device(torch::kCPU));
             cu_seqlens.pin_memory();
             attention_inputs.cu_seqlens = cu_seqlens;
         }

@@ -17,6 +17,7 @@
 #include "trt_plugins/smoothQuantGemmPlugin/smoothQuantGemmPlugin.h"
 #include "trt_plugins/weightOnlyGroupwiseQuantMatmulPlugin/weightOnlyGroupwiseQuantMatmulPlugin.h"
 #include "trt_plugins/mixtureOfExperts/mixtureOfExpertsPlugin.h"
+
 #include <memory>
 
 namespace trt_plugins = tensorrt_llm::plugins;
@@ -108,6 +109,10 @@ public:
     DeviceEventPtr   createEvent() override;
     DeviceEventPtr   createTorchEvent() override;
     bool             useGroupGemm() const;
+    GraphBase*       getDeviceGraphRunner(const DeviceInitParams& params,
+                                          py::object              py_instance,
+                                          int                     kv_cache_block_offset,
+                                          bool                    in_test) override;
 
 private:
     void         checkUseOpenSourceFMHA();
@@ -313,6 +318,8 @@ private:
     NcclParam tp_nccl_param_;
     NcclParam dp_tp_nccl_param_;
     NcclParam ffn_tp_nccl_param_;
+
+    GraphBase* graph_runner_;
 
     BufferPtr curandstate_buf_;  // for sampler use.
 

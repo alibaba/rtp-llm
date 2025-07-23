@@ -142,6 +142,13 @@ void DeviceBase::updateCurrentTorchStream() {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
+GraphBase* DeviceBase::getDeviceGraphRunner(const DeviceInitParams& params,
+                                            py::object              py_instance,
+                                            int                     kv_cache_block_offset,
+                                            bool                    in_test) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
 void DeviceBase::setCacheStore(std::shared_ptr<rtp_llm::CacheStore> cache_store) {
     cache_store_ = cache_store;
 }

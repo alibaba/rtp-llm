@@ -37,18 +37,18 @@ public:
         RTP_LLM_LOG_INFO("Release CudaGraphRunner .....");
         py::gil_scoped_acquire gil;
         py_instance_.release();
-        // for (auto& element : graph_instances_) {
-        //     GraphInstance& instance = element.second;
-        //     RTP_LLM_CHECK_WITH_INFO(instance.mem_hold_.params_ != nullptr, "cuda graph instance params_ can't be
-        //     null"); delete instance.mem_hold_.params_;
-        // }
+        for (auto& element : graph_instances_) {
+            GraphInstance& instance = element.second;
+            RTP_LLM_CHECK_WITH_INFO(instance.mem_hold_.params_ != nullptr, "cuda graph instance params_ can't be null");
+            delete instance.mem_hold_.params_;
+        }
         RTP_LLM_LOG_INFO("Release CudaGraphRunner Successfully");
     }
-    void           capture() override;
-    void           captureOneBatchSize(int bs) override;
-    void           prepareInputs(PyModelInputs& inputs) override;
-    bool           canRun(PyModelInputs& inputs) override;
-    void           replay(int bs) override;
+    void           capture();
+    void           captureOneBatchSize(int bs);
+    void           prepareInputs(PyModelInputs& inputs);
+    bool           canRun(PyModelInputs& inputs);
+    void           replay(int bs);
     void           initCapture() override;
     void           initKernelInternalMemory();
     int            getCurrentRealGraphBs();

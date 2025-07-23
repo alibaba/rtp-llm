@@ -55,11 +55,10 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params, py::obje
     }
     py::object py_init_result;
     if (enable_cuda_graph) {
-        graph_runner_             = DeviceFactory::getDeviceGraphRunner(params.device->initParams(),
-                                                            std::move(py_instance),
-                                                            k_cache_buffer_->shape()[0] * k_cache_buffer_->shape()[1],
-                                                            device_,
-                                                            false);
+        graph_runner_             = device_->getDeviceGraphRunner(params.device->initParams(),
+                                                      std::move(py_instance),
+                                                      k_cache_buffer_->shape()[0] * k_cache_buffer_->shape()[1],
+                                                      false);
         auto py_initialize_method = graph_runner_->py_instance_.attr("initialize");
         py_init_result            = py_initialize_method(init_resources);
         graph_runner_->initCapture();

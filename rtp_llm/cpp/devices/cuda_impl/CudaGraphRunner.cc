@@ -1,9 +1,19 @@
-#include "rtp_llm/cpp/devices/cuda_impl/CudaGraphRunner.h"
 #include <torch/torch.h>
+#include "rtp_llm/cpp/devices/cuda_impl/CudaGraphRunner.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/devices/cuda_impl/CudaFlashInfer.h"
 using namespace torch_ext;
 namespace rtp_llm {
+
+GraphBase* CudaDevice::getDeviceGraphRunner(const DeviceInitParams& params,
+                                            py::object              py_instance,
+                                            int                     kv_cache_block_offset,
+                                            bool                    in_test) {
+    if (!graph_runner_) {
+        graph_runner_ = new CudaGraphRunner(params, py_instance, kv_cache_block_offset, this, in_test);
+    }
+    return graph_runner_;
+}
 
 void CudaGraphRunner::captureOneBatchSize(int bs) {
     auto inputs = graph_instances_[bs].mem_hold_.py_model_inputs_;

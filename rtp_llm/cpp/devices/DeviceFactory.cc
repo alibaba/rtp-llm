@@ -198,35 +198,10 @@ std::shared_ptr<DeviceExporter> DeviceFactory::getDeviceExporter() {
     return exporter;
 }
 
-GraphBase* DeviceFactory::getDeviceGraphRunner(const DeviceInitParams& params,
-                                               py::object              py_instance,
-                                               int                     kv_cache_block_offset,
-                                               DeviceBase*             device,
-                                               bool                    in_test) {
-    static GraphBase* graph_runner = nullptr;
-    if (!graph_runner) {
-        const auto global_device_params = getDefaultGlobalDeviceParams();
-        auto       type                 = global_device_params.device_params[0].first;
-        const auto registration         = getRegistrationMap()[type];
-        if (registration.graph_creator != nullptr) {
-            graph_runner = registration.graph_creator(params, py_instance, kv_cache_block_offset, device, in_test);
-        } else {
-            RTP_LLM_LOG_INFO("Can not find device graph_creator: %d", type);
-        }
-    }
-    return graph_runner;
-}
-
 void DeviceFactory::registerDevice(DeviceType type, DeviceCreatorType creator) {
     auto& registrationMap = getRegistrationMap();
     RTP_LLM_CHECK_WITH_INFO((registrationMap.find(type) == registrationMap.end()), "Can not find device: %d", type);
     registrationMap[type] = creator;
-}
-
-void DeviceFactory::registerGraphRunner(DeviceType type, GraphCreatorFunc graph_creator_func) {
-    auto& registrationMap = getRegistrationMap();
-    RTP_LLM_CHECK_WITH_INFO((registrationMap.find(type) != registrationMap.end()), "Can not find device: %d", type);
-    registrationMap[type].graph_creator = graph_creator_func;
 }
 
 void registerDeviceOps(py::module& m) {
