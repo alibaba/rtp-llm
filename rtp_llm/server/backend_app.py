@@ -157,87 +157,11 @@ class BackendApp(object):
             check_shutdown()
             latest_cache_version: int = int(req.get("latest_cache_version", -1))
             latest_finised_version: int = int(req.get("latest_finised_version", -1))
-            load_balance_version = 0
-            load_balance_info = self.backend_server.get_load_balance_info(
-                latest_cache_version
-            )
-            engine_schedule_info = self.backend_server.get_engine_schedule_info(
-                latest_finised_version
-            )
-            available_concurrency = (
-                self.backend_server._global_controller.get_available_concurrency()
-            )
-            backend_available_concurrency = available_concurrency
-
-            if (
-                StaticConfig.misc_config.load_balance
-                and load_balance_info.step_per_minute > 0
-                and load_balance_info.step_latency_us > 0
-            ):
-                available_concurrency = load_balance_info.step_per_minute
-                # when use new version available_concurrency need set new load_balance_version
-                load_balance_version = 1
-            cache_status = load_balance_info.cache_status
-
-            worker_status: WorkStatus = WorkStatus(
-                role=self.backend_server.role_type,
-                server_port=worker_info.server_port,
-                http_port=worker_info.http_port,
-                grpc_port=worker_info.rpc_server_port,
-                available_concurrency=available_concurrency,
-                cache_status=CacheStatus(
-                    # cached_keys=(
-                    #     cache_status.cached_keys
-                    #     if latest_cache_version < cache_status.version
-                    #     else None
-                    # ),
-                    available_kv_cache=cache_status.available_kv_cache,
-                    total_kv_cache=cache_status.total_kv_cache,
-                    block_size=cache_status.block_size,
-                    version=cache_status.version,
-                ),
-                running_task_info=[
-                    TaskInfo(
-                        **{
-                            "request_id": task.request_id,
-                            "inter_request_id": task.inter_request_id,
-                            "prefix_length": task.prefix_length,
-                            "input_length": task.input_length,
-                            "waiting_time_ms": task.waiting_time_ms,
-                            "iterate_count": task.iterate_count,
-                            "end_time_ms": task.end_time_ms,
-                            "dp_rank": self.backend_server.dp_rank,
-                        }
-                    )
-                    for task in engine_schedule_info.running_task_info_list
-                ],
-                finished_task_list=[
-                    TaskInfo(
-                        **{
-                            "request_id": task.request_id,
-                            "inter_request_id": task.inter_request_id,
-                            "prefix_length": task.prefix_length,
-                            "input_length": task.input_length,
-                            "waiting_time_ms": task.waiting_time_ms,
-                            "iterate_count": task.iterate_count,
-                            "end_time_ms": task.end_time_ms,
-                            "dp_rank": self.backend_server.dp_rank,
-                        }
-                    )
-                    for task in engine_schedule_info.finished_task_info_list
-                    if task.end_time_ms > latest_finised_version
-                ],
-                profile_meta=None,
-                waiting_query_len=load_balance_info.waiting_query_len,
-                running_query_len=load_balance_info.running_query_len,
-                step_latency_ms=float(load_balance_info.step_latency_us / 1000),
-                iterate_count=load_balance_info.iterate_count,
-                dp_size=self.backend_server.dp_size,
-                tp_size=self.backend_server.tp_size,
-                version=load_balance_version,
-                status_version=int(time.time() * 1000),
-                alive=True,
-            )
+            worker_status = self.backend_server.get_worker_status(latest_cache_version, latest_finised_version)
+            worker_status.server_port=worker_info.server_port
+            worker_status.http_port=worker_info.http_port
+            worker_status.grpc_port=worker_info.rpc_server_port
+            
             return ORJSONResponse(content=worker_status.model_dump(exclude_none=True))
 
         # entry for worker RANK != 0

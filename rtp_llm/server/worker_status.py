@@ -34,9 +34,9 @@ class ProfileMeta(BaseModel):
 
 class WorkStatus(BaseModel):
     role: str  # prefill, decode, vit
-    server_port: int
-    http_port: int
-    grpc_port: int
+    server_port: Optional[int] = None
+    http_port: Optional[int] = None
+    grpc_port: Optional[int] = None
     available_concurrency: int
 
     running_task_info: List[TaskInfo]  # 当前running 的task信息

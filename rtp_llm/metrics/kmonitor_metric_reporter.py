@@ -15,6 +15,9 @@ class AccMetrics(Enum):
     UPDATE_QPS_METRIC = "py_rtp_update_qps_metric"
     ERROR_UPDATE_QPS_METRIC = "py_rtp_error_update_target_qps"
 
+    # worker_status
+    WORKER_STATUS_QPS_METRIC = "py_rtp_worker_status_qps"
+
     # route:
     ROUTE_QPS_METRIC = "py_rtp_route_qps"
     MASTER_ROUTE_QPS_METRIC = "py_rtp_master_route_qps"
@@ -36,6 +39,9 @@ class GaugeMetrics(Enum):
     NUM_BEAMS_METRIC = "ft_num_beams"
 
     UPDATE_LANTENCY_METRIC = "py_rtp_update_framework_rt"
+
+    # worker_status
+    WORKER_STATUS_QPS_LANTENCY_METRIC = "py_rtp_worker_status_rt"
 
     # route:
     ROUTE_RT_METRIC = "py_rtp_route_rt"
