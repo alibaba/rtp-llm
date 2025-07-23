@@ -23,7 +23,7 @@ async def main():
         model = ModelFactory.from_huggingface(
             model_config.ckpt_path, model_config=model_config
         )
-        pipeline = Pipeline(model, model.config, model.tokenizer)
+        pipeline = Pipeline(model.config, model.tokenizer)
 
         # usual request
         for res in pipeline(
@@ -52,7 +52,7 @@ async def main():
             pass
         print((await response.gen_complete_response_once()).model_dump_json(indent=4))
 
-        pipeline.stop()
+        model.stop()
 
 
 if __name__ == "__main__":

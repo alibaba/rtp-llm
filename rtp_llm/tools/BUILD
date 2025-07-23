@@ -31,9 +31,6 @@ py_library(
     srcs = [
            "model_assistant_server.py",
            ":model_assistant_api"
-    ],
-    deps = [
-        "//rtp_llm:models",
     ]
 )
 

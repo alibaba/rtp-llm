@@ -1,0 +1,11 @@
+# Tokenizer和Openai Renderer
+
+目前rtp_llm的tokenizer和openai renderer均为独立注册，和model_type绑定，具有统一接口。注意，这里的model_type需要和模型注册时完全一致。
+
+Tokenizer主要是把`transformers.AutoTokenizer`包了一层，以便进行模型相关的自定义tokenizer行为；对应的，Openai renderer是为了执行自定义Openai行为。
+
+# 开发指南
+
+对tokenizer而言，在`rtp_llm/frontend/tokenizer_factory/tokenizers/`目录下继承BaseTokenizer实现对应模型相关tokenize逻辑即可，用register_tokenizer进行注册，可以参考目录下多种tokenizer实现。具体需要实现的接口由需求决定，一般只用修改encode和decode两个接口即可。注意，引擎的返回结果为流式输出，如遇到多个token id共同拼成一个字符的情况会
+
+对于openai_renderer而言，主要是用来解析openai格式的输入，并渲染成正常的string格式输入。需要继承CustomChatRenderer并实现render_chat接口，由请求到渲染出来的各种输入，对于多模态模型而言需要手动将多模态输入剥离单独处理，因此每个模型都需要单独实现其openai renderer。

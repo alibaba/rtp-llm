@@ -2,9 +2,9 @@ import os
 from typing import Any, Dict, List, Union
 
 import torch
-from transformers import PreTrainedTokenizerBase
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.models.downstream_modules.custom_module import CustomHandler, CustomModule
 from rtp_llm.models.downstream_modules.embedding.api_datatype import (
     ColbertEmbeddingRequest,
@@ -20,18 +20,14 @@ from rtp_llm.utils.util import to_torch_dtype
 
 
 class ColBertEmbeddingModule(CustomModule):
-    def __init__(
-        self, config: GptInitModelParameters, tokenizer: PreTrainedTokenizerBase
-    ):
+    def __init__(self, config: GptInitModelParameters, tokenizer: BaseTokenizer):
         super().__init__(config, tokenizer)
         self.renderer = ColbertEmbeddingRenderer(config, tokenizer)
         self.handler = ColBertEmbeddingHandler(config)
 
 
 class ColbertEmbeddingRenderer(EmbeddingRendererBase):
-    def __init__(
-        self, config: GptInitModelParameters, tokenizer: PreTrainedTokenizerBase
-    ):
+    def __init__(self, config: GptInitModelParameters, tokenizer: BaseTokenizer):
         super().__init__(config, tokenizer)
         self.embedding_type = EmbeddingResponseType.COLBERT
 

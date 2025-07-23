@@ -13,6 +13,16 @@ py_package(
     ],
 )
 
+
+py_package(
+    name = "extension_package_frontend",
+    deps = [
+    ],
+    packages = [
+        "rtp_llm"
+    ],
+)
+
 py_library(
     name = "extension_lib",
     deps = [],

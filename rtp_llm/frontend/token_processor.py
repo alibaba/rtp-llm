@@ -6,7 +6,10 @@ import numpy.typing as npt
 
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
-from rtp_llm.utils.tokenizer_utils import DecodingState, IncrementDecodingUtils
+from rtp_llm.frontend.tokenizer_factory.tokenizer_utils import (
+    DecodingState,
+    IncrementDecodingUtils,
+)
 from rtp_llm.utils.word_util import (
     remove_padding_eos_with_numpy,
     get_stop_word_slices,

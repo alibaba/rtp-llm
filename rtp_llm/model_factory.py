@@ -11,14 +11,12 @@ from rtp_llm.config.py_config_modules import StaticConfig
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
-from rtp_llm.async_decoder_engine.async_model import AsyncModel
 from rtp_llm.config.gpt_init_model_parameters import ConfigMode, GptInitModelParameters
+from rtp_llm.distribute.gang_info import get_gang_info
 from rtp_llm.distribute.worker_info import g_parallel_info
 from rtp_llm.model_factory_register import _model_factory
-from rtp_llm.models.base_model import BaseModel, ModelConfig
-from rtp_llm.models.multimodal.multimodal_mixin import MultiModalMixin
-from rtp_llm.models.propose_model.propose_model import ProposeModel
 from rtp_llm.tools.api.hf_model_helper import get_model_info_from_hf
+from rtp_llm.utils.base_model_datatypes import ModelConfig
 from rtp_llm.utils.dump_config_utils import dump_model_to_table
 from rtp_llm.utils.fuser import fetch_remote_file_to_local
 from rtp_llm.utils.util import check_with_info
@@ -51,22 +49,27 @@ class ModelFactory:
         return model_cls
 
     @staticmethod
-    def create_gpt_init_config(model_config: ModelConfig):
-        global _model_factory
-        if model_config.model_type not in _model_factory:
-            raise Exception(f"model type {model_config.model_type} not registered!")
-        model_cls = _model_factory[model_config.model_type]
-        config: GptInitModelParameters = model_cls.create_config(
-            model_config,
+    def create_frontend_config(model_config: ModelConfig):
+        config = GptInitModelParameters(0, 0, 0, 0, 0)
+        config.update_common(
+            ckpt_path=model_config.ckpt_path,
+            tokenizer_path=model_config.tokenizer_path,
+            quantization=model_config.quantization,
+            data_type=model_config.act_type,
+            max_seq_len=model_config.max_seq_len,
+            seq_size_per_block=model_config.seq_size_per_block,
+            gen_num_per_circle=model_config.gen_num_per_circle,
+            lora_infos=model_config.lora_infos,
+            ptuning_path=model_config.ptuning_path,
+            ref_module=model_config.ref_module,
+            ref_dict=model_config.ref_dict,
             parallel_info=g_parallel_info,
+            gang_info=get_gang_info(),
             config_mode=ConfigMode.SimpleMode,
         )
         config.seq_size_per_block = model_config.seq_size_per_block
-        config.model_name = model_cls.__name__
-        if issubclass(model_cls, MultiModalMixin):
-            config.is_multimodal = True
 
-        return model_cls, config
+        return config
 
     @staticmethod
     def _create_model(model_config: ModelConfig):
@@ -86,6 +89,8 @@ class ModelFactory:
     def _create_sp_model(
         score_model_gpt_config: GptInitModelParameters, model_config: ModelConfig
     ):
+        from rtp_llm.models.propose_model.propose_model import ProposeModel
+
         model = None
         global _model_factory
         if (
@@ -142,7 +147,9 @@ class ModelFactory:
     @staticmethod
     def from_model_config(
         model_config: ModelConfig, propose_model_config: Optional[ModelConfig] = None
-    ) -> AsyncModel:
+    ):
+        from rtp_llm.async_decoder_engine.async_model import AsyncModel
+
         model = ModelFactory._create_model(model_config)
         if model_config.model_type == "fake_model" or model.config.vit_separation == 1:
             return model
@@ -283,7 +290,7 @@ class ModelFactory:
         return propose_model_config
 
     @staticmethod
-    def load_default_generate_config(model: Union[BaseModel, AsyncModel]):
+    def load_default_generate_config(model):
         generation_config_path = StaticConfig.generate_env_config.generation_config_path
         if generation_config_path:
             model.default_generate_config.update(

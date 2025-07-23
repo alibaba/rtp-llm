@@ -1,6 +1,6 @@
 from typing import List, Optional, Tuple, Union
 
-from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
+from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 
 
 class DecodingState(object):
@@ -41,7 +41,7 @@ class DecodingState(object):
 # Referenced from
 # https://github.com/vllm-project/vllm/blob/main/vllm/transformers_utils/tokenizer.py#L68
 def _convert_tokens_to_string_with_added_encoders(
-    tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+    tokenizer: BaseTokenizer,
     output_tokens: List[str],
     skip_special_tokens: bool,
     spaces_between_special_tokens: bool,
@@ -80,7 +80,7 @@ def _convert_tokens_to_string_with_added_encoders(
 class IncrementDecodingUtils(object):
     @staticmethod
     def detokenize_incrementally(
-        tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+        tokenizer: BaseTokenizer,
         all_input_ids: List[int],
         state: DecodingState,
         skip_special_tokens: bool = False,
@@ -112,7 +112,7 @@ class IncrementDecodingUtils(object):
 
     @staticmethod
     def _get_new_tokens(
-        tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+        tokenizer: BaseTokenizer,
         all_input_ids: List[int],
         state: DecodingState,
         skip_special_tokens: bool = False,
@@ -137,7 +137,7 @@ class IncrementDecodingUtils(object):
 
     @staticmethod
     def _convert_token_to_string(
-        tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+        tokenizer: BaseTokenizer,
         output_tokens: List[str],
         prefix_offset: int,
         read_offset: int,

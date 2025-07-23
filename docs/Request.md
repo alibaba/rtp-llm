@@ -39,5 +39,4 @@
 | `task_id` | `int` | system prompt的id |
 | `chat_id` | `str` | 多轮会话的id |
 | `timeout_ms` | `int` | request的超时时间 |
-| `request_format` | `str` | request的请求格式，取值(raw/chatapi)|
 | `yield_generator` | `bool` | 是否流式输出 |

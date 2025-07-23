@@ -16,8 +16,10 @@ import numpy as np
 import torch
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerBase
 
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig, RequestFormat
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models.base_model import ModelConfig
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
@@ -32,8 +34,6 @@ from rtp_llm.tools.quant.datasets_adapter import (
     DatasetsAdapter,
     DatasetType,
 )
-
-# from rtp_llm.tokenizer.tokenizer_base import TokenizerBase
 from rtp_llm.utils.fuser import MountRwMode, fetch_remote_file_to_local
 from rtp_llm.utils.time_util import Timer, timer_wrapper
 from rtp_llm.utils.weight_type import WEIGHT_TYPE
@@ -123,14 +123,11 @@ class WeightsQuantizer:
             tokenizer_path=self.model_path,
         )
         self.config: GptInitModelParameters = self.model_cls.create_config(model_config)
-        self.tokenizer = self.create_tokenizer(self.model_cls, self.config)
+        self.tokenizer = TokenizerFactory.create_from_env()
         self.special_tokens = self.config.special_tokens
-        # self.config.max_seq_len = self.tokenizer.model_max_length
         logging.info(f"max_seq_len:{self.tokenizer.model_max_length}")
 
-        self.eos_token_id = None
-        if isinstance(self.tokenizer, PreTrainedTokenizer):
-            self.eos_token_id = self.tokenizer.eos_token_id
+        self.eos_token_id = self.tokenizer.eos_token_id
         if self.eos_token_id == None:
             self.eos_token_id = self.config.special_tokens.eos_token_id
 
@@ -253,13 +250,6 @@ class WeightsQuantizer:
         # 7. 从数据集中选择采样的样本
         sampled_dataset = dataset.select(sampled_indices)
         return sampled_dataset
-
-    @timer_wrapper("create tokenizer")
-    def create_tokenizer(
-        self, model_cls, params: GptInitModelParameters
-    ) -> Union[PreTrainedTokenizerBase]:
-        tokenizer = model_cls.get_tokenizer(params)
-        return tokenizer
 
     @timer_wrapper("pretrain load model")
     def create_quanter(
@@ -386,26 +376,9 @@ class WeightsQuantizer:
         samples = []
         for data in dataset:
             text_data = data["text"]
-            is_chatml = False
-            try:
-                text_data = json.loads(text_data)
-                is_chatml = "type" in text_data and text_data["type"] == "chatml"
-            except Exception:
-                pass
-            if is_chatml:
-                text_data.update({"request_format": "chatapi"})
-                inference_request, remain_args = RequestExtractor(
-                    GenerateConfig()
-                ).extract_request(text_data)
-                token_ids = DefaultPlugin.process_encode_func(
-                    inference_request.input_texts[0],
-                    inference_request.generate_configs[0].dict(),
-                    self.special_tokens,
-                    self.tokenizer,
-                )
-            else:
-                assert isinstance(text_data, str)
-                token_ids = self.tokenizer.encode(text_data)
+            text_data = json.loads(text_data)
+            assert isinstance(text_data, str)
+            token_ids = self.tokenizer.encode(text_data)
             if token_ids and len(token_ids) < self.config.max_seq_len:
                 samples.append(torch.tensor(token_ids, dtype=torch.int))
                 logging.info(f"sample length: {len(samples[-1])}")
@@ -448,13 +421,18 @@ class WeightsQuantizer:
             inference_request.input_texts[0] = (
                 inference_request.input_texts[0] + response.get("response")[0]
             )
-        # 调用DefaultPlugin encode
-        token_ids = DefaultPlugin.process_encode_func(
-            inference_request.input_texts[0],
-            inference_request.generate_configs[0].dict(),
-            self.special_tokens,
-            self.tokenizer,
-        )
+        prompt = inference_request.input_texts[0]
+        if len(prompt) == 0:
+            raise FtRuntimeException(
+                ExceptionType.EMPTY_PROMPT_ERROR,
+                "prompt should have at least one token!",
+            )
+        if type(prompt) is not str:
+            raise FtRuntimeException(
+                ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                "expect string prompt, actual: " + str(prompt),
+            )
+        token_ids = self.tokenizer.encode(prompt)
         return torch.tensor(token_ids, dtype=torch.int)
 
 

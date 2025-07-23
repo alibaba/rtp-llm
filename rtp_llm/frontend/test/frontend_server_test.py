@@ -5,7 +5,7 @@ from unittest import TestCase, main
 
 from pydantic import BaseModel
 
-from rtp_llm.server.frontend_server import FrontendServer
+from rtp_llm.frontend.frontend_server import FrontendServer
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )

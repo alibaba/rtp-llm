@@ -6,9 +6,8 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
 
 import torch
-from transformers import Qwen2Tokenizer
 
-from rtp_llm.models.base_model import GenerateOutput
+from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer, QWenTokenizer
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatMessage,
@@ -33,10 +32,11 @@ from rtp_llm.openai.renderers.custom_renderer import (
 from rtp_llm.openai.renderers.qwen_reasoning_tool_renderer import (
     QwenReasoningToolRenderer,
 )
-from rtp_llm.tokenizer.tokenization_qwen import QWenTokenizer
-from rtp_llm.utils.word_util import is_truncated, truncate_response_with_stop_words
-
-QwenTokenizerTypes = Union[QWenTokenizer, Qwen2Tokenizer]
+from rtp_llm.utils.base_model_datatypes import GenerateOutput
+from rtp_llm.utils.word_util import (
+    is_truncated,
+    truncate_response_with_stop_words,
+)
 
 TOOL_DESC = """{name_for_model}: Call this tool to interact with the {name_for_human} API. What is the {name_for_human} API useful for? {description_for_model} Parameters: {parameters}"""
 
@@ -128,12 +128,13 @@ class ProcessedOutput:
 
 # TODO(wangyin): pass `max_window_size` to here.
 def make_context(
-    tokenizer: QwenTokenizerTypes,
+    tokenizer: BaseTokenizer,
     query: str,
     history: List[Tuple[str, str]] = [],
     system: str = "",
     max_window_size: int = 6144,
 ):
+    assert isinstance(tokenizer, QWenTokenizer)
     history = copy.deepcopy(history)
     im_start, im_end = "<|im_start|>", "<|im_end|>"
     im_start_tokens = [tokenizer.im_start_id]
@@ -188,7 +189,7 @@ def make_context(
 
 
 class QwenRenderer(CustomChatRenderer):
-    def __init__(self, tokenizer: QwenTokenizerTypes, renderer_params: RendererParams):
+    def __init__(self, tokenizer: BaseTokenizer, renderer_params: RendererParams):
         super().__init__(tokenizer, renderer_params)
         self.add_extra_stop_word_ids([[37763, 367, 25], [151643]])  # Observation:
 

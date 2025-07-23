@@ -14,23 +14,6 @@ from rtp_llm.models.multimodal.multimodal_mixin import MultiModalMixin
 from rtp_llm.models.qwen_v2 import QWenV2
 
 
-class InternVLTokenizer:
-    def __init__(self, tokenizer_path: str):
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            tokenizer_path, trust_remote_code=True
-        )
-
-    def encode(self, prompt: str, **kwargs):
-        prompt_slices = prompt.split("<image>")
-        new_prompt = prompt_slices[0]
-        for slice in prompt_slices[1:]:
-            new_prompt += "<img></img>" + slice
-        return self.tokenizer.encode(new_prompt, add_special_tokens=False, **kwargs)
-
-    def decode(self, token_id: List[int], **kwargs):
-        return self.tokenizer.decode(token_id, **kwargs)
-
-
 class InternVL(BaseModel, MultiModalMixin):
     def _init_multimodal(self, config: GptInitModelParameters):
         self.mm_part = InternVLImageEmbedding(config)
@@ -44,10 +27,6 @@ class InternVL(BaseModel, MultiModalMixin):
     @staticmethod
     def get_weight_cls():
         return InternVLWeightInfo
-
-    @classmethod
-    def get_tokenizer(cls, config: GptInitModelParameters):
-        return InternVLTokenizer(config.tokenizer_path)
 
     @classmethod
     def _create_config(cls, ckpt_path: str):
@@ -96,13 +75,6 @@ class InternVL(BaseModel, MultiModalMixin):
         ), "error config"
         config.mm_related_params.special_tokens.update({"default_mm_token": "<image>"})
         return config
-
-    @classmethod
-    def _update_config(cls, config: GptInitModelParameters):
-        if config.tokenizer_path:
-            config.special_tokens.stop_words_id_list = [
-                cls.get_tokenizer(config).encode("<|im_end|>")
-            ]
 
     @staticmethod
     def _init_vit_params(config: GptInitModelParameters, config_json: Dict[str, Any]):

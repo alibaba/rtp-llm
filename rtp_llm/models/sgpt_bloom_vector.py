@@ -51,38 +51,6 @@ class SGPTBloomVector(SGPTBloom):
             [{"decimals": 6}] * batch_size,
         )
 
-    @staticmethod
-    def process_encode_plugin(
-        prompt: str,
-        generate_config: Dict[str, Any],
-        tokenizer: Any,
-        max_seq_len: int,
-        **kwargs: Any
-    ) -> List[int]:
-        custon_gen_cfg = generate_config["custom_prop"]
-        is_query = custon_gen_cfg.get("is_query", False)
-        case_sensitive = custon_gen_cfg.get("case_sensitive", False)
-
-        prompt = prompt if case_sensitive else prompt.lower()
-        tokenizer = tokenizer.tokenizer  # PreTrainedTokenizerFast
-        batch_tokens = tokenizer(
-            prompt, padding=False, truncation=True, max_length=max_seq_len - 2
-        )
-
-        input_ids = batch_tokens["input_ids"]
-        if is_query:
-            SPECB_QUE_BOS = tokenizer.encode("[", add_special_tokens=False)[0]
-            SPECB_QUE_EOS = tokenizer.encode("]", add_special_tokens=False)[0]
-            input_ids.insert(0, SPECB_QUE_BOS)
-            input_ids.append(SPECB_QUE_EOS)
-        else:
-            SPECB_DOC_BOS = tokenizer.encode("{", add_special_tokens=False)[0]
-            SPECB_DOC_EOS = tokenizer.encode("}", add_special_tokens=False)[0]
-            input_ids.insert(0, SPECB_DOC_BOS)
-            input_ids.append(SPECB_DOC_EOS)
-
-        return input_ids
-
     @torch.no_grad()
     def generate_stream(self, input_token_ids, input_lengths, generate_config):
         return self.generate_weighted_hidden_states_stream(

@@ -4,13 +4,10 @@ from functools import partial
 from typing import AsyncGenerator, List, Optional
 
 from fastapi import Request
-from transformers import PreTrainedTokenizerBase
 
-from rtp_llm.async_decoder_engine.backend_rpc_server_visitor import (
-    BackendRPCServerVisitor,
-)
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -33,6 +30,7 @@ from rtp_llm.openai.renderers.custom_renderer import (
     RendererParams,
     StreamResponseObject,
 )
+from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
@@ -42,7 +40,7 @@ class OpenaiEndpoint(object):
     def __init__(
         self,
         model_config: GptInitModelParameters,
-        tokenizer: PreTrainedTokenizerBase,
+        tokenizer: BaseTokenizer,
         backend_rpc_server_visitor: BackendRPCServerVisitor,
     ):
         self.model_config = model_config
@@ -50,12 +48,10 @@ class OpenaiEndpoint(object):
 
         if tokenizer == None:
             raise AttributeError(f"tokenizer is none!")
-        self.tokenizer: PreTrainedTokenizerBase = tokenizer
+        self.tokenizer: BaseTokenizer = tokenizer
         self.backend_rpc_server_visitor = backend_rpc_server_visitor
 
-        self.eos_token_id = None
-        if isinstance(tokenizer, PreTrainedTokenizerBase):
-            self.eos_token_id = tokenizer.eos_token_id
+        self.eos_token_id = tokenizer.eos_token_id
         if self.eos_token_id == None:
             self.eos_token_id = self.model_config.special_tokens.eos_token_id
 
@@ -392,11 +388,7 @@ class OpenaiEndpoint(object):
         rendered_input = self.render_chat(chat_request)
         generate_config = self._extract_generation_config(chat_request)
 
-        mm_inputs = []
-        if self.model_config.is_multimodal:
-            mm_inputs = rendered_input.multimodal_inputs
-        else:
-            mm_inputs = []
+        mm_inputs = rendered_input.multimodal_inputs
 
         if generate_config.sp_advice_prompt != "":
             generate_config.sp_advice_prompt_token_ids = self.tokenizer.encode(

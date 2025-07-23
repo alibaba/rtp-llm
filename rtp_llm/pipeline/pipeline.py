@@ -5,29 +5,25 @@ import threading
 from typing import Any, AsyncGenerator, Dict, Iterator, List, Optional, Tuple, Union
 
 import torch
-from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
-from rtp_llm.async_decoder_engine.backend_rpc_server_visitor import (
-    BackendRPCServerVisitor,
-)
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.frontend.tokenizer_factory.tokenizer_utils import (
+    DecodingState,
+    IncrementDecodingUtils,
+)
+from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.metrics import GaugeMetrics, kmonitor
-from rtp_llm.model_factory import AsyncModel
-from rtp_llm.models.base_model import (
-    BaseModel,
+from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+from rtp_llm.utils.base_model_datatypes import (
     GenerateInput,
     GenerateOutput,
     GenerateOutputs,
     GenerateResponse,
 )
-from rtp_llm.pipeline.pipeline_custom_func import (
-    PipelineCustomFunc,
-    get_piple_custom_func,
-)
 from rtp_llm.utils.multimodal_util import MultimodalInput
 from rtp_llm.utils.time_util import current_time_ms
-from rtp_llm.utils.tokenizer_utils import DecodingState
 from rtp_llm.utils.util import AtomicCounter
 from rtp_llm.utils.word_util import (
     get_stop_word_slices,
@@ -43,27 +39,19 @@ request_counter = AtomicCounter()
 class Pipeline(object):
     def __init__(
         self,
-        model_cls: Union["BaseModel", BaseModel],
         model_config: GptInitModelParameters,
-        tokenizer: Optional[PreTrainedTokenizerBase],
+        tokenizer: Optional[BaseTokenizer],
         separated_frontend: bool = False,
     ):
-        self.model_cls = model_cls
         self.model_config = model_config
         self.tokenizer = tokenizer
         self._special_tokens: int = self.model_config.special_tokens
         self._mm_token: str = self.model_config.mm_related_params.special_tokens.get(
             "default_mm_token", ""
         )
-        self.piple_funcs: PipelineCustomFunc = get_piple_custom_func(self.model_cls)
         self.backend_rpc_server_visitor = BackendRPCServerVisitor(
             model_config, separated_frontend
         )
-
-    def stop(self):
-        if isinstance(self.model_cls, AsyncModel):
-            logging.info("async model stop")
-            self.model_cls.stop()
 
     def encode(self, prompt: str):
         assert self.tokenizer is not None
@@ -78,7 +66,7 @@ class Pipeline(object):
         generate_config: Union[GenerateConfig, Dict[str, Any]],
         vocab_size: int,
         special_tokens: Any,
-        tokenizer: PreTrainedTokenizerBase,
+        tokenizer: BaseTokenizer,
         **kwargs: Any
     ) -> GenerateConfig:
         if isinstance(generate_config, dict):
@@ -164,28 +152,19 @@ class Pipeline(object):
             self.tokenizer,
             **kwargs
         )
-        # for delete stop word from output
-        prompt = self.piple_funcs.modify_prompt_func(
-            prompt, generate_config=generate_config.model_dump(), **kwargs
-        )
-        mm_inputs = []
-        if self.model_config.is_multimodal:
-            prompt, mm_inputs = self.piple_funcs.multimodal_modify_prompt_func(
-                prompt,
-                urls,
-                self._mm_token,
-                generate_config=generate_config.model_dump(),
-                **kwargs
-            )
+        mm_inputs = [MultimodalInput(url) for url in urls] if urls is not None else []
 
-        token_ids = self.piple_funcs.process_encode_func(
-            prompt,
-            generate_config=generate_config.model_dump(),
-            tokenizer=self.tokenizer,
-            add_special_tokens=self.model_config.add_special_tokens,
-            special_tokens=self._special_tokens,
-            **kwargs
-        )
+        if len(prompt) == 0:
+            raise FtRuntimeException(
+                ExceptionType.EMPTY_PROMPT_ERROR,
+                "prompt should have at least one token!",
+            )
+        if type(prompt) is not str:
+            raise FtRuntimeException(
+                ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                "expect string prompt, actual: " + str(prompt),
+            )
+        token_ids = self.tokenizer.encode(prompt)
 
         if generate_config.sp_advice_prompt != "":
             generate_config.sp_advice_prompt_token_ids = self.tokenizer.encode(
@@ -227,10 +206,6 @@ class Pipeline(object):
         token_buffer: str,
         **kwargs: Any
     ):
-        generate_output.finished = (
-            self.piple_funcs.stop_generate_func(all_text, **kwargs)
-            or generate_output.finished
-        )
         if (
             stop_word_str_list
             and not generate_output.finished
@@ -301,6 +276,29 @@ class Pipeline(object):
                 for _ in range(len(generate_outputs.generate_outputs))
             ]
 
+        def tokenids_decode_func(
+            tokens: List[int],
+            tokenizer: BaseTokenizer,
+            decoding_state: Optional[DecodingState] = None,
+            return_incremental: bool = False,
+            **kwargs: Any
+        ) -> Tuple[str, str]:
+            if decoding_state is None:
+                all_text = tokenizer.decode(tokens, **kwargs)
+                # For some tokenizers (e.g. ChatGLM), decode a single token differs from decode a list of tokens.
+                while (len(all_text) > 0) and ("\uFFFD" == all_text[-1]):
+                    all_text = all_text[:-1]
+                return all_text, all_text
+
+            new_text = IncrementDecodingUtils.detokenize_incrementally(
+                tokenizer, tokens, decoding_state
+            )
+            decoding_state.all_text += new_text
+
+            return (
+                new_text if return_incremental == True else decoding_state.all_text
+            ), decoding_state.all_text
+
         # TODO(xinfei.sxf) remove i
         i = 0
         for generate_output in generate_outputs.generate_outputs:
@@ -325,7 +323,7 @@ class Pipeline(object):
                 stop_word_id_slices,
             )
 
-            text, all_text = self.piple_funcs.process_decode_func(
+            text, all_text = tokenids_decode_func(
                 tokens,
                 generate_config=generate_config.model_dump(),
                 tokenizer=self.tokenizer,
@@ -343,13 +341,6 @@ class Pipeline(object):
                 stop_word_str_list,
                 stop_word_str_slices,
                 token_buffers[i],
-                **kwargs
-            )
-
-            text = self.piple_funcs.modify_response_func(
-                text,
-                hidden_states=generate_output.hidden_states,
-                generate_config=generate_config.model_dump(),
                 **kwargs
             )
 

@@ -43,44 +43,6 @@ from rtp_llm.utils.multimodal_util import (
 )
 
 
-class LlamaTokenizerWrapper(LlamaTokenizer):
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.im_start = "<image>"
-        self.im_end = "</image>"
-        self.ref_start = "<ref>"
-        self.ref_end = "</ref>"
-        self.box_start = "<box>"
-        self.box_end = "</box>"
-        self.quad_start = "<quad>"
-        self.quad_end = "</quad>"
-        self.point_start = "<point>"
-        self.point_end = "</point>"
-        self.slice_start = "<slice>"
-        self.slice_end = "</slice>"
-
-    @property
-    def eos_id(self):
-        return self.sp_model.eos_id()
-
-    @property
-    def bos_id(self):
-        return self.sp_model.bos_id()
-
-    @property
-    def unk_id(self):
-        return self.sp_model.unk_id()
-
-    @property
-    def im_start_id(self):
-        return self._convert_token_to_id(self.im_start)
-
-    @property
-    def im_end_id(self):
-        return self._convert_token_to_id(self.im_end)
-
-
 class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
 
     def __init__(self, config: GptInitModelParameters):
@@ -299,13 +261,6 @@ class MiniCPMVEmbedding(Llama, MultiModalMixin):
         return MiniCPMVWeightInfo
 
     @classmethod
-    def get_tokenizer(cls, config: GptInitModelParameters):
-        tokenizer = AutoTokenizer.from_pretrained(
-            config.tokenizer_path, verbose=False, trust_remote_code=True, use_fast=True
-        )
-        return tokenizer
-
-    @classmethod
     def _create_config(cls, ckpt_path: str):
         config = GptInitModelParameters(
             head_num=0,
@@ -359,10 +314,6 @@ class MiniCPMVEmbedding(Llama, MultiModalMixin):
 
     def _init_custom_module(self) -> Optional[CustomModule]:
         return MiniCPMVModule(self.config, self.tokenizer)
-
-    @classmethod
-    def get_tokenizer(cls, config: GptInitModelParameters):
-        return LlamaTokenizerWrapper.from_pretrained(config.tokenizer_path)
 
 
 register_model("minicpmv_embedding", MiniCPMVEmbedding, ["MiniCPMVEmbedding"])

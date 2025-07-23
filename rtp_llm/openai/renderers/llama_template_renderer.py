@@ -1,8 +1,7 @@
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
-from transformers import PreTrainedTokenizerBase
-
+from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatMessage,
@@ -26,9 +25,7 @@ class LlamaTemplateArgs:
 
 
 class LlamaTemplateRenderer(CustomChatRenderer):
-    def __init__(
-        self, tokenizer: PreTrainedTokenizerBase, renderer_params: RendererParams
-    ):
+    def __init__(self, tokenizer: BaseTokenizer, renderer_params: RendererParams):
         super().__init__(tokenizer, renderer_params)
         model_name = renderer_params.model_type
         self.template = get_template_and_fix_tokenizer(model_name, tokenizer)
@@ -71,7 +68,6 @@ class LlamaTemplateRenderer(CustomChatRenderer):
 
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         template_args = self._extract_history(request.messages)
-        assert isinstance(self.tokenizer, PreTrainedTokenizerBase)
         encoded_ids = self.template.encode_oneturn(
             self.tokenizer,
             query=template_args.query,

@@ -4,11 +4,11 @@ from typing import Any, Dict, List, Tuple, Union
 
 import numpy as np
 import torch
-from transformers import PreTrainedTokenizerBase
 
 from rtp_llm.async_decoder_engine.embedding.interface import EngineInputs
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.metrics import GaugeMetrics, kmonitor
 from rtp_llm.models.downstream_modules.embedding.api_datatype import (
     ChatCompletionRequest,
@@ -18,9 +18,7 @@ from rtp_llm.utils.time_util import current_time_ms
 
 
 class CommonInputGenerator(object):
-    def __init__(
-        self, tokenizer: PreTrainedTokenizerBase, config: GptInitModelParameters
-    ):
+    def __init__(self, tokenizer: BaseTokenizer, config: GptInitModelParameters):
         self.tokenizer_ = tokenizer
         self.config_ = config
         from rtp_llm.models.downstream_modules.openai_render import (

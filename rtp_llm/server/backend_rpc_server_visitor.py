@@ -9,11 +9,11 @@ from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
-from rtp_llm.models.base_model import GenerateInput, GenerateOutputs
-from rtp_llm.ops.rtp_llm.rtp_llm_op import get_block_cache_keys
+from rtp_llm.ops.rtp_llm.get_block_cache_key import get_block_cache_keys
 from rtp_llm.server.host_service import HostService
 from rtp_llm.server.master_client import MasterClient
 from rtp_llm.server.misc import format_exception
+from rtp_llm.utils.base_model_datatypes import GenerateInput, GenerateOutputs
 from rtp_llm.utils.time_util import Timer
 
 route_logger = logging.getLogger("route_logger")

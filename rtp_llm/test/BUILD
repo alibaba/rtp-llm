@@ -15,22 +15,6 @@ py_test(
 )
 
 py_test(
-    name = "default_plugin_test",
-    srcs = [
-        "default_plugin_test.py",
-    ],
-    data = [
-        "//rtp_llm/test/model_test/fake_test/testdata:testdata",
-        "//rtp_llm:sdk"
-    ],
-    deps = [
-        "//rtp_llm:testlib",
-    ],
-    imports = ["aios/kmonitor/python_client"],
-    exec_properties = {'gpu':'A10'},
-)
-
-py_test(
     name = "slice_stop_word_list_test",
     srcs = [
         "slice_stop_word_list_test.py",

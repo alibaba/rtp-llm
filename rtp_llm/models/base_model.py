@@ -3,213 +3,38 @@ from typing import Any, Dict, List, NamedTuple, Optional, Union
 
 import torch
 from pydantic import BaseModel as PyBaseModel
-from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.gpt_init_model_parameters import ConfigMode, GptInitModelParameters
 from rtp_llm.config.task_type import TaskType
 from rtp_llm.distribute.gang_info import get_gang_info
 from rtp_llm.distribute.worker_info import ParallelInfo, g_parallel_info
+from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import (
+    BaseTokenizer,
+    TokenizerFactory,
+)
 from rtp_llm.model_loader.loader import ModelLoader, get_model_loader
 from rtp_llm.model_loader.model_weight_info import ModelDeployWeightInfo, ModelWeights
 from rtp_llm.models.downstream_modules.custom_module import CustomModule
 from rtp_llm.models.downstream_modules.utils import create_custom_module
 from rtp_llm.models.multimodal.multimodal_mixin import MultiModalMixin
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
+from rtp_llm.utils.base_model_datatypes import (
+    AuxInfo,
+    EmbeddingOutput,
+    GenerateContext,
+    GenerateInput,
+    GenerateOutput,
+    GenerateOutputs,
+    GenerateResponse,
+    ModelConfig,
+)
 from rtp_llm.utils.database import CkptDatabase
 from rtp_llm.utils.multimodal_util import MultimodalInput
 from rtp_llm.utils.time_util import timer_wrapper
 from rtp_llm.utils.util import to_torch_dtype
 
 FT_DEFAULT_MAX_NEW_TOKENS = 2048
-
-
-class EmbeddingOutput:
-    text_embedding: torch.Tensor
-    extra_input: Optional[torch.Tensor]
-
-    def __init__(
-        self, text_embedding: torch.Tensor, extra_input: Optional[List[torch.Tensor]]
-    ):
-        self.text_embedding = text_embedding
-        if extra_input:
-            try:
-                self.extra_input = torch.concat(extra_input)
-                self.extra_input = torch.Tensor(self.extra_input.shape[1:])
-            except:
-                raise Exception("Extra input must have same shape except dim 0")
-        else:
-            self.extra_input = None
-
-
-# single batch prompt input
-class GenerateInput(PyBaseModel):
-    request_id: int
-    token_ids: torch.Tensor
-    mm_inputs: List[MultimodalInput]
-    generate_config: GenerateConfig
-    tokenizer: Any = None  # TODO: remove this
-    prefix_length: int = 0
-    token_type_ids: List[int] = []
-
-    class Config:
-        arbitrary_types_allowed = True
-
-    @property
-    def input_length(self):
-        return self.token_ids.shape[-1]
-
-    @property
-    def prompt_length(self):
-        return self.token_ids.shape[-1] - self.prefix_length
-
-    def update_prefix(self, prefix_tokens: torch.Tensor):
-        self.token_ids = torch.concat([prefix_tokens, self.token_ids], dim=0)
-        self.prefix_length = prefix_tokens.nelement()
-
-
-class AuxInfo(PyBaseModel):
-    cost_time: float = 0
-    iter_count: int = 0
-    prefix_len: int = 0
-    input_len: int = 0
-    reuse_len: int = 0
-    output_len: int = 0
-    step_output_len: int = 0
-    fallback_tokens: int = 0
-    fallback_times: int = 0
-    first_token_cost_time: float = 0
-    wait_time: float = 0
-    pd_sep: bool = False
-    cum_log_probs: List[float] = []
-    beam_responses: List[str] = []
-    softmax_probs: List[float] = []
-    local_reuse_len: int = 0
-    remote_reuse_len: int = 0
-
-
-class GenerateOutput(PyBaseModel):
-    hidden_states: Optional[torch.Tensor] = None
-    output_ids: Optional[torch.Tensor] = None
-    input_ids: Optional[torch.Tensor] = None
-    finished: bool = False
-    aux_info: AuxInfo = AuxInfo()
-    loss: Optional[torch.Tensor] = None
-    logits: Optional[torch.Tensor] = None
-    all_probs: Optional[torch.Tensor] = None
-
-    class Config:
-        arbitrary_types_allowed = True
-
-
-class GenerateOutputs(PyBaseModel):
-    generate_outputs: List[GenerateOutput] = []
-
-
-class GenerateResponse(PyBaseModel):
-    generate_outputs: GenerateOutputs
-    generate_texts: List[str]
-
-
-class GenerateContext(NamedTuple):
-    inputs: Any
-    input_embeds: Any
-    attention_mask: Any
-    pad_lengths: Any
-    input_lengths: Any
-    memory_length: Any
-    sampler: Any
-    batch_size: Any
-    beam_width: Any
-    max_input_length: Any
-    finished: Any
-    sequence_lengths: Any
-    gen_length: Any
-    cum_log_probs: Any
-    extra_args: Any
-    all_start_time: Any
-    cache_indirection: Any
-    output_token_ids: Any
-
-
-class ModelConfig:
-    KV_CACHE_DTYPE = "KV_CACHE_DTYPE"
-    QUANTIZATION_KEY = "QUANTIZATION"
-    ACT_TYPE = "ACT_TYPE"
-    WEIGHT_TYPE = "WEIGHT_TYPE"  # Compatible for old config
-    INT8_MODE = "INT8_MODE"  # Compatible for old config
-
-    SP_KV_CACHE_DTYPE = "SP_KV_CACHE_DTYPE"
-    SP_QUANTIZATION_KEY = "SP_QUANTIZATION"
-    SP_ACT_TYPE = "SP_ACT_TYPE"
-    SP_WEIGHT_TYPE = "SP_WEIGHT_TYPE"  # Compatible for old config
-
-    def __init__(
-        self,
-        model_type: str = "",
-        ckpt_path: str = "",
-        tokenizer_path: str = "",
-        act_type: str = None,
-        kv_cache_type: str = None,
-        max_seq_len: int = 0,
-        seq_size_per_block: int = 8,
-        gen_num_per_circle: int = 1,
-        ptuning_path: Optional[str] = None,
-        lora_infos: Optional[Dict[str, str]] = None,
-        ref_module: Optional[torch.nn.Module] = None,
-        ref_dict: Dict[str, torch.Tensor] = {},
-        sp_type: str = "",
-        quantization: str = "",
-    ):
-        self.model_type: str = model_type
-        self.ckpt_path: str = ckpt_path
-        self.tokenizer_path: str = tokenizer_path
-        self.act_type: str = act_type
-        self.kv_cache_type: str = kv_cache_type
-        self.quantization = quantization
-        self.max_seq_len: int = max_seq_len
-        self.seq_size_per_block: int = seq_size_per_block
-        self.gen_num_per_circle: int = gen_num_per_circle
-        self.ptuning_path: Optional[str] = ptuning_path
-        self.lora_infos: Optional[Dict[str, str]] = lora_infos
-        self.ref_module: Optional[torch.nn.Module] = ref_module
-        self.ref_dict: Dict[str, torch.Tensor] = ref_dict
-        self.sp_type: str = sp_type
-
-    def add_ref_module(self, ref_module: Optional[torch.nn.Module]):
-        self.ref_module = ref_module
-
-    def add_ref_dict(self, ref_dict: Dict[str, torch.Tensor]):
-        self.ref_dict = ref_dict
-
-    def _replace(self, **kwargs: Any):
-        for k, v in kwargs.items():
-            if k in self.__dict__:
-                self.__dict__[k] = v
-        return self
-
-    @staticmethod
-    def get_quantization_from_params(env_params: Dict[str, str]):
-        if (not env_params.get(ModelConfig.QUANTIZATION_KEY)) and (
-            env_params.get(ModelConfig.WEIGHT_TYPE, "").upper() == "INT8"
-            or int(env_params.get(ModelConfig.INT8_MODE, "0")) == 1
-        ):
-            quantization = "INT8"
-        else:
-            quantization = env_params.get(ModelConfig.QUANTIZATION_KEY)
-        return quantization
-
-    @staticmethod
-    def get_sp_quantization_from_params(env_params: Dict[str, str]):
-        if not env_params.get(ModelConfig.SP_QUANTIZATION_KEY) and (
-            env_params.get(ModelConfig.SP_WEIGHT_TYPE, "").upper() == "INT8"
-            or int(env_params.get(ModelConfig.INT8_MODE, "0")) == 1
-        ):
-            quantization = "INT8"
-        else:
-            quantization = env_params.get(ModelConfig.SP_QUANTIZATION_KEY)
-        return quantization
-
 
 class BaseModel(object):
 
@@ -223,7 +48,7 @@ class BaseModel(object):
 
         self.linear_bias_slopes: Optional[torch.Tensor] = None
         self.prefix_tokens: Optional[torch.Tensor] = None
-        self.tokenizer: Optional[PreTrainedTokenizerBase] = None
+        self.tokenizer: Optional[BaseTokenizer] = None
         self.max_input_buffer_len: int = 0
 
         self.task_type: TaskType = TaskType.LANGUAGE_MODEL
@@ -338,38 +163,14 @@ class BaseModel(object):
     def _init_custom_module(self) -> Optional[CustomModule]:
         return create_custom_module(self.task_type, self.config, self.tokenizer)
 
-    @classmethod
-    def get_tokenizer(cls, config: GptInitModelParameters):
-        assert config.tokenizer_path
-        return AutoTokenizer.from_pretrained(
-            config.tokenizer_path, trust_remote_code=True
-        )
-
     def load_tokenizer(self) -> None:
-        if not self.config.tokenizer_path:
-            self.tokenizer = None
-            return
-
-        def error_handler(func: Any):
-            def wrapper(*args: Any, **kwargs: Any):
-                try:
-                    return func(*args, **kwargs)
-                except Exception as e:
-                    method_name = func.__name__
-                    raise RuntimeError(
-                        f"{method_name} failed, with input args: {args}, kwargs: {kwargs}"
-                    )
-
-            return wrapper
-
-        self.tokenizer = self.get_tokenizer(self.config)
+        if self.config:
+            self.tokenizer = TokenizerFactory.create_from_config(self.config)
+        else:
+            self.tokenizer = TokenizerFactory.create_from_env()
         if hasattr(self.tokenizer, "eos_token_id") and self.tokenizer.eos_token_id:
             self.config.special_tokens.eos_token_id = self.tokenizer.eos_token_id
             self.config.update_task_prompt_tokens_id(self.tokenizer)
-        if getattr(self.tokenizer, "encode", None):
-            self.tokenizer.encode = error_handler(self.tokenizer.encode)
-        if getattr(self.tokenizer, "decode", None):
-            self.tokenizer.decode = error_handler(self.tokenizer.decode)
 
     def is_multimodal(self) -> bool:
         return isinstance(self, MultiModalMixin)

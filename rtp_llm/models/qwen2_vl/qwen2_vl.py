@@ -229,17 +229,6 @@ class QWen2VLWeightInfo(ModelDeployWeightInfo, BaseMultiModalWeightInfo):
 
 
 class QWen2_VL(QWen_VL, MultiModalMixin):
-    @staticmethod
-    def multimodal_modify_prompt_plugin(
-        prompt: Union[List[Dict[str, Any]], str],
-        images: List[str],
-        img_token: str,
-        **kwargs: Any
-    ) -> Tuple[str, List[MultimodalInput]]:
-        return MultiModalMixin.multimodal_modify_prompt_plugin(
-            prompt, images, img_token, **kwargs
-        )
-
     def _init_multimodal(self, config: GptInitModelParameters):
         self.mm_part = Qwen2VLImageEmbedding(config)
         config.mm_related_params.vit_weights = QwenVL2VitWeight(
@@ -303,12 +292,6 @@ class QWen2_VL(QWen_VL, MultiModalMixin):
         config.mm_position_ids_style = 2
         config.position_id_len_factor = len(config.mrope_section)
         config.rotary_embedding_dim = 128
-
-    @classmethod
-    def get_tokenizer(cls, config: GptInitModelParameters):
-        return AutoTokenizer.from_pretrained(
-            config.tokenizer_path, trust_remote_code=True
-        )
 
     @staticmethod
     def get_weight_cls():

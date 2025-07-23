@@ -4,10 +4,8 @@ import json
 import os
 from typing import List
 
-from transformers import PreTrainedTokenizerBase
-
 from rtp_llm.config.py_config_modules import StaticConfig
-from rtp_llm.models.base_model import GenerateOutput
+from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatMessage,
@@ -25,6 +23,7 @@ from rtp_llm.openai.renderers.custom_renderer import (
     StreamStatus,
 )
 from rtp_llm.openai.renderers.llava_renderer import Conversation, SeparatorStyle
+from rtp_llm.utils.base_model_datatypes import GenerateOutput
 from rtp_llm.utils.fuser import fetch_remote_file_to_local
 from rtp_llm.utils.multimodal_util import MMUrlType
 from rtp_llm.utils.word_util import is_truncated
@@ -119,9 +118,7 @@ conv_templates = {
 
 
 class InternVLRenderer(CustomChatRenderer):
-    def __init__(
-        self, tokenizer: PreTrainedTokenizerBase, renderer_params: RendererParams
-    ):
+    def __init__(self, tokenizer: BaseTokenizer, renderer_params: RendererParams):
         super().__init__(tokenizer, renderer_params)
         self.roles = {RoleEnum.user: "USER", RoleEnum.assistant: "ASSISTANT"}
         self.video_frame_num = 8

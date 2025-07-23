@@ -2,9 +2,8 @@ import copy
 import logging
 from typing import Optional
 
-from transformers import PreTrainedTokenizerBase
-
 from rtp_llm.config.py_config_modules import StaticConfig
+from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.renderer_factory_register import _renderer_factory
 from rtp_llm.openai.renderers.basic_renderer import BasicRenderer
 from rtp_llm.openai.renderers.custom_renderer import CustomChatRenderer, RendererParams
@@ -18,12 +17,9 @@ class ChatRendererFactory:
 
     @staticmethod
     def try_get_imported_renderer(
-        tokenizer: PreTrainedTokenizerBase,
+        tokenizer: BaseTokenizer,
         params: RendererParams,
     ) -> Optional[CustomChatRenderer]:
-        if not isinstance(tokenizer, PreTrainedTokenizerBase):
-            return None
-
         try:
             return FastChatRenderer(tokenizer, params)
         except KeyError:
@@ -37,7 +33,7 @@ class ChatRendererFactory:
 
     @staticmethod
     def get_renderer(
-        tokenizer: PreTrainedTokenizerBase,
+        tokenizer: BaseTokenizer,
         params: RendererParams,
     ) -> CustomChatRenderer:
         # renderer priority:  `MODEL_TEMPLATE_TYPE` env for llama template or fastchat conversation

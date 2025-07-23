@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional, Union
 from pydantic import BaseModel, Field
 
 from rtp_llm.config.generate_config import GenerateConfig
-from rtp_llm.models.base_model import AuxInfo
+from rtp_llm.utils.base_model_datatypes import AuxInfo
 
 
 class ModelCard(BaseModel):

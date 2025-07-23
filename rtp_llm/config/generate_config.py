@@ -209,12 +209,9 @@ class GenerateConfig(BaseModel):
             think_end_tag: str = StaticConfig.generate_env_config.think_end_tag.encode(
                 "utf-8"
             ).decode("unicode_escape")
-            if isinstance(tokenizer, PreTrainedTokenizerBase):
-                tokenized_result: List[int] = tokenizer.encode(
-                    think_end_tag, add_special_tokens=False
-                )
-            else:
-                tokenized_result: List[int] = tokenizer.encode(think_end_tag)
+            tokenized_result: List[int] = tokenizer.encode(
+                think_end_tag, add_special_tokens=False
+            )
             self.end_think_token_ids = tokenized_result
         self.in_think_mode = (
             bool(StaticConfig.generate_env_config.think_mode)
@@ -224,7 +221,9 @@ class GenerateConfig(BaseModel):
     def add_stop_ids_from_str(self, tokenizer):
         ids_list = []
         for word in self.stop_words_str:
-            if isinstance(tokenizer, PreTrainedTokenizerBase):
+            if tokenizer is None:
+                return
+            else:
                 token_id = tokenizer.convert_tokens_to_ids(word)
                 if isinstance(token_id, int):
                     ids_list.append([token_id])
@@ -232,10 +231,6 @@ class GenerateConfig(BaseModel):
                     ids_list.append(token_id)
                 else:
                     ids_list.append(tokenizer.encode(word, add_special_tokens=True))
-            elif tokenizer is None:
-                return
-            else:
-                ids_list.append(tokenizer.encode(word))
 
         # remove duplicate element
         for item in ids_list:

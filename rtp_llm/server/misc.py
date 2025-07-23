@@ -5,7 +5,7 @@ from typing import Any, Callable, Dict
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.distribute.worker_info import g_parallel_info
-from rtp_llm.lora.lora_manager import LoraCountException
+from rtp_llm.lora.lora_exception import LoraCountException
 from rtp_llm.utils.concurrency_controller import ConcurrencyException
 
 

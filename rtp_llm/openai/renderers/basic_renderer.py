@@ -8,8 +8,8 @@ import jinja2
 from jinja2.exceptions import TemplateError
 from jinja2.sandbox import ImmutableSandboxedEnvironment
 from packaging import version
-from transformers import PreTrainedTokenizerBase
 
+from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.openai.renderers.custom_renderer import (
     CustomChatRenderer,
@@ -44,7 +44,7 @@ class PromptWithMMInput:
 class BasicRenderer(CustomChatRenderer):
     def __init__(
         self,
-        tokenizer: PreTrainedTokenizerBase,
+        tokenizer: BaseTokenizer,
         renderer_params: RendererParams,
     ):
         super().__init__(tokenizer, renderer_params)

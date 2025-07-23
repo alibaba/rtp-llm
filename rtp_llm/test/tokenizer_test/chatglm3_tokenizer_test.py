@@ -1,7 +1,7 @@
 from typing import Any
 from unittest import TestCase, main
 
-from rtp_llm.tokenizer.tokenization_chatglm3 import ChatGLMTokenizer
+from rtp_llm.frontend.tokenizer_factory.tokenizers import ChatGLMV3Tokenizer
 
 
 class AllFakeModelTest(TestCase):
@@ -11,9 +11,7 @@ class AllFakeModelTest(TestCase):
 
     def test_simple(self):
         # test load success from bad tokenizer file
-        tokenizer = ChatGLMTokenizer.from_pretrained(
-            self.data_path, encode_special_tokens=True
-        )
+        tokenizer = ChatGLMV3Tokenizer(self.data_path, {})
         # test special tokens
         res = tokenizer.encode("<|assistant|>")
         self.assertEqual(res, [64790, 64792, 64796])

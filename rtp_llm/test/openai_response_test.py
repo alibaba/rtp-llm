@@ -12,6 +12,14 @@ from typing_extensions import override
 
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
+from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
+from rtp_llm.frontend.tokenizer_factory.tokenizers.tokenization_chatglm3 import (
+    ChatGLMTokenizer,
+)
+from rtp_llm.frontend.tokenizer_factory.tokenizers.tokenization_qwen import (
+    QWenTokenizer,
+)
 from rtp_llm.models.base_model import (
     AuxInfo,
     BaseModel,
@@ -42,8 +50,6 @@ from rtp_llm.test.utils.stream_util import (
     is_valid_tool_call_chunk,
     merge_stream_responses,
 )
-from rtp_llm.tokenizer.tokenization_chatglm3 import ChatGLMTokenizer
-from rtp_llm.tokenizer.tokenization_qwen import QWenTokenizer
 
 
 @asynccontextmanager
@@ -187,7 +193,7 @@ class BaseToolCallTestSuite:
 
     def _create_tokenizer(self, tokenizer_path):
         """创建tokenizer - 子类可以重写"""
-        return AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+        return BaseTokenizer(tokenizer_path)
 
     def _create_render_params(self, tokenizer):
         """创建渲染参数 - 子类可以重写"""
@@ -327,6 +333,9 @@ class BaseToolCallTestSuite:
         merged_result: ChatCompletionStreamResponse = merge_stream_responses(chunk_list)
         self._validate_merged_result(merged_result)
 
+class QwenTestTokenizer(BaseTokenizer):
+    def __init__(self, vocab_file):
+        self.tokenizer = QWenTokenizer(vocab_file)
 
 class OpenaiResponseTest(IsolatedAsyncioTestCase):
     def __init__(self, *args: Any, **kwargs: Any):
@@ -345,8 +354,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         self.model.config = model_params
 
     async def test_parse_qwen_function_call(self):
-        os.environ["MODEL_TYPE"] = "qwen"
-        tokenizer = QWenTokenizer(
+        tokenizer = QwenTestTokenizer(
             f"{self.test_data_path}/qwen_7b/tokenizer/qwen.tiktoken"
         )
         self.model.tokenizer = tokenizer
@@ -443,8 +451,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         )
 
     async def test_finish_reason(self):
-        os.environ["MODEL_TYPE"] = "qwen"
-        tokenizer = QWenTokenizer(
+        tokenizer = QwenTestTokenizer(
             f"{self.test_data_path}/qwen_7b/tokenizer/qwen.tiktoken"
         )
         self.model.tokenizer = tokenizer
@@ -475,8 +482,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         self.assertEqual(FinisheReason.length, response.choices[0].finish_reason)
 
     async def test_parse_qwen_agent_function_call(self):
-        os.environ["MODEL_TYPE"] = "qwen_agent"
-        tokenizer = QWenTokenizer(
+        tokenizer = QwenTestTokenizer(
             f"{self.test_data_path}/qwen_7b/tokenizer/qwen.tiktoken"
         )
         self.model.tokenizer = tokenizer
@@ -632,8 +638,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         )
 
     async def test_parse_qwen_agent_tool_call(self):
-        os.environ["MODEL_TYPE"] = "qwen_agent_tool"
-        tokenizer = QWenTokenizer(
+        tokenizer = QwenTestTokenizer(
             f"{self.test_data_path}/qwen_7b/tokenizer/qwen.tiktoken"
         )
         self.model.tokenizer = tokenizer
@@ -2093,12 +2098,10 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         await qwen_suite.test_non_streaming_merge_logic()
 
     def test_chatglm_stop_word(self):
-        os.environ["MODEL_TYPE"] = "chatglm3"
-        self.model.config.py_env_configs.model_config.model_type = "chatglm3"
-        tokenizer = ChatGLMTokenizer.from_pretrained(
-            "rtp_llm/test/tokenizer_test/testdata/chatglm3_tokenizer",
-            encode_special_tokens=True,
+        tokenizer = TokenizerFactory.create(
+            "", "rtp_llm/test/tokenizer_test/testdata/chatglm3_tokenizer", "chatglm3"
         )
+        self.model.config.py_env_configs.model_config.model_type = "chatglm3"
         self.model.tokenizer = tokenizer
         self.endpoint = OpenaiEndpoint(self.model.config, self.model.tokenizer, None)
         self.assertEqual(self.endpoint.stop_words_id_list, [[64795], [64797], [2]])
@@ -2109,8 +2112,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
     @think_mode
     async def test_think_label(self):
         custom_renderer.THINK_END_TAG = "ulaire"  # id = 73675
-        os.environ["MODEL_TYPE"] = "qwen"
-        tokenizer = QWenTokenizer(
+        tokenizer = QwenTestTokenizer(
             f"{self.test_data_path}/qwen_7b/tokenizer/qwen.tiktoken"
         )
         self.model.tokenizer = tokenizer
@@ -2165,8 +2167,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
     async def test_think_label_more_than_one_token(self):
         custom_renderer.THINK_START_TAG = "我可以"
         custom_renderer.THINK_END_TAG = "可以ulaire"
-        os.environ["MODEL_TYPE"] = "qwen"
-        tokenizer = QWenTokenizer(
+        tokenizer = QwenTestTokenizer(
             f"{self.test_data_path}/qwen_7b/tokenizer/qwen.tiktoken"
         )
         self.model.tokenizer = tokenizer
@@ -2221,9 +2222,8 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
     async def test_think_label_real_situation_union(self):
         custom_renderer.THINK_START_TAG = "<think>\n"
         custom_renderer.THINK_END_TAG = "</think>\n"
-        os.environ["MODEL_TYPE"] = "qwen_2"
-        tokenizer = AutoTokenizer.from_pretrained(
-            f"{self.test_data_path}/deepseek_r1_qwen_14b_tokenizer"
+        tokenizer = TokenizerFactory.create(
+            "", f"{self.test_data_path}/deepseek_r1_qwen_14b_tokenizer", "qwen_2"
         )
         self.model.tokenizer = tokenizer
         self.endpoint = OpenaiEndpoint(self.model.config, self.model.tokenizer, None)

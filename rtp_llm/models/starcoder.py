@@ -177,14 +177,7 @@ class StarcoderWeightInfo(ModelDeployWeightInfo):
         return layer_weights
 
 
-StarcoderTokenizer = GPT2TokenizerFast
-
-
 class StarCoder(BaseModel):
-    @classmethod
-    def get_tokenizer(cls, config: GptInitModelParameters):
-        return StarcoderTokenizer.from_pretrained(config.tokenizer_path)
-
     @staticmethod
     def get_weight_cls():
         return StarcoderWeightInfo

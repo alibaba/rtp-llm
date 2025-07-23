@@ -1,7 +1,8 @@
 import torch
-from libth_transformer import rtp_llm_ops
 from torch import nn
 from torch.nn import functional as F
+
+from rtp_llm.ops import rtp_llm_ops
 
 
 class EmbeddingTorch(nn.Module):

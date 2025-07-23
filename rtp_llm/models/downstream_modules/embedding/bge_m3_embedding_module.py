@@ -2,12 +2,12 @@ from typing import Any, Dict, List, Union
 
 import torch
 from pydantic import BaseModel
-from transformers import PreTrainedTokenizerBase
 
 from rtp_llm.async_decoder_engine.embedding.interface import EngineOutputs
 from rtp_llm.config.base_model_config import PyDanticModelBase
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
+from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.model_loader.weight_module import CustomAtomicWeight
 from rtp_llm.models.downstream_modules.custom_module import (
     CustomHandler,
@@ -40,9 +40,7 @@ class RequestTuple(PyDanticModelBase):
 
 
 class BgeM3EmbeddingModule(CustomModule):
-    def __init__(
-        self, config: GptInitModelParameters, tokenizer: PreTrainedTokenizerBase
-    ):
+    def __init__(self, config: GptInitModelParameters, tokenizer: BaseTokenizer):
         self._colbert_module = ColBertEmbeddingModule(config, tokenizer)
         self._sparse_module = SparseEmbeddingModule(config, tokenizer)
         self._dense_module = DenseEmbeddingModule(config, tokenizer)

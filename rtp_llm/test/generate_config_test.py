@@ -6,8 +6,10 @@ from transformers import AutoTokenizer
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.config.py_config_modules import StaticConfig
+from rtp_llm.frontend.tokenizer_factory.tokenizers.tokenization_qwen import (
+    QWenTokenizer,
+)
 from rtp_llm.pipeline.pipeline import Pipeline
-from rtp_llm.tokenizer.tokenization_qwen import QWenTokenizer
 
 
 class GenerateConfigTest(TestCase):

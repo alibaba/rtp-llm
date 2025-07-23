@@ -83,18 +83,6 @@ class Bert(BaseModel):
         config.inter_size = config_json["intermediate_size"]
         config.config_dtype = config_json.get("torch_dtype", None)
 
-    @classmethod
-    def get_tokenizer(cls, config: GptInitModelParameters):
-        try:
-            return AutoTokenizer.from_pretrained(
-                config.tokenizer_path, trust_remote_code=True
-            )
-        except:
-            logging.warning(
-                "failed to load bert tokenizer using AutoTokenizer, try using BertTokenizer instead"
-            )
-            return BertTokenizer.from_pretrained(config.tokenizer_path)
-
 
 class Roberta(Bert):
     @staticmethod

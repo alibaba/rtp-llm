@@ -19,7 +19,7 @@ torch.cuda.set_device = lambda x: None
 from rtp_llm.distribute.gang_info import get_c2_members, get_gang_info
 from rtp_llm.distribute.worker_info import WorkerInfo, g_parallel_info
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
-from rtp_llm.server.frontend_server import FrontendWorker
+from rtp_llm.frontend.frontend_server import FrontendWorker
 from rtp_llm.start_backend_server import main
 
 

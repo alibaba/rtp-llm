@@ -2,9 +2,9 @@ import copy
 from typing import List
 
 from PIL import Image
-from transformers import AutoProcessor, PreTrainedTokenizerBase
+from transformers import AutoProcessor
 
-from rtp_llm.models.minicpmv.minicpmv import encode_video
+from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatMessage,
@@ -18,6 +18,28 @@ from rtp_llm.openai.renderers.custom_renderer import (
     RendererParams,
 )
 from rtp_llm.utils.multimodal_util import MMUrlType, get_bytes_io_from_url
+
+try:
+    from decord import VideoReader, cpu
+except ModuleNotFoundError:
+    VideoReader = None
+    cpu = None
+
+
+def encode_video(video_path, max_num_frames: int = 32):
+    def uniform_sample(l, n):
+        gap = len(l) / n
+        idxs = [int(i * gap + gap / 2) for i in range(n)]
+        return [l[i] for i in idxs]
+
+    vr = VideoReader(video_path, ctx=cpu(0))
+    sample_fps = round(vr.get_avg_fps() / 1)  # FPS
+    frame_idx = [i for i in range(0, len(vr), sample_fps)]
+    if len(frame_idx) > max_num_frames:
+        frame_idx = uniform_sample(frame_idx, max_num_frames)
+    frames = vr.get_batch(frame_idx).asnumpy()
+    frames = [Image.fromarray(v.astype("uint8")) for v in frames]
+    return frames
 
 
 class MiniCPMVConversation:
@@ -69,9 +91,7 @@ class MiniCPMVConversation:
 
 class MiniCPMVRenderer(CustomChatRenderer):
 
-    def __init__(
-        self, tokenizer: PreTrainedTokenizerBase, renderer_params: RendererParams
-    ):
+    def __init__(self, tokenizer: BaseTokenizer, renderer_params: RendererParams):
         super().__init__(tokenizer, renderer_params)
         self.processor = AutoProcessor.from_pretrained(
             self.ckpt_path, trust_remote_code=True

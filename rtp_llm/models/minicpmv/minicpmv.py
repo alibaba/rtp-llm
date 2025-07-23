@@ -25,33 +25,14 @@ from rtp_llm.models.multimodal.multimodal_mixin import (
     MultiModalMixin,
 )
 from rtp_llm.models.qwen_v2 import QWenV2, QWenV2Weight
+
+# minicpmv need to calculate num of frames to renderer input prompt, it must be preprocess first in frontend
+from rtp_llm.openai.renderers.minicpmv_renderer import encode_video
 from rtp_llm.utils.multimodal_util import (
     MMUrlType,
     get_bytes_io_from_url,
     vit_emb_cache_,
 )
-
-try:
-    from decord import VideoReader, cpu
-except ModuleNotFoundError:
-    VideoReader = None
-    cpu = None
-
-
-def encode_video(video_path, max_num_frames: int = 32):
-    def uniform_sample(l, n):
-        gap = len(l) / n
-        idxs = [int(i * gap + gap / 2) for i in range(n)]
-        return [l[i] for i in idxs]
-
-    vr = VideoReader(video_path, ctx=cpu(0))
-    sample_fps = round(vr.get_avg_fps() / 1)  # FPS
-    frame_idx = [i for i in range(0, len(vr), sample_fps)]
-    if len(frame_idx) > max_num_frames:
-        frame_idx = uniform_sample(frame_idx, max_num_frames)
-    frames = vr.get_batch(frame_idx).asnumpy()
-    frames = [Image.fromarray(v.astype("uint8")) for v in frames]
-    return frames
 
 
 class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
@@ -236,13 +217,6 @@ class MiniCPMV(QWenV2, MultiModalMixin):
     @staticmethod
     def get_weight_cls():
         return MiniCPMVWeightInfo
-
-    @classmethod
-    def get_tokenizer(cls, config: GptInitModelParameters):
-        tokenizer = AutoTokenizer.from_pretrained(
-            config.tokenizer_path, verbose=False, trust_remote_code=True, use_fast=True
-        )
-        return tokenizer
 
     @classmethod
     def _create_config(cls, ckpt_path: str):

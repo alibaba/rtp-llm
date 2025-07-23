@@ -16,7 +16,6 @@ from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models_py.model_desc.disaggregate_qwen3 import Qwen3DisaggregateModel
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.model_desc.qwen3 import Qwen3Model
-from rtp_llm.tokenizer.tokenization_qwen import QWenTokenizer as QwenTokenizerOrigin
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
@@ -38,12 +37,6 @@ def hidden_to_inter(hidden_size):
 
 def qkv_transpose(ts, hidden_size):
     return ts[0].reshape(hidden_size, -1)
-
-
-class QWenTokenizer(QwenTokenizerOrigin):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.decoder.update({v: k for k, v in self.special_tokens.items()})
 
 
 class QWenWeight(ModelDeployWeightInfo):
@@ -297,10 +290,6 @@ class QWenBase(BaseModel):
             config.rotary_embedding_style = 4
         config.org_embedding_max_pos = config_json.get("seq_length", 8192)
         config.use_logn_attn = config_json.get("use_logn_attn")
-
-    @classmethod
-    def get_tokenizer(cls, config: GptInitModelParameters):
-        return QWenTokenizer.from_pretrained(config.tokenizer_path)
 
 
 class QWen(QWenBase):

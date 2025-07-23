@@ -2,10 +2,10 @@ from typing import Any, Dict, List, Union
 
 import torch
 from pydantic import BaseModel
-from transformers import PreTrainedTokenizerBase
 
 from rtp_llm.async_decoder_engine.embedding.interface import EngineInputs, EngineOutputs
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.model_loader.weight_module import CustomAtomicWeight
 
@@ -18,9 +18,7 @@ class CustomModule(object):
     renderer: "CustomRenderer"
     handler: "CustomHandler"
 
-    def __init__(
-        self, config: GptInitModelParameters, tokenizer: PreTrainedTokenizerBase
-    ):
+    def __init__(self, config: GptInitModelParameters, tokenizer: BaseTokenizer):
         self.config_ = config
         self.tokenizer_ = tokenizer
 
@@ -97,9 +95,7 @@ class CustomHandler(object):
 
 
 class CustomRenderer(object):
-    def __init__(
-        self, config: GptInitModelParameters, tokenizer: PreTrainedTokenizerBase
-    ):
+    def __init__(self, config: GptInitModelParameters, tokenizer: BaseTokenizer):
         self.config_ = config
         self.tokenizer_ = tokenizer
 

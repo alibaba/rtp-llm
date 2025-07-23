@@ -4,10 +4,12 @@ from dataclasses import dataclass
 from typing import AsyncGenerator, Optional, Union
 
 import torch
-from transformers import Qwen2Tokenizer
 
 from rtp_llm.config.generate_config import GenerateConfig
-from rtp_llm.models.base_model import GenerateOutputs
+from rtp_llm.frontend.tokenizer_factory.tokenizers import (
+    QWenTokenizer,
+    QWenV2Tokenizer
+)
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatCompletionResponseStreamChoice,
@@ -26,7 +28,7 @@ from rtp_llm.openai.renderers.custom_renderer import (
     RendererParams,
     StreamResponseObject,
 )
-from rtp_llm.tokenizer.tokenization_qwen import QWenTokenizer
+from rtp_llm.utils.base_model_datatypes import GenerateOutputs
 from rtp_llm.utils.word_util import (
     get_stop_word_slices,
     truncate_response_with_stop_words,
@@ -38,7 +40,7 @@ import sys
 sys.path.insert(0, str(current_file_path))
 from qwen_agent.llm import get_chat_model
 
-QwenTokenizerTypes = Union[QWenTokenizer, Qwen2Tokenizer]
+QwenTokenizerTypes = Union[QWenTokenizer, QWenV2Tokenizer]
 
 
 @dataclass

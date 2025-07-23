@@ -4,9 +4,11 @@ import os
 import random
 from unittest import TestCase, main
 
-from rtp_llm.models.llama import LlamaTokenizer
-from rtp_llm.models.qwen import QWenTokenizer
-from rtp_llm.utils.tokenizer_utils import DecodingState, IncrementDecodingUtils
+from rtp_llm.frontend.tokenizer_factory.tokenizer_utils import (
+    DecodingState,
+    IncrementDecodingUtils,
+)
+from rtp_llm.frontend.tokenizer_factory.tokenizers import LlamaTokenizer, QWenTokenizer
 
 os.environ["FT_SERVER_TEST"] = "1"
 
@@ -20,21 +22,22 @@ class IncrementalDecodeTest(TestCase):
             "hello, what's your name?",
             "sxsadasfdjsadfas asdas djbnasdb asj asiokdnaskd asnkdnaskd naskdnas knask",
         ]
+        print(self.tokenizers)
 
     def _get_tokenizer_list(self):
         ret = []
         tokenizer_pairs = [
             (
                 QWenTokenizer,
-                "rtp_llm/test/model_test/fake_test/testdata/qwen_7b/tokenizer",
+                "rtp_llm/test/model_test/fake_test/testdata/qwen_7b/tokenizer/",
             ),
             (
                 LlamaTokenizer,
-                "rtp_llm/test/model_test/fake_test/testdata/llama/fake/hf_source",
+                "rtp_llm/test/model_test/fake_test/testdata/llama/fake/hf_source/",
             ),
         ]
         for cls, path in tokenizer_pairs:
-            ret.append(cls.from_pretrained(path))
+            ret.append(cls(path))
         return ret
 
     def _run_incremental_decode(self, tokenizer, all_input_ids, skip_special_tokens):

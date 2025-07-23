@@ -1,7 +1,6 @@
 from typing import List, Tuple
 
-from transformers import PreTrainedTokenizer, PreTrainedTokenizerBase
-
+from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatMessage,
@@ -18,9 +17,7 @@ from rtp_llm.openai.renderers.custom_renderer import (
 
 
 class ChatGlm4Renderer(CustomChatRenderer):
-    def __init__(
-        self, tokenizer: PreTrainedTokenizerBase, renderer_params: RendererParams
-    ):
+    def __init__(self, tokenizer: BaseTokenizer, renderer_params: RendererParams):
         super().__init__(tokenizer, renderer_params)
 
     def get_renderer_info(self) -> RendererInfo:
@@ -30,11 +27,14 @@ class ChatGlm4Renderer(CustomChatRenderer):
     def build_single_message(
         self, role: str, metadata: str, message: str, prefix_message_list: List[str]
     ) -> Tuple[List[int], str]:
-        assert isinstance(self.tokenizer, PreTrainedTokenizer)
         assert role in ["system", "user", "assistant", "observation"], role
+        # chatglm4 tokenizer.tokenizer -> tiktoken.Encoding
+        # rtp_llm/frontend/tokenizer_factory/tokenizers/tokenization_chatglm4.py:32
         role_tokens = [
             self.tokenizer.convert_tokens_to_ids(f"<|{role}|>")
-        ] + self.tokenizer.tokenizer.encode(f"{metadata}\n", disallowed_special=())
+        ] + self.tokenizer.tokenizer.tokenizer.encode(
+            f"{metadata}\n", disallowed_special=()
+        )
         prefix_message_tokens = []
         prefix_message = ""
         if prefix_message_list is not None:
@@ -109,14 +109,12 @@ class ChatGlm4Renderer(CustomChatRenderer):
                 input_ids.extend(part_ids)
                 input_message += part_messages
 
-        assert isinstance(self.tokenizer, PreTrainedTokenizer)
         input_ids.extend([self.tokenizer.convert_tokens_to_ids("<|assistant|>")])
         input_message += "<|assistant|>"
 
         return input_ids, input_message, input_image
 
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
-        assert isinstance(self.tokenizer, PreTrainedTokenizerBase)
         input_ids, input_message, input_image = self.handle_single_conversation(
             request.messages
         )

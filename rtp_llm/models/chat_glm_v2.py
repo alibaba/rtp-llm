@@ -4,15 +4,10 @@ from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.glm_v2_weight import GlmV2WeightInfo
-from rtp_llm.tokenizer.tokenization_chatglm2 import ChatGLMTokenizer
 from rtp_llm.utils.util import get_config_from_path
 
 
 class ChatGlmV2(BaseModel):
-    @classmethod
-    def get_tokenizer(cls, config: GptInitModelParameters):
-        return ChatGLMTokenizer.from_pretrained(config.tokenizer_path)
-
     @staticmethod
     def get_weight_cls():
         return GlmV2WeightInfo

@@ -62,9 +62,12 @@ class AuxInfo(PyBaseModel):
     step_output_len: int = 0
     fallback_tokens: int = 0
     fallback_times: int = 0
+    first_token_cost_time: float = 0
+    wait_time: float = 0
     pd_sep: bool = False
     cum_log_probs: List[float] = []
     beam_responses: List[str] = []
+    softmax_probs: List[float] = []
     local_reuse_len: int = 0
     remote_reuse_len: int = 0
 
@@ -114,13 +117,24 @@ class GenerateContext(NamedTuple):
 
 
 class ModelConfig:
+    KV_CACHE_DTYPE = "KV_CACHE_DTYPE"
+    QUANTIZATION_KEY = "QUANTIZATION"
+    ACT_TYPE = "ACT_TYPE"
+    WEIGHT_TYPE = "WEIGHT_TYPE"  # Compatible for old config
+    INT8_MODE = "INT8_MODE"  # Compatible for old config
+
+    SP_KV_CACHE_DTYPE = "SP_KV_CACHE_DTYPE"
+    SP_QUANTIZATION_KEY = "SP_QUANTIZATION"
+    SP_ACT_TYPE = "SP_ACT_TYPE"
+    SP_WEIGHT_TYPE = "SP_WEIGHT_TYPE"  # Compatible for old config
+
     def __init__(
         self,
         model_type: str = "",
         ckpt_path: str = "",
         tokenizer_path: str = "",
-        weight_type: WEIGHT_TYPE = WEIGHT_TYPE.FP16,
-        act_type: WEIGHT_TYPE = WEIGHT_TYPE.FP16,
+        act_type: str = None,
+        kv_cache_type: str = None,
         max_seq_len: int = 0,
         seq_size_per_block: int = 8,
         gen_num_per_circle: int = 1,
@@ -129,12 +143,14 @@ class ModelConfig:
         ref_module: Optional[torch.nn.Module] = None,
         ref_dict: Dict[str, torch.Tensor] = {},
         sp_type: str = "",
+        quantization: str = "",
     ):
         self.model_type: str = model_type
         self.ckpt_path: str = ckpt_path
         self.tokenizer_path: str = tokenizer_path
-        self.weight_type: WEIGHT_TYPE = weight_type
-        self.act_type: WEIGHT_TYPE = act_type
+        self.act_type: str = act_type
+        self.kv_cache_type: str = kv_cache_type
+        self.quantization = quantization
         self.max_seq_len: int = max_seq_len
         self.seq_size_per_block: int = seq_size_per_block
         self.gen_num_per_circle: int = gen_num_per_circle
@@ -155,3 +171,25 @@ class ModelConfig:
             if k in self.__dict__:
                 self.__dict__[k] = v
         return self
+
+    @staticmethod
+    def get_quantization_from_params(env_params: Dict[str, str]):
+        if (not env_params.get(ModelConfig.QUANTIZATION_KEY)) and (
+            env_params.get(ModelConfig.WEIGHT_TYPE, "").upper() == "INT8"
+            or int(env_params.get(ModelConfig.INT8_MODE, "0")) == 1
+        ):
+            quantization = "INT8"
+        else:
+            quantization = env_params.get(ModelConfig.QUANTIZATION_KEY)
+        return quantization
+
+    @staticmethod
+    def get_sp_quantization_from_params(env_params: Dict[str, str]):
+        if not env_params.get(ModelConfig.SP_QUANTIZATION_KEY) and (
+            env_params.get(ModelConfig.SP_WEIGHT_TYPE, "").upper() == "INT8"
+            or int(env_params.get(ModelConfig.INT8_MODE, "0")) == 1
+        ):
+            quantization = "INT8"
+        else:
+            quantization = env_params.get(ModelConfig.SP_QUANTIZATION_KEY)
+        return quantization

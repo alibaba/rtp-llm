@@ -91,13 +91,13 @@ def pipeline_main(model_args, barrier):
         model_args["ckpt_path"], model_config=ModelConfig(**model_args)
     )
     tokenizer = model.model.tokenizer
-    pipeline = Pipeline(model, model.config, model.tokenizer)
+    pipeline = Pipeline(model.config, model.tokenizer)
     barrier.wait()
-    return pipeline, tokenizer
+    return pipeline, model, tokenizer
 
 
 def pipeline_proc(model_args, barrier):
-    pipeline, tokenizer = pipeline_main(model_args, barrier)
+    pipeline, model, tokenizer = pipeline_main(model_args, barrier)
     time.sleep(100000)  # forever
 
 
@@ -210,13 +210,13 @@ def run_test(model_args: Dict[str, Any], test_args: Dict[str, Any]):
     lantency_test_res: List[LatencyTestResult] = []
     lantency_test_state = False
     try:
-        pipeline, tokenizer = pipeline_main(model_args, barrier)
+        pipeline, model, tokenizer = pipeline_main(model_args, barrier)
         lantency_test_state, lantency_test_res = run_latency_test(
             model_args, test_args, pipeline, tokenizer
         )
     finally:
-        if pipeline is not None:
-            pipeline.model.decoder_engine_.stop()
+        if model is not None:
+            model.decoder_engine_.stop()
 
         stop_event.set()
         monitor_thread.join()

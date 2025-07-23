@@ -58,7 +58,7 @@ def trans_from_tensor(t: torch.Tensor):
         res.fp16_data = t.numpy().tobytes()
     elif t.dtype == torch.bfloat16:
         res.data_type = TensorPB.DataType.BF16
-        res.bf16_data = t.numpy().tobytes()
+        res.bf16_data = t.view(torch.int16).numpy().tobytes()
     else:
         raise Exception("unknown tensor data type")
     return res

@@ -16,7 +16,7 @@ from rtp_llm.config.task_type import TaskType
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
-from rtp_llm.server.frontend_worker import FrontendWorker, TokenizerEncodeResponse
+from rtp_llm.frontend.frontend_worker import FrontendWorker, TokenizerEncodeResponse
 from rtp_llm.server.misc import format_exception
 from rtp_llm.structure.request_extractor import request_id_field_name
 from rtp_llm.utils.complete_response_async_generator import (
@@ -28,8 +28,6 @@ from rtp_llm.utils.concurrency_controller import (
 )
 from rtp_llm.utils.time_util import current_time_ms
 from rtp_llm.utils.util import check_with_info
-
-StreamObjectType = Union[Dict[str, Any], BaseModel]
 
 USAGE_HEADER = "USAGE"
 
@@ -65,10 +63,6 @@ class FrontendServer(object):
                     self._frontend_worker.tokenizer,
                     self._frontend_worker.backend_rpc_server_visitor,
                 )
-
-    def stop(self):
-        if self._frontend_worker is not None:
-            self._frontend_worker.stop()
 
     def ready(self):
         return True

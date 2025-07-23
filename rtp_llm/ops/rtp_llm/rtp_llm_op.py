@@ -1,6 +1,7 @@
 import logging
 from typing import Dict, List, Optional
 
+from rtp_llm.frontend.token_processor import TokenProcessor
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.propose_model.propose_model import ProposeModel
 from rtp_llm.ops import (
@@ -14,7 +15,6 @@ from rtp_llm.ops import RtpLLMOp as CppRtpLLMOp
 from rtp_llm.ops import WorkerStatusInfo
 from rtp_llm.ops import get_block_cache_keys as cpp_get_block_cache_keys
 from rtp_llm.utils.mm_process_engine import MMProcessEngine
-from rtp_llm.utils.token_processor import TokenProcessor
 
 
 class RtpLLMOp:

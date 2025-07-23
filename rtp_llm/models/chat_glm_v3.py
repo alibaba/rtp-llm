@@ -1,17 +1,10 @@
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.chat_glm_v2 import ChatGlmV2
-from rtp_llm.tokenizer.tokenization_chatglm3 import ChatGLMTokenizer
 from rtp_llm.utils.util import get_config_from_path
 
 
 class ChatGlmV3(ChatGlmV2):
-    @classmethod
-    def get_tokenizer(cls, config: GptInitModelParameters):
-        return ChatGLMTokenizer.from_pretrained(
-            config.tokenizer_path, encode_special_tokens=True
-        )
-
     @classmethod
     def _create_config(cls, ckpt_path: str):
         config_dict = get_config_from_path(ckpt_path)

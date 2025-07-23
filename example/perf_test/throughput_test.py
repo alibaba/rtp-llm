@@ -22,6 +22,7 @@ os.environ["LOCAL_WORLD_SIZE"] = os.environ["TP_SIZE"]
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 from example.perf_test.test_util import get_prompt, origin_prompt, write_odps
+from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.start_server import main
 
@@ -122,11 +123,7 @@ def wait_server_ready(proc):
 
 
 def get_tokenizer():
-    model_config = ModelFactory.create_normal_model_config()
-    model_cls = ModelFactory.get_model_cls(model_config.model_type)
-    params = model_cls.create_config(model_config)
-    tokenizer = model_cls.get_tokenizer(params)
-    return tokenizer
+    return TokenizerFactory.create_from_env()
 
 
 def run_test(

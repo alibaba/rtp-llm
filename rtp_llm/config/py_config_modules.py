@@ -113,6 +113,7 @@ class ModelConfig:
         self.task_type = os.environ.get("TASK_TYPE", self.task_type)
         self.model_type = os.environ.get("MODEL_TYPE", self.model_type)
         self.checkpoint_path = os.environ.get("CHECKPOINT_PATH", self.checkpoint_path)
+        self.tokenizer_path = os.environ.get("TOKENIZER_PATH", self.checkpoint_path)
         self.oss_endpoint = os.environ.get("OSS_ENDPOINT", self.oss_endpoint)
         self.ptuning_path = os.environ.get("PTUNING_PATH", self.ptuning_path)
         self.openai_api_key = os.environ.get("OPENAI_API_KEY", self.openai_api_key)

@@ -3,11 +3,11 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import torch
 from pydantic import BaseModel
 from torch.nn.utils.rnn import pad_sequence
-from transformers import PreTrainedTokenizerBase
 
 from rtp_llm.async_decoder_engine.embedding.interface import EngineInputs, EngineOutputs
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.distribute.worker_info import g_parallel_info
+from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.models.downstream_modules.common_input_generator import (
     CommonInputGenerator,
 )
@@ -137,9 +137,7 @@ def combo_to_list(
 class EmbeddingRendererBase(CustomRenderer):
     embedding_type: EmbeddingResponseType
 
-    def __init__(
-        self, config: GptInitModelParameters, tokenizer: PreTrainedTokenizerBase
-    ):
+    def __init__(self, config: GptInitModelParameters, tokenizer: BaseTokenizer):
         super().__init__(config, tokenizer)
         self.generator = CommonInputGenerator(tokenizer, config)
 

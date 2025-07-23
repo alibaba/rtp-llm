@@ -6,20 +6,11 @@ from dataclasses import dataclass, field
 from typing import AsyncGenerator, List, Optional, Union
 
 import torch
-from transformers import PreTrainedTokenizerBase
+from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 
-from rtp_llm.async_decoder_engine.backend_rpc_server_visitor import (
-    BackendRPCServerVisitor,
-)
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.gpt_init_model_parameters import TemplateType
 from rtp_llm.config.py_config_modules import PyEnvConfigs, StaticConfig
-from rtp_llm.models.base_model import (
-    AuxInfo,
-    GenerateInput,
-    GenerateOutput,
-    GenerateOutputs,
-)
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -37,6 +28,13 @@ from rtp_llm.openai.api_datatype import (
     RoleEnum,
     TopLogprob,
     UsageInfo,
+)
+from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+from rtp_llm.utils.base_model_datatypes import (
+    AuxInfo,
+    GenerateInput,
+    GenerateOutput,
+    GenerateOutputs,
 )
 from rtp_llm.utils.multimodal_util import MMPreprocessConfig, MMUrlType, MultimodalInput
 from rtp_llm.utils.util import has_overlap_kmp
@@ -252,7 +250,7 @@ class RenderedInputs:
 class CustomChatRenderer:
     def __init__(
         self,
-        tokenizer: PreTrainedTokenizerBase,
+        tokenizer: BaseTokenizer,
         renderer_params: RendererParams,
     ):
         self.py_env_configs = PyEnvConfigs()
@@ -301,18 +299,13 @@ class CustomChatRenderer:
     def tokenize_words(self, words: List[str]) -> List[List[int]]:
         ids_list = []
         for word in words:
-            if isinstance(self.tokenizer, PreTrainedTokenizerBase):
-                token_id = self.tokenizer.convert_tokens_to_ids(word)
-                if isinstance(token_id, int):
-                    ids_list.append([token_id])
-                elif isinstance(token_id, list):
-                    ids_list.append(token_id)
-                else:
-                    ids_list.append(
-                        self.tokenizer.encode(word, add_special_tokens=True)
-                    )
+            token_id = self.tokenizer.convert_tokens_to_ids(word)
+            if isinstance(token_id, int):
+                ids_list.append([token_id])
+            elif isinstance(token_id, list):
+                ids_list.append(token_id)
             else:
-                ids_list.append(self.tokenizer.encode(word))
+                ids_list.append(self.tokenizer.encode(word, add_special_tokens=True))
         return ids_list
 
     def get_all_extra_stop_word_ids_list(self) -> List[List[int]]:

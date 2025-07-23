@@ -4,19 +4,10 @@ from typing import Any, Dict, Optional
 
 from rtp_llm.async_decoder_engine.async_model import AsyncModel
 from rtp_llm.async_decoder_engine.rpc_engine import RPCEngine
+from rtp_llm.lora.lora_exception import LoraCountException, LoraException
 from rtp_llm.model_loader.loader import ModelLoader
 from rtp_llm.utils.database import CkptDatabase
 from rtp_llm.utils.time_util import Timer
-
-
-class LoraException(Exception):
-    def __init__(self, *args: object) -> None:
-        super().__init__(*args)
-
-
-class LoraCountException(LoraException):
-    def __init__(self, *args: object) -> None:
-        super().__init__(*args)
 
 
 class LoraManager:

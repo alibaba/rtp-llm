@@ -4,9 +4,13 @@
 #include "rtp_llm/cpp/dataclass/EngineScheduleInfo.h"
 #include "rtp_llm/cpp/th_op/GptInitParameterRegister.h"
 #include "rtp_llm/cpp/th_op/common/blockUtil.h"
+
+#ifndef USE_FRONTEND
 #include "rtp_llm/cpp/th_op/multi_gpu_gpt/RtpLLMOp.h"
 #include "rtp_llm/cpp/th_op/multi_gpu_gpt/RtpEmbeddingOp.h"
 #include "rtp_llm/cpp/th_op/multi_gpu_gpt/EmbeddingHandlerOp.h"
+#endif
+
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/utils/AttentionConfig.h"
 #include "rtp_llm/cpp/th_op/ConfigModules.h"
@@ -46,9 +50,13 @@ PYBIND11_MODULE(libth_transformer, m) {
     registerFMHAType(m);
     register_ffn_disaggregate_config(m);
     registerGptInitParameter(m);
+
+#ifndef USE_FRONTEND
     registerRtpLLMOp(m);
     registerRtpEmbeddingOp(m);
     registerEmbeddingHandler(m);
+#endif
+
     registerDeviceOps(m);
     registerCommon(m);
     registerPyOpDefs(m);

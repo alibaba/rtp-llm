@@ -19,17 +19,15 @@ from uvicorn.loops.auto import auto_loop_setup
 from rtp_llm.config.py_config_modules import PyEnvConfigs, StaticConfig
 from rtp_llm.config.uvicorn_config import UVICORN_LOGGING_CONFIG
 from rtp_llm.distribute.worker_info import g_worker_info
-from rtp_llm.embedding.frontend_embedding_app import register_frontend_embedding_api
-from rtp_llm.models.base_model import BaseModel
-from rtp_llm.openai.api_datatype import ChatCompletionRequest
-from rtp_llm.server.frontend_server import FrontendServer
+from rtp_llm.frontend.frontend_server import FrontendServer
+from rtp_llm.openai.api_datatype import (
+    ChatCompletionRequest,
+)
 from rtp_llm.utils.util import AtomicCounter, async_request_server
 from rtp_llm.utils.version_info import VersionInfo
 
 # make buffer larger to avoid throw exception "RemoteProtocolError Receive buffer too long"
 MAX_INCOMPLETE_EVENT_SIZE = 1024 * 1024
-
-StreamObjectType = Union[Dict[str, Any], BaseModel]
 
 active_requests = AtomicCounter()
 server_shutdown = False
@@ -47,7 +45,6 @@ class GracefulShutdownServer(Server):
         while active_requests.get() > 0:
             logging.info(f"wait {active_requests.get()} requests finish for 1s")
             await asyncio.sleep(1)
-        self.frontend_server.stop()
         await super().shutdown(sockets)
 
 
@@ -93,7 +90,6 @@ class FrontendApp(object):
             server.set_server(self.frontend_server)
             server.run()
         except BaseException as e:
-            self.frontend_server.stop()
             raise e
 
     def create_app(self):
@@ -273,5 +269,64 @@ class FrontendApp(object):
         async def encode(req: Union[str, Dict[Any, Any]]):
             return self.frontend_server.tokenize(req)
 
-        register_frontend_embedding_api(app, g_worker_info.backend_server_port)
+        if self.frontend_server.is_embedding:
+            # embedding
+            @app.post("/v1/embeddings")
+            async def embedding(request: Dict[str, Any], raw_request: RawRequest):
+                return await async_request_server(
+                    "post", g_worker_info.backend_server_port, "v1/embeddings", request
+                )
+
+            @app.post("/v1/embeddings/dense")
+            async def embedding_dense(request: Dict[str, Any], raw_request: RawRequest):
+                return await async_request_server(
+                    "post",
+                    g_worker_info.backend_server_port,
+                    "v1/embeddings/dense",
+                    request,
+                )
+
+            @app.post("/v1/embeddings/sparse")
+            async def embedding_sparse(
+                request: Dict[str, Any], raw_request: RawRequest
+            ):
+                return await async_request_server(
+                    "post",
+                    g_worker_info.backend_server_port,
+                    "v1/embeddings/sparse",
+                    request,
+                )
+
+            @app.post("/v1/embeddings/colbert")
+            async def embedding_colbert(
+                request: Dict[str, Any], raw_request: RawRequest
+            ):
+                return await async_request_server(
+                    "post",
+                    g_worker_info.backend_server_port,
+                    "v1/embeddings/colbert",
+                    request,
+                )
+
+            @app.post("/v1/embeddings/similarity")
+            async def similarity(request: Dict[str, Any], raw_request: RawRequest):
+                return await async_request_server(
+                    "post",
+                    g_worker_info.backend_server_port,
+                    "v1/embeddings/similarity",
+                    request,
+                )
+
+            @app.post("/v1/classifier")
+            async def classifier(request: Dict[str, Any], raw_request: RawRequest):
+                return await async_request_server(
+                    "post", g_worker_info.backend_server_port, "v1/classifier", request
+                )
+
+            @app.post("/v1/reranker")
+            async def reranker(request: Dict[str, Any], raw_request: RawRequest):
+                return await async_request_server(
+                    "post", g_worker_info.backend_server_port, "v1/reranker", request
+                )
+
         return app

@@ -250,10 +250,6 @@ class ModelLoader:
         model_size = self._weights_info.config.eval_model_size()
         device_mem_info = self._load_config.exported_device.get_mem_info()
         if device_mem_info is None:
-            import psutil
-
-            vmem = psutil.virtual_memory()
-            free_mem = vmem.free / (1024.0**2) / self._tp_size
             return "cpu"
         else:
             free_mem = device_mem_info.free / (1024.0**2)

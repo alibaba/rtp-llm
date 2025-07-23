@@ -4,10 +4,6 @@ import math
 import os
 from typing import Any, Dict, List
 
-from transformers.models.llama.tokenization_llama import (
-    LlamaTokenizer as LlamaTokenizerOrigin,
-)
-
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
@@ -18,13 +14,6 @@ def compute_intermediate_size(n, ffn_dim_multiplier=1, multiple_of=256):
     return multiple_of * (
         (int(ffn_dim_multiplier * int(8 * n / 3)) + multiple_of - 1) // multiple_of
     )
-
-
-class LlamaTokenizer(LlamaTokenizerOrigin):
-    def convert_tokens_to_string(self, tokens: List[int]):
-        if len(tokens) == 0:
-            return ""
-        return super().convert_tokens_to_string(tokens)
 
 
 class Llama(BaseModel):
@@ -155,18 +144,6 @@ class Llama(BaseModel):
         config.tie_word_embeddings = params_json.get("tie_word_embeddings", False)
         config.config_dtype = params_json.get("torch_dtype", None)
         return config
-
-    @classmethod
-    def get_tokenizer(cls, config: GptInitModelParameters):
-        tokenizer_config_file = os.path.join(
-            config.tokenizer_path, "tokenizer_config.json"
-        )
-        if os.path.exists(tokenizer_config_file):
-            logging.info("load super tokenzier")
-            return super().get_tokenizer(config)
-        else:
-            logging.info("load LlamaTokenizer")
-            return LlamaTokenizer.from_pretrained(config.tokenizer_path)
 
 
 class Baichuan(Llama):

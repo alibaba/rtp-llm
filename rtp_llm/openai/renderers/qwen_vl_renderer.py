@@ -1,8 +1,7 @@
 import copy
 from typing import List
 
-from transformers import PreTrainedTokenizerBase
-
+from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatMessage,
@@ -20,9 +19,7 @@ from rtp_llm.utils.multimodal_util import MMPreprocessConfig, MMUrlType
 
 
 class QwenVLRenderer(CustomChatRenderer):
-    def __init__(
-        self, tokenizer: PreTrainedTokenizerBase, renderer_params: RendererParams
-    ):
+    def __init__(self, tokenizer: BaseTokenizer, renderer_params: RendererParams):
         super().__init__(tokenizer, renderer_params)
 
     def _render_messages(self, messages: List[ChatMessage]) -> PromptWithMMInput:
@@ -65,9 +62,7 @@ class QwenVLRenderer(CustomChatRenderer):
 
 
 class Qwen2VLRenderer(CustomChatRenderer):
-    def __init__(
-        self, tokenizer: PreTrainedTokenizerBase, renderer_params: RendererParams
-    ):
+    def __init__(self, tokenizer: BaseTokenizer, renderer_params: RendererParams):
         super().__init__(tokenizer, renderer_params)
 
     def _render_messages(

@@ -3,9 +3,8 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Dict, List
 
-from transformers import PreTrainedTokenizerBase
-
 from rtp_llm.config.py_config_modules import StaticConfig
+from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatMessage,
@@ -182,9 +181,7 @@ conv_templates = {
 
 
 class LlavaRenderer(CustomChatRenderer):
-    def __init__(
-        self, tokenizer: PreTrainedTokenizerBase, renderer_params: RendererParams
-    ):
+    def __init__(self, tokenizer: BaseTokenizer, renderer_params: RendererParams):
         super().__init__(tokenizer, renderer_params)
 
     def _get_conv_template(self, model_name: str) -> Conversation:

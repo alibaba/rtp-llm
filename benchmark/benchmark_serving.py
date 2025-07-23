@@ -212,7 +212,6 @@ def main(args: argparse.Namespace):
     if args.backend == "trt":
         # api_url = f"http://{args.host}:{args.port}/v2/models/tensorrt_llm_bls/generate"
         api_url = f"http://{args.host}:{args.port}/v2/models/ensemble/generate"
-    # tokenizer = get_tokenizer(args.tokenizer, trust_remote_code=args.trust_remote_code)
     tokenizer = AutoTokenizer.from_pretrained(
         args.tokenizer, trust_remote_code=args.trust_remote_code, use_fast=False
     )

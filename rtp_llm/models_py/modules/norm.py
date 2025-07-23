@@ -1,8 +1,9 @@
 from typing import Optional, Tuple
 
 import torch
-from libth_transformer import rtp_llm_ops
 from torch import nn
+
+from rtp_llm.ops import rtp_llm_ops
 
 
 class BaseNorm(nn.Module):

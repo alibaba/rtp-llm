@@ -15,10 +15,12 @@ sys.path.append(str(current_file_path.parent.absolute()))
 from pydantic import BaseModel
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
 from rtp_llm.model_factory import ModelFactory
-from rtp_llm.models.base_model import GenerateConfig, GenerateResponse
 from rtp_llm.pipeline.pipeline import Pipeline
 from rtp_llm.structure.request_extractor import Request, RequestExtractor
+from rtp_llm.utils.base_model_datatypes import GenerateResponse
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
@@ -55,25 +57,16 @@ class TokenizerEncodeResponse(BaseModel):
 class FrontendWorker:
     def __init__(self, separated_frontend: bool) -> None:
         logging.info("starting frontend worker")
-        self.model_cls, self.model_config = ModelFactory.create_gpt_init_config(
+        self.model_config = ModelFactory.create_frontend_config(
             ModelFactory.create_normal_model_config()
         )
-        self.tokenizer = None
-        if self.model_config.tokenizer_path:
-            self.tokenizer = self.model_cls.get_tokenizer(self.model_config)
-            if hasattr(self.tokenizer, "eos_token_id") and self.tokenizer.eos_token_id:
-                self.model_config.special_tokens.eos_token_id = (
-                    self.tokenizer.eos_token_id
-                )
-            self.model_config.update_task_prompt_tokens_id(self.tokenizer)
-        self.pipeline = Pipeline(
-            self.model_cls, self.model_config, self.tokenizer, separated_frontend
-        )
+        self.tokenizer = TokenizerFactory.create_from_env()
+        if hasattr(self.tokenizer, "eos_token_id") and self.tokenizer.eos_token_id:
+            self.model_config.special_tokens.eos_token_id = self.tokenizer.eos_token_id
+        self.model_config.update_task_prompt_tokens_id(self.tokenizer)
+        self.pipeline = Pipeline(self.model_config, self.tokenizer, separated_frontend)
         self.backend_rpc_server_visitor = self.pipeline.backend_rpc_server_visitor
         logging.info("frontend worker start done.")
-
-    def stop(self):
-        self.pipeline.stop()
 
     def tokenizer_offset_mapping(self, prompt: str) -> Any:
         return self.pipeline.tokenizer(

@@ -53,6 +53,21 @@ config_setting(
     values = {"copt": "-DENABLE_3FS=1"},
 )
 
+config_setting(
+    name = "frontend",
+    values = {"define": "frontend=true"}
+)
+
+config_setting(
+    name = "default_cuda",
+    define_values = {"frontend": "false", "using_cuda": "true"}
+)
+
+config_setting(
+    name = "default_cuda12",
+    define_values = {"frontend": "false", "using_cuda12": "true"}
+)
+
 cc_library(
     name = "config_modules",
     srcs = [
@@ -110,15 +125,20 @@ filegroup(
         "//rtp_llm/cpp:th_op/GptInitParameter.cc",
         "//rtp_llm/cpp:th_op/init.cc",
         "//rtp_llm/cpp:th_op/common/InitEngineOps.cc",
-        "//rtp_llm/cpp:th_op/multi_gpu_gpt/RtpEmbeddingOp.cc",
-        "//rtp_llm/cpp:th_op/multi_gpu_gpt/EmbeddingHandlerOp.cc",
-        "//rtp_llm/cpp:th_op/multi_gpu_gpt/RtpLLMOp.cc",
         "//rtp_llm/cpp:th_op/common/blockUtil.cc",
     ] + select({
-        "@//:using_cuda": [
+        "@//:frontend": [],
+        "@//:default_cuda": [
+            "//rtp_llm/cpp:th_op/multi_gpu_gpt/RtpEmbeddingOp.cc",
+            "//rtp_llm/cpp:th_op/multi_gpu_gpt/EmbeddingHandlerOp.cc",
+            "//rtp_llm/cpp:th_op/multi_gpu_gpt/RtpLLMOp.cc",
             "//rtp_llm/cpp:th_op/common/NcclOp.cc",
         ],
-        "//conditions:default": [],
+        "//conditions:default": [
+            "//rtp_llm/cpp:th_op/multi_gpu_gpt/RtpEmbeddingOp.cc",
+            "//rtp_llm/cpp:th_op/multi_gpu_gpt/EmbeddingHandlerOp.cc",
+            "//rtp_llm/cpp:th_op/multi_gpu_gpt/RtpLLMOp.cc",
+        ],
     }),
     visibility = ["//visibility:public"],
 )
@@ -134,14 +154,20 @@ cc_library(
         "//rtp_llm/cpp:utils",
         "//rtp_llm/cpp/devices:device_py_export",
         "//rtp_llm/cpp/devices:devices_base",
-        "//rtp_llm/cpp:http_api_server",
-        "//rtp_llm/cpp:model_rpc_server",
         "@grpc//:grpc++",
     ] + select({
-        "@//:using_cuda": [
+        "@//:frontend": [
+            "//rtp_llm/cpp:dataclass",
+        ],
+        "@//:default_cuda": [
+            "//rtp_llm/cpp:http_api_server",
+            "//rtp_llm/cpp:model_rpc_server",
             "//rtp_llm/cpp/cuda:allocator_torch",
         ],
-        "//conditions:default": [],
+        "//conditions:default": [
+            "//rtp_llm/cpp:http_api_server",
+            "//rtp_llm/cpp:model_rpc_server",
+        ],
     }) + select_py_bindings(),
     copts = copts(),
     alwayslink = True,
@@ -179,7 +205,7 @@ cc_binary(
         ":th_transformer_lib",
         ":gpt_init_params",
     ] + select({
-        "@//:using_cuda": [
+        "@//:default_cuda": [
             ":th_transformer_gpu",
         ],
         "//conditions:default": [],

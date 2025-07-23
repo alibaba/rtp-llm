@@ -15,8 +15,6 @@ sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
 from rtp_llm.distribute.worker_info import WorkerInfo
 from rtp_llm.server.server_args.server_args import setup_args
-from rtp_llm.start_backend_server import start_backend_server
-from rtp_llm.start_frontend_server import start_frontend_server
 from rtp_llm.utils.concurrency_controller import init_controller
 
 
@@ -37,6 +35,8 @@ def check_server_health(server_port):
 
 
 def start_backend_server_impl(global_controller):
+    from rtp_llm.start_backend_server import start_backend_server
+
     profiling_debug_config = ProfilingDebugLoggingConfig()
     profiling_debug_config.update_from_env()
     # only for debug
@@ -72,6 +72,8 @@ def start_backend_server_impl(global_controller):
 
 
 def start_frontend_server_impl(global_controller, backend_process):
+    from rtp_llm.start_frontend_server import start_frontend_server
+
     server_config = ServerConfig()
     server_config.update_from_env()
     frontend_server_count = server_config.frontend_server_count

@@ -285,7 +285,6 @@ py_library(
         "openai/**/*.py",
     ]),
     deps = [
-        ":async_model",
         ":utils",
         ":ops",
         ":config",
@@ -294,6 +293,17 @@ py_library(
     data = [
         "openai/renderers/qwen_agent/utils/qwen.tiktoken"
     ],
+)
+
+py_library(
+    name = "frontend",
+    srcs = glob([
+        "frontend/*.py",
+        "frontend/**/*.py",
+    ]),
+    deps = [
+        ":openai_api"
+    ]
 )
 
 py_library(
@@ -309,7 +319,6 @@ py_library(
     ],
     deps = [
         "//rtp_llm/server:server",
-        ":models",
         ":uvicorn",
         ":fastapi",
         ":psutil",
@@ -339,6 +348,7 @@ py_library(
     ],
     deps = [
         ":sdk",
+        ":models",
     ],
     imports = ["."],
 )
@@ -378,27 +388,37 @@ py_library(
         ":eplb",
         ":ops",
         ":pipeline",
-        ":models",
         ":device",
         ":config",
         ":structure",
         "//rtp_llm/server:server",
         ":plugins",
-        ":async_model",
+        "//rtp_llm/cpp:model_rpc_client",
         ":openai_api",
-        ":embedding",
         ":lora",
         ":sdk",
+        ":frontend",
         "//rtp_llm/tools:model_assistant",
-        "//rtp_llm/tools/convert:convert",
         "//rtp_llm/distribute:distribute",
         ":tokenizer",
         "//rtp_llm/aios/kmonitor:kmonitor_py",
         "//rtp_llm/metrics:metrics",
         "//rtp_llm/access_logger:access_logger",
     ] + select({
-        "@//:using_rocm": [":aiter",],
-        "//conditions:default": [],
+        "@//:frontend": [],
+        "@//:using_rocm": [
+            ":models",
+            ":async_model",
+            ":embedding",
+            "//rtp_llm/tools/convert:convert",
+            ":aiter",
+        ],
+        "//conditions:default": [
+            ":models",
+            ":async_model",
+            ":embedding",
+            "//rtp_llm/tools/convert:convert",
+        ],
     }),
     data = [
         "//rtp_llm/libs:libs"
@@ -409,8 +429,7 @@ py_package(
     name = "rtp_llm_package",
     deps = [
         ":rtp_llm_lib",
-        "//rtp_llm/cpp/deep_gemm:jit_includes"
-    ],
+    ] + jit_deps(),
     packages = [
         "rtp_llm"
     ],
@@ -483,7 +502,7 @@ py_wheel(
     deps = [
         ":rtp_llm_package",
         "//deps:extension_package",
-    ] + jit_deps(),
+    ],
     requires = whl_reqs,
 )
 

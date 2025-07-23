@@ -10,9 +10,9 @@ import torch
 import torch.nn as nn
 from sentence_transformers.models import Normalize, Transformer
 from sentence_transformers.util import import_from_string
-from transformers import PreTrainedTokenizerBase
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.models.downstream_modules.custom_module import CustomHandler, CustomModule
 from rtp_llm.models.downstream_modules.embedding.api_datatype import (
     EmbeddingResponseFormat,
@@ -32,9 +32,7 @@ from rtp_llm.utils.util import to_torch_dtype
 
 
 class DenseEmbeddingModule(CustomModule):
-    def __init__(
-        self, config: GptInitModelParameters, tokenizer: PreTrainedTokenizerBase
-    ):
+    def __init__(self, config: GptInitModelParameters, tokenizer: BaseTokenizer):
         super().__init__(config, tokenizer)
         self.renderer = DenseEmbeddingRenderer(config, tokenizer)
         if os.path.exists(os.path.join(self.config_.ckpt_path, "modules.json")):

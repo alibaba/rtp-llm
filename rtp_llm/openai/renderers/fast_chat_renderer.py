@@ -1,5 +1,4 @@
-from transformers import PreTrainedTokenizerBase
-
+from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import ChatCompletionRequest, RendererInfo, RoleEnum
 from rtp_llm.openai.renderers.custom_renderer import (
     CustomChatRenderer,
@@ -11,9 +10,7 @@ from .conversation import get_conv_template
 
 
 class FastChatRenderer(CustomChatRenderer):
-    def __init__(
-        self, tokenizer: PreTrainedTokenizerBase, renderer_params: RendererParams
-    ):
+    def __init__(self, tokenizer: BaseTokenizer, renderer_params: RendererParams):
         super().__init__(tokenizer, renderer_params)
         self.conv_template = get_conv_template(renderer_params.model_type)
         self.roles_map = {

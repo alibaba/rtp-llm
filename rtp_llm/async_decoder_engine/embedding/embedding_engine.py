@@ -5,13 +5,13 @@ from typing_extensions import override
 
 from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 from rtp_llm.async_decoder_engine.embedding.interface import EngineInputs, EngineOutputs
-from rtp_llm.models.base_model import BaseModel
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.ops import LoadBalanceInfo, MultimodalInputCpp, RtpEmbeddingOp
 from rtp_llm.utils.mm_process_engine import MMProcessEngine
 
 
 class EmbeddingCppEngine(BaseEngine):
-    def __init__(self, model: BaseModel):
+    def __init__(self, model):
         logging.info("creating cpp embedding engine")
         self.model = model
         assert (

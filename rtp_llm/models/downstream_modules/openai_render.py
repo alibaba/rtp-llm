@@ -3,15 +3,14 @@ import logging
 from transformers import PreTrainedTokenizerBase
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.renderer_factory import ChatRendererFactory
 from rtp_llm.openai.renderers.basic_renderer import BasicRenderer
 from rtp_llm.openai.renderers.custom_renderer import CustomChatRenderer, RendererParams
 
 
 class OpenAIRenderBasicInfo(object):
-    def __init__(
-        self, tokenizer: PreTrainedTokenizerBase, config: GptInitModelParameters
-    ):
+    def __init__(self, tokenizer: BaseTokenizer, config: GptInitModelParameters):
         self.config = config
         self.max_seq_len = self.config.max_seq_len
 
@@ -19,9 +18,7 @@ class OpenAIRenderBasicInfo(object):
             raise AttributeError(f"model has no tokenizer!")
         self.tokenizer = tokenizer
 
-        self.eos_token_id = None
-        if isinstance(tokenizer, PreTrainedTokenizerBase):
-            self.eos_token_id = tokenizer.eos_token_id
+        self.eos_token_id = tokenizer.eos_token_id
         if self.eos_token_id is None:
             self.eos_token_id = self.config.special_tokens.eos_token_id
 

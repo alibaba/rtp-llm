@@ -18,7 +18,7 @@ from rtp_llm.cpp.proto.model_rpc_service_pb2 import (
 from rtp_llm.cpp.proto.model_rpc_service_pb2_grpc import RpcServiceStub
 from rtp_llm.distribute.gang_info import get_gang_info
 from rtp_llm.distribute.worker_info import g_parallel_info, g_worker_info
-from rtp_llm.models.base_model import (
+from rtp_llm.utils.base_model_datatypes import (
     AuxInfo,
     GenerateConfig,
     GenerateInput,

@@ -5,14 +5,9 @@ from transformers import PreTrainedTokenizerBase
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.chat_glm_v3 import ChatGlmV3
-from rtp_llm.tokenizer.tokenization_chatglm4 import ChatGLM4Tokenizer
 
 
 class ChatGlmV4(ChatGlmV3):
-    @classmethod
-    def get_tokenizer(cls, config: GptInitModelParameters) -> PreTrainedTokenizerBase:
-        return ChatGLM4Tokenizer.from_pretrained(config.tokenizer_path)
-
     @classmethod
     def update_stop_words(
         cls, config: GptInitModelParameters, config_json: Dict[str, Any]

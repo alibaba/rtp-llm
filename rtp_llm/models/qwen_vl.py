@@ -37,51 +37,6 @@ class QWen_VL(QWen, MultiModalMixin):
             {"vit": self.mm_part.vit}
         )
 
-    @staticmethod
-    def multimodal_modify_prompt_plugin(
-        prompt: Union[List[Dict[str, Any]], str],
-        images: List[str],
-        img_token: str,
-        **kwargs: Any,
-    ) -> Tuple[str, List[MultimodalInput]]:
-        prompt, mm_inputs = MultiModalMixin.multimodal_modify_prompt_plugin(
-            prompt, images, img_token, **kwargs
-        )
-        start_str = "<img>"
-        end_str = "</img>"
-        if img_token in prompt:
-            split_prompts = prompt.split(img_token)
-            if len(split_prompts) - 1 != len(images):
-                raise Exception("num of " + img_token + " should equals to images num")
-            res = split_prompts[0]
-            idx = 0
-            for split_prompt in split_prompts[1:]:
-                res = res + start_str + images[idx] + end_str + split_prompt
-                idx = idx + 1
-            return res, mm_inputs
-        else:
-            prefix_prompt = ""
-            if len(images) > 0:
-                for i in range(len(images)):
-                    prefix_prompt += (
-                        "Picture {i}:".format(i=i + 1)
-                        + start_str
-                        + images[i]
-                        + end_str
-                        + "\n"
-                    )
-
-            tmp_prompt = prompt
-            while start_str in tmp_prompt:
-                start_idx = tmp_prompt.find(start_str)
-                end_idx = tmp_prompt.find(end_str)
-                if end_idx < start_idx:
-                    raise Exception(f"unclosed tag <img> pair in {prompt}")
-                images.append(tmp_prompt[start_idx + len(start_str) : end_idx])
-                tmp_prompt = tmp_prompt[end_idx + len(end_str) :]
-
-            return prefix_prompt + prompt, [MultimodalInput(image) for image in images]
-
     @classmethod
     def _create_config(cls, ckpt_path: str):
         config = GptInitModelParameters(
@@ -121,12 +76,6 @@ class QWen_VL(QWen, MultiModalMixin):
         config.mm_sep_tokens = [
             [vit_config["image_start_id"], vit_config["image_start_id"] + 1]
         ]
-
-    @classmethod
-    def get_tokenizer(cls, config: GptInitModelParameters):
-        return AutoTokenizer.from_pretrained(
-            config.tokenizer_path, trust_remote_code=True
-        )
 
     @staticmethod
     def get_weight_cls():

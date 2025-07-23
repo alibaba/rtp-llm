@@ -12,7 +12,7 @@ CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
 from rtp_llm.distribute.worker_info import FrontendServerInfo
-from rtp_llm.server.frontend_app import FrontendApp
+from rtp_llm.frontend.frontend_app import FrontendApp
 from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
     set_global_controller,

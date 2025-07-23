@@ -18,11 +18,5 @@ class MegatronBert(Bert):
         config.layernorm_type = "pre_layernorm"
         return config
 
-    @classmethod
-    def get_tokenizer(cls, config: GptInitModelParameters):
-        return AutoTokenizer.from_pretrained(
-            config.tokenizer_path, trust_remote_code=True
-        )
-
 
 register_model("megatron_bert", MegatronBert, ["MegatronBertModel"])

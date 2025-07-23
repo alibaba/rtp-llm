@@ -123,19 +123,10 @@ try:
         MlaOpsType,
         ModelSpecificConfig,
         MoeConfig,
-    )
-    from libth_transformer import MultimodalInput as MultimodalInputCpp
-    from libth_transformer import (
         ParallelismDistributedConfig,
         ProfilingDebugLoggingConfig,
-        PyAttentionInputs,
-        PyModelInitResources,
-        PyModelInputs,
-        PyModelOutputs,
         QuantAlgo,
         RoleType,
-        RtpEmbeddingOp,
-        RtpLLMOp,
         SamplerConfig,
         SchedulerConfig,
         ServiceDiscoveryConfig,
@@ -151,3 +142,36 @@ except BaseException as e:
 
     print(f"Exception: {e}, traceback: {traceback.format_exc()}")
     logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
+
+
+# Frontend not related
+class EmptyClass:
+    def __init__(self, **kwargs):
+        pass
+
+
+try:
+    from libth_transformer import EngineScheduleInfo, KVCacheInfo, LoadBalanceInfo
+    from libth_transformer import MultimodalInput as MultimodalInputCpp
+    from libth_transformer import (
+        PyAttentionInputs,
+        PyModelInitResources,
+        PyModelInputs,
+        PyModelOutputs,
+        RtpEmbeddingOp,
+        RtpLLMOp,
+        rtp_llm_ops,
+    )
+except BaseException as e:
+    if os.environ.get("ROLE_TYPE") == "FRONTEND":
+        MultimodalInputCpp = LoadBalanceInfo = EngineScheduleInfo = EmptyClass
+        RtpEmbeddingOp = RtpLLMOp = EmptyClass
+        PyModelInputs = PyModelOutputs = PyAttentionInputs = PyModelInitResources = (
+            rtp_llm_ops
+        ) = EmptyClass
+    else:
+        import traceback
+
+        print(f"Exception: {e}, traceback: {traceback.format_exc()}")
+        logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
+        raise e

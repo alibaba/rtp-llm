@@ -4,6 +4,7 @@ from typing_extensions import override
 
 from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient
+from rtp_llm.frontend.token_processor import TokenProcessor
 from rtp_llm.models.base_model import BaseModel, GenerateInput, GenerateOutputs
 from rtp_llm.models.propose_model.propose_model import ProposeModel
 from rtp_llm.ops import (
@@ -14,7 +15,6 @@ from rtp_llm.ops import (
 )
 from rtp_llm.ops.rtp_llm.rtp_llm_op import RtpLLMOp
 from rtp_llm.utils.mm_process_engine import MMProcessEngine
-from rtp_llm.utils.token_processor import TokenProcessor
 
 
 class RPCEngine(BaseEngine):

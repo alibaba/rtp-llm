@@ -4,7 +4,7 @@ from typing import Any, List, Optional
 import torch
 
 try:
-    from libth_transformer.rtp_llm_ops import (
+    from rtp_llm.ops.rtp_llm_ops import (
         FusedRopeKVCacheDecodeOp,
         FusedRopeKVCachePrefillOp,
     )
@@ -89,7 +89,7 @@ PREFILL_MHA_IMPS: List[type[FMHAPrefillImplBase]] = []
 DECODE_MHA_IMPS: List[type[FMHADecodeImplBase]] = []
 
 try:
-    from libth_transformer.rtp_llm_ops import FlashInferPrefillOp
+    from rtp_llm.ops.rtp_llm_ops import FlashInferPrefillOp
 
     class FlashInferPrefillImpl(FMHAPrefillImplBase):
 
@@ -108,7 +108,7 @@ except ImportError:
 
 
 try:
-    from libth_transformer.rtp_llm_ops import FlashInferDecodeOp
+    from rtp_llm.ops.rtp_llm_ops import FlashInferDecodeOp
 
     class FlashInferDecodeImpl(FMHADecodeImplBase):
 
@@ -127,7 +127,7 @@ except ImportError:
 
 
 try:
-    from libth_transformer.rtp_llm_ops import TRTAttnOp
+    from rtp_llm.ops.rtp_llm_ops import TRTAttnOp
 
     class TRTMHAImpl(FMHAPrefillImplBase):
 
@@ -148,7 +148,7 @@ except ImportError:
 
 
 try:
-    from libth_transformer.rtp_llm_ops import XQAAttnOp
+    from rtp_llm.ops.rtp_llm_ops import XQAAttnOp
 
     class XQAImpl(FMHADecodeImplBase):
 

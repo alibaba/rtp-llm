@@ -13,17 +13,15 @@ from fastapi.responses import ORJSONResponse
 from pydantic import BaseModel
 
 from rtp_llm.access_logger.access_logger import AccessLogger
-from rtp_llm.async_decoder_engine.backend_rpc_server_visitor import (
-    BackendRPCServerVisitor,
-)
 from rtp_llm.config.py_config_modules import PyEnvConfigs, StaticConfig
+from rtp_llm.async_decoder_engine.async_model import AsyncModel
 from rtp_llm.config.task_type import TaskType
 from rtp_llm.distribute.gang_server import GangServer
 from rtp_llm.distribute.worker_info import g_parallel_info
 from rtp_llm.embedding.embedding_endpoint import EmbeddingEndpoint
 from rtp_llm.lora.lora_manager import LoraManager
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
-from rtp_llm.model_factory import AsyncModel, ModelFactory
+from rtp_llm.model_factory import ModelFactory
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.ops import (
     CacheStatusInfo,
@@ -31,6 +29,7 @@ from rtp_llm.ops import (
     LoadBalanceInfo,
     WorkerStatusInfo,
 )
+from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.server.misc import format_exception
 from rtp_llm.server.worker_status import TaskInfo, WorkStatus
 from rtp_llm.structure.request_extractor import request_id_field_name

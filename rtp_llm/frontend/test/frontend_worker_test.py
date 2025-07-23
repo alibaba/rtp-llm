@@ -5,9 +5,12 @@ from unittest import TestCase, main
 
 from rtp_llm.async_decoder_engine.async_model import AsyncModel
 from rtp_llm.config.log_config import LOGGING_CONFIG
-from rtp_llm.distribute.worker_info import g_worker_info, update_master_info
+from rtp_llm.distribute.worker_info import (
+    g_worker_info,
+    update_master_info,
+)
+from rtp_llm.frontend.frontend_worker import BatchPipelineResponse, FrontendWorker
 from rtp_llm.pipeline.pipeline import Pipeline
-from rtp_llm.server.frontend_worker import BatchPipelineResponse, FrontendWorker
 from rtp_llm.structure.request_extractor import request_id_field_name
 from rtp_llm.test.model_test.test_util.fake_model_loader import FakeModelLoader
 from rtp_llm.test.utils.port_util import PortManager
@@ -35,7 +38,7 @@ class FrontendWorkerTest(TestCase):
         self.frontend_worker = self.create_frontend_worker()
 
     def tearDown(self):
-        self.frontend_worker.stop()
+        self.frontend_worker.model.stop()
 
     def create_frontend_worker(self):
         port_list, _ = PortManager().get_consecutive_ports(1)
@@ -49,7 +52,7 @@ class FrontendWorkerTest(TestCase):
             max_seq_len=2048,
         )
         model: AsyncModel = self.fake_model_loader.load_model()
-        pipeline = Pipeline(model, model.config, model.tokenizer)
+        pipeline = Pipeline(model.config, model.tokenizer)
         return FakeFrontendWorker(model, pipeline)
 
     async def _run(self, frontend_worker, **kwargs):

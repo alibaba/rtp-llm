@@ -13,75 +13,6 @@ from rtp_llm.models.llava_weight import LlavaWeightInfo
 from rtp_llm.models.multimodal.multimodal_mixin import BaseVitWeights, MultiModalMixin
 
 
-class LlavaTokenizer(object):
-    def __init__(
-        self,
-        tokenzier_path: str,
-        mm_use_im_patch_token: bool,
-        mm_use_im_start_end: bool,
-        special_token_ids: Dict[str, Any],
-        special_tokens: Dict[str, Any],
-        bos_id: int = 1,
-    ):
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenzier_path)
-        self.mm_use_im_patch_token = mm_use_im_patch_token
-        self.mm_use_im_start_end = mm_use_im_start_end
-
-        extra_tokens: List[str] = []
-        if self.mm_use_im_patch_token:
-            extra_tokens.extend(["<im_patch>"])
-        if self.mm_use_im_start_end:
-            extra_tokens.extend(["<im_start>", "<im_end>"])
-        self.tokenizer.add_tokens(extra_tokens, special_tokens=True)
-
-        self.image_token_index: int = special_token_ids["image_token_index"]
-        self.ignore_token_index: int = special_token_ids["ignore_token_index"]
-        self.default_image_token = special_tokens["default_mm_token"]
-        self.default_im_start_token = special_tokens["default_im_start_token"]
-        self.default_im_end_token = special_tokens["default_im_end_token"]
-        self.bos_id = bos_id
-
-    def encode(self, s: str, **kwargs) -> List[int]:
-        replace_token = self.default_image_token
-        if self.mm_use_im_start_end:
-            replace_token = (
-                self.default_im_start_token + replace_token + self.default_im_end_token
-            )
-        s = s.replace(self.default_image_token, replace_token)
-
-        prompt_chunks: List[List[int]] = [
-            self.tokenizer.encode(chunk) for chunk in s.split(self.default_image_token)
-        ]
-
-        images = len(prompt_chunks) - 1
-
-        def insert_separator(X, sep):
-            return [ele for sublist in zip(X, [sep] * len(X)) for ele in sublist][:-1]
-
-        t: List[int] = []
-        offset = 0
-        if (
-            len(prompt_chunks) > 0
-            and len(prompt_chunks[0]) > 0
-            and prompt_chunks[0][0] == self.bos_id
-        ):
-            offset = 1
-            t.append(prompt_chunks[0][0])
-
-        for x in insert_separator(
-            prompt_chunks, [self.image_token_index] * (offset + 1)
-        ):
-            t.extend(x[offset:])
-
-        return t
-
-    def decode(self, t: List[int]) -> str:
-        return self.tokenizer.decode(t)
-
-    def apply_chat_template(self, messages, **kwargs):
-        return self.tokenizer.apply_chat_template(messages, **kwargs)
-
-
 class Llava(Llama, MultiModalMixin):
     def _init_multimodal(self, config: GptInitModelParameters):
         self.mm_part = LlavaImageEmbedding(config)
@@ -96,21 +27,6 @@ class Llava(Llama, MultiModalMixin):
         ):
             vit_weight_dict["image_newline"] = self.mm_part.image_newline
         config.mm_related_params.vit_weights = BaseVitWeights(vit_weight_dict, True)
-
-    @staticmethod
-    def multimodal_modify_prompt_plugin(
-        prompt: Union[List[Dict[str, Any]], str],
-        images: List[str],
-        img_token: str,
-        **kwargs: Any
-    ) -> Tuple[str, List[Any]]:
-        prompt, mm_inputs = MultiModalMixin.multimodal_modify_prompt_plugin(
-            prompt, images, img_token, **kwargs
-        )
-        if img_token in prompt:
-            return prompt, mm_inputs
-        else:
-            return prompt + (img_token + "\n") * len(images), mm_inputs
 
     @staticmethod
     def _create_config(ckpt_path):
@@ -208,17 +124,6 @@ class Llava(Llama, MultiModalMixin):
                 config.mm_related_params.config["image_size"] = img_size
             config.mm_related_params.config["vit_tower_path"] = vis_tower_name
             config.mm_sep_tokens = [[-200]]  # image_token_index
-
-    @classmethod
-    def get_tokenizer(cls, config: GptInitModelParameters):
-        return LlavaTokenizer(
-            config.tokenizer_path,
-            config.mm_related_params.config["mm_use_im_patch_token"],
-            config.mm_related_params.config["mm_use_im_start_end"],
-            config.mm_related_params.special_token_ids,
-            config.mm_related_params.special_tokens,
-            config.special_tokens.bos_token_id,
-        )
 
 
 register_model("llava", Llava, ["LlavaLlamaForCausalLM"])

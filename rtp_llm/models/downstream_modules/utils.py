@@ -1,9 +1,8 @@
 from typing import Optional
 
-from transformers import PreTrainedTokenizerBase
-
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.config.task_type import TaskType
+from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.models.downstream_modules import (
     ALLEmbeddingModule,
     BgeM3EmbeddingModule,
@@ -18,7 +17,7 @@ from rtp_llm.models.downstream_modules import (
 def create_custom_module(
     task_type: TaskType,
     config: GptInitModelParameters,
-    tokenizer: Optional[PreTrainedTokenizerBase],
+    tokenizer: Optional[BaseTokenizer],
 ):
     # try import internal module
     try:
