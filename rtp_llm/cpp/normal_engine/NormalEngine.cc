@@ -299,24 +299,27 @@ absl::Status NormalEngine::step() {
     bool gen_timeline = !streams.empty() && std::any_of(streams.begin(), streams.end(), [](const auto& stream) {
         return stream->genTimeline();
     });
+    if (gen_timeline && !streams.empty()) {
+        auto it = std::max_element(streams.begin(), streams.end(), [](const auto& a, const auto& b) {
+            return a->profileStep() < b->profileStep();
+        });
+        profiler_step_ = (*it)->profileStep();
+    }
     if (gen_timeline_sync_) {
         auto world_size = device_->getDeviceProperties().dp_size * device_->getDeviceProperties().tp_size;
         auto world_rank = device_->getDeviceProperties().dp_rank * device_->getDeviceProperties().tp_size
                           + device_->getDeviceProperties().tp_rank;
-        auto gen_timeline_buffer = device_->allocateBuffer({DataType::TYPE_BOOL, {world_size}, AllocationType::HOST});
-        *(gen_timeline_buffer->dataWithOffset<bool>(world_rank)) = gen_timeline;
+        auto gen_timeline_buffer = device_->allocateBuffer({DataType::TYPE_UINT8, {world_size}, AllocationType::HOST});
+        *(gen_timeline_buffer->dataWithOffset<uint8_t>(world_rank)) = static_cast<uint8_t>(profiler_step_);
         device_->allGather({{gen_timeline_buffer}, ParallelMode::DP_AND_TP});
-        device_->syncCommunication();
-        gen_timeline = std::any_of(gen_timeline_buffer->data<bool>(),
-                                   gen_timeline_buffer->dataWithOffset<bool>(world_size),
-                                   [](auto s) { return s; });
+        device_->syncCommunication(false);
+        auto it = std::max_element(gen_timeline_buffer->data<uint8_t>(),
+                                   gen_timeline_buffer->dataWithOffset<uint8_t>(world_size),
+                                   [](const uint8_t a, const uint8_t b) { return a < b; });
+        profiler_step_ = *it;
+        gen_timeline = profiler_step_ > 0;
     }
-    profiler_step_--;
-    if (profiler_step_ <= 0) {
-        profiler_.reset();
-        profiler_step_ = 0;
-    }
-    if (gen_timeline && profiler_step_ <= 0) {
+    if (gen_timeline && nullptr == profiler_) {
         auto stream_group = StreamGroups(streams);
         auto world_rank   = device_->getDeviceProperties().dp_rank * device_->getDeviceProperties().tp_size
                           + device_->getDeviceProperties().tp_rank;
@@ -327,13 +330,17 @@ absl::Status NormalEngine::step() {
                                                                int(stream_group.totalContextBatchSize() > 0));
         profiler_            = std::make_shared<CudaProfiler>(profiler_prefix);
         profiler_->start();
-        auto it        = std::max_element(streams.begin(), streams.end(), [](const auto& a, const auto& b) {
-            return a->profileStep() < b->profileStep();
-        });
-        profiler_step_ = (*it)->profileStep();
     }
     int64_t      step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     absl::Status status             = executor_->process(streams);
+    
+    if (nullptr != profiler_) {
+        profiler_step_--;
+        if (profiler_step_ <= 0) {
+            profiler_.reset();
+            profiler_step_ = 0;
+        }
+    }
 
     // report step metrics
     if (device_->getDeviceProperties().tp_rank == 0) {
