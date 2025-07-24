@@ -44,7 +44,13 @@ struct PrefillGenerateContextNew: public GenerateContext {
         }
     }
 
-    ~PrefillGenerateContextNew() { stopStream(); }
+    ~PrefillGenerateContextNew() { 
+        stopStream(); 
+        reportTime();
+    }
+
+private:
+    void reportTime();
 
 public:
     ErrorInfo init(const std::shared_ptr<EngineBase>& engine);

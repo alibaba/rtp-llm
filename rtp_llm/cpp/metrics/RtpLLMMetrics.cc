@@ -60,6 +60,10 @@ bool RpcMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(load_cache_max_rt_us_metric, "rtp_llm_rpc_load_cache_max_rt_us");
     REGISTER_GAUGE_MUTABLE_METRIC(load_cache_polling_cost_us_metric, "rtp_llm_rpc_load_cache_polling_cost_us");
 
+    REGISTER_GAUGE_MUTABLE_METRIC(notify_store_cache_rt_us_metric, "rtp_llm_rpc_notify_store_cache_rt_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(generate_first_token_rt_us_metric, "rtp_llm_rpc_generate_first_token_rt_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(wait_store_cache_rt_us_metric, "rtp_llm_rpc_wait_store_cache_rt_us");
+
     return true;
 }
 
@@ -91,6 +95,10 @@ void RpcMetrics::report(const kmonitor::MetricsTags* tags, RpcMetricsCollector* 
     REPORT_GAUGE(load_cache_min_rt_us);
     REPORT_GAUGE(load_cache_max_rt_us);
     REPORT_GAUGE(load_cache_polling_cost_us);
+
+    REPORT_GAUGE(notify_store_cache_rt_us);
+    REPORT_GAUGE(generate_first_token_rt_us);
+    REPORT_GAUGE(wait_store_cache_rt_us);
 }
 
 bool RtpLLMStreamMetrics::init(kmonitor::MetricsGroupManager* manager) {

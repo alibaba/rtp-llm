@@ -46,4 +46,13 @@ void PrefillGenerateContextNew::stopStream() {
     // }
 }
 
+void PrefillGenerateContextNew::reportTime() {
+    RpcMetricsCollector collector;
+    collectBasicMetrics(collector);
+    collector.notify_store_cache_rt_us = notify_store_cache_done_time_us - request_begin_time_us;
+    collector.generate_first_token_rt_us = generate_first_token_done_time_us - notify_store_cache_done_time_us;
+    collector.wait_store_cache_rt_us = currentTimeUs() - generate_first_token_done_time_us;
+    reportMetrics(collector);
+}
+
 }  // namespace rtp_llm
