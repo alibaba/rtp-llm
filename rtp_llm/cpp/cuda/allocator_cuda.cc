@@ -90,32 +90,7 @@ void PurePointerCudaAllocator::free(void** ptr) {
     return;
 }
 
-Allocator<AllocatorType::CUDA>::Allocator(int device_id): PurePointerCudaAllocator(device_id) {
-    int device_count = 1;
-    check_cuda_value(cudaGetDeviceCount(&device_count));
-    cudaMemPool_t mempool;
-    check_cuda_value(cudaDeviceGetDefaultMemPool(&mempool, device_id));
-    cudaMemAccessDesc desc                  = {};
-    int               peer_access_available = 0;
-    for (int i = 0; i < device_count; i++) {
-        if (i == device_id) {
-            continue;
-        }
-        check_cuda_value(cudaDeviceCanAccessPeer(&peer_access_available, device_id, i));
-        if (!peer_access_available) {
-            RTP_LLM_LOG_WARNING("Device " + std::to_string(device_id) + " peer access Device " + std::to_string(i)
-                                + " is not available.");
-            continue;
-        }
-        desc.location.type = cudaMemLocationTypeDevice;
-        desc.location.id   = i;
-        desc.flags         = cudaMemAccessFlagsProtReadWrite;
-        check_cuda_value(cudaMemPoolSetAccess(mempool, &desc, 1));
-    }
-    // set memory pool threshold to avoid shrinking the pool
-    uint64_t setVal = UINT64_MAX;
-    check_cuda_value(cudaMemPoolSetAttribute(mempool, cudaMemPoolAttrReleaseThreshold, &setVal));
-}
+Allocator<AllocatorType::CUDA>::Allocator(int device_id): PurePointerCudaAllocator(device_id) {}
 
 Allocator<AllocatorType::CUDA>::~Allocator() {
     destroy();
