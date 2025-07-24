@@ -27,6 +27,7 @@ onnx==1.16.0
 openai
 orjson
 oss2
+partial_json_parser
 Pillow
 pillow-avif-plugin
 pillow-heif

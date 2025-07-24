@@ -82,6 +82,7 @@ requirement([
     "pyOpenSSL",
     "nest_asyncio",
     "blobfile",
+    "partial_json_parser",
     "librosa",
     "matplotlib", # required by qwen vl tokenizer
     "flash_attn",
@@ -459,6 +460,7 @@ whl_reqs = [
     "openai",
     "nest_asyncio",
     "blobfile",
+    "partial_json_parser",
     "librosa",
     "matplotlib",
     "av",
