@@ -261,26 +261,31 @@ bool StreamCacheResource::generateKVBlockUpdateMapping(const std::vector<int>& b
 
     // increase ref count of shared blocks
     for (int old_batch_idx = 0; old_batch_idx < old_batch_size; ++old_batch_idx) {
-        if (batch_fork_count[old_batch_idx] > 1) {
-            auto& batch_blocks = batch_resource_.batch_block_id[old_batch_idx];
+        if (batch_fork_count[old_batch_idx] <= 1) {
+            // no shared blocks
+            continue;
+        }
 
-            // need to exclude last block
-            const bool exclude_last_block = unaligned_seq_length && batch_blocks.size() > 1;
+        auto& batch_blocks = batch_resource_.batch_block_id[old_batch_idx];
 
-            int last_block;
-            if (exclude_last_block) {
-                last_block = batch_blocks.back();
-                batch_blocks.pop_back();
-            }
+        // need to exclude last block if it is not shared
+        const bool exclude_last_block = unaligned_seq_length && batch_blocks.size() > 0;
 
-            // TODO(zhangjianning.zjn): would be better to pass the ref increment directly
+        int last_block;
+        if (exclude_last_block) {
+            last_block = batch_blocks.back();
+            batch_blocks.pop_back();
+        }
+
+        // TODO(zhangjianning.zjn): would be better to pass the ref increment directly
+        if (batch_blocks.size() > 0) {
             for (int i = 1; i < batch_fork_count[old_batch_idx]; ++i) {
                 resource_context_.cache_manager->incrRefCounter(batch_blocks);
             }
+        }
 
-            if (exclude_last_block) {
-                batch_blocks.push_back(last_block);
-            }
+        if (exclude_last_block) {
+            batch_blocks.push_back(last_block);
         }
     }
 
