@@ -216,7 +216,7 @@ BufferPtr DeviceBase::attentionOutGemm(const AttentionLayerParams& params) {
 #if defined(__aarch64__)
     // Arm attention op only support fp32 data type, convert to original dtype
     GemmParams output_gemm_params =
-        GemmParams(output_gemm_input, *(output_weight->kernel), nullopt, gemm_output, dtype);
+        GemmParams(output_gemm_input, *(output_weight->kernel), nullopt, gemm_output, gemm_output->type());
 #else
     GemmParams output_gemm_params = GemmParams(output_gemm_input, *(output_weight->kernel), nullopt, gemm_output);
 #endif

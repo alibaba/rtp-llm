@@ -79,7 +79,7 @@ void register_arpc_config(pybind11::module& m) {
 
 void register_ffn_disaggregate_config(pybind11::module& m) {
     pybind11::class_<FfnDisAggregateConfig>(m, "FfnDisAggregateConfig")
-        .def(pybind11::init<bool, int, int, int, int, int>(),
+        .def(pybind11::init<bool, int, int, int, int, bool>(),
              pybind11::arg("enable_ffn_disaggregate") = false,
              pybind11::arg("attention_tp_size")       = 1,
              pybind11::arg("attention_dp_size")       = 1,

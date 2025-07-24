@@ -60,12 +60,15 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
          cache_manager ? ((optional<CacheManager::KVCacheBuffer>)cache_manager->kvCacheBuffer()) : nullopt,
          params.model_id});
 
+    if (params.gpt_init_parameter.ffn_disaggregate_config.enable_ffn_disaggregate) {
+        RTP_LLM_LOG_INFO("using ffn as service");
+        enable_ffn_disaggregate_ = true;
+    }
     if (!params.py_model.is_none()) {
         RTP_LLM_LOG_INFO("init executor with python model");
         model_.reset(new PyWrappedModel(model_init_params, params.py_model));
-    } else if (params.gpt_init_parameter.ffn_disaggregate_config.enable_ffn_disaggregate) {
+    } else if (enable_ffn_disaggregate_) {
         RTP_LLM_LOG_INFO("using FfnDisaggregateModel for ffn as service");
-        enable_ffn_disaggregate_ = true;
         model_.reset(new FfnDisaggregateModel(
             {device_,
              params.gpt_weights,

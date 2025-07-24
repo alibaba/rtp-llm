@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/devices/Weights.h"
 #include "rtp_llm/cpp/stats/ExpertStats.h"
 #include "rtp_llm/cpp/cache/CacheManager.h"
+#include "rtp_llm/models_py/bindings/OpDefs.h"
 #include <string>
 #include <utility>
 
@@ -204,6 +205,11 @@ struct LastLayerDeferedParams {
     rtp_llm::DeviceHookPtr                           comm_barrier_hook;
 };
 
+struct TokenSliceInfo {
+    size_t offset = 0;
+    size_t count  = 0;
+};
+
 class GptModel {
 public:
     GptModel(const GptModelInitParams& params);
@@ -216,7 +222,9 @@ protected:
                                                           rtp_llm::DataType     attn_dtype,
                                                           rtp_llm::BufferPtr    combo_position_ids);
 
-    MicroBatchPlan                     planMicroBatches(const GptModelInputs& inputs);
+    MicroBatchPlan planMicroBatches(const GptModelInputs& inputs);
+    std::pair<std::vector<GptModelInputs>, std::vector<TokenSliceInfo>>
+    splitInputsIntoMicroBatches(const GptModelInputs& inputs, const MicroBatchPlan& micro_batch_plan);
     std::vector<LayerMicroBatchInputs> prepareMicroBatchInputs(const GptModelInputs&     model_inputs,
                                                                const rtp_llm::BufferPtr& hidden,
                                                                const rtp_llm::BufferPtr& pre_decoder_residual,

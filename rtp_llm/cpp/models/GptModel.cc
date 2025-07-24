@@ -25,7 +25,8 @@ string GptModelInputs::debugString() const {
         return "";
     }
     std::stringstream debug_string;
-    debug_string << "GptModelInputs { " << "combo_tokens: " << combo_tokens->debugStringWithData<int32_t>()
+    debug_string << "GptModelInputs { "
+                 << "combo_tokens: " << combo_tokens->debugStringWithData<int32_t>()
                  << ", input_lengths: " << input_lengths->debugStringWithData<int32_t>()
                  << ", sequence_lengths: " << sequence_lengths->debugStringWithData<int32_t>()
                  << ", prefix_lengths: " << prefix_lengths->debugStringWithData<int32_t>();
@@ -358,23 +359,20 @@ MicroBatchPlan GptModel::planMicroBatches(const GptModelInputs& inputs) {
                                 MicroBatchPlan{true, {{0, micro_batch_0_size}, {0, micro_batch_1_size}}};
 }
 
-vector<LayerMicroBatchInputs> GptModel::prepareMicroBatchInputs(const GptModelInputs&   inputs,
-                                                                const BufferPtr&        hidden,
-                                                                const BufferPtr&        pre_decoder_residual,
-                                                                const rtp_llm::DataType attn_dtype,
-                                                                const MicroBatchPlan&   micro_batch_plan) {
-    vector<LayerMicroBatchInputs> micro_batch_inputs;
-    size_t                        sliced_token_idx       = 0;
-    size_t                        sliced_lm_output_index = 0;
-    size_t                        sliced_batch_idx       = 0;  // for input_lengths and kv cache block id
-    size_t                        decode_batch_idx       = 0;  // for sequence_lengths
-    size_t                        prefill_batch_idx      = 0;  // for lm_output_indexes and prefix_lengths
+std::pair<vector<GptModelInputs>, vector<TokenSliceInfo>>
+GptModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const MicroBatchPlan& micro_batch_plan) {
+    vector<GptModelInputs> micro_batch_inputs;
+    vector<TokenSliceInfo> token_slice_recipes;
+    size_t                 sliced_token_idx       = 0;
+    size_t                 sliced_lm_output_index = 0;
+    size_t                 sliced_batch_idx       = 0;  // for input_lengths and kv cache block id
+    size_t                 decode_batch_idx       = 0;  // for sequence_lengths
+    size_t                 prefill_batch_idx      = 0;  // for lm_output_indexes and prefix_lengths
 
     if (!micro_batch_plan.enable) {
         RTP_LLM_LOG_DEBUG("micro batch disable when enable is false, use fake");
         // we put everything into the first micro batch, and send empty query to the second micro batch
-        auto attention_common_inputs = prepareAttentionInputs(inputs, attn_dtype, nullptr);
-        micro_batch_inputs.push_back({inputs.combo_tokens, hidden, pre_decoder_residual, attention_common_inputs});
+        micro_batch_inputs.push_back(inputs);
 
         // The fake query
         GptModelInputs fake_inputs;
@@ -387,9 +385,7 @@ vector<LayerMicroBatchInputs> GptModel::prepareMicroBatchInputs(const GptModelIn
         fake_inputs.prefix_lengths->data<int32_t>()[0] = 0;
         auto fake_hidden =
             device_->allocateBuffer({description_.data_type, {1, description_.attention_conf.hidden_size}});
-        auto attention_common_inputs_fake = prepareAttentionInputs(fake_inputs, attn_dtype, nullptr);
-        micro_batch_inputs.push_back(
-            {move(fake_inputs.combo_tokens), move(fake_hidden), nullptr, move(attention_common_inputs_fake), true});
+        micro_batch_inputs.push_back(fake_inputs);
     } else {
         // TODO(wangyin.yx): refact this splitting method, extract common code
         for (size_t i = 0; i < micro_batch_plan.batch_infos.size(); ++i) {
@@ -441,14 +437,10 @@ vector<LayerMicroBatchInputs> GptModel::prepareMicroBatchInputs(const GptModelIn
                 micro_model_inputs.cache_keys =
                     inputs.cache_keys ? inputs.cache_keys->slice(prefill_batch_idx, p_micro_batch_size) : nullptr;
 
-                auto micro_hidden = hidden ? hidden->slice(sliced_token_idx, slice_token_num) : nullptr;
-                auto micro_pre_decoder_residual =
-                    pre_decoder_residual ? pre_decoder_residual->slice(sliced_token_idx, slice_token_num) : nullptr;
-                auto attention_common_inputs = prepareAttentionInputs(micro_model_inputs, attn_dtype, nullptr);
-                micro_batch_inputs.push_back({move(micro_model_inputs.combo_tokens),
-                                              move(micro_hidden),
-                                              move(micro_pre_decoder_residual),
-                                              move(attention_common_inputs)});
+                token_slice_recipes.emplace_back(TokenSliceInfo{sliced_token_idx, (size_t)slice_token_num});
+
+                micro_batch_inputs.push_back(micro_model_inputs);
+
                 sliced_lm_output_index += slice_lm_output_num;
                 sliced_token_idx += slice_token_num;
                 sliced_batch_idx += total_batch_size;
@@ -477,14 +469,11 @@ vector<LayerMicroBatchInputs> GptModel::prepareMicroBatchInputs(const GptModelIn
                     device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {0}, rtp_llm::AllocationType::HOST}, {});
                 micro_model_inputs.lm_output_indexes =
                     inputs.lm_output_indexes->slice(sliced_batch_idx, d_micro_batch_size);
-                auto micro_hidden = hidden ? hidden->slice(sliced_token_idx, d_micro_batch_size) : nullptr;
-                auto micro_pre_decoder_residual =
-                    pre_decoder_residual ? pre_decoder_residual->slice(sliced_token_idx, d_micro_batch_size) : nullptr;
-                auto attention_common_inputs = prepareAttentionInputs(micro_model_inputs, attn_dtype, nullptr);
-                micro_batch_inputs.push_back({move(micro_model_inputs.combo_tokens),
-                                              move(micro_hidden),
-                                              move(micro_pre_decoder_residual),
-                                              move(attention_common_inputs)});
+
+                token_slice_recipes.emplace_back(TokenSliceInfo{sliced_token_idx, d_micro_batch_size});
+
+                micro_batch_inputs.push_back(micro_model_inputs);
+
                 sliced_token_idx += d_micro_batch_size;
                 sliced_batch_idx += d_micro_batch_size;
                 decode_batch_idx += d_micro_batch_size;
@@ -526,14 +515,10 @@ vector<LayerMicroBatchInputs> GptModel::prepareMicroBatchInputs(const GptModelIn
                         nullptr;
                 micro_model_inputs.cache_keys =
                     inputs.cache_keys ? inputs.cache_keys->slice(prefill_batch_idx, p_micro_batch_size) : nullptr;
-                auto micro_hidden = hidden ? hidden->slice(sliced_token_idx, slice_token_num) : nullptr;
-                auto micro_pre_decoder_residual =
-                    pre_decoder_residual ? pre_decoder_residual->slice(sliced_token_idx, slice_token_num) : nullptr;
-                auto attention_common_inputs = prepareAttentionInputs(micro_model_inputs, attn_dtype, nullptr);
-                micro_batch_inputs.push_back({move(micro_model_inputs.combo_tokens),
-                                              move(micro_hidden),
-                                              move(micro_pre_decoder_residual),
-                                              move(attention_common_inputs)});
+
+                token_slice_recipes.emplace_back(TokenSliceInfo{sliced_token_idx, (size_t)slice_token_num});
+
+                micro_batch_inputs.push_back(micro_model_inputs);
                 sliced_lm_output_index += slice_lm_output_num;
                 sliced_token_idx += slice_token_num;
                 sliced_batch_idx += p_micro_batch_size;
@@ -545,7 +530,45 @@ vector<LayerMicroBatchInputs> GptModel::prepareMicroBatchInputs(const GptModelIn
             }
         }
     }
-    return micro_batch_inputs;
+    return {micro_batch_inputs, token_slice_recipes};
+}
+
+vector<LayerMicroBatchInputs> GptModel::prepareMicroBatchInputs(const GptModelInputs&   inputs,
+                                                                const BufferPtr&        hidden,
+                                                                const BufferPtr&        pre_decoder_residual,
+                                                                const rtp_llm::DataType attn_dtype,
+                                                                const MicroBatchPlan&   micro_batch_plan) {
+
+    auto [split_inputs, token_recipes] = splitInputsIntoMicroBatches(inputs, micro_batch_plan);
+
+    vector<LayerMicroBatchInputs> final_inputs;
+    final_inputs.reserve(split_inputs.size());
+
+    for (size_t i = 0; i < split_inputs.size(); ++i) {
+        const auto& micro_inputs = split_inputs[i];
+
+        auto attention_common_inputs = prepareAttentionInputs(micro_inputs, attn_dtype, nullptr);
+
+        if (!micro_batch_plan.enable) {
+            final_inputs.emplace_back(LayerMicroBatchInputs{
+                micro_inputs.combo_tokens, hidden, pre_decoder_residual, std::move(attention_common_inputs)});
+            if (i > 0) {
+                // The second micro-batch is a fake/dummy input used when micro-batching is disabled.
+                // This is a workaround to maintain the original structure, which results in some tight coupling.
+                final_inputs.back().fake = true;
+            }
+        } else {
+            const auto& recipe       = token_recipes[i];
+            auto        micro_hidden = hidden ? hidden->slice(recipe.offset, recipe.count) : nullptr;
+            auto        micro_residual =
+                pre_decoder_residual ? pre_decoder_residual->slice(recipe.offset, recipe.count) : nullptr;
+
+            final_inputs.emplace_back(LayerMicroBatchInputs{
+                micro_inputs.combo_tokens, micro_hidden, micro_residual, std::move(attention_common_inputs)});
+        }
+    }
+
+    return final_inputs;
 }
 
 EmbeddingPostOutput GptModel::embeddingPost(const BufferPtr& hidden_states, const GptModelInputs& inputs) {

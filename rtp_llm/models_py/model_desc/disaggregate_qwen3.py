@@ -1,7 +1,9 @@
 import logging
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
+import torch.distributed as dist
 from torch import nn
 from typing_extensions import Unpack
 
@@ -11,26 +13,30 @@ from rtp_llm.distribute.worker_info import g_parallel_info
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.model_desc.qwen3 import Qwen3Model
-from rtp_llm.models_py.modules.attention_pure import FlashInferAttentionPure
+from rtp_llm.models_py.modules.attention_pure import CausalAttentionPure
 from rtp_llm.models_py.modules.embedding import Embedding
+from rtp_llm.models_py.modules.fmha import FMHAImplBase
 from rtp_llm.models_py.modules.linear import Linear
 from rtp_llm.models_py.modules.mlp import DenseMLP
-from rtp_llm.models_py.modules.norm import RMSNorm
-from rtp_llm.ops import PyAttentionInputs, PyModelInputs, PyModelOutputs
+from rtp_llm.models_py.modules.norm import FusedQKRMSNorm, RMSNorm
+from rtp_llm.ops import (
+    PyAttentionInputs,
+    PyModelInitResources,
+    PyModelInputs,
+    PyModelOutputs,
+)
 from rtp_llm.utils.model_weight import W
 from rtp_llm.utils.util import check_with_info
 
 
-class BatchSplitInfo(object):
-    # total_mirco_batch_size: [mirco_batch_size] total_token_num of each micro batch
-    # mirco_batch_sizes_list: [mirco_batch_size, dp_num] token_num of each micro batch size]
-    def __init__(
-        self, total_mirco_batch_size: List[int], mirco_batch_sizes_list: List[List[int]]
-    ):
-        self.total_mirco_batch_size = total_mirco_batch_size
-        self.mirco_batch_sizes_list = mirco_batch_sizes_list
+@dataclass
+class BatchSplitInfo:
+    total_mirco_batch_size: List[int]
+    mirco_batch_sizes_list: List[List[int]]
+
+    def __post_init__(self):
         check_with_info(
-            len(total_mirco_batch_size) == len(mirco_batch_sizes_list),
+            len(self.total_mirco_batch_size) == len(self.mirco_batch_sizes_list),
             "total_mirco_batch_size must be equal to len of mirco_batch_sizes_list",
         )
 
@@ -99,20 +105,28 @@ class Qwen3GemmLayer(nn.Module):
             return
 
         next_layer_weights = weights.weights[layer_idx + 1]
+        self.input_layernorm = RMSNorm(
+            next_layer_weights[W.pre_ln_gamma], eps=config.layernorm_eps
+        )
         self.qkv_proj = Linear(
             next_layer_weights[W.attn_qkv_w],
             next_layer_weights.get(W.attn_qkv_b, None),
         )
         check_with_info(W.q_ln_gamma in next_layer_weights, "q_ln_gamma not found")
         check_with_info(W.k_ln_gamma in next_layer_weights, "k_ln_gamma not found")
-        self.q_norm = RMSNorm(
-            next_layer_weights[W.q_ln_gamma], eps=config.layernorm_eps
-        )  # unlike olmo, only on the head dim!
-        self.k_norm = RMSNorm(
-            next_layer_weights[W.k_ln_gamma], eps=config.layernorm_eps
-        )  # thus post q_norm does not need reshape
 
-    def forward(self, residual: torch.Tensor, hidden_states: torch.Tensor):
+        self.qk_fuse_norm = FusedQKRMSNorm(
+            next_layer_weights[W.q_ln_gamma],
+            next_layer_weights[W.k_ln_gamma],
+            config.head_num,
+            config.head_num_kv,
+            config.size_per_head,
+            config.layernorm_eps,
+        )
+
+    def forward(
+        self, residual: torch.Tensor, hidden_states: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         hidden_states = self.o_proj(hidden_states)
         hidden_states = residual + hidden_states
         residual = hidden_states
@@ -120,13 +134,13 @@ class Qwen3GemmLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
         if self.is_last_layer:
-            return hidden_states
+            return hidden_states, hidden_states
 
-        hidden_states = self.qkv_proj(hidden_states)
-        # QK Norm not implemented yet
-        # hidden_states = self.q_norm(hidden_states)
-        # hidden_states = self.k_norm(hidden_states)
-        return hidden_states
+        next_hidden_states = self.input_layernorm(hidden_states)
+        next_attn_input = self.qkv_proj(next_hidden_states)
+        if hasattr(self, "qk_fuse_norm"):
+            next_attn_input = self.qk_fuse_norm(next_attn_input)
+        return next_attn_input, hidden_states
 
 
 class Qwen3GemmPreLayer(nn.Module):
@@ -140,20 +154,23 @@ class Qwen3GemmPreLayer(nn.Module):
         self.qkv_proj = Linear(
             weights.weights[0][W.attn_qkv_w], weights.weights[0].get(W.attn_qkv_b, None)
         )
-        self.q_norm = RMSNorm(
-            weights.weights[0][W.q_ln_gamma], eps=config.layernorm_eps
-        )
-        self.k_norm = RMSNorm(
-            weights.weights[0][W.k_ln_gamma], eps=config.layernorm_eps
+        self.qk_fuse_norm = FusedQKRMSNorm(
+            weights.weights[0][W.q_ln_gamma],
+            weights.weights[0][W.k_ln_gamma],
+            config.head_num,
+            config.head_num_kv,
+            config.size_per_head,
+            config.layernorm_eps,
         )
 
-    def forward(self, input_ids: torch.Tensor):
+    def forward(self, input_ids: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         hidden_states = self.embed_tokens(input_ids)
+        residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
         hidden_states = self.qkv_proj(hidden_states)
-        hidden_states = self.q_norm(hidden_states)
-        hidden_states = self.k_norm(hidden_states)
-        return hidden_states
+        if hasattr(self, "qk_fuse_norm"):
+            hidden_states = self.qk_fuse_norm(hidden_states)
+        return hidden_states, residual
 
 
 class Qwen3GemmModel(DisaggregateModelBase):
@@ -173,18 +190,17 @@ class Qwen3GemmModel(DisaggregateModelBase):
             )
         ]
 
+        self.norm = RMSNorm(
+            weights.get_global_weight(W.final_ln_gamma), eps=config.layernorm_eps
+        )
+        self.lm_head = Linear(weights.get_global_weight(W.lm_head))
+
     def recv_micro_batch_split_info(self) -> Tuple[List[torch.Tensor], BatchSplitInfo]:
         dp_num = len(self.attn_dp_rank)
         micro_batch_split_info = torch.empty(
-            [dp_num, self.micro_batch_size], device=self.device
+            [dp_num, self.micro_batch_size], dtype=torch.int64, device=self.device
         )
         for idx, rank in enumerate(self.attn_dp_rank):
-            print(
-                "bbb",
-                micro_batch_split_info[idx].dtype,
-                micro_batch_split_info[idx].shape,
-                micro_batch_split_info[idx].device,
-            )
             recv(micro_batch_split_info[idx], rank, Group.DP_AND_TP)
         mirco_batch_sizes_list: List[List[int]] = (
             micro_batch_split_info.cpu().transpose(0, 1).tolist()
@@ -193,19 +209,18 @@ class Qwen3GemmModel(DisaggregateModelBase):
             sum(sizes) for sizes in mirco_batch_sizes_list
         ]
         input_ids_list: List[torch.Tensor] = [
-            torch.empty([size], device=self.device) for size in total_micro_batch_sizes
+            torch.empty((size,), device=self.device, dtype=torch.int32)
+            for size in total_micro_batch_sizes
         ]
 
         for idx in range(self.micro_batch_size):
             input_ids: torch.Tensor = input_ids_list[idx]
             offset = 0
-            for idx, size in enumerate(total_micro_batch_sizes):
-                dist.recv(
-                    input_ids[offset, offset + size],
-                    self.attn_dp_rank[idx],
-                    get_total_group(),
-                )
-                offset += size
+            for rank_idx, rank in enumerate(self.attn_dp_rank):
+                size = mirco_batch_sizes_list[idx][rank_idx]
+                if size > 0:
+                    recv(input_ids[offset : offset + size], rank, Group.DP_AND_TP)
+                    offset += size
         return input_ids_list, BatchSplitInfo(
             total_micro_batch_sizes, mirco_batch_sizes_list
         )
@@ -213,7 +228,8 @@ class Qwen3GemmModel(DisaggregateModelBase):
     def send_to_attention(self, t: torch.Tensor, micro_batch_size_list: List[int]):
         offset = 0
         for idx, size in enumerate(micro_batch_size_list):
-            send(t[offset, offset + size], self.attn_dp_rank[idx], Group.DP_AND_TP)
+            tensor_slice = t[offset : offset + size]
+            send(tensor_slice, self.attn_dp_rank[idx], Group.DP_AND_TP)
             offset += size
 
     def recv_from_attention(
@@ -228,34 +244,42 @@ class Qwen3GemmModel(DisaggregateModelBase):
                 * self.config.gpt_init_params.size_per_head,
             ],
             device=self.device,
+            dtype=torch.half,
         )
+
         for idx, size in enumerate(mirco_batch_size_list):
-            recv(t[offset, offset + size], self.attn_dp_rank[idx], Group.DP_AND_TP)
+            recv(t[offset : offset + size], self.attn_dp_rank[idx], Group.DP_AND_TP)
             offset += size
         return t
 
     def forward_micro_batch(self, inputs: List[PyModelInputs]) -> List[PyModelOutputs]:
         input_ids_list, batch_split_info = self.recv_micro_batch_split_info()
         micro_batch_inputs: List[torch.Tensor] = []
+        residuals: List[torch.Tensor] = []
         for batch_idx, input_ids in enumerate(input_ids_list):
-            hidden_states = self.pre_layer(input_ids)
+            hidden_states, residual = self.pre_layer(input_ids)
+            residuals.append(residual)
             micro_batch_inputs.append(hidden_states)
             self.send_to_attention(
                 hidden_states, batch_split_info.mirco_batch_sizes_list[batch_idx]
             )
 
         for layer in self.layers:
+            next_residuals = []
             for batch_idx, input in enumerate(micro_batch_inputs):
-                residual = input
+                residual = residuals[batch_idx]
                 attn_out = self.recv_from_attention(
                     batch_split_info.mirco_batch_sizes_list[batch_idx],
                     batch_split_info.total_mirco_batch_size[batch_idx],
                 )
-                out = layer(residual, attn_out)
+                out, next_residual = layer(residual, attn_out)
+                next_residuals.append(next_residual)
+
                 self.send_to_attention(
                     out, batch_split_info.mirco_batch_sizes_list[batch_idx]
                 )
                 # send res to attention model
+            residuals = next_residuals
         return []
 
 
@@ -264,7 +288,7 @@ class Qwen3AttnModel(DisaggregateModelBase):
         super().__init__(config, weights)
         self.attention_layers = nn.ModuleList(
             [
-                FlashInferAttentionPure(config, weights.weights[idx], idx)
+                CausalAttentionPure(config, weights.weights[idx])
                 for idx in range(self.layer_num)
             ]
         )
@@ -272,21 +296,19 @@ class Qwen3AttnModel(DisaggregateModelBase):
             config.gpt_init_params.ffn_disaggregate_config.attention_dp_size
             * config.gpt_init_params.ffn_disaggregate_config.attention_tp_size
         )
+        self.norm = RMSNorm(
+            weights.get_global_weight(W.final_ln_gamma), eps=config.layernorm_eps
+        )
 
     def send_mirco_batch_split_info(self, micro_batch_split_info: List[PyModelInputs]):
         size_list = [input.input_ids.shape[0] for input in micro_batch_split_info]
+        tensor_to_send = torch.tensor(size_list, device=self.device)
         send(
-            torch.tensor(size_list, device=self.device),
+            tensor_to_send,
             self.ffn_service_rank,
             Group.DP_AND_TP,
         )
         for input in micro_batch_split_info:
-            print(
-                "aaa",
-                input.input_ids.dtype,
-                input.input_ids.shape,
-                input.input_ids.device,
-            )
             send(input.input_ids, self.ffn_service_rank, Group.DP_AND_TP)
 
     def recv_from_ffn_service(self, token_num: int) -> torch.Tensor:
@@ -300,6 +322,7 @@ class Qwen3AttnModel(DisaggregateModelBase):
                 * self.config.gpt_init_params.size_per_head,
             ],
             device=self.device,
+            dtype=torch.half,
         )
         recv(t, self.ffn_service_rank, Group.DP_AND_TP)
         return t
@@ -311,6 +334,7 @@ class Qwen3AttnModel(DisaggregateModelBase):
                 self.config.gpt_init_params.hidden_size,
             ],
             device=self.device,
+            dtype=torch.half,
         )
         recv(t, self.ffn_service_rank, Group.DP_AND_TP)
         return t
@@ -322,16 +346,20 @@ class Qwen3AttnModel(DisaggregateModelBase):
         self, mirco_batch_inputs: List[PyModelInputs]
     ) -> List[PyModelOutputs]:
         self.send_mirco_batch_split_info(mirco_batch_inputs)
-        for layer in self.attention_layers:
+        for i, layer in enumerate(self.attention_layers[: self.layer_num]):
             for idx, mirco_batch_input in enumerate(mirco_batch_inputs):
                 inputs = self.recv_from_ffn_service(
                     mirco_batch_input.input_ids.shape[0]
                 )
+                fmha_impl = self.get_fmha_impl(mirco_batch_input.attention_inputs)
                 out = layer(
                     hidden_states=inputs,
-                    k_cache_base=self.k_cache_base,
-                    v_cache_base=self.v_cache_base,
-                    attention_inputs=mirco_batch_input.attention_inputs,
+                    fmha_impl=fmha_impl,
+                    kv_cache=(
+                        self.kv_cache.get_layer_cache(i)
+                        if self.kv_cache is not None
+                        else None
+                    ),
                 )
                 self.send_to_ffn_service(out)
         outputs: List[PyModelOutputs] = []
@@ -352,8 +380,18 @@ class Qwen3DisaggregateModel(GptModelBase):
         else:
             self.model = Qwen3AttnModel(config, weights)
 
+        self.norm = RMSNorm(
+            weights.get_global_weight(W.final_ln_gamma), eps=config.layernorm_eps
+        )
+        self.lm_head = Linear(weights.get_global_weight(W.lm_head))
+
+    def initialize(self, init_resource: PyModelInitResources) -> bool:
+        super().initialize(init_resource)
+        self.model.initialize(init_resource)
+        return True
+
     def forward(self, inputs: PyModelInputs) -> PyModelOutputs:
         raise NotImplementedError()
 
-    def forward_mirco_batch(self, inputs: List[PyModelInputs]) -> List[PyModelOutputs]:
+    def forward_micro_batch(self, inputs: List[PyModelInputs]) -> List[PyModelOutputs]:
         return self.model.forward_micro_batch(inputs)
