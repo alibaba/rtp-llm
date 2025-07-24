@@ -171,17 +171,30 @@ GreedyOutput ROCmDevice::sampleGreedy(const GreedyParams& params) {
         auto input_lengths    = clone({params.input_lengths});
 
         if (step > 1 && params.repetition_penalty && decoder_batch_size) {
+            RTP_LLM_CHECK(params.presence_penalty.has_value() && params.frequency_penalty.has_value());
             auto& repetition_penalty = params.repetition_penalty->get();
+            auto& presence_penalty   = params.presence_penalty->get();
+            auto& frequency_penalty  = params.frequency_penalty->get();
             if (std::any_of(repetition_penalty.data<float>(),
                             repetition_penalty.data<float>() + batch_size,
-                            [&](auto t) { return t != 1.0f; })) {
-                const auto repetition_penalty_type = RepetitionPenaltyType::Multiplicative;
-                auto       repetition_penalty_buf  = allocateBuffer({DataType::TYPE_FP32, {batch_size}});
-                auto       penalty_logits          = allocateBuffer({DataType::TYPE_FP32, {batch_size * 64 * 1024}});
-                copy({*repetition_penalty_buf, repetition_penalty});
+                            [&](auto t) { return t != 1.0f; })
+                || std::any_of(presence_penalty.data<float>(),
+                               presence_penalty.data<float>() + batch_size,
+                               [&](auto t) { return t != 0.0f; })
+                || std::any_of(frequency_penalty.data<float>(),
+                               frequency_penalty.data<float>() + batch_size,
+                               [&](auto t) { return t != 0.0f; })) {
+                copy({sequence_lengths->view(0, decoder_batch_size), params.sequence_lengths});
+                auto penalty_ws = allocateBuffer({DataType::TYPE_INT32, {batch_size, vocab_size_padded}});
+                bufMemset(*penalty_ws, 0);
+                auto repetition_penalty_gpu = clone({repetition_penalty, AllocationType::DEVICE});
+                auto presence_penalty_gpu   = clone({presence_penalty, AllocationType::DEVICE});
+                auto frequency_penalty_gpu  = clone({frequency_penalty, AllocationType::DEVICE});
                 invokeBatchApplyRepetitionPenalty(logits.data<float>(),
-                                                  penalty_logits->data<float>(),
-                                                  repetition_penalty_buf->data<float>(),
+                                                  penalty_ws->data<int32_t>(),
+                                                  repetition_penalty_gpu->data<float>(),
+                                                  presence_penalty_gpu->data<float>(),
+                                                  frequency_penalty_gpu->data<float>(),
                                                   transposed_tokens->data<int32_t>(),
                                                   batch_size,
                                                   batch_size,  // local_batch_size
@@ -189,7 +202,6 @@ GreedyOutput ROCmDevice::sampleGreedy(const GreedyParams& params) {
                                                   sequence_lengths->data<int32_t>(),
                                                   step + 1,  // max_input_length
                                                   step + 1,  // step
-                                                  repetition_penalty_type,
                                                   stream_);
                 // NOTE: here step is max_len - 1
             }

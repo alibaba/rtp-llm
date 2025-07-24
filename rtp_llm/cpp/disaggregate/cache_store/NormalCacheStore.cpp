@@ -224,12 +224,12 @@ NormalCacheStore::submitRemoteStoreTask(const std::shared_ptr<RemoteStoreRequest
     tasks.push_back(task);
 
     RTP_LLM_LOG_DEBUG("normal cache store submit remote store task, request id is %s, request is %s",
-                     request->request_id.c_str(),
-                     request->toString().c_str());
+                      request->request_id.c_str(),
+                      request->toString().c_str());
 
-    auto                          request_id = request->request_id;
-    std::weak_ptr<RemoteStoreTaskImpl> weak_task = task;
-    RequestBlockBuffer::WatchFunc watchFunc =
+    auto                               request_id = request->request_id;
+    std::weak_ptr<RemoteStoreTaskImpl> weak_task  = task;
+    RequestBlockBuffer::WatchFunc      watchFunc =
         [this, request_id, weak_task](bool ok, const std::vector<std::shared_ptr<BlockBuffer>>& blocks) {
             if (!ok) {
                 RTP_LLM_LOG_WARNING("normal cache store run store task watch func failed, request id is %s",
@@ -242,7 +242,7 @@ NormalCacheStore::submitRemoteStoreTask(const std::shared_ptr<RemoteStoreRequest
                 RTP_LLM_LOG_DEBUG("task has been released, request id is %s", request_id.c_str());
                 return;
             }
-            
+
             auto transfer_request = task->makeAvailableRequest(blocks);
 
             if (transfer_request == nullptr) {
@@ -282,13 +282,6 @@ const std::shared_ptr<MemoryUtil>& NormalCacheStore::getMemoryUtil() const {
 
 const std::shared_ptr<RequestBlockBufferStore>& NormalCacheStore::getRequestBlockBufferStore() const {
     return request_block_buffer_store_;
-}
-
-bool NormalCacheStore::fillConnectionPool(const std::string& ip, uint32_t port, uint32_t rdma_port, int count) {
-    if (!messager_client_) {
-        return false;
-    }
-    return messager_client_->fillConnectionPool(ip, port, rdma_port, count);
 }
 
 }  // namespace rtp_llm

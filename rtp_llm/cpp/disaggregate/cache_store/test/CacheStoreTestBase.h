@@ -16,8 +16,6 @@ public:
         memory_util_       = createMemoryUtilImpl(cache_store_config.cache_store_rdma_mode);
         device_util_       = std::make_shared<DeviceUtil>();
         block_buffer_util_ = std::make_shared<BlockBufferUtil>(memory_util_, device_util_);
-
-        //initTestDataDir();
     }
     void TearDown() override {}
 

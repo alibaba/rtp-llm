@@ -51,8 +51,6 @@ public:
     virtual const std::shared_ptr<MemoryUtil>& getMemoryUtil() const = 0;
 
     virtual void debugInfo() = 0;
-
-    virtual bool fillConnectionPool(const std::string& ip, uint32_t port, uint32_t rdma_port, int count) = 0;
 };
 
 }  // namespace rtp_llm

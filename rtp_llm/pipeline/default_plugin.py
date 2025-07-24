@@ -1,3 +1,5 @@
+import inspect
+from functools import lru_cache
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Union
 
 from transformers import PreTrainedTokenizerBase
@@ -6,6 +8,14 @@ from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RequestFormat
 from rtp_llm.pipeline.chatapi_format import encode_chatapi
 from rtp_llm.utils.tokenizer_utils import DecodingState, IncrementDecodingUtils
+
+
+@lru_cache(maxsize=16)
+def supports_generate_config(tokenizer_cls):
+    try:
+        return "generate_config" in inspect.signature(tokenizer_cls.decode).parameters
+    except (TypeError, ValueError):
+        return False
 
 
 class DefaultPlugin(object):
@@ -58,8 +68,10 @@ class DefaultPlugin(object):
         **kwargs: Any
     ) -> str:
         if decoding_state is None:
-            all_text = tokenizer.decode(tokens, **kwargs)
-            # For some tokenizers (e.g. ChatGLM), decode a single token differs from decode a list of tokens.
+            if supports_generate_config(type(tokenizer)):
+                all_text = tokenizer.decode(tokens, **kwargs)
+            else:
+                all_text = tokenizer.decode(tokens)
             while (len(all_text) > 0) and ("\uFFFD" == all_text[-1]):
                 all_text = all_text[:-1]
             return all_text, all_text
@@ -70,7 +82,10 @@ class DefaultPlugin(object):
             )
             decoding_state.all_text += new_text
         else:
-            all_text = tokenizer.decode(tokens, **kwargs)
+            if supports_generate_config(type(tokenizer)):
+                all_text = tokenizer.decode(tokens, **kwargs)
+            else:
+                all_text = tokenizer.decode(tokens)
             new_text = all_text[len(decoding_state.all_text) :]
             decoding_state.all_text = all_text
 

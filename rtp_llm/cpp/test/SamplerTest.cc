@@ -47,7 +47,9 @@ TEST_F(SamplerTest, testGeneralSampling) {
     BufferPtr rand_seed     = createBuffer<uint64_t>({batch_size}, {0, 0, 0, 0, 0}, AllocationType::HOST);
     BufferPtr repetition_penalty =
         createBuffer<float>({batch_size}, {1.0f, 1.0f, 1.0f, 10000.0f, 1.0f}, AllocationType::HOST);
-    BufferPtr min_length = createBuffer<int32_t>({batch_size}, {0, 0, 0, 0, 10}, AllocationType::HOST);
+    BufferPtr presence_penalty  = createBuffer<float>({batch_size}, {0, 0, 0, 0, 0}, AllocationType::HOST);
+    BufferPtr frequency_penalty = createBuffer<float>({batch_size}, {0, 0, 0, 0, 0}, AllocationType::HOST);
+    BufferPtr min_length        = createBuffer<int32_t>({batch_size}, {0, 0, 0, 0, 10}, AllocationType::HOST);
 
     auto top_k       = createBuffer<uint32_t>({batch_size}, {1, 4, 0, 0, 8}, AllocationType::HOST);
     auto top_p       = createBuffer<float>({batch_size}, {0.0, 0.0, 0.001, 0.99, 0.9}, AllocationType::HOST);
@@ -69,8 +71,11 @@ TEST_F(SamplerTest, testGeneralSampling) {
         move(temperature),
         rand_seed,
         repetition_penalty,
+        presence_penalty,
+        frequency_penalty,
         min_length,
         nullptr,  // no_repeat_ngram_size
+        nullptr,
         device_->clone({*cum_log_probs}),
     };
 
