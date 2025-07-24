@@ -164,7 +164,6 @@ test --test_env FT_SERVER_TEST="1"
 test --test_env LOG_LEVEL="INFO"
 test --test_env NCCL_DEBUG="INFO"
 # for dp scatter add stable result
-test --test_env ENABLE_STABLE_SCATTER_ADD="ON"
 test --test_env TZ=Asia/Shanghai
 
 # compat for low driver < 535
