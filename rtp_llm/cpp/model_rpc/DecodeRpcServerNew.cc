@@ -91,6 +91,7 @@ grpc::Status DecodeRpcServerNew::GenerateStreamCall(grpc::ServerContext*        
     decode_context.error_info = decode_context.init(engine_);
     if (!decode_context.error_info.ok()) {
         RTP_LLM_LOG_WARNING("request [%s] prepare generate context failed, err: %s",
+                            decode_context.request_key.c_str(),
                             decode_context.error_info.ToString().c_str());
         return serializeErrorMsg(decode_context.request_key, decode_context.error_info);
     }
@@ -98,6 +99,7 @@ grpc::Status DecodeRpcServerNew::GenerateStreamCall(grpc::ServerContext*        
     decode_context.error_info = loadCacheFromPrefill(decode_context);
     if (!decode_context.error_info.ok()) {
         RTP_LLM_LOG_WARNING("request [%s] load cache from prefill failed, err: %s",
+                            decode_context.request_key.c_str(),
                             decode_context.error_info.ToString().c_str());
         return serializeErrorMsg(decode_context.request_key, decode_context.error_info);
     }
