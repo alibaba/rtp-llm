@@ -45,6 +45,7 @@ genrule(
         cp external/composable_kernel_archive/libtile_rmsnorm2d_fwd.so $(location libtile_rmsnorm2d_fwd.so);
         cp external/aiter/aiter/jit/module_activation.so $(location module_activation.so);
     """,
+    tags = ["rocm", "local"],
 )
 
 filegroup(
