@@ -1126,6 +1126,7 @@ class GptInitModelParameters:
                     os.environ.get("SYNC_STATUS_INTERVAL_MS", 50)
                 )
                 logging.info(f"sync_status_interval_ms: {self.sync_status_interval_ms}")
+            
 
         self.scheduler_reserve_resource_ratio = int(
             os.environ.get("SCHEDUlER_RESERVE_RESOURCE_RATIO", 5)
@@ -1133,10 +1134,7 @@ class GptInitModelParameters:
         logging.info(
             f"scheduler_reserve_resource_ratio: {self.scheduler_reserve_resource_ratio}"
         )
-        self.reuse_cache = (
-            os.environ.get("REUSE_CACHE", None) == "1"
-            or os.environ.get("USE_BLOCK_CACHE", None) == "1"
-        )
+        self.reuse_cache = bool(int(os.environ.get("REUSE_CACHE", 0)))
         logging.info(f"reuse_cache: {self.reuse_cache}")
         self.pre_allocate_op_mem = bool(int(os.environ.get("PRE_ALLOCATE_OP_MEM", 1)))
         logging.info(f"pre_allocate_op_mem: {self.pre_allocate_op_mem}")

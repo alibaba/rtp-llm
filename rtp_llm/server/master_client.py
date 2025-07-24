@@ -71,6 +71,7 @@ class MasterClient:
             }
         headers = {"Content-Type": "application/json"}
 
+
         # connect to master using long connection
         try:
             session = await self._get_session()
