@@ -484,7 +484,6 @@ class CustomChatRenderer:
     def _split_reasoning_text_and_content(
         self, item: OutputDelta, think_status: ThinkStatus
     ):
-
         if isinstance(item.output_str, str):
             processing_index, output_len = 0, len(item.output_str)
 
@@ -544,17 +543,16 @@ class CustomChatRenderer:
             raise Exception(f"undefined output_str type[{type(item.output_str)}]")
 
     async def _generate_stream_response(
-        self, items: List[OutputDelta], think_status: ThinkStatus
+        self, items: List[OutputDelta], think_status_list: List[ThinkStatus]
     ) -> StreamResponseObject:
         if len(items) == 0:
             raise Exception("output items length should not be 0")
         input_lengths = items[0].input_length
         output_lengths = sum([x.output_length for x in items])
         reuse_lengths = items[0].reuse_length
-
         all_choices = []
         for i, item in enumerate(items):
-            delta = self._split_reasoning_text_and_content(item, think_status)
+            delta = self._split_reasoning_text_and_content(item, think_status_list[i])
             all_choices.append(
                 ChatCompletionResponseStreamChoice(
                     index=i,
@@ -577,8 +575,12 @@ class CustomChatRenderer:
                 total_tokens=input_lengths + output_lengths,
                 completion_tokens=output_lengths,
                 completion_tokens_details=(
-                    CompletionTokensDetails(reasoning_tokens=think_status.think_tokens)
-                    if think_status.enable_think_mode > 0
+                    CompletionTokensDetails(
+                        reasoning_tokens=sum(
+                            [x.think_tokens for x in think_status_list]
+                        )
+                    )
+                    if think_status_list[0].enable_think_mode > 0
                     else None
                 ),
                 prompt_tokens_details=(
@@ -594,7 +596,7 @@ class CustomChatRenderer:
         buffer_list: List[StreamStatus],
         stop_words_str: List[str],
         is_streaming: bool,
-        think_status: ThinkStatus,
+        think_status_list: List[ThinkStatus],
     ):
         output_items: List[OutputDelta] = []
         for buffer in buffer_list:
@@ -613,13 +615,13 @@ class CustomChatRenderer:
                     aux_info.reuse_len,
                 )
             )
-        return await self._generate_stream_response(output_items, think_status)
+        return await self._generate_stream_response(output_items, think_status_list)
 
     async def _generate_final(
         self,
         buffer_list: List[StreamStatus],
         request: ChatCompletionRequest,
-        think_status: ThinkStatus,
+        think_status_list: List[ThinkStatus],
     ):
         input_token_length = 0
         output_token_length = 0
@@ -659,8 +661,12 @@ class CustomChatRenderer:
                 total_tokens=input_token_length + output_token_length,
                 completion_tokens=output_token_length,
                 completion_tokens_details=(
-                    CompletionTokensDetails(reasoning_tokens=think_status.think_tokens)
-                    if think_status.enable_think_mode
+                    CompletionTokensDetails(
+                        reasoning_tokens=sum(
+                            [x.think_tokens for x in think_status_list]
+                        )
+                    )
+                    if think_status_list[0].enable_think_mode
                     else None
                 ),
                 prompt_tokens_details=(
@@ -689,23 +695,30 @@ class CustomChatRenderer:
     ) -> AsyncGenerator[StreamResponseObject, None]:
         stop_word_slice_list = get_stop_word_slices(generate_config.stop_words_str)
         nums_output = request.n if request.n is not None else 1
-        nums_output = generate_config.num_beams if generate_config.num_beams != 1 else nums_output
+        nums_output = (
+            generate_config.num_beams if generate_config.num_beams != 1 else nums_output
+        )
         status_list = await self._create_status_list(nums_output, request)
         index = 0
         enable_think_mode = self.in_think_mode(request)
-        think_status = ThinkStatus(
-            enable_think_mode=enable_think_mode,
-            in_think_mode=enable_think_mode,
-            think_buffer="",
-            think_tokens=0,
-            is_streaming=generate_config.is_streaming,
-        )
+        think_status_list = [
+            ThinkStatus(
+                enable_think_mode=enable_think_mode,
+                in_think_mode=enable_think_mode,
+                think_buffer="",
+                think_tokens=0,
+                is_streaming=generate_config.is_streaming,
+            )
+            for _ in range(nums_output)
+        ]
         async for outputs in output_generator:
             if index == 0:
                 yield await self._generate_first(nums_output)
             index += 1
             if len(outputs.generate_outputs) != nums_output:
-                raise Exception(f"output num {len(outputs.generate_outputs)} != nums_output {nums_output}")
+                raise Exception(
+                    f"output num {len(outputs.generate_outputs)} != nums_output {nums_output}"
+                )
             delta_list: List[OutputDelta] = []
             for status, output in zip(status_list, outputs.generate_outputs):
                 delta_list.append(
@@ -718,7 +731,7 @@ class CustomChatRenderer:
                         generate_config.is_streaming,
                     )
                 )
-            yield await self._generate_stream_response(delta_list, think_status)
+            yield await self._generate_stream_response(delta_list, think_status_list)
             if self._check_all_finished(status_list):
                 break
         if index != 0:
@@ -726,9 +739,9 @@ class CustomChatRenderer:
                 status_list,
                 generate_config.stop_words_str,
                 generate_config.is_streaming,
-                think_status,
+                think_status_list,
             )
-            yield await self._generate_final(status_list, request, think_status)
+            yield await self._generate_final(status_list, request, think_status_list)
 
     def _create_empty_delta_sync(self, input_len: int, output_len: int, reuse_len: int):
         return OutputDelta(
