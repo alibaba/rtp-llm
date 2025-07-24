@@ -231,7 +231,7 @@ cc_library(
         "//rtp_llm/models_py/bindings:op_defs"
     ] + select({
         "@//:using_cuda": [
-            "//rtp_llm/cpp/devices/cuda_impl:gpu_base"
+            "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
         ],
         "@//:using_rocm": [
             "//rtp_llm/cpp/devices/rocm_impl:rocm_impl",

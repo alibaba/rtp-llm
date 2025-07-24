@@ -109,8 +109,10 @@ public:
     virtual GraphBase*       getDeviceGraphRunner(const DeviceInitParams& params,
                                                   py::object              py_instance,
                                                   int                     kv_cache_block_offset,
-                                                  bool                    in_test);
-    void                     setCacheStore(std::shared_ptr<rtp_llm::CacheStore> cache_store);
+                                                  bool                    in_test) {
+        throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+    }
+    void setCacheStore(std::shared_ptr<rtp_llm::CacheStore> cache_store);
 
     void writeCacheStore(const WriteCacheParams& params);
 

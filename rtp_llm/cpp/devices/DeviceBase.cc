@@ -142,13 +142,6 @@ void DeviceBase::updateCurrentTorchStream() {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-GraphBase* DeviceBase::getDeviceGraphRunner(const DeviceInitParams& params,
-                                            py::object              py_instance,
-                                            int                     kv_cache_block_offset,
-                                            bool                    in_test) {
-    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
-}
-
 void DeviceBase::setCacheStore(std::shared_ptr<rtp_llm::CacheStore> cache_store) {
     cache_store_ = cache_store;
 }
@@ -161,7 +154,8 @@ void DeviceBase::writeCacheStore(const WriteCacheParams& params) {
     }
     if (!param.pd_separation || param.context_batch_size == 0) {
         RTP_LLM_LOG_DEBUG("pd_separation = %d, context_batch_size = %d, so ignore writeCacheStore",
-            param.pd_separation, param.context_batch_size);
+                          param.pd_separation,
+                          param.context_batch_size);
         return;
     }
 
@@ -206,11 +200,12 @@ void DeviceBase::writeCacheStore(const WriteCacheParams& params) {
             if (param.decode_entrance) {
                 cache_key = makeCacheKey(params.common.model_id, std::to_string(block_id), param.layer_id);
             } else {
-                cache_key = makeCacheKey(params.common.model_id, param.cache_keys[batch_id * max_blocks_per_batch + index], param.layer_id);
+                cache_key = makeCacheKey(
+                    params.common.model_id, param.cache_keys[batch_id * max_blocks_per_batch + index], param.layer_id);
             }
             // FT_LOG_DEBUG("write kv cache_key %s", cache_key.c_str());
-            void* k_addr = (void*)((int8_t*)k_cache_data + block_id * param.k_block_size);
-            std::shared_ptr<void> k_block_addr(k_addr, [](void* p) { });
+            void*                 k_addr = (void*)((int8_t*)k_cache_data + block_id * param.k_block_size);
+            std::shared_ptr<void> k_block_addr(k_addr, [](void* p) {});
             request_blocks->addBlock("k_" + cache_key, k_block_addr, param.k_block_size, true, true);
             // if (k_scale_data) {
             //     void* k_scale_addr = (void*)((int8_t*)k_scale_data + block_id * param.scale_block_size);
