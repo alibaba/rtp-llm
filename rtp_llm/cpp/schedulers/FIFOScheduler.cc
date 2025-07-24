@@ -263,15 +263,14 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
                                        "input len " + std::to_string(stream->inputLength())
                                            + " is greater than kv cache max seq len "
                                            + std::to_string(cache_manager_->maxSeqLen()));
-            } else if ((size_t)stream->inputLength() * stream->batchSize() > max_batch_tokens_size_)) {
-                    auto error_info =
-                        autil::StringUtil::formatString("input len [%d] * batch size [%d] > max_batch_tokens_size [%d]",
-                                                        stream->inputLength(),
-                                                        stream->batchSize(),
-                                                        max_batch_tokens_size_);
-                    stream->stopAndRelease(ErrorCode::MALLOC_FAILED, error_info);
-                }
-            else {
+            } else if ((size_t)stream->inputLength() * stream->batchSize() > max_batch_tokens_size_) {
+                auto error_info =
+                    autil::StringUtil::formatString("input len [%d] * batch size [%d] > max_batch_tokens_size [%d]",
+                                                    stream->inputLength(),
+                                                    stream->batchSize(),
+                                                    max_batch_tokens_size_);
+                stream->stopAndRelease(ErrorCode::MALLOC_FAILED, error_info);
+            } else {
                 stream->stopAndRelease(ErrorCode::MALLOC_FAILED, "LACK MEM");
             }
             it++;
