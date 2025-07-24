@@ -110,6 +110,14 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
     return generate_input;
 }
 
+std::vector<RoleAddr> QueryConverter::getRoleAddrs(const GenerateConfigPB* config_proto) {
+    std::vector<RoleAddr> role_addrs;
+    for (const auto& role_addr : config_proto->role_addrs()) {
+        role_addrs.emplace_back(RoleType(role_addr.role()), role_addr.ip(), role_addr.http_port(), role_addr.grpc_port());
+    }
+    return role_addrs;
+}
+
 std::vector<MultimodalInput> QueryConverter::transMMInput(const MultimodalInputsPB* mm_inputs) {
     std::vector<MultimodalInput> inputs_vec;
     for (int i = 0; i < mm_inputs->multimodal_inputs_size(); i++) {

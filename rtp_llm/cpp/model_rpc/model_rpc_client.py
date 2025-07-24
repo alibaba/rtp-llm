@@ -300,6 +300,7 @@ class ModelRpcClient(object):
             if (
                 role_addr.role == RoleType.PREFILL
                 or role_addr.role == RoleType.PDFUSION
+                or (self.model_config.decode_entrance and role_addr.role == RoleType.DECODE)
             ):
                 if role_addr.ip != "":
                     address_list = [role_addr.ip + ":" + str(role_addr.grpc_port)]

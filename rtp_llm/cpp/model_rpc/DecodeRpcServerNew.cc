@@ -151,7 +151,7 @@ void DecodeRpcServerNew::makeRemoteGenerateRequest(DecodeGenerateContextNew& dec
     //     std::string mtp_hidden_states_key = "mtp_hidden_states_key-" + decode_context.request_id;
     //     request.set_mtp_hidden_states_key(mtp_hidden_states_key);
     //     // TODO: MTP register to cache store;
-    //     // resource_.cache_store->registeBuffer(mtp_hidden_states_key, generate_stream->returnEmptyHiddenStates());
+    //     // resource_.cache_store->regPisteBuffer(mtp_hidden_states_key, generate_stream->returnEmptyHiddenStates());
     // }
 
     request.set_use_mla(engine_->resourceContext().cache_manager->cacheConfig().use_mla);
@@ -162,8 +162,19 @@ void DecodeRpcServerNew::makeRemoteGenerateRequest(DecodeGenerateContextNew& dec
 ErrorInfo DecodeRpcServerNew::callPrefill(DecodeGenerateContextNew& decode_context) {
     RTP_LLM_LOG_DEBUG("request [%s] start to call prefill", decode_context.request_key.c_str());
 
-    auto host = load_balancer_->chooseHost(prefill_cluster_name_,
-                                           decode_context.request->generate_config().global_request_id());
+    auto role_addrs = QueryConverter::getRoleAddrs(&decode_context.request->generate_config());
+    std::shared_ptr<const Host> host;
+    for (auto& role_addr: role_addrs) {
+        if (role_addr.role == RoleType::PREFILL) {
+            host = std::make_shared<const Host>(role_addr.ip, role_addr.grpc_port, role_addr.http_port);
+            break;
+        }
+    }
+    if (!host) {
+        auto host = load_balancer_->chooseHost(prefill_cluster_name_,
+                                            decode_context.request->generate_config().global_request_id());
+    }
+
     if (!host || host->ip.empty()) {
         return ErrorInfo(ErrorCode::GET_HOST_FAILED,
                          "get host for decode cluster " + prefill_cluster_name_ + " failed");

@@ -23,6 +23,8 @@ public:
 
     static MultimodalOutput transMMOutput(const MultimodalOutputsPB* outputs_pb);
 
+    static std::vector<RoleAddr> getRoleAddrs(const GenerateConfigPB* config_proto);
+
 private:
     static std::shared_ptr<GenerateConfig> transGenerateConfig(const GenerateConfigPB* config_proto);
 
