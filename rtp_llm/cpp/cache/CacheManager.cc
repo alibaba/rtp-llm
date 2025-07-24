@@ -309,6 +309,11 @@ void CacheManager::initKvCacheMla() {
                                                                                (size_t)config_.seq_size_per_block,
                                                                                (size_t)config_.rope_head_dim},
                                                            (int8_t*)cache_base_ptr_ + kv_cache_.k_blocks->sizeBytes());
+    // memset k_blocks and v_blocks
+#ifdef USING_ROCM
+    device_->bufMemset(*kv_cache_.k_blocks, 0);
+    device_->bufMemset(*kv_cache_.v_blocks, 0);
+#endif
 }
 
 void CacheManager::initKvCacheNormal() {
@@ -329,6 +334,11 @@ void CacheManager::initKvCacheNormal() {
                                                                                (size_t)config_.seq_size_per_block,
                                                                                (size_t)config_.size_per_head},
                                                            (int8_t*)cache_base_ptr_ + kv_cache_.k_blocks->sizeBytes());
+    // memset k_blocks and v_blocks
+#ifdef USING_ROCM
+    device_->bufMemset(*kv_cache_.k_blocks, 0);
+    device_->bufMemset(*kv_cache_.v_blocks, 0);
+#endif
 }
 
 const CacheConfig& CacheManager::cacheConfig() const {
