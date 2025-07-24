@@ -251,9 +251,7 @@ public:
     int64_t     decode_retry_timeout_ms_         = 0;
     int64_t     decode_polling_kv_cache_step_ms_ = 0;
     int64_t     decode_polling_call_prefill_ms_  = 0;
-    bool        decode_use_async_load_cache_     = true;
     int64_t     rdma_connect_retry_times_        = 0;
-    bool        pd_sep_enable_fallback_          = false;
     std::string load_balance_policy_name_        = "";
     int64_t     sync_status_interval_ms_         = 0;
     int64_t     load_cache_timeout_ms_           = 0;

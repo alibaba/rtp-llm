@@ -24,10 +24,6 @@ grpc::Status DecodeRpcServerNew::init(const EngineInitParams&                   
 }
 
 bool DecodeRpcServerNew::ready() {
-    if (maga_init_params_.gpt_init_parameter.pd_sep_enable_fallback_) {
-        return true;
-    }
-
     char* decode_cm2_config_env = std::getenv("RTP_LLM_DECODE_CM2_CONFIG");
     if(!maga_init_params_.gpt_init_parameter.service_discovery_config.use_local && decode_cm2_config_env == nullptr) {
         RTP_LLM_LOG_INFO("service discovery by master, skip load balancer check");
@@ -86,7 +82,8 @@ bool DecodeRpcServerNew::initLoadBalancer() {
     }
 
     RTP_LLM_CHECK_WITH_INFO(load_balancer_->init(init_params), "load_balancer init failed");
-    RTP_LLM_LOG_INFO("load balancer init success, policy is %s", maga_init_params_.gpt_init_parameter.load_balance_policy_name_.c_str());
+    RTP_LLM_LOG_INFO("load balancer init success, policy is %s",
+                     maga_init_params_.gpt_init_parameter.load_balance_policy_name_.c_str());
     return true;
 }
 
@@ -123,14 +120,19 @@ ErrorInfo DecodeRpcServerNew::loadCacheFromPrefill(DecodeGenerateContextNew& dec
     RTP_LLM_LOG_DEBUG("request [%s] start to load cache from prefill", decode_context.request_key.c_str());
 
     makeRemoteGenerateRequest(decode_context);
-    RTP_LLM_LOG_DEBUG("request [%s] make remote generate request done, request is %s", decode_context.request_key.c_str(), decode_context.remote_generate_request.ShortDebugString().c_str());
+    RTP_LLM_LOG_DEBUG("request [%s] make remote generate request done, request is %s",
+                      decode_context.request_key.c_str(),
+                      decode_context.remote_generate_request.ShortDebugString().c_str());
 
     auto ret = callPrefill(decode_context);
     if (!ret.ok()) {
-        RTP_LLM_LOG_WARNING("request [%s] call prefill failed, err: %s", decode_context.request_key.c_str(), ret.ToString().c_str());
+        RTP_LLM_LOG_WARNING(
+            "request [%s] call prefill failed, err: %s", decode_context.request_key.c_str(), ret.ToString().c_str());
         return ret;
     }
-    RTP_LLM_LOG_DEBUG("request [%s] call prefill done, response is %s", decode_context.request_key.c_str(), decode_context.remote_generate_response.ShortDebugString().c_str());
+    RTP_LLM_LOG_DEBUG("request [%s] call prefill done, response is %s",
+                      decode_context.request_key.c_str(),
+                      decode_context.remote_generate_response.ShortDebugString().c_str());
 
     decode_context.load_cache_from_prefill_done_time_us = currentTimeUs();
     RTP_LLM_LOG_DEBUG("request [%s] load cache from prefill done", decode_context.request_key.c_str());
@@ -191,13 +193,13 @@ ErrorInfo DecodeRpcServerNew::callPrefill(DecodeGenerateContextNew& decode_conte
                          "get grpc connection for decode addr " + prefill_addr + " failed");
     }
 
-    auto                                 rpc_context = std::make_shared<DecodeRpcContextNew>(); 
-    auto                                 grpc_connection = connect_status.value();
-    auto                                 stub            = grpc_connection.stub;
+    auto rpc_context     = std::make_shared<DecodeRpcContextNew>();
+    auto grpc_connection = connect_status.value();
+    auto stub            = grpc_connection.stub;
     rpc_context->request = decode_context.remote_generate_request;
 
-    std::unique_ptr<grpc::ClientAsyncResponseReader<RemoteGenerateResponsePBNew>> reader(
-        stub->AsyncRemoteGenerateNew(rpc_context->client_context.get(), rpc_context->request , rpc_context->completion_queue.get()));
+    std::unique_ptr<grpc::ClientAsyncResponseReader<RemoteGenerateResponsePBNew>> reader(stub->AsyncRemoteGenerateNew(
+        rpc_context->client_context.get(), rpc_context->request, rpc_context->completion_queue.get()));
 
     reader->Finish(&decode_context.remote_generate_response, &rpc_context->status, reinterpret_cast<void*>(0));
     rpc_context->reader = std::move(reader);
@@ -208,14 +210,19 @@ ErrorInfo DecodeRpcServerNew::callPrefill(DecodeGenerateContextNew& decode_conte
     auto deadline_us = rpc_context->request.deadline_us();
 
     while (!rpc_context->finished) {
-        if(rpc_context->completion_queue->AsyncNext(&got_tag, &ok, std::chrono::system_clock::now() + std::chrono::milliseconds(maga_init_params_.gpt_init_parameter.decode_polling_call_prefill_ms_))
+        if (rpc_context->completion_queue->AsyncNext(
+                &got_tag,
+                &ok,
+                std::chrono::system_clock::now()
+                    + std::chrono::milliseconds(maga_init_params_.gpt_init_parameter.decode_polling_call_prefill_ms_))
             == grpc::CompletionQueue::NextStatus::TIMEOUT) {
             if (decode_context.server_context->IsCancelled()) {
                 RTP_LLM_LOG_WARNING("request [%s] is cancelled", decode_context.request_key.c_str());
                 rpc_context->client_context->TryCancel();
                 return ErrorInfo(ErrorCode::CANCELLED, "request is cancelled");
             } else if (currentTimeUs() > deadline_us) {
-                RTP_LLM_LOG_WARNING("request [%s] deadline exceed [%ld]", decode_context.request_key.c_str(), deadline_us);
+                RTP_LLM_LOG_WARNING(
+                    "request [%s] deadline exceed [%ld]", decode_context.request_key.c_str(), deadline_us);
                 rpc_context->client_context->TryCancel();
                 return ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "request deadline exceeded");
             }
@@ -223,10 +230,11 @@ ErrorInfo DecodeRpcServerNew::callPrefill(DecodeGenerateContextNew& decode_conte
         }
 
         if (!ok) {
-            RTP_LLM_LOG_WARNING("request [%s] async get next event from grpc completion queue failed", decode_context.request_key.c_str());
+            RTP_LLM_LOG_WARNING("request [%s] async get next event from grpc completion queue failed",
+                                decode_context.request_key.c_str());
             return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "async get next event from grpc completion queue failed");
         }
-        
+
         if (!rpc_context->status.ok()) {
             const auto& error_msg      = rpc_context->status.error_message();
             ErrorCode   new_error_code = ErrorCode::LOAD_KV_CACHE_FAILED;
@@ -251,13 +259,12 @@ ErrorInfo DecodeRpcServerNew::callPrefill(DecodeGenerateContextNew& decode_conte
             rpc_context->finished = true;
         }
     }
-   
-    
+
     auto block_ids = decode_context.getStream()->kvCache().blocks(0);
     for (auto block_id : block_ids) {
-        auto [k_buffer, v_buffer] = engine_->resourceContext().cache_manager->getKVBlockValue(block_id); 
+        auto [k_buffer, v_buffer] = engine_->resourceContext().cache_manager->getKVBlockValue(block_id);
     }
-    
+
     decode_context.load_cache_from_prefill_done_time_us = currentTimeUs();
     RTP_LLM_LOG_DEBUG("request [%s] call prefill done", decode_context.request_key.c_str());
     return ErrorInfo::OkStatus();

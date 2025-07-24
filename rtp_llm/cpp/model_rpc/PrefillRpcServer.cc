@@ -171,7 +171,7 @@ LoadBalancerInitParams PrefillRpcServer::makeConfig() {
 }
 
 ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> stream) {
-    static int max_wait_timeout_us = maga_init_params_.gpt_init_parameter.prefill_max_wait_timeout_ms_;
+    static int max_wait_timeout_us = maga_init_params_.gpt_init_parameter.prefill_max_wait_timeout_ms_ * 1000;
     auto       begin_time_us       = currentTimeUs();
     while (stream->waiting()) {
         usleep(100);
@@ -438,12 +438,7 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
                 prefill_context.retry_cost_time_ms,
                 max_retry_times + 1,
                 max_retry_timeout_ms);
-            if (maga_init_params_.gpt_init_parameter.pd_sep_enable_fallback_) {
-                RTP_LLM_LOG_WARNING("request [%ld] fallback to local server");
-                request_guard.reset();
-                return LocalRpcServer::GenerateStreamCall(server_context, request, writer);
-            }
-    	    return prefill_context.error_status;
+            return prefill_context.error_status;
         }
         EXECUTE_STAGE_FUNC(enqueueRequest, prefill_context);
         EXECUTE_STAGE_FUNC(remoteLoadCacheStart, prefill_context);
@@ -469,9 +464,6 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
 }
 
 bool PrefillRpcServer::ready() {
-    if (maga_init_params_.gpt_init_parameter.pd_sep_enable_fallback_) {
-        return true;
-    }
     if (!load_balancer_) {
         RTP_LLM_LOG_INFO("load balance is nullptr, server is not ready");
         return false;

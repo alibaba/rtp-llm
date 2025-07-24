@@ -387,7 +387,6 @@ class GptInitParameter:
     decode_polling_kv_cache_step_ms: int
     decode_retry_timeout_ms: int
     decode_retry_times: int
-    decode_use_async_load_cache: bool
     deepseek_mscale_all_dim: float
     deepseek_rope_mscale: float
     device_resource_config: DeviceResourceConfig
@@ -475,7 +474,6 @@ class GptInitParameter:
     num_valid_layer: int
     org_embedding_max_pos: int
     parallelism_distributed_config: ParallelismDistributedConfig
-    pd_sep_enable_fallback: bool
     phy_exp_num: int
     position_id_len_factor: int
     position_ids_style: int

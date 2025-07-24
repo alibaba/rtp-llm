@@ -253,7 +253,6 @@ class GptInitModelParameters:
     decode_polling_kv_cache_step_ms: int
     decode_retry_timeout_ms: int
     decode_retry_times: int
-    decode_use_async_load_cache: bool
     deepseek_mscale_all_dim: float
     deepseek_rope_mscale: float
     dp_rank: int
@@ -330,7 +329,6 @@ class GptInitModelParameters:
     num_layers: int
     num_valid_layer: int
     org_embedding_max_pos: int
-    pd_sep_enable_fallback: bool
     phy_exp_num: int
     position_id_len_factor: int
     position_ids_style: int
@@ -1047,15 +1045,16 @@ class GptInitModelParameters:
             role_type = "VIT"
         self.role_type = trans_role_type(role_type)
         logging.info(f"role_type: {self.role_type}")
+
         if self.role_type in [RoleType.PREFILL]:
             self.prefill_retry_times = int(os.environ.get("PREFILL_RETRY_TIMES", 0))
             logging.info(f"prefill_retry_times: {self.prefill_retry_times}")
             self.prefill_retry_timeout_ms = int(
-                os.environ.get("PREFILL_RETRY_TIMEOUT_MS", 0)
+                os.environ.get("PREFILL_RETRY_TIMEOUT_MS", 20)
             )
             logging.info(f"prefill_retry_timeout_ms: {self.prefill_retry_timeout_ms}")
             self.prefill_max_wait_timeout_ms = int(
-                os.environ.get("PREFILL_MAX_WAIT_TIMEOUT_US", 600 * 1000 * 1000)
+                os.environ.get("PREFILL_MAX_WAIT_TIMEOUT_MS", 600 * 1000)
             )
             logging.info(
                 f"prefill_max_wait_timeout_ms: {self.prefill_max_wait_timeout_ms}"
@@ -1063,17 +1062,19 @@ class GptInitModelParameters:
 
         if self.role_type in [RoleType.PREFILL, RoleType.DECODE]:
             self.cache_store_rdma_mode = bool(
-                int(os.environ.get("CACHE_STORE_RDMA_MODE", 1))
+                int(os.environ.get("CACHE_STORE_RDMA_MODE", 0))
             )
             logging.info(f"cache_store_rdma_mode: {self.cache_store_rdma_mode}")
 
-            self.load_cache_timeout_ms = int(os.environ.get("LOAD_CACHE_TIMEOUT_MS", 0))
+            self.load_cache_timeout_ms = int(
+                os.environ.get("LOAD_CACHE_TIMEOUT_MS", 5000)
+            )
             logging.info(f"load_cache_timeout_ms: {self.load_cache_timeout_ms}")
 
-            self.decode_retry_times = int(os.environ.get("DECODE_RETRY_TIMES", 0))
-            logging.info(f"decode_retry_times: {self.prefill_retry_times}")
+            self.decode_retry_times = int(os.environ.get("DECODE_RETRY_TIMES", 100))
+            logging.info(f"decode_retry_times: {self.decode_retry_times}")
             self.decode_retry_timeout_ms = int(
-                os.environ.get("DECODE_RETRY_TIMEOUT_MS", 0)
+                os.environ.get("DECODE_RETRY_TIMEOUT_MS", 100)
             )
             logging.info(f"decode_retry_timeout_ms: {self.decode_retry_timeout_ms}")
 
@@ -1096,20 +1097,11 @@ class GptInitModelParameters:
                 f"decode_polling_call_prefill_ms: {self.decode_polling_call_prefill_ms}"
             )
 
-            self.decode_use_async_load_cache = bool(
-                int(os.environ.get("DECODE_USE_ASYNC_LOAD_CACHE", 1))
-            )
-            logging.info(
-                f"decode_use_async_load_cache: {self.decode_use_async_load_cache}"
-            )
+            self.decode_entrance = bool(int(os.environ.get("DECODE_ENTRANCE", 0)))
+            logging.info(f"decode_entrance: {self.decode_entrance}")
 
             if (not self.decode_entrance and self.role_type in [RoleType.PREFILL]) or (
-                self.decode_entrance and self.role_type in [RoleType.DECODE]
-            ):
-                self.pd_sep_enable_fallback = bool(
-                    int(os.environ.get("PD_SEP_ENABLE_FALLBACK", 0))
-                )
-                logging.info(f"pd_sep_enable_fallback: {self.pd_sep_enable_fallback}")
+                self.decode_entrance and self.role_type in [RoleType.DECODE]):
                 self.load_balance_policy_name = os.environ.get(
                     "LOAD_BALANCE_POLICY_NAME", "RR"
                 )
@@ -1126,7 +1118,6 @@ class GptInitModelParameters:
                     os.environ.get("SYNC_STATUS_INTERVAL_MS", 50)
                 )
                 logging.info(f"sync_status_interval_ms: {self.sync_status_interval_ms}")
-            
 
         self.scheduler_reserve_resource_ratio = int(
             os.environ.get("SCHEDUlER_RESERVE_RESOURCE_RATIO", 5)

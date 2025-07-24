@@ -43,9 +43,6 @@ grpc::Status DecodeRpcServer::init(const EngineInitParams&                      
     if (!ret.ok()) {
         return ret;
     }
-    if (!maga_init_params_.gpt_init_parameter.decode_use_async_load_cache_) {
-        initThreadPool();
-    }
     return grpc::Status::OK;
 }
 
@@ -295,11 +292,7 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
         }
     }
 
-    if (maga_init_params_.gpt_init_parameter.decode_use_async_load_cache_) {
-        return loadCacheAsyncForTp(decode_context, load_context);
-    } else {
-        return loadCacheSyncForTp(decode_context, load_context);
-    }
+    return loadCacheAsyncForTp(decode_context, load_context);
 }
 
 ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_context,

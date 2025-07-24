@@ -12,10 +12,10 @@ class ServerArgsDefaultTest(TestCase):
 
     def test_default_args_env(self):
         # 动态导入 server_args 以应用纯净的环境
-        import rtp_llm.server.server_args
+        import rtp_llm.server.server_args.server_args
 
-        importlib.reload(rtp_llm.server.server_args)
-        rtp_llm.server.server_args.setup_args()
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        rtp_llm.server.server_args.server_args.setup_args()
         env = os.environ
 
         # 1. Parallelism and Distributed Setup Configuration
@@ -695,13 +695,23 @@ class ServerArgsSetTest(TestCase):
             "4000",
             "--disable_pdl",
             "True",
+            # 31. PD-Separation Configuration
+            "--prefill_retry_times",
+            "2",
+            "--decode_entrance",
+            "1",
+            "--sync_status_interval_ms",
+            "125",
+            # 32 jit
+            "--remote_jit_dir",
+            "/home/admin/jit_dir",
         ]
 
         # 重新加载 server_args 并执行 setup_args
-        import rtp_llm.server.server_args
+        import rtp_llm.server.server_args.server_args
 
-        importlib.reload(rtp_llm.server.server_args)
-        rtp_llm.server.server_args.setup_args()
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        rtp_llm.server.server_args.server_args.setup_args()
         env = os.environ
 
         # 1. Parallelism and Distributed Setup Configuration
@@ -953,6 +963,14 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env["STEP_RECORDS_TIME_RANGE"], "240000000")
         self.assertEqual(env["STEP_RECORDS_MAX_SIZE"], "4000")
         self.assertEqual(env["DISABLE_PDL"], "1")
+
+        # 31. PD-Separation Configuration
+        self.assertEqual(env["PREFILL_RETRY_TIMES"], "2")
+        self.assertEqual(env["DECODE_ENTRANCE"], "1")
+        self.assertEqual(env["SYNC_STATUS_INTERVAL_MS"], "125")
+
+        # 32. jit
+        self.assertEqual(env["REMOTE_JIT_DIR"], "/home/admin/jit_dir")
 
 
 if __name__ == "__main__":

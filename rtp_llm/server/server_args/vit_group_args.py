@@ -1,0 +1,57 @@
+import argparse
+import logging
+import os
+
+from rtp_llm.server.server_args.util import str2bool
+
+
+def init_vit_group_args(parser):
+    ##############################################################################################################
+    # Vit Configuration
+    ##############################################################################################################
+    vit_group = parser.add_argument_group("Vit Configuration")
+    vit_group.add_argument(
+        "--vit_separation",
+        env_name="VIT_SEPARATION",
+        type=int,
+        default=0,
+        help="VIT是否和主进程进行分离",
+    )
+    vit_group.add_argument(
+        "--vit_trt", env_name="VIT_TRT", type=int, default=0, help="VIT是否使用TRT库"
+    )
+    vit_group.add_argument(
+        "--trt_cache_enabled",
+        env_name="TRT_CACHE_ENABLED",
+        type=int,
+        default=0,
+        help="是否使用TRT_CACHE",
+    )
+    vit_group.add_argument(
+        "--trt_cache_path",
+        env_name="TRT_CACHE_PATH",
+        type=str,
+        default=os.path.join(os.getcwd(), "trt_cache"),
+        help="TRT_CACHE路径",
+    )
+    vit_group.add_argument(
+        "--download_headers",
+        env_name="DOWNLOAD_HEADERS",
+        type=str,
+        default="",
+        help="是否需要下载headers",
+    )
+    vit_group.add_argument(
+        "--mm_cache_item_num",
+        env_name="MM_CACHE_ITEM_NUM",
+        type=int,
+        default=10,
+        help="多模态开启的Cache的大小",
+    )
+    vit_group.add_argument(
+        "--url_cache_item_num",
+        env_name="URL_CACHE_ITEM_NUM",
+        type=int,
+        default=100,
+        help="多模态开启的用于URL的Cache的大小",
+    )
