@@ -11,6 +11,13 @@ namespace rtp_llm {
 
 TokenProcessor::TokenProcessor(py::object token_processor): token_processor_(token_processor) {}
 
+TokenProcessor::~TokenProcessor() {
+    py::gil_scoped_acquire acquire;
+    // make sure all py::object are deconstructed while holding GIL
+    py::object tmp;
+    tmp = std::move(token_processor_);
+}
+
 py::object TokenProcessor::getPyObject() const {
     return token_processor_;
 }
@@ -140,7 +147,9 @@ std::vector<std::string> TokenProcessorPerStream::decodeTokens(GenerateOutputs& 
 
 TokenProcessorPerStream::~TokenProcessorPerStream() {
     py::gil_scoped_acquire acquire;
-    token_processor_stream_.dec_ref();
+    // make sure all py::object are deconstructed while holding GIL
+    py::object tmp;
+    tmp = std::move(token_processor_stream_);
 }
 
 }  // namespace rtp_llm

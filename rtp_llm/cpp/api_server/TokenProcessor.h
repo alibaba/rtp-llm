@@ -15,7 +15,7 @@ class TokenProcessorPerStream;
 class TokenProcessor {
 public:
     TokenProcessor(py::object token_processor);
-    virtual ~TokenProcessor() = default;
+    virtual ~TokenProcessor();
 
 public:
     // virtual for test
