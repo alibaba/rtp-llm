@@ -52,9 +52,9 @@ class ServerArgsDefaultTest(TestCase):
         # self.assertIsNone(env.get("SEQ_SIZE_PER_BLOCK"))
         self.assertEqual(env.get("TEST_BLOCK_NUM"), "0")
         self.assertEqual(env["ENABLE_3FS"], "0")
-        self.assertEqual(env["MATCH_TIMEOUT_MS"], "1000")
-        self.assertEqual(env.get("RPC_GET_CACHE_TIMEOUT_MS"), "2000")
-        self.assertEqual(env.get("RPC_PUT_CACHE_TIMEOUT_MS"), "2000")
+        self.assertEqual(env["THREEFS_MATCH_TIMEOUT_MS"], "1000")
+        self.assertEqual(env.get("THREEFS_RPC_GET_CACHE_TIMEOUT_MS"), "3000")
+        self.assertEqual(env.get("THREEFS_RPC_PUT_CACHE_TIMEOUT_MS"), "3000")
         self.assertEqual(env.get("THREEFS_READ_TIMEOUT_MS"), "1000")
         self.assertEqual(env.get("THREEFS_WRITE_TIMEOUT_MS"), "2000")
         self.assertEqual(env.get("MAX_BLOCK_SIZE_PER_ITEM"), "16")
@@ -342,11 +342,11 @@ class ServerArgsSetTest(TestCase):
             "128",
             "--enable_3fs",
             "True",
-            "--match_timeout_ms",
+            "--threefs_match_timeout_ms",
             "5000",
-            "--rpc_get_cache_timeout_ms",
+            "--threefs_rpc_get_cache_timeout_ms",
             "5000",
-            "--rpc_put_cache_timeout_ms",
+            "--threefs_rpc_put_cache_timeout_ms",
             "5000",
             "--threefs_read_timeout_ms",
             "5000",
@@ -749,9 +749,9 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env["SEQ_SIZE_PER_BLOCK"], "64")
         self.assertEqual(env["TEST_BLOCK_NUM"], "128")
         self.assertEqual(env["ENABLE_3FS"], "1")
-        self.assertEqual(env.get("MATCH_TIMEOUT_MS"), "5000")
-        self.assertEqual(env.get("RPC_GET_CACHE_TIMEOUT_MS"), "5000")
-        self.assertEqual(env.get("RPC_PUT_CACHE_TIMEOUT_MS"), "5000")
+        self.assertEqual(env.get("THREEFS_MATCH_TIMEOUT_MS"), "5000")
+        self.assertEqual(env.get("THREEFS_RPC_GET_CACHE_TIMEOUT_MS"), "5000")
+        self.assertEqual(env.get("THREEFS_RPC_PUT_CACHE_TIMEOUT_MS"), "5000")
         self.assertEqual(env.get("THREEFS_READ_TIMEOUT_MS"), "5000")
         self.assertEqual(env.get("THREEFS_WRITE_TIMEOUT_MS"), "5000")
         self.assertEqual(env.get("THREEFS_READ_IOV_SIZE"), "1073741824")
@@ -970,9 +970,12 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env["DECODE_ENTRANCE"], "1")
         self.assertEqual(env["SYNC_STATUS_INTERVAL_MS"], "125")
 
+<<<<<<< HEAD:rtp_llm/server/server_args/test/server_args_test.py
         # 32. jit
         self.assertEqual(env["REMOTE_JIT_DIR"], "/home/admin/jit_dir")
 
+=======
+>>>>>>> fix server args:rtp_llm/server/server_args/test/server_args_test.py
 
 if __name__ == "__main__":
     main()

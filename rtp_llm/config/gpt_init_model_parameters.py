@@ -602,9 +602,13 @@ class GptInitModelParameters:
             multi_task_prompt=get_env_str("MULTI_TASK_PROMPT"),
             multi_task_prompt_str=get_env_str("MULTI_TASK_PROMPT_STR"),
             enable_3fs=get_env_bool("ENABLE_3FS", False),
-            match_timeout_ms=get_env_int("MATCH_TIMEOUT_MS", 1000),
-            rpc_get_cache_timeout_ms=get_env_int("RPC_GET_CACHE_TIMEOUT_MS", 2000),
-            rpc_put_cache_timeout_ms=get_env_int("RPC_PUT_CACHE_TIMEOUT_MS", 2000),
+            match_timeout_ms=get_env_int("THREEFS_MATCH_TIMEOUT_MS", 1000),
+            rpc_get_cache_timeout_ms=get_env_int(
+                "THREEFS_RPC_GET_CACHE_TIMEOUT_MS", 3000
+            ),
+            rpc_put_cache_timeout_ms=get_env_int(
+                "THREEFS_RPC_PUT_CACHE_TIMEOUT_MS", 3000
+            ),
             threefs_read_timeout_ms=get_env_int("THREEFS_READ_TIMEOUT_MS", 1000),
             threefs_write_timeout_ms=get_env_int("THREEFS_WRITE_TIMEOUT_MS", 2000),
             max_block_size_per_item=get_env_int("MAX_BLOCK_SIZE_PER_ITEM", 16),

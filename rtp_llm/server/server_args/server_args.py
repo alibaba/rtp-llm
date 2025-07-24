@@ -26,6 +26,7 @@ from rtp_llm.server.server_args.generate_group_args import init_generate_group_a
 from rtp_llm.server.server_args.hw_kernel_group_args import init_hw_kernel_group_args
 from rtp_llm.server.server_args.jit_group_args import init_jit_group_args
 from rtp_llm.server.server_args.kv_cache_group_args import init_kv_cache_group_args
+from rtp_llm.server.server_args.threefs_group_args import init_threefs_group_args
 from rtp_llm.server.server_args.load_group_args import init_load_group_args
 from rtp_llm.server.server_args.lora_group_args import init_lora_group_args
 from rtp_llm.server.server_args.misc_group_args import init_misc_group_args
@@ -223,6 +224,7 @@ def setup_args():
     init_generate_group_args(parser)
     init_hw_kernel_group_args(parser)
     init_kv_cache_group_args(parser)
+    init_threefs_group_args(parser)
     init_load_group_args(parser)
     init_lora_group_args(parser)
     init_misc_group_args(parser)
@@ -242,34 +244,28 @@ def setup_args():
     init_speculative_decoding_group_args(parser)
     init_vit_group_args(parser)
     init_worker_group_args(parser)
+<<<<<<< HEAD
     init_jit_group_args(parser)
+=======
+>>>>>>> fix server args
     init_pd_separation_group_args(parser)
 
     parser.parse_args()
 
     # add rocm env config, if using default value, change it to optimize version
-    if (
-        len(glob.glob("/dev/dri/renderD*")) > 0
-        and os.getenv("FT_DISABLE_CUSTOM_AR") is None
-    ):
+    if os.path.exists("/dev/kfd") and os.getenv("FT_DISABLE_CUSTOM_AR") is None:
         os.environ["FT_DISABLE_CUSTOM_AR"] = "0"
         logging.info(
             "[MI308X] enable FT_DISABLE_CUSTOM_AR by default, as amd has own implementation."
         )
 
-    if (
-        len(glob.glob("/dev/dri/renderD*")) > 0
-        and os.getenv("SEQ_SIZE_PER_BLOCK") is None
-    ):
+    if os.path.exists("/dev/kfd") and os.getenv("SEQ_SIZE_PER_BLOCK") is None:
         os.environ["SEQ_SIZE_PER_BLOCK"] = "16"
         logging.info(
             "[MI308X] set SEQ_SIZE_PER_BLOCK 16 by default, as it just support 16 now."
         )
 
-    if (
-        len(glob.glob("/dev/dri/renderD*")) > 0
-        and os.getenv("ENABLE_COMM_OVERLAP") is None
-    ):
+    if os.path.exists("/dev/kfd") and os.getenv("ENABLE_COMM_OVERLAP") is None:
         os.environ["ENABLE_COMM_OVERLAP"] = "0"
         logging.info("[MI308X] disable ENABLE_COMM_OVERLAP by default.")
 
