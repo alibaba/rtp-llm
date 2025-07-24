@@ -28,11 +28,11 @@ def start_frontend_server(server_id: int, global_controller: ConcurrencyControll
     ## collect all args and envs.
     py_env_configs = PyEnvConfigs()
     py_env_configs.update_from_env()
-    py_env_configs.server_config.fronted_server_id = server_id
+    py_env_configs.server_config.frontend_server_id = server_id
     setproctitle(f"rtp_llm_frontend_server_{server_id}")
     app = None
     g_frontend_server_info = FrontendServerInfo(
-        py_env_configs.server_config.fronted_server_id
+        py_env_configs.server_config.frontend_server_id
     )
     try:
         logging.info(f"g_frontend_server_info = {g_frontend_server_info}")

@@ -80,7 +80,7 @@ def start_backend_server_impl(global_controller):
 def start_frontend_server_impl(global_controller, backend_process):
     server_config = ServerConfig()
     server_config.update_from_env()
-    frontend_server_count = server_config.fronted_server_count
+    frontend_server_count = server_config.frontend_server_count
     if frontend_server_count < 1:
         logging.info(
             "frontend server's count is {frontend_server_count}, this may be a mistake"

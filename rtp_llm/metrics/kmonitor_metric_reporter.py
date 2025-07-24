@@ -48,7 +48,7 @@ class MetricReporter(object):
         self._kmon = kmonitor
         self._matic_map: Dict[str, Any] = {}
         self._inited = False
-        ## we will update this for every FrontedServer in `start_frontend_server_impl`
+        ## we will update this for every FrontendServer in `start_frontend_server_impl`
         self.frontend_server_id = 0
 
     def report(

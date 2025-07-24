@@ -48,29 +48,29 @@ def get_env_bool(name: str, default: bool = False):
 
 class ServerConfig:
     def __init__(self):
-        self.fronted_server_count = 4
+        self.frontend_server_count = 4
         self.start_port = DEFAULT_START_PORT
         self.timeout_keep_alive = 5
-        self.fronted_server_id = 0
+        self.frontend_server_id = 0
 
     def update_from_env(self):
-        self.fronted_server_count = int(
-            os.environ.get("FRONTED_SERVER_COUNT", self.fronted_server_count)
+        self.frontend_server_count = int(
+            os.environ.get("FRONTEND_SERVER_COUNT", self.frontend_server_count)
         )
         self.start_port = int(os.environ.get("START_PORT", self.start_port))
         self.timeout_keep_alive = int(
             os.environ.get("TIMEOUT_KEEP_ALIVE", self.timeout_keep_alive)
         )
-        self.fronted_server_id = int(
-            os.environ.get("FRONTEND_SERVER_ID", self.fronted_server_id)
+        self.frontend_server_id = int(
+            os.environ.get("FRONTEND_SERVER_ID", self.frontend_server_id)
         )
 
     def to_string(self):
         return (
-            f"fronted_server_count: {self.fronted_server_count}\n"
+            f"frontend_server_count: {self.frontend_server_count}\n"
             f"start_port: {self.start_port}\n"
             f"timeout_keep_alive: {self.timeout_keep_alive}\n"
-            f"fronted_server_id: {self.fronted_server_id}"
+            f"frontend_server_id: {self.frontend_server_id}"
         )
 
 

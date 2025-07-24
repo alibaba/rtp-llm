@@ -81,7 +81,7 @@ if __name__ == "__main__":
 
 前端请求代码:
 ```python
-## fronted.py
+## frontend.py
 import os
 import sys
 import logging
@@ -202,11 +202,11 @@ $PYTHON_BIN ${USER_HOME}/backend_front/backend.py
 
 前端启动脚本:
 ```shell
-## fronted.sh
+## frontend.sh
 export USE_COMPILE=0
 source prev.sh
 echo $USER_HOME
-$PYTHON_BIN ${USER_HOME}/backend_front/fronted.py
+$PYTHON_BIN ${USER_HOME}/backend_front/frontend.py
 ```
 ## 二. Python代码调试
 我们采用vscode进行代码开发调试，python代码调试比较方便使用图形化界面进行处理，比较直观。下面是进行launch调试的配置文件:
@@ -271,5 +271,5 @@ tanboyu+  23916  0.0  0.0   7996   900 pts/16   S+   23:59   0:00 grep --color=a
 ```
 服务启动之后，我们会发现存在一个rtp_llm_backend_server进程，这是推理服务启动的主进程，而rtp_llm_rank-0和rtp_llm_rank-1则是对应的子进程，这个数量是由我们的配置决定的，我们设置了TP_SIZE = 2所以这个地方会有对应的两个进程。另外还会默认启动四个rtp_llm_frontend_server前端服务进程，用于接受外部请求。
 
-接下来我们开始进行gdb调试: gdb -p 21251，打完断点后，执行bash fronted.sh ，就会命中断点， 然后我们可以根据堆栈查看代码路径。
+接下来我们开始进行gdb调试: gdb -p 21251，打完断点后，执行bash frontend.sh ，就会命中断点， 然后我们可以根据堆栈查看代码路径。
 ![](./pics/rtp-llm_backend_gdb_debug.png)
