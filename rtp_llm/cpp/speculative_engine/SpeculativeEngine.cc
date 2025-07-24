@@ -121,7 +121,7 @@ absl::Status SpeculativeEngine::init() {
     scheduler_.reset(new SpeculativeScheduler(score_model_params_.gpt_init_parameter,
                                               resource_context_.cache_manager,
                                               metrics_reporter_,
-                                              propose_model_params_->getGptInitParameter().gen_num_per_circle_ + 1));
+                                              propose_model_params_->genNumPerCircle() + 1));
     RTP_LLM_LOG_INFO("create fifo scheduler done");
     speculative_sampler_ = std::make_unique<SpeculativeSampler>(device_);
     RTP_LLM_LOG_INFO("create speculative sampler");

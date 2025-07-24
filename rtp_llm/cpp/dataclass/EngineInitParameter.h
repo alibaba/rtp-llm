@@ -111,6 +111,10 @@ struct ProposeModelEngineInitParams: public th::jit::CustomClassHolder {
         }
     }
 
+    const int genNumPerCircle() {
+        return gen_num_per_circle;
+    }
+
     std::string                       sp_type;
     size_t                            gen_num_per_circle   = 0;
     std::unique_ptr<EngineInitParams> vanilla_model_params = nullptr;

@@ -26,7 +26,7 @@ FIFOScheduler::FIFOScheduler(const rtp_llm::GptInitParameter&     params,
     fast_gen_max_context_len_(params.fast_gen_max_context_len_),
     metrics_reporter_(metrics_reporter) {
     if (params.enable_speculative_decoding_) {
-        max_generate_batch_size_ = params.max_generate_batch_size_ / max_score_len;
+        max_generate_batch_size_ = std::max((int)1, (int)params.max_generate_batch_size_ / max_score_len);
     }
     RTP_LLM_LOG_INFO("max_generate_batch_size %d", max_generate_batch_size_);
 }
