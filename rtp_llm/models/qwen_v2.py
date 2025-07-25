@@ -40,10 +40,6 @@ def scale_reshape(ts: List[torch.Tensor]):
     return ts[0].reshape(-1)
 
 
-def create_scalar_ones(ts: List[torch.Tensor]):
-    return torch.ones([1], dtype=torch.float32).to(ts[0].device)
-
-
 class QWenV2Weight(ModelDeployWeightInfo):
     def __init__(self, *args: Any, **kwargs: Any):
         self.prefix: str = kwargs.pop("prefix", "")
@@ -227,19 +223,6 @@ class QWenV2Weight(ModelDeployWeightInfo):
             ),
         ]
 
-        if self.attn_config.use_fp8_kv_cache:
-            layer_weights.append(
-                AtomicWeight(
-                    W.attention_output_static_quant_reciprocal,
-                    [
-                        CkptWeightInfo(
-                            self.prefix + "model.layers.{i}.self_attn.q_proj.weight"
-                        )
-                    ],
-                    create_scalar_ones,
-                    torch.float32,
-                )
-            )
         if self.bias:
             layer_weights.append(
                 AttnAtomicWeight(

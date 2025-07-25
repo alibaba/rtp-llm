@@ -10,7 +10,7 @@ from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.config.quant_config import QuantizationConfig
 from rtp_llm.distribute.worker_info import ParallelInfo
-from rtp_llm.model_loader.attn_weight import AttnConfig
+from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
 from rtp_llm.model_loader.ffn_weight import FfnConfig, FfnWeight, MoeWithSharedWeight
 from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.weight_module import (
@@ -29,6 +29,10 @@ from rtp_llm.utils.model_weight import (
     tolerate_failed,
 )
 from rtp_llm.utils.weight_type import WEIGHT_TYPE
+
+
+def create_scalar_ones(ts: List[torch.Tensor]):
+    return torch.ones([1], dtype=torch.float32).to(ts[0].device)
 
 
 class ModelWeightInfo:
@@ -240,6 +244,11 @@ class ModelDeployWeightInfo:
             logging.info("fix merge_w13")
             weight_info = self._fix_merge_w1_w3(weight_info)
 
+        if self.attn_config.use_fp8_kv_cache:
+            weight_info = self._add_attention_output_static_quant_reciprocal(
+                weight_info
+            )
+
         if self._quant_algo is not None and self._quant_algo.isQuant():
             weight_info = weight_info.to_quant_weight_info(self._quant_config)
 
@@ -315,6 +324,33 @@ class ModelDeployWeightInfo:
 
         origin_weight_info.layer_weights = layer_weights
         logging.info(f"fix weight style {origin_weight_info.layer_weights[0]}")
+        return origin_weight_info
+
+    def _add_attention_output_static_quant_reciprocal(
+        self, origin_weight_info: ModelWeightInfo
+    ):
+        for weights in origin_weight_info.layer_weights:
+            attn_q_weight_info: Optional[CkptWeightInfo] = None
+            for weight in weights:
+                if (
+                    isinstance(weight, AtomicWeight)
+                    or isinstance(weight, AttnAtomicWeight)
+                ) and weight.name == W.attn_qkv_w:
+                    attn_q_weight_info = weight.weights[0]
+                    break
+
+            assert attn_q_weight_info is not None
+            weights.append(
+                AtomicWeight(
+                    W.attention_output_static_quant_reciprocal,
+                    [attn_q_weight_info],
+                    create_scalar_ones,
+                    torch.float32,
+                )
+            )
+            logging.info(
+                f"append attention_output_static_quant_reciprocal {weights[-1]}"
+            )
         return origin_weight_info
 
     def _fix_merge_w1_w3(self, origin_weight_info: ModelWeightInfo):
