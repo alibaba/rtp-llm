@@ -31,7 +31,7 @@ py_test(
     srcs = ["server_args_test.py"],
     deps = [
         "//rtp_llm/server:server",
-        "//rtp_llm:config",
+        "//rtp_llm:config_ops",
     ],
     exec_properties = {'gpu':'A10'},
 )
