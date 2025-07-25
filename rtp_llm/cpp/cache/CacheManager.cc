@@ -474,17 +474,22 @@ void CacheManager::incrBlockRefCounter(const std::vector<int>& indices) {
 }
 
 void CacheManager::incrQueryRefCounter(const std::vector<int>& blocks) {
-    query_ref_counter_.incrementRefCounter(blocks);
-    for (auto block : blocks) {
-        if (query_ref_counter_.getRefCounter(block) == 1) {
+    std::set<int> unique_blocks(blocks.begin(), blocks.end());
+    for (auto block : unique_blocks) {
+        // it is okey to use getRefCounterUnchecked here, as the ref counters are about to increase
+        if (query_ref_counter_.getRefCounterUnchecked(block) == 0) {
             available_blocks_--;
         }
     }
+
+    query_ref_counter_.incrementRefCounter(blocks);
 }
 
 void CacheManager::decrQueryRefCounter(const std::vector<int>& blocks) {
     query_ref_counter_.decrementRefCounter(blocks);
-    for (auto block : blocks) {
+
+    std::set<int> unique_blocks(blocks.begin(), blocks.end());
+    for (auto block : unique_blocks) {
         if (query_ref_counter_.getRefCounter(block) == 0) {
             available_blocks_++;
         }
@@ -553,15 +558,15 @@ void CacheManager::freeImpl(const std::vector<int>& block_indices) {
 
 size_t CacheManager::newFreeBlocks(const std::vector<int>& indices) {
     std::unordered_map<int, int> decrement_counts;
-    for (int i: indices) {
+    for (int i : indices) {
         decrement_counts[i]++;
     }
     size_t new_free_blocks = 0;
     {
         std::lock_guard<std::mutex> guard(mutex_);
         for (const auto& pair : decrement_counts) {
-            int block_id = pair.first;
-            int decrement_count = pair.second;
+            int block_id          = pair.first;
+            int decrement_count   = pair.second;
             int current_ref_count = query_ref_counter_.getRefCounter(block_id);
             if (current_ref_count == decrement_count) {
                 new_free_blocks++;

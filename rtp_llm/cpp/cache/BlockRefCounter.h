@@ -16,8 +16,12 @@ public:
     }
 
     int getRefCounter(int block_index) const {
-        // assert(block_index < block_nums);
         return ref_counter.at(block_index);
+    }
+
+    int getRefCounterUnchecked(int block_index) const {
+        auto it = ref_counter.find(block_index);
+        return it != ref_counter.end() ? it->second : 0;
     }
 
     void incrementRefCounter(const std::vector<int>& block_indices) {
