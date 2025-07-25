@@ -296,11 +296,12 @@ class ModelRpcClient(object):
         stream_state = StreamState()
 
         address_list = self._addresses
+
         for role_addr in input_py.generate_config.role_addrs:
             if (
-                role_addr.role == RoleType.PREFILL
+                (self.model_config.decode_entrance and role_addr.role == RoleType.DECODE)
                 or role_addr.role == RoleType.PDFUSION
-                or (self.model_config.decode_entrance and role_addr.role == RoleType.DECODE)
+                or (not self.model_config.decode_entrance and role_addr.role == RoleType.PREFILL)
             ):
                 if role_addr.ip != "":
                     address_list = [role_addr.ip + ":" + str(role_addr.grpc_port)]

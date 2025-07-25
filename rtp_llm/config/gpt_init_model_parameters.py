@@ -250,6 +250,7 @@ class GptInitModelParameters:
     ckpt_path: str
     cross_attn_input_len: int
     data_type: str
+    decode_entrance: bool
     decode_polling_kv_cache_step_ms: int
     decode_retry_timeout_ms: int
     decode_retry_times: int
@@ -759,6 +760,9 @@ class GptInitModelParameters:
         # 3FS
         self.gpt_init_params.enable_3fs = get_env_bool("ENABLE_3FS", False)
 
+        # PD Seperation
+        self.decode_entrance = get_env_bool("DECODE_ENTRANCE", False)
+
     def update_config_with_sparse_config(self, ckpt_path: str):
         sparse_config_file = None
         sparse_config = None
@@ -1059,12 +1063,7 @@ class GptInitModelParameters:
                 f"decode_use_async_load_cache: {self.decode_use_async_load_cache}"
             )
 
-            self.decode_entrance = bool(int(os.environ.get("DECODE_ENTRANCE", 0)))
-            logging.info(f"decode_entrance: {self.decode_entrance}")
-
-            if (not self.decode_entrance and self.role_type in [RoleType.PREFILL]) or (
-                self.decode_entrance and self.role_type in [RoleType.DECODE]
-            ):
+            if (not self.decode_entrance and self.role_type in [RoleType.PREFILL]) or (self.decode_entrance and self.role_type in [RoleType.DECODE]):
                 self.pd_sep_enable_fallback = bool(
                     int(os.environ.get("PD_SEP_ENABLE_FALLBACK", 0))
                 )
