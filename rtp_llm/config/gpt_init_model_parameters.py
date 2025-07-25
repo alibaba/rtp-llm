@@ -1056,6 +1056,13 @@ class GptInitModelParameters:
                 f"decode_polling_kv_cache_step_ms: {self.decode_polling_kv_cache_step_ms}"
             )
 
+            self.decode_polling_call_prefill_ms = int(
+                os.environ.get("DECODE_POLLING_CALL_PREFILL_MS", 30)
+            )
+            logging.info(
+                f"decode_polling_call_prefill_ms: {self.decode_polling_call_prefill_ms}"
+            )
+
             self.decode_use_async_load_cache = bool(
                 int(os.environ.get("DECODE_USE_ASYNC_LOAD_CACHE", 1))
             )

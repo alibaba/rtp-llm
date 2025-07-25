@@ -204,7 +204,7 @@ ErrorInfo DecodeRpcServerNew::callPrefill(DecodeGenerateContextNew& decode_conte
     auto deadline_us = rpc_context->request.deadline_us();
 
     while (!rpc_context->finished) {
-        if(rpc_context->completion_queue->AsyncNext(&got_tag, &ok, std::chrono::system_clock::now() + std::chrono::milliseconds(maga_init_params_.gpt_init_parameter.decode_polling_call_prefil_ms_))
+        if(rpc_context->completion_queue->AsyncNext(&got_tag, &ok, std::chrono::system_clock::now() + std::chrono::milliseconds(maga_init_params_.gpt_init_parameter.decode_polling_call_prefill_ms_))
             == grpc::CompletionQueue::NextStatus::TIMEOUT) {
             if (decode_context.server_context->IsCancelled()) {
                 RTP_LLM_LOG_WARNING("request [%s] is cancelled", decode_context.request_key.c_str());
