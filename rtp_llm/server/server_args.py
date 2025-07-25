@@ -14,6 +14,8 @@ from typing import (
     Union,
 )
 
+from rtp_llm.config.py_config_modules import StaticConfig
+
 _T = TypeVar("_T")
 
 
@@ -1578,3 +1580,4 @@ def setup_args():
     parser.parse_args()
 
     parser.print_env_mappings()
+    StaticConfig.update_from_env()
