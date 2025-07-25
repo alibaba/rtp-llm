@@ -1388,7 +1388,8 @@ GptModelOutputs GptModel::forwardPostLayers(rtp_llm::BufferPtr       input,
                                             bool                     enable_sp,
                                             size_t                   token_num,
                                             const GptModelInputs&    inputs,
-                                            rtp_llm::BufferPtr       merged_eagle3_hidden) {
+                                            rtp_llm::BufferPtr       merged_eagle3_hidden,
+                                            bool                     skip_final_layernorm) {
     DevicePerfWrapper wrapper(device_, "forwardPostLayers");
     BufferPtr         all_gather_output = nullptr;
     if (enable_sp && device_props_.tp_size > 1) {
@@ -1426,7 +1427,7 @@ GptModelOutputs GptModel::forwardPostLayers(rtp_llm::BufferPtr       input,
     }
 
     auto hidden = input;
-    if (weights_.final_layernorm) {
+    if (weights_.final_layernorm && !skip_final_layernorm) {
         auto final_layernorm = device_->layernorm(LayernormParams(hidden,
                                                                   nullptr,
                                                                   rtp_llm::mayGetRef(weights_.final_layernorm),

@@ -45,13 +45,18 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         // `sequence_lengths`: pinned memory
         attention_inputs.sequence_lengths = Buffer2torchTensor(inputs.sequence_lengths, false);
         attention_inputs.input_lengths    = Buffer2torchTensor(inputs.input_lengths);
-        auto kv_cache_block_id_device =
-            device_->clone({*inputs.kv_cache_block_id, AllocationType::DEVICE, {"kv_cache_block_id"}});
-        attention_inputs.kv_cache_block_id_host   = Buffer2torchTensor(inputs.kv_cache_block_id);
-        attention_inputs.kv_cache_block_id_device = Buffer2torchTensor(kv_cache_block_id_device, false);
-        attention_inputs.dtype                    = torch::kHalf;
-        attention_inputs.is_prefill               = !attention_inputs.sequence_lengths.size(0);
-        attention_inputs.kv_block_offset          = k_cache_buffer_->shape()[0] * k_cache_buffer_->shape()[1];
+        BufferPtr kv_cache_block_id_device;
+        if (k_cache_buffer_) {
+            kv_cache_block_id_device =
+                device_->clone({*inputs.kv_cache_block_id, AllocationType::DEVICE, {"kv_cache_block_id"}});
+            attention_inputs.kv_cache_block_id_host   = Buffer2torchTensor(inputs.kv_cache_block_id);
+            attention_inputs.kv_cache_block_id_device = Buffer2torchTensor(kv_cache_block_id_device, false);
+            attention_inputs.kv_block_offset =
+                k_cache_buffer_ ? k_cache_buffer_->shape()[0] * k_cache_buffer_->shape()[1] : 0;
+        }
+        attention_inputs.dtype      = torch::kBFloat16;
+        attention_inputs.is_prefill = !attention_inputs.sequence_lengths.size(0);
+
         if (!enable_cuda_graph_ && !attention_inputs.is_prefill) {
             static torch::Tensor cu_seqlens =
                 torch::zeros({device_->initParams().concurrency_config.concurrency_limit + 1},
@@ -59,7 +64,6 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             cu_seqlens.pin_memory();
             attention_inputs.cu_seqlens = cu_seqlens;
         }
-
         auto           py_model_inputs = PyModelInputs({token_ids, attention_inputs});
         PyModelOutputs py_model_outputs;
         // Cast the Python object to PyModelOutputs and extract hidden states
@@ -82,7 +86,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                                  false,
                                  inputs.combo_tokens->shape()[0],
                                  inputs,
-                                 nullptr);
+                                 nullptr,
+                                 true);
 
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python error during forward call on Python instance: %s", e.what());

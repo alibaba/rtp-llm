@@ -361,6 +361,13 @@ def setup_args():
         help="是否开启INT8的KV_CACHE",
     )
     kv_cache_group.add_argument(
+        "--fp8_kv_cache",
+        env_name="FP8_KV_CACHE",
+        type=int,
+        default=0,
+        help="是否开启FP8的KV_CACHE",
+    )
+    kv_cache_group.add_argument(
         "--kv_cache_mem_mb",
         env_name="KV_CACHE_MEM_MB",
         type=int,

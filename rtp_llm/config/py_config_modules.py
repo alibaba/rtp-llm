@@ -443,6 +443,7 @@ class PyEplbConfig:
 class PyKvCacheConfig:
     def __init__(self):
         self.int8_kv_cache: int = 0
+        self.fp8_kv_cache: int = 0
         self.kv_cache_mem_mb: int = -1
         self.seq_size_per_block: int = -1
         self.test_block_num: int = 0
@@ -451,6 +452,7 @@ class PyKvCacheConfig:
 
     def update_from_env(self):
         self.int8_kv_cache = int(os.environ.get("INT8_KV_CACHE", self.int8_kv_cache))
+        self.fp8_kv_cache = int(os.environ.get("FP8_KV_CACHE", self.fp8_kv_cache))
         self.kv_cache_mem_mb = int(
             os.environ.get("KV_CACHE_MEM_MB", self.kv_cache_mem_mb)
         )
@@ -470,6 +472,7 @@ class PyKvCacheConfig:
     def to_string(self):
         return (
             f"int8_kv_cache: {self.int8_kv_cache}\n"
+            f"fp8_kv_cache: {self.fp8_kv_cache}\n"
             f"kv_cache_mem_mb: {self.kv_cache_mem_mb}\n"
             f"seq_size_per_block: {self.seq_size_per_block}\n"
             f"test_block_num: {self.test_block_num}\n"

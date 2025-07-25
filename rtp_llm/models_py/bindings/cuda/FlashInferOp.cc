@@ -16,18 +16,18 @@ FlashInferPrefillOp::FlashInferPrefillOp(const GptInitParameter& gpt_init_parame
     FMHACudaBase(gpt_init_parameter) {}
 
 bool FlashInferPrefillOp::support(torch_ext::PyAttentionInputs attn_inputs) {
-    if (fmha_config_.disable_flash_infer || attn_configs_.kv_cache_dtype == KvCacheDataType::INT8) {
+    if (fmha_config_.disable_flash_infer || attn_configs_.kv_cache_dtype != KvCacheDataType::BASE) {
         return false;
     }
-    auto prefix_lengths_host   = torchTensor2Buffer(attn_inputs.prefix_lengths);
-    auto sequence_lengths_host = torchTensor2Buffer(attn_inputs.sequence_lengths);
-    auto input_lengths_host    = torchTensor2Buffer(attn_inputs.input_lengths);
-    return FlashInferAttnParams::checkPrefill(device_,
-                                              attn_configs_,
-                                              prefix_lengths_host,
-                                              input_lengths_host,
-                                              torchDTypeToDataType(attn_inputs.dtype),
-                                              false);
+    auto     prefix_lengths_host   = torchTensor2Buffer(attn_inputs.prefix_lengths);
+    auto     sequence_lengths_host = torchTensor2Buffer(attn_inputs.sequence_lengths);
+    auto     input_lengths_host    = torchTensor2Buffer(attn_inputs.input_lengths);
+    DataType dtype                 = torchDTypeToDataType(attn_inputs.dtype);
+    if (attn_configs_.kv_cache_dtype == KvCacheDataType::FP8) {
+        dtype = DataType::TYPE_FP8_E4M3;
+    }
+    return FlashInferAttnParams::checkPrefill(
+        device_, attn_configs_, prefix_lengths_host, input_lengths_host, dtype, false);
 }
 
 FlashInferAttnParamsPtr FlashInferPrefillOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
@@ -103,8 +103,7 @@ torch::Tensor FlashInferPrefillOp::forward(const torch::Tensor&              q,
 FlashInferDecodeOp::FlashInferDecodeOp(const GptInitParameter& gpt_init_parameter): FMHACudaBase(gpt_init_parameter) {}
 
 bool FlashInferDecodeOp::support(torch_ext::PyAttentionInputs attn_inputs) {
-    if (fmha_config_.disable_flash_infer || attn_configs_.kv_cache_dtype == KvCacheDataType::INT8
-        || attn_configs_.kv_cache_dtype == KvCacheDataType::FP8) {
+    if (fmha_config_.disable_flash_infer || attn_configs_.kv_cache_dtype != KvCacheDataType::BASE) {
         return false;
     }
     return FlashInferAttnParams::checkDecode(device_, attn_configs_, torchDTypeToDataType(attn_inputs.dtype));

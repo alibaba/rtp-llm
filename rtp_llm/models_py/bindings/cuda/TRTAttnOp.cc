@@ -12,13 +12,14 @@ namespace rtp_llm {
 TRTPrefillOp::TRTPrefillOp(const GptInitParameter& gpt_init_parameter): FMHACudaBase(gpt_init_parameter) {}
 
 bool TRTPrefillOp::support(torch_ext::PyAttentionInputs attn_inputs) {
-    return fmha_config_.enable_paged_trt_fmha && attn_configs_.kv_cache_dtype == KvCacheDataType::BASE;
+    return fmha_config_.enable_paged_trt_fmha && attn_configs_.kv_cache_dtype != KvCacheDataType::INT8;
 }
 
 TRTAttnPtr TRTPrefillOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
+    static_scale_        = torch::ones({1}, torch::TensorOptions(torch::kFloat32).device(torch::kCUDA));
     int       batch_size = attn_inputs.input_lengths.size(0);
     BufferPtr kv_cache_block_id_host, kv_cache_block_id_device;
-    if (attn_inputs.kv_cache_block_id_host.size(0)) {
+    if (attn_inputs.kv_cache_block_id_host.defined() && attn_inputs.kv_cache_block_id_host.numel() > 0) {
         kv_cache_block_id_host   = torchTensor2Buffer(attn_inputs.kv_cache_block_id_host);
         kv_cache_block_id_device = torchTensor2Buffer(attn_inputs.kv_cache_block_id_device);
     }
@@ -30,13 +31,20 @@ TRTAttnPtr TRTPrefillOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
     TRTAttnPtr    attn_params;
     auto          params = device_->prepareTrtAttn(
         attn_configs_, attn_inputs.kv_block_offset, kv_cache_block_id_device, attn_inputs.input_lengths.size(0));
-    attn_params                = TRTAttnPtr(params, (TRTAttn*)params.get());
+    if (params) {
+        attn_params = TRTAttnPtr(params, (TRTAttn*)params.get());
+    } else {
+        attn_params = std::make_shared<TRTAttn>();
+    }
     attn_params->attn_type     = torchDTypeToDataType(attn_inputs.dtype);
     attn_params->cu_seqlens    = cu_seqlens;
     attn_params->cu_kv_seqlens = cu_kv_seqlens;
     attn_params->max_seq_len   = attn_inputs.input_lengths.max().item<int32_t>();
     // not support has_alibi_slopes
-    cufmha_runner_ = device_->selectCuFMHARunner(attn_configs_, torchDTypeToDataType(attn_inputs.dtype), false);
+    DataType attn_dtype = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8 ?
+                              DataType::TYPE_FP8_E4M3 :
+                              torchDTypeToDataType(attn_inputs.dtype);
+    cufmha_runner_      = device_->selectCuFMHARunner(attn_configs_, attn_dtype, false);
     return attn_params;
 }
 
@@ -103,9 +111,13 @@ TRTAttnPtr TRTPrefillOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
 torch::Tensor TRTPrefillOp::forward(const torch::Tensor&              input,
                                     std::optional<torch_ext::KVCache> kv_cache,
                                     const TRTAttnPtr&                 params) {
-    KVBlockArray kv_block_array = params->kv_block_array;
+    KVBlockArray kv_block_array;
     if (kv_cache.has_value()) {
+        kv_block_array                 = params->kv_block_array;
         kv_block_array.mPrimaryPoolPtr = kv_cache.value().k_cache_base.data_ptr();
+        if (kv_cache.value().k_scale_base.defined() && kv_cache.value().k_scale_base.numel() > 0) {
+            kv_block_array.scale = kv_cache.value().k_scale_base.data_ptr();
+        }
     }
 
     const int            local_head_num = attn_configs_.head_num;
@@ -113,22 +125,57 @@ torch::Tensor TRTPrefillOp::forward(const torch::Tensor&              input,
     const int            token_num      = input.size(0);
     const int            batch_size     = params->cu_seqlens.size(0) - 1;
     torch::TensorOptions options        = torch::TensorOptions(input.dtype()).device(input.device());
-    torch::Tensor        output         = torch::empty({token_num, local_head_num * size_per_head}, options);
-    torch::Tensor        tiled_counter = torch::zeros({1}, torch::TensorOptions(torch::kUInt32).device(input.device()));
-    cufmha_runner_->runTrtV2FmhaPaged(input.data_ptr(),
-                                      params->cu_seqlens.data_ptr(),
-                                      params->cu_kv_seqlens.data_ptr(),
-                                      output.data_ptr(),
-                                      reinterpret_cast<uint32_t*>(tiled_counter.data_ptr()),
-                                      batch_size,  // batch_size,
-                                      params->max_seq_len,
-                                      params->max_seq_len,  // seq_len_with_prefix,
-                                      token_num,
-                                      kv_block_array,
-                                      false,
-                                      false,
-                                      false,  // params.common.linear_bias_slopes != nullptr,
-                                      false);
+
+    torch::Tensor output        = torch::empty({token_num, local_head_num * size_per_head}, options);
+    torch::Tensor tiled_counter = torch::zeros({1}, torch::TensorOptions(torch::kUInt32).device(input.device()));
+    if (kv_cache.has_value() && false) {
+        cufmha_runner_->runTrtV2FmhaPaged(input.data_ptr(),
+                                          params->cu_seqlens.data_ptr(),
+                                          params->cu_kv_seqlens.data_ptr(),
+                                          output.data_ptr(),
+                                          reinterpret_cast<uint32_t*>(tiled_counter.data_ptr()),
+                                          batch_size,  // batch_size,
+                                          params->max_seq_len,
+                                          params->max_seq_len,  // seq_len_with_prefix,
+                                          token_num,
+                                          kv_block_array,
+                                          false,
+                                          false,
+                                          false,  // params.common.linear_bias_slopes != nullptr,
+                                          false);
+    } else {
+        bool          use_fp8_fmha = kv_block_array.cache_type == KvCacheDataType::FP8;
+        torch::Tensor tmp_fmha_input, tmp_fmha_output;
+        void*         fmha_input_ptr  = input.data_ptr();
+        void*         fmha_output_ptr = output.data_ptr();
+        RTP_LLM_CHECK_WITH_INFO(fmha_input_ptr, "fmha_input_ptr must be provided for trt v2 fmha");
+
+        float* attention_output_orig_quant_scale = nullptr;
+        if (use_fp8_fmha) {
+            attention_output_orig_quant_scale = static_scale_.data_ptr<float>();
+            tmp_fmha_input                    = input.to(torch::kFloat8_e4m3fn);
+            tmp_fmha_output                   = output.to(torch::kFloat8_e4m3fn);
+            fmha_input_ptr                    = tmp_fmha_input.data_ptr();
+            fmha_output_ptr                   = tmp_fmha_output.data_ptr();
+        }
+        RTP_LLM_CHECK_WITH_INFO(fmha_output_ptr, "fmha_output_ptr must be provided for trt v2 fmha");
+        cufmha_runner_->runTrtV2Fmha(fmha_input_ptr,
+                                     params->cu_seqlens.data_ptr(),
+                                     fmha_output_ptr,
+                                     reinterpret_cast<uint32_t*>(tiled_counter.data_ptr()),
+                                     attention_output_orig_quant_scale,
+                                     batch_size,
+                                     params->max_seq_len,
+                                     token_num,
+                                     kv_block_array,
+                                     false,
+                                     false,
+                                     false,  // params.common.linear_bias_slopes != nullptr,
+                                     false);
+        if (use_fp8_fmha) {
+            output = tmp_fmha_output.to(output.dtype());
+        }
+    }
     return output;
 }
 

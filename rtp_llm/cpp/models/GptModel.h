@@ -268,7 +268,8 @@ protected:
                                       bool                     enable_sp,
                                       size_t                   token_num,
                                       const GptModelInputs&    inputs,
-                                      const rtp_llm::BufferPtr merged_eagle3_hidden);
+                                      const rtp_llm::BufferPtr merged_eagle3_hidden,
+                                      bool                     skip_final_layernorm = false);
 
     void prepareExpertStats(const size_t layer_id, rtp_llm::FfnLayerParams& ffn_layer_params);
 

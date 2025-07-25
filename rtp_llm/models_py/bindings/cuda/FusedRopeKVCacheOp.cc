@@ -11,7 +11,7 @@ FusedRopeKVCachePrefillOp::FusedRopeKVCachePrefillOp(const GptInitParameter& gpt
 TRTAttnPtr FusedRopeKVCachePrefillOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
     int       batch_size = attn_inputs.input_lengths.size(0);
     BufferPtr kv_cache_block_id_host, kv_cache_block_id_device;
-    if (attn_inputs.kv_cache_block_id_host.size(0)) {
+    if (attn_inputs.kv_cache_block_id_host.defined() && attn_inputs.kv_cache_block_id_host.numel() > 0) {
         kv_cache_block_id_host   = torchTensor2Buffer(attn_inputs.kv_cache_block_id_host);
         kv_cache_block_id_device = torchTensor2Buffer(attn_inputs.kv_cache_block_id_device);
     }
@@ -23,7 +23,12 @@ TRTAttnPtr FusedRopeKVCachePrefillOp::prepare(torch_ext::PyAttentionInputs attn_
     TRTAttnPtr    attn_params;
     auto          params =
         device_->prepareTrtAttn(attn_configs_, attn_inputs.kv_block_offset, kv_cache_block_id_device, batch_size);
-    attn_params                            = TRTAttnPtr(params, (TRTAttn*)params.get());
+    if (params) {
+        attn_params = TRTAttnPtr(params, (TRTAttn*)params.get());
+    } else {
+        attn_params = std::make_shared<TRTAttn>();
+    }
+
     attn_params->attn_type                 = torchDTypeToDataType(attn_inputs.dtype);
     attn_params->cu_seqlens                = cu_seqlens;
     attn_params->cu_kv_seqlens             = cu_kv_seqlens;
@@ -52,6 +57,9 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
     torch::Tensor v_output              = torch::empty({token_num, local_head_num_kv, size_per_head},
                                           torch::TensorOptions(qkv.dtype()).device(qkv.device()));
 
+    torch::Tensor qkv_fp8 = torch::empty({token_num, (local_head_num + 2 * local_head_num_kv), size_per_head},
+                                         torch::TensorOptions(torch::kFloat8_e4m3fn).device(qkv.device()));
+
     PrefixPromptBatchWeightsParam prefix_prompt_param;
     if (kv_cache.has_value()) {
         auto kv_block_array            = params->kv_block_array;
@@ -73,6 +81,10 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
     bool store_q              = fmha_type == FMHAType::PAGED_TRT_V2 || fmha_type == FMHAType::NONE;
     bool store_kv             = fmha_type == FMHAType::NONE;
     bool store_cache          = kv_cache.has_value();
+    // bool use_qkv_fp8 =
+    //     fmha_type == FMHAType::TRT_V2 && prefix_prompt_param.kv_block_array.cache_type == KvCacheDataType::FP8;
+    // tmp not use qkv fp8 buffer
+    bool use_qkv_fp8 = false;
     DISPATCH_CUDA_FUNCTION_DATA_TYPE(
         torchDTypeToDataType(qkv.dtype()),
         invokeAddFusedQKVBiasTranspose,
@@ -82,7 +94,7 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
         v_output.data_ptr(),
         &prefix_prompt_param,
         qkv.data_ptr(),
-        nullptr,  // qkv_buf_fp8 != nullptr ? qkv_buf_fp8->data() : nullptr,
+        use_qkv_fp8 ? qkv_fp8.data_ptr() : nullptr,
         nullptr,  // params.common.position_ids ? params.common.position_ids->dataWithOffset<int>(decoder_batch_size *
                   // params.configs.rope_config.index_factor): nullptr,
         nullptr,  // params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias ?
@@ -106,7 +118,9 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
         store_kv,
         store_cache,
         device_->getStream());
-    if (fmha_type == FMHAType::PAGED_TRT_V2) {
+    if (use_qkv_fp8) {
+        return qkv_fp8;
+    } else if (fmha_type == FMHAType::PAGED_TRT_V2) {
         return q_output;
     } else if (fmha_type == FMHAType::FLASH_INFER) {
         return q_no_transpose_output;
@@ -121,7 +135,7 @@ FusedRopeKVCacheDecodeOp::FusedRopeKVCacheDecodeOp(const GptInitParameter& gpt_i
 TRTAttnPtr FusedRopeKVCacheDecodeOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
     int       batch_size = attn_inputs.sequence_lengths.size(0);
     BufferPtr kv_cache_block_id_host, kv_cache_block_id_device;
-    if (attn_inputs.kv_cache_block_id_host.size(0)) {
+    if (attn_inputs.kv_cache_block_id_host.defined() && attn_inputs.kv_cache_block_id_host.numel() > 0) {
         kv_cache_block_id_host   = torchTensor2Buffer(attn_inputs.kv_cache_block_id_host);
         kv_cache_block_id_device = torchTensor2Buffer(attn_inputs.kv_cache_block_id_device);
     }
@@ -177,8 +191,7 @@ torch::Tensor FusedRopeKVCacheDecodeOp::forward(const torch::Tensor&            
                                      params->sequence_lengths.data_ptr<int>(),
                                      nullptr,  // params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias ?
                                                // params.weights.qkv_weight->bias->data() : nullptr,
-                                               // cos_sin_cache.size(0) ? cos_sin_cache.data_ptr<float>() : nullptr,
-                                     cos_sin_cache.data_ptr<float>(),
+                                     cos_sin_cache.defined() ? cos_sin_cache.data_ptr<float>() : nullptr,
                                      batch_size,
                                      local_head_num,
                                      local_head_num_kv,

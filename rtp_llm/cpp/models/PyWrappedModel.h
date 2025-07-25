@@ -38,9 +38,10 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params, py::obje
     } else {
         RTP_LLM_LOG_INFO("Set PYTHONUNBUFFERED=TRUE for Python interpreter.");
     }
-
-    k_cache_base_tensor_ = Buffer2torchTensor(k_cache_buffer_, false);
-    v_cache_base_tensor_ = Buffer2torchTensor(v_cache_buffer_, false);
+    if (k_cache_buffer_) {
+        k_cache_base_tensor_ = Buffer2torchTensor(k_cache_buffer_, false);
+        v_cache_base_tensor_ = Buffer2torchTensor(v_cache_buffer_, false);
+    }
     if (k_scale_buffer_) {
         k_scale_base_tensor_ = Buffer2torchTensor(k_scale_buffer_, false);
         v_scale_base_tensor_ = Buffer2torchTensor(v_scale_buffer_, false);
@@ -48,11 +49,15 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params, py::obje
 
     py::gil_scoped_acquire          gil;
     torch_ext::PyModelInitResources init_resources;
-    init_resources.kv_cache.k_cache_base = k_cache_base_tensor_;
-    init_resources.kv_cache.v_cache_base = v_cache_base_tensor_;
-    if (k_scale_buffer_) {
-        init_resources.kv_cache.k_scale_base = k_scale_base_tensor_;
-        init_resources.kv_cache.v_scale_base = v_scale_base_tensor_;
+    if (k_cache_buffer_) {
+        torch_ext::KVCache kv_cache;
+        kv_cache.k_cache_base = k_cache_base_tensor_;
+        kv_cache.v_cache_base = v_cache_base_tensor_;
+        if (k_scale_buffer_) {
+            kv_cache.k_scale_base = k_scale_base_tensor_;
+            kv_cache.v_scale_base = v_scale_base_tensor_;
+        }
+        init_resources.kv_cache = kv_cache;
     }
     py::object py_init_result;
     if (enable_cuda_graph_) {

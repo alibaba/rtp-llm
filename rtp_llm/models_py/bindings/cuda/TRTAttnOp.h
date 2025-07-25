@@ -20,6 +20,7 @@ public:
 
 private:
     std::shared_ptr<cufmha> cufmha_runner_;
+    torch::Tensor           static_scale_;
 };
 
 void registerTRTAttnOp(const py::module& m);

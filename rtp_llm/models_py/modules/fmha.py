@@ -44,8 +44,10 @@ class FMHAImplBase(object):
         fmha_input = self.rope_kvcache_impl.forward(
             qkv, self.fmha_type(), kv_cache, self.rope_params
         )
-        assert self.fmha_impl is not None and self.fmha_params is not None
-        return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
+        assert self.fmha_impl is not None
+
+        res = self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
+        return res
 
     @staticmethod
     def fmha_type() -> FMHAType:
@@ -136,7 +138,7 @@ try:
 
         @staticmethod
         def fmha_type() -> FMHAType:
-            return FMHAType.PAGED_TRT_V2
+            return FMHAType.TRT_V2
 
     PREFILL_MHA_IMPS.append(TRTMHAImpl)
     # PREFILL_MHA_IMPS.insert(0, TRTMHAImpl)

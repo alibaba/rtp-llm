@@ -1124,6 +1124,8 @@ class GptInitModelParameters:
                     self.kv_cache_data_type = WEIGHT_TYPE.FP8.to_str()
             else:
                 self.kv_cache_data_type = WEIGHT_TYPE.FP8.to_str()
+        elif self.py_env_configs.py_kv_cache_config.fp8_kv_cache:
+            self.kv_cache_data_type = WEIGHT_TYPE.FP8.to_str()
         logging.info(f"kv_cache_data_type: {self.kv_cache_data_type}")
         logging.info(f"tp_split_emb_and_lm_head: {self.tp_split_emb_and_lm_head}")
 

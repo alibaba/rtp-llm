@@ -110,7 +110,6 @@ class Qwen3Model(GptModelBase):
         self.norm = RMSNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=config.layernorm_eps
         )
-        self.lm_head = Linear(weights.get_global_weight(W.lm_head))
 
     def forward(self, inputs: PyModelInputs) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
@@ -125,7 +124,7 @@ class Qwen3Model(GptModelBase):
                 fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
             )
-
+        hidden_states = self.norm(hidden_states)
         return PyModelOutputs(hidden_states)
 
 
