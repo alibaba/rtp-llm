@@ -5,12 +5,10 @@
 using namespace torch_ext;
 namespace rtp_llm {
 
-GraphBase* CudaDevice::getDeviceGraphRunner(const DeviceInitParams& params,
-                                            py::object              py_instance,
-                                            int                     kv_cache_block_offset,
-                                            bool                    in_test) {
+GraphBase*
+CudaDevice::getDeviceGraphRunner(const DeviceInitParams& params, py::object py_instance, int kv_cache_block_offset) {
     if (!graph_runner_) {
-        graph_runner_ = new CudaGraphRunner(params, py_instance, kv_cache_block_offset, this, in_test);
+        graph_runner_ = new CudaGraphRunner(params, py_instance, kv_cache_block_offset, this);
     }
     return graph_runner_;
 }
@@ -34,8 +32,28 @@ void CudaGraphRunner::captureOneBatchSize(int bs) {
         auto outputs        = py_outputs_obj.cast<PyModelOutputs>();
         graph_instances_[bs].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
         graph.capture_end();
-        graph_instances_[bs].mem_hold_.params_ =
-            FlashInferAttnParams::retrieveCaptureParam(std::max(MIN_CACHE_INPUT_TOKEN_NUM, bs));
+        // retrieve from private cache first
+        int                                   input_token_num  = std::max(MIN_CACHE_INPUT_TOKEN_NUM, bs);
+        int                                   batch_size       = std::max(MIN_CACHE_BATCH_SIZE, bs);
+        std::shared_ptr<FlashInferAttnParams> param_shared_ptr = nullptr;
+        auto cache = FlashInferAttnParams::isDecode(input_token_num) ? &PRIVATE_DECODE_PARAMS_CACHE :
+                                                                       &PRIVATE_PREFILL_PARAMS_CACHE;
+        if (!cache->empty()) {
+            auto params = cache->back();
+            if (batch_size <= params->batch_size && input_token_num <= params->input_token_num) {
+                param_shared_ptr = params;
+            }
+        }
+        if (param_shared_ptr == nullptr) {
+            auto param_ptr = FlashInferAttnParams::get(batch_size, input_token_num);
+            std::cout << "ParamsCache::DECODE_PARAMS_CACHE.size: " << ParamsCache::DECODE_PARAMS_CACHE.size()
+                      << ", ParamsCache::PREFILL_PARAMS_CACHE" << ParamsCache::PREFILL_PARAMS_CACHE.size() << std::endl;
+            std::cout << "addr: " << param_ptr << std::endl;
+            FlashInferAttnParams::recycle(param_ptr);
+            param_shared_ptr = std::shared_ptr<FlashInferAttnParams>(param_ptr);
+            cache->push_back(param_shared_ptr);
+        }
+        graph_instances_[bs].mem_hold_.params_ = param_shared_ptr;
         RTP_LLM_CHECK_WITH_INFO(graph_instances_[bs].mem_hold_.params_ != nullptr, "capture params can't be nullptr");
         if (enable_cuda_graph_debug_mode_) {
             graph.debug_dump(output_dot_filename);
@@ -149,13 +167,15 @@ std::vector<int> CudaGraphRunner::getBatchSizesToCapture(int concurrency_limit) 
     int              max_generate_batch_size = concurrency_limit;
     RTP_LLM_LOG_INFO("max_generate_batch_size for cuda graph: %d", max_generate_batch_size);
     // Add range 1 to 32 (inclusive)
-    int step = in_test_ ? 2 : 1;
-    for (int i = 1; i <= std::min(32, concurrency_limit); i += step) {
+    for (int i = 1; i <= std::min(32, max_generate_batch_size); i += 1) {
         capture_bs.push_back(i);
     }
     // Add range from 48 to max_generate_batch_size (exclusive), stepping by 16
-    for (int i = 48; i < max_generate_batch_size; i += 16) {
+    for (int i = 48; i <= max_generate_batch_size; i += 16) {
         capture_bs.push_back(i);
+    }
+    if (capture_bs[capture_bs.size() - 1] != max_generate_batch_size) {
+        capture_bs.push_back(max_generate_batch_size);
     }
     return capture_bs;
 }

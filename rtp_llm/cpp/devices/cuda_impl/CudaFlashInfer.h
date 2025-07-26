@@ -17,12 +17,15 @@ private:
     BufferPtr buf_h;
     BufferPtr buf_d;
 
+public:
     int batch_size      = 0;
     int input_token_num = 0;
-    int page_num        = 0;
-    int max_kv_len      = 0;
-    int max_q_len       = 0;
-    int accu_q_len      = 0;
+
+private:
+    int page_num   = 0;
+    int max_kv_len = 0;
+    int max_q_len  = 0;
+    int accu_q_len = 0;
 
 public:
     torch::Tensor float_workspace_d;
@@ -97,9 +100,8 @@ private:
 
     static bool sameQLength(const BufferPtr& input_lengths_host, int context_batch_size, int& q_length);
 
-    static bool isDecode(int input_token_num);
-
 public:
+    static bool                  isDecode(int input_token_num);
     static void                  recycle(void* p);
     void                         fillFlashInfer(const BufferPtr& prefix_lengths_host,
                                                 const BufferPtr& sequence_lengths_host,
@@ -107,7 +109,6 @@ public:
                                                 const BufferPtr& kv_cache_block_id_host,
                                                 const int        batch_size,
                                                 const int        tokens_per_block);
-    static FlashInferAttnParams* retrieveCaptureParam(int input_token_num);
     static FlashInferAttnParams* get(int batch_size, int input_token_num);
 };
 

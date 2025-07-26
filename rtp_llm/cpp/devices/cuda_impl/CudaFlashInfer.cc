@@ -35,21 +35,6 @@ bool FlashInferAttnParams::isDecode(int input_token_num) {
     return input_token_num <= MIN_CACHE_INPUT_TOKEN_NUM * 2;
 }
 
-FlashInferAttnParams* FlashInferAttnParams::retrieveCaptureParam(int input_token_num) {
-    FlashInferAttnParams* params = nullptr;
-    if (isDecode(input_token_num)) {
-        if (ParamsCache::DECODE_PARAMS_CACHE.empty()) {
-            return nullptr;
-        }
-        params = ParamsCache::DECODE_PARAMS_CACHE.back();
-        ParamsCache::DECODE_PARAMS_CACHE.pop_back();
-    } else if (!ParamsCache::PREFILL_PARAMS_CACHE.empty()) {
-        params = ParamsCache::PREFILL_PARAMS_CACHE.back();
-        ParamsCache::PREFILL_PARAMS_CACHE.pop_back();
-    }
-    return params;
-}
-
 void FlashInferAttnParams::recycle(void* p) {
     auto flashinfer = (FlashInferAttnParams*)p;
     if (isDecode(flashinfer->input_token_num)) {

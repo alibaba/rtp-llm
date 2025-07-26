@@ -14,8 +14,7 @@ public:
     CudaGraphRunner(const DeviceInitParams& params,
                     py::object              py_instance,
                     int                     kv_cache_block_offset,
-                    DeviceBase*             device,
-                    bool                    in_test = false):
+                    DeviceBase*             device):
         GraphBase(py_instance),
         enable_cuda_graph_(params.hw_kernel_config.enable_cuda_graph),
         concurrency_limit_(params.concurrency_config.concurrency_limit),
@@ -25,8 +24,7 @@ public:
         max_seq_len_(params.max_seq_len),
         seq_size_per_block_(params.tokens_per_block),
         kv_cache_block_offset_(kv_cache_block_offset),
-        device_(device),
-        in_test_(in_test) {
+        device_(device) {
         py::gil_scoped_acquire gil;
         if (!py_instance_ || py_instance_.is_none()) {
             throw std::runtime_error("CudaGraphRunner constructor: Python instance is null or none.");
@@ -37,11 +35,6 @@ public:
         RTP_LLM_LOG_INFO("Release CudaGraphRunner .....");
         py::gil_scoped_acquire gil;
         py_instance_.release();
-        for (auto& element : graph_instances_) {
-            GraphInstance& instance = element.second;
-            RTP_LLM_CHECK_WITH_INFO(instance.mem_hold_.params_ != nullptr, "cuda graph instance params_ can't be null");
-            delete instance.mem_hold_.params_;
-        }
         RTP_LLM_LOG_INFO("Release CudaGraphRunner Successfully");
     }
     void           capture();
@@ -78,7 +71,9 @@ public:
     DeviceBase* device_{nullptr};
 
 private:
-    bool             in_test_{false};
-    static const int MIN_CACHE_INPUT_TOKEN_NUM = 512;
+    static const int                                  MIN_CACHE_INPUT_TOKEN_NUM = 512;
+    static const int                                  MIN_CACHE_BATCH_SIZE      = 256;
+    std::deque<std::shared_ptr<FlashInferAttnParams>> PRIVATE_DECODE_PARAMS_CACHE;
+    std::deque<std::shared_ptr<FlashInferAttnParams>> PRIVATE_PREFILL_PARAMS_CACHE;
 };
 }  // namespace rtp_llm

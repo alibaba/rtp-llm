@@ -162,7 +162,7 @@ unordered_map<DeviceType, DeviceCreatorType>& DeviceFactory::getRegistrationMap(
 }
 
 vector<DeviceBase*>& DeviceFactory::getCurrentDevices() {
-    return DeviceFactory::devices;
+    return devices;
 }
 
 DeviceBase* DeviceFactory::getDevice(DeviceType type, int device_id) {

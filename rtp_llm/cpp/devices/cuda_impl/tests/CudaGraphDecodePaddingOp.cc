@@ -16,14 +16,14 @@ CudaGraphRunnerPtr CudaGraphDecodePaddingOp::createCudaGraphRunner(py::object py
     DeviceInitParams params;
     DeviceBase*      device                              = rtp_llm::DeviceFactory::getDefaultDevice();
     params.hw_kernel_config.enable_cuda_graph            = true;
-    params.concurrency_config.concurrency_limit          = 8;
+    params.concurrency_config.concurrency_limit          = 128;
     params.hw_kernel_config.enable_cuda_graph_debug_mode = false;
     params.hidden_size                                   = 896;
     params.max_seq_len                                   = 64;
     params.tokens_per_block                              = 64;
     // int  layer_num                              = 24;
     // int  block_num                              = 26037;
-    auto               runner_ptr = device->getDeviceGraphRunner(params, std::move(py_instance), 663676, true);
+    auto               runner_ptr            = device->getDeviceGraphRunner(params, std::move(py_instance), 663676);
     CudaGraphRunnerPtr cuda_graph_runner_ptr = dynamic_cast<CudaGraphRunner*>(runner_ptr);
     return cuda_graph_runner_ptr;
 }

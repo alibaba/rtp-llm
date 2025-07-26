@@ -109,10 +109,8 @@ public:
     DeviceEventPtr   createEvent() override;
     DeviceEventPtr   createTorchEvent() override;
     bool             useGroupGemm() const;
-    GraphBase*       getDeviceGraphRunner(const DeviceInitParams& params,
-                                          py::object              py_instance,
-                                          int                     kv_cache_block_offset,
-                                          bool                    in_test) override;
+    GraphBase*
+    getDeviceGraphRunner(const DeviceInitParams& params, py::object py_instance, int kv_cache_block_offset) override;
 
 private:
     void         checkUseOpenSourceFMHA();

@@ -106,10 +106,8 @@ public:
     virtual DeviceEventPtr   createEvent();
     virtual DeviceEventPtr   createTorchEvent();
     virtual void             updateCurrentTorchStream();
-    virtual GraphBase*       getDeviceGraphRunner(const DeviceInitParams& params,
-                                                  py::object              py_instance,
-                                                  int                     kv_cache_block_offset,
-                                                  bool                    in_test) {
+    virtual GraphBase*
+    getDeviceGraphRunner(const DeviceInitParams& params, py::object py_instance, int kv_cache_block_offset) {
         throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }
     void setCacheStore(std::shared_ptr<rtp_llm::CacheStore> cache_store);

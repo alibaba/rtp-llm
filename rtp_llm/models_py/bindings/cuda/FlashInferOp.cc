@@ -149,10 +149,6 @@ torch::Tensor FlashInferDecodeOp::forward(const torch::Tensor&              q,
         v_cache = kv_cache.value().v_cache_base;
     }
 
-    // std::cout<<"normal before params->plan: \n"<<params->plan<<std::endl;
-    // std::cout<<"normal before params->page_indptr_d: \n"<<params->page_indptr_d<<std::endl;
-    // std::cout<<"normal before params->page_indice_d: \n"<<params->page_indice_d.slice(0,0,10)<<std::endl;
-    // std::cout<<"normal before params->paged_kv_last_page_len_d: \n"<<params->paged_kv_last_page_len_d<<std::endl;
     BatchDecodeWithPagedKVCacheRun(params->float_workspace_d,         // float_workspace_buffer
                                    params->int_workspace_d,           // int_workspace_buffer
                                    params->plan,                      // plan_info_vec

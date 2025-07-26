@@ -1,3 +1,4 @@
+import math
 import os
 import sys
 import unittest
@@ -48,25 +49,50 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
         outputs2 = self.model.forward(inputs)
         outputs1 = self.op.forward(inputs)
         current_real_graph_size = self.op.getCurrentRealGraphSize()
+        print(
+            f"current_real_graph_size: {current_real_graph_size}, batch_size: {batch_size}"
+        )
         assert (
             current_real_graph_size == batch_size
             if batch_size % 2 == 1
             else batch_size + 1
-        )
-        print(
-            f"current_real_graph_size: {current_real_graph_size}, batch_size: {batch_size}"
-        )
-        print(f"outputs1.hidden_states: {outputs1.hidden_states}")
-        print(f"outputs2.hidden_states: {outputs2.hidden_states}")
+        ) or current_real_graph_size == (int(math.ceil(batch_size / 16)) * 16)
+        print(f"outputs1.hidden_states: {outputs1.hidden_states[0]}")
+        print(f"outputs2.hidden_states: {outputs2.hidden_states[0]}")
         torch.testing.assert_close(
             outputs1.hidden_states[:batch_size], outputs2.hidden_states
         )
         # assert((hidden_states1 == hidden_states2))
 
     def test_bacth_decode(self):
-        # batch_range = append(range(0,33) ,[37, 47, 48, 55, 64, 76, 80, 87, 96, 102, 112, 125, 128])
-        batch_range = [1, 2, 3, 4, 5, 6, 7]
-        # batch_range = [2]
+        batch_range = [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            14,
+            15,
+            19,
+            27,
+            48,
+            64,
+            80,
+            87,
+            96,
+            102,
+            112,
+            125,
+            128,
+        ]
         for bs in batch_range:
             self._test_single(bs)
             print(f"success for batch size: {bs}")

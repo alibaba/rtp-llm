@@ -52,7 +52,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         attention_inputs.dtype                    = torch::kHalf;
         attention_inputs.is_prefill               = !attention_inputs.sequence_lengths.size(0);
         attention_inputs.kv_block_offset          = k_cache_buffer_->shape()[0] * k_cache_buffer_->shape()[1];
-        if (!device_->initParams().hw_kernel_config.enable_cuda_graph && !attention_inputs.is_prefill) {
+        if (!enable_cuda_graph_ && !attention_inputs.is_prefill) {
             static torch::Tensor cu_seqlens =
                 torch::zeros({device_->initParams().concurrency_config.concurrency_limit + 1},
                              torch::TensorOptions(torch::kInt32).device(torch::kCPU));
@@ -63,7 +63,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         auto           py_model_inputs = PyModelInputs({token_ids, attention_inputs});
         PyModelOutputs py_model_outputs;
         // Cast the Python object to PyModelOutputs and extract hidden states
-        if (device_->initParams().hw_kernel_config.enable_cuda_graph) {
+        if (enable_cuda_graph_) {
             py_model_outputs = graph_runner_->forward(py_model_inputs);
         } else {
             auto py_model_forward = py_model_.attr("forward");
