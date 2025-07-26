@@ -208,10 +208,6 @@ def hf_gpt_converter(args, ret):
     llama_smoother = {}
 
     if args.smoothquant is not None or args.calibrate_kv_cache:
-        ## reserve this env
-        os.environ["TOKENIZERS_PARALLELISM"] = os.environ.get(
-            "TOKENIZERS_PARALLELISM", "false"
-        )
         # dataset = load_dataset("ccdv/cnn_dailymail",
         #                        '3.0.0',
         #                        cache_dir=args.dataset_cache_dir)

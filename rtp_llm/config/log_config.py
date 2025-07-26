@@ -1,7 +1,9 @@
 import os
 
+from rtp_llm.config.py_config_modules import StaticConfig
+
 ## reserve this env
-world_rank = os.environ.get("WORLD_RANK", "0")
+world_rank = StaticConfig.parallelism_distributed_config.world_rank
 LOGGING_CONFIG = {
     "version": 1,
     "disable_existing_loggers": False,

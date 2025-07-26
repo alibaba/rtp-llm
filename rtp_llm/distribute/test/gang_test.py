@@ -51,7 +51,7 @@ class GangTest(unittest.TestCase):
         {"GANG_ANNOCATION_PATH": "rtp_llm/distribute/test/testdata/annocation"},
     )
     def test_annocation(self):
-
+        StaticConfig.update_from_env()
         # os.environ['GANG_ANNOCATION_PATH'] = "rtp_llm/distribute/test/testdata/annocation"
         gang_members = get_c2_members()
         self.assertEqual(len(gang_members), 2)
@@ -72,6 +72,7 @@ class GangTest(unittest.TestCase):
         },
     )
     def test_multi_gpu_gang_info(self):
+        StaticConfig.update_from_env()
         g_parallel_info.reload()
         gang_info = get_gang_info()
         self.assertEqual(len(gang_info.members), 2)
@@ -98,6 +99,7 @@ class GangTest(unittest.TestCase):
         },
     )
     def test_multi_worker_gang_info(self):
+        StaticConfig.update_from_env()
         g_parallel_info.reload()
         gang_info = get_gang_info()
         self.assertEqual(len(gang_info.members), 2)
@@ -128,6 +130,7 @@ class GangTest(unittest.TestCase):
         },
     )
     def test_multi_worker_gpu_gang_info(self):
+        StaticConfig.update_from_env()
         g_parallel_info.reload()
         gang_info = get_gang_info()
         self.assertEqual(len(gang_info.members), 4)
@@ -175,6 +178,7 @@ class GangTest(unittest.TestCase):
         },
     )
     def test_multi_worker_gang_info_from_json(self):
+        StaticConfig.update_from_env()
         g_parallel_info.reload()
         gang_info = get_gang_info()
         self.assertEqual(len(gang_info.members), 2)
@@ -189,6 +193,7 @@ class GangTest(unittest.TestCase):
             gang_info.members[1].name, "llama13B_2A10_PCIE_1_inference_part1_0"
         )
         self.assertEqual(gang_info.members[1].server_port, 20000)
+        StaticConfig.gang_config.distribute_config_file = ""
 
     @mock.patch("torch.cuda.device_count")
     @mock.patch.dict(
@@ -214,6 +219,7 @@ class GangTest(unittest.TestCase):
         },
     )
     def test_server_start(self, torch_device_count):
+        StaticConfig.update_from_env()
         try:
             multiprocessing.set_start_method("spawn")
         except RuntimeError as e:
@@ -263,6 +269,7 @@ class GangTest(unittest.TestCase):
         },
     )
     def test_get_world_rank_from_world_index(self):
+        StaticConfig.update_from_env()
         g_parallel_info.reload()
         self.assertEqual(g_parallel_info.world_rank, 2)
 
@@ -279,6 +286,7 @@ class GangTest(unittest.TestCase):
         },
     )
     def test_multi_worker_gang_info_from_leader(self):
+        StaticConfig.update_from_env()
         g_parallel_info.reload()
         gang_info = get_gang_info()
         self.assertEqual(len(gang_info.members), 2)
@@ -292,6 +300,8 @@ class GangTest(unittest.TestCase):
         self.assertEqual(
             gang_info.members[1].server_port, WorkerInfo.server_port_offset(0)
         )
+        StaticConfig.gang_config.zone_name = ""
+        StaticConfig.gang_config.leader_address = None
 
     @mock.patch("torch.cuda.device_count")
     @mock.patch.dict(
@@ -318,6 +328,7 @@ class GangTest(unittest.TestCase):
         },
     )
     def test_server_start_leader(self, torch_device_count):
+        StaticConfig.update_from_env()
         try:
             multiprocessing.set_start_method("spawn")
         except RuntimeError as e:
@@ -354,6 +365,7 @@ class GangTest(unittest.TestCase):
             self.assertEqual(hb_response.json()["initializing"], False)
 
         finally:
+            StaticConfig.gang_config.leader_address = None
             for proc in procs:
                 if proc.is_alive():
                     proc.terminate()
@@ -383,6 +395,7 @@ class GangTest(unittest.TestCase):
         },
     )
     def test_server_start_worker(self, torch_device_count):
+        StaticConfig.update_from_env()
         try:
             multiprocessing.set_start_method("spawn")
         except RuntimeError as e:
@@ -429,6 +442,7 @@ class GangTest(unittest.TestCase):
             self.assertEqual(hb_response.json()["initializing"], False)
 
         finally:
+            StaticConfig.gang_config.leader_address = None
             for proc in procs:
                 if proc.is_alive():
                     proc.terminate()

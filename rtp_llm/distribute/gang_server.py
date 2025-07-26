@@ -112,7 +112,7 @@ class GangServer:
         @app.post("/broadcast_parts")
         def broadcast_parts(req: Dict[str, Any]):
             logging.debug(f"broadcast parts recv: {json.dumps(req)}")
-            os.environ[JSON_GANG_PARTS_ENV] = json.dumps(req)
+            StaticConfig.gang_config.json_gang_parts = json.dumps(req)
 
         @app.post("/report_failure")
         def handle_failure_report(req: Dict[str, Any]):
@@ -293,7 +293,7 @@ class GangServer:
                         part_info["name"] = name
                         part_info["ip"] = address
                         parts[name] = part_info
-                    os.environ[JSON_GANG_PARTS_ENV] = json.dumps(parts)
+                    StaticConfig.gang_config.json_gang_parts = json.dumps(parts)
                     try:
                         result = requests.post(broadcast_url, json=parts, timeout=1)
                     except:

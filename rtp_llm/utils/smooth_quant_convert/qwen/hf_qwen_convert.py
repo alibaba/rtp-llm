@@ -252,11 +252,6 @@ def hf_qwen_converter(args: ProgArgs, ret):
     act_range = {}
     qwen_smoother = {}
     if args.smoothquant is not None or args.calibrate_kv_cache:
-        ## reserve this env
-        os.environ["TOKENIZERS_PARALLELISM"] = os.environ.get(
-            "TOKENIZERS_PARALLELISM", "false"
-        )
-
         dataset = datasets.load_from_disk(args.dataset_cache_dir)
         tokenizer = AutoTokenizer.from_pretrained(
             args.in_file,
