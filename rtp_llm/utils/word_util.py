@@ -79,27 +79,38 @@ def get_stop_word_slices(
     return result
 
 
-def is_truncated(input_str: str, trunc_strs: List[str], is_streaming: bool):
+def is_truncated(
+    input_str: str, trunc_strs: List[str], is_streaming: bool, slice: bool = False
+):
     if len(input_str) > 0 and len(
-        truncate_response_with_stop_words(input_str, trunc_strs, is_streaming)
+        truncate_response_with_stop_words(input_str, trunc_strs, is_streaming, slice)
     ) != len(input_str):
         return True
     return False
 
 
 def truncate_response_with_stop_words(
-    response: str, stop_word_strs: List[str], is_streaming: bool = True
+    response: str,
+    stop_word_strs: List[str],
+    is_streaming: bool = True,
+    slice: bool = False,
 ):
+
     if is_streaming:
         first_pos = len(response)
         for stop_word in stop_word_strs:
             if stop_word:
-                pos = response.find(stop_word)
-                if pos == 0:
-                    first_pos = 0
-                    break
-                if pos != -1 and pos < first_pos:
-                    first_pos = pos
+                if slice:
+                    if response.endswith(stop_word):
+                        response = response[: (-len(stop_word))]
+                        break
+                else:
+                    pos = response.find(stop_word)
+                    if pos == 0:
+                        first_pos = 0
+                        break
+                    if pos != -1 and pos < first_pos:
+                        first_pos = pos
         response = response[:first_pos]
     else:
         min_index = len(response)

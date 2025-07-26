@@ -232,7 +232,7 @@ class QwenToolRenderer(CustomChatRenderer):
             status.finish_reason = FinisheReason.stop
             return await self._create_empty_delta(output.aux_info)
         if not is_truncated(
-            status.delta_output_string, stop_word_slice_list, is_streaming
+            status.delta_output_string, stop_word_slice_list, is_streaming, True
         ):
             status.update_result()
             delta = OutputDelta(

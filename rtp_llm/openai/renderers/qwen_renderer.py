@@ -452,7 +452,7 @@ class QwenRenderer(CustomChatRenderer):
                 status.responded_length : status.output_length - len("\nAction:")
             ]
             if is_truncated(
-                status.delta_output_string, stop_word_slice_list, is_streaming
+                status.delta_output_string, stop_word_slice_list, is_streaming, True
             ):
                 return await self._create_empty_delta(output.aux_info)
             else:
@@ -590,7 +590,7 @@ class QwenRenderer(CustomChatRenderer):
                 status.responded_length : status.output_length - len("\nAction:")
             ]
             if is_truncated(
-                status.delta_output_string, stop_word_slice_list, is_streaming
+                status.delta_output_string, stop_word_slice_list, is_streaming, True
             ):
                 return self._create_empty_delta_sync(input_len, output_len, reuse_len)
             else:

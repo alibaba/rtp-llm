@@ -224,7 +224,10 @@ class QwenAgentRenderer(CustomChatRenderer):
                     responded_length : output_length - len("✿FUNCTION✿:")
                 ]
                 trunc_string = truncate_response_with_stop_words(
-                    delta_string, stop_word_slice_list, generate_config.is_streaming
+                    delta_string,
+                    stop_word_slice_list,
+                    generate_config.is_streaming,
+                    True,
                 )
                 if trunc_string != delta_string:
                     continue
