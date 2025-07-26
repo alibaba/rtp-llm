@@ -165,7 +165,7 @@ struct ServiceDiscoveryConfig {
 };
 
 struct CacheStoreConfig {
-    bool        cache_store_rdma_mode        = true;
+    bool        cache_store_rdma_mode        = false;
     int         wrr_available_ratio          = 80;
     int         rank_factor                  = 0;
     int         thread_count                 = 16;

@@ -77,7 +77,7 @@ class CacheStoreConfig:
     rdma_qp_count_per_connection: int
     def __init__(
         self,
-        cache_store_rdma_mode: bool = True,
+        cache_store_rdma_mode: bool = False,
         wrr_available_ratio: int = 80,
         rank_factor: int = 0,
         thread_count: int = 16,

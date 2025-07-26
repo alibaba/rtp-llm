@@ -975,7 +975,7 @@ def setup_args():
         "--cache_store_rdma_mode",
         env_name="CACHE_STORE_RDMA_MODE",
         type=str2bool,
-        default=True,
+        default=False,
         help="控制 cache store 是否使用 RDMA 模式。",
     )
 

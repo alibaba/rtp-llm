@@ -555,7 +555,7 @@ class GptInitModelParameters:
 
         # CacheStoreConfig
         self.gpt_init_params.cache_store_config = CacheStoreConfig(
-            cache_store_rdma_mode=get_env_bool("CACHE_STORE_RDMA_MODE", True),
+            cache_store_rdma_mode=get_env_bool("CACHE_STORE_RDMA_MODE", False),
             wrr_available_ratio=get_env_int("WRR_AVAILABLE_RATIO", 80),
             rank_factor=get_env_int("RANK_FACTOR", 0),
             thread_count=get_env_int("CACHE_STORE_THREAD_COUNT", 16),
@@ -946,19 +946,16 @@ class GptInitModelParameters:
         self.seq_size_per_block = closest_power_of_2(
             int(max(seq_size_per_block, self.max_seq_len // 128))
         )  # must be 2^n
-        if self.py_env_configs.py_kv_cache_config.seq_size_per_block == 8:
-            self.seq_size_per_block = self.seq_size_per_block
-        else:
-            self.seq_size_per_block = (
+        if self.py_env_configs.py_kv_cache_config.seq_size_per_block != -1:
+            self.seq_size_per_block = int(
                 self.py_env_configs.py_kv_cache_config.seq_size_per_block
             )
+
         logging.info(f"seq_size_per_block: {self.seq_size_per_block}")
-        if self.py_env_configs.concurrency_config.concurrency_limit == 32:
-            self.max_generate_batch_size = 128
-        else:
-            self.max_generate_batch_size = (
-                self.py_env_configs.concurrency_config.concurrency_limit
-            )
+        self.max_generate_batch_size = (
+            self.py_env_configs.concurrency_config.concurrency_limit
+        )
+
         logging.info(f"max_generate_batch_size: {self.max_generate_batch_size}")
         self.max_context_batch_size = self.fifo_scheduler_config.max_context_batch_size
         logging.info(f"max_context_batch_size: {self.max_context_batch_size}")
@@ -1023,7 +1020,6 @@ class GptInitModelParameters:
                 f"prefill_max_wait_timeout_ms: {self.prefill_max_wait_timeout_ms}"
             )
 
-
         if self.role_type in [RoleType.PREFILL, RoleType.DECODE]:
             self.cache_store_rdma_mode = bool(
                 int(os.environ.get("CACHE_STORE_RDMA_MODE", 1))
@@ -1059,10 +1055,12 @@ class GptInitModelParameters:
                 f"decode_use_async_load_cache: {self.decode_use_async_load_cache}"
             )
 
-            self.decode_entrance = bool(int(os.environ.get('DECODE_ENTRANCE', 0)))
-            logging.info(f'decode_entrance: {self.decode_entrance}')
+            self.decode_entrance = bool(int(os.environ.get("DECODE_ENTRANCE", 0)))
+            logging.info(f"decode_entrance: {self.decode_entrance}")
 
-            if (not self.decode_entrance and self.role_type in [RoleType.PREFILL]) or (self.decode_entrance and self.role_type in [RoleType.DECODE]):
+            if (not self.decode_entrance and self.role_type in [RoleType.PREFILL]) or (
+                self.decode_entrance and self.role_type in [RoleType.DECODE]
+            ):
                 self.pd_sep_enable_fallback = bool(
                     int(os.environ.get("PD_SEP_ENABLE_FALLBACK", 0))
                 )
@@ -1070,7 +1068,9 @@ class GptInitModelParameters:
                 self.load_balance_policy_name = os.environ.get(
                     "LOAD_BALANCE_POLICY_NAME", "RR"
                 )
-                logging.info(f"load_balance_policy_name: {self.load_balance_policy_name}")
+                logging.info(
+                    f"load_balance_policy_name: {self.load_balance_policy_name}"
+                )
                 policy_list = ["RR", "WRR"]
                 if not self.load_balance_policy_name in policy_list:
                     raise Exception(
@@ -1082,14 +1082,19 @@ class GptInitModelParameters:
                 )
                 logging.info(f"sync_status_interval_ms: {self.sync_status_interval_ms}")
 
-
-
-        self.scheduler_reserve_resource_ratio = int(os.environ.get('SCHEDUlER_RESERVE_RESOURCE_RATIO', 5))
-        logging.info(f'scheduler_reserve_resource_ratio: {self.scheduler_reserve_resource_ratio}')
-        self.reuse_cache = os.environ.get('REUSE_CACHE', None) == '1' or os.environ.get('USE_BLOCK_CACHE', None) == '1'
-        logging.info(f'reuse_cache: {self.reuse_cache}')
-        self.pre_allocate_op_mem = bool(int(os.environ.get('PRE_ALLOCATE_OP_MEM', 1)))
-        logging.info(f'pre_allocate_op_mem: {self.pre_allocate_op_mem}')
+        self.scheduler_reserve_resource_ratio = int(
+            os.environ.get("SCHEDUlER_RESERVE_RESOURCE_RATIO", 5)
+        )
+        logging.info(
+            f"scheduler_reserve_resource_ratio: {self.scheduler_reserve_resource_ratio}"
+        )
+        self.reuse_cache = (
+            os.environ.get("REUSE_CACHE", None) == "1"
+            or os.environ.get("USE_BLOCK_CACHE", None) == "1"
+        )
+        logging.info(f"reuse_cache: {self.reuse_cache}")
+        self.pre_allocate_op_mem = bool(int(os.environ.get("PRE_ALLOCATE_OP_MEM", 1)))
+        logging.info(f"pre_allocate_op_mem: {self.pre_allocate_op_mem}")
         self.kv_cache_data_type = self.data_type
         if bool(self.py_env_configs.py_kv_cache_config.int8_kv_cache):
             self.kv_cache_data_type = WEIGHT_TYPE.INT8.to_str()

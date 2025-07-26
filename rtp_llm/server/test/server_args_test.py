@@ -143,7 +143,7 @@ class ServerArgsDefaultTest(TestCase):
         self.assertIsNone(env.get("RTP_LLM_MULTIMODAL_PART_CM2_CONFIG"))
 
         # 13. Cache Store 配置
-        self.assertEqual(env.get("CACHE_STORE_RDMA_MODE"), "1")
+        self.assertEqual(env.get("CACHE_STORE_RDMA_MODE"), "0")
         self.assertEqual(env.get("WRR_AVAILABLE_RATIO"), "80")
         self.assertEqual(env.get("RANK_FACTOR"), "0")
 
@@ -485,7 +485,7 @@ class ServerArgsSetTest(TestCase):
             '{"cm2": "multi2"}',
             # 13. Cache Store 配置
             "--cache_store_rdma_mode",
-            "False",
+            "True",
             "--wrr_available_ratio",
             "95",
             "--rank_factor",
@@ -798,7 +798,7 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env["RTP_LLM_MULTIMODAL_PART_CM2_CONFIG"], '{"cm2": "multi2"}')
 
         # 13. Cache Store 配置
-        self.assertEqual(env["CACHE_STORE_RDMA_MODE"], "0")
+        self.assertEqual(env["CACHE_STORE_RDMA_MODE"], "1")
         self.assertEqual(env["WRR_AVAILABLE_RATIO"], "95")
         self.assertEqual(env["RANK_FACTOR"], "1")
         self.assertEqual(env["CACHE_STORE_THREAD_COUNT"], "8")

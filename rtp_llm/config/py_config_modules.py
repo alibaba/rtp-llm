@@ -192,9 +192,7 @@ class LoraConfig:
 
     def update_from_env(self):
         self.lora_info = os.environ.get("LORA_INFO", self.lora_info)
-        merge_lora = os.environ.get("MERGE_LORA")
-        if merge_lora is not None:
-            self.merge_lora = merge_lora.lower() == "true"
+        self.merge_lora = get_env_bool("MERGE_LORA", self.merge_lora)
 
     def to_string(self):
         return f"lora_info: {self.lora_info}\n" f"merge_lora: {self.merge_lora}\n"
@@ -213,9 +211,9 @@ class LoadConfig:
         self.converter_num_per_gpu = int(
             os.environ.get("CONVERTER_NUM_PER_GPU", self.converter_num_per_gpu)
         )
-        tokenizers_parallelism = os.environ.get("TOKENIZERS_PARALLELISM")
-        if tokenizers_parallelism is not None:
-            self.tokenizers_parallelism = tokenizers_parallelism.lower() == "true"
+        self.tokenizers_parallelism = get_env_bool(
+            "TOKENIZERS_PARALLELISM", self.tokenizers_parallelism
+        )
         self.load_ckpt_num_process = int(
             os.environ.get("LOAD_CKPT_NUM_PROCESS", self.load_ckpt_num_process)
         )
@@ -273,9 +271,7 @@ class GangConfig:
         self.leader_address: Optional[str] = None
 
     def update_from_env(self):
-        fake_gang_env = os.environ.get("FAKE_GANG_ENV")
-        if fake_gang_env is not None:
-            self.fake_gang_env = fake_gang_env.lower() == "true"
+        self.fake_gang_env = get_env_bool("FAKE_GANG_ENV", self.fake_gang_env)
         self.gang_annocation_path = os.environ.get(
             "GANG_ANNOCATION_PATH", self.gang_annocation_path
         )
@@ -369,9 +365,7 @@ class GenerateEnvConfig:
             os.environ.get("THINK_END_TOKEN_ID", self.think_end_token_id)
         )
         self.think_mode = int(os.environ.get("THINK_MODE", self.think_mode))
-        force_stop_words = os.environ.get("FORCE_STOP_WORDS")
-        if force_stop_words is not None:
-            self.force_stop_words = force_stop_words.lower() == "true"
+        self.force_stop_words = get_env_bool("FORCE_STOP_WORDS", self.force_stop_words)
         self.stop_words_list = os.environ.get("STOP_WORDS_LIST", self.stop_words_list)
         self.stop_words_str = os.environ.get("STOP_WORDS_STR", self.stop_words_str)
         self.think_start_tag = os.environ.get("THINK_START_TAG", self.think_start_tag)
@@ -450,7 +444,7 @@ class PyKvCacheConfig:
     def __init__(self):
         self.int8_kv_cache: int = 0
         self.kv_cache_mem_mb: int = -1
-        self.seq_size_per_block: int = 8
+        self.seq_size_per_block: int = -1
         self.test_block_num: int = 0
         self.use_block_cache: Optional[int] = None
         self.blockwise_use_fp8_kv_cache: int = 0

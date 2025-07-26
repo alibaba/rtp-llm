@@ -448,7 +448,7 @@ void register_service_discovery_config(pybind11::module& m) {
 
 // CacheStoreConfig
 void CacheStoreConfig::update_from_env_for_test() {
-    cache_store_rdma_mode        = bool_from_env_for_test("CACHE_STORE_RDMA_MODE", true);
+    cache_store_rdma_mode        = bool_from_env_for_test("CACHE_STORE_RDMA_MODE", false);
     wrr_available_ratio          = autil::EnvUtil::getEnv("WRR_AVAILABLE_RATIO", 80);
     rank_factor                  = autil::EnvUtil::getEnv("RANK_FACTOR", 0);
     thread_count                 = autil::EnvUtil::getEnv("CACHE_STORE_THREAD_COUNT", 16);
@@ -459,7 +459,7 @@ void CacheStoreConfig::update_from_env_for_test() {
 void register_cache_store_config(pybind11::module& m) {
     pybind11::class_<CacheStoreConfig>(m, "CacheStoreConfig")
         .def(pybind11::init<bool, int, int, int, int, int>(),
-             pybind11::arg("cache_store_rdma_mode")        = true,
+             pybind11::arg("cache_store_rdma_mode")        = false,
              pybind11::arg("wrr_available_ratio")          = 80,
              pybind11::arg("rank_factor")                  = 0,
              pybind11::arg("thread_count")                 = 16,
