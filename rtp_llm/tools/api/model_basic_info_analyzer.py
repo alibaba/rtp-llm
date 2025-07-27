@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import traceback
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -229,9 +230,11 @@ def parse_model_basic_info(model_path, env_params=dict({}), ft_model_type=None):
     try:
         # 尝试使用 ft_model_type 加载模型
         res = _load_as_ft_style(model_path, is_from_hf, ft_model_type, env_params)
-    except Exception as e:
+    except Exception as _:
         # 如果发生异常，使用 hf_model_type 加载模型
-        logging.warning(f"try load model with ft_model_type failed: {str(e)}")
+        logging.warning(
+            f"try load model with ft_model_type failed: {traceback.format_exc()}"
+        )
         res = _load_as_hf_style(model_path, ft_model_type, env_params)
     if not is_from_hf and model_path:
         umount_file(model_path)
