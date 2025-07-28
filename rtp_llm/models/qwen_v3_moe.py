@@ -151,3 +151,4 @@ class Qwen3MoeEagle3(QWenV2):
 
 register_model("qwen_3_moe", Qwen3Moe, ["Qwen3MoeForCausalLM"])
 register_model("qwen_3_moe_eagle3", Qwen3MoeEagle3, ["Qwen3MoeForCausalLMEagle"])
+register_model("qwen3_coder_moe", Qwen3Moe, [])

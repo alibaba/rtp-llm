@@ -710,3 +710,4 @@ class DeepSeekV3Mtp(DeepSeekV2):
 register_model("deepseek2", DeepSeekV2, ["DeepseekV2ForCausalLM"])
 register_model("deepseek3", DeepSeekV2, ["DeepseekV3ForCausalLM"])
 register_model("deepseek-v3-mtp", DeepSeekV3Mtp, ["DeepseekV3ForCausalLMNextN"])
+register_model("kimi_k2", DeepSeekV2, [])
