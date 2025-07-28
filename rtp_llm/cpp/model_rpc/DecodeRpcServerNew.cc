@@ -149,13 +149,6 @@ void DecodeRpcServerNew::makeRemoteGenerateRequest(DecodeGenerateContextNew& dec
     // reuse block no need sent back from prefill
     request.set_reuse_block_size(generate_stream->reuseBlockSize());
 
-    // if (engine_->isMTPEagle()) {
-    //     std::string mtp_hidden_states_key = "mtp_hidden_states_key-" + decode_context.request_id;
-    //     request.set_mtp_hidden_states_key(mtp_hidden_states_key);
-    //     // TODO: MTP register to cache store;
-    //     // resource_.cache_store->regPisteBuffer(mtp_hidden_states_key, generate_stream->returnEmptyHiddenStates());
-    // }
-
     request.set_use_mla(engine_->resourceContext().cache_manager->cacheConfig().use_mla);
     request.set_layer_num(maga_init_params_.gpt_init_parameter.num_layers_);
     request.set_deadline_us(currentTimeUs() + decode_context.request_timeout_ms * 1000);
