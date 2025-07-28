@@ -262,8 +262,6 @@ ErrorInfo PrefillRpcServerNew::generateFirstToken(PrefillGenerateContextNew& pre
 }
 
 ErrorInfo PrefillRpcServerNew::waitStoreCacheForAllRankDone(PrefillGenerateContextNew& prefill_context) {
-    int64_t min_response_done_time_us = 1lu << 60;
-    int64_t max_response_done_time_us = 0;
     int     finished_count            = 0;
     bool    all_success               = true;
 
@@ -308,8 +306,8 @@ ErrorInfo PrefillRpcServerNew::waitStoreCacheForAllRankDone(PrefillGenerateConte
             const auto& response         = rpc_context->response;
             const auto& pb_error_code    = response.error_info().error_code();
             const auto& pb_error_message = response.error_info().error_message();
-            min_response_done_time_us    = std::min(min_response_done_time_us, response.done_time_us());
-            max_response_done_time_us    = std::max(max_response_done_time_us, response.done_time_us());
+            prefill_context.min_response_done_time_us    = std::min(prefill_context.min_response_done_time_us, response.done_time_us());
+            prefill_context.max_response_done_time_us    = std::max(prefill_context.max_response_done_time_us, response.done_time_us());
 
             if (!status.ok()) {
                 all_success = false;

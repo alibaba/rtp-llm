@@ -63,6 +63,8 @@ bool RpcMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(notify_store_cache_rt_us_metric, "rtp_llm_rpc_notify_store_cache_rt_us");
     REGISTER_GAUGE_MUTABLE_METRIC(generate_first_token_rt_us_metric, "rtp_llm_rpc_generate_first_token_rt_us");
     REGISTER_GAUGE_MUTABLE_METRIC(wait_store_cache_rt_us_metric, "rtp_llm_rpc_wait_store_cache_rt_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(min_response_done_time_us_metric, "rtp_llm_rpc_min_response_done_time_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(max_response_done_time_us_metric, "rtp_llm_rpc_max_response_done_time_us");
 
     return true;
 }
@@ -99,6 +101,8 @@ void RpcMetrics::report(const kmonitor::MetricsTags* tags, RpcMetricsCollector* 
     REPORT_GAUGE(notify_store_cache_rt_us);
     REPORT_GAUGE(generate_first_token_rt_us);
     REPORT_GAUGE(wait_store_cache_rt_us);
+    REPORT_GAUGE(min_response_done_time_us);
+    REPORT_GAUGE(max_response_done_time_us);
 }
 
 bool RtpLLMStreamMetrics::init(kmonitor::MetricsGroupManager* manager) {

@@ -69,6 +69,8 @@ public:
     int64_t notify_store_cache_done_time_us   = 0;
     int64_t generate_first_token_done_time_us = 0;
     int64_t wait_store_cache_done_time_us     = 0;
+    int64_t min_response_done_time_us         = 1lu << 60;
+    int64_t max_response_done_time_us         = 0;
 };
 
 }  // namespace rtp_llm

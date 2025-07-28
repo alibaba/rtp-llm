@@ -45,9 +45,11 @@ public:
     int64_t local_generate_rt_us           = 0;
 
     // pd-sep prefill metrics(decode entrance)
-    int64_t notify_store_cache_rt_us   = 0;
-    int64_t generate_first_token_rt_us = 0;
-    int64_t wait_store_cache_rt_us     = 0;
+    int64_t notify_store_cache_rt_us        = 0;
+    int64_t generate_first_token_rt_us      = 0;
+    int64_t wait_store_cache_rt_us          = 0;
+    int64_t min_response_done_time_us       = 1lu << 60;
+    int64_t max_response_done_time_us       = 0;
 
     // for decode tp
     int64_t load_cache_min_rt_us       = 0;
@@ -92,6 +94,8 @@ public:
     kmonitor::MutableMetric* notify_store_cache_rt_us_metric            = nullptr;
     kmonitor::MutableMetric* generate_first_token_rt_us_metric          = nullptr;
     kmonitor::MutableMetric* wait_store_cache_rt_us_metric              = nullptr;
+    kmonitor::MutableMetric* min_response_done_time_us_metric           = nullptr;
+    kmonitor::MutableMetric* max_response_done_time_us_metric           = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
