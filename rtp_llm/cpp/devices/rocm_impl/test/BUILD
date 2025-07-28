@@ -58,7 +58,6 @@ cc_test(
     srcs = [],
     env = device_test_envs(),
     copts = test_copts,
-    linkopts = test_linkopts,
     deps = test_deps + [
         "//rtp_llm/cpp/devices/base_tests:basic_test_cases"
     ],
