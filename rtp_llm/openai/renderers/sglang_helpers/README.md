@@ -1,8 +1,29 @@
-有几个直接copy sglang对应代码之后的修改, 在这里补充一下
+# SGLang 代码修改说明
 
-- 修改对应import的绝对路径
-- 移除了对应的structure_info和build_ebnf方法依赖
-- partial_json_parser目前还没被加入到系统依赖, 本地测试中手动import
-- qwen25_detector中间流式会对arguments做json.dumps()但是没有ensure_ascii=False, 会错误的转义中文, 故在base_format_detector中间修改
-- qwen25_detector中间非流式场景没有正确的处理tool_index, 做了fix
-- qwen3_detector中间没有正确的处理index
+在直接复制 SGLang 对应代码后，进行了以下几个关键修改：
+
+## 修改内容
+
+### 1. 导入路径调整
+- **修改对应 import 的绝对路径**
+  - 将原有的绝对导入路径调整为适配当前项目结构的相对路径
+
+### 2. 依赖移除
+- **移除了对应的 `structure_info` 和 `build_ebnf` 方法依赖**
+  - 简化了代码结构，去除了不必要的依赖项
+
+### 3. 中文编码问题修复
+- **修复 `qwen25_detector` 中的中文转义问题**
+  - 问题：流式处理中对 `arguments` 执行 `json.dumps()` 时缺少 `ensure_ascii=False` 参数
+  - 影响：导致中文字符被错误转义
+  - 解决方案：在 `base_format_detector` 中进行修改，确保中文字符正确处理
+
+### 4. 工具索引处理修复
+- **修复 `qwen25_detector` 非流式场景的 `tool_index` 处理**
+  - 问题：非流式场景下没有正确处理 `tool_index`
+  - 解决方案：添加了相应的修复逻辑
+
+### 5. 索引处理优化
+- **修复 `qwen3_coder_detector` 的索引处理问题**
+  - 问题：没有正确处理 `index` 参数
+  - 解决方案：完善了索引处理逻辑

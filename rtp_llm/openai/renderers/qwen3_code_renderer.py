@@ -6,7 +6,7 @@ from rtp_llm.openai.renderer_factory_register import register_renderer
 from rtp_llm.openai.renderers.sglang_helpers.function_call.base_format_detector import (
     BaseFormatDetector,
 )
-from rtp_llm.openai.renderers.sglang_helpers.function_call.qwen3_detector import (
+from rtp_llm.openai.renderers.sglang_helpers.function_call.qwen3_coder_detector import (
     Qwen3CoderDetector,
 )
 from rtp_llm.openai.renderers.tool_base_renderer import ToolBaseRenderer
