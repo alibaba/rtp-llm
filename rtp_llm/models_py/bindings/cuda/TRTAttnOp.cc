@@ -128,7 +128,7 @@ torch::Tensor TRTPrefillOp::forward(const torch::Tensor&              input,
 
     torch::Tensor output        = torch::empty({token_num, local_head_num * size_per_head}, options);
     torch::Tensor tiled_counter = torch::zeros({1}, torch::TensorOptions(torch::kUInt32).device(input.device()));
-    if (kv_cache.has_value() && false) {
+    if (kv_cache.has_value() && kv_block_array.cache_type == KvCacheDataType::BASE) {
         cufmha_runner_->runTrtV2FmhaPaged(input.data_ptr(),
                                           params->cu_seqlens.data_ptr(),
                                           params->cu_kv_seqlens.data_ptr(),
