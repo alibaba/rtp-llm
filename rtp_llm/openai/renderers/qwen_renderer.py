@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple, Union
 
+from rtp_llm.openai.renderers.tool_base_renderer import ToolStreamStatus
 import torch
 from transformers import Qwen2Tokenizer
 
@@ -38,7 +39,6 @@ from rtp_llm.openai.renderers.custom_renderer import (
 )
 from rtp_llm.openai.renderers.qwen_tool_renderer import (
     QwenToolRenderer,
-    QwenToolStreamStatus,
 )
 from rtp_llm.tokenizer.tokenization_qwen import QWenTokenizer
 from rtp_llm.utils.word_util import (
@@ -471,7 +471,10 @@ class QwenRenderer(CustomChatRenderer):
         self, n: int, request: ChatCompletionRequest
     ) -> List[StreamStatus]:
         if request.tools:
-            return [QwenToolStreamStatus(request) for _ in range(n)]
+            return [
+                ToolStreamStatus(request, self.qwen_tool_renderer._create_detector())
+                for _ in range(n)
+            ]        
         if request.functions and (len(request.functions) > 0):
             return [QwenStreamStatus(request) for _ in range(n)]
         else:

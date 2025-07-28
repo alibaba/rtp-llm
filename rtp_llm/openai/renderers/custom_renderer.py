@@ -631,10 +631,10 @@ class CustomChatRenderer:
             if buffer.output is None:
                 raise Exception("buffer last output should not be None")
             # 延迟引入, 避免循环import
-            from rtp_llm.openai.renderers.qwen_tool_renderer import QwenToolStreamStatus
+            from rtp_llm.openai.renderers.tool_base_renderer import ToolStreamStatus
 
             # 判断buffer有无generating_tool_call这个属性
-            if isinstance(buffer, QwenToolStreamStatus) and buffer.generating_tool_call:
+            if isinstance(buffer, ToolStreamStatus) and buffer.generating_tool_call:
                 buffer.finish_reason = FinisheReason.tool_calls
 
             if buffer.finish_reason == None:

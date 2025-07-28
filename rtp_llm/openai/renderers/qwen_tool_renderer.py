@@ -1,190 +1,19 @@
-import functools
-import json
-import logging
-from enum import Enum
-from typing import List, Optional, Tuple, Union
-
-from jinja2 import BaseLoader, Environment
-from transformers import Qwen2Tokenizer
-
-from rtp_llm.models.base_model import GenerateOutput
-from rtp_llm.openai.api_datatype import (
-    ChatCompletionRequest,
-    DeltaMessage,
-    FinisheReason,
-    FunctionCall,
-    RoleEnum,
-    ToolCall,
-)
+from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.openai.renderer_factory_register import register_renderer
-from rtp_llm.openai.renderers.custom_renderer import (
-    CustomChatRenderer,
-    OutputDelta,
-    RenderedInputs,
-    RendererParams,
-    StreamStatus,
-    ThinkStatus,
+from rtp_llm.openai.renderers.sglang_helpers.function_call.base_format_detector import (
+    BaseFormatDetector,
 )
-from rtp_llm.tokenizer.tokenization_qwen import QWenTokenizer
-from rtp_llm.utils.word_util import is_truncated, truncate_response_with_stop_words
-
-"""
-TODO List
-=========
-
-- ChatMessage工具调用ID支持
-  • 问题：需要在ChatMessage中增加tool_call_id字段
-  • 现状：OpenAI官方SDK中没有该字段
-  • 影响：不添加可能导致tool_call和tool_response顺序不对应，引起推理幻觉
-  • 相关文档：https://aliyuque.antfin.com/aiplus/aistudio/gurqfferzgx2w9k9#vPzRS
-
-- System Prompt中文支持
-
-- 对某些异常情况的支持:
-  • 例如:
-        为了给您提供北京、上海和伦敦的当前温度，我将分别查询这三个城市的温度。请稍等。
-        <tool_call>
-        {"name": "get_current_temperature", "arguments": {"location": "北京, China", "unit": "celsius"}}
-        </tool_call>
-        {"name": "get_current_temperature", "arguments": {"location": "上海, China", "unit": "celsius"}}
-        </tool_call>
-        {"name": "get_current_temperature", "arguments": {"location": "London, UK", "unit": "celsius"}}
-        </tool_call>
-    而非标准的:
-        <tool_call>
-        {"name": "get_current_temperature", "arguments": {"location": "北京, China", "unit": "celsius"}}
-        </tool_call>
-        <tool_call>
-        {"name": "get_current_temperature", "arguments": {"location": "上海, China", "unit": "celsius"}}
-        </tool_call>
-
-- tool_choice的支持
-
-"""
+from rtp_llm.openai.renderers.sglang_helpers.function_call.qwen25_detector import (
+    Qwen25Detector,
+)
+from rtp_llm.openai.renderers.tool_base_renderer import ToolBaseRenderer
 
 
-class ToolCallMessageExtractStrategy(str, Enum):
-    DEFAULT = "default"
-    SKIP_ON_FAILURE = "skip_on_failure"
-    # maybe useful: ERROR_ON_FAILURE
+class QwenToolRenderer(ToolBaseRenderer):
+    """QwenToolRenderer 使用 Qwen25Detector 进行工具调用解析"""
 
-    @classmethod
-    def from_extra_configs(cls, request: ChatCompletionRequest):
-        """从请求配置中提取工具调用消息提取策略"""
-        strategy = cls.DEFAULT
-        if extra_configs := request.extra_configs:
-            if extra_configs.tool_call_message_extract_strategy == cls.SKIP_ON_FAILURE:
-                strategy = cls.SKIP_ON_FAILURE
-        return strategy
-
-
-class QwenToolStreamStatus(StreamStatus):
-    generating_tool_call: bool = False
-    tool_call_index = 0
-    tool_call_responded_string = ""
-    tool_call_message_extract_strategy: ToolCallMessageExtractStrategy = (
-        ToolCallMessageExtractStrategy.DEFAULT
-    )
-
-    def __str__(self):
-        return (
-            f"QwenToolStreamStatus("
-            f"index={self.index}, "
-            f"request={self.request}, "
-            f"output={self.output}, "
-            f"origin_output_ids={self.origin_output_ids}, "
-            f"output_ids={self.output_ids}, "
-            f"last_output_ids={self.last_output_ids}, "
-            f"last_token_length={self.last_token_length}, "
-            f"finish_reason={self.finish_reason}, "
-            f"tokenizer={self.tokenizer}, "
-            f"responded_string={self.responded_string!r}, "
-            f"delta_output_string={self.delta_output_string!r})"
-            f"generating_tool_call={self.generating_tool_call}"
-            f"tool_call_index={self.tool_call_index}"
-            f"tool_call_responded_string={self.tool_call_responded_string}"
-        )
-
-
-QwenTokenizerTypes = Union[QWenTokenizer, Qwen2Tokenizer]
-
-
-JINJA_TEMPLATE = """{%- if tools %}\n    {{- '<|im_start|>system\\n' }}\n    {%- if messages[0]['role'] == 'system' %}\n        {{- messages[0]['content'] }}\n    {%- else %}\n        {{- 'You are a helpful assistant.' }}\n    {%- endif %}\n    {{- \"\\n\\n# Tools\\n\\nYou may call one or more functions to assist with the user query.\\n\\nYou are provided with function signatures within <tools></tools> XML tags:\\n<tools>\" }}\n    {%- for tool in tools %}\n        {{- \"\\n\" }}\n        {{- tool | tojson }}\n    {%- endfor %}\n    {{- \"\\n</tools>\\n\\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\\n<tool_call>\\n{\\\"name\\\": <function-name>, \\\"arguments\\\": <args-json-object>}\\n</tool_call><|im_end|>\\n\" }}\n{%- else %}\n    {%- if messages[0]['role'] == 'system' %}\n        {{- '<|im_start|>system\\n' + messages[0]['content'] + '<|im_end|>\\n' }}\n    {%- else %}\n        {{- '<|im_start|>system\\nYou are a helpful assistant.<|im_end|>\\n' }}\n    {%- endif %}\n{%- endif %}\n{%- for message in messages %}\n    {%- if (message.role == \"user\") or (message.role == \"system\" and not loop.first) or (message.role == \"assistant\" and not message.tool_calls) %}\n        {{- '<|im_start|>' + message.role + '\\n' + message.content + '<|im_end|>' + '\\n' }}\n    {%- elif message.role == \"assistant\" %}\n        {{- '<|im_start|>' + message.role }}\n        {%- if message.content %}\n            {{- '\\n' + message.content }}\n        {%- endif %}\n        {%- for tool_call in message.tool_calls %}\n            {%- if tool_call.function is defined %}\n                {%- set tool_call = tool_call.function %}\n            {%- endif %}\n            {{- '\\n<tool_call>\\n{\"name\": \"' }}\n            {{- tool_call.name }}\n            {{- '\", \"arguments\": ' }}\n            {{- tool_call.arguments | tojson }}\n            {{- '}\\n</tool_call>' }}\n        {%- endfor %}\n        {{- '<|im_end|>\\n' }}\n    {%- elif message.role == \"tool\" %}\n        {%- if (loop.index0 == 0) or (messages[loop.index0 - 1].role != \"tool\") %}\n            {{- '<|im_start|>user' }}\n        {%- endif %}\n        {{- '\\n<tool_response>\\n' }}\n        {{- message.content }}\n        {{- '\\n</tool_response>' }}\n        {%- if loop.last or (messages[loop.index0 + 1].role != \"tool\") %}\n            {{- '<|im_end|>\\n' }}\n        {%- endif %}\n    {%- endif %}\n{%- endfor %}\n{%- if add_generation_prompt %}\n    {{- '<|im_start|>assistant\\n' }}\n{%- endif %}\n"""
-
-
-class QwenToolRenderer(CustomChatRenderer):
-    """QwenToolRenderer
-    考虑到<|im_start|> ,<tool_call>等token都比较精简, 故不提取成常量, 增强直接可读性
-    """
-
-    def __init__(self, tokenizer: QwenTokenizerTypes, renderer_params: RendererParams):
-        super().__init__(tokenizer, renderer_params)
-        if not tokenizer.chat_template or "tool" not in tokenizer.chat_template:
-            self.chat_template = JINJA_TEMPLATE
-        else:
-            self.chat_template = tokenizer.chat_template
-
-    # override
-    async def _create_status_list(
-        self, n: int, request: ChatCompletionRequest
-    ) -> List[StreamStatus]:
-        if request.logprobs:
-            return [StreamStatus(request) for _ in range(n)]
-        else:
-            return [QwenToolStreamStatus(request) for _ in range(n)]
-
-    # override
-    def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
-        prompt: str = self._build_prompt(request)
-        input_ids: List[int] = self.tokenizer.encode(prompt)  # type: ignore
-        return RenderedInputs(input_ids=input_ids, rendered_prompt=prompt)
-
-    def _build_prompt(
-        self,
-        request: ChatCompletionRequest,
-    ) -> str:
-        """
-        构建提示文本
-        Args:
-            request: 聊天完成请求
-        Returns:
-            str: 格式化后的提示文本
-        """
-
-        context = request.model_dump(exclude_none=True)
-
-        # 只要不是已经有assistant消息, 则需要添加生成提示
-        if request.messages[-1].role != RoleEnum.assistant:
-            context["add_generation_prompt"] = True
-
-        if request.chat_template_kwargs is not None:
-            context.update(request.chat_template_kwargs)
-        if (
-            request.extend_fields is not None
-            and "chat_template_kwargs" in request.extend_fields
-            and isinstance(request.extend_fields["chat_template_kwargs"], dict)
-        ):
-            context.update(request.extend_fields["chat_template_kwargs"])
-
-        env = Environment(loader=BaseLoader())
-        # 重写tojson过滤器, 这里存在三个注意点
-        # 1. tojson过滤器默认会排序, 导致生成的json字符串不符合预期
-        # 2. tojson过滤器默认会转义汉字, 导致生成的json字符串不符合预期
-        # 3. arguments默认是str, 而官方模板会对json str再次dumps
-
-        env.filters["tojson"] = lambda value: (
-            value
-            if isinstance(value, str)
-            else json.dumps(value, sort_keys=False, ensure_ascii=False)
-        )
-
-        try:
-            # 使用自定义环境创建模板
-            template = env.from_string(self.chat_template)
-            rendered_prompt = template.render(**context)
-            return rendered_prompt
-        except Exception as e:
-            raise ValueError(f"Error rendering prompt template: {str(e)}")
+    def _create_detector(self) -> BaseFormatDetector:
+        return Qwen25Detector()
 
     def in_think_mode(self, request: ChatCompletionRequest):
         if request.disable_thinking():
@@ -232,7 +61,7 @@ class QwenToolRenderer(CustomChatRenderer):
             status.finish_reason = FinisheReason.stop
             return await self._create_empty_delta(output.aux_info)
         if not is_truncated(
-            status.delta_output_string, stop_word_slice_list, is_streaming, True
+            status.delta_output_string, stop_word_slice_list, is_streaming
         ):
             status.update_result()
             delta = OutputDelta(
