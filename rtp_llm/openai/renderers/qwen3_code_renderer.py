@@ -13,10 +13,10 @@ from rtp_llm.openai.renderers.tool_base_renderer import ToolBaseRenderer
 
 
 class Qwen3CoderRenderer(ToolBaseRenderer):
-    """Qwen3CoderRenderer 使用 Qwen3XMLDetector 进行工具调用解析"""
+    """Qwen3CoderRenderer 使用 Qwen3CoderDetector 进行工具调用解析"""
 
     def _create_detector(self) -> BaseFormatDetector:
-        """创建Qwen3XML检测器"""
+        """创建Qwen3Coder检测器"""
         return Qwen3CoderDetector()
 
     def _customize_jinja_env(self, env: Environment) -> None:

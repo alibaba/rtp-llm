@@ -1,7 +1,7 @@
 import json
 import logging
 import os
-from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, AsyncGenerator, List
 from unittest import IsolatedAsyncioTestCase, TestCase, main
 
 import torch
@@ -18,20 +18,14 @@ from rtp_llm.models.base_model import (
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatCompletionStreamResponse,
-    ChatMessage,
-    ContentPart,
-    ContentPartTypeEnum,
-    DeltaMessage,
     FinisheReason,
     GPTFunctionDefinition,
     GPTToolDefinition,
-    RendererInfo,
     RoleEnum,
 )
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.openai.renderer_factory import (
     ChatRendererFactory,
-    CustomChatRenderer,
     RendererParams,
 )
 from rtp_llm.openai.renderers import custom_renderer
@@ -40,7 +34,6 @@ from rtp_llm.openai.renderers.qwen3_code_renderer import Qwen3CoderRenderer
 from rtp_llm.openai.renderers.qwen_renderer import QwenRenderer
 from rtp_llm.openai.renderers.qwen_tool_renderer import QwenToolRenderer
 from rtp_llm.openai.utils import is_valid_tool_call_chunk, merge_stream_responses
-from rtp_llm.pipeline.chatapi_format import encode_chatapi
 from rtp_llm.tokenizer.tokenization_chatglm3 import ChatGLMTokenizer
 from rtp_llm.tokenizer.tokenization_qwen import QWenTokenizer
 

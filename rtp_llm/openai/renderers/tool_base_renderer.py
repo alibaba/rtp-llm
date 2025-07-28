@@ -79,7 +79,6 @@ class ToolBaseRenderer(CustomChatRenderer, ABC):
     @override
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         """渲染聊天请求"""
-        logging.info(f"开始渲染聊天请求，消息数量: {len(request.messages)}")
         prompt: str = self._build_prompt(request)
         input_ids: List[int] = self.tokenizer.encode(prompt)
         return RenderedInputs(input_ids=input_ids, rendered_prompt=prompt)
@@ -118,7 +117,6 @@ class ToolBaseRenderer(CustomChatRenderer, ABC):
         try:
             template = env.from_string(self.tokenizer.chat_template)
             rendered_prompt = template.render(**context)
-            logging.debug(f"提示文本构建成功")
             return rendered_prompt
         except Exception as e:
             logging.error(f"构建提示文本失败: {str(e)}")
@@ -169,7 +167,7 @@ class ToolBaseRenderer(CustomChatRenderer, ABC):
                 decoded_string = decoded_string[:-1]
         status.delta_output_string = decoded_string[len(decoded_prev_token) :]
 
-        # 这里增加劫持逻辑
+        # 这里增加劫持原始输出的逻辑
         if isinstance(status, ToolStreamStatus) and status.request.tools:
             tool_delta = await self._process_tool_calls(status, output, is_streaming)
             if tool_delta is not None:
@@ -239,7 +237,7 @@ class ToolBaseRenderer(CustomChatRenderer, ABC):
             return delta
 
         except Exception as e:
-            logging.error(f"工具调用解析失败: {e}")
+            logging.error(f"工具调用解析失败: {e}, 当前delta_output_string: {status.delta_output_string}")
             return None
 
     def _handle_non_streaming_parse(self, status: ToolStreamStatus, tools):
@@ -265,7 +263,7 @@ class ToolBaseRenderer(CustomChatRenderer, ABC):
 
     def _clean_stop_words(self, text: str):
         """
-        清理文本中的停止词，子类必须实现
+        清理文本中的停止词, 默认不做清理
 
         Args:
             text: 需要清理的文本
