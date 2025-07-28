@@ -32,7 +32,7 @@ class FunctionCall(BaseModel):
 class ToolCall(BaseModel):
     # 参照 openai 官方api definition
     index: Optional[int] = None
-    id: str
+    id: Optional[str] = None
     type: str
     function: FunctionCall
 

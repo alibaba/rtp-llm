@@ -30,9 +30,11 @@ from rtp_llm.openai.api_datatype import (
     ChatCompletionStreamResponse,
     ChatMessage,
     DebugInfo,
+    FunctionCall,
     ModelCard,
     ModelList,
     RoleEnum,
+    ToolCall,
     UsageInfo,
 )
 from rtp_llm.openai.renderer_factory import ChatRendererFactory
@@ -176,6 +178,79 @@ class OpenaiEndpoint(object):
         config.add_thinking_params(self.tokenizer)
         return config
 
+    def _merge_tool_calls(
+        self,
+        existing_tool_calls: Optional[List[ToolCall]],
+        delta_tool_calls: Optional[List[ToolCall]],
+    ) -> Optional[List[ToolCall]]:
+        """
+        合并增量的 tool_calls 到现有的 tool_calls 中
+        Args:
+            existing_tool_calls: 现有的 tool_calls 列表
+            delta_tool_calls: 增量的 tool_calls 列表
+        Returns:
+            合并后的 tool_calls 列表
+        """
+        if delta_tool_calls is None:
+            return existing_tool_calls
+        if existing_tool_calls is None:
+            existing_tool_calls = []
+        for delta_tool_call in delta_tool_calls:
+            # 查找是否已存在相同 index 的 tool_call
+            existing_tool_call = None
+            if delta_tool_call.index is not None:
+                for existing in existing_tool_calls:
+                    if existing.index == delta_tool_call.index:
+                        existing_tool_call = existing
+                        break
+            if existing_tool_call is None:
+                # 创建新的 tool_call
+                new_tool_call = ToolCall(
+                    index=delta_tool_call.index,
+                    id=delta_tool_call.id,
+                    type=delta_tool_call.type,
+                    function=FunctionCall(
+                        name=(
+                            delta_tool_call.function.name
+                            if delta_tool_call.function
+                            else None
+                        ),
+                        arguments=(
+                            delta_tool_call.function.arguments
+                            if delta_tool_call.function
+                            else None
+                        ),
+                    ),
+                )
+                existing_tool_calls.append(new_tool_call)
+            else:
+                # 增量更新现有的 tool_call
+                if delta_tool_call.id:
+                    existing_tool_call.id = delta_tool_call.id
+                if delta_tool_call.type:
+                    existing_tool_call.type = delta_tool_call.type
+                if delta_tool_call.function:
+                    if existing_tool_call.function is None:
+                        existing_tool_call.function = FunctionCall(
+                            name=delta_tool_call.function.name,
+                            arguments=delta_tool_call.function.arguments,
+                        )
+                    else:
+                        if delta_tool_call.function.name:
+                            existing_tool_call.function.name = (
+                                delta_tool_call.function.name
+                            )
+                        if delta_tool_call.function.arguments:
+                            if existing_tool_call.function.arguments is None:
+                                existing_tool_call.function.arguments = (
+                                    delta_tool_call.function.arguments
+                                )
+                            else:
+                                existing_tool_call.function.arguments += (
+                                    delta_tool_call.function.arguments
+                                )
+        return existing_tool_calls
+
     async def _collect_complete_response(
         self,
         choice_generator: Optional[AsyncGenerator[StreamResponseObject, None]],
@@ -231,9 +306,9 @@ class OpenaiEndpoint(object):
                         response.choices[i].delta.function_call
                         or all_choices[i].message.function_call
                     )
-                    all_choices[i].message.tool_calls = (
-                        response.choices[i].delta.tool_calls
-                        or all_choices[i].message.tool_calls
+                    all_choices[i].message.tool_calls = self._merge_tool_calls(
+                        all_choices[i].message.tool_calls,
+                        response.choices[i].delta.tool_calls,
                     )
                     all_choices[i].finish_reason = (
                         response.choices[i].finish_reason
