@@ -42,7 +42,15 @@ for i, call in enumerate(calls):
 
 **解决方案：**
 ```python
+# old
+res.extend(self.parse_base_json(raw, tools))
+
+# new
 # XinshiFix: 修复 tool_index 错误被分配的情况
-for i, call in enumerate(calls):
-    call.tool_index = i
+parsed_calls = self.parse_base_json(raw, tools)
+# 手动设置正确的 tool_index（父类注释要求的）
+for call in parsed_calls:
+    call.tool_index = self._current_tool_index
+    self._current_tool_index += 1
+res.extend(parsed_calls)
 ```
