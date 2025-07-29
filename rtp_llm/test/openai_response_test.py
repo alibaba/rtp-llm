@@ -24,16 +24,16 @@ from rtp_llm.openai.api_datatype import (
     RoleEnum,
 )
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
-from rtp_llm.openai.renderer_factory import (
-    ChatRendererFactory,
-    RendererParams,
-)
+from rtp_llm.openai.renderer_factory import ChatRendererFactory, RendererParams
 from rtp_llm.openai.renderers import custom_renderer
 from rtp_llm.openai.renderers.kimik2_renderer import KimiK2Renderer
 from rtp_llm.openai.renderers.qwen3_code_renderer import Qwen3CoderRenderer
 from rtp_llm.openai.renderers.qwen_renderer import QwenRenderer
 from rtp_llm.openai.renderers.qwen_tool_renderer import QwenToolRenderer
-from rtp_llm.openai.utils import is_valid_tool_call_chunk, merge_stream_responses
+from rtp_llm.test.utils.stream_util import (
+    is_valid_tool_call_chunk,
+    merge_stream_responses,
+)
 from rtp_llm.tokenizer.tokenization_chatglm3 import ChatGLMTokenizer
 from rtp_llm.tokenizer.tokenization_qwen import QWenTokenizer
 
