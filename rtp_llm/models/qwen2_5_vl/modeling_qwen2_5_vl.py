@@ -381,7 +381,7 @@ class Qwen2_5_VLVisionSdpaAttention(nn.Module):
         q, k = apply_rotary_pos_emb_vision(q, k, cos, sin)
 
         attention_mask = torch.zeros(
-            [1, seq_length, seq_length], device=q.device, dtype=torch.bool
+            [1, seq_length, seq_length], device=q.device, dtype=torch.float32
         )
         for i in range(1, len(cu_seqlens)):
             attention_mask[
