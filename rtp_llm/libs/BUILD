@@ -14,9 +14,48 @@ copy_files(
     visibility = ["//visibility:public"],
 )
 
+filegroup(
+    name = "copy_aiter",
+    srcs = select({
+        "@//:using_aiter_src": [":aiter_src_copy",],
+        "//conditions:default": [":aiter_copy"],
+    }),
+    visibility = ["//visibility:public"],
+)
+
+genrule(
+    name = "aiter_src_copy",
+    srcs = ["@aiter_src//:cpp_libraries"],
+    outs = [
+        "libmodule_aiter_enum.so",
+        "libmodule_custom_all_reduce.so",
+        "libmodule_moe_sorting.so",
+        "libmodule_moe_asm.so",
+        "libmodule_moe.so",
+        "libmodule_gemm_a8w8_bpreshuffle.so",
+        "libmodule_gemm_a8w8_blockscale.so",
+        "libmodule_quant.so",
+        "libmodule_pa.so",
+        "libmodule_activation.so",
+    ],
+    cmd = """
+        cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_aiter_enum.so $(location libmodule_aiter_enum.so);
+        cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_custom_all_reduce.so $(location libmodule_custom_all_reduce.so);
+        cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_moe_sorting.so $(location libmodule_moe_sorting.so);
+        cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_moe_asm.so $(location libmodule_moe_asm.so);
+        cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_moe.so $(location libmodule_moe.so);
+        cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_gemm_a8w8_bpreshuffle.so $(location libmodule_gemm_a8w8_bpreshuffle.so);
+        cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_gemm_a8w8_blockscale.so $(location libmodule_gemm_a8w8_blockscale.so);
+        cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_quant.so $(location libmodule_quant.so);
+        cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_pa.so $(location libmodule_pa.so);
+        cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_activation.so $(location libmodule_activation.so);
+    """,
+    tags = ["rocm", "local"],
+)
+
 genrule(
     name = "aiter_copy",
-    srcs = ["@aiter//:aiter_so","@composable_kernel_archive//:ck_fmha_rmsnorm2d_libraries"],
+    srcs = ["@aiter//:aiter_so"],
     outs = [
         "module_aiter_enum.so",
         "module_custom_all_reduce.so",
@@ -27,8 +66,6 @@ genrule(
         "module_gemm_a8w8_blockscale.so",
         "module_quant.so",
         "module_pa.so",
-        "libtile_rmsnorm2d_fwd.so",
-        "libtile_example_fmha_fwd.so",
         "module_activation.so",
     ],
     cmd = """
@@ -41,9 +78,21 @@ genrule(
         cp external/aiter/aiter/jit/module_gemm_a8w8_blockscale.so $(location module_gemm_a8w8_blockscale.so);
         cp external/aiter/aiter/jit/module_quant.so $(location module_quant.so);
         cp external/aiter/aiter/jit/module_pa.so $(location module_pa.so);
+        cp external/aiter/aiter/jit/module_activation.so $(location module_activation.so);
+    """,
+    tags = ["rocm", "local"],
+)
+
+genrule(
+    name = "ck_copy",
+    srcs = ["@composable_kernel_archive//:ck_fmha_rmsnorm2d_libraries"],
+    outs = [
+        "libtile_rmsnorm2d_fwd.so",
+        "libtile_example_fmha_fwd.so",
+    ],
+    cmd = """
         cp external/composable_kernel_archive/libtile_example_fmha_fwd.so $(location libtile_example_fmha_fwd.so);
         cp external/composable_kernel_archive/libtile_rmsnorm2d_fwd.so $(location libtile_rmsnorm2d_fwd.so);
-        cp external/aiter/aiter/jit/module_activation.so $(location module_activation.so);
     """,
     tags = ["rocm", "local"],
 )
@@ -54,5 +103,6 @@ filegroup(
     data = [
         ":libth_transformer_so",
         ":copy_hf3fs_libs",
+        ":copy_aiter",
     ] + kernel_so_deps()
 )

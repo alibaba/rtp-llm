@@ -21,9 +21,13 @@ cc_library(
     deps = [
         "//rtp_llm/cpp/cuda:nccl_util",
         "//rtp_llm/cpp/core:types",
-        "@aiter//:module_custom_all_reduce",
         "@local_config_rocm//rocm:rocm_headers",
-    ] + torch_deps(),
+    ] + torch_deps() + select({
+        "@//:using_aiter_src": [
+            "@aiter_src//:module_custom_all_reduce",
+        ],
+        "//conditions:default": ["@aiter//:module_custom_all_reduce",],
+    }),
     copts = rocm_copts() + ["-DUSE_ROCM=1"],
     include_prefix = "src",
     visibility = ["//visibility:public"],

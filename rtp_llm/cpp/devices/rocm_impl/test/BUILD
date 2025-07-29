@@ -116,13 +116,22 @@ cc_test(
     env = device_test_envs(),
     copts = test_copts + copts(),
     linkopts = test_linkopts,
-    deps = test_deps + [
-        "@aiter//:module_aiter_enum",
-        "@aiter//:module_moe_asm",
-        "@aiter//:module_moe",
-        "@aiter//:module_quant",
-        "@aiter//:module_moe_sorting",
-    ],
+    deps = test_deps + select({
+        "@//:using_aiter_src": [
+            "@aiter_src//:module_aiter_enum",
+            "@aiter_src//:module_moe_asm",
+            "@aiter_src//:module_moe",
+            "@aiter_src//:module_quant",
+            "@aiter_src//:module_moe_sorting",
+        ],
+        "//conditions:default": [
+            "@aiter//:module_aiter_enum",
+            "@aiter//:module_moe_asm",
+            "@aiter//:module_moe",
+            "@aiter//:module_quant",
+            "@aiter//:module_moe_sorting",
+        ],
+    }),
     tags = ["rocm"],
 )
 
