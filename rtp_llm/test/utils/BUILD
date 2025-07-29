@@ -24,6 +24,14 @@ py_library(
     srcs = ["port_util.py"],
 )
 
+py_library(
+    name = "stream_util",
+    srcs = ["stream_util.py"],
+    deps = [
+        "//rtp_llm:openai_api",
+    ],
+)
+
 py_test(
     name = "port_util_test",
     srcs = ["port_util_test.py"],
