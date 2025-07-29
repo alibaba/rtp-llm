@@ -1,6 +1,7 @@
 import argparse
 import logging
 import os
+import glob
 from typing import (
     Any,
     Callable,
@@ -599,14 +600,14 @@ def setup_args():
         "--ft_disable_custom_ar",
         env_name="FT_DISABLE_CUSTOM_AR",
         type=str2bool,
-        default=True,
+        default=None,
         help="设置为 `True` 时，禁用自定义的 AllReduce (AR) 实现，可能回退到标准库（如 NCCL）的 AllReduce。",
     )
     hw_kernel_group.add_argument(
         "--enable_merge_w13",
         env_name="ENABLE_MERGE_W13",
         type=str2bool,
-        default=False,
+        default=None,
         help="设置为 `True` 时，启用FFN W13 的合并操作。",
     )
 
@@ -679,7 +680,7 @@ def setup_args():
         "--enable_comm_overlap",
         env_name="ENABLE_COMM_OVERLAP",
         type=str2bool,
-        default=True,
+        default=None,
         help="设置为 `True` 以启用计算与通信之间的重叠执行，旨在提高设备利用率和吞吐量。",
     )
 
@@ -1670,6 +1671,35 @@ def setup_args():
     )
 
     parser.parse_args()
+
+    # add rocm env config, if using default value, change it to optimize version
+    if ( 
+        len(glob.glob('/dev/dri/renderD*')) > 0 
+        and os.getenv('FT_DISABLE_CUSTOM_AR') is None 
+    ):
+        os.environ['FT_DISABLE_CUSTOM_AR'] = '0'
+        logging.info("[MI308X] enable FT_DISABLE_CUSTOM_AR by default, as amd has own implementation.")
+    
+    if (
+        len(glob.glob('/dev/dri/renderD*')) > 0 
+        and os.getenv('SEQ_SIZE_PER_BLOCK') is None
+    ):
+        os.environ['SEQ_SIZE_PER_BLOCK'] = '16'
+        logging.info("[MI308X] set SEQ_SIZE_PER_BLOCK 16 by default, as it just support 16 now.")
+    
+    if (
+        len(glob.glob('/dev/dri/renderD*')) > 0 
+        and os.getenv('ENABLE_COMM_OVERLAP') is None
+    ):
+        os.environ['ENABLE_COMM_OVERLAP'] = '0'
+        logging.info("[MI308X] disable ENABLE_COMM_OVERLAP by default.")
+    
+    if (
+        len(glob.glob('/dev/dri/renderD*')) > 0 
+        and os.getenv('ENABLE_MERGE_W13') is None
+    ):
+        os.environ['ENABLE_MERGE_W13'] = '1'
+        logging.info("[MI308X] enable ENABLE_MERGE_W13 by default, it improves the performance both for bf16 and fp8.")
 
     parser.print_env_mappings()
     StaticConfig.update_from_env()
