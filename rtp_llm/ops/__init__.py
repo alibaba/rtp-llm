@@ -95,7 +95,7 @@ try:
 except BaseException as e:
     logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
 
-torch.ops.load_library(os.path.join(so_path, "libth_transformer.so"))
+
 try:
     from libth_transformer import (
         ArpcConfig,
