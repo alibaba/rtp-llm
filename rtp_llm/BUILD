@@ -324,6 +324,8 @@ py_library(
         ":setproctitle",
         ":portalocker",
         ":concurrent_log_handler",
+        ":blobfile",
+        ":partial_json_parser",
     ],
     data = jit_deps(),
     imports = ["."],
