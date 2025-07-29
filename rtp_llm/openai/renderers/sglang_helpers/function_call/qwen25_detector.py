@@ -9,7 +9,10 @@ from rtp_llm.openai.renderers.sglang_helpers.function_call.base_format_detector 
 )
 from rtp_llm.openai.renderers.sglang_helpers.function_call.core_types import (
     StreamingParseResult,
+    _GetInfoFunc,
+    StructureInfo
 )
+from rtp_llm.openai.renderers.sglang_helpers.function_call.ebnf_composer import EBNFComposer
 
 logger = logging.getLogger(__name__)
 
@@ -115,3 +118,19 @@ class Qwen25Detector(BaseFormatDetector):
                     self._normal_text_buffer = ""
 
         return result
+
+    def structure_info(self) -> _GetInfoFunc:
+        return lambda name: StructureInfo(
+            begin='<tool_call>\n{"name":"' + name + '", "arguments":',
+            end="}\n</tool_call>",
+            trigger="<tool_call>",
+        )
+
+    def build_ebnf(self, tools: List[Tool]):
+        return EBNFComposer.build_ebnf(
+            tools,
+            individual_call_start_token=self.bot_token.replace("\n", "\\n"),
+            individual_call_end_token=self.eot_token.replace("\n", "\\n"),
+            tool_call_separator="\\n",
+            function_format="json",
+        )

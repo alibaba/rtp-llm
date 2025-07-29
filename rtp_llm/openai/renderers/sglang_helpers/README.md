@@ -1,29 +1,48 @@
 # SGLang 代码修改说明
 
-在直接复制 SGLang 对应代码后，进行了以下几个关键修改：
 
 ## 修改内容
 
 ### 1. 导入路径调整
-- **修改对应 import 的绝对路径**
-  - 将原有的绝对导入路径调整为适配当前项目结构的相对路径
+**修改对应 import 的绝对路径**
+- 将原有的绝对导入路径调整为适配当前项目结构的相对路径
+- 确保模块间的依赖关系正确建立
 
-### 2. 依赖移除
-- **移除了对应的 `structure_info` 和 `build_ebnf` 方法依赖**
-  - 简化了代码结构，去除了不必要的依赖项
+### 2. 中文编码问题修复
+**修复 `qwen25_detector` 中的中文转义问题**
 
-### 3. 中文编码问题修复
-- **修复 `qwen25_detector` 中的中文转义问题**
-  - 问题：流式处理中对 `arguments` 执行 `json.dumps()` 时缺少 `ensure_ascii=False` 参数
-  - 影响：导致中文字符被错误转义
-  - 解决方案：在 `base_format_detector` 中进行修改，确保中文字符正确处理
+**问题描述：**
+- 流式处理中对 `arguments` 执行 `json.dumps()` 时缺少 `ensure_ascii=False` 参数
+- 导致中文字符被错误转义
 
-### 4. 工具索引处理修复
-- **修复 `qwen25_detector` 非流式场景的 `tool_index` 处理**
-  - 问题：非流式场景下没有正确处理 `tool_index`
-  - 解决方案：添加了相应的修复逻辑
+**解决方案：**
+```python
+cur_args_json = json.dumps(cur_arguments, ensure_ascii=False)
+```
 
-### 5. 索引处理优化
-- **修复 `qwen3_coder_detector` 的索引处理问题**
-  - 问题：没有正确处理 `index` 参数
-  - 解决方案：完善了索引处理逻辑
+### 3. 工具索引处理修复
+**修复 `qwen25_detector` 非流式场景的 `tool_index` 处理**
+
+**问题描述：**
+- 非流式场景下没有正确处理 `tool_index`
+
+**解决方案：**
+```python
+# XinshiFix: 修复 tool_index 错误被分配的情况
+for i, call in enumerate(calls):
+    call.tool_index = i
+```
+
+### 4. 索引处理优化
+**修复 `qwen3_coder_detector` 的索引处理问题**
+
+**问题描述：**
+- 没有正确处理 `index` 参数
+- 索引处理逻辑不完善
+
+**解决方案：**
+```python
+# XinshiFix: 修复 tool_index 错误被分配的情况
+for i, call in enumerate(calls):
+    call.tool_index = i
+```

@@ -12,7 +12,9 @@ from rtp_llm.openai.renderers.sglang_helpers.function_call.base_format_detector 
 from rtp_llm.openai.renderers.sglang_helpers.function_call.core_types import (
     StreamingParseResult,
     ToolCallItem,
+    _GetInfoFunc
 )
+from rtp_llm.openai.renderers.sglang_helpers.function_call.ebnf_composer import EBNFComposer
 
 logger = logging.getLogger(__name__)
 
@@ -138,3 +140,21 @@ class Qwen3CoderDetector(BaseFormatDetector):
             except Exception:
                 logger.warning("invalid tool call for %s dropped", fname)
         return res
+
+    def supports_structural_tag(self) -> bool:
+        return False
+
+    def structure_info(self) -> _GetInfoFunc:
+        raise NotImplementedError
+
+    def build_ebnf(self, tools: List[Tool]):
+        return EBNFComposer.build_ebnf(
+            tools,
+            individual_call_start_token=self.tool_call_start_token.replace("\n", "\\n"),
+            individual_call_end_token=self.tool_call_end_token.replace("\n", "\\n"),
+            tool_call_separator="\\n",
+            function_format="xml",
+            call_rule_fmt='"<function={name}>\\n" {arguments_rule} "\\n</function>"',
+            key_value_rule_fmt='"<parameter={key}>\\n" {valrule} "\\n</parameter>"',
+            key_value_separator="\\n",
+        )

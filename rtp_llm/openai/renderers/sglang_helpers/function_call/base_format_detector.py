@@ -3,7 +3,6 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List
 
-import partial_json_parser
 from partial_json_parser.core.exceptions import MalformedJSON
 from partial_json_parser.core.options import Allow
 
@@ -250,7 +249,6 @@ class BaseFormatDetector(ABC):
                 if cur_arguments:
                     # Calculate how much of the arguments we've already streamed
                     sent = len(self.streamed_args_for_tool[self.current_tool_id])
-                    # Xinshi Fix: 避免ascii码转义
                     cur_args_json = json.dumps(cur_arguments, ensure_ascii=False)
                     prev_arguments = None
                     if self.current_tool_id < len(self.prev_tool_call_arr):
@@ -321,5 +319,50 @@ class BaseFormatDetector(ABC):
     def has_tool_call(self, text: str) -> bool:
         """
         Check if the given text contains function call markers specific to this format.
+        """
+        raise NotImplementedError()
+
+    def supports_structural_tag(self) -> bool:
+        """Return True if this detector supports structural tag format."""
+        return True
+
+    @abstractmethod
+    def structure_info(self) -> _GetInfoFunc:
+        """
+        Return a function that creates StructureInfo for constrained generation.
+
+        The returned function takes a tool name and returns a StructureInfo object
+        containing the begin/end patterns and trigger tokens needed for constrained
+        generation of function calls in this format.
+
+        Returns:
+            A function that takes a tool name (str) and returns StructureInfo
+        """
+        raise NotImplementedError()
+
+    @abstractmethod
+    def build_ebnf(self, tools: List[Tool]) -> str:
+        """
+        Build an EBNF grammar for constrained generation of function calls.
+
+        This method generates an Extended Backus-Naur Form (EBNF) grammar that
+        constrains the model's output to valid function calls in this format.
+        The grammar should include all available tools and their parameter schemas.
+
+        Args:
+            tools: List of available tools/functions that can be called
+
+        Returns:
+            A string containing the EBNF grammar for this function call format
+
+        The EBNF grammar should:
+            - Define the overall structure of function calls in this format
+            - Include all tool names from the provided tools list
+            - Define valid JSON structures for function arguments
+            - Handle multiple function calls if the format supports them
+
+        Note:
+            Most implementations use EBNFComposer.build_ebnf() utility with
+            format-specific parameters rather than writing EBNF from scratch.
         """
         raise NotImplementedError()
