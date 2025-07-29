@@ -31,7 +31,9 @@ public:
                  int64_t     num_nvl_bytes    = 0,
                  int64_t     num_rdma_bytes   = 0,
                  bool        low_latency_mode = false,
-                 int         num_qps_per_rank = 1):
+                 int         num_qps_per_rank = 1,
+                 bool        allow_nvlink_for_low_latency_mode = true,
+                 bool        allow_mnnvl = false):
         device_(device),
         world_rank_(world_rank),
         world_size_(world_size),
@@ -39,13 +41,17 @@ public:
         num_nvl_bytes_(num_nvl_bytes),
         num_rdma_bytes_(num_rdma_bytes),
         low_latency_mode_(low_latency_mode),
-        num_qps_per_rank_(num_qps_per_rank) {}
+        num_qps_per_rank_(num_qps_per_rank),
+        allow_nvlink_for_low_latency_mode_(allow_nvlink_for_low_latency_mode),
+        allow_mnnvl_(allow_mnnvl) {}
     ~DeepEPBuffer() = default;
 
 public:
     bool init();
 
 private:
+    void setAcclEPLowLatencyEnv(int ll_opt_level, int num_nodes);
+
     void setLowLatencyEnv();
 
     std::vector<int> allGatherDeviceIds(int local_device_id);
@@ -119,7 +125,7 @@ public:
       2 low-latency kernels' result tensor at a single moment.
       */
     DeepEPDispatchOutputLowLatency lowLatencyDispatch(const torch::Tensor& x,
-                                                      const torch::Tensor& topk_idx,
+                                                      torch::Tensor&       topk_idx,
                                                       int                  num_max_dispatch_tokens_per_rank,
                                                       int                  num_experts,
                                                       bool                 use_fp8          = true,
@@ -203,6 +209,8 @@ private:
     int64_t     num_rdma_bytes_{0};
     bool        low_latency_mode_{false};
     int         num_qps_per_rank_{1};
+    bool        allow_nvlink_for_low_latency_mode_{true};
+    bool        allow_mnnvl_{false};
 
     std::unique_ptr<deep_ep::Buffer> buffer_;
 

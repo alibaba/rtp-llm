@@ -24,24 +24,34 @@ bool CudaDevice::initDeepEPBuffer() {
     size_t local_world_size = init_params_.parallelism_distributed_config.local_world_size;
 
     int num_experts = init_params_.num_experts + init_params_.extra_experts;
-
     int deep_ep_num_sm = init_params_.moe_config.deep_ep_num_sm > 0 ? init_params_.moe_config.deep_ep_num_sm : 24;
 
     // TODO: check if get right
     ll_num_max_token_per_rank =
         (init_params_.max_generate_batch_size + init_params_.tp_size - 1) / init_params_.tp_size;
+
+    int64_t num_nvl_bytes    = 0;
     int64_t num_rdma_bytes   = 0;
     int     num_qps_per_rank = 1;
     if (init_params_.use_deepep_low_latency) {  // low-latency mode
         num_rdma_bytes = DeepEPBuffer::getLowLatencyRdmaSizeHint(
             ll_num_max_token_per_rank, init_params_.hidden_size, world_size, num_experts);
-        num_qps_per_rank = autil::EnvUtil::getEnv("NVSHMEM_IBGDA_NUM_RC_PER_PE", num_experts / init_params_.ep_size);
+        num_qps_per_rank = num_experts / init_params_.ep_size;
     } else if (init_params_.use_deepep_internode) {  // normal-kernel internode
+        num_nvl_bytes    = int(2e9);
         num_rdma_bytes   = int(1e9);
-        num_qps_per_rank = autil::EnvUtil::getEnv("NVSHMEM_IBGDA_NUM_RC_PER_PE", std::max(deep_ep_num_sm / 2, (int)(num_experts / init_params_.ep_size)));
+        //normal ibgda
+        if (autil::EnvUtil::getEnv("ACCL_NORMAL_MODE", "IBRC") == "IBGDA") {
+            num_qps_per_rank = std::max(deep_ep_num_sm / 2, (int)(num_experts / init_params_.ep_size));
+        }
+        //normal ibrc
+        else {
+            num_qps_per_rank = deep_ep_num_sm / 2;
+        }
+        
     } else {
-        num_rdma_bytes   = 0;  // normal-kernel intranode
-        num_qps_per_rank = autil::EnvUtil::getEnv("NVSHMEM_IBGDA_NUM_RC_PER_PE", 1);
+        num_nvl_bytes    = int(2e9);  // normal-kernel intranode
+        num_qps_per_rank = 1;
     }
 
     try {
@@ -53,9 +63,9 @@ bool CudaDevice::initDeepEPBuffer() {
                                               world_rank,
                                               local_world_size,
                                               world_size,
-                                              int(1e9),
+                                              num_nvl_bytes,
                                               num_rdma_bytes,
-                                              init_params_.use_deepep_low_latency || init_params_.use_deepep_internode,
+                                              init_params_.use_deepep_low_latency,
                                               num_qps_per_rank));
         bool success = deepep_buffer_->init();
         if (!success) {
@@ -123,15 +133,16 @@ MoeDispatchOutput CudaDevice::deepEpDispatch(const MoeDispatchParams& params) {
     std::optional<torch::Tensor> x_scales;
 
     if (params.qscheme == QScheme::Qfp8PerTokenBlock) {
-        quantized_hidden = hidden->isQBuffer()
-                         ? hidden
-                         : quantize({*hidden, DataType::TYPE_QFP8_E4M3, 1, params.qscheme});
-        auto kernel_ptr  = reinterpret_cast<const QBuffer&>(*quantized_hidden).kernelPtr();
-        auto scales_ptr  = reinterpret_cast<const QBuffer&>(*quantized_hidden).scalesPtr();
-        x                = Buffer2torchTensorWithDstType(kernel_ptr, false, TORCH_FP8_E4M3_TYPE);  // [num_tokens, hidden_size]
-        x_scales         = Buffer2torchTensorWithDstType(scales_ptr, false, dataTypeToTorchType(scales_ptr->type()));  // [num_tokens, hidden_size / 128]
+        quantized_hidden =
+            hidden->isQBuffer() ? hidden : quantize({*hidden, DataType::TYPE_QFP8_E4M3, 1, params.qscheme});
+        auto kernel_ptr = reinterpret_cast<const QBuffer&>(*quantized_hidden).kernelPtr();
+        auto scales_ptr = reinterpret_cast<const QBuffer&>(*quantized_hidden).scalesPtr();
+        x        = Buffer2torchTensorWithDstType(kernel_ptr, false, TORCH_FP8_E4M3_TYPE);  // [num_tokens, hidden_size]
+        x_scales = Buffer2torchTensorWithDstType(
+            scales_ptr, false, dataTypeToTorchType(scales_ptr->type()));  // [num_tokens, hidden_size / 128]
     } else {
-        x = Buffer2torchTensorWithDstType(hidden, false, dataTypeToTorchType(hidden->type()));  // [num_tokens, hidden_size]
+        x = Buffer2torchTensorWithDstType(
+            hidden, false, dataTypeToTorchType(hidden->type()));  // [num_tokens, hidden_size]
     }
 
     std::shared_ptr<EventOverlap> dispatch_begin_event;

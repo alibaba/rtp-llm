@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/devices/cuda_impl/DeepEPBuffer.h"
 #include "rtp_llm/cpp/core/BufferHelper.h"
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
+#include "autil/EnvUtil.h"
 #include "deep_ep_api.h"
 
 using namespace std;
@@ -12,7 +13,7 @@ namespace rtp_llm {
  */
 bool DeepEPBuffer::init() {
     buffer_.reset(deep_ep::createDeepEPBuffer(
-        world_rank_, local_world_size_, world_size_, num_nvl_bytes_, num_rdma_bytes_, low_latency_mode_, true));
+        world_rank_, local_world_size_, world_size_, num_nvl_bytes_, num_rdma_bytes_, low_latency_mode_));
 
     int              local_device_id = buffer_->get_local_device_id();
     std::vector<int> device_ids      = allGatherDeviceIds(local_device_id);
@@ -21,22 +22,80 @@ bool DeepEPBuffer::init() {
     std::vector<std::string> ipc_handles      = allGatherIpcHandles(local_ipc_handle);
 
     std::string root_unique_id;
+    int         ll_opt_level = autil::EnvUtil::getEnv("ACCL_LOW_LATENCY_OPTIMIZE", 0);
+    int         num_nodes    = world_size_ / local_world_size_;
     if (buffer_->get_num_rdma_ranks() > 1 || low_latency_mode_) {
         // low latency set env
+#if USE_ACCL_EP
+        setAcclEPLowLatencyEnv(ll_opt_level, num_nodes);
+#else
         setLowLatencyEnv();
+#endif
         root_unique_id = getRootUniqueId();
     }
 
     buffer_->sync_string(device_ids, ipc_handles, root_unique_id);
 #if USE_ACCL_EP
-    if (buffer_->is_low_latency_optimize()) {
-        RTP_LLM_LOG_INFO("acclep low latency optimized, start get pxn handle");
+    // init PXN when allow nvlink in low latency mode && multinode
+    if (low_latency_mode_ && allow_nvlink_for_low_latency_mode_ && num_nodes > 1) {
+        RTP_LLM_LOG_INFO("acclep low latency optimized and node_num > 1, start get pxn handle");
         std::string              local_pxn_ipc_handle = buffer_->get_local_pxn_ipc_handle_string();
         std::vector<std::string> pxn_ipc_handles      = allGatherIpcHandles(local_pxn_ipc_handle);
         buffer_->sync_pxn_handles_string(device_ids, pxn_ipc_handles);
     }
 #endif
+    RTP_LLM_CHECK(buffer_->is_available());
     return true;
+}
+
+void DeepEPBuffer::setAcclEPLowLatencyEnv(int ll_opt_level, int num_nodes) {
+    if (low_latency_mode_ || autil::EnvUtil::getEnv("ACCL_NORMAL_MODE", "IBRC") == "IBGDA") {
+        RTP_LLM_CHECK(num_qps_per_rank_ > 0);
+
+        // enable NVSHMEM_P2P and ACCL_LOW_LATENCY_USE_COMPUTE_STREAM in allow_nvlink && single node
+        if (allow_nvlink_for_low_latency_mode_ && num_nodes == 1) {
+            setenv("NVSHMEM_DISABLE_P2P", "0", 1);
+            setenv("ACCL_LOW_LATENCY_OPTIMIZE", "1", 1);
+            setenv("ACCL_LOW_LATENCY_USE_COMPUTE_STREAM", "1", 1);
+            setenv("NVSHMEM_IB_ENABLE_IBGDA", "0", 1);
+        } else {
+            setenv("NVSHMEM_DISABLE_P2P", "1", 1);
+            setenv("NVSHMEM_IB_ENABLE_IBGDA", "1", 1);
+        }
+        
+        setenv("NVSHMEM_IBGDA_NIC_HANDLER", "gpu", 1);
+
+        if (getenv("NVSHMEM_IBGDA_NUM_RC_PER_PE") == nullptr) {
+            if (ll_opt_level > 1 && num_nodes > 1) {
+                // use pxn
+                std::string nvshmem_ibgda_rc_per_pe_str = std::to_string(num_qps_per_rank_ * local_world_size_);
+                setenv("NVSHMEM_IBGDA_NUM_RC_PER_PE", nvshmem_ibgda_rc_per_pe_str.c_str(), 1);
+            } else {
+                std::string nvshmem_ibgda_rc_per_pe_str = std::to_string(num_qps_per_rank_);
+                setenv("NVSHMEM_IBGDA_NUM_RC_PER_PE", nvshmem_ibgda_rc_per_pe_str.c_str(), 1);
+            }
+        }
+
+        if (getenv("NVSHMEM_IBGDA_NUM_RC_PER_CR_PE") == nullptr) {
+            if (ll_opt_level > 1 && num_nodes > 1) {
+                std::string nvshmem_ibgda_rc_per_cr_pe_str = std::to_string(num_qps_per_rank_);
+                setenv("NVSHMEM_IBGDA_NUM_RC_PER_CR_PE", nvshmem_ibgda_rc_per_cr_pe_str.c_str(), 1);
+            }
+        }
+
+        //! Make sure QP depth is always larger than the number of on-flight WRs, so that we can skip WQ slot check
+        setenv("NVSHMEM_QP_DEPTH", "1024", 1);
+    }
+
+    // Reduce gpu memory usage
+    setenv("NVSHMEM_MAX_TEAMS", "7", 1);
+    setenv("NVSHMEM_DISABLE_NVLS", "1", 1);
+    //! NVSHMEM initialization requires at least 256 MiB
+    std::string nvshmem_cumem_granularity_str = std::to_string(1 << 29);  // 2^29 = 536870912 (512 MiB)
+    setenv("NVSHMEM_CUMEM_GRANULARITY", nvshmem_cumem_granularity_str.c_str(), 1);
+    if (!allow_mnnvl_) {
+        setenv("NVSHMEM_DISABLE_MNNVL", "1", 1);
+    }
 }
 
 void DeepEPBuffer::setLowLatencyEnv() {
@@ -434,6 +493,7 @@ DeepEPDispatchOutput DeepEPBuffer::intranodeDispatch(const torch::Tensor&       
         RTP_LLM_CHECK(topk_weights.has_value());
 
         auto num_recv_tokens = handle->recv_src_idx.size(0);
+#if USE_ACCL_EP
         auto [recv_x,
               recv_x_scales,
               recv_topk_idx,
@@ -444,7 +504,34 @@ DeepEPDispatchOutput DeepEPBuffer::intranodeDispatch(const torch::Tensor&       
               recv_channel_prefix_matrix,
               recv_src_idx,
               send_head,
-              recv_event]    = buffer_->intranode_dispatch(x,
+              recv_event] = buffer_->intranode_dispatch(x,
+                                                        x_scales,
+                                                        std::nullopt,
+                                                        std::nullopt,
+                                                        std::nullopt,
+                                                        handle->is_token_in_rank,
+                                                        std::nullopt,
+                                                        num_recv_tokens,
+                                                        handle->rank_prefix_matrix,
+                                                        handle->channel_prefix_matrix,
+                                                        expert_alignment,
+                                                        0, /*num_worst_tokens*/
+                                                        config,
+                                                        event,
+                                                        async_finish,
+                                                        allocate_on_comm_stream);
+#else
+        auto [recv_x,
+              recv_x_scales,
+              recv_topk_idx,
+              recv_topk_weights,
+              num_recv_tokens_per_expert_list,
+              rank_prefix_matrix,
+              channel_prefix_matrix,
+              recv_channel_prefix_matrix,
+              recv_src_idx,
+              send_head,
+              recv_event] = buffer_->intranode_dispatch(x,
                                                         x_scales,
                                                         std::nullopt,
                                                         std::nullopt,
@@ -459,6 +546,7 @@ DeepEPDispatchOutput DeepEPBuffer::intranodeDispatch(const torch::Tensor&       
                                                         event,
                                                         async_finish,
                                                         allocate_on_comm_stream);
+#endif
         return {recv_x,
                 recv_x_scales,
                 std::nullopt,
@@ -471,6 +559,34 @@ DeepEPDispatchOutput DeepEPBuffer::intranodeDispatch(const torch::Tensor&       
         RTP_LLM_CHECK(num_tokens_per_rank.has_value());
         RTP_LLM_CHECK(num_tokens_per_expert.has_value());
         RTP_LLM_CHECK(is_token_in_rank.has_value());
+#if USE_ACCL_EP
+        auto [recv_x,
+              recv_x_scales,
+              recv_topk_idx,
+              recv_topk_weights,
+              num_recv_tokens_per_expert_list,
+              rank_prefix_matrix,
+              channel_prefix_matrix,
+              recv_channel_prefix_matrix,
+              recv_src_idx,
+              send_head,
+              recv_event] = buffer_->intranode_dispatch(x,
+                                                        x_scales,
+                                                        topk_idx,
+                                                        topk_weights,
+                                                        num_tokens_per_rank,
+                                                        is_token_in_rank.value(),
+                                                        num_tokens_per_expert,
+                                                        0, /*cached_num_recv_tokens*/
+                                                        std::nullopt,
+                                                        std::nullopt,
+                                                        expert_alignment,
+                                                        0, /*num_worst_tokens*/
+                                                        config,
+                                                        event,
+                                                        async_finish,
+                                                        allocate_on_comm_stream);
+#else
         auto [recv_x,
               recv_x_scales,
               recv_topk_idx,
@@ -496,6 +612,7 @@ DeepEPDispatchOutput DeepEPBuffer::intranodeDispatch(const torch::Tensor&       
                                                         event,
                                                         async_finish,
                                                         allocate_on_comm_stream);
+#endif
         DeepEPDispatchHandle handle;
         handle.intra_handle = DeepEPDispatchHandleIntra(rank_prefix_matrix,
                                                         channel_prefix_matrix,
@@ -697,7 +814,21 @@ DeepEPCombineOutput DeepEPBuffer::intranodeCombine(const torch::Tensor&         
                                                    bool                                            async_finish,
                                                    bool allocate_on_comm_stream) {
     RTP_LLM_CHECK(handle.has_value());
-    std::optional<deep_ep::EventHandle> event    = previous_event != nullptr ? previous_event->event() : std::nullopt;
+    std::optional<deep_ep::EventHandle> event = previous_event != nullptr ? previous_event->event() : std::nullopt;
+#if USE_ACCL_EP
+    auto [recv_x, recv_topk_weights, recv_event] = buffer_->intranode_combine(x,
+                                                                              topk_weights,
+                                                                              std::nullopt, /*bias_0*/
+                                                                              std::nullopt, /*bias_1*/
+                                                                              handle->recv_src_idx,
+                                                                              handle->rank_prefix_matrix,
+                                                                              handle->recv_channel_prefix_matrix,
+                                                                              handle->send_head,
+                                                                              config,
+                                                                              event,
+                                                                              async_finish,
+                                                                              allocate_on_comm_stream);
+#else
     auto [recv_x, recv_topk_weights, recv_event] = buffer_->intranode_combine(x,
                                                                               topk_weights,
                                                                               handle->recv_src_idx,
@@ -708,6 +839,7 @@ DeepEPCombineOutput DeepEPBuffer::intranodeCombine(const torch::Tensor&         
                                                                               event,
                                                                               async_finish,
                                                                               allocate_on_comm_stream);
+#endif
     return {recv_x, recv_topk_weights, make_shared<EventOverlap>(recv_event)};
 }
 
@@ -723,7 +855,24 @@ DeepEPCombineOutput DeepEPBuffer::internodeCombine(const torch::Tensor&         
     RTP_LLM_CHECK(handle.has_value());
 
     std::optional<deep_ep::EventHandle> event = previous_event != nullptr ? previous_event->event() : std::nullopt;
-
+#if USE_ACCL_EP
+    auto [combined_x, combined_topk_weights, recv_event] =
+        buffer_->internode_combine(x,
+                                   topk_weights,
+                                   std::nullopt, /*bias_0*/
+                                   std::nullopt, /*bias_1*/
+                                   handle->recv_src_meta.value(),
+                                   handle->is_token_in_rank,
+                                   handle->recv_rdma_channel_prefix_matrix.value(),
+                                   handle->recv_rdma_rank_prefix_sum,
+                                   handle->recv_gbl_channel_prefix_matrix.value(),
+                                   handle->send_rdma_head.value(),
+                                   handle->send_nvl_head.value(),
+                                   config,
+                                   event,
+                                   async_finish,
+                                   allocate_on_comm_stream);
+#else
     auto [combined_x, combined_topk_weights, recv_event] =
         buffer_->internode_combine(x,
                                    topk_weights,
@@ -738,6 +887,7 @@ DeepEPCombineOutput DeepEPBuffer::internodeCombine(const torch::Tensor&         
                                    event,
                                    async_finish,
                                    allocate_on_comm_stream);
+#endif
     return {combined_x, combined_topk_weights, make_shared<EventOverlap>(recv_event)};
 }
 
@@ -780,7 +930,7 @@ receive. As mentioned before, all not tokens are valid in `recv_x`.
  * hook: the receiving hook function (valid only if `return_recv_hook` is set).
 */
 DeepEPDispatchOutputLowLatency DeepEPBuffer::lowLatencyDispatch(const torch::Tensor& x,
-                                                                const torch::Tensor& topk_idx,
+                                                                torch::Tensor&       topk_idx,
                                                                 int                  num_max_dispatch_tokens_per_rank,
                                                                 int                  num_experts,
                                                                 bool                 use_fp8,
@@ -795,7 +945,35 @@ DeepEPDispatchOutputLowLatency DeepEPBuffer::lowLatencyDispatch(const torch::Ten
 
     // only several top-k shapes are supported
     RTP_LLM_CHECK(topk_idx.scalar_type() == torch::kLong);
+#if USE_ACCL_EP
+    int ll_opt_level = autil::EnvUtil::getEnv("ACCL_LOW_LATENCY_OPTIMIZE", 0);
+    // Acclep rebalance experts (not used in rtpllm)
+    torch::Tensor log2phy_offsets = torch::empty(0, torch::dtype(torch::kInt).device(torch::kCUDA));
+    torch::Tensor log2phy_values  = torch::empty(0, torch::dtype(torch::kInt).device(torch::kCUDA));
+    torch::Tensor log_idx_counter = torch::empty(0, torch::dtype(torch::kInt).device(torch::kCUDA));
 
+    auto [packed_recv_x,
+          packed_recv_x_scales,
+          packed_recv_count,
+          packed_recv_src_info,
+          packed_recv_layout_range,
+          event,
+          hook] = buffer_->low_latency_dispatch(x,
+                                                topk_idx,
+                                                std::nullopt,
+                                                num_max_dispatch_tokens_per_rank,
+                                                num_experts,
+                                                use_fp8,
+                                                false, /*round_scale*/
+                                                false, /*use_ue8m0*/
+                                                async_finish,
+                                                return_recv_hook,
+                                                ll_opt_level,
+                                                false, /*rebalance*/
+                                                log2phy_offsets,
+                                                log2phy_values,
+                                                log_idx_counter);
+#else
     auto [packed_recv_x,
           packed_recv_x_scales,
           packed_recv_count,
@@ -805,7 +983,7 @@ DeepEPDispatchOutputLowLatency DeepEPBuffer::lowLatencyDispatch(const torch::Ten
           hook] =
         buffer_->low_latency_dispatch(
             x, topk_idx, num_max_dispatch_tokens_per_rank, num_experts, use_fp8, async_finish, return_recv_hook);
-
+#endif
     DeepEPDispatchHandleLowLatency handle(
         packed_recv_src_info, packed_recv_layout_range, num_max_dispatch_tokens_per_rank, num_experts);
 
@@ -863,7 +1041,21 @@ DeepEPCombineOutputLowLatency DeepEPBuffer::lowLatencyCombine(const torch::Tenso
     RTP_LLM_CHECK(x.scalar_type() == c10::kBFloat16);
     RTP_LLM_CHECK(topk_idx.scalar_type() == c10::kLong);
     RTP_LLM_CHECK(topk_weights.scalar_type() == c10::kFloat);
-
+#if USE_ACCL_EP
+    int ll_opt_level               = autil::EnvUtil::getEnv("ACCL_LOW_LATENCY_OPTIMIZE", 0);
+    auto [combined_x, event, hook] = buffer_->low_latency_combine(x,
+                                                                  topk_idx,
+                                                                  topk_weights,
+                                                                  handle.packed_recv_src_info,
+                                                                  handle.packed_recv_layout_range,
+                                                                  handle.num_max_dispatch_tokens_per_rank,
+                                                                  handle.num_experts,
+                                                                  false /*zero_copy*/,
+                                                                  async_finish,
+                                                                  return_recv_hook,
+                                                                  ll_opt_level,
+                                                                  std::nullopt /*out tensor*/);
+#else
     auto [combined_x, event, hook] = buffer_->low_latency_combine(x,
                                                                   topk_idx,
                                                                   topk_weights,
@@ -874,6 +1066,7 @@ DeepEPCombineOutputLowLatency DeepEPBuffer::lowLatencyCombine(const torch::Tenso
                                                                   false /*zero_copy*/,
                                                                   async_finish,
                                                                   return_recv_hook);
+#endif
 
     printTorchTensorData(combined_x, "combine combined_x");
     std::shared_ptr<EventOverlap> event_overlap;

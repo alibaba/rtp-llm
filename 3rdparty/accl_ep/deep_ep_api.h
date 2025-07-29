@@ -10,7 +10,8 @@ inline Buffer* createDeepEPBuffer(int     world_rank,
                            int64_t num_nvl_bytes,
                            int64_t num_rdma_bytes,
                            bool    low_latency_mode,
-                           bool    use_nvshmem_transport) {
-    return new Buffer(world_rank, world_size, num_nvl_bytes, num_rdma_bytes, low_latency_mode);
+                           bool    use_nvshmem_transport = true) {
+    bool allow_nvlink_for_low_latency_mode = true;
+    return new Buffer(world_rank, world_size, num_nvl_bytes, num_rdma_bytes, low_latency_mode, allow_nvlink_for_low_latency_mode, local_world_size);
 }
 }  // namespace deep_ep
