@@ -394,15 +394,16 @@ const CacheManager::KVCacheBuffer& CacheManager::kvCacheBuffer() const {
 }
 
 CacheManager::MatchInfo CacheManager::mallocWithCache(const AdvancedMallocInfo& malloc_info) {
-    if (malloc_info.token_ids.empty() || malloc_info.token_ids.size() < config_.seq_size_per_block + 1) {
+    if (malloc_info.token_ids.size() < config_.seq_size_per_block + 1) {
         return MatchInfo{};
     }
 
-    auto match_begin_time_us = currentTimeUs();
-    auto match_info          = matchImpl(malloc_info);
-    auto match_cost_time_us  = currentTimeUs() - match_begin_time_us;
+    std::lock_guard<std::mutex> guard(mutex_);
+    auto                        match_begin_time_us = currentTimeUs();
+    auto                        match_info          = matchImpl(malloc_info);
+    auto                        match_cost_time_us  = currentTimeUs() - match_begin_time_us;
     if (match_info.loss.empty() && malloc_info.need_loss) {
-        free(match_info.cache_blocks);
+        freeWithoutLock(match_info.cache_blocks);
         return {0, {}, {}};
     }
     if (metrics_reporter_) {
@@ -417,6 +418,7 @@ CacheManager::MatchInfo CacheManager::mallocWithCache(const AdvancedMallocInfo& 
     return match_info;
 }
 
+// This function must not hold mutex_
 CacheManager::MatchInfo CacheManager::matchImpl(const AdvancedMallocInfo& malloc_info) {
     // match in gpu
     auto match_result = block_cache_.match(malloc_info.cache_keys);
@@ -447,7 +449,7 @@ CacheManager::MatchInfo CacheManager::matchImpl(const AdvancedMallocInfo& malloc
     if (reuse_block_num < cache_block_num) {
         std::vector<int> need_decref_blocks(match_result.block_indices.begin() + reuse_block_num,
                                             match_result.block_indices.end());
-        free(need_decref_blocks);
+        freeWithoutLock(need_decref_blocks);
     }
 
     RTP_LLM_CHECK_WITH_INFO((reuse_block_num <= cache_block_num),
@@ -544,6 +546,11 @@ void CacheManager::free(const std::vector<KVCacheResource>& resource) {
 
 void CacheManager::free(const std::vector<int>& block_indices) {
     std::lock_guard<std::mutex> guard(mutex_);
+    decrQueryRefCounter(block_indices);
+    freeImpl(block_indices);
+}
+
+void CacheManager::freeWithoutLock(const std::vector<int>& block_indices) {
     decrQueryRefCounter(block_indices);
     freeImpl(block_indices);
 }
@@ -923,9 +930,8 @@ void CacheManager::matchInDistKvCache(const AdvancedMallocInfo& malloc_info, Blo
     }
 
     std::vector<int64_t> matched_cache_keys(cache_keys.begin(), cache_keys.begin() + matched_len);
-    if (!dist_kvcache_->getForAllRank(
-            matched_cache_keys, resource.block_id, local_matched_len, request_id, extra_metas)) {
-        free(resource.block_id);
+    if (!dist_kvcache_->getForAllRank(matched_cache_keys, block_ids, local_matched_len, request_id, extra_metas)) {
+        freeWithoutLock(block_ids);
         return;
     }
 

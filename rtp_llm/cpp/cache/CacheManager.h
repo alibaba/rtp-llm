@@ -190,6 +190,7 @@ protected:
     std::tuple<bool, std::vector<int>> mallocImpl(const SimpleMallocInfo& malloc_info);
     void                               maybeFreeBlockFromCache(int nums);
 
+    void freeWithoutLock(const std::vector<int>& indice);
     void freeImpl(const std::vector<int>& indice);
     void insertIntoCache(FreeInfo& free_info);
 
