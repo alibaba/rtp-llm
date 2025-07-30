@@ -19,12 +19,13 @@ from rtp_llm.utils.concurrency_controller import (
 )
 
 
-def start_frontend_server(server_id: int, global_controller: ConcurrencyController):
+def start_frontend_server(rank_id: int, server_id: int, global_controller: ConcurrencyController):
     ## collect all args and envs.
     py_env_configs = PyEnvConfigs()
     py_env_configs.update_from_env()
     py_env_configs.server_config.frontend_server_id = server_id
-    setproctitle(f"rtp_llm_frontend_server_{server_id}")
+    py_env_configs.server_config.rank_id = rank_id
+    setproctitle(f"rtp_llm_frontend_server_rank_{rank_id}_server_{server_id}")
     app = None
     g_frontend_server_info = FrontendServerInfo(
         py_env_configs.server_config.frontend_server_id

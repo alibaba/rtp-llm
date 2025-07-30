@@ -44,6 +44,7 @@ class ServerConfig:
         self.start_port = DEFAULT_START_PORT
         self.timeout_keep_alive = 5
         self.frontend_server_id = 0
+        self.rank_id = 0
 
     def update_from_env(self):
         self.frontend_server_count = int(
@@ -62,7 +63,8 @@ class ServerConfig:
             f"frontend_server_count: {self.frontend_server_count}\n"
             f"start_port: {self.start_port}\n"
             f"timeout_keep_alive: {self.timeout_keep_alive}\n"
-            f"frontend_server_id: {self.frontend_server_id}"
+            f"frontend_server_id: {self.frontend_server_id}\n"
+            f"rank_id: {self.rank_id}"
         )
 
 

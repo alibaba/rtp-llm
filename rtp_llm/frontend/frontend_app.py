@@ -18,7 +18,7 @@ from uvicorn.loops.auto import auto_loop_setup
 
 from rtp_llm.config.py_config_modules import PyEnvConfigs, StaticConfig
 from rtp_llm.config.uvicorn_config import UVICORN_LOGGING_CONFIG
-from rtp_llm.distribute.worker_info import g_worker_info
+from rtp_llm.distribute.worker_info import g_worker_info, WorkerInfo
 from rtp_llm.frontend.frontend_server import FrontendServer
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
@@ -57,6 +57,10 @@ class FrontendApp(object):
         self.py_env_configs = py_env_configs
         self.frontend_server = FrontendServer(separated_frontend)
         self.separated_frontend = separated_frontend
+        g_worker_info.server_port = WorkerInfo.server_port_offset(self.py_env_configs.server_config.rank_id, g_worker_info.server_port)
+        g_worker_info.backend_server_port = WorkerInfo.server_port_offset(self.py_env_configs.server_config.rank_id, g_worker_info.backend_server_port)
+        logging.info(f"rank_id = {self.py_env_configs.server_config.rank_id}, "
+            f"server_port = {g_worker_info.server_port}, backend_server_port = {g_worker_info.backend_server_port}")
 
     def start(self):
         self.frontend_server.start()
