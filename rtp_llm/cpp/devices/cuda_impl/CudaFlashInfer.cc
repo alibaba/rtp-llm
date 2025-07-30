@@ -268,22 +268,23 @@ void FlashInferAttnParams::genPlan(int     batch_size,
         }
     } else {
         if (decode_plan) {
-            plan = BatchDecodeWithPagedKVCachePlan(float_workspace_d,  // float_workspace_buffer
-                                                   int_workspace_d,    // int_workspace_buffer
-                                                   int_workspace_h,    // page_locked_int_workspace_buffer
-                                                   page_indptr_h,      // indptr
-                                                   batch_size,         // batch_size
-                                                   local_head_num,     // num_qo_heads
-                                                   local_head_num_kv,  // num_kv_heads
-                                                   tokens_per_block,   // page_size
-                                                   enable_cuda_graph,  // enable_cuda_graph,
-                                                   -1,                 // window_left
-                                                   -1,                 // logits_soft_cap
-                                                   size_per_head,      // head_dim_qk
-                                                   size_per_head,      // head_dim_vo
-                                                   torch::empty(0, dataTypeToTorchType(dtype == DataType::TYPE_FP8_E4M3 ? DataType::TYPE_FP16 : dtype)),
-                                                   torch::empty(0, dataTypeToTorchType(dtype)),  // empty_kv_data
-                                                   stream);
+            plan = BatchDecodeWithPagedKVCachePlan(
+                float_workspace_d,  // float_workspace_buffer
+                int_workspace_d,    // int_workspace_buffer
+                int_workspace_h,    // page_locked_int_workspace_buffer
+                page_indptr_h,      // indptr
+                batch_size,         // batch_size
+                local_head_num,     // num_qo_heads
+                local_head_num_kv,  // num_kv_heads
+                tokens_per_block,   // page_size
+                enable_cuda_graph,  // enable_cuda_graph,
+                -1,                 // window_left
+                -1,                 // logits_soft_cap
+                size_per_head,      // head_dim_qk
+                size_per_head,      // head_dim_vo
+                torch::empty(0, dataTypeToTorchType(dtype == DataType::TYPE_FP8_E4M3 ? DataType::TYPE_FP16 : dtype)),
+                torch::empty(0, dataTypeToTorchType(dtype)),  // empty_kv_data
+                stream);
 
         } else {
             plan = BatchPrefillWithKVCachePlan(
@@ -463,7 +464,10 @@ ParamsPtr FlashInferAttnParams::prepare(rtp_llm::DeviceBase*             device,
     } else {
         params->decode_plan = true;
     }
-    bool enable_cuda_graph = device->initParams().hw_kernel_config.enable_cuda_graph;
+
+    // Todo(tuowu): flashinfer: do not use partition-kv kernel for short sequence, when not using CUDAGraph .
+    // check how short as `short sequence`.
+    // bool enable_cuda_graph = device->initParams().hw_kernel_config.enable_cuda_graph;
     params->genPlan(batch_size,
                     q_length,
                     local_head_num,
@@ -473,7 +477,7 @@ ParamsPtr FlashInferAttnParams::prepare(rtp_llm::DeviceBase*             device,
                     attn_configs.kv_lora_rank,
                     attn_configs.use_mla,
                     reinterpret_cast<int64_t>(cuda_device->getStream()),
-                    enable_cuda_graph);  // cuda_stream
+                    false);  // cuda_stream
 
     return ret;
 }

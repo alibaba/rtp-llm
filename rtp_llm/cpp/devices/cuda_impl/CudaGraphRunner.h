@@ -30,6 +30,15 @@ public:
             throw std::runtime_error("CudaGraphRunner constructor: Python instance is null or none.");
         }
         py_forward_method_ = py_instance_.attr("forward");
+        RTP_LLM_LOG_INFO("Initialize CudaGraphRunner with parameters below: \n \
+            enable_cuda_graph_: %d, concurrency_limit_: %d, enable_cuda_graph_debug_mode_: %d, hidden_size_: %d, max_seq_len_: %d, seq_size_per_block_: %d, kv_cache_block_offset_: %d",
+                         enable_cuda_graph_,
+                         concurrency_limit_,
+                         enable_cuda_graph_debug_mode_,
+                         hidden_size_,
+                         max_seq_len_,
+                         seq_size_per_block_,
+                         kv_cache_block_offset_);
     }
     ~CudaGraphRunner() {
         RTP_LLM_LOG_INFO("Release CudaGraphRunner .....");
@@ -48,22 +57,23 @@ public:
     PyModelOutputs forward(PyModelInputs& inputs) override;
 
 private:
-    std::vector<int>                       getBatchSizesToCapture(int concurrency_limit);
-    py::object                             py_forward_method_;
-    bool                                   enable_cuda_graph_{false};
-    int                                    concurrency_limit_{32};
-    at::cuda::CUDAStream                   capture_stream_;
-    bool                                   enable_cuda_graph_debug_mode_{false};
-    int                                    hidden_size_;
-    size_t                                 max_bs_{1};
-    int                                    num_tokens_per_bs_{1};
-    int                                    max_num_token_{1};
-    int                                    current_batch_size_{1};
-    int                                    current_real_graph_bs_{1};
-    int                                    max_seq_len_{0};
-    int                                    seq_size_per_block_{0};
-    int                                    kv_cache_block_offset_{0};
-    std::vector<int>                       capture_range_;
+    void                 copySmallerIntoLarger(const torch::Tensor& source_tensor, torch::Tensor& target_tensor);
+    std::vector<int>     getBatchSizesToCapture(int concurrency_limit);
+    py::object           py_forward_method_;
+    bool                 enable_cuda_graph_{false};
+    int                  concurrency_limit_{32};
+    at::cuda::CUDAStream capture_stream_;
+    bool                 enable_cuda_graph_debug_mode_{false};
+    int                  hidden_size_;
+    size_t               max_bs_{1};
+    int                  num_tokens_per_bs_{1};
+    int                  max_num_token_{1};
+    int                  current_batch_size_{1};
+    int                  current_real_graph_bs_{1};
+    int                  max_seq_len_{0};
+    int                  seq_size_per_block_{0};
+    int                  kv_cache_block_offset_{0};
+    std::vector<int>     capture_range_;
     std::unordered_map<int, GraphInstance> graph_instances_;
     CaptureMemoryHold                      capture_mem_hold_;
 

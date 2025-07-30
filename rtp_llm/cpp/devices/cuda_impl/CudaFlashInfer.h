@@ -85,8 +85,6 @@ private:
 
     static FlashInferAttnParams* create(CudaDevice* device, int batch_size, int token_num, int page_num);
 
-    void refreshFlashInferBuf(CudaDevice* device, int batch_size, int token_num);
-
     void genPlan(int     batch_size,
                  int     q_length,
                  int     local_head_num,
@@ -109,6 +107,7 @@ public:
                                                 const BufferPtr& kv_cache_block_id_host,
                                                 const int        batch_size,
                                                 const int        tokens_per_block);
+    void                         refreshFlashInferBuf(CudaDevice* device, int batch_size, int token_num);
     static FlashInferAttnParams* get(int batch_size, int input_token_num);
 };
 
@@ -119,5 +118,4 @@ struct ParamsCache {
     static inline std::deque<FlashInferAttnParams*> DECODE_PARAMS_CACHE;
     static inline std::deque<FlashInferAttnParams*> PREFILL_PARAMS_CACHE;
 };
-
 }  // namespace rtp_llm

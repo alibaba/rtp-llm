@@ -194,6 +194,10 @@ CudaDevice::~CudaDevice() {
         ncclCommDestroy(dp_tp_nccl_param_.nccl_comm_);
     }
     cache_store_.reset();
+    // release `graph_runner_`
+    if (graph_runner_) {
+        delete graph_runner_;
+    }
 }
 
 void CudaDevice::preRun() {

@@ -46,9 +46,6 @@ void CudaGraphRunner::captureOneBatchSize(int bs) {
         }
         if (param_shared_ptr == nullptr) {
             auto param_ptr = FlashInferAttnParams::get(batch_size, input_token_num);
-            std::cout << "ParamsCache::DECODE_PARAMS_CACHE.size: " << ParamsCache::DECODE_PARAMS_CACHE.size()
-                      << ", ParamsCache::PREFILL_PARAMS_CACHE" << ParamsCache::PREFILL_PARAMS_CACHE.size() << std::endl;
-            std::cout << "addr: " << param_ptr << std::endl;
             FlashInferAttnParams::recycle(param_ptr);
             param_shared_ptr = std::shared_ptr<FlashInferAttnParams>(param_ptr);
             cache->push_back(param_shared_ptr);
@@ -91,16 +88,40 @@ void CudaGraphRunner::capture() {
     RTP_LLM_LOG_INFO("Capture End");
 }
 
+void CudaGraphRunner::copySmallerIntoLarger(const torch::Tensor& source_tensor, torch::Tensor& target_tensor) {
+    if (source_tensor.dim() != target_tensor.dim()) {
+        throw std::runtime_error("Error: Source and target tensors must have the same number of dimensions.");
+    }
+
+    for (int i = 0; i < source_tensor.dim(); ++i) {
+        if (source_tensor.size(i) > target_tensor.size(i)) {
+            std::string error_msg =
+                "Error: Target tensor dimension " + std::to_string(i) + " (" + std::to_string(target_tensor.size(i))
+                + ")" + " is smaller than source tensor dimension " + std::to_string(i) + " ("
+                + std::to_string(source_tensor.size(i)) + "). " + "This violates the function's guarantee.";
+            throw std::runtime_error(error_msg);
+        }
+    }
+
+    torch::Tensor target_slice = target_tensor;
+
+    for (int i = 0; i < source_tensor.dim(); ++i) {
+        target_slice = target_slice.slice(i, 0, source_tensor.size(i));
+    }
+
+    target_slice.copy_(source_tensor);
+}
+
 void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
-    auto py_model_inputs_ = graph_instances_[current_real_graph_bs_].mem_hold_.py_model_inputs_;
+    auto& py_model_inputs_ = graph_instances_[current_real_graph_bs_].mem_hold_.py_model_inputs_;
     py_model_inputs_.input_ids.fill_(0);
     py_model_inputs_.input_ids.slice(0, 0, current_batch_size_ * num_tokens_per_bs_) = inputs.input_ids;
     py_model_inputs_.attention_inputs.input_lengths.slice(0, 0, current_batch_size_) =
         inputs.attention_inputs.input_lengths;
     py_model_inputs_.attention_inputs.sequence_lengths.slice(0, 0, current_batch_size_) =
         inputs.attention_inputs.sequence_lengths;
-    py_model_inputs_.attention_inputs.kv_cache_block_id_device.slice(0, 0, current_batch_size_) =
-        inputs.attention_inputs.kv_cache_block_id_device;
+    copySmallerIntoLarger(inputs.attention_inputs.kv_cache_block_id_device,
+                          py_model_inputs_.attention_inputs.kv_cache_block_id_device);
     // pinned memory
     inputs.attention_inputs.cu_seqlens =
         py_model_inputs_.attention_inputs.cu_seqlens.slice(0, 0, current_batch_size_ + 1);
@@ -111,6 +132,8 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
         torchTensor2Buffer(inputs.attention_inputs.kv_cache_block_id_host),
         current_batch_size_,
         seq_size_per_block_);
+    graph_instances_[current_real_graph_bs_].mem_hold_.params_->refreshFlashInferBuf(
+        dynamic_cast<CudaDevice*>(device_), current_batch_size_, inputs.attention_inputs.input_lengths.size(0));
 }
 
 PyModelOutputs CudaGraphRunner::forward(PyModelInputs& inputs) {
