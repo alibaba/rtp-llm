@@ -10,7 +10,7 @@ rpm_library(
     lib_path = "usr/lib64",
     include_path = "usr/include",
     shared_libs = [
-        "accl_ep_cpp.cpython-310-x86_64-linux-gnu.so",
+        "libaccl_ep.so",
     ],
     deps = [
         ":accl_ep_hdrs",

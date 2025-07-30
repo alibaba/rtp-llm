@@ -23,6 +23,15 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 
+copy_files(
+    name = "copy_acclep_libs",
+    srcs = select({
+        "//rtp_llm/cpp/devices/cuda_impl:use_accl_ep": ["//3rdparty/accl_ep:accl_ep_shared"],
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:public"],
+)
+
 genrule(
     name = "aiter_src_copy",
     srcs = ["@aiter_src//:cpp_libraries"],
@@ -104,5 +113,6 @@ filegroup(
         ":libth_transformer_so",
         ":copy_hf3fs_libs",
         ":copy_aiter",
+        ":copy_acclep_libs",
     ] + kernel_so_deps()
 )
