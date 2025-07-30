@@ -99,6 +99,8 @@ inline c10::ScalarType dataTypeToTorchType(DataType data_type) {
             return torch::kInt;
         case TYPE_BYTES:
             return torch::kByte;
+        case TYPE_QFP8_E4M3:
+            return TORCH_FP8_E4M3_TYPE;
         default:
             printStackTrace();
             RTP_LLM_LOG_ERROR("Unsupported data type: [%d]", data_type);
