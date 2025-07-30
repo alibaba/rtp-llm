@@ -894,12 +894,6 @@ AttentionModuleOutput ROCmDevice::decoderSelfAttention(const AttentionModulePara
             params.common.kv_cache->k_cache_buffer->shape()[0] * params.common.kv_cache->layer_num);
         prefix_prompt_param.offset_kv_block_array = offset_kv_block_array;
 
-        if (params.common.prefix_prompt_lengths) {
-            prefix_prompt_param.d_prefix_prompt_lengths  = params.common.prefix_prompt_lengths->data<int>();
-            prefix_prompt_param.max_prefix_prompt_length = params.common.max_prefix_length;
-            prefix_prompt_param.count_length             = 1;
-        }
-
         auto   token_num          = params.input.shape()[0];
         auto   decoder_batch_size = params.common.decoder_batch_size;
         auto   head_num           = params.configs.head_num;
