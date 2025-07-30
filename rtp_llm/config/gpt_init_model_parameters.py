@@ -643,6 +643,7 @@ class GptInitModelParameters:
             enable_cuda_graph_debug_mode=get_env_bool(
                 "ENABLE_CUDA_GRAPH_DEBUG_MODE", False
             ),
+            use_aiter_pa=get_env_bool("USE_AITER_PA", True),
         )
 
         # DeviceResourceConfig
@@ -1009,7 +1010,6 @@ class GptInitModelParameters:
         self.max_rpc_timeout_ms = int(os.environ.get("MAX_RPC_TIMEOUT_MS", 0))
         logging.info(f"max_rpc_timeout_ms: {self.max_rpc_timeout_ms}")
 
-
         self.max_batch_tokens_size = int(
             os.environ.get(
                 "MAX_BATCH_TOKENS_SIZE", self.max_context_batch_size * self.max_seq_len
@@ -1078,7 +1078,9 @@ class GptInitModelParameters:
                 f"decode_use_async_load_cache: {self.decode_use_async_load_cache}"
             )
 
-            if (not self.decode_entrance and self.role_type in [RoleType.PREFILL]) or (self.decode_entrance and self.role_type in [RoleType.DECODE]):
+            if (not self.decode_entrance and self.role_type in [RoleType.PREFILL]) or (
+                self.decode_entrance and self.role_type in [RoleType.DECODE]
+            ):
                 self.pd_sep_enable_fallback = bool(
                     int(os.environ.get("PD_SEP_ENABLE_FALLBACK", 0))
                 )

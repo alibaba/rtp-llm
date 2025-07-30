@@ -9,7 +9,7 @@
 #include "rtp_llm/cpp/rocm/hip_utils.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/devices/rocm_impl/aiterPA.h"
-
+#include "rtp_llm/cpp/th_op/ConfigModules.h"
 #include <filesystem>
 namespace fs = std::filesystem;
 
@@ -421,7 +421,7 @@ ParamsPtr FlashInferAttnParams::prepareDecodeFlashInferAttnParams(rtp_llm::Devic
 ParamsPtr AiterAttnParams::prepareDecodeAiterAttnParams(rtp_llm::DeviceBase* device,
                                                         const BufferPtr&     sequence_lengths_host) {
 
-    if (autil::EnvUtil::getEnv("USE_AITER_PA", 1L) == 0) {
+    if (!StaticConfig::use_aiter_pa) {
         return nullptr;
     }
 
@@ -592,7 +592,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                                     && !params.configs.fuse_qkv_add_bias);
     RTP_LLM_LOG_DEBUG("skip_add_bias_transpose: %d", skip_add_bias_transpose);
     if (!skip_add_bias_transpose) {
-        if (autil::EnvUtil::getEnv("USE_AITER_PA", 1L)) {
+        if (StaticConfig::use_aiter_pa) {
             DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
                                              invokeAddFusedQKVBiasTransposePrefill,
                                              q_output->data(),
@@ -885,7 +885,7 @@ AttentionModuleOutput ROCmDevice::decoderSelfAttention(const AttentionModulePara
     auto       kv_cache_offset      = allocateBuffer(
         {DataType::TYPE_INT32, {batch_size, 1, 2, max_blocks_per_batch}, AllocationType::DEVICE}, {"kv_cache_offset"});
 
-    if (autil::EnvUtil::getEnv("USE_AITER_PA", 1L)) {
+    if (StaticConfig::use_aiter_pa) {
         KVBlockArray kv_block_array = getKVBlockArray(params, *kv_cache_offset, batch_size, false, true);
         PrefixPromptBatchWeightsParam prefix_prompt_param;
         auto                          offset_kv_block_array = OffsetIndexedKVBlockArray(

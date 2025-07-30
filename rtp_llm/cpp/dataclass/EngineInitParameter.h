@@ -41,6 +41,7 @@ struct EngineInitParams: public th::jit::CustomClassHolder {
         StaticConfig::user_disable_pdl = gpt_init_parameter.misc_config.disable_pdl;
         StaticConfig::user_torch_cuda_profiler_dir =
             gpt_init_parameter.profiling_debug_logging_config.torch_cuda_profiler_dir;
+        StaticConfig::use_aiter_pa = gpt_init_parameter.hw_kernel_config.use_aiter_pa;
         // default 1 minute and 1000
         StepRecorder::STEP_RECORDS_TIME_RANGE = gpt_init_parameter.misc_config.step_records_time_range;
         StepRecorder::STEP_RECORDS_MAX_SIZE   = gpt_init_parameter.misc_config.step_records_max_size;

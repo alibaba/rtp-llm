@@ -520,6 +520,7 @@ class HWKernelConfig:
     enable_merge_w13: bool
     enable_cuda_graph: bool
     enable_cuda_graph_debug_mode: bool
+    use_aiter_pa: bool
     def __init__(
         self,
         deep_gemm_num_sm: int = -1,
@@ -531,6 +532,7 @@ class HWKernelConfig:
         enable_merge_w13: bool = False,
         enable_cuda_graph: bool = False,
         enable_cuda_graph_debug_mode: bool = False,
+        use_aiter_pa: bool = True,
     ) -> None: ...
     def to_string(self) -> str: ...
     def update_from_env(self) -> None: ...

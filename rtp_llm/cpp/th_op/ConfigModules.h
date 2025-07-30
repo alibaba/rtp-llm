@@ -14,6 +14,7 @@ struct StaticConfig {
     static bool        user_arm_gemm_use_kai;
     static bool        user_ft_core_dump_on_exception;
     static bool        user_disable_pdl;
+    static bool        use_aiter_pa;
     static std::string user_torch_cuda_profiler_dir;
 };
 
@@ -95,6 +96,7 @@ struct HWKernelConfig {
     bool        enable_merge_w13             = false;
     bool        enable_cuda_graph            = false;
     bool        enable_cuda_graph_debug_mode = false;
+    bool        use_aiter_pa                 = true;
     std::string to_string() const;
     void        update_from_env_for_test();
 };

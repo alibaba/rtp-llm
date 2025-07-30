@@ -84,6 +84,7 @@ class ServerArgsDefaultTest(TestCase):
         self.assertIsNone(env.get("ENABLE_MERGE_W13"))
         self.assertEqual(env.get("ENABLE_CUDA_GRAPH"), "0")
         self.assertEqual(env.get("ENABLE_CUDA_GRAPH_DEBUG_MODE"), "0")
+        self.assertEqual(env.get("USE_AITER_PA"), "1")
 
         # 7. 采样
         self.assertEqual(env.get("MAX_BATCH_SIZE"), "0")
@@ -391,6 +392,8 @@ class ServerArgsSetTest(TestCase):
             "True",
             "--enable_cuda_graph_debug_mode",
             "True",
+            "--use_aiter_pa",
+            "Flase",
             # 7. 采样
             "--max_batch_size",
             "128",
@@ -746,6 +749,7 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env["ENABLE_MERGE_W13"], "1")
         self.assertEqual(env.get("ENABLE_CUDA_GRAPH"), "1")
         self.assertEqual(env.get("ENABLE_CUDA_GRAPH_DEBUG_MODE"), "1")
+        self.assertEqual(env.get("USE_AITER_PA"), "0")
 
         # 7. 采样
         self.assertEqual(env["MAX_BATCH_SIZE"], "128")
