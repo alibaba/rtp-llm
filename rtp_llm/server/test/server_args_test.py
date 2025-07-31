@@ -393,7 +393,7 @@ class ServerArgsSetTest(TestCase):
             "--enable_cuda_graph_debug_mode",
             "True",
             "--use_aiter_pa",
-            "Flase",
+            "False",
             # 7. 采样
             "--max_batch_size",
             "128",

@@ -13,6 +13,7 @@ bool        StaticConfig::user_arm_gemm_use_kai          = false;
 bool        StaticConfig::user_ft_core_dump_on_exception = false;
 bool        StaticConfig::user_disable_pdl               = false;
 std::string StaticConfig::user_torch_cuda_profiler_dir   = "";
+bool        StaticConfig::use_aiter_pa                   = true;
 
 std::string to_lower(const std::string& s) {
     std::string result = s;
