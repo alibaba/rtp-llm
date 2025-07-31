@@ -123,7 +123,8 @@ void DeviceFactory::initDevices(const GptInitParameter& params) {
     RTP_LLM_LOG_INFO("device_params sp_type is %s", sp_type.c_str());
     RTP_LLM_LOG_INFO("device_params sp_model_type is %s", sp_model_type.c_str());
     if (((sp_type == "vanilla") && (sp_model_type == "mixtbstars-mtp"))
-        || ((sp_type == "vanilla") && (sp_model_type == "deepseek-v3-mtp")) || (sp_type == "mtp")) {
+        || ((sp_type == "vanilla") && (sp_model_type == "deepseek-v3-mtp")) || (sp_type == "mtp")
+        || (sp_type == "eagle")) {
         device_params.is_mtp = true;
         RTP_LLM_LOG_INFO("device_params.is_mtp true");
     }

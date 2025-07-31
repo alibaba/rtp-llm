@@ -163,7 +163,7 @@ public:
             debugString().c_str());
     }
 
-private:
+protected:
     size_t history_max_propose_len_ = 0;
     size_t current_step_            = 0;
 };

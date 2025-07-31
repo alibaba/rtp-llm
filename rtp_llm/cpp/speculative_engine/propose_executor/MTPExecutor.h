@@ -20,8 +20,13 @@ public:
                          const std::shared_ptr<lora::LoraManager>&         lora_manager,
                          bool                                              warm_up = false):
         ProposeExecutor(device), sp_type_(sp_type) {
-        propose_step_ = std::min(propose_model_engine_init_params->gen_num_per_circle,
-                                 propose_model_engine_init_params->mtp_model_params_->size());
+
+        if (sp_type_ == "eagle") {
+            propose_step_ = propose_model_engine_init_params->gen_num_per_circle;
+        } else {
+            propose_step_ = std::min(propose_model_engine_init_params->gen_num_per_circle,
+                                     propose_model_engine_init_params->mtp_model_params_->size());
+        }
 
         RTP_LLM_LOG_INFO("create MTPExecutor use propose_step_ is %d, gen_num_per_circle is %d, mtp_model_num is %d",
                          propose_step_,
@@ -48,7 +53,7 @@ public:
                                  std::nullopt,
                  mtp_params->model_id});
             std::unique_ptr<GptModel> new_model;
-            if (sp_type_ == "mtp") {
+            if (sp_type_ == "mtp" || sp_type_ == "eagle") {
                 RTP_LLM_LOG_INFO("prepare mtp model");
                 executor->setGptModel(std::make_unique<MTPModel>(model_params));
                 norm_executor->setGptModel(std::make_unique<MTPModel>(model_params));
@@ -88,7 +93,7 @@ public:
 
     bool updateEplbConfig(const EplbConfig& config) override;
 
-private:
+protected:
     std::string                                  sp_type_;
     size_t                                       propose_step_;
     std::vector<std::shared_ptr<NormalExecutor>> mtp_executors_;

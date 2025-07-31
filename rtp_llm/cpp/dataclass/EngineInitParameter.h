@@ -97,13 +97,13 @@ struct ProposeModelEngineInitParams: public th::jit::CustomClassHolder {
         mtp_model_params_(std::move(mtp_model_params)) {};
 
     bool draftModel() {
-        return sp_type == "vanilla" || sp_type == "mtp" || sp_type == "eagle3";
+        return sp_type == "vanilla" || sp_type == "mtp" || sp_type == "eagle3" || sp_type == "eagle";
     }
 
     const rtp_llm::GptInitParameter& getGptInitParameter() {
         if (sp_type == "vanilla") {
             return vanilla_model_params->gpt_init_parameter;
-        } else if (sp_type == "mtp" || sp_type == "eagle3") {
+        } else if (sp_type == "mtp" || sp_type == "eagle3" || sp_type == "eagle") {
             RTP_LLM_CHECK(!mtp_model_params_->empty());
             RTP_LLM_CHECK(mtp_model_params_->at(0) != nullptr);
             return mtp_model_params_->at(0)->gpt_init_parameter;

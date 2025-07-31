@@ -17,7 +17,8 @@ public:
     static std::tuple<CacheConfig, CacheConfig> createSpConfig(const rtp_llm::GptInitParameter&   score_param,
                                                                const rtp_llm::GptInitParameter&   propose_param,
                                                                const std::optional<WarmUpResult>& warm_up_result,
-                                                               bool                               is_mtp);
+                                                               bool                               is_mtp,
+                                                               bool                               is_eagle);
 
 private:
     static size_t getDefaultRuntimeMemorySize(const rtp_llm::GptInitParameter& param);

@@ -2,6 +2,8 @@
 
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include "rtp_llm/cpp/speculative_engine/propose_executor/MTPStream.h"
+#include "rtp_llm/cpp/speculative_engine/propose_executor/EagleStream.h"
 #include "rtp_llm/cpp/speculative_engine/propose_executor/ProposeExecutor.h"
 #include "rtp_llm/cpp/speculative_engine/score_executor/ScoreExecutor.h"
 #include "rtp_llm/cpp/speculative_engine/speculative_sampler/SpeculativeSampler.h"
@@ -72,12 +74,24 @@ public:
     absl::Status                      stop() override;
     LoadBalanceInfo                   getLoadBalanceInfo(int64_t latest_version) override;
 
+    GenerateStreamPtr makeMTPStream(const GenerateStreamPtr& stream, size_t propose_step) {
+        if (isEagle()) {
+            return std::make_shared<EagleStream>(*stream, propose_step);
+        } else {
+            return std::make_shared<MTPStream>(*stream, propose_step);
+        }
+    }
+
     const ResourceContext& resourceContext() const {
         return resource_context_;
     }
 
     bool isMTPEagle() override {
-        return sp_type_ == "mtp" || sp_type_ == "eagle3";
+        return sp_type_ == "mtp" || isEagle();
+    }
+
+    bool isEagle() {
+        return sp_type_ == "eagle" || sp_type_ == "eagle3";
     }
 
     bool isVanilla() {

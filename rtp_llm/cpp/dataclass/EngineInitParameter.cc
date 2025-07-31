@@ -338,7 +338,7 @@ std::unique_ptr<ProposeModelEngineInitParams> prepareMTPEngineInitParams(size_t 
     auto        sp_model           = model.attr("model");
     std::string sp_type            = model.attr("sp_type").cast<std::string>();
     size_t      gen_num_per_circle = model.attr("gen_num_per_circle").cast<size_t>();
-    RTP_LLM_CHECK(sp_type == "mtp" || sp_type == "eagle3");
+    RTP_LLM_CHECK(sp_type == "mtp" || sp_type == "eagle3" || sp_type == "eagle");
 
     std::unique_ptr<std::vector<std::unique_ptr<EngineInitParams>>> mtp_params =
         std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
@@ -363,6 +363,10 @@ std::unique_ptr<ProposeModelEngineInitParams> prepareMTPEngineInitParams(size_t 
                             py_layers_weights_vec.size());
         model_num = std::min(model_num, size_t(gpt_init_params.gen_num_per_circle_));
     }
+    if (sp_type == "eagle" || sp_type == "eagle3") {
+        model_num = 1;
+    }
+
     auto no_cast_gpt_init_params        = const_cast<rtp_llm::GptInitParameter&>(gpt_init_params);
     no_cast_gpt_init_params.num_layers_ = 1;
 

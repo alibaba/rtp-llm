@@ -96,6 +96,7 @@ class ModelFactory:
             model_config.sp_type == "vanilla"
             or model_config.sp_type == "mtp"
             or model_config.sp_type == "eagle3"
+            or model_config.sp_type == "eagle"
         ):
             if model_config.model_type not in _model_factory:
                 raise Exception(f"model type {model_config.model_type} not registered!")
@@ -239,7 +240,12 @@ class ModelFactory:
         propose_model_config = None
 
         sp_type = StaticConfig.py_speculative_execution_config.sp_type
-        if sp_type == "vanilla" or sp_type == "mtp" or sp_type == "eagle3":
+        if (
+            sp_type == "vanilla"
+            or sp_type == "mtp"
+            or sp_type == "eagle3"
+            or sp_type == "eagle"
+        ):
             logging.info("use vanilla speculative model")
             propose_model_type = (
                 StaticConfig.py_speculative_execution_config.sp_model_type

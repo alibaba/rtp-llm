@@ -2,6 +2,7 @@
 #include <cstdint>
 
 #include "rtp_llm/cpp/speculative_engine/SpeculativeEngine.h"
+#include "rtp_llm/cpp/speculative_engine/propose_executor/EagleExecutor.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
@@ -176,13 +177,17 @@ absl::Status SpeculativeEngine::initCacheManager(std::optional<WarmUpResult> war
         const auto& config                = CacheConfigCreator::createSpConfig(score_model_params_.gpt_init_parameter,
                                                                 propose_model_params_->getGptInitParameter(),
                                                                 warm_up_result,
-                                                                isMTPEagle());
+                                                                isMTPEagle(),
+                                                                isEagle());
         auto        scorer_cache_config   = std::get<0>(config);
         auto        proposer_cache_config = std::get<1>(config);
         resource_context_.cache_manager =
             make_shared<CacheManager>(scorer_cache_config, device_, false, metrics_reporter_);
         if (isMTPEagle()) {
             auto layer_num = propose_model_params_->getGptInitParameter().gen_num_per_circle_;
+            if (isEagle()) {
+                layer_num = 1;
+            }
             RTP_LLM_LOG_INFO("mtp cache manager init use layer num : %d", layer_num);
             for (int i = 0; i < layer_num; i++) {
                 RTP_LLM_CHECK(proposer_cache_config.layer_num == 1);
@@ -218,8 +223,15 @@ WarmUpResult SpeculativeEngine::warmUp() {
     if (isVanilla()) {
         propose_executor_.reset(new VanillaExecutor(propose_model_params_, device_, nullptr, nullptr, true));
     } else if (isMTPEagle()) {
-        propose_executor_.reset(new MTPExecutor(sp_type_, propose_model_params_, device_, {nullptr}, nullptr, true));
+        if (isEagle()) {
+            propose_executor_.reset(
+                new EagleExecutor(sp_type_, propose_model_params_, device_, {nullptr}, nullptr, true));
+        } else {
+            propose_executor_.reset(
+                new MTPExecutor(sp_type_, propose_model_params_, device_, {nullptr}, nullptr, true));
+        }
     }
+
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::prefill_warm_up));
     const auto device_status = device_->getDeviceStatus();
     device_->setTraceMemory(false);
@@ -606,7 +618,7 @@ absl::Status SpeculativeEngine::mtpStep(std::list<GenerateStreamPtr>& streams) {
 
         for (const GenerateStreamPtr& stream : prefill_streams) {
             size_t            propose_step   = 0;
-            GenerateStreamPtr propose_stream = std::make_shared<MTPStream>(*stream, propose_step);
+            GenerateStreamPtr propose_stream = makeMTPStream(stream, propose_step);
 
             SpeculativeExecutorStreamOutputPtr sp_output_buffer_ = propose_stream->getSPOutputBuffer();
             sp_output_buffer_->propose_step                      = 0;
@@ -617,7 +629,7 @@ absl::Status SpeculativeEngine::mtpStep(std::list<GenerateStreamPtr>& streams) {
 
         for (const GenerateStreamPtr& stream : pre_propose_streams) {
             size_t            propose_step   = 1;
-            GenerateStreamPtr propose_stream = std::make_shared<MTPStream>(*stream, propose_step);
+            GenerateStreamPtr propose_stream = makeMTPStream(stream, propose_step);
 
             SpeculativeExecutorStreamOutputPtr sp_output_buffer_ = propose_stream->getSPOutputBuffer();
             sp_output_buffer_->propose_step                      = propose_step;

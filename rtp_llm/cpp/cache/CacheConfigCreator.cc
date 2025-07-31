@@ -160,7 +160,8 @@ std::tuple<CacheConfig, CacheConfig>
 CacheConfigCreator::createSpConfig(const rtp_llm::GptInitParameter&   score_param,
                                    const rtp_llm::GptInitParameter&   propose_param,
                                    const std::optional<WarmUpResult>& warm_up_result,
-                                   bool                               is_mtp = false) {
+                                   bool                               is_mtp   = false,
+                                   bool                               is_eagle = false) {
     CacheConfig score_config = CacheConfigCreator::createBasicConfig(score_param);
 
     CacheConfig propose_config = CacheConfigCreator::createBasicConfig(propose_param, is_mtp);
@@ -170,8 +171,12 @@ CacheConfigCreator::createSpConfig(const rtp_llm::GptInitParameter&   score_para
     } else {
         const auto kv_cache_mem_size = CacheConfigCreator::getKVCacheMemorySize(score_param, warm_up_result);
         if (is_mtp) {
-            block_nums = kv_cache_mem_size
-                         / (score_config.block_size + propose_config.block_size * propose_param.gen_num_per_circle_);
+            auto cache_num = propose_param.gen_num_per_circle_;
+            if (is_eagle) {
+                cache_num = 1;
+            }
+
+            block_nums = kv_cache_mem_size / (score_config.block_size + propose_config.block_size * cache_num);
         } else {
             block_nums = kv_cache_mem_size / (score_config.block_size + propose_config.block_size);
         }
