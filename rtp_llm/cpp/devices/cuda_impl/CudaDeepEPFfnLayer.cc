@@ -42,10 +42,12 @@ bool CudaDevice::initDeepEPBuffer() {
         num_rdma_bytes   = int(1e9);
         //normal ibgda
         if (autil::EnvUtil::getEnv("ACCL_NORMAL_MODE", "IBRC") == "IBGDA") {
+            setenv("ACCL_NORMAL_MODE", "IBGDA", 1);
             num_qps_per_rank = std::max(deep_ep_num_sm / 2, (int)(num_experts / init_params_.ep_size));
         }
         //normal ibrc
         else {
+            setenv("ACCL_NORMAL_MODE", "IBRC", 1);
             num_qps_per_rank = deep_ep_num_sm / 2;
         }
         
