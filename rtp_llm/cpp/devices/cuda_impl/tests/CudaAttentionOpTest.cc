@@ -247,17 +247,20 @@ TEST_F(AttentionOpTest, XqaAttentionOpTest) {
     device_->init();
     ASSERT_TRUE(static_cast<CudaDevice*>(device_)->use_xqa);
     ASSERT_FALSE(static_cast<CudaDevice*>(device_)->use_multi_block_mode);
-    size_t              batch_size = 3;
-    std::vector<size_t> head_dim   = {64, 128, 256};
-    size_t              seq_q      = 1;
-    size_t              seq_kv     = 129;
-    size_t              head_q     = 64;
-    std::vector<size_t> head_kv    = {4, 8, 16, 32, 64};
-    std::vector<size_t> page_size  = {16, 32, 64, 128};
+    size_t              batch_size      = 3;
+    std::vector<size_t> head_dim        = {64, 128, 256};
+    size_t              seq_q           = 1;
+    size_t              seq_kv          = 129;
+    size_t              head_q          = 64;
+    std::vector<size_t> head_kv         = {4, 8, 16, 32, 64};
+    std::vector<size_t> page_size       = {16, 32, 64, 128};
+    std::vector<bool>   is_kv_cache_fp8 = {true, false};
     for (auto hd : head_dim) {
         for (auto hkv : head_kv) {
             for (auto ps : page_size) {
-                xqaAttentionOpTest(batch_size, seq_q, seq_kv, head_q, hkv, hd, ps);
+                for (auto is_kv_fp8 : is_kv_cache_fp8) {
+                    xqaAttentionOpTest(batch_size, seq_q, seq_kv, head_q, hkv, hd, ps, is_kv_fp8);
+                }
             }
         }
     }

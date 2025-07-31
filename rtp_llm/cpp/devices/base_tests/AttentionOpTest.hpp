@@ -133,7 +133,8 @@ public:
                             size_t num_heads,
                             size_t num_key_value_heads,
                             size_t head_dim,
-                            size_t tokens_per_block);
+                            size_t tokens_per_block,
+                            bool   is_kv_cache_fp8);
 
     void flashinferPrefillOpTest(size_t        batch_size,
                                  size_t        seq_len,
@@ -362,8 +363,7 @@ void AttentionOpTest::selfAttentionOpTest(size_t batch_size,
 #ifdef USING_ROCM
     ROCmDevice* device = dynamic_cast<ROCmDevice*>(device_);
     common_inputs.decode_aiter_attn =
-        AiterAttnParams::prepareDecodeAiterAttnParams(
-            device, torchTensor2Buffer(sequence_lengths_host));
+        AiterAttnParams::prepareDecodeAiterAttnParams(device, torchTensor2Buffer(sequence_lengths_host));
 #endif
 
     auto qkv_output = device_->allocateBuffer({qkv_states_device->type(), {token_num, num_heads, head_dim}});
@@ -473,13 +473,12 @@ void AttentionOpTest::aiterPageAttentionOpTest(size_t batch_size,
     common_inputs.decoder_max_seq_len = step - 1;
     common_inputs.max_prefix_length   = 0;
     common_inputs.decode_aiter_attn =
-        AiterAttnParams::prepareDecodeAiterAttnParams(
-            device, torchTensor2Buffer(sequence_lengths_host));
-    auto buffer_nullptr               = BufferPtr(nullptr);
-    auto attention_weight             = AttentionLayerWeights();
-    attention_weight.qkv_weight       = make_shared<const DenseWeights>(DenseWeights(buffer_nullptr, bias_device));
-    auto token_num                    = batch_size * seq_len;
-    auto attention_config             = AttentionConfigs(
+        AiterAttnParams::prepareDecodeAiterAttnParams(device, torchTensor2Buffer(sequence_lengths_host));
+    auto buffer_nullptr         = BufferPtr(nullptr);
+    auto attention_weight       = AttentionLayerWeights();
+    attention_weight.qkv_weight = make_shared<const DenseWeights>(DenseWeights(buffer_nullptr, bias_device));
+    auto token_num              = batch_size * seq_len;
+    auto attention_config       = AttentionConfigs(
         {num_heads, num_key_value_heads, head_dim, num_heads * head_dim, rope_config, tokens_per_block});
     auto qkv_output = device->allocateBuffer({qkv_states_device->type(), {token_num, num_heads, head_dim}});
     AttentionModuleParams params = {
@@ -516,7 +515,8 @@ void AttentionOpTest::xqaAttentionOpTest(size_t batch_size,
                                          size_t num_heads,
                                          size_t num_key_value_heads,
                                          size_t head_dim,
-                                         size_t tokens_per_block) {
+                                         size_t tokens_per_block,
+                                         bool   is_kv_cache_fp8) {
     Attention attention = Attention();
     attention.ptr()->to(torch::Device(torch::kCPU));
     auto               state_dict = attention.ptr()->named_parameters();
@@ -587,15 +587,22 @@ void AttentionOpTest::xqaAttentionOpTest(size_t batch_size,
     auto rope_config = RopeConfig({RopeStyle::Base, rope_dim, rope_theta, 1., 0., 0., max_position_embeddings});
 
     // cache manager need one block for preserve and every seq need one block for preserve.
-    auto block_num = 2 * batch_size * ((kv_seq_len + seq_len + tokens_per_block - 1) / tokens_per_block + 1) + 1;
-    rtp_llm::CacheConfig cache_conf(rtp_llm::KVCacheParam({1,
-                                                           (uint)block_num,
-                                                           (uint)num_key_value_heads,
-                                                           (uint)head_dim,
-                                                           (uint)tokens_per_block,
-                                                           DataType::TYPE_FP8_E4M3}));
-    cache_manager_            = nullptr;
-    auto kv_cache_block_id    = allocateKVBlocks(cache_conf, input_lengths, kvcache_pad_fp8, false);
+    auto block_num  = 2 * batch_size * ((kv_seq_len + seq_len + tokens_per_block - 1) / tokens_per_block + 1) + 1;
+    auto cache_conf = is_kv_cache_fp8 ? rtp_llm::CacheConfig(rtp_llm::KVCacheParam({1,
+                                                                                    (uint)block_num,
+                                                                                    (uint)num_key_value_heads,
+                                                                                    (uint)head_dim,
+                                                                                    (uint)tokens_per_block,
+                                                                                    DataType::TYPE_FP8_E4M3})) :
+                                        rtp_llm::CacheConfig(rtp_llm::KVCacheParam({1,
+                                                                                    (uint)block_num,
+                                                                                    (uint)num_key_value_heads,
+                                                                                    (uint)head_dim,
+                                                                                    (uint)tokens_per_block,
+                                                                                    DataType::TYPE_BF16}));
+    cache_manager_  = nullptr;
+    auto kv_cache_block_id    = is_kv_cache_fp8 ? allocateKVBlocks(cache_conf, input_lengths, kvcache_pad_fp8, false) :
+                                                  allocateKVBlocks(cache_conf, input_lengths, kvcache_pad, false);
     auto kv_cache_buffer      = cache_manager_->kvCacheBuffer();
     auto common_inputs        = AttentionCommonInputs({input_lengths_device, sequence_lengths_device});
     auto layer_k_cache_buffer = kv_cache_buffer.k_blocks->index(0);
@@ -638,7 +645,7 @@ void AttentionOpTest::xqaAttentionOpTest(size_t batch_size,
            tokens_per_block,
            trt_attn->kv_block_array.mPrimaryPoolPtr,
            reinterpret_cast<int32_t*>(const_cast<KVCacheIndex*>(trt_attn->kv_block_array.data)),
-           true,
+           is_kv_cache_fp8,
            reinterpret_cast<uint32_t*>(params.common.sequence_lengths->data()),
            device);
 
