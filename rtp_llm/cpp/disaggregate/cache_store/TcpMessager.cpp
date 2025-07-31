@@ -16,7 +16,7 @@ bool TcpMessager::init(MessagerInitParams params) {
     }
 
     tcp_server_ = std::make_shared<TcpServer>();
-    if (!tcp_server_->init(init_params_.server_port, init_params_.io_thread_count, init_params_.worker_thread_count)) {
+    if (!tcp_server_->init(init_params_.io_thread_count, init_params_.worker_thread_count, true)) {
         RTP_LLM_LOG_WARNING("messager init failed, tcp server init failed");
         return false;
     }

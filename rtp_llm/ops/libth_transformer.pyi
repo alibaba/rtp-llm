@@ -75,6 +75,8 @@ class CacheStoreConfig:
     thread_count: int
     rdma_connect_timeout_ms: int
     rdma_qp_count_per_connection: int
+    messager_io_thread_count: int
+    messager_worker_thread_count: int
     def __init__(
         self,
         cache_store_rdma_mode: bool = False,
@@ -83,6 +85,8 @@ class CacheStoreConfig:
         thread_count: int = 16,
         rdma_connect_timeout_ms: int = 250,
         rdma_qp_count_per_connection: int = 2,
+        messager_io_thread_count: int = 2,
+        messager_worker_thread_count: int = 16,
     ) -> None: ...
     def to_string(self) -> str: ...
     def update_from_env(self) -> None: ...

@@ -37,6 +37,9 @@ public:
 
     bool enable_metric{true};
 
+    uint32_t messager_io_thread_count     = 4;
+    uint32_t messager_worker_thread_count = 32;
+
     rtp_llm::DeviceBase*         device{nullptr};
     kmonitor::MetricsReporterPtr metrics_reporter;
 

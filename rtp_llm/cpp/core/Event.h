@@ -12,6 +12,7 @@ namespace rtp_llm {
 struct DeviceEvent {
     virtual ~DeviceEvent()           = default;
     virtual void synchronize() const = 0;
+    virtual bool checkReadiness() const = 0;
 };
 
 using DeviceEventPtr = std::shared_ptr<DeviceEvent>;

@@ -42,7 +42,6 @@ bool NormalCacheStoreTest::initCacheStores() {
     if (!cache_store1_) {
         return false;
     }
-
     CacheStoreInitParams params2;
     params2.listen_port   = port2_;
     params2.enable_metric = false;
@@ -95,6 +94,7 @@ TEST_F(NormalCacheStoreTest, testStore_Success) {
     };
 
     cache_store1_->store(store_cache, store_callback);
+
     mutex.lock();
     mutex.unlock();
 
@@ -112,6 +112,7 @@ TEST_F(NormalCacheStoreTest, testStore_Success) {
         verifyBlock(
             cache_store1_->getRequestBlockBufferStore()->getBlockBuffer(requestid, "ab"), "ab", block_size, false, '1');
     }
+
     ASSERT_TRUE(cache_store2_->getRequestBlockBufferStore()->getBlockBuffer(requestid, "a") == nullptr);
     ASSERT_TRUE(cache_store2_->getRequestBlockBufferStore()->getBlockBuffer(requestid, "ab") == nullptr);
 }
@@ -156,29 +157,6 @@ TEST_F(NormalCacheStoreTest, testStore_invalidParams) {
     store_cache->addBlock("block", nullptr, block_size, false, true);
 
     mutex.lock();
-    cache_store1_->store(store_cache, store_callback);
-    mutex.lock();
-    mutex.unlock();
-}
-
-TEST_F(NormalCacheStoreTest, testStore_pushWorkItemFailed) {
-    ASSERT_TRUE(initCacheStores());
-
-    uint32_t    block_size  = 16;
-    std::string requestid   = "test-request-id";
-    auto        store_cache = std::make_shared<RequestBlockBuffer>(requestid);
-    store_cache->addBlock(block_buffer_util_->makeBlockBuffer("a", block_size, '0', true));
-    store_cache->addBlock(block_buffer_util_->makeBlockBuffer("ab", block_size, '1', true));
-
-    std::mutex mutex;  // for sync test
-    mutex.lock();
-    auto store_callback = [&mutex](bool ok, CacheStoreErrorCode ec) {
-        mutex.unlock();
-        ASSERT_FALSE(ok);
-        ASSERT_EQ(CacheStoreErrorCode::PushWorkerItemFailed, ec);
-    };
-
-    cache_store1_->thread_pool_->stop();
     cache_store1_->store(store_cache, store_callback);
     mutex.lock();
     mutex.unlock();

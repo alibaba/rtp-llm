@@ -18,6 +18,10 @@ struct TorchEvent: public DeviceEvent {
         throw std::runtime_error("TorchEvent::synchronize() is not implemented.");
     }
 
+    bool checkReadiness() const override {
+        throw std::runtime_error("TorchEvent::checkReadiness() is not implemented.");
+    }
+
     std::shared_ptr<torch::Event> event;
 };
 

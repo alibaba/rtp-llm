@@ -166,7 +166,7 @@ ErrorInfo DecodeRpcServerNew::callPrefill(DecodeGenerateContextNew& decode_conte
         }
     }
     if (!host) {
-        auto host = load_balancer_->chooseHost(prefill_cluster_name_,
+        host = load_balancer_->chooseHost(prefill_cluster_name_,
                                             decode_context.request->generate_config().global_request_id());
     }
 

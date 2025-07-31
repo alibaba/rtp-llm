@@ -698,6 +698,19 @@ void CudaEvent::synchronize() const {
     cudaDeviceSynchronize();
 }
 
+bool CudaEvent::checkReadiness() const {
+    auto status = cudaEventQuery(event_);
+    if (status == cudaSuccess) {
+        return true;
+    } else if (status == cudaErrorNotReady) {
+        return false;
+    } else {
+        RTP_LLM_LOG_ERROR("CudaEvent checkReadiness failed with status: %d", status);
+        check_cuda_error();
+        return false;
+    }
+}
+
 CudaCommHook::CudaCommHook(cudaStream_t main_stream, cudaStream_t comm_stream):
     main_stream_(main_stream), comm_stream_(comm_stream) {
     check_cuda_value(cudaEventCreate(&hook_event_));

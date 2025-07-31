@@ -443,23 +443,27 @@ void register_service_discovery_config(pybind11::module& m) {
 
 // CacheStoreConfig
 void CacheStoreConfig::update_from_env_for_test() {
-    cache_store_rdma_mode        = bool_from_env_for_test("CACHE_STORE_RDMA_MODE", false);
-    wrr_available_ratio          = autil::EnvUtil::getEnv("WRR_AVAILABLE_RATIO", 80);
-    rank_factor                  = autil::EnvUtil::getEnv("RANK_FACTOR", 0);
-    thread_count                 = autil::EnvUtil::getEnv("CACHE_STORE_THREAD_COUNT", 16);
-    rdma_connect_timeout_ms      = autil::EnvUtil::getEnv("CACHE_STORE_RDMA_CONNECT_TIMEOUT_MS", 250);
-    rdma_qp_count_per_connection = autil::EnvUtil::getEnv("CACHE_STORE_RDMA_CONNECTION_COUNT_PER_CONNECTION", 2);
+    cache_store_rdma_mode               = bool_from_env_for_test("CACHE_STORE_RDMA_MODE", false);
+    wrr_available_ratio                 = autil::EnvUtil::getEnv("WRR_AVAILABLE_RATIO", 80);
+    rank_factor                         = autil::EnvUtil::getEnv("RANK_FACTOR", 0);
+    thread_count                        = autil::EnvUtil::getEnv("CACHE_STORE_THREAD_COUNT", 16);
+    rdma_connect_timeout_ms             = autil::EnvUtil::getEnv("CACHE_STORE_RDMA_CONNECT_TIMEOUT_MS", 250);
+    rdma_qp_count_per_connection        = autil::EnvUtil::getEnv("CACHE_STORE_RDMA_CONNECTION_COUNT_PER_CONNECTION", 2);
+    messager_io_thread_count            = autil::EnvUtil::getEnv("MESSAGER_IO_THREAD_COUNT", 2);
+    messager_worker_thread_count        = autil::EnvUtil::getEnv("MESSAGER_WORKER_THREAD_COUNT", 16);
 }
 
 void register_cache_store_config(pybind11::module& m) {
     pybind11::class_<CacheStoreConfig>(m, "CacheStoreConfig")
-        .def(pybind11::init<bool, int, int, int, int, int>(),
+        .def(pybind11::init<bool, int, int, int, int, int, int, int>(),
              pybind11::arg("cache_store_rdma_mode")        = false,
              pybind11::arg("wrr_available_ratio")          = 80,
              pybind11::arg("rank_factor")                  = 0,
              pybind11::arg("thread_count")                 = 16,
              pybind11::arg("rdma_connect_timeout_ms")      = 250,
-             pybind11::arg("rdma_qp_count_per_connection") = 2)
+             pybind11::arg("rdma_qp_count_per_connection") = 2,
+             pybind11::arg("messager_io_thread_count")     = 2,
+             pybind11::arg("messager_worker_thread_count") = 16)
         .def("to_string", &CacheStoreConfig::to_string)
         .def("update_from_env", &CacheStoreConfig::update_from_env_for_test)
         .def_readwrite("cache_store_rdma_mode", &CacheStoreConfig::cache_store_rdma_mode)
@@ -467,7 +471,9 @@ void register_cache_store_config(pybind11::module& m) {
         .def_readwrite("rank_factor", &CacheStoreConfig::rank_factor)
         .def_readwrite("thread_count", &CacheStoreConfig::thread_count)
         .def_readwrite("rdma_connect_timeout_ms", &CacheStoreConfig::rdma_connect_timeout_ms)
-        .def_readwrite("rdma_qp_count_per_connection", &CacheStoreConfig::rdma_qp_count_per_connection);
+        .def_readwrite("rdma_qp_count_per_connection", &CacheStoreConfig::rdma_qp_count_per_connection)
+        .def_readwrite("messager_io_thread_count", &CacheStoreConfig::messager_io_thread_count)
+        .def_readwrite("messager_worker_thread_count", &CacheStoreConfig::messager_worker_thread_count);
 }
 
 // SchedulerConfig
@@ -710,7 +716,9 @@ inline std::string CacheStoreConfig::to_string() const {
         << "rank_factor: " << rank_factor << "\n"
         << "thread_count: " << thread_count << "\n"
         << "rdma_connect_timeout_ms: " << rdma_connect_timeout_ms << "\n"
-        << "rdma_qp_count_per_connection: " << rdma_qp_count_per_connection;
+        << "rdma_qp_count_per_connection: " << rdma_qp_count_per_connection << "\n"
+        << "messager_io_thread_count: " << messager_io_thread_count << "\n"
+        << "messager_worker_thread_count: " << messager_worker_thread_count << "\n";
     return oss.str();
 }
 

@@ -578,6 +578,19 @@ void ROCmEvent::synchronize() const {
     hipDeviceSynchronize();
 }
 
+bool ROCmEvent::checkReadiness() const {
+    auto status = hipEventQuery(event_);
+    if (status == hipSuccess) {
+        return true;
+    } else if (status == hipErrorNotReady) {
+        return false;
+    } else {
+        RTP_LLM_LOG_ERROR("ROCmEvent checkReadiness failed with status: %d", status);
+        ROCM_CHECK_ERROR();
+        return false;
+    }
+}
+
 ROCmCommHook::ROCmCommHook(hipStream_t main_stream, hipStream_t comm_stream):
     main_stream_(main_stream), comm_stream_(comm_stream) {
     ROCM_CHECK(hipEventCreate(&hook_event_));

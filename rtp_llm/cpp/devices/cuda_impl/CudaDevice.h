@@ -34,6 +34,7 @@ public:
     ~CudaEvent() override;
 
     void        synchronize() const override;
+    bool        checkReadiness() const override;
     cudaEvent_t getEvent() const {
         return event_;
     }

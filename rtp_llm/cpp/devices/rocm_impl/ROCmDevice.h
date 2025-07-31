@@ -106,6 +106,7 @@ public:
     ~ROCmEvent() override;
 
     void synchronize() const override;
+    bool checkReadiness() const override;
 
 private:
     hipEvent_t  event_;

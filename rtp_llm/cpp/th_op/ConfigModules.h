@@ -172,6 +172,8 @@ struct CacheStoreConfig {
     int         thread_count                 = 16;
     int         rdma_connect_timeout_ms      = 250;
     int         rdma_qp_count_per_connection = 2;
+    int         messager_io_thread_count     = 2;
+    int         messager_worker_thread_count = 16;
     std::string to_string() const;
     void        update_from_env_for_test();
 };

@@ -79,6 +79,7 @@ private:
     const std::shared_ptr<RequestBlockBufferStore>& getRequestBlockBufferStore() const;
 
 private:
+    bool                                                                             thread_pool_close_{false};
     CacheStoreInitParams                                                             params_;
     std::shared_ptr<MemoryUtil>                                                      memory_util_;
     std::shared_ptr<RequestBlockBufferStore>                                         request_block_buffer_store_;
@@ -87,6 +88,8 @@ private:
     kmonitor::MetricsReporterPtr                                                     metrics_reporter_;
     std::shared_mutex                                                                remote_store_tasks_mutex_;
     std::unordered_map<std::string, std::list<std::shared_ptr<RemoteStoreTaskImpl>>> remote_store_tasks_;
+    std::shared_mutex                                                                store_tasks_mutex_;
+    std::unordered_map<std::shared_ptr<RequestBlockBuffer>, std::pair<CacheStoreStoreDoneCallback, std::function<void()>>> store_tasks_;
 };
 
 }  // namespace rtp_llm

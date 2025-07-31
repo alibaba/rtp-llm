@@ -10,6 +10,7 @@ namespace rtp_llm {
 
 NormalCacheStore::~NormalCacheStore() {
     if (thread_pool_) {
+        thread_pool_close_ = true;
         thread_pool_->stop();
         thread_pool_.reset();
     }
@@ -48,6 +49,9 @@ bool NormalCacheStore::init(const CacheStoreInitParams& params) {
     messager_init_params.rdma_server_port             = params.rdma_listen_port;
     messager_init_params.rdma_connect_timeout_ms      = params.rdma_connect_timeout_ms;
     messager_init_params.rdma_qp_count_per_connection = params.rdma_qp_count_per_connection;
+    messager_init_params.io_thread_count              = params.messager_io_thread_count;
+    messager_init_params.worker_thread_count          = params.messager_worker_thread_count;
+
     if (!messager_->init(messager_init_params)) {
         RTP_LLM_LOG_ERROR("normal cache store init failed : init messager failed");
         return false;
@@ -57,6 +61,34 @@ bool NormalCacheStore::init(const CacheStoreInitParams& params) {
         params.thread_count, params.queue_size, nullptr, "NormalCacheStoreTask");
     if (!thread_pool_->start()) {
         RTP_LLM_LOG_ERROR("normal cache store init failed : init thread pool failed");
+        return false;
+    }
+
+    auto check_task_readiness = [this]() {
+        while(!thread_pool_close_) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            std::unique_lock<std::shared_mutex> lock(store_tasks_mutex_);
+            for (auto it = this->store_tasks_.begin(); it != this->store_tasks_.end();) {
+                auto& [buffer, item] = *it;
+                auto& [callback, task] = item;
+                auto event = buffer->getEvent();
+                if ((event && event->checkReadiness()) || event == nullptr) {
+                    if (this->thread_pool_->pushTask(task) != autil::ThreadPoolBase::ERROR_NONE) {
+                        RTP_LLM_LOG_WARNING("normal cache store push store task to thread pool failed");
+                        callback(false, CacheStoreErrorCode::PushWorkerItemFailed);
+                        return;
+                    }
+
+                    it = store_tasks_.erase(it);
+                } else {
+                    ++it; 
+                }
+            }
+        }
+    };
+
+    if (thread_pool_->pushTask(check_task_readiness) != autil::ThreadPoolBase::ERROR_NONE) {
+        RTP_LLM_LOG_WARNING("normal cache store push check task to thread pool failed");
         return false;
     }
 
@@ -83,12 +115,9 @@ void NormalCacheStore::store(const std::shared_ptr<RequestBlockBuffer>& request_
     auto task = [this, request_block_buffer, callback, collector]() {
         this->runStoreTask(request_block_buffer, callback, collector);
     };
-
-    if (thread_pool_->pushTask(task) != autil::ThreadPoolBase::ERROR_NONE) {
-        RTP_LLM_LOG_WARNING("normal cache store push store task to thread pool failed");
-        callback(false, CacheStoreErrorCode::PushWorkerItemFailed);
-        return;
-    }
+   
+    std::unique_lock<std::shared_mutex> lock(store_tasks_mutex_);
+    store_tasks_[request_block_buffer] = {callback, task};
 }
 
 std::shared_ptr<StoreContext>
@@ -111,12 +140,6 @@ void NormalCacheStore::runStoreTask(const std::shared_ptr<RequestBlockBuffer>&  
                                     const std::shared_ptr<CacheStoreStoreMetricsCollector>& collector) {
     // store to local
     collector->markTaskRun();
-    // event to sync wait compute
-    auto event = request_block_buffer->getEvent();
-    if (event) {
-        event->synchronize();
-    }
-    collector->markEventSyncDone();
 
     auto ret = request_block_buffer_store_->setRequestBlockBuffer(request_block_buffer);
     collector->markEnd(ret);
