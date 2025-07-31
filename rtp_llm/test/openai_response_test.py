@@ -1061,6 +1061,120 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             )
             self._validate_merged_result(merged_result)
 
+    class ChatGLM45TestSuite(BaseToolCallTestSuite):
+        """GLM45相关测试的内嵌测试套件"""
+
+        def _get_model_type(self):
+            return "chatglm45"
+
+        def _get_tokenizer_path(self):
+            return "glm45/tokenizer/"
+
+        def _get_test_data(self, include_stop_word=False):
+            """获取测试数据"""
+            test_ids = [
+                151352,
+                455,
+                68852,
+                198,
+                151356,
+                8923,
+                151357,
+                198,
+                151358,
+                3430,
+                23584,
+                151359,
+                198,
+                151356,
+                1028,
+                151357,
+                198,
+                151358,
+                115937,
+                19,
+                12,
+                100539,
+                12,
+                99951,
+                151359,
+                198,
+                151353,
+                151352,
+                455,
+                68852,
+                198,
+                151356,
+                8923,
+                151357,
+                198,
+                151358,
+                2016,
+                29953,
+                151359,
+                198,
+                151356,
+                1028,
+                151357,
+                198,
+                151358,
+                115937,
+                19,
+                12,
+                100539,
+                12,
+                99869,
+                151359,
+                198,
+                151353,
+            ]
+
+            return test_ids
+
+        def _create_test_functions_and_tools(self):
+            """创建测试用的函数和工具定义 - 子类可以重写"""
+            functions = [
+                GPTFunctionDefinition(
+                    **{
+                        "name": "get_weather",
+                        "description": "Get weather information",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "city": {"type": "string", "description": "City name"},
+                                "date": {"type": "string", "description": "Date"},
+                            },
+                            "required": ["city", "date"],
+                        },
+                    }
+                )
+            ]
+            tools = [GPTToolDefinition(function=functions[0])]
+            return functions, tools
+
+        def _validate_renderer(self, chat_renderer):
+            """验证renderer类型"""
+            assert isinstance(chat_renderer, ChatGlm45Renderer)
+
+        def _assert_tool_call_response(
+            self,
+            response_delta,
+            expected_content="",
+        ):
+            """断言工具调用响应的内容"""
+            assert response_delta.tool_calls[0].function.name == "get_weather"
+            assert (
+                response_delta.tool_calls[0].function.arguments
+                == '{"city": "Beijing", "date": "2024-06-27"}'
+            )
+            assert response_delta.tool_calls[1].function.name == "get_weather"
+            assert (
+                response_delta.tool_calls[1].function.arguments
+                == '{"city": "Shanghai", "date": "2024-06-28"}'
+            )
+            assert response_delta.tool_calls[0].index == 0
+            assert response_delta.tool_calls[1].index == 1
+
     class Qwen3CoderTestSuite(BaseToolCallTestSuite):
         """Qwen3Coder相关测试的内嵌测试套件"""
 
@@ -1605,6 +1719,18 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         """测试Qwen模型非流式场景的合并逻辑"""
         qwen_suite = self.QwenMergeLogicTestSuite(self)
         await qwen_suite.test_non_streaming_merge_logic()
+
+    async def test_parse_chatglm45_tool_call_streaming_case(self):
+        suite = self.ChatGLM45TestSuite(self)
+        await suite.test_streaming_case()
+
+    async def test_parse_chatglm45_tool_call_no_stream(self):
+        suite = self.ChatGLM45TestSuite(self)
+        await suite.test_no_stream()
+
+    async def test_parse_chatglm45_tool_call_no_stream_PDseperate(self):
+        suite = self.ChatGLM45TestSuite(self)
+        await suite.test_no_stream_pd_separate()
 
     def test_chatglm_stop_word(self):
         os.environ["MODEL_TYPE"] = "chatglm3"

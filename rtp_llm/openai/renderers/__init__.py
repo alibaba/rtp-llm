@@ -1,6 +1,7 @@
 import logging
 
 from .chatglm4_renderer import ChatGlm4Renderer
+from .chatglm45_renderer import ChatGlm45Renderer
 from .internvl_renderer import InternVLRenderer
 from .kimik2_renderer import KimiK2Renderer
 from .llava_renderer import LlavaRenderer

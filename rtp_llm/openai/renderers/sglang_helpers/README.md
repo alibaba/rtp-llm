@@ -34,7 +34,7 @@ for i, call in enumerate(calls):
 ```
 
 ### 4. 索引处理优化
-**修复 `qwen3_coder_detector` 的索引处理问题**
+**修复 `qwen3_coder_detector` 以及`glm4_moe_detector` 的索引处理问题**
 
 **问题描述：**
 - 没有正确处理 `index` 参数
