@@ -18,7 +18,7 @@ from rtp_llm.openai.renderers.sglang_helpers.function_call.core_types import (
 
 def streaming_parse_result_to_delta_message(
     result: StreamingParseResult,
-) -> DeltaMessage:
+) -> tuple[DeltaMessage, str]:
     """
     将 StreamingParseResult 转换为 DeltaMessage
 
@@ -45,11 +45,13 @@ def streaming_parse_result_to_delta_message(
     # 创建 DeltaMessage
     delta_message = DeltaMessage(
         role=None,  # 在流式响应中，role 通常只在第一个 chunk 中设置
-        content=result.normal_text if result.normal_text else None,
+        content=None,
         tool_calls=tool_calls if tool_calls else None,
     )
 
-    return delta_message
+    text = result.normal_text if result.normal_text else ""
+
+    return delta_message, text
 
 
 def rtp_tools_to_sglang_tools(rtp_tools: List[GPTToolDefinition]) -> List[Tool]:

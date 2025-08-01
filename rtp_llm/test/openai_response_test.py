@@ -239,15 +239,6 @@ class BaseToolCallTestSuite:
         tools = [GPTToolDefinition(function=functions[0])]
         return functions, tools
 
-    def _get_target_chunk_index(self, generator_type, pd_separation, chunk_list):
-        """获取目标chunk的索引 - 子类可以重写"""
-        if generator_type == "once":
-            return 1 if len(chunk_list) > 1 else 0
-        elif generator_type == "two_steps" and pd_separation:
-            return 2 if len(chunk_list) > 2 else -1
-        else:
-            return 1 if len(chunk_list) > 1 else 0
-
     def _validate_renderer(self, chat_renderer):
         """验证renderer类型 - 子类可以重写"""
         pass
@@ -285,6 +276,7 @@ class BaseToolCallTestSuite:
         generator_type="normal",
         pd_separation=None,
         include_stop_word=False,
+        stop_words_str=None,
     ):
         """运行工具调用测试的通用方法"""
         tokenizer = self._setup_environment(pd_separation)
@@ -315,8 +307,12 @@ class BaseToolCallTestSuite:
                 test_ids, MAX_SEQ_LEN, tokenizer.eos_token_id or 0, seq_len_no_use
             )
 
+        generate_config = GenerateConfig(is_streaming=stream)
+        if stop_words_str:
+            generate_config.stop_words_str = stop_words_str
+
         stream_generator = chat_renderer.render_response_stream(
-            id_generator, request, GenerateConfig(is_streaming=stream)
+            id_generator, request, generate_config=generate_config
         )
         generate = self.parent.endpoint._complete_stream_response(
             stream_generator, None
@@ -336,48 +332,36 @@ class BaseToolCallTestSuite:
         assert delta.role == RoleEnum.assistant
         self._assert_tool_call_response(delta)
 
-    async def test_streaming_case(self):
+    async def test_streaming_case(self, stop_words_str=None):
         """测试工具调用流式场景"""
-        chunk_list = await self._run_tool_call_test(stream=True, pd_separation=False)
+        chunk_list = await self._run_tool_call_test(
+            stream=True, pd_separation=False, stop_words_str=stop_words_str
+        )
 
         merged_result: ChatCompletionStreamResponse = merge_stream_responses(chunk_list)
         self._validate_merged_result(merged_result)
 
-    async def test_no_stream(self):
+    async def test_no_stream(self, stop_words_str=None):
         """测试工具调用非流式场景"""
         chunk_list = await self._run_tool_call_test(
-            stream=False, generator_type="once", pd_separation=False
+            stream=False,
+            generator_type="once",
+            pd_separation=False,
+            stop_words_str=stop_words_str,
         )
-
-        # 获取目标chunk并验证
-        target_index = self._get_target_chunk_index("once", False, chunk_list)
-        target_chunk = (
-            chunk_list[target_index]
-            if target_index < len(chunk_list)
-            else chunk_list[-1]
-        )
-        target_delta = target_chunk.choices[0].delta
-        self._assert_tool_call_response(target_delta)
 
         # 验证合并结果
         merged_result: ChatCompletionStreamResponse = merge_stream_responses(chunk_list)
         self._validate_merged_result(merged_result)
 
-    async def test_no_stream_pd_separate(self):
+    async def test_no_stream_pd_separate(self, stop_words_str=None):
         """测试工具调用非流式PD分离场景"""
         chunk_list = await self._run_tool_call_test(
-            stream=False, generator_type="two_steps", pd_separation=True
+            stream=False,
+            generator_type="two_steps",
+            pd_separation=True,
+            stop_words_str=stop_words_str,
         )
-
-        # 获取目标chunk并验证
-        target_index = self._get_target_chunk_index("two_steps", True, chunk_list)
-        target_chunk = (
-            chunk_list[target_index]
-            if target_index < len(chunk_list)
-            else chunk_list[-1]
-        )
-        target_delta = target_chunk.choices[0].delta
-        self._assert_tool_call_response(target_delta)
 
         # 验证合并结果
         merged_result: ChatCompletionStreamResponse = merge_stream_responses(chunk_list)
@@ -956,6 +940,38 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             """验证renderer类型"""
             assert isinstance(chat_renderer, QwenRenderer)
 
+    class QwenThinkTestSuite(QwenToolTestSuite):
+        """Qwen相关测试的内嵌测试套件, 看看QwenThinkTool能否正常工作"""
+
+        def _get_model_type(self):
+            return "qwen_3"
+
+        def _validate_renderer(self, chat_renderer):
+            """验证renderer类型"""
+            assert isinstance(chat_renderer, QwenRenderer)
+
+        def _assert_tool_call_response(
+            self,
+            response_delta,
+            expected_content="好的，用户问的是杭州和北京的天气怎么样。\n",
+        ):
+            """断言工具调用响应的内容"""
+            assert response_delta.reasoning_content == expected_content
+            assert response_delta.tool_calls is not None
+            assert len(response_delta.tool_calls) == 2
+            assert response_delta.tool_calls[0].function.name == "get_current_weather"
+            assert (
+                response_delta.tool_calls[0].function.arguments
+                == '{"location": "杭州"}'
+            )
+            assert response_delta.tool_calls[0].index == 0
+            assert response_delta.tool_calls[1].function.name == "get_current_weather"
+            assert (
+                response_delta.tool_calls[1].function.arguments
+                == '{"location": "北京"}'
+            )
+            assert response_delta.tool_calls[1].index == 1
+
     class KimiK2TestSuite(BaseToolCallTestSuite):
         """KimiK2相关测试的内嵌测试套件"""
 
@@ -1059,11 +1075,6 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
                 pd_separation=True,
                 include_stop_word=True,
             )
-
-            # PD分离场景下，目标chunk是第3个
-            target_chunk = chunk_list[2]
-            target_delta = target_chunk.choices[0].delta
-            self._assert_tool_call_response(target_delta)
 
             # 验证合并结果
             merged_result: ChatCompletionStreamResponse = merge_stream_responses(
@@ -1203,6 +1214,27 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         """测试QwenTool工具调用非流式PD分离场景"""
         qwen_suite = self.QwenTestSuite(self)
         await qwen_suite.test_no_stream_pd_separate()
+
+    async def test_parse_qwen_think_call_streaming_case(self):
+        """测试QwenTool工具调用流式场景"""
+        qwen_suite = self.QwenThinkTestSuite(self)
+        custom_renderer.THINK_MODE = 1
+        await qwen_suite.test_streaming_case(stop_words_str=["<im_end>"])
+        custom_renderer.THINK_MODE = 0
+
+    async def test_parse_qwen_think_call_no_stream(self):
+        """测试QwenTool工具调用非流式场景"""
+        qwen_suite = self.QwenThinkTestSuite(self)
+        custom_renderer.THINK_MODE = 1
+        await qwen_suite.test_no_stream(stop_words_str=["<im_end>"])
+        custom_renderer.THINK_MODE = 0
+
+    async def test_parse_qwen_think_call_no_stream_PDseperate(self):
+        """测试QwenTool工具调用非流式PD分离场景"""
+        qwen_suite = self.QwenThinkTestSuite(self)
+        custom_renderer.THINK_MODE = 1
+        await qwen_suite.test_no_stream_pd_separate(stop_words_str=["<im_end>"])
+        custom_renderer.THINK_MODE = 0
 
     async def test_parse_kimik2_tool_call_streaming_case(self):
         """测试KimiK2工具调用流式场景"""

@@ -179,7 +179,7 @@ class ToolBaseRenderer(CustomChatRenderer, ABC):
             status.finish_reason = FinisheReason.stop
             return await self._create_empty_delta(output.aux_info)
         if not is_truncated(
-            status.delta_output_string, stop_word_slice_list, is_streaming
+            status.delta_output_string, stop_word_slice_list, is_streaming, True
         ):
             status.update_result()
             delta = OutputDelta(
@@ -219,7 +219,9 @@ class ToolBaseRenderer(CustomChatRenderer, ABC):
                 return None
 
             # 有工具调用时，使用格式转换函数
-            delta_message = streaming_parse_result_to_delta_message(parse_result)
+            delta_message, status.delta_output_string = (
+                streaming_parse_result_to_delta_message(parse_result)
+            )
 
             # 创建输出delta
             delta = OutputDelta(
@@ -232,12 +234,13 @@ class ToolBaseRenderer(CustomChatRenderer, ABC):
 
             # 更新状态
             status.generating_tool_call = True
-            status.delta_output_string = ""
 
             return delta
 
         except Exception as e:
-            logging.error(f"工具调用解析失败: {e}, 当前delta_output_string: {status.delta_output_string}")
+            logging.error(
+                f"工具调用解析失败: {e}, 当前delta_output_string: {status.delta_output_string}"
+            )
             return None
 
     def _handle_non_streaming_parse(self, status: ToolStreamStatus, tools):

@@ -9,10 +9,12 @@ from rtp_llm.openai.renderers.sglang_helpers.function_call.base_format_detector 
 )
 from rtp_llm.openai.renderers.sglang_helpers.function_call.core_types import (
     StreamingParseResult,
+    StructureInfo,
     _GetInfoFunc,
-    StructureInfo
 )
-from rtp_llm.openai.renderers.sglang_helpers.function_call.ebnf_composer import EBNFComposer
+from rtp_llm.openai.renderers.sglang_helpers.function_call.ebnf_composer import (
+    EBNFComposer,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +58,7 @@ class Qwen25Detector(BaseFormatDetector):
         :return: ParseResult indicating success or failure, consumed text, leftover text, and parsed calls.
         """
         idx = text.find(self.bot_token)
-        normal_text = text[:idx].strip() if idx != -1 else text
+        normal_text = text[:idx] if idx != -1 else text
         if self.bot_token not in text:
             return StreamingParseResult(normal_text=normal_text, calls=[])
 

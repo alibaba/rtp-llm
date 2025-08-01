@@ -54,3 +54,9 @@ for call in parsed_calls:
     self._current_tool_index += 1
 res.extend(parsed_calls)
 ```
+
+5. 避免strip影响think处理
+为了兼容rtp中对think的处理, 去除了原始代码中的strip
+```python
+normal_text = text[:idx] if idx != -1 else text
+```
