@@ -6,6 +6,7 @@ from unittest import IsolatedAsyncioTestCase, TestCase, main
 
 import torch
 from transformers import AutoTokenizer, PreTrainedTokenizer
+from typing_extensions import override
 
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
@@ -1184,6 +1185,205 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
                 == '{"location": "北京", "unit": "celsius"}'
             )
 
+    class Qwen3CoderComplexTestSuite(Qwen3CoderTestSuite):
+        @override
+        def _get_test_data(self, include_stop_word=False):
+            """获取测试数据"""
+            return [
+                151657,
+                198,
+                27,
+                1688,
+                28,
+                4934,
+                2458,
+                397,
+                27,
+                16181,
+                28,
+                1796,
+                397,
+                515,
+                220,
+                330,
+                4439,
+                675,
+                788,
+                330,
+                266,
+                14493,
+                58893,
+                73016,
+                756,
+                220,
+                330,
+                11525,
+                788,
+                2278,
+                262,
+                341,
+                414,
+                330,
+                73340,
+                788,
+                330,
+                80233,
+                756,
+                414,
+                330,
+                13871,
+                788,
+                330,
+                874,
+                72160,
+                69131,
+                1327,
+                30528,
+                15734,
+                514,
+                20201,
+                6847,
+                14493,
+                25762,
+                10076,
+                16130,
+                3332,
+                698,
+                262,
+                1153,
+                262,
+                341,
+                414,
+                330,
+                73340,
+                788,
+                330,
+                7423,
+                3332,
+                756,
+                414,
+                330,
+                13871,
+                788,
+                330,
+                874,
+                72160,
+                69131,
+                1327,
+                30528,
+                15734,
+                514,
+                20201,
+                6847,
+                14493,
+                25762,
+                10076,
+                29012,
+                3332,
+                698,
+                262,
+                456,
+                220,
+                3211,
+                220,
+                330,
+                16900,
+                788,
+                2278,
+                262,
+                341,
+                414,
+                330,
+                1499,
+                788,
+                330,
+                80233,
+                756,
+                414,
+                330,
+                983,
+                788,
+                330,
+                7423,
+                3332,
+                698,
+                262,
+                456,
+                220,
+                5133,
+                532,
+                522,
+                16181,
+                397,
+                27,
+                16181,
+                59245,
+                2638,
+                397,
+                97821,
+                6324,
+                44977,
+                93381,
+                12697,
+                28783,
+                14493,
+                36464,
+                13437,
+                15351,
+                38900,
+                72177,
+                59150,
+                28989,
+                4323,
+                198,
+                522,
+                16181,
+                397,
+                522,
+                1688,
+                397,
+                151658,
+            ]
+
+        @override
+        def _create_test_functions_and_tools(self):
+            """创建测试用的函数和工具定义 - 子类可以重写"""
+            functions = [
+                GPTFunctionDefinition(
+                    **{
+                        "name": "write_file",
+                        "description": "Writes content to a specified file in the local filesystem. \n      \n      The user has the ability to modify `content`. If modified, this will be stated in the response.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "file_path": {
+                                    "type": "string",
+                                    "description": "The absolute path to the file to write to (e.g., '/home/user/project/file.txt'). Relative paths are not supported.",
+                                },
+                                "content": {
+                                    "type": "string",
+                                    "description": "The content to write to the file.",
+                                },
+                            },
+                            "required": ["file_path", "content"],
+                        },
+                    }
+                )
+            ]
+            tools = [GPTToolDefinition(function=functions[0])]
+            return functions, tools
+
+        @override
+        def _assert_tool_call_response(self, response_delta, expected_content=""):
+            """断言工具调用响应的内容"""
+            assert response_delta.tool_calls is not None
+            assert response_delta.tool_calls[0].index == 0
+            assert response_delta.tool_calls[0].function.name == "write_file"
+            assert (
+                response_delta.tool_calls[0].function.arguments
+                == '{"content": "{\\n  \\"graphName\\": \\"atlas-demo-graph\\",\\n  \\"modules\\": [\\n    {\\n      \\"moduleName\\": \\"InputModule\\",\\n      \\"className\\": \\"com.taobao.recommendplatform.solutions.atlasdemo.module.InputModule\\"\\n    },\\n    {\\n      \\"moduleName\\": \\"ProcessModule\\",\\n      \\"className\\": \\"com.taobao.recommendplatform.solutions.atlasdemo.module.ProcessModule\\"\\n    }\\n  ],\\n  \\"edges\\": [\\n    {\\n      \\"from\\": \\"InputModule\\",\\n      \\"to\\": \\"ProcessModule\\"\\n    }\\n  ]\\n}", "file_path": "/Users/wuchen/workspace/test-atlas-gen/src/main/resources/graph_configs/default.json"}'
+            )
+
     # 使用基类的测试方法
     async def test_parse_qwen_tool_call_streaming_case(self):
         """测试QwenTool工具调用流式场景"""
@@ -1269,6 +1469,21 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
     async def test_parse_qwen3_coder_tool_call_no_stream_PDseperate(self):
         """测试Qwen3Coder工具调用非流式PD分离场景"""
         suite = self.Qwen3CoderTestSuite(self)
+        await suite.test_no_stream_pd_separate()
+
+    async def test_parse_qwen3_coder_complex_tool_call_streaming_case(self):
+        """测试Qwen3Coder工具调用流式场景"""
+        suite = self.Qwen3CoderComplexTestSuite(self)
+        await suite.test_streaming_case()
+
+    async def test_parse_qwen3_coder_complex_tool_call_no_stream(self):
+        """测试Qwen3Coder工具调用非流式场景"""
+        suite = self.Qwen3CoderComplexTestSuite(self)
+        await suite.test_no_stream()
+
+    async def test_parse_qwen3_coder_complex_tool_call_no_stream_PDseperate(self):
+        """测试Qwen3Coder工具调用非流式PD分离场景"""
+        suite = self.Qwen3CoderComplexTestSuite(self)
         await suite.test_no_stream_pd_separate()
 
     def test_chatglm_stop_word(self):

@@ -12,9 +12,11 @@ from rtp_llm.openai.renderers.sglang_helpers.function_call.base_format_detector 
 from rtp_llm.openai.renderers.sglang_helpers.function_call.core_types import (
     StreamingParseResult,
     ToolCallItem,
-    _GetInfoFunc
+    _GetInfoFunc,
 )
-from rtp_llm.openai.renderers.sglang_helpers.function_call.ebnf_composer import EBNFComposer
+from rtp_llm.openai.renderers.sglang_helpers.function_call.ebnf_composer import (
+    EBNFComposer,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +30,137 @@ def _safe_val(raw: str) -> Any:
             return ast.literal_eval(raw)
         except Exception:
             return raw
+
+
+def _convert_param_value(
+    param_value: str, param_name: str, param_config: Dict[str, Any], func_name: str
+) -> Any:
+    """
+    根据工具配置中的参数类型智能转换参数值
+    """
+    # 处理 null 值
+    if param_value.lower() == "null":
+        return None
+
+    # 获取参数类型配置
+    if param_name not in param_config:
+        logger.warning(
+            f"Parameter '{param_name}' not defined in tool '{func_name}', "
+            f"using fallback parsing"
+        )
+        return _safe_val(param_value)
+
+    param_spec = param_config[param_name]
+    if isinstance(param_spec, dict) and "type" in param_spec:
+        param_type = str(param_spec["type"]).strip().lower()
+    else:
+        # 如果没有类型信息，使用原始解析
+        return _safe_val(param_value)
+
+    # 根据类型进行转换
+    try:
+        if param_type in ["string", "str", "text", "varchar", "char", "enum"]:
+            return param_value
+
+        elif (
+            param_type.startswith("int")
+            or param_type.startswith("uint")
+            or param_type.startswith("long")
+            or param_type.startswith("short")
+            or param_type.startswith("unsigned")
+            or param_type == "integer"
+        ):
+            try:
+                return int(param_value)
+            except ValueError:
+                logger.warning(
+                    f"Cannot convert '{param_value}' to integer for parameter "
+                    f"'{param_name}' in tool '{func_name}', using string"
+                )
+                return param_value
+
+        elif (
+            param_type.startswith("num")
+            or param_type.startswith("float")
+            or param_type == "number"
+        ):
+            try:
+                float_val = float(param_value)
+                # 如果是整数，返回整数类型
+                return int(float_val) if float_val.is_integer() else float_val
+            except ValueError:
+                logger.warning(
+                    f"Cannot convert '{param_value}' to number for parameter "
+                    f"'{param_name}' in tool '{func_name}', using string"
+                )
+                return param_value
+
+        elif param_type in ["boolean", "bool", "binary"]:
+            param_value_lower = param_value.lower()
+            if param_value_lower in ["true", "false"]:
+                return param_value_lower == "true"
+            else:
+                logger.warning(
+                    f"Invalid boolean value '{param_value}' for parameter "
+                    f"'{param_name}' in tool '{func_name}', defaulting to False"
+                )
+                return False
+
+        elif param_type in ["object", "dict", "array", "list"]:
+            try:
+                return json.loads(param_value)
+            except json.JSONDecodeError:
+                logger.warning(
+                    f"Cannot parse JSON for parameter '{param_name}' in tool "
+                    f"'{func_name}', trying alternative parsing"
+                )
+                try:
+                    return ast.literal_eval(param_value)
+                except Exception:
+                    logger.warning(
+                        f"Cannot parse object for parameter '{param_name}' "
+                        f"in tool '{func_name}', using string"
+                    )
+                    return param_value
+
+        else:
+            # 未知类型，尝试智能解析
+            logger.info(
+                f"Unknown type '{param_type}' for parameter '{param_name}', using fallback"
+            )
+            return _safe_val(param_value)
+
+    except Exception as e:
+        logger.warning(
+            f"Error converting parameter '{param_name}' in tool '{func_name}': {e}, "
+            f"using fallback parsing"
+        )
+        return _safe_val(param_value)
+
+
+def _get_param_config(func_name: str, tools: List[Tool]) -> Dict[str, Any]:
+    """
+    从工具列表中获取指定函数的参数配置
+    """
+    for tool in tools:
+        if (
+            hasattr(tool, "function")
+            and hasattr(tool.function, "name")
+            and tool.function.name == func_name
+        ):
+            if hasattr(tool.function, "parameters"):
+                params = tool.function.parameters
+                if isinstance(params, dict):
+                    # 支持两种格式：
+                    # 1. {"properties": {"param1": {"type": "string"}}}
+                    # 2. {"param1": {"type": "string"}}
+                    if "properties" in params:
+                        return params["properties"]
+                    else:
+                        return params
+
+    logger.warning(f"Tool '{func_name}' not found in tools list")
+    return {}
 
 
 class Qwen3CoderDetector(BaseFormatDetector):
@@ -119,6 +252,10 @@ class Qwen3CoderDetector(BaseFormatDetector):
             idx = txt.index(">")
             fname = txt[:idx].strip()
             body = txt[idx + 1 :]
+
+            # 获取该函数的参数配置
+            param_config = _get_param_config(fname, tools)
+
             params: Dict[str, Any] = {}
             for pm in self.tool_call_parameter_regex.findall(body):
                 ptxt = pm[0] if pm[0] else pm[1]
@@ -127,7 +264,10 @@ class Qwen3CoderDetector(BaseFormatDetector):
                 pidx = ptxt.index(">")
                 pname = ptxt[:pidx].strip()
                 pval = ptxt[pidx + 1 :].lstrip("\n").rstrip("\n")
-                params[pname] = _safe_val(pval)
+
+                # 使用类型感知的参数转换
+                params[pname] = _convert_param_value(pval, pname, param_config, fname)
+
             raw = {"name": fname, "arguments": params}
             try:
                 # 调用父类方法解析

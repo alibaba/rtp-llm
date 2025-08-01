@@ -55,7 +55,10 @@ for call in parsed_calls:
 res.extend(parsed_calls)
 ```
 
-5. 避免strip影响think处理
+### 5. Qwen3CoderDetector 工具参数类型处理优化
+Qwen3_coder_detector中, 没有正确的处理工具参数值与类型的关系, 增加_convert_param_value和_get_param_config方法, 以优化代码格式
+
+### 6. 避免strip影响think处理
 为了兼容rtp中对think的处理, 去除了原始代码中的strip
 ```python
 normal_text = text[:idx] if idx != -1 else text
