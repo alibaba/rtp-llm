@@ -49,7 +49,6 @@ public:
     int64_t generate_first_token_rt_us = 0;
     int64_t wait_store_cache_rt_us     = 0;
 
-
     // for decode tp
     int64_t load_cache_min_rt_us       = 0;
     int64_t load_cache_max_rt_us       = 0;

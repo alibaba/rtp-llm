@@ -7,6 +7,7 @@ DecodeGenerateContextNew::~DecodeGenerateContextNew() {
     if (stream_ != nullptr && stream_->running()) {
         stream_->setStop(error_info.code(), error_info.ToString());
     }
+    reportTime();
 }
 
 ErrorInfo DecodeGenerateContextNew::init(const std::shared_ptr<EngineBase>& engine) {
@@ -27,6 +28,18 @@ ErrorInfo DecodeGenerateContextNew::init(const std::shared_ptr<EngineBase>& engi
     prepare_generate_context_done_time_us = currentTimeUs();
     RTP_LLM_LOG_DEBUG("request [%s] prepare generate context done", request_key.c_str());
     return ErrorInfo::OkStatus();
+}
+
+void DecodeGenerateContextNew::reportTime() {
+    RpcMetricsCollector collector;
+    collectBasicMetrics(collector);
+    collector.retry_times                    = retry_times;
+    collector.prepare_generate_context_rt_us = prepare_generate_context_done_time_us - request_begin_time_us;
+    collector.load_cache_from_prefill_rt_us  = load_cache_from_prefill_done_time_us - prepare_generate_context_done_time_us;
+    collector.local_generate_rt_us           = local_generate_done_time_us - load_cache_from_prefill_done_time_us;
+
+    reportMetrics(collector);
+    metrics_reporter.reset();  // avoid to report metrics in base class
 }
 
 }  // namespace rtp_llm

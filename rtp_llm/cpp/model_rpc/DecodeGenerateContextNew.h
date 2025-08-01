@@ -45,6 +45,9 @@ struct DecodeGenerateContextNew: public GenerateContext {
 
     ErrorInfo init(const std::shared_ptr<EngineBase>& engine);
 
+private:
+    void reportTime();
+
 public:
     const GenerateInputPB*                 request;
     grpc::ServerWriter<GenerateOutputsPB>* response_writer;
