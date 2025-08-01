@@ -848,6 +848,11 @@ class GptInitModelParameters:
                 tokens_id = tokenizer.encode(prompt)
                 self.insertMultiTaskPromptTokens(task_id, tokens_id)
 
+    def update_tokenizer_special_tokens(self, tokenizer):
+        self.special_tokens.stop_words_id_list += tokenizer.stop_words_id_list
+        self.special_tokens.stop_words_str_list += tokenizer.stop_words_str_list
+        self.special_tokens.eos_token_id = tokenizer.eos_token_id
+
     def update_task_prompt_config(self):
         prompt_file_path = self.kv_cache_config.multi_task_prompt
         if prompt_file_path == "":

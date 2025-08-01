@@ -13,7 +13,7 @@ from rtp_llm.frontend.tokenizer_factory.tokenizers.base_tokenizer import BaseTok
 
 
 class LlamaTokenizer(BaseTokenizer):
-    def __init__(self, tokenizer_path: str, config_json: Dict[str, Any] = {}):
+    def init_tokenizer(self, tokenizer_path: str, config_json: Dict[str, Any] = {}):
         tokenizer_config_file = os.path.join(tokenizer_path, "tokenizer_config.json")
         if os.path.exists(tokenizer_config_file):
             super().__init__(tokenizer_path, config_json)

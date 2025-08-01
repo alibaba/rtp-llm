@@ -16,19 +16,19 @@ from rtp_llm.frontend.tokenizer_factory.tokenizers.tokenization_chatglm4 import 
 
 
 class ChatGLMV2Tokenizer(BaseTokenizer):
-    def __init__(self, tokenizer_path: str, config_json: Dict[str, Any] = {}):
+    def init_tokenizer(self, tokenizer_path: str, config_json: Dict[str, Any] = {}):
         self.tokenizer = ChatGLMV2TokenizerHf.from_pretrained(tokenizer_path)
 
 
 class ChatGLMV3Tokenizer(BaseTokenizer):
-    def __init__(self, tokenizer_path: str, config_json: Dict[str, Any] = {}):
+    def init_tokenizer(self, tokenizer_path: str, config_json: Dict[str, Any] = {}):
         self.tokenizer = ChatGLMV3TokenizerHf.from_pretrained(
             tokenizer_path, encode_special_tokens=True
         )
 
 
 class ChatGLMV4Tokenizer(BaseTokenizer):
-    def __init__(self, tokenizer_path: str, config_json: Dict[str, Any] = {}):
+    def init_tokenizer(self, tokenizer_path: str, config_json: Dict[str, Any] = {}):
         self.tokenizer = ChatGLMV4TokenizerHf.from_pretrained(tokenizer_path)
 
 

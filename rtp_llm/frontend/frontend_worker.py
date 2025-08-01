@@ -61,9 +61,8 @@ class FrontendWorker:
             ModelFactory.create_normal_model_config()
         )
         self.tokenizer = TokenizerFactory.create_from_env()
-        if hasattr(self.tokenizer, "eos_token_id") and self.tokenizer.eos_token_id:
-            self.model_config.special_tokens.eos_token_id = self.tokenizer.eos_token_id
         self.model_config.update_task_prompt_tokens_id(self.tokenizer)
+        self.model_config.update_tokenizer_special_tokens(self.tokenizer)
         self.pipeline = Pipeline(self.model_config, self.tokenizer, separated_frontend)
         self.backend_rpc_server_visitor = self.pipeline.backend_rpc_server_visitor
         logging.info("frontend worker start done.")

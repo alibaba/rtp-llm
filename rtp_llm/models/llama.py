@@ -155,12 +155,6 @@ class Baichuan(Llama):
             config.rotary_embedding_dim = 0
             config.use_attention_linear_bias = True
         config.special_tokens.bos_token_id = -1
-        config.special_tokens.user.token_ids = [195]
-        config.special_tokens.user.eos_token_ids = []
-        config.special_tokens.assistant.token_ids = [196]
-        config.special_tokens.assistant.eos_token_ids = [
-            config.special_tokens.eos_token_id
-        ]
         return config
 
 

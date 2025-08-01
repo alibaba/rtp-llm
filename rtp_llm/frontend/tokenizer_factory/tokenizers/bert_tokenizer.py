@@ -11,7 +11,7 @@ from rtp_llm.frontend.tokenizer_factory.tokenizers.base_tokenizer import BaseTok
 
 
 class BertTokenizer(BaseTokenizer):
-    def __init__(self, tokenizer_path: str, config_json: Dict[str, Any] = {}):
+    def init_tokenizer(self, tokenizer_path: str, config_json: Dict[str, Any] = {}):
         try:
             self.tokenizer = AutoTokenizer.from_pretrained(
                 tokenizer_path, trust_remote_code=True

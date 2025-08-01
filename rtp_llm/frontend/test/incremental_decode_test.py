@@ -22,7 +22,6 @@ class IncrementalDecodeTest(TestCase):
             "hello, what's your name?",
             "sxsadasfdjsadfas asdas djbnasdb asj asiokdnaskd asnkdnaskd naskdnas knask",
         ]
-        print(self.tokenizers)
 
     def _get_tokenizer_list(self):
         ret = []

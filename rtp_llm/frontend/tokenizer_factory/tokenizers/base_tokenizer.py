@@ -5,6 +5,10 @@ from transformers import AutoTokenizer
 
 class BaseTokenizer:
     def __init__(self, tokenizer_path: str, config_json: Dict[str, Any] = {}):
+        self.config_json = config_json
+        self.init_tokenizer(tokenizer_path, self.config_json)
+
+    def init_tokenizer(self, tokenizer_path: str, config_json: Dict[str, Any]):
         self.tokenizer = AutoTokenizer.from_pretrained(
             tokenizer_path, trust_remote_code=True, verbose=False, use_fast=True
         )
@@ -21,6 +25,14 @@ class BaseTokenizer:
         return self.tokenizer.apply_chat_template(messages, **kwargs)
 
     @property
+    def stop_words_id_list(self):
+        return []
+
+    @property
+    def stop_words_str_list(self):
+        return []
+
+    @property
     def chat_template(self):
         return self.tokenizer.chat_template
 
@@ -34,7 +46,10 @@ class BaseTokenizer:
 
     @property
     def eos_token_id(self):
-        return self.tokenizer.eos_token_id
+        if self.tokenizer.eos_token_id is None:
+            return self.config_json.get("eos_token_id", 0)
+        else:
+            return self.tokenizer.eos_token_id
 
     @property
     def pad_token_id(self):
@@ -68,7 +83,10 @@ class BaseTokenizer:
 
     @property
     def vocab_size(self):
-        return self.tokenizer.vocab_size
+        if hasattr(self.tokenizer, "vocab_size"):
+            return self.tokenizer.vocab_size
+        else:
+            return self.config_json.get("vocab_size", 0)
 
     def convert_tokens_to_ids(self, tokens: Union[str, List[str]]):
         return self.tokenizer.convert_tokens_to_ids(tokens)

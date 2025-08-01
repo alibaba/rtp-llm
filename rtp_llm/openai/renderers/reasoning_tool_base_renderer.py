@@ -6,10 +6,9 @@ from abc import ABC
 from typing import List, Optional, Tuple
 
 from jinja2 import BaseLoader, Environment
-from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from typing_extensions import override
 
-from rtp_llm.models.base_model_datatypes import GenerateOutput
+from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     DeltaMessage,
@@ -33,6 +32,7 @@ from rtp_llm.openai.renderers.sglang_helpers.function_call.base_format_detector 
     BaseFormatDetector,
 )
 from rtp_llm.openai.renderers.sglang_helpers.reasoning_parser import ReasoningParser
+from rtp_llm.utils.base_model_datatypes import GenerateOutput
 from rtp_llm.utils.word_util import is_truncated
 
 

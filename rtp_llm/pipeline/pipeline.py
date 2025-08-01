@@ -147,7 +147,7 @@ class Pipeline(object):
         generate_config_json = kwargs.pop("generate_config", {})
         generate_config = self.create_generate_config(
             generate_config_json,
-            self.model_config.vocab_size,
+            self.tokenizer.vocab_size,
             self.model_config.special_tokens,
             self.tokenizer,
             **kwargs
@@ -294,7 +294,6 @@ class Pipeline(object):
                 tokenizer, tokens, decoding_state
             )
             decoding_state.all_text += new_text
-
             return (
                 new_text if return_incremental == True else decoding_state.all_text
             ), decoding_state.all_text
@@ -314,7 +313,6 @@ class Pipeline(object):
             else:
                 tokens = tokens.reshape(-1)
             output_lens.append(tokens.nelement())
-
             tokens = self.process_stop_id(
                 generate_config,
                 generate_output,

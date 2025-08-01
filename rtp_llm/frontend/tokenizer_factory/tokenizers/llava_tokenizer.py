@@ -9,7 +9,7 @@ from rtp_llm.frontend.tokenizer_factory.tokenizers.base_tokenizer import BaseTok
 
 
 class LlavaTokenizer(BaseTokenizer):
-    def __init__(self, tokenizer_path: str, config_json: Dict[str, Any] = {}):
+    def init_tokenizer(self, tokenizer_path: str, config_json: Dict[str, Any] = {}):
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
         self.mm_use_im_patch_token = config_json.get("mm_use_im_patch_token", False)
         self.mm_use_im_start_end = config_json.get("mm_use_im_start_end", False)
