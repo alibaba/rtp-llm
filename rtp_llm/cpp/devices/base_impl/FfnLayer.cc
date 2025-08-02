@@ -95,11 +95,14 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
                 printBufferData(*up_output, "ffn_up");
             }
             printBufferData(*up_output, "ffn_up_gate");
-            bool is_cuda = (init_params_.device_type == DeviceType::Cuda) || (init_params_.device_type == DeviceType::ROCm);
-            if (is_cuda && (params.configs.activation_type == ActivationType::Swiglu ||
-                    params.configs.activation_type == ActivationType::Silu ||
-                    params.configs.activation_type == ActivationType::Gelu)) {
-                auto act_output = allocateBuffer({up_output->type(), {up_output->shape()[0], up_output->shape()[1] / 2}, AllocationType::DEVICE});
+            bool is_cuda =
+                (init_params_.device_type == DeviceType::Cuda) || (init_params_.device_type == DeviceType::ROCm);
+            if (is_cuda
+                && (params.configs.activation_type == ActivationType::Swiglu
+                    || params.configs.activation_type == ActivationType::Silu
+                    || params.configs.activation_type == ActivationType::Gelu)) {
+                auto act_output = allocateBuffer(
+                    {up_output->type(), {up_output->shape()[0], up_output->shape()[1] / 2}, AllocationType::DEVICE});
                 up_output = activation({params.configs.activation_type,
                                         up_output,
                                         std::nullopt,
@@ -111,19 +114,19 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
                                         params.qscheme});
             } else {
                 printBufferData(*up_output, "gate_up_output buffer");
-                torch::Tensor gate_up_output_torch_tensor = Buffer2torchTensor(up_output, false);
+                torch::Tensor              gate_up_output_torch_tensor = Buffer2torchTensor(up_output, false);
                 std::vector<torch::Tensor> split_tensors = torch::chunk(gate_up_output_torch_tensor, 2, -1);
-                torch::Tensor first_half = split_tensors[0].clone();
-                torch::Tensor second_half = split_tensors[1].clone();
-                BufferPtr gate_output = torchTensor2Buffer(first_half);
-                BufferPtr up_out = torchTensor2Buffer(second_half);
+                torch::Tensor              first_half    = split_tensors[0].clone();
+                torch::Tensor              second_half   = split_tensors[1].clone();
+                BufferPtr                  gate_output   = torchTensor2Buffer(first_half);
+                BufferPtr                  up_out        = torchTensor2Buffer(second_half);
                 activation({params.configs.activation_type,
                             up_out,
                             std::nullopt,
                             *gate_output,
                             std::nullopt,
                             mayGetRef(params.weights.act_scale)});
-                
+
                 up_output = std::move(up_out);
             }
         } else {

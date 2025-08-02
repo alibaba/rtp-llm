@@ -820,8 +820,13 @@ def transpose_w13_2(ts: List[torch.Tensor]):
     w3 = transpose([ts[1]])
     return torch.concat([w1, w3], dim=0).contiguous()
 
+
 def concat_w13(ts: List[torch.Tensor]):
     return torch.concat(ts, dim=-1).contiguous()
+
+
+def concat_w13_2(ts: List[torch.Tensor]):
+    return torch.concat(ts, dim=0).contiguous()
 
 
 def ffn_sp_neg1_w13(
@@ -868,10 +873,21 @@ def ffn_sp_0_w13(
     return concat_w13([w1, w3])
 
 
-def sp_0_w13(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> torch.Tensor:
+def sp_0_w13(
+    t: torch.Tensor,
+    tp: int,
+    tp_rank: int,
+    ep: int,
+    ep_rank: int,
+    dp: int,
+    dp_rank: int,
+    ffn_tp_rank: int,
+    ffn_tp_size: int,
+    **kwargs: Any,
+) -> torch.Tensor:
     w1, w3 = torch.chunk(t, 2, dim=0)
-    w1 = sp_0(w1, tp, tp_rank, **kwargs)
-    w3 = sp_0(w3, tp, tp_rank, **kwargs)
+    w1 = sp_0(w1, ffn_tp_size, ffn_tp_rank, **kwargs)
+    w3 = sp_0(w3, ffn_tp_size, ffn_tp_rank, **kwargs)
     return torch.concat([w1, w3], dim=0)
 
 

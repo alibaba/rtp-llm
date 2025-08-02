@@ -14,19 +14,26 @@ public:
         torch::Tensor gate_proj;
         torch::Tensor up_proj;
         torch::Tensor down_proj;
+        torch::Tensor gate_up_proj;
     };
 
     struct FfnLayerTestOutput {
         torch::Tensor out;
     };
 
-    FfnLayerTestInput PrepareFfnLayerInput(size_t token_num, size_t hidden_size, size_t inter_size, DataType type) {
+    FfnLayerTestInput
+    PrepareFfnLayerInput(size_t token_num, size_t hidden_size, size_t inter_size, DataType type, ActivationType act) {
         auto dtype     = dataTypeToTorchType(type);
         auto input     = 0.01 * torch::rand({(int)token_num, (int)hidden_size}, torch::Device(torch::kCPU)).to(dtype);
         auto gate_proj = 0.01 * torch::rand({(int)hidden_size, (int)inter_size}, torch::Device(torch::kCPU)).to(dtype);
         auto up_proj   = 0.01 * torch::rand({(int)hidden_size, (int)inter_size}, torch::Device(torch::kCPU)).to(dtype);
         auto down_proj = 0.01 * torch::rand({(int)inter_size, (int)hidden_size}, torch::Device(torch::kCPU)).to(dtype);
-        return FfnLayerTestInput({input, gate_proj, up_proj, down_proj});
+        if (isGatedActivation(act)) {
+            auto gate_up_proj = torch::cat({gate_proj, up_proj}, 1);
+            return FfnLayerTestInput({input, gate_proj, up_proj, down_proj, gate_up_proj});
+        } else {
+            return FfnLayerTestInput({input, gate_proj, up_proj, down_proj});
+        }
     }
 
     FfnLayerTestOutput FfnOpRun(FfnLayerTestInput& params, ActivationType Atype) {
@@ -41,7 +48,10 @@ public:
         weights.up_weight   = std::make_unique<const DenseWeights>(DenseWeights(up_proj));
         weights.down_weight = std::make_unique<const DenseWeights>(DenseWeights(down_proj));
         weights.gate_weight = std::make_unique<const DenseWeights>(DenseWeights(gate_proj));
-
+        if (isGatedActivation(Atype)) {
+            auto gate_up_proj      = tensorToBuffer(params.gate_up_proj, alloc_type);
+            weights.gate_up_weight = std::make_unique<const DenseWeights>(DenseWeights(gate_up_proj));
+        }
         FfnConfigs     ffn_configs({Atype});
         FfnLayerParams Opparams(*input, ffn_configs, weights);
 
@@ -61,7 +71,7 @@ public:
     }
 
     void FfnOpTest(size_t token_num, size_t hidden_size, size_t inter_size, ActivationType act, DataType type) {
-        auto input      = PrepareFfnLayerInput(token_num, hidden_size, inter_size, type);
+        auto input      = PrepareFfnLayerInput(token_num, hidden_size, inter_size, type, act);
         auto result     = FfnOpRun(input, act);
         auto result_ref = FfnTorchRefRun(input, act);
         assertTensorClose(result.out.to(result_ref.out.scalar_type()), result_ref.out);
@@ -76,6 +86,8 @@ public:
         std::vector<torch::Tensor> up_lora_b;
         std::vector<torch::Tensor> down_lora_a;
         std::vector<torch::Tensor> down_lora_b;
+        std::vector<torch::Tensor> gate_up_lora_a;
+        std::vector<torch::Tensor> gate_up_lora_b;
     };
 
     FfnLoraLayerTestInput PrepareFfnLayerLoraInput(std::vector<int> input_lengths,
@@ -85,7 +97,8 @@ public:
                                                    int              hidden_size,
                                                    int              inter_size,
                                                    DataType         input_type,
-                                                   DataType         lora_type) {
+                                                   DataType         lora_type,
+                                                   ActivationType   act_type) {
         auto input_tensor_options =
             torch::TensorOptions(dataTypeToTorchType(input_type)).device(torch::Device(torch::kCPU));
         auto lora_tensor_options =
@@ -96,28 +109,64 @@ public:
         auto gate_proj  = 0.01 * torch::rand({(int)hidden_size, (int)inter_size}, input_tensor_options);
         auto up_proj    = 0.01 * torch::rand({(int)hidden_size, (int)inter_size}, input_tensor_options);
         auto down_proj  = 0.01 * torch::rand({(int)inter_size, (int)hidden_size}, input_tensor_options);
-        std::vector<torch::Tensor> gate_lora_a(batch_size);
-        std::vector<torch::Tensor> gate_lora_b(batch_size);
-        std::vector<torch::Tensor> up_lora_a(batch_size);
-        std::vector<torch::Tensor> up_lora_b(batch_size);
-        std::vector<torch::Tensor> down_lora_a(batch_size);
-        std::vector<torch::Tensor> down_lora_b(batch_size);
-        for (int i = 0; i < batch_size; i++) {
-            gate_lora_a[i] = torch::rand({hidden_size, gate_ranks[i]}, lora_tensor_options);
-            gate_lora_b[i] = torch::rand({gate_ranks[i], inter_size}, lora_tensor_options);
-            up_lora_a[i]   = torch::rand({hidden_size, up_ranks[i]}, lora_tensor_options);
-            up_lora_b[i]   = torch::rand({up_ranks[i], inter_size}, lora_tensor_options);
-            down_lora_a[i] = torch::rand({inter_size, down_ranks[i]}, lora_tensor_options);
-            down_lora_b[i] = torch::rand({down_ranks[i], hidden_size}, lora_tensor_options);
+        if (isGatedActivation(act_type)) {
+            auto                       gate_up_proj = torch::cat({gate_proj, up_proj}, 1);
+            std::vector<torch::Tensor> gate_lora_a(batch_size);
+            std::vector<torch::Tensor> gate_lora_b(batch_size);
+            std::vector<torch::Tensor> up_lora_a(batch_size);
+            std::vector<torch::Tensor> up_lora_b(batch_size);
+            std::vector<torch::Tensor> down_lora_a(batch_size);
+            std::vector<torch::Tensor> down_lora_b(batch_size);
+            std::vector<torch::Tensor> gate_up_lora_a(batch_size);
+            std::vector<torch::Tensor> gate_up_lora_b(batch_size);
+            for (int i = 0; i < batch_size; i++) {
+                gate_lora_a[i]    = torch::rand({hidden_size, gate_ranks[i]}, lora_tensor_options);
+                gate_lora_b[i]    = torch::rand({gate_ranks[i], inter_size}, lora_tensor_options);
+                up_lora_a[i]      = torch::rand({hidden_size, up_ranks[i]}, lora_tensor_options);
+                up_lora_b[i]      = torch::rand({up_ranks[i], inter_size}, lora_tensor_options);
+                down_lora_a[i]    = torch::rand({inter_size, down_ranks[i]}, lora_tensor_options);
+                down_lora_b[i]    = torch::rand({down_ranks[i], hidden_size}, lora_tensor_options);
+                gate_up_lora_a[i] = torch::cat({gate_lora_a[i], up_lora_a[i]}, 1);
+                auto zeros1       = torch::zeros_like(up_lora_b[i]);
+                auto zeros2       = torch::zeros_like(gate_lora_b[i]);
+                auto column1      = torch::cat({gate_lora_b[i], zeros1}, 0);
+                auto column2      = torch::cat({zeros2, up_lora_b[i]}, 0);
+                gate_up_lora_b[i] = torch::cat({column1, column2}, 1);
+            }
+            return FfnLoraLayerTestInput({FfnLayerTestInput{input, gate_proj, up_proj, down_proj, gate_up_proj},
+                                          input_lengths,
+                                          gate_lora_a,
+                                          gate_lora_b,
+                                          up_lora_a,
+                                          up_lora_b,
+                                          down_lora_a,
+                                          down_lora_b,
+                                          gate_up_lora_a,
+                                          gate_up_lora_b});
+        } else {
+            std::vector<torch::Tensor> gate_lora_a(batch_size);
+            std::vector<torch::Tensor> gate_lora_b(batch_size);
+            std::vector<torch::Tensor> up_lora_a(batch_size);
+            std::vector<torch::Tensor> up_lora_b(batch_size);
+            std::vector<torch::Tensor> down_lora_a(batch_size);
+            std::vector<torch::Tensor> down_lora_b(batch_size);
+            for (int i = 0; i < batch_size; i++) {
+                gate_lora_a[i] = torch::rand({hidden_size, gate_ranks[i]}, lora_tensor_options);
+                gate_lora_b[i] = torch::rand({gate_ranks[i], inter_size}, lora_tensor_options);
+                up_lora_a[i]   = torch::rand({hidden_size, up_ranks[i]}, lora_tensor_options);
+                up_lora_b[i]   = torch::rand({up_ranks[i], inter_size}, lora_tensor_options);
+                down_lora_a[i] = torch::rand({inter_size, down_ranks[i]}, lora_tensor_options);
+                down_lora_b[i] = torch::rand({down_ranks[i], hidden_size}, lora_tensor_options);
+            }
+            return FfnLoraLayerTestInput({FfnLayerTestInput{input, gate_proj, up_proj, down_proj},
+                                          input_lengths,
+                                          gate_lora_a,
+                                          gate_lora_b,
+                                          up_lora_a,
+                                          up_lora_b,
+                                          down_lora_a,
+                                          down_lora_b});
         }
-        return FfnLoraLayerTestInput({FfnLayerTestInput{input, gate_proj, up_proj, down_proj},
-                                      input_lengths,
-                                      gate_lora_a,
-                                      gate_lora_b,
-                                      up_lora_a,
-                                      up_lora_b,
-                                      down_lora_a,
-                                      down_lora_b});
     }
 
     FfnLayerTestOutput FfnLayerLoraOpRun(FfnLoraLayerTestInput& params, ActivationType Atype) {
@@ -133,6 +182,11 @@ public:
         weights.down_weight = std::make_unique<const DenseWeights>(DenseWeights(down_proj));
         weights.gate_weight = std::make_unique<const DenseWeights>(DenseWeights(gate_proj));
 
+        if (isGatedActivation(Atype)) {
+            auto gate_up_proj      = tensorToBuffer(params.input.gate_up_proj, alloc_type);
+            weights.gate_up_weight = std::make_unique<const DenseWeights>(DenseWeights(gate_up_proj));
+        }
+
         FfnConfigs     ffn_configs({Atype});
         FfnLayerParams Opparams(*input, ffn_configs, weights);
 
@@ -143,6 +197,8 @@ public:
         std::vector<ConstBufferPtr> gate_lora_bs;
         std::vector<ConstBufferPtr> up_lora_as;
         std::vector<ConstBufferPtr> up_lora_bs;
+        std::vector<ConstBufferPtr> gate_up_lora_as;
+        std::vector<ConstBufferPtr> gate_up_lora_bs;
         std::vector<ConstBufferPtr> down_lora_as;
         std::vector<ConstBufferPtr> down_lora_bs;
         for (int i = 0; i < params.input_lengths.size(); i++) {
@@ -152,11 +208,22 @@ public:
             up_lora_bs.push_back(tensorToBuffer(params.up_lora_b[i]));
             down_lora_as.push_back(tensorToBuffer(params.down_lora_a[i]));
             down_lora_bs.push_back(tensorToBuffer(params.down_lora_b[i]));
+            if (isGatedActivation(Atype)) {
+                gate_up_lora_as.push_back(tensorToBuffer(params.gate_up_lora_a[i]));
+                gate_up_lora_bs.push_back(tensorToBuffer(params.gate_up_lora_b[i]));
+            }
         }
-        Opparams.lora_input = lora::FfnLayerLoraInput(
-            {std::make_shared<lora::LoraOpInput>(lora_input_lengths, gate_lora_as, gate_lora_bs),
-             std::make_shared<lora::LoraOpInput>(lora_input_lengths, up_lora_as, up_lora_bs),
-             std::make_shared<lora::LoraOpInput>(lora_input_lengths, down_lora_as, down_lora_bs)});
+        if (isGatedActivation(Atype)) {
+            Opparams.lora_input = lora::FfnLayerLoraInput(
+                {std::make_shared<lora::LoraOpInput>(lora_input_lengths, gate_up_lora_as, gate_up_lora_bs),
+                 std::make_shared<lora::LoraOpInput>(lora_input_lengths, gate_up_lora_as, gate_up_lora_bs),
+                 std::make_shared<lora::LoraOpInput>(lora_input_lengths, down_lora_as, down_lora_bs)});
+        } else {
+            Opparams.lora_input = lora::FfnLayerLoraInput(
+                {std::make_shared<lora::LoraOpInput>(lora_input_lengths, gate_lora_as, gate_lora_bs),
+                 std::make_shared<lora::LoraOpInput>(lora_input_lengths, up_lora_as, up_lora_bs),
+                 std::make_shared<lora::LoraOpInput>(lora_input_lengths, down_lora_as, down_lora_bs)});
+        }
 
         auto output = this->device_->ffnLayer(Opparams);
         return FfnLayerTestOutput({bufferToTensor(*(output.hidden_states))});
@@ -190,7 +257,7 @@ public:
                           DataType         lora_type,
                           ActivationType   act) {
         auto input = PrepareFfnLayerLoraInput(
-            input_lengths, gate_ranks, up_ranks, down_ranks, hidden_size, inter_size, input_type, lora_type);
+            input_lengths, gate_ranks, up_ranks, down_ranks, hidden_size, inter_size, input_type, lora_type, act);
         auto result     = FfnLayerLoraOpRun(input, act);
         auto result_ref = FfnLayerLoraTorchRefRun(input, act);
         assertTensorClose(result.out.to(result_ref.out.scalar_type()), result_ref.out);

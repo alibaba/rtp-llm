@@ -132,7 +132,15 @@ void GroupedGemmParams::check() const {
         auto n_b = B[i]->shape()[1];
         auto m_c = (C.has_value()) ? C.value()[i]->shape()[0] : m_a;
         auto n_c = (C.has_value()) ? C.value()[i]->shape()[1] : n_b;
-        RTP_LLM_CHECK_WITH_INFO((m_a == m_c && k_a == k_b && n_b == n_c), "group gemm[%d] A, B, C (m ,n, k) valid.", i);
+        RTP_LLM_CHECK_WITH_INFO((m_a == m_c && k_a == k_b && n_b == n_c),
+                                "group gemm[%d] A, B, C (%d, %d, %d, %d, %d, %d) valid.",
+                                i,
+                                m_a,
+                                k_a,
+                                m_c,
+                                n_b,
+                                k_b,
+                                n_c);
     }
 }
 

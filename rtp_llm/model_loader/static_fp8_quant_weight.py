@@ -1,4 +1,5 @@
 import copy
+import functools
 import logging
 from typing import Any, Dict, List, Optional, Union
 
@@ -22,10 +23,12 @@ from rtp_llm.utils.model_weight import (
     WeightStyle,
     concat_0,
     concat_w13,
+    concat_w13_2,
     get_tensor_from_scalar,
     get_tensor_reciprocal,
     identity,
     merge_te_qkv,
+    pad_w13,
     sp_id,
     stack_,
     stack_moe_w1,
@@ -361,7 +364,11 @@ class StaticPerTensorFp8Weight(CompositeWeight, QuantWeight):
                         CkptWeightInfo(w1_name + self.qw_suffix, identity),
                         CkptWeightInfo(w3_name + self.qw_suffix, identity),
                     ],
-                    concat_w13,
+                    functools.partial(
+                        pad_w13,
+                        inter_padding_size=src_weight.config.inter_padding_size,
+                        dim=0,
+                    ),
                     data_type=torch.float8_e4m3fn,
                     config=src_weight.config,
                 ),
@@ -373,7 +380,7 @@ class StaticPerTensorFp8Weight(CompositeWeight, QuantWeight):
                         CkptWeightInfo(w3_name + self.qs_suffix, identity),
                     ],
                     concat_w13,
-                    data_type=torch.float8_e4m3fn,
+                    data_type=torch.float32,
                     config=src_weight.config,
                 ),
                 create_w8a8_fp8_weight(

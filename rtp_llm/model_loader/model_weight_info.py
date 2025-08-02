@@ -130,9 +130,18 @@ class ModelDeployWeightInfo:
         W.ffn_w3: "transformer.layers.{i}.mlp.gate.weight",
         W.ffn_b3: "transformer.layers.{i}.mlp.gate.bias",
         W.ffn_s3: "transformer.layers.{i}.mlp.gate.weights_scaling_factor",
-        W.ffn_w13 : ['transformer.layers.{i}.mlp.fc.weight', 'transformer.layers.{i}.mlp.gate.weight'],
-        W.ffn_b13 : ['transformer.layers.{i}.mlp.fc.bias', 'transformer.layers.{i}.mlp.gate.bias'],
-        W.ffn_s13 : ['transformer.layers.{i}.mlp.fc.weights_scaling_factor', 'transformer.layers.{i}.mlp.gate.weights_scaling_factor'],
+        W.ffn_w13: [
+            "transformer.layers.{i}.mlp.fc.weight",
+            "transformer.layers.{i}.mlp.gate.weight",
+        ],
+        W.ffn_b13: [
+            "transformer.layers.{i}.mlp.fc.bias",
+            "transformer.layers.{i}.mlp.gate.bias",
+        ],
+        W.ffn_s13: [
+            "transformer.layers.{i}.mlp.fc.weights_scaling_factor",
+            "transformer.layers.{i}.mlp.gate.weights_scaling_factor",
+        ],
         W.post_ln_gamma: "transformer.layers.{i}.post_layernorm.weight",
         W.post_ln_beta: "transformer.layers.{i}.post_layernorm.bias",
     }
@@ -310,7 +319,9 @@ class ModelDeployWeightInfo:
         for weights in origin_weight_info.layer_weights:
             ffn_weight = [weight for weight in weights if weight.name == W.ffn]
             assert len(ffn_weight) == 1
-            if (ffn_weight[0].w1 is not None or ffn_weight[0].w13 is not None) and self.weight_style == WeightStyle.TRT_ENGINE:
+            if (
+                ffn_weight[0].w1 is not None or ffn_weight[0].w13 is not None
+            ) and self.weight_style == WeightStyle.TRT_ENGINE:
                 m2 = self.TRT_ENGINE_LAYER_WEIGHT_MAP2
             elif self.weight_style == WeightStyle.TRT_ENGINE:
                 m2 = self.TRT_ENGINE_LAYER_WEIGHT_MAP
@@ -355,6 +366,9 @@ class ModelDeployWeightInfo:
         return origin_weight_info
 
     def _fix_merge_w1_w3(self, origin_weight_info: ModelWeightInfo):
+        if len(origin_weight_info.layer_weights) == 0:
+            return origin_weight_info
+
         def __update_weight_config(weight: WeightModule):
             if isinstance(weight, FfnWeight) or isinstance(weight, MoeWithSharedWeight):
                 logging.info(f"src_weights: {weight}")
