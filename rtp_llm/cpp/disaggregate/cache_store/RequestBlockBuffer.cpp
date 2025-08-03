@@ -121,8 +121,13 @@ bool RequestBlockBuffer::setWatchFunc(RequestBlockBuffer::WatchFunc&& watch_func
 }
 
 void RequestBlockBuffer::triggerWatchFunc(bool ok, const std::vector<std::shared_ptr<BlockBuffer>>& blocks) {
-    std::shared_lock<std::shared_mutex> lock(watch_func_mutex_);
-    for (auto watch_func : watch_funcs_) {
+    std::vector<WatchFunc> tmp_watch_funcs;
+    {
+        std::shared_lock<std::shared_mutex> lock(watch_func_mutex_);
+        tmp_watch_funcs = watch_funcs_;
+    }
+
+    for (auto watch_func : tmp_watch_funcs) {
         if (watch_func) {
             watch_func(ok, blocks);
         }

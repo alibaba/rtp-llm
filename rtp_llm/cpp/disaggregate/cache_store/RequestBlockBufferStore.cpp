@@ -41,7 +41,8 @@ bool RequestBlockBufferStore::setRequestBlockBuffer(const std::shared_ptr<Reques
         }
         valid_blocks.push_back(valid_block);
         RTP_LLM_LOG_DEBUG("set request block buffer success to make valid block, request id %s, block id is %s",
-                          request_block_buffer->getRequestId().c_str(), block->key.c_str());
+                          request_block_buffer->getRequestId().c_str(),
+                          block->key.c_str());
     }
     store_request_block_buffer->addBlocks(valid_blocks);
     return true;
@@ -182,7 +183,6 @@ bool RequestBlockBufferStore::copyBlock(const std::shared_ptr<BlockBuffer>& dst_
 
 void RequestBlockBufferStore::delRequestBlockBuffer(const std::string& requestid) {
     std::shared_ptr<RequestBlockBuffer> request_block_buffer;
-    RTP_LLM_LOG_DEBUG("del request block buffer, request id %s", requestid.c_str());
     {
         std::unique_lock<std::shared_mutex> lock(request_cache_map_mutex_);
         auto                                iter = request_cache_map_.find(requestid);
