@@ -613,7 +613,6 @@ class GptInitModelParameters:
                 nccl_debug_file=get_env_str("NCCL_DEBUG_FILE", ""),
                 debug_load_server=get_env_bool("DEBUG_LOAD_SERVER", False),
                 hack_layer_num=get_env_int("HACK_LAYER_NUM", 0),
-                test_layer_num=get_env_int("TEST_LAYER_NUM", 0),
                 debug_start_fake_process=get_env_bool(
                     "DEBUG_START_FAKE_PROCESS", False
                 ),
@@ -966,14 +965,6 @@ class GptInitModelParameters:
         logging.info(f"kv_cache_mem_mb: {self.kv_cache_mem_mb}")
         self.block_nums = self.py_env_configs.py_kv_cache_config.test_block_num
         logging.info(f"block_nums: {self.block_nums}")
-        if self.profiling_debug_logging_config.test_layer_num:
-            logging.info(
-                f"replace model layer with TEST_LAYER_NUM: {self.profiling_debug_logging_config.test_layer_num}"
-            )
-            if self.profiling_debug_logging_config.test_layer_num == 0:
-                self.layer_num = self.layer_num
-            else:
-                self.layer_num = self.profiling_debug_logging_config.test_layer_num
         self.enable_partial_fallback = (
             self.fifo_scheduler_config.enable_partial_fallback
         )

@@ -486,13 +486,6 @@ def setup_args():
         help="截断使用的模型层数",
     )
     profile_debug_logging_group.add_argument(
-        "--test_layer_num",
-        env_name="TEST_LAYER_NUM",
-        type=int,
-        default=None,
-        help="测试用的模型层数数量",
-    )
-    profile_debug_logging_group.add_argument(
         "--debug_start_fake_process",
         env_name="DEBUG_START_FAKE_PROCESS",
         type=str2bool,

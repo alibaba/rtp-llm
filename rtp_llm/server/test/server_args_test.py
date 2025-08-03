@@ -66,7 +66,6 @@ class ServerArgsDefaultTest(TestCase):
         self.assertIsNone(env.get("NCCL_DEBUG_FILE"))
         self.assertEqual(env.get("DEBUG_LOAD_SERVER"), "0")
         self.assertEqual(env.get("HACK_LAYER_NUM"), "0")
-        self.assertIsNone(env.get("TEST_LAYER_NUM"))
         self.assertIsNone(env.get("DEBUG_START_FAKE_PROCESS"))
         self.assertIsNone(env.get("DG_PRINT_REG_REUSE"))
         self.assertIsNone(env.get("DISABLE_DPC_RANDOM"))
@@ -356,8 +355,6 @@ class ServerArgsSetTest(TestCase):
             "True",
             "--hack_layer_num",
             "2",
-            "--test_layer_num",
-            "4",
             "--debug_start_fake_process",
             "True",
             "--dg_print_reg_reuse",
@@ -722,7 +719,6 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env["NCCL_DEBUG_FILE"], "/tmp/nccl.log")
         self.assertEqual(env["DEBUG_LOAD_SERVER"], "1")
         self.assertEqual(env["HACK_LAYER_NUM"], "2")
-        self.assertEqual(env["TEST_LAYER_NUM"], "4")
         self.assertEqual(env["DEBUG_START_FAKE_PROCESS"], "1")
         self.assertEqual(env["DG_PRINT_REG_REUSE"], "1")
         self.assertEqual(env["QWEN_AGENT_DEBUG"], "1")

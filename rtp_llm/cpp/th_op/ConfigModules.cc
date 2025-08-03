@@ -170,7 +170,6 @@ void ProfilingDebugLoggingConfig::update_from_env_for_test() {
     nccl_debug_file           = autil::EnvUtil::getEnv("NCCL_DEBUG_FILE", "");
     debug_load_server         = autil::EnvUtil::getEnv("DEBUG_LOAD_SERVER", false);
     hack_layer_num            = autil::EnvUtil::getEnv("HACK_LAYER_NUM", 0);
-    test_layer_num            = autil::EnvUtil::getEnv("TEST_LAYER_NUM", 0);
     debug_start_fake_process  = autil::EnvUtil::getEnv("DEBUG_START_FAKE_PROCESS", false);
     dg_print_reg_reuse        = bool_from_env_for_test("DG_PRINT_REG_REUSE", false);
     qwen_agent_debug          = bool_from_env_for_test("QWEN_AGENT_DEBUG", false);
@@ -192,7 +191,6 @@ void register_profiling_debug_logging_config(pybind11::module& m) {
                             std::string,
                             bool,
                             int,
-                            int,
                             bool,
                             bool,
                             bool,
@@ -210,7 +208,6 @@ void register_profiling_debug_logging_config(pybind11::module& m) {
              pybind11::arg("nccl_debug_file")           = "",
              pybind11::arg("debug_load_server")         = false,
              pybind11::arg("hack_layer_num")            = 0,
-             pybind11::arg("test_layer_num")            = 0,
              pybind11::arg("debug_start_fake_process")  = false,
              pybind11::arg("dg_print_reg_reuse")        = false,
              pybind11::arg("qwen_agent_debug")          = false,
@@ -230,7 +227,6 @@ void register_profiling_debug_logging_config(pybind11::module& m) {
         .def_readwrite("nccl_debug_file", &ProfilingDebugLoggingConfig::nccl_debug_file)
         .def_readwrite("debug_load_server", &ProfilingDebugLoggingConfig::debug_load_server)
         .def_readwrite("hack_layer_num", &ProfilingDebugLoggingConfig::hack_layer_num)
-        .def_readwrite("test_layer_num", &ProfilingDebugLoggingConfig::test_layer_num)
         .def_readwrite("debug_start_fake_process", &ProfilingDebugLoggingConfig::debug_start_fake_process)
         .def_readwrite("dg_print_reg_reuse", &ProfilingDebugLoggingConfig::dg_print_reg_reuse)
         .def_readwrite("qwen_agent_debug", &ProfilingDebugLoggingConfig::qwen_agent_debug)
@@ -613,7 +609,6 @@ inline std::string ProfilingDebugLoggingConfig::to_string() const {
         << "nccl_debug_file: " << nccl_debug_file << "\n"
         << "debug_load_server: " << debug_load_server << "\n"
         << "hack_layer_num: " << hack_layer_num << "\n"
-        << "test_layer_num: " << test_layer_num << "\n"
         << "debug_start_fake_process: " << debug_start_fake_process << "\n"
         << "dg_print_reg_reuse: " << dg_print_reg_reuse << "\n"
         << "qwen_agent_debug" << qwen_agent_debug << "\n"

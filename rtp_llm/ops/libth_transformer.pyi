@@ -702,7 +702,6 @@ class ProfilingDebugLoggingConfig:
     nccl_debug_file: str
     trace_memory: bool
     trace_malloc_stack: bool
-    test_layer_num: int
     torch_cuda_profiler_dir: str
     dg_print_reg_reuse: bool
     qwen_agent_debug: bool
@@ -722,7 +721,6 @@ class ProfilingDebugLoggingConfig:
         nccl_debug_file: str = "",
         debug_load_server: bool = False,
         hack_layer_num: int = 0,
-        test_layer_num: int = 0,
         debug_start_fake_process: bool = False,
         dg_print_reg_reuse: bool = False,
         qwen_agent_debug: bool = False,
