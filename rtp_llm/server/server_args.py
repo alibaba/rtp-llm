@@ -604,13 +604,6 @@ def setup_args():
         help="设置为 `True` 时，禁用自定义的 AllReduce (AR) 实现，可能回退到标准库（如 NCCL）的 AllReduce。",
     )
     hw_kernel_group.add_argument(
-        "--enable_merge_w13",
-        env_name="ENABLE_MERGE_W13",
-        type=str2bool,
-        default=None,
-        help="设置为 `True` 时，启用FFN W13 的合并操作。",
-    )
-    hw_kernel_group.add_argument(
         "--use_aiter_pa",
         env_name="USE_AITER_PA",
         type=str2bool,
@@ -1704,15 +1697,6 @@ def setup_args():
     ):
         os.environ["ENABLE_COMM_OVERLAP"] = "0"
         logging.info("[MI308X] disable ENABLE_COMM_OVERLAP by default.")
-
-    if (
-        len(glob.glob("/dev/dri/renderD*")) > 0
-        and os.getenv("ENABLE_MERGE_W13") is None
-    ):
-        os.environ["ENABLE_MERGE_W13"] = "1"
-        logging.info(
-            "[MI308X] enable ENABLE_MERGE_W13 by default, it improves the performance both for bf16 and fp8."
-        )
 
     parser.print_env_mappings()
     StaticConfig.update_from_env()

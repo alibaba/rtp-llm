@@ -93,7 +93,6 @@ struct HWKernelConfig {
     bool        enable_multi_block_mode      = true;
     bool        ft_disable_custom_ar         = true;
     std::string rocm_hipblaslt_config        = "gemm_config.csv";
-    bool        enable_merge_w13             = false;
     bool        enable_cuda_graph            = false;
     bool        enable_cuda_graph_debug_mode = false;
     bool        use_aiter_pa                 = true;

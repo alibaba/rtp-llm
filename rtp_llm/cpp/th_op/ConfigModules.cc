@@ -253,7 +253,6 @@ void HWKernelConfig::update_from_env_for_test() {
     enable_multi_block_mode      = bool_from_env_for_test("ENABLE_MULTI_BLOCK_MODE", true);
     ft_disable_custom_ar         = bool_from_env_for_test("FT_DISABLE_CUSTOM_AR", true);
     rocm_hipblaslt_config        = autil::EnvUtil::getEnv("ROCM_HIPBLASLT_CONFIG", "gemm_config.csv");
-    enable_merge_w13             = bool_from_env_for_test("ENABLE_MERGE_W13", false);
     enable_cuda_graph            = bool_from_env_for_test("ENABLE_CUDA_GRAPH", false);
     enable_cuda_graph_debug_mode = bool_from_env_for_test("ENABLE_CUDA_GRAPH_DEBUG_MODE", false);
     use_aiter_pa                 = bool_from_env_for_test("USE_AITER_PA", true);
@@ -261,14 +260,13 @@ void HWKernelConfig::update_from_env_for_test() {
 
 void register_hwkernel_config(pybind11::module& m) {
     pybind11::class_<HWKernelConfig>(m, "HWKernelConfig")
-        .def(pybind11::init<int, bool, bool, bool, bool, std::string, bool, bool, bool, bool>(),
+        .def(pybind11::init<int, bool, bool, bool, bool, std::string, bool, bool, bool>(),
              pybind11::arg("deep_gemm_num_sm")             = -1,
              pybind11::arg("arm_gemm_use_kai")             = false,
              pybind11::arg("enable_stable_scatter_add")    = false,
              pybind11::arg("enable_multi_block_mode")      = true,
              pybind11::arg("ft_disable_custom_ar")         = true,
              pybind11::arg("rocm_hipblaslt_config")        = "gemm_config.csv",
-             pybind11::arg("enable_merge_w13")             = false,
              pybind11::arg("enable_cuda_graph")            = false,
              pybind11::arg("enable_cuda_graph_debug_mode") = false,
              pybind11::arg("use_aiter_pa")                 = true)
@@ -280,7 +278,6 @@ void register_hwkernel_config(pybind11::module& m) {
         .def_readwrite("enable_multi_block_mode", &HWKernelConfig::enable_multi_block_mode)
         .def_readwrite("ft_disable_custom_ar", &HWKernelConfig::ft_disable_custom_ar)
         .def_readwrite("rocm_hipblaslt_config", &HWKernelConfig::rocm_hipblaslt_config)
-        .def_readwrite("enable_merge_w13", &HWKernelConfig::enable_merge_w13)
         .def_readwrite("enable_cuda_graph", &HWKernelConfig::enable_cuda_graph)
         .def_readwrite("enable_cuda_graph_debug_mode", &HWKernelConfig::enable_cuda_graph_debug_mode)
         .def_readwrite("use_aiter_pa", &HWKernelConfig::use_aiter_pa);
@@ -643,7 +640,6 @@ inline std::string HWKernelConfig::to_string() const {
         << "enable_multi_block_mode: " << enable_multi_block_mode << "\n"
         << "ft_disable_custom_ar: " << ft_disable_custom_ar << "\n"
         << "rocm_hipblaslt_config: " << rocm_hipblaslt_config << "\n"
-        << "enable_merge_w13: " << enable_merge_w13 << "\n"
         << "enable_cuda_graph: " << enable_cuda_graph << "\n"
         << "enable_cuda_graph_debug_mode" << enable_cuda_graph_debug_mode << "\n"
         << "use_aiter_pa" << use_aiter_pa << "\n";

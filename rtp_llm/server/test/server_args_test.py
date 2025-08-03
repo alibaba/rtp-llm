@@ -81,7 +81,6 @@ class ServerArgsDefaultTest(TestCase):
         self.assertEqual(env.get("ENABLE_MULTI_BLOCK_MODE"), "1")
         self.assertEqual(env.get("ROCM_HIPBLASLT_CONFIG"), "gemm_config.csv")
         self.assertIsNone(env.get("FT_DISABLE_CUSTOM_AR"))
-        self.assertIsNone(env.get("ENABLE_MERGE_W13"))
         self.assertEqual(env.get("ENABLE_CUDA_GRAPH"), "0")
         self.assertEqual(env.get("ENABLE_CUDA_GRAPH_DEBUG_MODE"), "0")
         self.assertEqual(env.get("USE_AITER_PA"), "1")
@@ -386,8 +385,6 @@ class ServerArgsSetTest(TestCase):
             "another_gemm_config.csv",
             "--ft_disable_custom_ar",
             "False",
-            "--enable_merge_w13",
-            "True",
             "--enable_cuda_graph",
             "True",
             "--enable_cuda_graph_debug_mode",
@@ -746,7 +743,6 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env["ENABLE_MULTI_BLOCK_MODE"], "0")
         self.assertEqual(env["ROCM_HIPBLASLT_CONFIG"], "another_gemm_config.csv")
         self.assertEqual(env["FT_DISABLE_CUSTOM_AR"], "0")
-        self.assertEqual(env["ENABLE_MERGE_W13"], "1")
         self.assertEqual(env.get("ENABLE_CUDA_GRAPH"), "1")
         self.assertEqual(env.get("ENABLE_CUDA_GRAPH_DEBUG_MODE"), "1")
         self.assertEqual(env.get("USE_AITER_PA"), "0")

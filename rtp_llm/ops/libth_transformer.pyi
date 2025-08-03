@@ -517,7 +517,6 @@ class HWKernelConfig:
     enable_stable_scatter_add: bool
     ft_disable_custom_ar: bool
     rocm_hipblaslt_config: str
-    enable_merge_w13: bool
     enable_cuda_graph: bool
     enable_cuda_graph_debug_mode: bool
     use_aiter_pa: bool
@@ -529,7 +528,6 @@ class HWKernelConfig:
         enable_multi_block_mode: bool = True,
         ft_disable_custom_ar: bool = True,
         rocm_hipblaslt_config: str = "gemm_config.csv",
-        enable_merge_w13: bool = False,
         enable_cuda_graph: bool = False,
         enable_cuda_graph_debug_mode: bool = False,
         use_aiter_pa: bool = True,

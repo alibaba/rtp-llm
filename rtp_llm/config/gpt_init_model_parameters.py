@@ -636,7 +636,6 @@ class GptInitModelParameters:
                 "ROCM_HIPBLASLT_CONFIG", "gemm_config.csv"
             ),
             ft_disable_custom_ar=get_env_bool("FT_DISABLE_CUSTOM_AR", True),
-            enable_merge_w13=get_env_bool("ENABLE_MERGE_W13", False),
             enable_cuda_graph=get_env_bool("ENABLE_CUDA_GRAPH", False),
             enable_cuda_graph_debug_mode=get_env_bool(
                 "ENABLE_CUDA_GRAPH_DEBUG_MODE", False
@@ -904,9 +903,7 @@ class GptInitModelParameters:
         self.phy_exp_num = (
             self.py_env_configs.py_eplb_config.redundant_expert + self.expert_num
         )
-        logging.info(
-            f"phy_exp_num: {self.phy_exp_num}"
-        )
+        logging.info(f"phy_exp_num: {self.phy_exp_num}")
 
         if gang_info is not None:
             self.num_nodes = gang_info.num_nodes
