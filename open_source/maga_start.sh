@@ -92,8 +92,6 @@ export FSLIB_PANGU_ENABLE_BUFFER_WRITE=${FSLIB_PANGU_ENABLE_BUFFER_WRITE-"true"}
 
 echo "START_PORT=${START_PORT}";
 
-export PY_INFERENCE_LOG_RESPONSE=1
-
 printenv > "$ENV_FILE";
 if [ "${CMD}" ]; then
     echo "use cmd mode"

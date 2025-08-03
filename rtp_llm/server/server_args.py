@@ -404,13 +404,6 @@ def setup_args():
         help="控制是否启用NVTX性能分析。可选值: True (启用), False (禁用)。默认为 False",
     )
     profile_debug_logging_group.add_argument(
-        "--py_inference_log_response",
-        env_name="PY_INFERENCE_LOG_RESPONSE",
-        type=str2bool,
-        default=False,
-        help="控制是否在Python推理的access log中记录响应内容。可选值: `True` (记录), `False` (不记录)。默认为 `False`",
-    )
-    profile_debug_logging_group.add_argument(
         "--trace_memory",
         env_name="RTP_LLM_TRACE_MEMORY",
         type=str2bool,

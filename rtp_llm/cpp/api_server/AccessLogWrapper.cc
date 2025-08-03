@@ -126,16 +126,6 @@ void AccessLogWrapper::logQueryAccess(const std::string& raw_request, int64_t re
     }
 }
 
-bool AccessLogWrapper::logResponse(bool py_inference_log_response) {
-    static bool checked      = false;
-    static bool log_response = false;
-    if (!checked) {
-        log_response = py_inference_log_response;
-        checked      = true;
-    }
-    return log_response;
-}
-
 std::string decodeUnicode(const std::string& input) {
     std::string result;
     size_t      i = 0;
@@ -204,8 +194,7 @@ void AccessLogWrapper::logSuccessAccess(const std::string&                raw_re
                                         int64_t                           request_id,
                                         int64_t                           start_time_us,
                                         const std::optional<std::string>& logable_response,
-                                        bool                              private_request,
-                                        bool                              py_inference_log_response) {
+                                        bool                              private_request) {
     if (private_request) {
         return;
     }
@@ -216,9 +205,7 @@ void AccessLogWrapper::logSuccessAccess(const std::string&                raw_re
     try {
         RequestLogInfo  request(decodeUnicode(raw_request));
         ResponseLogInfo response;
-        if (logResponse(py_inference_log_response)) {
-            response.addResponse(logable_response.value());
-        }
+        response.addResponse(logable_response.value());
         AccessLogInfoEmbedding access_log_info(request, response, request_id, start_time_us);
 
         std::string access_log_info_str = autil::legacy::ToJsonString(access_log_info, /*isCompact=*/true);

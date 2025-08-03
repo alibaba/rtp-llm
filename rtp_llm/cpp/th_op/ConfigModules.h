@@ -63,7 +63,6 @@ struct KVCacheConfig {
 
 struct ProfilingDebugLoggingConfig {
     bool        ft_nvtx                   = false;
-    bool        py_inference_log_response = false;
     bool        trace_memory              = false;
     bool        trace_malloc_stack        = false;
     bool        enable_device_perf        = false;

@@ -158,7 +158,6 @@ void register_kvcache_config(pybind11::module& m) {
 // ProfilingDebugLoggingConfig
 void ProfilingDebugLoggingConfig::update_from_env_for_test() {
     ft_nvtx                   = bool_from_env_for_test("FT_NVTX", false);
-    py_inference_log_response = bool_from_env_for_test("PY_INFERENCE_LOG_RESPONSE", false);
     trace_memory              = bool_from_env_for_test("RTP_LLM_TRACE_MEMORY", false);
     trace_malloc_stack        = bool_from_env_for_test("RTP_LLM_TRACE_MALLOC_STACK", false);
     enable_device_perf        = bool_from_env_for_test("ENABLE_DEVICE_PERF", false);
@@ -186,7 +185,6 @@ void register_profiling_debug_logging_config(pybind11::module& m) {
                             bool,
                             bool,
                             bool,
-                            bool,
                             std::string,
                             std::string,
                             bool,
@@ -202,7 +200,6 @@ void register_profiling_debug_logging_config(pybind11::module& m) {
                             bool,
                             bool>(),
              pybind11::arg("ft_nvtx")                   = false,
-             pybind11::arg("py_inference_log_response") = false,
              pybind11::arg("trace_memory")              = false,
              pybind11::arg("trace_malloc_stack")        = false,
              pybind11::arg("enable_device_perf")        = false,
@@ -224,7 +221,6 @@ void register_profiling_debug_logging_config(pybind11::module& m) {
         .def("to_string", &ProfilingDebugLoggingConfig::to_string)
         .def("update_from_env", &ProfilingDebugLoggingConfig::update_from_env_for_test)
         .def_readwrite("ft_nvtx", &ProfilingDebugLoggingConfig::ft_nvtx)
-        .def_readwrite("py_inference_log_response", &ProfilingDebugLoggingConfig::py_inference_log_response)
         .def_readwrite("trace_memory", &ProfilingDebugLoggingConfig::trace_memory)
         .def_readwrite("trace_malloc_stack", &ProfilingDebugLoggingConfig::trace_malloc_stack)
         .def_readwrite("enable_device_perf", &ProfilingDebugLoggingConfig::enable_device_perf)
@@ -609,7 +605,6 @@ inline std::string KVCacheConfig::to_string() const {
 inline std::string ProfilingDebugLoggingConfig::to_string() const {
     std::ostringstream oss;
     oss << "ft_nvtx: " << ft_nvtx << "\n"
-        << "py_inference_log_response: " << py_inference_log_response << "\n"
         << "trace_memory: " << trace_memory << "\n"
         << "trace_malloc_stack: " << trace_malloc_stack << "\n"
         << "enable_device_perf: " << enable_device_perf << "\n"

@@ -11,8 +11,6 @@ from rtp_llm.structure.request_extractor import request_id_field_name
 ACCESS_LOGGER_NAME = "access_logger"
 QUERY_ACCESS_LOGGER_NAME = "query_access_logger"
 
-LOG_RESPONSE = StaticConfig.profiling_debug_config.py_inference_log_response == 1
-
 
 def init_access_logger() -> None:
     access_logger = logging.getLogger(ACCESS_LOGGER_NAME)
@@ -68,8 +66,7 @@ class AccessLogger:
     def log_success_access(self, request: Dict[str, Any], response: Any) -> None:
         if not self.is_private_request(request):
             response_log = ResponseLog()
-            if LOG_RESPONSE:
-                response_log.add_response(response)
+            response_log.add_response(response)
             self.log_access(request, response_log)
 
     def log_exception_access(

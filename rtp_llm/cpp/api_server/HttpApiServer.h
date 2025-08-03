@@ -33,17 +33,14 @@ public:
                   std::shared_ptr<MultimodalProcessor> mm_processor,
                   std::string                          address,
                   const EngineInitParams&              params,
-                  py::object                           token_processor,
-                  bool                                 py_inference_log_response = false):
+                  py::object                           token_processor):
         engine_(engine),
         mm_processor_(mm_processor),
         addr_(address),
         engine_init_param_(params),
         params_(params.gpt_init_parameter),
         token_processor_(new TokenProcessor(token_processor)),
-        metrics_reporter_(params.metrics_reporter),
-        py_inference_log_response_(py_inference_log_response) {
-
+        metrics_reporter_(params.metrics_reporter) {
         is_embedding_ = false;
         active_request_count_.reset(new autil::AtomicCounter());
         request_counter_.reset(new autil::AtomicCounter());
@@ -54,13 +51,8 @@ public:
     HttpApiServer(std::shared_ptr<EmbeddingEngine>     embedding_engine,
                   std::shared_ptr<MultimodalProcessor> mm_processor,
                   const EngineInitParams&              params,
-                  py::object                           custom_module,
-                  bool                                 py_inference_log_response = false):
-        engine_init_param_(params),
-        params_(params.gpt_init_parameter),
-        metrics_reporter_(params.metrics_reporter),
-        py_inference_log_response_(py_inference_log_response) {
-
+                  py::object                           custom_module):
+        engine_init_param_(params), params_(params.gpt_init_parameter), metrics_reporter_(params.metrics_reporter) {
         is_embedding_       = true;
         embedding_endpoint_ = std::make_shared<EmbeddingEndpoint>(embedding_engine, mm_processor, custom_module);
         active_request_count_.reset(new autil::AtomicCounter());
@@ -134,7 +126,6 @@ private:
     std::shared_ptr<InferenceService>    inference_service_;
     std::shared_ptr<EmbeddingService>    embedding_service_;
     std::shared_ptr<LoraService>         lora_service_;
-    bool                                 py_inference_log_response_;
 };
 
 class CounterGuard {

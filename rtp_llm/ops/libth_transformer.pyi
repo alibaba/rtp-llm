@@ -701,7 +701,6 @@ class ProfilingDebugLoggingConfig:
     log_level: str
     log_path: str
     nccl_debug_file: str
-    py_inference_log_response: bool
     trace_memory: bool
     trace_malloc_stack: bool
     test_layer_num: int
@@ -712,7 +711,6 @@ class ProfilingDebugLoggingConfig:
     def __init__(
         self,
         ft_nvtx: bool = False,
-        py_inference_log_response: bool = False,
         trace_memory: bool = False,
         trace_malloc_stack: bool = False,
         enable_device_perf: bool = False,

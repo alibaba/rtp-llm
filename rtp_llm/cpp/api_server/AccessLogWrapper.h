@@ -8,9 +8,6 @@
 namespace rtp_llm {
 
 class AccessLogWrapper {
-private:
-    static bool logResponse(bool py_inference_log_response);
-
 public:
     static void logQueryAccess(const std::string& raw_request, int64_t request_id, bool private_request);
 
@@ -18,8 +15,7 @@ public:
                                  int64_t                           request_id,
                                  int64_t                           start_time_ms,
                                  const std::optional<std::string>& logable_response,
-                                 bool                              private_request,
-                                 bool                              py_inference_log_response);
+                                 bool                              private_request);
 
     static void logSuccessAccess(const std::string&              raw_request,
                                  int64_t                         request_id,

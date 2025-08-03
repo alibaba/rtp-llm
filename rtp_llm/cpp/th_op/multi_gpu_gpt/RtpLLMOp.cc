@@ -118,8 +118,6 @@ void RtpLLMOp::initRPCServer(const rtp_llm::EngineInitParams                    
     auto http_port      = maga_init_params.gpt_init_parameter.http_port_;
     auto model_rpc_port = maga_init_params.gpt_init_parameter.model_rpc_port_;
     auto role_type      = maga_init_params.gpt_init_parameter.role_type_;
-    auto py_inference_log_response =
-        maga_init_params.gpt_init_parameter.profiling_debug_logging_config.py_inference_log_response;
     // NOTE: ip/ip段可自定义为所需范围。
     std::string server_address("0.0.0.0:" + std::to_string(model_rpc_port));
     {
@@ -141,8 +139,7 @@ void RtpLLMOp::initRPCServer(const rtp_llm::EngineInitParams                    
                                                       model_rpc_service_->getMultimodalProcessor(),
                                                       http_server_address,
                                                       maga_init_params,
-                                                      token_processor,
-                                                      py_inference_log_response));
+                                                      token_processor));
         if (model_rpc_port < 0) {
             is_server_ready_ = true;
             return;

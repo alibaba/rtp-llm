@@ -54,7 +54,6 @@ class ServerArgsDefaultTest(TestCase):
 
         # 5. Profiling、Debugging、Logging
         self.assertEqual(env.get("FT_NVTX"), "0")
-        self.assertEqual(env.get("PY_INFERENCE_LOG_RESPONSE"), "0")
         self.assertEqual(env.get("RTP_LLM_TRACE_MEMORY"), "0")
         self.assertEqual(env.get("RTP_LLM_TRACE_MALLOC_STACK"), "0")
         self.assertEqual(env.get("ENABLE_DEVICE_PERF"), "0")
@@ -333,8 +332,6 @@ class ServerArgsSetTest(TestCase):
             "128",
             # 5. Profiling、Debugging、Logging
             "--ft_nvtx",
-            "True",
-            "--py_inference_log_response",
             "True",
             "--trace_memory",
             "True",
@@ -716,7 +713,6 @@ class ServerArgsSetTest(TestCase):
 
         # 5. Profiling、Debugging、Logging
         self.assertEqual(env["FT_NVTX"], "1")
-        self.assertEqual(env["PY_INFERENCE_LOG_RESPONSE"], "1")
         self.assertEqual(env["RTP_LLM_TRACE_MEMORY"], "1")
         self.assertEqual(env["RTP_LLM_TRACE_MALLOC_STACK"], "1")
         self.assertEqual(env["ENABLE_DEVICE_PERF"], "1")
