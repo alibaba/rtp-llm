@@ -397,13 +397,6 @@ def setup_args():
         "Profiling、Debugging、Logging"
     )
     profile_debug_logging_group.add_argument(
-        "--ft_nvtx",
-        env_name="FT_NVTX",
-        type=str2bool,
-        default=False,
-        help="控制是否启用NVTX性能分析。可选值: True (启用), False (禁用)。默认为 False",
-    )
-    profile_debug_logging_group.add_argument(
         "--trace_memory",
         env_name="RTP_LLM_TRACE_MEMORY",
         type=str2bool,

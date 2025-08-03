@@ -89,7 +89,6 @@ cc_library(
         "//rtp_llm/cpp/core:buffer_torch",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
-        "//rtp_llm/cpp/cuda:nvtx",
     ] + torch_deps(),
     visibility = ["//visibility:public"],
 )

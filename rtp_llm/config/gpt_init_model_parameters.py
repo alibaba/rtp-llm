@@ -598,7 +598,6 @@ class GptInitModelParameters:
         # ProfilingDebugLoggingConfig
         self.gpt_init_params.profiling_debug_logging_config = (
             ProfilingDebugLoggingConfig(
-                ft_nvtx=get_env_bool("FT_NVTX", False),
                 trace_memory=get_env_bool("RTP_LLM_TRACE_MEMORY", False),
                 trace_malloc_stack=get_env_bool("RTP_LLM_TRACE_MALLOC_STACK", False),
                 enable_device_perf=get_env_bool("ENABLE_DEVICE_PERF", False),

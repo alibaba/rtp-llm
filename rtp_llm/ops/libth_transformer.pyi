@@ -694,7 +694,6 @@ class ProfilingDebugLoggingConfig:
     enable_device_perf: bool
     ft_alog_conf_path: str
     ft_core_dump_on_exception: bool
-    ft_nvtx: bool
     gen_timeline_sync: bool
     hack_layer_num: int
     log_file_backup_count: int
@@ -710,7 +709,6 @@ class ProfilingDebugLoggingConfig:
     disable_dpc_random: bool
     def __init__(
         self,
-        ft_nvtx: bool = False,
         trace_memory: bool = False,
         trace_malloc_stack: bool = False,
         enable_device_perf: bool = False,

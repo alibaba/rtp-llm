@@ -82,9 +82,9 @@ def gen_cu_and_lib(name, params_list, split_num, template_header, template, temp
         copts = copts(),
         deps = [
             "//rtp_llm/cpp/core:buffer_torch",
+            "//rtp_llm/cpp/cuda:cuda_utils_base",
             "@local_config_cuda//cuda:cuda_headers",
             "@local_config_cuda//cuda:cudart",
-            "//rtp_llm/cpp/cuda:nvtx",
         ] + torch_deps(),
         visibility = ["//visibility:public"],
     )

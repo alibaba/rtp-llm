@@ -5,7 +5,6 @@ package(default_visibility = ["//rtp_llm:__subpackages__"])
 any_cuda_deps = select({
     "@//:using_cuda": [
         "//rtp_llm/cpp/cuda:memory_utils",
-        "//rtp_llm/cpp/cuda:nvtx",
         "//rtp_llm/cpp/cuda:cuda_utils",
         "//3rdparty:cub",
         "@local_config_cuda//cuda:cuda_headers",
@@ -54,7 +53,6 @@ cc_library(
     ]),
     deps = [
         "//rtp_llm/cpp/cuda:memory_utils",
-        "//rtp_llm/cpp/cuda:nvtx",
         "//rtp_llm/cpp/cuda:cuda_utils",
         "//rtp_llm/cpp:utils",
         "//3rdparty:cub",

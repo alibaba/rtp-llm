@@ -152,30 +152,6 @@ cc_library(
 )
 
 cc_library(
-    name = "nvtx",
-    srcs = [
-        "nvtx/nvtx_utils.cc",
-        "nvtx/kernel_profiler.cc"
-    ],
-    hdrs = [
-        "nvtx/nvtx_utils.h",
-        "nvtx/kernel_profiler.h"
-    ],
-    deps = [
-        "//rtp_llm/cpp:metrics",
-    ] + select({
-        "@//:using_cuda": [":cuda_utils",
-                           "@local_config_cuda//cuda:cuda_headers",
-                           "@local_config_cuda//cuda:cudart",],
-        "@//:using_rocm": ["//rtp_llm/cpp/rocm:rocm_utils"],
-        "//conditions:default": [],
-    }),
-    copts = copts(),
-    include_prefix = "src",
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
     name = "memory_utils",
     srcs = [
         "memory_utils.cu",
@@ -263,6 +239,7 @@ cc_library(
     name = "cuda_utils",
     deps = [
         ":cuda_utils_cu",
+        ":cuda_utils_base",
         "//rtp_llm/cpp:utils",
         "//rtp_llm/cpp/core:types",
         "@local_config_cuda//cuda:cuda_headers",
@@ -282,7 +259,6 @@ cc_library(
         "Dispatch.h"],
     deps = [
         ":nccl_util",
-        ":nvtx",
         ":cublas",
         ":cufmha",
         "cuggemm",

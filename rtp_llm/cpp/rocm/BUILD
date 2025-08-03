@@ -69,7 +69,6 @@ cc_library(
 cc_library(
     name = "rocm",
     deps = [
-        "//rtp_llm/cpp/cuda:nvtx",
         ":rocm_utils",
     ],
     copts=rocm_copts(),

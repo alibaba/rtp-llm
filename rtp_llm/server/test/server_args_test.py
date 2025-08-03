@@ -53,7 +53,6 @@ class ServerArgsDefaultTest(TestCase):
         self.assertEqual(env.get("TEST_BLOCK_NUM"), "0")
 
         # 5. Profiling、Debugging、Logging
-        self.assertEqual(env.get("FT_NVTX"), "0")
         self.assertEqual(env.get("RTP_LLM_TRACE_MEMORY"), "0")
         self.assertEqual(env.get("RTP_LLM_TRACE_MALLOC_STACK"), "0")
         self.assertEqual(env.get("ENABLE_DEVICE_PERF"), "0")
@@ -331,8 +330,6 @@ class ServerArgsSetTest(TestCase):
             "--test_block_num",
             "128",
             # 5. Profiling、Debugging、Logging
-            "--ft_nvtx",
-            "True",
             "--trace_memory",
             "True",
             "--trace_malloc_stack",
@@ -712,7 +709,6 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env["TEST_BLOCK_NUM"], "128")
 
         # 5. Profiling、Debugging、Logging
-        self.assertEqual(env["FT_NVTX"], "1")
         self.assertEqual(env["RTP_LLM_TRACE_MEMORY"], "1")
         self.assertEqual(env["RTP_LLM_TRACE_MALLOC_STACK"], "1")
         self.assertEqual(env["ENABLE_DEVICE_PERF"], "1")
