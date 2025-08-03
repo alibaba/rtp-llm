@@ -16,7 +16,10 @@ RequestBlockBuffer::RequestBlockBuffer(const std::string& requestid, const std::
 RequestBlockBuffer::RequestBlockBuffer(const std::string& requestid, rtp_llm::DeviceEventPtr event):
     requestid_(requestid), event_(std::move(event)) {}
 
-RequestBlockBuffer::~RequestBlockBuffer() {
+RequestBlockBuffer::~RequestBlockBuffer() {}
+
+void RequestBlockBuffer::notifyRequestDone() {
+    // request block buffer 关联的request已经结束，触发所有回调
     triggerWatchFunc(false, {});
 }
 

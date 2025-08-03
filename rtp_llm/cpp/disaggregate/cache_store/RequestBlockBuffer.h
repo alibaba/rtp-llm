@@ -56,6 +56,7 @@ public:
     // change with true callback, dtor with false callback
     typedef std::function<void(bool ok, const std::vector<std::shared_ptr<BlockBuffer>>&)> WatchFunc;
     bool setWatchFunc(WatchFunc&& watch_func);
+    void notifyRequestDone();
 
     std::string debugInfo() const;
 

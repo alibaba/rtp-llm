@@ -191,7 +191,7 @@ TEST_F(RequestBlockBufferTest, testWatchFunc_ReleaseBlock) {
     auto request_block_buffer = std::make_shared<RequestBlockBuffer>("request-1");
     ASSERT_TRUE(request_block_buffer->setWatchFunc(std::move(watch_func)));
 
-    request_block_buffer.reset();
+    request_block_buffer->notifyRequestDone();
     ASSERT_TRUE(watched_called);
     ASSERT_FALSE(watched_success);
     ASSERT_TRUE(watched_blocks.empty());

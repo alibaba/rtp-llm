@@ -187,9 +187,16 @@ void RequestBlockBufferStore::delRequestBlockBuffer(const std::string& requestid
         std::unique_lock<std::shared_mutex> lock(request_cache_map_mutex_);
         auto                                iter = request_cache_map_.find(requestid);
         if (iter != request_cache_map_.end()) {
-            request_block_buffer = iter->second;
+            request_block_buffer          = iter->second;
+            request_cache_map_[requestid] = nullptr;
         }
-        request_cache_map_[requestid] = nullptr;
+    }
+    if (request_block_buffer) {
+        request_block_buffer->notifyRequestDone();
+    }
+
+    {
+        std::unique_lock<std::shared_mutex> lock(request_cache_map_mutex_);
         for (int i = expired_request_caches_.size() - 1; i >= 0; i--) {
             if (currentTimeUs() - expired_request_caches_[i].second > 1000 * 60 * 60) {
                 request_cache_map_.erase(expired_request_caches_[i].first);

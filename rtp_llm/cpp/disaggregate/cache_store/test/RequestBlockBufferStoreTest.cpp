@@ -144,8 +144,10 @@ TEST_F(RequestBlockBufferStoreTest, testAfterDelRequestBlockBuffer) {
     auto block2        = block_buffer_util_->makeBlockBuffer("b2", 1024, '1', false);
     request_block->addBlock(block1);
     request_block->addBlock(block2);
-    ASSERT_FALSE(store->setRequestBlockBuffer(request_block));
+    ASSERT_TRUE(store->setRequestBlockBuffer(request_block));
 
+    store->delRequestBlockBuffer("request-1");
+    ASSERT_FALSE(store->setRequestBlockBuffer(request_block));
     ASSERT_FALSE(store->setRequestBlockBufferWatchFunc(
         "request-1",
         [](bool success, const std::vector<std::shared_ptr<BlockBuffer>>& blocks) { EXPECT_FALSE(success); }));
