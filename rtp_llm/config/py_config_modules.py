@@ -8,6 +8,7 @@ from rtp_llm.ops import (
     CacheStoreConfig,
     ConcurrencyConfig,
     DeviceResourceConfig,
+    FfnDisAggregateConfig,
     FIFOSchedulerConfig,
     FMHAConfig,
     HWKernelConfig,
@@ -609,6 +610,7 @@ class PyEnvConfigs:
         self.parallelism_distributed_config: ParallelismDistributedConfig = (
             ParallelismDistributedConfig()
         )
+        self.ffn_disaggregate_config: FfnDisAggregateConfig = FfnDisAggregateConfig()
         self.model_specific_config = ModelSpecificConfig()
         self.fmha_config = FMHAConfig()
         self.misc_config = MiscellaneousConfig()
@@ -639,6 +641,10 @@ class PyEnvConfigs:
         self.fmha_config.update_from_env()
         self.misc_config.update_from_env()
         self.concurrency_config.update_from_env()
+
+        # Update ffn_disaggregate_config from environment
+        enable_ffn_disaggregate = get_env_bool("ENABLE_FFN_DISAGGREGATE", False)
+        self.ffn_disaggregate_config.enable_ffn_disaggregate = enable_ffn_disaggregate
         logging.info(self.to_string())
 
     def to_string(self):

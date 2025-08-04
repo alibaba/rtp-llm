@@ -4,7 +4,6 @@
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/models/GptModel.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
-#include "rtp_llm/cpp/models/FfnDisaggregateModel.h"
 #include "rtp_llm/cpp/models/Sampler.h"
 #include "rtp_llm/cpp/th_op/GptInitParameter.h"
 
@@ -67,14 +66,6 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
     if (!params.py_model.is_none()) {
         RTP_LLM_LOG_INFO("init executor with python model");
         model_.reset(new PyWrappedModel(model_init_params, params.py_model));
-    } else if (enable_ffn_disaggregate_) {
-        RTP_LLM_LOG_INFO("using FfnDisaggregateModel for ffn as service");
-        model_.reset(new FfnDisaggregateModel(
-            {device_,
-             params.gpt_weights,
-             genModelDescription(params.gpt_init_parameter),
-             cache_manager ? ((optional<CacheManager::KVCacheBuffer>)cache_manager->kvCacheBuffer()) : nullopt,
-             params.model_id}));
     } else {
         RTP_LLM_LOG_INFO("init legacy c++ gpt model");
         model_.reset(new GptModel(model_init_params));

@@ -201,10 +201,12 @@ class BaseModel(object):
 
         self.task_type: TaskType = TaskType.LANGUAGE_MODEL
         self.custom_module: Optional[CustomModule] = None
-        self.is_attn_model = (
-            config.gpt_init_params.ffn_disaggregate_config.enable_ffn_disaggregate
-            and not config.gpt_init_params.ffn_disaggregate_config.is_ffn_service()
-        )
+        self.is_attn_model = False
+        if self.config:
+            self.is_attn_model = (
+                config.gpt_init_params.ffn_disaggregate_config.enable_ffn_disaggregate
+                and not config.gpt_init_params.ffn_disaggregate_config.is_ffn_service()
+            )
 
         self.default_generate_config: GenerateConfig = GenerateConfig()
         self.load_tokenizer()

@@ -234,6 +234,13 @@ def setup_args():
         default=1,
         help="FFN层序列并行大小。",
     )
+    parallel_group.add_argument(
+        "--enable_ffn_disaggregate",
+        env_name="ENABLE_FFN_DISAGGREGATE",
+        type=str2bool,
+        default=False,
+        help="启用AF分离功能。",
+    )
 
     ##############################################################################################################
     # Concurrency 控制

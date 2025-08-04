@@ -8,7 +8,7 @@ RtpProcessGroup::RtpProcessGroup(RtpProcessGroupType type) {
     device_ = dynamic_cast<CudaDevice*>(DeviceFactory::getDefaultDevice());
     if (!device_) {
         RTP_LLM_LOG_ERROR("DeviceFactory::getDefaultDevice() return type is not CudaDevice !");
-        abort();
+        throw std::runtime_error("DeviceFactory::getDefaultDevice() return type is not CudaDevice !");
     }
     auto device_properties = device_->getDeviceProperties();
     if (type == RtpProcessGroupType::DP_GROUP) {
@@ -28,7 +28,7 @@ RtpProcessGroup::RtpProcessGroup(RtpProcessGroupType type) {
         mode_ = ParallelMode::DP_AND_TP;
     } else {
         RTP_LLM_LOG_ERROR("Invalid RtpProcessGroupType !");
-        abort();
+        throw std::runtime_error("Invalid RtpProcessGroupType !");
     }
 }
 

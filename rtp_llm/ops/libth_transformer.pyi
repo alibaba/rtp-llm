@@ -22,6 +22,7 @@ __all__ = [
     "FIFOSchedulerConfig",
     "FMHAConfig",
     "FlashInferOp",
+    "FfnDisAggregateConfig",
     "GptInitParameter",
     "HWKernelConfig",
     "Host",
@@ -311,16 +312,6 @@ class FlashInferOp:
         attn_params: typing.Any,
     ) -> None: ...
 
-class FlashInferOp:
-    def __init__(self, gpt_init_parameter: GptInitParameter) -> None: ...
-    def forward(
-        self,
-        input: torch.Tensor,
-        output: torch.Tensor,
-        k_cache: torch.Tensor,
-        v_cache: torch.Tensor,
-        attn_params: typing.Any,
-    ) -> None: ...
 class FfnDisAggregateConfig:
     attention_dp_size: int
     attention_tp_size: int
@@ -335,7 +326,7 @@ class FfnDisAggregateConfig:
         attention_dp_size: int = 1,
         ffn_tp_size: int = 1,
         ffn_dp_size: int = 1,
-        is_ffn_rank: int = False,
+        is_ffn_rank: bool = False,
     ) -> None: ...
     def is_ffn_service(self) -> bool: ...
     def to_string(self) -> str: ...
@@ -596,7 +587,6 @@ class LoadBalanceInfo:
     step_per_minute: int
     total_kv_cache: int
     waiting_query_len: int
-    def __init__(self) -> None: ...
     def __init__(self) -> None: ...
 
 class MiscellaneousConfig:

@@ -931,11 +931,11 @@ class GptInitModelParameters:
 
         self.update_task_type_use_kvcache()
 
-        if bool(int(os.environ.get("USE_FFN_AS_SERVICE", 0))):
+        if StaticConfig.ffn_disaggregate_config.enable_ffn_disaggregate:
             # 暂时先限制tp=1, 更多支持在python版本实现
             assert (
                 g_parallel_info.tp_size == 1 and g_parallel_info.world_size > 1
-            ), "USE_FFN_AS_SERVICE must be used in dp = 1 world_size > 1"
+            ), "enable_ffn_disaggregate must be used in dp = 1 world_size > 1"
             attention_dp_size = g_parallel_info.world_size - 1
             attention_tp_size = 1
             ffn_tp_size = 1

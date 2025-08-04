@@ -108,6 +108,7 @@ try:
         EngineScheduleInfo,
         EplbConfig,
         EplbMode,
+        FfnDisAggregateConfig,
         FIFOSchedulerConfig,
         FMHAConfig,
         FMHAType,

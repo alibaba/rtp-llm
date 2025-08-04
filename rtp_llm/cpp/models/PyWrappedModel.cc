@@ -46,7 +46,7 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
     std::vector<BufferPtr> kv_cache_block_ids_device(split_inputs.size());
 
     for (size_t i = 0; i < split_inputs.size(); ++i) {
-        const auto&                  micro_inputs = split_inputs[i];
+        const auto& micro_inputs = split_inputs[i].kv_cache_block_id ? split_inputs[i] : split_inputs[0];
         torch_ext::PyAttentionInputs py_attn_inputs;
         py_attn_inputs.prefix_lengths = Buffer2torchTensor(micro_inputs.prefix_lengths);
 
