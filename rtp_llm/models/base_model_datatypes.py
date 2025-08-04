@@ -65,6 +65,8 @@ class AuxInfo(PyBaseModel):
     pd_sep: bool = False
     cum_log_probs: List[float] = []
     beam_responses: List[str] = []
+    local_reuse_len: int = 0
+    remote_reuse_len: int = 0
 
 
 class GenerateOutput(PyBaseModel):

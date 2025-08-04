@@ -142,6 +142,8 @@ public:
     int                                    fallback_times           = 0;
     int                                    step_output_len          = 0;
     bool                                   pd_sep                   = false;
+    int                                    local_reuse_len          = 0;
+    int                                    remote_reuse_len         = 0;
     std::optional<rtp_llm::ConstBufferPtr> cum_log_probs;
     std::optional<rtp_llm::ConstBufferPtr> all_probs;
     std::optional<rtp_llm::ConstBufferPtr> softmax_probs;

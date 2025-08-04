@@ -96,6 +96,8 @@ public:
             auto buffer = cum_log_probs.value();
             json.Jsonize("cum_log_probs", rtp_llm::buffer2vector<float>(*buffer));
         }
+        json.Jsonize("local_reuse_len", local_reuse_len, local_reuse_len);
+        json.Jsonize("remote_reuse_len", remote_reuse_len, remote_reuse_len);
     }
     AuxInfoAdapter() {
         AuxInfo();
@@ -112,6 +114,8 @@ public:
         step_output_len = base.step_output_len;
         pd_sep          = base.pd_sep;
         cum_log_probs   = base.cum_log_probs;
+        local_reuse_len = base.local_reuse_len;
+        remote_reuse_len = base.remote_reuse_len;
 
         cost_time_ms = cost_time_us / 1000.0;
     }

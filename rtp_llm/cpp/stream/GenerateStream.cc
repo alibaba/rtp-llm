@@ -338,6 +338,22 @@ void GenerateStream::setReuseLength(int reuse_length) {
     }
 }
 
+void GenerateStream::setLocalReuseLength(int length) {
+    local_reuse_length_ = length;
+}
+
+void GenerateStream::setRemoteReuseLength(int length) {
+    remote_reuse_length_ = length;
+}
+
+int GenerateStream::localReuseLength() const {
+    return local_reuse_length_;
+}
+
+int GenerateStream::remoteReuseLength() const {
+    return remote_reuse_length_;
+}
+
 void GenerateStream::setInitialReuseLength(int initial_reuse_length) {
     initial_reuse_length_ = initial_reuse_length;
 }

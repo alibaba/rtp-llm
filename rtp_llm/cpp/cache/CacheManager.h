@@ -36,7 +36,9 @@ public:
     };
 
     struct MatchInfo {
-        size_t             reuse_length = 0;
+        size_t             reuse_length        = 0;
+        size_t             local_reuse_length  = 0;
+        size_t             remote_reuse_length = 0;
         std::vector<int>   cache_blocks;
         std::vector<float> loss;
     };
@@ -140,7 +142,7 @@ public:
 
     void beamSearchKvUpdate(rtp_llm::BufferPtr src_block_offset, rtp_llm::BufferPtr target_block_offset);
 
-    void                                    regUserMr(size_t model_id);
+    void regUserMr(size_t model_id);
 
     bool getCacheForRank(const std::vector<int64_t>&               cache_keys,
                          const std::vector<int32_t>&               block_indices,

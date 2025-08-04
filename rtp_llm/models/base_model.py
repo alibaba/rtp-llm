@@ -86,6 +86,8 @@ class AuxInfo(PyBaseModel):
     cum_log_probs: List[float] = []
     beam_responses: List[str] = []
     softmax_probs: List[float] = []
+    local_reuse_len: int = 0
+    remote_reuse_len: int = 0
 
 
 class GenerateOutput(PyBaseModel):

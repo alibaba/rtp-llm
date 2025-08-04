@@ -215,6 +215,8 @@ def trans_output(
             fallback_tokens=output_pb.aux_info.fallback_tokens,
             fallback_times=output_pb.aux_info.fallback_times,
             pd_sep=output_pb.aux_info.pd_sep,
+            local_reuse_len=output_pb.aux_info.local_reuse_len,
+            remote_reuse_len=output_pb.aux_info.remote_reuse_len,
         )
         # TODO(xinfei.sxf) cum_log_probs is not right, ignore it temporarily
         if output_pb.aux_info.HasField("cum_log_probs"):

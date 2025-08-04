@@ -149,6 +149,10 @@ public:
     int    initialReuseLength() const;
     size_t maxTokenNum() const;
     void   setReuseLength(int reuse_length);
+    void   setLocalReuseLength(int length);
+    void   setRemoteReuseLength(int length);
+    int    localReuseLength() const;
+    int    remoteReuseLength() const;
     void   setInitialReuseLength(int initial_reuse_length);
     int    fallbackPrefixLength() const;
     void   setFallbackPrefixLength(int fallback_prefix_length);
@@ -463,6 +467,8 @@ protected:
     size_t                               last_output_pos_        = 0;
     int                                  initial_reuse_length_   = 0;
     int                                  reuse_length_           = 0;
+    int                                  local_reuse_length_     = 0;
+    int                                  remote_reuse_length_    = 0;
     int                                  reuse_mm_length_        = 0;
     int                                  fallback_blocks_        = 0;
     int                                  fallback_times_         = 0;

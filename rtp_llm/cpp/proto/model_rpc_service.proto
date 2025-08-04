@@ -144,6 +144,8 @@ message AuxInfoPB {
     int32 first_token_cost_time_us = 12;
     TensorPB softmax_probs = 13;
     int32 wait_time_us = 14;
+    int32 local_reuse_len = 15;
+    int32 remote_reuse_len = 16;
 }
 
 message GenerateOutputPB {

@@ -396,6 +396,9 @@ CacheManager::MatchInfo CacheManager::mallocWithCache(const AdvancedMallocInfo& 
         RtpLLMCacheReuseMetricsCollector collector;
         collector.kv_cache_reuse_length = match_info.reuse_length;
         collector.match_cost_time_us    = match_cost_time_us;
+        collector.gpu_input_length   = static_cast<int32_t>(malloc_info.cache_keys.size()) * config_.seq_size_per_block;
+        collector.gpu_reuse_length   = match_info.local_reuse_length;
+        collector.gpu_cache_hit_rate = collector.gpu_reuse_length * 100 / collector.gpu_input_length;
         metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(nullptr, &collector);
     }
     return match_info;
@@ -405,14 +408,7 @@ CacheManager::MatchInfo CacheManager::matchImpl(const AdvancedMallocInfo& malloc
     // match in gpu
     auto match_result = block_cache_.match(malloc_info.cache_keys);
     incrRefCounter(match_result.block_indices);
-    if (metrics_reporter_) {
-        RtpLLMCacheReuseMetricsCollector collector;
-        const auto                       input_len = static_cast<int32_t>(malloc_info.cache_keys.size());
-        collector.gpu_input_length                 = input_len * config_.seq_size_per_block;
-        collector.gpu_reuse_length                 = match_result.matched_len * config_.seq_size_per_block;
-        collector.gpu_cache_hit_rate               = match_result.matched_len * 100 / input_len;
-        metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(nullptr, &collector);
-    }
+    auto local_match_len = match_result.matched_len;
 
     // match in dist kvcache if cache keys not fully matched
     if (enable_dist_kvcache_ && match_result.matched_len < malloc_info.cache_keys.size()) {
@@ -448,7 +444,14 @@ CacheManager::MatchInfo CacheManager::matchImpl(const AdvancedMallocInfo& malloc
                             "reuse loss nums [%d] is less than need loss nums[%d]",
                             match_result.loss.size(),
                             reuse_length);
+
+    local_match_len             = local_match_len <= reuse_block_num ? local_match_len : reuse_block_num;
+    const auto local_reuse_len  = local_match_len * config_.seq_size_per_block;
+    const auto remote_reuse_len = (reuse_block_num - local_match_len) * config_.seq_size_per_block;
+
     return {(size_t)reuse_length,
+            local_reuse_len,
+            remote_reuse_len,
             vector<int>(match_result.block_indices.begin(), match_result.block_indices.begin() + reuse_block_num),
             vector<float>(match_result.loss.begin(),
                           match_result.loss.begin() + std::min((int)match_result.loss.size(), reuse_length))};
