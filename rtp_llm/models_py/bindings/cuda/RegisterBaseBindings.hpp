@@ -1,6 +1,6 @@
 #pragma once
 
-#include "rtp_llm/models_py/bindings/cuda/RtpNorm.h"
+#include "rtp_llm/models_py/bindings/common/RtpNorm.h"
 #include "rtp_llm/models_py/bindings/common/RtpEmbeddingLookup.h"
 #include "rtp_llm/models_py/bindings/common/FusedQKRmsNorm.h"
 #include "rtp_llm/models_py/bindings/cuda/FlashInferOp.h"
@@ -82,4 +82,4 @@ void registerBaseCudaBindings(py::module& rtp_ops_m) {
     registerRtpProcessGroup(rtp_ops_m);
 }
 
-}
+}  // namespace torch_ext

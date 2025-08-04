@@ -10,7 +10,7 @@ cc_library(
         "//rtp_llm/models_py/bindings:op_defs",
     ] + torch_deps() + select({
         "//:using_cuda": [
-            "//rtp_llm/cpp/kernels:kernels", 
+            "//rtp_llm/cpp/kernels:kernels",
             "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
         ],
         "//:using_rocm": [

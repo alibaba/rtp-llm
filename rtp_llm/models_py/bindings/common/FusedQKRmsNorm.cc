@@ -1,17 +1,19 @@
-#include <torch/extension.h>  
-#include <ATen/ATen.h>   
+#include <torch/extension.h>
+#include <ATen/ATen.h>
 #include "rtp_llm/models_py/bindings/common/FusedQKRmsNorm.h"
-#include "rtp_llm/models_py/bindings/common/Torch_ext.h"   
+#include "rtp_llm/models_py/bindings/common/Torch_ext.h"
 #include <vector>
 #include <cstdint>
 #include <iostream>
 #include <type_traits>
 #if USING_CUDA
 #include <ATen/cuda/CUDAContext.h>
+#include "rtp_llm/cpp/kernels/fused_qk_rmsnorm.h"
 #endif
 #if USING_ROCM
 #include <hip/hip_runtime.h>
 #include "rtp_llm/cpp/devices/rocm_impl/ROCmDevice.h"
+#include "rtp_llm/cpp/kernels/rocm/fused_qk_rmsnorm.h"
 #endif
 using namespace std;
 namespace th = torch;
@@ -43,10 +45,19 @@ void FusedQKRMSNorm(at::Tensor&   input,
     cudaStream_t stream = at::cuda::getCurrentCUDAStream(at::cuda::current_device()).stream();
 #endif
     DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FP16(input.scalar_type(), c_type, [&] {
-        invokeFusedQkRmsNorm(
-            static_cast<c_type*>(input.data_ptr()), static_cast<c_type*>(q_gamma.data_ptr()), static_cast<c_type*>(nullptr), static_cast<c_type*>(k_gamma.data_ptr()),
-            static_cast<c_type*>(nullptr), float(layernorm_eps), q_group_num, k_group_num, m, n, norm_size, stream);
+        invokeFusedQkRmsNorm(static_cast<c_type*>(input.data_ptr()),
+                             static_cast<c_type*>(q_gamma.data_ptr()),
+                             static_cast<c_type*>(nullptr),
+                             static_cast<c_type*>(k_gamma.data_ptr()),
+                             static_cast<c_type*>(nullptr),
+                             float(layernorm_eps),
+                             q_group_num,
+                             k_group_num,
+                             m,
+                             n,
+                             norm_size,
+                             stream);
         return true;
     });
 }
-}
+}  // namespace rtp_llm
