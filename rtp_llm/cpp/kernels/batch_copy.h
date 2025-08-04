@@ -5,9 +5,12 @@ namespace rtp_llm
 namespace kernels
 {
 
-struct BatchCopyConfig {
+struct BatchCopyConfig
+{
     bool aligned_copy;
+    bool rowAligned;
 };
+
 
 BatchCopyConfig getBatchCopyConfig(const size_t * bytes_host, size_t batch_size);
 

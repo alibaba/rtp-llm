@@ -28,6 +28,43 @@ static inline int getMultiProcessorCount()
 static constexpr size_t WARP_SIZE = 32;
 // each warp handles a segement (32 * uint4 = 512 bytes = 4 sectors)
 static constexpr size_t SEG_SIZE = WARP_SIZE * sizeof(uint4);
+static constexpr size_t ROW_SIZE_BYTES = 512;
+
+using CopyUnit = uint4;
+
+template<size_t ROW_SIZE_BYTES_T = ROW_SIZE_BYTES>
+__global__ void batchCopyRowAlignedKernel(char* const* __restrict__ dst, 
+                                          char const* const* __restrict__ src, 
+                                          const size_t* __restrict__ bytes, 
+                                          size_t batch_size) 
+{
+    const size_t batch_idx = blockIdx.x;
+    if (batch_idx >= batch_size) {
+        return;
+    }
+
+    const char* __restrict__ base_src_char = src[batch_idx];
+    char*       __restrict__ base_dst_char = dst[batch_idx];
+    const size_t total_rows = bytes[batch_idx] / ROW_SIZE_BYTES_T;
+
+    const int lane_id = threadIdx.x % 32;
+    const int warp_id = threadIdx.x / 32;
+    const int num_warps_in_block = blockDim.x / 32;
+
+    #pragma unroll 4
+    for (size_t row_idx = warp_id; row_idx < total_rows; row_idx += num_warps_in_block) {
+        const CopyUnit* __restrict__ row_src = 
+            reinterpret_cast<const CopyUnit*>(base_src_char + row_idx * ROW_SIZE_BYTES_T);
+        
+        CopyUnit* __restrict__ row_dst = 
+            reinterpret_cast<CopyUnit*>(base_dst_char + row_idx * ROW_SIZE_BYTES_T);
+
+
+        CopyUnit temp = __ldcs(&row_src[lane_id]); 
+        __stcs(&row_dst[lane_id], temp);          
+    }
+}
+
 
 template<bool IsAligned>
 static __global__ void batchCopy(char *__restrict__ const*__restrict__ dst, 
@@ -111,36 +148,65 @@ void invokeBatchCopy(void * const* dst,
                      const BatchCopyConfig &config,
                      cudaStream_t stream) {
 
-    int sm_count = getMultiProcessorCount();
 
-    DISPATCH_BOOL(IsAligned, config.aligned_copy, [&](){
-        constexpr auto kernel = batchCopy<IsAligned>;
+    RTP_LLM_LOG_DEBUG("Batch copy config: aligned_copy=%s, rowAligned=%s",
+                      (config.aligned_copy ? "true" : "false"),
+                      (config.rowAligned ? "true" : "false"));
 
-        int block_num_per_sm = 0;
-        constexpr int block_size = 1024;
-        constexpr int smem_size = 0;
-        check_cuda_value(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&block_num_per_sm, kernel, block_size, smem_size));
-        kernel<<<sm_count * block_num_per_sm, block_size, smem_size, stream>>>(reinterpret_cast<char * const*>(dst), 
-                                                                               reinterpret_cast<char const* const*>(src), 
-                                                                               bytes, 
-                                                                               batch_size);
-    });
+    if (config.rowAligned)
+    {
+        if (batch_size == 0) {
+            return;
+        }
+        const int grid_size = batch_size;
+        constexpr int block_size = 512; 
+        batchCopyRowAlignedKernel<><<<grid_size, block_size, 0, stream>>>(
+            reinterpret_cast<char* const*>(dst), 
+            reinterpret_cast<char const* const*>(src), 
+            bytes,
+            batch_size);
+    }
+    else
+    {
+        int sm_count = getMultiProcessorCount();
+        DISPATCH_BOOL(IsAligned, config.aligned_copy, [&](){
+            constexpr auto kernel = batchCopy<IsAligned>; 
+            int block_num_per_sm = 0;
+            constexpr int block_size = 1024;
+            constexpr int smem_size = 0;
+            check_cuda_value(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&block_num_per_sm, kernel, block_size, smem_size));
+            kernel<<<sm_count * block_num_per_sm, block_size, smem_size, stream>>>(
+                reinterpret_cast<char * const*>(dst), 
+                reinterpret_cast<char const* const*>(src), 
+                bytes, 
+                batch_size);
+        });
+    }
 
     check_cuda_error();
 }
 
-BatchCopyConfig getBatchCopyConfig(const size_t * bytes, size_t batch_size) {
-    bool aligned_copy = true;
-
+BatchCopyConfig getBatchCopyConfig(const size_t * bytes_host, size_t batch_size) {
+    bool is_row_aligned = true; 
     for (size_t i = 0; i < batch_size; ++i) {
-        if (bytes[i] % SEG_SIZE != 0) {
-            aligned_copy = false;
-            break;
+        if (bytes_host[i] % ROW_SIZE_BYTES != 0) {
+            is_row_aligned = false;
+            break; 
+        }
+    }
+    
+    bool is_seg_aligned = is_row_aligned;
+    if (!is_row_aligned) {
+        is_seg_aligned = true;
+        for (size_t i = 0; i < batch_size; ++i) {
+            if (bytes_host[i] % SEG_SIZE != 0) {
+                is_seg_aligned = false;
+                break;
+            }
         }
     }
 
-    return {aligned_copy};
+    return {is_seg_aligned, is_row_aligned};
 }
-
 }
 }
