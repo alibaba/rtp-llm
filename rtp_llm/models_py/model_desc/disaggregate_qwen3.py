@@ -17,7 +17,7 @@ from rtp_llm.models_py.modules.attention_pure import CausalAttentionPure
 from rtp_llm.models_py.modules.embedding import Embedding
 from rtp_llm.models_py.modules.fmha import FMHAImplBase
 from rtp_llm.models_py.modules.linear import Linear
-from rtp_llm.models_py.modules.mlp import DenseMLP
+from rtp_llm.models_py.modules.mlp import FusedSiluActDenseMLP
 from rtp_llm.models_py.modules.norm import FusedQKRMSNorm, RMSNorm
 from rtp_llm.ops import (
     PyAttentionInputs,
@@ -94,7 +94,7 @@ class Qwen3GemmLayer(nn.Module):
         self.post_attention_layernorm = RMSNorm(
             curent_layer_weights[W.post_ln_gamma], eps=config.layernorm_eps
         )
-        self.mlp = DenseMLP(config, curent_layer_weights)
+        self.mlp = FusedSiluActDenseMLP(config, curent_layer_weights)
 
         # if last layer, then all weights are setted to None
         self.qkv_proj = None
