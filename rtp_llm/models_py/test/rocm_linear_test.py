@@ -6,13 +6,10 @@ from torch import dtype as _dtype
 from torch.profiler import profile, ProfilerActivity, record_function
 
 class LinearTest(TestCase):
-    #DTYPES = [torch.half, torch.bfloat16]
-    #NUM_TOKENS = [7, 83, 4096]
-    #HIDDEN_SIZES = [768, 769, 770, 771, 5120, 5124, 5125, 5126, 8192, 8199]
     
-    DTYPES = [torch.half]
-    NUM_TOKENS = [6]
-    HIDDEN_SIZES = [4]
+    DTYPES = [torch.half, torch.bfloat16]
+    NUM_TOKENS = [7, 83, 4096]
+    HIDDEN_SIZES = [768, 769, 770, 771, 5120, 5124, 5125, 5126, 8192, 8199]
     
     def setUp(self) -> None:
         if not torch.cuda.is_available():
@@ -26,12 +23,8 @@ class LinearTest(TestCase):
         linear = Linear(w)
         linear_torch = LinearTorch(w)
         x = torch.randn(num_tokens, hidden_size, dtype=dtype)
-        print("jinxi-w",w)
-        print("jinxi-x",x)
         torch_output = linear_torch(x)
         my_output = linear(x)
-        print("torch_output",torch_output)
-        print("my_output",my_output)
         self.assertTrue(torch.allclose(torch_output, my_output, atol=1e-2, rtol=1e-2))
         
     def test_linear(self):

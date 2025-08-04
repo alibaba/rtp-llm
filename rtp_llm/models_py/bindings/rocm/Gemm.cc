@@ -27,7 +27,7 @@
 //     hipblasCreate(&hipblas_handle);
 //     //hipStream_t stream = reinterpret_cast<hipStream_t>(hip_stream);
 
-//     DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FP16(input.scalar_type(), s_type, c_type, [&] {
+//     DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FP16(input.scalar_type(), c_type, [&] {
 //         hipblasDatatype_t dtype = (std::is_same<c_type, __half>::value) ? HIPBLAS_R_16F : HIPBLAS_R_16B;
 
 //         hipblasGemmEx(hipblas_handle,
@@ -55,7 +55,6 @@
 //     });
 // }
 
-
 // void gemm(at::Tensor& output, at::Tensor& input, at::Tensor& weight, int64_t hip_stream){
 //     CHECK_INPUT(input);
 //     CHECK_INPUT(weight);
@@ -80,7 +79,7 @@
 //     hipblasCreate(&hipblas_handle);
 //     hipStream_t stream = reinterpret_cast<hipStream_t>(hip_stream);
 
-//     DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FP16(input.scalar_type(), s_type, c_type, [&] {
+//     DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FP16(input.scalar_type(), c_type, [&] {
 //         hipDataType hdtype = (std::is_same<c_type, __half>::value) ? HIP_R_16F : HIP_R_16BF;
 
 //         // Step 1: 创建矩阵描述符
@@ -88,7 +87,7 @@
 //         hipblasLtMatrixLayoutCreate(&ADesc, hdtype, k, m, k);
 //         hipblasLtMatrixLayoutCreate(&BDesc, hdtype, n, k, n);
 //         hipblasLtMatrixLayoutCreate(&CDesc, hdtype, n, m, n);
-        
+
 //         // Step 2: 创建矩阵乘法描述符
 //         hipblasLtMatmulDesc_t matmul;
 //         hipblasLtMatmulDescCreate(&matmul, HIPBLAS_COMPUTE_32F, HIP_R_32F);
@@ -105,7 +104,7 @@
 //                                               sizeof(workspaceSize));
 //         int returnedAlgoCount = 0;
 //         hipblasLtMatmulAlgoGetHeuristic(
-//             hipblas_handle, matmul, ADesc, BDesc, CDesc, CDesc, 
+//             hipblas_handle, matmul, ADesc, BDesc, CDesc, CDesc,
 //             blasLtPrefer, 1, &heuristicResult, &returnedAlgoCount);
 
 //         //Step 4: 执行矩阵乘法
@@ -161,20 +160,21 @@
 //     });
 // }
 
-hipblasHandle_t g_hipblas_handle = nullptr;
+hipblasHandle_t   g_hipblas_handle   = nullptr;
 hipblasLtHandle_t g_hipblaslt_handle = nullptr;
-hipStream_t g_stream = nullptr;
+hipStream_t       g_stream           = nullptr;
 
 // 全局分配器和包装器
 rtp_llm::Allocator<rtp_llm::AllocatorType::ROCM>* g_allocator = nullptr;
-std::unique_ptr<rtp_llm::rocm::hipblasMMWrapper> g_hipblas_mm_wrapper;
+std::unique_ptr<rtp_llm::rocm::hipblasMMWrapper>  g_hipblas_mm_wrapper;
 
 // 初始化标志
 bool g_initialized = false;
 
 // 初始化函数
 void initialize_global_resources(hipStream_t stream) {
-    if (g_initialized) return;
+    if (g_initialized)
+        return;
 
     // 创建 HIPBLAS 句柄
     hipblasCreate(&g_hipblas_handle);
@@ -187,16 +187,12 @@ void initialize_global_resources(hipStream_t stream) {
     // 初始化 hipblasMMWrapper
     rtp_llm::HWKernelConfig hw_kernel_config;
     g_hipblas_mm_wrapper = std::make_unique<rtp_llm::rocm::hipblasMMWrapper>(
-        g_hipblas_handle,
-        g_hipblaslt_handle,
-        g_stream,
-        g_allocator,
-        hw_kernel_config);
+        g_hipblas_handle, g_hipblaslt_handle, g_stream, g_allocator, hw_kernel_config);
 
     g_initialized = true;
 }
 
-void gemm(at::Tensor& output, at::Tensor& input, at::Tensor& weight, int64_t hip_stream){
+void gemm(at::Tensor& output, at::Tensor& input, at::Tensor& weight, int64_t hip_stream) {
     CHECK_INPUT(input);
     CHECK_INPUT(weight);
     auto device = input.device();
@@ -206,32 +202,32 @@ void gemm(at::Tensor& output, at::Tensor& input, at::Tensor& weight, int64_t hip
     CHECK_EQ(input.size(1), weight.size(0));
     CHECK_EQ(input.size(0), output.size(0));
     CHECK_EQ(weight.size(1), output.size(1));
-    const int m = input.size(0);
-    const int n = weight.size(1);
-    const int k = input.size(1);
-    const float alpha = 1.0f;
-    const float beta  = 0.0f;
+    const int   m      = input.size(0);
+    const int   n      = weight.size(1);
+    const int   k      = input.size(1);
+    const float alpha  = 1.0f;
+    const float beta   = 0.0f;
     hipStream_t stream = reinterpret_cast<hipStream_t>(hip_stream);
     initialize_global_resources(stream);  // 仅首次调用时初始化
 
-    DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FP16(input.scalar_type(), s_type, c_type, [&] {
+    DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FP16(input.scalar_type(), c_type, [&] {
         hipDataType dtype = (std::is_same<c_type, __half>::value) ? HIP_R_16F : HIP_R_16BF;
-        
+
         g_hipblas_mm_wrapper->setGemmConfig(dtype, dtype, dtype, HIP_R_32F);
         g_hipblas_mm_wrapper->setStream(stream);
         g_hipblas_mm_wrapper->Gemm(HIPBLAS_OP_N,
-                                  HIPBLAS_OP_N,
-                                  n,
-                                  m,
-                                  k,
-                                  static_cast<c_type*>(weight.data_ptr()),
-                                  n,
-                                  static_cast<c_type*>(input.data_ptr()),
-                                  k,
-                                  static_cast<c_type*>(output.data_ptr()),
-                                  n,
-                                  alpha,
-                                  beta);
+                                   HIPBLAS_OP_N,
+                                   n,
+                                   m,
+                                   k,
+                                   static_cast<c_type*>(weight.data_ptr()),
+                                   n,
+                                   static_cast<c_type*>(input.data_ptr()),
+                                   k,
+                                   static_cast<c_type*>(output.data_ptr()),
+                                   n,
+                                   alpha,
+                                   beta);
         return true;
     });
 }
