@@ -1,7 +1,7 @@
 #include <random>
 
-#include "rtp_llm/cpp/cache/kvcache_readwrite_test/KVCacheReadPerfTest.h"
-#include "rtp_llm/cpp/cache/kvcache_readwrite_test/KVCacheWritePerfTest.h"
+#include "rtp_llm/cpp/cache/perf_test/KVCacheReadPerfTest.h"
+#include "rtp_llm/cpp/cache/perf_test/KVCacheWritePerfTest.h"
 
 using namespace rtp_llm;
 

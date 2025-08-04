@@ -161,19 +161,27 @@ void KVCacheConfig::update_from_env_for_test() {
     multi_task_prompt        = autil::EnvUtil::getEnv("MULTI_TASK_PROMPT", "");
     multi_task_prompt_str    = autil::EnvUtil::getEnv("MULTI_TASK_PROMPT_STR", "");
     enable_3fs               = bool_from_env_for_test("ENABLE_3FS", false);
-    rpc_get_cache_timeout_ms = autil::EnvUtil::getEnv("RPC_GET_CACHE_TIMEOUT_MS", 5000);
-    rpc_put_cache_timeout_ms = autil::EnvUtil::getEnv("RPC_PUT_CACHE_TIMEOUT_MS", 5000);
+    rpc_get_cache_timeout_ms = autil::EnvUtil::getEnv("RPC_GET_CACHE_TIMEOUT_MS", 3000);
+    rpc_put_cache_timeout_ms = autil::EnvUtil::getEnv("RPC_PUT_CACHE_TIMEOUT_MS", 3000);
+    threefs_read_timeout_ms  = autil::EnvUtil::getEnv("THREEFS_READ_TIMEOUT_MS", 1000);
+    threefs_write_timeout_ms = autil::EnvUtil::getEnv("THREEFS_WRITE_TIMEOUT_MS", 2000);
+    threefs_read_iov_size    = autil::EnvUtil::getEnv("THREEFS_READ_IOV_SIZE", 1LL << 32);   // 4GB
+    threefs_write_iov_size   = autil::EnvUtil::getEnv("THREEFS_WRITE_IOV_SIZE", 1LL << 32);  // 4GB
 }
 
 void register_kvcache_config(pybind11::module& m) {
     pybind11::class_<KVCacheConfig>(m, "KVCacheConfig")
-        .def(pybind11::init<bool, std::string, std::string, bool, int, int>(),
+        .def(pybind11::init<bool, std::string, std::string, bool, int, int, int, int, int64_t, int64_t>(),
              pybind11::arg("reuse_cache")              = false,
              pybind11::arg("multi_task_prompt")        = "",
              pybind11::arg("multi_task_prompt_str")    = "",
              pybind11::arg("enable_3fs")               = false,
-             pybind11::arg("rpc_get_cache_timeout_ms") = 5000,
-             pybind11::arg("rpc_put_cache_timeout_ms") = 5000)
+             pybind11::arg("rpc_get_cache_timeout_ms") = 3000,
+             pybind11::arg("rpc_put_cache_timeout_ms") = 3000,
+             pybind11::arg("threefs_read_timeout_ms")  = 1000,
+             pybind11::arg("threefs_write_timeout_ms") = 2000,
+             pybind11::arg("threefs_read_iov_size")    = 1LL << 32,
+             pybind11::arg("threefs_write_iov_size")   = 1LL << 32)
         .def("to_string", &KVCacheConfig::to_string)
         .def("update_from_env", &KVCacheConfig::update_from_env_for_test)
         .def_readwrite("reuse_cache", &KVCacheConfig::reuse_cache)
@@ -181,7 +189,11 @@ void register_kvcache_config(pybind11::module& m) {
         .def_readwrite("multi_task_prompt_str", &KVCacheConfig::multi_task_prompt_str)
         .def_readwrite("enable_3fs", &KVCacheConfig::enable_3fs)
         .def_readwrite("rpc_get_cache_timeout_ms", &KVCacheConfig::rpc_get_cache_timeout_ms)
-        .def_readwrite("rpc_put_cache_timeout_ms", &KVCacheConfig::rpc_put_cache_timeout_ms);
+        .def_readwrite("rpc_put_cache_timeout_ms", &KVCacheConfig::rpc_put_cache_timeout_ms)
+        .def_readwrite("threefs_read_timeout_ms", &KVCacheConfig::threefs_read_timeout_ms)
+        .def_readwrite("threefs_write_timeout_ms", &KVCacheConfig::threefs_write_timeout_ms)
+        .def_readwrite("threefs_read_iov_size", &KVCacheConfig::threefs_read_iov_size)
+        .def_readwrite("threefs_write_iov_size", &KVCacheConfig::threefs_write_iov_size);
 }
 
 // ProfilingDebugLoggingConfig
@@ -627,7 +639,11 @@ inline std::string KVCacheConfig::to_string() const {
         << "multi_task_prompt_str: " << multi_task_prompt_str << "\n"
         << "enable_3fs: " << enable_3fs << "\n"
         << "rpc_get_cache_timeout_ms: " << rpc_get_cache_timeout_ms << "\n"
-        << "rpc_put_cache_timeout_ms: " << rpc_put_cache_timeout_ms;
+        << "rpc_put_cache_timeout_ms: " << rpc_put_cache_timeout_ms << "\n"
+        << "threefs_read_timeout_ms: " << threefs_read_timeout_ms << "\n"
+        << "threefs_write_timeout_ms: " << threefs_write_timeout_ms << "\n"
+        << "threefs_read_iov_size: " << threefs_read_iov_size << "\n"
+        << "threefs_write_iov_size: " << threefs_write_iov_size;
     return oss.str();
 }
 

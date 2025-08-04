@@ -34,45 +34,22 @@ DistStorage3FS::~DistStorage3FS() {
 }
 
 bool DistStorage3FS::init(const DistStorage3FSInitParams& init_params) {
+    RTP_LLM_LOG_INFO("3fs init params: [%s]", init_params.toString().c_str());
+    if (!checkInitParams(init_params)) {
+        RTP_LLM_LOG_WARNING("3fs init failed, check init params failed, params: [%s]", init_params.toString().c_str());
+        return false;
+    }
     init_params_ = init_params;
-
-    const auto& mountpoint = init_params_.mountpoint;
-    if (mountpoint.empty()) {
-        RTP_LLM_LOG_WARNING("init failed, 3fs mountpoint is empty");
-        return false;
-    }
-    if (!std::filesystem::exists(mountpoint)) {
-        RTP_LLM_LOG_WARNING("init failed, 3fs mountpoint not exists: %s", mountpoint.c_str());
-        return false;
-    }
-
-    // root dir env only used for debug
-    if (auto root_dir_env = autil::EnvUtil::getEnv("THREEFS_ROOT_DIR", std::string("")); !root_dir_env.empty()) {
-        init_params_.root_dir = root_dir_env;
-    };
-    const auto& root_dir = init_params_.root_dir;
-    if (root_dir.empty()) {
-        RTP_LLM_LOG_WARNING("init failed, 3fs root dir is empty");
-        return false;
-    }
-    const auto root_dir_path = std::filesystem::path(mountpoint) / root_dir;
-    if (!std::filesystem::exists(root_dir_path)) {
-        RTP_LLM_LOG_WARNING("init failed, 3fs root dir not exists: %s", root_dir_path.c_str());
-        return false;
-    }
 
     if (init_params_.enable_async_write) {
         write_thread_pool_ = std::make_shared<autil::LockFreeThreadPool>(
             init_params_.write_thread_num, init_params_.write_queue_size, nullptr, "3FSWriteThread");
         if (!write_thread_pool_->start()) {
-            RTP_LLM_LOG_INFO("init failed, start async thread pool failed, thread num: %lu, queue size: %lu",
-                             init_params_.write_thread_num,
-                             init_params_.write_queue_size);
+            RTP_LLM_LOG_WARNING("init failed, start async thread pool failed, thread num: %lu, queue size: %lu",
+                                init_params_.write_thread_num,
+                                init_params_.write_queue_size);
             return false;
         }
-        RTP_LLM_LOG_INFO("3fs enable async write, thread num: %lu, queue size: %lu",
-                         init_params_.write_thread_num,
-                         init_params_.write_queue_size);
     }
 
     auto cuda_util = std::make_shared<ThreeFSCudaUtil>();
@@ -88,9 +65,6 @@ bool DistStorage3FS::init(const DistStorage3FSInitParams& init_params) {
         RTP_LLM_LOG_WARNING("init read iov handle failed");
         return false;
     }
-    RTP_LLM_LOG_INFO("3fs read iov size: %zu, read iov block size: %zu",
-                     init_params_.read_iov_size,
-                     init_params_.read_iov_block_size);
 
     // write iov
     if (!initIovHandle(write_iov_handle_, init_params.write_iov_block_size, init_params_.write_iov_size, cuda_util)) {
@@ -98,9 +72,6 @@ bool DistStorage3FS::init(const DistStorage3FSInitParams& init_params) {
         releaseIovHandle(read_iov_handle_);
         return false;
     }
-    RTP_LLM_LOG_INFO("3fs write iov size: %zu, write iov block size: %zu",
-                     init_params_.write_iov_size,
-                     init_params_.write_iov_block_size);
 
     if (metrics_reporter_) {
         stop_report_metrics_.store(false);
@@ -109,7 +80,30 @@ bool DistStorage3FS::init(const DistStorage3FSInitParams& init_params) {
         stop_report_metrics_.store(true);
     }
 
-    RTP_LLM_LOG_INFO("3fs init done, mountpoint: %s, root dir: %s", mountpoint.c_str(), init_params_.root_dir.c_str());
+    return true;
+}
+
+bool DistStorage3FS::checkInitParams(const DistStorage3FSInitParams& init_params) const {
+    const auto& mountpoint = init_params.mountpoint;
+    if (mountpoint.empty()) {
+        RTP_LLM_LOG_WARNING("init failed, 3fs mountpoint is empty");
+        return false;
+    }
+    if (!std::filesystem::exists(mountpoint)) {
+        RTP_LLM_LOG_WARNING("init failed, 3fs mountpoint not exists: %s", mountpoint.c_str());
+        return false;
+    }
+
+    const auto& root_dir = init_params.root_dir;
+    if (root_dir.empty()) {
+        RTP_LLM_LOG_WARNING("init failed, 3fs root dir is empty");
+        return false;
+    }
+    const auto root_dir_path = std::filesystem::path(mountpoint) / root_dir;
+    if (!std::filesystem::exists(root_dir_path)) {
+        RTP_LLM_LOG_WARNING("init failed, 3fs root dir not exists: %s", root_dir_path.c_str());
+        return false;
+    }
     return true;
 }
 
@@ -274,7 +268,10 @@ bool DistStorage3FS::initIovHandle(ThreeFSIovHandle&                            
     }
 
     if (!cuda_util->registerHost(iov->base, iov_size)) {
-        RTP_LLM_LOG_WARNING("cuda register iov failed, iov base: %p, iov size: %zu", iov->base, iov_size);
+        RTP_LLM_LOG_WARNING("cuda register iov failed, iov base: %p, expect iov size: %zu, actual iov size: %zu",
+                            iov->base,
+                            iov_size,
+                            iov->size);
         releaseIov(iov);
         return false;
     }

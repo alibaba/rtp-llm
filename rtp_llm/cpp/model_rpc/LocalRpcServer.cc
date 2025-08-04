@@ -203,6 +203,7 @@ EngineScheduleInfo LocalRpcServer::getEngineScheduleInfo(int64_t latest_finised_
 
     std::vector<int64_t>               cache_keys(request->cache_keys().begin(), request->cache_keys().end());
     std::vector<int32_t>               block_ids(request->block_ids().begin(), request->block_ids().end());
+    const auto                         ignore_block_num = request->ignore_block_num();
     std::map<std::string, std::string> extra_metas;
     for (const auto& meta : request->extra_metas()) {
         extra_metas[meta.key()] = meta.value();
@@ -210,15 +211,14 @@ EngineScheduleInfo LocalRpcServer::getEngineScheduleInfo(int64_t latest_finised_
 
     bool result = false;
     if (op_code == ::DistKvCacheOp::GET) {
-        result = cache_manager->getCacheForRank(cache_keys, block_ids, request_id, extra_metas);
+        result = cache_manager->getCacheForRank(cache_keys, block_ids, ignore_block_num, request_id, extra_metas);
     } else {
-        result = cache_manager->putCacheForRank(cache_keys, block_ids, request_id, extra_metas);
+        result = cache_manager->putCacheForRank(cache_keys, block_ids, ignore_block_num, request_id, extra_metas);
     }
 
     if (!result) {
-        RTP_LLM_LOG_WARNING("dist kvcache failed, %s cache failed, request: [%s]",
-                            ::DistKvCacheOp_Name(op_code).c_str(),
-                            request->ShortDebugString().c_str());
+        RTP_LLM_LOG_WARNING(
+            "dist kvcache failed, %s cache failed, request: %ld", ::DistKvCacheOp_Name(op_code).c_str(), request_id);
         const std::string error_msg = "cache manager " + ::DistKvCacheOp_Name(op_code) + " failed";
         return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
     }

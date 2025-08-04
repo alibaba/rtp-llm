@@ -597,8 +597,12 @@ class GptInitModelParameters:
             multi_task_prompt=get_env_str("MULTI_TASK_PROMPT"),
             multi_task_prompt_str=get_env_str("MULTI_TASK_PROMPT_STR"),
             enable_3fs=get_env_bool("ENABLE_3FS", False),
-            rpc_get_cache_timeout_ms=int(os.environ.get("RPC_GET_CACHE_TIMEOUT_MS", 5000)),
-            rpc_put_cache_timeout_ms=int(os.environ.get("RPC_PUT_CACHE_TIMEOUT_MS", 5000)),
+            rpc_get_cache_timeout_ms=get_env_int("RPC_GET_CACHE_TIMEOUT_MS", 3000),
+            rpc_put_cache_timeout_ms=get_env_int("RPC_PUT_CACHE_TIMEOUT_MS", 3000),
+            threefs_read_timeout_ms=get_env_int("THREEFS_READ_TIMEOUT_MS", 1000),
+            threefs_write_timeout_ms=get_env_int("THREEFS_WRITE_TIMEOUT_MS", 2000),
+            threefs_read_iov_size=get_env_int("THREEFS_READ_IOV_SIZE", 1 << 32),
+            threefs_write_iov_size=get_env_int("THREEFS_WRITE_IOV_SIZE", 1 << 32),
         )
 
         # ProfilingDebugLoggingConfig

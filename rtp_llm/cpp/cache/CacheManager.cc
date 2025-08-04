@@ -47,9 +47,11 @@ CacheManager::CacheManager(const CacheConfig&                 config,
         }
     }
 
-    RTP_LLM_LOG_INFO("enable 3fs: %d", params_.kv_cache_config.enable_3fs);
     if (params_.kv_cache_config.enable_3fs) {
         enable_dist_kvcache_ = initDistKvCache();
+        if (!enable_dist_kvcache_) {
+            RTP_LLM_FAIL("dist kv cache init failed");
+        }
     }
 }
 
@@ -379,6 +381,10 @@ const CacheManager::KVCacheBuffer& CacheManager::kvCacheBuffer() const {
 }
 
 CacheManager::MatchInfo CacheManager::mallocWithCache(const AdvancedMallocInfo& malloc_info) {
+    if (malloc_info.token_ids.empty() || malloc_info.token_ids.size() < config_.seq_size_per_block + 1) {
+        return MatchInfo{};
+    }
+
     auto match_begin_time_us = currentTimeUs();
     auto match_info          = matchImpl(malloc_info);
     auto match_cost_time_us  = currentTimeUs() - match_begin_time_us;
@@ -401,7 +407,10 @@ CacheManager::MatchInfo CacheManager::matchImpl(const AdvancedMallocInfo& malloc
     incrRefCounter(match_result.block_indices);
     if (metrics_reporter_) {
         RtpLLMCacheReuseMetricsCollector collector;
-        collector.gpu_reuse_length = match_result.matched_len;
+        const auto                       input_len = static_cast<int32_t>(malloc_info.cache_keys.size());
+        collector.gpu_input_length                 = input_len * config_.seq_size_per_block;
+        collector.gpu_reuse_length                 = match_result.matched_len * config_.seq_size_per_block;
+        collector.gpu_cache_hit_rate               = match_result.matched_len * 100 / input_len;
         metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(nullptr, &collector);
     }
 
@@ -565,7 +574,7 @@ void CacheManager::insertIntoCache(FreeInfo& free_info) {
                        free_info.is_resident};
         std::vector<int> indices = block_cache_.put(item);
         if (enable_dist_kvcache_) {
-            putCacheForAllRank(item.cache_key, item.block_indices, free_info.request_id, free_info.adapter_name);
+            putCacheForAllRank(item.cache_key, item.block_indices, 0, free_info.request_id, free_info.adapter_name);
         }
         freeImpl(indices);
         freeImpl(std::vector<int>(free_info.block_indices.begin() + block_len, free_info.block_indices.end()));
@@ -754,11 +763,14 @@ bool CacheManager::initDistKvCache() {
     init_params.rpc_get_cache_timeout_ms = params_.kv_cache_config.rpc_get_cache_timeout_ms;
     init_params.rpc_put_cache_timeout_ms = params_.kv_cache_config.rpc_put_cache_timeout_ms;
     if (params_.kv_cache_config.enable_3fs) {
-        init_params.storage_manager_params.init_params_3fs = DistStorage3FSInitParams{};
+        DistStorage3FSInitParams init_params_3fs;
+        init_params_3fs.read_iov_size                      = params_.kv_cache_config.threefs_read_iov_size;
+        init_params_3fs.write_iov_size                     = params_.kv_cache_config.threefs_write_iov_size;
+        init_params.storage_manager_params.init_params_3fs = init_params_3fs;
     }
     auto dist_kvcache = std::make_unique<DistKvCache>(this, params_, metrics_reporter_);
     if (!dist_kvcache->init(init_params)) {
-        RTP_LLM_LOG_WARNING("dist kvcache init failed");
+        RTP_LLM_LOG_WARNING("dist kvcache init failed!!!");
         return false;
     }
     dist_kvcache_  = std::move(dist_kvcache);
@@ -780,10 +792,9 @@ void CacheManager::matchInDistKvCache(const AdvancedMallocInfo& malloc_info, Blo
     }
 
     std::map<std::string, std::string> extra_metas;
-    extra_metas["LORA_CKPT_PATH"]       = getLoraCkptPath(malloc_info.adapter_name);
-    extra_metas["IGNORE_CACHE_KEY_NUM"] = std::to_string(local_matched_len);
+    extra_metas["LORA_CKPT_PATH"] = getLoraCkptPath(malloc_info.adapter_name);
 
-    auto matched_len = dist_kvcache_->matchForAllRank(cache_keys, request_id, extra_metas);
+    auto matched_len = dist_kvcache_->matchForAllRank(cache_keys, local_matched_len, request_id, extra_metas);
     if (matched_len <= 0) {
         return;
     }
@@ -802,7 +813,8 @@ void CacheManager::matchInDistKvCache(const AdvancedMallocInfo& malloc_info, Blo
     }
 
     std::vector<int64_t> matched_cache_keys(cache_keys.begin(), cache_keys.begin() + matched_len);
-    if (!dist_kvcache_->getForAllRank(matched_cache_keys, resource.block_id, request_id, extra_metas)) {
+    if (!dist_kvcache_->getForAllRank(
+            matched_cache_keys, resource.block_id, local_matched_len, request_id, extra_metas)) {
         free(resource.block_id);
         return;
     }
@@ -814,6 +826,7 @@ void CacheManager::matchInDistKvCache(const AdvancedMallocInfo& malloc_info, Blo
 
 bool CacheManager::putCacheForAllRank(const std::vector<int64_t>& cache_keys,
                                       const std::vector<int32_t>& block_indices,
+                                      size_t                      ignore_block_num,
                                       int64_t                     request_id,
                                       const std::string&          adapter_name) const {
     if (cache_keys.empty()) {
@@ -827,27 +840,29 @@ bool CacheManager::putCacheForAllRank(const std::vector<int64_t>& cache_keys,
     if (dist_kvcache_) {
         std::map<std::string, std::string> extra_metas;
         extra_metas["LORA_CKPT_PATH"] = getLoraCkptPath(adapter_name);
-        return dist_kvcache_->putForAllRank(cache_keys, block_indices, request_id, extra_metas);
+        return dist_kvcache_->putForAllRank(cache_keys, block_indices, ignore_block_num, request_id, extra_metas);
     }
     return false;
 }
 
 bool CacheManager::getCacheForRank(const std::vector<int64_t>&               cache_keys,
                                    const std::vector<int32_t>&               block_indices,
+                                   size_t                                    ignore_block_num,
                                    int64_t                                   request_id,
                                    const std::map<std::string, std::string>& extra_metas) const {
     if (dist_kvcache_) {
-        return dist_kvcache_->get(cache_keys, block_indices, request_id, extra_metas);
+        return dist_kvcache_->get(cache_keys, block_indices, ignore_block_num, request_id, extra_metas);
     }
     return false;
 }
 
 bool CacheManager::putCacheForRank(const std::vector<int64_t>&               cache_keys,
                                    const std::vector<int32_t>&               block_indices,
+                                   size_t                                    ignore_block_num,
                                    int64_t                                   request_id,
                                    const std::map<std::string, std::string>& extra_metas) const {
     if (dist_kvcache_) {
-        return dist_kvcache_->put(cache_keys, block_indices, request_id, extra_metas);
+        return dist_kvcache_->put(cache_keys, block_indices, ignore_block_num, request_id, extra_metas);
     }
     return false;
 }

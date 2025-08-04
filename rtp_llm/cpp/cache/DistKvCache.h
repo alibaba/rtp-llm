@@ -12,8 +12,8 @@ class CacheManager;
 
 struct DistKvCacheInitParams {
     DistStorageManagerInitParams storage_manager_params;
-    int                          rpc_get_cache_timeout_ms;
-    int                          rpc_put_cache_timeout_ms;
+    int                          rpc_get_cache_timeout_ms{3000};
+    int                          rpc_put_cache_timeout_ms{3000};
 };
 
 /**
@@ -31,34 +31,40 @@ public:
 
 public:
     int32_t matchForAllRank(const std::vector<int64_t>&        cache_keys,
+                            size_t                             ignore_block_num,
                             int64_t                            request_id,
                             std::map<std::string, std::string> extra_metas);
 
     int32_t match(const std::vector<int64_t>&        cache_keys,
+                  size_t                             ignore_block_num,
                   int64_t                            request_id,
                   std::map<std::string, std::string> extra_metas) const;
 
     bool getForAllRank(const std::vector<int64_t>&        cache_keys,
                        const std::vector<int32_t>&        block_indices,
+                       size_t                             ignore_block_num,
                        int64_t                            request_id,
                        std::map<std::string, std::string> extra_metas) const;
 
     bool get(const std::vector<int64_t>&        cache_keys,
              const std::vector<int32_t>&        block_indices,
+             size_t                             ignore_block_num,
              int64_t                            request_id,
              std::map<std::string, std::string> extra_metas) const;
 
     bool putForAllRank(const std::vector<int64_t>&        cache_keys,
                        const std::vector<int32_t>&        block_indices,
+                       size_t                             ignore_block_num,
                        int64_t                            request_id,
                        std::map<std::string, std::string> extra_metas) const;
 
     bool put(const std::vector<int64_t>&        cache_keys,
              const std::vector<int32_t>&        block_indices,
+             size_t                             ignore_block_num,
              int64_t                            request_id,
              std::map<std::string, std::string> extra_metas) const;
 
-    bool initDefaultMetas(const DistStorage3FSInitParams& storage_3fs_init_params);
+    bool initDefaultMetas();
 
 private:
     enum OpType {
@@ -67,6 +73,7 @@ private:
     };
     bool syncCallAllRank(const std::vector<int64_t>&              cache_keys,
                          const std::vector<int32_t>&              block_indices,
+                         size_t                                   ignore_block_num,
                          int64_t                                  request_id,
                          const std::map<std::string, std::string> extra_metas,
                          DistKvCache::OpType                      op_type) const;

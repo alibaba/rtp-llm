@@ -5,7 +5,7 @@
 
 #include "rtp_llm/cpp/cache/CacheManager.h"
 #include "rtp_llm/cpp/cache/DistKvCache.h"
-#include "rtp_llm/cpp/cache/kvcache_readwrite_test/KVCacheOptionBase.h"
+#include "rtp_llm/cpp/cache/perf_test/KVCacheOptionBase.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 
 extern std::atomic<bool> g_stop_flag;
@@ -142,8 +142,10 @@ public:
                     cache_keys.back() = option.last_cache_key;
                 }
 
+                size_t ignore_block_num = 0;
                 RTP_LLM_LOG_DEBUG("put cache, request: %ld, cache key: %lu", request_id, cache_keys.back());
-                if (!dist_kvcache->put(cache_keys, block_indices, request_id, {})) {
+
+                if (!dist_kvcache->put(cache_keys, block_indices, ignore_block_num, request_id, {})) {
                     RTP_LLM_LOG_ERROR(
                         "put cache to 3fs failed, request: %ld, cache key: %lu", request_id, cache_keys.back());
                 } else {

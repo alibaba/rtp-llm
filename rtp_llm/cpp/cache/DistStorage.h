@@ -47,6 +47,15 @@ struct DistStorageLocalMemInitParams {
 };
 
 struct DistStorage3FSInitParams {
+    std::string toString() const {
+        std::ostringstream oss;
+        oss << "enable_async_write: " << enable_async_write << ", write_thread_num: " << write_thread_num
+            << ", write_queue_size: " << write_queue_size << ", read_iov_block_size: " << read_iov_block_size
+            << ", read_iov_size: " << read_iov_size << ", write_iov_block_size: " << write_iov_block_size
+            << ", write_iov_size: " << write_iov_size << ", mountpoint: " << mountpoint << ", root_dir: " << root_dir;
+        return oss.str();
+    }
+
     bool   enable_async_write = true;
     size_t write_thread_num   = 4;
     size_t write_queue_size   = 1000;

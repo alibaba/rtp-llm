@@ -20,6 +20,8 @@ public:
     bool del(const DistStorage::Item& item) override;
 
 private:
+    bool checkInitParams(const DistStorage3FSInitParams& init_params) const;
+
     std::shared_ptr<threefs::DistStorage3FSFile> getFile(const DistStorage::Item& item, bool read = true);
     void                                         removeFile(const DistStorage::Item& item);
     std::string                                  makeFilepath(const std::map<std::string, std::string>& metas) const;
@@ -56,11 +58,6 @@ private:
     // for metric
     std::atomic<bool> stop_report_metrics_{false};
     std::thread       report_metrics_thread_;
-
-    const size_t kDefaultReadIovSize{1ULL << 32};        // 4GB
-    const size_t kDefaultReadIovBlockSize{0};            // 0
-    const size_t kDefaultWriteIovSize{1ULL << 32};       // 4GB
-    const size_t kDefaultWriteIovBlockSize{1ULL << 20};  // 1MB
 };
 
 }  // namespace rtp_llm::threefs

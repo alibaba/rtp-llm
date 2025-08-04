@@ -13,8 +13,14 @@ bool DistStorageManager::init(const DistStorageManagerInitParams& init_params) {
     init_params_ = init_params;
     if (init_params_.init_params_3fs.has_value()) {
 #ifdef ENABLE_3FS
+        auto init_params_3fs = init_params_.init_params_3fs.value();
+        // root dir env only used for debug
+        if (auto root_dir_env = autil::EnvUtil::getEnv("THREEFS_ROOT_DIR", std::string("")); !root_dir_env.empty()) {
+            init_params_3fs.root_dir = root_dir_env;
+        };
+
         auto storage = std::make_shared<threefs::DistStorage3FS>(metrics_reporter_);
-        if (!storage->init(init_params_.init_params_3fs.value())) {
+        if (!storage->init(init_params_3fs)) {
             RTP_LLM_LOG_WARNING("init failed, 3fs storage init failed");
             return false;
         }

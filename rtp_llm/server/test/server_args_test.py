@@ -52,6 +52,12 @@ class ServerArgsDefaultTest(TestCase):
         # self.assertIsNone(env.get("SEQ_SIZE_PER_BLOCK"))
         self.assertEqual(env.get("TEST_BLOCK_NUM"), "0")
         self.assertEqual(env["ENABLE_3FS"], "0")
+        self.assertEqual(env.get("RPC_GET_CACHE_TIMEOUT_MS"), "3000")
+        self.assertEqual(env.get("RPC_PUT_CACHE_TIMEOUT_MS"), "3000")
+        self.assertEqual(env.get("THREEFS_READ_TIMEOUT_MS"), "1000")
+        self.assertEqual(env.get("THREEFS_WRITE_TIMEOUT_MS"), "2000")
+        self.assertEqual(env.get("THREEFS_READ_IOV_SIZE"), "4294967296")
+        self.assertEqual(env.get("THREEFS_WRITE_IOV_SIZE"), "4294967296")
 
         # 5. Profiling、Debugging、Logging
         self.assertEqual(env.get("RTP_LLM_TRACE_MEMORY"), "0")
@@ -331,6 +337,18 @@ class ServerArgsSetTest(TestCase):
             "128",
             "--enable_3fs",
             "True",
+            "--rpc_get_cache_timeout_ms",
+            "5000",
+            "--rpc_put_cache_timeout_ms",
+            "5000",
+            "--threefs_read_timeout_ms",
+            "5000",
+            "--threefs_write_timeout_ms",
+            "5000",
+            "--threefs_read_iov_size",
+            "1073741824",
+            "--threefs_write_iov_size",
+            "1073741824",
             # 5. Profiling、Debugging、Logging
             "--trace_memory",
             "True",
@@ -708,6 +726,12 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env["SEQ_SIZE_PER_BLOCK"], "64")
         self.assertEqual(env["TEST_BLOCK_NUM"], "128")
         self.assertEqual(env["ENABLE_3FS"], "1")
+        self.assertEqual(env.get("RPC_GET_CACHE_TIMEOUT_MS"), "5000")
+        self.assertEqual(env.get("RPC_PUT_CACHE_TIMEOUT_MS"), "5000")
+        self.assertEqual(env.get("THREEFS_READ_TIMEOUT_MS"), "5000")
+        self.assertEqual(env.get("THREEFS_WRITE_TIMEOUT_MS"), "5000")
+        self.assertEqual(env.get("THREEFS_READ_IOV_SIZE"), "1073741824")
+        self.assertEqual(env.get("THREEFS_WRITE_IOV_SIZE"), "1073741824")
 
         # 5. Profiling、Debugging、Logging
         self.assertEqual(env["RTP_LLM_TRACE_MEMORY"], "1")

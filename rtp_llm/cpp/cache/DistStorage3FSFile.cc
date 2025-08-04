@@ -40,7 +40,10 @@ DistStorage3FSFile::~DistStorage3FSFile() {
 
 bool DistStorage3FSFile::isExist() {
     struct stat file_stat;
-    return ::stat(filepath_.c_str(), &file_stat) == 0;
+    if (auto ret = ::stat(filepath_.c_str(), &file_stat); ret != 0) {
+        return false;
+    }
+    return static_cast<int64_t>(file_stat.st_size) > 0;
 }
 
 bool DistStorage3FSFile::open(bool write) {
@@ -366,6 +369,15 @@ bool DistStorage3FSFile::read(const std::vector<DistStorage::Iov>& iovs) {
                             offset_to_read);
         return true;
     }
+    if (const auto file_len = getFileLength(); offset_to_read + read_len > file_len) {
+        RTP_LLM_LOG_WARNING(
+            "read failed, read len exceed file len, file: %s, offset: %ld, read len: %zu, file len: %ld",
+            filepath_.c_str(),
+            offset_to_read,
+            read_len,
+            file_len);
+        return false;
+    }
 
     if (!open()) {
         return false;
@@ -650,6 +662,18 @@ void DistStorage3FSFile::releaseIovIor(const std::shared_ptr<ThreeFSHandle>& han
         delete ior_handle.ior;
         ior_handle.ior = nullptr;
     }
+}
+
+std::optional<int64_t> DistStorage3FSFile::getFileLength() const {
+    struct stat file_stat;
+    if (auto ret = ::stat(filepath_.c_str(), &file_stat); ret != 0) {
+        RTP_LLM_LOG_WARNING("get file length failed, stat failed, file: %s, ret: %d, errno: %s",
+                            filepath_.c_str(),
+                            ret,
+                            strerror(errno));
+        return std::nullopt;
+    }
+    return static_cast<int64_t>(file_stat.st_size);  // byte
 }
 
 void DistStorage3FSFile::verify(const std::vector<DistStorage::Iov>&    write_iovs,

@@ -296,8 +296,9 @@ message DistKvCacheRequestPB {
     int64 request_id = 1;
     repeated int64 cache_keys = 2;
     repeated int32 block_ids = 3;
-    DistKvCacheOp op = 4;
-    repeated MetaKV extra_metas = 5;
+    uint32 ignore_block_num = 4;
+    DistKvCacheOp op = 5;
+    repeated MetaKV extra_metas = 6;
 }
 
 message DistKvCacheResponsePB {}

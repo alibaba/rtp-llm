@@ -142,13 +142,15 @@ public:
 
     void                                    regUserMr(size_t model_id);
 
-    bool getCacheForRank(const std::vector<int64_t>& cache_keys,
-                         const std::vector<int32_t>& block_indices,
-                         int64_t                     request_id,
+    bool getCacheForRank(const std::vector<int64_t>&               cache_keys,
+                         const std::vector<int32_t>&               block_indices,
+                         size_t                                    ignore_block_num,
+                         int64_t                                   request_id,
                          const std::map<std::string, std::string>& extra_metas) const;
-    bool putCacheForRank(const std::vector<int64_t>& cache_keys,
-                         const std::vector<int32_t>& block_indices,
-                         int64_t                     request_id,
+    bool putCacheForRank(const std::vector<int64_t>&               cache_keys,
+                         const std::vector<int32_t>&               block_indices,
+                         size_t                                    ignore_block_num,
+                         int64_t                                   request_id,
                          const std::map<std::string, std::string>& extra_metas) const;
 
 protected:
@@ -192,6 +194,7 @@ private:
     void matchInDistKvCache(const AdvancedMallocInfo& malloc_info, BlockCache::MatchResult& match_result);
     bool putCacheForAllRank(const std::vector<int64_t>& cache_keys,
                             const std::vector<int32_t>& block_indices,
+                            size_t                      ignore_block_num,
                             int64_t                     request_id,
                             const std::string&          adapter_name) const;
     std::map<std::string, std::string> getLoraInfo() const;

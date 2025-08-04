@@ -58,7 +58,7 @@ public:
     PROPERTY(int64_t, cache_put_length, CachePutLength, -1);
     PROPERTY(int64_t, cache_hit_rate, CacheHitRate, -1);
     PROPERTY(bool, match_qps, MatchQps, false);
-    PROPERTY(bool, match_success_qps, MatchSuccessQps, false);
+    PROPERTY(bool, match_failed_qps, MatchFailedQps, false);
     PROPERTY(bool, get_cache_failed_qps, GetCacheFailedQps, false);
     PROPERTY(bool, put_cache_failed_qps, PutCacheFailedQps, false);
 
@@ -155,7 +155,7 @@ public:
         REGISTER_METRIC(cache_put_length);
         REGISTER_METRIC(cache_hit_rate);
         REGISTER_QPS_METRIC(match_qps);
-        REGISTER_QPS_METRIC(match_success_qps);
+        REGISTER_QPS_METRIC(match_failed_qps);
         REGISTER_QPS_METRIC(get_cache_failed_qps);
         REGISTER_QPS_METRIC(put_cache_failed_qps);
 
@@ -206,7 +206,7 @@ public:
         REPORT_METRIC(cache_put_length, CachePutLength);
         REPORT_METRIC(cache_hit_rate, CacheHitRate);
         REPORT_QPS_METRIC(match_qps, MatchQps);
-        REPORT_QPS_METRIC(match_success_qps, MatchSuccessQps);
+        REPORT_QPS_METRIC(match_failed_qps, MatchFailedQps);
         REPORT_QPS_METRIC(get_cache_failed_qps, GetCacheFailedQps);
         REPORT_QPS_METRIC(put_cache_failed_qps, PutCacheFailedQps);
 
@@ -259,7 +259,7 @@ private:
     METRIC(get_cache_cost_us);
     METRIC(put_cache_cost_us);
     METRIC(match_qps);
-    METRIC(match_success_qps);
+    METRIC(match_failed_qps);
     METRIC(get_cache_failed_qps);
     METRIC(put_cache_failed_qps);
 

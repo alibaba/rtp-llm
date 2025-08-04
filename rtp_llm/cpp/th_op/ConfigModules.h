@@ -58,8 +58,12 @@ struct KVCacheConfig {
     std::string multi_task_prompt        = "";
     std::string multi_task_prompt_str    = "";
     bool        enable_3fs               = false;
-    int         rpc_get_cache_timeout_ms = 5000;
-    int         rpc_put_cache_timeout_ms = 5000;
+    int         rpc_get_cache_timeout_ms = 3000;
+    int         rpc_put_cache_timeout_ms = 3000;
+    int         threefs_read_timeout_ms  = 1000;
+    int         threefs_write_timeout_ms = 2000;
+    int64_t     threefs_read_iov_size    = 1LL << 32;  // 4GB
+    int64_t     threefs_write_iov_size   = 1LL << 32;  // 4GB
     std::string to_string() const;
     void        update_from_env_for_test();
 };

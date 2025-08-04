@@ -42,13 +42,12 @@ void startTest() {
     const int buffer_len    = 1 * 1024 * 1024;
     auto      buffer        = malloc(buffer_len);
     auto      shared_buffer = std::shared_ptr<void>(buffer, [](void* ptr) { free(ptr); });
-    int64_t   offset        = 0;
     for (int i = 0; i < 10; ++i) {
         DistStorage::Iov iov;
         iov.data    = std::shared_ptr<void>(buffer, [](void* ptr) {});
         iov.len     = buffer_len;
-        iov.offset  = offset;
         iov.gpu_mem = false;
+        iov.ignore  = false;
         item.iovs.push_back(iov);
     }
 

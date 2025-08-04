@@ -89,6 +89,7 @@ private:
 
     int64_t calcLeftSizeInBlock(int64_t iov_block_size, int64_t iov_offset) const;
 
+    std::optional<int64_t> getFileLength() const;
     void verify(const std::vector<DistStorage::Iov>& write_iovs, const std::shared_ptr<ThreeFSCudaUtil>& cuda_util);
 
 private:

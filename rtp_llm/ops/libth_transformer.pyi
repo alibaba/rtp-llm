@@ -564,14 +564,22 @@ class KVCacheConfig:
     enable_3fs: bool
     rpc_get_cache_timeout_ms: int
     rpc_put_cache_timeout_ms: int
+    threefs_read_timeout_ms: int
+    threefs_write_timeout_ms: int
+    threefs_read_iov_size: int
+    threefs_write_iov_size: int
     def __init__(
         self,
         reuse_cache: bool = False,
         multi_task_prompt: str = "",
         multi_task_prompt_str: str = "",
-        enable_3fs: bool = False
-        rpc_get_cache_timeout_ms: int = 5000,
-        rpc_put_cache_timeout_ms: int = 5000,
+        enable_3fs: bool = False,
+        rpc_get_cache_timeout_ms: int = 3000,
+        rpc_put_cache_timeout_ms: int = 3000,
+        threefs_read_timeout_ms: int = 1000,
+        threefs_write_timeout_ms: int = 2000,
+        threefs_read_iov_size: int = 1 << 32,
+        threefs_write_iov_size: int = 1 << 32,
     ) -> None: ...
     def to_string(self) -> str: ...
     def update_from_env(self) -> None: ...

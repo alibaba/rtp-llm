@@ -5,7 +5,7 @@
 
 #include "rtp_llm/cpp/cache/CacheManager.h"
 #include "rtp_llm/cpp/cache/DistKvCache.h"
-#include "rtp_llm/cpp/cache/kvcache_readwrite_test/KVCacheOptionBase.h"
+#include "rtp_llm/cpp/cache/perf_test/KVCacheOptionBase.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 
 extern std::atomic<bool> g_stop_flag;
@@ -119,10 +119,8 @@ public:
                     block_indices[i] = i + 1;
                 }
 
-                std::map<std::string, std::string> metas;
-                metas["IGNORE_CACHE_KEY_NUM"] = "0";
-
-                const auto matched_len = dist_kvcache->matchForAllRank(cache_keys, request_id, metas);
+                size_t     ignore_block_num = 0;
+                const auto matched_len = dist_kvcache->matchForAllRank(cache_keys, ignore_block_num, request_id, {});
                 if (matched_len != cache_keys.size()) {
                     RTP_LLM_LOG_ERROR("not fully match, request: %ld, cache key: %ld, matched len: %d|%lu",
                                       request_id,
@@ -132,9 +130,9 @@ public:
                     ++request_id;
                     continue;
                 }
-                
+
                 RTP_LLM_LOG_INFO("get cache, request id: %ld, cache key num: %d", request_id, matched_len);
-                if (!dist_kvcache->get(cache_keys, block_indices, request_id, {})) {
+                if (!dist_kvcache->get(cache_keys, block_indices, ignore_block_num, request_id, {})) {
                     RTP_LLM_LOG_ERROR(
                         "get cache from 3fs failed, request: %ld, cache key: %ld", request_id, cache_keys.back());
                 }
