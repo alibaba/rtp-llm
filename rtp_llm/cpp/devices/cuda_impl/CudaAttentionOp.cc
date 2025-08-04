@@ -436,7 +436,8 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
         static torch::Tensor cos_sin_cache = getRopeCosSin(params.configs.rope_config.style,
                                                            params.configs.rope_config.dim,
                                                            params.configs.rope_config.base,
-                                                           params.configs.rope_config.scale);
+                                                           params.configs.rope_config.scale,
+                                                           init_params_.max_seq_len);
 
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(params.input.type(),
                                          invokeDecodeAddFusedQKVBiasTranspose,
