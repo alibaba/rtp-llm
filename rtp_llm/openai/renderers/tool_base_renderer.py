@@ -36,8 +36,6 @@ class ToolStreamStatus(StreamStatus):
         super().__init__(request)
         self.generating_tool_call = False
         self.detector = detector
-        self.compatible_pd_seperate_tag = bool(os.environ.get("PD_SEPARATION", 0))
-        self.compatible_pd_seperate_first_token = None
 
 
 class ToolBaseRenderer(CustomChatRenderer, ABC):
@@ -201,7 +199,7 @@ class ToolBaseRenderer(CustomChatRenderer, ABC):
         is_streaming: bool,
     ) -> Optional[OutputDelta]:
         """处理工具调用的通用逻辑"""
-        # 转换工具格式
+        # 转换工具格式, 这里需要确保streaming=True的情况下, token是一个个返回的, 而streaming=False的情况下, token是全部完整的输出
         sglang_tools = rtp_tools_to_sglang_tools(status.request.tools)
         try:
             if is_streaming:
@@ -209,9 +207,14 @@ class ToolBaseRenderer(CustomChatRenderer, ABC):
                     status.delta_output_string, sglang_tools
                 )
             else:
-                parse_result = self._handle_non_streaming_parse(status, sglang_tools)
-                if parse_result is None:
-                    return None
+                # 兼容kimik2在非流式的情况下可能返回结果中有以<|im_end|>的结果
+                status.delta_output_string = self._clean_stop_words(
+                    status.delta_output_string
+                )
+
+                parse_result = status.detector.detect_and_parse(
+                    status.delta_output_string, sglang_tools
+                )
 
             # 如果没有工具调用，将文本还给 delta_output_string，让默认逻辑处理
             if not parse_result.calls:
@@ -242,27 +245,6 @@ class ToolBaseRenderer(CustomChatRenderer, ABC):
                 f"工具调用解析失败: {e}, 当前delta_output_string: {status.delta_output_string}"
             )
             return None
-
-    def _handle_non_streaming_parse(self, status: ToolStreamStatus, tools):
-        """处理非流式解析的逻辑"""
-        # 清理停止词
-        status.delta_output_string = self._clean_stop_words(status.delta_output_string)
-
-        # 处理PD分离兼容性
-        if status.compatible_pd_seperate_tag:
-            status.compatible_pd_seperate_tag = False
-            status.compatible_pd_seperate_first_token = status.delta_output_string
-            status.delta_output_string = ""
-            return None
-        else:
-            if status.compatible_pd_seperate_first_token:
-                status.delta_output_string = (
-                    status.compatible_pd_seperate_first_token
-                    + status.delta_output_string
-                )
-
-            # 执行检测和解析
-            return status.detector.detect_and_parse(status.delta_output_string, tools)
 
     def _clean_stop_words(self, text: str):
         """

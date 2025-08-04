@@ -13,6 +13,7 @@ from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.models.base_model import (
     AuxInfo,
     BaseModel,
+    GenerateInput,
     GenerateOutput,
     GenerateOutputs,
 )
@@ -93,68 +94,6 @@ async def fake_output_generator_once(
         )
     )
 
-    yield outputs
-
-
-async def fake_output_generator_two_steps(
-    output_ids: List[int], max_seq_len: int, eos_id: int, seq_len: int
-) -> AsyncGenerator[GenerateOutputs, None]:
-    """
-    为了兼容目前PD分离场景, 目标token分两次生成的case
-    分两次返回结果：
-    第一次：返回第一个token
-    第二次：返回剩余的所有tokens
-    """
-    if not output_ids:
-        return
-
-    # 第一次返回：只包含第一个token
-    first_token = [output_ids[0]]
-    output_tensor = torch.full((1, max_seq_len), eos_id, dtype=torch.int)
-    output_tensor[0, : len(first_token)] = torch.tensor(first_token, dtype=torch.int)
-
-    finished = torch.full((1,), False, dtype=torch.bool)  # 未完成
-
-    outputs = GenerateOutputs()
-    aux = AuxInfo()
-    aux.input_len = seq_len
-    aux.output_len = 1
-
-    outputs.generate_outputs.append(
-        GenerateOutput(
-            hidden_states=None,
-            output_ids=output_tensor,
-            finished=finished,
-            aux_info=aux,
-            loss=None,
-            logits=None,
-        )
-    )
-    yield outputs
-
-    # 第二次返回：只包含剩余的tokens（从第二个开始）
-    remaining_tokens = output_ids[1:]
-    output_tensor = torch.full((1, max_seq_len), eos_id, dtype=torch.int)
-    output_tensor[0, : len(remaining_tokens)] = torch.tensor(
-        remaining_tokens, dtype=torch.int
-    )
-
-    finished = torch.full((1,), True, dtype=torch.bool)  # 第二次返回后完成
-    outputs = GenerateOutputs()
-    aux = AuxInfo()
-    aux.input_len = seq_len
-    aux.output_len = len(remaining_tokens)
-
-    outputs.generate_outputs.append(
-        GenerateOutput(
-            hidden_states=None,
-            output_ids=output_tensor,
-            finished=finished,
-            aux_info=aux,
-            loss=None,
-            logits=None,
-        )
-    )
     yield outputs
 
 
@@ -248,18 +187,12 @@ class BaseToolCallTestSuite:
         """验证流式chunk - 子类可以重写"""
         pass
 
-    def _setup_environment(self, pd_separation=None):
+    def _setup_environment(self):
         """设置测试环境"""
         os.environ["MODEL_TYPE"] = self._get_model_type()
 
         # 设置额外的环境变量
         self._setup_additional_environment()
-
-        # 设置PD_SEPARATION环境变量
-        if pd_separation:
-            os.environ["PD_SEPARATION"] = "1"
-        elif "PD_SEPARATION" in os.environ:
-            del os.environ["PD_SEPARATION"]
 
         tokenizer_path = f"{self.parent.test_data_path}/{self._get_tokenizer_path()}"
         tokenizer = self._create_tokenizer(tokenizer_path)
@@ -274,13 +207,11 @@ class BaseToolCallTestSuite:
     async def _run_tool_call_test(
         self,
         stream=True,
-        generator_type="normal",
-        pd_separation=None,
         include_stop_word=False,
         stop_words_str=None,
     ):
         """运行工具调用测试的通用方法"""
-        tokenizer = self._setup_environment(pd_separation)
+        tokenizer = self._setup_environment()
         test_ids = self._get_test_data(include_stop_word)
         render_params = self._create_render_params(tokenizer)
 
@@ -294,16 +225,11 @@ class BaseToolCallTestSuite:
 
         seq_len_no_use = 314
 
-        # 根据generator_type选择不同的生成器
-        if generator_type == "once":
+        if not stream:
             id_generator = fake_output_generator_once(
                 test_ids, MAX_SEQ_LEN, tokenizer.eos_token_id or 0, seq_len_no_use
             )
-        elif generator_type == "two_steps":
-            id_generator = fake_output_generator_two_steps(
-                test_ids, MAX_SEQ_LEN, tokenizer.eos_token_id or 0, seq_len_no_use
-            )
-        else:  # normal
+        else:
             id_generator = fake_output_generator(
                 test_ids, MAX_SEQ_LEN, tokenizer.eos_token_id or 0, seq_len_no_use
             )
@@ -336,7 +262,7 @@ class BaseToolCallTestSuite:
     async def test_streaming_case(self, stop_words_str=None):
         """测试工具调用流式场景"""
         chunk_list = await self._run_tool_call_test(
-            stream=True, pd_separation=False, stop_words_str=stop_words_str
+            stream=True, stop_words_str=stop_words_str
         )
 
         merged_result: ChatCompletionStreamResponse = merge_stream_responses(chunk_list)
@@ -346,32 +272,12 @@ class BaseToolCallTestSuite:
         """测试工具调用非流式场景"""
         chunk_list = await self._run_tool_call_test(
             stream=False,
-            generator_type="once",
-            pd_separation=False,
             stop_words_str=stop_words_str,
         )
 
         # 验证合并结果
         merged_result: ChatCompletionStreamResponse = merge_stream_responses(chunk_list)
         self._validate_merged_result(merged_result)
-
-    async def test_no_stream_pd_separate(self, stop_words_str=None):
-        """测试工具调用非流式PD分离场景"""
-        chunk_list = await self._run_tool_call_test(
-            stream=False,
-            generator_type="two_steps",
-            pd_separation=True,
-            stop_words_str=stop_words_str,
-        )
-
-        # 验证合并结果
-        merged_result: ChatCompletionStreamResponse = merge_stream_responses(chunk_list)
-        self._validate_merged_result(merged_result)
-
-    def cleanup_environment(self):
-        """清理测试环境"""
-        if "PD_SEPARATION" in os.environ:
-            del os.environ["PD_SEPARATION"]
 
 
 class OpenaiResponseTest(IsolatedAsyncioTestCase):
@@ -1068,12 +974,10 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             assert response_delta.tool_calls[0].index == 0
             assert response_delta.tool_calls[1].index == 1
 
-        async def test_no_stream_pd_separate_stop_words(self):
+        async def test_no_stream_stop_words(self):
             """测试KimiK2工具调用非流式PD分离场景（包含停止词）"""
             chunk_list = await self._run_tool_call_test(
                 stream=False,
-                generator_type="two_steps",
-                pd_separation=True,
                 include_stop_word=True,
             )
 
@@ -1395,11 +1299,6 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         qwen_suite = self.QwenToolTestSuite(self)
         await qwen_suite.test_no_stream()
 
-    async def test_parse_qwen_tool_call_no_stream_PDseperate(self):
-        """测试QwenTool工具调用非流式PD分离场景"""
-        qwen_suite = self.QwenToolTestSuite(self)
-        await qwen_suite.test_no_stream_pd_separate()
-
     async def test_parse_qwen_call_streaming_case(self):
         """测试QwenTool工具调用流式场景"""
         qwen_suite = self.QwenTestSuite(self)
@@ -1409,11 +1308,6 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         """测试QwenTool工具调用非流式场景"""
         qwen_suite = self.QwenTestSuite(self)
         await qwen_suite.test_no_stream()
-
-    async def test_parse_qwen_call_no_stream_PDseperate(self):
-        """测试QwenTool工具调用非流式PD分离场景"""
-        qwen_suite = self.QwenTestSuite(self)
-        await qwen_suite.test_no_stream_pd_separate()
 
     async def test_parse_qwen_think_call_streaming_case(self):
         """测试QwenTool工具调用流式场景"""
@@ -1429,13 +1323,6 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         await qwen_suite.test_no_stream(stop_words_str=["<im_end>"])
         custom_renderer.THINK_MODE = 0
 
-    async def test_parse_qwen_think_call_no_stream_PDseperate(self):
-        """测试QwenTool工具调用非流式PD分离场景"""
-        qwen_suite = self.QwenThinkTestSuite(self)
-        custom_renderer.THINK_MODE = 1
-        await qwen_suite.test_no_stream_pd_separate(stop_words_str=["<im_end>"])
-        custom_renderer.THINK_MODE = 0
-
     async def test_parse_kimik2_tool_call_streaming_case(self):
         """测试KimiK2工具调用流式场景"""
         kimi_suite = self.KimiK2TestSuite(self)
@@ -1446,15 +1333,10 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         kimi_suite = self.KimiK2TestSuite(self)
         await kimi_suite.test_no_stream()
 
-    async def test_parse_kimik2_tool_call_no_stream_PDseperate(self):
-        """测试KimiK2工具调用非流式PD分离场景"""
-        kimi_suite = self.KimiK2TestSuite(self)
-        await kimi_suite.test_no_stream_pd_separate()
-
-    async def test_parse_kimik2_tool_call_no_stream_PDseperate_stop_words(self):
+    async def test_parse_kimik2_tool_call_no_stream_stop_words(self):
         """测试KimiK2工具调用非流式PD分离场景（包含停止词）"""
         kimi_suite = self.KimiK2TestSuite(self)
-        await kimi_suite.test_no_stream_pd_separate_stop_words()
+        await kimi_suite.test_no_stream_stop_words()
 
     async def test_parse_qwen3_coder_tool_call_streaming_case(self):
         """测试Qwen3Coder工具调用流式场景"""
@@ -1466,11 +1348,6 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         suite = self.Qwen3CoderTestSuite(self)
         await suite.test_no_stream()
 
-    async def test_parse_qwen3_coder_tool_call_no_stream_PDseperate(self):
-        """测试Qwen3Coder工具调用非流式PD分离场景"""
-        suite = self.Qwen3CoderTestSuite(self)
-        await suite.test_no_stream_pd_separate()
-
     async def test_parse_qwen3_coder_complex_tool_call_streaming_case(self):
         """测试Qwen3Coder工具调用流式场景"""
         suite = self.Qwen3CoderComplexTestSuite(self)
@@ -1481,10 +1358,175 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         suite = self.Qwen3CoderComplexTestSuite(self)
         await suite.test_no_stream()
 
-    async def test_parse_qwen3_coder_complex_tool_call_no_stream_PDseperate(self):
-        """测试Qwen3Coder工具调用非流式PD分离场景"""
-        suite = self.Qwen3CoderComplexTestSuite(self)
-        await suite.test_no_stream_pd_separate()
+    class QwenMergeLogicTestSuite(QwenTestSuite):
+        """基于QwenTestSuite，专门测试generate_choice合并逻辑"""
+
+        def _create_two_step_mock_model_rpc_client(self, tokenizer, test_ids, seq_len):
+            """创建模拟的ModelRpcClient - 分两步返回"""
+
+            class MockModelRpcClient:
+                def __init__(self, test_ids, max_seq_len, eos_token_id, seq_len):
+                    self.test_ids = test_ids
+                    self.max_seq_len = max_seq_len
+                    self.eos_token_id = eos_token_id
+                    self.seq_len = seq_len
+                    self.generated_outputs_count = 0
+
+                async def enqueue(
+                    self, input: GenerateInput
+                ) -> AsyncGenerator[GenerateOutputs, None]:
+                    """模拟ModelRpcClient.enqueue - 分两步返回"""
+
+                    # 第一步：返回第一个token
+                    self.generated_outputs_count += 1
+                    first_token = [self.test_ids[0]]
+
+                    output_tensor1 = torch.full(
+                        (1, self.max_seq_len), self.eos_token_id, dtype=torch.int
+                    )
+                    output_tensor1[0, : len(first_token)] = torch.tensor(
+                        first_token, dtype=torch.int
+                    )
+
+                    outputs1 = GenerateOutputs()
+                    aux1 = AuxInfo()
+                    aux1.input_len = self.seq_len
+                    aux1.output_len = len(first_token)
+                    aux1.reuse_len = 0
+
+                    outputs1.generate_outputs.append(
+                        GenerateOutput(
+                            hidden_states=None,
+                            output_ids=output_tensor1,
+                            finished=torch.full((1,), False, dtype=torch.bool),
+                            aux_info=aux1,
+                            loss=None,
+                            logits=None,
+                        )
+                    )
+
+                    yield outputs1
+
+                    # 第二步：返回剩余的所有token
+                    self.generated_outputs_count += 1
+                    remaining_tokens = self.test_ids[1:]
+
+                    output_tensor2 = torch.full(
+                        (1, self.max_seq_len), self.eos_token_id, dtype=torch.int
+                    )
+                    output_tensor2[0, : len(remaining_tokens)] = torch.tensor(
+                        remaining_tokens, dtype=torch.int
+                    )
+
+                    outputs2 = GenerateOutputs()
+                    aux2 = AuxInfo()
+                    aux2.input_len = self.seq_len
+                    aux2.output_len = len(remaining_tokens)
+                    aux2.reuse_len = 0
+
+                    outputs2.generate_outputs.append(
+                        GenerateOutput(
+                            hidden_states=None,
+                            output_ids=output_tensor2,
+                            finished=torch.full((1,), True, dtype=torch.bool),
+                            aux_info=aux2,
+                            loss=None,
+                            logits=None,
+                        )
+                    )
+
+                    yield outputs2
+
+            return MockModelRpcClient(
+                test_ids, 1024, tokenizer.eos_token_id or 0, seq_len
+            )
+
+        def _create_mock_backend_visitor_with_mock_rpc_client(
+            self, tokenizer, test_ids, seq_len
+        ):
+            """创建使用mock ModelRpcClient的BackendRPCServerVisitor"""
+            mock_rpc_client = self._create_two_step_mock_model_rpc_client(
+                tokenizer, test_ids, seq_len
+            )
+
+            class MockBackendRPCServerVisitor:
+                def __init__(self, mock_rpc_client):
+                    self.model_rpc_client = mock_rpc_client
+                    self.enqueue_call_count = 0
+
+                async def enqueue(
+                    self, input: GenerateInput
+                ) -> AsyncGenerator[GenerateOutputs, None]:
+                    """模拟BackendRPCServerVisitor.enqueue的行为 - 直接返回generator"""
+                    self.enqueue_call_count += 1
+                    return self.model_rpc_client.enqueue(input)
+
+            return MockBackendRPCServerVisitor(mock_rpc_client), mock_rpc_client
+
+        async def test_non_streaming_merge_logic(self):
+            """测试非流式场景的合并逻辑"""
+            tokenizer = self._setup_environment()
+            test_ids = self._get_test_data()
+            render_params = self._create_render_params(tokenizer)
+
+            chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
+            self._validate_renderer(chat_renderer)
+
+            functions, tools = self._create_test_functions_and_tools()
+
+            mock_visitor, mock_rpc_client = (
+                self._create_mock_backend_visitor_with_mock_rpc_client(
+                    tokenizer, test_ids, 314
+                )
+            )
+
+            request = ChatCompletionRequest(messages=[], tools=tools, stream=False)
+            generate_config = GenerateConfig(is_streaming=False)
+
+            choice_generator = chat_renderer.generate_choice(
+                request_id=123,
+                input_ids=[1, 2, 3],
+                mm_inputs=[],
+                generate_config=generate_config,
+                backend_rpc_server_visitor=mock_visitor,
+                request=request,
+            )
+
+            stream_response_objects = []
+            async for stream_response_obj in choice_generator:
+                stream_response_objects.append(stream_response_obj)
+
+            # 验证合并逻辑
+            self.parent.assertEqual(
+                mock_rpc_client.generated_outputs_count,
+                2,
+                "ModelRpcClient应该返回2个输出",
+            )
+            # stream_response_objects应该额外包含generate_first, flush_buffer, generate_final 3个chunk, 共4个
+            self.parent.assertEqual(
+                len(stream_response_objects), 4, "generate_choice应该合并输出"
+            )
+
+            # 验证工具调用结果
+            async def stream_response_objects_to_generator():
+                for stream_obj in stream_response_objects:
+                    yield stream_obj
+
+            generate = self.parent.endpoint._complete_stream_response(
+                stream_response_objects_to_generator(), None
+            )
+            chunk_list = [chunk async for chunk in generate]
+
+            from rtp_llm.test.utils.stream_util import merge_stream_responses
+
+            merged_result = merge_stream_responses(chunk_list)
+
+            self._validate_merged_result(merged_result)
+
+    async def test_qwen_non_streaming_merge_logic(self):
+        """测试Qwen模型非流式场景的合并逻辑"""
+        qwen_suite = self.QwenMergeLogicTestSuite(self)
+        await qwen_suite.test_non_streaming_merge_logic()
 
     def test_chatglm_stop_word(self):
         os.environ["MODEL_TYPE"] = "chatglm3"

@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import functools
 import json
 import logging
@@ -364,10 +365,87 @@ class CustomChatRenderer:
             )
         )
 
+        # 处理非流式请求的合并逻辑
+        if not generate_config.is_streaming:
+            output_generator = await self._merge_non_streaming_outputs(output_generator)
+
         async for response in self.render_response_stream(
             output_generator, request, generate_config
         ):
             yield response
+
+    async def _merge_non_streaming_outputs(
+        self, output_generator: AsyncGenerator[GenerateOutputs, None]
+    ) -> AsyncGenerator[GenerateOutputs, None]:
+        """
+        合并非流式请求的多个输出为单个输出
+
+        Args:
+            output_generator: 原始的输出生成器
+
+        Returns:
+            包含单个合并输出的新生成器
+        """
+        # 收集所有输出
+        collected_outputs = []
+        async for output in output_generator:
+            collected_outputs.append(output)
+
+        # 合并输出
+        merged_output = self._merge_generate_outputs(collected_outputs)
+
+        # 创建新的单次输出generator
+        async def single_output_generator():
+            yield merged_output
+
+        return single_output_generator()
+
+    def _merge_generate_outputs(
+        self, collected_outputs_list: List[GenerateOutputs]
+    ) -> GenerateOutputs:
+        """
+        合并多个GenerateOutputs为单个GenerateOutputs
+
+        Args:
+            collected_outputs_list: 要合并的GenerateOutputs列表
+
+        Returns:
+            合并后的GenerateOutputs
+        """
+        if len(collected_outputs_list) <= 1:
+            return (
+                collected_outputs_list[0]
+                if collected_outputs_list
+                else GenerateOutputs(generate_outputs=[])
+            )
+
+        # 获取最后一个作为基础
+        final_outputs = collected_outputs_list[-1]
+
+        # 对每个choice/beam分别处理
+        merged_generate_outputs = []
+        for i, final_output in enumerate(final_outputs.generate_outputs):
+            # 收集这个choice在所有GenerateOutputs中的output_ids
+            all_output_ids = []
+            for outputs in collected_outputs_list:
+                if i < len(outputs.generate_outputs):
+                    output_ids = outputs.generate_outputs[i].output_ids
+                    all_output_ids.append(output_ids)
+
+            # 合并output_ids
+            merged_output_ids = (
+                torch.cat(all_output_ids, dim=1)
+                if all_output_ids
+                else final_output.output_ids
+            )
+
+            # 深拷贝final_output并只替换output_ids
+            merged_output = copy.deepcopy(final_output)
+            merged_output.output_ids = merged_output_ids
+
+            merged_generate_outputs.append(merged_output)
+
+        return GenerateOutputs(generate_outputs=merged_generate_outputs)
 
     async def _create_empty_delta(self, aux_info: AuxInfo):
         return OutputDelta(
