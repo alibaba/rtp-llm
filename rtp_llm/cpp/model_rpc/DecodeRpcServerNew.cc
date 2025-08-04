@@ -28,6 +28,12 @@ bool DecodeRpcServerNew::ready() {
         return true;
     }
 
+    char* decode_cm2_config_env = std::getenv("RTP_LLM_DECODE_CM2_CONFIG");
+    if(!maga_init_params_.gpt_init_parameter.service_discovery_config.use_local && decode_cm2_config_env == nullptr) {
+        RTP_LLM_LOG_INFO("service discovery by master, skip load balancer check");
+        return true;
+    }
+
     if (!load_balancer_) {
         RTP_LLM_LOG_INFO("load balance is nullptr, server is not ready");
         return false;
@@ -60,8 +66,11 @@ bool DecodeRpcServerNew::initLoadBalancer() {
         RTP_LLM_LOG_INFO("init load balancer with local mode, config is %s", remote_rpc_server_ip_env);
     } else {
         char* decode_cm2_config_env = std::getenv("RTP_LLM_DECODE_CM2_CONFIG");
-        RTP_LLM_CHECK_WITH_INFO(decode_cm2_config_env, "decode_cm2_config_env must be not empty");
-
+        if (decode_cm2_config_env == nullptr) {
+            RTP_LLM_LOG_INFO("RTP_LLM_DECODE_CM2_CONFIG is not set, use default subscribe config");
+            load_balancer_.reset(nullptr);
+            return true;
+        }
         if (!BaseLoadBalancer::makeCm2SubscribeConfig(
                 init_params.subscribe_config, prefill_cluster_name_, decode_cm2_config_env)) {
             RTP_LLM_LOG_ERROR("make cm2 subscribe config from config %s failed", decode_cm2_config_env);
@@ -165,7 +174,7 @@ ErrorInfo DecodeRpcServerNew::callPrefill(DecodeGenerateContextNew& decode_conte
             break;
         }
     }
-    if (!host) {
+    if (!host && load_balancer_) {
         host = load_balancer_->chooseHost(prefill_cluster_name_,
                                             decode_context.request->generate_config().global_request_id());
     }
