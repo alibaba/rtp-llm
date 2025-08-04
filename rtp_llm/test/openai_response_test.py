@@ -975,7 +975,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             assert response_delta.tool_calls[1].index == 1
 
         async def test_no_stream_stop_words(self):
-            """测试KimiK2工具调用非流式PD分离场景（包含停止词）"""
+            """测试KimiK2工具调用非流式场景（包含停止词）"""
             chunk_list = await self._run_tool_call_test(
                 stream=False,
                 include_stop_word=True,
@@ -1334,7 +1334,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         await kimi_suite.test_no_stream()
 
     async def test_parse_kimik2_tool_call_no_stream_stop_words(self):
-        """测试KimiK2工具调用非流式PD分离场景（包含停止词）"""
+        """测试KimiK2工具调用非流式场景（包含停止词）"""
         kimi_suite = self.KimiK2TestSuite(self)
         await kimi_suite.test_no_stream_stop_words()
 
