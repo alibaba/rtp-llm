@@ -52,12 +52,36 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
             break;
         }
         case FMHAType::PAGED_TRT_V2: {
-            RTP_LLM_CHECK_WITH_INFO(q_output != nullptr, "q_output must be provided for paged trt v2 fmha");
+            RTP_LLM_CHECK_WITH_INFO(q_output != nullptr, "q_output must be provided for paged trt v2 fmha");            
+            float* attention_output_orig_quant_scale = nullptr;
+            if (params.weights.static_scale_reciprocal_weight && use_fp8_fmha) {
+                printBufferData(*(params.weights.static_scale_reciprocal_weight->kernel), "attn scale");
+                attention_output_orig_quant_scale =
+                    (params.weights.static_scale_reciprocal_weight->kernel->data<float>());
+            }
+            bool      need_quant_fmha_out = !use_fp8_fmha && params.output.isQBuffer();
+            BufferPtr tmp_fmha_output;
+            void* fmha_output_ptr = params.output.data();
+            if (need_quant_fmha_out) {
+                // for sm89 cannot use fp8_fmha, but attention output should be fp8
+                tmp_fmha_output = allocateBuffer(
+                    {datatype, {batch_size, head_num * seq_len_with_prefix * size_per_head}, AllocationType::DEVICE},
+                    {"fmha_fp16_output"});
+                cudaMemsetAsync(tmp_fmha_output->data(), 0, tmp_fmha_output->sizeBytes(), stream);
+                fmha_output_ptr = tmp_fmha_output->data();
+            } else if (use_fp8_fmha && params.output.type() != DataType::TYPE_QFP8_E4M3) {
+                tmp_fmha_output = allocateBuffer({DataType::TYPE_FP8_E4M3,
+                                                  {batch_size, head_num * seq_len_with_prefix * size_per_head},
+                                                  AllocationType::DEVICE},
+                                                 {"fmha_fp8_output"});
+                fmha_output_ptr = tmp_fmha_output->data();
+            }
             cufmha_runner->runTrtV2FmhaPaged(q_output->data(),
                                              params.common.cu_seqlens->data(),
                                              params.common.cu_kv_seqlens->data(),
-                                             params.output.data(),
+                                             fmha_output_ptr,
                                              reinterpret_cast<uint32_t*>(tiled_counter_ptr->data()),
+                                             attention_output_orig_quant_scale,
                                              batch_size,
                                              seq_len,
                                              seq_len_with_prefix,
@@ -67,6 +91,32 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
                                              false,
                                              params.common.linear_bias_slopes != nullptr,
                                              false);
+            if (need_quant_fmha_out) {
+                DataType quant_out_data_type = DataType::TYPE_FP8_E4M3;
+                auto     quant_params =
+                    QuantizeParams(*tmp_fmha_output,
+                                   quant_out_data_type,
+                                   1,
+                                   QScheme::Qfp8PerTensor,
+                                   std::nullopt,
+                                   std::nullopt,
+                                   (OptionalConstBufferRef)*params.weights.static_quant_weight->kernel,
+                                   (OptionalConstBufferRef)*params.weights.static_scale_reciprocal_weight->kernel);
+                auto quant_output = quantize(quant_params);
+                cudaMemcpyAsync(
+                    params.output.data(), quant_output->data(), params.output.size(), cudaMemcpyDeviceToDevice, stream);
+            } else if (use_fp8_fmha && params.output.type() != DataType::TYPE_QFP8_E4M3) {
+                RTP_LLM_CHECK_WITH_INFO(tmp_fmha_output != nullptr, "tmp_fmha_output must be provided for fp8 fmha");
+                printBufferData(*tmp_fmha_output, "tmp_fmha_output");
+                auto quant_fmha_output_t   = Buffer2torchTensor(*tmp_fmha_output, false);
+                auto dequant_fmha_output_t = quant_fmha_output_t.to(dataTypeToTorchType(datatype));
+                cudaMemcpyAsync(params.output.data(),
+                                dequant_fmha_output_t.data_ptr(),
+                                params.output.sizeBytes(),
+                                cudaMemcpyDeviceToDevice,
+                                stream);
+                printBufferData(params.output, "params.output");
+            }
             break;
         }
         case FMHAType::TRT_V2: {

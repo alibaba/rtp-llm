@@ -251,11 +251,15 @@ void UnfusedAttentionTest::prefillAddFusedQKVBiasTransposeTest(size_t batch_size
     auto seq_len_with_prefix = seq_len + params.common.max_prefix_length;
 
     auto qkv_buf_fp8 =
-        device->allocateBuffer({DataType::TYPE_FP8_E4M3,
-                                {batch_size, (num_heads + num_key_value_heads * 2), seq_len_with_prefix, head_dim},
-                                AllocationType::DEVICE},
-                               {"qkv_fp8_output"});
-    device->bufMemset(*qkv_buf_fp8, 0);
+        cache_conf.dtype == DataType::TYPE_FP8_E4M3 ?
+            device->allocateBuffer({DataType::TYPE_FP8_E4M3,
+                                    {batch_size, (num_heads + num_key_value_heads * 2), seq_len_with_prefix, head_dim},
+                                    AllocationType::DEVICE},
+                                   {"qkv_fp8_output"}) :
+            nullptr;
+    if (qkv_buf_fp8) {
+        device->bufMemset(*qkv_buf_fp8, 0);
+    }
 
     float* scale_out_ptr        = nullptr;
     int    int8_mode            = 0;
@@ -282,7 +286,7 @@ void UnfusedAttentionTest::prefillAddFusedQKVBiasTransposeTest(size_t batch_size
                                              v_output->data(),
                                              &prefix_prompt_param,
                                              params.input.data(),
-                                             qkv_buf_fp8->data(),
+                                             qkv_buf_fp8 ? qkv_buf_fp8->data() : nullptr,
                                              params.common.position_ids->data<int>(),
                                              params.weights.qkv_weight->bias->data(),
                                              params.common.padding_offset->data<int>(),
@@ -321,7 +325,7 @@ void UnfusedAttentionTest::prefillAddFusedQKVBiasTransposeTest(size_t batch_size
                                              v_output->data(),
                                              &prefix_prompt_param,
                                              params.input.data(),
-                                             qkv_buf_fp8->data(),
+                                             qkv_buf_fp8 ? qkv_buf_fp8->data() : nullptr,
                                              params.common.position_ids->data<int>(),
                                              params.weights.qkv_weight->bias->data(),
                                              params.common.padding_offset->data<int>(),
@@ -370,7 +374,7 @@ void UnfusedAttentionTest::prefillAddFusedQKVBiasTransposeTest(size_t batch_size
                                          v_output->data(),
                                          &prefix_prompt_param,
                                          params.input.data(),
-                                         qkv_buf_fp8->data(),
+                                         qkv_buf_fp8 ? qkv_buf_fp8->data() : nullptr,
                                          params.common.position_ids->data<int>(),
                                          params.weights.qkv_weight->bias->data(),
                                          params.common.padding_offset->data<int>(),

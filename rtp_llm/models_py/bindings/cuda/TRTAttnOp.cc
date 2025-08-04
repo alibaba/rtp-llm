@@ -128,12 +128,15 @@ torch::Tensor TRTPrefillOp::forward(const torch::Tensor&              input,
 
     torch::Tensor output        = torch::empty({token_num, local_head_num * size_per_head}, options);
     torch::Tensor tiled_counter = torch::zeros({1}, torch::TensorOptions(torch::kUInt32).device(input.device()));
+    bool          use_fp8_fmha = kv_block_array.cache_type == KvCacheDataType::FP8;
+    float* attention_output_orig_quant_scale = use_fp8_fmha ? static_scale_.data_ptr<float>() : nullptr;
     if (kv_cache.has_value() && kv_block_array.cache_type == KvCacheDataType::BASE) {
         cufmha_runner_->runTrtV2FmhaPaged(input.data_ptr(),
                                           params->cu_seqlens.data_ptr(),
                                           params->cu_kv_seqlens.data_ptr(),
                                           output.data_ptr(),
                                           reinterpret_cast<uint32_t*>(tiled_counter.data_ptr()),
+                                          attention_output_orig_quant_scale,
                                           batch_size,  // batch_size,
                                           params->max_seq_len,
                                           params->max_seq_len,  // seq_len_with_prefix,
@@ -144,15 +147,13 @@ torch::Tensor TRTPrefillOp::forward(const torch::Tensor&              input,
                                           false,  // params.common.linear_bias_slopes != nullptr,
                                           false);
     } else {
-        bool          use_fp8_fmha = kv_block_array.cache_type == KvCacheDataType::FP8;
         torch::Tensor tmp_fmha_input, tmp_fmha_output;
         void*         fmha_input_ptr  = input.data_ptr();
         void*         fmha_output_ptr = output.data_ptr();
         RTP_LLM_CHECK_WITH_INFO(fmha_input_ptr, "fmha_input_ptr must be provided for trt v2 fmha");
 
-        float* attention_output_orig_quant_scale = nullptr;
+        
         if (use_fp8_fmha) {
-            attention_output_orig_quant_scale = static_scale_.data_ptr<float>();
             tmp_fmha_input                    = input.to(torch::kFloat8_e4m3fn);
             tmp_fmha_output                   = output.to(torch::kFloat8_e4m3fn);
             fmha_input_ptr                    = tmp_fmha_input.data_ptr();

@@ -1485,7 +1485,21 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
             dest_q_idx = (pre_len + seq_idx) * size_per_head * head_num + head_idx * size_per_head + tidx * vec_size;
         }
 
+#ifdef ENABLE_FP8
+        if (QuantizedQKV != nullptr) {
+            // fp8 paged fmha
+            QuantizedVecType* quantized_q_ptr =
+                USE_PAGED_FMHA ? reinterpret_ptr<QuantizedEltType, QuantizedVecType>(q_buf, dest_q_idx) :
+                                reinterpret_ptr<QuantizedEltType, QuantizedVecType>(QuantizedQKV, src_q_idx);
+            convert_to_fp8(quantized_q_ptr, q);
+        } else {
+            // paged fmha
+            *reinterpret_cast<Vec_t*>(&q_buf[dest_q_idx]) = q;
+        }
+#else
+        // paged fmha
         *reinterpret_cast<Vec_t*>(&q_buf[dest_q_idx]) = q;
+#endif
     }
 
     if (store_kv) {

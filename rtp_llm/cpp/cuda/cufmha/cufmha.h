@@ -72,6 +72,7 @@ public:
                            void*        cu_kv_seqlens,
                            void*        output,
                            uint32_t*    tile_counter_ptr,
+                           float*       attention_output_orig_quant_scale,
                            size_t       batch_size,
                            size_t       input_seq_len,
                            size_t       max_past_kv_len,

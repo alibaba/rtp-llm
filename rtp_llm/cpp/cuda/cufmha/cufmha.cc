@@ -141,6 +141,7 @@ void cufmha::runTrtV2FmhaPaged(void*        input,
                                void*        cu_kv_seqlens,
                                void*        output,
                                uint32_t*    tile_counter_ptr,
+                               float*       attention_output_orig_quant_scale,
                                size_t       batch_size,
                                size_t       input_seq_len,
                                size_t       max_past_kv_len,
@@ -169,7 +170,7 @@ void cufmha::runTrtV2FmhaPaged(void*        input,
                                     0);
 
     trtv2_paged_fmha_runner_->run(
-        input, kv_block_array, cu_q_seqlens, cu_kv_seqlens, tile_counter_ptr, nullptr, output, stream_);
+        input, kv_block_array, cu_q_seqlens, cu_kv_seqlens, tile_counter_ptr, attention_output_orig_quant_scale, output, stream_);
     check_cuda_error();
 }
 
