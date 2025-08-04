@@ -12,7 +12,7 @@ class Linear(nn.Module):
         
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         output = torch.zeros(*input.shape[:-1], self.weight.shape[1], dtype=input.dtype).to(input.device)
-        rtp_llm_ops.gemm(output, input, self.weight, 0)
+        rtp_llm_ops.gemm(output, input, self.weight)
         if self.bias is not None:
             output = output + self.bias
         return output

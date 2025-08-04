@@ -45,13 +45,7 @@ void registerBasicRocmOps(py::module& rtp_ops_m) {
                   py::arg("n"),
                   py::arg("norm_size"));
 
-    rtp_ops_m.def("gemm",
-                  &gemm,
-                  "Gemm kernel",
-                  py::arg("output"),
-                  py::arg("input"),
-                  py::arg("weight"),
-                  py::arg("hip_stream") = 0);
+    rtp_ops_m.def("gemm", &gemm, "Gemm kernel", py::arg("output"), py::arg("input"), py::arg("weight"));
 }
 
 void registerBaseRocmBindings(py::module& rtp_ops_m) {
