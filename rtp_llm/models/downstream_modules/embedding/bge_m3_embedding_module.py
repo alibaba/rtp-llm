@@ -27,7 +27,7 @@ from rtp_llm.models.downstream_modules.embedding.dense_embedding_module import (
     DenseEmbeddingModule,
     SentenceTransformerHandler,
 )
-from rtp_llm.models.downstream_modules.embedding.misc import combo_to_batch
+from rtp_llm.models.downstream_modules.embedding.misc import combo_to_batch_data
 from rtp_llm.models.downstream_modules.embedding.sparse_emebdding_module import (
     SparseEmbeddingHandler,
     SparseEmbeddingModule,
@@ -87,6 +87,14 @@ class BgeM3EmbeddingHandler(CustomHandler):
         self.sparse_handler = sparse
         self.colbert_handler = colbert
 
+        extend_forward_args_list = (
+            set(["input_lengths"])  # require input_lengths for combo to batch
+            | set(dense.extend_forward_args())
+            | set(sparse.extend_forward_args())
+            | set(colbert.extend_forward_args())
+        )
+        self.extend_forward_args_list = [*extend_forward_args_list]
+
     def init(self, tensor_map: Any):
         self.dense_handler.init(tensor_map)
         self.sparse_handler.init(tensor_map)
@@ -121,24 +129,24 @@ class BgeM3EmbeddingHandler(CustomHandler):
         batch_output.outputs = [x[embedding_type.value] for x in batch_output.outputs]
         return batch_output
 
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        hidden_states: torch.Tensor,
-        input_lengths: torch.Tensor,
-    ) -> List[Dict[str, torch.Tensor]]:
-        batch_input_ids, batch_hidden_states, batch_attention_mask = combo_to_batch(
-            hidden_states, input_ids, input_lengths
-        )
+    def extend_forward_args(self):
+        return self.extend_forward_args_list
 
-        dense_res = self.dense_handler.forward_internal(
-            batch_input_ids, batch_hidden_states, batch_attention_mask
-        )
+    def extend_forward(
+        self,
+        **combo_data: Any,
+    ) -> List[Dict[str, torch.Tensor]]:
+        input_lengths: torch.Tensor = combo_data["input_lengths"]
+        batch_data = combo_to_batch_data(input_lengths, **combo_data)
+
+        dense_res = self.dense_handler.extend_forward_internal(batch_data)
         colbert_res = self.colbert_handler.forward_internal(
-            batch_input_ids, batch_hidden_states, batch_attention_mask
+            batch_data["input_ids"],
+            batch_data["hidden_states"],
+            batch_data["attention_mask"],
         )
         sparse_res = self.sparse_handler.forward(
-            input_ids, hidden_states, input_lengths
+            combo_data["input_ids"], combo_data["hidden_states"], input_lengths
         )
         stream = torch.cuda.current_stream()
         dense_res = dense_res.cpu()

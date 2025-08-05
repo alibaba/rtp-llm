@@ -91,6 +91,7 @@ struct GptModelInputs {
     bool               decode_entrance = false;
 
     bool need_all_logits = false;
+    bool need_moe_gating = false;
     bool warmup          = false;
     bool skip_run        = false;
 
@@ -130,6 +131,8 @@ struct GptModelOutputs {
     rtp_llm::BufferPtr all_logits;
     rtp_llm::BufferPtr softmax_result;
 
+    std::vector<rtp_llm::BufferPtr> moe_gating;
+
     mutable rtp_llm::BufferPtr scatter_logits;
     mutable rtp_llm::BufferPtr scatter_hidden_states;
     std::shared_ptr<void>      captured_values;
@@ -140,6 +143,7 @@ using LoraMap = std::unordered_map<std::string, rtp_llm::ConstBufferPtr>;
 struct GptLayerOutputs {
     rtp_llm::BufferPtr hidden;
     rtp_llm::BufferPtr pre_decoder_residual;
+    rtp_llm::BufferPtr moe_gating;
 };
 
 struct MicroBatchInfo {
@@ -166,10 +170,11 @@ struct GptLayerInputs {
     rtp_llm::AttentionCommonInputs     attention_common_inputs;
     const rtp_llm::DataType            dtype;
     std::vector<LayerMicroBatchInputs> micro_batch_inputs;
-    bool                               enable_sp     = false;
-    size_t                             token_num     = 0;
-    size_t                             pad_token_num = 0;
-    BufferPtr                          residual      = nullptr;
+    bool                               enable_sp       = false;
+    size_t                             token_num       = 0;
+    size_t                             pad_token_num   = 0;
+    BufferPtr                          residual        = nullptr;
+    bool                               need_moe_gating = false;
 };
 
 struct AttentionBlockOutputs {

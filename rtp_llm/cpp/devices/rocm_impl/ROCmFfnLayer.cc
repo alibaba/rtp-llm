@@ -269,6 +269,8 @@ MoeGateSelectOutput ROCmDevice::moeGateSelect(const FfnLayerParams& params) {
     BufferPtr logits = allocateBuffer({DataType::TYPE_FP32, {num_token, num_expert}}, {"rocm_logits"});
     gemm({hidden, *(params.weights.moe_gating_weight->kernel), nullopt, logits, DataType::TYPE_FP32});
 
+    BufferPtr moe_gating;
+
     // step 2. calculate topk function to get topk_ids and topk_weights
     torch::Tensor logits_tensor = Buffer2torchTensor(*logits, false);
 
@@ -294,7 +296,16 @@ MoeGateSelectOutput ROCmDevice::moeGateSelect(const FfnLayerParams& params) {
                 n_group,
                 topk_group,
                 has_moe_norm);  // FIXME(liyangcheng.lyc): not set routed_scaling_factor, no such config now
-        } else {                // use grouped_topk, in aiter will invoke function `grouped_topk`
+
+            if (params.need_moe_gating) {
+                // TODO(zhangjianning.zjn): would be better to get the corrected moe gating from the kernel above
+                // directly
+                moe_gating                   = clone({*logits});
+                torch::Tensor moe_gating_tsr = Buffer2torchTensor(*moe_gating, false);
+                moe_gating_tsr.add_(e_score_correction_bias_tensor);
+            }
+        } else {  // use grouped_topk, in aiter will invoke function `grouped_topk`
+            // TODO(zhangjianning.zjn): should support returning moe_gating once the branch is supported
             // FIXME(liyangcheng.lyc): not implemented yet
             RTP_LLM_FAIL("[ROCm moeGateSelect]: n_group > 1 and e_score_correction_bias is null not implemented yet");
         }
@@ -307,9 +318,11 @@ MoeGateSelectOutput ROCmDevice::moeGateSelect(const FfnLayerParams& params) {
         // invoke aiter kernel
         aiter::topk_softmax(
             topk_weights_tensor, topk_ids_tensor, token_expert_indicies_tensor, logits_tensor, has_moe_norm);
+
+        moe_gating = std::move(logits);
     }
 
-    return {topk_ids, topk_weights};
+    return {topk_ids, topk_weights, moe_gating};
 }
 
 FfnLayerOutput ROCmDevice::moeFfn(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs) {

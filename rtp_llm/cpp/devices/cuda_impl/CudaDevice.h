@@ -207,6 +207,7 @@ public:
 
     void              moeGateSelectWithBias(const FfnLayerParams& params,
                                             BufferPtr             gate,
+                                            BufferPtr             gate_with_bias,
                                             BufferPtr             expert_scales,
                                             BufferPtr             expert_for_source_row,
                                             int                   normalization_mode);

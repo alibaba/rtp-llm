@@ -829,6 +829,7 @@ vector<GptLayerInputs> GptModel::forwardPrefillMicroBatchedLayers(vector<GptLaye
                                 ->moeFfn(moe_ffn_params,
                                          {dispatched_output.expert_ids,
                                           dispatched_output.expert_scales,
+                                          nullptr,
                                           dispatched_output.deep_ep_ll_output})
                                 .hidden_states;
             device_->checkError();
@@ -1104,6 +1105,7 @@ GptLayerOutputs GptModel::forwardGptLayer(GptLayerInputs                        
     auto        residual  = move(attention_block_output.residual);
     auto        residual2 = move(attention_block_output.residual2);
     const auto& layer     = weights_.layers[layer_id];
+    BufferPtr   moe_gating;
 
     printBufferData(*hidden, "layer_" + to_string(layer_id) + "_ffn_input");
     bool   enable_sp          = inputs.enable_sp;
@@ -1123,7 +1125,8 @@ GptLayerOutputs GptModel::forwardGptLayer(GptLayerInputs                        
                         device_props_.ffn_fuse_add_residual ? (OptionalConstBufferRef)*residual : nullopt,
                         description_.act_qscheme,
                         std::move(ffn_output_buf),
-                        enable_sp});
+                        enable_sp,
+                        inputs.need_moe_gating});
 
     // expert stats
     prepareExpertStats(layer_id, ffn_layer_params);
@@ -1134,12 +1137,17 @@ GptLayerOutputs GptModel::forwardGptLayer(GptLayerInputs                        
     auto ffn_output = device_->ffnLayer(ffn_layer_params);
     device_->checkError();
     hidden = ffn_output.hidden_states;
+    if (inputs.need_moe_gating) {
+        moe_gating = std::move(ffn_output.moe_gating);
+    }
     if (device_props_.ffn_tp_size > 1 && (!layer.ffn_weights.moe_gating_weight || device_props_.use_all_gather)
         && !enable_sp) {
-        // Note: for custom all reduce, allReduce will allocate a new buffer and replace the original attn_hidden with
-        // it
-        auto wrapper = DevicePerfWrapper(device_, "post_ffn_all_reduce, sizeBytes=%ld", (long)hidden->sizeBytes());
-        hidden       = device_->allReduce({std::move(hidden), ReduceOp::Sum, false, ParallelMode::FFN_TP}).buffer;
+        {
+            // Note: for custom all reduce, allReduce will allocate a new buffer and replace the original attn_hidden
+            // with it
+            auto wrapper = DevicePerfWrapper(device_, "post_ffn_all_reduce, sizeBytes=%ld", (long)hidden->sizeBytes());
+            hidden       = device_->allReduce({std::move(hidden), ReduceOp::Sum, false, ParallelMode::FFN_TP}).buffer;
+        }
     }
     device_->checkError();
     if (residual_scale_) {
@@ -1166,7 +1174,7 @@ GptLayerOutputs GptModel::forwardGptLayer(GptLayerInputs                        
     hidden = std::move(ffn_layernorm_output.output);
     printBufferData(*hidden, "layer_" + to_string(layer_id) + "_final_hidden");
 
-    return {hidden, pre_decoder_residual};
+    return {hidden, pre_decoder_residual, moe_gating};
 }
 
 AttentionBlockOutputs GptModel::forwardAttentionBlock(const GptLayerInputs&                   inputs,
@@ -1371,6 +1379,7 @@ EpFfnInputs GptModel::forwardAttentionAndMoeGate(const GptLayerInputs&   inputs,
                                                  const int32_t           layer_id,
                                                  const size_t            micro_batch_idx,
                                                  bool                    capture_last_hidden) {
+    // TODO(zhangjianning.zjn) support returning moe_gating when need_moe_gating is true
     auto        hidden               = inputs.hidden;
     auto        pre_decoder_residual = inputs.pre_decoder_residual;
     const auto& layer                = weights_.layers[layer_id];
@@ -1538,13 +1547,22 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
 
     GptLayerOutputs        layer_outputs;
     std::vector<BufferPtr> eagle3_selected_hidden;
+    std::vector<BufferPtr> moe_gating;
+    if (inputs.need_moe_gating) {
+        moe_gating.reserve(layer_num_);
+    }
     if (int(device_props_.enable_layer_micro_batch) && layer_inputs.micro_batch_inputs.size() > 0) {
+        // TODO(zhangjianning.zjn) support return moe_gating in micro batch
         layer_outputs = forwardMicroBatchedLayers(layer_inputs, inputs, eagle3_selected_hidden);
     } else {
+        layer_inputs.need_moe_gating = inputs.need_moe_gating;
         for (int32_t i = 0; i < layer_num_; ++i) {
             layer_outputs                     = forwardGptLayer(layer_inputs, i, inputs.lora_model_input);
             layer_inputs.hidden               = layer_outputs.hidden;
             layer_inputs.pre_decoder_residual = layer_outputs.pre_decoder_residual;
+            if (inputs.need_moe_gating) {
+                moe_gating.push_back(std::move(layer_outputs.moe_gating));
+            }
             if (dynamic_cast<Eagle3Model*>(this) == nullptr && device_props_.is_eagle3
                 && device_props_.eagle3_selected_layer.count(i) > 0) {
                 eagle3_selected_hidden.push_back(device_->clone({*layer_inputs.hidden, AllocationType::DEVICE}));
@@ -1565,6 +1583,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
 
     // make sure cpu buffers out lives gpu exec
     outputs.captured_values = make_shared<GptLayerInputs>(layer_inputs);
+    outputs.moe_gating      = std::move(moe_gating);
     return outputs;
 }
 

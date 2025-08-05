@@ -289,6 +289,7 @@ MoeGateSelectOutput CudaDevice::moeGateSelect(const FfnLayerParams& params) {
     const auto top_k      = moe_conf.top_k;
 
     const auto gate = gemm({hidden, *params.weights.moe_gating_weight->kernel, nullopt, nullptr, DataType::TYPE_FP32});
+    BufferPtr  moe_gating;
 
     const auto expert_scales         = allocateBuffer({DataType::TYPE_FP32, {token_num, top_k}}, {"moe_expert_scale"});
     DataType   topk_t                = (init_params_.use_deepep_moe && params.qscheme == QScheme::Qfp8PerTokenBlock) ?
@@ -305,7 +306,8 @@ MoeGateSelectOutput CudaDevice::moeGateSelect(const FfnLayerParams& params) {
     prepareMoEGate(params, gate);
 
     if (params.weights.e_score_correction_bias) {
-        moeGateSelectWithBias(params, gate, expert_scales, expert_for_source_row, (int)normalization_mode);
+        moe_gating = clone({*gate});
+        moeGateSelectWithBias(params, gate, moe_gating, expert_scales, expert_for_source_row, (int)normalization_mode);
     } else {
         if (topk_t == DataType::TYPE_INT64) {
             moe_plugin_->selectExpertsForTokens<int64_t>(gate->data<float>(),
@@ -340,6 +342,7 @@ MoeGateSelectOutput CudaDevice::moeGateSelect(const FfnLayerParams& params) {
                                                      normalization_mode,
                                                      stream_);
         }
+        moe_gating = std::move(gate);
     }
     if (init_params_.moe_config.fake_balance_expert) {
         if (topk_t == DataType::TYPE_INT64) {
@@ -364,11 +367,12 @@ MoeGateSelectOutput CudaDevice::moeGateSelect(const FfnLayerParams& params) {
 
     printBufferData(*expert_for_source_row, "expert_for_source_row");
     printBufferData(*expert_scales, "expert_scales");
-    return {expert_for_source_row, expert_scales};
+    return {expert_for_source_row, expert_scales, moe_gating};
 }
 
 void CudaDevice::moeGateSelectWithBias(const FfnLayerParams& params,
                                        BufferPtr             gate,
+                                       BufferPtr             gate_with_bias,
                                        BufferPtr             expert_scales,
                                        BufferPtr             expert_for_source_row,
                                        int                   normalization_mode) {
@@ -379,10 +383,10 @@ void CudaDevice::moeGateSelectWithBias(const FfnLayerParams& params,
     const auto  num_expert = params.weights.moe_gating_weight->kernel->shape()[1];
     const auto  top_k      = moe_conf.top_k;
 
-    at::Tensor gate_tensor = Buffer2torchTensor(gate, false);
+    at::Tensor gate_with_bias_tensor = Buffer2torchTensor(gate_with_bias, false);
     at::Tensor e_score_correction_bias_tensor =
         Buffer2torchTensor(params.weights.e_score_correction_bias, false).to(torch::kFloat32);
-    at::Tensor gate_with_bias_tensor = gate_tensor.add(e_score_correction_bias_tensor);
+    gate_with_bias_tensor.add_(e_score_correction_bias_tensor);
     at::Tensor group_scores =
         torch::empty({(int64_t)token_num, moe_conf.n_group}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
 
@@ -391,7 +395,7 @@ void CudaDevice::moeGateSelectWithBias(const FfnLayerParams& params,
                                       reinterpret_cast<float*>(group_scores.mutable_data_ptr()),
                                       expert_scales->data<float>(),
                                       expert_for_source_row->data<int64_t>(),
-                                      reinterpret_cast<float*>(gate_with_bias_tensor.data_ptr()),
+                                      gate_with_bias->data<float>(),
                                       token_num,
                                       num_expert,
                                       moe_conf.n_group,
@@ -405,7 +409,7 @@ void CudaDevice::moeGateSelectWithBias(const FfnLayerParams& params,
                                       reinterpret_cast<float*>(group_scores.mutable_data_ptr()),
                                       expert_scales->data<float>(),
                                       expert_for_source_row->data<int32_t>(),
-                                      reinterpret_cast<float*>(gate_with_bias_tensor.data_ptr()),
+                                      gate_with_bias->data<float>(),
                                       token_num,
                                       num_expert,
                                       moe_conf.n_group,

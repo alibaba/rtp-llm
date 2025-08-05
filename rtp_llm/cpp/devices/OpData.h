@@ -639,6 +639,7 @@ struct MoeCombineOutput {
 
 struct FfnLayerOutput {
     BufferPtr                       hidden_states;
+    BufferPtr                       moe_gating;
     DeviceHookPtr                   comm_barrier_hook;
     std::optional<MoeCombineOutput> moe_combine_output;
 };
@@ -647,10 +648,11 @@ struct FfnLayerParams {
     FfnLayerParams(const Buffer&                input,
                    const FfnConfigs&            configs,
                    const FfnLayerWeights&       weights,
-                   const OptionalConstBufferRef residual  = std::nullopt,
-                   const QScheme                qscheme   = QScheme::NoQuantize,
-                   BufferPtr                    output    = nullptr,
-                   bool                         enable_sp = false):
+                   const OptionalConstBufferRef residual        = std::nullopt,
+                   const QScheme                qscheme         = QScheme::NoQuantize,
+                   BufferPtr                    output          = nullptr,
+                   bool                         enable_sp       = false,
+                   bool                         need_moe_gating = false):
         input(input),
         configs(configs),
         weights(weights),
@@ -672,6 +674,7 @@ struct FfnLayerParams {
 
     lora::FfnLayerLoraInput lora_input;
     bool                    enable_sp;
+    bool                    need_moe_gating;
 };
 
 struct MoeDispatchOutput {
@@ -693,6 +696,7 @@ struct MoeDispatchOutput {
 struct MoeGateSelectOutput {
     BufferPtr                                       expert_ids;
     BufferPtr                                       expert_scales;
+    BufferPtr                                       moe_gating        = nullptr;
     std::shared_ptr<DeepEPDispatchOutputLowLatency> deep_ep_ll_output = nullptr;
 };
 

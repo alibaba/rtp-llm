@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <bitset>
 #include <torch/python.h>
 #include <torch/torch.h>
 #include <torch/extension.h>
@@ -12,6 +13,24 @@
 
 namespace rtp_llm {
 
+namespace HandlerArgs {
+
+enum class Arg : uint32_t {
+    INPUT_LENGTHS,
+    HIDDEN_STATES,
+    INPUT_IDS,
+    ATTENTION_MASK,
+    MOE_GATING,
+    // reserve as number marker
+    NUM_INPUT_TYPES
+};
+
+constexpr size_t NUM_INPUT_TYPES = static_cast<size_t>(Arg::NUM_INPUT_TYPES);
+
+using Flag = std::bitset<NUM_INPUT_TYPES>;
+
+}  // namespace HandlerArgs
+
 class EmbeddingExecutor {
 public:
     explicit EmbeddingExecutor(const EngineInitParams& params, rtp_llm::DeviceBase* device, py::object handler);
@@ -21,6 +40,7 @@ public:
 private:
     std::unique_ptr<GptModel>       model_;
     py::object                      handler_;
+    HandlerArgs::Flag               handler_args_;
     py::handle                      torch_type_;
     rtp_llm::DeviceBase*            device_;
     rtp_llm::BufferPtr              max_position_ids_buf_;

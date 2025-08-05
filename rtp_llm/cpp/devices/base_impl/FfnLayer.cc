@@ -15,10 +15,12 @@ namespace rtp_llm {
 FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
     RUNTIME_ASSERT_OP_ARG(!params.residual, "default FFN implementation does not support residual!");
     BufferPtr output;
+    BufferPtr moe_gating;
     if (params.weights.moe_gating_weight) {
         RUNTIME_ASSERT_OP_ARG(params.configs.moe_configs, "moe configs not set");
         auto moe_output = moeFfnLayer(params);
         output          = moe_output.hidden_states;
+        moe_gating      = moe_output.moe_gating;
 
         auto shared_expert_output = moeSharedExpert(params).hidden_states;
 
@@ -193,7 +195,12 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
     }
 
     printBufferData(*output, "ffn_out");
-    return FfnLayerOutput({std::move(output)});
+    if (moe_gating != nullptr) {
+        printBufferData(*moe_gating, "moe_gating");
+    } else {
+        RTP_LLM_LOG_TRACE("no moe_gating");
+    }
+    return FfnLayerOutput({std::move(output), std::move(moe_gating)});
 }
 
 FfnLayerOutput DeviceBase::epMoeFfnLayer(const FfnLayerParams& params, const MoeGateSelectOutput& gate_output) {
@@ -210,10 +217,12 @@ FfnLayerOutput DeviceBase::epMoeFfnLayer(const FfnLayerParams& params, const Moe
     auto              moe_ffn_params =
         FfnLayerParams({*hidden_states, params.configs, params.weights, params.residual, params.qscheme});
     moe_ffn_params.expert_stats = params.expert_stats;
-    hidden_states =
-        moeFfn(moe_ffn_params,
-               {dispatched_output.expert_ids, dispatched_output.expert_scales, dispatched_output.deep_ep_ll_output})
-            .hidden_states;
+    hidden_states               = moeFfn(moe_ffn_params,
+                                         {dispatched_output.expert_ids,
+                                          dispatched_output.expert_scales,
+                                          nullptr,
+                                          dispatched_output.deep_ep_ll_output})
+                        .hidden_states;
     auto combine_out = epCombine({hidden_states,
                                   dispatched_output.indices,
                                   params.output,
@@ -229,7 +238,7 @@ FfnLayerOutput DeviceBase::epMoeFfnLayer(const FfnLayerParams& params, const Moe
                                   dispatched_output.expert_scales});
     // TODO(wangyin.yx): refact this defered combine.
     if (combine_out.comm_barrier_hook) {
-        return {combine_out.all_output, combine_out.comm_barrier_hook, combine_out};
+        return {combine_out.all_output, nullptr, combine_out.comm_barrier_hook, combine_out};
     } else {
         auto out = gatherCombineOutput(combine_out);
         printBufferData(*out.hidden_states, "moe_ffn_ep_out");
@@ -241,10 +250,14 @@ FfnLayerOutput DeviceBase::moeFfnLayer(const FfnLayerParams& params) {
     RUNTIME_ASSERT_OP_ARG(params.configs.moe_configs, "moe configs not set");
     const auto&         moe_conf    = params.configs.moe_configs.value();
     MoeGateSelectOutput gate_output = moeGateSelect(params);
+    FfnLayerOutput      output;
     if (moe_conf.ep_size > 1 && !moe_conf.use_all_gather) {
-        return epMoeFfnLayer(params, gate_output);
+        output = epMoeFfnLayer(params, gate_output);
+    } else {
+        output = moeFfn(params, gate_output);
     }
-    return moeFfn(params, gate_output);
+    output.moe_gating = std::move(gate_output.moe_gating);
+    return output;
 }
 
 FfnLayerOutput DeviceBase::moeSharedExpert(const FfnLayerParams& params) {
@@ -320,10 +333,12 @@ void DeviceBase::computeInsertedMoE() {
                                                     ffn_params.residual,
                                                     ffn_params.qscheme});
 
-        hidden =
-            moeFfn(moe_ffn_params,
-                   {dispatched_output.expert_ids, dispatched_output.expert_scales, dispatched_output.deep_ep_ll_output})
-                .hidden_states;
+        hidden = moeFfn(moe_ffn_params,
+                        {dispatched_output.expert_ids,
+                         dispatched_output.expert_scales,
+                         nullptr,
+                         dispatched_output.deep_ep_ll_output})
+                     .hidden_states;
 
         auto combine_out = epCombine({
             hidden,

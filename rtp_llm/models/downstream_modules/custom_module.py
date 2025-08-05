@@ -77,6 +77,22 @@ class CustomHandler(object):
     ) -> Union[torch.Tensor, List[Any]]:
         raise NotImplementedError
 
+    # specify required args for extended_forward
+    def extend_forward_args(self) -> List[str]:
+        return ["input_lengths", "input_ids", "hidden_states"]
+
+    # extended_forward
+    # input_lengths: [batch_size]
+    # input_ids: [token_len]
+    # hidden_states: [token_len, hidden_size]
+    # moe_gating: list of Optional[Tensor], with length = layer_num, [token_len, expert_num]
+    def extend_forward(self, **kwargs: Any) -> Union[torch.Tensor, List[Any]]:
+        return self.forward(
+            input_lengths=kwargs["input_lengths"],
+            input_ids=kwargs["input_ids"],
+            hidden_states=kwargs["hidden_states"],
+        )
+
     def post_process(self, request: Any, batch_output: EngineOutputs) -> EngineOutputs:
         return batch_output
 

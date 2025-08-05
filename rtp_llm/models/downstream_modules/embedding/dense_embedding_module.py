@@ -1,9 +1,10 @@
 import copy
 import json
+import logging
 import os
 import sys
 from collections import OrderedDict
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Set, Union
 
 import torch
 import torch.nn as nn
@@ -21,7 +22,7 @@ from rtp_llm.models.downstream_modules.embedding.api_datatype import (
 )
 from rtp_llm.models.downstream_modules.embedding.misc import (
     EmbeddingRendererBase,
-    combo_to_batch,
+    combo_to_batch_data,
 )
 from rtp_llm.utils.tensor_utils import (
     get_first_token_from_combo_tokens,
@@ -97,18 +98,36 @@ class NormalHandler(CustomHandler):
 
 
 class SentenceTransformerHandler(CustomHandler):
+    arg_name_mapping = {
+        "token_embeddings": "hidden_states",
+    }
+
+    @classmethod
+    def rename_args(cls, lst: List[str]) -> List[str]:
+        return [cls.arg_name_mapping.get(x, x) for x in lst]
+
     def __init__(self, config: GptInitModelParameters):
         super().__init__(config)
         sys.path.append(config.ckpt_path)
         dtype = to_torch_dtype(config.data_type)
+
         modules_config_path = os.path.join(config.ckpt_path, "modules.json")
         assert os.path.exists(
             modules_config_path
         ), "not found modules.json from sentence_transformer"
         with open(modules_config_path) as fIn:
             modules_config = json.load(fIn)
+
         modules: OrderedDict[str, nn.Module] = OrderedDict()
-        for module_config in modules_config:
+        fallback_args = [
+            "input_lengths",
+            "input_ids",
+            "attention_mask",
+            "token_embeddings",
+        ]
+        extend_forward_args_list: Set[str] = set()
+        for module_idx, module_config in enumerate(modules_config):
+            # import module
             module_class = import_from_string(module_config["type"])
             # For Transformer, don't load the full directory, rely on `transformers` instead
             # But, do load the config file first.
@@ -122,29 +141,55 @@ class SentenceTransformerHandler(CustomHandler):
                     module_path = os.path.join(config.ckpt_path, module_config["path"])
                 module = module_class.load(module_path)
                 modules[module_config["name"]] = module
+
+                # collect module args
+                module_args = (
+                    module.forward_args()
+                    if hasattr(module, "forward_args")
+                    else fallback_args
+                )
+                if isinstance(module_args, list):
+                    for arg_idx, module_arg in enumerate(module_args):
+                        if isinstance(module_arg, str):
+                            extend_forward_args_list.add(module_arg)
+                        else:
+                            logging.warning(
+                                f'unexpected {arg_idx}th module_arg of module {module_idx}: "{module_arg}", ignored'
+                            )
+                else:
+                    logging.warning(
+                        f'unexpected module_args of module {module_idx}: "{module_args}", ignored'
+                    )
+
         self.model = nn.Sequential(modules).cuda().to(dtype)
+        self.raw_extend_forward_args_list = [*extend_forward_args_list]
+        self.extend_forward_args_list = self.rename_args(
+            self.raw_extend_forward_args_list
+        )
+        # require input_lengths for combo conversion
+        if "input_lengths" not in self.extend_forward_args_list:
+            self.extend_forward_args_list.append("input_lengths")
 
-    def forward(
+        logging.info(
+            f"original extend forward args: {self.raw_extend_forward_args_list}"
+        )
+        logging.info(f"extend forward args: {self.extend_forward_args_list}")
+
+    def extend_forward_args(self) -> List[str]:
+        return self.extend_forward_args_list
+
+    def extend_forward(
         self,
-        input_ids: torch.Tensor,
-        hidden_states: torch.Tensor,
-        input_lengths: torch.Tensor,
+        **combo_data: Any,
     ) -> List[Any]:
-        batch_input_ids, batch_hidden_states, batch_attention_mask = combo_to_batch(
-            hidden_states, input_ids, input_lengths
-        )
-        return self.forward_internal(
-            batch_input_ids, batch_hidden_states, batch_attention_mask
-        )
+        input_lengths: torch.Tensor = combo_data["input_lengths"]
+        batch_data = combo_to_batch_data(input_lengths, combo_data)
+        return self.extend_forward_internal(batch_data)
 
-    def forward_internal(
-        self,
-        batch_input_ids: torch.Tensor,
-        batch_hidden_states: torch.Tensor,
-        batch_attention_mask: torch.Tensor,
-    ):
-        input = {
-            "token_embeddings": batch_hidden_states,
-            "attention_mask": batch_attention_mask,
+    def extend_forward_internal(self, data: Dict[str, torch.Tensor]):
+        data = {
+            k: data[self.arg_name_mapping.get(k, k)]
+            for k in self.raw_extend_forward_args_list
         }
-        return self.model(input)["sentence_embedding"]
+
+        return self.model(data)["sentence_embedding"]
