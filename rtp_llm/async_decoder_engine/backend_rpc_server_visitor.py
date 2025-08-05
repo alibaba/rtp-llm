@@ -48,6 +48,8 @@ class BackendRPCServerVisitor:
                     block_cache_keys=block_cache_keys,
                     seq_len=input.prompt_length,
                     debug=False,
+                    generate_timeout=input.generate_config.ttft_timeout_ms,
+                    request_priority=input.generate_config.traffic_reject_priority
                 )
             )
         except BaseException as e:

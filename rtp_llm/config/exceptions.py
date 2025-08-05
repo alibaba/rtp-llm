@@ -3,6 +3,7 @@ from enum import IntEnum
 
 class ExceptionType(IntEnum):
     # Old error codes, remain compatible
+    TRAFFIC_LIMIT_ERROR = 429
     CONCURRENCY_LIMIT_ERROR = 409
     CANCELLED_ERROR = 499
     ERROR_INPUT_FORMAT_ERROR = 507

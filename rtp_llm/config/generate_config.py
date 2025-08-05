@@ -69,6 +69,8 @@ class GenerateConfig(BaseModel):
     using_hf_sampling: bool = False
     print_stop_words: bool = False
     timeout_ms: Optional[int] = -1
+    ttft_timeout_ms: Optional[int] = -1
+    traffic_reject_priority: Optional[int] = 100
     chat_id: Optional[str] = None
     task_id: Optional[Union[str, int]] = None
     request_format: str = RequestFormat.RAW

@@ -42,20 +42,33 @@ class MasterClient:
         block_cache_keys: list[int],
         seq_len: int,
         debug: bool,
+        generate_timeout: int,
+        request_priority: int = 100,
     ) -> Tuple[Optional[List[RoleAddr]], int]:
         inter_request_id = -1
         # get master address
         if not master_addr:
             return None, inter_request_id
-
+        payload = {}
         # prepare request to master
         url = "http://" + master_addr + "/rtp_llm/schedule"
-        payload = {
-            "model": "engine_service",
-            "block_cache_keys": block_cache_keys,
-            "seq_len": seq_len,
-            "debug": debug,
-        }
+        if generate_timeout != -1:
+            payload = {
+                "model": "engine_service",
+                "block_cache_keys": block_cache_keys,
+                "seq_len": seq_len,
+                "debug": debug,
+                "generate_timeout": generate_timeout,
+                "request_priority": request_priority,
+            }
+        else:
+            payload = {
+                "model": "engine_service",
+                "block_cache_keys": block_cache_keys,
+                "seq_len": seq_len,
+                "debug": debug,
+                "request_priority": request_priority,
+            }
         headers = {"Content-Type": "application/json"}
 
         # connect to master using long connection
