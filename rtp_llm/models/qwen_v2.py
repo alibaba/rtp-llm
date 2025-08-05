@@ -43,7 +43,9 @@ def scale_reshape(ts: List[torch.Tensor]):
 class QWenV2Weight(ModelDeployWeightInfo):
     def __init__(self, *args: Any, **kwargs: Any):
         self.prefix: str = kwargs.pop("prefix", "")
+        self.model_prefix: str = "model."
         self.bias = True
+        self.strip_model_prefix = False
         super().__init__(*args, **kwargs)
 
     @property
@@ -56,6 +58,9 @@ class QWenV2Weight(ModelDeployWeightInfo):
             self.prefix = "language_model."
         if self.prefix + "transformer.layers.0.attention.dense.weight" in meta_dicts[0]:
             self.weight_style = WeightStyle.TRT_ENGINE
+        if self._exist(weight_keys, "layers.0.input_layernorm.weight"):
+            self.model_prefix = ""
+        self.transformer_prefix = self.prefix + self.model_prefix
         logging.info(f"weight_style: {self.weight_style}")
 
     def _get_weight_info(self):
@@ -80,7 +85,8 @@ class QWenV2Weight(ModelDeployWeightInfo):
                         W.ffn_w1,
                         [
                             CkptWeightInfo(
-                                self.prefix + "model.layers.{i}.mlp.gate_proj.weight",
+                                self.transformer_prefix
+                                + "layers.{i}.mlp.gate_proj.weight",
                                 identity,
                             )
                         ],
@@ -99,7 +105,8 @@ class QWenV2Weight(ModelDeployWeightInfo):
                         W.ffn_w3,
                         [
                             CkptWeightInfo(
-                                self.prefix + "model.layers.{i}.mlp.up_proj.weight",
+                                self.transformer_prefix
+                                + "layers.{i}.mlp.up_proj.weight",
                                 identity,
                             )
                         ],
@@ -118,7 +125,8 @@ class QWenV2Weight(ModelDeployWeightInfo):
                         W.ffn_w2,
                         [
                             CkptWeightInfo(
-                                self.prefix + "model.layers.{i}.mlp.down_proj.weight",
+                                self.transformer_prefix
+                                + "layers.{i}.mlp.down_proj.weight",
                                 identity,
                             )
                         ],
@@ -151,7 +159,7 @@ class QWenV2Weight(ModelDeployWeightInfo):
                 W.pre_ln_gamma,
                 [
                     CkptWeightInfo(
-                        self.prefix + "model.layers.{i}.input_layernorm.weight",
+                        self.transformer_prefix + "layers.{i}.input_layernorm.weight",
                         identity,
                     )
                 ],
@@ -161,15 +169,15 @@ class QWenV2Weight(ModelDeployWeightInfo):
                 W.attn_qkv_w,
                 [
                     CkptWeightInfo(
-                        self.prefix + "model.layers.{i}.self_attn.q_proj.weight",
+                        self.transformer_prefix + "layers.{i}.self_attn.q_proj.weight",
                         identity,
                     ),
                     CkptWeightInfo(
-                        self.prefix + "model.layers.{i}.self_attn.k_proj.weight",
+                        self.transformer_prefix + "layers.{i}.self_attn.k_proj.weight",
                         identity,
                     ),
                     CkptWeightInfo(
-                        self.prefix + "model.layers.{i}.self_attn.v_proj.weight",
+                        self.transformer_prefix + "layers.{i}.self_attn.v_proj.weight",
                         identity,
                     ),
                 ],
@@ -198,7 +206,7 @@ class QWenV2Weight(ModelDeployWeightInfo):
                 W.attn_o_w,
                 [
                     CkptWeightInfo(
-                        self.prefix + "model.layers.{i}.self_attn.o_proj.weight",
+                        self.transformer_prefix + "layers.{i}.self_attn.o_proj.weight",
                         identity,
                     )
                 ],
@@ -213,8 +221,8 @@ class QWenV2Weight(ModelDeployWeightInfo):
                 W.post_ln_gamma,
                 [
                     CkptWeightInfo(
-                        self.prefix
-                        + "model.layers.{i}.post_attention_layernorm.weight",
+                        self.transformer_prefix
+                        + "layers.{i}.post_attention_layernorm.weight",
                         identity,
                     )
                 ],
@@ -229,15 +237,18 @@ class QWenV2Weight(ModelDeployWeightInfo):
                     W.attn_qkv_b,
                     [
                         CkptWeightInfo(
-                            self.prefix + "model.layers.{i}.self_attn.q_proj.bias",
+                            self.transformer_prefix
+                            + "layers.{i}.self_attn.q_proj.bias",
                             identity,
                         ),
                         CkptWeightInfo(
-                            self.prefix + "model.layers.{i}.self_attn.k_proj.bias",
+                            self.transformer_prefix
+                            + "layers.{i}.self_attn.k_proj.bias",
                             identity,
                         ),
                         CkptWeightInfo(
-                            self.prefix + "model.layers.{i}.self_attn.v_proj.bias",
+                            self.transformer_prefix
+                            + "layers.{i}.self_attn.v_proj.bias",
                             identity,
                         ),
                     ],
@@ -253,7 +264,8 @@ class QWenV2Weight(ModelDeployWeightInfo):
                         W.q_ln_gamma,
                         [
                             CkptWeightInfo(
-                                self.prefix + "model.layers.{i}.self_attn.q_norm.weight"
+                                self.transformer_prefix
+                                + "layers.{i}.self_attn.q_norm.weight"
                             )
                         ],
                         config=attn_config,
@@ -262,7 +274,8 @@ class QWenV2Weight(ModelDeployWeightInfo):
                         W.k_ln_gamma,
                         [
                             CkptWeightInfo(
-                                self.prefix + "model.layers.{i}.self_attn.k_norm.weight"
+                                self.transformer_prefix
+                                + "layers.{i}.self_attn.k_norm.weight"
                             )
                         ],
                         config=attn_config,
@@ -301,7 +314,7 @@ class QWenV2Weight(ModelDeployWeightInfo):
                     W.embedding,
                     [
                         CkptWeightInfo(
-                            self.prefix + "model.embed_tokens.weight", identity
+                            self.transformer_prefix + "embed_tokens.weight", identity
                         )
                     ],
                     identity,
@@ -313,7 +326,7 @@ class QWenV2Weight(ModelDeployWeightInfo):
                 ),
                 AtomicWeight(
                     W.final_ln_gamma,
-                    [CkptWeightInfo(self.prefix + "model.norm.weight", identity)],
+                    [CkptWeightInfo(self.transformer_prefix + "norm.weight", identity)],
                     identity,
                 ),
                 AtomicWeight(

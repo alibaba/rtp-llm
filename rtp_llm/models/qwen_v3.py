@@ -1,23 +1,15 @@
 import json
+import logging
 import os
+from typing import Optional
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.task_type import TaskType
 from rtp_llm.model_factory_register import register_model
-from rtp_llm.model_loader.ffn_weight import (
-    FfnConfig,
-    MoeAtomicWeight,
-    MoeConfig,
-    MoeWeight,
+from rtp_llm.models.downstream_modules.custom_module import CustomModule
+from rtp_llm.models.downstream_modules.reranker.qwen3_reranker import (
+    Qwen3RerankerModule,
 )
 from rtp_llm.models.qwen_v2 import QWenV2, QWenV2Weight
-from rtp_llm.utils.model_weight import (
-    CkptWeightInfo,
-    W,
-    identity,
-    stack_,
-    stack_moe_w1,
-    transpose,
-)
 
 
 class QWenV3Weight(QWenV2Weight):
@@ -36,6 +28,13 @@ class QwenV3(QWenV2):
         config = super()._create_config(ckpt_path)
         config.use_qk_norm = True
         return config
+
+    def _init_custom_module(self) -> Optional[CustomModule]:
+        logging.info(f"task_type : {self.task_type}")
+        if self.task_type == TaskType.RERANKER:
+            logging.info("using Qwen3RerankerModule as custom module")
+            return Qwen3RerankerModule(self.config, self.tokenizer)
+        return super()._init_custom_module()
 
 
 register_model("qwen_3", QwenV3, ["Qwen3ForCausalLM"])

@@ -509,6 +509,13 @@ class ModelDeployWeightInfo:
                 return True
         return False
 
+    @staticmethod
+    def _exist(keys: List[str], val: str):
+        for key in keys:
+            if val == key:
+                return True
+        return False
+
     def create_load_config(
         self,
         compute_dtype: torch.dtype,

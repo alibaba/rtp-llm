@@ -20,7 +20,7 @@ from rtp_llm.model_loader.model_weight_info import (
     ModelWeightInfo,
     ModelWeights,
 )
-from rtp_llm.model_loader.weight_module import CustomAtomicWeight
+from rtp_llm.model_loader.weight_module import CustomAtomicWeight, WeightModule
 from rtp_llm.utils.database import BaseDatabase, CkptDatabase
 from rtp_llm.utils.fuser import fetch_remote_file_to_local
 from rtp_llm.utils.model_weight import W, WeightStyle
@@ -211,6 +211,8 @@ class ModelLoader:
                     yield (id, name, tensor)
 
         for weight in self._model_weights_info.weights:
+            if self._maybe_skip_weight(weight):
+                continue
             weights = weight.load(
                 self._load_config.database, None, device, self._load_config
             )
@@ -223,6 +225,11 @@ class ModelLoader:
             )
             for name, tensor in weights.items():
                 yield (None, name, tensor)
+
+    def _maybe_skip_weight(self, weight: WeightModule):
+        if self._task_type == TaskType.LANGUAGE_MODEL:
+            return False
+        return weight.name in [W.lm_head]
 
     @staticmethod
     def force_clean_cuda_memory():

@@ -6,6 +6,7 @@ from rtp_llm.config.base_model_config import PyDanticModelBase
 class VoyageRerankerRequest(PyDanticModelBase):
     query: str
     documents: List[str]
+    instruction: Optional[str] = None
     model: Optional[str] = None
     top_k: Optional[int] = None
     sorted: bool = True
