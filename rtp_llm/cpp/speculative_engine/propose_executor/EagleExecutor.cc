@@ -36,7 +36,7 @@ absl::Status EagleExecutor::propose(const std::list<GenerateStreamPtr>& streams,
     }
 
     for (size_t i = 0; i < propose_step_; i++) {
-        RTP_LLM_LOG_INFO("mtp propose step %d", i);
+        RTP_LLM_LOG_DEBUG("mtp propose step %d", i);
         if (i > 0) {
             // remove stopped/finished stream
             propose_streams.remove_if([](const GenerateStreamPtr& stream) {
