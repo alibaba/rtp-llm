@@ -170,11 +170,11 @@ class OpenaiEndpoint(object):
         config.add_special_tokens(self.model_config.special_tokens)
         config.convert_select_tokens(self.model_config.vocab_size, self.tokenizer)
         if (
-            request.extend_fields
-            and "max_thinking_tokens" in request.extend_fields.keys()
-            and isinstance(request.extend_fields["max_thinking_tokens"], int)
+            request.extra_configs
+            and request.extra_configs.max_thinking_tokens is not None
+            and isinstance(request.extra_configs.max_thinking_tokens, int)
         ):
-            config.max_thinking_tokens = request.extend_fields["max_thinking_tokens"]
+            config.max_thinking_tokens = request.extra_configs.max_thinking_tokens
         config.add_thinking_params(self.tokenizer)
         return config
 

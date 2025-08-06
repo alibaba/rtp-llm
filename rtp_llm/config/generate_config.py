@@ -38,8 +38,11 @@ class GenerateConfig(BaseModel):
     # only for qwen agent fncall check max input tokens
     max_input_tokens: int = 32000
     max_thinking_tokens: int = 32000
+    in_think_mode: bool = False # same as `enable_thinking` in chat_template_kwargs, discard one in the future
+    chat_template_kwargs: Optional[Dict[str, Any]] = (
+        None  
+    )
     end_think_token_ids: List[int] = []
-    in_think_mode: bool = False
     num_beams: int = 1
     do_sample: bool = True
     # 0 mean not use num_return_sequences,

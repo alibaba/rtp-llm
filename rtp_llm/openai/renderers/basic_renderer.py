@@ -197,11 +197,11 @@ class BasicRenderer(CustomChatRenderer):
         if request.chat_template_kwargs is not None:
             render_args.update(request.chat_template_kwargs)
         if (
-            request.extend_fields is not None
-            and "chat_template_kwargs" in request.extend_fields
-            and isinstance(request.extend_fields["chat_template_kwargs"], dict)
+            request.extra_configs is not None
+            and request.extra_configs.chat_template_kwargs is not None
+            and isinstance(request.extra_configs.chat_template_kwargs, dict)
         ):
-            render_args.update(request.extend_fields["chat_template_kwargs"])
+            render_args.update(request.extra_configs.chat_template_kwargs)
         rendered = template.render(**render_args)
         logging.debug(
             f"request [{request.model_dump_json(indent=4)}] rendered string: [{rendered}]]"

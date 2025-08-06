@@ -157,10 +157,10 @@ class ChatCompletionRequest(BaseModel):
 
     def get_chat_template_kwargs(self):
         if (
-            self.extend_fields is not None
-            and "chat_template_kwargs" in self.extend_fields
+            self.extra_configs is not None
+            and  self.extra_configs.chat_template_kwargs is not None
         ):
-            return self.extend_fields["chat_template_kwargs"]
+            return self.extra_configs.chat_template_kwargs
         else:
             return self.chat_template_kwargs
 

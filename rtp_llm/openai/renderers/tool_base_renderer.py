@@ -100,11 +100,11 @@ class ToolBaseRenderer(CustomChatRenderer, ABC):
             context.update(request.chat_template_kwargs)
 
         if (
-            request.extend_fields is not None
-            and "chat_template_kwargs" in request.extend_fields
-            and isinstance(request.extend_fields["chat_template_kwargs"], dict)
+            request.extra_configs is not None
+            and request.extra_configs.chat_template_kwargs is not None
+            and isinstance(request.extra_configs.chat_template_kwargs, dict)
         ):
-            context.update(request.extend_fields["chat_template_kwargs"])
+            context.update(request.extra_configs.chat_template_kwargs)
 
         # 创建Jinja2环境
         env = Environment(loader=BaseLoader(), trim_blocks=True, lstrip_blocks=True)
