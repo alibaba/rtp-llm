@@ -324,6 +324,7 @@ struct FfnDisAggregateConfig {
     int         ffn_dp_size             = 1;
     bool        is_ffn_rank             = false;
     std::string to_string() const;
+    void        update_from_env_for_test();
     bool        is_ffn_service() const {
         return enable_ffn_disaggregate && is_ffn_rank;
     }

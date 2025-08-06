@@ -641,10 +641,7 @@ class PyEnvConfigs:
         self.fmha_config.update_from_env()
         self.misc_config.update_from_env()
         self.concurrency_config.update_from_env()
-
-        # Update ffn_disaggregate_config from environment
-        enable_ffn_disaggregate = get_env_bool("ENABLE_FFN_DISAGGREGATE", False)
-        self.ffn_disaggregate_config.enable_ffn_disaggregate = enable_ffn_disaggregate
+        self.ffn_disaggregate_config.update_from_env()
         logging.info(self.to_string())
 
     def to_string(self):

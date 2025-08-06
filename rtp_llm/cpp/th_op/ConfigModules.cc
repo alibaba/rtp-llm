@@ -87,6 +87,7 @@ void register_ffn_disaggregate_config(pybind11::module& m) {
              pybind11::arg("ffn_dp_size")             = 1,
              pybind11::arg("is_ffn_rank")             = false)
         .def("to_string", &FfnDisAggregateConfig::to_string)
+        .def("update_from_env", &FfnDisAggregateConfig::update_from_env_for_test)
         .def("is_ffn_service", &FfnDisAggregateConfig::is_ffn_service)
         .def_readwrite("enable_ffn_disaggregate", &FfnDisAggregateConfig::enable_ffn_disaggregate)
         .def_readwrite("attention_tp_size", &FfnDisAggregateConfig::attention_tp_size)
@@ -462,14 +463,14 @@ void register_service_discovery_config(pybind11::module& m) {
 
 // CacheStoreConfig
 void CacheStoreConfig::update_from_env_for_test() {
-    cache_store_rdma_mode               = bool_from_env_for_test("CACHE_STORE_RDMA_MODE", false);
-    wrr_available_ratio                 = autil::EnvUtil::getEnv("WRR_AVAILABLE_RATIO", 80);
-    rank_factor                         = autil::EnvUtil::getEnv("RANK_FACTOR", 0);
-    thread_count                        = autil::EnvUtil::getEnv("CACHE_STORE_THREAD_COUNT", 16);
-    rdma_connect_timeout_ms             = autil::EnvUtil::getEnv("CACHE_STORE_RDMA_CONNECT_TIMEOUT_MS", 250);
-    rdma_qp_count_per_connection        = autil::EnvUtil::getEnv("CACHE_STORE_RDMA_CONNECTION_COUNT_PER_CONNECTION", 2);
-    messager_io_thread_count            = autil::EnvUtil::getEnv("MESSAGER_IO_THREAD_COUNT", 2);
-    messager_worker_thread_count        = autil::EnvUtil::getEnv("MESSAGER_WORKER_THREAD_COUNT", 16);
+    cache_store_rdma_mode        = bool_from_env_for_test("CACHE_STORE_RDMA_MODE", false);
+    wrr_available_ratio          = autil::EnvUtil::getEnv("WRR_AVAILABLE_RATIO", 80);
+    rank_factor                  = autil::EnvUtil::getEnv("RANK_FACTOR", 0);
+    thread_count                 = autil::EnvUtil::getEnv("CACHE_STORE_THREAD_COUNT", 16);
+    rdma_connect_timeout_ms      = autil::EnvUtil::getEnv("CACHE_STORE_RDMA_CONNECT_TIMEOUT_MS", 250);
+    rdma_qp_count_per_connection = autil::EnvUtil::getEnv("CACHE_STORE_RDMA_CONNECTION_COUNT_PER_CONNECTION", 2);
+    messager_io_thread_count     = autil::EnvUtil::getEnv("MESSAGER_IO_THREAD_COUNT", 2);
+    messager_worker_thread_count = autil::EnvUtil::getEnv("MESSAGER_WORKER_THREAD_COUNT", 16);
 }
 
 void register_cache_store_config(pybind11::module& m) {
@@ -786,6 +787,15 @@ inline std::string ArpcConfig::to_string() const {
 }
 
 // FfnDisAggregateConfig
+void FfnDisAggregateConfig::update_from_env_for_test() {
+    enable_ffn_disaggregate = bool_from_env_for_test("ENABLE_FFN_DISAGGREGATE", false);
+    attention_tp_size       = autil::EnvUtil::getEnv("ATTENTION_TP_SIZE", 1);
+    attention_dp_size       = autil::EnvUtil::getEnv("ATTENTION_DP_SIZE", 1);
+    ffn_tp_size             = autil::EnvUtil::getEnv("FFN_TP_SIZE", 1);
+    ffn_dp_size             = autil::EnvUtil::getEnv("FFN_DP_SIZE", 1);
+    is_ffn_rank             = bool_from_env_for_test("IS_FFN_RANK", false);
+}
+
 inline std::string FfnDisAggregateConfig::to_string() const {
     std::ostringstream oss;
     oss << "enable_ffn_disaggregate: " << enable_ffn_disaggregate << "\n";
