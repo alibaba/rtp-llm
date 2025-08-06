@@ -310,7 +310,8 @@ void FlashInferAttnParams::genPlan(int     batch_size,
 
 bool FlashInferAttnParams::check(rtp_llm::DeviceBase*             device,
                                  const rtp_llm::AttentionConfigs& attn_configs,
-                                 DataType                         dtype) {
+                                 DataType                         dtype,
+                                 bool                             is_prefill) {
     if (rtp_llm::get_sm() < 80) {
         return false;
     }
@@ -332,7 +333,7 @@ bool FlashInferAttnParams::check(rtp_llm::DeviceBase*             device,
             || (attn_configs.rope_config.style != RopeStyle::Base && attn_configs.rope_config.style != RopeStyle::No)
             || attn_configs.mask_type != causalMask || attn_configs.q_scaling != 1.0f || attn_configs.use_logn_attn
             || (size_per_head != 64 && size_per_head != 128 && size_per_head != 192)
-            || (group_size > 10 && group_size != 16)) {
+            || (!is_prefill && group_size > 10 && group_size != 16)) {
             return false;
         }
     }
@@ -345,7 +346,7 @@ bool FlashInferAttnParams::checkPrefill(rtp_llm::DeviceBase*             device,
                                         const BufferPtr&                 input_lengths_host,
                                         DataType                         dtype,
                                         bool                             skip_no_prefix) {
-    if (!check(device, attn_configs, dtype)) {
+    if (!check(device, attn_configs, dtype, true)) {
         return false;
     }
     bool has_prefix = prefix_lengths_host && prefix_lengths_host->size();
@@ -378,7 +379,7 @@ bool FlashInferAttnParams::checkPrefill(rtp_llm::DeviceBase*             device,
 bool FlashInferAttnParams::checkDecode(rtp_llm::DeviceBase*             device,
                                        const rtp_llm::AttentionConfigs& attn_configs,
                                        DataType                         dtype) {
-    return check(device, attn_configs, dtype);
+    return check(device, attn_configs, dtype, false);
 }
 
 ParamsPtr FlashInferAttnParams::prepare(rtp_llm::DeviceBase*             device,
