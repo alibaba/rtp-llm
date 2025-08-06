@@ -567,9 +567,7 @@ class GptInitModelParameters:
             messager_worker_thread_count=get_env_int(
                 "MESSAGER_WORKER_THREAD_COUNT", 32
             ),
-            messager_io_thread_count=get_env_int(
-                "MESSAGER_IO_THREAD_COUNT", 4
-            ),
+            messager_io_thread_count=get_env_int("MESSAGER_IO_THREAD_COUNT", 4),
         )
 
         # ConcurrencyConfig

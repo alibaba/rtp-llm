@@ -69,7 +69,7 @@ class BackendRPCServerVisitor:
             input.generate_config.inter_request_id = inter_request_id
             if inter_request_id != -1:
                 input.request_id = inter_request_id
-            route_logger.info(
+            route_logger.debug(
                 f"master route success, request <{input.request_id}> route to address: {role_addrs}, inter_request_id: {inter_request_id}"
             )
             kmonitor.report(AccMetrics.MASTER_ROUTE_QPS_METRIC, 1)
@@ -78,18 +78,20 @@ class BackendRPCServerVisitor:
         role_addrs = self.host_service.get_backend_role_addrs()
         if role_addrs:
             input.generate_config.role_addrs = role_addrs
-            route_logger.info(
+            route_logger.warning(
                 f"fallback to host service, request <{input.request_id}> route to address: {role_addrs}"
             )
             kmonitor.report(
                 AccMetrics.DOMAIN_ROUTE_QPS_METRIC,
                 1,
             )
+        else:
+            route_logger.error(f"host service failed, request <{input.request_id}>")
 
     async def route_ips(self, input: GenerateInput):
         with Timer() as route_timer:
             master_addr = self.host_service.get_master_addr()
-            route_logger.info(f"routing to master: {master_addr}")
+            route_logger.debug(f"routing to master: {master_addr}")
             # master don't support schedule batched input yet
             input_token_batched = False
             if len(input.token_ids.shape) == 2 and input.token_ids.size(0) != 1:
@@ -101,13 +103,18 @@ class BackendRPCServerVisitor:
                 kmonitor.report(
                     GaugeMetrics.MASTER_ROUTE_RT_METRIC, master_route_timer.cost_ms()
                 )
+            else:
+                route_logger.warning(
+                    f"master address: {master_addr} or input token batched: {input_token_batched} is not valid, fallback to domain routing"
+                )
             if not input.generate_config.role_addrs:
                 with Timer() as domain_route_timer:
                     await self.get_domain_route_addrs(input)
                 kmonitor.report(
                     GaugeMetrics.DOMAIN_ROUTE_RT_METRIC, domain_route_timer.cost_ms()
                 )
-            route_logger.info(f"routing to master done")
+            route_logger.debug(f"routing to master done")
+
         kmonitor.report(GaugeMetrics.ROUTE_RT_METRIC, route_timer.cost_ms())
         if self.separated_frontend and not input.generate_config.role_addrs:
             raise FtRuntimeException(

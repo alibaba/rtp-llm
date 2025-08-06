@@ -7,6 +7,8 @@ from rtp_llm.vipserver.netutil import NetUtils
 from rtp_llm.vipserver.update_thread import UpdateThread
 from rtp_llm.vipserver.vipserver_proxy import VIPServerProxy
 
+DOMAIN_FAILED_CNT_THRESHOLD = 20
+
 
 class HostReactor:
     domain_map = {}
@@ -14,6 +16,7 @@ class HostReactor:
 
     def __init__(self, proxy: VIPServerProxy):
         self.domain_map: dict[str, list[Host]] = {}
+        self.domain_failed_cnt: dict[str, int] = {}
         self.domain_update_lock = threading.Lock()
         self.proxy = proxy
         self.update_domain_thread = UpdateThread(
@@ -36,7 +39,21 @@ class HostReactor:
     def update_domain_map(self, new_map: dict[str, list[Host]]):
         self.domain_update_lock.acquire()
         for k, v in new_map.items():
-            self.domain_map[k] = v
+            if v:
+                self.domain_map[k] = v
+                self.domain_failed_cnt[k] = 0
+            else:
+                self.domain_failed_cnt[k] = self.domain_failed_cnt.get(k, 0) + 1
+                logging.warning(
+                    f"{k} failed to refresh vipserver domain server list: empyt host list - {self.domain_failed_cnt[k]} times"
+                )
+                if self.domain_failed_cnt[k] >= DOMAIN_FAILED_CNT_THRESHOLD:
+                    logging.warning(
+                        f"{k} has failed {self.domain_failed_cnt[k]} times, set server list to empty."
+                    )
+                    self.domain_map[k] = []
+                    self.domain_failed_cnt[k] = 0
+
         self.domain_update_lock.release()
 
     def refresh_domain_srv_lst(self, domain: str):
@@ -61,13 +78,10 @@ class HostReactor:
                         hosts.append(Host(host["ip"], host["port"]))
                 self.update_domain_map({domain: hosts})
             else:
-                logging.info(
-                    f"failed to refresh vipserver domain server list: empyt host list"
-                )
                 self.update_domain_map({domain: []})
 
         except Exception as e:
-            logging.error("failed to refresh vipserver domain server list", e)
+            logging.error(f"{domain} failed to refresh vipserver domain server list", e)
             stack_summary = traceback.format_exception(type(e), e, e.__traceback__)
             stack_str = "\n".join(stack_summary)
             logging.error(f"error stack: {stack_str}")

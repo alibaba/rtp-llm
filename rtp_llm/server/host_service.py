@@ -145,7 +145,7 @@ class MasterService:
         while True:
             host = self.master_vip.get_host(refresh=True)
             master_addr = f"{host.ip}:{host.port}" if host else None
-            route_logger.info(f"master address from vipserver: {master_addr}")
+            route_logger.debug(f"master address from vipserver: {master_addr}")
             if master_addr:
                 try:
                     # request master_addr to get real master address
@@ -155,16 +155,13 @@ class MasterService:
                         request_url, headers=headers, json={}, timeout=0.5
                     )
                     if response.status_code == 200:
-                        logging.info(f"Master address response: {response}")
-                        logging.info(f"Response text: {response.text}")
-                        logging.info(f"Response JSON: {response.json()}")
                         master_addr = response.json()["real_master_host"]
                 except Exception as e:
                     route_logger.error(
                         f"Failed to get master address from {master_addr}, error: {e}"
                     )
                     pass
-            route_logger.info(f"master address refreshed: {master_addr}")
+            route_logger.debug(f"master address refreshed: {master_addr}")
             self.cached_master_addr = master_addr
             time.sleep(1)
 
