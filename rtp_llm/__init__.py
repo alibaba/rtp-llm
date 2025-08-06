@@ -3,6 +3,7 @@ import logging.config
 import os
 
 from rtp_llm.config.log_config import LOGGING_CONFIG
+from rtp_llm.utils.torch_patch import *
 
 ## for `__init__.py`, we reserve the envs, don't use StaticConfig.
 LOG_PATH = os.environ.get("LOG_PATH", "logs")
