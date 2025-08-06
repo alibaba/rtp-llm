@@ -154,7 +154,10 @@ class Qwen2VLRenderer(CustomChatRenderer):
 
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         messages = copy.deepcopy(request.messages)
-        prompt_and_mm_input = self._render_messages(messages, request.add_vision_id)
+        prompt_and_mm_input = self._render_messages(
+            messages,
+            request.extra_configs.add_vision_id if request.extra_configs else True,
+        )
         input_ids = self.tokenizer.encode(prompt_and_mm_input.prompt)
         return RenderedInputs(
             input_ids=input_ids,

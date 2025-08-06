@@ -136,7 +136,6 @@ class ChatCompletionRequest(BaseModel):
     # logit_bias: Optional[Dict[str, float]] = None
 
     # ---- These params are hacked for our framework, not standard.
-    add_vision_id: Optional[bool] = True  # whether add vision id in chat template
     extra_configs: Optional[GenerateConfig] = None
     private_request: bool = False
     trace_id: Optional[str] = None
