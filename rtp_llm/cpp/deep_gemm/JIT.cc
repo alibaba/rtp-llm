@@ -2,6 +2,7 @@
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
 
+#include <cstdlib>
 #include <sstream>
 #include <chrono>
 #include <future>
@@ -144,10 +145,18 @@ KernelPath JIT::getKernelPath(KernelParams params) {
     const string params_str = getParamsStr(params);
     const string func_name  = "runDeepGemm_" + params_str;
 
-    remote_dir_path = string("/mnt/nas1/deep_gemm_runtime/" + file_hash + "/" + short_params_str + "/" + params_str);
-    local_dir_path  = string("./deep_gemm_runtime/" + file_hash + "/" + short_params_str + "/" + params_str);
+    char const* remote_jit_dir_env = getenv("REMOTE_JIT_DIR");
+    string      remote_jit_dir_env_str;
+    if (remote_jit_dir_env) {
+        remote_jit_dir_env_str = string(remote_jit_dir_env);
+    } else {
+        remote_jit_dir_env_str = string("/mnt/nas1");
+    }
+    remote_dir_path =
+        string(remote_jit_dir_env_str + "/deep_gemm_runtime/" + file_hash + "/" + short_params_str + "/" + params_str);
+    local_dir_path = string("./deep_gemm_runtime/" + file_hash + "/" + short_params_str + "/" + params_str);
 
-    if (filesystem::exists("/mnt/nas1/")) {
+    if (filesystem::exists(remote_jit_dir_env_str)) {
         has_remote_cache = true;
         if (!filesystem::exists(remote_dir_path)) {
             filesystem::create_directories(remote_dir_path);
@@ -185,7 +194,8 @@ KernelPath JIT::getKernelPath(KernelParams params) {
 
     const string pid_and_timestamp_str = generateKernelName();
     const string cu_filename           = local_dir_path.string() + "/" + pid_and_timestamp_str + ".cu";
-    const string so_filename           = local_dir_path.string() + "/" + pid_and_timestamp_str + ".so";
+    const string so_filename           = local_dir_path.string() + "/" + pid_and_timestamp_str + ".so.temp";
+    const string so_filename_final     = local_dir_path.string() + "/" + pid_and_timestamp_str + ".so";
     const string remote_filename       = remote_dir_path.string() + "/" + pid_and_timestamp_str + ".so";
     RTP_LLM_LOG_INFO("JIT compilation " + cu_filename + " begin");
 
@@ -213,8 +223,18 @@ KernelPath JIT::getKernelPath(KernelParams params) {
         command = "cp " + so_filename + " " + remote_filename;
         result  = system(command.c_str());
         if (result != 0) {
+            command = "rm -f " + remote_filename;
+            result  = system(command.c_str());
             RTP_LLM_FAIL("Failed to copy so " + so_filename + " to remote " + remote_filename);
         }
+    }
+
+    command = "mv " + so_filename + " " + so_filename_final;
+    result  = system(command.c_str());
+    if (result != 0) {
+        command = "rm -f " + so_filename_final;
+        result  = system(command.c_str());
+        RTP_LLM_FAIL("Failed to move so " + so_filename + " to " + so_filename_final);
     }
 
     RTP_LLM_LOG_INFO("JIT compilation " + cu_filename + " finished");
@@ -225,7 +245,7 @@ KernelPath JIT::getKernelPath(KernelParams params) {
         cv.notify_one();
     }
 
-    return KernelPath{so_filename, params};
+    return KernelPath{so_filename_final, params};
 }
 
 void JIT::loadKernel(vector<KernelPath>& kernel_paths) {

@@ -137,4 +137,5 @@ cc_test(
     ],
     timeout = "long",
     exec_properties = {'gpu':'H20'},
+    env = {"REMOTE_JIT_DIR": "/mnt/nas1"},
 )

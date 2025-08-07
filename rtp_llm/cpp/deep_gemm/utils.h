@@ -8,7 +8,6 @@
 #include <iostream>
 #include <string>
 #include <filesystem>
-#include <iostream>
 #include <algorithm>
 #include <random>
 #include <chrono>
@@ -41,16 +40,12 @@ inline std::string getDeepGemmTypeStr(DeepGemmType type) {
     switch (type) {
         case DeepGemmType::Normal:
             return std::string("deep_gemm::GemmType::Normal");
-            break;
         case DeepGemmType::GroupedContiguous:
             return std::string("deep_gemm::GemmType::GroupedContiguous");
-            break;
         case DeepGemmType::GroupedMasked:
             return std::string("deep_gemm::GemmType::GroupedMasked");
-            break;
         default:
             return "";
-            break;
     }
 }
 
