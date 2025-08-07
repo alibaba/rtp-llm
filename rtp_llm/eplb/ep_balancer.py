@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import random
+import time
 import traceback
 from collections import deque
 from enum import Enum
@@ -172,6 +173,7 @@ class ExpertBalancer:
             "layer": layer_id,
             "plan": phy2log.tolist(),
             "phy2log": self.phy2log,
+            "update_time": time.ctime(),
         }
         with open(file_name, "a") as f:
             f.write(json.dumps(log_data) + "\n")
