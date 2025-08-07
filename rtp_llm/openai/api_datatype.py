@@ -150,7 +150,7 @@ class ChatCompletionRequest(BaseModel):
     template_key: Optional[str] = None
     user_template: Optional[str] = None
     debug_info: Optional[bool] = False
-    aux_info: Optional[bool] = False
+    aux_info: Optional[bool] = True
     extend_fields: Optional[Dict[str, Any]] = (
         None  # This field is not effective, only for logging.
     )

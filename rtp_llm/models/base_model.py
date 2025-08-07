@@ -4,7 +4,7 @@ from typing import Any, Dict, List, NamedTuple, Optional, Union
 import torch
 from pydantic import BaseModel as PyBaseModel
 
-from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.config.generate_config import GenerateConfig, RoleAddr, RoleType
 from rtp_llm.config.gpt_init_model_parameters import ConfigMode, GptInitModelParameters
 from rtp_llm.config.task_type import TaskType
 from rtp_llm.distribute.gang_info import get_gang_info

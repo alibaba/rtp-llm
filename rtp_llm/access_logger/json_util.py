@@ -1,5 +1,6 @@
 import json
 from typing import Any
+from enum import Enum
 
 import numpy
 
@@ -11,7 +12,12 @@ def response_encoder(element: Any) -> Any:
         return str(element)
     elif isinstance(element, bytes):
         return f"bytes[{len(element)}]"
-    return element.__dict__
+    elif isinstance(element, Enum):
+        return element.value  # Or use str(element) for the enum name and value
+    elif hasattr(element, '__dict__'):
+        return element.__dict__
+    else:
+        return str(element)
 
 
 def dump_json(obj: Any) -> str:

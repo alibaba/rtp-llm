@@ -70,6 +70,7 @@ class AuxInfo(PyBaseModel):
     softmax_probs: List[float] = []
     local_reuse_len: int = 0
     remote_reuse_len: int = 0
+    role_addrs: List[RoleAddr] = []
 
 
 class GenerateOutput(PyBaseModel):
