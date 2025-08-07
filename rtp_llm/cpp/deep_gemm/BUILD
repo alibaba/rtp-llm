@@ -8,16 +8,25 @@ load("//rtp_llm/cpp/deep_gemm:template.bzl", "NORMAL_GEMM_CASES", "GROUPED_CONTI
                 "dispatch_template_header", "dispatch_template", "dispatch_template_tail")
 
 cc_library(
+    name = "deep_gemm_utils",
+    hdrs = ["utils.h"],
+    copts = copts(),
+    deps = [],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "deepgemm_hdrs",
-    hdrs = [
-        "utils.h",
-    ] + select({
+    hdrs = select({
         "@//:using_cuda12": glob([
             "deep_gemm_template.h",
             "include/*.cuh"
         ]),
         "//conditions:default": [],
     }),
+    deps = [
+        ":deep_gemm_utils"
+    ],
     copts = sm90_cuda_copts,
     visibility = ["//visibility:public"],
 )
@@ -35,9 +44,15 @@ gen_dispatch_code(
 )
 
 filegroup(
+    name = "deep_gemm_utils_hdrs",
+    srcs = ["utils.h"],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
     name = "deep_gemm_jit_include",
     srcs = [
-        "utils.h",
+        ":deep_gemm_utils_hdrs",
         "deep_gemm_template.h",
         "interleave_ffma.py",
         "JIT.h",
@@ -64,11 +79,12 @@ filegroup(
 
 cc_library(
     name = "JIT",
-    hdrs = ["JIT.h", "utils.h"],
+    hdrs = ["JIT.h"],
     srcs = ["JIT.cc"],
     data = [":jit_includes"],
     copts = copts(),
     deps = [
+        ":deep_gemm_utils",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
         "//rtp_llm/cpp/core:buffer_torch",
@@ -79,10 +95,11 @@ cc_library(
 
 cc_library(
     name = "deep_gemm_plugins_impl",
-    hdrs = ["DeepGemmPlugin.h", "utils.h"],
+    hdrs = ["DeepGemmPlugin.h"],
     srcs = ["DeepGemmPlugin.cpp", ":deepgemm_dispatch"],
     copts = copts(),
     deps = [
+        ":deep_gemm_utils",
         ":deepgemm_dpsk_inst",
         ":deepgemm_qwen_inst",
         ":JIT",
@@ -118,5 +135,6 @@ cc_test(
         "//rtp_llm/cpp/devices/cuda_impl:gpu_base",
         "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
     ],
+    timeout = "long",
     exec_properties = {'gpu':'H20'},
 )

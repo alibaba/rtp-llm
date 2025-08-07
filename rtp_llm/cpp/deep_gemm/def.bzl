@@ -75,12 +75,13 @@ def gen_cu_and_lib(name, params_list, split_num, template_header, template, temp
 
     native.cc_library(
         name = name + "_inst",
-        hdrs = ["DeepGemmPlugin.h", "utils.h"],
+        hdrs = ["DeepGemmPlugin.h"],
         srcs = ["DeepGemmPlugin.cpp"] + [
             ":" + name + "_" + str(i) + "_inst" for i in range((len(params_list) + split_num - 1) // split_num)
         ],
         copts = copts(),
         deps = [
+            "//rtp_llm/cpp/deep_gemm:deep_gemm_utils",
             "//rtp_llm/cpp/core:buffer_torch",
             "//rtp_llm/cpp/cuda:cuda_utils_base",
             "@local_config_cuda//cuda:cuda_headers",
