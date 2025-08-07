@@ -599,6 +599,22 @@ def setup_args():
     )
 
     hw_kernel_group.add_argument(
+        "--enable_native_cuda_graph",
+        env_name="ENABLE_NATIVE_CUDA_GRAPH",
+        type=str2bool,
+        default=False,
+        help="系统是否允许在C++后端使用Cuda Graph",
+    )
+
+    hw_kernel_group.add_argument(
+        "--num_native_cuda_graph",
+        env_name="NUM_NATIVE_CUDA_GRAPH",
+        type=int,
+        default=200,
+        help="C++后端缓存Cuda Graph数量",
+    )
+
+    hw_kernel_group.add_argument(
         "--deep_gemm_num_sm",
         env_name="DEEP_GEMM_NUM_SM",
         type=int,

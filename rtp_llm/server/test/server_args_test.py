@@ -89,6 +89,8 @@ class ServerArgsDefaultTest(TestCase):
         self.assertEqual(env.get("ENABLE_CUDA_GRAPH"), "0")
         self.assertEqual(env.get("ENABLE_CUDA_GRAPH_DEBUG_MODE"), "0")
         self.assertEqual(env.get("USE_AITER_PA"), "1")
+        self.assertEqual(env.get("ENABLE_NATIVE_CUDA_GRAPH"), "0")
+        self.assertEqual(env.get("NUM_NATIVE_CUDA_GRAPH"), "200")
 
         # 7. 采样
         self.assertEqual(env.get("MAX_BATCH_SIZE"), "0")
@@ -407,6 +409,10 @@ class ServerArgsSetTest(TestCase):
             "True",
             "--use_aiter_pa",
             "False",
+            "--enable_native_cuda_graph",
+            "True",
+            "--num_native_cuda_graph",
+            "100",
             # 7. 采样
             "--max_batch_size",
             "128",
@@ -769,6 +775,8 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env.get("ENABLE_CUDA_GRAPH"), "1")
         self.assertEqual(env.get("ENABLE_CUDA_GRAPH_DEBUG_MODE"), "1")
         self.assertEqual(env.get("USE_AITER_PA"), "0")
+        self.assertEqual(env.get("ENABLE_NATIVE_CUDA_GRAPH"), "1")
+        self.assertEqual(env.get("NUM_NATIVE_CUDA_GRAPH"), "100")
 
         # 7. 采样
         self.assertEqual(env["MAX_BATCH_SIZE"], "128")

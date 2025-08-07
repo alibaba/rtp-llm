@@ -288,11 +288,13 @@ void HWKernelConfig::update_from_env_for_test() {
     enable_cuda_graph            = bool_from_env_for_test("ENABLE_CUDA_GRAPH", false);
     enable_cuda_graph_debug_mode = bool_from_env_for_test("ENABLE_CUDA_GRAPH_DEBUG_MODE", false);
     use_aiter_pa                 = bool_from_env_for_test("USE_AITER_PA", true);
+    enable_native_cuda_graph     = bool_from_env_for_test("ENABLE_NATIVE_CUDA_GRAPH", false);
+    num_native_cuda_graph        = autil::EnvUtil::getEnv("NUM_NATIVE_CUDA_GRAPH", 200);
 }
 
 void register_hwkernel_config(pybind11::module& m) {
     pybind11::class_<HWKernelConfig>(m, "HWKernelConfig")
-        .def(pybind11::init<int, bool, bool, bool, bool, std::string, bool, bool, bool>(),
+        .def(pybind11::init<int, bool, bool, bool, bool, std::string, bool, bool, bool, bool, int>(),
              pybind11::arg("deep_gemm_num_sm")             = -1,
              pybind11::arg("arm_gemm_use_kai")             = false,
              pybind11::arg("enable_stable_scatter_add")    = false,
@@ -301,7 +303,9 @@ void register_hwkernel_config(pybind11::module& m) {
              pybind11::arg("rocm_hipblaslt_config")        = "gemm_config.csv",
              pybind11::arg("enable_cuda_graph")            = false,
              pybind11::arg("enable_cuda_graph_debug_mode") = false,
-             pybind11::arg("use_aiter_pa")                 = true)
+             pybind11::arg("use_aiter_pa")                 = true,
+             pybind11::arg("enable_native_cuda_graph")     = false,
+             pybind11::arg("num_native_cuda_graph")        = 200)
         .def("to_string", &HWKernelConfig::to_string)
         .def("update_from_env", &HWKernelConfig::update_from_env_for_test)
         .def_readwrite("deep_gemm_num_sm", &HWKernelConfig::deep_gemm_num_sm)
@@ -312,7 +316,9 @@ void register_hwkernel_config(pybind11::module& m) {
         .def_readwrite("rocm_hipblaslt_config", &HWKernelConfig::rocm_hipblaslt_config)
         .def_readwrite("enable_cuda_graph", &HWKernelConfig::enable_cuda_graph)
         .def_readwrite("enable_cuda_graph_debug_mode", &HWKernelConfig::enable_cuda_graph_debug_mode)
-        .def_readwrite("use_aiter_pa", &HWKernelConfig::use_aiter_pa);
+        .def_readwrite("use_aiter_pa", &HWKernelConfig::use_aiter_pa)
+        .def_readwrite("enable_native_cuda_graph", &HWKernelConfig::enable_native_cuda_graph)
+        .def_readwrite("num_native_cuda_graph", &HWKernelConfig::num_native_cuda_graph);
 }
 
 // DeviceResourceConfig
@@ -688,7 +694,9 @@ inline std::string HWKernelConfig::to_string() const {
         << "rocm_hipblaslt_config: " << rocm_hipblaslt_config << "\n"
         << "enable_cuda_graph: " << enable_cuda_graph << "\n"
         << "enable_cuda_graph_debug_mode" << enable_cuda_graph_debug_mode << "\n"
-        << "use_aiter_pa" << use_aiter_pa << "\n";
+        << "use_aiter_pa" << use_aiter_pa << "\n"
+        << "enable_native_cuda_graph" << enable_native_cuda_graph << "\n"
+        << "num_native_cuda_graph" << num_native_cuda_graph << "\n";
     return oss.str();
 }
 
