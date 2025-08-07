@@ -1,25 +1,21 @@
 #pragma once
 
-namespace rtp_llm
-{
-namespace kernels
-{
+namespace rtp_llm {
+namespace kernels {
 
-struct BatchCopyConfig
-{
-    bool aligned_copy;
-    bool rowAligned;
+struct BatchCopyConfig {
+    size_t uniform_size;
+    bool   is_fully_aligned;
 };
 
+BatchCopyConfig getBatchCopyConfig(const size_t* bytes_host, size_t batch_size);
 
-BatchCopyConfig getBatchCopyConfig(const size_t * bytes_host, size_t batch_size);
+void invokeBatchCopy(void* const*           dst,
+                     void const* const*     src,
+                     size_t*                bytes,
+                     size_t                 batch_size,
+                     const BatchCopyConfig& config,
+                     cudaStream_t           stream);
 
-void invokeBatchCopy(void * const* dst, 
-                     void const* const* src, 
-                     size_t * bytes, 
-                     size_t batch_size, 
-                     const BatchCopyConfig &config,
-                     cudaStream_t stream);
-
-}
-}
+}  // namespace kernels
+}  // namespace rtp_llm
