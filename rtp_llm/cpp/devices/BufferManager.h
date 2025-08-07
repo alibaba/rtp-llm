@@ -10,8 +10,11 @@
 namespace rtp_llm {
 
 struct BufferParams {
-    BufferParams(DataType type, const std::vector<size_t>& dims, AllocationType allocation = AllocationType::DEVICE):
-        type(type), dims(dims), allocation(allocation) {}
+    BufferParams(DataType                   type,
+                 const std::vector<size_t>& dims,
+                 AllocationType             allocation    = AllocationType::DEVICE,
+                 bool                       private_alloc = false):
+        type(type), dims(dims), allocation(allocation), private_alloc(private_alloc) {}
 
     // for allocating pure buffer space
     BufferParams(const std::vector<size_t>& dims, AllocationType allocation = AllocationType::DEVICE):

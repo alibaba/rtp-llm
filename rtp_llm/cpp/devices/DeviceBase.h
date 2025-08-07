@@ -139,6 +139,16 @@ public:
     virtual void
     updateExpertGpuLoads(const MoeConfigs& moe_conf, const OptionalExpertStats& expert_stats, BufferPtr expert_ids);
 
+    void nativeGraphBeginCapture() {
+        native_graph_capturing_ = true;
+    }
+    void nativeGraphEndCapture() {
+        native_graph_capturing_ = false;
+    }
+    bool nativeGraphCapturing() {
+        return native_graph_capturing_;
+    }
+
 public:
     // device-independence op implementations
     CloneOutput  clone(const CloneParams& params) override;
@@ -197,6 +207,7 @@ protected:
 
 protected:
     std::unique_ptr<BufferManager> buffer_manager_;
+    bool                           native_graph_capturing_ = false;
 
 public:
     MlaOpsType mla_ops_type = MlaOpsType::AUTO;

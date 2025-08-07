@@ -93,7 +93,7 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
     }
 
     origin_torch_hip_allocator_ = at::hip::HIPCachingAllocator::allocator;
-    initTorchHIPAllocator(allocator_.get(), device_id_);
+    initTorchHIPAllocator(allocator_.get(), device_id_, this);
     // change torch hip gpu allocate
     at::hip::HIPCachingAllocator::allocator.store(getTorchHIPAllocator());
 
@@ -209,8 +209,7 @@ DevicePrepOutput ROCmDevice::prepareModelRun(const DevicePrepParams& params) {
                                                                                                params.input_lengths,
                                                                                                params.kv_cache_block_id,
                                                                                                params.attn_dtype);
-    output.decode_aiter_attn = AiterAttnParams::prepareDecodeAiterAttnParams(
-        this, params.sequence_lengths);
+    output.decode_aiter_attn        = AiterAttnParams::prepareDecodeAiterAttnParams(this, params.sequence_lengths);
     return std::move(output);
 }
 

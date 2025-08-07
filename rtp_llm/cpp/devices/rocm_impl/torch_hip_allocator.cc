@@ -10,7 +10,7 @@ void local_raw_delete(void* ptr) {
 }
 
 void TorchHipAllocator::malloc(void** devPtr, int device, size_t size, hipStream_t stream) {
-    *devPtr = allocator_->malloc(size);
+    *devPtr = device_->nativeGraphCapturing() ? allocator_->mallocPrivate(size) : allocator_->malloc(size);
 }
 
 void TorchHipAllocator::free(void** ptr) {
@@ -21,7 +21,7 @@ void TorchHipAllocator::free(void** ptr) {
 
 at::DataPtr TorchHipAllocator::allocate(size_t size) {
     auto  device = c10::Device(at::DeviceType::HIP, device_id_);
-    void* ptr    = allocator_->malloc(size);
+    void* ptr    = device_->nativeGraphCapturing() ? allocator_->mallocPrivate(size) : allocator_->malloc(size);
     return {ptr, ptr, &local_raw_delete, device};
 }
 
@@ -55,8 +55,8 @@ void TorchHipAllocator::raw_delete(void* ptr) {
 c10::hip::HIPCachingAllocator::HIPAllocator* getTorchHIPAllocator() {
     return &torch_hip_allocator;
 }
-void initTorchHIPAllocator(IAllocator* allocator, int device_id) {
-    torch_hip_allocator.init(allocator, device_id);
+void initTorchHIPAllocator(IAllocator* allocator, int device_id, DeviceBase* device) {
+    torch_hip_allocator.init(allocator, device_id, device);
 }
 
 }  // namespace rtp_llm

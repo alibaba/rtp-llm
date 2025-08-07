@@ -2,6 +2,7 @@
 
 #include "c10/hip/HIPCachingAllocator.h"
 #include "rtp_llm/cpp/core/allocator.h"
+#include "rtp_llm/cpp/devices/DeviceBase.h"
 
 namespace rtp_llm {
 class TorchHipAllocator: public c10::hip::HIPCachingAllocator::HIPAllocator {
@@ -10,13 +11,15 @@ private:
     IAllocator*                               allocator_;
     at::hip::HIPCachingAllocator::DeviceStats stats;
 
-    int        device_id_;
-    std::mutex mutex;
+    int         device_id_;
+    std::mutex  mutex;
+    DeviceBase* device_;
 
 public:
-    void init(IAllocator* allocator, int device_id) {
+    void init(IAllocator* allocator, int device_id, DeviceBase* device) {
         allocator_ = allocator;
         device_id_ = device_id;
+        device_    = device;
     }
 
     void init(int device_count) override {}
@@ -149,9 +152,13 @@ public:
 
     void beginAllocateToPool(c10::DeviceIndex                 device,
                              c10::hip::MempoolId_t            mempool_id,
-                             std::function<bool(hipStream_t)> filter) override {};
+                             std::function<bool(hipStream_t)> filter) override {
+        device_->nativeGraphBeginCapture();
+    }
 
-    virtual void endAllocateToPool(c10::DeviceIndex device, c10::hip::MempoolId_t mempool_id) override {}
+    void endAllocateToPool(c10::DeviceIndex device, c10::hip::MempoolId_t mempool_id) override {
+        device_->nativeGraphEndCapture();
+    }
 
     void attachAllocatorTraceTracker(c10::hip::HIPCachingAllocator::AllocatorTraceTracker tracker) override {};
 
@@ -160,6 +167,6 @@ public:
 
 c10::hip::HIPCachingAllocator::HIPAllocator* getTorchHIPAllocator();
 
-void initTorchHIPAllocator(IAllocator* allocator, int device_id);
+void initTorchHIPAllocator(IAllocator* allocator, int device_id, DeviceBase* device);
 
 }  // namespace rtp_llm

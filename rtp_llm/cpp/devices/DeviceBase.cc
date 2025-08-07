@@ -77,7 +77,8 @@ BufferStatus DeviceBase::queryBufferStatus() {
 }
 
 BufferPtr DeviceBase::allocateBuffer(const BufferParams& params, const BufferHints& hints) {
-    return buffer_manager_->allocate(params, hints);
+    return buffer_manager_->allocate(
+        {params.type, params.dims, params.allocation, nativeGraphCapturing() ? true : params.private_alloc}, hints);
 }
 
 BufferPtr DeviceBase::allocateBufferLike(const Buffer& buffer, const AllocationType atype, const BufferHints& hints) {
