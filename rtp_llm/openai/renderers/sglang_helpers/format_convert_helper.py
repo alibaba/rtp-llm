@@ -1,12 +1,7 @@
 import secrets
 from typing import List
 
-from rtp_llm.openai.api_datatype import (
-    DeltaMessage,
-    FunctionCall,
-    GPTToolDefinition,
-    ToolCall,
-)
+from rtp_llm.openai.api_datatype import FunctionCall, GPTToolDefinition, ToolCall
 from rtp_llm.openai.renderers.sglang_helpers.entrypoints.openai.protocol import (
     Function,
     Tool,
@@ -16,20 +11,20 @@ from rtp_llm.openai.renderers.sglang_helpers.function_call.core_types import (
 )
 
 
-def streaming_parse_result_to_delta_message(
+def streaming_parse_result_to_tool_calls(
     result: StreamingParseResult,
-) -> tuple[DeltaMessage, str]:
+) -> tuple[List[ToolCall], str]:
     """
-    将 StreamingParseResult 转换为 DeltaMessage
+    将 StreamingParseResult 转换为 ToolCall 列表
 
     Args:
         result: StreamingParseResult 对象，包含普通文本和工具调用信息
 
     Returns:
-        DeltaMessage: 转换后的 DeltaMessage 对象
+        tuple[List[ToolCall], str]: (工具调用列表, 剩余的普通文本)
     """
     # 构建 tool_calls 列表
-    tool_calls = []
+    tool_calls: List[ToolCall] = []
     for call in result.calls:
         # 只有当 name 不为空时才生成新的 ID
         call_id = f"call_{secrets.token_hex(8)}" if call.name else None
@@ -42,16 +37,7 @@ def streaming_parse_result_to_delta_message(
         )
         tool_calls.append(tool_call)
 
-    # 创建 DeltaMessage
-    delta_message = DeltaMessage(
-        role=None,  # 在流式响应中，role 通常只在第一个 chunk 中设置
-        content=None,
-        tool_calls=tool_calls if tool_calls else None,
-    )
-
-    text = result.normal_text if result.normal_text else ""
-
-    return delta_message, text
+    return tool_calls, result.normal_text
 
 
 def rtp_tools_to_sglang_tools(rtp_tools: List[GPTToolDefinition]) -> List[Tool]:
@@ -64,7 +50,7 @@ def rtp_tools_to_sglang_tools(rtp_tools: List[GPTToolDefinition]) -> List[Tool]:
     Returns:
         List[Tool]: SGLang 格式的工具定义列表
     """
-    sglang_tools = []
+    sglang_tools: List[Tool] = []
     for rtp_tool in rtp_tools:
         if rtp_tool.type == "function" and rtp_tool.function:
             sglang_tool = Tool(

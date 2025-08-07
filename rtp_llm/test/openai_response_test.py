@@ -1,6 +1,9 @@
+import asyncio
+import functools
 import json
 import logging
 import os
+from contextlib import asynccontextmanager, contextmanager
 from typing import Any, AsyncGenerator, List
 from unittest import IsolatedAsyncioTestCase, TestCase, main
 
@@ -20,6 +23,7 @@ from rtp_llm.models.base_model import (
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatCompletionStreamResponse,
+    ChatMessage,
     FinisheReason,
     GPTFunctionDefinition,
     GPTToolDefinition,
@@ -30,14 +34,57 @@ from rtp_llm.openai.renderer_factory import ChatRendererFactory, RendererParams
 from rtp_llm.openai.renderers import custom_renderer
 from rtp_llm.openai.renderers.kimik2_renderer import KimiK2Renderer
 from rtp_llm.openai.renderers.qwen3_code_renderer import Qwen3CoderRenderer
+from rtp_llm.openai.renderers.qwen_reasoning_tool_renderer import (
+    QwenReasoningToolRenderer,
+)
 from rtp_llm.openai.renderers.qwen_renderer import QwenRenderer
-from rtp_llm.openai.renderers.qwen_tool_renderer import QwenToolRenderer
 from rtp_llm.test.utils.stream_util import (
     is_valid_tool_call_chunk,
     merge_stream_responses,
 )
 from rtp_llm.tokenizer.tokenization_chatglm3 import ChatGLMTokenizer
 from rtp_llm.tokenizer.tokenization_qwen import QWenTokenizer
+
+
+@asynccontextmanager
+async def think_mode_context():
+    """异步上下文管理器：临时设置 THINK_MODE = 1"""
+    original_mode = getattr(custom_renderer, "THINK_MODE", 0)
+    try:
+        custom_renderer.THINK_MODE = 1
+        yield
+    finally:
+        custom_renderer.THINK_MODE = original_mode
+
+
+@contextmanager
+def think_mode_context_sync():
+    """同步上下文管理器：临时设置 THINK_MODE = 1"""
+    original_mode = getattr(custom_renderer, "THINK_MODE", 0)
+    try:
+        custom_renderer.THINK_MODE = 1
+        yield
+    finally:
+        custom_renderer.THINK_MODE = original_mode
+
+
+def think_mode(func):
+    """装饰器：在函数执行期间设置 THINK_MODE = 1"""
+
+    @functools.wraps(func)
+    async def async_wrapper(*args, **kwargs):
+        async with think_mode_context():
+            return await func(*args, **kwargs)
+
+    @functools.wraps(func)
+    def sync_wrapper(*args, **kwargs):
+        with think_mode_context_sync():
+            return func(*args, **kwargs)
+
+    if asyncio.iscoroutinefunction(func):
+        return async_wrapper
+    else:
+        return sync_wrapper
 
 
 async def fake_output_generator(
@@ -221,7 +268,11 @@ class BaseToolCallTestSuite:
         self._validate_renderer(chat_renderer)
 
         functions, tools = self._create_test_functions_and_tools()
-        request = ChatCompletionRequest(messages=[], tools=tools, stream=stream)
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hello")],
+            tools=tools,
+            stream=stream,
+        )
 
         seq_len_no_use = 314
 
@@ -352,7 +403,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         )
         chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
         request = ChatCompletionRequest(
-            messages=[],
+            messages=[ChatMessage(role=RoleEnum.user, content="hello")],
             functions=[
                 GPTFunctionDefinition(
                     **{
@@ -409,7 +460,9 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             stop_word_ids_list=[],
         )
         chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
-        request = ChatCompletionRequest(messages=[])
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hello")]
+        )
         input_length = 1018
         id_generator = fake_output_generator(
             test_ids, MAX_SEQ_LEN, tokenizer.eos_token_id or 0, input_length
@@ -512,7 +565,10 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
                 }
             )
         ]
-        request = ChatCompletionRequest(messages=[], functions=functions)
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hello")],
+            functions=functions,
+        )
         id_generator = fake_output_generator(
             test_ids, 1024, tokenizer.eos_token_id or 0, 314
         )
@@ -545,7 +601,9 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             },
         )
         # 非functioncall 格式返回，输入没有functions
-        request = ChatCompletionRequest(messages=[])
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hello")]
+        )
         id_generator = fake_output_generator(
             test_ids, 1024, tokenizer.eos_token_id or 0, 314
         )
@@ -664,7 +722,9 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         ]
         tools = [GPTToolDefinition(function=functions[0])]
 
-        request = ChatCompletionRequest(messages=[], tools=tools)
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hello")], tools=tools
+        )
         id_generator = fake_output_generator(
             test_ids, 1024, tokenizer.eos_token_id or 0, 314
         )
@@ -709,7 +769,9 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             },
         )
         # 非functioncall 格式返回，输入没有functions
-        request = ChatCompletionRequest(messages=[])
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hello")]
+        )
         id_generator = fake_output_generator(
             test_ids, 1024, tokenizer.eos_token_id or 0, 314
         )
@@ -751,27 +813,32 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
 
         def _validate_renderer(self, chat_renderer):
             """验证renderer类型"""
-            assert isinstance(chat_renderer, QwenToolRenderer)
+            assert isinstance(chat_renderer, QwenReasoningToolRenderer)
 
         def _get_test_data(self, include_stop_word=False):
             """获取测试数据"""
-            return [
+            # <think>
+            # 好的
+            # </think>
+
+            # <tool_call>
+            # {"name": "get_current_weather", "arguments": {"location": "杭州"}}
+            # </tool_call>
+            # <tool_call>
+            # {"name": "get_current_weather", "arguments": {"location": "北京"}}
+            # </tool_call>
+
+            # 文本内容
+            token_ids = [
                 151667,
                 198,
                 99692,
-                3837,
-                20002,
-                56007,
-                100146,
-                104130,
-                33108,
-                68990,
-                9370,
-                104307,
-                104472,
-                8997,
+                198,
                 151668,
                 271,
+                108704,
+                43815,
+                198,
                 151657,
                 198,
                 4913,
@@ -815,10 +882,12 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
                 151658,
             ]
 
+            return token_ids
+
         def _assert_tool_call_response(
             self,
             response_delta,
-            expected_content="<think>\n好的，用户问的是杭州和北京的天气怎么样。\n</think>",
+            expected_content="<think>\n好的\n</think>\n\n文本内容\n",
         ):
             """断言工具调用响应的内容"""
             assert response_delta.content.strip() == expected_content.strip()
@@ -837,33 +906,24 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             )
             assert response_delta.tool_calls[1].index == 1
 
-    class QwenTestSuite(QwenToolTestSuite):
-        """Qwen相关测试的内嵌测试套件, 看看QwenTool和Qwen是否一样正常工作"""
-
-        def _get_model_type(self):
-            return "qwen_3"
-
-        def _validate_renderer(self, chat_renderer):
-            """验证renderer类型"""
-            assert isinstance(chat_renderer, QwenRenderer)
-
     class QwenThinkTestSuite(QwenToolTestSuite):
         """Qwen相关测试的内嵌测试套件, 看看QwenThinkTool能否正常工作"""
 
         def _get_model_type(self):
-            return "qwen_3"
+            return "qwen_3_moe"
 
         def _validate_renderer(self, chat_renderer):
             """验证renderer类型"""
-            assert isinstance(chat_renderer, QwenRenderer)
+            assert isinstance(chat_renderer, QwenReasoningToolRenderer)
 
         def _assert_tool_call_response(
             self,
             response_delta,
-            expected_content="好的，用户问的是杭州和北京的天气怎么样。\n",
+            expected_content="文本内容",
         ):
             """断言工具调用响应的内容"""
-            assert response_delta.reasoning_content == expected_content
+            assert response_delta.content.strip() == expected_content.strip()
+            assert response_delta.reasoning_content.strip() == "好的"
             assert response_delta.tool_calls is not None
             assert len(response_delta.tool_calls) == 2
             assert response_delta.tool_calls[0].function.name == "get_current_weather"
@@ -878,6 +938,18 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
                 == '{"location": "北京"}'
             )
             assert response_delta.tool_calls[1].index == 1
+
+    class QwenForceThinkTestSuite(QwenThinkTestSuite):
+        """Qwen相关测试的内嵌测试套件, 看看QwenThinkTool能否正常工作"""
+
+        def _get_test_data(self, include_stop_word=False):
+            test_ids = super()._get_test_data(include_stop_word)
+            # 移除开头的<think>和\n
+            return test_ids[2:]
+
+        @override
+        def _get_tokenizer_path(self):
+            return "qwen3_30b_thinking_0527/tokenizer/"
 
     class KimiK2TestSuite(BaseToolCallTestSuite):
         """KimiK2相关测试的内嵌测试套件"""
@@ -1299,29 +1371,29 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         qwen_suite = self.QwenToolTestSuite(self)
         await qwen_suite.test_no_stream()
 
-    async def test_parse_qwen_call_streaming_case(self):
-        """测试QwenTool工具调用流式场景"""
-        qwen_suite = self.QwenTestSuite(self)
-        await qwen_suite.test_streaming_case()
-
-    async def test_parse_qwen_call_no_stream(self):
-        """测试QwenTool工具调用非流式场景"""
-        qwen_suite = self.QwenTestSuite(self)
-        await qwen_suite.test_no_stream()
-
+    @think_mode
     async def test_parse_qwen_think_call_streaming_case(self):
-        """测试QwenTool工具调用流式场景"""
+        """测试QwenTool工具思考调用流式场景"""
         qwen_suite = self.QwenThinkTestSuite(self)
-        custom_renderer.THINK_MODE = 1
         await qwen_suite.test_streaming_case(stop_words_str=["<im_end>"])
-        custom_renderer.THINK_MODE = 0
 
+    @think_mode
     async def test_parse_qwen_think_call_no_stream(self):
-        """测试QwenTool工具调用非流式场景"""
+        """测试QwenTool工具思考调用非流式场景"""
         qwen_suite = self.QwenThinkTestSuite(self)
-        custom_renderer.THINK_MODE = 1
         await qwen_suite.test_no_stream(stop_words_str=["<im_end>"])
-        custom_renderer.THINK_MODE = 0
+
+    @think_mode
+    async def test_parse_qwen_force_think_call_streaming_case(self):
+        """测试QwenTool工具思考调用流式场景"""
+        qwen_suite = self.QwenForceThinkTestSuite(self)
+        await qwen_suite.test_streaming_case(stop_words_str=["<im_end>"])
+
+    @think_mode
+    async def test_parse_qwen_force_think_call_no_stream(self):
+        """测试QwenTool工具思考调用非流式场景"""
+        qwen_suite = self.QwenForceThinkTestSuite(self)
+        await qwen_suite.test_no_stream(stop_words_str=["<im_end>"])
 
     async def test_parse_kimik2_tool_call_streaming_case(self):
         """测试KimiK2工具调用流式场景"""
@@ -1358,7 +1430,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         suite = self.Qwen3CoderComplexTestSuite(self)
         await suite.test_no_stream()
 
-    class QwenMergeLogicTestSuite(QwenTestSuite):
+    class QwenMergeLogicTestSuite(QwenToolTestSuite):
         """基于QwenTestSuite，专门测试generate_choice合并逻辑"""
 
         def _create_two_step_mock_model_rpc_client(self, tokenizer, test_ids, seq_len):
@@ -1480,7 +1552,11 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
                 )
             )
 
-            request = ChatCompletionRequest(messages=[], tools=tools, stream=False)
+            request = ChatCompletionRequest(
+                messages=[ChatMessage(role=RoleEnum.user, content="hello")],
+                tools=tools,
+                stream=False,
+            )
             generate_config = GenerateConfig(is_streaming=False)
 
             choice_generator = chat_renderer.generate_choice(
@@ -1542,8 +1618,8 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             self.endpoint.stop_words_str_list, ["<|user|>", "<|observation|>"]
         )
 
+    @think_mode
     async def test_think_label(self):
-        custom_renderer.THINK_MODE = 1
         custom_renderer.THINK_END_TAG = "ulaire"  # id = 73675
         os.environ["MODEL_TYPE"] = "qwen"
         tokenizer = QWenTokenizer(
@@ -1560,7 +1636,9 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             stop_word_ids_list=[],
         )
         chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
-        request = ChatCompletionRequest(messages=[])
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hello")]
+        )
         input_length = 109
         id_generator = fake_output_generator(
             test_ids, MAX_SEQ_LEN, tokenizer.eos_token_id or 0, input_length
@@ -1595,8 +1673,8 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             {"audio_tokens": None, "reasoning_tokens": 5},
         )
 
+    @think_mode
     async def test_think_label_more_than_one_token(self):
-        custom_renderer.THINK_MODE = 1
         custom_renderer.THINK_START_TAG = "我可以"
         custom_renderer.THINK_END_TAG = "可以ulaire"
         os.environ["MODEL_TYPE"] = "qwen"
@@ -1614,7 +1692,9 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             stop_word_ids_list=[],
         )
         chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
-        request = ChatCompletionRequest(messages=[])
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hello")]
+        )
         input_length = 109
         id_generator = fake_output_generator(
             test_ids, MAX_SEQ_LEN, tokenizer.eos_token_id or 0, input_length
@@ -1649,8 +1729,8 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             {"audio_tokens": None, "reasoning_tokens": 5},
         )
 
+    @think_mode
     async def test_think_label_real_situation_union(self):
-        custom_renderer.THINK_MODE = 1
         custom_renderer.THINK_START_TAG = "<think>\n"
         custom_renderer.THINK_END_TAG = "</think>\n"
         os.environ["MODEL_TYPE"] = "qwen_2"
@@ -1668,7 +1748,9 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             stop_word_ids_list=[],
         )
         chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
-        request = ChatCompletionRequest(messages=[])
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hello")]
+        )
         input_length = 109
         id_generator = fake_output_generator(
             test_ids, MAX_SEQ_LEN, tokenizer.eos_token_id or 0, input_length
@@ -1690,7 +1772,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
                 "message": {
                     "role": "assistant",
                     "content": "\n使用使用使用",
-                    "reasoning_content": "可以可以可以",
+                    "reasoning_content": "\n可以可以可以",
                     "function_call": None,
                     "tool_calls": None,
                     "partial": False,

@@ -1,18 +1,22 @@
 import logging
+from typing import Optional
 
 from typing_extensions import override
 
+from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.openai.renderer_factory_register import register_renderer
+from rtp_llm.openai.renderers.reasoning_tool_base_renderer import (
+    ReasoningToolBaseRenderer,
+)
 from rtp_llm.openai.renderers.sglang_helpers.function_call.base_format_detector import (
     BaseFormatDetector,
 )
 from rtp_llm.openai.renderers.sglang_helpers.function_call.kimik2_detector import (
     KimiK2Detector,
 )
-from rtp_llm.openai.renderers.tool_base_renderer import ToolBaseRenderer
 
 
-class KimiK2Renderer(ToolBaseRenderer):
+class KimiK2Renderer(ReasoningToolBaseRenderer):
     """KimiK2渲染器，使用 KimiK2Detector 进行工具调用解析"""
 
     @override
@@ -20,9 +24,14 @@ class KimiK2Renderer(ToolBaseRenderer):
         """设置KimiK2特定的停止词"""
         self.add_extra_stop_words(["<|im_end|>"])
 
-    def _create_detector(self) -> BaseFormatDetector:
-        """创建KimiK2检测器"""
-        return KimiK2Detector()
+    @override
+    def _create_detector(
+        self, request: ChatCompletionRequest
+    ) -> Optional[BaseFormatDetector]:
+        if request.tools:
+            return KimiK2Detector()
+        else:
+            return None
 
     @override
     def _clean_stop_words(self, text: str) -> str:

@@ -709,10 +709,15 @@ class CustomChatRenderer:
             if buffer.output is None:
                 raise Exception("buffer last output should not be None")
             # 延迟引入, 避免循环import
-            from rtp_llm.openai.renderers.tool_base_renderer import ToolStreamStatus
+            from rtp_llm.openai.renderers.reasoning_tool_base_renderer import (
+                ReasoningToolStreamStatus,
+            )
 
             # 判断buffer有无generating_tool_call这个属性
-            if isinstance(buffer, ToolStreamStatus) and buffer.generating_tool_call:
+            if (
+                isinstance(buffer, ReasoningToolStreamStatus)
+                and buffer.generating_tool_call
+            ):
                 buffer.finish_reason = FinisheReason.tool_calls
 
             if buffer.finish_reason == None:
@@ -765,6 +770,10 @@ class CustomChatRenderer:
         global THINK_MODE
         return THINK_MODE
 
+    def should_enable_think_mode(self, request: ChatCompletionRequest):
+        # 留出方法给子类重写, 避免重复的think处理
+        return self.in_think_mode(request)
+
     async def render_response_stream(
         self,
         output_generator: AsyncGenerator[GenerateOutputs, None],
@@ -778,7 +787,7 @@ class CustomChatRenderer:
         )
         status_list = await self._create_status_list(nums_output, request)
         index = 0
-        enable_think_mode = self.in_think_mode(request)
+        enable_think_mode = self.should_enable_think_mode(request)
         think_status_list = [
             ThinkStatus(
                 enable_think_mode=enable_think_mode,

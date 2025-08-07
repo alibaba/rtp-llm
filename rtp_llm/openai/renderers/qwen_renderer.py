@@ -6,9 +6,9 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple, Union
 
-from rtp_llm.openai.renderers.tool_base_renderer import ToolStreamStatus
 import torch
 from transformers import Qwen2Tokenizer
+from typing_extensions import override
 
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.models.base_model import GenerateOutput, GenerateOutputs
@@ -28,6 +28,7 @@ from rtp_llm.openai.api_datatype import (
 from rtp_llm.openai.renderer_factory_register import register_renderer
 from rtp_llm.openai.renderers.basic_renderer import BasicRenderer
 from rtp_llm.openai.renderers.custom_renderer import (
+    THINK_START_TAG,
     CustomChatRenderer,
     OutputDelta,
     RenderedInputs,
@@ -37,8 +38,11 @@ from rtp_llm.openai.renderers.custom_renderer import (
     StreamStatusSync,
     ThinkStatus,
 )
-from rtp_llm.openai.renderers.qwen_tool_renderer import (
-    QwenToolRenderer,
+from rtp_llm.openai.renderers.qwen_reasoning_tool_renderer import (
+    QwenReasoningToolRenderer,
+)
+from rtp_llm.openai.renderers.reasoning_tool_base_renderer import (
+    ReasoningToolStreamStatus,
 )
 from rtp_llm.tokenizer.tokenization_qwen import QWenTokenizer
 from rtp_llm.utils.word_util import (
@@ -203,7 +207,9 @@ class QwenRenderer(CustomChatRenderer):
         super().__init__(tokenizer, renderer_params)
         self.add_extra_stop_word_ids([[37763, 367, 25], [151643]])  # Observation:
 
-        self.qwen_tool_renderer = QwenToolRenderer(tokenizer, renderer_params)
+        self.qwen_reasoning_tool_renderer = QwenReasoningToolRenderer(
+            tokenizer, renderer_params
+        )
 
         self.template_chat_renderer: Optional[BasicRenderer] = None
         try:
@@ -217,8 +223,8 @@ class QwenRenderer(CustomChatRenderer):
             pass
 
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
-        if request.tools:
-            return self.qwen_tool_renderer.render_chat(request)
+        if request.tools or self.in_think_mode(request):
+            return self.qwen_reasoning_tool_renderer.render_chat(request)
 
         if (self.template_chat_renderer != None) and (
             (request.functions == None) or (len(request.functions) == 0)
@@ -406,8 +412,8 @@ class QwenRenderer(CustomChatRenderer):
         stop_word_slice_list: List[str],
         is_streaming: bool,
     ) -> OutputDelta:
-        if status.request.tools:
-            return await self.qwen_tool_renderer._update_single_status(
+        if status.request.tools or self.in_think_mode(status.request):
+            return await self.qwen_reasoning_tool_renderer._update_single_status(
                 status,
                 output,
                 max_new_tokens,
@@ -470,11 +476,10 @@ class QwenRenderer(CustomChatRenderer):
     async def _create_status_list(
         self, n: int, request: ChatCompletionRequest
     ) -> List[StreamStatus]:
-        if request.tools:
-            return [
-                ToolStreamStatus(request, self.qwen_tool_renderer._create_detector())
-                for _ in range(n)
-            ]        
+        if request.tools or self.in_think_mode(request):
+            return await self.qwen_reasoning_tool_renderer._create_status_list(
+                n, request
+            )
         if request.functions and (len(request.functions) > 0):
             return [QwenStreamStatus(request) for _ in range(n)]
         else:
@@ -488,8 +493,8 @@ class QwenRenderer(CustomChatRenderer):
         is_streaming: bool,
         think_status: ThinkStatus,
     ):
-        if buffer_list[0].request.tools:
-            return await self.qwen_tool_renderer._flush_buffer(
+        if buffer_list[0].request.tools or self.in_think_mode(buffer_list[0].request):
+            return await self.qwen_reasoning_tool_renderer._flush_buffer(
                 buffer_list, stop_words_str, is_streaming, think_status
             )
 
@@ -700,5 +705,3 @@ register_renderer("qwen_13b", QwenRenderer)
 register_renderer("qwen_1b8", QwenRenderer)
 register_renderer("qwen_2", QwenRenderer)
 register_renderer("qwen_2_moe", QwenRenderer)
-register_renderer("qwen_3", QwenRenderer)
-register_renderer("qwen_3_moe", QwenRenderer)

@@ -1,23 +1,34 @@
 import json
+from typing import Optional
 
 from jinja2 import Environment
+from typing_extensions import override
 
+from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.openai.renderer_factory_register import register_renderer
+from rtp_llm.openai.renderers.reasoning_tool_base_renderer import (
+    ReasoningToolBaseRenderer,
+)
 from rtp_llm.openai.renderers.sglang_helpers.function_call.base_format_detector import (
     BaseFormatDetector,
 )
 from rtp_llm.openai.renderers.sglang_helpers.function_call.qwen3_coder_detector import (
     Qwen3CoderDetector,
 )
-from rtp_llm.openai.renderers.tool_base_renderer import ToolBaseRenderer
 
 
-class Qwen3CoderRenderer(ToolBaseRenderer):
+class Qwen3CoderRenderer(ReasoningToolBaseRenderer):
     """Qwen3CoderRenderer 使用 Qwen3CoderDetector 进行工具调用解析"""
 
-    def _create_detector(self) -> BaseFormatDetector:
+    @override
+    def _create_detector(
+        self, request: ChatCompletionRequest
+    ) -> Optional[BaseFormatDetector]:
         """创建Qwen3Coder检测器"""
-        return Qwen3CoderDetector()
+        if request.tools:
+            return Qwen3CoderDetector()
+        else:
+            return None
 
     def _customize_jinja_env(self, env: Environment) -> None:
         """自定义Jinja2环境，添加smart items过滤器"""
