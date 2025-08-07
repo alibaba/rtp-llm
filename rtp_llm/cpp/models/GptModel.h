@@ -40,65 +40,6 @@ struct EmbeddingPostOutput {
     BufferPtr residual;
 };
 
-// A batch includes two parts: context batch and decoder batch.
-// context batch is request for initial word, decoder batch is request for incremental word.
-// ids and lengths are int32_t
-struct GptModelInputs {
-    // input_lengths holds original input length for requests,
-    // shape [decoder_batch_size + context_batch_size], int32
-    // sequence_lengths holds current sequence length for incremental decoding requests,
-    // shape [decoder_batch_size], int32
-    mutable rtp_llm::BufferPtr combo_tokens;       // [cumulated_seq_len]
-    rtp_llm::BufferPtr         input_lengths;      // [batch_size]
-    rtp_llm::BufferPtr         sequence_lengths;   // [decoder_batch_size]
-    rtp_llm::BufferPtr         lm_output_indexes;  // [sum(lm_output_lengths)]
-    rtp_llm::BufferPtr         lm_output_lengths;  // [total_batch_size]
-    rtp_llm::BufferPtr         prefix_lengths;     // [context_batch_size]
-
-    rtp_llm::BufferPtr combo_tokens_type_ids;  // [cumulated_seq_len]
-    rtp_llm::BufferPtr combo_position_ids;     // [cumulated_seq_len]
-
-    // for mtp model
-    rtp_llm::BufferPtr last_hidden_states;
-
-    // for tp sync
-    rtp_llm::BufferPtr lora_ids;            // [batch_size]
-    rtp_llm::BufferPtr lora_input_lengths;  // [batch_size]
-
-    // no need tp sync
-    rtp_llm::lora::LoraModelInputPtr lora_model_input;
-
-    rtp_llm::BufferPtr attention_mask;  // [batch_size, seq_len, seq_len]
-
-    rtp_llm::BufferPtr kv_cache_block_id;  // [batch_size, block_nums], kv cache block block id
-
-    std::optional<std::vector<rtp_llm::BufferPtr>> multimodal_features;  // all features in gathered stream stored here
-    rtp_llm::BufferPtr text_tokens_mask;  // text part in multimodal input tokens [cumulated_seq_len]
-    rtp_llm::BufferPtr mm_features_locs;  // features index
-
-    std::optional<std::vector<rtp_llm::BufferPtr>>
-                       input_embeddings;       // all input embeddings in gathered stream stored here
-    rtp_llm::BufferPtr input_embeddings_locs;  // input embeddings index
-
-    rtp_llm::BufferPtr request_id;             // int64, [context_batch_size]
-    rtp_llm::BufferPtr request_pd_separation;  // bool, [context_batch_size]
-    rtp_llm::BufferPtr cache_keys;             // [context_batch_size]
-    size_t             k_block_size;
-    size_t             v_block_size;
-    size_t             scale_block_size;
-    size_t             seq_size_per_block;
-    bool               pd_separation   = false;
-    bool               decode_entrance = false;
-
-    bool need_all_logits = false;
-    bool need_moe_gating = false;
-    bool warmup          = false;
-    bool skip_run        = false;
-
-public:
-    std::string debugString() const;
-};
-
 enum GptModelInputIndex : size_t {
     comboTokens,
     inputLengths,
@@ -123,20 +64,6 @@ enum GptModelInputIndex : size_t {
 };
 
 void tpSyncModelInputs(GptModelInputs& inputs, rtp_llm::DeviceBase* device);
-
-struct GptModelOutputs {
-    rtp_llm::BufferPtr logits;
-    rtp_llm::BufferPtr hidden_states;
-    rtp_llm::BufferPtr all_hidden_states;
-    rtp_llm::BufferPtr all_logits;
-    rtp_llm::BufferPtr softmax_result;
-
-    std::vector<rtp_llm::BufferPtr> moe_gating;
-
-    mutable rtp_llm::BufferPtr scatter_logits;
-    mutable rtp_llm::BufferPtr scatter_hidden_states;
-    std::shared_ptr<void>      captured_values;
-};
 
 using LoraMap = std::unordered_map<std::string, rtp_llm::ConstBufferPtr>;
 

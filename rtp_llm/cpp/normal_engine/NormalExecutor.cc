@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/models/GptModel.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
+#include "rtp_llm/cpp/models/NativeDeviceGraphModel.h"
 #include "rtp_llm/cpp/models/Sampler.h"
 #include "rtp_llm/cpp/th_op/GptInitParameter.h"
 
@@ -66,6 +67,9 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
     if (!params.py_model.is_none()) {
         RTP_LLM_LOG_INFO("init executor with python model");
         model_.reset(new PyWrappedModel(model_init_params, params.py_model));
+    } else if (device_->initParams().hw_kernel_config.enable_native_cuda_graph) {
+        RTP_LLM_LOG_INFO("init legacy c++ gpt model with native cuda graph");
+        model_.reset(new NativeDeviceGraphModel(model_init_params));
     } else {
         RTP_LLM_LOG_INFO("init legacy c++ gpt model");
         model_.reset(new GptModel(model_init_params));

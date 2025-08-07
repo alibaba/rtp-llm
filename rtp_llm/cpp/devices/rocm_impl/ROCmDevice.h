@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/devices/DeviceOps.h"
 #include "rtp_llm/cpp/devices/DeviceData.h"
 #include "rtp_llm/cpp/devices/BufferManager.h"
+#include "rtp_llm/cpp/devices/rocm_impl/NativeHipGraphRunner.h"
 
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
@@ -27,12 +28,11 @@
 namespace rtp_llm {
 
 struct AiterAttnParams {
-  BufferPtr sequence_lengths;
-  BufferPtr sequence_lengths_host;
-  torch::Tensor sequence_lengths_t;
+    BufferPtr     sequence_lengths;
+    BufferPtr     sequence_lengths_host;
+    torch::Tensor sequence_lengths_t;
 
-  static ParamsPtr prepareDecodeAiterAttnParams(
-      rtp_llm::DeviceBase* device, const BufferPtr& sequence_lengths_host);
+    static ParamsPtr prepareDecodeAiterAttnParams(rtp_llm::DeviceBase* device, const BufferPtr& sequence_lengths_host);
 };
 
 struct FlashInferAttnParams {
@@ -204,13 +204,26 @@ public:
                                  bool                         use_fp8_fmha,
                                  bool                         use_offset_array = false);
 
+    std::shared_ptr<NativeGraphRunner> getNativeGraphRunner() override {
+        return std::make_shared<NativeHipGraphRunner<GptModelInputs, GptModelOutputs>>(this);
+    }
+    void registerARGraphBuffers() {
+        if (custom_allreduce_comm_)
+            custom_allreduce_comm_->registerGraphBuffers();
+    }
+
 protected:
     void InvokeROCmDeepGemm(const GemmParams& params, BufferPtr output);
     void InvokeROCmPTPCGemm(const GemmParams& params, BufferPtr output);
     // void prepareCommBuffer(const PrepareCommBufferParams& params) override;
 
 public:
-    BufferPtr   testVecAdd(const BufferPtr a, const BufferPtr b);
+    BufferPtr testVecAdd(const BufferPtr a, const BufferPtr b);
+    void      setStream(hipStream_t stream) {
+        current_stream_ = stream;
+        stream_         = stream;
+        hipblas_mm_wrapper_->setStream(stream);
+    }
     hipStream_t getStream(DeviceStream stream);
     hipStream_t getStream() {
         return stream_;

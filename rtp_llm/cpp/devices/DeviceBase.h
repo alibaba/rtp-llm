@@ -8,6 +8,8 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
 #include "rtp_llm/cpp/stats/ExpertStats.h"
 #include "rtp_llm/cpp/devices/GraphBase.h"
+#include "rtp_llm/cpp/devices/NativeGraphRunnerBase.h"
+
 namespace rtp_llm {
 
 #define CACHED_BUF(dtype, atype, ...)                                                                                  \
@@ -63,6 +65,8 @@ namespace rtp_llm {
                 buffers.emplace_back(std::move(buffer));                                                               \
             });                                                                                                        \
     }()
+
+using NativeGraphRunner = NativeGraphRunnerBase<GptModelInputs, GptModelOutputs>;
 
 class DeviceBase: public DeviceOps {
 public:
@@ -139,6 +143,9 @@ public:
     virtual void
     updateExpertGpuLoads(const MoeConfigs& moe_conf, const OptionalExpertStats& expert_stats, BufferPtr expert_ids);
 
+    virtual std::shared_ptr<NativeGraphRunner> getNativeGraphRunner() {
+        throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+    }
     void nativeGraphBeginCapture() {
         native_graph_capturing_ = true;
     }

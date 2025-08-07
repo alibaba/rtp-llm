@@ -20,47 +20,6 @@ using namespace rtp_llm;
 
 namespace rtp_llm {
 
-string GptModelInputs::debugString() const {
-    if (!Logger::getEngineLogger().isDebugMode()) {
-        return "";
-    }
-    std::stringstream debug_string;
-    debug_string << "GptModelInputs { "
-                 << "combo_tokens: " << combo_tokens->debugStringWithData<int32_t>()
-                 << ", input_lengths: " << input_lengths->debugStringWithData<int32_t>()
-                 << ", sequence_lengths: " << sequence_lengths->debugStringWithData<int32_t>()
-                 << ", prefix_lengths: " << prefix_lengths->debugStringWithData<int32_t>();
-    if (combo_position_ids) {
-        debug_string << ", combo_position_ids: " << combo_position_ids->debugStringWithData<int32_t>();
-    }
-    if (lora_ids) {
-        debug_string << ", lora_ids: " << lora_ids->debugStringWithData<int32_t>();
-    }
-    if (lora_input_lengths) {
-        debug_string << ", lora_input_lengths: " << lora_input_lengths->debugStringWithData<int32_t>();
-    }
-    if (kv_cache_block_id) {
-        debug_string << ", kv_cache_block_id: " << kv_cache_block_id->debugStringWithData<int32_t>();
-    }
-    if (attention_mask) {
-        debug_string << ", attention_mask: " << attention_mask->debugString();
-    }
-    if (request_id) {
-        debug_string << ", request_id: " << request_id->debugStringWithData<int64_t>();
-    }
-    if (request_pd_separation) {
-        debug_string << ", request_pd_separation: " << request_pd_separation->debugStringWithData<bool>();
-    }
-    if (cache_keys) {
-        debug_string << ", cache_keys: " << cache_keys->debugStringWithData<int64_t>();
-    }
-    debug_string << ", k block_size: " << k_block_size;
-    debug_string << ", v block_size: " << v_block_size;
-    debug_string << ", pd_separation: " << pd_separation;
-    debug_string << "}";
-    return debug_string.str();
-}
-
 GptModel::GptModel(const GptModelInitParams& params):
     device_(params.device),
     device_props_(params.device->getDeviceProperties()),
