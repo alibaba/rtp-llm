@@ -128,8 +128,8 @@ def http_deps():
 
     http_file(
         name = "hf3fs_rpm",
-        urls = ["https://271332.oss-cn-hangzhou-zmf.aliyuncs.com/3fs/rpm/hf3fs-1.1.0-1.alios7.x86_64.rpm"],
-        sha256 = "ebe51a157d0315e1b1c65d61e22401fac92cfd26fe331aaa37beed86cf08a01f"
+        urls = ["http://search-ad.oss-cn-hangzhou-zmf.aliyuncs.com/pkg%2F3fs%2Fhf3fs-1.2.0-1.alios7.x86_64.rpm"],
+        sha256 = "d5c9ce8474f6bf2177c11c4dc36acf633b5d4763353cd70156b0a0b2d54b8316"
     )
 
     ck_repo(name = "composable_kernel")
