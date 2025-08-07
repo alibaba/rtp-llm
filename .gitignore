@@ -45,7 +45,9 @@ package/maga_start.sh
 
 model_rpc_service_pb2.py
 model_rpc_service_pb2_grpc.py
+rtp_llm/cpp/deep_gemm/cutlass_hdr
 
 cuda_profiler*.json
+normal_profiler*.json
 
 core-*
