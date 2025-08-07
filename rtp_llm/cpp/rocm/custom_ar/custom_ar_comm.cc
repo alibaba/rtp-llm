@@ -2,6 +2,8 @@
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/rocm/hip_utils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "c10/hip/HIPStream.h"
+#include "c10/hip/HIPGraphsC10Utils.h"
 #include <climits>
 #include <cstdint>
 #include <sys/types.h>
@@ -40,7 +42,41 @@ bool CustomAllReduceComm::checkAllReduceAvailable(size_t elts_total_num, DataTyp
 }
 
 void CustomAllReduceComm::allReduce(torch::Tensor& input_tensor, torch::Tensor& output_tensor) {
-    aiter::all_reduce_unreg(fa_, input_tensor, buffer_, output_tensor);
+    if (at::hip::currentStreamCaptureStatusMayInitCtx() != at::hip::CaptureStatus::None) {
+        aiter::all_reduce_reg(fa_, input_tensor, output_tensor, false);
+    } else {
+        aiter::all_reduce_unreg(fa_, input_tensor, buffer_, output_tensor);
+    }
+}
+
+void CustomAllReduceComm::registerGraphBuffers() {
+    auto [handle, offset] = aiter::get_graph_buffer_ipc_meta(fa_);
+    auto _handles         = all_gather(handle.data_ptr(), handle.numel(), at::hip::getCurrentHIPStream().stream());
+    auto _offsets = all_gather(offset.data(), sizeof(int64_t) * offset.size(), at::hip::getCurrentHIPStream().stream());
+    std::vector<std::string>          handles(world_size_);
+    std::vector<std::vector<int64_t>> offsets(world_size_);
+    for (int i = 0; i < world_size_; ++i) {
+        handles[i] = std::string(_handles[i].data(), handle.numel());
+        offsets[i] = std::vector<int64_t>(_offsets[i].size() / sizeof(int64_t));
+        std::memcpy(offsets[i].data(), _offsets[i].data(), _offsets[i].size());
+    }
+    aiter::register_graph_buffers(fa_, handles, offsets);
+}
+
+std::vector<std::vector<char>> CustomAllReduceComm::all_gather(void* addr, size_t size, hipStream_t stream) {
+    char* device_buffer;
+    ROCM_CHECK(hipMalloc(&device_buffer, size * world_size_));
+    ROCM_CHECK(hipMemcpyAsync(device_buffer + rank_index_ * size, addr, size, hipMemcpyHostToDevice, stream));
+    ftNcclAllGather(device_buffer, device_buffer, size, rank_index_, nccl_para_, stream);
+    ROCM_CHECK(hipStreamSynchronize(stream));
+    std::vector<std::vector<char>> ret(world_size_);
+    for (size_t i = 0; i < world_size_; ++i) {
+        std::vector<char> tmp(size);
+        ROCM_CHECK(hipMemcpyAsync(tmp.data(), device_buffer + size * i, size, hipMemcpyDeviceToHost, stream));
+        ret[i] = tmp;
+    }
+    ROCM_CHECK(hipFreeAsync(device_buffer, stream));
+    return ret;
 }
 
 void CustomAllReduceComm::init(const NcclParam& nccl_para, hipStream_t stream) {
@@ -64,6 +100,7 @@ void CustomAllReduceComm::init(const NcclParam& nccl_para, hipStream_t stream) {
     fa_ = aiter::init_custom_ar(meta_, rank_data_, meta_handles, meta_offsets, rank_index_, support_nv_link_);
 
     aiter::register_buffer(fa_, buffer_, buffer_handles, buffer_offsets);
+    nccl_para_ = nccl_para;
 }
 
 std::vector<std::string>

@@ -10,23 +10,22 @@ inline torch::Tensor Buffer2torchTensorCustom(const Buffer& buf, std::vector<int
     return torch::from_blob((void*)((char*)(buf.data()) + offset), shape, option);
 }
 
-void runAiterPA(const AttentionModuleParams& params,
-		rtp_llm::DeviceBase*         device,
-		Buffer&                      q_tmp) {
-    auto out   = Buffer2torchTensor(params.output,false);
-    auto query = Buffer2torchTensor(q_tmp,false);
-    
+void runAiterPA(const AttentionModuleParams& params, rtp_llm::DeviceBase* device, Buffer& q_tmp) {
+    auto out   = Buffer2torchTensor(params.output, false);
+    auto query = Buffer2torchTensor(q_tmp, false);
+
     if (q_tmp.shape().size() < 3) {
         throw std::runtime_error("aiter_paged_attention only support 3-dim input");
     } else if (q_tmp.shape().size() > 3) {
         query = query.reshape({query.size(0), query.size(1), -1});
     }
 
-    size_t    num_seqs           = q_tmp.shape()[0];
-    size_t    num_heads          = params.configs.head_num;
-    size_t    head_size          = params.configs.size_per_head;
-    int64_t   partition_size     = 256;
-    int64_t   max_seq_len        = params.common.decoder_max_seq_len + 1;
+    size_t  num_seqs       = q_tmp.shape()[0];
+    size_t  num_heads      = params.configs.head_num;
+    size_t  head_size      = params.configs.size_per_head;
+    int64_t partition_size = 256;
+    int64_t max_seq_len =
+        device->nativeGraphCapturing() ? device->initParams().max_seq_len : params.common.decoder_max_seq_len + 1;
     size_t    max_num_partitions = (max_seq_len + partition_size - 1) / partition_size;
     auto      datatype           = params.output.type();
     BufferPtr exp_sums_buffer    = device->allocateBuffer(
@@ -65,17 +64,16 @@ void runAiterPA(const AttentionModuleParams& params,
     std::optional<torch::Tensor> fp8_out_scale;
     std::optional<torch::Tensor> alibi_slopes;
 
-    auto block_tables = Buffer2torchTensor(params.common.kv_cache->kv_cache_block_id,false);
-    //int64_t max_num_blocks_per_seq = (int64_t)params.common.kv_cache->kv_cache_block_id->shape()[1];
-    //auto block_tables = Buffer2torchTensorCustom(*params.common.kv_cache->kv_cache_block_id,
-    //                                            {(int64_t)params.common.kv_cache->kv_cache_block_id->shape()[0],
-    //                                             max_num_blocks_per_seq,
-    //                                            }, 0);
+    auto block_tables = Buffer2torchTensor(params.common.kv_cache->kv_cache_block_id, false);
+    // int64_t max_num_blocks_per_seq = (int64_t)params.common.kv_cache->kv_cache_block_id->shape()[1];
+    // auto block_tables = Buffer2torchTensorCustom(*params.common.kv_cache->kv_cache_block_id,
+    //                                             {(int64_t)params.common.kv_cache->kv_cache_block_id->shape()[0],
+    //                                              max_num_blocks_per_seq,
+    //                                             }, 0);
 
     auto aiter_attn = (AiterAttnParams*)params.common.decode_aiter_attn.get();
     if (!aiter_attn) {
-      throw std::runtime_error(
-          "aiter_attn must be setting when using aiter pa");
+        throw std::runtime_error("aiter_attn must be setting when using aiter pa");
     }
 
     auto context_lens = aiter_attn->sequence_lengths_t;

@@ -30,6 +30,10 @@ public:
 
     static bool shouldCustomAR(const std::vector<size_t>& tp_ranks, size_t rank);
 
+    void registerGraphBuffers();
+
+    std::vector<std::vector<char>> all_gather(void* addr, size_t size, hipStream_t stream);
+
 private:
     static size_t getCommBufThreshold();
 
@@ -50,6 +54,7 @@ private:
     torch::Tensor       buffer_;
     torch::Tensor       rank_data_;
     int64_t             fa_;
+    NcclParam           nccl_para_;
 };
 
 std::unique_ptr<CustomAllReduceComm>

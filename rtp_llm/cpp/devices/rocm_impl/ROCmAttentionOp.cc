@@ -318,6 +318,13 @@ void prepareDecodeAiterAttnParamsImpl(AiterAttnParams*     params,
                                       rtp_llm::DeviceBase* device,
                                       const BufferPtr&     sequence_lengths_host,
                                       const uint64_t       batch_size) {
+    if (device->nativeGraphCapturing()) {
+        params->sequence_lengths_host = nullptr;
+        params->sequence_lengths      = device->clone({*sequence_lengths_host, AllocationType::DEVICE});
+        params->sequence_lengths_t    = Buffer2torchTensor(params->sequence_lengths, false);
+        params->sequence_lengths_t += 1;
+        return;
+    }
     params->sequence_lengths_host =
         device->allocateBuffer({DataType::TYPE_INT32, {batch_size}, AllocationType::HOST}, {"sequence_lengths_host"});
 
