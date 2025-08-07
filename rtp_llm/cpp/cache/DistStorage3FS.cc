@@ -164,7 +164,8 @@ std::shared_ptr<DistStorage3FSFile> DistStorage3FS::getFile(const DistStorage::I
     }
 
     ThreeFSFileConfig config   = {init_params_.mountpoint, filepath, write_thread_pool_, metrics_reporter_};
-    auto              new_file = std::make_shared<DistStorage3FSFile>(config, read_iov_handle_, write_iov_handle_);
+    auto              new_file = std::make_shared<DistStorage3FSFile>(
+        config, read_iov_handle_, write_iov_handle_, init_params_.read_timeout_ms, init_params_.write_timeout_ms);
     if (read) {
         std::unique_lock<std::shared_mutex> lock(file_map_mutex_);
         file_map_[key] = new_file;

@@ -58,6 +58,7 @@ struct KVCacheConfig {
     std::string multi_task_prompt        = "";
     std::string multi_task_prompt_str    = "";
     bool        enable_3fs               = false;
+    int         match_timeout_ms         = 1000;
     int         rpc_get_cache_timeout_ms = 3000;
     int         rpc_put_cache_timeout_ms = 3000;
     int         threefs_read_timeout_ms  = 1000;

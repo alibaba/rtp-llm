@@ -28,11 +28,15 @@ inline float calcMiBs(int64_t len_byte, int64_t cost_us) {
 
 DistStorage3FSFile::DistStorage3FSFile(const ThreeFSFileConfig& config,
                                        const ThreeFSIovHandle&  read_iov_handle,
-                                       const ThreeFSIovHandle&  write_iov_handle):
+                                       const ThreeFSIovHandle&  write_iov_handle,
+                                       size_t                   read_timeout_ms,
+                                       size_t                   write_timeout_ms):
     config_(config),
     read_iov_handle_(read_iov_handle),
     write_iov_handle_(write_iov_handle),
-    filepath_(config.filepath) {}
+    filepath_(config.filepath),
+    read_timeout_ms_(read_timeout_ms),
+    write_timeout_ms_(write_timeout_ms) {}
 
 DistStorage3FSFile::~DistStorage3FSFile() {
     close();
@@ -282,8 +286,7 @@ bool DistStorage3FSFile::waitForWriteIos(const std::shared_ptr<ThreeFSHandle>& h
     }
 
     hf3fs_cqe cqes[submit_io_count];
-    int       timeout_ms         = 2000;  // TODO(LXQ) timeout threhold
-    auto      time_spec          = createTimeoutTimeSpec(timeout_ms);
+    auto      time_spec          = createTimeoutTimeSpec(static_cast<int>(write_timeout_ms_));
     auto      ior                = handle->ior_handle.ior;
     int       completed_io_count = hf3fs_wait_for_ios(ior, cqes, submit_io_count, submit_io_count, &time_spec);
     if (completed_io_count < 0) {
@@ -298,8 +301,8 @@ bool DistStorage3FSFile::waitForWriteIos(const std::shared_ptr<ThreeFSHandle>& h
         return false;
     } else if (completed_io_count == 0) {
         RTP_LLM_LOG_WARNING(
-            "wait write io but hf3fs_wait_for_ios return 0, maybe timeout(%d ms), file: %s, submit io count: %d, ior_entries: %d, write_total_len: %ld, iov_size: %zu",
-            timeout_ms,
+            "wait write io but hf3fs_wait_for_ios return 0, maybe timeout(%zu ms), file: %s, submit io count: %d, ior_entries: %d, write_total_len: %ld, iov_size: %zu",
+            write_timeout_ms_,
             filepath_.c_str(),
             submit_io_count,
             handle->ior_handle.ior_entries,
@@ -527,8 +530,7 @@ bool DistStorage3FSFile::submitAndWaitForReadIos(const std::shared_ptr<ThreeFSHa
     }
 
     hf3fs_cqe cqes[submit_io_count];
-    int       timeout_ms         = 1000;  // 1s
-    auto      time_spec          = createTimeoutTimeSpec(timeout_ms);
+    auto      time_spec          = createTimeoutTimeSpec(static_cast<int>(read_timeout_ms_));
     auto      completed_io_count = hf3fs_wait_for_ios(ior, cqes, submit_io_count, submit_io_count, &time_spec);
     if (completed_io_count < 0) {
         RTP_LLM_LOG_WARNING("wait read io failed, hf3fs_wait_for_ios failed, errno: %s, submit io count: %d",
@@ -536,8 +538,8 @@ bool DistStorage3FSFile::submitAndWaitForReadIos(const std::shared_ptr<ThreeFSHa
                             submit_io_count);
         return false;
     } else if (completed_io_count == 0) {
-        RTP_LLM_LOG_WARNING("wait read io but hf3fs_wait_for_ios return 0, maybe timeout(%d ms), submit io count: %d",
-                            timeout_ms,
+        RTP_LLM_LOG_WARNING("wait read io but hf3fs_wait_for_ios return 0, maybe timeout(%zu ms), submit io count: %d",
+                            read_timeout_ms_,
                             submit_io_count);
         return false;
     }

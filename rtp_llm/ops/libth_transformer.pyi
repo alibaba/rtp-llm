@@ -562,6 +562,7 @@ class KVCacheConfig:
     multi_task_prompt_str: str
     reuse_cache: bool
     enable_3fs: bool
+    match_timeout_ms: int
     rpc_get_cache_timeout_ms: int
     rpc_put_cache_timeout_ms: int
     threefs_read_timeout_ms: int
@@ -574,6 +575,7 @@ class KVCacheConfig:
         multi_task_prompt: str = "",
         multi_task_prompt_str: str = "",
         enable_3fs: bool = False,
+        match_timeout_ms: int = 1000,
         rpc_get_cache_timeout_ms: int = 3000,
         rpc_put_cache_timeout_ms: int = 3000,
         threefs_read_timeout_ms: int = 1000,

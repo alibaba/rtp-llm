@@ -52,7 +52,9 @@ struct DistStorage3FSInitParams {
         oss << "enable_async_write: " << enable_async_write << ", write_thread_num: " << write_thread_num
             << ", write_queue_size: " << write_queue_size << ", read_iov_block_size: " << read_iov_block_size
             << ", read_iov_size: " << read_iov_size << ", write_iov_block_size: " << write_iov_block_size
-            << ", write_iov_size: " << write_iov_size << ", mountpoint: " << mountpoint << ", root_dir: " << root_dir;
+            << ", write_iov_size: " << write_iov_size << ", read_timeout_ms: " << read_timeout_ms
+            << ", write_timeout_ms: " << write_timeout_ms << ", mountpoint: " << mountpoint
+            << ", root_dir: " << root_dir;
         return oss.str();
     }
 
@@ -64,6 +66,9 @@ struct DistStorage3FSInitParams {
     size_t read_iov_size        = 1ULL << 32;  // 4GB
     size_t write_iov_block_size = 1ULL << 20;  // 1MB
     size_t write_iov_size       = 1ULL << 32;  // 4GB
+
+    size_t read_timeout_ms  = 1000;
+    size_t write_timeout_ms = 2000;
 
     std::string mountpoint{"/3fs/stage/3fs/"};
     std::string root_dir{"rtp_llm/"};

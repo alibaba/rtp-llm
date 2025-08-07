@@ -404,6 +404,13 @@ def setup_args():
         help="是否启用 3FS 存储 KVCache. 打开此开关需要先打开 REUSE_CACHE",
     )
     kv_cache_group.add_argument(
+        "--match_timeout_ms",
+        env_name="MATCH_TIMEOUT_MS",
+        type=int,
+        default=1000,
+        help="所有 RANK 从远端匹配 KVCache 的超时时间, 单位为毫秒",
+    )
+    kv_cache_group.add_argument(
         "--rpc_get_cache_timeout_ms",
         env_name="RPC_GET_CACHE_TIMEOUT_MS",
         type=int,

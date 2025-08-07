@@ -597,6 +597,7 @@ class GptInitModelParameters:
             multi_task_prompt=get_env_str("MULTI_TASK_PROMPT"),
             multi_task_prompt_str=get_env_str("MULTI_TASK_PROMPT_STR"),
             enable_3fs=get_env_bool("ENABLE_3FS", False),
+            match_timeout_ms=get_env_int("MATCH_TIMEOUT_MS", 1000),
             rpc_get_cache_timeout_ms=get_env_int("RPC_GET_CACHE_TIMEOUT_MS", 3000),
             rpc_put_cache_timeout_ms=get_env_int("RPC_PUT_CACHE_TIMEOUT_MS", 3000),
             threefs_read_timeout_ms=get_env_int("THREEFS_READ_TIMEOUT_MS", 1000),

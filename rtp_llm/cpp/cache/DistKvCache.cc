@@ -1,5 +1,7 @@
 #include "rtp_llm/cpp/cache/DistKvCache.h"
 
+#include <future>
+
 #include "rtp_llm/cpp/cache/CacheManager.h"
 #include "rtp_llm/cpp/cache/DistKvCacheMetrics.h"
 
@@ -19,6 +21,11 @@ DistKvCache::DistKvCache(CacheManager*                       cache_manager,
 
 DistKvCache::~DistKvCache() {
     RTP_LLM_LOG_INFO("DistKvCache destructor");
+    if (wait_match_thread_pool_) {
+        wait_match_thread_pool_->stop();
+        wait_match_thread_pool_->waitFinish();
+        wait_match_thread_pool_.reset();
+    }
     rpc_pool_.reset();
     storage_.reset();
     planner_.reset();
@@ -49,6 +56,15 @@ bool DistKvCache::init(const DistKvCacheInitParams& init_params) {
 
     if (!initDefaultMetas()) {
         RTP_LLM_LOG_WARNING("init failed, init default metas failed");
+        return false;
+    }
+
+    wait_match_thread_pool_ =
+        std::make_unique<autil::LockFreeThreadPool>(thread_num_, queue_size_, nullptr, "WaitMatchThreadPool");
+    if (!wait_match_thread_pool_->start()) {
+        RTP_LLM_LOG_WARNING("init failed, start wait match thread pool failed, thread num: %zu, queue size: %zu",
+                            thread_num_,
+                            queue_size_);
         return false;
     }
 
@@ -97,21 +113,58 @@ int32_t DistKvCache::matchForAllRank(const std::vector<int64_t>&        cache_ke
         return 0;
     }
 
+    if (wait_match_thread_pool_ == nullptr || wait_match_thread_pool_->isFull()) {
+        RTP_LLM_LOG_WARNING("match for all rank failed, wait match thread pool is full, something maybe wrong");
+        return 0;
+    }
+
     const auto&   cache_config = cache_manager_->cacheConfig();
     const int32_t input_len    = static_cast<int32_t>(cache_keys.size());
 
     auto metrics = DistKvCacheMetricsFactory::createMetrics(metrics_reporter_);
     DistKvCacheMetrics::markMatchBeginUs(metrics);
 
-    int32_t match_len = static_cast<int32_t>(cache_keys.size());
-    for (int i = 0; i < gpt_init_params_.tp_size_; i++) {
-        extra_metas["TP_RANK"] = std::to_string(i);
-        auto ret               = match(cache_keys, ignore_block_num, request_id, extra_metas);
-        if (ret < match_len) {
-            match_len = ret;
+    auto stop = std::make_shared<std::atomic<bool>>(false);
+    auto task =
+        [shared_this = shared_from_this(), cache_keys, ignore_block_num, request_id, extra_metas, stop]() -> int32_t {
+        int32_t match_len = static_cast<int32_t>(cache_keys.size());
+        auto    metas     = extra_metas;
+        for (int i = 0; i < shared_this->gpt_init_params_.tp_size_; i++) {
+            metas["TP_RANK"] = std::to_string(i);
+            auto ret         = shared_this->match(cache_keys, ignore_block_num, request_id, metas, stop);
+            if (ret < match_len) {
+                match_len = ret;
+            }
+            if (match_len == 0) {
+                break;
+            }
         }
-        if (match_len == 0) {
-            break;
+        return match_len;
+    };
+    auto future = std::async(std::launch::async, task);
+    auto status = future.wait_for(std::chrono::milliseconds(init_params_.match_timeout_ms));
+
+    int32_t match_len = 0;
+    if (status == std::future_status::ready) {
+        match_len = future.get();
+    } else if (status == std::future_status::timeout) {
+        RTP_LLM_LOG_WARNING("match for all rank timeout, request: %ld, input block num: %zu, ignore block num: %zu",
+                            request_id,
+                            cache_keys.size(),
+                            ignore_block_num);
+
+        auto wait_future_task = [stop, shared_wait_future = std::move(future).share()]() {
+            if (stop) {
+                stop->store(true);
+            }
+            if (shared_wait_future.valid()) {
+                shared_wait_future.get();
+            }
+        };
+        if (auto code = wait_match_thread_pool_->pushTask(std::move(wait_future_task), false);
+            code != autil::ThreadPool::ERROR_NONE) {
+            RTP_LLM_LOG_WARNING("match for all rank timeout, push wait future task failed, item count: %zu",
+                                wait_match_thread_pool_->getItemCount());
         }
     }
 
@@ -136,10 +189,11 @@ int32_t DistKvCache::matchForAllRank(const std::vector<int64_t>&        cache_ke
     return match_len;
 }
 
-int32_t DistKvCache::match(const std::vector<int64_t>&        cache_keys,
-                           size_t                             ignore_block_num,
-                           int64_t                            request_id,
-                           std::map<std::string, std::string> extra_metas) const {
+int32_t DistKvCache::match(const std::vector<int64_t>&               cache_keys,
+                           size_t                                    ignore_block_num,
+                           int64_t                                   request_id,
+                           std::map<std::string, std::string>        extra_metas,
+                           const std::shared_ptr<std::atomic<bool>>& stop) const {
     for (auto& [key, value] : default_metas_) {
         if (extra_metas.count(key) == 0) {
             extra_metas[key] = value;
@@ -148,6 +202,9 @@ int32_t DistKvCache::match(const std::vector<int64_t>&        cache_keys,
 
     int32_t match_len = 0;
     for (int len = cache_keys.size(); len > ignore_block_num; --len) {
+        if (stop && stop->load()) {
+            break;
+        }
         std::vector<int64_t> cache_keys_to_match(cache_keys.begin(), cache_keys.begin() + len);
         auto layout_items = planner_->layout(cache_keys_to_match, {}, ignore_block_num, extra_metas, true);
         if (layout_items.empty()) {
@@ -156,6 +213,10 @@ int32_t DistKvCache::match(const std::vector<int64_t>&        cache_keys,
 
         bool success = true;
         for (auto& item : layout_items) {
+            if (stop && stop->load()) {
+                success = false;
+                break;
+            }
             if (!storage_->lookup(item)) {
                 success = false;
                 break;

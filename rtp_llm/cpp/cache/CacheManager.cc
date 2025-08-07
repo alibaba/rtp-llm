@@ -763,12 +763,15 @@ void CacheManager::beamSearchKvUpdate(rtp_llm::BufferPtr src_block_offset, rtp_l
 
 bool CacheManager::initDistKvCache() {
     DistKvCacheInitParams init_params;
+    init_params.match_timeout_ms         = params_.kv_cache_config.match_timeout_ms;
     init_params.rpc_get_cache_timeout_ms = params_.kv_cache_config.rpc_get_cache_timeout_ms;
     init_params.rpc_put_cache_timeout_ms = params_.kv_cache_config.rpc_put_cache_timeout_ms;
     if (params_.kv_cache_config.enable_3fs) {
         DistStorage3FSInitParams init_params_3fs;
         init_params_3fs.read_iov_size                      = params_.kv_cache_config.threefs_read_iov_size;
         init_params_3fs.write_iov_size                     = params_.kv_cache_config.threefs_write_iov_size;
+        init_params_3fs.read_timeout_ms                    = params_.kv_cache_config.threefs_read_timeout_ms;
+        init_params_3fs.write_timeout_ms                   = params_.kv_cache_config.threefs_write_timeout_ms;
         init_params.storage_manager_params.init_params_3fs = init_params_3fs;
     }
     auto dist_kvcache = std::make_unique<DistKvCache>(this, params_, metrics_reporter_);

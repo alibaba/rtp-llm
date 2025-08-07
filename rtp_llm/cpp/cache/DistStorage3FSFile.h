@@ -53,7 +53,9 @@ class DistStorage3FSFile: public std::enable_shared_from_this<DistStorage3FSFile
 public:
     DistStorage3FSFile(const ThreeFSFileConfig& config,
                        const ThreeFSIovHandle&  read_iov_handle,
-                       const ThreeFSIovHandle&  write_iov_handle);
+                       const ThreeFSIovHandle&  write_iov_handle,
+                       size_t                   read_timeout_ms  = 1000,
+                       size_t                   write_timeout_ms = 2000);
     ~DistStorage3FSFile();
 
 public:
@@ -98,6 +100,8 @@ private:
     ThreeFSIovHandle        write_iov_handle_;
     int32_t                 fd_{-1};  // file descriptor
     const std::string       filepath_;
+    const size_t            read_timeout_ms_;
+    const size_t            write_timeout_ms_;
 
     const int32_t kDefaultFileLengthForRead{1ULL << 30};  // 1GB
     const int32_t kDefaultReadSizePerIo{1ULL << 20};      // 1MB

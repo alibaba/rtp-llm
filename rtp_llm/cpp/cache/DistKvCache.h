@@ -1,5 +1,6 @@
 #pragma once
 
+#include "autil/LockFreeThreadPool.h"
 #include "rtp_llm/cpp/cache/DistStorage.h"
 #include "rtp_llm/cpp/cache/DistKvCachePlanner.h"
 #include "rtp_llm/cpp/cache/DistStorage.h"
@@ -12,6 +13,7 @@ class CacheManager;
 
 struct DistKvCacheInitParams {
     DistStorageManagerInitParams storage_manager_params;
+    int                          match_timeout_ms{1000};
     int                          rpc_get_cache_timeout_ms{3000};
     int                          rpc_put_cache_timeout_ms{3000};
 };
@@ -20,7 +22,7 @@ struct DistKvCacheInitParams {
  * @brief Distributed KV cache manage interface.
  * wrap dist kvcache impl for rank and all kinds of storage.
  */
-class DistKvCache {
+class DistKvCache: public std::enable_shared_from_this<DistKvCache> {
 public:
     DistKvCache(CacheManager*                       cache_manager,
                 const GptInitParameter&             gpt_init_params,
@@ -35,10 +37,11 @@ public:
                             int64_t                            request_id,
                             std::map<std::string, std::string> extra_metas);
 
-    int32_t match(const std::vector<int64_t>&        cache_keys,
-                  size_t                             ignore_block_num,
-                  int64_t                            request_id,
-                  std::map<std::string, std::string> extra_metas) const;
+    int32_t match(const std::vector<int64_t>&               cache_keys,
+                  size_t                                    ignore_block_num,
+                  int64_t                                   request_id,
+                  std::map<std::string, std::string>        extra_metas,
+                  const std::shared_ptr<std::atomic<bool>>& stop) const;
 
     bool getForAllRank(const std::vector<int64_t>&        cache_keys,
                        const std::vector<int32_t>&        block_indices,
@@ -92,6 +95,10 @@ private:
 
     std::atomic<int64_t> total_match_len_{0};
     std::atomic<int64_t> total_input_len_{0};
+
+    std::unique_ptr<autil::LockFreeThreadPool> wait_match_thread_pool_;
+    const size_t                               thread_num_{1};
+    const size_t                               queue_size_{2000};
 };
 
 }  // namespace rtp_llm
