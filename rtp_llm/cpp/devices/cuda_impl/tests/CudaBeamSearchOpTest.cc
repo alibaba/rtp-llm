@@ -1,4 +1,3 @@
-#include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
 #include "rtp_llm/cpp/devices/base_tests/BeamSearchOpTest.hpp"
 using namespace std;
 using namespace rtp_llm;

@@ -21,13 +21,13 @@
 namespace tensorrt_llm {
 
 struct BeamSearchConfig {
-    size_t mVPart;
-    size_t mByteMaxSharedMemoryPerBlock;
-    size_t mByteSharedMemoryStage1;
-    size_t mByteSharedMemoryStage3;
-    size_t mWorkspaceSize;
-    bool   mVBWS;
-    bool   mV2;
+    size_t mVPart                       = 0;
+    size_t mByteMaxSharedMemoryPerBlock = 0;
+    size_t mByteSharedMemoryStage1      = 0;
+    size_t mByteSharedMemoryStage3      = 0;
+    size_t mWorkspaceSize               = 0;
+    bool   mVBWS                        = false;
+    bool   mV2                          = false;
 };
 
 template<typename T>
@@ -36,4 +36,4 @@ BeamSearchConfig configureBeamSearch(runtime::SizeType32 batchSize,
                                      runtime::SizeType32 beamWidthOut,
                                      runtime::SizeType32 vocabSize);
 
-}
+}  // namespace tensorrt_llm

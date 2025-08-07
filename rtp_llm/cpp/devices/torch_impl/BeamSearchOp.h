@@ -68,7 +68,6 @@ struct BeamSearchOpImpl: torch::nn::Module {
 
     BeamSearchOpOutput singleForward(BeamSearchOpInput input) {
         // logits float[beam_width_in, vocab_size]
-        auto beam_width_in  = input.logits.size(0);
         auto beam_width_out = input.beam_width_out;
         // token_ids int[beam_width_in, max_seq_len]
         auto max_seq_len = input.token_ids.size(1);
@@ -78,11 +77,7 @@ struct BeamSearchOpImpl: torch::nn::Module {
         auto [log_probs, index] = input.logits.log_softmax(-1).topk(beam_width_out, -1);
 
         // add cum_log_probs
-        auto cum_log_probs = input.cum_log_probs;
-        if (beam_width_in == beam_width_out && input.input_lengths.equal(input.sequence_lengths)) {
-            cum_log_probs.index_put_({torch::indexing::Slice(1)}, -1e9);
-        }
-        log_probs = log_probs + cum_log_probs.reshape({-1, 1});
+        log_probs = log_probs + input.cum_log_probs.reshape({-1, 1});
 
         auto input_lengths =
             torch::zeros({beam_width_out}, torch::TensorOptions(torch::kInt).device(torch::Device(torch::kCPU)));

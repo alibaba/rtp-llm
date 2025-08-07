@@ -80,20 +80,19 @@ BeamSearchOutput CudaDevice::sampleBeamSearch(const BeamSearchParams& params) {
         {DataType::TYPE_INT32, {(size_t)batch_size, (size_t)beam_width_out}, AllocationType::DEVICE}, {"beam_indices"});
     auto output_ids = allocateBuffer(
         {DataType::TYPE_INT32, {(size_t)batch_size, (size_t)beam_width_out}, AllocationType::DEVICE}, {"output_ids"});
-    auto input_lengths_out =
-        allocateBuffer({DataType::TYPE_INT32, {(size_t)batch_size, (size_t)beam_width_out}, AllocationType::DEVICE},
-                       {"input_length_out"});
+    BufferPtr input_lengths_out =
+        config.mVBWS ?
+            allocateBuffer({DataType::TYPE_INT32, {(size_t)batch_size, (size_t)beam_width_out}, AllocationType::DEVICE},
+                           {"input_length_out"}) :
+            params.input_lengths;
     auto sequence_lengths_out =
         allocateBuffer({DataType::TYPE_INT32, {(size_t)batch_size, (size_t)beam_width_out}, AllocationType::DEVICE},
                        {"sequence_lengths_out"});
-    BufferPtr cum_log_probs_out;
-    if (config.mVBWS) {
-        cum_log_probs_out =
+    auto cum_log_probs_out =
+        config.mVBWS ?
             allocateBuffer({DataType::TYPE_FP32, {(size_t)batch_size, (size_t)beam_width_out}, AllocationType::DEVICE},
-                           {"cum_log_probs_out"});
-    } else {
-        cum_log_probs_out = params.cum_log_probs;
-    }
+                           {"cum_log_probs_out"}) :
+            params.cum_log_probs;
 
     // set BeamHypotheses
     tensorrt_llm::kernels::BeamHypotheses BH;

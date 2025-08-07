@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include "rtp_llm/cpp/utils/Logger.h"
 #include "beamSearch.h"
 #include "beamSearchKernels.h"
 #include "beamSearchKernelsTemplate.h"
@@ -208,6 +209,22 @@ BeamSearchConfig configureBeamSearch(runtime::SizeType32 batchSize,
         config.mWorkspaceSize = nByteStage2LogProbs + nByteStage2Ids
             + max(nByteStage1LogProbs + nByteStage1Ids + max(nByteStage1TopK, nByteStage2TopK), nByteStage3);
     }
+
+    RTP_LLM_LOG_DEBUG("configureBeamSearch: "
+                      "config.mVPart = %zu, "
+                      "config.mByteMaxSharedMemoryPerBlock = %zu, "
+                      "config.mByteSharedMemoryStage1 = %zu, "
+                      "config.mByteSharedMemoryStage3 = %zu, "
+                      "config.mWorkspaceSize = %zu, "
+                      "config.mVBWS = %s, "
+                      "config.mV2 = %s",
+                      config.mVPart,
+                      config.mByteMaxSharedMemoryPerBlock,
+                      config.mByteSharedMemoryStage1,
+                      config.mByteSharedMemoryStage3,
+                      config.mWorkspaceSize,
+                      config.mVBWS ? "true" : "false",
+                      config.mV2 ? "true" : "false");
 
     return config;
 }

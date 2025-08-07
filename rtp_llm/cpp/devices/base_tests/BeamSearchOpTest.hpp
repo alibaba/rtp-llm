@@ -58,7 +58,8 @@ public:
             logits = torch::randn({batch_size, 1, vocab_size}, float_options).repeat({1, beam_width_in, 1});
             token_ids =
                 torch::randint(0, vocab_size, {batch_size, 1, max_seq_len}, int_options).repeat({1, beam_width_in, 1});
-            cum_log_probs = torch::zeros({batch_size, beam_width_in}, float_options);
+            cum_log_probs = torch::full({batch_size, beam_width_in}, -1e9);
+            cum_log_probs.index_put_({"...", 0}, 0.0);
         } else {
             logits        = torch::randn({batch_size, beam_width_in, vocab_size}, float_options);
             token_ids     = torch::randint(0, vocab_size, {batch_size, beam_width_in, max_seq_len}, int_options);

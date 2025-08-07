@@ -288,6 +288,7 @@ cc_test(
     env = test_envs,
     copts = copts(),
     deps = test_deps,
+    linkstatic = 1,
     exec_properties = {'gpu':'A10'},
 )
 
