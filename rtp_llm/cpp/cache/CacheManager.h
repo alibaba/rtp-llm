@@ -228,7 +228,7 @@ protected:
     const GptInitParameter             params_;
     std::map<std::string, std::string> lora_info_map_;
     bool                               enable_dist_kvcache_{false};
-    std::unique_ptr<DistKvCache>       dist_kvcache_;
+    std::shared_ptr<DistKvCache>       dist_kvcache_;
 };
 
 typedef std::shared_ptr<CacheManager> CacheManagerPtr;

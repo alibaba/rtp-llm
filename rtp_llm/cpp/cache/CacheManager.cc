@@ -774,7 +774,7 @@ bool CacheManager::initDistKvCache() {
         init_params_3fs.write_timeout_ms                   = params_.kv_cache_config.threefs_write_timeout_ms;
         init_params.storage_manager_params.init_params_3fs = init_params_3fs;
     }
-    auto dist_kvcache = std::make_unique<DistKvCache>(this, params_, metrics_reporter_);
+    auto dist_kvcache = std::make_shared<DistKvCache>(this, params_, metrics_reporter_);
     if (!dist_kvcache->init(init_params)) {
         RTP_LLM_LOG_WARNING("dist kvcache init failed!!!");
         return false;

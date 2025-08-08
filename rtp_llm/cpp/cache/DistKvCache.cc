@@ -126,7 +126,14 @@ int32_t DistKvCache::matchForAllRank(const std::vector<int64_t>&        cache_ke
 
     auto stop = std::make_shared<std::atomic<bool>>(false);
     auto task =
-        [shared_this = shared_from_this(), cache_keys, ignore_block_num, request_id, extra_metas, stop]() -> int32_t {
+        [weak_this = weak_from_this(), cache_keys, ignore_block_num, request_id, extra_metas, stop]() -> int32_t {
+        if (weak_this.expired()) {
+            RTP_LLM_LOG_WARNING("match for all rank failed, dist kv cache has been expired, request_id: %ld",
+                                request_id);
+            return 0;
+        }
+        auto shared_this = weak_this.lock();
+
         int32_t match_len = static_cast<int32_t>(cache_keys.size());
         auto    metas     = extra_metas;
         for (int i = 0; i < shared_this->gpt_init_params_.tp_size_; i++) {
