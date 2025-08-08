@@ -16,7 +16,7 @@ void ArpcServerWrapper::start() {
     RTP_LLM_CHECK_WITH_INFO(arpc_server_->Listen(spec), "arpc listen on %s failed", spec.c_str());
     // set metric reporter
     arpc::KMonitorANetMetricReporterConfig metricConfig;
-    metricConfig.metricLevel                 = kmonitor::NORMAL;
+    metricConfig.metricLevel                 = kmonitor::FATAL;
     metricConfig.anetConfig.enableANetMetric = false;
     metricConfig.arpcConfig.enableArpcMetric = true;
     auto metricReporter                      = std::make_shared<arpc::KMonitorANetServerMetricReporter>(metricConfig);

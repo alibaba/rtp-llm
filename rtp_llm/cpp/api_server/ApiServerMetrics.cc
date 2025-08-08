@@ -16,7 +16,7 @@ bool ApiServerMetricReporter::init() {
 #define LOCAL_REGISTER_QPS_MUTABLE_METRIC(target, name)                                                                \
     do {                                                                                                               \
         std::string metricName = (name);                                                                               \
-        target.reset(kMonitor->RegisterMetric(metricName, kmonitor::QPS, kmonitor::NORMAL));                           \
+        target.reset(kMonitor->RegisterMetric(metricName, kmonitor::QPS, kmonitor::FATAL));                           \
         if (nullptr == target) {                                                                                       \
             AUTIL_LOG(ERROR, "failed to register metric:[%s]", metricName.c_str());                                    \
             return false;                                                                                              \
@@ -26,7 +26,7 @@ bool ApiServerMetricReporter::init() {
 #define LOCAL_REGISTER_GAUGE_MUTABLE_METRIC(target, name)                                                              \
     do {                                                                                                               \
         std::string metricName = (name);                                                                               \
-        target.reset(kMonitor->RegisterMetric(metricName, kmonitor::GAUGE, kmonitor::NORMAL));                         \
+        target.reset(kMonitor->RegisterMetric(metricName, kmonitor::GAUGE, kmonitor::FATAL));                         \
         if (nullptr == target) {                                                                                       \
             AUTIL_LOG(ERROR, "failed to register metric:[%s]", metricName.c_str());                                    \
             return false;                                                                                              \

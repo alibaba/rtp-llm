@@ -23,7 +23,7 @@ bool TcpServer::init(uint32_t io_thread_count, uint32_t worker_thread_count, boo
     rpc_server_.reset(new arpc::ANetRPCServer(rpc_server_transport_.get(), 3, 100));
     if (enable_metric) {
         arpc::KMonitorANetMetricReporterConfig metricConfig;
-        metricConfig.metricLevel                 = kmonitor::NORMAL;
+        metricConfig.metricLevel                 = kmonitor::FATAL;
         metricConfig.anetConfig.enableANetMetric = true;
         metricConfig.arpcConfig.enableArpcMetric = true;
         auto metricReporter = std::make_shared<arpc::KMonitorANetServerMetricReporter>(metricConfig);

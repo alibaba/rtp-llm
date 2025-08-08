@@ -562,7 +562,7 @@ bool initKmonitorFactory() {
     if (param.kmonitorNormalSamplePeriod > 0) {
         RTP_LLM_LOG_INFO("set kmonitor normal sample period [%d] seconds.", param.kmonitorNormalSamplePeriod);
         kmonitor::MetricLevelConfig config;
-        config.period[kmonitor::NORMAL] = (unsigned int)param.kmonitorNormalSamplePeriod;
+        config.period[kmonitor::FATAL] = (unsigned int)param.kmonitorNormalSamplePeriod;
         kmonitor::MetricLevelManager::SetGlobalLevelConfig(config);
     }
 

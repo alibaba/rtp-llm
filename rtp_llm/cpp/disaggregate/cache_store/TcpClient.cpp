@@ -24,7 +24,7 @@ bool TcpClient::init(int io_thread_count) {
         arpc::KMonitorANetMetricReporterConfig metricConfig;
         metricConfig.arpcConfig.enableArpcMetric = true;
         metricConfig.anetConfig.enableANetMetric = false;
-        metricConfig.metricLevel                 = kmonitor::NORMAL;
+        metricConfig.metricLevel                 = kmonitor::FATAL;
         auto metricReporter = std::make_shared<arpc::KMonitorANetClientMetricReporter>(metricConfig);
         if (!metricReporter->init(rpc_channel_transport_.get())) {
             RTP_LLM_LOG_ERROR("anet metric reporter init failed");
