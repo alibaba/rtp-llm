@@ -15,7 +15,10 @@ from torchvision import io, transforms
 from torchvision.transforms import InterpolationMode
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.models.multimodal.multimodal_common import MultiModalEmbeddingInterface
+from rtp_llm.models.multimodal.multimodal_common import (
+    MultiModalEmbeddingInterface,
+    timeout_decorator,
+)
 from rtp_llm.models.qwen2_vl.image_processing_qwen2_vl import Qwen2VLImageProcessor
 from rtp_llm.models.qwen2_vl.modeling_qwen2_vl import (
     Qwen2VisionTransformerPretrainedModel,
@@ -110,6 +113,7 @@ class Qwen2VLImageEmbedding(MultiModalEmbeddingInterface):
         else:
             raise Exception("unknown mm url type")
 
+    @timeout_decorator(30)
     def _mm_preprocess(self, data, **kwargs):
         mm_type = kwargs.get("mm_type")
         if mm_type == MMUrlType.DEFAULT:

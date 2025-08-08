@@ -9,7 +9,10 @@ from transformers.models.whisper.feature_extraction_whisper import (
 )
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.models.multimodal.multimodal_common import AudioEmbeddingInterface
+from rtp_llm.models.multimodal.multimodal_common import (
+    AudioEmbeddingInterface,
+    timeout_decorator,
+)
 from rtp_llm.models.qwen_v2_audio.configuration_qwen2_audio import (
     Qwen2AudioConfig,
     Qwen2AudioEncoderConfig,
@@ -40,6 +43,7 @@ class Processor(AudioEmbeddingInterface):
     def _device(self):
         return self.audio_tower.device
 
+    @timeout_decorator(30)
     def _mm_preprocess(self, data: BytesIO, **kwargs) -> Dict[str, torch.Tensor]:
         audio = librosa.load(data, sr=self.feature_extractor.sampling_rate)[0]
         features_dict = self.feature_extractor(

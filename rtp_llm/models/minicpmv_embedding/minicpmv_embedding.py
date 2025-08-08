@@ -29,6 +29,7 @@ from rtp_llm.models.minicpmv_embedding.resampler import Resampler
 from rtp_llm.models.multimodal.multimodal_common import (
     MultiModalEmbeddingInterface,
     mm_lock,
+    timeout_decorator,
 )
 from rtp_llm.models.multimodal.multimodal_mixin import (
     BaseMultiModalWeightInfo,
@@ -152,6 +153,7 @@ class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
         else:
             return (cached_res, None)
 
+    @timeout_decorator(30)
     def _mm_preprocess(self, data, type, **kwargs):
         if type == MMUrlType.IMAGE:
             return Image.open(data).convert("RGB")

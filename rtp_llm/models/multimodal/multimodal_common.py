@@ -17,6 +17,8 @@ from pillow_heif import register_heif_opener
 register_heif_opener()
 
 import threading
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from functools import wraps
 
 from torchvision import transforms
 
@@ -27,6 +29,23 @@ from rtp_llm.utils.multimodal_util import (
     get_vit_compute_dtype,
     vit_emb_cache_,
 )
+
+
+def timeout_decorator(timeout_sec):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(func, *args, **kwargs)
+                try:
+                    return future.result(timeout=timeout_sec)
+                except TimeoutError:
+                    raise TimeoutError(f"Function '{func.__name__}' timed out")
+
+        return wrapper
+
+    return decorator
+
 
 mm_lock = threading.Lock()
 
@@ -89,6 +108,7 @@ class MultiModalEmbeddingInterface:
         vit_emb_cache_.insert_cache(url, features)
         return features
 
+    @timeout_decorator(10)
     def _mm_preprocess(self, data, **kwargs):
         raise NotImplementedError
 
@@ -98,6 +118,7 @@ class MultiModalEmbeddingInterface:
 
 
 class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
+    @timeout_decorator(30)
     def _mm_preprocess(self, data, **kwargs):
         return Image.open(data).convert("RGB")
 
@@ -111,6 +132,7 @@ class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
 
 
 class AudioEmbeddingInterface(MultiModalEmbeddingInterface):
+    @timeout_decorator(30)
     def _mm_preprocess(self, data, **kwargs):
         # temporary
         import torchaudio
@@ -127,6 +149,7 @@ class AudioEmbeddingInterface(MultiModalEmbeddingInterface):
 
 
 class VideoEmbeddingInterface(MultiModalEmbeddingInterface):
+    @timeout_decorator(30)
     def _mm_preprocess(self, data, **kwargs):
         return VideoReader(data, ctx=cpu(0))
 

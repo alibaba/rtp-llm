@@ -22,7 +22,10 @@ from rtp_llm.models.llava_utils import (
     process_anyres_image,
     unpad_image,
 )
-from rtp_llm.models.multimodal.multimodal_common import MultiModalEmbeddingInterface
+from rtp_llm.models.multimodal.multimodal_common import (
+    MultiModalEmbeddingInterface,
+    timeout_decorator,
+)
 from rtp_llm.utils.multimodal_util import MMUrlType
 
 try:
@@ -85,6 +88,7 @@ class LlavaImageEmbedding(MultiModalEmbeddingInterface):
         else:
             raise Exception("unknown mm url type")
 
+    @timeout_decorator(30)
     def _mm_preprocess(self, data, **kwargs):
         mm_type = kwargs.get("mm_type")
         if mm_type == MMUrlType.DEFAULT:

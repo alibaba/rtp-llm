@@ -28,7 +28,10 @@ from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPo
 from transformers.modeling_utils import PreTrainedModel
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.models.multimodal.multimodal_common import MultiModalEmbeddingInterface
+from rtp_llm.models.multimodal.multimodal_common import (
+    MultiModalEmbeddingInterface,
+    timeout_decorator,
+)
 from rtp_llm.utils.flash_attn_utils import can_use_flash_attn
 from rtp_llm.utils.multimodal_util import MMUrlType
 
@@ -221,6 +224,7 @@ class InternVLImageEmbedding(MultiModalEmbeddingInterface):
         else:
             raise Exception("unknown mm url type")
 
+    @timeout_decorator(30)
     def _mm_preprocess(self, data, **kwargs):
         mm_type = kwargs.get("mm_type")
         if mm_type == MMUrlType.DEFAULT:
