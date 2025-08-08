@@ -195,7 +195,7 @@ protected:
     std::unique_ptr<MoEInsertionParams>  moe_insertion_params_;
     std::unique_ptr<MoEInsertionReturns> moe_insertion_ret_;
 
-private:
+protected:
     std::unique_ptr<BufferManager> buffer_manager_;
 
 public:

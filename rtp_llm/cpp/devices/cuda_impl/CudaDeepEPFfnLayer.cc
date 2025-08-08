@@ -23,7 +23,7 @@ bool CudaDevice::initDeepEPBuffer() {
     size_t world_size       = nccl_param.world_size_;
     size_t local_world_size = init_params_.parallelism_distributed_config.local_world_size;
 
-    int num_experts = init_params_.num_experts + init_params_.extra_experts;
+    int num_experts    = init_params_.num_experts + init_params_.extra_experts;
     int deep_ep_num_sm = init_params_.moe_config.deep_ep_num_sm > 0 ? init_params_.moe_config.deep_ep_num_sm : 24;
 
     // TODO: check if get right
@@ -38,19 +38,19 @@ bool CudaDevice::initDeepEPBuffer() {
             ll_num_max_token_per_rank, init_params_.hidden_size, world_size, num_experts);
         num_qps_per_rank = num_experts / init_params_.ep_size;
     } else if (init_params_.use_deepep_internode) {  // normal-kernel internode
-        num_nvl_bytes    = int(2e9);
-        num_rdma_bytes   = int(1e9);
-        //normal ibgda
+        num_nvl_bytes  = int(2e9);
+        num_rdma_bytes = int(1e9);
+        // normal ibgda
         if (autil::EnvUtil::getEnv("ACCL_NORMAL_MODE", "IBRC") == "IBGDA") {
             setenv("ACCL_NORMAL_MODE", "IBGDA", 1);
             num_qps_per_rank = std::max(deep_ep_num_sm / 2, (int)(num_experts / init_params_.ep_size));
         }
-        //normal ibrc
+        // normal ibrc
         else {
             setenv("ACCL_NORMAL_MODE", "IBRC", 1);
             num_qps_per_rank = deep_ep_num_sm / 2;
         }
-        
+
     } else {
         num_nvl_bytes    = int(2e9);  // normal-kernel intranode
         num_qps_per_rank = 1;
@@ -75,13 +75,8 @@ bool CudaDevice::initDeepEPBuffer() {
             return false;
         }
 
-        if (init_params_.moe_config.deep_ep_num_sm > 0) {
-            int new_num_sms = init_params_.moe_config.deep_ep_num_sm;
-            RTP_LLM_LOG_INFO("Set DEEP_EP_NUM_SM to %ld", new_num_sms);
-            deepep_buffer_->setNumSMs(new_num_sms);
-        } else {
-            RTP_LLM_LOG_INFO("Deep EP use default sm num");
-        }
+        RTP_LLM_LOG_INFO("Set DEEP_EP_NUM_SM to %ld", deep_ep_num_sm);
+        deepep_buffer_->setNumSMs(deep_ep_num_sm);
         return true;
     } catch (const std::exception& e) {
         RTP_LLM_LOG_ERROR("Failed to create DeepEPBuffer: %s", e.what());

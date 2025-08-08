@@ -33,6 +33,7 @@ namespace rtp_llm {
 CudaDevice::CudaDevice(const DeviceInitParams& params): DeviceBase(params) {
     RTP_LLM_LOG_INFO("Initialize CudaDevice. %d", device_id_);
     check_cuda_value(cudaSetDevice(device_id_));
+    printDeviceMemoryUsage("before init");
     if (init_params_.device_resource_config.not_use_default_stream) {
         torch_default_stream_ = std::make_unique<at::cuda::CUDAStream>(at::cuda::getStreamFromPool(true));
     } else {
@@ -114,7 +115,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params): DeviceBase(params) {
         std::vector<size_t> tp_ranks   = fcNcclGatherRanks(nccl_param, stream_);
         custom_allreduce_comm_ = initCustomAllReduceComm(nccl_param, tp_ranks, stream_, params.hw_kernel_config);
     }
-
+    printDeviceMemoryUsage("after init communicator");
     // cudaHostMalloc needs page table on GPU memory, retain this part first.
     auto host_allocator_ptr = new Allocator<AllocatorType::CUDA_HOST>(device_id_);
     host_allocator_ptr->setStream(stream_);
@@ -133,6 +134,20 @@ CudaDevice::CudaDevice(const DeviceInitParams& params): DeviceBase(params) {
 
     auto allocator_ptr = new Allocator<AllocatorType::CUDA>(device_id_);
     allocator_ptr->setStream(stream_);
+
+    if (init_params_.use_deepep_moe) {
+        // init deepep buffer before buffer manager init to avoid out of mem
+        buffer_manager_.reset(
+            new BufferManager(allocator_ptr, host_allocator_ptr, init_params_.profile_debug_logging_config));
+        if (!initDeepEPBuffer()) {
+            RTP_LLM_CHECK_WITH_INFO(false, "init deepep buffer failed");
+        } else {
+            RTP_LLM_LOG_INFO("init deepep buffer success");
+        }
+        printDeviceMemoryUsage("after init deepep buffer");
+        buffer_manager_.reset();
+    }
+
     if (params.device_reserve_memory_bytes) {
         size_t free_bytes, total_bytes;
         check_cuda_value(cudaMemGetInfo(&free_bytes, &total_bytes));
@@ -173,6 +188,16 @@ CudaDevice::CudaDevice(const DeviceInitParams& params): DeviceBase(params) {
     RTP_LLM_LOG_INFO("use_stable_scatter_add: %d", use_stable_scatter_add);
 }
 
+void CudaDevice::printDeviceMemoryUsage(std::string stage) {
+    size_t free_bytes, total_bytes;
+    check_cuda_value(cudaMemGetInfo(&free_bytes, &total_bytes));
+    RTP_LLM_LOG_INFO("stage:[%s] cuda device %d has %lu bytes free memory, total %lu bytes.",
+                     stage.c_str(),
+                     device_id_,
+                     free_bytes,
+                     total_bytes);
+}
+
 CudaDevice::~CudaDevice() {
     // change torch cuda gpu allocate
     if (origin_torch_cuda_allocator_) {
@@ -209,18 +234,21 @@ void CudaDevice::printDebugInfo() {
 }
 
 void CudaDevice::init() {
+    // should init cuda device first to avoid set it in device reserve
     DeviceBase::init();
 
     RTP_LLM_LOG_INFO("cuda device init max batch size: %d\n", init_params_.max_batch_size);
     curandstate_buf_ = allocateBuffer({init_params_.max_batch_size * sizeof(curandState_t)}, {"curandstate"});
+}
 
-    if (init_params_.use_deepep_moe) {
-        if (!initDeepEPBuffer()) {
-            RTP_LLM_CHECK_WITH_INFO(false, "init deepep buffer failed");
-        } else {
-            RTP_LLM_LOG_INFO("init deepep buffer success");
-        }
-    }
+// pre-allocate buffer before buffer managaer
+void CudaDevice::commBarrier(const NcclParam& nccl_param) {
+    void* tmpBuffer = nullptr;
+    check_cuda_value(cudaMalloc(&tmpBuffer, 32));
+    check_cuda_value(cudaMemset(tmpBuffer, 0, 32));
+    ftNcclAllReduceSum((float*)tmpBuffer, (float*)tmpBuffer, 32, nccl_param, stream_);
+    cudaStreamSynchronize(stream_);
+    check_cuda_value(cudaFree(tmpBuffer));
 }
 
 void CudaDevice::initNcclParam(size_t             rank,
@@ -247,6 +275,7 @@ void CudaDevice::initNcclParam(size_t             rank,
     NCCLCHECK(ncclGroupStart());
     NCCLCHECK(ncclCommInitRank(&nccl_param.nccl_comm_, world_size, *nccl_id, rank));
     NCCLCHECK(ncclGroupEnd());
+    commBarrier(nccl_param);
 }
 
 void CudaDevice::checkError() {

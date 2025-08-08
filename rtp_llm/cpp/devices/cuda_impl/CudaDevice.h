@@ -129,6 +129,8 @@ private:
                                size_t             port,
                                const std::string& tp_group_name,
                                NcclParam&         nccl_param);
+    void         commBarrier(const NcclParam& nccl_param);
+    void         printDeviceMemoryUsage(std::string stage);
     bool         initDeepEPBuffer();
     void         updateCurrentTorchStream() override;
     void         checkUseGroupGemm();
