@@ -917,7 +917,7 @@ class GptInitModelParameters:
         self.enable_sp = parallel_info.ffn_sp_size > 1
         self.local_rank = parallel_info.local_rank
         self.use_all_gather = (
-            self.dp_size == 1
+            bool(int(os.environ.get("USE_ALL_GATHER", 0)))
             and self.gpt_init_params.moe_config.use_deepep_low_latency == False
         )
         logging.info(f"use_all_gather: {self.use_all_gather}")
