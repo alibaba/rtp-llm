@@ -23,8 +23,7 @@ namespace rtp_llm {
 
 JITRuntimeMap      JIT::jit_kernels_;
 mutex              jit_thread_num_mutex_;
-int                jit_thread_num_    = 0;
-const int          MAX_JIT_THREAD_NUM = 32;
+int                jit_thread_num_ = 0;
 condition_variable cv;
 
 string getFilesHash(filesystem::path path) {
@@ -43,7 +42,6 @@ string getFilesHash(filesystem::path path) {
 
     for (const auto& file : files) {
         string filename = file.string();
-        SHA256_Update(&sha256, filename.c_str(), filename.size());
 
         ifstream ifs(file, ios::binary);
         char     buffer[4096];
@@ -167,29 +165,30 @@ KernelPath JIT::getKernelPath(KernelParams params) {
     string                command;
     KernelPathCacheStatus so_status;
 
+    if (!filesystem::exists(local_dir_path)) {
+        filesystem::create_directories(local_dir_path);
+    } else {
+        so_status = findMatchingFiles(local_dir_path, ".so");
+        if (so_status.find) {
+            DECREASE_JIT_THREAD_NUM;
+            return KernelPath{so_status.path, params};
+        }
+    }
+
     if (has_remote_cache) {
         so_status = findMatchingFiles(remote_dir_path, ".so");
         if (so_status.find) {
             string local_filepath = local_dir_path.string() + "/" + so_status.path.filename().string();
-            command               = "cp " + so_status.path.string() + " " + local_filepath;
-            result                = system(command.c_str());
-            if (result != 0) {
-                RTP_LLM_FAIL("Failed to copy so " + so_status.path.string() + " to local " + local_filepath);
+            try {
+                filesystem::copy(so_status.path.string(), local_filepath);
+            } catch (const filesystem::filesystem_error& e) {
+                if (!filesystem::exists(local_filepath)) {
+                    throw e;
+                }
             }
+            DECREASE_JIT_THREAD_NUM;
             return KernelPath{local_filepath, params};
         }
-    }
-
-    filesystem::create_directories(local_dir_path);
-    so_status = findMatchingFiles(local_dir_path, ".so");
-
-    if (so_status.find) {
-        return KernelPath{so_status.path, params};
-    }
-
-    {
-        unique_lock<mutex> lock(jit_thread_num_mutex_);
-        jit_thread_num_++;
     }
 
     const string pid_and_timestamp_str = generateKernelName();
@@ -219,32 +218,20 @@ KernelPath JIT::getKernelPath(KernelParams params) {
         RTP_LLM_FAIL("Failed to do interleave ffma");
     }
 
-    if (has_remote_cache) {
-        command = "cp " + so_filename + " " + remote_filename;
-        result  = system(command.c_str());
-        if (result != 0) {
-            command = "rm -f " + remote_filename;
-            result  = system(command.c_str());
-            RTP_LLM_FAIL("Failed to copy so " + so_filename + " to remote " + remote_filename);
+    if (has_remote_cache && !filesystem::exists(remote_filename)) {
+        try {
+            filesystem::copy(so_filename, remote_filename);
+        } catch (const filesystem::filesystem_error& e) {
+            if (!filesystem::exists(remote_filename)) {
+                throw e;
+            }
         }
     }
 
-    command = "mv " + so_filename + " " + so_filename_final;
-    result  = system(command.c_str());
-    if (result != 0) {
-        command = "rm -f " + so_filename_final;
-        result  = system(command.c_str());
-        RTP_LLM_FAIL("Failed to move so " + so_filename + " to " + so_filename_final);
-    }
-
+    filesystem::rename(so_filename, so_filename_final);
     RTP_LLM_LOG_INFO("JIT compilation " + cu_filename + " finished");
 
-    {
-        unique_lock<mutex> lock(jit_thread_num_mutex_);
-        jit_thread_num_--;
-        cv.notify_one();
-    }
-
+    DECREASE_JIT_THREAD_NUM;
     return KernelPath{so_filename_final, params};
 }
 
@@ -301,16 +288,10 @@ runDeepGemmFunc JIT::searchKernel(KernelParams& params) {
                         KernelParams now_params{
                             n, k, bm_, bn_, bk_, num_groups, num_stages_, num_tma_multicast_, gemm_type, true};
                         if (gemm_type == DeepGemmType::Normal || gemm_type == DeepGemmType::GroupedMasked) {
-                            {
-                                unique_lock<mutex> lock(jit_thread_num_mutex_);
-                                cv.wait(lock, [] { return jit_thread_num_ <= MAX_JIT_THREAD_NUM; });
-                            }
+                            INCREASE_JIT_THREAD_NUM;
                             futures.emplace_back(async(launch::async, getKernelPath, now_params));
                         }
-                        {
-                            unique_lock<mutex> lock(jit_thread_num_mutex_);
-                            cv.wait(lock, [] { return jit_thread_num_ <= MAX_JIT_THREAD_NUM; });
-                        }
+                        INCREASE_JIT_THREAD_NUM;
                         now_params.swap_ab = false;
                         futures.emplace_back(async(launch::async, getKernelPath, now_params));
                     }

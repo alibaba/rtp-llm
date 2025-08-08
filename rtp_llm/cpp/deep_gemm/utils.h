@@ -11,8 +11,24 @@
 #include <algorithm>
 #include <random>
 #include <chrono>
+#include <thread>
 
 namespace rtp_llm {
+
+#define MAX_JIT_THREAD_NUM 8
+#define INCREASE_JIT_THREAD_NUM                                                                                        \
+    {                                                                                                                  \
+        unique_lock<mutex> lock(jit_thread_num_mutex_);                                                                \
+        cv.wait(lock, [] { return jit_thread_num_ < MAX_JIT_THREAD_NUM; });                                            \
+        jit_thread_num_++;                                                                                             \
+    }
+
+#define DECREASE_JIT_THREAD_NUM                                                                                        \
+    {                                                                                                                  \
+        unique_lock<mutex> lock(jit_thread_num_mutex_);                                                                \
+        jit_thread_num_--;                                                                                             \
+        cv.notify_one();                                                                                               \
+    }
 
 enum class DeepGemmType {
     Normal,
@@ -87,7 +103,7 @@ inline std::string generateKernelName() {
     auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
 
     std::ostringstream oss;
-    oss << getpid() << "_" << timestamp;
+    oss << getpid() << "_" << std::this_thread::get_id() << "_" << timestamp;
     return oss.str();
 }
 
@@ -108,10 +124,15 @@ inline KernelPathCacheStatus findMatchingFiles(const std::filesystem::path& dire
         return KernelPathCacheStatus(false, std::string(""));
     }
 
+    char*       log_level_str = std::getenv("LOG_LEVEL");
+    std::string log_level     = log_level_str == nullptr ? "INFO" : std::string(log_level_str);
+    if (log_level == "DEBUG" || log_level == "TRACE") {
+        return KernelPathCacheStatus(true, matched_files[0]);
+    }
+
     std::random_device              rd;
     std::mt19937                    gen(rd());
     std::uniform_int_distribution<> dis(0, matched_files.size() - 1);
-
     return KernelPathCacheStatus(true, matched_files[dis(gen)]);
 }
 
