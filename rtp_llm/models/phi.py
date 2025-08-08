@@ -1,3 +1,5 @@
+import torch
+
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight
@@ -140,6 +142,7 @@ class Phi(BaseModel):
             tie_word_embeddings=config_dict.get("tie_word_embeddings", False),
         )
         config.head_num_kv = config.head_num
+        config.config_dtype = config_dict.get("torch_dtype", None)
         return config
 
 

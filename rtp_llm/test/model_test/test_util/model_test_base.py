@@ -28,7 +28,6 @@ class ModelTestBase(TestCase):
         model_type: str = "",
         tokenizer_path: str = "",
         ckpt_path: str = "",
-        weight_type: torch.dtype = torch.float16,
         test_loss: bool = False,
         fake_name: str = "",
         quantization: str = "",
@@ -38,10 +37,9 @@ class ModelTestBase(TestCase):
         self.model_type = model_type
         self.tokenizer_path = tokenizer_path
         self.ckpt_path = ckpt_path
-        self.weight_type = weight_type
+        self.quantization = quantization
         self.test_loss = test_loss
         self.fake_name = fake_name
-        self.quantization = quantization
 
         os.environ["FT_PLUGIN_PATH"] = os.path.join(
             os.getcwd(), "rtp_llm/plugins/ret_hidden_states.py"
@@ -51,7 +49,7 @@ class ModelTestBase(TestCase):
         logging.info(f"model_type: {self.model_type}")
         logging.info(f"tokenizer path: {self.tokenizer_path}")
         logging.info(f"check point path: {self.ckpt_path}")
-        logging.info(f"weight_type: {weight_type}")
+        logging.info(f"quantization: {quantization}")
         logging.info(f"test_loss: {test_loss}")
 
     def flat(self, x: Union[List[bool], bool]) -> List[bool]:
@@ -244,7 +242,7 @@ class ModelTestBase(TestCase):
                 model_type=self.model_type,
                 tokenizer_path=self.tokenizer_path,
                 ckpt_path=self.ckpt_path,
-                weight_type=self.weight_type,
+                quantization=self.quantization,
                 max_seq_len=8192,
                 quantization=self.quantization,
             )

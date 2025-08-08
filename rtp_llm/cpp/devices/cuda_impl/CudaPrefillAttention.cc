@@ -52,7 +52,7 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
             break;
         }
         case FMHAType::PAGED_TRT_V2: {
-            RTP_LLM_CHECK_WITH_INFO(q_output != nullptr, "q_output must be provided for paged trt v2 fmha");            
+            RTP_LLM_CHECK_WITH_INFO(q_output != nullptr, "q_output must be provided for paged trt v2 fmha");
             float* attention_output_orig_quant_scale = nullptr;
             if (params.weights.static_scale_reciprocal_weight && use_fp8_fmha) {
                 printBufferData(*(params.weights.static_scale_reciprocal_weight->kernel), "attn scale");
@@ -61,7 +61,7 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
             }
             bool      need_quant_fmha_out = !use_fp8_fmha && params.output.isQBuffer();
             BufferPtr tmp_fmha_output;
-            void* fmha_output_ptr = params.output.data();
+            void*     fmha_output_ptr = params.output.data();
             if (need_quant_fmha_out) {
                 // for sm89 cannot use fp8_fmha, but attention output should be fp8
                 tmp_fmha_output = allocateBuffer(
@@ -253,6 +253,7 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
                                    std::nullopt,
                                    nullptr,
                                    DataType::TYPE_FP32,
+                                   params.compute_type,
                                    TransposeOperation::NONE,
                                    TransposeOperation::TRANSPOSE});
             qk_output->updateShape({batch_size, head_num, seq_len, seq_len_with_prefix});

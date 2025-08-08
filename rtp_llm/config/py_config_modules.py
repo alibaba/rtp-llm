@@ -24,6 +24,7 @@ from rtp_llm.ops import (
     SpeculativeExecutionConfig,
 )
 from rtp_llm.utils.fuser import MountRwMode, fetch_remote_file_to_local
+from rtp_llm.utils.weight_type import WEIGHT_TYPE
 
 DEFAULT_START_PORT = 8088
 MASTER_INFO_PORT_NUM = 11
@@ -108,7 +109,11 @@ class ModelConfig:
             "LOCAL_EXTRA_DATA_PATH", self.local_extra_data_path
         )
         self.tokenizer_path = os.environ.get("TOKENIZER_PATH", self.tokenizer_path)
-        self.act_type = os.environ.get("ACT_TYPE", self.act_type)
+        if int(os.environ.get("USE_FLOAT32", 0) == "1"):
+            self.act_type = WEIGHT_TYPE.FP32.to_str()
+            logging.info(f"set data_type = WEIGHT_TYPE.FP32 by USE_FLOAT32 == 1")
+        else:
+            self.act_type = os.environ.get("ACT_TYPE", self.act_type)
         self.use_float32 = get_env_bool("USE_FLOAT32", self.use_float32)
         self.original_checkpoint_path = os.environ.get(
             "ORIGINAL_CHECKPOINT_PATH", self.original_checkpoint_path
@@ -165,12 +170,18 @@ class PySpeculativeExecutionConfig:
         self.sp_checkpoint_path: Optional[str] = None
         self.sp_type: Optional[str] = None
         self.sp_model_type: Optional[str] = None
+        self.sp_kv_cache_dtype: Optional[str] = None
 
     def update_from_env(self):
         self.gen_num_per_circle = int(
             os.environ.get("GEN_NUM_PER_CIRCLE", self.gen_num_per_circle)
         )
+        sp_int8_mode = int(os.environ.get("SP_INT8_MODE", 0))
         self.sp_quantization = os.environ.get("SP_QUANTIZATION", self.sp_quantization)
+        if sp_int8_mode and not self.sp_quantization:
+            self.sp_quantization = WEIGHT_TYPE.INT8.to_str()
+
+        self.sp_kv_cache_dtype = os.environ.get("SP_KV_CACHE_DTYPE", None)
         self.sp_checkpoint_path = os.environ.get(
             "SP_CHECKPOINT_PATH", self.sp_checkpoint_path
         )
@@ -184,6 +195,8 @@ class PySpeculativeExecutionConfig:
             f"sp_checkpoint_path: {self.sp_checkpoint_path}\n"
             f"sp_type: {self.sp_type}\n"
             f"sp_model_type: {self.sp_model_type}"
+            f"sp_kv_cache_dtype: {self.sp_kv_cache_dtype}\n"
+            f"sp_checkpoint_path: {self.sp_checkpoint_path}"
         )
 
 
@@ -342,9 +355,13 @@ class VitConfig:
             os.environ.get("url_cache_item_num", self.url_cache_item_num)
         )
         self.use_igraph_cache = get_env_bool("USE_IGRAPH_CACHE", self.use_igraph_cache)
-        self.igraph_search_dom = get_env_str("IGRAPH_SEARCH_DOM", self.igraph_search_dom)
+        self.igraph_search_dom = get_env_str(
+            "IGRAPH_SEARCH_DOM", self.igraph_search_dom
+        )
         self.igraph_vipserver = get_env_int("IGRAPH_VIPSERVER", self.igraph_vipserver)
-        self.igraph_table_name = get_env_str("IGRAPH_TABLE_NAME", self.igraph_table_name)
+        self.igraph_table_name = get_env_str(
+            "IGRAPH_TABLE_NAME", self.igraph_table_name
+        )
 
     def to_string(self):
         return (
@@ -408,6 +425,8 @@ class QuantizationConfig:
     def update_from_env(self):
         self.int8_mode = int(os.environ.get("INT8_MODE", self.int8_mode))
         self.quantization = os.environ.get("QUANTIZATION", self.quantization)
+        if self.int8_mode and not self.quantization:
+            self.quantization = WEIGHT_TYPE.INT8.to_str()
 
     def to_string(self):
         return f"int8_mode: {self.int8_mode}\n" f"quantization: {self.quantization}"
@@ -463,6 +482,7 @@ class PyKvCacheConfig:
         self.test_block_num: int = 0
         self.use_block_cache: Optional[int] = None
         self.blockwise_use_fp8_kv_cache: int = 0
+        self.kv_cache_dtype: Optional[str] = None
 
     def update_from_env(self):
         self.int8_kv_cache = int(os.environ.get("INT8_KV_CACHE", self.int8_kv_cache))
@@ -482,11 +502,21 @@ class PyKvCacheConfig:
                 "BLOCKWISE_USE_FP8_KV_CACHE", self.blockwise_use_fp8_kv_cache
             )
         )
+        self.kv_cache_dtype = os.environ.get("KV_CACHE_DTYPE", None)
+        if self.int8_kv_cache:
+            self.kv_cache_dtype = WEIGHT_TYPE.INT8.to_str()
+        elif self.blockwise_use_fp8_kv_cache or self.fp8_kv_cache:
+            self.kv_cache_dtype = WEIGHT_TYPE.FP8.to_str()
+        elif int(os.environ.get("USE_FLOAT32", 0)):
+            self.kv_cache_dtype = WEIGHT_TYPE.FP32.to_str()
+        if not self.kv_cache_dtype:
+            self.kv_cache_dtype = WEIGHT_TYPE.AUTO.to_str()
 
     def to_string(self):
         return (
             f"int8_kv_cache: {self.int8_kv_cache}\n"
             f"fp8_kv_cache: {self.fp8_kv_cache}\n"
+            f"kv_cache_dtype: {self.kv_cache_dtype}\n"
             f"kv_cache_mem_mb: {self.kv_cache_mem_mb}\n"
             f"seq_size_per_block: {self.seq_size_per_block}\n"
             f"test_block_num: {self.test_block_num}\n"

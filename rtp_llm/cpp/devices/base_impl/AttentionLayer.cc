@@ -44,7 +44,12 @@ BufferPtr DeviceBase::attentionQKVGemm(const AttentionLayerParams& params) {
         } else {
             throw OpException({OpErrorType::ERROR_UNIMPLEMENTED, "allGatherloraLinear qscheme type not supported"});
         }
-        GemmParams                qkv_gemm_params = GemmParams(*ag_recv_buffer, *(params.weights.qkv_weight->kernel));
+        GemmParams                qkv_gemm_params = GemmParams(*ag_recv_buffer,
+                                                *(params.weights.qkv_weight->kernel),
+                                                std::nullopt,
+                                                nullptr,
+                                                DataType::TYPE_INVALID,
+                                                params.compute_type);
         AllGatherLoraLinearOutput all_gather_output =
             allGatherloraLinear({LoraLinearParams(qkv_gemm_params, params.common.lora_input.qkv_lora_input),
                                  attn_input_ptr,
@@ -143,7 +148,8 @@ BufferPtr DeviceBase::attentionAttn(const AttentionLayerParams& params) {
                               params.common,
                               params.weights,
                               params.configs,
-                              params.qscheme});
+                              params.qscheme,
+                              params.compute_type});
     }
     if (context_batch_size) {
         auto context_qkv    = qkv.view(generate_batch_size, context_token_num);
@@ -158,7 +164,8 @@ BufferPtr DeviceBase::attentionAttn(const AttentionLayerParams& params) {
                           params.common,
                           params.weights,
                           params.configs,
-                          params.qscheme});
+                          params.qscheme,
+                          params.compute_type});
     }
     if (layer_kv_cache) {
         params.common.kv_cache->kv_cache_block_id = kv_cache_block_id;
@@ -218,7 +225,8 @@ BufferPtr DeviceBase::attentionOutGemm(const AttentionLayerParams& params) {
     GemmParams output_gemm_params =
         GemmParams(output_gemm_input, *(output_weight->kernel), nullopt, gemm_output, gemm_output->type());
 #else
-    GemmParams output_gemm_params = GemmParams(output_gemm_input, *(output_weight->kernel), nullopt, gemm_output);
+    GemmParams output_gemm_params = GemmParams(
+        output_gemm_input, *(output_weight->kernel), nullopt, gemm_output, DataType::TYPE_INVALID, params.compute_type);
 #endif
     if (params.enable_sp) {
         printBufferData(output_gemm_input, "attn_rs_input");
@@ -249,6 +257,7 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
                                         params.residual,
                                         params.ln_params,
                                         params.qscheme,
+                                        params.compute_type,
                                         params.enable_sp,
                                         params.pad_token_num});
     return {attentionOutGemm({params.layer_id,
@@ -260,6 +269,7 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
                               params.residual,
                               params.ln_params,
                               params.qscheme,
+                              params.compute_type,
                               params.enable_sp,
                               params.pad_token_num})};
 }

@@ -153,8 +153,9 @@ void ArmGemmOptOpTest::TransposeBatchGemmOP(TransposeOperation op_a,
     auto A_device = createDeviceBuffer<float>(A_host);
     auto B_device = createDeviceBuffer<float>(B_host);
 
-    GemmParams params{*A_device, *B_device, nullopt, nullptr, DataType::TYPE_INVALID, op_a, op_b};
-    auto       C_device = device_->gemm(params);
+    GemmParams params{
+        *A_device, *B_device, nullopt, nullptr, DataType::TYPE_INVALID, DataType::TYPE_INVALID, op_a, op_b};
+    auto C_device = device_->gemm(params);
 
     if (op_a == TransposeOperation::TRANSPOSE) {
         A_host = A_host.transpose(1, 2);

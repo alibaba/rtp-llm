@@ -35,7 +35,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     output_mutex_(std::make_shared<std::mutex>()),
     cv_(std::make_shared<std::condition_variable>()),
     mm_position_ids_style_(PositionIdsStyle(params.mm_position_ids_style_)),
-    dtype_(rtp_llm::getDataType(params.data_type_)),
+    dtype_(params.data_type_),
     hidden_size_(params.hidden_size_) {
     if (!updatePrefix(resource_context.system_prompt)) {
         return;

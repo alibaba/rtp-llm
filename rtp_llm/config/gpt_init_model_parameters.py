@@ -21,7 +21,7 @@ from rtp_llm.config.quant_config import (
     Fp8BlockWiseQuantConfig,
     Fp8PerChannelCompressedQuantConfig,
     QuantizationConfig,
-    preset_quant_config,
+    init_quant_config,
 )
 from rtp_llm.config.task_type import TaskType, check_task_type
 from rtp_llm.distribute.gang_info import GangInfo, get_gang_info
@@ -233,6 +233,7 @@ class GptInitModelParameters:
         "num_nodes",
         "quant_config",
         "py_env_configs",
+        "config_dtype",
     }
 
     # copy from rtp_llm/ops/libth_transformer.pyi for python intelligence
@@ -248,6 +249,7 @@ class GptInitModelParameters:
     cross_attn_input_len: int
     data_type: str
     decode_entrance: bool
+    config_dtype: str
     decode_polling_kv_cache_step_ms: int
     decode_retry_timeout_ms: int
     decode_retry_times: int
@@ -431,6 +433,7 @@ class GptInitModelParameters:
             "layernorm_type": "setLayerNormType",
             "norm_type": "setNormType",
             "activation_type": "setActivationType",
+            "data_type": "setDataType",
             "kv_cache_data_type": "setKvCacheDataType",
         }
         self.has_lm_head_bias = False
@@ -477,6 +480,7 @@ class GptInitModelParameters:
         self.qk_norm = False
         self.quant_config = None
         self.role_type = RoleType.PDFUSION
+        self.config_dtype = None
 
         # For cpp, we use `gpt_init_params`, `py_env_configs` for python.
         # There are some common envs in cpp and python, so they will
@@ -875,7 +879,8 @@ class GptInitModelParameters:
         ptuning_path: Optional[str],
         tokenizer_path: str,
         quantization: str,
-        data_type: WEIGHT_TYPE,
+        data_type: str,
+        kv_cache_type: str,
         max_seq_len: int,
         seq_size_per_block: int,
         gen_num_per_circle: int,
@@ -885,7 +890,8 @@ class GptInitModelParameters:
         config_mode: ConfigMode = ConfigMode.ComplexMode,
         gang_info: Optional[GangInfo] = None,
     ):
-        self._load_quant_config(ckpt_path, quantization)
+
+        self._init_precision_config(ckpt_path, quantization, data_type, kv_cache_type)
 
         self.tp_size = parallel_info.tp_size
         self.tp_rank = parallel_info.tp_rank
@@ -926,7 +932,6 @@ class GptInitModelParameters:
         self.lora_infos = lora_infos
         self.tokenizer_path = tokenizer_path
 
-        self.data_type = data_type.to_str()
         self.gen_num_per_circle = gen_num_per_circle
         self.ptuning_path = ptuning_path
         self.ref_module = ref_module
@@ -1135,20 +1140,6 @@ class GptInitModelParameters:
         logging.info(f"reuse_cache: {self.reuse_cache}")
         self.pre_allocate_op_mem = bool(int(os.environ.get("PRE_ALLOCATE_OP_MEM", 1)))
         logging.info(f"pre_allocate_op_mem: {self.pre_allocate_op_mem}")
-        self.kv_cache_data_type = self.data_type
-        if bool(self.py_env_configs.py_kv_cache_config.int8_kv_cache):
-            self.kv_cache_data_type = WEIGHT_TYPE.INT8.to_str()
-        elif self.quant_algo.isFp8():
-            if self.quant_algo.isGroupwise():
-                if bool(
-                    self.py_env_configs.py_kv_cache_config.blockwise_use_fp8_kv_cache
-                ):
-                    self.kv_cache_data_type = WEIGHT_TYPE.FP8.to_str()
-            else:
-                self.kv_cache_data_type = WEIGHT_TYPE.FP8.to_str()
-        elif self.py_env_configs.py_kv_cache_config.fp8_kv_cache:
-            self.kv_cache_data_type = WEIGHT_TYPE.FP8.to_str()
-        logging.info(f"kv_cache_data_type: {self.kv_cache_data_type}")
         logging.info(f"tp_split_emb_and_lm_head: {self.tp_split_emb_and_lm_head}")
 
         # use environment variables to update stop_words_str and stop_words_id
@@ -1177,9 +1168,39 @@ class GptInitModelParameters:
             f" stop_words_id_list [{self.special_tokens.stop_words_id_list}]"
         )
 
-    def _load_quant_config_from_ckpt(
-        self, ckpt_path: str
-    ) -> Optional[QuantizationConfig]:
+    def _init_precision_config(
+        self,
+        ckpt_path: str,
+        quantization: str,
+        data_type_str: Optional[str],
+        kv_cache_dtype_str: Optional[str],
+    ):
+        quant_config = self._load_quant_config_from_ckpt(ckpt_path)
+        if not quant_config:
+            if quantization:
+                quant_config = init_quant_config(quantization)
+                logging.info(f"need_load_quant by {quant_config.get_method()}")
+        if quant_config:
+            self.quant_algo.setQuantAlgo(
+                quant_config.get_algo().lower(),
+                quant_config.bits,
+                quant_config.group_size(),
+            )
+
+        # Verify the data_type
+        data_type, kv_cache_data_type = self._get_and_verify_dtype(
+            quant_config, data_type_str, kv_cache_dtype_str
+        )
+
+        self.quant_config = quant_config
+        self.data_type = data_type.to_str()
+        self.kv_cache_data_type = kv_cache_data_type.to_str()
+        logging.info(
+            f"quant_config: {self.quant_config}, data_type:{self.data_type}, kv_cache_data_type: {self.kv_cache_data_type}"
+        )
+
+    @staticmethod
+    def _load_quant_config_from_ckpt(ckpt_path: str) -> Optional[QuantizationConfig]:
         quant_config_path = os.path.join(ckpt_path, "smoothquant.ini")
         if os.path.exists(quant_config_path):
             return QuantizationConfig.from_config(
@@ -1250,35 +1271,60 @@ class GptInitModelParameters:
             }
         )
 
-    def _load_quant_config(self, ckpt_path: str, quantization: str):
-        self.quant_config = self._load_quant_config_from_ckpt(ckpt_path)
-        if not self.quant_config:
-            if quantization:
-                try:
-                    quant_config_dict = json.loads(quantization)
-                    self.quant_config: QuantizationConfig = (
-                        QuantizationConfig.from_config(quant_config_dict)
-                    )
-                except Exception:
-                    self.quant_config = preset_quant_config.get(
-                        quantization.upper(), None
-                    )
-                    if self.quant_config is None:
-                        raise ValueError(
-                            f"{quantization.upper()} is not support now, quantization must in {list(preset_quant_config.keys())}"
-                        )
-                logging.info(f"need_load_quant by {self.quant_config.get_method()}")
-        if self.quant_config:
+    def _get_and_verify_dtype(
+        self, quant_config: QuantizationConfig, data_type_str, kv_cache_dtype_str
+    ):
+        data_type: WEIGHT_TYPE = None
+        config_dtype = (
+            WEIGHT_TYPE.from_str(self.config_dtype) if self.config_dtype else None
+        )
+        if data_type_str:
+            data_type = WEIGHT_TYPE.from_str(data_type_str)
+            logging.info(f"set data_type by args: {data_type}")
+
+        if not data_type or data_type == WEIGHT_TYPE.AUTO:
+            data_type = config_dtype if config_dtype else WEIGHT_TYPE.FP16
             logging.info(
-                f"quant config info: {self.quant_config.get_algo()}, {self.quant_config.bits()}, {self.quant_config.group_size()}"
+                f"data_type is not set or it's auto,we will use config_dtype:{config_dtype} or {WEIGHT_TYPE.FP16}"
             )
-            self.quant_algo.setQuantAlgo(
-                self.quant_config.get_algo().lower(),
-                self.quant_config.bits(),
-                self.quant_config.group_size(),
+        if quant_config and isinstance(quant_config, Fp8BlockWiseQuantConfig):
+            data_type = WEIGHT_TYPE.BF16  # now fp8_block_wise only support bf16
+            logging.info(f"now fp8_block_wise only support bf16")
+        elif quant_config and quant_config.get_method().lower() in [
+            "smooth_quant",
+            "omni_quant",
+        ]:
+            data_type = WEIGHT_TYPE.FP16
+
+        if config_dtype and data_type != config_dtype:
+            if data_type == WEIGHT_TYPE.FP32:
+                # Upcasting to float32 is allowed.
+                logging.info("Upcasting %s to %s.", config_dtype, data_type)
+                pass
+            elif config_dtype == WEIGHT_TYPE.FP32:
+                # Downcasting from float32 to float16 or bfloat16 is allowed.
+                logging.info("Downcasting %s to %s.", config_dtype, data_type)
+                pass
+            else:
+                # Casting between float16 and bfloat16 is allowed with a warning.
+                logging.warning("Casting %s to %s.", config_dtype, data_type)
+
+        kv_cache_data_type: Optional[WEIGHT_TYPE] = (
+            WEIGHT_TYPE.from_str(kv_cache_dtype_str)
+            if kv_cache_dtype_str
+            else data_type
+        )
+        if quant_config and quant_config.get_method().lower() == "fp8":
+            kv_cache_data_type = WEIGHT_TYPE.FP8
+
+        if kv_cache_data_type == WEIGHT_TYPE.AUTO:
+            kv_cache_data_type: WEIGHT_TYPE = data_type
+
+        if quant_config:
+            quant_config.verify_compute_dtype_and_kv_cache_dtype(
+                data_type.to_torch_dtype(), kv_cache_data_type.to_torch_dtype()
             )
-        else:
-            logging.info("no quant config")
+        return (data_type, kv_cache_data_type)
 
     def get_params_dict(self):
         res: Dict[str, Any] = {}

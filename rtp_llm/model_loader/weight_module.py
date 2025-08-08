@@ -437,8 +437,11 @@ class AtomicWeight(WeightModule):
                     f"load {self.name} lora A failed: {tensor_name}, {traceback.format_exc()}"
                 )
                 return {}
+        convert_type = (
+            self.data_type if self.data_type is not None else load_config.compute_dtype
+        )
         after_merge_tensor = self.lora_a_process_func(before_merge_tensors).to(
-            data_type
+            convert_type
         )
         return {self.lora_a_name: after_merge_tensor}
 
@@ -474,8 +477,11 @@ class AtomicWeight(WeightModule):
                     f"load {self.name} lora B failed: {tensor_name}, {traceback.format_exc()}"
                 )
                 return {}
+        convert_type = (
+            self.data_type if self.data_type is not None else load_config.compute_dtype
+        )
         after_merge_tensor = self.lora_b_process_func(before_merge_tensors).to(
-            data_type
+            convert_type
         )
         return {self.lora_b_name: after_merge_tensor}
 

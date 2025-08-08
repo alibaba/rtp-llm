@@ -239,6 +239,7 @@ class Mixtral(BaseModel):
         )
         config.special_tokens.eos_token_id = 2
         config.special_tokens.bos_token_id = 1
+        config.config_dtype = config_json.get("torch_dtype", None)
         return config
 
 

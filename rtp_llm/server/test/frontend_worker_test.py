@@ -51,7 +51,6 @@ class FrontendWorkerTest(TestCase):
             model_type="llama",
             tokenizer_path=self.tokenizer_path,
             ckpt_path=self.ckpt_path,
-            weight_type=WEIGHT_TYPE.FP16,
             max_seq_len=2048,
         )
         model: AsyncModel = self.fake_model_loader.load_model()

@@ -117,7 +117,7 @@ class WeightsQuantizer:
         model_config = ModelConfig(
             model_type=self.model_type,
             ckpt_path=self.model_path,
-            weight_type=WEIGHT_TYPE.FP16,
+            act_type=WEIGHT_TYPE.FP16.to_str(),
             ptuning_path=None,
             max_seq_len=0,
             tokenizer_path=self.model_path,

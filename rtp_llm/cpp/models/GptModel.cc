@@ -1083,6 +1083,7 @@ GptLayerOutputs GptModel::forwardGptLayer(GptLayerInputs                        
                         layer.ffn_weights,
                         device_props_.ffn_fuse_add_residual ? (OptionalConstBufferRef)*residual : nullopt,
                         description_.act_qscheme,
+                        description_.compute_type,
                         std::move(ffn_output_buf),
                         enable_sp,
                         inputs.need_moe_gating});
@@ -1278,6 +1279,7 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(const GptLayerInputs&     
                               device_props_.attn_fuse_add_residual ? (OptionalConstBufferRef)*residual : nullopt,
                               {description_.layernorm_eps, description_.norm_type},
                               description_.act_qscheme,
+                              description_.compute_type,
                               enable_sp,
                               inputs.pad_token_num});
     if (description_.attention_conf.use_mla && device_->mla_ops_type != rtp_llm::MlaOpsType::MHA) {
@@ -1360,6 +1362,7 @@ EpFfnInputs GptModel::forwardAttentionAndMoeGate(const GptLayerInputs&   inputs,
                         layer.ffn_weights,
                         device_props_.ffn_fuse_add_residual ? (OptionalConstBufferRef)*residual : nullopt,
                         description_.act_qscheme,
+                        description_.compute_type,
                         std::move(ffn_output_buf)});
 
     prepareExpertStats(layer_id, ffn_layer_params);
@@ -1472,6 +1475,7 @@ GptModelOutputs GptModel::forwardPostLayers(rtp_llm::BufferPtr       input,
                                                *(lm_head->kernel),
                                                nullopt,
                                                nullptr,
+                                               rtp_llm::DataType::TYPE_FP32,
                                                rtp_llm::DataType::TYPE_FP32,
                                                TransposeOperation::NONE,
                                                TransposeOperation::TRANSPOSE));

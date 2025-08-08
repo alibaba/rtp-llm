@@ -228,6 +228,7 @@ class StarCoder2(BaseModel):
         config.rotary_embedding_base = config_json.get("rope_theta", 1000000)
         config.rotary_embedding_dim = config.size_per_head
         config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
+        config.config_dtype = config_json.get("torch_dtype", None)
         return config
 
     @classmethod

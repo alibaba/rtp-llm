@@ -30,12 +30,18 @@ LoraLinearOutput DeviceBase::loraLinear(const LoraLinearParams& params) {
         if (inputs.size() > 0) {
             if (params.lora_input->use_same_lora_) {
                 RTP_LLM_LOG_DEBUG("use same lora");
-                auto tmp    = gemm({params.gemm_params.A, *lora_as[0]});
+                auto tmp    = gemm({params.gemm_params.A,
+                                    *lora_as[0],
+                                    std::nullopt,
+                                    nullptr,
+                                    DataType::TYPE_INVALID,
+                                    params.gemm_params.D_type});
                 auto result = gemm({*tmp,
                                     *lora_bs[0],
                                     std::nullopt,
                                     output,
                                     DataType::TYPE_INVALID,
+                                    params.gemm_params.D_type,
                                     TransposeOperation::NONE,
                                     TransposeOperation::NONE,
                                     ActivationType::Identity,
@@ -91,6 +97,7 @@ ReduceScatterLoraLinearOutput DeviceBase::loraLinearReduceScatter(const LoraLine
                                                       linear_params.gemm_params.C,
                                                       output_d_chunk,
                                                       linear_params.gemm_params.compute_type,
+                                                      linear_params.gemm_params.D_type,
                                                       linear_params.gemm_params.transA,
                                                       linear_params.gemm_params.transB,
                                                       linear_params.gemm_params.activationType,
@@ -166,6 +173,7 @@ AllGatherLoraLinearOutput DeviceBase::allGatherloraLinear(const AllGatherLoraLin
                                                       linear_params.gemm_params.C,
                                                       output_d_chunk,
                                                       linear_params.gemm_params.compute_type,
+                                                      linear_params.gemm_params.D_type,
                                                       linear_params.gemm_params.transA,
                                                       linear_params.gemm_params.transB,
                                                       linear_params.gemm_params.activationType,

@@ -761,6 +761,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                                std::nullopt,
                                nullptr,
                                DataType::TYPE_FP32,
+                               DataType::TYPE_FP32,
                                TransposeOperation::NONE,
                                TransposeOperation::TRANSPOSE});
         qk_output->updateShape({batch_size, head_num, seq_len, seq_len_with_prefix});
@@ -780,7 +781,9 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
         softmax_qk_output->updateShape(
             {batch_size, kv_head_num, (head_num / kv_head_num) * seq_len, seq_len_with_prefix});
         printBufferData(*softmax_qk_output, "softmax_qk_output: ");
-        auto qkv_output = gemm({*softmax_qk_output, *v_output});
+
+        auto qkv_output =
+            gemm({*softmax_qk_output, *v_output, std::nullopt, nullptr, DataType::TYPE_INVALID, params.compute_type});
         qkv_output->updateShape({batch_size, head_num, seq_len, size_per_head});
         printBufferData(*qkv_output, "qkv_output");
         auto& qkv_transpose_output = params.output;

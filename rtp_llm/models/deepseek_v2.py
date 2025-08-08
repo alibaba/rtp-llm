@@ -622,6 +622,7 @@ class DeepSeekV2(BaseModel):
                 else:
                     layer_inter_size.append(ffn_inter_size)
             config.layer_inter_size = layer_inter_size
+            config.config_dtype = config_json.get("torch_dtype", None)
 
     @staticmethod
     def get_weight_cls():

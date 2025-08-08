@@ -67,6 +67,7 @@ class QWenV2Audio(QWenV2, MultiModalMixin):
         config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
 
         config.mm_sep_tokens = [[sep_token]]  # image_token_index
+        config.config_dtype = config_json.get("torch_dtype", None)
 
 
 register_model("qwen_v2_audio", QWenV2Audio)

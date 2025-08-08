@@ -16,9 +16,10 @@ class FakeModelLoader(object):
         model_type: str,
         tokenizer_path: str,
         ckpt_path: str,
-        weight_type: WEIGHT_TYPE = WEIGHT_TYPE.FP16,
         max_seq_len: int = 0,
         quantization: str = "",
+        data_type: str = WEIGHT_TYPE.AUTO.to_str(),
+        kv_cache_type: str = WEIGHT_TYPE.AUTO.to_str(),
         load_py_model: bool = False,
         device_reserve_memory_bytes: int = 0,
         warm_up: bool = False,
@@ -26,12 +27,14 @@ class FakeModelLoader(object):
         self.model_type = model_type
         self.tokenizer_path = tokenizer_path
         self.ckpt_path = ckpt_path
-        self.weight_type = weight_type
-        self.max_seq_len = max_seq_len
+        self.max_seq_len: int = max_seq_len
         self.quantization = quantization
         self.load_py_model = load_py_model
         self.device_reserve_memory_bytes = device_reserve_memory_bytes
         self.warm_up = warm_up
+        self.data_type = data_type
+        self.kv_cache_type = kv_cache_type
+
         logging.info(f"tokenizer path: {self.tokenizer_path}")
         logging.info(f"check point path: {self.ckpt_path}")
 
@@ -49,7 +52,6 @@ class FakeModelLoader(object):
             ckpt_path=self.ckpt_path,
             model_type=self.model_type,
             tokenizer_path=self.tokenizer_path,
-            weight_type=self.weight_type,
             max_seq_len=64,
             seq_size_per_block=64,
             gen_num_per_circle=1,
@@ -90,7 +92,8 @@ class FakeModelLoader(object):
             lora_infos=None,
             tokenizer_path=self.tokenizer_path,
             quantization=model_config.quantization,
-            data_type=model_config.act_type,
+            data_type=self.data_type,
+            kv_cache_type=self.kv_cache_type,
             max_seq_len=self.max_seq_len,
             seq_size_per_block=64,
             gen_num_per_circle=1,

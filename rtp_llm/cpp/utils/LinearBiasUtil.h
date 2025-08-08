@@ -48,9 +48,7 @@ rtp_llm::BufferPtr splitSlopesTP(const rtp_llm::GptInitParameter& gpt_init_param
     int  start_pos        = local_head_num * gpt_init_params.tp_rank_;
     auto tp_slopes        = std::vector<float>(slopes.begin() + start_pos, slopes.begin() + start_pos + local_head_num);
     auto tp_slopes_buffer = rtp_llm::vector2Buffer(tp_slopes);
-    auto convert_slopes   = tp_slopes_buffer ?
-                                device->convert({tp_slopes_buffer, rtp_llm::getDataType(gpt_init_params.data_type_)}) :
-                                nullptr;
+    auto convert_slopes = tp_slopes_buffer ? device->convert({tp_slopes_buffer, gpt_init_params.data_type_}) : nullptr;
     auto linear_bias_slopes =
         convert_slopes ? device->clone({*convert_slopes, rtp_llm::AllocationType::DEVICE}) : nullptr;
     return linear_bias_slopes;

@@ -144,10 +144,6 @@ class ModelConfig:
         self.ref_dict: Dict[str, torch.Tensor] = ref_dict
         self.sp_type: str = sp_type
 
-    @property
-    def int8_mode(self):
-        return True if self.weight_type == WEIGHT_TYPE.INT8 else False
-
     def add_ref_module(self, ref_module: Optional[torch.nn.Module]):
         self.ref_module = ref_module
 

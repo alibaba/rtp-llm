@@ -12,7 +12,8 @@ BufferPtr DeviceBase::mhaQKVGemm(const AttentionLayerParams& params) {
     // Arm attention op only support fp32 data type
     auto qkv_gemm_params = GemmParams(input, *(qkv_weight->kernel), std::nullopt, nullptr, DataType::TYPE_FP32);
 #else
-    auto qkv_gemm_params = GemmParams(input, *(qkv_weight->kernel));
+    auto qkv_gemm_params =
+        GemmParams(input, *(qkv_weight->kernel), std::nullopt, nullptr, DataType::TYPE_INVALID, params.compute_type);
 #endif
 
     auto      lora_linear_params = LoraLinearParams(qkv_gemm_params, params.common.lora_input.qkv_lora_input);

@@ -1,9 +1,5 @@
 from typing import Any, Dict
 
-import torch
-
-from rtp_llm.async_decoder_engine.async_model import AsyncModel
-from rtp_llm.model_factory import ModelFactory
 from rtp_llm.test.model_test.test_util.fake_model_loader import FakeModelLoader
 from rtp_llm.test.model_test.test_util.model_test_base import ModelTestBase
 
@@ -15,7 +11,7 @@ class FakeModelTest(ModelTestBase):
         model_type: str = "",
         tokenizer_path: str = "",
         ckpt_path: str = "",
-        weight_type: torch.dtype = torch.float16,
+        quantization: str = "",
         test_loss: bool = False,
         fake_name: str = "",
     ) -> None:
@@ -24,14 +20,17 @@ class FakeModelTest(ModelTestBase):
             model_type,
             tokenizer_path,
             ckpt_path,
-            weight_type,
+            quantization,
             test_loss,
             fake_name,
         )
 
     def _load_model(self):
         fake_model_loader = FakeModelLoader(
-            self.model_type, self.tokenizer_path, self.ckpt_path, self.weight_type
+            self.model_type,
+            self.tokenizer_path,
+            self.ckpt_path,
+            quantization=self.quantization,
         )
         return fake_model_loader.load_model()
 
@@ -44,7 +43,7 @@ def single_fake_test(
         model_config["model_type"],
         model_config["tokenizer_path"],
         model_config["ckpt_path"],
-        model_config["weight_type"],
+        model_config.get("quantization"),
         test_loss=test_loss,
         fake_name=fake_name,
     )

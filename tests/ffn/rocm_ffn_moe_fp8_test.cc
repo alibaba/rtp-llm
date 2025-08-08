@@ -106,7 +106,7 @@ void ROCmFfnMoeFp8Op::forward(torch::Tensor input,
     weights.e_score_correction_bias = e_score_correction_bias_buffer;
 
     FfnLayerParams ffn_layer_params(
-        *input_buffer, ffn_configs, weights, std::nullopt, QScheme::Qfp8PerTokenBlock, nullptr);
+        *input_buffer, ffn_configs, weights, std::nullopt, QScheme::Qfp8PerTokenBlock, DataType::TYPE_INVALID, nullptr);
 
     FfnLayerOutput ffn_output = device_->ffnLayer(ffn_layer_params);
 

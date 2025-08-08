@@ -1,5 +1,6 @@
 from typing import Any, Dict, List
 
+import torch
 from transformers.models.gpt2.tokenization_gpt2_fast import GPT2TokenizerFast
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
@@ -210,6 +211,7 @@ class StarCoder(BaseModel):
         config.has_positional_encoding = True
         config.has_post_decoder_layernorm = True
         config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
+        config.config_dtype = config_json.get("torch_dtype", None)
         return config
 
     @classmethod

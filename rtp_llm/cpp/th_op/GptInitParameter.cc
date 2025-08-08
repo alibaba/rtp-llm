@@ -65,6 +65,10 @@ void GptInitParameter::setActivationType() {
     activation_type_ = getActivationType(activation_type_str_);
 }
 
+void GptInitParameter::setDataType() {
+    data_type_ = getDataType(data_type_str_);
+}
+
 void GptInitParameter::setKvCacheDataType() {
     kv_cache_data_type_ = getDataType(kv_cache_data_type_str_);
 }
@@ -368,7 +372,7 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(residual_scalar, residual_scalar_)                                                                    \
     DEF_PROPERTY(use_norm_input_residual, use_norm_input_residual_)                                                    \
     DEF_PROPERTY(use_norm_attn_out_residual, use_norm_attn_out_residual_)                                              \
-    DEF_PROPERTY(data_type, data_type_)                                                                                \
+    DEF_PROPERTY(data_type, data_type_str_)                                                                            \
     DEF_PROPERTY(has_positional_encoding, has_positional_encoding_)                                                    \
     DEF_PROPERTY(has_pre_decoder_layernorm, has_pre_decoder_layernorm_)                                                \
     DEF_PROPERTY(has_post_decoder_layernorm, has_post_decoder_layernorm_)                                              \
@@ -500,6 +504,7 @@ void registerGptInitParameter(py::module m) {
         .def("setNormType", &GptInitParameter::setNormType)
         .def("setActivationType", &GptInitParameter::setActivationType)
         .def("setTaskType", &GptInitParameter::setTaskType, py::arg("task"))
+        .def("setDataType", &GptInitParameter::setDataType)
         .def("setKvCacheDataType", &GptInitParameter::setKvCacheDataType)
         .def("showDebugInfo", &GptInitParameter::showDebugInfo)
         .def("isGatedActivation", &GptInitParameter::isGatedActivation)

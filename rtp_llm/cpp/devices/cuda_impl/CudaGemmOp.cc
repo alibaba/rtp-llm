@@ -95,19 +95,9 @@ struct CudaGemmArguments {
         if (params.C != std::nullopt) {
             CDtype = params.C.value().get().type();
         }
-        DDtype = (params.compute_type == DataType::TYPE_INVALID) ? params.A.type() : params.compute_type;
-        // int8 gemm
-        if (ADtype == DataType::TYPE_QINT8 && BDtype == DataType::TYPE_QINT8) {
-            DDtype = DataType::TYPE_FP16;
-        }
-        // fp8 gemm
-        if (ADtype == DataType::TYPE_QFP8_E4M3 && BDtype == DataType::TYPE_QFP8_E4M3) {
-            DDtype = DataType::TYPE_FP16;
-        }
-        // fp8 block wise with fused activation
-        if (params.qscheme == QScheme::Qfp8PerTokenBlock) {
-            DDtype = DataType::TYPE_BF16;
-        }
+        DDtype = (params.D_type == DataType::TYPE_INVALID) ?
+                     ((params.compute_type == DataType::TYPE_INVALID) ? params.A.type() : params.compute_type) :
+                     params.D_type;
 
         dim        = params.A.dim();
         batch_size = std::accumulate(Ashape.begin(), Ashape.end() - 2, (size_t)1, std::multiplies<size_t>());
@@ -249,6 +239,7 @@ void CudaDevice::InvokeGeneralGemm(const GemmParams& params, CudaGemmArguments a
     if (params.compute_type != DataType::TYPE_INVALID) {
         computeType = dtypeConvert(params.compute_type);
     }
+
     const auto A    = params.A.data();
     const auto B    = params.B.data();
     auto       D    = output->data();

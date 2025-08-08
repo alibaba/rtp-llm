@@ -1,50 +1,32 @@
-import os
 from enum import Enum
-from typing import Any, Dict, Optional, Union
+from typing import Dict
 
-from rtp_llm.config.py_config_modules import PyEnvConfigs
+import torch
 
 
 class WEIGHT_TYPE(Enum):
-    INT4 = ["int4"]
-    INT8 = ["int8"]
-    FP8 = ["fp8", "fp8_e4m3"]
-    FP16 = ["fp16", "float16"]
-    FP32 = ["fp32", "float32"]
-    BF16 = ["bf16", "bfloat16", "bp16"]
+    # 每个枚举值现在是 (别名列表, torch dtype) 的元组
+    AUTO = ["auto", None]  # 特殊处理
+    INT4 = (["int4"], None)  # 特殊处理
+    INT8 = (["int8"], torch.int8)
+    FP8 = (["fp8", "fp8_e4m3"], torch.float8_e4m3fn)
+    FP16 = (["fp16", "float16"], torch.float16)
+    FP32 = (["fp32", "float32"], torch.float32)
+    BF16 = (["bf16", "bfloat16", "bp16"], torch.bfloat16)
 
     @classmethod
     def from_str(cls, value: str) -> "WEIGHT_TYPE":
         lower_value = value.lower()
-        for name, member in cls.__members__.items():
-            if lower_value in map(str.lower, member.value):
+        for member in cls:
+            # 调整这里访问成员值的第一个元素（别名列表）
+            if lower_value in map(str.lower, member.value[0]):
                 return member
         raise ValueError("No enum member with value %s" % value)
 
     def to_str(self) -> str:
-        return self.value[0]
+        return self.value[0][0]
 
-
-## reserve `env_param`, because input param from the invoker is various (os.environ or api req).
-def get_weight_type_from_env(env_param: Dict[str, str]) -> WEIGHT_TYPE:
-    weight_type_str = env_param.get("WEIGHT_TYPE", None)
-    if weight_type_str:
-        weight_type = WEIGHT_TYPE.from_str(weight_type_str)
-        return weight_type
-    else:
-        int8_mode = int(env_param.get("INT8_MODE", "0"))
-        if int8_mode == 1:
-            return WEIGHT_TYPE.INT8
-        return WEIGHT_TYPE.FP16
-
-
-def get_propose_weight_type_from_env(env_param: Dict[str, str]) -> WEIGHT_TYPE:
-    propose_weight_type_str = env_param.get("SP_WEIGHT_TYPE", None)
-    if propose_weight_type_str:
-        propose_weight_type = WEIGHT_TYPE.from_str(propose_weight_type_str)
-    else:
-        propose_int8_mode = int(env_param.get("SP_INT8_MODE", "0"))
-        propose_weight_type = (
-            WEIGHT_TYPE.INT8 if propose_int8_mode == 1 else WEIGHT_TYPE.FP16
-        )
-    return propose_weight_type
+    def to_torch_dtype(self) -> torch.dtype:
+        if (dtype := self.value[1]) is None:
+            raise NotImplementedError("Torch does not support INT4 dtype directly.")
+        return dtype

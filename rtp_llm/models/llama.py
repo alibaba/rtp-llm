@@ -4,6 +4,7 @@ import math
 import os
 from typing import Any, Dict, List
 
+import torch
 from transformers.models.llama.tokenization_llama import (
     LlamaTokenizer as LlamaTokenizerOrigin,
 )
@@ -133,6 +134,7 @@ class Llama(BaseModel):
         else:
             config.special_tokens.eos_token_id = eos_token_id
         config.use_logn_attn = config_json.get("use_logn_attn", False)
+        config.config_dtype = config_json.get("torch_dtype", None)
 
     @staticmethod
     def from_params(config: GptInitModelParameters, params_json: Dict[str, Any]):
@@ -152,6 +154,7 @@ class Llama(BaseModel):
         config.special_tokens.eos_token_id = 2
         config.rotary_embedding_dim = config.size_per_head
         config.tie_word_embeddings = params_json.get("tie_word_embeddings", False)
+        config.config_dtype = params_json.get("torch_dtype", None)
         return config
 
     @classmethod

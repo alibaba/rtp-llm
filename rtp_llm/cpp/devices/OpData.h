@@ -393,6 +393,7 @@ struct GemmParams {
                OptionalConstBufferRef C              = std::nullopt,
                BufferPtr              D              = nullptr,
                const DataType         compute_type   = DataType::TYPE_INVALID,
+               const DataType         D_type         = DataType::TYPE_INVALID,
                TransposeOperation     transA         = TransposeOperation::NONE,
                TransposeOperation     transB         = TransposeOperation::NONE,
                const ActivationType   activationType = ActivationType::Identity,
@@ -405,6 +406,7 @@ struct GemmParams {
         C(C),
         D(D),
         compute_type(compute_type),
+        D_type(D != nullptr ? D->type() : D_type),
         transA(transA),
         transB(transB),
         activationType(activationType),
@@ -418,6 +420,8 @@ struct GemmParams {
     OptionalConstBufferRef C;
     BufferPtr              D;
     const DataType         compute_type = DataType::TYPE_INVALID;  // If passed invalid type, op should infer type
+    const DataType         D_type =
+        DataType::TYPE_INVALID;  // for D is null, you can pass output_type to set output_buffer type
 
     const TransposeOperation transA = TransposeOperation::NONE;
     const TransposeOperation transB = TransposeOperation::NONE;
@@ -567,6 +571,7 @@ struct AttentionModuleParams {
     const AttentionLayerWeights& weights;
     const AttentionConfigs&      configs;
     const QScheme                qscheme;
+    const DataType               compute_type = DataType::TYPE_INVALID;
 };
 
 struct MlaRotaryWriteKVCacheParams {
@@ -594,7 +599,8 @@ struct MlaAttentionModuleParams {
     const AttentionLayerWeights& weights;
     const AttentionConfigs&      configs;
     const QScheme                qscheme;
-    bool                         is_prefill = false;
+    const DataType               compute_type = DataType::TYPE_INVALID;
+    bool                         is_prefill   = false;
 };
 
 enum class SendRecvType {
@@ -643,6 +649,7 @@ struct AttentionLayerParams {
     const OptionalConstBufferRef residual;  // for intel xft
     const LayerNormConfig        ln_params;
     const QScheme                qscheme;
+    const DataType               compute_type;
     bool                         enable_sp;
     size_t                       pad_token_num;
 };
@@ -719,6 +726,7 @@ struct FfnLayerParams {
                    const FfnLayerWeights&       weights,
                    const OptionalConstBufferRef residual        = std::nullopt,
                    const QScheme                qscheme         = QScheme::NoQuantize,
+                   const DataType               compute_type    = DataType::TYPE_INVALID,
                    BufferPtr                    output          = nullptr,
                    bool                         enable_sp       = false,
                    bool                         need_moe_gating = false):
@@ -727,6 +735,7 @@ struct FfnLayerParams {
         weights(weights),
         residual(residual),
         qscheme(qscheme),
+        compute_type(compute_type),
         output(std::move(output)),
         enable_sp(enable_sp) {}
 
@@ -738,8 +747,9 @@ struct FfnLayerParams {
 
     OptionalExpertStats expert_stats = std::nullopt;
 
-    const QScheme qscheme;
-    BufferPtr     output;
+    const QScheme  qscheme;
+    const DataType compute_type;
+    BufferPtr      output;
 
     lora::FfnLayerLoraInput lora_input;
     bool                    enable_sp;

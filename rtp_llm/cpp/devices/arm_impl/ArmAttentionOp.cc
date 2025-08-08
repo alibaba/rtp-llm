@@ -395,6 +395,7 @@ void ArmCpuDevice::runOneBatch(
                                std::nullopt,
                                nullptr,
                                DataType::TYPE_INVALID,
+                               params.compute_type,
                                TransposeOperation::NONE,
                                TransposeOperation::TRANSPOSE});
     printBufferData(*qk_output, "qk_output: ");

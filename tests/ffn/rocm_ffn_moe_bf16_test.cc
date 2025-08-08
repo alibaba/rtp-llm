@@ -90,7 +90,8 @@ void ROCmFfnMoeBf16Op::forward(torch::Tensor                input,
     weights.moe_gating_weight       = std::make_shared<const DenseWeights>(DenseWeights(gating_weight_buffer));
     weights.e_score_correction_bias = e_score_correction_bias_buffer;
 
-    FfnLayerParams ffn_layer_params(*input_buffer, ffn_configs, weights, std::nullopt, QScheme::NoQuantize, nullptr);
+    FfnLayerParams ffn_layer_params(
+        *input_buffer, ffn_configs, weights, std::nullopt, QScheme::NoQuantize, DataType::TYPE_INVALID, nullptr);
 
     FfnLayerOutput ffn_output = device_->ffnLayer(ffn_layer_params);
 

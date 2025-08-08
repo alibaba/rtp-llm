@@ -16,6 +16,7 @@ from rtp_llm.models_py.model_desc.module_base import (  # load libth_transformer
 )
 from rtp_llm.models_py.model_desc.qwen3 import Qwen3Model
 from rtp_llm.test.model_test.test_util.fake_model_loader import FakeModelLoader
+from rtp_llm.utils.weight_type import WEIGHT_TYPE
 
 
 class TestCudaGraphDecodePadding(unittest.TestCase):
@@ -25,6 +26,7 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
             tokenizer_path="/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
             ckpt_path="/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
             load_py_model=True,
+            data_type=WEIGHT_TYPE.FP16.to_str(),
             device_reserve_memory_bytes=-536870912,
         )
         async_model = loader.load_model()

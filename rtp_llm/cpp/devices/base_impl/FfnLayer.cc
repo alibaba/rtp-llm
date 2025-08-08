@@ -76,7 +76,12 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
                 }
                 printBufferData(*ffn_input_ptr, "ffn_ag_input");
 
-                GemmParams up_gemm_params(*ag_recv_buffer, *(params.weights.gate_up_weight->kernel));
+                GemmParams up_gemm_params(*ag_recv_buffer,
+                                          *(params.weights.gate_up_weight->kernel),
+                                          std::nullopt,
+                                          nullptr,
+                                          DataType::TYPE_INVALID,
+                                          params.compute_type);
 
                 AllGatherLoraLinearOutput all_gather_output =
                     allGatherloraLinear({LoraLinearParams(up_gemm_params, params.lora_input.up_lora_input),
@@ -92,7 +97,12 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
                 printBufferData(*up_output, "ffn_ag_final_output");
             } else {
                 printBufferData(params.input, "input");
-                GemmParams up_gemm_params(params.input, *(params.weights.gate_up_weight->kernel));
+                GemmParams up_gemm_params(params.input,
+                                          *(params.weights.gate_up_weight->kernel),
+                                          std::nullopt,
+                                          nullptr,
+                                          DataType::TYPE_INVALID,
+                                          params.compute_type);
                 up_output = loraLinear(LoraLinearParams(up_gemm_params, params.lora_input.up_lora_input)).output;
                 printBufferData(*up_output, "ffn_up");
             }
@@ -133,7 +143,12 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
             }
         } else {
             RTP_LLM_CHECK_WITH_INFO(!params.enable_sp, "enable_sp is not supported for non-gated activation");
-            auto up_gemm_params     = GemmParams(params.input, *(params.weights.up_weight->kernel));
+            auto up_gemm_params     = GemmParams(params.input,
+                                             *(params.weights.up_weight->kernel),
+                                             std::nullopt,
+                                             nullptr,
+                                             DataType::TYPE_INVALID,
+                                             params.compute_type);
             auto lora_linear_params = LoraLinearParams(up_gemm_params, params.lora_input.up_lora_input);
             auto activation_params  = ActivationParams(params.configs.activation_type,
                                                       nullptr,
@@ -173,8 +188,12 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
             BufferPtr gemm_output = allocateBuffer(
                 {params.output->type(), {up_output->shape()[0], params.weights.down_weight->kernel->shape()[1]}},
                 {"ffn_rs_input"});
-            GemmParams down_gemm_params =
-                GemmParams(*(up_output), *(params.weights.down_weight->kernel), nullopt, gemm_output);
+            GemmParams                    down_gemm_params = GemmParams(*(up_output),
+                                                     *(params.weights.down_weight->kernel),
+                                                     nullopt,
+                                                     gemm_output,
+                                                     DataType::TYPE_INVALID,
+                                                     params.compute_type);
             ReduceScatterLoraLinearOutput reduce_scatter_output =
                 loraLinearReduceScatter({LoraLinearParams(down_gemm_params, params.lora_input.down_lora_input),
                                          params.output,
@@ -187,8 +206,12 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
             printBufferData(*gemm_output, "ffn_rs_inter_output");
             printBufferData(*output, "ffn_rs_final_output");
         } else {
-            auto down_gemm_params =
-                GemmParams(*(up_output), *(params.weights.down_weight->kernel), nullopt, params.output);
+            auto down_gemm_params    = GemmParams(*(up_output),
+                                               *(params.weights.down_weight->kernel),
+                                               nullopt,
+                                               params.output,
+                                               DataType::TYPE_INVALID,
+                                               params.compute_type);
             down_gemm_params.qscheme = params.qscheme;
             output = loraLinear(LoraLinearParams(down_gemm_params, params.lora_input.down_lora_input)).output;
         }
@@ -273,6 +296,7 @@ FfnLayerOutput DeviceBase::moeSharedExpert(const FfnLayerParams& params) {
                                                 *(params.weights.shared_expert),
                                                 params.residual,
                                                 params.qscheme,
+                                                params.compute_type,
                                                 shared_expert_output});
         ffn_params.lora_input = params.lora_input;
         shared_expert_output  = ffnLayer(ffn_params).hidden_states;

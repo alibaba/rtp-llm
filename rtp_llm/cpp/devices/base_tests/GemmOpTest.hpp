@@ -67,6 +67,7 @@ public:
                           std::nullopt,
                           D,
                           DataType::TYPE_FP32,
+                          dDtype,
                           TransposeOperation::NONE,
                           TransposeOperation::NONE,
                           ActivationType::Identity,
@@ -89,7 +90,7 @@ public:
         auto A = tensorToBuffer(input.A);
         auto B = tensorToBuffer(input.B);
 
-        GemmParams params{*A, *B, std::nullopt, nullptr, DataType::TYPE_INVALID, a_op, b_op};
+        GemmParams params{*A, *B, std::nullopt, nullptr, DataType::TYPE_INVALID, DataType::TYPE_INVALID, a_op, b_op};
         auto       C = device_->gemm(params);
         return GemmOpTestOutput({bufferToTensor(*C)});
     }
@@ -97,11 +98,12 @@ public:
     GemmOpTestOutput MixtureBatchTransposeGemmOpRun(GemmOpTestInput&   input,
                                                     TransposeOperation a_op,
                                                     TransposeOperation b_op,
-                                                    DataType           type) {
+                                                    DataType           type,
+                                                    DataType           D_type = DataType::TYPE_INVALID) {
         auto A = tensorToBuffer(input.A);
         auto B = tensorToBuffer(input.B);
 
-        GemmParams params{*A, *B, std::nullopt, nullptr, type, a_op, b_op};
+        GemmParams params{*A, *B, std::nullopt, nullptr, type, D_type, a_op, b_op};
         auto       C = device_->gemm(params);
         return GemmOpTestOutput({bufferToTensor(*C)});
     }

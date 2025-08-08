@@ -288,7 +288,12 @@ MoeGateSelectOutput CudaDevice::moeGateSelect(const FfnLayerParams& params) {
     const auto num_expert = params.weights.moe_gating_weight->kernel->shape()[1];
     const auto top_k      = moe_conf.top_k;
 
-    const auto gate = gemm({hidden, *params.weights.moe_gating_weight->kernel, nullopt, nullptr, DataType::TYPE_FP32});
+    const auto gate = gemm({hidden,
+                            *params.weights.moe_gating_weight->kernel,
+                            nullopt,
+                            nullptr,
+                            DataType::TYPE_FP32,
+                            DataType::TYPE_FP32});
     BufferPtr  moe_gating;
 
     const auto expert_scales         = allocateBuffer({DataType::TYPE_FP32, {token_num, top_k}}, {"moe_expert_scale"});

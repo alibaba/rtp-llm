@@ -81,6 +81,7 @@ class Bert(BaseModel):
         config.type_vocab_size = config_json.get("type_vocab_size", 0)
         config.layernorm_eps = config_json["layer_norm_eps"]
         config.inter_size = config_json["intermediate_size"]
+        config.config_dtype = config_json.get("torch_dtype", None)
 
     @classmethod
     def get_tokenizer(cls, config: GptInitModelParameters):

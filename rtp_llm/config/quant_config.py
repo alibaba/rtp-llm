@@ -1,3 +1,4 @@
+import json
 import weakref
 from abc import ABC, abstractmethod
 from enum import Enum
@@ -28,6 +29,10 @@ class QuantizationConfig(ABC):
         self._group_size = group_size
         self._is_quanted = is_quanted
 
+    @property
+    def bits(self):
+        return self._bits
+
     @classmethod
     @abstractmethod
     def get_method(cls) -> str:
@@ -41,9 +46,24 @@ class QuantizationConfig(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def get_supported_act_dtypes(self) -> List[torch.dtype]:
+    def get_supported_compute_dtypes(self) -> List[torch.dtype]:
         """List of supported activation dtypes."""
         raise NotImplementedError
+
+    @abstractmethod
+    def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
+        """List of supported kv cache dtypes."""
+        raise NotImplementedError
+
+    def verify_compute_dtype_and_kv_cache_dtype(self, compute_dtype, kv_cache_dtype):
+        if compute_dtype not in self.get_supported_compute_dtypes():
+            raise ValueError(
+                f"compute_dtype: {compute_dtype} must in {self.__class__}'s {self.get_supported_compute_dtypes()}"
+            )
+        if kv_cache_dtype not in self.get_supported_kv_cache_dtypes():
+            raise ValueError(
+                f"kv_cache_dtype: {kv_cache_dtype} must in {self.__class__}'s {self.get_supported_kv_cache_dtypes()}"
+            )
 
     @classmethod
     @abstractmethod
@@ -67,9 +87,6 @@ class QuantizationConfig(ABC):
             f"config: {config}'s method is not support in {cls._registry.keys()}"
         )
 
-    def bits(self) -> int:
-        return self._bits
-
     def is_quanted(self) -> bool:
         return self._is_quanted
 
@@ -90,8 +107,11 @@ class WeightOnlyInt8PerChannelQuantConfig(QuantizationConfig):
     def get_algo(cls) -> str:
         return "weight_only_per_col"
 
-    def get_supported_act_dtypes(self) -> List[torch.dtype]:
-        return [torch.float16, torch.bfloat16]
+    def get_supported_compute_dtypes(self) -> List[torch.dtype]:
+        return [torch.float32, torch.float16, torch.bfloat16]
+
+    def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
+        return [torch.float32, torch.float16, torch.bfloat16, torch.int8]
 
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
@@ -124,8 +144,11 @@ class Fp8PerTensorQuantConfig(QuantizationConfig):
     def get_algo(cls) -> str:
         return "fp8"
 
-    def get_supported_act_dtypes(self) -> List[torch.dtype]:
-        return [torch.float16]
+    def get_supported_compute_dtypes(self) -> List[torch.dtype]:
+        return [torch.float16, torch.bfloat16]
+
+    def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
+        return [torch.float8_e4m3fn]
 
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
@@ -155,8 +178,11 @@ class Fp8BlockWiseQuantConfig(QuantizationConfig):
     def get_algo(cls) -> str:
         return "fp8"
 
-    def get_supported_act_dtypes(self) -> List[torch.dtype]:
+    def get_supported_compute_dtypes(self) -> List[torch.dtype]:
         return [torch.bfloat16]
+
+    def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
+        return [torch.float16, torch.bfloat16, torch.float8_e4m3fn]
 
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
@@ -196,7 +222,13 @@ class Fp8PerChannelCompressedQuantConfig(CompressedTensorsQuantConfig):
         return "fp8-perchannel-compressed-tensors"
 
     def get_supported_act_dtypes(self) -> List[torch.dtype]:
-        return [torch.bfloat16]
+        return [torch.float16, torch.bfloat16]
+
+    def get_supported_compute_dtypes(self) -> List[torch.dtype]:
+        return [torch.float16, torch.bfloat16]
+
+    def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
+        return [torch.float16, torch.bfloat16, torch.float8_e4m3fn]
 
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
@@ -215,8 +247,11 @@ class SmoothQuantConfig(QuantizationConfig):
     def get_algo(cls) -> str:
         return "smooth_quant"
 
-    def get_supported_act_dtypes(self) -> List[torch.dtype]:
+    def get_supported_compute_dtypes(self) -> List[torch.dtype]:
         return [torch.float16, torch.bfloat16]
+
+    def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
+        return [torch.float16, torch.bfloat16, torch.int8]
 
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
@@ -238,8 +273,11 @@ class OmniQuantConfig(QuantizationConfig):
     def type(self) -> str:
         return "int"
 
-    def get_supported_act_dtypes(self) -> List[torch.dtype]:
+    def get_supported_compute_dtypes(self) -> List[torch.dtype]:
         return [torch.float16, torch.bfloat16]
+
+    def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
+        return [torch.float16, torch.bfloat16, torch.int8]
 
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
@@ -258,8 +296,11 @@ class Int8PerTensorQuantConfig(QuantizationConfig):
     def get_algo(cls) -> str:
         return "pertensor_quant"
 
-    def get_supported_act_dtypes(self) -> List[torch.dtype]:
-        return [torch.float16, torch.bfloat16]
+    def get_supported_compute_dtypes(self) -> List[torch.dtype]:
+        return [torch.float16, torch.bfloat16, torch.float32]
+
+    def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
+        return [torch.float16, torch.bfloat16, torch.int8, torch.float32]
 
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
@@ -278,8 +319,11 @@ class AWQConfig(QuantizationConfig):
     def get_algo(cls) -> str:
         return "awq"
 
-    def get_supported_act_dtypes(self) -> List[torch.dtype]:
+    def get_supported_compute_dtypes(self) -> List[torch.dtype]:
         return [torch.float16, torch.bfloat16]
+
+    def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
+        return [torch.float16, torch.bfloat16, torch.int8]
 
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
@@ -298,8 +342,11 @@ class GPTQConfig(QuantizationConfig):
     def get_algo(cls) -> str:
         return "gptq"
 
-    def get_supported_act_dtypes(self) -> List[torch.dtype]:
+    def get_supported_compute_dtypes(self) -> List[torch.dtype]:
         return [torch.float16, torch.bfloat16]
+
+    def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
+        return [torch.float16, torch.bfloat16, torch.int8]
 
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
@@ -321,3 +368,18 @@ preset_quant_config = {
     "FP8_PER_BLOCK": DEFAULT_FP8_BLOCK_WISE_QUANT_CONFIG,
     "FP8_PER_CHANNEL_COMPRESSED": DEFAULT_FP8_PER_CHANNEL_COMPRESSED_QUANT_CONFIG,
 }
+
+
+def init_quant_config(quantization: str):
+    try:
+        quant_config_dict = json.loads(quantization)
+        quant_config: QuantizationConfig = QuantizationConfig.from_config(
+            quant_config_dict
+        )
+    except Exception:
+        quant_config = preset_quant_config.get(quantization.upper(), None)
+        if quant_config is None:
+            raise ValueError(
+                f"{quantization.upper()} is not support now, quantization must in {list(preset_quant_config.keys())}"
+            )
+    return quant_config

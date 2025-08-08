@@ -1,11 +1,9 @@
-import json
 import logging
 import os
 import traceback
 from dataclasses import dataclass
 from typing import List, Optional
 
-import transformers
 from transformers import AutoConfig, PretrainedConfig
 
 from rtp_llm.model_factory import ModelFactory
@@ -13,7 +11,6 @@ from rtp_llm.model_factory_register import ModelDict
 from rtp_llm.models.base_model import BaseModel, ModelConfig
 from rtp_llm.tools.api.hf_model_helper import HfStyleModelInfo, get_hf_model_info
 from rtp_llm.utils.fuser import fetch_remote_file_to_local, umount_file
-from rtp_llm.utils.weight_type import WEIGHT_TYPE, get_weight_type_from_env
 
 GENERAL_HF_MODEL = "HuggingFacePipeline"
 
@@ -157,14 +154,15 @@ def _load_as_ft_style(
         hf_model_info = get_hf_model_info(model_path)
         if hf_model_info and hf_model_info.model_config_file is not None:
             model_path = os.path.dirname(hf_model_info.model_config_file)
+    quantization = ModelConfig.get_quantization_from_params(env_params)
     model_config = ModelConfig(
         model_type=ft_model_type,
         ckpt_path=model_path,
-        weight_type=get_weight_type_from_env(env_params),
+        act_type=env_params.get(ModelConfig.ACT_TYPE),
         ptuning_path=None,
         max_seq_len=int(env_params.get("MAX_SEQ_LEN", "0")),
         tokenizer_path=None,
-        quantization=env_params.get(ModelConfig.QUANTIZATION_KEY),
+        quantization=quantization,
     )
     config: GptInitModelParameters = model_cls.create_config(model_config)
     is_quant_weight = config.quant_algo.isQuant()

@@ -1,13 +1,11 @@
 import argparse
 import copy
 import fnmatch
-import hashlib
 import json
 import logging
 import multiprocessing
 import os
 import shutil
-import time
 from typing import Dict, Optional
 
 import torch
@@ -24,7 +22,6 @@ from rtp_llm.tools.api.model_basic_info_analyzer import (
 )
 from rtp_llm.utils.fuser import MountRwMode, fetch_remote_file_to_local
 from rtp_llm.utils.time_util import timer_wrapper
-from rtp_llm.utils.weight_type import WEIGHT_TYPE, get_weight_type_from_env
 
 CUR_PATH: str = os.path.dirname(os.path.abspath(__file__))
 ONE_MB = 1024**2
@@ -118,15 +115,15 @@ class WeightConverter:
                 model_size_mb = self.model_basic_info.model_size / ONE_MB
 
                 env_params = copy.deepcopy(self.env_params)
+                quantization = ModelConfig.get_quantization_from_params(env_params)
                 model_config = ModelConfig(
                     model_type=self.model_type,
                     ckpt_path=self.model_path,
-                    weight_type=get_weight_type_from_env(env_params),
-                    act_type=WEIGHT_TYPE.from_str(env_params.get("ACT_TYPE", "FP16")),
+                    act_type=env_params.get(ModelConfig.ACT_TYPE),
                     ptuning_path=None,
                     max_seq_len=0,
                     tokenizer_path=self.model_path,
-                    quantization=env_params.get(ModelConfig.QUANTIZATION_KEY),
+                    quantization=quantization,
                 )
                 paralle_info = ParallelInfo.from_params(env_params)
                 config: GptInitModelParameters = self.model_cls.create_config(
@@ -166,15 +163,16 @@ class WeightConverter:
         env_params.update({"TP_RANK": tp_rank})
         StaticConfig.update_from_env()
 
+        quantization = ModelConfig.get_quantization_from_params(env_params)
         model_config = ModelConfig(
             model_type=self.model_type,
             ckpt_path=self.model_path,
-            weight_type=get_weight_type_from_env(env_params),
-            act_type=WEIGHT_TYPE.from_str(env_params.get("ACT_TYPE", "FP16")),
+            act_type=env_params.get(ModelConfig.ACT_TYPE),
+            kv_cache_type=StaticConfig.py_kv_cache_config.kv_cache_dtype,
             ptuning_path=None,
             max_seq_len=0,
             tokenizer_path=self.model_path,
-            quantization=env_params.get(ModelConfig.QUANTIZATION_KEY),
+            quantization=quantization,
         )
         paralle_info = ParallelInfo.from_params(env_params)
         logging.info(f"begin convert model rank:{paralle_info}")

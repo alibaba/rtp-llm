@@ -110,11 +110,13 @@ public:
     std::string    layernorm_type_str_     = "pre_layernorm";
     std::string    norm_type_str_          = "layernorm";
     std::string    activation_type_str_    = "Gelu";
+    std::string    data_type_str_          = "fp16";
     std::string    kv_cache_data_type_str_ = "fp16";
     LayerNormType  layernorm_type_         = LayerNormType::pre_layernorm;
     NormType       norm_type_              = NormType::layernorm;
     TaskType       task_type_              = TaskType::LANGUAGE_MODEL;
     ActivationType activation_type_        = ActivationType::Gelu;
+    DataType       data_type_              = DataType::TYPE_FP16;
     DataType       kv_cache_data_type_     = DataType::TYPE_FP16;
 
     int64_t rotary_embedding_dim_    = 0;
@@ -144,8 +146,7 @@ public:
     bool use_norm_input_residual_    = false;
     bool use_norm_attn_out_residual_ = false;
 
-    std::string data_type_  = "fp16";
-    int64_t     local_rank_ = 0;
+    int64_t local_rank_ = 0;
 
     int64_t max_seq_len_                = 0;
     int64_t max_batch_tokens_size_      = 0;
@@ -328,6 +329,7 @@ public:
     void             setNormType();
     void             setTaskType(std::string task);
     void             setActivationType();
+    void             setDataType();
     void             setKvCacheDataType();
     bool             isGatedActivation() const;
     RopeConfig       getRopeConfig() const;

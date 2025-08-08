@@ -60,7 +60,7 @@ std::shared_ptr<GenerateStream> SpeculativeEngine::enqueueMinFakeQuery(int32_t m
     stream->setMetricsReporter(nullptr);
 
     if (fake_hidden_states) {
-        auto      dtype = rtp_llm::getDataType(score_model_params_.gpt_init_parameter.data_type_);
+        auto      dtype = score_model_params_.gpt_init_parameter.data_type_;
         BufferPtr fake_hidden_states;
         if (sp_type_ == "eagle3") {
             fake_hidden_states =

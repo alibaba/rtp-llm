@@ -1,5 +1,7 @@
 from typing import Any, Dict
 
+import torch
+
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
@@ -75,6 +77,7 @@ class GPTNeox(BaseModel):
         config.norm_type = "layernorm"
         config.use_norm_input_residual = True
         config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
+        config.config_dtype = config_json.get("torch_dtype", None)
 
         return config
 

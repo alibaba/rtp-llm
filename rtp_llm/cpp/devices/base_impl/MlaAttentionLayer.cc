@@ -128,6 +128,7 @@ AttentionLayerOutput DeviceBase::mlaAttentionLayer(const AttentionLayerParams& p
                                 params.weights,
                                 params.configs,
                                 params.qscheme,
+                                params.compute_type,
                                 true});
         } else {
             RTP_LLM_LOG_DEBUG("no absorb context mla attention");
@@ -153,7 +154,12 @@ AttentionLayerOutput DeviceBase::mlaAttentionLayer(const AttentionLayerParams& p
     }
 
     printBufferData(*qkv_output, "attent_proj_input");
-    auto output_gemm_params = GemmParams(*qkv_output, *(params.weights.output_weight->kernel));
+    auto output_gemm_params = GemmParams(*qkv_output,
+                                         *(params.weights.output_weight->kernel),
+                                         std::nullopt,
+                                         nullptr,
+                                         DataType::TYPE_INVALID,
+                                         params.compute_type);
     auto attention_out =
         loraLinear(LoraLinearParams(output_gemm_params, params.common.lora_input.out_lora_input)).output;
     printBufferData(*attention_out, "attention_out");

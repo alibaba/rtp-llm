@@ -2,6 +2,8 @@ import functools
 import json
 import os
 
+import torch
+
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight
@@ -200,6 +202,7 @@ class Falcon(BaseModel):
         config.special_tokens.eos_token_id = config_json.get("eos_token_id", 0)
         config.rotary_embedding_dim = config.size_per_head
         config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
+        config.config_dtype = config_json.get("torch_dtype", None)
         return config
 
 

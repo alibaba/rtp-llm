@@ -126,7 +126,7 @@ def get_ffn_quant_weight_info(
         assert len(weights) == 1
     w_name = weights[0].name[: -len(W_SUFFIX)]
     group_size = quant_config.group_size()
-    pad_div = 32 // quant_config.bits()
+    pad_div = 32 // quant_config.bits
     is_awq = isinstance(quant_config, AWQConfig)
     is_gptq = isinstance(quant_config, GPTQConfig)
     w: str = None
@@ -413,7 +413,7 @@ class GroupWiseWeight(CompositeWeight, QuantWeight):
             device,
             isinstance(self.quant_config, GPTQConfig),
             isinstance(self.quant_config, AWQConfig),
-            self.quant_config.bits(),
+            self.quant_config.bits,
         )
         sub_tensors = {
             self.kernel.name: weight,

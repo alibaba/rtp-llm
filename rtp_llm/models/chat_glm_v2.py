@@ -60,6 +60,7 @@ class ChatGlmV2(BaseModel):
         config.special_tokens.pad_token_id = config_json.get("pad_token_id", 0)
         config = cls.get_rotary_embedding_scale(config, config_json)
         cls.update_stop_words(config, config_json)
+        config.config_dtype = config_json.get("torch_dtype", None)
         return config
 
     @classmethod

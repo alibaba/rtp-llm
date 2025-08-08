@@ -15,6 +15,7 @@ GroupedGemmOutput DeviceBase::groupedGemm(const GroupedGemmParams& params) {
                               std::nullopt,
                               params.C.value()[i],
                               DataType::TYPE_INVALID,
+                              params.C.value()[i]->type(),
                               TransposeOperation::NONE,
                               TransposeOperation::NONE,
                               ActivationType::Identity,

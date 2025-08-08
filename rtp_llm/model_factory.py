@@ -22,11 +22,7 @@ from rtp_llm.tools.api.hf_model_helper import get_model_info_from_hf
 from rtp_llm.utils.dump_config_utils import dump_model_to_table
 from rtp_llm.utils.fuser import fetch_remote_file_to_local
 from rtp_llm.utils.util import check_with_info
-from rtp_llm.utils.weight_type import (
-    WEIGHT_TYPE,
-    get_propose_weight_type_from_env,
-    get_weight_type_from_env,
-)
+from rtp_llm.utils.weight_type import WEIGHT_TYPE
 
 
 class ModelFactory:
@@ -208,24 +204,17 @@ class ModelFactory:
             f"load model from tokenizer_path: {tokenizer_path}, ckpt_path: {ckpt_path}, lora_infos: {lora_infos}, ptuning_path: {ptuning_path}"
         )
 
-        weight_type: WEIGHT_TYPE = get_weight_type_from_env(os.environ)
-        act_type = (
-            weight_type
-            if weight_type in [WEIGHT_TYPE.FP16, WEIGHT_TYPE.BF16]
-            else WEIGHT_TYPE.FP16
-        )
+        act_type = None
         # TODO(xinfei.sxf) fix this
-        ACT_TYPE = "ACT_TYPE"
-        if StaticConfig.model_config.act_type:
-            act_type = WEIGHT_TYPE.from_str(StaticConfig.model_config.act_type)
-
+        act_type = StaticConfig.model_config.act_type
+        kv_cache_type = StaticConfig.py_kv_cache_config.kv_cache_dtype
         quantization = StaticConfig.quantization_config.quantization
         model_config = ModelConfig(
             model_type=model_type,
             ckpt_path=ckpt_path,
             tokenizer_path=tokenizer_path,
-            weight_type=weight_type,
             act_type=act_type,
+            kv_cache_type=kv_cache_type,
             max_seq_len=max_seq_len,
             seq_size_per_block=seq_size_per_block,
             lora_infos=lora_infos,
@@ -262,25 +251,21 @@ class ModelFactory:
             propose_ckpt_path = fetch_remote_file_to_local(origin_ckpt_path)
             logging.info(f"load propose model from ckpt_path: {propose_ckpt_path}")
 
-            propose_weight_type = get_propose_weight_type_from_env(os.environ)
-            propose_act_type = (
-                propose_weight_type
-                if propose_weight_type in [WEIGHT_TYPE.FP16, WEIGHT_TYPE.BF16]
-                else WEIGHT_TYPE.FP16
-            )
-            ## SP_ACT_TYPE = "ACT_TYPE"
-            if StaticConfig.model_config.act_type:
-                propose_act_type = WEIGHT_TYPE.from_str(
-                    StaticConfig.model_config.act_type
-                )
+            propose_act_type = WEIGHT_TYPE.from_str(
+                StaticConfig.model_config.act_type
+            ).to_str()
             quantization = StaticConfig.py_speculative_execution_config.sp_quantization
+            kv_cache_type = (
+                StaticConfig.py_speculative_execution_config.sp_kv_cache_dtype
+            )
+
             propose_model_config = ModelConfig(
                 model_type=propose_model_type,
                 ckpt_path=propose_ckpt_path,
                 tokenizer_path=normal_model_config.tokenizer_path,
                 lora_infos=None,
-                weight_type=propose_weight_type,
                 act_type=propose_act_type,
+                kv_cache_type=kv_cache_type,
                 max_seq_len=normal_model_config.max_seq_len,
                 gen_num_per_circle=gen_num_per_circle,
                 sp_type=sp_type,
