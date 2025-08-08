@@ -1704,7 +1704,7 @@ def setup_args():
 
     # add rocm env config, if using default value, change it to optimize version
     if (
-        len(glob.glob("/dev/dri/renderD*")) > 0
+        os.path.exists("/dev/kfd")
         and os.getenv("FT_DISABLE_CUSTOM_AR") is None
     ):
         os.environ["FT_DISABLE_CUSTOM_AR"] = "0"
@@ -1713,7 +1713,7 @@ def setup_args():
         )
 
     if (
-        len(glob.glob("/dev/dri/renderD*")) > 0
+        os.path.exists("/dev/kfd")
         and os.getenv("SEQ_SIZE_PER_BLOCK") is None
     ):
         os.environ["SEQ_SIZE_PER_BLOCK"] = "16"
@@ -1722,7 +1722,7 @@ def setup_args():
         )
 
     if (
-        len(glob.glob("/dev/dri/renderD*")) > 0
+        os.path.exists("/dev/kfd")
         and os.getenv("ENABLE_COMM_OVERLAP") is None
     ):
         os.environ["ENABLE_COMM_OVERLAP"] = "0"
