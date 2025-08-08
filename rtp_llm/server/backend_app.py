@@ -157,11 +157,13 @@ class BackendApp(object):
             check_shutdown()
             latest_cache_version: int = int(req.get("latest_cache_version", -1))
             latest_finised_version: int = int(req.get("latest_finised_version", -1))
-            worker_status = self.backend_server.get_worker_status(latest_cache_version, latest_finised_version)
-            worker_status.server_port=worker_info.server_port
-            worker_status.http_port=worker_info.http_port
-            worker_status.grpc_port=worker_info.rpc_server_port
-            
+            worker_status = self.backend_server.get_worker_status(
+                latest_cache_version, latest_finised_version
+            )
+            worker_status.server_port = worker_info.server_port
+            worker_status.http_port = worker_info.http_port
+            worker_status.grpc_port = worker_info.rpc_server_port
+
             return ORJSONResponse(content=worker_status.model_dump(exclude_none=True))
 
         # entry for worker RANK != 0
@@ -189,8 +191,7 @@ class BackendApp(object):
 
         @app.post("/update_scheduler_info")
         def update_scheduler_info(req: Union[str, Dict[str, Any]]):
-            self.backend_server.update_scheduler_info(req)
-            return {"status": "ok"}
+            return self.backend_server.update_scheduler_info(req)
 
         # update for worker RANK == 0
         @app.post("/update")

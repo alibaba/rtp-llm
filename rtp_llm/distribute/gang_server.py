@@ -5,10 +5,10 @@ import logging
 import os
 import time
 import traceback
-from concurrent.futures import ThreadPoolExecutor, wait
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from datetime import timedelta
 from threading import Thread
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Union
 
 import requests
 import torch.distributed as dist
@@ -254,19 +254,21 @@ class GangServer:
         req: Dict[str, Any],
         uri: str = "inference_internal",
         is_wait: bool = False,
-    ):
+    ) -> Union[List[requests.Response], List[Future[requests.Response]]]:
         req = copy.deepcopy(req)
 
-        def curl_impl(url: str):
-            _ = requests.post(url, json=req)
+        def curl_impl(url: str) -> requests.Response:
+            return requests.post(url, json=req)
 
-        future_list = []
+        future_list: List[Future[requests.Response]] = []
         for member in self._gang_info.workers():
             url = f"http://{member.ip}:{member.backend_server_port}/{uri}"
             future_ = self._request_threadpool.submit(curl_impl, url)
             future_list.append(future_)
         if is_wait:
-            wait(future_list)
+            return [x.result() for x in future_list]
+        else:
+            return future_list
 
     def _broadcast_parts(self, gang_info: GangInfo):
         if (

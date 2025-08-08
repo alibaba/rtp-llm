@@ -8,9 +8,10 @@ import os
 import threading
 import time
 import traceback
-from typing import Any, Callable, Dict, Union
+from typing import Any, Callable, Dict, List, Union
 
 import orjson
+import requests
 import torch
 from fastapi import Request
 from fastapi import Request as RawRequest
@@ -341,21 +342,38 @@ class BackendServer(object):
     def add_lora(self, req: Dict[str, str]):
         assert self._lora_manager is not None
         if g_parallel_info.is_master and g_parallel_info.world_size > 1:
-            self._gang_server.request_workers(req, "add_lora_internal", True)
+            _ = self._gang_server.request_workers(req, "add_lora_internal", True)
         self._lora_manager.add_lora(req["adapter_name"], req["lora_path"])
 
     def remove_lora(self, req: Dict[str, str]):
         assert self._lora_manager is not None
         self._lora_manager.remove_lora(req["adapter_name"])
         if g_parallel_info.is_master and g_parallel_info.world_size > 1:
-            self._gang_server.request_workers(req, "remove_lora_internal", True)
+            _ = self._gang_server.request_workers(req, "remove_lora_internal", True)
 
     def update_scheduler_info(self, req: Union[str, Dict[str, str]]):
         if self.model is None:
             return
         if isinstance(req, str):
             req = json.loads(req)
-        self.model.decoder_engine_.update_scheduler_info(json.dumps(req))
+        try:
+            self.model.decoder_engine_.update_scheduler_info(json.dumps(req))
+            if not (g_parallel_info.is_master and g_parallel_info.world_size > 1):
+                return {"status": "ok"}
+            ret: List[requests.Response] = self._gang_server.request_workers(
+                req, "update_scheduler_info", True
+            )
+            for r in ret:
+                if r.status_code != 200:
+                    return {
+                        "status": "error",
+                        "details": f"update scheduler info failed, status_code: {r.status_code}",
+                    }
+                if r.json().get("status", "ok") != "ok":
+                    return {"status": "error", "details": r.json()}
+            return {"status": "ok"}
+        except Exception as e:
+            return {"status": "error", "details": str(e)}
 
     def update_eplb_config(self, req: Dict[str, str]) -> bool:
         if self.model is None:

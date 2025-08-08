@@ -238,6 +238,12 @@ class FrontendApp(object):
             finally:
                 active_requests.decrement()
 
+        @app.post("/update_scheduler_info")
+        async def update_scheduler_info(req: Union[str, Dict[Any, Any]]):
+            return await async_request_server(
+                "post", g_worker_info.backend_server_port, "update_scheduler_info", req
+            )
+
         @app.post("/chat/render")
         @app.post("/v1/chat/render")
         async def chat_render(request: ChatCompletionRequest, raw_request: RawRequest):
