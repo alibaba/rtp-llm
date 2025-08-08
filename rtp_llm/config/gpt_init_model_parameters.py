@@ -894,7 +894,10 @@ class GptInitModelParameters:
         self.ffn_tp_size = parallel_info.ffn_tp_size
         self.enable_sp = parallel_info.ffn_sp_size > 1
         self.local_rank = parallel_info.local_rank
-        self.use_all_gather = self.dp_size == 1
+        self.use_all_gather = (
+            self.dp_size == 1
+            and self.gpt_init_params.moe_config.use_deepep_low_latency == False
+        )
         logging.info(f"use_all_gather: {self.use_all_gather}")
 
         self.eplb_update_time = self.py_env_configs.py_eplb_config.eplb_update_time
