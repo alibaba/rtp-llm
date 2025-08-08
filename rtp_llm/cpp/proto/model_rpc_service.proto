@@ -357,6 +357,8 @@ service RpcService {
     rpc RemoteLoad(BroadcastLoadRequestPB) returns (BroadcastLoadResponsePB);
     rpc RemoteGenerate(stream GenerateRequestPB) returns (stream GenerateOutputsPB);
     rpc RemoteFinish(RemoteFinishRequestPB) returns (EmptyPB);
+    rpc RemoteFinishNew(RemoteFinishRequestPB) returns (EmptyPB);
+    
 
     rpc RemoteGenerateNew(RemoteGenerateRequestPBNew) returns (RemoteGenerateResponsePBNew);
     rpc RemoteStore(RemoteStoreRequestPB) returns (RemoteStoreResponsePB);

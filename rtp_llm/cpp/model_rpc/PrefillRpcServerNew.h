@@ -25,6 +25,8 @@ public:
     grpc::Status
     RemoteStore(grpc::ServerContext* context, const RemoteStoreRequestPB* request, RemoteStoreResponsePB* response);
 
+    grpc::Status RemoteFinish(grpc::ServerContext* context, const RemoteFinishRequestPB* request, EmptyPB* response);
+
 private:
     bool validRequest(PrefillGenerateContextNew& prefill_context);
 
@@ -32,6 +34,8 @@ private:
     ErrorInfo notifyStoreCache(PrefillGenerateContextNew& prefill_context, int index);
     void      constructRemoteLoadRequest(PrefillGenerateContextNew& prefill_context, int index);
 
+    void notifyRequestEndForAllRank(PrefillGenerateContextNew& prefill_context);
+    void notifyRequestEnd(PrefillGenerateContextNew& prefill_context, int index);
     ErrorInfo generateFirstToken(PrefillGenerateContextNew& prefill_context);
     ErrorInfo waitStoreCacheForAllRankDone(PrefillGenerateContextNew& prefill_context);
 };
