@@ -93,6 +93,9 @@ int64_t NormalEngine::getLastScheduleTime() {
 }
 
 WarmUpResult NormalEngine::warmUp(const EngineInitParams& params) {
+    if (params_.scheduler_config.use_batch_decode_scheduler) {
+        return decodeWarmUp(params);
+    }
     if (params_.role_type_ == RoleType::PDFUSION || params_.role_type_ == RoleType::PREFILL) {
         return prefillWarmUp(params);
     } else if (params_.role_type_ == RoleType::DECODE) {
@@ -301,7 +304,7 @@ absl::Status NormalEngine::step() {
         return stream->genTimeline();
     });
     if (gen_timeline && !streams.empty()) {
-        auto it = std::max_element(streams.begin(), streams.end(), [](const auto& a, const auto& b) {
+        auto it        = std::max_element(streams.begin(), streams.end(), [](const auto& a, const auto& b) {
             return a->profileStep() < b->profileStep();
         });
         profiler_step_ = (*it)->profileStep();
@@ -314,11 +317,11 @@ absl::Status NormalEngine::step() {
         *(gen_timeline_buffer->dataWithOffset<uint8_t>(world_rank)) = static_cast<uint8_t>(profiler_step_);
         device_->allGather({{gen_timeline_buffer}, ParallelMode::DP_AND_TP});
         device_->syncCommunication(false);
-        auto it = std::max_element(gen_timeline_buffer->data<uint8_t>(),
+        auto it        = std::max_element(gen_timeline_buffer->data<uint8_t>(),
                                    gen_timeline_buffer->dataWithOffset<uint8_t>(world_size),
                                    [](const uint8_t a, const uint8_t b) { return a < b; });
         profiler_step_ = *it;
-        gen_timeline = profiler_step_ > 0;
+        gen_timeline   = profiler_step_ > 0;
     }
     if (gen_timeline && nullptr == profiler_) {
         auto stream_group = StreamGroups(streams);
@@ -334,7 +337,7 @@ absl::Status NormalEngine::step() {
     }
     int64_t      step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     absl::Status status             = executor_->process(streams);
-    
+
     if (nullptr != profiler_) {
         profiler_step_--;
         if (profiler_step_ <= 0) {

@@ -83,6 +83,10 @@ public:
         for (auto it = running_streams_.begin(); it != running_streams_.end(); it++) {
             // reset start time，to get more accurate avg token time
             (*it)->resetBeginTime(autil::TimeUtility::currentTimeInMicroSeconds());
+            // only set gen_timeline = True for first rank
+            if (device_->getDeviceProperties().dp_rank != 0) {
+                (*it)->setGenTimeline(false);
+            }
             auto result = (*it)->initKVBlock(0, 0);
             if (!result.ok()) {
                 (*it)->setStop(ErrorCode::MALLOC_FAILED,
