@@ -953,8 +953,11 @@ vector<GptLayerInputs> GptModel::forwardDecodeMicroBatchedLayers(vector<GptLayer
             auto& last_layer_defered_params = last_layer_defered_params_vec[micro_batch_idx];
 
             auto last_layer_moe_ret = device_->stealMoEInsertionRet();
-            RUNTIME_ASSERT_OP_ARG(bool(last_layer_defered_params.shared_expert_output) == bool(last_layer_moe_ret),
-                                  "moe insertion return should only be null if no previous layer.");
+            // qwen moe has no shared expert, so we can not use it to check if the moe insertion is valid.
+            if (layer.ffn_weights.shared_expert) {
+                RUNTIME_ASSERT_OP_ARG(bool(last_layer_defered_params.shared_expert_output) == bool(last_layer_moe_ret),
+                                      "moe insegrtion return should only be null if no previous layer.");
+            }
             if (last_layer_defered_params.combine_output) {
                 last_layer_defered_params.combine_output = nullopt;
             }
