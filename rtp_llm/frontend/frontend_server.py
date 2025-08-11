@@ -358,7 +358,7 @@ class FrontendServer(object):
     def check_health(self):
         assert self._frontend_worker is not None
         backend_role_addrs = self._frontend_worker.backend_rpc_server_visitor.host_service.get_backend_role_addrs(
-            refresh=True
+            refresh=False
         )
         has_pdfusion = False
         has_prefill = False
