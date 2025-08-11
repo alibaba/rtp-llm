@@ -29,7 +29,15 @@ class QwenReasoningToolRenderer(ReasoningToolBaseRenderer):
         self, request: ChatCompletionRequest
     ) -> Optional[BaseFormatDetector]:
         if request.tools:
-            return Qwen25Detector()
+            detector = Qwen25Detector()
+            # 对于qwen3-thinking的模型，注意到tool_call_separator需要设置为"\n\n"
+            try:
+                rendered_result = self.render_chat(request)
+                if rendered_result.rendered_prompt.endswith(THINK_START_TAG):
+                    detector.tool_call_separator = "\n\n"
+            except Exception:
+                pass
+            return detector
         else:
             return None
 

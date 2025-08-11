@@ -944,6 +944,8 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
 
         def _get_test_data(self, include_stop_word=False):
             test_ids = super()._get_test_data(include_stop_word)
+            # 把</tool_call>和<tool_call>之间的\n(198)替换为\n\n(271)
+            test_ids[29] = 271
             # 移除开头的<think>和\n
             return test_ids[2:]
 
