@@ -92,6 +92,9 @@ class BackendRPCServerVisitor:
 
     async def route_ips(self, input: GenerateInput):
         with Timer() as route_timer:
+            # Check if role_addrs is already specified in the request
+            role_addrs_specified = bool(input.generate_config.role_addrs)
+
             master_addr = self.host_service.get_master_addr()
             route_logger.debug(f"routing to master: {master_addr}")
             # master don't support schedule batched input yet
@@ -99,13 +102,14 @@ class BackendRPCServerVisitor:
             if len(input.token_ids.shape) == 2 and input.token_ids.size(0) != 1:
                 input_token_batched = True
 
-            if master_addr and not input_token_batched:
+            # Only get route from master if role_addrs is not specified
+            if not role_addrs_specified and master_addr and not input_token_batched:
                 with Timer() as master_route_timer:
                     await self.get_master_route_addrs(master_addr, input)
                 kmonitor.report(
                     GaugeMetrics.MASTER_ROUTE_RT_METRIC, master_route_timer.cost_ms()
                 )
-            else:
+            elif not role_addrs_specified:
                 route_logger.warning(
                     f"master address: {master_addr} or input token batched: {input_token_batched} is not valid, fallback to domain routing"
                 )
@@ -175,7 +179,8 @@ class BackendRPCServerVisitor:
                 f"request length is {input.prompt_length}, max_new_tokens is {max_new_tokens}",
             )
 
-        if self.host_service.service_available:
+        # Only route IPs for separated_frontend
+        if self.host_service.service_available and self.separated_frontend:
             await self.route_ips(input)
 
         return self.model_rpc_client.enqueue(input)
