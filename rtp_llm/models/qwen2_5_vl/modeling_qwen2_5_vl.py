@@ -380,8 +380,10 @@ class Qwen2_5_VLVisionSdpaAttention(nn.Module):
             cos, sin = position_embeddings
         q, k = apply_rotary_pos_emb_vision(q, k, cos, sin)
 
+        # dtype = bool leads to nan result in rocm
+        # dtype = fp32 leads to type not insistent in L20 & H20
         attention_mask = torch.zeros(
-            [1, seq_length, seq_length], device=q.device, dtype=torch.float32
+            [1, seq_length, seq_length], device=q.device, dtype=torch.bool
         )
         for i in range(1, len(cu_seqlens)):
             attention_mask[
