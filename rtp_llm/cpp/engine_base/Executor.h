@@ -34,6 +34,7 @@ public:
                                                                    (int)params.scoring_func_,
                                                                    (int)params.moe_topk_group_,
                                                                    (int)params.moe_n_group_,
+                                                                   params.routed_scaling_factor_,
                                                                    params.enable_eplb_}) :
                                                               std::nullopt;
         rtp_llm::FfnConfigs ffn_config{

@@ -148,7 +148,7 @@ class ModelDeployWeightInfo:
 
     def __init__(self, config: GptInitModelParameters, tp_size: int, tp_rank: int):
         self.config = config
-        self._use_qk_norm = config.use_qk_norm
+        self._use_qk_norm = config.qk_norm
         self._hidden_size = config.hidden_size
         self._inter_size = config.inter_size
         self._inter_padding_size = config.inter_padding_size

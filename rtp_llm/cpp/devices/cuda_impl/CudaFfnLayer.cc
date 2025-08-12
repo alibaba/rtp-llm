@@ -396,7 +396,7 @@ void CudaDevice::moeGateSelectWithBias(const FfnLayerParams& params,
                                       moe_conf.topk_group,
                                       top_k,
                                       normalization_mode,
-                                      1.0,
+                                      moe_conf.routed_scaling_factor,
                                       stream_);
     } else if (expert_for_source_row->type() == DataType::TYPE_INT32) {
         invokeNoAuxTc<float, int32_t>(gate->data<float>(),
@@ -410,7 +410,7 @@ void CudaDevice::moeGateSelectWithBias(const FfnLayerParams& params,
                                       moe_conf.topk_group,
                                       top_k,
                                       normalization_mode,
-                                      1.0,
+                                      moe_conf.routed_scaling_factor,
                                       stream_);
     } else {
         RTP_LLM_LOG_ERROR("Unsupported expert_for_source_row type: %d", int(expert_for_source_row->type()));

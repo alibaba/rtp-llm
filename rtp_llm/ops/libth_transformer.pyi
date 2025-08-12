@@ -466,6 +466,7 @@ class GptInitParameter:
     moe_normalize_expert_scale: bool
     moe_style: int
     moe_topk_group: int
+    routed_scaling_factor: float
     mrope_section: list[int]
     nccl_ip: str
     nope_head_dim: int
@@ -506,6 +507,7 @@ class GptInitParameter:
     rotary_embedding_style: int
     rotary_factor1: float
     rotary_factor2: float
+    partial_rotary_factor: float
     sampler_config: SamplerConfig
     scheduler_config: SchedulerConfig
     scheduler_reserve_resource_ratio: int

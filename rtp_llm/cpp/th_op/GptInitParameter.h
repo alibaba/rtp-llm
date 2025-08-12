@@ -97,6 +97,8 @@ public:
     int64_t moe_n_group_    = 1;
     int64_t moe_topk_group_ = 1;
 
+    double routed_scaling_factor_ = 1.0;  // used in deepseek v2 and glm4 moe
+
     // in sparse, those params might vary among layers
     bool                 is_sparse_head_           = false;
     std::vector<int64_t> layer_head_num_           = {};
@@ -122,6 +124,7 @@ public:
     double  rotary_embedding_scale_  = 1.0;
     double  rotary_factor1_          = 0;
     double  rotary_factor2_          = 0;
+    double  partial_rotary_factor_   = 1.0;
     int64_t org_embedding_max_pos_   = 0;
     double  rotary_embedding_mscale_ = 1.0;
     int64_t rotary_embedding_offset_ = 0;

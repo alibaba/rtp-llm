@@ -35,6 +35,7 @@ if platform.processor() != "aarch64":
 import logging
 
 from .bert import Bert
+from .glm4_moe import Glm4Moe
 from .jina_bert.jina_bert import JinaBert
 from .megatron_bert import MegatronBert
 from .mixtral import Mixtral

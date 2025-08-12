@@ -227,12 +227,10 @@ class GptInitModelParameters:
         "add_special_tokens",
         "template_type",
         "build_position_ids",
-        "routed_scaling_factor",
         "vit_run_batch",
         "phy2log",
         "is_mtp",
         "num_nodes",
-        "use_qk_norm",
         "quant_config",
         "py_env_configs",
     }
@@ -322,6 +320,7 @@ class GptInitModelParameters:
     moe_normalize_expert_scale: bool
     moe_style: int
     moe_topk_group: int
+    routed_scaling_factor: float
     mrope_section: list[int]
     nccl_ip: str
     nope_head_dim: int
@@ -359,6 +358,7 @@ class GptInitModelParameters:
     rotary_embedding_style: int
     rotary_factor1: float
     rotary_factor2: float
+    partial_rotary_factor: float
     scheduler_reserve_resource_ratio: int
     scoring_func: int
     seq_size_per_block: int
@@ -474,7 +474,7 @@ class GptInitModelParameters:
         self.phy2log: List[List[int]] = []
 
         self.is_mtp = False
-        self.use_qk_norm = False
+        self.qk_norm = False
         self.quant_config = None
         self.role_type = RoleType.PDFUSION
 

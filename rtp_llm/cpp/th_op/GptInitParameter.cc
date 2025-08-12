@@ -362,6 +362,7 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(org_embedding_max_pos, org_embedding_max_pos_)                                                        \
     DEF_PROPERTY(rotary_factor1, rotary_factor1_)                                                                      \
     DEF_PROPERTY(rotary_factor2, rotary_factor2_)                                                                      \
+    DEF_PROPERTY(partial_rotary_factor, partial_rotary_factor_)                                                        \
     DEF_PROPERTY(mrope_section, mrope_section_)                                                                        \
     DEF_PROPERTY(input_embedding_scalar, input_embedding_scalar_)                                                      \
     DEF_PROPERTY(residual_scalar, residual_scalar_)                                                                    \
@@ -463,6 +464,7 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(v_head_dim, v_head_dim_)                                                                              \
     DEF_PROPERTY(moe_n_group, moe_n_group_)                                                                            \
     DEF_PROPERTY(moe_topk_group, moe_topk_group_)                                                                      \
+    DEF_PROPERTY(routed_scaling_factor, routed_scaling_factor_)                                                        \
     DEF_PROPERTY(softmax_extra_scale, softmax_extra_scale_)                                                            \
     DEF_PROPERTY(vit_separation, vit_separation_)                                                                      \
     DEF_PROPERTY(enable_speculative_decoding, enable_speculative_decoding_)                                            \

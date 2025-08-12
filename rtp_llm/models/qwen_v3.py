@@ -26,7 +26,7 @@ class QwenV3(QWenV2):
     @classmethod
     def _create_config(cls, ckpt_path: str):
         config = super()._create_config(ckpt_path)
-        config.use_qk_norm = True
+        config.qk_norm = True
         return config
 
     def _init_custom_module(self) -> Optional[CustomModule]:
