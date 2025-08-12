@@ -93,6 +93,9 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                 device_->copy({cum_log_probs_out, cum_log_probs_in});
             }
 
+            auto top_k              = inputs.top_k->view(from_batch_idx_in, batch_size_in);
+            auto top_p              = inputs.top_p->view(from_batch_idx_in, batch_size_in);
+            auto temperature        = inputs.temperature->view(from_batch_idx_in, batch_size_in);
             auto random_seeds       = MAY_GET_BUFFER_VIEW(inputs.random_seeds, from_batch_idx_in, batch_size_in);
             auto repetition_penalty = MAY_GET_BUFFER_VIEW(inputs.repetition_penalty, from_batch_idx_in, batch_size_in);
             auto presence_penalty   = MAY_GET_BUFFER_VIEW(inputs.presence_penalty, from_batch_idx_in, batch_size_in);
@@ -109,9 +112,9 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                                        sequence_lengths,
                                        token_ids_in,
                                        inputs.step,
-                                       *inputs.top_k,
-                                       *inputs.top_p,
-                                       *inputs.temperature,
+                                       top_k,
+                                       top_p,
+                                       temperature,
                                        inputs.random_seeds ? (OptionalBufferRef)random_seeds : nullopt,
                                        inputs.repetition_penalty ? (OptionalBufferRef)repetition_penalty : nullopt,
                                        inputs.min_lengths ? (OptionalBufferRef)min_lengths : nullopt,

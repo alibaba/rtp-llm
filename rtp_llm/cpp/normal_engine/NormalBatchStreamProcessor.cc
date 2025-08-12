@@ -243,9 +243,11 @@ absl::StatusOr<SamplerInputs> NormalBatchStreamProcessor::gatherSamplerInput(
 
     setLogitsProcessorInputs(sampler_inputs, all_streams);
 
-    int  batch_idx               = 0;
-    bool return_logits           = false;
-    bool calculate_softmax_probs = false;
+    size_t total_decode_batch_size_in = 0;
+    int    batch_idx                  = 0;
+    bool   return_logits              = false;
+    bool   calculate_softmax_probs    = false;
+    bool   has_tile                   = false;
     for (auto& stream : all_streams) {
         const auto& complete_token_ids = stream->completeTokenIds();
         auto        complete_seq_len   = complete_token_ids->shape()[1];
@@ -257,6 +259,11 @@ absl::StatusOr<SamplerInputs> NormalBatchStreamProcessor::gatherSamplerInput(
                    complete_token_ids->dataWithOffset<int32_t>(i * complete_seq_len),
                    seq_len * sizeof(int));
             batch_idx += 1;
+        }
+        if (stream->isContextStream()) {
+            has_tile |= current_batch_size > 1;
+        } else {
+            total_decode_batch_size_in += current_batch_size;
         }
         return_logits |= stream->returnLogits();
         calculate_softmax_probs |= stream->calculateSoftmaxProbs();
@@ -277,7 +284,23 @@ absl::StatusOr<SamplerInputs> NormalBatchStreamProcessor::gatherSamplerInput(
     }
 
     // need copy logits when has tile or return logits
-    if (return_logits || calculate_softmax_probs) {
+    if (has_tile) {
+        sampler_inputs.logits = device_->allocateBuffer(
+            {model_output.logits->type(), {total_batch_size_in, vocab_size}, rtp_llm::AllocationType::DEVICE}, {});
+        device_->copy({sampler_inputs.logits->view(0, total_decode_batch_size_in),
+                       model_output.logits->view(0, total_decode_batch_size_in)});
+        size_t input_offset  = total_decode_batch_size_in;
+        size_t logits_offset = total_decode_batch_size_in;
+        for (auto& stream : stream_groups.contextStreams()) {
+            auto current_batch_size = stream->tileNumIn();
+            for (int i = 0; i < current_batch_size; ++i) {
+                device_->copy(
+                    {sampler_inputs.logits->view(input_offset, 1), model_output.logits->view(logits_offset, 1)});
+                input_offset += 1;
+            }
+            logits_offset += 1;
+        }
+    } else if (return_logits || calculate_softmax_probs) {
         sampler_inputs.logits = device_->clone({*model_output.logits, rtp_llm::AllocationType::DEVICE});
     } else {
         sampler_inputs.logits = model_output.logits;
@@ -435,13 +458,14 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_gro
         auto batch_new_all_token_ids = new_all_token_ids->slice(batch_idx_out, cur_batch_size_out);
 
         bool has_beam_search = stream->numBeamsIn() > 1 || stream->numBeamsOut() > 1;
+        bool has_tile        = stream->isContextStream() && stream->tileNumIn() > 1;
 
         // construct mapping from output batches to input batches
         BufferPtr src_batch_indices;
         if (has_beam_search) {
             // beam search
             src_batch_indices = sampler_output.beam_index->slice(batch_idx_out, cur_batch_size_out);
-        } else if (cur_batch_size_in != cur_batch_size_out) {
+        } else if (has_tile) {
             // from context stream to decode straem, there might be other cases in future
             src_batch_indices = device_->allocateBuffer(
                 {rtp_llm::DataType::TYPE_INT32, {(size_t)cur_batch_size_out}, rtp_llm::AllocationType::HOST}, {});

@@ -50,15 +50,14 @@ void CompleteTokenIds::init(const std::shared_ptr<GenerateInput>& generate_input
     common_len_             = seq_length_;
     start_check_seq_length_ = seq_length_;
 
-    complete_token_ids_ =
-        device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32,
-                                 {(size_t)max_batch_size_, (size_t)max_seq_len_ + extra_reserve_token_num},
-                                 rtp_llm::AllocationType::HOST},
-                                {});
+    size_t max_token_num = max_seq_len_ + extra_reserve_token_num;
+
+    complete_token_ids_ = device_->allocateBuffer(
+        {rtp_llm::DataType::TYPE_INT32, {(size_t)max_batch_size_, max_token_num}, rtp_llm::AllocationType::HOST}, {});
 
     memset(complete_token_ids_->data(), 0, complete_token_ids_->sizeBytes());
     for (int i = 0; i < batch_size_; ++i) {
-        memcpy(complete_token_ids_->dataWithOffset<int32_t>(i * max_seq_len_),
+        memcpy(complete_token_ids_->dataWithOffset<int32_t>(i * max_token_num),
                generate_input->input_ids->data(),
                generate_input->input_ids->sizeBytes());
     }
