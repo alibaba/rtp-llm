@@ -1,22 +1,61 @@
 import json
 import logging
+import os
+from typing import Optional
 
 from jinja2 import BaseLoader, Environment
+from transformers import PreTrainedTokenizerBase
 from typing_extensions import override
 
 from rtp_llm.openai.api_datatype import ChatCompletionRequest, RoleEnum
 from rtp_llm.openai.renderer_factory_register import register_renderer
+from rtp_llm.openai.renderers.custom_renderer import RendererParams
+from rtp_llm.openai.renderers.reasoning_tool_base_renderer import (
+    ReasoningToolBaseRenderer,
+)
 from rtp_llm.openai.renderers.sglang_helpers.function_call.base_format_detector import (
     BaseFormatDetector,
 )
 from rtp_llm.openai.renderers.sglang_helpers.function_call.glm4_moe_detector import (
     Glm4MoeDetector,
 )
-from rtp_llm.openai.renderers.tool_base_renderer import ToolBaseRenderer
+from rtp_llm.openai.renderers.sglang_helpers.reasoning_parser import ReasoningParser
 
 
-class ChatGlm45Renderer(ToolBaseRenderer):
+class ChatGlm45Renderer(ReasoningToolBaseRenderer):
     """ChatGLM45Renderer 使用 GLM4MoeDetector 进行工具调用解析"""
+
+    def __init__(
+        self, tokenizer: PreTrainedTokenizerBase, renderer_params: RendererParams
+    ):
+        super().__init__(tokenizer, renderer_params)
+
+        self.chat_template = self.tokenizer.chat_template
+        if not self.chat_template:
+            logging.warning(
+                "Glm 4 tokenizer does not have a chat template, try load default."
+            )
+            tokenizer_path = self.tokenizer.name_or_path
+            if tokenizer_path and os.path.exists(tokenizer_path):
+                default_template_path = os.path.join(
+                    tokenizer_path, "chat_template.jinja"
+                )
+                if os.path.exists(default_template_path):
+                    with open(default_template_path, "r") as f:
+                        # load all content
+                        self.chat_template = f.read()
+                    logging.info(
+                        f"loaded default chat template from {default_template_path}"
+                    )
+                else:
+                    logging.warning(
+                        f"Default chat template not found at {default_template_path}, using empty template."
+                    )
+
+    @override
+    def _setup_stop_words(self):
+        """设置GLM45特定的停止词"""
+        self.add_extra_stop_words(["<|user|>", "<|observation|>"])
 
     def _preprocess_messages(self, messages):
         """预处理消息，确保 tool_calls 中的 arguments 是字典对象"""
@@ -53,9 +92,23 @@ class ChatGlm45Renderer(ToolBaseRenderer):
             processed_messages.append(processed_message)
         return processed_messages
 
-    def _create_detector(self) -> BaseFormatDetector:
+    @override
+    def _create_detector(
+        self, request: ChatCompletionRequest
+    ) -> Optional[BaseFormatDetector]:
         """创建GLM45检测器"""
-        return Glm4MoeDetector()
+        if request.tools:
+            return Glm4MoeDetector()
+        else:
+            return None
+
+    @override
+    def _create_reasoning_parser(
+        self, request: ChatCompletionRequest
+    ) -> Optional[ReasoningParser]:
+        if not self.in_think_mode(request):
+            return None
+        return ReasoningParser(model_type="glm45")
 
     @override
     def _build_prompt(self, request: ChatCompletionRequest) -> str:
@@ -120,4 +173,4 @@ class ChatGlm45Renderer(ToolBaseRenderer):
         )
 
 
-register_renderer("chatglm45", ChatGlm45Renderer)
+register_renderer("glm4_moe", ChatGlm45Renderer)

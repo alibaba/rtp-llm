@@ -32,6 +32,7 @@ from rtp_llm.openai.api_datatype import (
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.openai.renderer_factory import ChatRendererFactory, RendererParams
 from rtp_llm.openai.renderers import custom_renderer
+from rtp_llm.openai.renderers.chatglm45_renderer import ChatGlm45Renderer
 from rtp_llm.openai.renderers.kimik2_renderer import KimiK2Renderer
 from rtp_llm.openai.renderers.qwen3_code_renderer import Qwen3CoderRenderer
 from rtp_llm.openai.renderers.qwen_reasoning_tool_renderer import (
@@ -1065,92 +1066,100 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         """GLM45相关测试的内嵌测试套件"""
 
         def _get_model_type(self):
-            return "chatglm45"
+            return "glm4_moe"
 
         def _get_tokenizer_path(self):
             return "glm45/tokenizer/"
 
         def _get_test_data(self, include_stop_word=False):
             """获取测试数据"""
+            # <think>用户询问杭州和北京的天气怎么样。</think>
+            # 我来帮您查询杭州和北京的天气情况。
+            # <tool_call>get_current_weather
+            # <arg_key>location</arg_key>
+            # <arg_value>杭州</arg_value>
+            # <arg_key>unit</arg_key>
+            # <arg_value>celsius</arg_value>
+            # </tool_call>
+            # <tool_call>get_current_weather
+            # <arg_key>location</arg_key>
+            # <arg_value>北京</arg_value>
+            # <arg_key>unit</arg_key>
+            # <arg_value>celsius</arg_value>
+            # </tool_call>
             test_ids = [
+                198,
+                151350,
+                99833,
+                104678,
+                102506,
+                98327,
+                121828,
+                101791,
+                103753,
+                1773,
+                151351,
+                198,
+                110943,
+                99215,
+                99526,
+                102961,
+                102506,
+                98327,
+                121828,
+                101791,
+                98962,
+                8994,
                 151352,
                 455,
+                11075,
                 68852,
                 198,
                 151356,
-                8923,
+                2527,
                 151357,
                 198,
                 151358,
-                3430,
-                23584,
+                102506,
                 151359,
                 198,
                 151356,
-                1028,
+                3843,
                 151357,
                 198,
                 151358,
-                115937,
-                19,
-                12,
-                100539,
-                12,
-                99951,
+                66,
+                40026,
                 151359,
                 198,
                 151353,
+                198,
                 151352,
                 455,
+                11075,
                 68852,
                 198,
                 151356,
-                8923,
+                2527,
                 151357,
                 198,
                 151358,
-                2016,
-                29953,
+                99334,
                 151359,
                 198,
                 151356,
-                1028,
+                3843,
                 151357,
                 198,
                 151358,
-                115937,
-                19,
-                12,
-                100539,
-                12,
-                99869,
+                66,
+                40026,
                 151359,
                 198,
                 151353,
             ]
 
             return test_ids
-
-        def _create_test_functions_and_tools(self):
-            """创建测试用的函数和工具定义 - 子类可以重写"""
-            functions = [
-                GPTFunctionDefinition(
-                    **{
-                        "name": "get_weather",
-                        "description": "Get weather information",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "city": {"type": "string", "description": "City name"},
-                                "date": {"type": "string", "description": "Date"},
-                            },
-                            "required": ["city", "date"],
-                        },
-                    }
-                )
-            ]
-            tools = [GPTToolDefinition(function=functions[0])]
-            return functions, tools
 
         def _validate_renderer(self, chat_renderer):
             """验证renderer类型"""
@@ -1159,20 +1168,27 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         def _assert_tool_call_response(
             self,
             response_delta,
-            expected_content="",
+            expected_content="我来帮您查询杭州和北京的天气情况。",
         ):
             """断言工具调用响应的内容"""
-            assert response_delta.tool_calls[0].function.name == "get_weather"
+            assert response_delta.content.strip() == expected_content.strip()
+            assert (
+                response_delta.reasoning_content.strip()
+                == "用户询问杭州和北京的天气怎么样。"
+            )
+            assert response_delta.tool_calls is not None
+            assert len(response_delta.tool_calls) == 2
+            assert response_delta.tool_calls[0].function.name == "get_current_weather"
             assert (
                 response_delta.tool_calls[0].function.arguments
-                == '{"city": "Beijing", "date": "2024-06-27"}'
-            )
-            assert response_delta.tool_calls[1].function.name == "get_weather"
-            assert (
-                response_delta.tool_calls[1].function.arguments
-                == '{"city": "Shanghai", "date": "2024-06-28"}'
+                == '{"location": "杭州", "unit": "celsius"}'
             )
             assert response_delta.tool_calls[0].index == 0
+            assert response_delta.tool_calls[1].function.name == "get_current_weather"
+            assert (
+                response_delta.tool_calls[1].function.arguments
+                == '{"location": "北京", "unit": "celsius"}'
+            )
             assert response_delta.tool_calls[1].index == 1
 
     class Qwen3CoderTestSuite(BaseToolCallTestSuite):
@@ -1526,6 +1542,16 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         kimi_suite = self.KimiK2TestSuite(self)
         await kimi_suite.test_no_stream_stop_words()
 
+    @think_mode
+    async def test_parse_chatglm45_tool_call_streaming_case(self):
+        suite = self.ChatGLM45TestSuite(self)
+        await suite.test_streaming_case()
+
+    @think_mode
+    async def test_parse_chatglm45_tool_call_no_stream(self):
+        suite = self.ChatGLM45TestSuite(self)
+        await suite.test_no_stream()
+
     async def test_parse_qwen3_coder_tool_call_streaming_case(self):
         """测试Qwen3Coder工具调用流式场景"""
         suite = self.Qwen3CoderTestSuite(self)
@@ -1719,18 +1745,6 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         """测试Qwen模型非流式场景的合并逻辑"""
         qwen_suite = self.QwenMergeLogicTestSuite(self)
         await qwen_suite.test_non_streaming_merge_logic()
-
-    async def test_parse_chatglm45_tool_call_streaming_case(self):
-        suite = self.ChatGLM45TestSuite(self)
-        await suite.test_streaming_case()
-
-    async def test_parse_chatglm45_tool_call_no_stream(self):
-        suite = self.ChatGLM45TestSuite(self)
-        await suite.test_no_stream()
-
-    async def test_parse_chatglm45_tool_call_no_stream_PDseperate(self):
-        suite = self.ChatGLM45TestSuite(self)
-        await suite.test_no_stream_pd_separate()
 
     def test_chatglm_stop_word(self):
         os.environ["MODEL_TYPE"] = "chatglm3"
