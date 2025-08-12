@@ -113,3 +113,26 @@ py_test(
     exec_properties = {'gpu':'A10'},
     shard_count = 1,
 )
+
+py_test(
+    name = "template_test",
+    srcs = [
+        "template_test.py",
+    ],
+    deps = [
+        "//rtp_llm:sdk",
+        "//rtp_llm:testlib",
+        # qwen agent
+        "//rtp_llm:pydantic",
+        "//rtp_llm:json5",
+        "//rtp_llm:dashscope",
+        "//rtp_llm:jieba",
+        "//rtp_llm:openai",
+        "//rtp_llm:Pillow",
+    ],
+    data = [
+        "//rtp_llm/test/model_test/fake_test/testdata:testdata",
+        "//rtp_llm/test/tokenizer_test:testdata",
+    ],
+    exec_properties = {'gpu':'A10'},
+)
