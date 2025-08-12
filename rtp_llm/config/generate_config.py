@@ -34,14 +34,14 @@ class RoleAddr(BaseModel):
 
 
 class GenerateConfig(BaseModel):
-    max_new_tokens: int = 1000
+    max_new_tokens: int = 32000
     # only for qwen agent fncall check max input tokens
     max_input_tokens: int = 32000
     max_thinking_tokens: int = 32000
-    in_think_mode: bool = False # same as `enable_thinking` in chat_template_kwargs, discard one in the future
-    chat_template_kwargs: Optional[Dict[str, Any]] = (
-        None  
+    in_think_mode: bool = (
+        False  # same as `enable_thinking` in chat_template_kwargs, discard one in the future
     )
+    chat_template_kwargs: Optional[Dict[str, Any]] = None
     end_think_token_ids: List[int] = []
     num_beams: int = 1
     do_sample: bool = True
