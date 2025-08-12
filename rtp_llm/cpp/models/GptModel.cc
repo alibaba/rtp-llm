@@ -660,7 +660,10 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
         hidden             = std::move(decoder_input.output);
     }
     device_->checkError();
-
+    if (hidden != nullptr)
+        printBufferData(*hidden, "before embedding hidden");
+    if (mm_feature_locs != 0)
+        printBufferData(*mm_feature_locs, "mm_feature_locs");
     if (inputs.multimodal_features) {
         hidden = device_->multimodalEmbedding({hidden,
                                                (OptionalConstVecBufferPtrRef)inputs.multimodal_features,

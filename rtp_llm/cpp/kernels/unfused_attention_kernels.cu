@@ -1490,7 +1490,7 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
             // fp8 paged fmha
             QuantizedVecType* quantized_q_ptr =
                 USE_PAGED_FMHA ? reinterpret_ptr<QuantizedEltType, QuantizedVecType>(q_buf, dest_q_idx) :
-                                reinterpret_ptr<QuantizedEltType, QuantizedVecType>(QuantizedQKV, src_q_idx);
+                                 reinterpret_ptr<QuantizedEltType, QuantizedVecType>(QuantizedQKV, src_q_idx);
             convert_to_fp8(quantized_q_ptr, q);
         } else {
             // paged fmha
@@ -3109,6 +3109,7 @@ __global__ void add_fusedQKV_bias_transpose_decode_kernel(T*                    
                                                           T*                            k_buf,
                                                           T*                            v_buf,
                                                           PrefixPromptBatchWeightsParam param,
+                                                          const int*                    input_lengths,
                                                           T*                            QKV,
                                                           void*                         QuantizedQKV,
                                                           const int*                    position_ids,
@@ -3184,16 +3185,21 @@ __global__ void add_fusedQKV_bias_transpose_decode_kernel(T*                    
     }
 
     // refer to the implementation of hipify decode attention
+    const auto batch_beam_idx = blockIdx.y;
+    const int  position_id    = position_ids == nullptr ? -1 : position_ids[token_idx * rope_config.index_factor];
+
+    const int input_len = (input_lengths == nullptr) ? 0 : input_lengths[batch_beam_idx];
+    const int timestep  = tlength;
     attention_rope<T, Vec_t, ROPE_STYLE>(rope_config,
                                          q,
                                          k,
                                          reinterpret_cast<T*>(smem_),
                                          tidx,
                                          tlength,
-                                         -1 /*timestep*/,
+                                         tlength,  // timestep,
                                          sequence_length,
-                                         -1 /*position_id*/,
-                                         -1 /*input_len*/,
+                                         position_id,
+                                         input_len,
                                          prefix_prompt_length,
                                          true /*count_prefix_length*/,
                                          true /*HANDLE_KV*/);
@@ -3212,9 +3218,9 @@ __global__ void add_fusedQKV_bias_transpose_decode_kernel(T*                    
 
     if (store_cache) {
         if (head_idx < head_num_kv) {
-            OffsetIndexedKVBlockArray  offset_kv_block_array  = param.offset_kv_block_array ;
-            Tcache*      k_cache = reinterpret_cast<Tcache*>(offset_kv_block_array.getKBlockPtr(batch_idx, dst_kv_seq_idx));
-            Tcache*      v_cache = reinterpret_cast<Tcache*>(offset_kv_block_array.getVBlockPtr(batch_idx, dst_kv_seq_idx));
+            OffsetIndexedKVBlockArray offset_kv_block_array = param.offset_kv_block_array;
+            Tcache* k_cache = reinterpret_cast<Tcache*>(offset_kv_block_array.getKBlockPtr(batch_idx, dst_kv_seq_idx));
+            Tcache* v_cache = reinterpret_cast<Tcache*>(offset_kv_block_array.getVBlockPtr(batch_idx, dst_kv_seq_idx));
 
 #pragma unroll
             for (int vec_i = 0; vec_i < vec_size; vec_i++) {
@@ -3222,8 +3228,8 @@ __global__ void add_fusedQKV_bias_transpose_decode_kernel(T*                    
                     dst_kv_seq_idx, head_idx, size_per_head, tidx * vec_size + vec_i);
                 k_cache[inKBlockIdx] = reinterpret_cast<T*>(&k)[vec_i];
 
-                const int inVBlockIdx =
-                    offset_kv_block_array.getVLocalIdx(dst_kv_seq_idx, head_idx, size_per_head, tidx * vec_size + vec_i);
+                const int inVBlockIdx = offset_kv_block_array.getVLocalIdx(
+                    dst_kv_seq_idx, head_idx, size_per_head, tidx * vec_size + vec_i);
                 v_cache[inVBlockIdx] = reinterpret_cast<T*>(&v)[vec_i];
             }
         }
@@ -3235,6 +3241,7 @@ void invokeAddFusedQKVBiasTransposeDecode(T*                             q_buf,
                                           T*                             k_buf,
                                           T*                             v_buf,
                                           PrefixPromptBatchWeightsParam* param_ptr,
+                                          const int*                     input_lengths,
                                           T*                             QKV,
                                           void*                          QuantizedQKV,
                                           const int*                     position_ids,
@@ -3272,6 +3279,7 @@ void invokeAddFusedQKVBiasTransposeDecode(T*                             q_buf,
                                                              k_buf,
                                                              v_buf,
                                                              param,
+                                                             input_lengths,
                                                              QKV,
                                                              QuantizedQKV,
                                                              position_ids,
@@ -3550,6 +3558,7 @@ INSTANTIATEADDFUSEDQKVBIASTRANSPOSEPREFILL(__nv_bfloat16);
                                                        T*                             k_buf,                           \
                                                        T*                             v_buf,                           \
                                                        PrefixPromptBatchWeightsParam* param,                           \
+                                                       const int*                     input_lengths,                   \
                                                        T*                             QKV,                             \
                                                        void*                          QuantizedQKV,                    \
                                                        const int*                     position_ids,                    \

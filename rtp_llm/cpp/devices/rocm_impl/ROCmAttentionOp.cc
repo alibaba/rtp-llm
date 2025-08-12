@@ -762,7 +762,6 @@ void selfAttentionwrapper(const AttentionModuleParams params,
                           int*                        block_counter,
                           KVBlockArray                kv_block_array,
                           cudaStream_t                stream) {
-    size_t      token_num         = params.input.shape()[0];
     size_t      batch_size        = params.common.decoder_batch_size;
     size_t      step              = params.common.decoder_max_seq_len + 1;
     size_t      local_head_num    = params.configs.head_num;
@@ -770,78 +769,72 @@ void selfAttentionwrapper(const AttentionModuleParams params,
     size_t      size_per_head     = params.configs.size_per_head;
     const auto& output            = params.output;
 
-    const T* qkv_buf_ptr = params.input.data<T>();
-    T*       qkv_buf_2_  = output.data<T>();
+    const T* qkv_buf_ptr  = params.input.data<T>();
+    void*    attn_out_ptr = nullptr;
+    attn_out_ptr          = output.data();
 
-    const T* bias_ptr =
-        (params.weights.qkv_weight->bias == nullptr) ? nullptr : params.weights.qkv_weight->bias->data<T>();
-
-    // TODO(lidongjin) support relative attention
-    const T* relative_attention_bias_ptr = nullptr;
-    // prefix prompt
-
-    auto prefix_lengths =
-        params.common.prefix_prompt_lengths ? params.common.prefix_prompt_lengths->data<int>() : nullptr;
-    auto max_prefix_length = params.common.max_prefix_length;
+    const T* bias_ptr = (params.weights.qkv_weight->bias == nullptr || !params.configs.fuse_qkv_add_bias) ?
+                            nullptr :
+                            params.weights.qkv_weight->bias->data<T>();
 
     const auto* input_lengths    = params.common.input_lengths->data<int>();
     const auto* sequence_lengths = params.common.sequence_lengths->data<int>();
 
-    float        q_scaling                      = params.configs.q_scaling;
-    int          relative_attention_bias_stride = 0;
+    float        q_scaling = params.configs.q_scaling;
     const float* linear_bias_slopes =
         params.common.linear_bias_slopes ? params.common.linear_bias_slopes->data<float>() : nullptr;
-    const bool* masked_tokens = nullptr;
 
-    // TODO(lidongjin) support int8
-    const float*                    query_weight_scale_out            = nullptr;
-    const float*                    attention_output_weight_scale_out = nullptr;
-    int                             int8_mode                         = 0;
     tensorrt_llm::common::QuantMode kv_cache_quant_mode =
         trt_common::QuantMode::fromDescription(false, false, false, false, false, false, false, false);
     if (params.configs.kv_cache_dtype == KvCacheDataType::INT8) {
         kv_cache_quant_mode =
             trt_common::QuantMode::fromDescription(true, true, false, false, false, true, false, true);
     }
-    fusedQKV_masked_attention_dispatch<T, KVBlockArray>(qkv_buf_ptr,
-                                                        bias_ptr,
-                                                        relative_attention_bias_ptr,
-                                                        nullptr,  // cache_indir
-                                                        reinterpret_cast<T*>(qkv_buf_2_),
-                                                        nullptr,  // finished
-                                                        sequence_lengths,
-                                                        batch_size,
-                                                        1,  // beam_width
-                                                        local_head_num,
-                                                        local_head_num_kv,
-                                                        size_per_head,
-                                                        params.configs.rope_config,
-                                                        params.configs.use_logn_attn,
-                                                        nullptr,
-                                                        step,
-                                                        prefix_lengths,
-                                                        max_prefix_length,
-                                                        true,  // count_prefix_lengths,
-                                                        input_lengths,
-                                                        step,
-                                                        q_scaling,
-                                                        relative_attention_bias_stride,
-                                                        linear_bias_slopes,
-                                                        masked_tokens,
-                                                        query_weight_scale_out,
-                                                        attention_output_weight_scale_out,
-                                                        int8_mode,
-                                                        kv_cache_quant_mode,
-                                                        use_multi_block_mode,
-                                                        (int)max_seq_len_tile,
-                                                        reinterpret_cast<T*>(partial_out),
-                                                        partial_sum,
-                                                        partial_max,
-                                                        block_counter,
-                                                        params.configs.softmax_extra_scale,
-                                                        kv_block_array,
-                                                        stream);
 
+    const float* attention_output_orig_quant_scale = nullptr;
+    if (params.weights.static_scale_reciprocal_weight) {
+        attention_output_orig_quant_scale = params.weights.static_scale_reciprocal_weight->kernel->data<float>();
+    }
+
+    fusedQKV_masked_attention_dispatch<T, KVBlockArray>(
+        qkv_buf_ptr,
+        bias_ptr,
+        nullptr,  // relative_attention_bias
+        nullptr,  // cache_indir
+        reinterpret_cast<T*>(attn_out_ptr),
+        nullptr,  // finished
+        sequence_lengths,
+        batch_size,
+        1,  // beam_width
+        local_head_num,
+        local_head_num_kv,
+        size_per_head,
+        params.configs.rope_config,
+        params.configs.use_logn_attn,
+        params.common.position_ids ? params.common.position_ids->data<int>() : nullptr,
+        step,
+        nullptr,  // prefix_prompt_lengths
+        0,        // max_prefix_prompt_length
+        true,     // count_prefix_length
+        input_lengths,
+        step,
+        q_scaling,
+        0,  // relative_attention_bias_stride,
+        linear_bias_slopes,
+        nullptr,  // masked_tokens,
+        nullptr,  // query_weight_scale_out
+        attention_output_orig_quant_scale,
+        0,  // int8_mode,
+        kv_cache_quant_mode,
+        use_multi_block_mode,
+        (int)max_seq_len_tile,
+        reinterpret_cast<T*>(partial_out),
+        partial_sum,
+        partial_max,
+        block_counter,
+        params.configs.softmax_extra_scale,
+        kv_block_array,
+        stream);
     check_cuda_error();
 }
 
@@ -903,13 +896,16 @@ AttentionModuleOutput ROCmDevice::decoderSelfAttention(const AttentionModulePara
         auto q_output = allocateBuffer(
             {params.input.type(), {batch_size, head_num, size_per_head}, AllocationType::DEVICE}, {"q_output"});
 
-        bool store_qkv   = false;
-        bool store_q     = true;
-        bool store_kv    = false;
-        bool store_cache = params.common.kv_cache.has_value();
+        bool        store_qkv        = false;
+        bool        store_q          = true;
+        bool        store_kv         = false;
+        bool        store_cache      = params.common.kv_cache.has_value();
+        const auto* sequence_lengths = params.common.sequence_lengths->data<int>();
+        const auto* input_lengths    = params.common.input_lengths->data<int>();
 
         bool skip_add_bias_transpose = (params.configs.rope_config.style == RopeStyle::No && !params.common.kv_cache
                                         && !params.configs.fuse_qkv_add_bias);
+        printBufferData(*params.common.input_lengths, "input_lengths");
         if (!skip_add_bias_transpose) {
             DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
                                              invokeAddFusedQKVBiasTransposeDecode,
@@ -917,9 +913,11 @@ AttentionModuleOutput ROCmDevice::decoderSelfAttention(const AttentionModulePara
                                              nullptr,
                                              nullptr,
                                              &prefix_prompt_param,
+                                             input_lengths,
                                              params.input.data(),
                                              nullptr,
-                                             /*params.common.position_ids*/ nullptr,
+                                             params.common.position_ids ? params.common.position_ids->data<int>() :
+                                                                          nullptr,
                                              params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias ?
                                                  params.weights.qkv_weight->bias->data() :
                                                  nullptr,

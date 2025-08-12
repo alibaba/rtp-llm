@@ -382,9 +382,15 @@ class Qwen2_5_VLVisionSdpaAttention(nn.Module):
 
         # dtype = bool leads to nan result in rocm
         # dtype = fp32 leads to type not insistent in L20 & H20
+        device_full_name = torch.cuda.get_device_name(0)
+        device_name = device_full_name.split()[-1]
         attention_mask = torch.zeros(
             [1, seq_length, seq_length], device=q.device, dtype=torch.bool
         )
+        if 'MI308X' in device_name:
+            attention_mask = torch.zeros(
+                [1, seq_length, seq_length], device=q.device, dtype=torch.float32
+            )
         for i in range(1, len(cu_seqlens)):
             attention_mask[
                 ...,
