@@ -10,6 +10,7 @@ py_library(
     name = "modules",
     srcs = glob([
         "modules/*.py",
+        "modules/moe/*.py",
     ]),
     deps = [
         ":utils",
