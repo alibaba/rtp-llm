@@ -474,8 +474,8 @@ __global__ void group_idx_and_topk_idx_kernel(T*            scores,
     T* s_topk_value                   = reinterpret_cast<T*>(s_topk_idx + NUM_WARPS_PER_BLOCK * topk) + warp_id * topk;
     s_topk_idx += warp_id * topk;
 
-    T       value            = cuda::std::numeric_limits<T>::min();
-    T       topk_group_value = cuda::std::numeric_limits<T>::min();
+    T       value            = cuda::std::numeric_limits<T>::lowest();
+    T       topk_group_value = cuda::std::numeric_limits<T>::lowest();
     int32_t num_equalto_topkth_group;
 
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
@@ -499,11 +499,11 @@ __global__ void group_idx_and_topk_idx_kernel(T*            scores,
             __syncwarp();  // Ensure all threads have valid data before reduction
             topk_group_value = cg::reduce(tile, value, cg::greater<T>());
             if (value == topk_group_value) {
-                value = cuda::std::numeric_limits<T>::min();
+                value = cuda::std::numeric_limits<T>::lowest();
             }
             pre_count_equal_to_top_value = count_equal_to_top_value;
             count_equal_to_top_value =
-                __popc(__ballot_sync(FULL_WARP_MASK, (value == cuda::std::numeric_limits<T>::min())));
+                __popc(__ballot_sync(FULL_WARP_MASK, (value == cuda::std::numeric_limits<T>::lowest())));
         }
         num_equalto_topkth_group = target_num_min - pre_count_equal_to_top_value;
     }
@@ -513,7 +513,7 @@ __global__ void group_idx_and_topk_idx_kernel(T*            scores,
         (int32_t)topk, -INFINITY);
 
     int  count_equalto_topkth_group = 0;
-    bool if_proceed_next_topk       = (topk_group_value != cuda::std::numeric_limits<T>::min());
+    bool if_proceed_next_topk       = (topk_group_value != cuda::std::numeric_limits<T>::lowest());
     if (case_id < num_tokens && if_proceed_next_topk) {
         for (int i_group = 0; i_group < n_group; i_group++) {
             if ((group_scores[i_group] > topk_group_value)
@@ -524,7 +524,7 @@ __global__ void group_idx_and_topk_idx_kernel(T*            scores,
                     T candidates =
                         (i < num_experts_per_group) && isfinite(cuda_cast<float, T>(scores_with_bias[offset + i])) ?
                             scores_with_bias[offset + i] :
-                            cuda::std::numeric_limits<T>::min();
+                            cuda::std::numeric_limits<T>::lowest();
                     queue.add(candidates, offset + i);
                 }
                 if (group_scores[i_group] == topk_group_value) {
