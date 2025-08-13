@@ -511,10 +511,10 @@ class CustomChatRenderer:
         decoded_string = self.tokenizer.decode(status.tokens_to_decode)
         # For some tokenizers (e.g. ChatGLM), decode a single token differs from decode a list of tokens.
         if is_streaming:
-            if len(decoded_string) > 0 and "\uFFFD" == decoded_string[-1]:
+            if len(decoded_string) > 0 and "\ufffd" == decoded_string[-1]:
                 return await self._create_empty_delta(output.aux_info)
         else:
-            while (len(decoded_string) > 0) and ("\uFFFD" == decoded_string[-1]):
+            while (len(decoded_string) > 0) and ("\ufffd" == decoded_string[-1]):
                 decoded_string = decoded_string[:-1]
         status.delta_output_string = decoded_string[len(decoded_prev_token) :]
         if is_truncated(status.delta_output_string, stop_words_str, is_streaming):
@@ -773,9 +773,15 @@ class CustomChatRenderer:
     ) -> AsyncGenerator[StreamResponseObject, None]:
         stop_word_slice_list = get_stop_word_slices(generate_config.stop_words_str)
         nums_output = request.n if request.n is not None else 1
-        nums_output = (
-            generate_config.num_beams if generate_config.num_beams != 1 else nums_output
+        # FIXME(zhangjianning.zjn): for variable width beam search,
+        # the num_ouput may not be the last num beams,
+        # and is dependent to the length of sequence
+        last_num_beams = (
+            generate_config.variable_num_beams[-1]
+            if len(generate_config.variable_num_beams) > 1
+            else generate_config.num_beams
         )
+        nums_output = last_num_beams if last_num_beams != 1 else nums_output
         status_list = await self._create_status_list(nums_output, request)
         index = 0
         enable_think_mode = self.should_enable_think_mode(request)
@@ -901,10 +907,10 @@ class CustomChatRenderer:
         decoded_string = self.tokenizer.decode(status.tokens_to_decode)
         # For some tokenizers (e.g. ChatGLM), decode a single token differs from decode a list of tokens.
         if is_streaming:
-            if len(decoded_string) > 0 and "\uFFFD" == decoded_string[-1]:
+            if len(decoded_string) > 0 and "\ufffd" == decoded_string[-1]:
                 return self._create_empty_delta_sync(input_len, output_len, reuse_len)
         else:
-            while (len(decoded_string) > 0) and ("\uFFFD" == decoded_string[-1]):
+            while (len(decoded_string) > 0) and ("\ufffd" == decoded_string[-1]):
                 decoded_string = decoded_string[:-1]
         status.delta_output_string = decoded_string[len(decoded_prev_token) :]
         if is_truncated(status.delta_output_string, stop_words_str, is_streaming):

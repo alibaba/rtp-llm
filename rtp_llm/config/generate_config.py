@@ -138,8 +138,15 @@ class GenerateConfig(BaseModel):
         cp.timeout_ms = -1
         self.md5_value = hashlib.md5(cp.__str__().encode()).hexdigest()
 
+    def max_num_beams(self):
+        return (
+            self.num_beams
+            if len(self.variable_num_beams) == 0
+            else max(self.variable_num_beams)
+        )
+
     def has_num_beams(self):
-        return max([self.num_beams, *self.variable_num_beams]) > 1 
+        return self.max_num_beams() > 1
 
     def is_same(self, config: "GenerateConfig") -> bool:
         return self.md5_value == config.md5_value
@@ -271,7 +278,7 @@ class GenerateConfig(BaseModel):
             )
             check_with_info(
                 is_list_positive_integer(self.variable_num_beams),
-                f"variable_num_beams {self.variable_num_beams} is wrong data type"
+                f"variable_num_beams {self.variable_num_beams} is wrong data type",
             )
             check_with_info(
                 is_positive_integer(self.num_return_sequences),

@@ -93,7 +93,7 @@ ThinkModeLogitsProcessorPtr ThinkModeLogitsProcessor::fromGenerateInput(rtp_llm:
             generate_input->generate_config->end_think_token_ids,
             generate_input->inputLength(),
             0,
-            generate_input->generate_config->num_beams > 1 || generate_input->generate_config->num_return_sequences > 1,
+            generate_input->generate_config->hasNumBeams() || generate_input->generate_config->num_return_sequences > 1,
             std::make_shared<StringContainDFA<size_t, int>>(generate_input->generate_config->end_think_token_ids));
         std::vector<StreamThinkInfo> think_infos = {think_info};
         auto                         ptr         = std::make_shared<ThinkModeLogitsProcessor>(device, think_infos);

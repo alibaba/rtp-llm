@@ -82,7 +82,7 @@ TreeLogitsProcessorPtr TreeLogitsProcessor::fromGenerateInput(rtp_llm::DeviceBas
         StreamTreeInfo              tree_info(PrefixToCandidateTokens::instance()->initSuccess(),
                                  generate_input->inputLength(),
                                  0,
-                                 generate_input->generate_config->num_beams > 1
+                                 generate_input->generate_config->hasNumBeams()
                                      || generate_input->generate_config->num_return_sequences > 1,
                                  std::make_shared<TreeDFA<std::string, int>>(PrefixToCandidateTokens::instance()));
         std::vector<StreamTreeInfo> tree_infos       = {tree_info};
