@@ -108,26 +108,29 @@ FfnLayerOutput CudaDevice::moeFfnFp8(const FfnLayerParams& params, const MoeGate
     printBufferData(*expert_first_token_offset, "expert_first_token_offset");
     check_cuda_error();
 
-    size_t padding_size      = pad_to_multiple_of_128(token_num);
-    size_t total_padding_num = padding_size * num_experts_per_node;
-
+    size_t padding_size            = token_num <= 16 ? pad_to_multiple_of_16(token_num) :
+                                                       (token_num <= 32 ? pad_to_multiple_of_32(token_num) :
+                                                                          (token_num <= 64 ? pad_to_multiple_of_64(token_num) :
+                                                                                             pad_to_multiple_of_128(token_num)));
     size_t max_num_rows            = token_num * top_k;
+    size_t expected_m              = max_num_rows / num_experts_per_node;
     auto   permuted_src_row_to_dst = allocateBuffer({DataType::TYPE_INT32, {max_num_rows}}, {"permuted_rows"});
-    auto   padding_group_index = allocateBuffer({DataType::TYPE_INT32, {total_padding_num}}, {"padding_group_index"});
+    auto   masked_m                = allocateBuffer({DataType::TYPE_INT32, {num_experts_per_node}}, {"masked_m"});
     computeSrc2Dst(expert_first_token_offset->data<int64_t>(),
                    permuted_src_row_to_dst->data<int>(),
-                   padding_group_index->data<int>(),
+                   masked_m->data<int>(),
                    num_experts_per_node,
                    padding_size,
                    stream_);
     check_cuda_error();
 
-    BufferPtr permuted_padding_input =
-        allocateBuffer({DataType::TYPE_FP8_E4M3, {total_padding_num, hidden_size}}, {"permuted_padding_input"});
-    BufferPtr permuted_padding_input_fp8_scales = allocateBuffer(
-        {DataType::TYPE_FP32, {total_padding_num, hidden_size / 128}}, {"permuted_padding_input_fp8_scales"});
+    BufferPtr permuted_padding_input = allocateBuffer(
+        {DataType::TYPE_FP8_E4M3, {num_experts_per_node, padding_size, hidden_size}}, {"permuted_padding_input"});
+    BufferPtr permuted_padding_input_fp8_scales =
+        allocateBuffer({DataType::TYPE_FP32, {num_experts_per_node, padding_size, hidden_size / 128}},
+                       {"permuted_padding_input_fp8_scales"});
     BufferPtr permuted_padding_scales =
-        allocateBuffer({DataType::TYPE_FP32, {total_padding_num}}, {"permuted_padding_scales"});
+        allocateBuffer({DataType::TYPE_FP32, {num_experts_per_node, padding_size}}, {"permuted_padding_scales"});
     printBufferData(*hidden_fp8, "moe_hidden_fp8");
     printBufferData(*hidden_fp8_scales, "moe_hidden_fp8_scales");
     expandInputRowsKernelLauncherContiguous_V2<__nv_fp8_e4m3>(hidden_fp8->data<__nv_fp8_e4m3>(),
@@ -150,10 +153,11 @@ FfnLayerOutput CudaDevice::moeFfnFp8(const FfnLayerParams& params, const MoeGate
 
     BufferPtr fc1_result;
     if (is_gated_activation) {
-        fc1_result =
-            allocateBuffer({DataType::TYPE_BF16, {total_padding_num, (size_t)moe_inter_size * 2}}, {"fc1_result"});
+        fc1_result = allocateBuffer(
+            {DataType::TYPE_BF16, {num_experts_per_node, padding_size, (size_t)moe_inter_size * 2}}, {"fc1_result"});
     } else {
-        fc1_result = allocateBuffer({DataType::TYPE_BF16, {total_padding_num, (size_t)moe_inter_size}}, {"fc1_result"});
+        fc1_result = allocateBuffer({DataType::TYPE_BF16, {num_experts_per_node, padding_size, (size_t)moe_inter_size}},
+                                    {"fc1_result"});
     }
     BufferPtr permuted_padding_input_fp8(
         new QBuffer(std::move(permuted_padding_input),
@@ -161,49 +165,43 @@ FfnLayerOutput CudaDevice::moeFfnFp8(const FfnLayerParams& params, const MoeGate
                     std::move(BufferPtr(new Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_INVALID, {0}, nullptr)))));
     printBufferData(*permuted_padding_input_fp8, "fc1_input_fp8");
     printBufferData(*weights.moe_gate_weight->kernel, "moe_gate_weight");
-    printBufferData(*padding_group_index, "padding_group_index");
-    DeepGemmPlugin::groupedGemmFp8Contiguous(*permuted_padding_input_fp8,
-                                             *weights.moe_gate_weight->kernel,
-                                             *fc1_result,
-                                             padding_group_index->view(0, total_padding_num),
-                                             stream_);
+    printBufferData(*masked_m, "masked_m");
+    DeepGemmPlugin::groupedGemmFp8Masked_V2(
+        *permuted_padding_input_fp8, *weights.moe_gate_weight->kernel, *fc1_result, *masked_m, expected_m, stream_);
     printBufferData(*fc1_result, "fc1_result");
     check_cuda_error();
-    using GemmOutputType = __nv_bfloat16;
-    using ScaleBiasType  = __nv_bfloat16;
-    BufferPtr fc1_activation =
-        allocateBuffer({DataType::TYPE_FP8_E4M3, {total_padding_num, (size_t)moe_inter_size}}, {"fc1_activation"});
-    BufferPtr fc1_activation_fp8_scales = allocateBuffer(
-        {DataType::TYPE_FP32, {total_padding_num, (size_t)moe_inter_size / 128}}, {"fc1_activation_fp8_scales"});
+    using GemmOutputType     = __nv_bfloat16;
+    using ScaleBiasType      = __nv_bfloat16;
+    BufferPtr fc1_activation = allocateBuffer(
+        {DataType::TYPE_FP8_E4M3, {num_experts_per_node, padding_size, (size_t)moe_inter_size}}, {"fc1_activation"});
+    BufferPtr fc1_activation_fp8_scales =
+        allocateBuffer({DataType::TYPE_FP32, {num_experts_per_node, (size_t)moe_inter_size / 128, padding_size}},
+                       {"fc1_activation_fp8_scales"});
 
-    doActivationContiguous_V2<GemmOutputType, ScaleBiasType>(
+    doActivationMasked<GemmOutputType, ScaleBiasType>(
         fc1_activation->data<__nv_fp8_e4m3>(),
         fc1_activation_fp8_scales->data<float>(),
         static_cast<GemmOutputType const*>(fc1_result->data<T>()),
         (ScaleBiasType*)OPTIONAL_BUFFER_GET_DATA_OR_NULLPTR(weights.moe_gate_weight->bias),
         true,
-        permuted_src_row_to_dst->data<int>(),
-        expert_first_token_offset->data<int64_t>(),
         num_experts_per_node,
-        max_num_rows,
+        padding_size,
         moe_inter_size,
         params.configs.activation_type,
-        permuted_experts->data<int>(),
+        masked_m->data<int>(),
         stream_);
     fc1_result.reset();
 
     check_cuda_error();
-    const auto fc2_result = allocateBuffer({DataType::TYPE_BF16, {total_padding_num, hidden_size}}, {"fc2_result"});
-    BufferPtr  fc1_activation_fp8(
+    auto fc2_result =
+        allocateBuffer({DataType::TYPE_BF16, {num_experts_per_node, padding_size, hidden_size}}, {"fc2_result"});
+    BufferPtr fc1_activation_fp8(
         new QBuffer(std::move(fc1_activation),
                     std::move(fc1_activation_fp8_scales),
                     std::move(BufferPtr(new Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_INVALID, {0}, nullptr)))));
     printBufferData(*fc1_activation_fp8, "fc1_activation_fp8");
-    DeepGemmPlugin::groupedGemmFp8Contiguous(*fc1_activation_fp8,
-                                             *weights.moe_down_weight->kernel,
-                                             *fc2_result,
-                                             padding_group_index->view(0, total_padding_num),
-                                             stream_);
+    DeepGemmPlugin::groupedGemmFp8Masked(
+        *fc1_activation_fp8, *weights.moe_down_weight->kernel, *fc2_result, *masked_m, expected_m, stream_);
     printBufferData(*fc2_result, "fc2_result");
     check_cuda_error();
     using OutputType = __nv_bfloat16;

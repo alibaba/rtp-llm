@@ -49,7 +49,7 @@ void expandInputRowsKernelLauncherContiguous_V2(T const*       unpermuted_input,
 
 void computeSrc2Dst(int64_t const* expert_first_token_offset,
                     int*           permuted_src_row_to_dst,
-                    int*           padding_group_index,
+                    int*           masked_m,
                     size_t         num_experts_per_node,
                     size_t         padding_size,
                     cudaStream_t   stream);

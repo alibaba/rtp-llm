@@ -148,6 +148,16 @@ inline size_t pad_to_multiple_of_16(const size_t& input) {
     return ALIGNMENT * ((input + ALIGNMENT - 1) / ALIGNMENT);
 }
 
+inline size_t pad_to_multiple_of_32(const size_t& input) {
+    static constexpr int ALIGNMENT = 32;
+    return ALIGNMENT * ((input + ALIGNMENT - 1) / ALIGNMENT);
+}
+
+inline size_t pad_to_multiple_of_64(const size_t& input) {
+    static constexpr int ALIGNMENT = 64;
+    return ALIGNMENT * ((input + ALIGNMENT - 1) / ALIGNMENT);
+}
+
 inline size_t pad_to_multiple_of_128(const size_t& input) {
     static constexpr int ALIGNMENT = 128;
     return ALIGNMENT * ((input + ALIGNMENT - 1) / ALIGNMENT);

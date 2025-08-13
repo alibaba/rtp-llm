@@ -19,6 +19,12 @@ public:
                                      const Buffer& masked_m,
                                      int           expected_m,
                                      cudaStream_t  stream);
+    static void groupedGemmFp8Masked_V2(const Buffer& lhs,
+                                        const Buffer& rhs,
+                                        Buffer&       output,
+                                        const Buffer& masked_m,
+                                        int           expected_m,
+                                        cudaStream_t  stream);
 
 private:
     static inline int getNumSms();

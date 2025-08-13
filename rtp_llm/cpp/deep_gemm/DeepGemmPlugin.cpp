@@ -483,9 +483,9 @@ void DeepGemmPlugin::groupedGemmFp8Contiguous(
 void DeepGemmPlugin::groupedGemmFp8Masked(
     const Buffer& lhs, const Buffer& rhs, Buffer& output, const Buffer& masked_m, int expected_m, cudaStream_t stream) {
 #ifdef ENABLE_FP8
-    // lhs.fp8 e4m3, [num_groups, m_max, k]; scales -> fp32, [num_groups, m_max, k / 128]
+    // lhs.fp8 e4m3, [num_groups, m_max, k]; scales -> fp32, [num_groups, k / 128, m_max]
     // rhs.fp8 e4m3, [num_groups, n, k]; scales -> fp32, [num_groups, n / 128, k / 128]
-    // output.bf16, [m, n]
+    // output.bf16, [num_groups, m_max, n]
     // masked_m -> int32, [num_groups]
     size_t m, n, k;
     m              = lhs.shape()[1];
@@ -520,4 +520,47 @@ void DeepGemmPlugin::groupedGemmFp8Masked(
                 best_config.swap_ab);
 #endif
 }
+
+void DeepGemmPlugin::groupedGemmFp8Masked_V2(
+    const Buffer& lhs, const Buffer& rhs, Buffer& output, const Buffer& masked_m, int expected_m, cudaStream_t stream) {
+#ifdef ENABLE_FP8
+    // lhs.fp8 e4m3, [num_groups, m_max, k]; scales -> fp32, [num_groups, m_max, k / 128]
+    // rhs.fp8 e4m3, [num_groups, n, k]; scales -> fp32, [num_groups, n / 128, k / 128]
+    // output.bf16, [num_groups, m_max, n]
+    // masked_m -> int32, [num_groups]
+    size_t m, n, k;
+    m              = lhs.shape()[1];
+    k              = lhs.shape()[2];
+    n              = rhs.shape()[1];
+    int num_groups = rhs.shape()[0];
+    RTP_LLM_CHECK_WITH_INFO(n % 64 == 0 && k % 128 == 0, "n(%ld) % 64 or k(%ld) % 128 != 0", n, k);
+
+    auto lhs_scales = getColMajorTmaAlignedTensor(reinterpret_cast<const QBuffer&>(lhs).scales());
+    int  num_sms    = getNumSms();
+
+    auto best_config = getBestConfig(m, n, k, num_groups, num_sms, DeepGemmType::GroupedMasked, expected_m);
+
+    runDeepGemm(output.data<__nv_bfloat16>(),
+                reinterpret_cast<const QBuffer&>(lhs).kernel().data<__nv_fp8_e4m3>(),
+                (float*)lhs_scales.data_ptr(),
+                reinterpret_cast<const QBuffer&>(rhs).kernel().data<__nv_fp8_e4m3>(),
+                reinterpret_cast<const QBuffer&>(rhs).scalesData<float>(),
+                masked_m.data<int>(),  // grouped_layout
+                m,
+                n,
+                k,
+                best_config.block_m,
+                best_config.block_n,
+                128,         // block_k
+                num_groups,  // num_groups
+                best_config.num_stages,
+                best_config.num_tma_multicast,
+                DeepGemmType::GroupedMasked,
+                stream,
+                num_sms,
+                best_config.smem_size,
+                best_config.swap_ab);
+#endif
+}
+
 }  // namespace rtp_llm

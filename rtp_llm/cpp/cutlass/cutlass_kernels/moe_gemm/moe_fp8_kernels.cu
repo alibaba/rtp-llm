@@ -312,34 +312,33 @@ template void expandInputRowsKernelLauncherContiguous_V2<__nv_fp8_e4m3>(__nv_fp8
 
 __global__ void computeSrc2DstKernel(int64_t const* expert_first_token_offset,
                                      int*           permuted_src_row_to_dst,
-                                     int*           padding_group_index,
+                                     int*           masked_m,
                                      size_t         padding_size) {
     size_t const expert_id  = blockIdx.x;
     size_t const tid        = threadIdx.x;
     size_t       row_offset = static_cast<size_t>(expert_first_token_offset[expert_id]);
     size_t       curr_row   = static_cast<size_t>(expert_first_token_offset[expert_id + 1]) - row_offset;
 
-    size_t padding_offset = expert_id * padding_size;
-
-    for (size_t i = tid; i < curr_row; i += blockDim.x) {
-        permuted_src_row_to_dst[row_offset + i] = padding_offset + i;
+    if (tid == 0) {
+        masked_m[expert_id] = static_cast<int>(curr_row);
     }
 
-    for (size_t i = tid; i < padding_size; i += blockDim.x) {
-        padding_group_index[padding_offset + i] = expert_id;
+    size_t padding_offset = expert_id * padding_size;
+    for (size_t i = tid; i < curr_row; i += blockDim.x) {
+        permuted_src_row_to_dst[row_offset + i] = padding_offset + i;
     }
 }
 
 void computeSrc2Dst(int64_t const* expert_first_token_offset,
                     int*           permuted_src_row_to_dst,
-                    int*           padding_group_index,
+                    int*           masked_m,
                     size_t         num_experts_per_node,
                     size_t         padding_size,
                     cudaStream_t   stream) {
     int64_t const blocks  = num_experts_per_node;
     int64_t const threads = 512;
     computeSrc2DstKernel<<<blocks, threads, 0, stream>>>(
-        expert_first_token_offset, permuted_src_row_to_dst, padding_group_index, padding_size);
+        expert_first_token_offset, permuted_src_row_to_dst, masked_m, padding_size);
 }
 
 const int FINALIZE_THREADS_PER_BLOCK = 256;
