@@ -76,6 +76,10 @@ struct GptModelInputs {
     rtp_llm::BufferPtr text_tokens_mask;  // text part in multimodal input tokens [cumulated_seq_len]
     rtp_llm::BufferPtr mm_features_locs;  // features index
 
+    std::optional<std::vector<rtp_llm::BufferPtr>>
+                       input_embeddings;       // all input embeddings in gathered stream stored here
+    rtp_llm::BufferPtr input_embeddings_locs;  // input embeddings index
+
     rtp_llm::BufferPtr request_id;             // int64, [context_batch_size]
     rtp_llm::BufferPtr request_pd_separation;  // bool, [context_batch_size]
     rtp_llm::BufferPtr cache_keys;             // [context_batch_size]
@@ -114,7 +118,7 @@ enum GptModelInputIndex : size_t {
     mtpHiddenStates,
     mtpHiddenStatesDtype,
     skipRun,
-    gptModelInputLength
+    gptModelInputLength,
 };
 
 void tpSyncModelInputs(GptModelInputs& inputs, rtp_llm::DeviceBase* device);

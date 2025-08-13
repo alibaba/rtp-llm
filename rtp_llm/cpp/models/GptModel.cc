@@ -609,7 +609,8 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
         inputs.multimodal_features ?
             device_->clone({*inputs.text_tokens_mask, AllocationType::DEVICE, {"text_tokens_mask"}}) :
             nullptr;
-    const BufferPtr mm_feature_locs = inputs.mm_features_locs ? inputs.mm_features_locs : nullptr;
+    const BufferPtr mm_feature_locs       = inputs.mm_features_locs ? inputs.mm_features_locs : nullptr;
+    const BufferPtr input_embeddings_locs = inputs.input_embeddings_locs ? inputs.input_embeddings_locs : nullptr;
 
     // word embedding lookup
     auto hidden = device_->embeddingLookup(
@@ -634,6 +635,12 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
     EmbeddingPostOutput output = embeddingPost(hidden, inputs);
     hidden                     = output.hidden;
     device_->checkError();
+    if (inputs.input_embeddings) {
+        hidden =
+            device_->inputEmbedding({hidden,
+                                     (OptionalConstVecBufferPtrRef)inputs.input_embeddings,
+                                     input_embeddings_locs ? (OptionalConstBufferRef)*input_embeddings_locs : nullopt});
+    }
 
     auto hidden_dtype = hidden->type();
     auto attn_dtype   = hidden_dtype;
@@ -669,6 +676,7 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
                                                (OptionalConstVecBufferPtrRef)inputs.multimodal_features,
                                                mm_feature_locs ? (OptionalConstBufferRef)*mm_feature_locs : nullopt});
     }
+
     device_->checkError();
 
     printBufferData(*hidden, "input_hidden");

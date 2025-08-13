@@ -83,6 +83,10 @@ BufferPtr DeviceOps::multimodalEmbedding(const MultimodalEmbeddingParams& params
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
+BufferPtr DeviceOps::inputEmbedding(const InputEmbeddingParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
 BufferPtr DeviceOps::activation(const ActivationParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }

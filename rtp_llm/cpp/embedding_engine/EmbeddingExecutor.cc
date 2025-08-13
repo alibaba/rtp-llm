@@ -83,6 +83,8 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
     std::vector<rtp_llm::BufferPtr> gathered_mm_features;
     std::vector<int>                new_locs;
     std::vector<int>                merged_text_mask;
+    std::vector<rtp_llm::BufferPtr> gathered_input_embeddings;
+    std::vector<int>                gathered_input_embeddings_locs;
     merged_text_mask.resize(token_num, 1);
     for (auto& stream : streams) {
         int         length     = stream->inputLength();
@@ -98,6 +100,13 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
             }
             const auto text_token_mask = mm_feature.value().text_tokens_mask;
             memcpy(merged_text_mask.data() + token_idx, text_token_mask->data(), text_token_mask->size() * sizeof(int));
+        }
+
+        if (stream->embeddingInput()->input_embeddings.has_value()) {
+            auto input_embedding_buffer = stream->embeddingInput()->input_embeddings.value();
+            gathered_input_embeddings.emplace_back(
+                device_->clone({*input_embedding_buffer, rtp_llm::AllocationType::HOST}));
+            gathered_input_embeddings_locs.push_back(token_idx);
         }
         memcpy(merged_tokens + (int)token_idx, stream->embeddingInput()->token_ids->data(), length * sizeof(int32_t));
         memcpy(merged_token_type_ids + (int)token_idx,
@@ -128,6 +137,13 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
         model_input.text_tokens_mask =
             device_->clone({*vector2Buffer(merged_text_mask), rtp_llm::AllocationType::HOST});
     }
+
+    if (!gathered_input_embeddings.empty()) {
+        model_input.input_embeddings = std::move(gathered_input_embeddings);
+        model_input.input_embeddings_locs =
+            device_->clone({*vector2Buffer(gathered_input_embeddings_locs), rtp_llm::AllocationType::HOST});
+    }
+
     size_t max_seq_len = *std::max_element(input_lengths, input_lengths + batch_size);
     reportMetrics(batch_size, token_num, max_seq_len);
     return model_input;
@@ -249,7 +265,6 @@ absl::StatusOr<py::object> EmbeddingExecutor::postProcess(const ModelRequest&   
 
 absl::Status EmbeddingExecutor::process(const std::list<EmbeddingStreamPtr>& streams) {
     CHECK_AND_RETURN_REF(model_input, gatherModelInput(streams));
-    RTP_LLM_LOG_DEBUG("model_input: %s", model_input.debugString().c_str());
     auto            merged_output = std::make_unique<MergedOutput>();
     GptModelOutputs model_output;
     ModelRequest    model_request    = generateOldModelRequest(model_input);

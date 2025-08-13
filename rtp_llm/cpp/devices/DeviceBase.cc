@@ -422,6 +422,25 @@ MultimodalEmbeddingOutput DeviceBase::multimodalEmbedding(const MultimodalEmbedd
     return move(embeddings);
 }
 
+BufferPtr DeviceBase::inputEmbedding(const InputEmbeddingParams& params) {
+    RUNTIME_ASSERT_OP_ARG(params.input_embeddings, "no input embeddings found");
+    const auto& embeddings            = params.word_embeddings;
+    const auto& features              = params.input_embeddings.value().get();
+    const auto& input_embeddings_locs = params.input_embeddings_locs.value().get();
+    const auto  input_embeddings_num  = features.size();
+
+    RUNTIME_ASSERT_OP_ARG(embeddings->typeSize() == features[0]->typeSize(),
+                          "type size of embeddings and multimodal features should be equal.");
+
+    for (int i = 0; i < input_embeddings_num; ++i) {
+        auto& feature = features[i];
+        auto  loc     = input_embeddings_locs.dataWithOffset<int32_t>(i);
+        copy({embeddings->view(*loc, feature->shape()[0]), *feature});
+    }
+
+    return move(embeddings);
+}
+
 AllReduceOutput DeviceBase::allReduce(const AllReduceParams& params) {
     if (getDeviceProperties().tp_size == 1) {
         return AllReduceOutput({params.buffer});

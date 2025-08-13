@@ -422,6 +422,12 @@ struct MultimodalEmbeddingParams {
     OptionalConstBufferRef       multimodal_locs;
 };
 
+struct InputEmbeddingParams {
+    const BufferPtr&             word_embeddings;
+    OptionalConstVecBufferPtrRef input_embeddings;
+    OptionalConstBufferRef       input_embeddings_locs;
+};
+
 using MultimodalEmbeddingOutput = BufferPtr;
 
 struct CacheStoreInputs {
@@ -458,16 +464,16 @@ struct AttentionCommonInputs {
 
     lora::AttentionLayerLoraInput lora_input;
 
-    int layer_id = 0;
-    BufferPtr                                 request_id;               // [context_batch_size]
-    BufferPtr                                 request_pd_separation;    // [context_batch_size]
-    std::vector<std::string>                  cache_keys;               // [context_batch_size]
-    size_t                                    k_block_size = 0;
-    size_t                                    v_block_size = 0;
-    size_t                                    scale_block_size = 0;
-    bool                                      pd_separation = false;
-    size_t                                    model_id = 0;
-    bool                                      decode_entrance = false;
+    int                      layer_id = 0;
+    BufferPtr                request_id;             // [context_batch_size]
+    BufferPtr                request_pd_separation;  // [context_batch_size]
+    std::vector<std::string> cache_keys;             // [context_batch_size]
+    size_t                   k_block_size     = 0;
+    size_t                   v_block_size     = 0;
+    size_t                   scale_block_size = 0;
+    bool                     pd_separation    = false;
+    size_t                   model_id         = 0;
+    bool                     decode_entrance  = false;
 
     bool warmup;
 
@@ -944,7 +950,7 @@ struct DevicePrepOutput {
     ParamsPtr prefill_flash_infer_attn;
     ParamsPtr decode_trt_attn;
     ParamsPtr prefill_trt_attn;
-    
+
     // rocm
     ParamsPtr decode_aiter_attn;
 };

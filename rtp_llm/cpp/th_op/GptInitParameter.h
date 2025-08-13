@@ -330,7 +330,6 @@ public:
     RopeConfig       getRopeConfig() const;
     AttentionConfigs getAttentionConfigs() const;
     bool             isKvCacheQuant() const;
-
 };
 
 }  // namespace rtp_llm
