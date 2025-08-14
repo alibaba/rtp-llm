@@ -31,7 +31,7 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
     GenerateOutputs generate_results;
     generate_results.request_id = request_id_;
 
-    for (int i = 0; i < tileNumOut(); i++) {
+    for (int i = 0; i < nextBatchSize(); i++) {
         GenerateOutput generate_output;
         generate_output.aux_info.iter_count      = iter_count_;
         generate_output.aux_info.fallback_tokens = fallback_blocks_ * seqSizePerBlock();

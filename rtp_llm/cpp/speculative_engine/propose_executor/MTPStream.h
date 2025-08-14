@@ -17,7 +17,7 @@ namespace rtp_llm {
 class MTPStream: public GenerateStream {
 public:
     MTPStream(const GenerateStream& stream, size_t propose_step): GenerateStream(stream) {
-        RTP_LLM_CHECK(tileNumMax() == 1);
+        RTP_LLM_CHECK(maxBatchSize() == 1);
         RTP_LLM_CHECK(!isChunkStream());
         std::shared_ptr<GenerateConfig>& generate_config = generateConfig();
         if (!generate_config->top1()) {

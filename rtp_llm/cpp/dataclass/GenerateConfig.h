@@ -89,7 +89,7 @@ public:
     std::vector<RoleAddr> role_addrs;
     int64_t               inter_request_id = -1;  // used for master scheduling
 
-    int numBeamsMax() {
+    int maxNumBeams() {
         if (variable_num_beams.size() > 0) {
             return *std::max_element(variable_num_beams.begin(), variable_num_beams.end());
         } else {
@@ -98,7 +98,7 @@ public:
     }
 
     bool hasNumBeams() {
-        return numBeamsMax() > 1;
+        return maxNumBeams() > 1;
     }
 
     void addSpecialTokens(const rtp_llm::SpecialTokens& special_tokens) {

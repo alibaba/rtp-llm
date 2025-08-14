@@ -163,7 +163,7 @@ absl::StatusOr<int> StreamCacheResource::incrKVBlock(int token_capacity, size_t 
         return real_occupy;
     }
 
-    auto batch_size   = stream_->tileNumIn();
+    auto batch_size   = stream_->currentBatchSize();
     auto total_blocks = batch_size * extra_blocks_num;
     std::tie(success, kv_cache_resource) =
         resource_context_.cache_manager->malloc({stream_->streamId(), (uint32_t)total_blocks, verbose});
@@ -327,14 +327,14 @@ bool StreamCacheResource::generateKVBlockUpdateMapping(const std::vector<int>& b
 
 // TODO(xinfei.sxf) move code to batch resource class
 void StreamCacheResource::constructCacheKey() {
-    batch_resource_.cache_keys.resize(stream_->tileNumIn());
+    batch_resource_.cache_keys.resize(stream_->currentBatchSize());
     if (!resource_context_.cache_manager) {
         return;
     }
     if (!reuseCache() && !resource_context_.use_cache_store) {
         return;
     }
-    for (size_t i = 0; i < stream_->tileNumIn(); i++) {
+    for (size_t i = 0; i < stream_->currentBatchSize(); i++) {
         batch_resource_.cache_keys[i].reserve(singleBatchNeedBlocks(stream_->max_seq_len_));
     }
     auto    seq_size_per_block = seqSizePerBlock();
@@ -348,7 +348,7 @@ void StreamCacheResource::constructCacheKey() {
             hashInt64Array(hash, token_ids + pos, token_ids + std::min(pos + seq_size_per_block, stream_->seqLength()));
         batch_resource_.cache_keys[0].push_back(hash);
     }
-    for (size_t i = 1; i < stream_->tileNumIn(); i++) {
+    for (size_t i = 1; i < stream_->currentBatchSize(); i++) {
         batch_resource_.cache_keys[i] = batch_resource_.cache_keys[0];
     }
 }
@@ -362,7 +362,7 @@ void StreamCacheResource::reConstructCacheKeys() {
     }
     auto seq_size_per_block = seqSizePerBlock();
     auto total_blocks       = stream_->seqLength() / seq_size_per_block;
-    for (size_t i = 0; i < stream_->tileNumIn(); ++i) {
+    for (size_t i = 0; i < stream_->currentBatchSize(); ++i) {
         if (!last_block_aligned_ && !batch_resource_.cache_keys[i].empty()) {
             batch_resource_.cache_keys[i].pop_back();
         }
@@ -388,8 +388,8 @@ const std::vector<int64_t>& StreamCacheResource::cacheKeys(int32_t batch_id) con
 }
 
 void StreamCacheResource::fakeInitKVBlock() {
-    batch_resource_.resize(stream_->tileNumMax());
-    for (size_t i = 0; i < stream_->tileNumMax(); i++) {
+    batch_resource_.resize(stream_->maxBatchSize());
+    for (size_t i = 0; i < stream_->maxBatchSize(); i++) {
         batch_resource_.resize(i, stream_->seqLength(), true);
     }
 }

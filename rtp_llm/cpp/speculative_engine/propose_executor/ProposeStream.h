@@ -10,7 +10,7 @@ class ProposeStream: public GenerateStream {
 public:
     ProposeStream(const GenerateStream& stream, size_t propose_step): GenerateStream(stream) {
         // WARNING: VanillaStream currently only support batch_size = 1
-        RTP_LLM_CHECK(tileNumMax() == 1);
+        RTP_LLM_CHECK(maxBatchSize() == 1);
         std::shared_ptr<GenerateConfig>& generate_config = generateConfig();
         if (!generate_config->top1()) {
             setReturnAllProbs(true);

@@ -20,7 +20,7 @@ std::shared_ptr<GenerateInput> ChatService::fillGenerateInput(int64_t           
     input->begin_time_us                 = autil::TimeUtility::currentTimeInMicroSeconds();
     input->generate_config               = openai_endpoint_->extract_generation_config(chat_request);
     metric_reporter_->reportFTInputTokenLengthMetric(input->generate_config->select_tokens_id.size());
-    metric_reporter_->reportFTNumBeansMetric(input->generate_config->numBeamsMax());
+    metric_reporter_->reportFTNumBeansMetric(input->generate_config->maxNumBeams());
 
     const auto& vec    = rendered_input.input_ids;
     auto        device = rtp_llm::DeviceFactory::getDefaultDevice();

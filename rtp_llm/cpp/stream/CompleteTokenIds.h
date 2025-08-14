@@ -55,8 +55,8 @@ public:
 private:
     rtp_llm::DeviceBase* device_;
 
-    int batch_size_;      // eq to stream.tileNumIn()
-    int max_batch_size_;  // eq to stream.tileNumMax()
+    int batch_size_;
+    int max_batch_size_;
     int max_seq_len_;
     int seq_size_per_block_;
 

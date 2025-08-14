@@ -147,9 +147,9 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
     generate_stream->step();
 
     auto new_tokens     = engine_->getDevice()->allocateBuffer({rtp_llm::DataType::TYPE_INT32,
-                                                            {(size_t)generate_stream->tileNumOut(), (size_t)1},
-                                                            rtp_llm::AllocationType::HOST},
-                                                           {});
+                                                                {(size_t)generate_stream->nextBatchSize(), (size_t)1},
+                                                                rtp_llm::AllocationType::HOST},
+                                                               {});
     auto data           = new_tokens->data<int32_t>();
     auto first_token_id = generate_request.first_generate_token_id();
     *data               = first_token_id;

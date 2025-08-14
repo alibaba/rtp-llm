@@ -235,7 +235,7 @@ InferenceService::fillGenerateInput(int64_t                                reque
     input->lora_id = engine_->getLoraManager()->getLoraId(input->generate_config->adapter_name);
     if (metric_reporter_) {
         metric_reporter_->reportFTInputTokenLengthMetric(input->generate_config->select_tokens_id.size());
-        metric_reporter_->reportFTNumBeansMetric(input->generate_config->numBeamsMax());
+        metric_reporter_->reportFTNumBeansMetric(input->generate_config->maxNumBeams());
     }
     autil::ScopedTime2 timer;
     auto               vec = token_processor_->encode(text);

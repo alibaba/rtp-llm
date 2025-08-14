@@ -25,7 +25,7 @@ grpc::Status DecodeRpcServerNew::init(const EngineInitParams&                   
 
 bool DecodeRpcServerNew::ready() {
     char* decode_cm2_config_env = std::getenv("RTP_LLM_DECODE_CM2_CONFIG");
-    if(!maga_init_params_.gpt_init_parameter.service_discovery_config.use_local && decode_cm2_config_env == nullptr) {
+    if (!maga_init_params_.gpt_init_parameter.service_discovery_config.use_local && decode_cm2_config_env == nullptr) {
         RTP_LLM_LOG_INFO("service discovery by master, skip load balancer check");
         return true;
     }
@@ -168,9 +168,9 @@ void DecodeRpcServerNew::makeRemoteGenerateRequest(DecodeGenerateContextNew& dec
 ErrorInfo DecodeRpcServerNew::callPrefill(DecodeGenerateContextNew& decode_context) {
     RTP_LLM_LOG_DEBUG("request [%s] start to call prefill", decode_context.request_key.c_str());
 
-    auto role_addrs = QueryConverter::getRoleAddrs(&decode_context.request->generate_config());
+    auto                        role_addrs = QueryConverter::getRoleAddrs(&decode_context.request->generate_config());
     std::shared_ptr<const Host> host;
-    for (auto& role_addr: role_addrs) {
+    for (auto& role_addr : role_addrs) {
         if (role_addr.role == RoleType::PREFILL) {
             host = std::make_shared<const Host>(role_addr.ip, role_addr.grpc_port, role_addr.http_port);
             break;
@@ -178,7 +178,7 @@ ErrorInfo DecodeRpcServerNew::callPrefill(DecodeGenerateContextNew& decode_conte
     }
     if (!host && load_balancer_) {
         host = load_balancer_->chooseHost(prefill_cluster_name_,
-                                            decode_context.request->generate_config().global_request_id());
+                                          decode_context.request->generate_config().global_request_id());
     }
 
     if (!host || host->ip.empty()) {
@@ -321,7 +321,7 @@ ErrorInfo DecodeRpcServerNew::writeAppendFirstToken(DecodeGenerateContextNew& de
 
     // append first token to generate stream
     auto new_tokens     = engine_->getDevice()->allocateBuffer({rtp_llm::DataType::TYPE_INT32,
-                                                                {(size_t)generate_stream->tileNumIn(), (size_t)1},
+                                                                {(size_t)generate_stream->nextBatchSize(), (size_t)1},
                                                                 rtp_llm::AllocationType::HOST},
                                                                {});
     auto data           = new_tokens->data<int32_t>();

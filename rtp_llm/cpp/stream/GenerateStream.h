@@ -131,20 +131,18 @@ public:
     std::string                      adapterName() const;
     rtp_llm::SpecialTokens           specialTokens() const;
 
-    int tileNum(int iter_count) const;
-    int tileNumIn() const;
-    int tileNumOut() const;
-    int tileNumMax() const;
+    int batchSize(int output_len) const;
+    int currentBatchSize() const;
+    int nextBatchSize() const;
+    int maxBatchSize() const;
 
-    int batchSize(int iter_count) const;
-    int batchSizeIn() const;
-    int batchSizeOut() const;
-    int batchSizeMax() const;
+    int  numBeams(int output_len) const;
+    int  currentNumBeams() const;
+    int  nextNumBeams() const;
+    int  maxNumBeams() const;
+    bool hasNumBeams() const;
 
-    int numBeams(int iter_count) const;
-    int numBeamsIn() const;
-    int numBeamsOut() const;
-    int numBeamsMax() const;
+    bool needTilingForSampling() const;
 
     int    numReturnSequences() const;
     bool   calculateLoss() const;
@@ -295,7 +293,7 @@ public:
     }
 
     bool disableSpRun() const {
-        return numBeamsMax() > 1 || forceDisableSpRun();
+        return hasNumBeams() || forceDisableSpRun();
     }
 
     bool needReturnHiddenStates() {

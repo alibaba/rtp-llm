@@ -54,7 +54,7 @@ absl::StatusOr<SamplerInputs> ScoreBatchStreamProcessor::gatherSamplerInput(cons
     bool return_all_probs = stream_groups.needReturnAllProbs();
 
     for (auto& stream : all_streams) {
-        RTP_LLM_CHECK_WITH_INFO(stream->tileNumMax() == 1, "stream tile num must be 1 in ScoreExecutor");
+        RTP_LLM_CHECK_WITH_INFO(stream->maxBatchSize() == 1, "stream tile num must be 1 in ScoreExecutor");
     }
 
     size_t        total_batch_size = stream_groups.totalScoreBatchSize();

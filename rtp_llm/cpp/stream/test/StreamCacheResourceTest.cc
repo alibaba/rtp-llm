@@ -524,7 +524,7 @@ TEST_F(StreamCacheResourceTest, testQueryLevelReuseCacheControl) {
     // Test with query-level reuse_cache = false
     stream_->releaseResource();
     // Re-initialize batch resource after release
-    resource.init(stream_->tileNum());
+    resource.init(stream_->currentBatchSize());
     size_t baseline_free_blocks                            = cache_manager_->freeBlockNums();
     stream_->generate_input_->generate_config->reuse_cache = false;
     ASSERT_TRUE(resource.initKVBlock(token_capacity).ok());
@@ -550,7 +550,7 @@ TEST_F(StreamCacheResourceTest, testQueryLevelReuseCacheMasterSwitch) {
     // Test with query-level reuse_cache = false, should also be ignored
     stream_->releaseResource();
     // Re-initialize batch resource after release
-    resource.init(stream_->tileNum());
+    resource.init(stream_->currentBatchSize());
     stream_->generate_input_->generate_config->reuse_cache = false;
     ASSERT_TRUE(resource.initKVBlock(token_capacity).ok());
     ASSERT_EQ(cache_manager_->freeBlockNums(), 5);

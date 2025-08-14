@@ -15,9 +15,11 @@ struct StreamGroups {
 public:
     StreamGroups(const std::list<GenerateStreamPtr>& streams) {
         for (auto& stream : streams) {
+            auto cur_batch_size  = stream->currentBatchSize();
+            auto next_batch_size = stream->nextBatchSize();
             if (stream->isContextStream()) {
                 context_streams_.push_back(stream);
-                total_context_batch_size_ += stream->batchSizeIn();
+                total_context_batch_size_ += cur_batch_size;
                 max_context_seq_len_ = std::max(max_context_seq_len_, (size_t)stream->contextLength());
                 max_reuse_length_    = std::max(max_reuse_length_, (size_t)stream->reuseLength());
                 cum_context_seq_len_ += (size_t)stream->contextLength();
@@ -27,15 +29,15 @@ public:
                 }
             } else {
                 decode_streams_.push_back(stream);
-                total_decode_batch_size_ += stream->batchSizeIn();
+                total_decode_batch_size_ += cur_batch_size;
                 if (!has_multimodal_input_ && stream->multimodalFeaturesLength() > 0) {
                     has_multimodal_input_ = true;
                 }
             }
             total_block_update_copy_num_ += stream->streamCacheResource().getKVBlockUpdateMapping().size();
             model_execute_token_size_ += stream->currentExecuteTokenSize();
-            total_sampler_batch_size_in_ += stream->tileNumIn();
-            total_sampler_batch_size_out_ += stream->tileNumOut();
+            total_sampler_batch_size_in_ += stream->needTilingForSampling() ? next_batch_size : cur_batch_size;
+            total_sampler_batch_size_out_ += next_batch_size;
             max_block_size_ = std::max(max_block_size_, stream->maxBlockSize());
             max_seq_len_    = std::max(max_seq_len_, (size_t)stream->seqLength());
             total_score_batch_size_ += stream->scoreLen();
@@ -119,12 +121,12 @@ public:
     bool needReturnCumLogProbs() const {
         // beam kernel need cum log probs input, tmp set true
         for (auto& stream : context_streams_) {
-            if (stream->returnCumLogProbs() || stream->numBeamsMax() > 1) {
+            if (stream->returnCumLogProbs() || stream->hasNumBeams()) {
                 return true;
             }
         }
         for (auto& stream : decode_streams_) {
-            if (stream->returnCumLogProbs() || stream->numBeamsMax() > 1) {
+            if (stream->returnCumLogProbs() || stream->hasNumBeams()) {
                 return true;
             }
         }
