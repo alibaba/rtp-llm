@@ -369,10 +369,12 @@ TEST_F(FIFOSchedulerTest, testMaxContextBatchSize) {
 
     {
         // test abnormal case with tile num
+        autil::EnvGuard perf_scope("PERF_TEST", "1");
+
         std::shared_ptr<GenerateInput> query2 = make_shared<GenerateInput>();
         query2->input_ids                     = createBuffer<int32_t>({7}, {1, 2, 3, 4, 5, 6, 7}, AllocationType::HOST);
         query2->generate_config               = make_shared<GenerateConfig>();
-        query2->generate_config->num_beams    = 20;
+        query2->generate_config->num_return_sequences = 20;
         shared_ptr<GenerateStream> stream2 =
             make_shared<NormalGenerateStream>(query2, config, resource_context, nullptr);
         ASSERT_TRUE(scheduler.enqueue(stream2).ok());

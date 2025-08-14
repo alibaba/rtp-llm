@@ -32,6 +32,8 @@ public:
     };
 
     GenerateStreamPtr createComplexContextStream(std::vector<int> input_ids) {
+        autil::EnvGuard perf_scope("PERF_TEST", "1");
+
         auto            cache_config  = init_config();
         auto            cache_manager = std::make_shared<CacheManager>(cache_config, device_);
         ResourceContext resource_context;
@@ -40,12 +42,13 @@ public:
 
         std::shared_ptr<GenerateInput>  generate_input(new GenerateInput());
         std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
-        generate_config->num_beams      = 2;
-        generate_input->input_ids       = rtp_llm::vector2Buffer(input_ids);
-        generate_input->generate_config = generate_config;
+        generate_config->num_return_sequences = 2;
+        generate_input->input_ids             = rtp_llm::vector2Buffer(input_ids);
+        generate_input->generate_config       = generate_config;
         rtp_llm::GptInitParameter params;
         params.max_seq_len_ = 2048;
         auto stream         = std::make_shared<NormalGenerateStream>(generate_input, params, resource_context, nullptr);
+
         return stream;
     }
 
