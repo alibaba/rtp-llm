@@ -9,7 +9,7 @@ import threading
 import time
 from functools import cached_property
 from typing import Any, Dict, List, Optional, Union
-
+from rtp_llm.ops import EngineScheduleInfo, LoadBalanceInfo, WorkerStatusInfo, CacheStatusInfo
 import uvicorn
 from anyio import CapacityLimiter
 from anyio.lowlevel import RunVar
@@ -151,19 +151,37 @@ class BackendApp(object):
         async def health():
             check_shutdown()
             return {"status": "home"}
-
+        
+        @app.post("/cache_status")
+        def cache_status(req: Dict[str, Any]):
+            check_shutdown()
+            latest_cache_version: int = int(req.get("latest_cache_version", -1))
+            cache_status_info = self.backend_server.get_cache_status(latest_cache_version)
+            logging.info(f"cache_status info: {cache_status_info.available_kv_cache}, {cache_status_info.total_kv_cache}, {cache_status_info.block_size}, {cache_status_info.version}, {cache_status_info.cached_keys}")
+            cache_status = CacheStatus()
+            cache_status.available_kv_cache = cache_status_info.available_kv_cache
+            cache_status.total_kv_cache = cache_status_info.total_kv_cache
+            cache_status.block_size = cache_status_info.block_size
+            cache_status.version = cache_status_info.version
+            cache_status.cached_keys = cache_status_info.cached_keys
+            return ORJSONResponse(content=cache_status.model_dump(exclude_none=True))
+        
         @app.post("/worker_status")
         def worker_status(req: Dict[str, Any]):
             check_shutdown()
             latest_cache_version: int = int(req.get("latest_cache_version", -1))
             latest_finised_version: int = int(req.get("latest_finised_version", -1))
-            worker_status = self.backend_server.get_worker_status(
-                latest_cache_version, latest_finised_version
-            )
-            worker_status.server_port = worker_info.server_port
-            worker_status.http_port = worker_info.http_port
-            worker_status.grpc_port = worker_info.rpc_server_port
-
+            worker_status = self.backend_server.get_worker_status(latest_cache_version, latest_finised_version)
+            worker_status.server_port=worker_info.server_port
+            worker_status.http_port=worker_info.http_port
+            worker_status.grpc_port=worker_info.rpc_server_port
+            cache_status_info = self.backend_server.get_cache_status(latest_cache_version)
+            worker_status.cache_status = CacheStatus()
+            worker_status.cache_status.available_kv_cache = cache_status_info.available_kv_cache
+            worker_status.cache_status.total_kv_cache = cache_status_info.total_kv_cache
+            worker_status.cache_status.block_size = cache_status_info.block_size
+            worker_status.cache_status.version = cache_status_info.version
+            worker_status.cache_status.cached_keys = cache_status_info.cached_keys
             return ORJSONResponse(content=worker_status.model_dump(exclude_none=True))
 
         # entry for worker RANK != 0

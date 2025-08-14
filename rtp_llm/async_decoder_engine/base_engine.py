@@ -3,7 +3,7 @@ from typing import Any, AsyncGenerator, Dict
 
 from pydantic import BaseModel
 
-from rtp_llm.ops import EngineScheduleInfo, LoadBalanceInfo
+from rtp_llm.ops import EngineScheduleInfo, LoadBalanceInfo, WorkerStatusInfo, CacheStatusInfo
 
 
 class BaseEngine:
@@ -28,6 +28,16 @@ class BaseEngine:
 
     @abstractmethod
     def get_load_balance_info(self, latest_cache_version: int) -> LoadBalanceInfo:
+        raise NotImplementedError()
+    
+    @abstractmethod
+    def get_worker_status_info(
+        self, latest_cache_version: int, latest_finished_version: int
+    ) -> WorkerStatusInfo:
+        raise NotImplementedError()
+    
+    @abstractmethod
+    def get_cache_status_info(self, latest_cache_version: int) -> CacheStatusInfo:
         raise NotImplementedError()
 
     @abstractmethod

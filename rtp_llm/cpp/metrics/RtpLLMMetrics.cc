@@ -7,6 +7,7 @@
 namespace rtp_llm {
 
 AUTIL_LOG_SETUP(rtp_llm, RpcMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RpcWorkerStatusMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMStreamMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpEmbeddingGlobalMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpEmbeddingStreamMetrics);
@@ -67,6 +68,16 @@ bool RpcMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(max_response_done_time_us_metric, "rtp_llm_rpc_max_response_done_time_us");
 
     return true;
+}
+
+bool RpcWorkerStatusMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_QPS_MUTABLE_METRIC(qps_metric, "rtp_llm_rpc_worker_status_qps");
+    REGISTER_GAUGE_MUTABLE_METRIC(total_rt_us_metric, "rtp_llm_rpc_worker_status_total_rt_us");
+    return true;
+}
+void RpcWorkerStatusMetrics::report(const kmonitor::MetricsTags* tags, RpcWorkerStatusMetricsCollector* collector) {
+    REPORT_QPS(qps);
+    REPORT_GAUGE(total_rt_us);
 }
 
 void RpcMetrics::report(const kmonitor::MetricsTags* tags, RpcMetricsCollector* collector) {

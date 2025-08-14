@@ -118,6 +118,8 @@ try:
         KVCacheConfig,
         KVCacheInfo,
         LoadBalanceInfo,
+        WorkerStatusInfo,
+        CacheStatusInfo,
         MiscellaneousConfig,
         MlaOpsType,
         ModelSpecificConfig,

@@ -11,7 +11,7 @@ from rtp_llm.distribute.worker_info import g_parallel_info
 from rtp_llm.models.base_model import BaseModel, GenerateInput
 from rtp_llm.models.multimodal.multimodal_mixin import MultiModalMixin
 from rtp_llm.models.propose_model.propose_model import ProposeModel
-from rtp_llm.ops import EngineScheduleInfo, LoadBalanceInfo
+from rtp_llm.ops import EngineScheduleInfo, LoadBalanceInfo, WorkerStatusInfo, CacheStatusInfo
 from rtp_llm.utils.gemm_utils.device_map import get_device
 
 
@@ -82,6 +82,16 @@ class AsyncModel:
     def get_load_balance_info(self, latest_cache_version: int) -> LoadBalanceInfo:
         return self.decoder_engine_.get_load_balance_info(latest_cache_version)
 
+    def get_worker_status_info(
+        self, latest_cache_version: int, latest_finished_version: int
+    ) -> WorkerStatusInfo:
+        return self.decoder_engine_.get_worker_status_info(
+            latest_cache_version, latest_finished_version
+        )
+        
+    def get_cache_status_info(self, latest_cache_version: int) -> CacheStatusInfo:
+        return self.decoder_engine_.get_cache_status_info(latest_cache_version)
+    
     def get_engine_schedule_info(
         self, latest_finised_version: int
     ) -> EngineScheduleInfo:

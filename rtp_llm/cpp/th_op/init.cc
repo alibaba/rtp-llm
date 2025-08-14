@@ -22,6 +22,8 @@ PYBIND11_MODULE(libth_transformer, m) {
 
     registerKvCacheInfo(m);
     registerLoadBalanceInfo(m);
+    registerWorkerStatusInfo(m);
+    registerCacheStatusInfo(m);
     registerEngineScheduleInfo(m);
     register_parallelism_distributed_config(m);
     register_concurrency_config(m);

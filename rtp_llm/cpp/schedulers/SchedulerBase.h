@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/dataclass/MergedQuery.h"
 #include "rtp_llm/cpp/dataclass/Query.h"
 #include "rtp_llm/cpp/stream/StreamGroups.h"
+#include "rtp_llm/cpp/dataclass/EngineScheduleInfo.h"
 
 namespace rtp_llm {
 
@@ -26,6 +27,12 @@ public:
     }
     virtual int64_t runningQueryLen() {
         return 0;
+    }
+    virtual std::vector<EngineScheduleInfo::TaskInfo> waitingTaskList() {
+        return {};
+    }
+    virtual std::vector<EngineScheduleInfo::TaskInfo> runningTaskList() {
+        return {};
     }
     virtual bool canLoadBalance() {
         return true;

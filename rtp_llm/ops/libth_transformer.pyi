@@ -29,6 +29,8 @@ __all__ = [
     "KVCacheConfig",
     "KVCacheInfo",
     "LoadBalanceInfo",
+    "WorkerStatusInfo",
+    "CacheStatusInfo",
     "MiscellaneousConfig",
     "MlaOpsType",
     "ModelSpecificConfig",
@@ -206,6 +208,8 @@ class EngineScheduleInfo:
     def __init__(self) -> None: ...
 
 class EngineTaskInfo:
+    end_time_ms: int
+    inter_request_id: int
     input_length: int
     iterate_count: int
     prefix_length: int
@@ -605,6 +609,27 @@ class LoadBalanceInfo:
     waiting_query_len: int
     def __init__(self) -> None: ...
 
+class WorkerStatusInfo:
+    role: RoleType
+    load_balance_info: LoadBalanceInfo
+    engine_schedule_info: EngineScheduleInfo
+    status_version: int
+    alive: bool
+    dp_size: int
+    tp_size: int
+    version: int
+    dp_rank: int
+    precision: str
+    def __init__(self) -> None: ...
+
+class CacheStatusInfo:
+    available_kv_cache: int
+    block_size: int
+    cached_keys: list[int]
+    total_kv_cache: int
+    version: int
+    def __init__(self) -> None: ...
+
 class MiscellaneousConfig:
     load_balance: int
     step_records_max_size: int
@@ -841,6 +866,8 @@ class RtpLLMOp:
     ) -> None: ...
     def get_engine_schedule_info(self) -> EngineScheduleInfo: ...
     def get_load_balance_info(self, arg0: int) -> LoadBalanceInfo: ...
+    def get_worker_status_info(self, arg0: int, arg1: int) -> WorkerStatusInfo: ...
+    def get_cache_status_info(self, arg0: int) -> CacheStatusInfo: ...
     def init(
         self,
         model: typing.Any,

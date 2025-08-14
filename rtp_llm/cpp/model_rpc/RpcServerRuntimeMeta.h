@@ -5,7 +5,7 @@
 namespace rtp_llm {
 class RpcServerRuntimeMeta {
 public:
-    EngineScheduleInfo getEngineScheduleInfo(int64_t latest_finised_version) {
+    EngineScheduleInfo getEngineScheduleInfo(int64_t latest_finished_version) {
         std::unique_lock<std::mutex> lock(mutex_);
         EngineScheduleInfo           info;
         for (auto& iter : running_streams_) {
@@ -13,7 +13,7 @@ public:
         }
         // trimFinishedStreams();
         for (auto& iter : finished_streams_) {
-            if (iter.first >= latest_finised_version) {
+            if (iter.first >= latest_finished_version) {
                 info.finished_task_info_list.push_back(iter.second);
             }
         }
@@ -36,12 +36,17 @@ public:
             return;
         }
         auto& task_info         = ptr->second;
-        task_info.iterate_count = stream->iterCount();
         if (finished_streams_.size() >= finished_capacity_) {
             finished_streams_.pop_front();
         }
-        auto current          = autil::TimeUtility::currentTimeInMilliSeconds();
-        task_info.end_time_ms = current;
+        int64_t current            = autil::TimeUtility::currentTimeInMilliSeconds();
+        task_info.end_time_ms      = current;
+        task_info.inter_request_id = stream->interRequestId();
+        task_info.prefix_length    = stream->prefixLength();
+        task_info.input_length     = stream->inputLength();
+        task_info.waiting_time_ms  = stream->getTimeInfo().wait_time_us / 1000;
+        task_info.iterate_count    = stream->iterCount();
+
         finished_streams_.push_back(std::make_pair(current, task_info));
         running_streams_.erase(ptr);
     }

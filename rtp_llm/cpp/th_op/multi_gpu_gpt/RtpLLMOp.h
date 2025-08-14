@@ -3,6 +3,8 @@
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/dataclass/EngineInitParameter.h"
 #include "rtp_llm/cpp/dataclass/LoadBalance.h"
+#include "rtp_llm/cpp/dataclass/WorkerStatusInfo.h"
+#include "rtp_llm/cpp/dataclass/CacheStatusInfo.h"
 #include "rtp_llm/cpp/api_server/HttpApiServer.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServiceImpl.h"
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServiceImpl.h"
@@ -27,7 +29,9 @@ public:
     void removeLora(const std::string& adapter_name);
     bool ready();
     rtp_llm::LoadBalanceInfo    getLoadBalanceInfo(int64_t latest_version);
-    rtp_llm::EngineScheduleInfo getEngineScheduleInfo(int64_t latest_finised_version);
+    rtp_llm::EngineScheduleInfo getEngineScheduleInfo(int64_t latest_finished_version);
+    rtp_llm::WorkerStatusInfo   getWorkerStatusInfo(int64_t latest_cache_version, int64_t latest_finished_version);
+    rtp_llm::CacheStatusInfo    getCacheStatusInfo(int64_t latest_cache_version);
     // currently only used in BatchDecodeScheduler
     void updateSchedulerInfo(const std::string& scheduler_info);
     bool updateEplbConfig(const rtp_llm::EplbConfig& config);

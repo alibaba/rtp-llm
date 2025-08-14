@@ -3,7 +3,7 @@ from typing import Dict, List, Optional, Tuple
 
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.propose_model.propose_model import ProposeModel
-from rtp_llm.ops import EngineScheduleInfo, EplbConfig, EplbMode, LoadBalanceInfo
+from rtp_llm.ops import EngineScheduleInfo, EplbConfig, EplbMode, LoadBalanceInfo, WorkerStatusInfo, CacheStatusInfo
 from rtp_llm.ops import RtpLLMOp as CppRtpLLMOp
 from rtp_llm.ops import get_block_cache_keys as cpp_get_block_cache_keys
 from rtp_llm.utils.mm_process_engine import MMProcessEngine
@@ -40,6 +40,14 @@ class RtpLLMOp:
     def get_load_balance_info(self, latest_cache_version: int) -> LoadBalanceInfo:
         return self.ft_op.get_load_balance_info(latest_cache_version)  # type: ignore
 
+    def get_worker_status_info(
+        self, latest_cache_version: int, latest_finished_version: int
+    ) -> WorkerStatusInfo:
+        return self.ft_op.get_worker_status_info(latest_cache_version, latest_finished_version)
+
+    def get_cache_status_info(self, latest_cache_version: int) -> CacheStatusInfo:
+        return self.ft_op.get_cache_status_info(latest_cache_version)
+    
     def get_engine_schedule_info(
         self, latest_finised_version: int
     ) -> EngineScheduleInfo:

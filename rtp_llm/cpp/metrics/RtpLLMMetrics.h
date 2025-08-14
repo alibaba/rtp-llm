@@ -101,6 +101,25 @@ private:
     AUTIL_LOG_DECLARE();
 };
 
+class RpcWorkerStatusMetricsCollector final {
+public:
+    bool    qps              = false;
+    int64_t total_rt_us      = 0;
+};
+
+class RpcWorkerStatusMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RpcWorkerStatusMetricsCollector* collector);
+
+public:
+    kmonitor::MutableMetric* qps_metric              = nullptr;
+    kmonitor::MutableMetric* total_rt_us_metric      = nullptr;
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
 class RtpLLMStreamMetricsCollector final {
 public:
     bool qps               = false;

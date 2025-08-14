@@ -17,7 +17,7 @@ class AccMetrics(Enum):
 
     # worker_status
     WORKER_STATUS_QPS_METRIC = "py_rtp_worker_status_qps"
-
+    CACHE_STATUS_QPS_METRIC = "py_rtp_cache_status_qps"
     # route:
     ROUTE_QPS_METRIC = "py_rtp_route_qps"
     MASTER_ROUTE_QPS_METRIC = "py_rtp_master_route_qps"
@@ -42,6 +42,7 @@ class GaugeMetrics(Enum):
 
     # worker_status
     WORKER_STATUS_QPS_LANTENCY_METRIC = "py_rtp_worker_status_rt"
+    CACHE_STATUS_QPS_LATENCY_METRIC = "py_rtp_cache_status_rt"
 
     # route:
     ROUTE_RT_METRIC = "py_rtp_route_rt"

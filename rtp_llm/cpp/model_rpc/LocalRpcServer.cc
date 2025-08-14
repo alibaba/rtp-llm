@@ -1,4 +1,5 @@
 #include <memory>
+#include <chrono>
 #include "rtp_llm/cpp/dataclass/Query.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
@@ -149,6 +150,162 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     return generate_context.error_status;
 }
 
+grpc::Status LocalRpcServer::GetCacheStatus(grpc::ServerContext*   context,
+                                             const CacheVersionPB* request,
+                                             CacheStatusPB*        response) {
+    RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s, request cache version: [%d]",
+                      context->peer().c_str(),
+                      request->latest_cache_version());
+    CacheStatusInfo cache_status = getCacheStatusInfo(request->latest_cache_version());
+    response->set_available_kv_cache(cache_status.available_kv_cache);
+    response->set_total_kv_cache(cache_status.total_kv_cache);
+    response->set_block_size(cache_status.block_size);
+    response->set_version(cache_status.version);
+    for (const auto& key : cache_status.cached_keys) {
+        response->add_cache_keys(static_cast<long int>(key));
+    }
+    return grpc::Status::OK;
+}
+
+grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
+                                             const StatusVersionPB* request,
+                                             WorkerStatusPB*        response) {
+    int64_t request_begin_time_us = currentTimeUs();
+    int latest_cache_version    = request->latest_cache_version();
+    int latest_finished_version = request->latest_finished_version();
+    RTP_LLM_LOG_DEBUG("receive workerStatus rpc request from client: %s, latest_cache_version : %d, latest_finished_version: %d",
+                        context->peer().c_str(), latest_cache_version, latest_finished_version);
+
+    WorkerStatusInfo status_info = getWorkerStatusInfo(latest_cache_version, latest_finished_version);
+    
+    const auto& load_balance_info    = status_info.load_balance_info;
+    const auto& engine_schedule_info = status_info.engine_schedule_info;
+    response->set_role(status_info.role);
+
+    for (const auto& task : engine_schedule_info.running_task_info_list) {
+        TaskInfoPB* task_info = response->add_running_task_info();
+        task_info->set_request_id(task.request_id);
+        task_info->set_inter_request_id(task.inter_request_id);
+        task_info->set_prefix_length(task.prefix_length);
+        task_info->set_input_length(task.input_length);
+        task_info->set_waiting_time_ms(task.waiting_time_ms);
+        task_info->set_iterate_count(task.iterate_count);
+        task_info->set_end_time_ms(task.end_time_ms);
+        task_info->set_dp_rank(status_info.dp_rank);
+        task_info->set_is_waiting(task.is_waiting);
+    }
+
+    for (const auto& task : engine_schedule_info.finished_task_info_list) {
+        TaskInfoPB* task_info = response->add_finished_task_list();
+        task_info->set_request_id(task.request_id);
+        task_info->set_inter_request_id(task.inter_request_id);
+        task_info->set_prefix_length(task.prefix_length);
+        task_info->set_input_length(task.input_length);
+        task_info->set_waiting_time_ms(task.waiting_time_ms);
+        task_info->set_iterate_count(task.iterate_count);
+        task_info->set_end_time_ms(task.end_time_ms);
+        task_info->set_dp_rank(status_info.dp_rank);
+        task_info->set_is_waiting(task.is_waiting);
+    }
+    response->set_waiting_query_len(load_balance_info.waiting_query_len);
+    response->set_running_query_len(load_balance_info.running_query_len);
+    response->set_step_latency_ms(load_balance_info.step_latency_us / 1000.0);
+    response->set_iterate_count(load_balance_info.iterate_count);
+    response->set_dp_size(status_info.dp_size);
+    response->set_tp_size(status_info.tp_size);
+    response->set_version(status_info.version);
+    response->set_status_version(status_info.status_version);
+    response->set_alive(status_info.alive);
+    response->set_precision(status_info.precision);
+    reportTime(request_begin_time_us);
+    return grpc::Status::OK;
+}
+
+CacheStatusInfo LocalRpcServer::getCacheStatusInfo(int64_t latest_cache_version) {
+    int64_t request_begin_time_us = currentTimeUs();
+    CacheStatusInfo cache_status;
+    const auto& load_balance_info = getLoadBalanceInfo(latest_cache_version);
+    cache_status.available_kv_cache = load_balance_info.cache_status.available_kv_cache;
+    cache_status.total_kv_cache = load_balance_info.cache_status.total_kv_cache;
+    cache_status.block_size = load_balance_info.cache_status.block_size;
+    cache_status.version = load_balance_info.cache_status.version;
+    cache_status.cached_keys.clear(); // Clear existing data if necessary
+    for (const auto& key : load_balance_info.cache_status.cached_keys) {
+        cache_status.cached_keys.push_back(static_cast<long int>(key));
+    }
+    reportTime(request_begin_time_us);
+    return cache_status;
+}
+
+WorkerStatusInfo LocalRpcServer::getWorkerStatusInfo(int64_t latest_cache_version, int64_t latest_finished_version) {
+    WorkerStatusInfo status_info;
+    status_info.load_balance_info = getLoadBalanceInfo(latest_cache_version);
+    status_info.engine_schedule_info = getEngineScheduleInfo(latest_finished_version);
+
+    switch (maga_init_params_.gpt_init_parameter.role_type_) {
+        case RoleType::PDFUSION:
+            status_info.role = "RoleType.PDFUSION";
+            break;
+        case RoleType::PREFILL:
+            status_info.role = "RoleType.PREFILL";
+            break;
+        case RoleType::DECODE:
+            status_info.role = "RoleType.DECODE";
+            break;
+        case RoleType::VIT:
+            status_info.role = "RoleType.VIT";
+            break;
+        case RoleType::FRONTEND:
+            status_info.role = "RoleType.FRONTEND";
+            break;
+        default:
+            status_info.role = "RoleType.UNKNOWN";
+    }
+    status_info.dp_size = maga_init_params_.gpt_init_parameter.dp_size_;
+    status_info.tp_size = maga_init_params_.gpt_init_parameter.tp_size_;
+    status_info.version = 1;
+    status_info.dp_rank = maga_init_params_.gpt_init_parameter.dp_rank_;
+
+    auto now = std::chrono::system_clock::now();
+    status_info.status_version = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+    status_info.alive = true;
+    auto quant_method = maga_init_params_.gpt_init_parameter.quant_algo_.getQuantMethod();
+
+    switch (quant_method) {
+        case QuantMethod::WeightOnlyPerCol:
+            status_info.precision = "WeightOnlyPerCol";
+            break;
+        case QuantMethod::GptQ:
+            status_info.precision = "GptQ";
+            break;
+        case QuantMethod::Awq:
+            status_info.precision = "Awq";
+            break;
+        case QuantMethod::SmoothQuant:
+            status_info.precision = "SmoothQuant";
+            break;
+        case QuantMethod::OmniQuant:
+            status_info.precision = "OmniQuant";
+            break;
+        case QuantMethod::PerTensorQuant:
+            status_info.precision = "PerTensorQuant";
+            break;
+        case QuantMethod::FP8Quant:
+            status_info.precision = "FP8Quant";
+            break;
+        case QuantMethod::FP8PTPC:
+            status_info.precision = "FP8PTPC";
+            break;
+        case QuantMethod::None:
+            status_info.precision = "FP16";
+            break;
+        default:
+            RTP_LLM_LOG_ERROR("unknown quant method: %d", static_cast<int>(quant_method));
+            status_info.precision = "UNKNOWN";
+    }
+
+    return status_info;
+}
 LoadBalanceInfo LocalRpcServer::getLoadBalanceInfo(int64_t latest_version) {
     return engine_->getLoadBalanceInfo(latest_version);
 }
@@ -166,8 +323,16 @@ size_t LocalRpcServer::onflightRequestNum() {
     return onflight_requests_;
 }
 
-EngineScheduleInfo LocalRpcServer::getEngineScheduleInfo(int64_t latest_finised_version) {
-    auto info               = meta_->getEngineScheduleInfo(latest_finised_version);
+EngineScheduleInfo LocalRpcServer::getEngineScheduleInfo(int64_t latest_finished_version) {
+    EngineScheduleInfo info               = meta_->getEngineScheduleInfo(latest_finished_version);
+    std::vector<EngineScheduleInfo::TaskInfo> running_task_info_list = engine_->getScheduler().runningTaskList();
+    for (auto& task_info : info.running_task_info_list) {
+        for(auto& running_task : running_task_info_list) {
+            if (task_info.inter_request_id == running_task.inter_request_id) {
+                task_info.is_waiting = false;
+            }
+        }
+    }
     auto last_schedule_time = engine_->getLastScheduleTime();
     // in case last_schedule_delta is negative
     info.last_schedule_delta =
@@ -224,5 +389,15 @@ EngineScheduleInfo LocalRpcServer::getEngineScheduleInfo(int64_t latest_finised_
     }
     return grpc::Status::OK;
 }
+
+void LocalRpcServer::reportTime(int64_t request_begin_time_us) {
+    RpcWorkerStatusMetricsCollector collector;
+    collector.qps              = true;
+    collector.total_rt_us = (currentTimeUs() - request_begin_time_us);
+    if (metrics_reporter_) {
+        metrics_reporter_->report<RpcWorkerStatusMetrics, RpcWorkerStatusMetricsCollector>(nullptr, &collector);
+    }
+}
+
 
 }  // namespace rtp_llm

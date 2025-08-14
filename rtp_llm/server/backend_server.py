@@ -31,9 +31,9 @@ from rtp_llm.lora.lora_manager import LoraManager
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.model_factory import AsyncModel, ModelFactory
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
-from rtp_llm.ops import EngineScheduleInfo, LoadBalanceInfo
+from rtp_llm.ops import EngineScheduleInfo, LoadBalanceInfo, WorkerStatusInfo, CacheStatusInfo
 from rtp_llm.server.misc import format_exception
-from rtp_llm.server.worker_status import CacheStatus, TaskInfo, WorkStatus
+from rtp_llm.server.worker_status import TaskInfo, WorkStatus
 from rtp_llm.structure.request_extractor import request_id_field_name
 from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
@@ -218,18 +218,29 @@ class BackendServer(object):
         return self.model.get_load_balance_info(latest_cache_version)
 
     def get_engine_schedule_info(
-        self, latest_finised_version: int
+        self, latest_finished_version: int
     ) -> EngineScheduleInfo:
         if self.model is None:
             return EngineScheduleInfo()
-        return self.model.get_engine_schedule_info(latest_finised_version)
+        return self.model.get_engine_schedule_info(latest_finished_version)
 
-    def get_worker_status(self, latest_cache_version: int, latest_finised_version: int):
+        # get worker status
+    def get_cache_status(self, latest_cache_version: int) -> CacheStatusInfo:
+        with Timer() as t:
+            cache_status_info: CacheStatusInfo = self.model.get_cache_status_info(
+                latest_cache_version
+            )
+        kmonitor.report(AccMetrics.CACHE_STATUS_QPS_METRIC, 1)
+        kmonitor.report(GaugeMetrics.CACHE_STATUS_QPS_LATENCY_METRIC, t.cost_ms())
+        return cache_status_info
+    
+    def get_worker_status(self, latest_cache_version: int, latest_finished_version: int) -> WorkStatus:
         with Timer() as t:
             load_balance_version = 0
-            load_balance_info = self.get_load_balance_info(latest_cache_version)
-            engine_schedule_info = self.get_engine_schedule_info(latest_finised_version)
+            worker_status_info: WorkerStatusInfo = self.model.get_worker_status_info(latest_cache_version, latest_finished_version)
             available_concurrency = self._global_controller.get_available_concurrency()
+            load_balance_info = worker_status_info.load_balance_info
+            engine_schedule_info = worker_status_info.engine_schedule_info
             if (
                 StaticConfig.misc_config.load_balance
                 and load_balance_info.step_per_minute > 0
@@ -238,22 +249,9 @@ class BackendServer(object):
                 available_concurrency = load_balance_info.step_per_minute
                 # when use new version available_concurrency need set new load_balance_version
                 load_balance_version = 1
-            cache_status = load_balance_info.cache_status
-
             worker_status: WorkStatus = WorkStatus(
                 role=self.role_type,
                 available_concurrency=available_concurrency,
-                cache_status=CacheStatus(
-                    # cached_keys=(
-                    #     cache_status.cached_keys
-                    #     if latest_cache_version < cache_status.version
-                    #     else None
-                    # ),
-                    available_kv_cache=cache_status.available_kv_cache,
-                    total_kv_cache=cache_status.total_kv_cache,
-                    block_size=cache_status.block_size,
-                    version=cache_status.version,
-                ),
                 running_task_info=[
                     TaskInfo(
                         **{
@@ -264,7 +262,7 @@ class BackendServer(object):
                             "waiting_time_ms": task.waiting_time_ms,
                             "iterate_count": task.iterate_count,
                             "end_time_ms": task.end_time_ms,
-                            "dp_rank": self.dp_rank,
+                            "dp_rank": worker_status_info.dp_rank,
                         }
                     )
                     for task in engine_schedule_info.running_task_info_list
@@ -279,22 +277,22 @@ class BackendServer(object):
                             "waiting_time_ms": task.waiting_time_ms,
                             "iterate_count": task.iterate_count,
                             "end_time_ms": task.end_time_ms,
-                            "dp_rank": self.dp_rank,
+                            "dp_rank": worker_status_info.dp_rank,
                         }
                     )
                     for task in engine_schedule_info.finished_task_info_list
-                    if task.end_time_ms > latest_finised_version
                 ],
                 profile_meta=None,
                 waiting_query_len=load_balance_info.waiting_query_len,
                 running_query_len=load_balance_info.running_query_len,
                 step_latency_ms=float(load_balance_info.step_latency_us / 1000),
                 iterate_count=load_balance_info.iterate_count,
-                dp_size=self.dp_size,
-                tp_size=self.tp_size,
+                dp_size=worker_status_info.dp_size,
+                tp_size=worker_status_info.tp_size,
                 version=load_balance_version,
-                status_version=int(time.time() * 1000),
-                alive=True,
+                status_version=worker_status_info.status_version,
+                alive=worker_status_info.alive,
+                precision=worker_status_info.precision
             )
         kmonitor.report(AccMetrics.WORKER_STATUS_QPS_METRIC, 1)
         kmonitor.report(GaugeMetrics.WORKER_STATUS_QPS_LANTENCY_METRIC, t.cost_ms())

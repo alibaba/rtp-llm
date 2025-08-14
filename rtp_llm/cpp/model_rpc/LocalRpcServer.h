@@ -8,6 +8,8 @@
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/utils/AtomicUtil.h"
 #include "rtp_llm/cpp/dataclass/LoadBalance.h"
+#include "rtp_llm/cpp/dataclass/WorkerStatusInfo.h"
+#include "rtp_llm/cpp/dataclass/CacheStatusInfo.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/utils/RpcErrorCode.h"
@@ -17,6 +19,10 @@
 #include "rtp_llm/cpp/dataclass/EngineScheduleInfo.h"
 #include "rtp_llm/cpp/multimodal_processor/LocalMultimodalProcessor.h"
 #include "rtp_llm/cpp/multimodal_processor/RemoteMultimodalProcessor.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+
 namespace rtp_llm {
 class LocalRpcServer {
 public:
@@ -25,6 +31,12 @@ public:
     virtual grpc::Status init(const EngineInitParams&                                maga_init_params,
                               py::object                                             mm_process_engine,
                               std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params);
+    grpc::Status
+    GetWorkerStatus(grpc::ServerContext* context, const ::StatusVersionPB* request, ::WorkerStatusPB* response);
+    
+    grpc::Status
+    GetCacheStatus(grpc::ServerContext* context, const ::CacheVersionPB* request, ::CacheStatusPB* response);
+
     grpc::Status         GenerateStreamCall(grpc::ServerContext*                   context,
                                             const GenerateInputPB*                 request,
                                             grpc::ServerWriter<GenerateOutputsPB>* writer);
@@ -33,6 +45,10 @@ public:
                                   const ::DistKvCacheRequestPB* request,
                                   ::DistKvCacheResponsePB*      response);
 
+    CacheStatusInfo getCacheStatusInfo(int64_t latest_cache_version);
+
+    WorkerStatusInfo getWorkerStatusInfo(int64_t latest_cache_version, int64_t latest_finished_version);
+    
     LoadBalanceInfo getLoadBalanceInfo(int64_t latest_version);
 
     void addLora(const std::string&                        adapter_name,
@@ -64,6 +80,7 @@ public:
 
     virtual EngineScheduleInfo getEngineScheduleInfo(int64_t latest_finised_version);
 
+    void reportTime(int64_t request_begin_time_us);
 public:
     typedef grpc::internal::WriterInterface<GenerateOutputsPB> WriterInterface;
 

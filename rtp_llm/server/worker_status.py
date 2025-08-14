@@ -21,9 +21,9 @@ class TaskInfo(BaseModel):
 
 
 class CacheStatus(BaseModel):
-    available_kv_cache: int
-    total_kv_cache: int
-    block_size: int
+    available_kv_cache: int = -1
+    total_kv_cache: int  = -1
+    block_size: int = -1
     version: int = -1
     cached_keys: Optional[List[int]] = None
 
@@ -48,6 +48,7 @@ class WorkStatus(BaseModel):
     dp_size: int
     tp_size: int
     alive: bool
+    precision: str = "fp16"
     version: int
     status_version: Optional[int] = -1  # 时间戳
 

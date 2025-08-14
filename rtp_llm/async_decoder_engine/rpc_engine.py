@@ -8,7 +8,7 @@ from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient
 from rtp_llm.models.base_model import BaseModel, GenerateInput, GenerateOutputs
 from rtp_llm.models.propose_model.propose_model import ProposeModel
-from rtp_llm.ops import EngineScheduleInfo, LoadBalanceInfo
+from rtp_llm.ops import EngineScheduleInfo, LoadBalanceInfo, WorkerStatusInfo, CacheStatusInfo
 from rtp_llm.ops.rtp_llm.rtp_llm_op import RtpLLMOp
 from rtp_llm.utils.mm_process_engine import MMProcessEngine
 from rtp_llm.utils.time_util import Timer
@@ -55,6 +55,18 @@ class RPCEngine(BaseEngine):
     def get_load_balance_info(self, latest_cache_version: int) -> LoadBalanceInfo:
         return self.rtp_llm_op_.get_load_balance_info(latest_cache_version)
 
+    @override
+    def get_worker_status_info(
+        self, latest_cache_version: int, latest_finished_version: int
+    ) -> WorkerStatusInfo:
+        return self.rtp_llm_op_.get_worker_status_info(
+            latest_cache_version, latest_finished_version
+        )
+    
+    @override
+    def get_cache_status_info(self, latest_cache_version: int) -> CacheStatusInfo:
+        return self.rtp_llm_op_.get_cache_status_info(latest_cache_version)
+    
     @override
     def get_engine_schedule_info(
         self, latest_finised_version: int

@@ -162,7 +162,29 @@ class FrontendApp(object):
             return await async_request_server(
                 "get", g_worker_info.backend_server_port, "", {}
             )
-
+            
+        @app.get("/cache_status")
+        @app.post("/cache_status")
+        @app.get("/rtp_llm/cache_status")
+        @app.post("/rtp_llm/cache_status")
+        async def cache_status(
+            request: Request, data: Optional[Dict[Any, Any]] = Body(None)
+        ):
+            query_params = (
+                dict(request.query_params) if request.method == "GET" else (data or {})
+            )
+            
+            logging.info(f"cache_status request {data}")
+            response = await async_request_server(
+                "post", g_worker_info.backend_server_port, "cache_status", query_params
+            )
+            if "error" not in response:
+                response["frontend_available_concurrency"] = (
+                    self.frontend_server._global_controller.get_available_concurrency()
+                )
+            logging.info(f"cache_status response {response}")
+            return response
+        
         @app.get("/worker_status")
         @app.post("/worker_status")
         @app.get("/rtp_llm/worker_status")

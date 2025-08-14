@@ -7,6 +7,7 @@
 #include <grpcpp/resource_quota.h>
 #include "rtp_llm/cpp/dataclass/EngineInitParameter.h"
 #include "rtp_llm/cpp/dataclass/LoadBalance.h"
+#include "rtp_llm/cpp/dataclass/WorkerStatusInfo.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/th_op/GptInitParameter.h"
@@ -118,6 +119,15 @@ rtp_llm::EngineScheduleInfo RtpLLMOp::getEngineScheduleInfo(int64_t latest_finis
     return model_rpc_service_->getEngineScheduleInfo(latest_finised_version);
 }
 
+rtp_llm::WorkerStatusInfo RtpLLMOp::getWorkerStatusInfo(int64_t latest_cache_version,
+                                                       int64_t latest_finished_version) {
+    return model_rpc_service_->getWorkerStatusInfo(latest_cache_version, latest_finished_version);
+}
+
+rtp_llm::CacheStatusInfo RtpLLMOp::getCacheStatusInfo(int64_t latest_cache_version) {
+    return model_rpc_service_->getCacheStatusInfo(latest_cache_version);
+}
+
 void RtpLLMOp::initRPCServer(const rtp_llm::EngineInitParams                        maga_init_params,
                              py::object                                             mm_process_engine,
                              std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
@@ -157,6 +167,7 @@ void RtpLLMOp::initRPCServer(const rtp_llm::EngineInitParams                    
     builder.AddChannelArgument(GRPC_ARG_MAX_METADATA_SIZE, 1024 * 1024 * 1024);
     builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
     builder.RegisterService(model_rpc_service_.get());
+    
     grpc_server_ = builder.BuildAndStart();
     RTP_LLM_CHECK_WITH_INFO(grpc_server_ != nullptr, "grpc server start failed at address " + server_address);
 
@@ -260,6 +271,9 @@ void registerRtpLLMOp(const py::module& m) {
         .def("remove_lora", &torch_ext::RtpLLMOp::removeLora, py::arg("adapter_name"))
         .def("get_load_balance_info", &torch_ext::RtpLLMOp::getLoadBalanceInfo, py::arg("latest_version"))
         .def("get_engine_schedule_info", &torch_ext::RtpLLMOp::getEngineScheduleInfo)
+        .def("get_worker_status_info", &torch_ext::RtpLLMOp::getWorkerStatusInfo, py::arg("latest_cache_version"),
+                py::arg("latest_finished_version"))
+        .def("get_cache_status_info", &torch_ext::RtpLLMOp::getCacheStatusInfo, py::arg("latest_cache_version"))
         .def("update_scheduler_info", &torch_ext::RtpLLMOp::updateSchedulerInfo, py::arg("scheduler_info"))
         .def("stop", &torch_ext::RtpLLMOp::stop)
         .def("ready", &torch_ext::RtpLLMOp::ready)
