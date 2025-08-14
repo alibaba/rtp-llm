@@ -171,6 +171,9 @@ def select_py_bindings():
         "//:using_cuda12": [
             "//rtp_llm/models_py/bindings/cuda:cuda_bindings_register"
         ],
+        "//:using_rocm": [
+            "//rtp_llm/models_py/bindings/rocm:rocm_bindings_register"
+        ],
         "//conditions:default": [
             "//rtp_llm/models_py/bindings:dummy_register",
         ],
