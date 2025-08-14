@@ -12,6 +12,13 @@ namespace rtp_llm {
 class CacheManager;
 
 struct DistKvCacheInitParams {
+    std::string toString() const {
+        std::ostringstream oss;
+        oss << "match_timeout_ms: " << match_timeout_ms << ", rpc_get_cache_timeout_ms: " << rpc_get_cache_timeout_ms
+            << ", rpc_put_cache_timeout_ms: " << rpc_put_cache_timeout_ms;
+        return oss.str();
+    }
+
     DistStorageManagerInitParams storage_manager_params;
     int                          match_timeout_ms{1000};
     int                          rpc_get_cache_timeout_ms{3000};

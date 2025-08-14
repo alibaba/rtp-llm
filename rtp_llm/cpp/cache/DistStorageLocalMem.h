@@ -1,5 +1,6 @@
 #pragma once
 
+#include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/cache/DistStorage.h"
 
 namespace rtp_llm {

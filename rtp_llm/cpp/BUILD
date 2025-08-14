@@ -221,6 +221,7 @@ cc_library(
         "//rtp_llm/cpp/cuda:cuda_utils_base",
         "//3rdparty/3fs:hf3fs",
         "@havenask//aios/autil:lock_free",
+        "@havenask//aios/autil:scope",
         "@havenask//aios/kmonitor:kmonitor_client_cpp",
         "@local_config_cuda//cuda:cuda_headers",
     ],

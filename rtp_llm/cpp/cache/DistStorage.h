@@ -1,8 +1,11 @@
 #pragma once
 
+#include <map>
+#include <memory>
 #include <optional>
-
-#include "kmonitor/client/MetricsReporter.h"
+#include <sstream>
+#include <string>
+#include <vector>
 
 namespace rtp_llm {
 
@@ -75,8 +78,20 @@ struct DistStorage3FSInitParams {
 };
 
 struct DistStorageManagerInitParams {
+    std::string toString() const {
+        std::ostringstream oss;
+        oss << "lookup_timeout_ms: " << lookup_timeout_ms << ", get_timeout_ms: " << get_timeout_ms
+            << ", put_timeout_ms: " << put_timeout_ms << ", del_timeout_ms: " << del_timeout_ms;
+        return oss.str();
+    }
+
     std::optional<DistStorage3FSInitParams>      init_params_3fs;
     std::optional<DistStorageLocalMemInitParams> init_params_local_mem;
+
+    size_t lookup_timeout_ms{1000};
+    size_t get_timeout_ms{2000};
+    size_t put_timeout_ms{1000};
+    size_t del_timeout_ms{1000};
 };
 
 }  // namespace rtp_llm

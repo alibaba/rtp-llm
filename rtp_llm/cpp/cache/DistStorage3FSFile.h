@@ -76,7 +76,7 @@ private:
                          int32_t                               submit_io_count,
                          int64_t                               write_total_len,
                          bool                                  last_io,
-                         std::shared_ptr<DistKvCacheMetrics>   metrics) const;
+                         std::shared_ptr<DistKvCacheMetrics>   metrics);
 
     bool doRead(const std::shared_ptr<ThreeFSHandle>& handle,
                 int64_t                               file_offset,

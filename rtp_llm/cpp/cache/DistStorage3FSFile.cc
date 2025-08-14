@@ -6,6 +6,7 @@
 
 #include "rtp_llm/cpp/cache/DistKvCacheMetrics.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "autil/Scope.h"
 
 namespace rtp_llm {
 
@@ -275,13 +276,26 @@ bool DistStorage3FSFile::waitForWriteIos(const std::shared_ptr<ThreeFSHandle>& h
                                          int32_t                               submit_io_count,
                                          int64_t                               write_total_len,
                                          bool                                  last_io,
-                                         std::shared_ptr<DistKvCacheMetrics>   metrics) const {
-    if (submit_io_count <= 0) {
+                                         std::shared_ptr<DistKvCacheMetrics>   metrics) {
+    auto release_func = [shared_this = shared_from_this(), last_io, handle, write_total_len, &metrics]() {
         if (last_io) {
+            if (shared_this->fd_ != -1) {
+                if (::fsync(shared_this->fd_) != 0) {
+                    RTP_LLM_LOG_WARNING(
+                        "fsync failed, errno: %s, file: %s", strerror(errno), shared_this->filepath_.c_str());
+                    shared_this->del();
+                }
+            }
             DistKvCacheMetrics::markWriteBlockDoneUs(metrics);
+            if (metrics) {
+                DistKvCacheMetrics::setWriteBlockThroughput(metrics,
+                                                            calcMiBs(write_total_len, metrics->WriteBlockCostUs()));
+            }
+            shared_this->releaseIovIor(handle);
         }
-        return true;
-    }
+    };
+    autil::ScopeGuard guard(release_func);
+
     if (handle == nullptr || handle->ior_handle.ior == nullptr) {
         return false;
     }
@@ -326,18 +340,6 @@ bool DistStorage3FSFile::waitForWriteIos(const std::shared_ptr<ThreeFSHandle>& h
         }
     }
 
-    if (last_io) {
-        if (fd_ != -1) {
-            ::fsync(fd_);
-        }
-        releaseIovIor(handle);
-
-        DistKvCacheMetrics::markWriteBlockDoneUs(metrics);
-        if (metrics) {
-            DistKvCacheMetrics::setWriteBlockThroughput(metrics,
-                                                        calcMiBs(write_total_len, metrics->WriteBlockCostUs()));
-        }
-    }
     return true;
 }
 
