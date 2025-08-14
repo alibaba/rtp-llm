@@ -146,7 +146,7 @@ class ChatGlm45Renderer(ReasoningToolBaseRenderer):
         self._customize_jinja_env(env)
 
         try:
-            template = env.from_string(self.tokenizer.chat_template)
+            template = env.from_string(self.chat_template)
             rendered_prompt = template.render(**context)
             return rendered_prompt
         except Exception as e:

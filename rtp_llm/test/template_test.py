@@ -2,7 +2,8 @@ import logging
 
 logging.basicConfig(level=logging.INFO)
 import os
-from typing import Any
+from abc import ABC, abstractmethod
+from typing import Any, List
 from unittest import TestCase, main
 
 import torch
@@ -39,6 +40,192 @@ from rtp_llm.openai.renderers.qwen_reasoning_tool_renderer import (
 from rtp_llm.openai.renderers.qwen_renderer import QwenRenderer
 from rtp_llm.pipeline.chatapi_format import encode_chatapi
 from rtp_llm.tokenizer.tokenization_qwen import QWenTokenizer
+
+
+class BaseRendererTestMixin(ABC):
+    """渲染器测试基类混入"""
+
+    @abstractmethod
+    def get_tokenizer(self):
+        """获取tokenizer实例"""
+        pass
+
+    @abstractmethod
+    def get_render_params(self) -> RendererParams:
+        """获取渲染参数"""
+        pass
+
+    @abstractmethod
+    def get_step1_expected_renderer_prompt(self) -> str:
+        """获取步骤1的期望prompt"""
+        pass
+
+    @abstractmethod
+    def get_step2_expected_renderer_prompt(self) -> str:
+        """获取步骤2的期望prompt"""
+        pass
+
+    @abstractmethod
+    def get_step3_expected_renderer_prompt(self) -> str:
+        """获取步骤3的期望prompt"""
+        pass
+
+    def get_tools(self) -> List[GPTToolDefinition]:
+        """获取工具定义 - 通用实现"""
+        return [
+            GPTToolDefinition(
+                type="function",
+                function=GPTFunctionDefinition(
+                    **{
+                        "name": "get_current_temperature",
+                        "description": "Get current temperature at a location.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "location": {
+                                    "type": "string",
+                                    "description": 'The location to get the temperature for, in the format "City, State, Country".',
+                                },
+                                "unit": {
+                                    "type": "string",
+                                    "enum": ["celsius", "fahrenheit"],
+                                    "description": 'The unit to return the temperature in. Defaults to "celsius".',
+                                },
+                            },
+                            "required": ["location"],
+                        },
+                    }
+                ),
+            ),
+            GPTToolDefinition(
+                type="function",
+                function=GPTFunctionDefinition(
+                    **{
+                        "name": "get_temperature_date",
+                        "description": "Get temperature at a location and date.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "location": {
+                                    "type": "string",
+                                    "description": 'The location to get the temperature for, in the format "City, State, Country".',
+                                },
+                                "date": {
+                                    "type": "string",
+                                    "description": 'The date to get the temperature for, in the format "Year-Month-Day".',
+                                },
+                                "unit": {
+                                    "type": "string",
+                                    "enum": ["celsius", "fahrenheit"],
+                                    "description": 'The unit to return the temperature in. Defaults to "celsius".',
+                                },
+                            },
+                            "required": ["location", "date"],
+                        },
+                    }
+                ),
+            ),
+        ]
+
+    def get_initial_messages(self) -> List[ChatMessage]:
+        """获取初始消息 - 通用实现"""
+        return [
+            ChatMessage(
+                **{
+                    "role": RoleEnum.system,
+                    "content": "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nCurrent Date: 2024-09-30",
+                }
+            ),
+            ChatMessage(
+                **{
+                    "role": RoleEnum.user,
+                    "content": "What's the temperature in San Francisco now? How about tomorrow?",
+                }
+            ),
+        ]
+
+    def get_messages_with_tool_response(self) -> List[ChatMessage]:
+        """获取包含工具响应的消息 - 通用实现"""
+        messages = self.get_initial_messages()
+        messages.extend(
+            [
+                ChatMessage(
+                    **{
+                        "role": RoleEnum.tool,
+                        "content": '{"temperature": 26.1, "location": "San Francisco, CA, USA", "unit": "celsius"}',
+                        "tool_call_id": "call_1",
+                    }
+                ),
+                ChatMessage(
+                    **{
+                        "role": RoleEnum.tool,
+                        "content": '{"temperature": 25.9, "location": "San Francisco, CA, USA", "date": "2024-10-01", "unit": "celsius"}',
+                        "tool_call_id": "call_2",
+                    }
+                ),
+            ]
+        )
+        return messages
+
+    def get_messages_with_follow_up(self) -> List[ChatMessage]:
+        """获取包含后续对话的消息 - 通用实现"""
+        messages = self.get_messages_with_tool_response()
+        messages.extend(
+            [
+                ChatMessage(
+                    **{
+                        "role": RoleEnum.assistant,
+                        "content": "San Francisco今天26.1度, 明天25.9度",
+                    }
+                ),
+                ChatMessage(
+                    **{
+                        "role": RoleEnum.user,
+                        "content": "那北京明天温度如何",
+                    }
+                ),
+            ]
+        )
+        return messages
+
+    def run_renderer_test(self):
+        """运行渲染器测试的通用方法"""
+        tokenizer = self.get_tokenizer()
+        render_params = self.get_render_params()
+        chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
+        tools = self.get_tools()
+
+        # 测试步骤1：初始消息
+        initial_messages = self.get_initial_messages()
+        request = ChatCompletionRequest(messages=initial_messages, tools=tools)
+        renderer_prompt = chat_renderer.render_chat(request).rendered_prompt
+        expected_prompt = self.get_step1_expected_renderer_prompt()
+        logging.info(
+            f"Step 1 prompt: \n{renderer_prompt}\n-----------------------------------"
+        )
+        assert renderer_prompt == expected_prompt, "Step 1 prompt mismatch"
+
+        # 测试步骤2：包含工具响应的消息
+        tool_response_messages = self.get_messages_with_tool_response()
+        request = ChatCompletionRequest(messages=tool_response_messages, tools=tools)
+        renderer_prompt = chat_renderer.render_chat(request).rendered_prompt
+        expected_prompt = self.get_step2_expected_renderer_prompt()
+
+        logging.info(
+            f"Step 2 prompt: \n{renderer_prompt}\n-----------------------------------"
+        )
+        assert renderer_prompt == expected_prompt, "Step 2 prompt mismatch"
+
+        # 测试步骤3：后续对话消息
+        follow_up_messages = self.get_messages_with_follow_up()
+        request = ChatCompletionRequest(messages=follow_up_messages, tools=tools)
+        renderer_prompt = chat_renderer.render_chat(request).rendered_prompt
+        expected_prompt = self.get_step3_expected_renderer_prompt()
+
+        logging.info(
+            f"Step 3 prompt: \n{renderer_prompt}\n-----------------------------------"
+        )
+        assert renderer_prompt == expected_prompt, "Step 3 prompt mismatch"
 
 
 class TemplateTest(TestCase):
@@ -402,6 +589,175 @@ get_current_weather: Get the current weather in a given location. 输入参数�
 <|im_start|>assistant
 template ends here"""
         )
+
+    # Qwen3渲染器测试实现
+    class Qwen3RendererTestImpl(BaseRendererTestMixin):
+        def __init__(self, test_instance):
+            self.test_instance = test_instance
+
+        def get_tokenizer(self):
+            return AutoTokenizer.from_pretrained(
+                f"{self.test_instance.test_data_path}/model_test/fake_test/testdata/qwen3_30b/tokenizer/",
+                trust_remote_code=True,
+            )
+
+        def get_render_params(self) -> RendererParams:
+            tokenizer = self.get_tokenizer()
+            return RendererParams(
+                model_type="qwen_3",
+                max_seq_len=1024,
+                eos_token_id=tokenizer.eos_token_id or 0,
+                stop_word_ids_list=[],
+            )
+
+        def get_step1_expected_renderer_prompt(self) -> str:
+            return """<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nCurrent Date: 2024-09-30\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{"type": "function", "function": {"name": "get_current_temperature", "description": "Get current temperature at a location.", "parameters": {"type": "object", "properties": {"location": {"type": "string", "description": "The location to get the temperature for, in the format \\"City, State, Country\\"."}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "The unit to return the temperature in. Defaults to \\"celsius\\"."}}, "required": ["location"]}}}\n{"type": "function", "function": {"name": "get_temperature_date", "description": "Get temperature at a location and date.", "parameters": {"type": "object", "properties": {"location": {"type": "string", "description": "The location to get the temperature for, in the format \\"City, State, Country\\"."}, "date": {"type": "string", "description": "The date to get the temperature for, in the format \\"Year-Month-Day\\"."}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "The unit to return the temperature in. Defaults to \\"celsius\\"."}}, "required": ["location", "date"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{"name": <function-name>, "arguments": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nWhat\'s the temperature in San Francisco now? How about tomorrow?<|im_end|>\n<|im_start|>assistant\n"""
+
+        def get_step2_expected_renderer_prompt(self) -> str:
+            return """<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nCurrent Date: 2024-09-30\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{"type": "function", "function": {"name": "get_current_temperature", "description": "Get current temperature at a location.", "parameters": {"type": "object", "properties": {"location": {"type": "string", "description": "The location to get the temperature for, in the format \\"City, State, Country\\"."}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "The unit to return the temperature in. Defaults to \\"celsius\\"."}}, "required": ["location"]}}}\n{"type": "function", "function": {"name": "get_temperature_date", "description": "Get temperature at a location and date.", "parameters": {"type": "object", "properties": {"location": {"type": "string", "description": "The location to get the temperature for, in the format \\"City, State, Country\\"."}, "date": {"type": "string", "description": "The date to get the temperature for, in the format \\"Year-Month-Day\\"."}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "The unit to return the temperature in. Defaults to \\"celsius\\"."}}, "required": ["location", "date"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{"name": <function-name>, "arguments": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nWhat\'s the temperature in San Francisco now? How about tomorrow?<|im_end|>\n<|im_start|>user\n<tool_response>\n{"temperature": 26.1, "location": "San Francisco, CA, USA", "unit": "celsius"}\n</tool_response>\n<tool_response>\n{"temperature": 25.9, "location": "San Francisco, CA, USA", "date": "2024-10-01", "unit": "celsius"}\n</tool_response><|im_end|>\n<|im_start|>assistant\n"""
+
+        def get_step3_expected_renderer_prompt(self) -> str:
+            return """<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nCurrent Date: 2024-09-30\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{"type": "function", "function": {"name": "get_current_temperature", "description": "Get current temperature at a location.", "parameters": {"type": "object", "properties": {"location": {"type": "string", "description": "The location to get the temperature for, in the format \\"City, State, Country\\"."}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "The unit to return the temperature in. Defaults to \\"celsius\\"."}}, "required": ["location"]}}}\n{"type": "function", "function": {"name": "get_temperature_date", "description": "Get temperature at a location and date.", "parameters": {"type": "object", "properties": {"location": {"type": "string", "description": "The location to get the temperature for, in the format \\"City, State, Country\\"."}, "date": {"type": "string", "description": "The date to get the temperature for, in the format \\"Year-Month-Day\\"."}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "The unit to return the temperature in. Defaults to \\"celsius\\"."}}, "required": ["location", "date"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{"name": <function-name>, "arguments": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nWhat\'s the temperature in San Francisco now? How about tomorrow?<|im_end|>\n<|im_start|>user\n<tool_response>\n{"temperature": 26.1, "location": "San Francisco, CA, USA", "unit": "celsius"}\n</tool_response>\n<tool_response>\n{"temperature": 25.9, "location": "San Francisco, CA, USA", "date": "2024-10-01", "unit": "celsius"}\n</tool_response><|im_end|>\n<|im_start|>assistant\nSan Francisco今天26.1度, 明天25.9度<|im_end|>\n<|im_start|>user\n那北京明天温度如何<|im_end|>\n<|im_start|>assistant\n"""
+
+    # Qwen3 Thinking渲染器测试实现
+    class Qwen3ThinkingRendererTestImpl(BaseRendererTestMixin):
+        def __init__(self, test_instance):
+            self.test_instance = test_instance
+
+        def get_tokenizer(self):
+            return AutoTokenizer.from_pretrained(
+                f"{self.test_instance.test_data_path}/model_test/fake_test/testdata/qwen3_30b_thinking_0527/tokenizer/",
+                trust_remote_code=True,
+            )
+
+        def get_render_params(self) -> RendererParams:
+            tokenizer = self.get_tokenizer()
+            return RendererParams(
+                model_type="qwen_3",
+                max_seq_len=1024,
+                eos_token_id=tokenizer.eos_token_id or 0,
+                stop_word_ids_list=[],
+            )
+
+        def get_step1_expected_renderer_prompt(self) -> str:
+            return """<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nCurrent Date: 2024-09-30\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{"type": "function", "function": {"name": "get_current_temperature", "description": "Get current temperature at a location.", "parameters": {"type": "object", "properties": {"location": {"type": "string", "description": "The location to get the temperature for, in the format \\"City, State, Country\\"."}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "The unit to return the temperature in. Defaults to \\"celsius\\"."}}, "required": ["location"]}}}\n{"type": "function", "function": {"name": "get_temperature_date", "description": "Get temperature at a location and date.", "parameters": {"type": "object", "properties": {"location": {"type": "string", "description": "The location to get the temperature for, in the format \\"City, State, Country\\"."}, "date": {"type": "string", "description": "The date to get the temperature for, in the format \\"Year-Month-Day\\"."}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "The unit to return the temperature in. Defaults to \\"celsius\\"."}}, "required": ["location", "date"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{"name": <function-name>, "arguments": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nWhat\'s the temperature in San Francisco now? How about tomorrow?<|im_end|>\n<|im_start|>assistant\n<think>\n"""
+
+        def get_step2_expected_renderer_prompt(self) -> str:
+            return """<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nCurrent Date: 2024-09-30\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{"type": "function", "function": {"name": "get_current_temperature", "description": "Get current temperature at a location.", "parameters": {"type": "object", "properties": {"location": {"type": "string", "description": "The location to get the temperature for, in the format \\"City, State, Country\\"."}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "The unit to return the temperature in. Defaults to \\"celsius\\"."}}, "required": ["location"]}}}\n{"type": "function", "function": {"name": "get_temperature_date", "description": "Get temperature at a location and date.", "parameters": {"type": "object", "properties": {"location": {"type": "string", "description": "The location to get the temperature for, in the format \\"City, State, Country\\"."}, "date": {"type": "string", "description": "The date to get the temperature for, in the format \\"Year-Month-Day\\"."}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "The unit to return the temperature in. Defaults to \\"celsius\\"."}}, "required": ["location", "date"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{"name": <function-name>, "arguments": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nWhat\'s the temperature in San Francisco now? How about tomorrow?<|im_end|>\n<|im_start|>user\n<tool_response>\n{"temperature": 26.1, "location": "San Francisco, CA, USA", "unit": "celsius"}\n</tool_response>\n<tool_response>\n{"temperature": 25.9, "location": "San Francisco, CA, USA", "date": "2024-10-01", "unit": "celsius"}\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n"""
+
+        def get_step3_expected_renderer_prompt(self) -> str:
+            return """<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nCurrent Date: 2024-09-30\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{"type": "function", "function": {"name": "get_current_temperature", "description": "Get current temperature at a location.", "parameters": {"type": "object", "properties": {"location": {"type": "string", "description": "The location to get the temperature for, in the format \\"City, State, Country\\"."}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "The unit to return the temperature in. Defaults to \\"celsius\\"."}}, "required": ["location"]}}}\n{"type": "function", "function": {"name": "get_temperature_date", "description": "Get temperature at a location and date.", "parameters": {"type": "object", "properties": {"location": {"type": "string", "description": "The location to get the temperature for, in the format \\"City, State, Country\\"."}, "date": {"type": "string", "description": "The date to get the temperature for, in the format \\"Year-Month-Day\\"."}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "The unit to return the temperature in. Defaults to \\"celsius\\"."}}, "required": ["location", "date"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{"name": <function-name>, "arguments": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nWhat\'s the temperature in San Francisco now? How about tomorrow?<|im_end|>\n<|im_start|>user\n<tool_response>\n{"temperature": 26.1, "location": "San Francisco, CA, USA", "unit": "celsius"}\n</tool_response>\n<tool_response>\n{"temperature": 25.9, "location": "San Francisco, CA, USA", "date": "2024-10-01", "unit": "celsius"}\n</tool_response><|im_end|>\n<|im_start|>assistant\nSan Francisco今天26.1度, 明天25.9度<|im_end|>\n<|im_start|>user\n那北京明天温度如何<|im_end|>\n<|im_start|>assistant\n<think>\n"""
+
+    # Kimik2渲染器测试实现
+    class Kimik2RendererTestImpl(BaseRendererTestMixin):
+        def __init__(self, test_instance):
+            self.test_instance = test_instance
+
+        def get_tokenizer(self):
+            return AutoTokenizer.from_pretrained(
+                f"{self.test_instance.test_data_path}/model_test/fake_test/testdata/kimi_k2/tokenizer/",
+                trust_remote_code=True,
+            )
+
+        def get_render_params(self) -> RendererParams:
+            tokenizer = self.get_tokenizer()
+            return RendererParams(
+                model_type="kimi_k2",
+                max_seq_len=1024,
+                eos_token_id=tokenizer.eos_token_id or 0,
+                stop_word_ids_list=[],
+            )
+
+        def get_step1_expected_renderer_prompt(self) -> str:
+            return """<|im_system|>tool_declare<|im_middle|>[{"type": "function", "function": {"name": "get_current_temperature", "description": "Get current temperature at a location.", "parameters": {"type": "object", "properties": {"location": {"type": "string", "description": "The location to get the temperature for, in the format \\"City, State, Country\\"."}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "The unit to return the temperature in. Defaults to \\"celsius\\"."}}, "required": ["location"]}}}, {"type": "function", "function": {"name": "get_temperature_date", "description": "Get temperature at a location and date.", "parameters": {"type": "object", "properties": {"location": {"type": "string", "description": "The location to get the temperature for, in the format \\"City, State, Country\\"."}, "date": {"type": "string", "description": "The date to get the temperature for, in the format \\"Year-Month-Day\\"."}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "The unit to return the temperature in. Defaults to \\"celsius\\"."}}, "required": ["location", "date"]}}}]<|im_end|><|im_system|>system<|im_middle|>You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nCurrent Date: 2024-09-30<|im_end|><|im_user|>user<|im_middle|>What\'s the temperature in San Francisco now? How about tomorrow?<|im_end|><|im_assistant|>assistant<|im_middle|>"""
+
+        def get_step2_expected_renderer_prompt(self) -> str:
+            return """<|im_system|>tool_declare<|im_middle|>[{"type": "function", "function": {"name": "get_current_temperature", "description": "Get current temperature at a location.", "parameters": {"type": "object", "properties": {"location": {"type": "string", "description": "The location to get the temperature for, in the format \\"City, State, Country\\"."}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "The unit to return the temperature in. Defaults to \\"celsius\\"."}}, "required": ["location"]}}}, {"type": "function", "function": {"name": "get_temperature_date", "description": "Get temperature at a location and date.", "parameters": {"type": "object", "properties": {"location": {"type": "string", "description": "The location to get the temperature for, in the format \\"City, State, Country\\"."}, "date": {"type": "string", "description": "The date to get the temperature for, in the format \\"Year-Month-Day\\"."}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "The unit to return the temperature in. Defaults to \\"celsius\\"."}}, "required": ["location", "date"]}}}]<|im_end|><|im_system|>system<|im_middle|>You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nCurrent Date: 2024-09-30<|im_end|><|im_user|>user<|im_middle|>What\'s the temperature in San Francisco now? How about tomorrow?<|im_end|><|im_system|>tool<|im_middle|>## Return of \n    {"temperature": 26.1, "location": "San Francisco, CA, USA", "unit": "celsius"}<|im_end|><|im_system|>tool<|im_middle|>## Return of \n    {"temperature": 25.9, "location": "San Francisco, CA, USA", "date": "2024-10-01", "unit": "celsius"}<|im_end|><|im_assistant|>assistant<|im_middle|>"""
+
+        def get_step3_expected_renderer_prompt(self) -> str:
+            return """<|im_system|>tool_declare<|im_middle|>[{"type": "function", "function": {"name": "get_current_temperature", "description": "Get current temperature at a location.", "parameters": {"type": "object", "properties": {"location": {"type": "string", "description": "The location to get the temperature for, in the format \\"City, State, Country\\"."}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "The unit to return the temperature in. Defaults to \\"celsius\\"."}}, "required": ["location"]}}}, {"type": "function", "function": {"name": "get_temperature_date", "description": "Get temperature at a location and date.", "parameters": {"type": "object", "properties": {"location": {"type": "string", "description": "The location to get the temperature for, in the format \\"City, State, Country\\"."}, "date": {"type": "string", "description": "The date to get the temperature for, in the format \\"Year-Month-Day\\"."}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "The unit to return the temperature in. Defaults to \\"celsius\\"."}}, "required": ["location", "date"]}}}]<|im_end|><|im_system|>system<|im_middle|>You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nCurrent Date: 2024-09-30<|im_end|><|im_user|>user<|im_middle|>What\'s the temperature in San Francisco now? How about tomorrow?<|im_end|><|im_system|>tool<|im_middle|>## Return of \n    {"temperature": 26.1, "location": "San Francisco, CA, USA", "unit": "celsius"}<|im_end|><|im_system|>tool<|im_middle|>## Return of \n    {"temperature": 25.9, "location": "San Francisco, CA, USA", "date": "2024-10-01", "unit": "celsius"}<|im_end|><|im_assistant|>assistant<|im_middle|>San Francisco今天26.1度, 明天25.9度<|im_end|><|im_user|>user<|im_middle|>那北京明天温度如何<|im_end|><|im_assistant|>assistant<|im_middle|>"""
+
+    # Qwen3 Coder渲染器测试实现
+    class Qwen3CoderRendererTestImpl(BaseRendererTestMixin):
+        def __init__(self, test_instance):
+            self.test_instance = test_instance
+
+        def get_tokenizer(self):
+            return AutoTokenizer.from_pretrained(
+                f"{self.test_instance.test_data_path}/model_test/fake_test/testdata/qwen3_coder/tokenizer/",
+                trust_remote_code=True,
+            )
+
+        def get_render_params(self) -> RendererParams:
+            tokenizer = self.get_tokenizer()
+            return RendererParams(
+                model_type="qwen3_coder_moe",
+                max_seq_len=1024,
+                eos_token_id=tokenizer.eos_token_id or 0,
+                stop_word_ids_list=[],
+            )
+
+        def get_step1_expected_renderer_prompt(self) -> str:
+            return """<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nCurrent Date: 2024-09-30\n\nYou have access to the following functions:\n\n<tools>\n<function>\n<name>get_current_temperature</name>\n<description>Get current temperature at a location.</description>\n<parameters>\n<parameter>\n<name>location</name>\n<type>string</type>\n<description>The location to get the temperature for, in the format "City, State, Country".</description>\n</parameter>\n<parameter>\n<name>unit</name>\n<type>string</type>\n<description>The unit to return the temperature in. Defaults to "celsius".</description>\n<enum>[`celsius`, `fahrenheit`]</enum>\n</parameter>\n<required>[`location`]</required>\n</parameters>\n</function>\n<function>\n<name>get_temperature_date</name>\n<description>Get temperature at a location and date.</description>\n<parameters>\n<parameter>\n<name>location</name>\n<type>string</type>\n<description>The location to get the temperature for, in the format "City, State, Country".</description>\n</parameter>\n<parameter>\n<name>date</name>\n<type>string</type>\n<description>The date to get the temperature for, in the format "Year-Month-Day".</description>\n</parameter>\n<parameter>\n<name>unit</name>\n<type>string</type>\n<description>The unit to return the temperature in. Defaults to "celsius".</description>\n<enum>[`celsius`, `fahrenheit`]</enum>\n</parameter>\n<required>[`location`, `date`]</required>\n</parameters>\n</function>\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nWhat\'s the temperature in San Francisco now? How about tomorrow?<|im_end|>\n<|im_start|>assistant\n"""
+
+        def get_step2_expected_renderer_prompt(self) -> str:
+            return """<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nCurrent Date: 2024-09-30\n\nYou have access to the following functions:\n\n<tools>\n<function>\n<name>get_current_temperature</name>\n<description>Get current temperature at a location.</description>\n<parameters>\n<parameter>\n<name>location</name>\n<type>string</type>\n<description>The location to get the temperature for, in the format "City, State, Country".</description>\n</parameter>\n<parameter>\n<name>unit</name>\n<type>string</type>\n<description>The unit to return the temperature in. Defaults to "celsius".</description>\n<enum>[`celsius`, `fahrenheit`]</enum>\n</parameter>\n<required>[`location`]</required>\n</parameters>\n</function>\n<function>\n<name>get_temperature_date</name>\n<description>Get temperature at a location and date.</description>\n<parameters>\n<parameter>\n<name>location</name>\n<type>string</type>\n<description>The location to get the temperature for, in the format "City, State, Country".</description>\n</parameter>\n<parameter>\n<name>date</name>\n<type>string</type>\n<description>The date to get the temperature for, in the format "Year-Month-Day".</description>\n</parameter>\n<parameter>\n<name>unit</name>\n<type>string</type>\n<description>The unit to return the temperature in. Defaults to "celsius".</description>\n<enum>[`celsius`, `fahrenheit`]</enum>\n</parameter>\n<required>[`location`, `date`]</required>\n</parameters>\n</function>\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nWhat\'s the temperature in San Francisco now? How about tomorrow?<|im_end|>\n<|im_start|>user\n<tool_response>\n{"temperature": 26.1, "location": "San Francisco, CA, USA", "unit": "celsius"}\n</tool_response>\n<tool_response>\n{"temperature": 25.9, "location": "San Francisco, CA, USA", "date": "2024-10-01", "unit": "celsius"}\n</tool_response>\n<|im_end|>\n<|im_start|>assistant\n"""
+
+        def get_step3_expected_renderer_prompt(self) -> str:
+            return """<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nCurrent Date: 2024-09-30\n\nYou have access to the following functions:\n\n<tools>\n<function>\n<name>get_current_temperature</name>\n<description>Get current temperature at a location.</description>\n<parameters>\n<parameter>\n<name>location</name>\n<type>string</type>\n<description>The location to get the temperature for, in the format "City, State, Country".</description>\n</parameter>\n<parameter>\n<name>unit</name>\n<type>string</type>\n<description>The unit to return the temperature in. Defaults to "celsius".</description>\n<enum>[`celsius`, `fahrenheit`]</enum>\n</parameter>\n<required>[`location`]</required>\n</parameters>\n</function>\n<function>\n<name>get_temperature_date</name>\n<description>Get temperature at a location and date.</description>\n<parameters>\n<parameter>\n<name>location</name>\n<type>string</type>\n<description>The location to get the temperature for, in the format "City, State, Country".</description>\n</parameter>\n<parameter>\n<name>date</name>\n<type>string</type>\n<description>The date to get the temperature for, in the format "Year-Month-Day".</description>\n</parameter>\n<parameter>\n<name>unit</name>\n<type>string</type>\n<description>The unit to return the temperature in. Defaults to "celsius".</description>\n<enum>[`celsius`, `fahrenheit`]</enum>\n</parameter>\n<required>[`location`, `date`]</required>\n</parameters>\n</function>\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nWhat\'s the temperature in San Francisco now? How about tomorrow?<|im_end|>\n<|im_start|>user\n<tool_response>\n{"temperature": 26.1, "location": "San Francisco, CA, USA", "unit": "celsius"}\n</tool_response>\n<tool_response>\n{"temperature": 25.9, "location": "San Francisco, CA, USA", "date": "2024-10-01", "unit": "celsius"}\n</tool_response>\n<|im_end|>\n<|im_start|>assistant\nSan Francisco今天26.1度, 明天25.9度<|im_end|>\n<|im_start|>user\n那北京明天温度如何<|im_end|>\n<|im_start|>assistant\n"""
+
+    # GLM45渲染器测试实现
+    class Glm45RendererTestImpl(BaseRendererTestMixin):
+        def __init__(self, test_instance):
+            self.test_instance = test_instance
+
+        def get_tokenizer(self):
+            return AutoTokenizer.from_pretrained(
+                f"{self.test_instance.test_data_path}/model_test/fake_test/testdata/glm45/tokenizer/"
+            )
+
+        def get_render_params(self) -> RendererParams:
+            tokenizer = self.get_tokenizer()
+            return RendererParams(
+                model_type="glm4_moe",
+                max_seq_len=1024,
+                eos_token_id=tokenizer.eos_token_id or 0,
+                stop_word_ids_list=[],
+            )
+
+        def get_step1_expected_renderer_prompt(self) -> str:
+            return """[gMASK]<sop><|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{"type": "function", "function": {"name": "get_current_temperature", "description": "Get current temperature at a location.", "parameters": {"type": "object", "properties": {"location": {"type": "string", "description": "The location to get the temperature for, in the format \\"City, State, Country\\"."}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "The unit to return the temperature in. Defaults to \\"celsius\\"."}}, "required": ["location"]}}}\n{"type": "function", "function": {"name": "get_temperature_date", "description": "Get temperature at a location and date.", "parameters": {"type": "object", "properties": {"location": {"type": "string", "description": "The location to get the temperature for, in the format \\"City, State, Country\\"."}, "date": {"type": "string", "description": "The date to get the temperature for, in the format \\"Year-Month-Day\\"."}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "The unit to return the temperature in. Defaults to \\"celsius\\"."}}, "required": ["location", "date"]}}}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}\n<arg_key>{arg-key-1}</arg_key>\n<arg_value>{arg-value-1}</arg_value>\n<arg_key>{arg-key-2}</arg_key>\n<arg_value>{arg-value-2}</arg_value>\n...\n</tool_call><|system|>\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nCurrent Date: 2024-09-30<|user|>\nWhat\'s the temperature in San Francisco now? How about tomorrow?<|assistant|>"""
+
+        def get_step2_expected_renderer_prompt(self) -> str:
+            return """[gMASK]<sop><|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{"type": "function", "function": {"name": "get_current_temperature", "description": "Get current temperature at a location.", "parameters": {"type": "object", "properties": {"location": {"type": "string", "description": "The location to get the temperature for, in the format \\"City, State, Country\\"."}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "The unit to return the temperature in. Defaults to \\"celsius\\"."}}, "required": ["location"]}}}\n{"type": "function", "function": {"name": "get_temperature_date", "description": "Get temperature at a location and date.", "parameters": {"type": "object", "properties": {"location": {"type": "string", "description": "The location to get the temperature for, in the format \\"City, State, Country\\"."}, "date": {"type": "string", "description": "The date to get the temperature for, in the format \\"Year-Month-Day\\"."}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "The unit to return the temperature in. Defaults to \\"celsius\\"."}}, "required": ["location", "date"]}}}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}\n<arg_key>{arg-key-1}</arg_key>\n<arg_value>{arg-value-1}</arg_value>\n<arg_key>{arg-key-2}</arg_key>\n<arg_value>{arg-value-2}</arg_value>\n...\n</tool_call><|system|>\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nCurrent Date: 2024-09-30<|user|>\nWhat\'s the temperature in San Francisco now? How about tomorrow?<|observation|>\n<tool_response>\n{"temperature": 26.1, "location": "San Francisco, CA, USA", "unit": "celsius"}\n</tool_response>\n<tool_response>\n{"temperature": 25.9, "location": "San Francisco, CA, USA", "date": "2024-10-01", "unit": "celsius"}\n</tool_response><|assistant|>"""
+
+        def get_step3_expected_renderer_prompt(self) -> str:
+            return """[gMASK]<sop><|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{"type": "function", "function": {"name": "get_current_temperature", "description": "Get current temperature at a location.", "parameters": {"type": "object", "properties": {"location": {"type": "string", "description": "The location to get the temperature for, in the format \\"City, State, Country\\"."}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "The unit to return the temperature in. Defaults to \\"celsius\\"."}}, "required": ["location"]}}}\n{"type": "function", "function": {"name": "get_temperature_date", "description": "Get temperature at a location and date.", "parameters": {"type": "object", "properties": {"location": {"type": "string", "description": "The location to get the temperature for, in the format \\"City, State, Country\\"."}, "date": {"type": "string", "description": "The date to get the temperature for, in the format \\"Year-Month-Day\\"."}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "The unit to return the temperature in. Defaults to \\"celsius\\"."}}, "required": ["location", "date"]}}}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}\n<arg_key>{arg-key-1}</arg_key>\n<arg_value>{arg-value-1}</arg_value>\n<arg_key>{arg-key-2}</arg_key>\n<arg_value>{arg-value-2}</arg_value>\n...\n</tool_call><|system|>\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nCurrent Date: 2024-09-30<|user|>\nWhat\'s the temperature in San Francisco now? How about tomorrow?<|observation|>\n<tool_response>\n{"temperature": 26.1, "location": "San Francisco, CA, USA", "unit": "celsius"}\n</tool_response>\n<tool_response>\n{"temperature": 25.9, "location": "San Francisco, CA, USA", "date": "2024-10-01", "unit": "celsius"}\n</tool_response><|assistant|>\n<think></think>\nSan Francisco今天26.1度, 明天25.9度<|user|>\n那北京明天温度如何<|assistant|>"""
+
+    def test_qwen3(self):
+        """Qwen3渲染器测试"""
+        qwen3_test = self.Qwen3RendererTestImpl(self)
+        qwen3_test.run_renderer_test()
+
+    def test_qwen3_thinking(self):
+        """Qwen3 Thinking渲染器测试"""
+        qwen3_thinking_test = self.Qwen3ThinkingRendererTestImpl(self)
+        qwen3_thinking_test.run_renderer_test()
+
+    def test_kimik2(self):
+        """Kimik2渲染器测试"""
+        kimik2_test = self.Kimik2RendererTestImpl(self)
+        kimik2_test.run_renderer_test()
+
+    def test_qwen3_coder(self):
+        """Qwen3 Coder渲染器测试"""
+        qwen3_coder_test = self.Qwen3CoderRendererTestImpl(self)
+        qwen3_coder_test.run_renderer_test()
+
+    def test_glm45(self):
+        """GLM45渲染器测试"""
+        glm45_test = self.Glm45RendererTestImpl(self)
+        glm45_test.run_renderer_test()
 
 
 if __name__ == "__main__":
