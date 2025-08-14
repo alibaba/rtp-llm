@@ -16,6 +16,6 @@ from .qwen_vl_renderer import QwenVLRenderer
 
 try:
     from internal_source.rtp_llm.openai_renderers import internal_init
-except ImportError:
-    logging.info("no internal_source found")
+except ImportError as e:
+    logging.info(f"no internal_source found, error: {str(e)}")
     pass

@@ -47,6 +47,13 @@ class GaugeMetrics(Enum):
     ROUTE_RT_METRIC = "py_rtp_route_rt"
     MASTER_ROUTE_RT_METRIC = "py_rtp_master_route_rt"
     DOMAIN_ROUTE_RT_METRIC = "py_rtp_domain_route_rt"
+    
+    # igraph
+    IGRAPH_RT_METRIC = "py_rtp_igraph_rt"
+    PARSE_IGRAPH_RESPONSE_RT_METRIC = "py_rtp_parse_igraph_response_rt"
+
+    # vit preprocess
+    VIT_PREPROCESS_RT_METRIC = "py_rtp_vit_preprocess_rt"
 
 
 class MetricReporter(object):

@@ -14,7 +14,7 @@ namespace py = pybind11;
 namespace rtp_llm {
 
 ErrorInfo MultimodalProcessor::getStrHash(int32_t* token_ids, std::string& url, int mm_emb_len) {
-    int url_len = url.length(), data_size_scale = std::max(int(sizeof(size_t) / sizeof(int32_t)), 1);
+    int url_len = url.length(), data_size_scale = std::max(int(sizeof(int32_t) / sizeof(int32_t)), 1);
     if (mm_emb_len / data_size_scale <= 0) {
         std::stringstream exception_str;
         exception_str << "length of multimodal input is too short, at least " << data_size_scale << ", get "
@@ -25,9 +25,8 @@ ErrorInfo MultimodalProcessor::getStrHash(int32_t* token_ids, std::string& url, 
     int                    now_idx    = 0;
     std::hash<std::string> hasher;
     while (now_idx * substr_len < url_len && now_idx * data_size_scale < mm_emb_len) {
-        size_t hash_res =
-            hasher(url.substr(now_idx * substr_len, std::min(url_len - now_idx * substr_len, substr_len)));
-        memcpy(token_ids + now_idx * data_size_scale, &hash_res, sizeof(size_t));
+        int32_t hash_res = hasher(url.substr(now_idx * substr_len, std::min(url_len - now_idx * substr_len, substr_len)));
+        memcpy(token_ids + now_idx * data_size_scale, &hash_res, sizeof(int32_t));
         now_idx++;
     }
     return ErrorInfo::OkStatus();
@@ -192,7 +191,6 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
     if (input->generate_config && input->generate_config->calculate_loss) {
         return ErrorInfo(ErrorCode::MM_NOT_SUPPORTED_ERROR, "cannot calculate loss in multimodal query");
     }
-
     CHECK_AND_RETURN_REF(mm_embedding_res, MultimodalEmbedding(input->multimodal_inputs.value()));
     input->multimodal_features = std::move(mm_embedding_res.mm_features);
     input->mm_position_ids     = std::move(mm_embedding_res.mm_position_ids);

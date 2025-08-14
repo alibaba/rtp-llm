@@ -48,6 +48,7 @@ class RoleEnum(str, Enum):
 
 class ContentPartTypeEnum(str, Enum):
     text = "text"
+    igraph = "igraph"
     image_url = "image_url"
     video_url = "video_url"
     audio_url = "audio_url"
@@ -62,6 +63,9 @@ class MMPreprocessConfigPart(BaseModel):
     min_frames: Optional[int] = None
     max_frames: Optional[int] = None
 
+class IgraphInfo(BaseModel):
+    table_name: str
+    item_id: str
 
 class ImageURL(BaseModel):
     url: str
@@ -75,6 +79,7 @@ class AudioURL(BaseModel):
 class ContentPart(BaseModel):
     type: ContentPartTypeEnum
     text: Optional[str] = None
+    igraph: Optional[IgraphInfo] = None
     image_url: Optional[ImageURL] = None
     video_url: Optional[ImageURL] = None
     audio_url: Optional[AudioURL] = None

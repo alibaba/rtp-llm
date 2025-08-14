@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import time
 import threading
 from dataclasses import dataclass, field
 from enum import IntEnum
@@ -63,6 +64,7 @@ class MMUrlType(IntEnum):
     VIDEO = 2
     AUDIO = 3
     TENSOR = 4
+    IGRAPH = 5
 
 
 @dataclass
@@ -100,6 +102,44 @@ def get_vit_compute_dtype(dtype: str):
         return torch.bfloat16
     else:
         return torch.half
+
+def retry_on_assertion_error(retries:int=3):
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            for attempt in range(1, retries + 1):
+                try:
+                    return func(*args, **kwargs)
+                except AssertionError as e:
+                    print(f"[retry_on_assertion_error] AssertionError on attempt {attempt}: {str(e)}")
+                    if attempt == retries:
+                        print("[retry_on_assertion_error] Max retries reached, re-raising.")
+                        raise
+        return wrapper
+    return decorator
+
+def get_json_result_from_url(url: str):
+    try:
+        if url.startswith("http") or url.startswith("https"):
+            response = requests.get(
+                url, stream=True, headers=HTTP_HEADS, timeout=10
+            )
+            if response.status_code == 200:
+                res = response.content.decode("utf-8")
+            else:
+                raise Exception(
+                    f"download failed, error code: {response.status_code}"
+                )
+        elif get_base64_prefix(url) > 0:
+            bytes_data = base64.b64decode(url[get_base64_prefix(url):])
+            res = bytes_data.decode("utf-8")
+        else:
+            # treat url as local path
+            with open(url, "r", encoding="utf-8") as fh:
+                buf = fh.read()
+            res = buf
+    except Exception as e:
+        raise Exception(f"download and load {url} error, exception {e}")
+    return res
 
 
 def get_bytes_io_from_url(url: str):

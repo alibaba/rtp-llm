@@ -99,18 +99,22 @@ void RtpLLMOp::addLora(const std::string& adapter_name, py::object py_lora_a_wei
     auto convert        = rtp_llm::WeightsConverter(true);
     auto lora_a_weights = convert.convertLayerWeights_(py_lora_a_weights);
     auto lora_b_weights = convert.convertLayerWeights_(py_lora_b_weights);
+    pybind11::gil_scoped_release release;
     model_rpc_service_->addLora(adapter_name, *lora_a_weights, *lora_b_weights);
 }
 
 void RtpLLMOp::removeLora(const std::string& adapter_name) {
+    pybind11::gil_scoped_release release;
     model_rpc_service_->removeLora(adapter_name);
 }
 
 rtp_llm::LoadBalanceInfo RtpLLMOp::getLoadBalanceInfo(int64_t latest_version) {
+    pybind11::gil_scoped_release release;
     return model_rpc_service_->getLoadBalanceInfo(latest_version);
 }
 
 rtp_llm::EngineScheduleInfo RtpLLMOp::getEngineScheduleInfo(int64_t latest_finised_version) {
+    pybind11::gil_scoped_release release;
     return model_rpc_service_->getEngineScheduleInfo(latest_finised_version);
 }
 
@@ -163,6 +167,7 @@ void RtpLLMOp::initRPCServer(const rtp_llm::EngineInitParams                    
 }
 
 bool RtpLLMOp::ready() {
+    pybind11::gil_scoped_release release;
     return model_rpc_service_->ready();
 }
 
@@ -183,11 +188,13 @@ void RtpLLMOp::startHttpServer(py::object model_weights_loader,
 }
 
 void RtpLLMOp::updateSchedulerInfo(const std::string& scheduler_info) {
+    pybind11::gil_scoped_release release;
     model_rpc_service_->getEngine()->getScheduler().updateSchedulerInfo(scheduler_info);
 }
 
 bool RtpLLMOp::updateEplbConfig(const rtp_llm::EplbConfig& config) {
     if (model_rpc_service_) {
+        pybind11::gil_scoped_release release;
         return model_rpc_service_->getEngine()->updateEplbConfig(config);
     }
     return false;

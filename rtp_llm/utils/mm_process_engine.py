@@ -14,7 +14,9 @@ from rtp_llm.utils.multimodal_util import (
     vit_emb_cache_,
 )
 from rtp_llm.utils.util import check_with_info, to_torch_dtype
-
+from rtp_llm.metrics import kmonitor
+from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
+from rtp_llm.utils.time_util import Timer
 
 class MMEmbeddingRes:
     embeddings: List[torch.Tensor] = []
@@ -45,7 +47,9 @@ class MMProcessEngine:
         preprocess_configs: Optional[List[List[int]]] = None,
     ):
         if self.run_batch:
-            res, pos = self.model.mm_part.mm_embedding(urls, types, tensors)
+            with Timer() as route_timer:
+                res, pos = self.model.mm_part.mm_embedding(urls, types, tensors)
+            kmonitor.report(GaugeMetrics.VIT_PREPROCESS_RT_METRIC, route_timer.cost_ms())
             return MMEmbeddingRes(res, pos)
         if types is None or len(types) == 0:
             types = [MMUrlType.DEFAULT] * len(urls)
