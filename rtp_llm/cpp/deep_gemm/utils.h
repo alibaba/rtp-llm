@@ -15,7 +15,7 @@
 
 namespace rtp_llm {
 
-#define MAX_JIT_THREAD_NUM 8
+#define MAX_JIT_THREAD_NUM 16
 #define INCREASE_JIT_THREAD_NUM                                                                                        \
     {                                                                                                                  \
         unique_lock<mutex> lock(jit_thread_num_mutex_);                                                                \
