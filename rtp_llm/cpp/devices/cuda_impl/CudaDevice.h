@@ -282,6 +282,10 @@ protected:
                         const MoeConfigs&          moe_conf,
                         const FfnLayerWeights&     weights);
 
+#ifdef ENABLE_DEEP_EP
+    size_t initDeepEPLLMaxTokenPerRank(const DeviceInitParams& params);
+#endif
+
 protected:
     std::unique_ptr<at::cuda::CUDAStream> torch_default_stream_;
     std::unique_ptr<at::cuda::CUDAStream> torch_comm_stream_;

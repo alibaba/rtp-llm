@@ -17,6 +17,32 @@ namespace rtp_llm {
 
 #ifdef ENABLE_DEEP_EP
 
+size_t CudaDevice::initDeepEPLLMaxTokenPerRank(const DeviceInitParams& params) {
+    size_t max_token = (init_params_.max_generate_batch_size + init_params_.tp_size - 1) / init_params_.tp_size;
+
+    // for speculative decoding, need consider gen_num_per_cycle
+    if (!init_params_.sp_config.sp_type.empty()) {
+        max_token = max_token * (init_params_.sp_config.gen_num_per_cycle + 1);
+    }
+
+    vector<int> matched_tokens = {16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128};
+
+    if (max_token > 128) {
+        // padding to multiple of 128
+        max_token = ((max_token + 127) / 128) * 128;
+        return max_token;
+    }
+
+    for (auto t : matched_tokens) {
+        if (max_token <= t) {
+            max_token = t;
+            return max_token;
+        }
+    }
+
+    return 128;
+}
+
 bool CudaDevice::initDeepEPBuffer() {
     auto   nccl_param       = getNcclParam(ParallelMode::DP_AND_TP);
     size_t world_rank       = nccl_param.rank_;
@@ -27,8 +53,7 @@ bool CudaDevice::initDeepEPBuffer() {
     int deep_ep_num_sm = init_params_.moe_config.deep_ep_num_sm > 0 ? init_params_.moe_config.deep_ep_num_sm : 24;
 
     // TODO: check if get right
-    ll_num_max_token_per_rank =
-        (init_params_.max_generate_batch_size + init_params_.tp_size - 1) / init_params_.tp_size;
+    ll_num_max_token_per_rank = initDeepEPLLMaxTokenPerRank(init_params_);
 
     int64_t num_nvl_bytes    = 0;
     int64_t num_rdma_bytes   = 0;
