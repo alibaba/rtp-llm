@@ -2,6 +2,7 @@ import itertools
 from unittest import SkipTest, TestCase, main
 
 import torch
+import torch.nn.functional as F
 from torch import dtype as _dtype
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
@@ -10,6 +11,54 @@ from rtp_llm.models_py.modules.moe import (
     FusedMoe,
     NaiveBatchedExperts,
 )
+
+
+def torch_sparse_block_forward(
+    hidden_states: torch.Tensor,
+    up_proj: torch.Tensor,
+    down_proj: torch.Tensor,
+    routing_weights: torch.Tensor,
+    expert_ids: torch.Tensor,
+):
+    sequence_length = hidden_states.shape[0]
+    num_experts = up_proj.shape[0]
+    hidden_dim = down_proj.shape[1]
+    inter_dim = down_proj.shape[2]
+
+    final_hidden_states = torch.zeros(
+        (sequence_length, hidden_dim),
+        dtype=hidden_states.dtype,
+        device=hidden_states.device,
+    )
+    expert_mask = F.one_hot(expert_ids.long(), num_classes=num_experts).permute(2, 1, 0)
+
+    for expert_idx in range(num_experts):
+        idx, top_x = torch.where(expert_mask[expert_idx])
+        # in torch it is faster to index using lists than torch tensors
+        top_x_list = top_x.tolist()
+        idx_list = idx.tolist()
+
+        routing_weight = (
+            # routing_weights [num_tokens, top_k]
+            routing_weights[top_x_list, idx_list, None]
+        )
+
+        current_state = hidden_states[None, top_x_list].reshape(-1, hidden_dim)
+
+        up_proj_x, up_proj_g = torch.split(up_proj[expert_idx], inter_dim, dim=0)
+
+        current_hidden_states = F.silu(F.linear(current_state, up_proj_g)) * F.linear(
+            current_state, up_proj_x
+        )
+        current_hidden_states = F.linear(current_hidden_states, down_proj[expert_idx])
+        current_hidden_states = current_hidden_states * routing_weight
+
+        final_hidden_states.index_add_(
+            0, top_x, current_hidden_states.to(hidden_states.dtype)
+        )
+
+    final_hidden_states = final_hidden_states.reshape(sequence_length, hidden_dim)
+    return final_hidden_states
 
 
 class FusedMoeBatchedTest(TestCase):
@@ -25,6 +74,69 @@ class FusedMoeBatchedTest(TestCase):
         if not torch.cuda.is_available():
             raise SkipTest("CUDA is not available")
         torch.set_default_device("cuda")
+
+    def torch_sparse_block_forward(
+        self,
+        hidden_states: torch.Tensor,
+        up_proj_w: torch.Tensor,
+        down_proj_w: torch.Tensor,
+        routing_weights: torch.Tensor,
+        expert_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Computes the forward pass of a Sparse Mixture of Experts (MoE) block.
+
+        This function routes each token to its assigned expert, processes it through that expert's
+        feed-forward network (a Gated Linear Unit), and aggregates the results using the
+        router-provided weights.
+        """
+        # sequence_length, hidden_dim = hidden_states.shape
+        num_experts = up_proj_w.shape[0]
+        inter_dim = down_proj_w.shape[2]
+
+        # The final output tensor is initialized to zeros and will be populated via index_add_.
+        final_hidden_states = torch.zeros_like(hidden_states)
+
+        # Create a one-hot mask to determine which tokens go to which expert.
+        # The permute reshapes it to (num_experts, top_k, sequence_length) for easy iteration.
+        expert_mask = F.one_hot(expert_ids, num_classes=num_experts).permute(2, 1, 0)
+
+        for expert_idx in range(num_experts):
+            # Find the tokens and their top-k indices routed to the current expert.
+            top_k_indices, token_indices = torch.where(expert_mask[expert_idx])
+
+            if token_indices.numel() == 0:
+                continue
+
+            # Gather the hidden states and routing weights for the selected tokens.
+            dispatched_tokens = hidden_states[token_indices]
+            current_routing_weights = routing_weights[
+                token_indices, top_k_indices
+            ].unsqueeze(1)
+
+            # Get the weights for the current expert's feed-forward network.
+            # Note: F.linear expects weights of shape (out_features, in_features).
+            # The input weights are (in_features, out_features), so they are transposed (.T).
+            current_up_proj_w = up_proj_w[expert_idx]
+            current_down_proj_w = down_proj_w[expert_idx]
+
+            # Split the up-projection weights for the Gated Linear Unit (GLU).
+            gate_w, up_w = torch.split(current_up_proj_w, inter_dim, dim=0)
+
+            # Expert computation: SiLU Gated Linear Unit (SwiGLU).
+            gate_output = F.silu(F.linear(dispatched_tokens, gate_w.T))
+            up_output = F.linear(dispatched_tokens, up_w.T)
+
+            # Combine, project down, and apply the routing weight.
+            expert_output = F.linear(gate_output * up_output, current_down_proj_w.T)
+            expert_output *= current_routing_weights
+
+            # Scatter-add the weighted expert outputs back to their original positions.
+            final_hidden_states.index_add_(
+                0, token_indices, expert_output.to(hidden_states.dtype)
+            )
+
+        return final_hidden_states
 
     def _run_fused_moe_batched_test(
         self,
@@ -103,12 +215,17 @@ class FusedMoeBatchedTest(TestCase):
             global_num_experts=num_experts,
         )
 
+        # Compute reference output using torch_sparse_block_forward
+        ref_output = torch_sparse_block_forward(
+            hidden_states, w1, w2, topk_weights, topk_ids
+        )
+
         # Verify output shape
         self.assertEqual(output.shape, (num_tokens, hidden_size))
+        self.assertEqual(ref_output.shape, (num_tokens, hidden_size))
 
-        # Verify output is not NaN or Inf
-        self.assertFalse(torch.isnan(output).any())
-        self.assertFalse(torch.isinf(output).any())
+        # Compare outputs
+        self.assertTrue(torch.allclose(output, ref_output, atol=1e-2, rtol=1e-2))
 
         print(
             f"FusedMoe with BatchedDataRouter and NaiveBatchedExperts test passed. "

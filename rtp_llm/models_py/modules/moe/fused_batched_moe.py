@@ -232,7 +232,11 @@ class NaiveBatchedExperts(mm.FusedMoeExpertExecutor):
                     0, 1
                 )  # Use class member
 
-            self.activation(activation, tmp, input.to(tmp.dtype))
+            # self.activation(activation, tmp, input.to(tmp.dtype))
+            value, gate = torch.split(input, N, dim=-1)
+            import torch.nn.functional as F
+
+            tmp = F.silu(gate) * value
 
             if self.quant_config.is_quantized:
                 # assert w2_scale is not None

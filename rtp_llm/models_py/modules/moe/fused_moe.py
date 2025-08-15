@@ -94,6 +94,7 @@ class FusedMoeExpertExecutor(ABC):
     ) -> None:
         if activation == "SiGLU":
             stream_id = torch.cuda.current_stream().cuda_stream
+            # input g在后面
             rtp_llm_ops.silu_and_mul(output, input, stream_id)
         else:
             raise ValueError(f"Unsupported activation type: {activation}")
