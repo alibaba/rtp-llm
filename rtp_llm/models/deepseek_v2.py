@@ -286,7 +286,6 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
             moe_config = MoeConfig(
                 inter_padding_size=inter_padding_size,
                 expert_num=self.expert_num_,
-                routed_scaling_factor=self.routed_scaling_factor,
             )
             layer_weights = [
                 MoeWithSharedWeight(
@@ -351,10 +350,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                             [
                                 CkptWeightInfo(
                                     "model.layers.{i}.mlp.experts.{expert_id}.down_proj.weight",
-                                    functools.partial(
-                                        multipy_identity,
-                                        scale=self.routed_scaling_factor,
-                                    ),
+                                    identity,
                                 )
                             ],
                             stack_,

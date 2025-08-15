@@ -211,7 +211,6 @@ class Glm4MoeWeight(ModelDeployWeightInfo):
             moe_config = MoeConfig(
                 inter_padding_size=inter_padding_size,
                 expert_num=self.expert_num_,
-                routed_scaling_factor=self.routed_scaling_factor,
             )
             layer_weights = [
                 MoeWithSharedWeight(

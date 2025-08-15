@@ -196,7 +196,6 @@ class ModelDeployWeightInfo:
         self.nope_head_dim = config.nope_head_dim
         self.rope_head_dim = config.rope_head_dim
         self.v_head_dim = config.v_head_dim
-        self.routed_scaling_factor = config.routed_scaling_factor
 
         # for vit sep
         self.vit_separation = config.vit_separation

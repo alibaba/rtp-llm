@@ -631,10 +631,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             [
                 CkptWeightInfo(
                     w_name + QS_SUFFIX,
-                    functools.partial(
-                        multipy_identity,
-                        scale=src_weight_info.config.routed_scaling_factor,
-                    ),
+                    identity,
                 )
             ],
             stack_,

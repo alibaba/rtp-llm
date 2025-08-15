@@ -225,7 +225,7 @@ class FfnWeight(CompositeWeight):
         self.name = W.ffn
         sub_weight_dict = {sub_weight.name: sub_weight for sub_weight in sub_weights}
         self.config = config
-        if  W.ffn_w1 in sub_weight_dict and W.ffn_w3 in sub_weight_dict:
+        if W.ffn_w1 in sub_weight_dict and W.ffn_w3 in sub_weight_dict:
             self.origin_w1 = sub_weight_dict[W.ffn_w1]
             self.origin_w3 = sub_weight_dict[W.ffn_w3]
             sub_weight_dict = fix_merge_w13(sub_weight_dict)
@@ -272,7 +272,6 @@ class MoeConfig(BaseModel):
     is_moe: bool = True
     expert_num: int = -1
     inter_padding_size: int = -1
-    routed_scaling_factor: float = 1.0
     weight_stack: bool = False
 
 
