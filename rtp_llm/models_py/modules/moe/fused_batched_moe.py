@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from math import prod
 from typing import Any, Optional
 
 import torch
@@ -125,6 +126,8 @@ class NaiveBatchedExperts(mm.FusedMoeExpertExecutor):
         self,
         max_num_tokens: int,
         num_dispatchers: int,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
         block_shape: Optional[list[int]] = None,
         per_act_token_quant: bool = False,
     ):
@@ -137,6 +140,12 @@ class NaiveBatchedExperts(mm.FusedMoeExpertExecutor):
         )
         self.max_num_tokens = max_num_tokens
         self.num_dispatchers = num_dispatchers
+        self.w1 = w1
+        self.w2 = w2
+
+    @property
+    def local_num_experts(self) -> int:
+        return self.w1.size(0)
 
     def finalize_weight_and_reduce_impl(self) -> mm.TopKWeightAndReduce:
         return TopKWeightAndReduceDelegate()
@@ -161,32 +170,40 @@ class NaiveBatchedExperts(mm.FusedMoeExpertExecutor):
         output = workspace13
         return (workspace13, workspace2, output, a.dtype)
 
-    def apply(
+    def execute(
         self,
-        output: torch.Tensor,
         payload: mm.ExpertForwardPayload,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
         activation: str,
         global_num_experts: int,
         expert_map: Optional[torch.Tensor],
-        w1_scale: Optional[torch.Tensor],
-        w2_scale: Optional[torch.Tensor],
-        w1_zp: Optional[torch.Tensor],
-        w2_zp: Optional[torch.Tensor],
         a2_scale: Optional[torch.Tensor],
-        workspace13: torch.Tensor,
-        workspace2: torch.Tensor,
         apply_router_weight_on_input: bool,
         extra_expert_args: Optional[dict[str, Any]],
-    ):
+    ) -> torch.Tensor:
         assert payload.expert_x.dim() == 3
         assert payload.expert_tokens_meta is not None
         expert_num_tokens = payload.expert_tokens_meta.expert_num_tokens
 
-        num_local_experts = w1.size(0)
+        num_local_experts = self.w1.size(0)  # Use class member
 
-        N = w1.size(1) // 2
+        N = self.w1.size(1) // 2  # Use class member
+
+        num_dp = self.num_dispatchers
+        output_shape = (
+            num_local_experts,
+            self.max_num_tokens * num_dp,
+            self.w2.size(1),
+        )
+
+        output = torch.empty(
+            output_shape, device=payload.expert_x.device, dtype=self.w2.dtype
+        )
+
+        workspace2 = torch.empty(
+            (self.max_num_tokens * num_dp, N),
+            device=payload.expert_x.device,
+            dtype=self.w2.dtype,
+        )
 
         for expert in range(num_local_experts):
             # Indexing expert_num_tokens doesn't work w/cudagraphs or inductor
@@ -207,19 +224,22 @@ class NaiveBatchedExperts(mm.FusedMoeExpertExecutor):
                 # assert a1q_scale is not None and w1_scale is not None
                 # input = self.dequant(hidden_states[expert, :, :],
                 #                      a1q_scale[expert])
-                # w1_dq = self.dequant(w1[expert], w1_scale[expert])
+                # w1_dq = self.dequant(self.w1[expert], w1_scale[expert])  # Use class member
                 # input = input[:num] @ w1_dq.transpose(0, 1)
                 raise NotImplementedError("quantization not supported yet")
             else:
-                input = payload.expert_x[expert, :num, :] @ w1[expert].transpose(0, 1)
+                input = payload.expert_x[expert, :num, :] @ self.w1[expert].transpose(
+                    0, 1
+                )  # Use class member
 
             self.activation(activation, tmp, input.to(tmp.dtype))
 
             if self.quant_config.is_quantized:
                 # assert w2_scale is not None
-                # w2_dq = self.dequant(w2[expert], w2_scale[expert])
+                # w2_dq = self.dequant(self.w2[expert], w2_scale[expert])  # Use class member
                 raise NotImplementedError("quantization not supported yet")
             else:
-                w2_dq = w2[expert]
+                w2_dq = self.w2[expert]  # Use class member
 
             output[expert, :num, :] = tmp @ w2_dq.transpose(0, 1).to(tmp.dtype)
+        return output

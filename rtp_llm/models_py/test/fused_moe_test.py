@@ -61,19 +61,8 @@ class FusedMoeBatchedTest(TestCase):
             num_dispatchers=1,
             rank=0,
         )
-
-        experts = NaiveBatchedExperts(max_num_tokens=num_tokens, num_dispatchers=1)
-
-        # Create FusedMoe module
-        weights: dict[str, torch.Tensor] = {}
-        fused_moe = FusedMoe(model_param, weights, router, experts)
-
-        # Create test data
         scaling_factor = 0.1
-        hidden_states = (
-            torch.randn(num_tokens, hidden_size, dtype=dtype, device="cuda")
-            * scaling_factor
-        )
+        # Create test weights
         w1 = (
             torch.randn(
                 num_experts, inter_size * 2, hidden_size, dtype=dtype, device="cuda"
@@ -87,6 +76,17 @@ class FusedMoeBatchedTest(TestCase):
             * scaling_factor
         )
 
+        experts = NaiveBatchedExperts(
+            max_num_tokens=num_tokens, num_dispatchers=1, w1=w1, w2=w2
+        )
+
+        fused_moe = FusedMoe(router, experts)
+
+        hidden_states = (
+            torch.randn(num_tokens, hidden_size, dtype=dtype, device="cuda")
+            * scaling_factor
+        )
+
         # Create routing weights and ids
         topk_weights = torch.softmax(
             torch.randn(num_tokens, top_k, dtype=torch.float32, device="cuda"), dim=1
@@ -97,8 +97,6 @@ class FusedMoeBatchedTest(TestCase):
         # Run forward pass
         output = fused_moe(
             hidden_states=hidden_states,
-            w1=w1,
-            w2=w2,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation="SiGLU",
