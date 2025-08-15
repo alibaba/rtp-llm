@@ -56,7 +56,6 @@ from rtp_llm.server.server_args.sparse_group_args import init_sparse_group_args
 from rtp_llm.server.server_args.speculative_decoding_group_args import (
     init_speculative_decoding_group_args,
 )
-from rtp_llm.server.server_args.threefs_group_args import init_threefs_group_args
 from rtp_llm.server.server_args.vit_group_args import init_vit_group_args
 from rtp_llm.server.server_args.worker_group_args import init_worker_group_args
 
@@ -241,7 +240,6 @@ def setup_args():
     init_server_group_args(parser)
     init_sparse_group_args(parser)
     init_speculative_decoding_group_args(parser)
-    init_threefs_group_args(parser)
     init_vit_group_args(parser)
     init_worker_group_args(parser)
     init_jit_group_args(parser)

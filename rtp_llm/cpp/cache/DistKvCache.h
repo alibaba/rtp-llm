@@ -21,8 +21,8 @@ struct DistKvCacheInitParams {
 
     DistStorageManagerInitParams storage_manager_params;
     int                          match_timeout_ms{1000};
-    int                          rpc_get_cache_timeout_ms{3000};
-    int                          rpc_put_cache_timeout_ms{3000};
+    int                          rpc_get_cache_timeout_ms{2000};
+    int                          rpc_put_cache_timeout_ms{2000};
     int                          max_block_size_per_item{16};
 };
 

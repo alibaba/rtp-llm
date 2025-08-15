@@ -162,8 +162,8 @@ void KVCacheConfig::update_from_env_for_test() {
     multi_task_prompt_str    = autil::EnvUtil::getEnv("MULTI_TASK_PROMPT_STR", "");
     enable_3fs               = bool_from_env_for_test("ENABLE_3FS", false);
     match_timeout_ms         = autil::EnvUtil::getEnv("MATCH_TIMEOUT_MS", 1000);
-    rpc_get_cache_timeout_ms = autil::EnvUtil::getEnv("RPC_GET_CACHE_TIMEOUT_MS", 3000);
-    rpc_put_cache_timeout_ms = autil::EnvUtil::getEnv("RPC_PUT_CACHE_TIMEOUT_MS", 3000);
+    rpc_get_cache_timeout_ms = autil::EnvUtil::getEnv("RPC_GET_CACHE_TIMEOUT_MS", 2000);
+    rpc_put_cache_timeout_ms = autil::EnvUtil::getEnv("RPC_PUT_CACHE_TIMEOUT_MS", 2000);
     threefs_read_timeout_ms  = autil::EnvUtil::getEnv("THREEFS_READ_TIMEOUT_MS", 1000);
     threefs_write_timeout_ms = autil::EnvUtil::getEnv("THREEFS_WRITE_TIMEOUT_MS", 2000);
     max_block_size_per_item  = autil::EnvUtil::getEnv("MAX_BLOCK_SIZE_PER_ITEM", 16);
@@ -179,8 +179,8 @@ void register_kvcache_config(pybind11::module& m) {
              pybind11::arg("multi_task_prompt_str")    = "",
              pybind11::arg("enable_3fs")               = false,
              pybind11::arg("match_timeout_ms")         = 1000,
-             pybind11::arg("rpc_get_cache_timeout_ms") = 3000,
-             pybind11::arg("rpc_put_cache_timeout_ms") = 3000,
+             pybind11::arg("rpc_get_cache_timeout_ms") = 2000,
+             pybind11::arg("rpc_put_cache_timeout_ms") = 2000,
              pybind11::arg("threefs_read_timeout_ms")  = 1000,
              pybind11::arg("threefs_write_timeout_ms") = 2000,
              pybind11::arg("max_block_size_per_item")  = 16,

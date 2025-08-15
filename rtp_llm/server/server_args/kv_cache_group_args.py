@@ -80,14 +80,14 @@ def init_kv_cache_group_args(parser):
         "--rpc_get_cache_timeout_ms",
         env_name="RPC_GET_CACHE_TIMEOUT_MS",
         type=int,
-        default=3000,
+        default=2000,
         help="所有 RANK 从远端拉取 KVCache 的超时时间, 单位为毫秒",
     )
     kv_cache_group.add_argument(
         "--rpc_put_cache_timeout_ms",
         env_name="RPC_PUT_CACHE_TIMEOUT_MS",
         type=int,
-        default=3000,
+        default=2000,
         help="所有 RANK 向远端存储 KVCache 的超时时间, 单位为毫秒",
     )
     kv_cache_group.add_argument(

@@ -90,7 +90,7 @@ struct DistStorageManagerInitParams {
 
     size_t lookup_timeout_ms{1000};
     size_t get_timeout_ms{2000};
-    size_t put_timeout_ms{1000};
+    size_t put_timeout_ms{2000};
     size_t del_timeout_ms{1000};
 };
 
