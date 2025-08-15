@@ -1,16 +1,31 @@
+#pragma once
 #include <vector>
 #include <torch/extension.h>
 #include <torch/all.h>
 #include "rtp_llm/cpp/core/Types.h"
 
-#if defined(USING_ROCM)
+#if USING_ROCM
 #include <rtp_llm/cpp/rocm/amd_bfloat16.h>
 #include <hip/hip_runtime.h>
-using bf16_type = amd_bfloat16;
-#else
+#include "rtp_llm/cpp/devices/rocm_impl/ROCmDevice.h"
+#include "rtp_llm/cpp/kernels/rocm/fused_qk_rmsnorm.h"
+#include "rtp_llm/cpp/kernels/rocm/layernorm_kernels.h"
+using bf16_type  = amd_bfloat16;
+using StreamType = hipStream_t;
+#define GET_CURRENT_STREAM() at::hip::getCurrentHIPStream().stream()
+#elif USING_CUDA
 #include <cuda_runtime_api.h>
+#include <cuda_runtime.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <cuda_device_runtime_api.h>
 #include <cuda_bf16.h>
-using bf16_type = nv_bfloat16;
+#include <cuda_fp16.h>
+#include <cuda_fp8.h>
+#include "rtp_llm/cpp/kernels/layernorm_kernels.h"
+#include "rtp_llm/cpp/kernels/fused_qk_rmsnorm.h"
+using bf16_type  = nv_bfloat16;
+using StreamType = cudaStream_t;
+#define GET_CURRENT_STREAM() at::cuda::getCurrentCUDAStream(at::cuda::current_device()).stream()
 #endif
 
 #define DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FP16(pytorch_dtype, c_type, ...)                                               \

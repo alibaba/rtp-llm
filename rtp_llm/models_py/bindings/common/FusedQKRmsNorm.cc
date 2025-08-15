@@ -6,15 +6,6 @@
 #include <cstdint>
 #include <iostream>
 #include <type_traits>
-#if USING_CUDA
-#include <ATen/cuda/CUDAContext.h>
-#include "rtp_llm/cpp/kernels/fused_qk_rmsnorm.h"
-#endif
-#if USING_ROCM
-#include <hip/hip_runtime.h>
-#include "rtp_llm/cpp/devices/rocm_impl/ROCmDevice.h"
-#include "rtp_llm/cpp/kernels/rocm/fused_qk_rmsnorm.h"
-#endif
 using namespace std;
 namespace th = torch;
 using namespace rtp_llm;
@@ -38,12 +29,9 @@ void FusedQKRMSNorm(at::Tensor&   input,
     CHECK_DIM(2, input);    // input: (batch_size, hidden_size)
     CHECK_DIM(1, q_gamma);  // weight: (hidden_size)
     CHECK_DIM(1, k_gamma);  // weight: (hidden_size)
-#if USING_ROCM
-    hipStream_t stream = at::hip::getCurrentHIPStream().stream();
-#endif
-#if USING_CUDA
-    cudaStream_t stream = at::cuda::getCurrentCUDAStream(at::cuda::current_device()).stream();
-#endif
+
+    StreamType stream = GET_CURRENT_STREAM();
+
     DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FP16(input.scalar_type(), c_type, [&] {
         invokeFusedQkRmsNorm(static_cast<c_type*>(input.data_ptr()),
                              static_cast<c_type*>(q_gamma.data_ptr()),
