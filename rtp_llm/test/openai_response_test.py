@@ -1062,6 +1062,109 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             )
             self._validate_merged_result(merged_result)
 
+    class KimiK2AdvancedTestSuite(KimiK2TestSuite):
+        """KimiK2Advanced相关测试的内嵌测试套件, 测试能否支持带有-的functiononname"""
+
+        @override
+        def _get_test_data(self, include_stop_word=False):
+            token_ids = [
+                35659,
+                80048,
+                13021,
+                12365,
+                488,
+                42930,
+                8597,
+                2267,
+                292,
+                163595,
+                163597,
+                41937,
+                1150,
+                67651,
+                12,
+                50171,
+                25,
+                15,
+                163598,
+                8264,
+                5791,
+                1289,
+                414,
+                12365,
+                16934,
+                163599,
+                163597,
+                41937,
+                1150,
+                67651,
+                12,
+                50171,
+                25,
+                16,
+                163598,
+                8264,
+                5791,
+                1289,
+                414,
+                3372,
+                16934,
+                163599,
+                163596,
+            ]
+            if include_stop_word:
+                token_ids.append(163586)  # 增加一个<|im_end|>
+            return token_ids
+
+        @override
+        def _create_test_functions_and_tools(self):
+            """创建测试用的函数和工具定义 - 子类可以重写"""
+            functions = [
+                GPTFunctionDefinition(
+                    **{
+                        "name": "get-current-weather",
+                        "description": "Get the current weather in a given location.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "location": {
+                                    "type": "string",
+                                    "description": "The city and state, e.g. San Francisco, CA",
+                                },
+                                "unit": {
+                                    "type": "string",
+                                    "enum": ["celsius", "fahrenheit"],
+                                },
+                            },
+                            "required": ["location"],
+                        },
+                    }
+                )
+            ]
+            tools = [GPTToolDefinition(function=functions[0])]
+            return functions, tools
+
+        @override
+        def _assert_tool_call_response(
+            self,
+            response_delta,
+            expected_content="我来帮您查询杭州和北京的天气情况。",
+        ):
+            """断言工具调用响应的内容"""
+            assert response_delta.content.strip() == expected_content.strip()
+            assert response_delta.tool_calls[0].function.name == "get-current-weather"
+            assert (
+                response_delta.tool_calls[0].function.arguments
+                == '{"location": "杭州"}'
+            )
+            assert response_delta.tool_calls[1].function.name == "get-current-weather"
+            assert (
+                response_delta.tool_calls[1].function.arguments
+                == '{"location": "北京"}'
+            )
+            assert response_delta.tool_calls[0].index == 0
+            assert response_delta.tool_calls[1].index == 1
+
     class ChatGLM45TestSuite(BaseToolCallTestSuite):
         """GLM45相关测试的内嵌测试套件"""
 
@@ -1540,6 +1643,21 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
     async def test_parse_kimik2_tool_call_no_stream_stop_words(self):
         """测试KimiK2工具调用非流式场景（包含停止词）"""
         kimi_suite = self.KimiK2TestSuite(self)
+        await kimi_suite.test_no_stream_stop_words()
+
+    async def test_parse_kimik2_advanced_tool_call_streaming_case(self):
+        """测试KimiK2工具调用流式场景"""
+        kimi_suite = self.KimiK2AdvancedTestSuite(self)
+        await kimi_suite.test_streaming_case()
+
+    async def test_parse_kimik2_advanced_tool_call_no_stream(self):
+        """测试KimiK2工具调用非流式场景"""
+        kimi_suite = self.KimiK2AdvancedTestSuite(self)
+        await kimi_suite.test_no_stream()
+
+    async def test_parse_kimik2_advanced_tool_call_no_stream_stop_words(self):
+        """测试KimiK2工具调用非流式场景（包含停止词）"""
+        kimi_suite = self.KimiK2AdvancedTestSuite(self)
         await kimi_suite.test_no_stream_stop_words()
 
     @think_mode
