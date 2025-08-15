@@ -291,7 +291,9 @@ MoeGateSelectOutput CudaDevice::moeGateSelect(const FfnLayerParams& params) {
     const auto gate = gemm({hidden, *params.weights.moe_gating_weight->kernel, nullopt, nullptr, DataType::TYPE_FP32});
 
     const auto expert_scales         = allocateBuffer({DataType::TYPE_FP32, {token_num, top_k}}, {"moe_expert_scale"});
-    DataType   topk_t                = init_params_.use_deepep_moe ? DataType::TYPE_INT64 : DataType::TYPE_INT32;
+    DataType   topk_t                = (init_params_.use_deepep_moe && params.qscheme == QScheme::Qfp8PerTokenBlock) ?
+                                           DataType::TYPE_INT64 :
+                                           DataType::TYPE_INT32;
     const auto expert_for_source_row = allocateBuffer({topk_t, {token_num, top_k}}, {"moe_expert_for_src"});
     const auto softmax_out = allocateBuffer({DataType::TYPE_FP32, {token_num, num_expert}}, {"moe_softmax_out"});
     const auto source_rows = allocateBuffer({DataType::TYPE_INT32, {token_num, top_k}}, {"source_rows"});
