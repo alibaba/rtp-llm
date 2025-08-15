@@ -149,6 +149,7 @@ void GenerateStream::cancel() {
 }
 
 absl::StatusOr<int> GenerateStream::initKVBlock(int token_capacity, size_t reserve_step) {
+    std::lock_guard<std::mutex> lock(*output_mutex_);
     if (generate_status_->status == StreamState::WAITING) {
         wait_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
     } else if (generate_status_->status == StreamState::PAUSED) {
@@ -158,20 +159,24 @@ absl::StatusOr<int> GenerateStream::initKVBlock(int token_capacity, size_t reser
 }
 
 void GenerateStream::fakeInitKVBlock() {
+    std::lock_guard<std::mutex> lock(*output_mutex_);
     stream_cache_resource_->fakeInitKVBlock();
 }
 
 absl::StatusOr<int> GenerateStream::incrKVBlock(int token_capacity, size_t reserve_step) {
+    std::lock_guard<std::mutex> lock(*output_mutex_);
     return stream_cache_resource_->incrKVBlock(token_capacity, reserve_step);
 }
 
 int GenerateStream::tryReleaseKVBlock(int nums) {
-    auto release_blocks = stream_cache_resource_->tryReleaseKVBlock(nums);
+    std::lock_guard<std::mutex> lock(*output_mutex_);
+    auto                        release_blocks = stream_cache_resource_->tryReleaseKVBlock(nums);
     incrFallbackBlock(release_blocks);
     return release_blocks;
 }
 
 void GenerateStream::releaseResource() {
+    std::lock_guard<std::mutex> lock(*output_mutex_);
     stream_cache_resource_->releaseResource();
 }
 void GenerateStream::setNeedReleaseResource(bool need_release_resource) {
