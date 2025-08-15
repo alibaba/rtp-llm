@@ -423,11 +423,11 @@ CacheManager::MatchInfo CacheManager::matchImpl(const AdvancedMallocInfo& malloc
     // match in gpu
     auto match_result = block_cache_.match(malloc_info.cache_keys);
     incrRefCounter(match_result.block_indices);
-    auto local_match_len = match_result.block_indices.size();
+    auto local_match_blocks = match_result.block_indices.size();
 
     // match in dist kvcache if cache keys not fully matched
     if (enable_dist_kvcache_ && malloc_info.enable_3fs && !malloc_info.need_loss
-        && local_match_len < malloc_info.cache_keys.size()) {
+        && local_match_blocks < malloc_info.cache_keys.size()) {
         matchInDistKvCache(malloc_info, match_result);
     }
 
@@ -453,7 +453,7 @@ CacheManager::MatchInfo CacheManager::matchImpl(const AdvancedMallocInfo& malloc
     }
 
     RTP_LLM_CHECK_WITH_INFO((reuse_block_num <= cache_block_num),
-                            "reuse block nums[%d] is less than need block nums[%d]",
+                            "reuse block nums[%d] is greater than need block nums[%d]",
                             reuse_block_num,
                             cache_block_num);
     RTP_LLM_CHECK_WITH_INFO((match_result.loss.empty() || match_result.loss.size() >= reuse_length),
@@ -461,9 +461,9 @@ CacheManager::MatchInfo CacheManager::matchImpl(const AdvancedMallocInfo& malloc
                             match_result.loss.size(),
                             reuse_length);
 
-    local_match_len             = local_match_len <= reuse_block_num ? local_match_len : reuse_block_num;
-    const auto local_reuse_len  = local_match_len * config_.seq_size_per_block;
-    const auto remote_reuse_len = (reuse_block_num - local_match_len) * config_.seq_size_per_block;
+    local_match_blocks          = local_match_blocks <= reuse_block_num ? local_match_blocks : reuse_block_num;
+    const auto local_reuse_len  = local_match_blocks * config_.seq_size_per_block;
+    const auto remote_reuse_len = (reuse_block_num - local_match_blocks) * config_.seq_size_per_block;
 
     return {(size_t)reuse_length,
             local_reuse_len,
@@ -896,11 +896,11 @@ bool CacheManager::initDistKvCache() {
 }
 
 void CacheManager::matchInDistKvCache(const AdvancedMallocInfo& malloc_info, BlockCache::MatchResult& match_result) {
-    const auto cache_keys        = malloc_info.cache_keys;
-    const auto request_id        = malloc_info.request_id;
-    const auto local_matched_len = match_result.block_indices.size();
+    const auto cache_keys           = malloc_info.cache_keys;
+    const auto request_id           = malloc_info.request_id;
+    const auto local_matched_blocks = match_result.block_indices.size();
 
-    if (local_matched_len >= cache_keys.size()) {
+    if (local_matched_blocks >= cache_keys.size()) {
         return;
     }
     if (!dist_kvcache_) {
@@ -911,32 +911,31 @@ void CacheManager::matchInDistKvCache(const AdvancedMallocInfo& malloc_info, Blo
     std::map<std::string, std::string> extra_metas;
     extra_metas["LORA_CKPT_PATH"] = getLoraCkptPath(malloc_info.adapter_name);
 
-    auto matched_len = dist_kvcache_->matchForAllRank(cache_keys, local_matched_len, request_id, extra_metas);
-    if (matched_len <= 0) {
+    auto matched_blocks = dist_kvcache_->matchForAllRank(cache_keys, local_matched_blocks, request_id, extra_metas);
+    if (matched_blocks <= 0) {
         return;
     }
 
-    int64_t need_block_num = static_cast<int64_t>(matched_len) - static_cast<int64_t>(local_matched_len);
+    int64_t need_block_num = static_cast<int64_t>(matched_blocks) - static_cast<int64_t>(local_matched_blocks);
     if (need_block_num <= 0) {
         return;
     }
-    auto [success, resource] = malloc(SimpleMallocInfo(request_id, static_cast<uint32_t>(need_block_num), true));
+    auto [success, block_id] = mallocIndex(SimpleMallocInfo(request_id, static_cast<uint32_t>(need_block_num), true));
     if (!success) {
         RTP_LLM_LOG_WARNING(
-            "prefix matched in dist kvcache but free block index not enough, need block num: %d, free block index len: %lu",
+            "prefix matched in dist kvcache but free block index not enough, need block num: %d, free blocks num: %lu",
             need_block_num,
             freeBlockNums());
         return;
     }
 
-    std::vector<int64_t> matched_cache_keys(cache_keys.begin(), cache_keys.begin() + matched_len);
-    if (!dist_kvcache_->getForAllRank(matched_cache_keys, block_ids, local_matched_len, request_id, extra_metas)) {
-        freeWithoutLock(block_ids);
+    std::vector<int64_t> matched_cache_keys(cache_keys.begin(), cache_keys.begin() + matched_blocks);
+    if (!dist_kvcache_->getForAllRank(matched_cache_keys, block_id, local_matched_blocks, request_id, extra_metas)) {
+        freeWithoutLock(block_id);
         return;
     }
 
-    match_result.block_indices.insert(
-        match_result.block_indices.end(), resource.block_id.begin(), resource.block_id.end());
+    match_result.block_indices.insert(match_result.block_indices.end(), block_id.begin(), block_id.end());
 }
 
 bool CacheManager::putToDistKvCache(const std::vector<int64_t>& cache_keys,

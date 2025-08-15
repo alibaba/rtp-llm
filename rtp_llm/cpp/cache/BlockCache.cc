@@ -32,27 +32,27 @@ BlockCache::MatchResult BlockCache::match(const std::vector<int64_t>& cache_key)
     std::lock_guard<std::mutex> lock(mutex_);
 
     CacheItem matched_item;
-    size_t    matched_len = 0;
+    size_t    matched_blocks = 0;
 
     for (const auto& item : lru_cache_.items()) {
         size_t common_length = prefixLength(item.second.cache_key, cache_key);
-        if (common_length > matched_len) {
-            matched_item = item.second;
-            matched_len  = common_length;
+        if (common_length > matched_blocks) {
+            matched_item   = item.second;
+            matched_blocks = common_length;
         }
     }
 
     // Increase matched item's popularity
-    if (matched_len > 0) {
+    if (matched_blocks > 0) {
         lru_cache_.get(matched_item.item_key);
     }
 
     auto matched_block_indices =
-        std::vector<int>(matched_item.block_indices.begin(), matched_item.block_indices.begin() + matched_len);
+        std::vector<int>(matched_item.block_indices.begin(), matched_item.block_indices.begin() + matched_blocks);
     std::vector<float> matched_loss;
-    if (!matched_item.loss.empty() && matched_len * seq_size_per_block_ <= matched_item.loss.size()) {
+    if (!matched_item.loss.empty() && matched_blocks * seq_size_per_block_ <= matched_item.loss.size()) {
         matched_loss = std::vector<float>(matched_item.loss.begin(),
-                                          matched_item.loss.begin() + matched_len * seq_size_per_block_);
+                                          matched_item.loss.begin() + matched_blocks * seq_size_per_block_);
     }
     return {matched_block_indices, matched_loss};
 }

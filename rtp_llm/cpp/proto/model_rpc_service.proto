@@ -136,7 +136,7 @@ message AuxInfoPB {
     int32 cost_time_us = 1;
     int32 iter_count = 2;
     int32 input_len = 3;
-    int32 reuse_len = 4;
+    int32 total_reuse_len = 4;
     int32 prefix_len = 5;
     int32 output_len = 6;
     int32 fallback_tokens = 7;
@@ -147,8 +147,15 @@ message AuxInfoPB {
     int32 first_token_cost_time_us = 12;
     TensorPB softmax_probs = 13;
     int32 wait_time_us = 14;
+
     int32 local_reuse_len = 15;
     int32 remote_reuse_len = 16;
+    int32 prefill_total_reuse_len = 17;
+    int32 prefill_local_reuse_len = 18;
+    int32 prefill_remote_reuse_len = 19;
+    int32 decode_total_reuse_len = 20;
+    int32 decode_local_reuse_len = 21;
+    int32 decode_remote_reuse_len = 22;
 }
 
 message GenerateOutputPB {

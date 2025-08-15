@@ -57,7 +57,6 @@ class AuxInfo(PyBaseModel):
     iter_count: int = 0
     prefix_len: int = 0
     input_len: int = 0
-    reuse_len: int = 0
     output_len: int = 0
     step_output_len: int = 0
     fallback_tokens: int = 0
@@ -68,8 +67,19 @@ class AuxInfo(PyBaseModel):
     cum_log_probs: List[float] = []
     beam_responses: List[str] = []
     softmax_probs: List[float] = []
+
+    reuse_len: int = 0
     local_reuse_len: int = 0
     remote_reuse_len: int = 0
+
+    prefill_total_reuse_len: int = 0
+    prefill_local_reuse_len: int = 0
+    prefill_remote_reuse_len: int = 0
+
+    decode_total_reuse_len: int = 0
+    decode_local_reuse_len: int = 0
+    decode_remote_reuse_len: int = 0
+
     role_addrs: List[RoleAddr] = []
 
 

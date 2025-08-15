@@ -30,7 +30,7 @@ namespace rtp_llm {
             }                                                                                                          \
             auto wait_time_ms = prefill_context.getStream()->getTimeInfo().wait_time_us / 1000;                        \
             if (wait_time_ms) {                                                                                        \
-                new_error_msg += "stream wait time is " + std::to_string(first_token_rt_ms) + "ms, ";                  \
+                new_error_msg += "stream wait time is " + std::to_string(wait_time_ms) + "ms, ";                       \
             }                                                                                                          \
         }                                                                                                              \
         auto status = prefill_context.closeGrpcStream();                                                               \
@@ -370,8 +370,11 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
     RTP_LLM_LOG_DEBUG("request [%ld] start to poll remote output", prefill_context.request_id);
     auto&             request_id = prefill_context.request_id;
     GenerateOutputsPB response;
-    auto              initial_reuse_len = prefill_context.getStream()->initialReuseLength();
-    auto              first_token_rt_us = prefill_context.getStream()->getTimeInfo().first_token_rt_us;
+    auto              prefill_total_reuse_len  = prefill_context.getStream()->initialReuseLength();
+    auto              prefill_local_reuse_len  = prefill_context.getStream()->localReuseLength();
+    auto              prefill_remote_reuse_len = prefill_context.getStream()->remoteReuseLength();
+
+    auto first_token_rt_us = prefill_context.getStream()->getTimeInfo().first_token_rt_us;
     while (prefill_context.client_stream->Read(&response)) {
         if (prefill_context.server_context->IsCancelled()) {
             RTP_LLM_LOG_WARNING("request [%ld] cancel by user", request_id);
@@ -389,7 +392,24 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
         for (size_t i = 0; i < response.generate_outputs_size(); i++) {
             response.mutable_generate_outputs(i)->mutable_aux_info()->set_first_token_cost_time_us(first_token_rt_us);
             response.mutable_generate_outputs(i)->mutable_aux_info()->set_cost_time_us(cost_time_us);
-            response.mutable_generate_outputs(i)->mutable_aux_info()->set_reuse_len(initial_reuse_len);
+
+            response.mutable_generate_outputs(i)->mutable_aux_info()->set_total_reuse_len(prefill_total_reuse_len);
+            response.mutable_generate_outputs(i)->mutable_aux_info()->set_local_reuse_len(prefill_local_reuse_len);
+            response.mutable_generate_outputs(i)->mutable_aux_info()->set_remote_reuse_len(prefill_remote_reuse_len);
+
+            response.mutable_generate_outputs(i)->mutable_aux_info()->set_prefill_total_reuse_len(
+                prefill_total_reuse_len);
+            response.mutable_generate_outputs(i)->mutable_aux_info()->set_prefill_local_reuse_len(
+                prefill_local_reuse_len);
+            response.mutable_generate_outputs(i)->mutable_aux_info()->set_prefill_remote_reuse_len(
+                prefill_remote_reuse_len);
+
+            response.mutable_generate_outputs(i)->mutable_aux_info()->set_decode_total_reuse_len(
+                response.generate_outputs(i).aux_info().total_reuse_len());
+            response.mutable_generate_outputs(i)->mutable_aux_info()->set_decode_local_reuse_len(
+                response.generate_outputs(i).aux_info().local_reuse_len());
+            response.mutable_generate_outputs(i)->mutable_aux_info()->set_decode_remote_reuse_len(
+                response.generate_outputs(i).aux_info().remote_reuse_len());
         }
         if (!prefill_context.rpc_context.writer->Write(response)) {
             RTP_LLM_LOG_WARNING("request [%ld] write outputs pb failed", request_id);

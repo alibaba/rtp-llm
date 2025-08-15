@@ -297,8 +297,11 @@ ErrorInfo DecodeRpcServerNew::writeAppendFirstToken(DecodeGenerateContextNew& de
         return ErrorInfo(ErrorCode::CANCELLED, "request is cancelled");
     }
 
-    auto&   response          = decode_context.remote_generate_response;
-    auto    initial_reuse_len = decode_context.getStream()->initialReuseLength();
+    auto& response                = decode_context.remote_generate_response;
+    auto  decode_total_reuse_len  = decode_context.getStream()->initialReuseLength();
+    auto  decode_local_reuse_len  = decode_context.getStream()->localReuseLength();
+    auto  decode_remote_reuse_len = decode_context.getStream()->remoteReuseLength();
+
     auto    first_token_rt_us = response.first_token_rt_us();
     int64_t cost_time_us      = currentTimeUs() - decode_context.request_begin_time_us;
 
@@ -307,7 +310,20 @@ ErrorInfo DecodeRpcServerNew::writeAppendFirstToken(DecodeGenerateContextNew& de
         response_output->mutable_generate_outputs(i)->mutable_aux_info()->set_first_token_cost_time_us(
             first_token_rt_us);
         response_output->mutable_generate_outputs(i)->mutable_aux_info()->set_cost_time_us(cost_time_us);
-        response_output->mutable_generate_outputs(i)->mutable_aux_info()->set_reuse_len(initial_reuse_len);
+
+        response_output->mutable_generate_outputs(i)->mutable_aux_info()->set_prefill_total_reuse_len(
+            response_output->generate_outputs(i).aux_info().total_reuse_len());
+        response_output->mutable_generate_outputs(i)->mutable_aux_info()->set_prefill_local_reuse_len(
+            response_output->generate_outputs(i).aux_info().local_reuse_len());
+        response_output->mutable_generate_outputs(i)->mutable_aux_info()->set_prefill_remote_reuse_len(
+            response_output->generate_outputs(i).aux_info().remote_reuse_len());
+
+        response_output->mutable_generate_outputs(i)->mutable_aux_info()->set_decode_total_reuse_len(
+            decode_total_reuse_len);
+        response_output->mutable_generate_outputs(i)->mutable_aux_info()->set_decode_local_reuse_len(
+            decode_local_reuse_len);
+        response_output->mutable_generate_outputs(i)->mutable_aux_info()->set_decode_remote_reuse_len(
+            decode_remote_reuse_len);
     }
 
     if (!decode_context.response_writer->Write(*response_output)) {

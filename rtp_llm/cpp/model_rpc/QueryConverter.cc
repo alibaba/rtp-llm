@@ -121,7 +121,8 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
 std::vector<RoleAddr> QueryConverter::getRoleAddrs(const GenerateConfigPB* config_proto) {
     std::vector<RoleAddr> role_addrs;
     for (const auto& role_addr : config_proto->role_addrs()) {
-        role_addrs.emplace_back(RoleType(role_addr.role()), role_addr.ip(), role_addr.http_port(), role_addr.grpc_port());
+        role_addrs.emplace_back(
+            RoleType(role_addr.role()), role_addr.ip(), role_addr.http_port(), role_addr.grpc_port());
     }
     return role_addrs;
 }
@@ -256,11 +257,11 @@ void QueryConverter::transResponse(GenerateOutputsPB* outputs, const GenerateOut
         aux_info->set_fallback_tokens(response.aux_info.fallback_tokens);
         aux_info->set_fallback_times(response.aux_info.fallback_times);
         aux_info->set_input_len(response.aux_info.input_len);
-        aux_info->set_reuse_len(response.aux_info.reuse_len);
         aux_info->set_prefix_len(response.aux_info.prefix_len);
         aux_info->set_output_len(response.aux_info.output_len);
         aux_info->set_step_output_len(response.aux_info.step_output_len);
         aux_info->set_pd_sep(response.aux_info.pd_sep);
+        aux_info->set_total_reuse_len(response.aux_info.reuse_len);
         aux_info->set_local_reuse_len(response.aux_info.local_reuse_len);
         aux_info->set_remote_reuse_len(response.aux_info.remote_reuse_len);
         if (response.aux_info.cum_log_probs.has_value()) {

@@ -196,16 +196,22 @@ def trans_output(
             wait_time=output_pb.aux_info.wait_time_us / 1000.0,
             iter_count=output_pb.aux_info.iter_count,
             input_len=output_pb.aux_info.input_len,
-            reuse_len=output_pb.aux_info.reuse_len,
             prefix_len=output_pb.aux_info.prefix_len,
             output_len=output_pb.aux_info.output_len,
             step_output_len=output_pb.aux_info.step_output_len,
             fallback_tokens=output_pb.aux_info.fallback_tokens,
             fallback_times=output_pb.aux_info.fallback_times,
             pd_sep=output_pb.aux_info.pd_sep,
+            reuse_len=output_pb.aux_info.total_reuse_len,
             local_reuse_len=output_pb.aux_info.local_reuse_len,
             remote_reuse_len=output_pb.aux_info.remote_reuse_len,
-            role_addrs=input_py.generate_config.role_addrs
+            prefill_total_reuse_len=output_pb.aux_info.prefill_total_reuse_len,
+            prefill_local_reuse_len=output_pb.aux_info.prefill_local_reuse_len,
+            prefill_remote_reuse_len=output_pb.aux_info.prefill_remote_reuse_len,
+            decode_total_reuse_len=output_pb.aux_info.decode_total_reuse_len,
+            decode_local_reuse_len=output_pb.aux_info.decode_local_reuse_len,
+            decode_remote_reuse_len=output_pb.aux_info.decode_remote_reuse_len,
+            role_addrs=input_py.generate_config.role_addrs,
         )
         # TODO(xinfei.sxf) cum_log_probs is not right, ignore it temporarily
         if output_pb.aux_info.HasField("cum_log_probs"):
