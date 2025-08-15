@@ -23,6 +23,7 @@ from rtp_llm.ops import (
     ServiceDiscoveryConfig,
     SpeculativeExecutionConfig,
 )
+from rtp_llm.utils.fuser import MountRwMode, fetch_remote_file_to_local
 
 DEFAULT_START_PORT = 8088
 MASTER_INFO_PORT_NUM = 11
@@ -593,6 +594,20 @@ class WorkerConfig:
         return f"worker_info_port_num: {self.worker_info_port_num}"
 
 
+class JITConfig:
+    def __init__(self):
+        self.remote_jit_dir: str = ""
+
+    def update_from_env(self):
+        self.remote_jit_dir = os.environ.get("REMOTE_JIT_DIR", self.remote_jit_dir)
+        os.environ["REMOTE_JIT_DIR"] = fetch_remote_file_to_local(
+            self.remote_jit_dir, MountRwMode.RWMODE_RW
+        )
+
+    def to_string(self):
+        return f"remote_jit_dir: {self.remote_jit_dir}"
+
+
 class PyEnvConfigs:
     def __init__(self):
         self.server_config: ServerConfig = ServerConfig()
@@ -627,6 +642,7 @@ class PyEnvConfigs:
         self.fmha_config = FMHAConfig()
         self.misc_config = MiscellaneousConfig()
         self.concurrency_config = ConcurrencyConfig()
+        self.jit_config = JITConfig()
 
     def update_from_env(self):
         self.server_config.update_from_env()
@@ -654,6 +670,7 @@ class PyEnvConfigs:
         self.misc_config.update_from_env()
         self.concurrency_config.update_from_env()
         self.ffn_disaggregate_config.update_from_env()
+        self.jit_config.update_from_env()
         logging.info(self.to_string())
 
     def to_string(self):
@@ -691,6 +708,7 @@ class PyEnvConfigs:
             "[fmha_config]\n" + self.fmha_config.to_string() + "\n\n"
             "[misc_config]\n" + self.misc_config.to_string() + "\n\n"
             "[concurrency_config]\n" + self.concurrency_config.to_string() + "\n\n"
+            "[jit_config]\n" + self.jit_config.to_string() + "\n\n"
         )
 
 
