@@ -15,28 +15,14 @@ DefaultDistKvCachePlanner::DefaultDistKvCachePlanner(CacheManager*              
     init_params_3fs_(init_params_3fs),
     metrics_reporter_(metrics_reporter) {}
 
+
 std::vector<DistStorage::Item> DefaultDistKvCachePlanner::layout(const std::vector<int64_t>& cache_keys,
                                                                  const std::vector<int32_t>& block_indices,
                                                                  size_t                      ignore_block_num,
-                                                                 const std::map<std::string, std::string>& metas,
-                                                                 bool                                      skip_iov) {
-    if (cache_keys.empty()) {
+                                                                 const std::map<std::string, std::string>& metas) {
+    uint32_t total_len = cache_keys.size();
+    if (total_len == 0) {
         return {};
-    }
-
-    DistStorage::Item item;
-    item.type                    = DistStorage::ST_3FS;
-    item.metas                   = metas;
-    item.metas["LAST_CACHE_KEY"] = std::to_string(cache_keys.back());
-
-    const auto kvcache_key = generateKvCacheKey(item.metas);
-    if (!kvcache_key.has_value()) {
-        return {};
-    }
-    item.key = kvcache_key.value();
-
-    if (skip_iov) {
-        return {item};
     }
 
     if (cache_keys.size() > block_indices.size() + ignore_block_num) {
@@ -47,54 +33,68 @@ std::vector<DistStorage::Item> DefaultDistKvCachePlanner::layout(const std::vect
             ignore_block_num);
         return {};
     }
-
+    
     const auto& cache_config = cache_manager_->cacheConfig();
     const auto  k_block_len  = cache_config.k_block_stride;
     const auto  v_block_len  = cache_config.v_block_stride;
 
-    // layer_num * block_num * 2[k & v]
-    item.iovs.reserve(cache_keys.size() * cache_config.layer_num * 2);
+    std::shared_ptr<DistStorage::Item> item;
+    uint32_t                           item_block_count = 0;
+    std::vector<int64_t>               item_keys;
+    std::vector<DistStorage::Item>     items;
 
-    for (int i = 0; i < cache_keys.size(); i++) {
-        bool ignore = i < ignore_block_num;
-        for (int layer_id = 0; layer_id < cache_config.layer_num; layer_id++) {
-            if (ignore) {
-                item.iovs.push_back(DistStorage::Iov{nullptr, k_block_len, false, ignore});
-                item.iovs.push_back(DistStorage::Iov{nullptr, v_block_len, false, ignore});
-            } else {
-                auto block_id    = block_indices.at(i - ignore_block_num);
-                auto block_addrs = cache_manager_->convertIndexToAddr(block_id, layer_id);
-                if (!block_addrs.k_addr || !block_addrs.v_addr) {
-                    return {};
+    for (int i = 0; i < total_len; i++) {
+        bool ignore   = i < ignore_block_num;
+        if (item == nullptr) {
+            item             = std::make_shared<DistStorage::Item>();
+            item->type       = DistStorage::ST_3FS;
+            item->metas      = metas;
+            item_block_count = 0;
+            item_keys.clear();
+        }
+
+        if (!block_indices.empty()) {
+            for (int layer_id = 0; layer_id < cache_config.layer_num; layer_id++) {
+                if (ignore) {
+                    item->iovs.push_back(DistStorage::Iov{nullptr, k_block_len, false, ignore});
+                    item->iovs.push_back(DistStorage::Iov{nullptr, v_block_len, false, ignore});
+                } else {
+                    auto block_id    = block_indices.at(i - ignore_block_num);
+                    auto block_addrs = cache_manager_->convertIndexToAddr(block_id, layer_id);
+                    if (!block_addrs.k_addr || !block_addrs.v_addr) {
+                        return {};
+                    }
+                    item->iovs.push_back(DistStorage::Iov{std::shared_ptr<void>(block_addrs.k_addr, [](void* p) {}),
+                                                        k_block_len,
+                                                        true,
+                                                        ignore});
+                    item->iovs.push_back(DistStorage::Iov{std::shared_ptr<void>(block_addrs.v_addr, [](void* p) {}),
+                                                        v_block_len,
+                                                        true,
+                                                        ignore});
                 }
-                item.iovs.push_back(DistStorage::Iov{
-                    std::shared_ptr<void>(block_addrs.k_addr, [](void* p) {}), k_block_len, true, ignore});
-                item.iovs.push_back(DistStorage::Iov{
-                    std::shared_ptr<void>(block_addrs.v_addr, [](void* p) {}), v_block_len, true, ignore});
             }
         }
-    }
 
-    return {item};
-}
+        item_block_count++;
+        item_keys.push_back(cache_keys[i]);
 
-std::optional<std::string>
-DefaultDistKvCachePlanner::generateKvCacheKey(const std::map<std::string, std::string>& metas) const {
-    try {
-        std::ostringstream oss;
-        oss << metas.at("BIZ_NAME") << "_" << metas.at("CKPT_PATH") << "_" << metas.at("LORA_CKPT_PATH") << "_"
-            << metas.at("SEQ_SIZE_PER_BLOCK") << "_" << metas.at("DTYPE") << "_" << metas.at("USE_MLA") << "_"
-            << metas.at("TP_SIZE") << "_" << metas.at("TP_RANK") << "_" << metas.at("LAST_CACHE_KEY");
-        return oss.str();
-    } catch (const std::exception& e) {
-        std::ostringstream oss;
-        for (const auto& [key, value] : metas) {
-            oss << key << ":" << value << ", ";
+        if (item_block_count >= cache_config.max_block_size_per_item && item_keys.size() > 0) {
+            item->key = item->metas["TP_RANK"] + "_"  + std::to_string(item_keys.front()) + "_" + std::to_string(item_keys.back());
+            item->metas["ITEM_KEY"] = item->key;
+            RTP_LLM_LOG_DEBUG("push item: %s", item->key.c_str());
+            items.push_back(*item);
+            item = nullptr;
         }
-        RTP_LLM_LOG_WARNING(
-            "found exception when generate kvcache key. metas: [%s], exception: [%s]", oss.str().c_str(), e.what());
     }
-    return std::nullopt;
+
+    if (item != nullptr && item_keys.size() > 0) {
+        item->key = item->metas["TP_RANK"] + "_" + std::to_string(item_keys.front()) + "_" + std::to_string(item_keys.back());
+        item->metas["ITEM_KEY"] = item->key;
+        RTP_LLM_LOG_DEBUG("push item: %s", item->key.c_str());
+        items.push_back(*item);
+    }
+    return items;
 }
 
 bool DefaultDistKvCachePlanner::verify(const std::vector<DistStorage::Item>&     items,

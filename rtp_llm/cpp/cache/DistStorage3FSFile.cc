@@ -373,7 +373,7 @@ bool DistStorage3FSFile::read(const std::vector<DistStorage::Iov>& iovs) {
                             offset_to_read);
         return true;
     }
-    if (const auto file_len = getFileLength(); offset_to_read + read_len > file_len) {
+    if (const auto file_len = getFileLength(); offset_to_read + static_cast<int64_t>(read_len) > file_len) {
         RTP_LLM_LOG_WARNING(
             "read failed, read len exceed file len, file: %s, offset: %ld, read len: %zu, file len: %ld",
             filepath_.c_str(),

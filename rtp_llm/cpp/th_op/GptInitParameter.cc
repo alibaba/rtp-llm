@@ -402,6 +402,7 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(mm_position_ids_style, mm_position_ids_style_)                                                        \
     DEF_PROPERTY(pre_allocate_op_mem, pre_allocate_op_mem_)                                                            \
     DEF_PROPERTY(seq_size_per_block, seq_size_per_block_)                                                              \
+    DEF_PROPERTY(max_block_size_per_item, max_block_size_per_item_)                                                    \
     DEF_PROPERTY(block_nums, block_nums_)                                                                              \
     DEF_PROPERTY(scheduler_reserve_resource_ratio, scheduler_reserve_resource_ratio_)                                  \
     DEF_PROPERTY(kv_cache_mem_mb, kv_cache_mem_mb_)                                                                    \

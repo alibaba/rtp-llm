@@ -99,6 +99,11 @@ private:
     std::unique_ptr<autil::LockFreeThreadPool> wait_match_thread_pool_;
     const size_t                               thread_num_{1};
     const size_t                               queue_size_{2000};
+
+    // IO thread pool for parallel 3FS read/write of multiple items
+    std::unique_ptr<autil::LockFreeThreadPool> io_thread_pool_;
+    const size_t                               io_thread_num_{4};
+    const size_t                               io_queue_size_{4096};
 };
 
 }  // namespace rtp_llm

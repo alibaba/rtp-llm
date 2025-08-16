@@ -23,6 +23,7 @@ CacheConfig CacheConfigCreator::createBasicConfig(const rtp_llm::GptInitParamete
                                          (uint)(param.kv_lora_rank_ + param.rope_head_dim_),
                                          (uint)0,
                                          (uint)param.seq_size_per_block_,
+                                         (uint)param.max_block_size_per_item_,
                                          dtype});
     }
 
@@ -31,6 +32,7 @@ CacheConfig CacheConfigCreator::createBasicConfig(const rtp_llm::GptInitParamete
                                     (uint)local_head_num_kv,
                                     (uint)param.size_per_head_,
                                     (uint)param.seq_size_per_block_,
+                                    (uint)param.max_block_size_per_item_,
                                     dtype});
 }
 

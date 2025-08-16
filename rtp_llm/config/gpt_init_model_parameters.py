@@ -362,6 +362,7 @@ class GptInitModelParameters:
     scheduler_reserve_resource_ratio: int
     scoring_func: int
     seq_size_per_block: int
+    max_block_size_per_item: int
     size_per_head: int
     softmax_extra_scale: float
     special_tokens: SpecialTokens
@@ -770,6 +771,10 @@ class GptInitModelParameters:
 
         # PD Seperation
         self.decode_entrance = get_env_bool("DECODE_ENTRANCE", False)
+
+        # KVCache Config
+        self.max_block_size_per_item = get_env_int("MAX_BLOCK_SIZE_PER_ITEM", 16)
+        logging.info(f"max_block_size_per_item: {self.max_block_size_per_item}")
 
     def update_config_with_sparse_config(self, ckpt_path: str):
         sparse_config_file = None

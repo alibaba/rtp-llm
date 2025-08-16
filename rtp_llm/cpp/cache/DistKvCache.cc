@@ -1,6 +1,8 @@
 #include "rtp_llm/cpp/cache/DistKvCache.h"
 
 #include <future>
+#include <thread>
+#include <algorithm>
 
 #include "rtp_llm/cpp/cache/CacheManager.h"
 #include "rtp_llm/cpp/cache/DistKvCacheMetrics.h"
@@ -192,7 +194,6 @@ int32_t DistKvCache::matchForAllRank(const std::vector<int64_t>&        cache_ke
         DistKvCacheMetrics::setTotalCacheInputLength(metrics, total_input_len * cache_config.seq_size_per_block);
         DistKvCacheMetrics::setTotalCacheHitRate(metrics, total_match_len * 100.0 / total_input_len);
     }
-
     return match_len;
 }
 
@@ -207,40 +208,55 @@ int32_t DistKvCache::match(const std::vector<int64_t>&               cache_keys,
         }
     }
 
-    int32_t match_len = 0;
-    for (int len = cache_keys.size(); len > ignore_block_num; --len) {
-        if (stop && stop->load()) {
-            break;
-        }
-        std::vector<int64_t> cache_keys_to_match(cache_keys.begin(), cache_keys.begin() + len);
-        auto layout_items = planner_->layout(cache_keys_to_match, {}, ignore_block_num, extra_metas, true);
-        if (layout_items.empty()) {
-            continue;
-        }
+    const auto& cache_config = cache_manager_->cacheConfig();
 
-        bool success = true;
-        for (auto& item : layout_items) {
-            if (stop && stop->load()) {
-                success = false;
-                break;
-            }
-            if (!storage_->lookup(item)) {
-                success = false;
-                break;
-            }
+    // get layout at the granularity of items i.e. blocks collection
+    auto layout_items = planner_->layout(cache_keys, {}, ignore_block_num, extra_metas);
+
+    if (layout_items.empty()) {
+        return 0;
+    }
+
+    if (storage_->lookup(layout_items.back())) {
+        RTP_LLM_LOG_DEBUG("request[%ld] match all", request_id);
+        return cache_keys.size();
+    }
+
+    int32_t left = 0;
+    int32_t right = static_cast<int32_t>(layout_items.size()) - 2;
+    int32_t mid = 0;
+    int32_t match_len = 0;
+    
+    
+    while (left <= right) {
+        mid = left + (right - left) / 2;
+        if (storage_->lookup(layout_items[mid])) {
+            RTP_LLM_LOG_DEBUG("request[%ld] match index: %d", request_id, mid);
+            left = mid + 1;
+        } else {
+            right = mid - 1;
         }
-        if (success) {
-            match_len = len;
+    }
+    match_len = (right + 1) * cache_config.max_block_size_per_item;
+    DistStorage::Item item;
+    // deep search partial block
+    item = DistStorage::Item();
+    item.type       = DistStorage::ST_3FS;
+    item.metas      = extra_metas;
+    
+    int start_key = (right + 1) * cache_config.max_block_size_per_item;
+    int end_key = start_key + cache_config.max_block_size_per_item - 1;
+    end_key = std::min(end_key, static_cast<int>(cache_keys.size()) - 1);
+    for (int i = end_key; i >= start_key; i--) {
+        item.key = item.metas["TP_RANK"] + "_" + std::to_string(cache_keys[start_key]) + "_" + std::to_string(cache_keys[i]);
+        item.metas["ITEM_KEY"] = item.key;
+        if (storage_->lookup(item)) {
+            RTP_LLM_LOG_DEBUG("request[%ld] deep match item: %s, len: %d", request_id, item.key.c_str(), i - start_key + 1);
+            match_len += (i - start_key + 1);
             break;
         }
     }
 
-    RTP_LLM_LOG_DEBUG("request: %ld, already match len: %d, dist kv match len: %d, cache keys: [%zu|%s]",
-                      request_id,
-                      ignore_block_num,
-                      match_len,
-                      cache_keys.size(),
-                      vectorToString(cache_keys).c_str());
     return match_len;
 }
 
@@ -289,6 +305,12 @@ bool DistKvCache::get(const std::vector<int64_t>&        cache_keys,
     }
 
     auto layout_items = planner_->layout(cache_keys, block_indices, ignore_block_num, extra_metas);
+    RTP_LLM_LOG_DEBUG("layout items size: %zu", layout_items.size());
+
+    for (auto &item : layout_items) {
+        RTP_LLM_LOG_DEBUG("layout item: %s", item.key.c_str());  
+    }
+
     if (layout_items.empty()) {
         RTP_LLM_LOG_WARNING("dist kv cache get cache, layout iovs is empty");
         return false;
@@ -371,6 +393,7 @@ bool DistKvCache::put(const std::vector<int64_t>&        cache_keys,
             extra_metas[key] = value;
         }
     }
+
 
     auto layout_items = planner_->layout(cache_keys, block_indices, ignore_block_num, extra_metas);
     if (layout_items.empty()) {

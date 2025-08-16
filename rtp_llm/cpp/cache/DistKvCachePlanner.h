@@ -10,8 +10,7 @@ public:
     virtual std::vector<DistStorage::Item> layout(const std::vector<int64_t>&               cache_keys,
                                                   const std::vector<int32_t>&               block_indices,
                                                   size_t                                    ignore_block_num,
-                                                  const std::map<std::string, std::string>& metas,
-                                                  bool                                      skip_iov = false) = 0;
+                                                  const std::map<std::string, std::string>& metas) = 0;
 
     virtual bool verify(const std::vector<DistStorage::Item>&     buffers,
                         const std::vector<int64_t>&               cache_keys,
@@ -33,8 +32,7 @@ public:
     std::vector<DistStorage::Item> layout(const std::vector<int64_t>&               cache_keys,
                                           const std::vector<int32_t>&               block_indices,
                                           size_t                                    ignore_block_num,
-                                          const std::map<std::string, std::string>& metas,
-                                          bool                                      skip_iov) override;
+                                          const std::map<std::string, std::string>& metas) override;
 
     bool verify(const std::vector<DistStorage::Item>&     buffers,
                 const std::vector<int64_t>&               cache_keys,

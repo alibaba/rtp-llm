@@ -180,7 +180,7 @@ std::string DistStorage3FS::makeFilepath(const std::map<std::string, std::string
         const auto filepath = std::filesystem::path(init_params_.mountpoint) / init_params_.root_dir
                               / metas.at("BIZ_NAME") / metas.at("CKPT_PATH") / metas.at("LORA_CKPT_PATH")
                               / metas.at("SEQ_SIZE_PER_BLOCK") / metas.at("DTYPE") / metas.at("USE_MLA")
-                              / metas.at("TP_SIZE") / metas.at("TP_RANK") / metas.at("LAST_CACHE_KEY");
+                              / metas.at("TP_SIZE") / metas.at("TP_RANK") / metas.at("ITEM_KEY");
         return filepath.lexically_normal().string();
     } catch (const std::exception& e) {
         std::ostringstream oss;

@@ -11,7 +11,8 @@ struct KVCacheParam {
     uint              block_nums;
     uint              local_head_num_kv;
     uint              size_per_head;
-    uint              seq_size_per_block = 1;
+    uint              seq_size_per_block        = 1;
+    uint              max_block_size_per_item   = 2;
     rtp_llm::DataType dtype;
 };
 
@@ -20,17 +21,19 @@ struct MlaCacheParam {
     uint              block_nums;
     uint              kv_lora_rank;
     uint              rope_head_dim;
-    uint              seq_size_per_block = 1;
+    uint              seq_size_per_block        = 1;
+    uint              max_block_size_per_item   = 2;
     rtp_llm::DataType dtype;
 };
 
 struct CacheConfig {
-    uint32_t          layer_num          = 0;
-    uint32_t          block_nums         = 0;
-    uint32_t          local_head_num_kv  = 0;
-    uint32_t          size_per_head      = 0;
-    uint32_t          seq_size_per_block = 1;
-    rtp_llm::DataType dtype              = rtp_llm::TYPE_INVALID;
+    uint32_t          layer_num                 = 0;
+    uint32_t          block_nums                = 0;
+    uint32_t          local_head_num_kv         = 0;
+    uint32_t          size_per_head             = 0;
+    uint32_t          seq_size_per_block        = 1;
+    uint32_t          max_block_size_per_item   = 2;
+    rtp_llm::DataType dtype                     = rtp_llm::TYPE_INVALID;
 
     size_t block_size   = 0;
     size_t k_block_size = 0;
@@ -58,6 +61,7 @@ struct CacheConfig {
         local_head_num_kv(param.local_head_num_kv),
         size_per_head(param.size_per_head),
         seq_size_per_block(param.seq_size_per_block),
+        max_block_size_per_item(param.max_block_size_per_item),
         dtype(param.dtype) {
 
         auto dtype_size = rtp_llm::getTypeSize(dtype);
@@ -82,7 +86,7 @@ struct CacheConfig {
 
     CacheConfig(const MlaCacheParam& param):
         CacheConfig(KVCacheParam{
-            param.layer_num, param.block_nums, 1, param.kv_lora_rank, param.seq_size_per_block, param.dtype}) {
+            param.layer_num, param.block_nums, 1, param.kv_lora_rank, param.seq_size_per_block, param.max_block_size_per_item, param.dtype}) {
         use_mla       = true;
         kv_lora_rank  = param.kv_lora_rank;
         rope_head_dim = param.rope_head_dim;
