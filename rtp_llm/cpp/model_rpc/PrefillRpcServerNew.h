@@ -34,8 +34,6 @@ private:
     ErrorInfo notifyStoreCache(PrefillGenerateContextNew& prefill_context, int index);
     void      constructRemoteLoadRequest(PrefillGenerateContextNew& prefill_context, int index);
 
-    void notifyRequestEndForAllRank(PrefillGenerateContextNew& prefill_context);
-    void notifyRequestEnd(PrefillGenerateContextNew& prefill_context, int index);
     ErrorInfo generateFirstToken(PrefillGenerateContextNew& prefill_context);
     ErrorInfo waitStoreCacheForAllRankDone(PrefillGenerateContextNew& prefill_context);
 };

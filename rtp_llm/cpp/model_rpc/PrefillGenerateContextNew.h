@@ -1,7 +1,9 @@
 #pragma once
 
+#include "rtp_llm/cpp/model_rpc/RemoteServerResource.h"
 #include "rtp_llm/cpp/model_rpc/GenerateContext.h"
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
+
 
 namespace rtp_llm {
 
@@ -26,7 +28,8 @@ struct PrefillRpcContext {
 };
 
 struct PrefillGenerateContextNew: public GenerateContext {
-    PrefillGenerateContextNew(grpc::ServerContext*              server_context,
+    PrefillGenerateContextNew(RemoteServerResource*             resource,
+                              grpc::ServerContext*                server_context,
                               const RemoteGenerateRequestPBNew* request,
                               RemoteGenerateResponsePBNew*      response,
                               kmonitor::MetricsReporterPtr&     metrics_reporter,
@@ -36,6 +39,7 @@ struct PrefillGenerateContextNew: public GenerateContext {
                         server_context,
                         metrics_reporter,
                         meta),
+        resource(resource),
         request(request),
         response(response) {
         request_begin_time_us = currentTimeUs();
@@ -46,17 +50,21 @@ struct PrefillGenerateContextNew: public GenerateContext {
 
     ~PrefillGenerateContextNew() { 
         stopStream(); 
+        notifyRequestEndForAllRank();
         reportTime();
     }
 
 private:
     void reportTime();
+    void notifyRequestEndForAllRank();
+    void notifyRequestEnd(int index);
 
 public:
     ErrorInfo init(const std::shared_ptr<EngineBase>& engine);
     void stopStream();
 
 public:
+    RemoteServerResource*             resource;
     const RemoteGenerateRequestPBNew* request;
     RemoteGenerateResponsePBNew*      response;
     std::shared_ptr<GenerateInput>    generate_input;

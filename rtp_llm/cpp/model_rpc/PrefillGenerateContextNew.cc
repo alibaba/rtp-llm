@@ -1,5 +1,7 @@
 #include "rtp_llm/cpp/model_rpc/PrefillGenerateContextNew.h"
+#include "rtp_llm/cpp/model_rpc/RemoteServerResource.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
+
 
 namespace rtp_llm {
 
@@ -44,6 +46,39 @@ void PrefillGenerateContextNew::stopStream() {
     //         usleep(1000);
     //     }
     // }
+}
+
+
+void PrefillGenerateContextNew::notifyRequestEndForAllRank() {
+    for (int i = 0; i < resource->grpc_workers.size(); ++i) {
+        notifyRequestEnd(i);
+    }
+}
+
+void PrefillGenerateContextNew::notifyRequestEnd(int index) {
+    auto& worker         = resource->grpc_workers[index];
+    auto  connect_status = resource->rpc_pool.getConnection(worker);
+    if (!connect_status.ok()) {
+        RTP_LLM_LOG_WARNING("request [%s] get grpc connection for rank:%d, addr:%s failed",
+                            request_key.c_str(),
+                            index,
+                            worker.c_str());
+    }
+
+    RemoteFinishRequestPB finish_request;
+    finish_request.set_request_id(request_id);
+
+    auto                    stub           = connect_status.value().stub.get();
+    grpc::ClientContext     client_context;
+    EmptyPB                 response;
+    auto                    status = stub->RemoteFinishNew(&client_context, finish_request, &response);
+
+    if(!status.ok()) {
+        std::string error_msg = "remote finish for rank:" + std::to_string(index) + " failed";
+        RTP_LLM_LOG_ERROR("request [%s] %s",
+                            request_key.c_str(),
+                            error_msg.c_str());
+    }
 }
 
 void PrefillGenerateContextNew::reportTime() {

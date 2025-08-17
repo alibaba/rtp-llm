@@ -26,7 +26,7 @@ grpc::Status PrefillRpcServerNew::RemoteGenerateNew(grpc::ServerContext*        
     auto modified_config = mutable_input->mutable_generate_config();
     modified_config->set_inter_request_id(-1);
 
-	PrefillGenerateContextNew prefill_context(context, request, response, metrics_reporter_, meta_);
+	PrefillGenerateContextNew prefill_context(&resource_, context, request, response, metrics_reporter_, meta_);
     RTP_LLM_LOG_INFO("request [%s] RemoteGenerateNew", prefill_context.request_key.c_str());
 
     prefill_context.error_info = prefill_context.init(engine_);
@@ -74,9 +74,6 @@ grpc::Status PrefillRpcServerNew::RemoteGenerateNew(grpc::ServerContext*        
     //        engine_->getDevice()->getDeviceProperties().tp_rank == 0 &&
     //        !request->mtp_hidden_states_key.empty()) {
     //}
-
-    // clear request block buffer for all ranks 
-    notifyRequestEndForAllRank(prefill_context);
 
     RTP_LLM_LOG_DEBUG("request [%s] RemoteGenerateNew success, response is %s",
                      prefill_context.request_key.c_str(),
@@ -174,38 +171,6 @@ ErrorInfo PrefillRpcServerNew::notifyStoreCache(PrefillGenerateContextNew& prefi
     reader->Finish(&rpc_context->response, &rpc_context->status, reinterpret_cast<void*>(index));
     rpc_context->reader = std::move(reader);
     return ErrorInfo::OkStatus();
-}
-
-void PrefillRpcServerNew::notifyRequestEndForAllRank(PrefillGenerateContextNew& prefill_context) {
-    for (int i = 0; i < resource_.workers.size(); ++i) {
-        notifyRequestEnd(prefill_context, i);
-    }
-}
-
-void PrefillRpcServerNew::notifyRequestEnd(PrefillGenerateContextNew& prefill_context, int index) {
-    auto& worker         = resource_.grpc_workers[index];
-    auto  connect_status = resource_.rpc_pool.getConnection(worker);
-    if (!connect_status.ok()) {
-        RTP_LLM_LOG_WARNING("request [%s] get grpc connection for rank:%d, addr:%s failed",
-                            prefill_context.request_key.c_str(),
-                            index,
-                            worker.c_str());
-    }
-
-    RemoteFinishRequestPB finish_request;
-    finish_request.set_request_id(prefill_context.request_id);
-
-    auto                    stub           = connect_status.value().stub.get();
-    grpc::ClientContext     client_context;
-    EmptyPB                 response;
-    auto                    status = stub->RemoteFinishNew(&client_context, finish_request, &response);
-
-    if(!status.ok()) {
-        std::string error_msg = "remote finish for rank:" + std::to_string(index) + " failed";
-        RTP_LLM_LOG_ERROR("request [%s] %s",
-                            prefill_context.request_key.c_str(),
-                            error_msg.c_str());
-    }
 }
 
 void PrefillRpcServerNew::constructRemoteLoadRequest(PrefillGenerateContextNew& prefill_context, int index) {
