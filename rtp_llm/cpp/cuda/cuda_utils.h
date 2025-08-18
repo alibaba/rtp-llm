@@ -131,8 +131,13 @@ enum class OperationType {
     FP8
 };
 
-inline int div_up(int a, int n) {
-    return (a + n - 1) / n;
+template<typename T>
+inline T ceil_div(T a, T b) {
+    return (a + b - 1) / b;
+}
+
+inline int div_up(int a, int b) {
+    return ceil_div<int>(a, b);
 }
 
 template<typename T,
@@ -143,24 +148,41 @@ auto constexpr ceilDiv(T numerator, U denominator) {
     return (numerator + denominator - 1) / denominator;
 }
 
+template<size_t alignment>
+inline size_t pad(const size_t& input) {
+    return alignment * ((input + alignment - 1) / alignment);
+}
+
 inline size_t pad_to_multiple_of_16(const size_t& input) {
-    static constexpr int ALIGNMENT = 16;
-    return ALIGNMENT * ((input + ALIGNMENT - 1) / ALIGNMENT);
+    return pad<16>(input);
+}
+
+inline size_t pad_to_multiple_of_24(const size_t& input) {
+    return pad<24>(input);
 }
 
 inline size_t pad_to_multiple_of_32(const size_t& input) {
-    static constexpr int ALIGNMENT = 32;
-    return ALIGNMENT * ((input + ALIGNMENT - 1) / ALIGNMENT);
+    return pad<32>(input);
+}
+
+inline size_t pad_to_multiple_of_48(const size_t& input) {
+    return pad<48>(input);
 }
 
 inline size_t pad_to_multiple_of_64(const size_t& input) {
-    static constexpr int ALIGNMENT = 64;
-    return ALIGNMENT * ((input + ALIGNMENT - 1) / ALIGNMENT);
+    return pad<64>(input);
+}
+
+inline size_t pad_to_multiple_of_96(const size_t& input) {
+    return pad<96>(input);
+}
+
+inline size_t pad_to_multiple_of_120(const size_t& input) {
+    return pad<120>(input);
 }
 
 inline size_t pad_to_multiple_of_128(const size_t& input) {
-    static constexpr int ALIGNMENT = 128;
-    return ALIGNMENT * ((input + ALIGNMENT - 1) / ALIGNMENT);
+    return pad<128>(input);
 }
 
 template<typename T>

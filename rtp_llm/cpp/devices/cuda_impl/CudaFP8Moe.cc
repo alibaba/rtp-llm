@@ -108,12 +108,22 @@ FfnLayerOutput CudaDevice::moeFfnFp8(const FfnLayerParams& params, const MoeGate
     printBufferData(*expert_first_token_offset, "expert_first_token_offset");
     check_cuda_error();
 
-    size_t padding_size            = token_num <= 16 ? pad_to_multiple_of_16(token_num) :
-                                                       (token_num <= 32 ? pad_to_multiple_of_32(token_num) :
-                                                                          (token_num <= 64 ? pad_to_multiple_of_64(token_num) :
-                                                                                             pad_to_multiple_of_128(token_num)));
+    size_t padding_size =
+        token_num <= 16 ?
+            pad_to_multiple_of_16(token_num) :
+            (token_num <= 24 ?
+                 pad_to_multiple_of_24(token_num) :
+                 (token_num <= 32 ?
+                      pad_to_multiple_of_32(token_num) :
+                      (token_num <= 48 ?
+                           pad_to_multiple_of_48(token_num) :
+                           (token_num <= 64 ?
+                                pad_to_multiple_of_64(token_num) :
+                                (token_num <= 96 ? pad_to_multiple_of_96(token_num) :
+                                                   (token_num <= 120 ? pad_to_multiple_of_120(token_num) :
+                                                                       pad_to_multiple_of_128(token_num)))))));
     size_t max_num_rows            = token_num * top_k;
-    size_t expected_m              = max_num_rows / num_experts_per_node;
+    size_t expected_m              = ceil_div<size_t>(max_num_rows, num_experts_per_node);
     auto   permuted_src_row_to_dst = allocateBuffer({DataType::TYPE_INT32, {max_num_rows}}, {"permuted_rows"});
     auto   masked_m                = allocateBuffer({DataType::TYPE_INT32, {num_experts_per_node}}, {"masked_m"});
     computeSrc2Dst(expert_first_token_offset->data<int64_t>(),
