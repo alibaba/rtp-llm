@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/lora/LoraManager.h"
 #include "rtp_llm/cpp/schedulers/SchedulerBase.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/NormalCacheStore.h"
+#include "rtp_llm/cpp/dataclass/KvCacheInfo.h"
 
 namespace rtp_llm {
 
@@ -83,6 +84,10 @@ public:
 
     virtual LoadBalanceInfo getLoadBalanceInfo(int64_t latest_version) {
         return LoadBalanceInfo();
+    }
+
+    virtual KVCacheInfo getCacheStatusInfo(int64_t latest_version) {
+        return KVCacheInfo();
     }
 
     virtual const ResourceContext& resourceContext() const {

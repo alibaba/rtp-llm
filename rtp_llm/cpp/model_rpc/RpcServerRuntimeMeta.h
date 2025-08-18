@@ -6,7 +6,7 @@ namespace rtp_llm {
 class RpcServerRuntimeMeta {
 public:
     EngineScheduleInfo getEngineScheduleInfo(int64_t latest_finished_version) {
-        std::unique_lock<std::mutex> lock(mutex_);
+        std::shared_lock<std::shared_mutex> lock(read_write_lock_); 
         EngineScheduleInfo           info;
         for (auto& iter : running_streams_) {
             info.running_task_info_list.push_back(iter.second);
@@ -21,7 +21,7 @@ public:
     }
 
     void enqueue(int64_t request_id, const GenerateStreamPtr& stream) {
-        std::unique_lock<std::mutex> lock(mutex_);
+        std::unique_lock<std::shared_mutex> lock(read_write_lock_); 
         running_streams_[request_id] = EngineScheduleInfo::TaskInfo({request_id,
                                                                      stream->interRequestId(),
                                                                      stream->prefixLength(),
@@ -30,7 +30,7 @@ public:
     }
 
     void dequeue(int64_t request_id, const GenerateStreamPtr& stream) {
-        std::unique_lock<std::mutex> lock(mutex_);
+        std::unique_lock<std::shared_mutex> lock(read_write_lock_); 
         auto                         ptr = running_streams_.find(request_id);
         if (ptr == running_streams_.end()) {
             return;
@@ -71,7 +71,7 @@ protected:
     }
     std::unordered_map<int64_t, EngineScheduleInfo::TaskInfo>   running_streams_;
     std::list<std::pair<int64_t, EngineScheduleInfo::TaskInfo>> finished_streams_;
-    std::mutex                                                  mutex_;
+    mutable std::shared_mutex                                   read_write_lock_;
     int64_t                                                     timeout_ms_        = 5000;
     int64_t                                                     finished_capacity_ = 1000;
 };

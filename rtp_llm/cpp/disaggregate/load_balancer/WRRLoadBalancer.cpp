@@ -88,7 +88,7 @@ std::shared_ptr<const Host> WRRLoadBalancer::chooseHostByWeight(const std::share
         if (iter == host_load_balance_info_map_.end()) {
             continue;
         }
-        weight_acc += rank_factor_ == 0 ? iter->second.load_balance_info.cache_status.available_kv_cache :
+        weight_acc += rank_factor_ == 0 ? iter->second.cache_status.available_kv_cache :
                                           iter->second.load_balance_info.onflight_requests;
         if (weight_acc >= threshold) {
             return host;
@@ -106,7 +106,7 @@ double WRRLoadBalancer::calculateThreshold(std::vector<std::shared_ptr<const Hos
         if (iter == host_load_balance_info_map_.end()) {
             continue;
         }
-        weight_sum += rank_factor_ == 0 ? iter->second.load_balance_info.cache_status.available_kv_cache :
+        weight_sum += rank_factor_ == 0 ? iter->second.cache_status.available_kv_cache :
                                           iter->second.load_balance_info.onflight_requests;
     }
     return weight_sum * generateRandomDouble();

@@ -37,6 +37,7 @@ FIFOScheduler::~FIFOScheduler() {
 }
 
 bool FIFOScheduler::empty() {
+    lock_guard<mutex> lock(lock_);
     return waiting_streams_.empty() && running_streams_.empty();
 }
 
@@ -65,7 +66,6 @@ void FIFOScheduler::evaluateRunningRemote() {
 }
 
 int64_t FIFOScheduler::lastScheduleTime() {
-    lock_guard<mutex> lock(lock_);
     return empty() ? autil::TimeUtility::currentTimeInMilliSeconds() : last_schedule_time_.load();
 }
 
@@ -397,6 +397,7 @@ void FIFOScheduler::reportMetrics(size_t fallback_stream_size) {
         collector.fallback_stream_size       = fallback_stream_size;
         metrics_reporter_->report<RtpLLMSchedulerMetrics, RtpLLMSchedulerMetricsCollector>(nullptr, &collector);
     }
+    return;
 }
 
 }  // namespace rtp_llm

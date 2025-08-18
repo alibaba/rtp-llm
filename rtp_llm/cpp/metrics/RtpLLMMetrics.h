@@ -101,6 +101,12 @@ private:
     AUTIL_LOG_DECLARE();
 };
 
+class RpcCacheStatusMetricsCollector final {
+public:
+    bool    qps              = false;
+    int64_t total_rt_us      = 0;
+};
+
 class RpcWorkerStatusMetricsCollector final {
 public:
     bool    qps         = false;
@@ -115,6 +121,20 @@ public:
 public:
     kmonitor::MutableMetric* qps_metric         = nullptr;
     kmonitor::MutableMetric* total_rt_us_metric = nullptr;
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
+
+class RpcCacheStatusMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RpcCacheStatusMetricsCollector* collector);
+
+public:
+    kmonitor::MutableMetric* qps_metric              = nullptr;
+    kmonitor::MutableMetric* total_rt_us_metric      = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -455,6 +475,25 @@ public:
 
 public:
     kmonitor::MutableMetric* kernel_exec_time_metric = nullptr;
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
+class RtpLLMKVCacheInfoMetricsCollector final {
+public:
+    bool    qps              = false;
+    int64_t total_latency_us = 0;
+};
+
+class RtpLLMKVCacheInfoMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMKVCacheInfoMetricsCollector* collector);
+
+public:
+    kmonitor::MutableMetric* qps_metric              = nullptr;
+    kmonitor::MutableMetric* total_latency_us_metric = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();

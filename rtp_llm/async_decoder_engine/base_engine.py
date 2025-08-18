@@ -2,7 +2,7 @@ from abc import abstractmethod
 from typing import Any, AsyncGenerator, Dict
 
 from rtp_llm.ops import (
-    CacheStatusInfo,
+    KVCacheInfo,
     EngineScheduleInfo,
     LoadBalanceInfo,
     WorkerStatusInfo,
@@ -40,7 +40,7 @@ class BaseEngine:
         raise NotImplementedError()
 
     @abstractmethod
-    def get_cache_status_info(self, latest_cache_version: int) -> CacheStatusInfo:
+    def get_cache_status_info(self, latest_cache_version: int) -> KVCacheInfo:
         raise NotImplementedError()
 
     @abstractmethod

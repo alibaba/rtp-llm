@@ -33,6 +33,7 @@ public:
                                              preRunMode                            mode) override;
     absl::Status                      stop() override;
     LoadBalanceInfo                   getLoadBalanceInfo(int64_t latest_version) override;
+    KVCacheInfo                       getCacheStatusInfo(int64_t latest_version)  override;
     absl::Status                      step();
     absl::Status                      startLoop();
     int64_t                           getLastScheduleTime() override;

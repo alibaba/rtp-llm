@@ -8,6 +8,7 @@ namespace rtp_llm {
 
 AUTIL_LOG_SETUP(rtp_llm, RpcMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RpcWorkerStatusMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RpcCacheStatusMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMStreamMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpEmbeddingGlobalMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpEmbeddingStreamMetrics);
@@ -21,6 +22,7 @@ AUTIL_LOG_SETUP(rtp_llm, RtpLLMKernelMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMSpeculativeEngineMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLmEplbMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheStoreMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RtpLLMKVCacheInfoMetrics);
 
 #define REPORT_QPS(name)                                                                                               \
     if (collector->name) {                                                                                             \
@@ -68,6 +70,17 @@ bool RpcMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(max_response_done_time_us_metric, "rtp_llm_rpc_max_response_done_time_us");
 
     return true;
+}
+
+bool RpcCacheStatusMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_QPS_MUTABLE_METRIC(qps_metric, "rtp_llm_rpc_cache_status_qps");
+    REGISTER_GAUGE_MUTABLE_METRIC(total_rt_us_metric, "rtp_llm_rpc_cache_status_total_rt_us");
+    return true;
+}
+
+void RpcCacheStatusMetrics::report(const kmonitor::MetricsTags* tags, RpcCacheStatusMetricsCollector* collector) {
+    REPORT_QPS(qps);
+    REPORT_GAUGE(total_rt_us);
 }
 
 bool RpcWorkerStatusMetrics::init(kmonitor::MetricsGroupManager* manager) {
@@ -397,6 +410,17 @@ void RtpLLmEplbMetrics::report(const kmonitor::MetricsTags* tags, RtpLLmEplbMetr
         }
         collector->update_weights_qps = false;
     }
+}
+
+void RtpLLMKVCacheInfoMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMKVCacheInfoMetricsCollector* collector) {
+    REPORT_QPS(qps);
+    REPORT_GAUGE(total_latency_us);
+}
+
+bool RtpLLMKVCacheInfoMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_QPS_MUTABLE_METRIC(qps_metric, "rtp_llm_kv_cache_info_qps");
+    REGISTER_GAUGE_MUTABLE_METRIC(total_latency_us_metric, "rtp_llm_kv_cache_info_total_latency_us");
+    return true;
 }
 
 bool RtpLLMCacheStoreMetrics::init(kmonitor::MetricsGroupManager* manager) {

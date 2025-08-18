@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/dataclass/LoadBalance.h"
 #include "rtp_llm/cpp/http_server/http_client/SimpleHttpClient.h"
 
+
 namespace rtp_llm {
 
 class WorkerTaskStatus: public autil::legacy::Jsonizable {
@@ -31,8 +32,8 @@ class WorkerStatusResponse: public autil::legacy::Jsonizable {
 public:
     void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override {
         json.Jsonize("available_concurrency", available_concurrency);
-        json.Jsonize("available_kv_cache", load_balance_info.cache_status.available_kv_cache);
-        json.Jsonize("total_kv_cache", load_balance_info.cache_status.total_kv_cache);
+        json.Jsonize("available_kv_cache", cache_status.available_kv_cache);
+        json.Jsonize("total_kv_cache", cache_status.total_kv_cache);
         json.Jsonize("step_latency_ms", load_balance_info.step_latency_us / 1000.0);
         json.Jsonize("step_per_minute", load_balance_info.step_per_minute);
         json.Jsonize("iterate_count", load_balance_info.iterate_count);
@@ -47,6 +48,7 @@ public:
 public:
     int                           available_concurrency;
     LoadBalanceInfo               load_balance_info;
+    KVCacheInfo                   cache_status;
     bool                          alive;
     int64_t                       last_schedule_delta;
     std::vector<WorkerTaskStatus> running_task_list;

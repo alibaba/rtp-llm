@@ -24,7 +24,7 @@ from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.ops import (
-    CacheStatusInfo,
+    KVCacheInfo,
     EngineScheduleInfo,
     LoadBalanceInfo,
     WorkerStatusInfo,
@@ -221,10 +221,9 @@ class BackendServer(object):
         return self.model.get_engine_schedule_info(latest_finished_version)
 
         # get worker status
-
-    def get_cache_status(self, latest_cache_version: int) -> CacheStatusInfo:
+    def get_cache_status(self, latest_cache_version: int) -> KVCacheInfo:
         with Timer() as t:
-            cache_status_info: CacheStatusInfo = self.model.get_cache_status_info(
+            cache_status_info: KVCacheInfo = self.model.get_cache_status_info(
                 latest_cache_version
             )
         kmonitor.report(AccMetrics.CACHE_STATUS_QPS_METRIC, 1)

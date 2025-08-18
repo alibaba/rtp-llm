@@ -244,10 +244,7 @@ def setup_args():
     init_speculative_decoding_group_args(parser)
     init_vit_group_args(parser)
     init_worker_group_args(parser)
-<<<<<<< HEAD
     init_jit_group_args(parser)
-=======
->>>>>>> fix server args
     init_pd_separation_group_args(parser)
 
     parser.parse_args()

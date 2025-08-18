@@ -121,10 +121,10 @@ rtp_llm::EngineScheduleInfo RtpLLMOp::getEngineScheduleInfo(int64_t latest_finis
 
 rtp_llm::WorkerStatusInfo RtpLLMOp::getWorkerStatusInfo(int64_t latest_cache_version, int64_t latest_finished_version) {
     pybind11::gil_scoped_release release;
-    return model_rpc_service_->getWorkerStatusInfo(latest_cache_version, latest_finished_version);
+    return model_rpc_service_->getWorkerStatusInfo(latest_cache_version, latest_finished_version, true);
 }
 
-rtp_llm::CacheStatusInfo RtpLLMOp::getCacheStatusInfo(int64_t latest_cache_version) {
+rtp_llm::KVCacheInfo RtpLLMOp::getCacheStatusInfo(int64_t latest_cache_version) {
     pybind11::gil_scoped_release release;
     return model_rpc_service_->getCacheStatusInfo(latest_cache_version);
 }

@@ -9,8 +9,8 @@ template<typename KeyType, typename ValueType>
 class LRUCache {
 public:
     struct CacheSnapshot {
-        int64_t              version;
-        std::vector<KeyType> keys;
+        int64_t                version;
+        std::vector<ValueType> values;
     };
 
 public:
@@ -117,12 +117,12 @@ void LRUCache<KeyType, ValueType>::printCache() const {
 template<typename KeyType, typename ValueType>
 typename LRUCache<KeyType, ValueType>::CacheSnapshot
 LRUCache<KeyType, ValueType>::cacheSnapshot(int64_t latest_version) const {
-    std::vector<KeyType> keys;
-    keys.reserve(items_list_.size());
+    std::vector<ValueType> values;
+    values.reserve(items_list_.size());
     if (latest_version < version) {
         for (const auto& item : items_list_) {
-            keys.push_back(item.first);
+            values.push_back(item.second);
         }
     }
-    return CacheSnapshot{version, std::move(keys)};  // 移动构造避免拷贝
+    return CacheSnapshot{version, std::move(values)};
 }

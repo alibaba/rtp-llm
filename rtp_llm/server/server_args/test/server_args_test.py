@@ -970,12 +970,9 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env["DECODE_ENTRANCE"], "1")
         self.assertEqual(env["SYNC_STATUS_INTERVAL_MS"], "125")
 
-<<<<<<< HEAD:rtp_llm/server/server_args/test/server_args_test.py
         # 32. jit
         self.assertEqual(env["REMOTE_JIT_DIR"], "/home/admin/jit_dir")
 
-=======
->>>>>>> fix server args:rtp_llm/server/server_args/test/server_args_test.py
 
 if __name__ == "__main__":
     main()

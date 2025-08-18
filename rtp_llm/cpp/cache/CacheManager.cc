@@ -378,11 +378,21 @@ size_t CacheManager::availableBlockNums() const {
 
 KVCacheInfo CacheManager::getKVCacheInfo(int64_t latest_version) const {
     auto snapshot = block_cache_.cacheSnapshot(latest_version);
-    return {(size_t)availableBlockNums() * seq_size_per_block_,
-            (size_t)totalBlocks() * seq_size_per_block_,
-            (size_t)seq_size_per_block_,
-            std::move(snapshot.keys),
-            snapshot.version};
+    std::vector<int64_t> cachekeys;
+    std::unordered_set<int64_t> seen_keys; 
+    for (const auto& cacheItem : snapshot.values) {
+        for (auto& key_part : cacheItem.cache_key) {
+            if (seen_keys.insert(key_part).second) {
+                cachekeys.push_back(key_part);
+            }
+        }
+    }
+    KVCacheInfo info{(size_t)availableBlockNums() * seq_size_per_block_,
+                     (size_t)totalBlocks() * seq_size_per_block_,
+                     (size_t)seq_size_per_block_,
+                     std::move(cachekeys),
+                     snapshot.version};
+    return info;
 }
 
 size_t CacheManager::cacheItemNum() const {

@@ -314,14 +314,16 @@ message DistKvCacheRequestPB {
     repeated MetaKV extra_metas = 6;
 }
 
-message DistKvCacheResponsePB {}
+message DistKvCacheResponsePB {
+}
+
 message StatusVersionPB {
-  int32 latest_cache_version = 1;
-  int32 latest_finished_version = 2;
+  int64 latest_cache_version = 1;
+  int64 latest_finished_version = 2;
 }
 
 message CacheVersionPB {
-  int32 latest_cache_version = 1;
+  int64 latest_cache_version = 1;
 }
 
 message CacheStatusPB {

@@ -108,8 +108,7 @@ void registerLoadBalanceInfo(const py::module& m) {
         .def_readwrite("iterate_count", &LoadBalanceInfo::iterate_count)
         .def_readwrite("onflight_requests", &LoadBalanceInfo::onflight_requests)
         .def_readwrite("waiting_query_len", &LoadBalanceInfo::waiting_query_len)
-        .def_readwrite("running_query_len", &LoadBalanceInfo::running_query_len)
-        .def_readwrite("cache_status", &LoadBalanceInfo::cache_status);
+        .def_readwrite("running_query_len", &LoadBalanceInfo::running_query_len);
 }
 
 }  // namespace rtp_llm

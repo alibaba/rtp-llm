@@ -86,7 +86,6 @@ struct LoadBalanceInfo {
     int64_t     onflight_requests = 0;
     int64_t     waiting_query_len = 0;
     int64_t     running_query_len = 0;
-    KVCacheInfo cache_status;
 };
 
 struct Host {

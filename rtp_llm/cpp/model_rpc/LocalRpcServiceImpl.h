@@ -35,26 +35,25 @@ public:
         return local_server_->DistKvCache(context, request, response);
     }
 
-    ::grpc::Status GetWorkerStatus(::grpc::ServerContext* context,
-                                   const StatusVersionPB* request,
-                                   WorkerStatusPB*        response) override {
+    ::grpc::Status
+    GetWorkerStatus(::grpc::ServerContext* context, const StatusVersionPB* request, WorkerStatusPB* response) override {
         return local_server_->GetWorkerStatus(context, request, response);
     }
 
-    ::grpc::Status GetCacheStatus(::grpc::ServerContext* context,
-                                  const CacheVersionPB* request,
-                                  CacheStatusPB*        response) override {
+    ::grpc::Status
+    GetCacheStatus(::grpc::ServerContext* context, const CacheVersionPB* request, CacheStatusPB* response) override {
         return local_server_->GetCacheStatus(context, request, response);
     }
 
-    WorkerStatusInfo getWorkerStatusInfo(int64_t latest_cache_version, int64_t latest_finished_version) {
-        return local_server_->getWorkerStatusInfo(latest_cache_version, latest_finished_version);
+    WorkerStatusInfo
+    getWorkerStatusInfo(int64_t latest_cache_version, int64_t latest_finished_version, bool needLoadBalanceInfo) {
+        return local_server_->getWorkerStatusInfo(latest_cache_version, latest_finished_version, needLoadBalanceInfo);
     }
 
-    CacheStatusInfo getCacheStatusInfo(int64_t latest_cache_version) {
+    KVCacheInfo getCacheStatusInfo(int64_t latest_cache_version) {
         return local_server_->getCacheStatusInfo(latest_cache_version);
     }
-    
+
     LoadBalanceInfo getLoadBalanceInfo(int64_t latest_version) {
         return local_server_->getLoadBalanceInfo(latest_version);
     }

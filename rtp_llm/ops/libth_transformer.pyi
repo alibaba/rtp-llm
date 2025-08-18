@@ -30,7 +30,6 @@ __all__ = [
     "KVCacheInfo",
     "LoadBalanceInfo",
     "WorkerStatusInfo",
-    "CacheStatusInfo",
     "MiscellaneousConfig",
     "MlaOpsType",
     "ModelSpecificConfig",
@@ -670,7 +669,6 @@ class KVCacheInfo:
     def __init__(self) -> None: ...
 
 class LoadBalanceInfo:
-    cache_status: KVCacheInfo
     iterate_count: int
     onflight_requests: int
     running_query_len: int
@@ -693,13 +691,6 @@ class WorkerStatusInfo:
     precision: str
     def __init__(self) -> None: ...
 
-class CacheStatusInfo:
-    available_kv_cache: int
-    block_size: int
-    cached_keys: list[int]
-    total_kv_cache: int
-    version: int
-    def __init__(self) -> None: ...
 
 class MiscellaneousConfig:
     load_balance: int
@@ -945,7 +936,7 @@ class RtpLLMOp:
     def get_engine_schedule_info(self) -> EngineScheduleInfo: ...
     def get_load_balance_info(self, arg0: int) -> LoadBalanceInfo: ...
     def get_worker_status_info(self, arg0: int, arg1: int) -> WorkerStatusInfo: ...
-    def get_cache_status_info(self, arg0: int) -> CacheStatusInfo: ...
+    def get_cache_status_info(self, arg0: int) -> KVCacheInfo: ...
     def init(
         self,
         model: typing.Any,

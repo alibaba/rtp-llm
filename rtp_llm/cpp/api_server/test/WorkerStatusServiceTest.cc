@@ -77,8 +77,6 @@ TEST_F(WorkerStatusServiceTest, WorkerStatus_HasLoadBalanceEnv) {
     load_balance_info.step_latency_us                 = 1;
     load_balance_info.iterate_count                   = 2;
     load_balance_info.step_per_minute                 = 3;
-    load_balance_info.cache_status.available_kv_cache = 4;
-    load_balance_info.cache_status.total_kv_cache     = 5;
     EXPECT_CALL(*mock_engine_base_, getLoadBalanceInfo(testing::_))
         .WillOnce(testing::Invoke([&load_balance_info](int64_t) { return load_balance_info; }));
 
@@ -93,10 +91,7 @@ TEST_F(WorkerStatusServiceTest, WorkerStatus_HasLoadBalanceEnv) {
                           load_balance_info.step_latency_us / 1000);
                 EXPECT_EQ(worker_status_response.load_balance_info.iterate_count, load_balance_info.iterate_count);
                 EXPECT_EQ(worker_status_response.load_balance_info.step_per_minute, load_balance_info.step_per_minute);
-                EXPECT_EQ(worker_status_response.load_balance_info.cache_status.available_kv_cache,
-                          load_balance_info.cache_status.available_kv_cache);
-                EXPECT_EQ(worker_status_response.load_balance_info.cache_status.total_kv_cache,
-                          load_balance_info.cache_status.total_kv_cache);
+               
 
                 EXPECT_EQ(worker_status_response.load_balance_version, 1);
                 EXPECT_TRUE(worker_status_response.alive);
@@ -122,8 +117,6 @@ TEST_F(WorkerStatusServiceTest, WorkerStatus_NoLoadBalanceEnv) {
     load_balance_info.step_latency_us                 = 1;
     load_balance_info.iterate_count                   = 2;
     load_balance_info.step_per_minute                 = 3;
-    load_balance_info.cache_status.available_kv_cache = 4;
-    load_balance_info.cache_status.total_kv_cache     = 5;
     EXPECT_CALL(*mock_engine_base_, getLoadBalanceInfo(testing::_))
         .WillOnce(testing::Invoke([&load_balance_info](int64_t) { return load_balance_info; }));
 
@@ -138,10 +131,7 @@ TEST_F(WorkerStatusServiceTest, WorkerStatus_NoLoadBalanceEnv) {
                           load_balance_info.step_latency_us / 1000);
                 EXPECT_EQ(worker_status_response.load_balance_info.iterate_count, load_balance_info.iterate_count);
                 EXPECT_EQ(worker_status_response.load_balance_info.step_per_minute, load_balance_info.step_per_minute);
-                EXPECT_EQ(worker_status_response.load_balance_info.cache_status.available_kv_cache,
-                          load_balance_info.cache_status.available_kv_cache);
-                EXPECT_EQ(worker_status_response.load_balance_info.cache_status.total_kv_cache,
-                          load_balance_info.cache_status.total_kv_cache);
+
 
                 EXPECT_EQ(worker_status_response.load_balance_version, 0);
                 EXPECT_TRUE(worker_status_response.alive);

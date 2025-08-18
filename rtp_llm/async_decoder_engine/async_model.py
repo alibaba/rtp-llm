@@ -11,7 +11,7 @@ from rtp_llm.distribute.worker_info import g_parallel_info
 from rtp_llm.models.base_model import BaseModel, GenerateInput
 from rtp_llm.models.propose_model.propose_model import ProposeModel
 from rtp_llm.ops import (
-    CacheStatusInfo,
+    KVCacheInfo,
     EngineScheduleInfo,
     LoadBalanceInfo,
     WorkerStatusInfo,
@@ -92,8 +92,13 @@ class AsyncModel:
         return self.decoder_engine_.get_worker_status_info(
             latest_cache_version, latest_finished_version
         )
+<<<<<<< HEAD
 
     def get_cache_status_info(self, latest_cache_version: int) -> CacheStatusInfo:
+=======
+        
+    def get_cache_status_info(self, latest_cache_version: int) -> KVCacheInfo:
+>>>>>>> fix: fix grpc status bugs
         return self.decoder_engine_.get_cache_status_info(latest_cache_version)
 
     def get_engine_schedule_info(

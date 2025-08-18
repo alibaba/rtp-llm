@@ -3,7 +3,6 @@ import logging
 import socket
 import threading
 from typing import Any, Dict, List, Optional, Union
-
 from anyio import CapacityLimiter
 from anyio.lowlevel import RunVar
 from fastapi import FastAPI, HTTPException
@@ -13,6 +12,7 @@ from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse
 from typing_extensions import override
+import uvicorn
 from uvicorn import Config, Server
 from uvicorn.loops.auto import auto_loop_setup
 

@@ -9,7 +9,7 @@
 #include "rtp_llm/cpp/utils/AtomicUtil.h"
 #include "rtp_llm/cpp/dataclass/LoadBalance.h"
 #include "rtp_llm/cpp/dataclass/WorkerStatusInfo.h"
-#include "rtp_llm/cpp/dataclass/CacheStatusInfo.h"
+#include "rtp_llm/cpp/dataclass/KvCacheInfo.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/utils/RpcErrorCode.h"
@@ -33,22 +33,23 @@ public:
                               std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params);
     grpc::Status
     GetWorkerStatus(grpc::ServerContext* context, const ::StatusVersionPB* request, ::WorkerStatusPB* response);
-    
+
     grpc::Status
     GetCacheStatus(grpc::ServerContext* context, const ::CacheVersionPB* request, ::CacheStatusPB* response);
 
-    grpc::Status         GenerateStreamCall(grpc::ServerContext*                   context,
-                                            const GenerateInputPB*                 request,
-                                            grpc::ServerWriter<GenerateOutputsPB>* writer);
+    grpc::Status GenerateStreamCall(grpc::ServerContext*                   context,
+                                    const GenerateInputPB*                 request,
+                                    grpc::ServerWriter<GenerateOutputsPB>* writer);
 
-    ::grpc::Status DistKvCache(::grpc::ServerContext*              context,
-                                  const ::DistKvCacheRequestPB* request,
-                                  ::DistKvCacheResponsePB*      response);
+    ::grpc::Status DistKvCache(::grpc::ServerContext*        context,
+                               const ::DistKvCacheRequestPB* request,
+                               ::DistKvCacheResponsePB*      response);
 
-    CacheStatusInfo getCacheStatusInfo(int64_t latest_cache_version);
+    KVCacheInfo getCacheStatusInfo(int64_t latest_cache_version);
 
-    WorkerStatusInfo getWorkerStatusInfo(int64_t latest_cache_version, int64_t latest_finished_version);
-    
+    WorkerStatusInfo
+    getWorkerStatusInfo(int64_t latest_cache_version, int64_t latest_finished_version, bool needLoadBalanceInfo);
+
     LoadBalanceInfo getLoadBalanceInfo(int64_t latest_version);
 
     void addLora(const std::string&                        adapter_name,
@@ -80,7 +81,10 @@ public:
 
     virtual EngineScheduleInfo getEngineScheduleInfo(int64_t latest_finised_version);
 
-    void reportTime(int64_t request_begin_time_us);
+    void reportWorkerStatusTime(int64_t request_begin_time_us, int64_t request_after_lb_time_us);
+
+    void reportCacheStatusTime(int64_t request_begin_time_us);
+
 public:
     typedef grpc::internal::WriterInterface<GenerateOutputsPB> WriterInterface;
 
