@@ -889,6 +889,13 @@ def setup_args():
         default=10,
         help="负载均衡的统计窗口大小",
     )
+    moe_group.add_argument(
+        "--max_moe_normal_masked_token_num",
+        env_name="RTP_LLM_MAX_MOE_NORMAL_MASKED_TOKEN_NUM",
+        type=int,
+        default=1024,
+        help="moe normal使用masked的最大token数目",
+    )
 
     ##############################################################################################################
     # 模型特定配置

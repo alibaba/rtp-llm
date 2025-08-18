@@ -478,9 +478,9 @@ class GptInitModelParameters:
         self.quant_config = None
         self.role_type = RoleType.PDFUSION
 
-        ## For cpp, we use `gpt_init_params`, `py_env_configs` for python.
-        ## There are some common envs in cpp and python, so they will
-        ## share some configs together.
+        # For cpp, we use `gpt_init_params`, `py_env_configs` for python.
+        # There are some common envs in cpp and python, so they will
+        # share some configs together.
         self.update_gpt_init_params_from_env()
         self.py_env_configs = PyEnvConfigs()
         self.py_env_configs.update_from_env()
@@ -677,6 +677,7 @@ class GptInitModelParameters:
             hack_moe_expert=get_env_bool("HACK_MOE_EXPERT", False),
             eplb_balance_layer_per_step=get_env_int("EPLB_BALANCE_LAYER_PER_STEP", 1),
             deep_ep_num_sm=get_env_int("DEEP_EP_NUM_SM", 0),
+            max_moe_normal_masked_token_num=get_env_int("RTP_LLM_MAX_MOE_NORMAL_MASKED_TOKEN_NUM", 1024),
         )
 
         # ModelSpecificConfig

@@ -369,30 +369,32 @@ void register_sampler_config(pybind11::module& m) {
 
 // MoeConfig
 void MoeConfig::update_from_env_for_test() {
-    use_deepep_moe              = bool_from_env_for_test("USE_DEEPEP_MOE", false);
-    use_deepep_internode        = bool_from_env_for_test("USE_DEEPEP_INTERNODE", false);
-    use_deepep_low_latency      = bool_from_env_for_test("USE_DEEPEP_LOW_LATENCY", true);
-    fake_balance_expert         = bool_from_env_for_test("FAKE_BALANCE_EXPERT", false);
-    eplb_control_step           = autil::EnvUtil::getEnv("EPLB_CONTROL_STEP", 100);
-    eplb_test_mode              = bool_from_env_for_test("EPLB_TEST_MODE", false);
-    hack_moe_expert             = bool_from_env_for_test("HACK_MOE_EXPERT", false);
-    eplb_balance_layer_per_step = autil::EnvUtil::getEnv("EPLB_BALANCE_LAYER_PER_STEP", 1);
-    deep_ep_num_sm              = autil::EnvUtil::getEnv("DEEP_EP_NUM_SM", 0);
+    use_deepep_moe                  = bool_from_env_for_test("USE_DEEPEP_MOE", false);
+    use_deepep_internode            = bool_from_env_for_test("USE_DEEPEP_INTERNODE", false);
+    use_deepep_low_latency          = bool_from_env_for_test("USE_DEEPEP_LOW_LATENCY", true);
+    fake_balance_expert             = bool_from_env_for_test("FAKE_BALANCE_EXPERT", false);
+    eplb_control_step               = autil::EnvUtil::getEnv("EPLB_CONTROL_STEP", 100);
+    eplb_test_mode                  = bool_from_env_for_test("EPLB_TEST_MODE", false);
+    hack_moe_expert                 = bool_from_env_for_test("HACK_MOE_EXPERT", false);
+    eplb_balance_layer_per_step     = autil::EnvUtil::getEnv("EPLB_BALANCE_LAYER_PER_STEP", 1);
+    deep_ep_num_sm                  = autil::EnvUtil::getEnv("DEEP_EP_NUM_SM", 0);
+    max_moe_normal_masked_token_num = autil::EnvUtil::getEnv("RTP_LLM_MAX_MOE_NORMAL_MASKED_TOKEN_NUM", 1024);
 }
 
 void register_moe_config(pybind11::module& m) {
     pybind11::class_<MoeConfig>(m, "MoeConfig")
-        .def(pybind11::init<bool, bool, bool, bool, bool, int, bool, bool, int, int>(),
-             pybind11::arg("use_deepep_moe")              = false,
-             pybind11::arg("use_deepep_internode")        = false,
-             pybind11::arg("use_deepep_low_latency")      = true,
-             pybind11::arg("use_deepep_p2p_low_latency")  = false,
-             pybind11::arg("fake_balance_expert")         = false,
-             pybind11::arg("eplb_control_step")           = 100,
-             pybind11::arg("eplb_test_mode")              = false,
-             pybind11::arg("hack_moe_expert")             = false,
-             pybind11::arg("eplb_balance_layer_per_step") = 1,
-             pybind11::arg("deep_ep_num_sm")              = 0)
+        .def(pybind11::init<bool, bool, bool, bool, bool, int, bool, bool, int, int, int>(),
+             pybind11::arg("use_deepep_moe")                  = false,
+             pybind11::arg("use_deepep_internode")            = false,
+             pybind11::arg("use_deepep_low_latency")          = true,
+             pybind11::arg("use_deepep_p2p_low_latency")      = false,
+             pybind11::arg("fake_balance_expert")             = false,
+             pybind11::arg("eplb_control_step")               = 100,
+             pybind11::arg("eplb_test_mode")                  = false,
+             pybind11::arg("hack_moe_expert")                 = false,
+             pybind11::arg("eplb_balance_layer_per_step")     = 1,
+             pybind11::arg("deep_ep_num_sm")                  = 0,
+             pybind11::arg("max_moe_normal_masked_token_num") = 1024)
         .def("to_string", &MoeConfig::to_string)
         .def("update_from_env", &MoeConfig::update_from_env_for_test)
         .def_readwrite("use_deepep_moe", &MoeConfig::use_deepep_moe)
@@ -404,7 +406,8 @@ void register_moe_config(pybind11::module& m) {
         .def_readwrite("eplb_test_mode", &MoeConfig::eplb_test_mode)
         .def_readwrite("hack_moe_expert", &MoeConfig::hack_moe_expert)
         .def_readwrite("eplb_balance_layer_per_step", &MoeConfig::eplb_balance_layer_per_step)
-        .def_readwrite("deep_ep_num_sm", &MoeConfig::deep_ep_num_sm);
+        .def_readwrite("deep_ep_num_sm", &MoeConfig::deep_ep_num_sm)
+        .def_readwrite("max_moe_normal_masked_token_num", &MoeConfig::max_moe_normal_masked_token_num);
 }
 
 // ModelSpecificConfig
@@ -721,7 +724,8 @@ inline std::string MoeConfig::to_string() const {
         << "eplb_test_mode: " << eplb_test_mode << "\n"
         << "hack_moe_expert: " << hack_moe_expert << "\n"
         << "eplb_balance_layer_per_step: " << eplb_balance_layer_per_step << "\n"
-        << "deep_ep_num_sm: " << deep_ep_num_sm;
+        << "deep_ep_num_sm: " << deep_ep_num_sm << "\n"
+        << "max_moe_normal_masked_token_num: " << max_moe_normal_masked_token_num;
     return oss.str();
 }
 

@@ -125,6 +125,7 @@ class ServerArgsDefaultTest(TestCase):
         self.assertEqual(env.get("BALANCE_METHOD"), "mix")
         self.assertEqual(env.get("EPLB_FORCE_REPACK"), "0")
         self.assertEqual(env.get("EPLB_STATS_WINDOW_SIZE"), "10")
+        self.assertEqual(env.get("RTP_LLM_MAX_MOE_NORMAL_MASKED_TOKEN_NUM"), "1024")
 
         # 10. 模型特定配置
         self.assertEqual(env.get("MAX_LORA_MODEL_SIZE"), "-1")
@@ -467,6 +468,8 @@ class ServerArgsSetTest(TestCase):
             "1",
             "--eplb_stats_window_size",
             "20",
+            "--max_moe_normal_masked_token_num",
+            "512",
             # 10. 模型特定配置
             "--max_lora_model_size",
             "2048",
@@ -801,6 +804,7 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env["BALANCE_METHOD"], "greedy")
         self.assertEqual(env["EPLB_FORCE_REPACK"], "1")
         self.assertEqual(env["EPLB_STATS_WINDOW_SIZE"], "20")
+        self.assertEqual(env.get("RTP_LLM_MAX_MOE_NORMAL_MASKED_TOKEN_NUM"), "512")
 
         # 10. 模型特定配置
         self.assertEqual(env["MAX_LORA_MODEL_SIZE"], "2048")

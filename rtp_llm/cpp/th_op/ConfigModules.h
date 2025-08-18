@@ -127,16 +127,17 @@ struct SamplerConfig {
 };
 
 struct MoeConfig {
-    bool        use_deepep_moe              = false;
-    bool        use_deepep_internode        = false;
-    bool        use_deepep_low_latency      = true;
-    bool        use_deepep_p2p_low_latency  = false;
-    bool        fake_balance_expert         = false;
-    int         eplb_control_step           = 100;
-    bool        eplb_test_mode              = false;
-    bool        hack_moe_expert             = false;
-    int         eplb_balance_layer_per_step = 1;
-    int         deep_ep_num_sm              = 0;
+    bool        use_deepep_moe                  = false;
+    bool        use_deepep_internode            = false;
+    bool        use_deepep_low_latency          = true;
+    bool        use_deepep_p2p_low_latency      = false;
+    bool        fake_balance_expert             = false;
+    int         eplb_control_step               = 100;
+    bool        eplb_test_mode                  = false;
+    bool        hack_moe_expert                 = false;
+    int         eplb_balance_layer_per_step     = 1;
+    int         deep_ep_num_sm                  = 0;
+    int         max_moe_normal_masked_token_num = 1024;
     std::string to_string() const;
     void        update_from_env_for_test();
 };
