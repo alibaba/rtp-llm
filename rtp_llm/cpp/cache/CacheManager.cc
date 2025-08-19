@@ -208,16 +208,18 @@ void CacheManager::initKvCache() {
 }
 
 void CacheManager::initKVCacheScale() {
+    bool is_cpu = (this->device_->getDeviceProperties().type == DeviceType::ArmCpu);
+    rtp_llm::MemoryType memory_type = is_cpu ? rtp_llm::MemoryType::MEMORY_CPU : rtp_llm::MemoryType::MEMORY_GPU;
     if (config_.dtype == rtp_llm::DataType::TYPE_INT8) {
         kv_cache_.k_scale =
-            std::make_unique<rtp_llm::Buffer>(rtp_llm::MemoryType::MEMORY_GPU,
+            std::make_unique<rtp_llm::Buffer>(memory_type,
                                          rtp_llm::DataType::TYPE_FP32,
                                          std::vector<size_t>{(size_t)config_.layer_num,
                                                              (size_t)config_.block_nums,
                                                              (size_t)config_.local_head_num_kv,
                                                              (size_t)config_.seq_size_per_block},
                                          (int8_t*)cache_base_ptr_ + kv_cache_.k_blocks->sizeBytes() * 2);
-        kv_cache_.v_scale = std::make_unique<rtp_llm::Buffer>(rtp_llm::MemoryType::MEMORY_GPU,
+        kv_cache_.v_scale = std::make_unique<rtp_llm::Buffer>(memory_type,
                                                          rtp_llm::DataType::TYPE_FP32,
                                                          std::vector<size_t>{(size_t)config_.layer_num,
                                                                              (size_t)config_.block_nums,
@@ -230,7 +232,7 @@ void CacheManager::initKVCacheScale() {
 #ifdef ENABLE_FP8
     else if (config_.dtype == rtp_llm::DataType::TYPE_FP8_E4M3) {
         kv_cache_.k_scale = std::make_unique<rtp_llm::Buffer>(
-                rtp_llm::MemoryType::MEMORY_GPU,
+                memory_type,
                 rtp_llm::DataType::TYPE_FP32,
                 std::vector<size_t>{(size_t)config_.layer_num,
                     (size_t)config_.block_nums,
@@ -238,7 +240,7 @@ void CacheManager::initKVCacheScale() {
                     (size_t)config_.seq_size_per_block},
                 (__nv_fp8_e4m3*)cache_base_ptr_ + kv_cache_.k_blocks->sizeBytes() * 2);
         kv_cache_.v_scale = std::make_unique<rtp_llm::Buffer>(
-                rtp_llm::MemoryType::MEMORY_GPU,
+                memory_type,
                 rtp_llm::DataType::TYPE_FP32,
                 std::vector<size_t>{(size_t)config_.layer_num,
                     (size_t)config_.block_nums,
@@ -251,14 +253,16 @@ void CacheManager::initKVCacheScale() {
 
 void CacheManager::initKvCacheMla() {
     RTP_LLM_LOG_INFO("init mla kv cache");
-    kv_cache_.k_blocks = std::make_unique<rtp_llm::Buffer>(rtp_llm::MemoryType::MEMORY_GPU,
+    bool is_cpu = (this->device_->getDeviceProperties().type == DeviceType::ArmCpu);
+    rtp_llm::MemoryType memory_type = is_cpu ? rtp_llm::MemoryType::MEMORY_CPU : rtp_llm::MemoryType::MEMORY_GPU;
+    kv_cache_.k_blocks = std::make_unique<rtp_llm::Buffer>(memory_type,
                                                       config_.dtype,
                                                       std::vector<size_t>{(size_t)config_.layer_num,
                                                                           (size_t)config_.block_nums,
                                                                           (size_t)config_.seq_size_per_block,
                                                                           (size_t)config_.kv_lora_rank},
                                                       cache_base_ptr_);
-    kv_cache_.v_blocks = std::make_unique<rtp_llm::Buffer>(rtp_llm::MemoryType::MEMORY_GPU,
+    kv_cache_.v_blocks = std::make_unique<rtp_llm::Buffer>(memory_type,
                                                       config_.dtype,
                                                       std::vector<size_t>{(size_t)config_.layer_num,
                                                                           (size_t)config_.block_nums,                                                      
@@ -269,7 +273,9 @@ void CacheManager::initKvCacheMla() {
 
 void CacheManager::initKvCacheNormal() {
     RTP_LLM_LOG_INFO("init normal kv cache");
-    kv_cache_.k_blocks = std::make_unique<rtp_llm::Buffer>(rtp_llm::MemoryType::MEMORY_GPU,
+    bool is_cpu = (this->device_->getDeviceProperties().type == DeviceType::ArmCpu);
+    rtp_llm::MemoryType memory_type = is_cpu ? rtp_llm::MemoryType::MEMORY_CPU : rtp_llm::MemoryType::MEMORY_GPU;
+    kv_cache_.k_blocks = std::make_unique<rtp_llm::Buffer>(memory_type,
                                                       config_.dtype,
                                                       std::vector<size_t>{(size_t)config_.layer_num,
                                                                           (size_t)config_.block_nums,
@@ -277,7 +283,7 @@ void CacheManager::initKvCacheNormal() {
                                                                           (size_t)config_.seq_size_per_block,
                                                                           (size_t)config_.size_per_head},
                                                       cache_base_ptr_);
-    kv_cache_.v_blocks = std::make_unique<rtp_llm::Buffer>(rtp_llm::MemoryType::MEMORY_GPU,
+    kv_cache_.v_blocks = std::make_unique<rtp_llm::Buffer>(memory_type,
                                                       config_.dtype,
                                                       std::vector<size_t>{(size_t)config_.layer_num,
                                                                           (size_t)config_.block_nums,

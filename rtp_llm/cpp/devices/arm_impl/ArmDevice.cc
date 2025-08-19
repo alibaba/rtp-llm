@@ -3,6 +3,8 @@
 #include "rtp_llm/cpp/core/allocator.h"
 #include "rtp_llm/cpp/core/cpu_allocator.h"
 #include "rtp_llm/cpp/core/TrackerAllocator.h"
+#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
+
 #include <cstring>
 #include <sys/sysinfo.h>
 
@@ -160,6 +162,19 @@ DevicePrepOutput ArmCpuDevice::prepareModelRun(const DevicePrepParams& params) {
     }
 
     return output;
+}
+
+SliceOutput ArmCpuDevice::slice(const SliceParams& params) {
+    const auto& input = params.input;
+    const auto& starts = params.start;
+    const auto& step = params.step;
+    auto input_t = Buffer2torchTensor(params.input, false);
+    auto sliceTensor = input_t.slice(params.dim, starts, params.end, step);
+    auto buffer_shape = torchShapeToBufferShape(sliceTensor.sizes());
+    auto out = allocateBuffer({input.type(), buffer_shape});
+    auto out_t = Buffer2torchTensor(out, false);
+    out_t.copy_(sliceTensor, false);
+    return out;
 }
 
 RTP_LLM_REGISTER_DEVICE(ArmCpu);

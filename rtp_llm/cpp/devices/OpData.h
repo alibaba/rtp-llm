@@ -526,6 +526,7 @@ struct MlaRotaryWriteKVCacheParams {
     const AttentionLayerWeights&    weights;
     const AttentionConfigs&         configs;
     const QScheme                   qscheme;
+    bool                            is_prefill = false;
 };
 
 struct MlaAttentionModuleParams {

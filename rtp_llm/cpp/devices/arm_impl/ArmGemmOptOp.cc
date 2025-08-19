@@ -17,7 +17,7 @@ namespace rtp_llm {
 ///          B [b, ..., k, n]
 ///          C [b, ..., m, n]
 BufferPtr ArmCpuDevice::gemm(const GemmParams& params) {
-    if (params.B.type() == DataType::TYPE_QINT4X2)
+    if (params.B.type() == DataType::TYPE_QINT4X2 || params.B.type() == DataType::TYPE_QFP8_E4M3)
             return gemm_kai_a8w4(params);
     return (this->*gemmFunc)(params);
 }

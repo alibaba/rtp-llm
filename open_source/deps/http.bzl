@@ -82,9 +82,9 @@ def http_deps():
 
     http_archive(
         name = "torch_2.3_py310_cpu_aarch64",
-        sha256 = "bef6996c27d8f6e92ea4e13a772d89611da0e103b48790de78131e308cf73076",
+        sha256 = "90832f4d118c566b8652a2196ac695fc1f14cf420db27b5a1b41c7eaaf2141e9",
         urls = [
-            "https://download.pytorch.org/whl/cpu/torch-2.1.2-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl#sha256=bef6996c27d8f6e92ea4e13a772d89611da0e103b48790de78131e308cf73076"
+            "https://download.pytorch.org/whl/cpu/torch-2.6.0%2Bcpu-cp310-cp310-manylinux_2_28_aarch64.whl#sha256=90832f4d118c566b8652a2196ac695fc1f14cf420db27b5a1b41c7eaaf2141e9"
         ],
         type = "zip",
         build_file = clean_dep("//:BUILD.pytorch"),

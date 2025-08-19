@@ -27,7 +27,7 @@
 #include "kai/ukernels/matmul/matmul_clamp_f32_qsi8d32p_qsi4c32p/kai_matmul_clamp_f32_qsi8d32p4x8_qsi4c32p4x8_8x4x32_neon_i8mm.h"
 #include "kai/ukernels/matmul/matmul_clamp_f32_qsi8d32p_qsi4c32p/kai_matmul_clamp_f32_qsi8d32p_qsi4c32p_interface.h"
 #include "kai/ukernels/matmul/pack/kai_rhs_pack_nxk_qsi4c32pscalef16_qsu4c32s16s0.h"
-
+#include <ATen/core/ScalarType.h>
 #define GPTQ_COMPUTE_AS_DI_BF16 0
 
 namespace rtp_llm {
@@ -121,34 +121,53 @@ static void quant_qs4c32_f32(size_t n, size_t k, size_t bl, const float* rhs_f32
     }
 }
 
-ConstBufferPtr prepareGemmWeight(const std::string& key, ConstBufferPtr input) {
-    if (armPrepareWeightFunc == nullptr) {
-        if (std::getenv("ARM_GEMM_USE_KAI") == nullptr) {
-            armPrepareWeightFunc = prepareGemmOptWeight;
-        } else {
-            RTP_LLM_LOG_INFO("KleidiAI enabled.\n");
-            armPrepareWeightFunc = prepareKaiWeightBf16;
-        }
-    }
-    // Transpose and reorder
-    if (key == W::lm_head) {
-        return armPrepareWeightFunc(transposeWeight(input), true, true);
-    }
-
-    // // Reorder RHS weight matrics for better GEMM performance
-    if (key == W::attn_qkv_w) {
-        return armPrepareWeightFunc(input, false, true);
-    }
-    if (key == W::attn_o_w ||
-        key == W::ffn_w1 ||
-        key == W::ffn_w2 ||
-        key == W::ffn_w3) {
-        return armPrepareWeightFunc(input, false, false);
-    }
-
-    return input;
+size_t get_rhs_packed_size(int n, int k) {
+    const size_t bl = 32;
+    const size_t nr = kai_get_nr_matmul_clamp_f32_qsi8d32p1x8_qsi4c32p4x8_1x4x32_neon_dotprod();
+    const size_t kr = kai_get_kr_matmul_clamp_f32_qsi8d32p1x8_qsi4c32p4x8_1x4x32_neon_dotprod();
+    return kai_get_rhs_packed_size_rhs_pack_nxk_qsi4c32pscalef16_qsu4c32s16s0(n, k, nr, kr, bl);
 }
 
+void transposeWeightByAcl(size_t k, size_t n, DataType data_type, void *input_data) {
+
+    arm_compute::NETranspose transB;
+    arm_compute::Tensor      wei_tran_tensor;
+    arm_compute::TensorInfo  wei_data_info;
+    arm_compute::TensorInfo  wei_tran_info;
+    arm_compute::Tensor wei_tensor;
+    arm_compute::DataType acl_data_type;
+
+    if (data_type == DataType::TYPE_FP16)
+        acl_data_type = arm_compute::DataType::F16;
+    else if (data_type == DataType::TYPE_FP32)
+        acl_data_type = arm_compute::DataType::F32;
+    else if (data_type == DataType::TYPE_FP8_E4M3)
+        acl_data_type = arm_compute::DataType::U8;
+    else
+        throw std::runtime_error("transpose data type is not supported");
+
+    wei_data_info = arm_compute::TensorInfo(arm_compute::TensorShape(n, k), 1, acl_data_type);
+    wei_tran_info = arm_compute::TensorInfo(arm_compute::TensorShape(k, n), 1, acl_data_type);
+
+    size_t element_num = k * n;
+    size_t data_size = data_type == DataType::TYPE_FP32 ? sizeof(float) : sizeof(float16_t);
+
+    size_t transposed_size = element_num * data_size;
+    void *transposed_data = malloc(transposed_size);
+
+    wei_tensor.allocator()->init(wei_data_info);
+    wei_tran_tensor.allocator()->init(wei_tran_info);
+    wei_tensor.allocator()->import_memory(input_data);
+
+    wei_tran_tensor.allocator()->import_memory(transposed_data);
+
+    transB.configure(&wei_tensor, &wei_tran_tensor);
+    transB.run();
+
+    // Update input buffer with transposed data, reduce memory usage
+    memcpy(input_data, transposed_data, transposed_size);
+    free(transposed_data);
+}
 
 BufferPtr transposeWeight(ConstBufferPtr input) {
 
@@ -185,33 +204,10 @@ BufferPtr transposeWeight(ConstBufferPtr input) {
     std::vector<size_t> weight_workspace_shape = std::vector<size_t>(Bshape.begin(), Bshape.end() - 2);
     weight_workspace_shape.insert(weight_workspace_shape.end(), {n, k});
 
-    size_t element_num = k * n;
-    size_t data_size = data_type == DataType::TYPE_FP32 ? sizeof(float) : sizeof(float16_t);
-    //const void *data = malloc(element_num * data_size);
-    //output = BufferPtr(new Buffer(MemoryType::MEMORY_CPU,
-    //                                                data_type,
-    //                                                weight_workspace_shape,
-    //                                                data)),
-    size_t transposed_size = element_num * data_size;
-    void *transposed_data = malloc(transposed_size);
-
-    wei_tensor.allocator()->init(wei_data_info);
-    wei_tran_tensor.allocator()->init(wei_tran_info);
-    wei_tensor.allocator()->import_memory(input->data());
-    //wei_tran_tensor.allocator()->import_memory(output->data());
-    wei_tran_tensor.allocator()->import_memory(transposed_data);
-
-    transB.configure(&wei_tensor, &wei_tran_tensor);
-    transB.run();
-
-    //return output;
-    // Update input buffer with transposed data, reduce memory usage
-    RTP_LLM_CHECK_WITH_INFO(input->sizeBytes() >= transposed_size, "transpose dst size < src size");
-    memcpy(input->data(), transposed_data, transposed_size);
-    free(transposed_data);
+    transposeWeightByAcl(k, n, input->type(), input->data());
 
     auto packedBuffer = BufferPtr(new Buffer(MemoryType::MEMORY_CPU,
-                                                        data_type,
+                                                        input->type(),
                                                         weight_workspace_shape,
                                                         input->data()));
     return packedBuffer;
@@ -350,6 +346,87 @@ ConstBufferPtr prepareKaiWeightBf16(ConstBufferPtr input, bool isTranspose, bool
         return output;
 }
 
+ConstBufferPtr prepareKaiWeightKcVc(ConstBufferPtr input) {
+    if (input->type() != DataType::TYPE_FP16) {
+        throw std::runtime_error("prepareKaiWeightKcVc only supports fp16 weight type");
+    }
+
+    ConstBufferPtr output = input;
+
+    size_t bs = input->shape()[0];
+    size_t k = input->shape()[1];
+    size_t n = input->shape()[2];
+
+    const size_t nr = kai_get_nr_matmul_clamp_f32_bf16p8x4_bf16p12x4b_8x12_neon_mmla();
+    const size_t kr = kai_get_kr_matmul_clamp_f32_bf16p8x4_bf16p12x4b_8x12_neon_mmla();
+    const size_t sr = kai_get_sr_matmul_clamp_f32_bf16p8x4_bf16p12x4b_8x12_neon_mmla();
+
+    const size_t rhs_packed_size = kai_get_rhs_packed_size_rhs_pack_kxn_bf16p12x4biasf32_f16_neon(n, k);
+
+    uint8_t* rhs_packed = new uint8_t[bs * rhs_packed_size];
+
+    std::vector<size_t> weight_workspace_shape = {bs, rhs_packed_size / sizeof(bfloat16_t)};
+
+    output = BufferPtr(new Buffer(MemoryType::MEMORY_CPU,
+                       DataType::TYPE_BF16,
+                       weight_workspace_shape,
+                       rhs_packed));
+
+    const size_t rhs_stride = n * sizeof(float16_t);
+    float16_t* rhs = (float16_t* )input->data();
+
+    #pragma omp parallel for
+    for (int b = 0; b < bs; ++b) {
+        kai_run_rhs_pack_kxn_bf16p12x4biasf32_f16_neon(
+            1, n, k, nr, kr, sr,                        // Packing arguments
+            rhs_stride,                                 // RHS stride
+            rhs + b * k * n,                            // RHS
+            NULL,                                       // Bias
+            NULL,                                       // Scale
+            rhs_packed + b * rhs_packed_size,           // RHS packed
+            0, NULL);
+    }
+    return output;
+}
+
+BufferPtr transposeWeightMoe(ConstBufferPtr input, bool isMerged) {
+
+    std::vector<size_t> Bshape = input->shape();
+    auto data_type = input->type();
+    auto dim = input->dim();
+    size_t k;
+    size_t n;
+
+
+    k = Bshape[dim - 2];
+    n = Bshape[dim - 1];
+
+    std::vector<size_t> transposedShape = std::vector<size_t>(Bshape.begin(), Bshape.end() - 2);
+    transposedShape.insert(transposedShape.end(), {n, k});
+
+    size_t experts_num = input->size() / (k * n);
+
+    if (isMerged) {
+        k /= 2;
+    }
+
+    for (size_t i = 0; i < experts_num; i++) {
+        // pack weight
+        if (!isMerged) {
+            transposeWeightByAcl(k, n, data_type, input->dataWithOffset(k * n * i));
+        } else {
+            transposeWeightByAcl(k, n, data_type, input->dataWithOffset(2 * i * k * n));
+            transposeWeightByAcl(k, n, data_type, input->dataWithOffset((2 * i + 1) * k * n));
+        }
+    }
+
+    auto packedBuffer = BufferPtr(new Buffer(MemoryType::MEMORY_CPU,
+        data_type,
+        transposedShape,
+        input->data()));
+    return packedBuffer;
+}
+
 ConstBufferPtr prepareGemmOptWeight(ConstBufferPtr input, bool isTranspose, bool unused) {
     ConstBufferPtr weight_workspace = input;
 
@@ -397,7 +474,7 @@ ConstBufferPtr prepareGemmOptWeight(ConstBufferPtr input, bool isTranspose, bool
             }
         }
 
-	// Update original buffer with packed data to save memory usage
+	    // Update original buffer with packed data to save memory usage
         //RTP_LLM_CHECK_WITH_INFO(input->sizeBytes() >= weight_workspace->sizeBytes(), "gemm pack dst size < src size");
         //memcpy(input->data(), weight_workspace->data(), weight_workspace->sizeBytes());
         //free(weight_workspace->data());
@@ -412,50 +489,238 @@ ConstBufferPtr prepareGemmOptWeight(ConstBufferPtr input, bool isTranspose, bool
     return weight_workspace;
 }
 
-//ConstBufferPtr prepareGemmWeight(const std::string& key, ConstBufferPtr input) {
-//    // Transpose and reorder
-//    if (key == W::lm_head) {
-//        return prepareGemmOptWeight(transposeWeight(input), true);
-//    }
-//
-//    // Reorder RHS weight matrics for better GEMM performance
-//    if (key == W::attn_qkv_w ||
+BufferPtr prepareGemmOptWeightMoe(ConstBufferPtr input, bool isMerged) {
+    if (input->type() != DataType::TYPE_FP32 && input->type() != DataType::TYPE_FP16) {
+        throw std::runtime_error("prepareGemmOptWeightMoe type is not supported");
+    }
+
+    BufferPtr weight_workspace;
+    GemmKernel gemm_kernel;
+    std::vector<size_t> Bshape = input->shape();
+    auto dim = input->dim();
+
+    size_t k;
+    size_t n;
+
+    k = Bshape[dim - 2];
+    n = Bshape[dim - 1];
+    size_t experts_num = input->size() / (k * n);
+
+    if (isMerged) {
+        n /= 2;
+    }
+
+    size_t weight_k_pack = std::ceil(k / 8.0) * 8;
+    size_t width = weight_k_pack * 2;
+    size_t height = n / 2 + n % 2;
+
+    void *data = malloc(input->sizeBytes());
+    memset(data, 0, input->sizeBytes());
+
+    // allocate a temp workspace to pack weight fp32->bf16
+    std::vector<size_t> weight_workspace_shape = std::vector<size_t>(Bshape.begin(), Bshape.end() - 2);
+    weight_workspace_shape.insert(weight_workspace_shape.end(), {n, k});
+
+    weight_workspace = BufferPtr(new Buffer(MemoryType::MEMORY_CPU,
+                                                DataType::TYPE_BF16,
+                                                weight_workspace_shape,
+                                                data));
+
+    for (size_t i = 0; i < experts_num; i++) {
+        // pack weight
+        if (!isMerged) {
+            hie::bfloat16* weight_workspace_cur_ptr = reinterpret_cast<hie::bfloat16*>(weight_workspace->dataWithOffset(height * width * i));
+            if (input->type() == DataType::TYPE_FP32) {
+                float* B_fp32_ptr = reinterpret_cast<float*>(input->dataWithOffset(k * n * i));
+                gemm_kernel.gemm_pack_weight_FP32toBF16_arm(n, k, weight_k_pack, B_fp32_ptr, weight_workspace_cur_ptr);
+            } else { // if(params.B.type() == DataType::TYPE_FP16)
+                float16_t* B_fp16_ptr = reinterpret_cast<float16_t*>(input->dataWithOffset(k * n * i));
+                gemm_kernel.gemm_pack_weight_FP16toBF16_arm(n, k, weight_k_pack, B_fp16_ptr, weight_workspace_cur_ptr);
+            }
+        } else {
+            hie::bfloat16* weight_workspace_cur_ptr = reinterpret_cast<hie::bfloat16*>(weight_workspace->dataWithOffset(2 * height * width * i));
+            if (input->type() == DataType::TYPE_FP32) {
+                float* B_fp32_ptr = reinterpret_cast<float*>(input->dataWithOffset(2 * k * n * i));
+                gemm_kernel.gemm_pack_weight_FP32toBF16_arm(n, k, weight_k_pack, B_fp32_ptr, weight_workspace_cur_ptr);
+            } else { // if(params.B.type() == DataType::TYPE_FP16)
+                float16_t* B_fp16_ptr = reinterpret_cast<float16_t*>(input->dataWithOffset(2 * k * n * i));
+                gemm_kernel.gemm_pack_weight_FP16toBF16_arm(n, k, weight_k_pack, B_fp16_ptr, weight_workspace_cur_ptr);
+            }
+
+            weight_workspace_cur_ptr = reinterpret_cast<hie::bfloat16*>(weight_workspace->dataWithOffset(2 * height * width * i + height * width));
+            if (input->type() == DataType::TYPE_FP32) {
+                float* B_fp32_ptr = reinterpret_cast<float*>(input->dataWithOffset(2 * k * n * i + k * n));
+                gemm_kernel.gemm_pack_weight_FP32toBF16_arm(n, k, weight_k_pack, B_fp32_ptr, weight_workspace_cur_ptr);
+            } else { // if(params.B.type() == DataType::TYPE_FP16)
+                float16_t* B_fp16_ptr = reinterpret_cast<float16_t*>(input->dataWithOffset(2 * k * n * i + k * n));
+                gemm_kernel.gemm_pack_weight_FP16toBF16_arm(n, k, weight_k_pack, B_fp16_ptr, weight_workspace_cur_ptr);
+            }
+        }
+    }
+    // Update original buffer with packed data to save memory usage
+    RTP_LLM_CHECK_WITH_INFO(input->sizeBytes() >= weight_workspace->sizeBytes(), "gemm pack dst size < src size");
+    memcpy(input->data(), weight_workspace->data(), input->sizeBytes());
+    free(weight_workspace->data());
+
+    auto packedBuffer = BufferPtr(new Buffer(MemoryType::MEMORY_CPU,
+                                                    DataType::TYPE_BF16,
+                                                    Bshape,
+                                                    input->data()));
+    return packedBuffer;
+}
+
+ConstBufferPtr prepareGemmWeight(const std::string& key, ConstBufferPtr input) {
+    if (armPrepareWeightFunc == nullptr) {
+        if (std::getenv("ARM_GEMM_USE_KAI") == nullptr) {
+            armPrepareWeightFunc = prepareGemmOptWeight;
+        } else {
+            RTP_LLM_LOG_INFO("KleidiAI enabled.\n");
+            armPrepareWeightFunc = prepareKaiWeightBf16;
+        }
+    }
+
+    // Transpose and reorder
+    if (key == W::lm_head) {
+        return armPrepareWeightFunc(transposeWeight(input), true, true);
+    }
+
+    if (key == W::mla_kc || key == W::mla_vc) {
+        return prepareKaiWeightKcVc(input);
+    }
+
+    if (key == W::moe_w1) {
+        if (std::getenv("ARM_GEMM_USE_KAI") != nullptr) {
+            throw std::runtime_error("prepareKAIWeightBf16Moe is not implemented.");
+        }
+        return prepareGemmOptWeightMoe(transposeWeightMoe(input, /*isMerged*/true), /*isMerged*/true);
+    }
+
+    if (key == W::moe_w2) {
+        return prepareGemmOptWeightMoe(transposeWeightMoe(input, /*isMerged*/false), /*isMerged*/false);
+    }
+
+    // Reorder RHS weight matrics for better GEMM performance
+    if (key == W::attn_qkv_w ||
+        key == W::attn_q_b ||
+        key == W::attn_k_nope ||
+        key == W::attn_v ||
+        key == W::mla_fusedqkrope_no_lora ||
+        key == W::mla_fusedqkrope ||
+        key == W::moe_gate) {
+        return armPrepareWeightFunc(input, false, /*isForceF32Out*/true);
+    }
+    if (key == W::attn_o_w ||
+        key == W::ffn_w1 ||
+        key == W::ffn_w2 ||
+        key == W::ffn_w3) {
+        return armPrepareWeightFunc(input, false, /*isForceF32Out*/false);
+    }
+
+    return input;
+}
+
 torch::Tensor ArmCpuDevice::preprocessGemmWeightByKey(const std::string& key, torch::Tensor weight) {
+    if (c10::isFloat8Type(weight.dtype().toScalarType()) || key.find("weight_only_quant_scale") != std::string::npos) {
+        return weight;
+    }
+
     auto buffer = torchTensor2Buffer(weight);
     auto retBuffer = prepareGemmWeight(key, buffer);
 
     // Repacked buffer size may not match with shape size * element size,
     // should use buffer pointer instead of copying data.
     if ((key == W::attn_qkv_w ||
+        key == W::mla_fusedqkrope_no_lora ||
+        key == W::mla_fusedqkrope ||
+        key == W::mla_kc ||
+        key == W::mla_vc ||
         key == W::attn_o_w ||
         key == W::ffn_w1 ||
         key == W::ffn_w2 ||
-      //  key == W::ffn_w3) {
-      //return prepareGemmOptWeight(input, false);
         key == W::ffn_w3 ||
+        key == W::moe_gate ||
         key == W::lm_head) && retBuffer->type() == DataType::TYPE_BF16) {
-        return Buffer2torchTensor(*retBuffer, false);
-    }
-
-    if ((key == W::attn_qkv_w ||
-        key == W::attn_o_w ||
-        key == W::ffn_w1 ||
-        key == W::ffn_w2 ||
-        key == W::ffn_w3) && retBuffer->type() == DataType::TYPE_UINT8) {
         return Buffer2torchTensor(*retBuffer, false);
     }
 
     return Buffer2torchTensor(*retBuffer);
 }
 
+inline float fp8_to_fp32_e4m3(uint8_t fp8_value) {
+    // Extract sign, exponent, and mantissa
+    uint8_t sign = (fp8_value & 0x80) >> 7;      // 1 bit for sign
+    uint8_t exponent = (fp8_value & 0x78) >> 3;  // 4 bits for exponent
+    uint8_t mantissa = (fp8_value & 0x07);       // 3 bits for mantissa
 
-//torch::Tensor ArmCpuDevice::preprocessGemmWeightByKey(const std::string& key, torch::Tensor weight) {
-//    auto buffer = torchTensor2Buffer(weight);
-//    auto retBuffer = prepareGemmWeight(key, buffer);
-//    return Buffer2torchTensor(*retBuffer);
-//}
+    if (exponent == 0) {
+        // Subnormal number
+        float subnormal = mantissa / 512.0f;
+        return sign ? -subnormal : subnormal;
+    } else if (exponent == 0xF && mantissa == 0x7) {
+        // NaN
+        return sign ? -NAN : NAN;
+    } else {
+        // Normalized number
+        float normalized = (8.0f + mantissa) * (1 << exponent) / (1 << 10);
+        return sign ? -normalized : normalized;
+    }
+}
+
+static void quant_qs4c32_f8(size_t n, size_t k, size_t scale_n, size_t scale_k, size_t bl, const uint8_t* qweight, const float* qscales, uint8_t* rhs_qs4c32) {
+    if (bl != 32) {
+        throw std::runtime_error("bl should be 32");
+    }
+    const size_t num_blocks_row = num_blocks_per_row(k, bl);
+    const size_t num_bytes_block = num_bytes_per_block_qs4c32(bl);
+    const size_t dst_stride = num_blocks_row * num_bytes_block;
+    #pragma omp parallel for
+    for (size_t row_idx = 0; row_idx < n; ++row_idx) {
+        uint8_t* dst_ptr = (uint8_t*)rhs_qs4c32 + row_idx * dst_stride;
+
+        for (size_t block_idx = 0; block_idx < num_blocks_row; ++block_idx) {
+            float src[32];
+            float max = 0.0f;
+            float amax = 0.0f;
+            float scale_0 = qscales[row_idx / 128 * scale_k + block_idx * bl / 128 ];
+            for (size_t i = 0; i < bl; ++i) {
+                uint8_t qint8 = qweight[row_idx * k + block_idx * bl + i];
+                const float x0 = scale_0 * fp8_to_fp32_e4m3(qint8);
+                src[i] = x0;
+                const float ax0 = fabsf(x0);
+                if (amax < ax0) {
+                    amax = ax0;
+                    max = x0;
+                }
+            }
+
+            const float scale = max / -8.0;
+            const float recip_scale = scale ? 1.0f / scale : 0.0f;
+
+            // Store the scale at the beginning of the block
+            *((uint16_t*)dst_ptr) = kai_cast_f16_f32(scale);
+            dst_ptr += sizeof(uint16_t);
+
+            for (size_t i = 0; i < bl / 2; ++i) {
+                float v0_f32 = src[i];
+                float v1_f32 = src[i + bl / 2];
+
+                v0_f32 *= recip_scale;
+                v1_f32 *= recip_scale;
+
+                const uint8_t v0_u8 = (uint8_t)std::min((int8_t)15, (int8_t)(v0_f32 + 8.5f));
+                const uint8_t v1_u8 = (uint8_t)std::min((int8_t)15, (int8_t)(v1_f32 + 8.5f));
+
+                const uint8_t rhs_v0 = (v1_u8 << 4) | v0_u8;
+
+                dst_ptr[0] = rhs_v0;
+                dst_ptr += sizeof(uint8_t);
+            }
+        }
+    }
+}
 
 ConstBufferPtr prepareGemmOptForGPTQInt4(ConstBufferPtr kernel, ConstBufferPtr scales, const std::string& key) {
+
     ConstBufferPtr weight_workspace = kernel;
 
     std::vector<size_t> Bshape = kernel->shape();
@@ -517,6 +782,7 @@ ConstBufferPtr prepareGemmOptForGPTQInt4(ConstBufferPtr kernel, ConstBufferPtr s
         gemm_kernel.gemm_pack_weight_FP16toBF16_arm(n, k, weight_k_pack, unpacked_weight, weight_workspace_cur_ptr);
         free(unpacked_weight);
         return weight_workspace;
+    }
 #else
     if (kernel->type() == DataType::TYPE_INT8 && scales->type() == DataType::TYPE_FP16) {
         int8_t* qweight = (int8_t*)kernel->data();
@@ -572,7 +838,8 @@ ConstBufferPtr prepareGemmOptForGPTQInt4(ConstBufferPtr kernel, ConstBufferPtr s
 
         std::vector<size_t> weight_workspace_shape = std::vector<size_t>(Bshape.begin(), Bshape.end() - 2);
 
-	weight_workspace_shape.insert(weight_workspace_shape.end(), {k, n / 2});
+        weight_workspace_shape.insert(weight_workspace_shape.end(), {k, n / 2});
+
         BufferPtr output = BufferPtr(new Buffer(MemoryType::MEMORY_CPU,
                                                         DataType::TYPE_UINT8,
                                                         weight_workspace_shape,
@@ -580,8 +847,7 @@ ConstBufferPtr prepareGemmOptForGPTQInt4(ConstBufferPtr kernel, ConstBufferPtr s
 
         uint8_t* rhs_native_mtx_qs4c32 = new uint8_t[rhs_native_size_qs4c32];
 
-        quant_qs4c32_f32(
-                n, k, bl, (const float*)transposedWeight->data(), (uint8_t*)rhs_native_mtx_qs4c32);
+        quant_qs4c32_f32(n, k, bl, (const float*)transposedWeight->data(), (uint8_t*)rhs_native_mtx_qs4c32);
 
         struct kai_rhs_pack_qs4cxs1s0_param kai_rhs_params;
         kai_rhs_params.lhs_zero_point = 1;
@@ -611,8 +877,101 @@ ConstBufferPtr prepareGemmOptForGPTQInt4(ConstBufferPtr kernel, ConstBufferPtr s
         delete[] rhs_native_mtx_qs4c32;
         free(unpacked_weight);
         return output;
-#endif
+    } else if (kernel->type() == DataType::TYPE_FP8_E4M3 && scales->type() == DataType::TYPE_FP32) {
+        uint8_t* qweight = (uint8_t*)kernel->data();
+        auto qscales = (float*)scales->data();
+        n /= 2;
+
+        if (key == W::moe_w1 || key == W::moe_w2) {
+            size_t tmp = k;
+            k = n;
+            n = tmp;
+        }
+        size_t scale_k = k / 128;
+        size_t scale_n = n / 128;
+
+        size_t batch_size = std::accumulate(Bshape.begin(), Bshape.end() - 2, (size_t)1, std::multiplies<size_t>());
+
+        //float* unpacked_weight = (float*)malloc(k * n * sizeof(float));
+
+        const size_t bl = 32;
+        const size_t num_blocks = k / bl;
+        const size_t num_bytes_per_block_qs4c32 = (bl / 2) + sizeof(int16_t);
+        const size_t rhs_native_size_qs4c32 = n * num_blocks * num_bytes_per_block_qs4c32;
+        uint8_t* rhs_native_mtx_qs4c32 = new uint8_t[rhs_native_size_qs4c32];
+
+        const size_t nr = kai_get_nr_matmul_clamp_f32_qsi8d32p1x8_qsi4c32p4x8_1x4x32_neon_dotprod();
+        const size_t kr = kai_get_kr_matmul_clamp_f32_qsi8d32p1x8_qsi4c32p4x8_1x4x32_neon_dotprod();
+        const size_t sr = kai_get_sr_matmul_clamp_f32_qsi8d32p1x8_qsi4c32p4x8_1x4x32_neon_dotprod();
+
+        // In a single row, we pack nr bias values followed by K rows of nr RHS values
+        const size_t rhs_packed_size = kai_get_rhs_packed_size_rhs_pack_nxk_qsi4c32pscalef16_qsu4c32s16s0(n, k, nr, kr, bl);
+
+        uint8_t* rhs_packed_mtx_qs4c32 = new uint8_t[rhs_packed_size * batch_size];
+
+        std::vector<size_t> weight_workspace_shape = std::vector<size_t>(Bshape.begin(), Bshape.end() - 2);
+
+        // workaround to save/load converted weights
+        // set buffer size same as actual packed buffer size
+        // dim n is correct and is used in gemm compute
+        // dim k is wrong and should not be used
+        if (rhs_packed_size % n != 0) {
+            throw std::runtime_error("rhs_packed_size is not multiple of n");
+        }
+        weight_workspace_shape.insert(weight_workspace_shape.end(), {rhs_packed_size / n, n});
+        //weight_workspace_shape.insert(weight_workspace_shape.end(), {k, n});
+
+        BufferPtr output = BufferPtr(new Buffer(MemoryType::MEMORY_CPU,
+                                                        DataType::TYPE_UINT8,
+                                                        weight_workspace_shape,
+                                                        rhs_packed_mtx_qs4c32));
+
+        for (int b = 0; b < batch_size; b++) {
+            // qweight/qscales are transposed [n, k]
+            // #pragma omp parallel for collapse(2)
+            // for (int i = 0; i < n; i++) {
+            //     for (int j = 0; j < k; j++) {
+            //         uint8_t qint8 = qweight[b * k * n + i * k + j];
+            //         float scale_0 = qscales[b * scale_k * scale_n + i / 128 * scale_k + j / 128 ];
+            //         auto x0 = scale_0 * fp8_to_fp32_e4m3(qint8);
+            //         unpacked_weight[i * k + j ] = x0;
+            //     }
+            // }
+
+            //quant_qs4c32_f32(n, k, bl, unpacked_weight, rhs_native_mtx_qs4c32);
+
+            quant_qs4c32_f8(n, k, scale_n, scale_k, bl, qweight + b * k * n, qscales + b * scale_k * scale_n, rhs_native_mtx_qs4c32);
+
+            struct kai_rhs_pack_qs4cxs1s0_param kai_rhs_params;
+            kai_rhs_params.lhs_zero_point = 1;
+            kai_rhs_params.rhs_zero_point = 8;
+
+            // Packing only needs to be performed once if the contents of the bias and RHS matrices are expected to be constant.
+            int n_step = 32;
+            size_t rhs_stride = kai_rhs_stride(k, bl);
+
+            #pragma omp parallel for
+            for (int n_start = 0; n_start < n; n_start += n_step) {
+                const size_t rhs_offset = kai_get_rhs_offset_rhs_pack_nxk_qsi4c32pscalef16_qsu4c32s16s0(n_start, rhs_stride);
+                const size_t packed_offset = kai_get_rhs_packed_offset_rhs_pack_nxk_qsi4c32pscalef16_qsu4c32s16s0(n_start, k, nr, kr, bl);
+
+                int tile_n = (n_start + n_step <= n) ? n_step : n - n_start;
+                kai_run_rhs_pack_nxk_qsi4c32pscalef16_qsu4c32s16s0(
+                    1, tile_n, k,                                           // Dimensions
+                    nr, kr, sr,                                             // Packing arguments
+                    bl,                                                     // Block length
+                    (const uint8_t*)(rhs_native_mtx_qs4c32 + rhs_offset),   // RHS
+                    NULL,                                                   // Bias
+                    ((uint8_t*)rhs_packed_mtx_qs4c32 + b * rhs_packed_size +  packed_offset),      // RHS packed
+                    0, &kai_rhs_params
+                );
+            }
+        }
+        delete[] rhs_native_mtx_qs4c32;
+        //free(unpacked_weight);
+        return output;
     }
+#endif
     return weight_workspace;
 }
 

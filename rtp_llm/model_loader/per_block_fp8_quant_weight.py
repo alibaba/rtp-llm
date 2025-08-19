@@ -370,6 +370,11 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             scale_weight = processed_res[self.scale.name]
             scale_weight = scale_weight.reshape(scale_weight.shape[-1], -1) if  scale_weight.dim() == 2 else scale_weight
             processed_res[self.scale.name] = scale_weight
+            from rtp_llm.ops import get_device
+            exported_device: DeviceExporter = get_device()
+            preprocess_weight_scale = exported_device.preprocess_weight_scale
+            qweight_interleaved = preprocess_weight_scale(kernel_weight, scale_weight, self.kernel.name)
+            processed_res[self.kernel.name] = qweight_interleaved
 
         return processed_res
 

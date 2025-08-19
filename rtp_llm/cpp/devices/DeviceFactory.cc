@@ -216,7 +216,7 @@ void registerDeviceOps(py::module& m) {
              py::arg("weight"),
              py::arg("quant_type"),
              py::arg("arch"))
-        .def("preprocess_weight_scale", &DeviceExporter::preprocessWeightScale, py::arg("weight"), py::arg("scale"));
+        .def("preprocess_weight_scale", &DeviceExporter::preprocessWeightScale, py::arg("weight"), py::arg("scale"), py::arg("key"));
 
     m.def("get_device", &DeviceFactory::getDeviceExporter);
 }

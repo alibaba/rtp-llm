@@ -67,7 +67,7 @@ class ArmCpuImpl(CpuImpl):
         qweight = qweight.to(torch.int8)
         if not is_int8:
             qweight = packer(qweight)
-        qweight_interleaved = preprocess_weight_scale(qweight, scales_fp16)
+        qweight_interleaved = preprocess_weight_scale(qweight, scales_fp16, "")
 
         # zero = 0 if qzeros_int32 = -2004318072 torch.int32 for awq
         # zero = 0 if qzeros_int32 = 2004318071  torch.int32 for gptq
@@ -83,6 +83,9 @@ class ArmCpuImpl(CpuImpl):
 
         # return processed interleaved weight, original scales and zeros * scales
         return qweight_interleaved.contiguous().to(device),  zeros_x_scales_fp16.contiguous().to(device), scales_fp16.contiguous().to(device)
+
+    def shuffle_moe_weight(self, x: torch.Tensor, datatype: torch.dtype, name: str) -> torch.Tensor:
+        return x
 
 class GpuImpl(DeviceBase):
     def __init__(self, exported_device: DeviceExporter):

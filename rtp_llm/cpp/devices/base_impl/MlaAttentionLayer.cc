@@ -60,7 +60,11 @@ AttentionLayerOutput DeviceBase::mlaAttentionLayer(const AttentionLayerParams& p
     DevicePerfWrapper pre_mla_wrapper(this, "pre_mla_layer");
     if (params.weights.fusedqkrope_weight != nullptr) {
         // auto q_output_size = params.configs.nope_head_dim;
+#if defined(__aarch64__)
+        fused_qkv = gemm(GemmParams(input, *(params.weights.fusedqkrope_weight->kernel), std::nullopt, nullptr, DataType::TYPE_FP32));
+#else
         fused_qkv                = gemm(GemmParams(input, *(params.weights.fusedqkrope_weight->kernel)));
+#endif
         kv_offset = params.configs.q_lora_rank;
         auto norm_output         = layernormWithStride(LayernormWithStrideParams(
             {fused_qkv,
@@ -73,7 +77,11 @@ AttentionLayerOutput DeviceBase::mlaAttentionLayer(const AttentionLayerParams& p
                      false}));
         q                        = gemm(GemmParams(*norm_output.output, *(params.weights.q_b_weight->kernel)));
     } else {
+#if defined(__aarch64__)
+        fused_qkv = gemm(GemmParams(input, *(params.weights.fusedqkrope_no_lora_weight->kernel), std::nullopt, nullptr, DataType::TYPE_FP32));
+#else
         fused_qkv                = gemm(GemmParams(input, *(params.weights.fusedqkrope_no_lora_weight->kernel)));
+#endif
         kv_offset = params.configs.head_num * params.configs.size_per_head;
         q = slice(SliceParams({*fused_qkv, -1, 0, (int64_t)(params.configs.head_num * params.configs.size_per_head)}));
     }
@@ -88,7 +96,11 @@ AttentionLayerOutput DeviceBase::mlaAttentionLayer(const AttentionLayerParams& p
                                    true}));
     pre_mla_wrapper.stop();
     auto      dtype         = input.type();
+#if defined(__aarch64__)
+    auto qkv_output = allocateBuffer({DataType::TYPE_FP32, {h_token_num, params.configs.head_num * params.configs.v_head_dim}}, {"qkv_output"});
+#else
     auto qkv_output = allocateBuffer({dtype, {h_token_num, params.configs.head_num * params.configs.v_head_dim}}, {"qkv_output"});
+#endif
     if (generate_batch_size) {
         RTP_LLM_LOG_DEBUG("absorb decode mla attention");
         RTP_LLM_CHECK_WITH_INFO(layer_kv_cache.has_value(), "kv cache can not be null for mla attention layer");
@@ -148,12 +160,17 @@ AttentionLayerOutput DeviceBase::mlaAttentionLayer(const AttentionLayerParams& p
                                 params.common,
                                 params.weights,
                                 params.configs,
-                                params.qscheme});
+                                params.qscheme,
+                                true});
         }
     }
   
     printBufferData(*qkv_output, "attent_proj_input");
+#if defined(__aarch64__)
+    auto output_gemm_params = GemmParams(*qkv_output, *(params.weights.output_weight->kernel), std::nullopt, nullptr, dtype);
+#else
     auto output_gemm_params = GemmParams(*qkv_output, *(params.weights.output_weight->kernel));
+#endif
     auto attention_out = loraLinear(LoraLinearParams(output_gemm_params, params.common.lora_input.out_lora_input)).output;
     printBufferData(*attention_out, "attention_out");
     return {std::move(attention_out)};

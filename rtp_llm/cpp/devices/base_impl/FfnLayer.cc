@@ -20,6 +20,13 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
         auto moe_output = moeFfnLayer(params);
         output = moe_output.hidden_states;
 
+#if defined(__aarch64__)
+        if (params.input.type() == DataType::TYPE_FP16 &&
+            params.weights.moe_down_weight->kernel->type() == DataType::TYPE_QFP8_E4M3) {
+            return FfnLayerOutput({std::move(output)});
+        }
+#endif
+
         auto shared_expert_output = moeSharedExpert(params).hidden_states;
 
         // for deep ep ll, the gather should be defered afater shared expert.
@@ -32,9 +39,16 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
         printBufferData(*output, "moe_out_after_barrier");
         if (shared_expert_output) {
             // just add bias to output
-            layernorm({
+#if defined(__aarch64__)
+            shared_expert_output = layernorm({
+                output, nullptr, nullopt, mayGetRef(shared_expert_output),
+                nullopt, nullopt, 1.0f, 1e-5, true, false, NormType::rmsnorm
+            }).output;
+#else
+            shared_expert_output = layernorm({
                 output, nullptr, nullopt, mayGetRef(shared_expert_output)
             }).output;
+#endif
         }
     } else {
         BufferPtr up_output;

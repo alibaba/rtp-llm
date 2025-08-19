@@ -1,6 +1,12 @@
 #pragma once
+
 #include "rtp_llm/cpp/devices/torch_impl/FfnLayer.h"
 #include "rtp_llm/cpp/devices/testing/TestBase.h"
+
+#if defined(__aarch64__)
+#include "rtp_llm/cpp/devices/arm_impl/gemm_opt/ArmGemmKernel.h"
+#endif
+
 #include <torch/torch.h>
 #include <functional>
 #include <iostream>
@@ -48,10 +54,20 @@ public:
         auto up_proj    = tensorToBuffer(params.up_proj, alloc_type);
         auto down_proj  = tensorToBuffer(params.down_proj, alloc_type);
 
+#if defined(__aarch64__)
+        auto gate_packed = prepareGemmOptWeight(gate_proj);
+        auto up_packed = prepareGemmOptWeight(up_proj);
+        auto down_packed = prepareGemmOptWeight(down_proj);
+        FfnLayerWeights weights;
+        weights.up_weight = std::make_unique<const DenseWeights>(DenseWeights(up_packed));
+        weights.down_weight = std::make_unique<const DenseWeights>(DenseWeights(down_packed));
+        weights.gate_weight = std::make_unique<const DenseWeights>(DenseWeights(gate_packed));
+#else
         FfnLayerWeights weights;
         weights.up_weight = std::make_unique<const DenseWeights>(DenseWeights(up_proj));
         weights.down_weight = std::make_unique<const DenseWeights>(DenseWeights(down_proj));
         weights.gate_weight = std::make_unique<const DenseWeights>(DenseWeights(gate_proj));
+#endif
 
         FfnConfigs ffn_configs({Atype});
         FfnLayerParams Opparams(*input,

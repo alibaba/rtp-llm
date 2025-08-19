@@ -126,7 +126,7 @@ build:arm --host_action_env TF_NEED_CUDA="0"
 build:arm --crosstool_top=@bazel_tools//tools/cpp:toolchain
 build:arm --host_crosstool_top=@bazel_tools//tools/cpp:toolchain
 build:arm --copt="-DUSING_CUDA=0"
-build:arm --copt="-D_GLIBCXX_USE_CXX11_ABI=0"
+build:arm --copt="-D_GLIBCXX_USE_CXX11_ABI=1"
 build:arm --define=xft_use_icx=false
 build:arm --copt=-Wno-tautological-compare
 build:arm --copt=-Wno-array-bounds # aios

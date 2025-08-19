@@ -110,12 +110,156 @@ void updateKVCache(const AttentionModuleParams& params, int batch, size_t step, 
     }
 }
 
+struct Float2 {
+    float x;
+    float y;
+};
+
+inline Float2 rotary_embedding_transform(const Float2& v, const Float2& coef) {
+    return {
+        coef.x * v.x - coef.y * v.y,
+        coef.x * v.y + coef.y * v.x
+    };
+}
+
+inline float rope_inv_freq(const int zid, const int rot_embed_dim, const float base) {
+    return 1.0f / std::pow(base, zid / static_cast<float>(rot_embed_dim));
+}
+
+struct YarnRope {
+    int dim;
+    int base;
+    int max_pos;
+    float beta_slow;
+    float beta_fast;
+    float scaling_factor;
+    float extrapolation_factor;
+    float mscale;
+
+    static float find_correction_dim(float num_rot, int dim, int base, int max_pos = 2048) {
+        const float pi = 3.141592654f;
+        float t0 = dim * std::log(max_pos / (num_rot * 2 * pi));
+        float t1 = 2 * std::log((float)base);
+        return t0 / t1;
+    }
+
+    static std::pair<float, float> find_correction_range(float low_rot, float high_rot, int dim, int base, int max_pos = 2048) {
+        int low  = static_cast<int>(std::floor(find_correction_dim(low_rot, dim, base, max_pos)));
+        int high = static_cast<int>(std::ceil(find_correction_dim(high_rot, dim, base, max_pos)));
+        return {std::max(0, low), std::min(high, dim - 1)};
+    }
+
+    static float linear_ramp_mask(float min_, float max_, int tidx) {
+        if (min_ == max_) max_ += 0.001f;
+        float linear = (tidx / 2.0f - min_) / (max_ - min_);
+        return std::min(1.0f, std::max(0.0f, linear));
+    }
+
+    float operator()(float inv_freq, int zid) const {
+        auto [low, high] = find_correction_range(beta_fast, beta_slow, dim, base, max_pos);
+        float inv_freq_e = inv_freq;
+        float inv_freq_i = inv_freq_e / scaling_factor;
+        float mask = (1.0f - linear_ramp_mask(low, high, zid)) * extrapolation_factor;
+        return inv_freq_i * (1 - mask) + inv_freq_e * mask;
+    }
+
+    float sin_cos_scale() const {
+        return mscale;
+    }
+};
+
+struct LinearScaleRope {
+    float scale = 1.0;
+    float operator()(float inv_freq, int zid) const {
+        return inv_freq / scale;
+    }
+
+    float sin_cos_scale() const {
+        return 1.0;
+    }
+};
+
+template<typename RopeInit>
+Float2 rotary_embedding_coefficient(
+    const int zid, const int rot_embed_dim, const float t_step,
+    const float base, const RopeInit& rope_init)
+{
+    float inv_freq = rope_inv_freq(zid, rot_embed_dim, base);
+    inv_freq = rope_init(inv_freq, zid);
+    float angle = inv_freq * t_step;
+    float scale = rope_init.sin_cos_scale();
+    return {scale * std::cos(angle), scale * std::sin(angle)};
+}
+
+template<typename RopeInit>
+void apply_rotary_embedding(Float2& v, int zid, int rot_embed_dim, int t_step,
+                            float base, const RopeInit& rope_init)
+{
+    Float2 coef = rotary_embedding_coefficient(zid, rot_embed_dim, t_step, base, rope_init);
+    v = rotary_embedding_transform(v, coef);
+}
+
 /* Input 'qkv' consists of q & k & v, and each with shape [batch, seq_len, num_heads, head_dim].
  * Half RoPE is applied to q & k.
  * Retrieve pre-calculated Cos/Sin if exists.
  */
 template<typename T>
-void ArmCpuDevice::halfRopeQK(void *qkv, int batch, int seq_len, int num_heads, int kv_num_heads, int head_size, size_t step, size_t base, size_t embed_dim) {
+void ArmCpuDevice::halfRopeQK(void *qkv, int batch, int seq_len, int num_heads, int kv_num_heads, int head_size, size_t step, const RopeConfig *rope_config/* size_t base, size_t embed_dim */) {
+    auto base = rope_config->base;
+    auto embed_dim = rope_config->dim;
+    auto offset = rope_config->offset;
+    if (rope_config->style == RopeStyle::Yarn) {
+        YarnRope yarn;
+        yarn.dim = embed_dim;
+        yarn.base = base;
+        yarn.max_pos = rope_config->max_pos;
+        yarn.beta_slow = rope_config->factor1;
+        yarn.beta_fast =  rope_config->factor2;
+        yarn.scaling_factor = rope_config->scale;
+        yarn.extrapolation_factor = rope_config->extrapolation_factor;
+        yarn.mscale = rope_config->mscale;
+
+        size_t inv_freq_size = (embed_dim + 1) / 2;
+        const int N = batch * seq_len;
+
+        parallel_for(N, [&](int tid) {
+            int j = tid % seq_len;
+            T* q_input = (T*)qkv + tid * (num_heads + 2 * kv_num_heads) * head_size + offset;
+            T* k_input = (T*)qkv + tid * (num_heads + 2 * kv_num_heads) * head_size + num_heads * head_size + offset;
+
+            size_t seq = (j == 0) ? step : j;
+
+            for (int h = 0; h < num_heads; h++) {
+                for (int d = 0; d < inv_freq_size; d++) {
+                    int rope_idx = d;
+                    if (rope_idx < 0 || rope_idx >= inv_freq_size)
+                        continue;
+                    
+                    // Load q
+                    Float2 q = {
+                        q_input[h * head_size + d],
+                        q_input[h * head_size + d + inv_freq_size]
+                    };
+                    apply_rotary_embedding(q, rope_idx * 2, embed_dim, seq, base, yarn);
+                    q_input[h * head_size + d]                 = q.x;
+                    q_input[h * head_size + d + inv_freq_size] = q.y;
+
+                    // Load and apply RoPE to k
+                    if (h < kv_num_heads) {
+                        Float2 k = {
+                            k_input[h * head_size + d],
+                            k_input[h * head_size + d + inv_freq_size]
+                        };
+                        apply_rotary_embedding(k, rope_idx * 2, embed_dim, seq, base, yarn);
+                        k_input[h * head_size + d]                 = k.x;
+                        k_input[h * head_size + d + inv_freq_size] = k.y;
+                    }
+                }
+            }
+        });
+        return;
+    }
+
     size_t inv_freq_size = (embed_dim + 1) / 2;
 
     auto &value = ropeCosSin[base];
@@ -228,13 +372,14 @@ void ArmCpuDevice::runOneBatch(const AttentionModuleParams& params, size_t past_
 
     tStart = std::chrono::steady_clock::now();
     if (params.configs.rope_config.style != RopeStyle::No) {
-        if (params.configs.rope_config.style == RopeStyle::Base) {
+        if (params.configs.rope_config.style == RopeStyle::Base ||
+            params.configs.rope_config.style == RopeStyle::Yarn) {
             if (datatype == DataType::TYPE_FP32) {
                 halfRopeQK<float>(qkv, 1, seq_len, head_num, kv_head_num, size_per_head, step,
-                                    params.configs.rope_config.base, params.configs.rope_config.dim);
+                                    &params.configs.rope_config);
             } else if (datatype == DataType::TYPE_FP16) {
                 halfRopeQK<__fp16>(qkv, 1, seq_len, head_num, kv_head_num, size_per_head, step,
-                                    params.configs.rope_config.base, params.configs.rope_config.dim);
+                                    &params.configs.rope_config);
             } else {
                 throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
             }
@@ -510,12 +655,12 @@ void ArmCpuDevice::biasAddRopeWriteKVCache(const AttentionModuleParams& params, 
 
     tStart = std::chrono::steady_clock::now();
     if (params.configs.rope_config.style != RopeStyle::No) {
-        if (params.configs.rope_config.style == RopeStyle::Base) {
+        if (params.configs.rope_config.style == RopeStyle::Base || 
+            params.configs.rope_config.style == RopeStyle::Yarn) {
             halfRopeQK<float>(qkv, 1, seq_len, head_num, kv_head_num, size_per_head, step,
-                                params.configs.rope_config.base,
-                                params.configs.rope_config.dim);
+                                &params.configs.rope_config);
         } else {
-            throw std::runtime_error("SelfAttention RoPE type is not supported");
+            throw std::runtime_error("RoPE type is not supported");
         }
     }
     tEnd = std::chrono::steady_clock::now();
@@ -1038,7 +1183,7 @@ void ArmCpuDevice::runOneBatchFlashDecoding(const AttentionModuleParams& params,
 
     int q_len = group_size;
     int kv_len = step + 1;
-    int q_blk = q_len;
+    int q_blk = 8;
     int kv_blk = params.configs.tokens_per_block;
 
     // get kv blocks address
@@ -1056,7 +1201,8 @@ void ArmCpuDevice::runOneBatchFlashDecoding(const AttentionModuleParams& params,
     int kv_split_blk = kv_blk * std::min(kv_blk_num, (int)((kv_blk_num * kv_head_num + num_thread - 1) / num_thread));
     int kv_split_num = (kv_len + kv_split_blk - 1) / kv_split_blk;
 
-    const size_t N = kv_head_num * kv_split_num;
+    const int q_blk_num = (q_len + q_blk - 1) / q_blk;
+    const size_t N = q_blk_num * kv_head_num * kv_split_num;
 
     typedef struct {
         float* pre_sum;
@@ -1086,13 +1232,15 @@ void ArmCpuDevice::runOneBatchFlashDecoding(const AttentionModuleParams& params,
     }
 
     parallel_for(N, [&](int idx) {
+        Ptrs ptr = ptrs[idx];
+        int q_blk_idx = idx / (kv_head_num * kv_split_num);
+        idx = idx % (kv_head_num * kv_split_num);
         int kv_h = idx / kv_split_num;
         int kv_split_idx = idx % kv_split_num;
         int h = kv_h * group_size;
-        Ptrs ptr = ptrs[idx];
-        int q_real_blk = q_blk;
+        int q_real_blk = std::min(q_blk, q_len - q_blk_idx * q_blk);
         uint64_t src_off = h * size_per_head;
-        const float* q_buf = (float *)q + src_off;
+        const float* q_buf = (float *)q + src_off + q_blk_idx * q_blk * q_stride;
         float* out = ptr.o_arr;
 
         // reset out
@@ -1139,12 +1287,13 @@ void ArmCpuDevice::runOneBatchFlashDecoding(const AttentionModuleParams& params,
     tStart = std::chrono::steady_clock::now();
 
     // reduce sum kv_split_O to Output
-    parallel_for(kv_head_num, [&](int idx) {
-        int kv_h = idx;
+    parallel_for(q_blk_num * kv_head_num, [&](int idx) {
+        int q_blk_idx = idx / kv_head_num;
+        int kv_h = idx % kv_head_num;
         int h = kv_h * group_size;
         uint64_t out_off = h * v_head_dim;
-        float* out = output + out_off;
-        int q_real_blk = q_blk;
+        float* out = output + out_off + q_blk_idx * q_blk * o_stride;
+        int q_real_blk = std::min(q_blk, q_len - q_blk_idx * q_blk);
 
         // reset out
         float32x4_t zero = vdupq_n_f32(0.0f);
@@ -1160,7 +1309,7 @@ void ArmCpuDevice::runOneBatchFlashDecoding(const AttentionModuleParams& params,
             float lse_max = std::numeric_limits<float>::lowest();
 
             for (int j = 0; j < kv_split_num; j++) {
-                Ptrs ptr = ptrs[kv_h * kv_split_num + j];
+                Ptrs ptr = ptrs[idx * kv_split_num + j];
 
                 // lse = max + log(sum)
                 // lse_max = max(lse)
@@ -1169,7 +1318,7 @@ void ArmCpuDevice::runOneBatchFlashDecoding(const AttentionModuleParams& params,
             }
 
             for (int j = 0; j < kv_split_num; j++) {
-                Ptrs ptr = ptrs[kv_h * kv_split_num + j];
+                Ptrs ptr = ptrs[idx * kv_split_num + j];
 
                 // lse_sum = sum(exp(lse - lse_max))
                 lse_sum += std::exp(ptr.lse[ii] - lse_max);
@@ -1180,9 +1329,11 @@ void ArmCpuDevice::runOneBatchFlashDecoding(const AttentionModuleParams& params,
         }
 
         for (int i = 0; i < kv_split_num; i++) {
-            Ptrs ptr = ptrs[kv_h * kv_split_num + i];
+            Ptrs ptr = ptrs[idx * kv_split_num + i];
 
-            vReduceSumSplitKVOutput(out, ptr.o_arr, ptr.lse, lse_logsum, q_real_blk, v_head_dim, o_stride);
+            vReduceSumSplitKVOutput(out, ptr.o_arr, ptr.lse, lse_logsum,
+                    q_real_blk, v_head_dim, o_stride);
+
         }
 
         delete[] lse_logsum;
@@ -1205,7 +1356,9 @@ AttentionModuleOutput ArmCpuDevice::contextAttention(const AttentionModuleParams
         for (int batch = 0; batch < batch_size; batch++) {
             size_t context_len = *static_cast<int*>(params.common.input_lengths->dataWithOffset(decoder_batch + batch));
 
-            biasAddRopeWriteKVCache(params, past_seq, batch, context_len, 0);
+            if (!params.configs.use_mla) {
+                biasAddRopeWriteKVCache(params, past_seq, batch, context_len, 0);
+            }
 
             if (isFAenabled) {
                 runOneBatchFlash(params, past_seq, batch, context_len, 0);
@@ -1233,9 +1386,11 @@ AttentionModuleOutput ArmCpuDevice::decoderSelfAttention(const AttentionModulePa
         for (int batch = 0; batch < batch_size; batch++) {
             size_t step = *static_cast<int*>(params.common.sequence_lengths->dataWithOffset(batch));
 
-            biasAddRopeWriteKVCache(params, batch, batch, 1, step);
+            if (!params.configs.use_mla) {
+                biasAddRopeWriteKVCache(params, batch, batch, 1, step);
+            }
 
-            if (isFAenabled) {
+            if (isFAenabled || params.configs.use_mla) {
                 runOneBatchFlashDecoding(params, batch, batch, 1, step);
             } else {
                 runOneBatchStride(params, batch, batch, 1, step);

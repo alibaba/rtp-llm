@@ -296,11 +296,139 @@ BufferPtr ArmCpuDevice::gemm_kai_bf16(const GemmParams& params) {
     return output;
 }
 
+inline size_t get_a8w4_variant(size_t m) {
+    return (m == 1) ? 0 : 1;
+}
+
+size_t get_lhs_packed_size_kai_a8w4(int* m_array, int k, int bs, size_t* offsets) {
+    size_t packed_size = 0;
+    const size_t bl = 32;
+    for (int i = 0; i < bs; i++) {
+        int m = m_array[i];
+        size_t idx_variant = get_a8w4_variant(m);
+        size_t mr = fp16_ukernel_variants[idx_variant].ukernel.get_mr();
+        size_t kr = fp16_ukernel_variants[idx_variant].ukernel.get_kr();
+        size_t sr = fp16_ukernel_variants[idx_variant].ukernel.get_sr();
+
+        offsets[i] = packed_size;
+        packed_size += kai_get_lhs_packed_size_lhs_quant_pack_qsi8d32p_f16(m, k, bl, mr, kr, sr);
+    }
+    return packed_size;
+}
+
+// batch pack lhs with different m and same k
+void batch_pack_lhs_kai_a8w4(const float16_t* input, const size_t* input_offsets, uint8_t* output, const size_t* output_offsets, int* m_array, int k, int bs) {
+    const size_t bl = 32;
+    const int m_step = 128;
+    const int max_m = m_array[0];
+    #pragma omp parallel for collapse(2) schedule(dynamic, 1)
+    for (int b = 0; b < bs; b++) {
+        for (int m_start = 0; m_start < max_m; m_start += m_step) {
+            int m = m_array[b];
+            if (m_start >= m) {
+                continue;
+            }
+            size_t idx_variant = get_a8w4_variant(m);
+            size_t mr = fp16_ukernel_variants[idx_variant].ukernel.get_mr();
+            size_t kr = fp16_ukernel_variants[idx_variant].ukernel.get_kr();
+            size_t sr = fp16_ukernel_variants[idx_variant].ukernel.get_sr();
+
+            const float16_t* input_ptr = input + input_offsets[b];
+            uint8_t* output_ptr = output + output_offsets[b];
+
+            const size_t lhs_packed_offset = kai_get_lhs_packed_offset_lhs_quant_pack_qsi8d32p_f16(m_start, k, bl, mr, kr, sr);
+            int tile_m = (m_start + m_step <= m) ? m_step : m - m_start;
+            kai_run_lhs_quant_pack_qsi8d32p_f16(
+                tile_m, k, bl, mr, kr, sr, 0,
+                input_ptr + m_start * k,
+                k * sizeof(float16_t),
+                output_ptr + lhs_packed_offset);
+        }
+    }
+}
+
+// batch matmul with same shape packed weights
+// input: qsi8d32p weight: qsi4c32p output: fp16
+void batch_matmul_kai_a8w4(const uint8_t* input, const size_t* input_offsets,
+                           const uint8_t* weight, const size_t* weight_offsets,
+                           float16_t* output, const size_t* output_offsets,
+                           int* m_array, int k, int n, size_t output_stride,
+                           int bs) {
+    const size_t bl = 32;
+    const int n_step = 256;
+    #pragma omp parallel for collapse(2) schedule(dynamic, 1)
+    for (int b = 0; b < bs; ++b) {
+        for (int n_start = 0; n_start < n; n_start += n_step) {
+            int m = m_array[b];
+            size_t idx_variant = get_a8w4_variant(m);
+
+            const size_t rhs_offset = fp16_ukernel_variants[idx_variant].ukernel.get_rhs_packed_offset(n_start, k, bl);
+            const size_t dst_offset = fp16_ukernel_variants[idx_variant].ukernel.get_dst_offset(0, n_start, output_stride);
+
+            const void* lhs_ptr = input + input_offsets[b];
+            const void* rhs_ptr = weight + weight_offsets[b] + rhs_offset;
+            float16_t* dst_ptr = output + output_offsets[b] + dst_offset / sizeof(float16_t);
+
+            int tile_n = (n_start + n_step <= n) ? n_step : n - n_start;
+
+            fp16_ukernel_variants[idx_variant].ukernel.run_matmul(
+                m, tile_n, k, bl,           // Dimensions
+                lhs_ptr,                    // LHS packed
+                rhs_ptr,                    // RHS packed
+                dst_ptr,                    // DST
+                output_stride,              // DST stride (row)
+                sizeof(float16_t),          // DST stride (col)
+                -HALF_FLT_MAX, HALF_FLT_MAX // Min and max for the clamp operation
+            );
+        }
+    }
+}
+
+// batch matmul with same shape packed weights
+// input: fp32 weight: bf16 output: fp32
+void batch_matmul_kai_bf16(const float* input, size_t input_batch_stride, size_t input_row_stride,
+                           const bfloat16_t* weight,
+                           float* output, size_t output_batch_stride, size_t output_row_stride,
+                           int m, int k, int n, int bs) {
+    const size_t mr = kai_get_mr_matmul_clamp_f32_bf16p8x4_bf16p12x4b_8x12_neon_mmla();
+    const size_t kr = kai_get_kr_matmul_clamp_f32_bf16p8x4_bf16p12x4b_8x12_neon_mmla();
+    const size_t sr = kai_get_sr_matmul_clamp_f32_bf16p8x4_bf16p12x4b_8x12_neon_mmla();
+
+    const size_t lhs_packed_size = kai_get_lhs_packed_size_lhs_quant_pack_bf16p8x4_f32_neon(m, k, mr, kr, sr);
+    const size_t rhs_packed_size = kai_get_rhs_packed_size_rhs_pack_kxn_bf16p12x4biasf32_f16_neon(n, k);
+
+    #pragma omp parallel for
+    for (int i = 0; i < bs; i++) {
+        uint8_t* lhs_packed = new uint8_t[lhs_packed_size];
+        const float* lhs_ptr = input + i * input_batch_stride;
+        const bfloat16_t* rhs_ptr = weight + i * rhs_packed_size / sizeof(bfloat16_t);
+        float* output_ptr = output + i * output_batch_stride;
+        kai_run_lhs_quant_pack_bf16p8x4_f32_neon(
+            m, k, mr, kr, sr, 0,
+            lhs_ptr,
+            input_row_stride * sizeof(float),
+            lhs_packed);
+        kai_run_matmul_clamp_f32_bf16p8x4_bf16p12x4b_8x12_neon_mmla(
+            m, n, k,                             // Dimensions
+            lhs_packed,                          // LHS
+            rhs_ptr,                             // RHS packed
+            output_ptr,                          // DST
+            output_row_stride * sizeof(float),   // DST stride (row)
+            sizeof(float),                       // DST stride (col)
+            -FLT_MAX, FLT_MAX                    // Min and max for the clamp operation
+        );
+        delete[] lhs_packed;
+    }
+}
+
 BufferPtr ArmCpuDevice::gemm_kai_a8w4(const GemmParams& params) {
 #ifdef GEMM_DEBUG
     auto start = std::chrono::high_resolution_clock::now();
 #endif
-    params.check();
+
+    if (params.B.type() != DataType::TYPE_QFP8_E4M3) {
+        params.check();
+    }
 
     std::vector<size_t> Ashape;
     std::vector<size_t> Bshape;
