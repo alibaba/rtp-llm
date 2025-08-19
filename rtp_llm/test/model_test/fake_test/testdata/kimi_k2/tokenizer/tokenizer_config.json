@@ -1,0 +1,165 @@
+{
+  "added_tokens_decoder": {
+    "163584": {
+      "content": "[BOS]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "163585": {
+      "content": "[EOS]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "163586": {
+      "content": "<|im_end|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "163587": {
+      "content": "<|im_user|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "163588": {
+      "content": "<|im_assistant|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "163590": {
+      "content": "<|start_header_id|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "163591": {
+      "content": "<|end_header_id|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "163593": {
+      "content": "[EOT]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "163594": {
+      "content": "<|im_system|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "163595": {
+      "content": "<|tool_calls_section_begin|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": false
+    },
+    "163596": {
+      "content": "<|tool_calls_section_end|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": false
+    },
+    "163597": {
+      "content": "<|tool_call_begin|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": false
+    },
+    "163598": {
+      "content": "<|tool_call_argument_begin|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": false
+    },
+    "163599": {
+      "content": "<|tool_call_end|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": false
+    },
+    "163601": {
+      "content": "<|im_middle|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "163838": {
+      "content": "[UNK]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "163839": {
+      "content": "[PAD]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    }
+  },
+  "additional_special_tokens": [
+    "<|im_end|>",
+    "<|im_user|>",
+    "<|im_assistant|>",
+    "<|start_header_id|>",
+    "<|end_header_id|>",
+    "[EOT]",
+    "<|im_system|>",
+    "<|im_middle|>"
+  ],
+  "bos_token": "[BOS]",
+  "clean_up_tokenization_spaces": false,
+  "eos_token": "[EOS]",
+  "extra_special_tokens": {},
+  "chat_template": "{%- if tools -%}\n  <|im_system|>tool_declare<|im_middle|>{{ tools | tojson }}<|im_end|>\n{%- endif -%}\n{%- for message in messages -%}\n  {%- if loop.first and messages[0]['role'] != 'system' -%}\n    <|im_system|>system<|im_middle|>You are Kimi, an AI assistant created by Moonshot AI.<|im_end|>\n  {%- endif -%}\n  {%- if message['role'] == 'system' -%}\n    <|im_system|>system<|im_middle|>\n  {%- elif message['role'] == 'user' -%}\n    <|im_user|>user<|im_middle|>\n  {%- elif message['role'] == 'assistant' -%}\n    <|im_assistant|>assistant<|im_middle|>\n  {%- elif message['role'] == 'tool' -%}\n    <|im_system|>tool<|im_middle|>\n  {%- endif -%}\n  {%- if message['role'] == 'assistant' and message.get('tool_calls') -%}\n    {%- if message['content'] -%}{{ message['content'] }}{%- endif -%}\n    <|tool_calls_section_begin|>\n    {%- for tool_call in message['tool_calls'] -%}\n      {%- set formatted_id = tool_call['id'] -%}\n      <|tool_call_begin|>{{ formatted_id }}<|tool_call_argument_begin|>{% if tool_call['function']['arguments'] is string %}{{ tool_call['function']['arguments'] }}{% else %}{{ tool_call['function']['arguments'] | tojson }}{% endif %}<|tool_call_end|>\n    {%- endfor -%}\n    <|tool_calls_section_end|>\n  {%- elif message['role'] == 'tool' -%}\n    ## Return of {{ message.tool_call_id }}\n    {{ message['content'] }}\n  {%- elif message['content'] is string -%}\n    {{ message['content'] }}\n  {%- elif message['content'] is not none -%}\n    {% for content in message['content'] -%}\n      {% if content['type'] == 'image' or 'image' in content or 'image_url' in content -%}\n        <|media_start|>image<|media_content|><|media_pad|><|media_end|>\n      {% else -%}\n        {{ content['text'] }}\n      {%- endif -%}\n    {%- endfor -%}\n  {%- endif -%}\n  <|im_end|>\n{%- endfor -%}\n{%- if add_generation_prompt -%}\n  <|im_assistant|>assistant<|im_middle|>\n{%- endif -%}",
+  "model_max_length": 1000000000000000019884624838656,
+  "pad_token": "[PAD]",
+  "tokenizer_class": "TikTokenTokenizer",
+  "unk_token": "[UNK]",
+  "auto_map": {
+    "AutoTokenizer": [
+      "tokenization_kimi.TikTokenTokenizer",
+      null
+    ]
+  }
+}
