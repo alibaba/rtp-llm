@@ -57,6 +57,7 @@ std::shared_ptr<GenerateStream> SpeculativeEngine::enqueueMinFakeQuery(int32_t m
     fake_input->begin_time_us          = autil::TimeUtility::currentTimeInMicroSeconds();
     fake_input->fake_query             = true;
     auto stream                        = makeStream(fake_input);
+    stream->setIsDummyStream(true);
     stream->setMetricsReporter(nullptr);
 
     if (fake_hidden_states) {

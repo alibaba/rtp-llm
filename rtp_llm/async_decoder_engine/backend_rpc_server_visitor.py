@@ -6,6 +6,7 @@ import torch
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
@@ -49,7 +50,7 @@ class BackendRPCServerVisitor:
                     seq_len=input.prompt_length,
                     debug=False,
                     generate_timeout=input.generate_config.ttft_timeout_ms,
-                    request_priority=input.generate_config.traffic_reject_priority
+                    request_priority=input.generate_config.traffic_reject_priority,
                 )
             )
         except BaseException as e:
@@ -124,6 +125,34 @@ class BackendRPCServerVisitor:
                 f"request <{input.request_id}> no backend role addresses found after routing",
             )
 
+    def check_sp_supported(self, input: GenerateInput):
+        if not StaticConfig.py_speculative_execution_config.sp_model_type:
+            return
+        if input.generate_config.force_disable_sp_run:
+            return
+
+        # speculative decoding does not support batched input
+        if len(input.token_ids.shape) == 2 and input.token_ids.size(0) != 1:
+            raise FtRuntimeException(
+                ExceptionType.UNSUPPORTED_OPERATION,
+                "speculative decoding does not support batched input",
+            )
+        # speculative decoding does not support num_return_sequences > 1 or num_beams > 1
+        if (
+            input.generate_config.num_return_sequences > 1
+            or input.generate_config.num_beams > 1
+        ):
+            raise FtRuntimeException(
+                ExceptionType.UNSUPPORTED_OPERATION,
+                "speculative decoding does not support num_return_sequences > 1 or num_beams > 1",
+            )
+        # speculative decoding does not support return_all_probs
+        if input.generate_config.return_all_probs:
+            raise FtRuntimeException(
+                ExceptionType.UNSUPPORTED_OPERATION,
+                "speculative decoding does not support return_all_probs",
+            )
+
     @torch.inference_mode()
     async def enqueue(
         self, input: GenerateInput
@@ -133,6 +162,9 @@ class BackendRPCServerVisitor:
                 ExceptionType.LONG_PROMPT_ERROR,
                 f"model tokens can not be empty, request length is {input.prompt_length}",
             )
+
+        self.check_sp_supported(input)
+
         max_new_tokens = min(
             self.config.max_seq_len - input.prompt_length,
             input.generate_config.max_new_tokens,

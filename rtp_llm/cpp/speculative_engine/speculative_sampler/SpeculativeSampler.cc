@@ -138,8 +138,10 @@ void SpeculativeSampler::streamSample(SpeculativeSamplerOutput&           sample
             }
         }
 
-        sample_output.propose_token_num += propose_step;
-        sample_output.accept_token_num += accept_len;
+        if (!stream->isDummyStream()) {
+            sample_output.propose_token_num += propose_step;
+            sample_output.accept_token_num += accept_len;
+        }
 
         rtp_llm::BufferPtr accept_tokens = device_->allocateBuffer(
             {rtp_llm::DataType::TYPE_INT32, {1, accept_len}, rtp_llm::AllocationType::HOST}, {"accept_tokens"});
@@ -169,7 +171,10 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
         }
         if (propose_stream_output->propose_step == 0) {
             size_t accept_len = 1;
-            sample_output.accept_token_num += accept_len;
+
+            if (!stream->isDummyStream()) {
+                sample_output.accept_token_num += accept_len;
+            }
 
             rtp_llm::BufferPtr accept_tokens = device_->allocateBuffer(
                 {rtp_llm::DataType::TYPE_INT32, {1, accept_len}, rtp_llm::AllocationType::HOST}, {"accept_tokens"});
@@ -274,8 +279,10 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
         size_t                             propose_step          = num_speculate_tokens;
         size_t                             accept_len            = output_emitted_token_num_h[i].item<int32_t>();
 
-        sample_output.propose_token_num += propose_step;
-        sample_output.accept_token_num += accept_len;
+        if (!stream->isDummyStream()) {
+            sample_output.propose_token_num += propose_step;
+            sample_output.accept_token_num += accept_len;
+        }
 
         rtp_llm::BufferPtr accept_tokens = device_->allocateBuffer(
             {rtp_llm::DataType::TYPE_INT32, {1, accept_len}, rtp_llm::AllocationType::HOST}, {"accept_tokens"});

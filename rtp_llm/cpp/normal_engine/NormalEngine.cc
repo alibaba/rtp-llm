@@ -166,6 +166,7 @@ std::shared_ptr<GenerateStream> NormalEngine::enqueueMinFakeQuery(int32_t max_ne
     fake_input->begin_time_us                   = autil::TimeUtility::currentTimeInMicroSeconds();
     fake_input->fake_query                      = true;
     auto stream                                 = makeStream(fake_input);
+    stream->setIsDummyStream(true);
     stream->setMetricsReporter(nullptr);
     enqueue(stream);
     return stream;

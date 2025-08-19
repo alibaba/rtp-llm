@@ -85,6 +85,14 @@ public:
     }
 
 public:
+    void setIsDummyStream(bool is_dummy) {
+        is_dummy_stream = is_dummy;
+    }
+
+    bool isDummyStream() const {
+        return is_dummy_stream;
+    }
+
     // Exported to python world.
     virtual void cancel();
 
@@ -541,6 +549,7 @@ protected:
     // just for bool test
     bool perf_test_ = false;
     friend class StreamCacheResource;
+    bool is_dummy_stream = false;
 };
 
 typedef std::shared_ptr<GenerateStream> GenerateStreamPtr;
