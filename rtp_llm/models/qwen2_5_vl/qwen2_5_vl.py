@@ -44,6 +44,13 @@ from rtp_llm.models.qwen2_vl.qwen2_vl_vit import (
     smart_resize,
 )
 
+import torch.library as tl
+
+if not hasattr(tl, "wrap_triton"):
+    def wrap_triton(fn):
+        return fn
+    tl.wrap_triton = wrap_triton
+
 
 def smart_nframes(configs, total_frames, video_fps) -> int:
     fps = configs.fps if configs.fps != -1 else FPS

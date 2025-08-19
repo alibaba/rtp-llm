@@ -52,6 +52,13 @@ from transformers.utils import (
 
 from rtp_llm.utils.flash_attn_utils import can_use_flash_attn
 
+import torch.library as tl
+
+if not hasattr(tl, "wrap_triton"):
+    def wrap_triton(fn):
+        return fn
+    tl.wrap_triton = wrap_triton
+
 default_attn_impl = "sdpa"
 try:
     if can_use_flash_attn():
