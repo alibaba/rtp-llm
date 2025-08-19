@@ -88,6 +88,9 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     think_logits_processor_ptr_ =
         ThinkModeLogitsProcessor::fromGenerateInput(device_, generate_input_, init_batch_size);
     tree_logits_processor_ptr_ = TreeLogitsProcessor::fromGenerateInput(device_, generate_input_, init_batch_size);
+    beam_search_logits_processor_ptr_ =
+        BeamSearchLogitsProcessor::fromGenerateInput(device_, generate_input_, special_tokens_.eos_token_id_);
+
     initializeLogitsProcessorList();
 }
 
@@ -97,6 +100,10 @@ void GenerateStream::initializeLogitsProcessorList() {
     }
     if (tree_logits_processor_ptr_ != nullptr) {
         logits_processor_list_.push_back(std::static_pointer_cast<BaseLogitsProcessor>(tree_logits_processor_ptr_));
+    }
+    if (beam_search_logits_processor_ptr_ != nullptr) {
+        logits_processor_list_.push_back(
+            std::static_pointer_cast<BaseLogitsProcessor>(beam_search_logits_processor_ptr_));
     }
 }
 
@@ -580,6 +587,11 @@ ErrorInfo GenerateStream::statusInfo() {
     return generate_status_->error_info;
 }
 
+bool GenerateStream::isDoneWithoutLock(int batch_id) const {
+    auto status = sub_generate_status_[batch_id].status;
+    return status == StreamState::FINISHED || status == StreamState::STOPPED;
+}
+
 void GenerateStream::setPaused() {
     // TODO(xinfei.sxf) fix mutex name
     std::lock_guard<std::mutex> lock(*output_mutex_);
@@ -602,9 +614,7 @@ bool GenerateStream::setRunning() {
 
 void GenerateStream::setFinishedWithoutLock() {
     generate_status_->status = StreamState::FINISHED;
-    for (int i = 0; i < currentBatchSize(); ++i) {
-        sub_generate_status_[i].status = StreamState::FINISHED;
-    }
+    fillSubGenerateStatus(StreamState::FINISHED);
 }
 
 bool GenerateStream::stoppedWithoutLock() {
@@ -706,13 +716,16 @@ bool GenerateStream::needFinish() {
 }
 
 bool GenerateStream::needFinishBySPTokens() {
+    if (hasNumBeams()) {
+        // update sub_generate_status to RUNNING for beam search,
+        // as the same batch_id may refers to different beams between steps
+        fillSubGenerateStatus(StreamState::RUNNING);
+    }
+
     matchEosToken();
     matchStopWordsList();
-    // num beams, finished by batch 0
-    if (hasNumBeams()) {
-        return sub_generate_status_[0].status == StreamState::FINISHED;
-    }
-    // num sequence, finished by all batch
+
+    // check if all batch finished
     return std::all_of(sub_generate_status_.begin(), sub_generate_status_.end(), [](GenerateStatus& generate_status) {
         return generate_status.status == StreamState::FINISHED;
     });
@@ -982,12 +995,18 @@ void GenerateStream::incBatchWithPrefillLen(int32_t len) {
     batch_with_prefill_len_ += len;
 }
 
+void GenerateStream::fillSubGenerateStatus(StreamState state) {
+    for (size_t i = 0; i < sub_generate_status_.size(); ++i) {
+        sub_generate_status_[i].status = state;
+    }
+}
+
 void GenerateStream::resizeSubGenerateStatus(size_t new_size) {
     if (sub_generate_status_.size() != new_size) {
         size_t old_size = sub_generate_status_.size();
         sub_generate_status_.resize(new_size);
         for (size_t i = old_size; i < new_size; ++i) {
-            sub_generate_status_[i].status = StreamState::WAITING;
+            sub_generate_status_[i].status = StreamState::RUNNING;
         }
     }
 }

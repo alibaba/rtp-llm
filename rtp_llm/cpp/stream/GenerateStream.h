@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/models/Sampler.h"
 #include "rtp_llm/cpp/logits_processor/ThinkModeLogitsProcessor.h"
 #include "rtp_llm/cpp/logits_processor/TreeLogitsProcessor.h"
+#include "rtp_llm/cpp/logits_processor/BeamSearchLogitsProcessor.h"
 #include "rtp_llm/cpp/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/system_prompt/SystemPrompt.h"
@@ -405,6 +406,10 @@ public:
         return tree_logits_processor_ptr_;
     }
 
+    BeamSearchLogitsProcessorPtr getBeamSearchLogitsProcessor() {
+        return beam_search_logits_processor_ptr_;
+    }
+
     void                                initializeLogitsProcessorList();
     std::vector<BaseLogitsProcessorPtr> getAllLogitsProcessorPtr() const {
         return logits_processor_list_;
@@ -464,6 +469,7 @@ public:
         return generate_input_->generate_config->enable_3fs;
     }
 
+    void fillSubGenerateStatus(StreamState state);
     void resizeSubGenerateStatus(size_t new_size);
 
 public:
@@ -556,6 +562,7 @@ protected:
 
     ThinkModeLogitsProcessorPtr         think_logits_processor_ptr_;
     TreeLogitsProcessorPtr              tree_logits_processor_ptr_;
+    BeamSearchLogitsProcessorPtr        beam_search_logits_processor_ptr_;
     std::vector<BaseLogitsProcessorPtr> logits_processor_list_;
 
     // just for bool test

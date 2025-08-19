@@ -265,6 +265,7 @@ absl::StatusOr<SamplerInputs> NormalBatchStreamProcessor::gatherSamplerInput(
             memcpy(sampler_inputs.token_ids->dataWithOffset<int32_t>((batch_idx) * (sampler_inputs.step + 1)),
                    complete_token_ids->dataWithOffset<int32_t>(cur_batch * complete_seq_len),
                    seq_len * sizeof(int));
+            sampler_inputs.finished_mask->data<bool>()[batch_idx] = stream->isDoneWithoutLock(i);
             batch_idx += 1;
         }
         need_tiling |= stream->needTilingForSampling();
@@ -345,6 +346,7 @@ SamplerInputs NormalBatchStreamProcessor::allocateSamplerInputs(const StreamGrou
     sampler_inputs.min_lengths          = CACHED_HOST_BUF(TYPE_INT32, {total_batch_size_in});
     sampler_inputs.no_repeat_ngram_size = CACHED_HOST_BUF(TYPE_INT32, {total_batch_size_in});
     sampler_inputs.do_sample            = CACHED_HOST_BUF(TYPE_BOOL, {total_batch_size_in});
+    sampler_inputs.finished_mask        = CACHED_HOST_BUF(TYPE_BOOL, {total_batch_size_in});
     if (stream_groups.needReturnCumLogProbs()) {
         sampler_inputs.cum_log_probs = device_->allocateBuffer(
             {rtp_llm::DataType::TYPE_FP32, {total_batch_size_in}, rtp_llm::AllocationType::HOST}, {});

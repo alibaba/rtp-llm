@@ -78,9 +78,10 @@ TEST_F(SamplerTest, testGeneralSampling) {
         frequency_penalty,
         min_length,
         nullptr,  // no_repeat_ngram_size
-        nullptr,
+        nullptr,  // do_sample
+        nullptr,  // finished_mask
         device_->clone({*cum_log_probs}),
-        nullptr,
+        nullptr,  // all_probs
     };
 
     auto outputs = sampler_->forward(inputs);
