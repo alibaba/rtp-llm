@@ -14,6 +14,7 @@ from rtp_llm.models_py.modules.linear import Linear
 from rtp_llm.models_py.modules.moe import FusedMoe
 from rtp_llm.models_py.modules.moe.fused_batched_moe import (
     BatchedDataRouter,
+    BatchedTritonExperts,
     NaiveBatchedExperts,
 )
 from rtp_llm.models_py.modules.norm import RMSNorm
@@ -60,7 +61,7 @@ class Qwen3MoeLayer(nn.Module):
             rank=0,
         )
 
-        experts = NaiveBatchedExperts(
+        experts = BatchedTritonExperts(
             max_num_tokens=max_num_tokens, num_dispatchers=1, w1=self.w1, w2=self.w2
         )
 

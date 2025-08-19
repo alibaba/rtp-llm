@@ -1,3 +1,9 @@
+py_library(
+    name = "kernels",
+    srcs = glob([
+        "kernels/*.py",
+    ])
+)
 
 py_library(
     name = "utils",
@@ -14,6 +20,7 @@ py_library(
     ]),
     deps = [
         ":utils",
+        ":kernels",
     ],
 )
 

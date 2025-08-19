@@ -2,6 +2,7 @@
 # Import implementations from other modules
 from rtp_llm.models_py.modules.moe.fused_batched_moe import (
     BatchedDataRouter,
+    BatchedTritonExperts,
     NaiveBatchedExperts,
 )
 from rtp_llm.models_py.modules.moe.fused_moe import (
