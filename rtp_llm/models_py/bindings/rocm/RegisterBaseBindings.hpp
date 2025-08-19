@@ -2,6 +2,7 @@
 #include "rtp_llm/models_py/bindings/common/RtpEmbeddingLookup.h"
 #include "rtp_llm/models_py/bindings/common/FusedQKRmsNorm.h"
 #include "rtp_llm/models_py/bindings/rocm/Gemm.h"
+#include "rtp_llm/models_py/bindings/rocm/FusedRopeKVCacheOp.h"
 
 using namespace rtp_llm;
 
@@ -50,6 +51,7 @@ void registerBasicRocmOps(py::module& rtp_ops_m) {
 
 void registerBaseRocmBindings(py::module& rtp_ops_m) {
     registerBasicRocmOps(rtp_ops_m);
+    rtp_llm::registerFusedRopeKVCacheOp(rtp_ops_m);
 }
 
 }  // namespace torch_ext

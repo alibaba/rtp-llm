@@ -126,6 +126,30 @@ private:
     hipStream_t comm_stream_;
 };
 
+struct CKAttn {
+    KVBlockArray kv_block_array;
+    BufferPtr kv_cache_offset;
+    BufferPtr kv_cache_offset_h;
+
+    torch::Tensor cu_seqlens;
+    torch::Tensor cu_kv_seqlens;
+    torch::Tensor input_lengths;
+    torch::Tensor sequence_lengths;
+    int max_seq_len;
+    bool decode_plan;
+
+    DataType attn_type;
+
+    static void setKvCache(KVBlockArray &kv_block_array, const KvCacheInfo &kv_cache) {
+        kv_block_array.mPrimaryPoolPtr = kv_cache.k_cache_buffer->data();
+        if (kv_cache.k_scale_buffer) {
+            kv_block_array.scale = kv_cache.k_scale_buffer->data();
+        }
+    }
+};
+
+using CKAttnPtr = std::shared_ptr<CKAttn>;
+
 class ROCmDevice: public DeviceBase {
 public:
     ROCmDevice(const DeviceInitParams& params);
@@ -231,6 +255,11 @@ public:
     hipDeviceProp_t* getRocmDeviceProperties() {
         return &rocmDevProp;
     }
+    ParamsPtr PrepareCKAttn(const AttentionConfigs& configs,
+                             int                     kv_block_offset,
+                             const BufferPtr&        kv_cache_block_id,
+                             int                     batch_size);
+
 
 private:
     hipDeviceProp_t                              rocmDevProp;

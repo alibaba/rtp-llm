@@ -35,6 +35,20 @@ cc_library(
 )
 
 cc_library(
+    name = "rocm_attn_bindings_base",
+    hdrs = [
+        "RegisterAttnOpBindings.hpp"
+    ],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/models_py/bindings:register_ops_hdr",
+        ":rocm_bindings",
+    ],
+    visibility = ["//visibility:public"],
+    alwayslink = 1,
+)
+
+cc_library(
     name = "rocm_bindings_register",
     srcs = [
         "RegisterRocmOps.cc",
@@ -43,6 +57,7 @@ cc_library(
     deps = [
         "//rtp_llm/models_py/bindings:register_ops_hdr",
         ":rocm_bindings_base",
+        ":rocm_attn_bindings_base",
     ],
     visibility = ["//visibility:public"],
     alwayslink = 1,

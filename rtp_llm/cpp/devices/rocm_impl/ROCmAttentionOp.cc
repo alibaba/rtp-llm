@@ -517,6 +517,53 @@ KVBlockArray ROCmDevice::getKVBlockArray(const AttentionModuleParams& params,
     return kv_cache_buffer;
 }
 
+ParamsPtr ROCmDevice::PrepareCKAttn(const AttentionConfigs& configs,
+                                    int kv_block_offset,
+                                    const BufferPtr &kv_cache_block_id,
+                                    int batch_size) {
+    RTP_LLM_LOG_DEBUG("PrepareCKAttn: kv_block_offset: %d, batch_size: %d, kv_cache_block_id: %s",
+                      kv_block_offset, batch_size,
+                      kv_cache_block_id ? kv_cache_block_id->debugString().c_str() : "nullptr");
+    if (kv_block_offset <= 0 || batch_size <= 0 || !kv_cache_block_id) {
+        return nullptr;
+    }
+    auto ck_attn = std::make_shared<CKAttn>();
+    KvCacheDataType cache_type = KvCacheDataType::BASE;
+    #ifdef ENABLE_FP8
+    if (use_fp8_fmha_) {
+        cache_type = KvCacheDataType::FP8;
+    } else
+    #endif
+    if (configs.kv_cache_dtype == KvCacheDataType::INT8) {
+        RTP_LLM_LOG_DEBUG("now use kv_cache int8");
+        cache_type = KvCacheDataType::INT8;
+    }
+    const auto max_blocks_per_batch = kv_cache_block_id->shape()[1];
+    auto const  elemSize             = 2;  // 2 for kv cache fp16
+    
+    ck_attn->kv_cache_offset =  allocateBuffer({DataType::TYPE_INT32, {size_t(batch_size), 1, 2, max_blocks_per_batch}, AllocationType::DEVICE},
+                                         {"kv_cache_offset"});
+    ck_attn->kv_block_array = KVBlockArray(batch_size,
+                                            max_blocks_per_batch,
+                                            configs.tokens_per_block,
+                                            configs.kv_head_num * configs.size_per_head * elemSize,
+                                            0,
+                                            0,
+                                            nullptr, // (uint64_t*)k_cache.data(),
+                                            nullptr,
+                                            (rtp_llm::KVCacheIndex*)ck_attn->kv_cache_offset->data<int>());
+    ck_attn->kv_block_array.cache_type = cache_type;
+    ck_attn->kv_block_array.mScaleBytesPerBlock = configs.tokens_per_block * configs.kv_head_num * sizeof(float);
+    invokeConvertOffsetToBlockArrayData(ck_attn->kv_cache_offset->data<int>(),
+                                        kv_cache_block_id->data<int>(),
+                                        batch_size,
+                                        max_blocks_per_batch,
+                                        kv_block_offset,
+                                        stream_);
+    check_cuda_error();
+    return ck_attn;
+}
+
 AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& params) {
     auto datatype            = params.input.type();
     auto token_num           = params.input.shape()[0];
