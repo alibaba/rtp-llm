@@ -39,6 +39,15 @@ std::vector<DistStorage::Item> DefaultDistKvCachePlanner::layout(const std::vect
         return {item};
     }
 
+    if (cache_keys.size() > block_indices.size() + ignore_block_num) {
+        RTP_LLM_LOG_WARNING(
+            "layout failed, cache key size or block size is invalid, cache key size: %zu, block size: %zu, ignore block num: %d",
+            cache_keys.size(),
+            block_indices.size(),
+            ignore_block_num);
+        return {};
+    }
+
     const auto& cache_config = cache_manager_->cacheConfig();
     const auto  k_block_len  = cache_config.k_block_stride;
     const auto  v_block_len  = cache_config.v_block_stride;
@@ -47,17 +56,22 @@ std::vector<DistStorage::Item> DefaultDistKvCachePlanner::layout(const std::vect
     item.iovs.reserve(cache_keys.size() * cache_config.layer_num * 2);
 
     for (int i = 0; i < cache_keys.size(); i++) {
-        auto block_id = block_indices[i];
-        bool ignore   = i < ignore_block_num;
+        bool ignore = i < ignore_block_num;
         for (int layer_id = 0; layer_id < cache_config.layer_num; layer_id++) {
-            auto block_addrs = cache_manager_->convertIndexToAddr(block_id, layer_id);
-            if (!block_addrs.k_addr || !block_addrs.v_addr) {
-                return {};
+            if (ignore) {
+                item.iovs.push_back(DistStorage::Iov{nullptr, k_block_len, false, ignore});
+                item.iovs.push_back(DistStorage::Iov{nullptr, v_block_len, false, ignore});
+            } else {
+                auto block_id    = block_indices.at(i - ignore_block_num);
+                auto block_addrs = cache_manager_->convertIndexToAddr(block_id, layer_id);
+                if (!block_addrs.k_addr || !block_addrs.v_addr) {
+                    return {};
+                }
+                item.iovs.push_back(DistStorage::Iov{
+                    std::shared_ptr<void>(block_addrs.k_addr, [](void* p) {}), k_block_len, true, ignore});
+                item.iovs.push_back(DistStorage::Iov{
+                    std::shared_ptr<void>(block_addrs.v_addr, [](void* p) {}), v_block_len, true, ignore});
             }
-            item.iovs.push_back(
-                DistStorage::Iov{std::shared_ptr<void>(block_addrs.k_addr, [](void* p) {}), k_block_len, true, ignore});
-            item.iovs.push_back(
-                DistStorage::Iov{std::shared_ptr<void>(block_addrs.v_addr, [](void* p) {}), v_block_len, true, ignore});
         }
     }
 

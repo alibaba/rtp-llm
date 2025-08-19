@@ -218,6 +218,7 @@ cc_library(
     ],
     deps = [
         "//rtp_llm/cpp:utils",
+        "//rtp_llm/cpp/cuda:cuda_utils_base",
         "//3rdparty/3fs:hf3fs",
         "@havenask//aios/autil:lock_free",
         "@havenask//aios/kmonitor:kmonitor_client_cpp",

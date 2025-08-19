@@ -687,6 +687,10 @@ void CacheManager::blockCopy(int src_block_index, int dest_block_index) {
 }
 
 CacheManager::BlockAddrInfo CacheManager::convertIndexToAddr(int block_index, int layer_id) const {
+    if (block_index < 0 || block_index >= config_.block_nums || layer_id < 0 || layer_id >= config_.layer_num) {
+        RTP_LLM_FAIL("block index or layer id out of range, block_index: %d, layer_id: %d");
+    }
+
     BlockAddrInfo addr_info;
     size_t        total_blocks_num = (size_t)(layer_id * config_.block_nums + block_index);
     auto          k_offset         = config_.getKeyOffset(block_index, layer_id);

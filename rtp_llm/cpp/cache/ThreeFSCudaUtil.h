@@ -1,7 +1,6 @@
 #pragma once
 
-#include <cuda_runtime.h>
-
+#include "rtp_llm/cpp/cuda/cuda_utils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 #define CHECK_CUDA_ERROR(cuda_call)                                                                                    \
@@ -39,15 +38,15 @@ public:
     }
 
     void copyAsyncHostToDevice(void* dst, const void* src, size_t size) {
-        CHECK_CUDA_ERROR(cudaMemcpyAsync(dst, src, size, cudaMemcpyHostToDevice, cuda_stream_));
+        check_cuda_value(cudaMemcpyAsync(dst, src, size, cudaMemcpyHostToDevice, cuda_stream_));
     }
 
     void copyAsyncDeviceToHost(void* dst, const void* src, size_t size) {
-        CHECK_CUDA_ERROR(cudaMemcpyAsync(dst, src, size, cudaMemcpyDeviceToHost, cuda_stream_));
+        check_cuda_value(cudaMemcpyAsync(dst, src, size, cudaMemcpyDeviceToHost, cuda_stream_));
     }
 
     void sync() {
-        CHECK_CUDA_ERROR(cudaStreamSynchronize(cuda_stream_));
+        check_cuda_value(cudaStreamSynchronize(cuda_stream_));
     }
 
     bool registerHost(void* ptr, size_t size) const {

@@ -145,6 +145,7 @@ bool DistStorage3FSFile::write(const std::vector<DistStorage::Iov>& iovs) {
     if (!open(true)) {
         DistKvCacheMetrics::markTotalWriteDoneUs(metrics);
         RTP_LLM_LOG_WARNING("write failed, open file failed, file: %s", filepath_.c_str());
+        releaseIovIor(handle);
         return false;
     }
 
