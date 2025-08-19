@@ -52,6 +52,11 @@ ArmCpuDevice::ArmCpuDevice(const DeviceInitParams& params): DeviceBase(params) {
         gemmFunc = &ArmCpuDevice::gemm_kai_bf16;
     }
 
+    if (std::getenv("ARM_FA") == nullptr) {
+        isFAenabled = false;
+    } else {
+        isFAenabled = true;
+    }
 }
 
 ArmCpuDevice::~ArmCpuDevice() {}

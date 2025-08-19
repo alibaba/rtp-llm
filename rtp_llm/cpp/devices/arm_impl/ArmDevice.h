@@ -55,9 +55,12 @@ private:
     arm_compute::DataType getAclDataType(DataType type);
     void runOneBatch(const AttentionModuleParams& params, size_t past_seq, int batch, size_t seq_len, size_t step);
     void runOneBatchStride(const AttentionModuleParams& params, size_t past_seq, int batch, size_t seq_len, size_t step);
+    void runOneBatchFlash(const AttentionModuleParams& params, size_t past_seq, int batch, size_t seq_len, size_t step);
+    void runOneBatchFlashDecoding(const AttentionModuleParams& params, size_t past_seq, int batch, size_t seq_len, size_t step);
     std::unordered_map<int, std::tuple<int, float *, float *>> ropeCosSin;
     template<typename T>
     void halfRopeQK(void *qkv, int batch, int seq_len, int num_heads, int kv_num_heads, int head_size, size_t step, size_t base, size_t embed_dim);
+    void biasAddRopeWriteKVCache(const AttentionModuleParams& params, size_t past_seq, int batch, size_t seq_len, size_t step);
     void logTime(std::chrono::microseconds diff, size_t index);
     uint64_t  a_cnt_[16] = {0};
     uint64_t a_tmin_[16] = {999999999, 999999999, 999999999, 999999999, 999999999, 999999999, 999999999, 999999999,
@@ -68,6 +71,7 @@ private:
 
     BufferPtr (ArmCpuDevice::*gemmFunc)(const GemmParams& params);
     bool isKAIenabled;
+    bool isFAenabled;
 
 #ifdef GEMM_DEBUG
     static TimerRecorder timer_recorder_;
@@ -75,5 +79,6 @@ private:
 };
 
 extern ConstBufferPtr (*armPrepareWeightFunc)(ConstBufferPtr input, bool isTranspose, bool isForceF32Out);
-
+extern float32x4_t vexpq_f32(float32x4_t x);
+extern float vMax(int n, const float* a);
 } // namespace rtp_llm
