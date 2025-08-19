@@ -393,6 +393,9 @@ class GptInitModelParameters:
     world_size: int
     role_type: RoleType
     quant_config: QuantizationConfig
+    enable_3fs: bool
+    enable_ep_moe: bool
+    enable_deepep_moe: bool
 
     batch_decode_scheduler_config: BatchDecodeSchedulerConfig
     cache_store_config: CacheStoreConfig
@@ -768,6 +771,13 @@ class GptInitModelParameters:
 
         # PD Seperation
         self.decode_entrance = get_env_bool("DECODE_ENTRANCE", False)
+        
+        # 3FS
+        self.gpt_init_params.enable_3fs = get_env_bool("ENABLE_3FS", False)
+        
+        # EP mode
+        self.gpt_init_params.enable_ep_moe = get_env_bool("ENABLE_EP_MOE", False)
+        self.gpt_init_params.enable_deepep_moe = get_env_bool("ENABLE_DEEPEP_MOE", False)
 
     def update_config_with_sparse_config(self, ckpt_path: str):
         sparse_config_file = None

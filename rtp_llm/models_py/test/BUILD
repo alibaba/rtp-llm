@@ -1,3 +1,4 @@
+load("//bazel:arch_select.bzl", get_triton_deps = "triton_deps")
 
 test_envs = {
     "DEVICE_RESERVE_MEMORY_BYTES": "512000000",  # 512MB
@@ -214,6 +215,49 @@ py_test (
         "//rtp_llm:testlib",
         "//rtp_llm/test/model_test/test_util:test_util"
     ],
+)
+
+py_test (
+    name = "per_token_group_quant_8bit_test",
+    srcs = ["per_token_group_quant_8bit_test.py"],
+    deps = [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:config",
+        "//rtp_llm:utils",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/model_test/test_util:test_util"
+    ] + get_triton_deps(["triton", "torch", "numpy"]),
+    env = test_envs,
+    exec_properties = {'gpu':'H20'},
+)
+
+py_test (
+    name = "invokedeepgemm_test",
+    srcs = ["invokedeepgemm_test.py"],
+    deps = [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:config",
+        "//rtp_llm:utils",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/model_test/test_util:test_util"
+    ],
+    env = test_envs,
+    exec_properties = {'gpu':'H20'},
+)
+
+py_test (
+    name = "moe_select_topk_test",
+    srcs = ["moe_select_topk_test.py"],
+    deps = [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:config",
+        "//rtp_llm:utils",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/model_test/test_util:test_util"
+    ] + get_triton_deps(["triton", "torch", "numpy"]),
     env = test_envs,
     tags = ["open_skip", "H20"],
     exec_properties = {'gpu':'H20'},

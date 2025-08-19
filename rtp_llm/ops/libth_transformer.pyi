@@ -541,6 +541,9 @@ class GptInitParameter:
     worker_grpc_addrs: list[str]
     worker_port_offset: int
     world_size: int
+    enable_3fs: bool
+    enable_ep_moe: bool
+    enable_deepep_moe: bool
 
     def __init__(
         self,
@@ -563,8 +566,6 @@ class GptInitParameter:
     def setNormType(self) -> None: ...
     def setTaskType(self, task: str) -> None: ...
     def showDebugInfo(self) -> None: ...
-
-
 class HWKernelConfig:
     arm_gemm_use_kai: bool
     deep_gemm_num_sm: int

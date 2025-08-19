@@ -24,10 +24,14 @@ if os.environ.get("FT_SERVER_TEST") is None:
     try:
         logging.config.dictConfig(LOGGING_CONFIG)
         file_logger_init_success = True
-        print(f"successfully init logger config {LOGGING_CONFIG}")
+        print("successfully init logger config {}".format(LOGGING_CONFIG))
     except BaseException as e:
         # for compatible with yitian arm machine in prod env, which lacks hippo infras and envs.
         import traceback
+<<<<<<< HEAD
+=======
+        print("failed to init logger config {}: {}\n {}".format(LOGGING_CONFIG, e, traceback.format_exc()))
+>>>>>>> support deepgemm epmoe and fp8 block inference
 
         print(
             f"failed to init logger config {LOGGING_CONFIG}: {e}\n {traceback.format_exc()}"
@@ -59,15 +63,19 @@ if os.environ.get("FT_ALOG_CONF_PATH") is None:
                 os.path.dirname(module_path), "config/alog.conf"
             )
         else:
-            print(f"Could not find the module '{rtp_llm_path}'.")
+            print("Could not find the module '{}'.".format(rtp_llm_path))
     except ImportError as e:
-        print(f"Error importing module: {e}")
+        print("Error importing module: {}".format(e))
 
 logging.info("init logger end")
 
 import transformers
+<<<<<<< HEAD
 
 logging.info(f"transformers version: {transformers.__version__}")
+=======
+logging.info("transformers version: {}".format(transformers.__version__))
+>>>>>>> support deepgemm epmoe and fp8 block inference
 
 # load th_transformer.so
 from .ops import *

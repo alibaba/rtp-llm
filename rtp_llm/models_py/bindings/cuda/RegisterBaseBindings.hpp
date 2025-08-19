@@ -7,6 +7,8 @@
 #include "rtp_llm/models_py/bindings/cuda/FusedMoEOp.h"
 #include "rtp_llm/models_py/bindings/cuda/SelectTopkOp.h"
 #include "rtp_llm/models_py/bindings/cuda/RtpProcessGroup.h"
+#include "rtp_llm/models_py/bindings/cuda/PerTokenGroupQuantFp8.h"
+#include "rtp_llm/models_py/bindings/cuda/MoETopkSoftmax.h"
 #include "3rdparty/flashinfer/flashinfer.h"
 
 using namespace rtp_llm;
@@ -71,8 +73,35 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("beta"),
                   py::arg("eps"));
 
-    rtp_ops_m.def(
-        "embedding", &embedding, "Embedding lookup kernel", py::arg("output"), py::arg("input"), py::arg("weight"));
+    rtp_ops_m.def("per_token_group_quant_int8", &per_token_group_quant_int8, "Int8 Gemm Per Token Group",
+        py::arg("input"),
+        py::arg("output_q"),
+        py::arg("output_s"),
+        py::arg("group_size"),
+        py::arg("eps"),
+        py::arg("int8_min"),
+        py::arg("int8_max"));
+
+    rtp_ops_m.def("per_token_group_quant_fp8", &per_token_group_quant_fp8, "Fp8 Gemm Per Token Group",
+        py::arg("input"),
+        py::arg("output_q"),
+        py::arg("output_s"),
+        py::arg("group_size"),
+        py::arg("eps"),
+        py::arg("fp8_min"),
+        py::arg("fp8_max"));
+    
+    rtp_ops_m.def("moe_topk_softmax", &moe_topk_softmax, "MoE Topk Softmax kernel",
+        py::arg("topk_weights"),
+        py::arg("topk_indices"),
+        py::arg("token_expert_indices"),
+        py::arg("gating_output"));
+
+    rtp_ops_m.def("embedding", &embedding, "Embedding lookup kernel",
+        py::arg("output"),
+        py::arg("input"),
+        py::arg("weight"),
+        py::arg("cuda_stream") = 0);
 }
 
 void registerBaseCudaBindings(py::module& rtp_ops_m) {

@@ -16,12 +16,13 @@ py_library(
     name = "modules",
     srcs = glob([
         "modules/*.py",
-        "modules/moe/*.py",
+        "modules/*/*.py",
     ]),
     deps = [
         ":utils",
         ":kernels",
     ],
+    visibility = ["//visibility:public"],
 )
 
 py_library(
@@ -48,6 +49,7 @@ py_library(
         ":utils",
         ":modules",
         "//rtp_llm/model_loader:loader",
+        "//rtp_llm:deep_ep",
     ] + select({
         "@//:using_cuda12": [
             ":modules_cuda"

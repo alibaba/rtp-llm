@@ -331,7 +331,7 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(hidden_size, hidden_size_)                                                                            \
     DEF_PROPERTY(type_vocab_size, type_vocab_size_)                                                                    \
     DEF_PROPERTY(embedding_size, embedding_size_)                                                                      \
-    DEF_PROPERTY(gen_num_per_circle, gen_num_per_circle_)                                                              \
+    DEF_PROPERTY(layer_num, layer_num_)                                                                                \
     DEF_PROPERTY(inter_size, inter_size_)                                                                              \
     DEF_PROPERTY(inter_padding_size, inter_padding_size_)                                                              \
     DEF_PROPERTY(moe_inter_padding_size, moe_inter_padding_size_)                                                      \
@@ -478,7 +478,10 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(phy_exp_num, phy_exp_num_)                                                                            \
     DEF_PROPERTY(eplb_update_time, eplb_update_time_)                                                                  \
     DEF_PROPERTY(eplb_mode, eplb_mode_)                                                                                \
-    DEF_PROPERTY(py_eplb, py_eplb_)
+    DEF_PROPERTY(py_eplb, py_eplb_)                                                                                    \
+    DEF_PROPERTY(enable_3fs, enable_3fs_)                                                                              \
+    DEF_PROPERTY(enable_ep_moe, enable_ep_moe_)                                                                        \
+    DEF_PROPERTY(enable_deepep_moe, enable_deepep_moe_)
 
     pybind11::class_<GptInitParameter>(m, "GptInitParameter")
         .def(pybind11::init<int64_t,  // head_num

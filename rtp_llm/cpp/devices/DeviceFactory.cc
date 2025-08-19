@@ -237,6 +237,7 @@ void registerDeviceOps(py::module& m) {
         .def("preprocess_weight_scale", &DeviceExporter::preprocessWeightScale, py::arg("weight"), py::arg("scale"));
 
     m.def("get_device", &DeviceFactory::getDeviceExporter);
+    m.def("init_device", &DeviceFactory::initDevices, py::arg("params"));
 }
 
 }  // namespace rtp_llm
