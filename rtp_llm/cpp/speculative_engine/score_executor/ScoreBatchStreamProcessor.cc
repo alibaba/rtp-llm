@@ -180,6 +180,7 @@ absl::Status ScoreBatchStreamProcessor::dispatch(const StreamGroups& stream_grou
                                             nullptr,
                                             all_probs,
                                             loss,
+                                            nullptr,
                                             all_hidden_states};
         stream->updateOutput(update_info);
         token_offset += token_size;

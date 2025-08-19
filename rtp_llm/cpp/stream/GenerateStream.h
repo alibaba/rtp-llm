@@ -29,6 +29,7 @@ struct StreamUpdateInfo {
     const rtp_llm::BufferPtr cum_log_probs;
     const rtp_llm::BufferPtr all_probs;
     const rtp_llm::BufferPtr loss;
+    const rtp_llm::BufferPtr src_batch_indices;
     // for mtp
     const rtp_llm::BufferPtr all_hidden_states;
     bool                     update_remote_generate = true;

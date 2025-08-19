@@ -553,32 +553,16 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_gro
         RTP_LLM_LOG_DEBUG(
             "stream [%ld], new_tokens = [%s]", stream->streamId(), new_tokens->debugStringWithData<int32_t>().c_str());
 
-        if (has_beam_search) {
-            stream->beamSearchLogitProcessorUpdate(src_batch_indices);
-            stream->update({batch_new_all_token_ids,
-                            1,
-                            batch_hidden_states,
-                            batch_logits,
-                            current_softmax_result,
-                            batch_cum_log_probs,
-                            all_probs,
-                            loss,
-                            all_hidden_states});
-        } else {
-            stream->update({new_tokens,
-                            1,
-                            batch_hidden_states,
-                            batch_logits,
-                            current_softmax_result,
-                            batch_cum_log_probs,
-                            all_probs,
-                            loss,
-                            all_hidden_states});
-        }
-
-        if (!stream->updateKvCacheBlocks(src_batch_indices)) {
-            stream->setStop(ErrorCode::MALLOC_FAILED, "update kv cache blocks failed");
-        }
+        stream->update({has_beam_search ? batch_new_all_token_ids : new_tokens,
+                        1,
+                        batch_hidden_states,
+                        batch_logits,
+                        current_softmax_result,
+                        batch_cum_log_probs,
+                        all_probs,
+                        loss,
+                        src_batch_indices,
+                        all_hidden_states});
 
         batch_idx_in += cur_batch_size;
         batch_idx_out += next_batch_size;

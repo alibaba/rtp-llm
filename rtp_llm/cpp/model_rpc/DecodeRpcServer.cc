@@ -154,7 +154,7 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
     auto first_token_id = generate_request.first_generate_token_id();
     *data               = first_token_id;
     generate_stream->incLastOutputPos();
-    generate_stream->update({new_tokens, 1, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr});
+    generate_stream->update({new_tokens, 1, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr});
     if (propose_maga_init_params_) {
         generate_stream->setReuseLength(generate_stream->seqLength() - 1);
         generate_stream->setFallbackPrefixLength(generate_stream->reuseLength());

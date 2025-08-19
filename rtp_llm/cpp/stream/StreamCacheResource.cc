@@ -197,7 +197,7 @@ void StreamCacheResource::setKVCache(const BatchKVCacheResource& kv_cache_resour
     batch_resource_ = kv_cache_resource;
 }
 
-bool StreamCacheResource::generateKVBlockUpdateMapping(const std::vector<int>& block_src_batch) {
+bool StreamCacheResource::updateKVBlock(const std::vector<int>& block_src_batch, bool copy_last_block) {
     block_update_mapping_.clear();
 
     if (!resource_context_.cache_manager || block_src_batch.size() == 0) {
@@ -218,7 +218,6 @@ bool StreamCacheResource::generateKVBlockUpdateMapping(const std::vector<int>& b
 
     // collect free and malloc infos of kv cache blocks
     // TODO(zhangjianning.zjn): might be possible to repurpose disused blocks for new batches?
-    bool        unaligned_seq_length = stream_->seqLength() % seqSizePerBlock() != 0;
     vector<int> disused_kv_blocks;
     uint32_t    num_new_blocks = 0;
     for (int old_batch_idx = 0; old_batch_idx < old_batch_size; ++old_batch_idx) {
@@ -227,7 +226,7 @@ bool StreamCacheResource::generateKVBlockUpdateMapping(const std::vector<int>& b
         if (fork_count == 0) {
             const auto& blocks = batch_resource_.batch_block_id[old_batch_idx];
             disused_kv_blocks.insert(disused_kv_blocks.end(), blocks.begin(), blocks.end());
-        } else if (fork_count > 1 && unaligned_seq_length) {
+        } else if (fork_count > 1 && copy_last_block) {
             num_new_blocks += fork_count - 1;
         }
     }
@@ -269,7 +268,7 @@ bool StreamCacheResource::generateKVBlockUpdateMapping(const std::vector<int>& b
         auto& batch_blocks = batch_resource_.batch_block_id[old_batch_idx];
 
         // need to exclude last block if it is not shared
-        const bool exclude_last_block = unaligned_seq_length && batch_blocks.size() > 0;
+        const bool exclude_last_block = copy_last_block && batch_blocks.size() > 0;
 
         int last_block;
         if (exclude_last_block) {
@@ -308,7 +307,7 @@ bool StreamCacheResource::generateKVBlockUpdateMapping(const std::vector<int>& b
             batch_resource_.batch_block_id.emplace_back(old_block_ids[old_batch_idx]);
             batch_resource_.cache_keys.emplace_back(old_cache_keys[old_batch_idx]);
             auto& blocks = batch_resource_.batch_block_id.back();
-            if (unaligned_seq_length && blocks.size() > 0) {
+            if (copy_last_block && blocks.size() > 0) {
                 int old_block = blocks.back();
                 blocks.pop_back();
 

@@ -91,6 +91,7 @@ void SpeculativeSampler::updateSampleStream(SpeculativeExecutorStreamOutputPtr& 
                                  nullptr,
                                  nullptr,
                                  std::move(loss),
+                                 nullptr,
                                  hidden_states};
 
     stream->update(update_info);

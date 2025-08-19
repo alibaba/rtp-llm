@@ -805,29 +805,48 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
         return;
     }
 
-    updateLogitProcessorStatus(update_info);
-
     resizeSubGenerateStatus(update_info.new_tokens->shape()[0]);
 
     // TODO(xinfei.sxf) fix this (update_queue)
     updateOutput(update_info);
-}
 
-// src_batch_indices: [tile_num_out] int, the element must less than tile_num_in.
-bool GenerateStream::updateKvCacheBlocks(const rtp_llm::BufferPtr& src_batch_indices) {
-    RTP_LLM_CHECK(src_batch_indices == nullptr || src_batch_indices->shape()[0] == currentBatchSize());
-
-    std::vector<int> block_src_batch;
-    if (!finished() && src_batch_indices) {
-        block_src_batch = rtp_llm::buffer2vector<int>(*src_batch_indices);
+    if (finishedWithoutLock() || stoppedWithoutLock()) {
+        return;
     }
 
-    return stream_cache_resource_->generateKVBlockUpdateMapping(block_src_batch);
+    updateLogitProcessorStatus(update_info);
+
+    if (!updateKvCacheBlocks(update_info.src_batch_indices)) {
+        setStopWithoutLock(ErrorCode::MALLOC_FAILED, "update kv cache blocks failed");
+        return;
+    }
+}
+
+// src_batch_indices: [batch_size] int, the element must less than the batch_size of last step.
+bool GenerateStream::updateKvCacheBlocks(const rtp_llm::BufferPtr& src_batch_indices) {
+    if (src_batch_indices == nullptr || src_batch_indices->size() == 0) {
+        // no need to update, clear update mapping
+        stream_cache_resource_->clearKVBlockUpdateMapping();
+        return true;
+    }
+
+    auto block_src_batch = rtp_llm::buffer2vector<int>(*src_batch_indices);
+    RTP_LLM_CHECK(block_src_batch.size() == currentBatchSize());
+
+    // NOTE: `1` is used here as updateKvCacheBlocks is called after updateOutput,
+    // in which the seqLength has already increased
+    bool is_seq_len_misaligned = seqLength() % seqSizePerBlock() != 1;
+
+    return stream_cache_resource_->updateKVBlock(block_src_batch, is_seq_len_misaligned);
 }
 
 void GenerateStream::beamSearchLogitProcessorUpdate(const rtp_llm::BufferPtr& beam_idx) {
+    if (beam_idx == nullptr || !hasNumBeams()) {
+        return;
+    }
+
     auto beam_idx_vec = rtp_llm::buffer2vector<int>(*beam_idx);
-    RTP_LLM_CHECK(beam_idx_vec.size() == nextBatchSize());
+    RTP_LLM_CHECK(beam_idx_vec.size() == currentBatchSize());
 
     for (auto logit_processor_ptr : getAllLogitsProcessorPtr()) {
         logit_processor_ptr->beamSearchLogitProcessorUpdate(beam_idx_vec);
@@ -835,6 +854,8 @@ void GenerateStream::beamSearchLogitProcessorUpdate(const rtp_llm::BufferPtr& be
 }
 
 void GenerateStream::updateLogitProcessorStatus(const StreamUpdateInfo& update_info) {
+    beamSearchLogitProcessorUpdate(update_info.src_batch_indices);
+
     const auto& new_tokens = update_info.new_tokens;
     RTP_LLM_CHECK(new_tokens->shape()[0] == currentBatchSize());
     auto num_new_tokens = update_info.num_new_tokens;

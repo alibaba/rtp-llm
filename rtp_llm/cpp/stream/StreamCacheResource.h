@@ -54,10 +54,12 @@ public:
     const BatchKVCacheResource& kvCache() const;
     void                        setKVCache(const BatchKVCacheResource& kv_cache_resource);
 
-    // generate block copy mapping for kv cache update
+    // update kv block based on the source of new batches and generate block copy mapping.
+    // used in beam search or multiple return sequences
     //
     // @params block_src_batch: [new_batch_size] int, indicating the blocks of batch i should be
     //                           forked from old batch block_src_batch[i],
+    // @params copy_last_block: bool, if ture, copy the last block from the old batch for each batch
     //
     // Note: This method may allocate and free KV cache blocks, but the caller must
     // execute the block copy maunually (e.g., via `getKVBlockUpdateMapping` and
@@ -71,12 +73,17 @@ public:
     // old batch 2 --------+--- new batch 2
     //                      \-- new batch 3
     //
-    // @returns true if success, false if failed
+    // @returns true if success, false otherwise
     //
-    bool generateKVBlockUpdateMapping(const std::vector<int>& block_src_batch);
+    bool updateKVBlock(const std::vector<int>& block_src_batch, bool copy_last_block);
+
+    // clear block copy mapping
+    void clearKVBlockUpdateMapping() {
+        block_update_mapping_.clear();
+    }
 
     // get block copy mapping of last kv cache update
-    const std::vector<BlockIdPair>& getKVBlockUpdateMapping() {
+    const std::vector<BlockIdPair>& getKVBlockUpdateMapping() const {
         return block_update_mapping_;
     }
 
