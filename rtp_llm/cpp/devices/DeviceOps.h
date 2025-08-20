@@ -67,6 +67,8 @@ public:
     virtual MoeGateSelectOutput  moeGateSelect(const FfnLayerParams& params);
     virtual FfnLayerOutput       moeFfn(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs);
     virtual FfnLayerOutput       moeFfnFp8(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs);
+    virtual FfnLayerOutput moeFfnFp8Contiguous(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs);
+    virtual FfnLayerOutput moeFfnFp8Masked(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs);
     virtual FfnLayerOutput deepEpMoeFfnLayer(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs);
     virtual FfnLayerOutput deepEpLLMoeFfn(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs);
 

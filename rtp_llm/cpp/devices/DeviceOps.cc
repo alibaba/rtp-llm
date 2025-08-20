@@ -183,6 +183,14 @@ FfnLayerOutput DeviceOps::moeFfnFp8(const FfnLayerParams& params, const MoeGateS
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
+FfnLayerOutput DeviceOps::moeFfnFp8Contiguous(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
+FfnLayerOutput DeviceOps::moeFfnFp8Masked(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
 FfnLayerOutput DeviceOps::epMoeFfnLayer(const FfnLayerParams& params, const MoeGateSelectOutput& gate_output) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
