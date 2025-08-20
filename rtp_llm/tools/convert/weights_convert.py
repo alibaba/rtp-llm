@@ -164,6 +164,7 @@ class WeightConverter:
         env_params.update({"WORLD_RANK": world_rank})
         env_params.update({"DP_RANK": dp_rank})
         env_params.update({"TP_RANK": tp_rank})
+        StaticConfig.update_from_env()
 
         model_config = ModelConfig(
             model_type=self.model_type,
