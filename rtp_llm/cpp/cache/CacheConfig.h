@@ -114,12 +114,20 @@ struct CacheConfig {
         return v_block_stride;
     }
 
+    virtual size_t getKVScaleBlockStride() const {
+        return kv_scale_block_stride;
+    }
+
     size_t getKeyLayerStride() const {
         return block_nums * getKeyBlockStride();
     }
 
     size_t getValueLayerStride() const {
         return block_nums * getValueBlockStride();
+    }
+
+    size_t getKVScaleLayerStride() const {
+        return block_nums * getKVScaleBlockStride();
     }
 
     size_t getKeyOffset(int block_index, int layer_id) const {
@@ -134,12 +142,22 @@ struct CacheConfig {
         return layer_id * layer_stride + block_index * block_stride;
     }
 
+    size_t getKVScaleOffset(int block_index, int layer_id) const {
+        auto const block_stride = getKVScaleBlockStride();
+        auto const layer_stride = getKVScaleLayerStride();
+        return layer_id * layer_stride + block_index * block_stride;
+    }
+
     size_t getKeyShape() const {
         return getKeyBlockStride() / rtp_llm::getTypeSize(dtype);
     }
 
     size_t getValueShape() const {
         return getValueBlockStride() / rtp_llm::getTypeSize(dtype);
+    }
+
+    size_t getKVScaleShape() const {
+        return getKVScaleBlockStride() / rtp_llm::getTypeSize(dtype);
     }
 
     std::string debugString() const {

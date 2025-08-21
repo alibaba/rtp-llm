@@ -719,42 +719,59 @@ void CacheManager::blockBatchCopy(const Buffer& copy_mapping) {
 }
 
 void CacheManager::blockBatchCopy(const BlockIdPair* begin_ptr, const BlockIdPair* end_ptr) {
+    using CopyType = BatchCopyParams::CopyType;
+
     if (end_ptr == begin_ptr) {
         return;
     }
 
     auto& k_blocks = *kv_cache_.k_blocks;
     auto& v_blocks = *kv_cache_.v_blocks;
+    auto* k_scale  = kv_cache_.k_scale.get();
+    auto* v_scale  = kv_cache_.v_scale.get();
 
     BatchCopyParams copy_params;
 
-    auto k_copy_type = BatchCopyParams::get_copy_type(k_blocks.where(), k_blocks.where());
-    auto v_copy_type = BatchCopyParams::get_copy_type(v_blocks.where(), v_blocks.where());
+    // reserve space for each copy type
+    size_t copy_nums[CopyType::TYPE_SIZE] = {};
 
     const size_t copy_num = (end_ptr - begin_ptr) * config_.layer_num;
-    if (k_copy_type == v_copy_type) {
-        copy_params.reserve(k_copy_type, 2 * copy_num);
-    } else {
-        copy_params.reserve(k_copy_type, copy_num);
-        copy_params.reserve(v_copy_type, copy_num);
+
+    auto k_copy_type = BatchCopyParams::get_copy_type(k_blocks.where(), k_blocks.where());
+    copy_nums[k_copy_type] += copy_num;
+    auto v_copy_type = BatchCopyParams::get_copy_type(v_blocks.where(), v_blocks.where());
+    copy_nums[v_copy_type] += copy_num;
+    CopyType k_scale_copy_type;
+    if (k_scale != nullptr) {
+        k_scale_copy_type = BatchCopyParams::get_copy_type(k_scale->where(), k_scale->where());
+        copy_nums[k_scale_copy_type] += copy_num;
+    }
+    CopyType v_scale_copy_type;
+    if (v_scale != nullptr) {
+        v_scale_copy_type = BatchCopyParams::get_copy_type(v_scale->where(), v_scale->where());
+        copy_nums[v_scale_copy_type] += copy_num;
     }
 
-    const auto copy_blocks =
-        [&](Buffer& buffer_blocks, size_t block_bytes, BatchCopyParams::CopyType copy_type, auto get_offset) {
-            auto blocks_data = (char*)(buffer_blocks.data());
-            for (auto it = begin_ptr; it != end_ptr; ++it) {
-                auto [src_block_index, dest_block_index] = *it;
-                for (uint32_t layer_id = 0; layer_id < config_.layer_num; layer_id++) {
-                    auto dst_offset = get_offset(dest_block_index, layer_id);
-                    auto dst_data   = blocks_data + dst_offset;
+    for (size_t i = 0; i < CopyType::TYPE_SIZE; ++i) {
+        copy_params.reserve(static_cast<CopyType>(i), copy_nums[i]);
+    }
 
-                    auto src_offset = get_offset(src_block_index, layer_id);
-                    auto src_data   = blocks_data + src_offset;
+    // construct batch copy params
+    const auto copy_blocks = [&](Buffer& buffer_blocks, size_t block_bytes, CopyType copy_type, auto get_offset) {
+        auto blocks_data = (char*)(buffer_blocks.data());
+        for (auto it = begin_ptr; it != end_ptr; ++it) {
+            auto [src_block_index, dest_block_index] = *it;
+            for (uint32_t layer_id = 0; layer_id < config_.layer_num; layer_id++) {
+                auto dst_offset = get_offset(dest_block_index, layer_id);
+                auto dst_data   = blocks_data + dst_offset;
 
-                    copy_params.add(dst_data, src_data, block_bytes, copy_type);
-                }
+                auto src_offset = get_offset(src_block_index, layer_id);
+                auto src_data   = blocks_data + src_offset;
+
+                copy_params.add(dst_data, src_data, block_bytes, copy_type);
             }
-        };
+        }
+    };
 
     // copy k blocks
     auto k_copy_bytes = config_.getKeyBlockStride();
@@ -767,6 +784,22 @@ void CacheManager::blockBatchCopy(const BlockIdPair* begin_ptr, const BlockIdPai
     copy_blocks(v_blocks, v_copy_bytes, v_copy_type, [&](int block_index, int layer_id) {
         return config_.getValueOffset(block_index, layer_id);
     });
+
+    // copy k scales
+    if (k_scale != nullptr) {
+        auto k_scale_copy_bytes = config_.getKVScaleBlockStride();
+        copy_blocks(*k_scale, k_scale_copy_bytes, k_scale_copy_type, [&](int block_index, int layer_id) {
+            return config_.getKVScaleOffset(block_index, layer_id);
+        });
+    }
+
+    // copy v scales
+    if (v_scale != nullptr) {
+        auto v_scale_copy_bytes = config_.getKVScaleBlockStride();
+        copy_blocks(*v_scale, v_scale_copy_bytes, v_scale_copy_type, [&](int block_index, int layer_id) {
+            return config_.getKVScaleOffset(block_index, layer_id);
+        });
+    }
 
     device_->batchCopy(copy_params);
 }
