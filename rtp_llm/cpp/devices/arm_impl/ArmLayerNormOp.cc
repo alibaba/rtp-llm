@@ -1639,4 +1639,49 @@ LayernormOutput ArmCpuDevice::layernormWithStride(const LayernormWithStrideParam
     }
 }
 
+QkRmsNormOutput ArmCpuDevice::qkRmsNorm(const QkRmsNormParams& params) {
+    const auto data_type = params.input->type();
+    const auto m = params.input->shape()[0];
+    const auto stride = params.input->shape()[1];
+    const auto& q_gamma = params.q_norm_weight->get().gamma.get()->data();
+    const auto& q_beta = (params.q_norm_weight && params.q_norm_weight->get().beta) ? params.q_norm_weight->get().beta.get()->data() : nullptr;
+    const auto& k_gamma = params.k_norm_weight->get().gamma.get()->data();
+    const auto& k_beta = (params.k_norm_weight && params.k_norm_weight->get().beta) ? params.k_norm_weight->get().beta.get()->data() : nullptr;
+    RTP_LLM_CHECK_WITH_INFO((q_beta != nullptr && k_beta != nullptr) || (q_beta == nullptr && k_beta == nullptr),
+                       "q_beta and q_beta should both nullptr or not nullptr");
+    const auto eps         = params.eps;
+    const auto q_group_num = params.q_group_num;
+    const auto k_group_num = params.k_group_num;
+    const auto norm_size = params.norm_size;
+    auto gamma_type = params.q_norm_weight->get().gamma->type();
+
+    // Apply RMS norm to each q head and k head separately in place
+    DISPATCH_ARM_FUNCTION_TWO_DATA_TYPES(gamma_type, data_type,
+        invokeRmsNormWithStride,
+        params.input->data(),
+        stride,
+        params.input->data(),
+        stride,
+        q_gamma,
+        q_beta,
+        eps,
+        m,
+        norm_size * q_group_num,
+        norm_size);
+    DISPATCH_ARM_FUNCTION_TWO_DATA_TYPES(gamma_type, data_type,
+        invokeRmsNormWithStride,
+        params.input->dataWithOffset(norm_size * q_group_num),
+        stride,
+        params.input->dataWithOffset(norm_size * q_group_num),
+        stride,
+        k_gamma,
+        k_beta,
+        eps,
+        m,
+        norm_size * k_group_num,
+        norm_size);
+
+    return params.input;
+}
+
 }

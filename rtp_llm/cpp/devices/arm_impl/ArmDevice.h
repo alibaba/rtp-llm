@@ -24,6 +24,7 @@ public:
     void copy(const CopyParams& params) override;
     LayernormOutput layernorm(const LayernormParams& params) override;
     LayernormOutput layernormWithStride(const LayernormWithStrideParams& params) override;
+    QkRmsNormOutput qkRmsNorm(const QkRmsNormParams& params) override;
     BufferPtr gemm(const GemmParams& params) override;
     BufferPtr gemm_acl(const GemmParams& params);
     BufferPtr gemm_opt(const GemmParams& params);
