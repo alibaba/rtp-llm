@@ -1,7 +1,4 @@
 import torch
-import triton
-import triton.language as tl
-from triton import Config
 
 from rtp_llm.utils.util import check_with_info
 
