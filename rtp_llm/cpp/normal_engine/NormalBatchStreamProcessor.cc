@@ -66,7 +66,6 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     model_input.warmup             = warm_up_;
     model_input.decode_entrance    = decode_entrance_;
 
-
     int* merged_tokens      = (int*)model_input.combo_tokens->data();
     int* input_lengths      = (int*)model_input.input_lengths->data();
     int* lora_ids           = (int*)model_input.lora_ids->data();
@@ -105,7 +104,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             input_lengths[batch_idx]    = stream->inputLength();
             sequence_lengths[batch_idx] = stream->seqLength() - 1;  // need remove
             if (need_cal_position_id) {
-                stream->generateNextPositionId(combo_position_ids + batch_idx * position_id_len_factor_);
+                stream->generateNextPositionId(combo_position_ids + batch_idx * position_id_len_factor_, device_);
             }
             lora_ids[batch_idx]           = stream->loraId();
             lora_input_lengths[batch_idx] = 1;
