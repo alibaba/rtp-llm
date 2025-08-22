@@ -11,13 +11,15 @@ public:
     std::string debugString() const {
         std::stringstream debug_string;
         debug_string << "SpeculativeSamplerOutput { ";
-        debug_string << "propose_token_num: " << propose_token_num << ", accept_token_num: " << accept_token_num << "}";
+        debug_string << "propose_token_num: " << propose_token_num << ", accept_token_num: " << accept_token_num
+                     << ", stream_num: " << stream_num << "}";
         return debug_string.str();
     }
 
 public:
     size_t propose_token_num = 0;
     size_t accept_token_num  = 0;
+    size_t stream_num        = 0;
 };
 
 class SpeculativeSampler {

@@ -497,6 +497,7 @@ absl::Status SpeculativeEngine::spStep(std::list<GenerateStreamPtr>& streams) {
 
         metrics_.propose_token_num += sampler_output.propose_token_num;
         metrics_.accept_token_num += sampler_output.accept_token_num;
+        metrics_.stream_num += sampler_output.stream_num;
     }
 
     for (auto& stream : streams) {
@@ -662,6 +663,7 @@ absl::Status SpeculativeEngine::mtpStep(std::list<GenerateStreamPtr>& streams) {
 
             metrics_.propose_token_num += sampler_output.propose_token_num;
             metrics_.accept_token_num += sampler_output.accept_token_num;
+            metrics_.stream_num += sampler_output.stream_num;
         }
 
         for (auto& stream : pre_propose_streams) {
@@ -681,6 +683,11 @@ absl::Status SpeculativeEngine::mtpStep(std::list<GenerateStreamPtr>& streams) {
 }
 
 void SpeculativeEngine::reportMetrics() {
+    RTP_LLM_LOG_DEBUG("propose_token_num: %d, accept_token_num: %d, stream_num: %d",
+                      metrics_.propose_token_num,
+                      metrics_.accept_token_num,
+                      metrics_.stream_num);
+
     if (!metrics_reporter_) {
         return;
     }
@@ -696,7 +703,8 @@ void SpeculativeEngine::reportMetrics() {
                                                       metrics_.score_time_us,
                                                       metrics_.sampler_time_us,
                                                       metrics_.propose_token_num,
-                                                      metrics_.accept_token_num};
+                                                      metrics_.accept_token_num,
+                                                      metrics_.stream_num};
     metrics_reporter_->report<RtpLLMSpeculativeEngineMetrics, RtpLLMSpeculativeEngineMetricsCollector>(nullptr,
                                                                                                        &collector);
 }

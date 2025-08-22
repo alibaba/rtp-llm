@@ -45,11 +45,11 @@ public:
     int64_t local_generate_rt_us           = 0;
 
     // pd-sep prefill metrics(decode entrance)
-    int64_t notify_store_cache_rt_us        = 0;
-    int64_t generate_first_token_rt_us      = 0;
-    int64_t wait_store_cache_rt_us          = 0;
-    int64_t min_response_done_time_us       = 1lu << 60;
-    int64_t max_response_done_time_us       = 0;
+    int64_t notify_store_cache_rt_us   = 0;
+    int64_t generate_first_token_rt_us = 0;
+    int64_t wait_store_cache_rt_us     = 0;
+    int64_t min_response_done_time_us  = 1lu << 60;
+    int64_t max_response_done_time_us  = 0;
 
     // for decode tp
     int64_t load_cache_min_rt_us       = 0;
@@ -91,11 +91,11 @@ public:
     kmonitor::MutableMetric* load_cache_max_rt_us_metric       = nullptr;
     kmonitor::MutableMetric* load_cache_polling_cost_us_metric = nullptr;
 
-    kmonitor::MutableMetric* notify_store_cache_rt_us_metric            = nullptr;
-    kmonitor::MutableMetric* generate_first_token_rt_us_metric          = nullptr;
-    kmonitor::MutableMetric* wait_store_cache_rt_us_metric              = nullptr;
-    kmonitor::MutableMetric* min_response_done_time_us_metric           = nullptr;
-    kmonitor::MutableMetric* max_response_done_time_us_metric           = nullptr;
+    kmonitor::MutableMetric* notify_store_cache_rt_us_metric   = nullptr;
+    kmonitor::MutableMetric* generate_first_token_rt_us_metric = nullptr;
+    kmonitor::MutableMetric* wait_store_cache_rt_us_metric     = nullptr;
+    kmonitor::MutableMetric* min_response_done_time_us_metric  = nullptr;
+    kmonitor::MutableMetric* max_response_done_time_us_metric  = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -103,8 +103,8 @@ private:
 
 class RpcWorkerStatusMetricsCollector final {
 public:
-    bool    qps              = false;
-    int64_t total_rt_us      = 0;
+    bool    qps         = false;
+    int64_t total_rt_us = 0;
 };
 
 class RpcWorkerStatusMetrics: public kmonitor::MetricsGroup {
@@ -113,8 +113,8 @@ public:
     void report(const kmonitor::MetricsTags* tags, RpcWorkerStatusMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* qps_metric              = nullptr;
-    kmonitor::MutableMetric* total_rt_us_metric      = nullptr;
+    kmonitor::MutableMetric* qps_metric         = nullptr;
+    kmonitor::MutableMetric* total_rt_us_metric = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -468,6 +468,7 @@ public:
     int64_t speculative_sampler_latency_us = 0;
     int64_t total_propose_token_num        = 0;
     int64_t total_accepted_token_num       = 0;
+    int64_t total_stream_num               = 0;
 };
 
 class RtpLLMSpeculativeEngineMetrics: public kmonitor::MetricsGroup {
@@ -482,6 +483,7 @@ public:
     kmonitor::MutableMetric* speculative_sampler_latency_us_metric = nullptr;
     kmonitor::MutableMetric* total_propose_token_num_metric        = nullptr;
     kmonitor::MutableMetric* total_accepted_token_num_metric       = nullptr;
+    kmonitor::MutableMetric* sp_avg_accept_token_num_metric        = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -553,22 +555,21 @@ public:
 
 class RtpLLMCacheStoreRemoteStoreMetricsCollector final {
 public:
-    bool success = true;
-    int64_t block_count = 0;
-    int64_t total_block_size = 0; 
-    int64_t latency_us = 0; // 从调用CacheStore::submitStoreTask 到store完成的时间
-    int64_t first_block_ready_latency_us = 0; // 第一block可以传输
-    int64_t all_block_ready_latency_us = 0; // 从调用CacheStore::submitStoreTask 到最后一个block ready 可以传输的时间.
-    int64_t transfer_gap_latency_us = 0; // 从最后一个block ready 可以传输 到 最后一个 block 传输完成的时间差.
+    bool    success                      = true;
+    int64_t block_count                  = 0;
+    int64_t total_block_size             = 0;
+    int64_t latency_us                   = 0;  // 从调用CacheStore::submitStoreTask 到store完成的时间
+    int64_t first_block_ready_latency_us = 0;  // 第一block可以传输
+    int64_t all_block_ready_latency_us = 0;  // 从调用CacheStore::submitStoreTask 到最后一个block ready 可以传输的时间.
+    int64_t transfer_gap_latency_us    = 0;  // 从最后一个block ready 可以传输 到 最后一个 block 传输完成的时间差.
 };
 
 class RtpLLMCacheStoreTransferMetricsCollector final {
 public:
-    int64_t block_count = 0;
-    int64_t total_block_size = 0; 
-    int64_t latency_us = 0;
+    int64_t block_count      = 0;
+    int64_t total_block_size = 0;
+    int64_t latency_us       = 0;
 };
-
 
 class RtpLLMCacheStoreMetrics: public kmonitor::MetricsGroup {
 public:
@@ -578,7 +579,6 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMCacheStoreStoreMetricsCollector* collector);
     void report(const kmonitor::MetricsTags* tags, RtpLLMCacheStoreRemoteStoreMetricsCollector* collector);
     void report(const kmonitor::MetricsTags* tags, RtpLLMCacheStoreTransferMetricsCollector* collector);
-
 
 public:
     kmonitor::MutableMetric* load_client_qps_metric                      = nullptr;
@@ -612,20 +612,20 @@ public:
     kmonitor::MutableMetric* store_wait_task_run_latency_us_metric   = nullptr;
     kmonitor::MutableMetric* store_wait_event_sync_latency_us_metric = nullptr;
 
-    kmonitor::MutableMetric* remote_store_qps_metric = nullptr;
-    kmonitor::MutableMetric* remote_store_error_qps_metric = nullptr;
-    kmonitor::MutableMetric* remote_store_block_count_metric = nullptr;
-    kmonitor::MutableMetric* remote_store_total_block_size_metric = nullptr;
-    kmonitor::MutableMetric* remote_store_latency_us_metric = nullptr;
+    kmonitor::MutableMetric* remote_store_qps_metric                          = nullptr;
+    kmonitor::MutableMetric* remote_store_error_qps_metric                    = nullptr;
+    kmonitor::MutableMetric* remote_store_block_count_metric                  = nullptr;
+    kmonitor::MutableMetric* remote_store_total_block_size_metric             = nullptr;
+    kmonitor::MutableMetric* remote_store_latency_us_metric                   = nullptr;
     kmonitor::MutableMetric* remote_store_first_block_ready_latency_us_metric = nullptr;
-    kmonitor::MutableMetric* remote_store_all_block_ready_latency_us_metric = nullptr;
-    kmonitor::MutableMetric* remote_store_transfer_gap_latency_us_metric = nullptr;
+    kmonitor::MutableMetric* remote_store_all_block_ready_latency_us_metric   = nullptr;
+    kmonitor::MutableMetric* remote_store_transfer_gap_latency_us_metric      = nullptr;
 
-    kmonitor::MutableMetric* transfer_qps_metric = nullptr;
-    kmonitor::MutableMetric* transfer_error_qps_metric = nullptr;
-    kmonitor::MutableMetric* transfer_block_count_metric = nullptr;
+    kmonitor::MutableMetric* transfer_qps_metric              = nullptr;
+    kmonitor::MutableMetric* transfer_error_qps_metric        = nullptr;
+    kmonitor::MutableMetric* transfer_block_count_metric      = nullptr;
     kmonitor::MutableMetric* transfer_total_block_size_metric = nullptr;
-    kmonitor::MutableMetric* transfer_latency_us_metric = nullptr;
+    kmonitor::MutableMetric* transfer_latency_us_metric       = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();

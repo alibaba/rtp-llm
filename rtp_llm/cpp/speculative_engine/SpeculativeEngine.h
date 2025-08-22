@@ -52,12 +52,14 @@ struct SpeculativeEngineStepMetrics {
         sampler_time_us   = 0;
         propose_token_num = 0;
         accept_token_num  = 0;
+        stream_num        = 0;
     }
     int64_t propose_time_us   = 0;
     int64_t score_time_us     = 0;
     int64_t sampler_time_us   = 0;
     int64_t propose_token_num = 0;
     int64_t accept_token_num  = 0;
+    int64_t stream_num        = 0;
 };
 
 class SpeculativeEngine: public EngineBase {

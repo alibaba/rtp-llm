@@ -141,6 +141,7 @@ void SpeculativeSampler::streamSample(SpeculativeSamplerOutput&           sample
         if (!stream->isDummyStream()) {
             sample_output.propose_token_num += propose_step;
             sample_output.accept_token_num += accept_len;
+            sample_output.stream_num++;
         }
 
         rtp_llm::BufferPtr accept_tokens = device_->allocateBuffer(
@@ -282,6 +283,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
         if (!stream->isDummyStream()) {
             sample_output.propose_token_num += propose_step;
             sample_output.accept_token_num += accept_len;
+            sample_output.stream_num++;
         }
 
         rtp_llm::BufferPtr accept_tokens = device_->allocateBuffer(
