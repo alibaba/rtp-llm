@@ -25,7 +25,7 @@ ErrorInfo PrefillGenerateContextNew::init(const std::shared_ptr<EngineBase>& eng
     auto status = stream_->initKVBlock(0);
     if (!status.ok()) {
         RTP_LLM_LOG_WARNING("request [%s] init kv block failed, malloc kv cache block failed", request_key.c_str());
-        error_info = ErrorInfo(ErrorCode::MALLOC_FAILED, "malloc kv cache block failed at decode node");
+        error_info = ErrorInfo(ErrorCode::MALLOC_FAILED, "malloc kv cache block failed at prefill node");
         return error_info;
     }
 

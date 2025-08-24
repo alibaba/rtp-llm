@@ -366,7 +366,7 @@ bool DistStorage3FSFile::read(const std::vector<DistStorage::Iov>& iovs) {
         }
     }
     if (iovs.empty() || read_len == 0 || offset_to_read == -1) {
-        RTP_LLM_LOG_WARNING("read but iovs are invalid, file: %s, size: %zu, len: %zu, offset: %ld",
+        RTP_LLM_LOG_DEBUG("read but iovs are invalid, file: %s, size: %zu, len: %zu, offset: %ld",
                             filepath_.c_str(),
                             iovs.size(),
                             read_len,

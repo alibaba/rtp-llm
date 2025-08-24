@@ -204,7 +204,7 @@ public:
 
     bool    pre_allocate_op_mem_ = true;
     int64_t seq_size_per_block_  = 8;
-    int64_t max_block_size_per_item_ = 2;
+    int64_t max_block_size_per_item_ = 16;
 
     int64_t block_nums_                       = 0;
     int64_t scheduler_reserve_resource_ratio_ = 5;

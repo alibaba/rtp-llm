@@ -583,6 +583,7 @@ class KVCacheConfig:
     rpc_put_cache_timeout_ms: int
     threefs_read_timeout_ms: int
     threefs_write_timeout_ms: int
+    max_block_size_per_item: int
     threefs_read_iov_size: int
     threefs_write_iov_size: int
 
@@ -597,6 +598,7 @@ class KVCacheConfig:
         rpc_put_cache_timeout_ms: int = 3000,
         threefs_read_timeout_ms: int = 1000,
         threefs_write_timeout_ms: int = 2000,
+        max_block_size_per_item: int = 16,
         threefs_read_iov_size: int = 1 << 32,
         threefs_write_iov_size: int = 1 << 32,
     ) -> None: ...

@@ -362,7 +362,6 @@ class GptInitModelParameters:
     scheduler_reserve_resource_ratio: int
     scoring_func: int
     seq_size_per_block: int
-    max_block_size_per_item: int
     size_per_head: int
     softmax_extra_scale: float
     special_tokens: SpecialTokens
@@ -605,6 +604,7 @@ class GptInitModelParameters:
             rpc_put_cache_timeout_ms=get_env_int("RPC_PUT_CACHE_TIMEOUT_MS", 3000),
             threefs_read_timeout_ms=get_env_int("THREEFS_READ_TIMEOUT_MS", 1000),
             threefs_write_timeout_ms=get_env_int("THREEFS_WRITE_TIMEOUT_MS", 2000),
+            max_block_size_per_item=get_env_int("MAX_BLOCK_SIZE_PER_ITEM", 16),
             threefs_read_iov_size=get_env_int("THREEFS_READ_IOV_SIZE", 1 << 32),
             threefs_write_iov_size=get_env_int("THREEFS_WRITE_IOV_SIZE", 1 << 32),
         )
@@ -771,10 +771,6 @@ class GptInitModelParameters:
 
         # PD Seperation
         self.decode_entrance = get_env_bool("DECODE_ENTRANCE", False)
-
-        # KVCache Config
-        self.max_block_size_per_item = get_env_int("MAX_BLOCK_SIZE_PER_ITEM", 16)
-        logging.info(f"max_block_size_per_item: {self.max_block_size_per_item}")
 
     def update_config_with_sparse_config(self, ckpt_path: str):
         sparse_config_file = None

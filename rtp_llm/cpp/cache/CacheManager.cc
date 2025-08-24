@@ -770,6 +770,7 @@ bool CacheManager::initDistKvCache() {
     init_params.match_timeout_ms         = params_.kv_cache_config.match_timeout_ms;
     init_params.rpc_get_cache_timeout_ms = params_.kv_cache_config.rpc_get_cache_timeout_ms;
     init_params.rpc_put_cache_timeout_ms = params_.kv_cache_config.rpc_put_cache_timeout_ms;
+    init_params.max_block_size_per_item  = params_.kv_cache_config.max_block_size_per_item;
     if (params_.kv_cache_config.enable_3fs) {
         DistStorage3FSInitParams init_params_3fs;
         init_params_3fs.read_iov_size                      = params_.kv_cache_config.threefs_read_iov_size;
@@ -809,11 +810,11 @@ void CacheManager::matchInDistKvCache(const AdvancedMallocInfo& malloc_info, Blo
         return;
     }
 
-    auto need_block_num = matched_len - local_matched_len;
+    int64_t need_block_num = static_cast<int64_t>(matched_len) - static_cast<int64_t>(local_matched_len);
     if (need_block_num <= 0) {
         return;
     }
-    auto [success, resource] = malloc(SimpleMallocInfo(-1, need_block_num, true));
+    auto [success, resource] = malloc(SimpleMallocInfo(-1, static_cast<uint32_t>(need_block_num), true));
     if (!success) {
         RTP_LLM_LOG_WARNING(
             "prefix matched in dist kvcache but free block index not enough, need block num: %d, free block index len: %lu",

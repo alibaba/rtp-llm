@@ -23,6 +23,11 @@ DistKvCache::DistKvCache(CacheManager*                       cache_manager,
 
 DistKvCache::~DistKvCache() {
     RTP_LLM_LOG_INFO("DistKvCache destructor");
+    if (io_thread_pool_) {
+        io_thread_pool_->stop();
+        io_thread_pool_->waitFinish();
+        io_thread_pool_.reset();
+    }
     if (wait_match_thread_pool_) {
         wait_match_thread_pool_->stop();
         wait_match_thread_pool_->waitFinish();
@@ -67,6 +72,15 @@ bool DistKvCache::init(const DistKvCacheInitParams& init_params) {
         RTP_LLM_LOG_WARNING("init failed, start wait match thread pool failed, thread num: %zu, queue size: %zu",
                             thread_num_,
                             queue_size_);
+        return false;
+    }
+
+    // parallel IO pool for 3FS get/put of multiple items
+    io_thread_pool_ = std::make_unique<autil::LockFreeThreadPool>(io_thread_num_, io_queue_size_, nullptr, "DistKvCacheIOThreadPool");
+    if (!io_thread_pool_->start()) {
+        RTP_LLM_LOG_WARNING("init failed, start io thread pool failed, thread num: %zu, queue size: %zu",
+                            io_thread_num_,
+                            io_queue_size_);
         return false;
     }
 
@@ -202,13 +216,21 @@ int32_t DistKvCache::match(const std::vector<int64_t>&               cache_keys,
                            int64_t                                   request_id,
                            std::map<std::string, std::string>        extra_metas,
                            const std::shared_ptr<std::atomic<bool>>& stop) const {
+    if (cache_keys.empty()) {
+        return 0;
+    }
+    
+    RTP_LLM_LOG_DEBUG("match cache_keys size: %zu", cache_keys.size());
     for (auto& [key, value] : default_metas_) {
         if (extra_metas.count(key) == 0) {
             extra_metas[key] = value;
         }
     }
 
-    const auto& cache_config = cache_manager_->cacheConfig();
+
+    RTP_LLM_LOG_DEBUG("cache_keys size: %zu", cache_keys.size());
+    RTP_LLM_LOG_DEBUG("ignore_block_num: %zu", ignore_block_num);
+    RTP_LLM_LOG_DEBUG("extra_metas: %s", extra_metas.at("TP_RANK").c_str());
 
     // get layout at the granularity of items i.e. blocks collection
     auto layout_items = planner_->layout(cache_keys, {}, ignore_block_num, extra_metas);
@@ -237,18 +259,18 @@ int32_t DistKvCache::match(const std::vector<int64_t>&               cache_keys,
             right = mid - 1;
         }
     }
-    match_len = (right + 1) * cache_config.max_block_size_per_item;
+    match_len = (right + 1) * init_params_.max_block_size_per_item;
     DistStorage::Item item;
     // deep search partial block
     item = DistStorage::Item();
     item.type       = DistStorage::ST_3FS;
     item.metas      = extra_metas;
     
-    int start_key = (right + 1) * cache_config.max_block_size_per_item;
-    int end_key = start_key + cache_config.max_block_size_per_item - 1;
+    int start_key = (right + 1) * init_params_.max_block_size_per_item;
+    int end_key = start_key + init_params_.max_block_size_per_item - 1;
     end_key = std::min(end_key, static_cast<int>(cache_keys.size()) - 1);
     for (int i = end_key; i >= start_key; i--) {
-        item.key = item.metas["TP_RANK"] + "_" + std::to_string(cache_keys[start_key]) + "_" + std::to_string(cache_keys[i]);
+        item.key = std::to_string(cache_keys[start_key]) + "_" + std::to_string(cache_keys[i]);
         item.metas["ITEM_KEY"] = item.key;
         if (storage_->lookup(item)) {
             RTP_LLM_LOG_DEBUG("request[%ld] deep match item: %s, len: %d", request_id, item.key.c_str(), i - start_key + 1);
@@ -305,8 +327,6 @@ bool DistKvCache::get(const std::vector<int64_t>&        cache_keys,
     }
 
     auto layout_items = planner_->layout(cache_keys, block_indices, ignore_block_num, extra_metas);
-    RTP_LLM_LOG_DEBUG("layout items size: %zu", layout_items.size());
-
     for (auto &item : layout_items) {
         RTP_LLM_LOG_DEBUG("layout item: %s", item.key.c_str());  
     }
@@ -319,12 +339,26 @@ bool DistKvCache::get(const std::vector<int64_t>&        cache_keys,
     auto metrics = DistKvCacheMetricsFactory::createMetrics(metrics_reporter_);
     DistKvCacheMetrics::markGetCacheBeginUs(metrics);
 
-    for (auto& item : layout_items) {
-        if (!storage_->get(item)) {
-            RTP_LLM_LOG_WARNING("get cache failed, rank: %d, key: %s", gpt_init_params_.tp_rank_, item.key.c_str());
-            DistKvCacheMetrics::markGetCacheDoneUs(metrics);
-            return false;
+
+    std::vector<autil::ThreadPoolBase::Future<bool>> get_futures;
+    get_futures.reserve(layout_items.size());
+    for (auto& it : layout_items) {
+        auto get_task = [this, it]() mutable -> bool {
+            return storage_->get(it);
+        };
+        get_futures.emplace_back(io_thread_pool_->async(get_task));
+    }
+
+    bool any_failed = false;
+    for (auto& future : get_futures) {
+        if (future.valid() && !future.get()) {
+            any_failed = true;
+            break;
         }
+    }
+    if (any_failed) {
+        DistKvCacheMetrics::markGetCacheDoneUs(metrics);
+        return false;
     }
 
     DistKvCacheMetrics::markGetCacheDoneUs(metrics);
@@ -351,26 +385,6 @@ bool DistKvCache::putForAllRank(const std::vector<int64_t>&        cache_keys,
 
     auto metrics = DistKvCacheMetricsFactory::createMetrics(metrics_reporter_);
     DistKvCacheMetrics::markTotalPutCacheBeginUs(metrics);
-
-    bool exist = true;
-    for (int i = 0; i < gpt_init_params_.tp_size_; i++) {
-        extra_metas["TP_RANK"] = std::to_string(i);
-        auto layout_items      = planner_->layout(cache_keys, block_indices, ignore_block_num, extra_metas, true);
-        for (auto& item : layout_items) {
-            if (!storage_->lookup(item)) {
-                exist = false;
-                break;
-            }
-        }
-        if (!exist) {
-            break;
-        }
-    }
-
-    if (exist) {
-        DistKvCacheMetrics::markTotalPutCacheDoneUs(metrics);
-        return true;
-    }
 
     bool result =
         syncCallAllRank(cache_keys, block_indices, ignore_block_num, request_id, rpc_extra_metas, OpType::OP_PUT);
@@ -404,13 +418,28 @@ bool DistKvCache::put(const std::vector<int64_t>&        cache_keys,
     auto metrics = DistKvCacheMetricsFactory::createMetrics(metrics_reporter_);
     DistKvCacheMetrics::markPutCacheBeginUs(metrics);
 
-    for (auto& item : layout_items) {
-        if (!storage_->put(item)) {
-            RTP_LLM_LOG_WARNING("dist kv cache put cache, put cache failed, key: %s", item.key.c_str());
-            DistKvCacheMetrics::markPutCacheDoneUs(metrics);
-            return false;
+
+    std::vector<autil::ThreadPoolBase::Future<bool>> put_futures;
+    put_futures.reserve(layout_items.size());
+    for (auto& it : layout_items) {
+        auto put_task = [this, it]() mutable -> bool {
+            return storage_->putIfNotExist(it);
+        };
+        put_futures.emplace_back(io_thread_pool_->async(put_task));
+    }
+
+    bool any_failed = false;
+    for (auto& future : put_futures) {
+        if (future.valid() && !future.get()) {
+            any_failed = true;
+            break;
         }
     }
+    if (any_failed) {
+        DistKvCacheMetrics::markPutCacheDoneUs(metrics);
+        return false;
+    }
+    
 
     DistKvCacheMetrics::markPutCacheDoneUs(metrics);
     return true;

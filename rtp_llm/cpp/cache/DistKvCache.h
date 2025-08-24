@@ -16,6 +16,7 @@ struct DistKvCacheInitParams {
     int                          match_timeout_ms{1000};
     int                          rpc_get_cache_timeout_ms{3000};
     int                          rpc_put_cache_timeout_ms{3000};
+    int                          max_block_size_per_item{16};
 };
 
 /**
@@ -102,7 +103,7 @@ private:
 
     // IO thread pool for parallel 3FS read/write of multiple items
     std::unique_ptr<autil::LockFreeThreadPool> io_thread_pool_;
-    const size_t                               io_thread_num_{4};
+    const size_t                               io_thread_num_{8};
     const size_t                               io_queue_size_{4096};
 };
 

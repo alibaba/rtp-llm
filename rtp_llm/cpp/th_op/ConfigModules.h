@@ -63,6 +63,7 @@ struct KVCacheConfig {
     int         rpc_put_cache_timeout_ms = 3000;
     int         threefs_read_timeout_ms  = 1000;
     int         threefs_write_timeout_ms = 2000;
+    int         max_block_size_per_item  = 16;
     int64_t     threefs_read_iov_size    = 1LL << 32;  // 4GB
     int64_t     threefs_write_iov_size   = 1LL << 32;  // 4GB
     std::string to_string() const;

@@ -166,13 +166,14 @@ void KVCacheConfig::update_from_env_for_test() {
     rpc_put_cache_timeout_ms = autil::EnvUtil::getEnv("RPC_PUT_CACHE_TIMEOUT_MS", 3000);
     threefs_read_timeout_ms  = autil::EnvUtil::getEnv("THREEFS_READ_TIMEOUT_MS", 1000);
     threefs_write_timeout_ms = autil::EnvUtil::getEnv("THREEFS_WRITE_TIMEOUT_MS", 2000);
+    max_block_size_per_item  = autil::EnvUtil::getEnv("MAX_BLOCK_SIZE_PER_ITEM", 16);
     threefs_read_iov_size    = autil::EnvUtil::getEnv("THREEFS_READ_IOV_SIZE", 1LL << 32);   // 4GB
     threefs_write_iov_size   = autil::EnvUtil::getEnv("THREEFS_WRITE_IOV_SIZE", 1LL << 32);  // 4GB
 }
 
 void register_kvcache_config(pybind11::module& m) {
     pybind11::class_<KVCacheConfig>(m, "KVCacheConfig")
-        .def(pybind11::init<bool, std::string, std::string, bool, int, int, int, int, int, int64_t, int64_t>(),
+        .def(pybind11::init<bool, std::string, std::string, bool, int, int, int, int, int, int, int64_t, int64_t>(),
              pybind11::arg("reuse_cache")              = false,
              pybind11::arg("multi_task_prompt")        = "",
              pybind11::arg("multi_task_prompt_str")    = "",
@@ -182,6 +183,7 @@ void register_kvcache_config(pybind11::module& m) {
              pybind11::arg("rpc_put_cache_timeout_ms") = 3000,
              pybind11::arg("threefs_read_timeout_ms")  = 1000,
              pybind11::arg("threefs_write_timeout_ms") = 2000,
+             pybind11::arg("max_block_size_per_item")  = 16,
              pybind11::arg("threefs_read_iov_size")    = 1LL << 32,
              pybind11::arg("threefs_write_iov_size")   = 1LL << 32)
         .def("to_string", &KVCacheConfig::to_string)
@@ -195,6 +197,7 @@ void register_kvcache_config(pybind11::module& m) {
         .def_readwrite("rpc_put_cache_timeout_ms", &KVCacheConfig::rpc_put_cache_timeout_ms)
         .def_readwrite("threefs_read_timeout_ms", &KVCacheConfig::threefs_read_timeout_ms)
         .def_readwrite("threefs_write_timeout_ms", &KVCacheConfig::threefs_write_timeout_ms)
+        .def_readwrite("max_block_size_per_item", &KVCacheConfig::max_block_size_per_item)
         .def_readwrite("threefs_read_iov_size", &KVCacheConfig::threefs_read_iov_size)
         .def_readwrite("threefs_write_iov_size", &KVCacheConfig::threefs_write_iov_size);
 }
@@ -655,6 +658,7 @@ inline std::string KVCacheConfig::to_string() const {
         << "rpc_put_cache_timeout_ms: " << rpc_put_cache_timeout_ms << "\n"
         << "threefs_read_timeout_ms: " << threefs_read_timeout_ms << "\n"
         << "threefs_write_timeout_ms: " << threefs_write_timeout_ms << "\n"
+        << "max_block_size_per_item: " << max_block_size_per_item << "\n"
         << "threefs_read_iov_size: " << threefs_read_iov_size << "\n"
         << "threefs_write_iov_size: " << threefs_write_iov_size;
     return oss.str();

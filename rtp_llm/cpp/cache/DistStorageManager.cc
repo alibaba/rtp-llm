@@ -80,6 +80,17 @@ bool DistStorageManager::put(const DistStorage::Item& item) {
     return false;
 }
 
+bool DistStorageManager::putIfNotExist(const DistStorage::Item& item) {
+    auto storage = getStorage(item);
+    if (storage) {
+        if(storage->lookup(item)) {
+            return true;
+        }
+        return storage->put(item);
+    }
+    return false;
+}
+
 bool DistStorageManager::del(const DistStorage::Item& item) {
     auto storage = getStorage(item);
     if (storage) {

@@ -109,6 +109,13 @@ def init_kv_cache_group_args(parser):
         help="3FS 写 KVCache 的超时时间, 单位为毫秒",
     )
     kv_cache_group.add_argument(
+        "--max_block_size_per_item",
+        env_name="MAX_BLOCK_SIZE_PER_ITEM",
+        type=int,
+        default=16,
+        help="KVCache 分块存储每个 item 最大容纳 block 的数量",
+    )
+    kv_cache_group.add_argument(
         "--threefs_read_iov_size",
         env_name="THREEFS_READ_IOV_SIZE",
         type=int,

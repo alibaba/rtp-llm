@@ -57,6 +57,7 @@ class ServerArgsDefaultTest(TestCase):
         self.assertEqual(env.get("RPC_PUT_CACHE_TIMEOUT_MS"), "3000")
         self.assertEqual(env.get("THREEFS_READ_TIMEOUT_MS"), "1000")
         self.assertEqual(env.get("THREEFS_WRITE_TIMEOUT_MS"), "2000")
+        self.assertEqual(env.get("MAX_BLOCK_SIZE_PER_ITEM"), "16")
         self.assertEqual(env.get("THREEFS_READ_IOV_SIZE"), "4294967296")
         self.assertEqual(env.get("THREEFS_WRITE_IOV_SIZE"), "4294967296")
 

@@ -14,6 +14,7 @@ public:
     bool lookup(const DistStorage::Item& key);
     bool get(DistStorage::Item& item);
     bool put(const DistStorage::Item& item);
+    bool putIfNotExist(const DistStorage::Item& item);
     bool del(const DistStorage::Item& item);
 
 private:

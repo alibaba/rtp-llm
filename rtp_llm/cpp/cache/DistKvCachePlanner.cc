@@ -25,7 +25,7 @@ std::vector<DistStorage::Item> DefaultDistKvCachePlanner::layout(const std::vect
         return {};
     }
 
-    if (cache_keys.size() > block_indices.size() + ignore_block_num) {
+    if (!block_indices.empty() && cache_keys.size() > block_indices.size() + ignore_block_num) {
         RTP_LLM_LOG_WARNING(
             "layout failed, cache key size or block size is invalid, cache key size: %zu, block size: %zu, ignore block num: %d",
             cache_keys.size(),
@@ -79,8 +79,8 @@ std::vector<DistStorage::Item> DefaultDistKvCachePlanner::layout(const std::vect
         item_block_count++;
         item_keys.push_back(cache_keys[i]);
 
-        if (item_block_count >= cache_config.max_block_size_per_item && item_keys.size() > 0) {
-            item->key = item->metas["TP_RANK"] + "_"  + std::to_string(item_keys.front()) + "_" + std::to_string(item_keys.back());
+        if (item_block_count >= gpt_init_params_.kv_cache_config.max_block_size_per_item && item_keys.size() > 0) {
+            item->key = std::to_string(item_keys.front()) + "_" + std::to_string(item_keys.back());
             item->metas["ITEM_KEY"] = item->key;
             RTP_LLM_LOG_DEBUG("push item: %s", item->key.c_str());
             items.push_back(*item);
@@ -89,7 +89,7 @@ std::vector<DistStorage::Item> DefaultDistKvCachePlanner::layout(const std::vect
     }
 
     if (item != nullptr && item_keys.size() > 0) {
-        item->key = item->metas["TP_RANK"] + "_" + std::to_string(item_keys.front()) + "_" + std::to_string(item_keys.back());
+        item->key = std::to_string(item_keys.front()) + "_" + std::to_string(item_keys.back());
         item->metas["ITEM_KEY"] = item->key;
         RTP_LLM_LOG_DEBUG("push item: %s", item->key.c_str());
         items.push_back(*item);
