@@ -825,12 +825,14 @@ class GptInitModelParameters:
             self.is_sparse_head = True
 
     def update_inter_padding_size(self, tp_size: int, ep_size: int, dp_size: int):
-        # TODO
         # AFD: Skip tp_size * dp_size == ep_size validation
-        # if tp_size * dp_size != ep_size:
-        #     raise ValueError(
-        #         f"tp_size:{tp_size} * dp_size:{dp_size} != ep_size:{ep_size}"
-        #     )
+        if (
+            not self.ffn_disaggregate_config.enable_ffn_disaggregate
+            and tp_size * dp_size != ep_size
+        ):
+            raise ValueError(
+                f"tp_size:{tp_size} * dp_size:{dp_size} != ep_size:{ep_size}"
+            )
         # new tp_size just only for moe
         if self.quant_algo.isGroupwise():
             align_size = tp_size * self.quant_algo.getGroupSize()
@@ -993,8 +995,7 @@ class GptInitModelParameters:
         self.update_task_type_use_kvcache()
 
         if StaticConfig.ffn_disaggregate_config.enable_ffn_disaggregate:
-            # TODO moe ADF FFN 支持 sp,tp 并行
-            # TODO dense module ADF ffn 支持 tp,sp 并行
+            # 目前实现限制 ffn_tp_size = 1
             assert (
                 StaticConfig.ffn_disaggregate_config.ffn_tp_size == 1
             ), "ffn_tp_size must be 1 in current version"
@@ -1003,8 +1004,8 @@ class GptInitModelParameters:
                 == StaticConfig.ffn_disaggregate_config.attention_dp_size
                 * StaticConfig.ffn_disaggregate_config.attention_tp_size
                 + StaticConfig.ffn_disaggregate_config.ffn_ep_size
-            ), f"g_parallel_info.world_size:{g_parallel_info.world_size} != attention_dp_size:{StaticConfig.ffn_disaggregate_config.attention_dp_size} * attention_tp_size:{StaticConfig.ffn_disaggregate_config.attention_tp_size} + ffn_ep_size:{StaticConfig.ffn_disaggregate_config.ffn_ep_size}"
-
+                * StaticConfig.ffn_disaggregate_config.ffn_tp_size
+            )
             self.gpt_init_params.ffn_disaggregate_config.is_ffn_rank = (
                 g_parallel_info.world_rank
                 >= g_parallel_info.attention_tp_size * g_parallel_info.attention_dp_size

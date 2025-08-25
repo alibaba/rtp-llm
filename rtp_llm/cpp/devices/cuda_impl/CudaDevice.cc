@@ -64,13 +64,6 @@ CudaDevice::CudaDevice(const DeviceInitParams& params): DeviceBase(params) {
     }
 
     if (params.tp_size > 1 && !params.ffn_as_service) {
-        RTP_LLM_LOG_INFO("init tp nccl param, tp_size: %d, dp_size: %d, ffn_as_service: %s, tp_rank: %d, dp_rank: %d",
-                         params.tp_size,
-                         params.dp_size,
-                         params.ffn_as_service ? "true" : "false",
-                         params.tp_rank,
-                         params.dp_rank);
-
         auto master_ip = params.master_ip;
         if (params.dp_size > 1) {
             master_ip = "127.0.0.1";
@@ -91,8 +84,6 @@ CudaDevice::CudaDevice(const DeviceInitParams& params): DeviceBase(params) {
         }
     }
 
-    // TODO(muxue)
-    // if (params.ep_size > 1 || params.dp_size > 1) {
     if (params.tp_size * params.dp_size > 1 && !params.ffn_as_service) {
         initNcclParam(params.dp_rank * params.tp_size + params.tp_rank,
                       params.dp_size * params.tp_size,

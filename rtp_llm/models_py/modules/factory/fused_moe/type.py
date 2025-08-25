@@ -12,6 +12,8 @@ class RouterType(Enum):
     DEEPEP_NORMAL = 2  # DeepEP normal mode
     DEEPEP_LOW_LATENCY = 4  # DeepEP low latency mode (best communication)
     PURE_TP = 5  # optimize when EP=TP, use all_reduce as gather
+    AFD_ATTN_ROUTER = 6  # AF disaggregate attention router (m2n)
+    AFD_FFN_ROUTER = 7  # AF disaggregate FFN router (m2n)
 
 
 class ExecutorType(Enum):

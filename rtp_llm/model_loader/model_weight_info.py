@@ -280,7 +280,7 @@ class ModelDeployWeightInfo:
             config.gpt_init_params.ffn_disaggregate_config.is_ffn_service()
         )
         self.enable_ffn_disaggregate = (
-            config.ffn_disaggregate_config.enable_ffn_disaggregate
+            config.gpt_init_params.ffn_disaggregate_config.enable_ffn_disaggregate
         )
 
     @property

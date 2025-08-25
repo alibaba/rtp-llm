@@ -132,15 +132,9 @@ void CacheManager::allocateAndSync() {
             device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {world_size}, rtp_llm::AllocationType::HOST});
         auto block_num_ptr        = block_num_infos->data<int>();
         block_num_ptr[local_rank] = config_.block_nums;
-        RTP_LLM_LOG_INFO("block nums is %d for local rank %d", config_.block_nums, local_rank);
         device_->allGather({{block_num_infos}, ParallelMode::DP_AND_TP});
         device_->syncCommunication(false);
         device_->syncAndCheck();
-        // if (properties.ffn_as_service) {
-        //     config_.block_nums = 1;
-        // } else {
-        //     config_.block_nums = *std::min_element(block_num_ptr, block_num_ptr + world_size);
-        // }
         config_.block_nums = *std::min_element(block_num_ptr, block_num_ptr + world_size);
     }
     if (properties.ffn_as_service) {

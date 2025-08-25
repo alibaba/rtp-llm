@@ -5,6 +5,7 @@ from typing import Optional, Tuple
 
 from deep_ep import Buffer as DeepEPBuffer
 from deep_ep import Config as DeepEPConfig
+from deep_ep import EventOverlap as DeepEPEventOverlap
 from torch.distributed import ProcessGroup
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
@@ -267,21 +268,19 @@ class DeepEPWrapper:
         ll_num_max_token_per_rank = self._calc_low_latency_max_token_per_rank(
             max_generate_batch_size, attention_tp_size
         )
+        self._ll_num_max_token_per_rank = ll_num_max_token_per_rank
 
         attention_dp_size: int = (
             params.gpt_init_params.ffn_disaggregate_config.attention_dp_size
         )
-        ffn_dp_size: int = params.gpt_init_params.ffn_disaggregate_config.ffn_dp_size
+        ffn_ep_size: int = params.gpt_init_params.ffn_disaggregate_config.ffn_ep_size
         ffn_tp_size: int = params.gpt_init_params.ffn_disaggregate_config.ffn_tp_size
         assert (
-            attention_dp_size > 0 and ffn_dp_size > 0 and ffn_tp_size > 0
-        ), "attention_dp_size, ffn_dp_size and ffn_tp_size must be set"
+            attention_dp_size > 0 and ffn_ep_size > 0 and ffn_tp_size > 0
+        ), "attention_dp_size, ffn_ep_size and ffn_tp_size must be set"
         num_m = attention_dp_size * attention_tp_size
-        num_n = ffn_dp_size * ffn_tp_size
+        num_n = ffn_ep_size * ffn_tp_size
 
-        num_nvl_bytes = 0
-        num_rdma_bytes = 0
-        num_qps_per_rank = 1
         if not hasattr(DeepEPBuffer, "get_low_latency_rdma_size_hint_m2n"):
             raise RuntimeError(
                 "current deep_ep provider does not support low-latency m2n"
@@ -309,18 +308,16 @@ class DeepEPWrapper:
                 f"num_n: {num_n}",
                 flush=True,
             )
-        num_qps_per_rank = num_experts / num_n
+        num_qps_per_rank = max(1, num_experts // num_n)
 
         init_kwargs = {
             "group": group,
-            "num_nvl_bytes": num_nvl_bytes,
             "num_rdma_bytes": num_rdma_bytes,
             "low_latency_mode": True,
             "num_qps_per_rank": num_qps_per_rank,
         }
         if self._use_accl_ep:
             init_kwargs["allow_nvlink_for_low_latency_mode"] = True
-            init_kwargs["allow_mnnvl"] = False
         return DeepEPBuffer(**init_kwargs)  # type: ignore
 
     def destroy_deepep_buffer(self) -> None:
