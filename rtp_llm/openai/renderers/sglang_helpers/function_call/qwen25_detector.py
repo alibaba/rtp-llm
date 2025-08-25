@@ -76,9 +76,6 @@ class Qwen25Detector(BaseFormatDetector):
                 )
                 continue
 
-        # XinshiFix: 修复 tool_index错误被分配的情况
-        for i, call in enumerate(calls):
-            call.tool_index = i
         return StreamingParseResult(normal_text=normal_text, calls=calls)
 
     def parse_streaming_increment(

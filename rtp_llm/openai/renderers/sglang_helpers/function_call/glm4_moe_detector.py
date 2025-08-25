@@ -97,10 +97,6 @@ class Glm4MoeDetector(BaseFormatDetector):
                 match_result = {"name": func_name, "parameters": arguments}
                 calls.extend(self.parse_base_json(match_result, tools))
 
-            # XINSHI Fix: 统一为所有 calls 分配 tool_index
-            for i, call in enumerate(calls):
-                call.tool_index = i
-
             return StreamingParseResult(normal_text=normal_text, calls=calls)
         except Exception as e:
             logger.error(f"Error in detect_and_parse: {e}")

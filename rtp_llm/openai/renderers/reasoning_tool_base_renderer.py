@@ -66,6 +66,8 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
     ):
         super().__init__(tokenizer, renderer_params)
         self._setup_stop_words()
+        # 避免短期内多次encode prompt的开销
+        self._cached_encode = functools.lru_cache()(self.tokenizer.encode)
 
     def _setup_stop_words(self):
         """设置额外的停止词，子类可以重写"""
@@ -110,7 +112,7 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         """渲染聊天请求"""
         prompt: str = self._build_prompt(request)
-        input_ids: List[int] = self.tokenizer.encode(prompt)
+        input_ids: List[int] = self._cached_encode(prompt)
         return RenderedInputs(input_ids=input_ids, rendered_prompt=prompt)
 
     def _build_prompt(self, request: ChatCompletionRequest) -> str:
@@ -354,6 +356,11 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
             tool_calls, remaining_text = streaming_parse_result_to_tool_calls(
                 parse_result
             )
+
+            # 统一为非流式场景的tool_call重新分配index以兼容sglang中非流式大部分index为-1的情况
+            if not is_streaming:
+                for i, tool_call in enumerate(tool_calls):
+                    tool_call.index = i
 
             return tool_calls, remaining_text
 

@@ -20,20 +20,7 @@
 cur_args_json = json.dumps(cur_arguments, ensure_ascii=False)
 ```
 
-### 3. 工具索引处理修复
-**修复 `qwen25_detector` 非流式场景的 `tool_index` 处理**
-
-**问题描述：**
-- 非流式场景下没有正确处理 `tool_index`
-
-**解决方案：**
-```python
-# XinshiFix: 修复 tool_index 错误被分配的情况
-for i, call in enumerate(calls):
-    call.tool_index = i
-```
-
-### 4. 索引处理优化
+### 3. 索引处理优化
 **修复 `qwen3_coder_detector` 以及`glm4_moe_detector` 的索引处理问题**
 
 **问题描述：**

@@ -33,6 +33,7 @@ from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.openai.renderer_factory import ChatRendererFactory, RendererParams
 from rtp_llm.openai.renderers import custom_renderer
 from rtp_llm.openai.renderers.chatglm45_renderer import ChatGlm45Renderer
+from rtp_llm.openai.renderers.deepseekv31_renderer import DeepseekV31Renderer
 from rtp_llm.openai.renderers.kimik2_renderer import KimiK2Renderer
 from rtp_llm.openai.renderers.qwen3_code_renderer import Qwen3CoderRenderer
 from rtp_llm.openai.renderers.qwen_reasoning_tool_renderer import (
@@ -1595,6 +1596,214 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
                 == '{"content": "{\\n  \\"graphName\\": \\"atlas-demo-graph\\",\\n  \\"modules\\": [\\n    {\\n      \\"moduleName\\": \\"InputModule\\",\\n      \\"className\\": \\"com.taobao.recommendplatform.solutions.atlasdemo.module.InputModule\\"\\n    },\\n    {\\n      \\"moduleName\\": \\"ProcessModule\\",\\n      \\"className\\": \\"com.taobao.recommendplatform.solutions.atlasdemo.module.ProcessModule\\"\\n    }\\n  ],\\n  \\"edges\\": [\\n    {\\n      \\"from\\": \\"InputModule\\",\\n      \\"to\\": \\"ProcessModule\\"\\n    }\\n  ]\\n}", "file_path": "/Users/wuchen/workspace/test-atlas-gen/src/main/resources/graph_configs/default.json"}'
             )
 
+    class DeepseekV31TestSuite(BaseToolCallTestSuite):
+        """DeepseekV31相关测试的内嵌测试套件"""
+
+        def _get_model_type(self):
+            return "deepseek_v31"
+
+        def _get_tokenizer_path(self):
+            return "deepseek_v31/tokenizer/"
+
+        def _validate_renderer(self, chat_renderer):
+            """验证renderer类型"""
+            assert isinstance(chat_renderer, DeepseekV31Renderer)
+
+        def _get_test_data(self, include_stop_word=False):
+            """获取测试数据"""
+            # 我来为您查询北京和杭州的天气情况。<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_current_weather<｜tool▁sep｜>{"location": "北京", "unit": "celsius"}<｜tool▁call▁end｜><｜tool▁call▁begin｜>get_current_weather<｜tool▁sep｜>{"location": "杭州", "unit": "celsius"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+
+            # 文本内容
+            token_ids = [
+                38463,
+                48289,
+                17916,
+                6127,
+                548,
+                24463,
+                301,
+                16652,
+                2782,
+                320,
+                128806,
+                128808,
+                1133,
+                90605,
+                65,
+                50219,
+                128814,
+                24313,
+                33182,
+                3362,
+                582,
+                6127,
+                1760,
+                582,
+                15165,
+                3362,
+                582,
+                69,
+                33030,
+                62773,
+                128809,
+                128808,
+                1133,
+                90605,
+                65,
+                50219,
+                128814,
+                24313,
+                33182,
+                3362,
+                582,
+                24463,
+                1760,
+                582,
+                15165,
+                3362,
+                582,
+                69,
+                33030,
+                62773,
+                128809,
+                128807,
+                201,
+            ]
+
+            return token_ids
+
+        def _assert_tool_call_response(
+            self,
+            response_delta,
+            expected_content="我来为您查询北京和杭州的天气情况。",
+        ):
+            """断言工具调用响应的内容"""
+            assert response_delta.content.strip() == expected_content.strip()
+            assert response_delta.tool_calls is not None
+            assert len(response_delta.tool_calls) == 2
+            assert response_delta.tool_calls[0].function.name == "get_current_weather"
+            assert (
+                response_delta.tool_calls[0].function.arguments
+                == '{"location": "北京", "unit": "celsius"}'
+            )
+            assert response_delta.tool_calls[0].index == 0
+            assert response_delta.tool_calls[1].function.name == "get_current_weather"
+            assert (
+                response_delta.tool_calls[1].function.arguments
+                == '{"location": "杭州", "unit": "celsius"}'
+            )
+            assert response_delta.tool_calls[1].index == 1
+
+    class DeepseekV31ThinkTestSuite(BaseToolCallTestSuite):
+        """DeepseekV31相关测试的内嵌测试套件"""
+
+        def _get_model_type(self):
+            return "deepseek_v31"
+
+        def _get_tokenizer_path(self):
+            return "deepseek_v31/tokenizer/"
+
+        def _validate_renderer(self, chat_renderer):
+            """验证renderer类型"""
+            assert isinstance(chat_renderer, DeepseekV31Renderer)
+
+        async def _run_tool_call_test(
+            self,
+            stream=True,
+            include_stop_word=False,
+            stop_words_str=None,
+        ):
+            """运行工具调用测试的通用方法"""
+            tokenizer = self._setup_environment()
+            test_ids = self._get_test_data(include_stop_word)
+            render_params = self._create_render_params(tokenizer)
+
+            chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
+
+            # 子类特定的renderer验证
+            self._validate_renderer(chat_renderer)
+
+            request = ChatCompletionRequest(
+                messages=[ChatMessage(role=RoleEnum.user, content="hello")],
+                stream=stream,
+                chat_template_kwargs={"thinking": True},
+            )
+
+            seq_len_no_use = 314
+
+            if not stream:
+                id_generator = fake_output_generator_once(
+                    test_ids, MAX_SEQ_LEN, tokenizer.eos_token_id or 0, seq_len_no_use
+                )
+            else:
+                id_generator = fake_output_generator(
+                    test_ids, MAX_SEQ_LEN, tokenizer.eos_token_id or 0, seq_len_no_use
+                )
+
+            generate_config = GenerateConfig(is_streaming=stream)
+            if stop_words_str:
+                generate_config.stop_words_str = stop_words_str
+
+            stream_generator = chat_renderer.render_response_stream(
+                id_generator, request, generate_config=generate_config
+            )
+            generate = self.parent.endpoint._complete_stream_response(
+                stream_generator, None
+            )
+
+            chunk_list = []
+            async for chunk in generate:
+                chunk_list.append(chunk)
+
+            return chunk_list
+
+        def _get_test_data(self, include_stop_word=False):
+            """获取测试数据"""
+            # 唔，用户发来一个简单的问候"你好"。</think>有什么我可以帮你的吗？
+
+            # 文本内容
+            token_ids = [
+                53217,
+                303,
+                6640,
+                740,
+                637,
+                1057,
+                18341,
+                56020,
+                4,
+                30594,
+                75693,
+                128799,
+                10457,
+                34071,
+                3950,
+                4597,
+                3467,
+                1148,
+            ]
+
+            return token_ids
+
+        def _validate_merged_result(self, merged_result):
+            """验证合并后的结果 - 通用验证逻辑"""
+            assert merged_result.choices[0].finish_reason == FinisheReason.stop
+            delta = merged_result.choices[0].delta
+            assert delta.role == RoleEnum.assistant
+            self._assert_tool_call_response(delta)
+
+        def _assert_tool_call_response(
+            self,
+            response_delta,
+            expected_content="有什么我可以帮你的吗？",
+        ):
+            """断言工具调用响应的内容"""
+            assert response_delta.content.strip() == expected_content.strip()
+            assert (
+                response_delta.reasoning_content.strip()
+                == '唔，用户发来一个简单的问候"你好"。'
+            )
+
     # 使用基类的测试方法
     async def test_parse_qwen_tool_call_streaming_case(self):
         """测试QwenTool工具调用流式场景"""
@@ -1689,6 +1898,30 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         """测试Qwen3Coder工具调用非流式场景"""
         suite = self.Qwen3CoderComplexTestSuite(self)
         await suite.test_no_stream()
+
+    @think_mode
+    async def test_parse_deepseek_v31_tool_call_streaming_case(self):
+        """测试deepseek_v31工具调用流式场景, 并且全程打开think_mode"""
+        test_suite = self.DeepseekV31TestSuite(self)
+        await test_suite.test_streaming_case()
+
+    @think_mode
+    async def test_parse_deepseek_v31_tool_call_no_stream(self):
+        """测试deepseek_v31工具调用非流式场景, 并且全程打开think_mode"""
+        test_suite = self.DeepseekV31TestSuite(self)
+        await test_suite.test_no_stream()
+
+    @think_mode
+    async def test_parse_deepseek_v31_think_streaming_case(self):
+        """测试deepseek_v31打开思考的流式场景"""
+        test_suite = self.DeepseekV31ThinkTestSuite(self)
+        await test_suite.test_streaming_case()
+
+    @think_mode
+    async def test_parse_deepseek_v31_think_no_stream(self):
+        """测试deepseek_v31打开思考的非流式场景"""
+        test_suite = self.DeepseekV31ThinkTestSuite(self)
+        await test_suite.test_no_stream()
 
     class QwenMergeLogicTestSuite(QwenToolTestSuite):
         """基于QwenTestSuite，专门测试generate_choice合并逻辑"""
