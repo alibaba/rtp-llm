@@ -252,6 +252,7 @@ void invokeLoadPrefixKVCache(T*                             q_buf,
                              const int                      int8_mode,
                              cudaStream_t                   stream);
 
+#if USING_ROCM
 template<typename T>
 void invokeLoadPrefixKVCacheAiter(T*                             q_buf,
                                   T*                             k_buf,
@@ -265,6 +266,7 @@ void invokeLoadPrefixKVCacheAiter(T*                             q_buf,
                                   const float*                   scale,
                                   const int                      int8_mode,
                                   cudaStream_t                   stream);
+#endif
 
 template<typename T>
 void invokeTranspose4d(T*           dst,

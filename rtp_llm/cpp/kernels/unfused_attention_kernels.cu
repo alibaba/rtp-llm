@@ -3366,6 +3366,7 @@ __global__ void load_prefix_KVCache_kernel(T*                            q_buf,
     }
 }
 
+#if USING_ROCM
 template<typename T, typename Tcache>
 __global__ void load_prefix_KVCache_kernel_aiter(T*                            q_buf,
                                                  T*                            k_buf,
@@ -3436,6 +3437,7 @@ __global__ void load_prefix_KVCache_kernel_aiter(T*                            q
         }
     }
 }
+#endif
 
 template<typename T>
 void invokeLoadPrefixKVCache(T*                             q_buf,
@@ -3460,6 +3462,7 @@ void invokeLoadPrefixKVCache(T*                             q_buf,
     });
 }
 
+#if USING_ROCM
 template<typename T>
 void invokeLoadPrefixKVCacheAiter(T*                             q_buf,
                                   T*                             k_buf,
@@ -3482,6 +3485,7 @@ void invokeLoadPrefixKVCacheAiter(T*                             q_buf,
             <<<grid, block, 0, stream>>>(q_buf, k_buf, v_buf, param, seq_len, head_num, head_num_kv, size_per_head);
     });
 }
+#endif
 
 template<typename T>
 __global__ void SplitQKV_kernel(T*        q_buf,
@@ -3684,6 +3688,7 @@ INSTANTIATEADDFUSEDQKVBIASTRANSPOSEDECODE(__nv_bfloat16);
 #undef INSTANTIATEADDFUSEDQKVBIASTRANSPOSEDECODE
 #endif
 
+#if USING_ROCM
 #define INSTANTIATEINVOKELOADPREFIXKVCACHEAITER(T)                                                                     \
     template void invokeLoadPrefixKVCacheAiter(T*                             q_buf,                                   \
                                                T*                             k_buf,                                   \
@@ -3703,6 +3708,7 @@ INSTANTIATEINVOKELOADPREFIXKVCACHEAITER(half);
 INSTANTIATEINVOKELOADPREFIXKVCACHEAITER(__nv_bfloat16);
 #endif
 #undef INSTANTIATEINVOKELOADPREFIXKVCACHEAITER
+#endif
 
 #define INSTANTIATEINVOKELOADPREFIXKVCACHE(T)                                                                          \
     template void invokeLoadPrefixKVCache(T*                             q_buf,                                        \
