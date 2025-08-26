@@ -68,7 +68,7 @@ def whl_deps():
 def platform_deps():
     return select({
         "@//:using_arm": [],
-        "@//:using_rocm": ["pyyaml"],
+        "@//:using_rocm": ["pyyaml","decord==0.6.0"],
         "//conditions:default": ["decord==0.6.0"],
     })
 
