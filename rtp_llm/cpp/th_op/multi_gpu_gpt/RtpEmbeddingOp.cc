@@ -22,6 +22,7 @@ void RtpEmbeddingOp::init(py::object model, py::object mm_process_engine) {
         rtp_llm::EngineInitParams params(0, gpt_init_params, std::move(*gpt_weight), py_model);
         py::object                custom_module = model.attr("custom_module");
         py::object                py_render     = model.attr("custom_module").attr("renderer");
+        py::object                py_tokenizer  = model.attr("tokenizer");
         py::object                py_handler    = model.attr("custom_module").attr("handler");
 
         if (gpt_init_params.tp_rank_ == 0) {
@@ -35,7 +36,7 @@ void RtpEmbeddingOp::init(py::object model, py::object mm_process_engine) {
         if (!mm_process_engine.is_none()) {
             mm_processor_.reset(new rtp_llm::LocalMultimodalProcessor(mm_process_engine, params.gpt_init_parameter));
         }
-        startRpcServer(gpt_init_params, py_render, params.metrics_reporter, mm_processor_);
+        startRpcServer(gpt_init_params, py_render, py_tokenizer, params.metrics_reporter, mm_processor_);
         startHttpServer(embedding_engine_, mm_processor_, params, custom_module);
     } catch (const std::exception& e) {
         RTP_LLM_FAIL("init embedding engine failed, error msg: %s", e.what());
@@ -74,10 +75,11 @@ void RtpEmbeddingOp::startHttpServer(std::shared_ptr<rtp_llm::EmbeddingEngine>  
 
 void RtpEmbeddingOp::startRpcServer(const rtp_llm::GptInitParameter&              gpt_init_params,
                                     py::object                                    py_render,
+                                    py::object                                    py_tokenizer,
                                     kmonitor::MetricsReporterPtr                  reporter,
                                     std::shared_ptr<rtp_llm::MultimodalProcessor> mm_processor) {
-    auto arpc_service =
-        std::move(createEmbeddingArpcService(gpt_init_params, py_render, mm_processor, embedding_engine_, reporter));
+    auto arpc_service = std::move(createEmbeddingArpcService(
+        gpt_init_params, py_render, py_tokenizer, mm_processor, embedding_engine_, reporter));
     if (arpc_service) {
         RTP_LLM_LOG_INFO("creating arpc service");
         embedding_rpc_service_.reset(new rtp_llm::ArpcServerWrapper(std::move(arpc_service),

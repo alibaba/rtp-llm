@@ -37,6 +37,7 @@ public:
 private:
     void startRpcServer(const rtp_llm::GptInitParameter&              gpt_init_params,
                         py::object                                    py_render,
+                        py::object                                    py_tokenizer,
                         kmonitor::MetricsReporterPtr                  reporter,
                         std::shared_ptr<rtp_llm::MultimodalProcessor> mm_processor);
 
