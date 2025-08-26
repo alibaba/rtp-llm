@@ -50,6 +50,14 @@ int64_t getDefaultDeviceReserveMemoryBytes(const GptInitParameter& params) {
     return reserve_bytes;
 }
 
+bool DeviceFactory::isAlreadyInit() {
+    if (getCurrentDevices().size()) {
+        return true;
+    } else {
+        return false;
+    }
+}
+
 void DeviceFactory::initDevices(const GptInitParameter& params) {
     if (getCurrentDevices().size()) {
         RTP_LLM_LOG_WARNING("Devices are already initialized! will do nothing.");

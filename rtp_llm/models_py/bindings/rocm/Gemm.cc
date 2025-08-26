@@ -7,6 +7,8 @@
 #include <hipblaslt/hipblaslt.h>
 #include <hipblaslt/hipblaslt-ext.hpp>
 #include "rtp_llm/cpp/devices/rocm_impl/ROCmDevice.h"
+#include "rtp_llm/cpp/devices/DeviceFactory.h"
+#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 
 // void gemm(at::Tensor& output, at::Tensor& input, at::Tensor& weight, int64_t hip_stream){
 //     CHECK_INPUT(input);
@@ -161,38 +163,6 @@
 //     });
 // }
 
-hipblasHandle_t   g_hipblas_handle   = nullptr;
-hipblasLtHandle_t g_hipblaslt_handle = nullptr;
-// hipStream_t       g_stream           = nullptr;
-
-// 全局分配器和包装器
-rtp_llm::Allocator<rtp_llm::AllocatorType::ROCM>* g_allocator = nullptr;
-std::unique_ptr<rtp_llm::rocm::hipblasMMWrapper>  g_hipblas_mm_wrapper;
-
-// 初始化标志
-bool g_initialized = false;
-
-// 初始化函数
-void initialize_global_resources() {
-    if (g_initialized)
-        return;
-
-    // 创建 HIPBLAS 句柄
-    hipblasCreate(&g_hipblas_handle);
-    hipblasLtCreate(&g_hipblaslt_handle);
-    hipStream_t stream = at::hip::getCurrentHIPStream().stream();
-
-    // 初始化分配器
-    g_allocator = new rtp_llm::Allocator<rtp_llm::AllocatorType::ROCM>();
-
-    // 初始化 hipblasMMWrapper
-    rtp_llm::HWKernelConfig hw_kernel_config;
-    g_hipblas_mm_wrapper = std::make_unique<rtp_llm::rocm::hipblasMMWrapper>(
-        g_hipblas_handle, g_hipblaslt_handle, stream, g_allocator, hw_kernel_config);
-
-    g_initialized = true;
-}
-
 void gemm(at::Tensor& output, at::Tensor& input, at::Tensor& weight) {
     CHECK_INPUT(input);
     CHECK_INPUT(weight);
@@ -203,33 +173,14 @@ void gemm(at::Tensor& output, at::Tensor& input, at::Tensor& weight) {
     CHECK_EQ(input.size(1), weight.size(0));
     CHECK_EQ(input.size(0), output.size(0));
     CHECK_EQ(weight.size(1), output.size(1));
-    const int   m     = input.size(0);
-    const int   n     = weight.size(1);
-    const int   k     = input.size(1);
-    const float alpha = 1.0f;
-    const float beta  = 0.0f;
 
-    initialize_global_resources();  // 仅首次调用时初始化
+    rtp_llm::BufferPtr input_buffer  = rtp_llm::torchTensor2Buffer(input);
+    rtp_llm::BufferPtr weight_buffer = rtp_llm::torchTensor2Buffer(weight);
+    rtp_llm::BufferPtr output_buffer = rtp_llm::torchTensor2Buffer(output);
 
-    DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FP16(input.scalar_type(), c_type, [&] {
-        hipDataType dtype = (std::is_same<c_type, __half>::value) ? HIP_R_16F : HIP_R_16BF;
-
-        g_hipblas_mm_wrapper->setGemmConfig(dtype, dtype, dtype, HIP_R_32F);
-        hipStream_t stream = at::hip::getCurrentHIPStream().stream();
-        g_hipblas_mm_wrapper->setStream(stream);
-        g_hipblas_mm_wrapper->Gemm(HIPBLAS_OP_N,
-                                   HIPBLAS_OP_N,
-                                   n,
-                                   m,
-                                   k,
-                                   static_cast<c_type*>(weight.data_ptr()),
-                                   n,
-                                   static_cast<c_type*>(input.data_ptr()),
-                                   k,
-                                   static_cast<c_type*>(output.data_ptr()),
-                                   n,
-                                   alpha,
-                                   beta);
-        return true;
-    });
+    if (!rtp_llm::DeviceFactory::isAlreadyInit()) {
+        rtp_llm::DeviceFactory::initDevices(rtp_llm::GptInitParameter());
+    }
+    rtp_llm::ROCmDevice* device_ = dynamic_cast<rtp_llm::ROCmDevice*>(rtp_llm::DeviceFactory::getDefaultDevice());
+    device_->gemm({*input_buffer, *weight_buffer, std::nullopt, output_buffer});
 }

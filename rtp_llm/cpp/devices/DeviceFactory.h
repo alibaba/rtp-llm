@@ -23,6 +23,7 @@ public:
 class DeviceFactory {
 public:
     static void        initDevices(const GptInitParameter& params);
+    static bool        isAlreadyInit();
     static DeviceBase* getDefaultDevice();
     static void        registerDevice(DeviceType type, DeviceCreatorType creator);
     // This function exports default device to python world.
