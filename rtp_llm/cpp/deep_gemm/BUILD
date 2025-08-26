@@ -138,5 +138,6 @@ cc_test(
         "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
     ],
     timeout = "long",
+    tags = ["open_skip", "H20"],
     exec_properties = {'gpu':'H20'},
 )

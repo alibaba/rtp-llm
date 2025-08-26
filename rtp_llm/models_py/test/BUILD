@@ -200,6 +200,7 @@ py_test (
         "//rtp_llm/test/model_test/test_util:test_util"
     ],
     env = test_envs,
+    tags = ["open_skip", "H20"],
     exec_properties = {'gpu':'H20'},
 )
 
@@ -214,6 +215,7 @@ py_test (
         "//rtp_llm/test/model_test/test_util:test_util"
     ],
     env = test_envs,
+    tags = ["open_skip", "H20"],
     exec_properties = {'gpu':'H20'},
 )
 
