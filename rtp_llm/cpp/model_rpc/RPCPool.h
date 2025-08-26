@@ -22,14 +22,29 @@ public:
     absl::StatusOr<Connection<T>> getConnection(std::string peer) {
         std::lock_guard<std::mutex> guard(mutex_);
         auto                        iter = connection_pool_.find(peer);
-        if (iter == connection_pool_.end() || iter->second.channel->GetState(true) == GRPC_CHANNEL_SHUTDOWN
-            || iter->second.channel->GetState(true) == GRPC_CHANNEL_TRANSIENT_FAILURE) {
+        // Check if we need to create a new connection
+        bool need_new_connection = iter == connection_pool_.end();
+        if (!need_new_connection) {
+            // Check if existing connection is in a bad state
+            auto channel_state = iter->second.channel->GetState(true);
+            need_new_connection =
+                (channel_state == GRPC_CHANNEL_SHUTDOWN || channel_state == GRPC_CHANNEL_TRANSIENT_FAILURE);
+            // Remove bad connection from pool if needed
+            if (need_new_connection) {
+                connection_pool_.erase(iter);
+            }
+        }
+
+        if (need_new_connection) {
             grpc::ChannelArguments args;
             args.SetInt(GRPC_ARG_MAX_SEND_MESSAGE_LENGTH, -1);
             args.SetInt(GRPC_ARG_MAX_RECEIVE_MESSAGE_LENGTH, -1);
             args.SetInt(GRPC_ARG_MAX_CONNECTION_IDLE_MS, 60000);
             args.SetInt(GRPC_ARG_MAX_CONCURRENT_STREAMS, 100000);
             args.SetInt(GRPC_ARG_KEEPALIVE_TIME_MS, 10000);
+            // Add keepalive parameters to detect dead connections faster
+            args.SetInt(GRPC_ARG_KEEPALIVE_TIMEOUT_MS, 5000);
+            args.SetInt(GRPC_ARG_KEEPALIVE_PERMIT_WITHOUT_CALLS, 1);
             auto grpc_channel = grpc::CreateCustomChannel(peer, grpc::InsecureChannelCredentials(), args);
             if (!grpc_channel) {
                 std::string error_msg = "create grpc channel for " + peer + " failed";
