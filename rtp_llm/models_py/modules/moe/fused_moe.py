@@ -1,13 +1,10 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from math import prod
 from typing import Any, Dict, Optional, final
 
 import torch
-from libth_transformer import rtp_llm_ops  # type: ignore
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.models_py.modules import FusedMoEQuantConfig, resize_cache
+from rtp_llm.models_py.modules.moe.utils import FusedMoEQuantConfig
 
 
 @dataclass
@@ -34,7 +31,6 @@ class ExpertForwardPayload:
 
 
 class TopKWeightAndReduce(ABC):
-
     @abstractmethod
     def apply(
         self,
@@ -75,7 +71,6 @@ class FusedMoeDataRouter(ABC):
 
 
 class FusedMoeExpertExecutor(ABC):
-
     def __init__(
         self,
         quant_config: Optional[FusedMoEQuantConfig],

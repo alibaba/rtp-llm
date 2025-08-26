@@ -1,5 +1,3 @@
-from dataclasses import dataclass
-from math import prod
 from typing import Any, Optional
 
 import torch
@@ -8,12 +6,15 @@ import triton.language as tl
 import rtp_llm.models_py.modules.moe.fused_moe as mm
 from rtp_llm.models_py.kernels.activation import silu_and_mul
 from rtp_llm.models_py.kernels.grouped_gemm import invoke_moe_batched_triton_kernel
-from rtp_llm.models_py.modules import FusedMoEQuantConfig, resize_cache
 from rtp_llm.models_py.modules.moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
     TopKWeightAndReduceNaiveBatched,
 )
-from rtp_llm.models_py.modules.moe.utils import normalize_scales_shape
+from rtp_llm.models_py.modules.moe.utils import (
+    FusedMoEQuantConfig,
+    normalize_scales_shape,
+    resize_cache,
+)
 
 
 class BatchedDataRouter(mm.FusedMoeDataRouter):
