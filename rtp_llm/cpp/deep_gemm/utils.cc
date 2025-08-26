@@ -1,10 +1,12 @@
 #include "rtp_llm/cpp/deep_gemm/utils.h"
+#include <future>
 #include <openssl/sha.h>
 
 namespace rtp_llm {
 
 const std::string jit_hdrs_path  = getJITPath();
 const std::string remote_jit_dir = getRemoteJITDir();
+bool              use_remote_jit = std::filesystem::exists(remote_jit_dir);
 
 std::string getFilesHash(std::filesystem::path path, bool interleave) {
     std::vector<std::filesystem::path> files = {path.string() + "/JIT.h", path.string() + "/JIT.cc"};
@@ -153,7 +155,17 @@ void* searchAndLoadKernel(const std::filesystem::path& directory, const std::str
 void* findCachedKernel(const std::filesystem::path& remote_dir_path,
                        const std::filesystem::path& local_dir_path,
                        const std::string&           params_str) {
-    auto remote_cache = searchAndLoadKernel(remote_dir_path, params_str);
+    void* remote_cache = nullptr;
+    if (use_remote_jit) {
+        remote_cache = searchAndLoadKernel(remote_dir_path, params_str);
+        auto future  = std::async(std::launch::async, searchAndLoadKernel, remote_dir_path, params_str);
+        auto status  = future.wait_for(std::chrono::seconds(30));
+        if (status == std::future_status::timeout) {
+            use_remote_jit = false;
+        } else {
+            remote_cache = future.get();
+        }
+    }
     if (!remote_cache) {
         return searchAndLoadKernel(local_dir_path, params_str);
     }
@@ -174,7 +186,8 @@ std::string compileAndSaveKernel(const std::filesystem::path& local_dir_path,
     const std::string cu_filename           = local_dir_path.string() + "/" + pid_and_timestamp_str + ".cu";
     const std::string so_filename           = local_dir_path.string() + "/" + pid_and_timestamp_str + ".so.temp";
     const std::string so_filename_final     = local_dir_path.string() + "/" + pid_and_timestamp_str + ".so";
-    const std::string remote_filename       = remote_dir_path.string() + "/" + pid_and_timestamp_str + ".so";
+    const std::string remote_filename       = remote_dir_path.string() + "/" + pid_and_timestamp_str + ".so.temp";
+    const std::string remote_filename_final = remote_dir_path.string() + "/" + pid_and_timestamp_str + ".so";
     RTP_LLM_LOG_INFO("JIT compilation " + cu_filename + " begin");
 
     std::ofstream cu_file(cu_filename.c_str());
@@ -199,11 +212,24 @@ std::string compileAndSaveKernel(const std::filesystem::path& local_dir_path,
 
     std::filesystem::rename(so_filename, so_filename_final);
 
-    if (std::filesystem::exists(remote_jit_dir) && !std::filesystem::exists(remote_filename)) {
+    if (use_remote_jit && !std::filesystem::exists(remote_filename)) {
         if (!std::filesystem::exists(remote_dir_path)) {
             std::filesystem::create_directories(remote_dir_path);
         }
-        std::filesystem::copy(so_filename_final, remote_filename);
+        auto future = std::async(std::launch::async, [&] {
+            try {
+                std::filesystem::copy(so_filename_final, remote_filename);
+                std::filesystem::rename(remote_filename, remote_filename_final);
+                return true;
+            } catch (const std::exception& e) {
+                return false;
+            }
+        });
+
+        auto status = future.wait_for(std::chrono::seconds(30));
+        if (status == std::future_status::timeout || !future.get()) {
+            use_remote_jit = false;
+        }
     }
     return so_filename_final;
 }
