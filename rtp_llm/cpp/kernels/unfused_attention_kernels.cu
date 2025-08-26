@@ -3366,6 +3366,77 @@ __global__ void load_prefix_KVCache_kernel(T*                            q_buf,
     }
 }
 
+template<typename T, typename Tcache>
+__global__ void load_prefix_KVCache_kernel_aiter(T*                            q_buf,
+                                                 T*                            k_buf,
+                                                 T*                            v_buf,
+                                                 PrefixPromptBatchWeightsParam param,
+                                                 const int                     seq_len,
+                                                 const int                     head_num,
+                                                 const int                     head_num_kv,
+                                                 const int                     size_per_head) {
+    static constexpr bool ENABLE_8BITS_CACHE = sizeof(Tcache) == 1;
+
+    constexpr int vec_size = Vec_t<T>::size;
+    using Vec_t            = typename Vec_t<T>::Type;
+
+    const int head_idx      = blockIdx.y;
+    const int tidx          = threadIdx.x;
+    const int total_seq_len = param.max_prefix_prompt_length + seq_len;
+
+    if (tidx * vec_size >= size_per_head) {
+        return;
+    }
+    // NOTE: blockIdx.x < batch_size * param.max_prefix_prompt_length really handles prefix prompts
+
+    if (head_idx < head_num_kv) {
+        const int prompt_batch_idx = blockIdx.x / param.max_prefix_prompt_length;
+        const int prompt_seq_idx   = blockIdx.x % param.max_prefix_prompt_length;
+        const int prompt_length    = param.d_prefix_prompt_lengths[prompt_batch_idx];
+
+        if (prompt_seq_idx < prompt_length) {
+            const int dest_kv_idx = prompt_batch_idx * size_per_head * total_seq_len * head_num_kv
+                                    + head_idx * size_per_head * total_seq_len + prompt_seq_idx * size_per_head
+                                    + tidx * vec_size;
+            if (param.kv_block_array.mMaxSeqs > 0) {
+                Tcache* k_cache =
+                    reinterpret_cast<Tcache*>(param.kv_block_array.getKBlockPtr(prompt_batch_idx, prompt_seq_idx));
+                Tcache* v_cache =
+                    reinterpret_cast<Tcache*>(param.kv_block_array.getVBlockPtr(prompt_batch_idx, prompt_seq_idx));
+                const int inKBlockIdx = param.kv_block_array.getKLocalIdx<KvCacheDataType::BASE>(
+                    prompt_seq_idx, head_idx, size_per_head, tidx * vec_size);
+
+                for (int vec_i = 0; vec_i < vec_size; vec_i++) {
+                    const int inVBlockIdx = param.kv_block_array.getVLocalIdx(
+                        prompt_seq_idx, head_idx, size_per_head, tidx * vec_size + vec_i);
+                    v_buf[dest_kv_idx + vec_i] = *reinterpret_cast<const T*>(&v_cache[inVBlockIdx]);
+                }
+
+                if constexpr (ENABLE_8BITS_CACHE) {
+                    float* k_scale_ptr =
+                        reinterpret_cast<float*>(param.kv_block_array.getKScalePtr(prompt_batch_idx, prompt_seq_idx));
+                    float* v_scale_ptr =
+                        reinterpret_cast<float*>(param.kv_block_array.getVScalePtr(prompt_batch_idx, prompt_seq_idx));
+                    int inScaleIdx = param.kv_block_array.getKVScaleLocalIdx(prompt_seq_idx, head_idx);
+                    for (int vec_i = 0; vec_i < vec_size; vec_i++) {
+                        const int inVBlockIdx = param.kv_block_array.getVLocalIdx(
+                            prompt_seq_idx, head_idx, size_per_head, tidx * vec_size + vec_i);
+                        load_8bits_kv_cache_vec(reinterpret_cast<Vec_t*>(&v_buf[dest_kv_idx]),
+                                                v_cache,
+                                                inVBlockIdx,
+                                                v_scale_ptr[inScaleIdx]);
+                    }
+                    load_8bits_kv_cache_vec(
+                        reinterpret_cast<Vec_t*>(&k_buf[dest_kv_idx]), k_cache, inKBlockIdx, k_scale_ptr[inScaleIdx]);
+                } else {
+                    *reinterpret_cast<Vec_t*>(&k_buf[dest_kv_idx]) =
+                        *reinterpret_cast<const Vec_t*>(&k_cache[inKBlockIdx]);
+                }
+            }
+        }
+    }
+}
+
 template<typename T>
 void invokeLoadPrefixKVCache(T*                             q_buf,
                              T*                             k_buf,
@@ -3385,6 +3456,29 @@ void invokeLoadPrefixKVCache(T*                             q_buf,
 
     FT_SWITCH_KV_CACHE_TYPE_CASE(param.kv_block_array.cache_type, Tcache, [&] {
         load_prefix_KVCache_kernel<T, Tcache>
+            <<<grid, block, 0, stream>>>(q_buf, k_buf, v_buf, param, seq_len, head_num, head_num_kv, size_per_head);
+    });
+}
+
+template<typename T>
+void invokeLoadPrefixKVCacheAiter(T*                             q_buf,
+                                  T*                             k_buf,
+                                  T*                             v_buf,
+                                  PrefixPromptBatchWeightsParam* param_ptr,
+                                  const int                      batch_size,
+                                  const int                      seq_len,
+                                  const int                      head_num,
+                                  const int                      head_num_kv,
+                                  const int                      size_per_head,
+                                  const float*                   scale,
+                                  const int                      int8_mode,
+                                  cudaStream_t                   stream) {
+    auto& param = *param_ptr;
+    dim3  block((size_per_head / Vec_t<T>::size + 31) / 32 * 32);
+    dim3  grid(batch_size * param.max_prefix_prompt_length, head_num);
+
+    FT_SWITCH_KV_CACHE_TYPE_CASE(param.kv_block_array.cache_type, Tcache, [&] {
+        load_prefix_KVCache_kernel_aiter<T, Tcache>
             <<<grid, block, 0, stream>>>(q_buf, k_buf, v_buf, param, seq_len, head_num, head_num_kv, size_per_head);
     });
 }
@@ -3589,6 +3683,26 @@ INSTANTIATEADDFUSEDQKVBIASTRANSPOSEDECODE(__nv_bfloat16);
 #endif
 #undef INSTANTIATEADDFUSEDQKVBIASTRANSPOSEDECODE
 #endif
+
+#define INSTANTIATEINVOKELOADPREFIXKVCACHEAITER(T)                                                                     \
+    template void invokeLoadPrefixKVCacheAiter(T*                             q_buf,                                   \
+                                               T*                             k_buf,                                   \
+                                               T*                             v_buf,                                   \
+                                               PrefixPromptBatchWeightsParam* param,                                   \
+                                               const int                      batch_size,                              \
+                                               const int                      seq_len,                                 \
+                                               const int                      head_num,                                \
+                                               const int                      head_num_kv,                             \
+                                               const int                      size_per_head,                           \
+                                               const float*                   scale,                                   \
+                                               const int                      int8_mode,                               \
+                                               cudaStream_t                   stream)
+INSTANTIATEINVOKELOADPREFIXKVCACHEAITER(float);
+INSTANTIATEINVOKELOADPREFIXKVCACHEAITER(half);
+#ifdef ENABLE_BF16
+INSTANTIATEINVOKELOADPREFIXKVCACHEAITER(__nv_bfloat16);
+#endif
+#undef INSTANTIATEINVOKELOADPREFIXKVCACHEAITER
 
 #define INSTANTIATEINVOKELOADPREFIXKVCACHE(T)                                                                          \
     template void invokeLoadPrefixKVCache(T*                             q_buf,                                        \

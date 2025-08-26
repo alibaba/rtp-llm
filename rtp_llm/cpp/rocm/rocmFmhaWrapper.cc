@@ -31,6 +31,7 @@ uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
                                     void*  softmax_lse_,
                                     size_t batch_size,
                                     size_t seq_len,
+                                    size_t max_prefix_prompt_length,
                                     void*  seqstart_q,
                                     void*  seqstart_k,
                                     void*  lse_acc_buf,
@@ -52,7 +53,7 @@ uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
     }
 
     ck_tile::index_t seqlen_q = seq_len;
-    ck_tile::index_t seqlen_k = seq_len;
+    ck_tile::index_t seqlen_k = seq_len + max_prefix_prompt_length;
     if (seqlen_k < 0)
         seqlen_k = seqlen_q;
     // auto [seqlen_qs, seqlen_ks, seqlen_kpads] = decode_seqlen(mode_enum::batch,
@@ -70,7 +71,7 @@ uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
     // This kernel add bias to QKV, which has shape [batch_size, seq_len, 3, head_num, size_per_head], and
     // QKV split to 3 split buffer q, k, v and transpose them to [batch_size, head_num, seq_len, size_per_head].
     // For q and k, also apply the rotary embedding.
-    bool  i_perm  = false;  // if true, will be batch * nhead * seqlen * hdim
+    bool  i_perm  = true;   // if true, will be batch * nhead * seqlen * hdim
     bool  o_perm  = false;  // if false, will be batch * seqlen * nhead * hdim
     float scale_s = 0.f;
     if (scale_s == .0f)
@@ -118,13 +119,13 @@ uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
     }
 
     int                    num_splits   = 1;
-    const ck_tile::index_t max_seqlen_q = seq_len;  // max of all batch
-    const ck_tile::index_t max_seqlen_k = seq_len;
+    const ck_tile::index_t max_seqlen_q = seqlen_q;  // max of all batch
+    const ck_tile::index_t max_seqlen_k = seqlen_k;
 
     // host memory for storing all the tensor elements
     const ck_tile::index_t shape_batch    = (mode == mode_enum::batch ? batch : 1);
-    const ck_tile::index_t shape_seqlen_q = (mode == mode_enum::batch ? seq_len : seq_len);
-    const ck_tile::index_t shape_seqlen_k = (mode == mode_enum::batch ? seq_len : seq_len);
+    const ck_tile::index_t shape_seqlen_q = (mode == mode_enum::batch ? seqlen_q : seqlen_q);
+    const ck_tile::index_t shape_seqlen_k = (mode == mode_enum::batch ? seqlen_k : seqlen_k);
     const ck_tile::index_t seqlen_knew    = 0;
 
     ck_tile::HostTensor<ck_tile::half_t> lse_acc_host(

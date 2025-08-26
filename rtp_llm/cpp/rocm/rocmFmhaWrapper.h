@@ -44,6 +44,7 @@ public:
                        void*  softmax_lse_,
                        size_t batch_size,
                        size_t seq_len,
+                       size_t max_prefix_prompt_length,
                        void*  seqstart_q,
                        void*  seqstart_k,
                        void*  lse_acc_buf,

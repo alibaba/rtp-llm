@@ -253,6 +253,20 @@ void invokeLoadPrefixKVCache(T*                             q_buf,
                              cudaStream_t                   stream);
 
 template<typename T>
+void invokeLoadPrefixKVCacheAiter(T*                             q_buf,
+                                  T*                             k_buf,
+                                  T*                             v_buf,
+                                  PrefixPromptBatchWeightsParam* param,
+                                  const int                      batch_size,
+                                  const int                      seq_len,
+                                  const int                      head_num,
+                                  const int                      head_num_kv,
+                                  const int                      size_per_head,
+                                  const float*                   scale,
+                                  const int                      int8_mode,
+                                  cudaStream_t                   stream);
+
+template<typename T>
 void invokeTranspose4d(T*           dst,
                        T*           src,
                        const int    local_batch_size,
