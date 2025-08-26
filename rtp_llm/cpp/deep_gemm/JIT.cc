@@ -3,15 +3,8 @@
 #include <cuda_runtime.h>
 
 #include <cstdlib>
-#include <sstream>
-#include <chrono>
-#include <future>
 #include <vector>
-#include <openssl/sha.h>
 #include <filesystem>
-#include <future>
-#include <mutex>
-#include <condition_variable>
 
 #include "rtp_llm/cpp/deep_gemm/JIT.h"
 
@@ -21,55 +14,18 @@ namespace rtp_llm {
 
 #ifdef ENABLE_FP8
 
-JITRuntimeMap      JIT::jit_kernels_;
-mutex              jit_thread_num_mutex_;
-int                jit_thread_num_ = 0;
-condition_variable cv;
-
-string getFilesHash(filesystem::path path) {
-    vector<filesystem::path> files = {path.string() + "/cpp/deep_gemm/deep_gemm_template.h",
-                                      path.string() + "/cpp/deep_gemm/utils.h",
-                                      path.string() + "/cpp/deep_gemm/interleave_ffma.py",
-                                      path.string() + "/cpp/deep_gemm/JIT.h",
-                                      path.string() + "/cpp/deep_gemm/JIT.cc"};
-    collectFiles(filesystem::path(path.string() + "/cpp/deep_gemm/include"), files);
-    collectFiles(filesystem::path(path.string() + "/cpp/deep_gemm/cutlass_hdr"), files);
-
-    sort(files.begin(), files.end());
-
-    SHA256_CTX sha256;
-    SHA256_Init(&sha256);
-
-    for (const auto& file : files) {
-        string filename = file.string();
-
-        ifstream ifs(file, ios::binary);
-        char     buffer[4096];
-        while (ifs.read(buffer, sizeof(buffer)) || ifs.gcount() > 0) {
-            SHA256_Update(&sha256, buffer, ifs.gcount());
-        }
-    }
-
-    unsigned char hash[SHA256_DIGEST_LENGTH];
-    SHA256_Final(hash, &sha256);
-
-    ostringstream oss;
-    for (int i = 0; i < SHA256_DIGEST_LENGTH; ++i) {
-        oss << hex << setw(2) << setfill('0') << static_cast<int>(hash[i]);
-    }
-
-    return oss.str();
-}
+JITRuntimeMap JIT::jit_kernels_;
+const string  file_hash = getFilesHash(jit_hdrs_path + "/cpp/deep_gemm");
 
 string JIT::getParamsStr(KernelParams& params) {
-    auto [n, k, bm, bn, bk, num_groups, num_stages, num_tma_multicast, gemm_type, swap_ab] = params;
+    auto& [n, k, bm, bn, bk, num_groups, num_stages, num_tma_multicast, gemm_type, swap_ab] = params;
     return to_string(n) + "_" + to_string(k) + "_" + to_string(bm) + "_" + to_string(bn) + "_" + to_string(bk) + "_"
            + to_string(num_groups) + "_" + to_string(num_stages) + "_" + to_string(num_tma_multicast) + "_"
            + to_string(uint32_t(gemm_type)) + "_" + to_string(uint32_t(swap_ab));
 }
 
 string JIT::getKernelStr(KernelParams& params) {
-    auto [n, k, bm, bn, bk, num_groups, num_stages, num_tma_multicast, gemm_type, swap_ab] = params;
+    auto& [n, k, bm, bn, bk, num_groups, num_stages, num_tma_multicast, gemm_type, swap_ab] = params;
     const string template_str = to_string(n) + ", " + to_string(k) + ", " + to_string(bm) + ", " + to_string(bn) + ", "
                                 + to_string(bk) + ", " + to_string(num_groups) + ", " + to_string(num_stages) + ", "
                                 + to_string(num_tma_multicast) + ", " + getDeepGemmTypeStr(gemm_type);
@@ -130,181 +86,86 @@ void runDeepGemm_)delimiter"
     return code;
 }
 
-KernelPath JIT::getKernelPath(KernelParams params) {
-    auto [n, k, bm, bn, bk, num_groups, num_stages, num_tma_multicast, gemm_type, swap_ab] = params;
-    static const string hdrs_path                                                          = getJITPath();
-    static const string file_hash                                                          = getFilesHash(hdrs_path);
-    const string        short_params_str =
+bool JIT::loadFromCache(KernelParams& params) {
+    auto& [n, k, bm, bn, bk, num_groups, num_stages, num_tma_multicast, gemm_type, swap_ab] = params;
+    const string short_params_str =
         to_string(n) + "_" + to_string(k) + "_" + to_string(num_groups) + "_" + to_string(uint32_t(gemm_type));
-    filesystem::path local_dir_path, remote_dir_path;
 
-    bool has_remote_cache = false;
+    filesystem::path local_dir_path, remote_dir_path;
 
     const string params_str = getParamsStr(params);
     const string func_name  = "runDeepGemm_" + params_str;
 
-    char const* remote_jit_dir_env = getenv("REMOTE_JIT_DIR");
-    string      remote_jit_dir_env_str;
-    if (remote_jit_dir_env) {
-        remote_jit_dir_env_str = string(remote_jit_dir_env);
-    } else {
-        remote_jit_dir_env_str = string("/mnt/nas1");
-    }
-    remote_dir_path =
-        string(remote_jit_dir_env_str + "/deep_gemm_runtime/" + file_hash + "/" + short_params_str + "/" + params_str);
     local_dir_path = string("./deep_gemm_runtime/" + file_hash + "/" + short_params_str + "/" + params_str);
+    remote_dir_path =
+        string(remote_jit_dir + "/deep_gemm_runtime/" + file_hash + "/" + short_params_str + "/" + params_str);
 
-    if (filesystem::exists(remote_jit_dir_env_str)) {
-        has_remote_cache = true;
-        if (!filesystem::exists(remote_dir_path)) {
-            filesystem::create_directories(remote_dir_path);
-        }
-    }
-
-    int                   result;
-    string                command;
-    KernelPathCacheStatus so_status;
-
-    if (!filesystem::exists(local_dir_path)) {
-        filesystem::create_directories(local_dir_path);
-    } else {
-        so_status = findMatchingFiles(local_dir_path, ".so");
-        if (so_status.find) {
-            DECREASE_JIT_THREAD_NUM;
-            return KernelPath{so_status.path, params};
-        }
-    }
-
-    if (has_remote_cache) {
-        so_status = findMatchingFiles(remote_dir_path, ".so");
-        if (so_status.find) {
-            string local_filepath = local_dir_path.string() + "/" + so_status.path.filename().string();
-            try {
-                filesystem::copy(so_status.path.string(), local_filepath);
-            } catch (const filesystem::filesystem_error& e) {
-                if (!filesystem::exists(local_filepath)) {
-                    throw e;
-                }
-            }
-            DECREASE_JIT_THREAD_NUM;
-            return KernelPath{local_filepath, params};
-        }
-    }
-
-    const string pid_and_timestamp_str = generateKernelName();
-    const string cu_filename           = local_dir_path.string() + "/" + pid_and_timestamp_str + ".cu";
-    const string so_filename           = local_dir_path.string() + "/" + pid_and_timestamp_str + ".so.temp";
-    const string so_filename_final     = local_dir_path.string() + "/" + pid_and_timestamp_str + ".so";
-    const string remote_filename       = remote_dir_path.string() + "/" + pid_and_timestamp_str + ".so";
-    RTP_LLM_LOG_INFO("JIT compilation " + cu_filename + " begin");
-
-    ofstream cu_file(cu_filename.c_str());
-    cu_file << getKernelStr(params);
-    cu_file.close();
-
-    command =
-        "/usr/local/cuda/bin/nvcc " + cu_filename + " -o " + so_filename
-        + " -std=c++17 -shared -O3 --expt-relaxed-constexpr --expt-extended-lambda -gencode=arch=compute_90a,code=sm_90a --compiler-options=-fPIC,-O3,-Wno-deprecated-declarations,-Wno-abi -diag-suppress 177 -DENABLE_FP8 -I"
-        + hdrs_path + "/../ -I" + hdrs_path + "/cpp/deep_gemm/cutlass_hdr/cutlass/include";
-
-    result = system(command.c_str());
-    if (result != 0) {
-        RTP_LLM_FAIL("Compilation error for template %u %u %u %u", n, k, num_groups, gemm_type);
-    }
-
-    command = "/opt/conda310/bin/python " + hdrs_path + "/cpp/deep_gemm/interleave_ffma.py --so " + so_filename;
-    result  = system(command.c_str());
-    if (result != 0) {
-        RTP_LLM_FAIL("Failed to do interleave ffma");
-    }
-
-    if (has_remote_cache && !filesystem::exists(remote_filename)) {
-        try {
-            filesystem::copy(so_filename, remote_filename);
-        } catch (const filesystem::filesystem_error& e) {
-            if (!filesystem::exists(remote_filename)) {
-                throw e;
-            }
-        }
-    }
-
-    filesystem::rename(so_filename, so_filename_final);
-    RTP_LLM_LOG_INFO("JIT compilation " + cu_filename + " finished");
-
-    DECREASE_JIT_THREAD_NUM;
-    return KernelPath{so_filename_final, params};
-}
-
-void JIT::loadKernel(vector<KernelPath>& kernel_paths) {
-    for (auto& kernel_path : kernel_paths) {
-        void* lib = dlopen(kernel_path.path.c_str(), RTLD_NOW);
-        if (!lib) {
-            RTP_LLM_FAIL("Failed to load library: " + kernel_path.path + ", error: " + dlerror());
-        }
-
-        string          func_name = "runDeepGemm_" + getParamsStr(kernel_path.params);
-        runDeepGemmFunc kernel    = (runDeepGemmFunc)dlsym(lib, func_name.c_str());
-        if (!kernel) {
-            RTP_LLM_FAIL("Failed to find function: " + func_name + ", error: " + dlerror());
-        }
-        RTP_LLM_LOG_INFO("JIT load " + kernel_path.path + " finished");
-
-        auto [n, k, bm, bn, bk, num_groups, num_stages, num_tma_multicast, gemm_type, swap_ab] = kernel_path.params;
-
+    auto cached_kernel = findCachedKernel(remote_dir_path, local_dir_path, params_str);
+    if (cached_kernel) {
         auto kernel_key = vector<uint32_t>{
             n, k, bm, bn, bk, num_groups, num_stages, num_tma_multicast, uint32_t(gemm_type), uint32_t(swap_ab)};
-        jit_kernels_.insert(kernel_key, kernel);
+        jit_kernels_.insert(kernel_key, (runDeepGemmFunc)cached_kernel);
+        return true;
     }
+
+    return false;
+}
+
+void JIT::compileAndSave(KernelParams& params) {
+    auto& [n, k, bm, bn, bk, num_groups, num_stages, num_tma_multicast, gemm_type, swap_ab] = params;
+    const string short_params_str =
+        to_string(n) + "_" + to_string(k) + "_" + to_string(num_groups) + "_" + to_string(uint32_t(gemm_type));
+
+    filesystem::path local_dir_path, remote_dir_path;
+
+    const string params_str = getParamsStr(params);
+    const string func_name  = "runDeepGemm_" + params_str;
+
+    local_dir_path = string("./deep_gemm_runtime/" + file_hash + "/" + short_params_str + "/" + params_str);
+    remote_dir_path =
+        string(remote_jit_dir + "/deep_gemm_runtime/" + file_hash + "/" + short_params_str + "/" + params_str);
+
+    RTP_LLM_LOG_INFO("JIT compilation " + params_str + " begin");
+
+    string command;
+    command =
+        " -std=c++17 -shared -O3 --expt-relaxed-constexpr --expt-extended-lambda -gencode=arch=compute_90a,code=sm_90a --compiler-options=-fPIC,-O3,-Wno-deprecated-declarations,-Wno-abi -diag-suppress 177 -DENABLE_FP8 -I"
+        + jit_hdrs_path + "/../ -I" + jit_hdrs_path + "/cpp/deep_gemm/cutlass_hdr/cutlass/include";
+
+    string so_filename_final =
+        compileAndSaveKernel(local_dir_path, remote_dir_path, getKernelStr(params), command, true);
+    if (so_filename_final == "") {
+        RTP_LLM_FAIL("Failed to compile and save kernel for " + getParamsStr(params));
+    }
+
+    RTP_LLM_LOG_INFO("JIT compilation " + so_filename_final + " finished");
+    auto kernel = loadKernel(so_filename_final, params_str);
+    if (!kernel) {
+        RTP_LLM_FAIL("Failed to load kernel from " + so_filename_final);
+    }
+    auto kernel_key = vector<uint32_t>{
+        n, k, bm, bn, bk, num_groups, num_stages, num_tma_multicast, uint32_t(gemm_type), uint32_t(swap_ab)};
+    jit_kernels_.insert(kernel_key, (runDeepGemmFunc)kernel);
 }
 
 runDeepGemmFunc JIT::searchKernel(KernelParams& params) {
-    auto [n, k, bm, bn, bk, num_groups, num_stages, num_tma_multicast, gemm_type, swap_ab] = params;
+    auto& [n, k, bm, bn, bk, num_groups, num_stages, num_tma_multicast, gemm_type, swap_ab] = params;
 
     auto kernel_key = vector<uint32_t>{
         n, k, bm, bn, bk, num_groups, num_stages, num_tma_multicast, uint32_t(gemm_type), uint32_t(swap_ab)};
 
+    // find in runtime cache first
     auto kernel_value = jit_kernels_.find(kernel_key);
     if (kernel_value) {
         return kernel_value;
     }
 
-    static const vector<uint32_t> bm_list         = {64, 128};
-    static const vector<uint32_t> bn_list         = {16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128};
-    static const vector<uint32_t> bk_list         = {128};
-    static const vector<uint32_t> num_stages_list = {4, 5, 6, 7, 8};
-    static const vector<uint32_t> num_tma_multicast_list = {1, 2};
     RTP_LLM_LOG_INFO("Start compile and load deepgemm kernel for %u %u %u %u", n, k, num_groups, uint32_t(gemm_type));
 
-    vector<future<KernelPath>> futures;
-
-    for (auto& bm_ : bm_list) {
-        for (auto& bn_ : bn_list) {
-            for (auto& bk_ : bk_list) {
-                for (auto& num_stages_ : num_stages_list) {
-                    if (128 % bn_ && num_stages_ > 6) {
-                        continue;
-                    }
-                    for (auto& num_tma_multicast_ : num_tma_multicast_list) {
-                        KernelParams now_params{
-                            n, k, bm_, bn_, bk_, num_groups, num_stages_, num_tma_multicast_, gemm_type, true};
-                        if (gemm_type == DeepGemmType::Normal || gemm_type == DeepGemmType::GroupedMasked) {
-                            INCREASE_JIT_THREAD_NUM;
-                            futures.emplace_back(async(launch::async, getKernelPath, now_params));
-                        }
-                        INCREASE_JIT_THREAD_NUM;
-                        now_params.swap_ab = false;
-                        futures.emplace_back(async(launch::async, getKernelPath, now_params));
-                    }
-                }
-            }
-        }
+    KernelParams now_params{n, k, bm, bn, bk, num_groups, num_stages, num_tma_multicast, gemm_type, swap_ab};
+    if (!loadFromCache(now_params)) {
+        compileAndSave(now_params);
     }
-
-    vector<KernelPath> kernel_paths;
-    for (auto& future : futures) {
-        kernel_paths.emplace_back(future.get());
-    }
-    loadKernel(kernel_paths);
 
     RTP_LLM_LOG_INFO("Finish compile and load deepgemm kernel for %u %u %u %u", n, k, num_groups, uint32_t(gemm_type));
 

@@ -50,18 +50,13 @@ struct KernelParams {
     bool         swap_ab;
 };
 
-struct KernelPath {
-    std::string  path;
-    KernelParams params;
-};
-
 class JIT {
 private:
     static JITRuntimeMap   jit_kernels_;
     static std::string     getParamsStr(KernelParams& params);
     static std::string     getKernelStr(KernelParams& params);
-    static KernelPath      getKernelPath(KernelParams params);
-    static void            loadKernel(std::vector<KernelPath>& kernel_paths);
+    static bool            loadFromCache(KernelParams& params);
+    static void            compileAndSave(KernelParams& params);
     static runDeepGemmFunc searchKernel(KernelParams& params);
 
 public:

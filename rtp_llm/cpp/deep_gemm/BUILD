@@ -10,8 +10,11 @@ load("//rtp_llm/cpp/deep_gemm:template.bzl", "NORMAL_GEMM_CASES", "GROUPED_CONTI
 cc_library(
     name = "deep_gemm_utils",
     hdrs = ["utils.h"],
+    srcs = ["utils.cc"],
     copts = copts(),
-    deps = [],
+    deps = [
+        "//rtp_llm/cpp:utils",
+    ],
     visibility = ["//visibility:public"],
 )
 
@@ -25,7 +28,7 @@ cc_library(
         "//conditions:default": [],
     }),
     deps = [
-        ":deep_gemm_utils"
+        ":deep_gemm_utils",
     ],
     copts = sm90_cuda_copts,
     visibility = ["//visibility:public"],
@@ -45,7 +48,7 @@ gen_dispatch_code(
 
 filegroup(
     name = "deep_gemm_utils_hdrs",
-    srcs = ["utils.h"],
+    srcs = ["utils.h", "utils.cc"],
     visibility = ["//visibility:public"],
 )
 
@@ -53,7 +56,6 @@ filegroup(
     name = "deep_gemm_jit_include",
     srcs = [
         ":deep_gemm_utils_hdrs",
-        "deep_gemm_template.h",
         "interleave_ffma.py",
         "JIT.h",
         "JIT.cc"
@@ -137,5 +139,4 @@ cc_test(
     ],
     timeout = "long",
     exec_properties = {'gpu':'H20'},
-    env = {"REMOTE_JIT_DIR": "/mnt/nas1"},
 )
