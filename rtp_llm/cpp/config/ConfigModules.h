@@ -420,6 +420,20 @@ private:
     int local_world_size_;
 };
 
+struct FfnDisAggregateConfig {
+    bool        enable_ffn_disaggregate = false;
+    int         attention_tp_size       = 1;
+    int         attention_dp_size       = 1;
+    int         ffn_tp_size             = 1;
+    int         ffn_ep_size             = 1;
+    bool        is_ffn_rank             = false;
+    std::string to_string() const;
+    void        update_from_env_for_test();
+    bool        is_ffn_service() const {
+        return enable_ffn_disaggregate && is_ffn_rank;
+    }
+};
+
 struct ArpcConfig {
     int         threadNum   = 10;
     int         queueNum    = 50;

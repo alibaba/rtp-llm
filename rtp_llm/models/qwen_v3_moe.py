@@ -9,6 +9,7 @@ from rtp_llm.models.qwen_v2 import QWenV2, QWenV2Weight
 from rtp_llm.models.qwen_v2_moe import Qwen2Moe, QWenV2MoeWeight
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeModel
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
+from rtp_llm.models_py.model_desc.qwen3_moe_afd import Qwen3MoeAfdModel
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
@@ -112,16 +113,28 @@ class Qwen3Moe(Qwen2Moe):
         moe_config = self.moe_config
         max_generate_batch_size = self.max_generate_batch_size
 
-        self.py_model = GenericMoeModel(
-            model_config,
-            parallelism_config,
-            self.weight,
-            moe_config,
-            max_generate_batch_size=max_generate_batch_size,
-            fmha_config=fmha_config,
-            py_hw_kernel_config=py_hw_kernel_config,
-            device_resource_config=self.device_resource_config,
-        )
+        if self.config.gpt_init_params.ffn_disaggregate_config.enable_ffn_disaggregate:
+            self.py_model = Qwen3MoeAfdModel(
+                model_config,
+                parallelism_config,
+                self.weight,
+                moe_config,
+                max_generate_batch_size=max_generate_batch_size,
+                fmha_config=fmha_config,
+                py_hw_kernel_config=py_hw_kernel_config,
+                device_resource_config=self.device_resource_config,
+            )
+        else:
+            self.py_model = GenericMoeModel(
+                model_config,
+                parallelism_config,
+                self.weight,
+                moe_config,
+                max_generate_batch_size=max_generate_batch_size,
+                fmha_config=fmha_config,
+                py_hw_kernel_config=py_hw_kernel_config,
+                device_resource_config=self.device_resource_config,
+            )
         return self.py_model
 
 

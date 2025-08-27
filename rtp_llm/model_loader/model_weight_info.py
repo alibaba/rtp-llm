@@ -25,6 +25,7 @@ from rtp_llm.utils.model_weight import (
     choose_available,
     identity,
     tolerate_failed,
+    transpose,
 )
 from rtp_llm.utils.weight_type import WEIGHT_TYPE
 
@@ -92,6 +93,74 @@ class ModelWeightInfo:
                     layer_weights.append(weight.create(weight, quant_config))
 
         return ModelWeightInfo(weights, layer_weights)
+
+    def remove_ffn_weights(self) -> "ModelWeightInfo":
+
+        filtered_layer_weights = []
+        if self.layer_weights:
+            for i, layer_item in enumerate(self.layer_weights):
+                if isinstance(layer_item, list):
+                    filtered_layer = []
+                    for w in layer_item:
+                        if w.name == W.moe:
+                            filtered_layer.append(
+                                MoeAtomicWeight(
+                                    W.moe_gate,
+                                    [
+                                        CkptWeightInfo(
+                                            "model.layers.{i}.mlp.gate.weight", identity
+                                        )
+                                    ],
+                                    transpose,
+                                    config=w.config,
+                                )
+                            )
+                    filtered_layer_weights.append(filtered_layer)
+                else:
+                    w = layer_item
+                    if w.name == W.moe:
+                        filtered_layer_weights.append(
+                            MoeAtomicWeight(
+                                W.moe_gate,
+                                [
+                                    CkptWeightInfo(
+                                        "model.layers.{i}.mlp.gate.weight", identity
+                                    )
+                                ],
+                                transpose,
+                                config=w.config,
+                            )
+                        )
+
+        return ModelWeightInfo(self.weights, filtered_layer_weights)
+
+    def remove_attn_weights(self) -> "ModelWeightInfo":
+        attn_names_to_remove = {
+            W.pre_ln_gamma,
+            W.attn_qkv_w,
+            W.attn_qkv_b,
+            W.attn_o_w,
+            W.post_ln_gamma,
+            W.attn_qkv_b,
+            W.q_ln_gamma,
+            W.k_ln_gamma,
+        }
+
+        filtered_weights = [
+            w for w in self.weights if w.name not in attn_names_to_remove
+        ]
+        filtered_layer_weights = []
+        if self.layer_weights:
+            for i, layer_item in enumerate(self.layer_weights):
+                if isinstance(layer_item, list):
+                    filtered_layer = [
+                        w for w in layer_item if w.name not in attn_names_to_remove
+                    ]
+                    filtered_layer_weights.append(filtered_layer)
+                elif layer_item.name not in attn_names_to_remove:
+                    filtered_layer_weights.append(layer_item)
+
+        return ModelWeightInfo(filtered_weights, filtered_layer_weights)
 
 
 class ModelDeployWeightInfo:

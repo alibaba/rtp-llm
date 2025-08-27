@@ -81,7 +81,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params): DeviceBase(params) {
         }
     }
 
-    if (params.ep_size > 1) {
+    if (params.ep_size > 1 || params.dp_size > 1) {
         initNcclParam(params.dp_rank * params.tp_size + params.tp_rank,
                       params.dp_size * params.tp_size,
                       params.master_ip,
