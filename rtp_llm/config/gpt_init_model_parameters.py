@@ -1035,10 +1035,12 @@ class GptInitModelParameters:
             self.is_sparse_head = True
 
     def update_inter_padding_size(self, tp_size: int, ep_size: int, dp_size: int):
-        if tp_size * dp_size != ep_size:
-            raise ValueError(
-                f"tp_size:{tp_size} * dp_size:{dp_size} != ep_size:{ep_size}"
-            )
+        # TODO
+        # AFD: Skip tp_size * dp_size == ep_size validation
+        # if tp_size * dp_size != ep_size:
+        #     raise ValueError(
+        #         f"tp_size:{tp_size} * dp_size:{dp_size} != ep_size:{ep_size}"
+        #     )
         # new tp_size just only for moe
         if self.quant_algo.isGroupwise():
             align_size = tp_size * self.quant_algo.getGroupSize()
@@ -1205,13 +1207,29 @@ class GptInitModelParameters:
             # 暂时先限制tp=1, 更多支持在python版本实现
             assert (
                 g_parallel_info.tp_size == 1 and g_parallel_info.world_size > 1
-            ), "enable_ffn_disaggregate must be used in dp = 1 world_size > 1"
-            attention_dp_size = g_parallel_info.world_size - 1
-            attention_tp_size = 1
+            ), "enable_ffn_disaggregate must be used in tp = 1 world_size > 1"
+            attention_dp_size = StaticConfig.ffn_disaggregate_config.attention_dp_size
+            attention_tp_size = StaticConfig.ffn_disaggregate_config.attention_tp_size
+            assert (
+                attention_tp_size == 1
+            ), "attention_tp_size must be 1 in current version"
+
             ffn_tp_size = 1
             assert (
                 attention_tp_size == ffn_tp_size
             ), "attention_tp_size must be equal to ffn_tp_size"
+
+            ffn_ep_size = StaticConfig.ffn_disaggregate_config.ffn_ep_size
+            expected_ffn_ep_size = (
+                g_parallel_info.world_size - attention_dp_size * attention_tp_size
+            ) // ffn_tp_size
+            if ffn_ep_size > 1:
+                assert (
+                    ffn_ep_size == expected_ffn_ep_size
+                ), f"ffn_ep_size must be {expected_ffn_ep_size} in current version"
+            else:
+                ffn_ep_size = expected_ffn_ep_size
+
             self.gpt_init_params.ffn_disaggregate_config.enable_ffn_disaggregate = True
             self.gpt_init_params.ffn_disaggregate_config.attention_tp_size = (
                 attention_tp_size
@@ -1220,11 +1238,16 @@ class GptInitModelParameters:
                 attention_dp_size
             )
             self.gpt_init_params.ffn_disaggregate_config.ffn_tp_size = ffn_tp_size
-            # TODO: remove it, ffn dp is stupid
-            self.gpt_init_params.ffn_disaggregate_config.ffn_dp_size = 1
+            self.gpt_init_params.ffn_disaggregate_config.ffn_ep_size = ffn_ep_size
             self.gpt_init_params.ffn_disaggregate_config.is_ffn_rank = (
                 g_parallel_info.world_rank >= attention_tp_size * attention_dp_size
             )
+            # TODO:
+            self.ep_rank = (
+                g_parallel_info.world_rank - attention_tp_size * attention_dp_size
+            )
+            self.ep_rank = max(0, self.ep_rank)
+            self.ep_size = ffn_ep_size
 
         logging.info(f"config_mode = {config_mode}")
         if config_mode == ConfigMode.SimpleMode:
