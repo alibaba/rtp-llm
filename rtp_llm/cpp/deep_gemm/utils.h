@@ -40,7 +40,7 @@ struct VectorHasher {
     }
 };
 
-std::string getFilesHash(std::filesystem::path path, bool interleave = true);
+std::string getFilesHash(std::string path, bool interleave = true);
 
 std::string getDeepGemmTypeStr(DeepGemmType type);
 
@@ -66,7 +66,7 @@ std::string compileAndSaveKernel(const std::filesystem::path& local_dir_path,
                                  const std::string&           nvcc_command,
                                  bool                         interleave = true);
 
-extern const std::string jit_hdrs_path;
+extern std::string       jit_hdrs_path;
 extern const std::string remote_jit_dir;
 extern bool              use_remote_jit;
 

@@ -15,7 +15,6 @@ namespace rtp_llm {
 #ifdef ENABLE_FP8
 
 JITRuntimeMap JIT::jit_kernels_;
-const string  file_hash = getFilesHash(jit_hdrs_path + "/cpp/deep_gemm");
 
 string JIT::getParamsStr(KernelParams& params) {
     auto& [n, k, bm, bn, bk, num_groups, num_stages, num_tma_multicast, gemm_type, swap_ab] = params;
@@ -96,7 +95,8 @@ bool JIT::loadFromCache(KernelParams& params) {
     const string params_str = getParamsStr(params);
     const string func_name  = "runDeepGemm_" + params_str;
 
-    local_dir_path = string("./deep_gemm_runtime/" + file_hash + "/" + short_params_str + "/" + params_str);
+    const string file_hash = getFilesHash("/cpp/deep_gemm");
+    local_dir_path         = string("./deep_gemm_runtime/" + file_hash + "/" + short_params_str + "/" + params_str);
     remote_dir_path =
         string(remote_jit_dir + "/deep_gemm_runtime/" + file_hash + "/" + short_params_str + "/" + params_str);
 
@@ -121,7 +121,8 @@ void JIT::compileAndSave(KernelParams& params) {
     const string params_str = getParamsStr(params);
     const string func_name  = "runDeepGemm_" + params_str;
 
-    local_dir_path = string("./deep_gemm_runtime/" + file_hash + "/" + short_params_str + "/" + params_str);
+    const string file_hash = getFilesHash("/cpp/deep_gemm");
+    local_dir_path         = string("./deep_gemm_runtime/" + file_hash + "/" + short_params_str + "/" + params_str);
     remote_dir_path =
         string(remote_jit_dir + "/deep_gemm_runtime/" + file_hash + "/" + short_params_str + "/" + params_str);
 

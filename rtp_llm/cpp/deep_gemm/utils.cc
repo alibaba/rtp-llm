@@ -4,20 +4,24 @@
 
 namespace rtp_llm {
 
-const std::string jit_hdrs_path  = getJITPath();
+std::string       jit_hdrs_path  = "";
 const std::string remote_jit_dir = getRemoteJITDir();
 bool              use_remote_jit = std::filesystem::exists(remote_jit_dir);
 
-std::string getFilesHash(std::filesystem::path path, bool interleave) {
-    std::vector<std::filesystem::path> files = {path.string() + "/JIT.h", path.string() + "/JIT.cc"};
-    files.push_back(jit_hdrs_path + "/cpp/deep_gemm/utils.h");
-    files.push_back(path.string() + "/cpp/deep_gemm/utils.cc");
-    if (interleave) {
-        files.push_back(path.string() + "/interleave_ffma.py");
+std::string getFilesHash(std::string rel_path, bool interleave) {
+    if (jit_hdrs_path.empty()) {
+        jit_hdrs_path = getJITPath();
     }
-    collectFiles(std::filesystem::path(path.string() + "/cutlass_hdr"), files);
-    collectFiles(std::filesystem::path(path.string() + "/deepgemm_hdr"), files);
-    collectFiles(std::filesystem::path(path.string() + "/include"), files);
+    std::vector<std::filesystem::path> files = {jit_hdrs_path + rel_path + "/JIT.h",
+                                                jit_hdrs_path + rel_path + "/JIT.cc"};
+    files.push_back(jit_hdrs_path + "/cpp/deep_gemm/utils.h");
+    files.push_back(jit_hdrs_path + "/cpp/deep_gemm/utils.cc");
+    if (interleave) {
+        files.push_back(jit_hdrs_path + "/interleave_ffma.py");
+    }
+    collectFiles(std::filesystem::path(jit_hdrs_path + rel_path + "/cutlass_hdr"), files);
+    collectFiles(std::filesystem::path(jit_hdrs_path + rel_path + "/deepgemm_hdr"), files);
+    collectFiles(std::filesystem::path(jit_hdrs_path + rel_path + "/include"), files);
 
     sort(files.begin(), files.end());
 
@@ -188,7 +192,6 @@ std::string compileAndSaveKernel(const std::filesystem::path& local_dir_path,
     const std::string so_filename_final     = local_dir_path.string() + "/" + pid_and_timestamp_str + ".so";
     const std::string remote_filename       = remote_dir_path.string() + "/" + pid_and_timestamp_str + ".so.temp";
     const std::string remote_filename_final = remote_dir_path.string() + "/" + pid_and_timestamp_str + ".so";
-    RTP_LLM_LOG_INFO("JIT compilation " + cu_filename + " begin");
 
     std::ofstream cu_file(cu_filename.c_str());
     cu_file << cu_file_content;
@@ -203,6 +206,9 @@ std::string compileAndSaveKernel(const std::filesystem::path& local_dir_path,
     }
 
     if (interleave) {
+        if (jit_hdrs_path.empty()) {
+            jit_hdrs_path = getJITPath();
+        }
         command = "/opt/conda310/bin/python " + jit_hdrs_path + "/cpp/deep_gemm/interleave_ffma.py --so " + so_filename;
         result  = system(command.c_str());
         if (result != 0) {
