@@ -68,6 +68,5 @@ std::string compileAndSaveKernel(const std::filesystem::path& local_dir_path,
 
 extern std::string       jit_hdrs_path;
 extern const std::string remote_jit_dir;
-extern bool              use_remote_jit;
 
 }  // namespace rtp_llm

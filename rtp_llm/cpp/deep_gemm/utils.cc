@@ -165,6 +165,7 @@ void* findCachedKernel(const std::filesystem::path& remote_dir_path,
         auto future  = std::async(std::launch::async, searchAndLoadKernel, remote_dir_path, params_str);
         auto status  = future.wait_for(std::chrono::seconds(30));
         if (status == std::future_status::timeout) {
+            RTP_LLM_LOG_INFO("Remote jit search timeout, use local jit");
             use_remote_jit = false;
         } else {
             remote_cache = future.get();
@@ -233,7 +234,11 @@ std::string compileAndSaveKernel(const std::filesystem::path& local_dir_path,
         });
 
         auto status = future.wait_for(std::chrono::seconds(30));
-        if (status == std::future_status::timeout || !future.get()) {
+        if (status == std::future_status::timeout) {
+            RTP_LLM_LOG_INFO("Remote jit copy timeout, use local jit");
+            use_remote_jit = false;
+        } else if (!future.get()) {
+            RTP_LLM_LOG_INFO("Remote jit copy failed, use local jit");
             use_remote_jit = false;
         }
     }
