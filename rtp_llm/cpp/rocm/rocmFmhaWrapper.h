@@ -49,7 +49,10 @@ public:
                        void*  seqstart_k,
                        void*  lse_acc_buf,
                        void*  linear_bias_slopes = nullptr,
-                       void*  biasBuffer         = nullptr);
+                       void*  biasBuffer         = nullptr,
+                       bool   i_perm_            = false,  // if true, will be batch * nhead * seqlen * hdim
+                       bool   o_perm_            = false   // if false, will be batch * seqlen * nhead * hdim
+    );
     uint32_t runCKFmhaMLA(void*  q,
                           void*  k,
                           void*  v,

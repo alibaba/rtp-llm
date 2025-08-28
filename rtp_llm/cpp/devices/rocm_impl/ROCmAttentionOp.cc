@@ -723,6 +723,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                                 lse_acc_buf->data(),
                                 params.common.linear_bias_slopes ? params.common.linear_bias_slopes->data() : nullptr,
                                 nullptr,
+                                false,
                                 false);
     } else if (fmha_runner_->runCKFmha(q_output->data(),
                                        k_output->data(),
@@ -739,7 +740,8 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                                        params.common.linear_bias_slopes ? params.common.linear_bias_slopes->data() :
                                                                           nullptr,
                                        nullptr,
-                                       true)) {
+                                       true,
+                                       false)) {
         printBufferData(params.output, "run_ck_data_output");
         return;
     } else {
