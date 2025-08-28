@@ -66,14 +66,16 @@ public:
                            const std::vector<std::vector<int32_t>>& mm_bounds    = {},
                            bool                                     need_loss    = false,
                            bool                                     verbose      = false,
-                           const std::string                        adapter_name = ""):
+                           const std::string                        adapter_name = "",
+                           bool                                     enable_3fs   = false):
             request_id(request_id),
             token_ids(token_ids),
             cache_keys(cache_keys),
             mm_bounds(mm_bounds),
             need_loss(need_loss),
             verbose(verbose),
-            adapter_name(adapter_name) {}
+            adapter_name(adapter_name),
+            enable_3fs(enable_3fs) {}
 
         int64_t                                 request_id;
         const std::vector<int32_t>&             token_ids;
@@ -82,6 +84,7 @@ public:
         bool                                    need_loss = false;
         bool                                    verbose   = false;
         const std::string                       adapter_name;
+        bool                                    enable_3fs = false;
     };
 
     struct FreeInfo {
@@ -90,13 +93,15 @@ public:
                  const std::vector<int64_t>& cache_keys,
                  const std::vector<int32_t>& block_indices,
                  const std::vector<float>    loss         = {},
-                 const std::string           adapter_name = ""):
+                 const std::string           adapter_name = "",
+                 bool                        enable_3fs   = false):
             request_id(request_id),
             token_ids(token_ids),
             cache_keys(cache_keys),
             block_indices(block_indices),
             loss(loss),
-            adapter_name(adapter_name) {}
+            adapter_name(adapter_name),
+            enable_3fs(enable_3fs) {}
 
         int64_t                     request_id;
         const std::vector<int32_t>& token_ids;
@@ -105,6 +110,7 @@ public:
         const std::vector<float>    loss;
         bool                        is_resident = false;
         const std::string           adapter_name;
+        bool                        enable_3fs = false;
     };
 
 public:

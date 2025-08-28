@@ -78,7 +78,10 @@ public:
     bool             gen_timeline = false;
     int              profile_step = 3;
     bool             ignore_eos   = false;
-    bool             top1() {
+    bool             reuse_cache  = true;
+    bool             enable_3fs   = true;
+
+    bool top1() {
         return top_k == 1;
     }
 
@@ -131,7 +134,8 @@ public:
                      << ", can_use_pd_separation: " << can_use_pd_separation << ", pd_separation: " << pd_separation
                      << ", in_think_mode: " << in_think_mode << ", max_thinking_tokens: " << max_thinking_tokens
                      << ", end_think_token_ids: " << vectorToString(end_think_token_ids)
-                     << ", gen_timeline: " << gen_timeline << ", profile_step: " << profile_step << "}";
+                     << ", gen_timeline: " << gen_timeline << ", profile_step: " << profile_step
+                     << ", reuse_cache: " << reuse_cache << ", enable_3fs: " << enable_3fs << "}";
         return debug_string.str();
     }
 
@@ -203,6 +207,8 @@ public:
         JSONIZE(end_think_token_ids);
         JSONIZE(gen_timeline);
         JSONIZE(profile_step);
+        JSONIZE(reuse_cache);
+        JSONIZE(enable_3fs);
 #undef JSONIZE
 #undef JSONIZE_OPTIONAL
     }

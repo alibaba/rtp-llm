@@ -18,7 +18,7 @@ public:
     }
 
     CacheConfig init_config() {
-        CacheConfig config(3, 9, 1, 1, 2, TYPE_INT8);
+        CacheConfig config(KVCacheParam{KVCacheParam{3, 9, 1, 1, 2, rtp_llm::DataType::TYPE_INT8}});
         return config;
     }
 
@@ -87,12 +87,12 @@ TEST_F(GenerateStreamTest, testConstructCacheKey) {
     auto                      stream1    = builder.createComplexContextStream({{1, 2, 3, 4, 5}, {}});
     auto&                     cache_key1 = stream1->cacheKeys(0);
     auto&                     cache_key2 = stream1->cacheKeys(1);
-    ASSERT_EQ(cache_key1.size(), 2);
-    ASSERT_EQ(cache_key2.size(), 2);
+    ASSERT_EQ(cache_key1.size(), 3);
+    ASSERT_EQ(cache_key2.size(), 3);
     ASSERT_EQ(cache_key1[0], cache_key2[0]);
     ASSERT_EQ(cache_key1[1], cache_key2[1]);
 
-    stream1->reConstructCacheKeys();
+    stream1->stream_cache_resource_->reConstructCacheKeys();
     ASSERT_EQ(cache_key1.size(), 2);
     ASSERT_EQ(cache_key2.size(), 2);
 
@@ -101,16 +101,50 @@ TEST_F(GenerateStreamTest, testConstructCacheKey) {
     batch_tokens_1[stream1->seqLength() - 1] = 8;
     auto batch_tokens_2                      = stream1->complete_token_ids_->data(0);
     batch_tokens_2[stream1->seqLength() - 1] = 9;
-    stream1->reConstructCacheKeys();
+    stream1->stream_cache_resource_->reConstructCacheKeys();
     ASSERT_EQ(cache_key1.size(), 3);
     ASSERT_EQ(cache_key2.size(), 3);
     ASSERT_NE(cache_key1[2], cache_key2[2]);
 
     stream1->setSeqLength(7);
-    stream1->reConstructCacheKeys();
+    stream1->stream_cache_resource_->reConstructCacheKeys();
     ASSERT_EQ(cache_key1.size(), 3);
     ASSERT_EQ(cache_key2.size(), 3);
     ASSERT_NE(cache_key1[2], cache_key2[2]);
+}
+
+TEST_F(GenerateStreamTest, testGenerateStreamReuseCacheMethod) {
+    rtp_llm::GptInitParameter params;
+    auto                      builder = GenerateStreamBuilder(params);
+    auto                      stream  = builder.createContextStream({1, 2, 3, 4, 5, 6});
+
+    // default true
+    ASSERT_TRUE(stream->reuseCache());
+
+    // flip to false and verify
+    stream->generate_input_->generate_config->reuse_cache = false;
+    ASSERT_FALSE(stream->reuseCache());
+
+    // flip back to true and verify
+    stream->generate_input_->generate_config->reuse_cache = true;
+    ASSERT_TRUE(stream->reuseCache());
+}
+
+TEST_F(GenerateStreamTest, testGenerateStreamEnable3FSMethod) {
+    rtp_llm::GptInitParameter params;
+    auto                      builder = GenerateStreamBuilder(params);
+    auto                      stream  = builder.createContextStream({1, 2, 3, 4, 5, 6});
+
+    // default true
+    ASSERT_TRUE(stream->enable3FS());
+
+    // flip to false and verify
+    stream->generate_input_->generate_config->enable_3fs = false;
+    ASSERT_FALSE(stream->enable3FS());
+
+    // flip back to true and verify
+    stream->generate_input_->generate_config->enable_3fs = true;
+    ASSERT_TRUE(stream->enable3FS());
 }
 
 }  // namespace rtp_llm

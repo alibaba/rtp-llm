@@ -411,7 +411,7 @@ CacheManager::MatchInfo CacheManager::matchImpl(const AdvancedMallocInfo& malloc
     auto local_match_len = match_result.matched_len;
 
     // match in dist kvcache if cache keys not fully matched
-    if (enable_dist_kvcache_ && match_result.matched_len < malloc_info.cache_keys.size()) {
+    if (enable_dist_kvcache_ && malloc_info.enable_3fs && match_result.matched_len < malloc_info.cache_keys.size()) {
         matchInDistKvCache(malloc_info, match_result);
     }
 
@@ -576,7 +576,7 @@ void CacheManager::insertIntoCache(FreeInfo& free_info) {
                                   std::vector<float>{free_info.loss.begin(), free_info.loss.begin() + token_len},
                        free_info.is_resident};
         std::vector<int> indices = block_cache_.put(item);
-        if (enable_dist_kvcache_) {
+        if (enable_dist_kvcache_ && free_info.enable_3fs) {
             putCacheForAllRank(item.cache_key, item.block_indices, 0, free_info.request_id, free_info.adapter_name);
         }
         freeImpl(indices);

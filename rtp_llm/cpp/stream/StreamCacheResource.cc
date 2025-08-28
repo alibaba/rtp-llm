@@ -16,7 +16,7 @@ void StreamCacheResource::freeBatchBlocks(size_t batch_id, vector<int>& blocks) 
     if (blocks.empty()) {
         return;
     }
-    if (blocks.size() == batch_resource_.blockSize(batch_id) && resource_context_.reuse_cache) {
+    if (blocks.size() == batch_resource_.blockSize(batch_id) && reuseCache()) {
         reConstructCacheKeys();
         auto          tokens_id  = stream_->completeTokenIdsVec(batch_id);
         const auto&   cache_keys = stream_->cacheKeys(batch_id);
@@ -25,7 +25,8 @@ void StreamCacheResource::freeBatchBlocks(size_t batch_id, vector<int>& blocks) 
             loss = rtp_llm::buffer2vector<float>(*(stream_->getLoss()));
         }
         // TODO(xinfei.sxf) 一些场景调用了cancel的地方，是否应该free with cache
-        CacheManager::FreeInfo free_info(stream_->streamId(), tokens_id, cache_keys, blocks, loss, adapter_name_);
+        CacheManager::FreeInfo free_info(
+            stream_->streamId(), tokens_id, cache_keys, blocks, loss, adapter_name_, enable3FS());
         resource_context_.cache_manager->freeWithCache(free_info);
     } else {
         resource_context_.cache_manager->free(blocks);
@@ -96,15 +97,21 @@ absl::StatusOr<int> StreamCacheResource::initKVBlock(int token_capacity, size_t 
         return incrKVBlock(token_capacity, reserve_step);
     }
 
-    if (resource_context_.reuse_cache) {
+    if (reuseCache()) {
         auto common_tokens_vec = stream_->commonCompleteTokenIdsVec();
         // TODO(xinfei.sxf) fix cache keys in fallback case
         auto common_cache_keys = stream_->cacheKeys(0);
         auto mm_bounds_vec     = stream_->multimodalIntervals();
         // TODO(xinfei.sxf) fix need loss param
-        CacheManager::AdvancedMallocInfo malloc_info(
-            stream_->streamId(), common_tokens_vec, common_cache_keys, mm_bounds_vec, false, false, adapter_name_);
-        auto match_info = resource_context_.cache_manager->mallocWithCache(malloc_info);
+        CacheManager::AdvancedMallocInfo malloc_info(stream_->streamId(),
+                                                     common_tokens_vec,
+                                                     common_cache_keys,
+                                                     mm_bounds_vec,
+                                                     false,
+                                                     false,
+                                                     adapter_name_,
+                                                     enable3FS());
+        auto                             match_info = resource_context_.cache_manager->mallocWithCache(malloc_info);
         if (stream_->calculateLoss() && match_info.loss.empty()) {
             match_info = CacheManager::MatchInfo{0, {}, {}};
         }
@@ -216,7 +223,7 @@ void StreamCacheResource::constructCacheKey() {
     if (!resource_context_.cache_manager) {
         return;
     }
-    if (!resource_context_.reuse_cache && !resource_context_.use_cache_store) {
+    if (!reuseCache() && !resource_context_.use_cache_store) {
         return;
     }
     for (size_t i = 0; i < stream_->tileNum(); i++) {
@@ -242,7 +249,7 @@ void StreamCacheResource::reConstructCacheKeys() {
     if (!resource_context_.cache_manager) {
         return;
     }
-    if (!resource_context_.reuse_cache && !resource_context_.use_cache_store) {
+    if (!reuseCache() && !resource_context_.use_cache_store) {
         return;
     }
     auto seq_size_per_block = seqSizePerBlock();
@@ -281,6 +288,14 @@ void StreamCacheResource::fakeInitKVBlock() {
 
 int StreamCacheResource::mallocFailedTimes() const {
     return malloc_failed_times_;
+}
+
+bool StreamCacheResource::reuseCache() const {
+    return resource_context_.reuse_cache && stream_->reuseCache();
+}
+
+bool StreamCacheResource::enable3FS() const {
+    return resource_context_.enable_3fs && stream_->enable3FS();
 }
 
 }  // namespace rtp_llm

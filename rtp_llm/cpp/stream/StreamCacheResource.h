@@ -16,6 +16,7 @@ struct ResourceContext {
     std::shared_ptr<CacheManager>              propose_cache_manager = nullptr;
     std::shared_ptr<SystemPrompt>              system_prompt         = nullptr;
     bool                                       reuse_cache{false};
+    bool                                       enable_3fs{false};
     bool                                       use_cache_store{false};
     std::vector<std::shared_ptr<CacheManager>> mtp_cache_managers;
 };
@@ -69,6 +70,9 @@ public:
     void setStream(GenerateStream* stream) {
         stream_ = stream;
     }
+
+    bool reuseCache() const;
+    bool enable3FS() const;
 
     std::string debugString() const {
         std::stringstream debug_string;

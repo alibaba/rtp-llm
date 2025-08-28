@@ -250,4 +250,134 @@ TEST_F(NormalEngineTest, testReuseCache) {
     }
 }
 
+TEST_F(NormalEngineTest, testQueryReuseCacheWhenSwitchIsOn) {
+    CustomConfig config;
+    config.reuse_cache   = true;
+    auto gpt_init_params = rtp_llm::GptInitParameter();
+    auto engine          = createMockEngine(device_, config, gpt_init_params);
+    ASSERT_TRUE(engine->resourceContext().reuse_cache);
+
+    // First query with reuse_cache = true
+    {
+        std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
+        query->input_ids       = createBuffer<int32_t>({7}, {1, 2, 3, 4, 5, 6, 7}, rtp_llm::AllocationType::HOST);
+        query->generate_config = make_shared<GenerateConfig>();
+        query->generate_config->max_new_tokens = 1;
+        query->generate_config->reuse_cache    = true;
+        shared_ptr<GenerateStream> stream      = engine->enqueue(query);
+
+        ASSERT_TRUE(stream != nullptr);
+        auto output1 = stream->nextOutput();
+        ASSERT_TRUE(output1.ok());
+        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.output_len, 1);
+        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.prefix_len, 0);
+        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.reuse_len, 0);
+        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.input_len, 7);
+
+        ASSERT_TRUE(stream->finished());
+        auto output2 = stream->nextOutput();
+        ASSERT_TRUE(!output2.ok());
+    }
+
+    // Second query with reuse_cache = false (should not reuse cache)
+    {
+        std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
+        query->input_ids       = createBuffer<int32_t>({7}, {1, 2, 3, 4, 50, 60, 70}, rtp_llm::AllocationType::HOST);
+        query->generate_config = make_shared<GenerateConfig>();
+        query->generate_config->max_new_tokens = 1;
+        query->generate_config->reuse_cache    = false;
+        shared_ptr<GenerateStream> stream      = engine->enqueue(query);
+
+        ASSERT_TRUE(stream != nullptr);
+        auto output1 = stream->nextOutput();
+        ASSERT_TRUE(output1.ok());
+        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.output_len, 1);
+        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.prefix_len, 0);
+        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.reuse_len,
+                  0);  // Should be 0 because reuse_cache = false
+        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.input_len, 7);
+
+        ASSERT_TRUE(stream->finished());
+        auto output2 = stream->nextOutput();
+        ASSERT_TRUE(!output2.ok());
+    }
+
+    // Third query with reuse_cache = true (should reuse cache)
+    {
+        std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
+        query->input_ids       = createBuffer<int32_t>({7}, {1, 2, 3, 4, 50, 60, 70}, rtp_llm::AllocationType::HOST);
+        query->generate_config = make_shared<GenerateConfig>();
+        query->generate_config->max_new_tokens = 1;
+        query->generate_config->reuse_cache    = true;
+        shared_ptr<GenerateStream> stream      = engine->enqueue(query);
+
+        ASSERT_TRUE(stream != nullptr);
+        auto output1 = stream->nextOutput();
+        ASSERT_TRUE(output1.ok());
+        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.output_len, 1);
+        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.prefix_len, 0);
+        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.reuse_len, 4);  // Should be 4 because reuse_cache = true
+        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.input_len, 7);
+
+        ASSERT_TRUE(stream->finished());
+        auto output2 = stream->nextOutput();
+        ASSERT_TRUE(!output2.ok());
+    }
+}
+
+TEST_F(NormalEngineTest, testQueryReuseCacheWhenSwitchIsOff) {
+    // Test with engine-level reuse_cache = false (master switch off)
+    CustomConfig config;
+    config.reuse_cache   = false;
+    auto gpt_init_params = rtp_llm::GptInitParameter();
+    auto engine          = createMockEngine(device_, config, gpt_init_params);
+    ASSERT_FALSE(engine->resourceContext().reuse_cache);
+
+    // Query with reuse_cache = true, but should be ignored because engine-level is false
+    {
+        std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
+        query->input_ids       = createBuffer<int32_t>({7}, {1, 2, 3, 4, 5, 6, 7}, rtp_llm::AllocationType::HOST);
+        query->generate_config = make_shared<GenerateConfig>();
+        query->generate_config->max_new_tokens = 1;
+        query->generate_config->reuse_cache    = true;  // This should be ignored
+        shared_ptr<GenerateStream> stream      = engine->enqueue(query);
+
+        ASSERT_TRUE(stream != nullptr);
+        auto output1 = stream->nextOutput();
+        ASSERT_TRUE(output1.ok());
+        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.output_len, 1);
+        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.prefix_len, 0);
+        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.reuse_len,
+                  0);  // Should be 0 because engine-level reuse_cache = false
+        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.input_len, 7);
+
+        ASSERT_TRUE(stream->finished());
+        auto output2 = stream->nextOutput();
+        ASSERT_TRUE(!output2.ok());
+    }
+
+    // Query with reuse_cache = false, should also result in no cache reuse
+    {
+        std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
+        query->input_ids       = createBuffer<int32_t>({7}, {1, 2, 3, 4, 50, 60, 70}, rtp_llm::AllocationType::HOST);
+        query->generate_config = make_shared<GenerateConfig>();
+        query->generate_config->max_new_tokens = 1;
+        query->generate_config->reuse_cache    = false;
+        shared_ptr<GenerateStream> stream      = engine->enqueue(query);
+
+        ASSERT_TRUE(stream != nullptr);
+        auto output1 = stream->nextOutput();
+        ASSERT_TRUE(output1.ok());
+        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.output_len, 1);
+        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.prefix_len, 0);
+        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.reuse_len,
+                  0);  // Should be 0 because engine-level reuse_cache = false
+        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.input_len, 7);
+
+        ASSERT_TRUE(stream->finished());
+        auto output2 = stream->nextOutput();
+        ASSERT_TRUE(!output2.ok());
+    }
+}
+
 }  // namespace rtp_llm

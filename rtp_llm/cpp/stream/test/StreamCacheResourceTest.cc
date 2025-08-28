@@ -509,4 +509,99 @@ TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock) {
     ASSERT_EQ(cache_manager_->cacheItemNum(), 2);
 }
 
+TEST_F(StreamCacheResourceTest, testQueryLevelReuseCacheControl) {
+    // Test query-level reuse_cache control when engine-level is enabled
+    prepareResource(true);  // Enable engine-level reuse_cache
+    auto& resource = stream_->streamCacheResource();
+
+    // Test with query-level reuse_cache = true
+    stream_->generate_input_->generate_config->reuse_cache = true;
+    int token_capacity                                     = 1000;
+    ASSERT_TRUE(resource.initKVBlock(token_capacity).ok());
+    ASSERT_EQ(cache_manager_->freeBlockNums(), 5);
+    ASSERT_EQ(resource.maxBlockSize(), 3);
+
+    // Test with query-level reuse_cache = false
+    stream_->releaseResource();
+    // Re-initialize batch resource after release
+    resource.init(stream_->tileNum());
+    size_t baseline_free_blocks                            = cache_manager_->freeBlockNums();
+    stream_->generate_input_->generate_config->reuse_cache = false;
+    ASSERT_TRUE(resource.initKVBlock(token_capacity).ok());
+    ASSERT_EQ(cache_manager_->freeBlockNums(),
+              baseline_free_blocks >= 3 ? baseline_free_blocks - 3 : baseline_free_blocks);
+    ASSERT_EQ(resource.maxBlockSize(), 3);
+
+    stream_->releaseResource();
+}
+
+TEST_F(StreamCacheResourceTest, testQueryLevelReuseCacheMasterSwitch) {
+    // Test that query-level reuse_cache is ignored when engine-level is disabled
+    prepareResource(false);  // Disable engine-level reuse_cache
+    auto& resource = stream_->streamCacheResource();
+
+    // Test with query-level reuse_cache = true, but should be ignored
+    stream_->generate_input_->generate_config->reuse_cache = true;
+    int token_capacity                                     = 1000;
+    ASSERT_TRUE(resource.initKVBlock(token_capacity).ok());
+    ASSERT_EQ(cache_manager_->freeBlockNums(), 5);
+    ASSERT_EQ(resource.maxBlockSize(), 3);
+
+    // Test with query-level reuse_cache = false, should also be ignored
+    stream_->releaseResource();
+    // Re-initialize batch resource after release
+    resource.init(stream_->tileNum());
+    stream_->generate_input_->generate_config->reuse_cache = false;
+    ASSERT_TRUE(resource.initKVBlock(token_capacity).ok());
+    ASSERT_EQ(cache_manager_->freeBlockNums(), 5);
+    ASSERT_EQ(resource.maxBlockSize(), 3);
+
+    stream_->releaseResource();
+}
+
+TEST_F(StreamCacheResourceTest, testStreamCacheResourceReuseCacheMethod) {
+    // engine=true, query=true -> true
+    prepareResource(true);
+    auto& resource                                         = stream_->streamCacheResource();
+    stream_->generate_input_->generate_config->reuse_cache = true;
+    ASSERT_TRUE(resource.reuseCache());
+
+    // engine=true, query=false -> false
+    stream_->generate_input_->generate_config->reuse_cache = false;
+    ASSERT_FALSE(resource.reuseCache());
+
+    // engine=false, query=true -> false
+    resource.resource_context_.reuse_cache                 = false;
+    stream_->generate_input_->generate_config->reuse_cache = true;
+    ASSERT_FALSE(resource.reuseCache());
+
+    // engine=false, query=false -> false
+    stream_->generate_input_->generate_config->reuse_cache = false;
+    ASSERT_FALSE(resource.reuseCache());
+}
+
+TEST_F(StreamCacheResourceTest, testStreamCacheResourceEnable3FSMethod) {
+    // Start with engine=true to test query toggling
+    prepareResource(true);
+    auto& resource = stream_->streamCacheResource();
+
+    // engine=true, query=true -> true
+    resource.resource_context_.enable_3fs                 = true;
+    stream_->generate_input_->generate_config->enable_3fs = true;
+    ASSERT_TRUE(resource.enable3FS());
+
+    // engine=true, query=false -> false
+    stream_->generate_input_->generate_config->enable_3fs = false;
+    ASSERT_FALSE(resource.enable3FS());
+
+    // engine=false, query=true -> false
+    resource.resource_context_.enable_3fs                 = false;
+    stream_->generate_input_->generate_config->enable_3fs = true;
+    ASSERT_FALSE(resource.enable3FS());
+
+    // engine=false, query=false -> false
+    stream_->generate_input_->generate_config->enable_3fs = false;
+    ASSERT_FALSE(resource.enable3FS());
+}
+
 }  // namespace rtp_llm

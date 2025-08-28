@@ -438,6 +438,14 @@ public:
         score_stream_ = stream;
     }
 
+    bool reuseCache() const {
+        return generate_input_->generate_config->reuse_cache;
+    }
+
+    bool enable3FS() const {
+        return generate_input_->generate_config->enable_3fs;
+    }
+
 public:
     struct TimeInfo {
         int64_t begin_time_us;

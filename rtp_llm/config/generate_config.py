@@ -123,6 +123,12 @@ class GenerateConfig(BaseModel):
 
     global_request_id: int = -1
 
+    # 只有开启环境变量 REUSE_CACHE 时才生效
+    reuse_cache: bool = True
+
+    # 只有开启环境变量 ENABLE_3FS 时才生效
+    enable_3fs: bool = True
+
     def gen_hash_value(self):
         cp = copy.copy(self)
         cp.max_new_tokens = 0

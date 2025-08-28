@@ -88,6 +88,8 @@ message GenerateConfigPB {
     float presence_penalty = 44;
     float frequency_penalty = 45;
     bool do_sample = 46;
+    bool reuse_cache = 47;
+    bool enable_3fs = 48;
 }
 
 message MMPreprocessConfigPB {
