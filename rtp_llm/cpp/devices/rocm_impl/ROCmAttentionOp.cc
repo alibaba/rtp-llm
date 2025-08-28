@@ -707,9 +707,11 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
     printBufferData(*q_output, "run_ck_q_output");
     printBufferData(*k_output, "run_ck_k_output");
     printBufferData(*v_output, "run_ck_v_output");
-    if (fmha_runner_->runCKFmha(q_output->data(),  // params.input.data()
-                                k_output->data(),  // params.input.dataWithOffset(hidden_units)
-                                v_output->data(),  // params.input.dataWithOffset(hidden_units + hidden_units_kv)
+    if (skip_add_bias_transpose) {
+        // not implemented reuse cache for this branch
+        fmha_runner_->runCKFmha(params.input.data(),
+                                params.input.dataWithOffset(hidden_units),
+                                params.input.dataWithOffset(hidden_units + hidden_units_kv),
                                 params.output.data(),
                                 nullptr,  // buffer for store out softmax_lse, looks like not used by RTP
                                 batch_size,
@@ -720,7 +722,24 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                                 params.common.cu_kv_seqlens->data(),
                                 lse_acc_buf->data(),
                                 params.common.linear_bias_slopes ? params.common.linear_bias_slopes->data() : nullptr,
-                                nullptr)) {
+                                nullptr,
+                                false);
+    } else if (fmha_runner_->runCKFmha(q_output->data(),
+                                       k_output->data(),
+                                       v_output->data(),
+                                       params.output.data(),
+                                       nullptr,  // buffer for store out softmax_lse, looks like not used by RTP
+                                       batch_size,
+                                       seq_len,
+                                       prefix_prompt_param.max_prefix_prompt_length,
+                                       // context_token_num,
+                                       params.common.cu_seqlens->data(),
+                                       params.common.cu_kv_seqlens->data(),
+                                       lse_acc_buf->data(),
+                                       params.common.linear_bias_slopes ? params.common.linear_bias_slopes->data() :
+                                                                          nullptr,
+                                       nullptr,
+                                       true)) {
         printBufferData(params.output, "run_ck_data_output");
         return;
     } else {

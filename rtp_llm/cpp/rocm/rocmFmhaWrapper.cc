@@ -36,7 +36,9 @@ uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
                                     void*  seqstart_k,
                                     void*  lse_acc_buf,
                                     void*  linear_bias_slopes,
-                                    void*  biasBuffer) {
+                                    void*  biasBuffer,
+                                    bool   i_perm_,  // if true, will be batch * nhead * seqlen * hdim
+                                    bool   o_perm_) {  // if false, will be batch * seqlen * nhead * hdim
 
     // map parms from FT to CK
     mode_enum mode      = mode_enum::group;
@@ -71,8 +73,8 @@ uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
     // This kernel add bias to QKV, which has shape [batch_size, seq_len, 3, head_num, size_per_head], and
     // QKV split to 3 split buffer q, k, v and transpose them to [batch_size, head_num, seq_len, size_per_head].
     // For q and k, also apply the rotary embedding.
-    bool  i_perm  = true;   // if true, will be batch * nhead * seqlen * hdim
-    bool  o_perm  = false;  // if false, will be batch * seqlen * nhead * hdim
+    bool  i_perm  = i_perm_;  // if true, will be batch * nhead * seqlen * hdim
+    bool  o_perm  = o_perm_;  // if false, will be batch * seqlen * nhead * hdim
     float scale_s = 0.f;
     if (scale_s == .0f)
         scale_s = 1.0 / ck_tile::sqrt(static_cast<float>(hdim_q));  // TODO: q ? v ?
