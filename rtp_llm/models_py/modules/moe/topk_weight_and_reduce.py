@@ -23,7 +23,6 @@ class TopKWeightAndReduceDelegate(mm.TopKWeightAndReduce):
 
     def apply(
         self,
-        output: Optional[torch.Tensor],
         fused_expert_output: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
@@ -46,7 +45,6 @@ class TopKWeightAndReduceNaiveBatched(mm.TopKWeightAndReduce):
 
     def apply(
         self,
-        output: Optional[torch.Tensor],
         fused_expert_output: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
@@ -57,14 +55,11 @@ class TopKWeightAndReduceNaiveBatched(mm.TopKWeightAndReduce):
         num_local_experts = fused_expert_output.size(0)
         K = fused_expert_output.size(-1)
 
-        if output is None:
-            output = torch.zeros(
-                (num_tokens, K),
-                device=fused_expert_output.device,
-                dtype=fused_expert_output.dtype,
-            )
-        else:
-            output.fill_(0)
+        output = torch.zeros(
+            (num_tokens, K),
+            device=fused_expert_output.device,
+            dtype=fused_expert_output.dtype,
+        )
 
         assert output.size() == (
             num_tokens,

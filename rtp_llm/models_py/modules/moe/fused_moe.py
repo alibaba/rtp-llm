@@ -34,7 +34,6 @@ class TopKWeightAndReduce(ABC):
     @abstractmethod
     def apply(
         self,
-        output: Optional[torch.Tensor],
         fused_expert_output: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
@@ -50,6 +49,7 @@ class FusedMoeDataRouter(ABC):
         a1: torch.Tensor,
         a1_scale: Optional[torch.Tensor],
         a2_scale: Optional[torch.Tensor],
+        topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         num_experts: int,
         quant_config: FusedMoEQuantConfig,
@@ -59,14 +59,13 @@ class FusedMoeDataRouter(ABC):
     @abstractmethod
     def finalize(
         self,
-        output: torch.Tensor,
         fused_expert_output: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: TopKWeightAndReduce,
         extra_finalize_args: Optional[dict[str, Any]],
-    ) -> None:
+    ) -> torch.Tensor:
         raise NotImplementedError
 
 
@@ -129,7 +128,6 @@ class FusedMoe(torch.nn.Module):
         extra_finalize_args: Optional[Dict[str, Any]] = None,
     ) -> torch.Tensor:
         a1 = hidden_states
-        output = torch.zeros_like(a1)
 
         local_num_experts = self.fused_experts.local_num_experts
         if global_num_experts == -1:
@@ -139,6 +137,7 @@ class FusedMoe(torch.nn.Module):
             a1,
             a1_scale,
             a2_scale,
+            topk_weights,
             topk_ids,
             global_num_experts,
             self.fused_experts.quant_config,
@@ -170,8 +169,7 @@ class FusedMoe(torch.nn.Module):
                 extra_expert_args=extra_expert_args,
             )
 
-        self.router.finalize(
-            output,
+        output = self.router.finalize(
             fused_out,
             payload.expert_topk_weights,
             payload.expert_topk_ids,
@@ -179,5 +177,7 @@ class FusedMoe(torch.nn.Module):
             self.fused_experts.finalize_weight_and_reduce_impl(),
             extra_finalize_args,
         )
+
+        assert output.shape == hidden_states.shape
 
         return output
