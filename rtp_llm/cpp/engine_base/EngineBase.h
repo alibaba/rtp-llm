@@ -46,6 +46,26 @@ public:
 
     void removeLora(const std::string& adapter_name);
 
+    void pause() {
+        // This very simple function sets the pause_ flag to true.
+        // At the beginning of the Engine's Step method, it checks if pause_ is true.
+        // If it is, the Engine will sleep for a moment, thus pausing its execution.
+        // Pausing the Engine is necessary for tasks like updating model weights, swapping LoRA adapters,
+        // or clearing GPU memory, as it prevents model forwarding during these updates.
+        // The pause_ parameter doesn't need to guarantee thread-safe access; only this interface modifies it.
+        pause_ = true;
+    }
+
+    void restart() {
+        // This very simple function sets the pause_ flag to false, resuming the model's execution.
+        // At the beginning of the Engine's Step method, it checks if pause_ is true.
+        // If it is, the Engine will sleep for a moment, thus pausing its execution.
+        // Pausing the Engine is necessary for tasks like updating model weights, swapping LoRA adapters,
+        // or clearing GPU memory, as it prevents model forwarding during these updates.
+        // The pause_ parameter doesn't need to guarantee thread-safe access; only this interface modifies it.
+        pause_ = false;
+    }
+
     std::shared_ptr<lora::LoraManager> getLoraManager();
 
     virtual std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>& input) = 0;
@@ -92,6 +112,7 @@ protected:
     ResourceContext                    resource_context_;
     std::shared_ptr<lora::LoraManager> lora_manager_;
     std::unique_ptr<SchedulerBase>     scheduler_ = nullptr;
+    bool                               pause_     = false;
 };
 
 }  // namespace rtp_llm

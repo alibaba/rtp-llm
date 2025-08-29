@@ -35,6 +35,8 @@ public:
     // currently only used in BatchDecodeScheduler
     void updateSchedulerInfo(const std::string& scheduler_info);
     bool updateEplbConfig(const rtp_llm::EplbConfig& config);
+    void pause();
+    void restart();
 
 private:
     void                                                   _init(int64_t                                                model_rpc_port,

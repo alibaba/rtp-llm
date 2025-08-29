@@ -345,6 +345,10 @@ void SpeculativeEngine::tpSyncDisableSPRun(bool& all_streams_disable_sp_run) {
 
 absl::Status SpeculativeEngine::step() {
 
+    while (pause_) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+
     list<GenerateStreamPtr> streams;
 
     if (device_->getDeviceProperties().tp_rank == 0) {

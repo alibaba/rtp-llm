@@ -3,7 +3,12 @@ from typing import Any, AsyncGenerator, Dict
 
 from pydantic import BaseModel
 
-from rtp_llm.ops import EngineScheduleInfo, LoadBalanceInfo, WorkerStatusInfo, CacheStatusInfo
+from rtp_llm.ops import (
+    CacheStatusInfo,
+    EngineScheduleInfo,
+    LoadBalanceInfo,
+    WorkerStatusInfo,
+)
 
 
 class BaseEngine:
@@ -29,13 +34,13 @@ class BaseEngine:
     @abstractmethod
     def get_load_balance_info(self, latest_cache_version: int) -> LoadBalanceInfo:
         raise NotImplementedError()
-    
+
     @abstractmethod
     def get_worker_status_info(
         self, latest_cache_version: int, latest_finished_version: int
     ) -> WorkerStatusInfo:
         raise NotImplementedError()
-    
+
     @abstractmethod
     def get_cache_status_info(self, latest_cache_version: int) -> CacheStatusInfo:
         raise NotImplementedError()
@@ -52,4 +57,20 @@ class BaseEngine:
 
     @abstractmethod
     def update_eplb_config(self, req: Dict[str, str]) -> bool:
+        raise NotImplementedError()
+
+    def pause(self) -> None:
+        """Pauses the engine's execution.
+
+        When called, this method sets the `pause_` flag to true. The engine's
+        `step` method checks this flag and sleeps when it's true, effectively
+        pausing execution. This is necessary for tasks like updating model weights
+        or clearing GPU memory, which require the engine to be inactive. The `pause_`
+        parameter is modified only by this interface, so it doesn't need to be
+        thread-safe.
+        """
+        raise NotImplementedError()
+
+    def restart(self) -> None:
+        """Restarts the engine's execution."""
         raise NotImplementedError()

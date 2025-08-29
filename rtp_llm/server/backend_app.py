@@ -9,7 +9,7 @@ import threading
 import time
 from functools import cached_property
 from typing import Any, Dict, List, Optional, Union
-from rtp_llm.ops import EngineScheduleInfo, LoadBalanceInfo, WorkerStatusInfo, CacheStatusInfo
+
 import uvicorn
 from anyio import CapacityLimiter
 from anyio.lowlevel import RunVar
@@ -30,6 +30,12 @@ from rtp_llm.distribute.worker_info import WorkerInfo, g_parallel_info, g_worker
 from rtp_llm.embedding.backend_embedding_app import register_backend_embedding_api
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models.base_model import BaseModel
+from rtp_llm.ops import (
+    CacheStatusInfo,
+    EngineScheduleInfo,
+    LoadBalanceInfo,
+    WorkerStatusInfo,
+)
 from rtp_llm.server.backend_server import BackendServer
 from rtp_llm.server.misc import check_is_master, check_is_worker
 from rtp_llm.server.worker_status import CacheStatus, TaskInfo, WorkStatus
@@ -151,13 +157,17 @@ class BackendApp(object):
         async def health():
             check_shutdown()
             return {"status": "home"}
-        
+
         @app.post("/cache_status")
         def cache_status(req: Dict[str, Any]):
             check_shutdown()
             latest_cache_version: int = int(req.get("latest_cache_version", -1))
-            cache_status_info = self.backend_server.get_cache_status(latest_cache_version)
-            logging.info(f"cache_status info: {cache_status_info.available_kv_cache}, {cache_status_info.total_kv_cache}, {cache_status_info.block_size}, {cache_status_info.version}, {cache_status_info.cached_keys}")
+            cache_status_info = self.backend_server.get_cache_status(
+                latest_cache_version
+            )
+            logging.info(
+                f"cache_status info: {cache_status_info.available_kv_cache}, {cache_status_info.total_kv_cache}, {cache_status_info.block_size}, {cache_status_info.version}, {cache_status_info.cached_keys}"
+            )
             cache_status = CacheStatus()
             cache_status.available_kv_cache = cache_status_info.available_kv_cache
             cache_status.total_kv_cache = cache_status_info.total_kv_cache
@@ -165,19 +175,25 @@ class BackendApp(object):
             cache_status.version = cache_status_info.version
             cache_status.cached_keys = cache_status_info.cached_keys
             return ORJSONResponse(content=cache_status.model_dump(exclude_none=True))
-        
+
         @app.post("/worker_status")
         def worker_status(req: Dict[str, Any]):
             check_shutdown()
             latest_cache_version: int = int(req.get("latest_cache_version", -1))
             latest_finised_version: int = int(req.get("latest_finised_version", -1))
-            worker_status = self.backend_server.get_worker_status(latest_cache_version, latest_finised_version)
-            worker_status.server_port=worker_info.server_port
-            worker_status.http_port=worker_info.http_port
-            worker_status.grpc_port=worker_info.rpc_server_port
-            cache_status_info = self.backend_server.get_cache_status(latest_cache_version)
+            worker_status = self.backend_server.get_worker_status(
+                latest_cache_version, latest_finised_version
+            )
+            worker_status.server_port = worker_info.server_port
+            worker_status.http_port = worker_info.http_port
+            worker_status.grpc_port = worker_info.rpc_server_port
+            cache_status_info = self.backend_server.get_cache_status(
+                latest_cache_version
+            )
             worker_status.cache_status = CacheStatus()
-            worker_status.cache_status.available_kv_cache = cache_status_info.available_kv_cache
+            worker_status.cache_status.available_kv_cache = (
+                cache_status_info.available_kv_cache
+            )
             worker_status.cache_status.total_kv_cache = cache_status_info.total_kv_cache
             worker_status.cache_status.block_size = cache_status_info.block_size
             worker_status.cache_status.version = cache_status_info.version
@@ -243,6 +259,61 @@ class BackendApp(object):
                     return {"status": "set eplb config failed"}
             except Exception as e:
                 return {"error": str(e)}
+
+        @app.post("/pause")
+        async def pause():
+            """
+            Pauses the engine's execution.
+
+            When called, this method sets the `pause_` flag to true. The engine's
+            `step` method checks this flag and sleeps when it's true, effectively
+            pausing execution. This is necessary for tasks like updating model weights
+            or clearing GPU memory, which require the engine to be inactive. The `pause_`
+            parameter is modified only by this interface, so it doesn't need to be
+            thread-safe.
+            """
+            try:
+                self.backend_server.pause()
+            except Exception as e:
+                # Using f-string for error details
+                return {
+                    "error": "Failed to pause generate engine",
+                    "details": traceback.format_exc(),
+                }
+
+        @app.post("/internal_pause")
+        async def internal_pause():
+            try:
+                self.backend_server.internal_pause()
+            except Exception as e:
+                # Using f-string for error details
+                return {
+                    "error": "Failed to pause generate engine",
+                    "details": traceback.format_exc(),
+                }
+
+        @app.post("/restart")
+        async def restart():
+            """Restarts the engine's execution"""
+            try:
+                self.backend_server.restart()
+            except Exception as e:
+                # Using f-string for error details
+                return {
+                    "error": "Failed to restart generate engine",
+                    "details": traceback.format_exc(),
+                }
+
+        @app.post("/internal_restart")
+        async def internal_restart():
+            try:
+                self.backend_server.restart()
+            except Exception as e:
+                # Using f-string for error details
+                return {
+                    "error": "Failed to restart generate engine",
+                    "details": traceback.format_exc(),
+                }
 
         register_backend_embedding_api(app, self.backend_server)
         return app

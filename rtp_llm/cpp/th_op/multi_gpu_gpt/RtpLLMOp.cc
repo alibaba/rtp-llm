@@ -97,9 +97,9 @@ std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> RtpLLMOp::initProposeMode
 }
 
 void RtpLLMOp::addLora(const std::string& adapter_name, py::object py_lora_a_weights, py::object py_lora_b_weights) {
-    auto convert        = rtp_llm::WeightsConverter(true);
-    auto lora_a_weights = convert.convertLayerWeights_(py_lora_a_weights);
-    auto lora_b_weights = convert.convertLayerWeights_(py_lora_b_weights);
+    auto                         convert        = rtp_llm::WeightsConverter(true);
+    auto                         lora_a_weights = convert.convertLayerWeights_(py_lora_a_weights);
+    auto                         lora_b_weights = convert.convertLayerWeights_(py_lora_b_weights);
     pybind11::gil_scoped_release release;
     model_rpc_service_->addLora(adapter_name, *lora_a_weights, *lora_b_weights);
 }
@@ -119,8 +119,7 @@ rtp_llm::EngineScheduleInfo RtpLLMOp::getEngineScheduleInfo(int64_t latest_finis
     return model_rpc_service_->getEngineScheduleInfo(latest_finised_version);
 }
 
-rtp_llm::WorkerStatusInfo RtpLLMOp::getWorkerStatusInfo(int64_t latest_cache_version,
-                                                       int64_t latest_finished_version) {
+rtp_llm::WorkerStatusInfo RtpLLMOp::getWorkerStatusInfo(int64_t latest_cache_version, int64_t latest_finished_version) {
     return model_rpc_service_->getWorkerStatusInfo(latest_cache_version, latest_finished_version);
 }
 
@@ -167,7 +166,7 @@ void RtpLLMOp::initRPCServer(const rtp_llm::EngineInitParams                    
     builder.AddChannelArgument(GRPC_ARG_MAX_METADATA_SIZE, 1024 * 1024 * 1024);
     builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
     builder.RegisterService(model_rpc_service_.get());
-    
+
     grpc_server_ = builder.BuildAndStart();
     RTP_LLM_CHECK_WITH_INFO(grpc_server_ != nullptr, "grpc server start failed at address " + server_address);
 
@@ -247,6 +246,16 @@ RtpLLMOp::~RtpLLMOp() {
     stop();
 }
 
+void RtpLLMOp::pause() {
+    auto engine = model_rpc_service_->getEngine();
+    engine->pause();
+}
+
+void RtpLLMOp::restart() {
+    auto engine = model_rpc_service_->getEngine();
+    engine->restart();
+}
+
 void registerRtpLLMOp(const py::module& m) {
     pybind11::class_<torch_ext::RtpLLMOp>(m, "RtpLLMOp")
         .def(pybind11::init<>())
@@ -271,13 +280,17 @@ void registerRtpLLMOp(const py::module& m) {
         .def("remove_lora", &torch_ext::RtpLLMOp::removeLora, py::arg("adapter_name"))
         .def("get_load_balance_info", &torch_ext::RtpLLMOp::getLoadBalanceInfo, py::arg("latest_version"))
         .def("get_engine_schedule_info", &torch_ext::RtpLLMOp::getEngineScheduleInfo)
-        .def("get_worker_status_info", &torch_ext::RtpLLMOp::getWorkerStatusInfo, py::arg("latest_cache_version"),
-                py::arg("latest_finished_version"))
+        .def("get_worker_status_info",
+             &torch_ext::RtpLLMOp::getWorkerStatusInfo,
+             py::arg("latest_cache_version"),
+             py::arg("latest_finished_version"))
         .def("get_cache_status_info", &torch_ext::RtpLLMOp::getCacheStatusInfo, py::arg("latest_cache_version"))
         .def("update_scheduler_info", &torch_ext::RtpLLMOp::updateSchedulerInfo, py::arg("scheduler_info"))
         .def("stop", &torch_ext::RtpLLMOp::stop)
         .def("ready", &torch_ext::RtpLLMOp::ready)
-        .def("update_eplb_config", &torch_ext::RtpLLMOp::updateEplbConfig, py::arg("config"));
+        .def("update_eplb_config", &torch_ext::RtpLLMOp::updateEplbConfig, py::arg("config"))
+        .def("pause", &torch_ext::RtpLLMOp::pause)
+        .def("restart", &torch_ext::RtpLLMOp::restart);
 }
 
 }  // namespace torch_ext

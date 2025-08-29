@@ -281,6 +281,11 @@ NormalEngine::batchEnqueue(const std::vector<std::shared_ptr<GenerateInput>>& in
 }
 
 absl::Status NormalEngine::step() {
+    while (pause_) {
+        // wait 50ms if system paused.
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+
     list<GenerateStreamPtr> streams;
     if (device_->getDeviceProperties().tp_rank == 0 && !params_.ffn_disaggregate_config.is_ffn_service()) {
         if (scheduler_->empty() || step_recorder_.empty()) {

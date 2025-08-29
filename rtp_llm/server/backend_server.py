@@ -31,7 +31,12 @@ from rtp_llm.lora.lora_manager import LoraManager
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.model_factory import AsyncModel, ModelFactory
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
-from rtp_llm.ops import EngineScheduleInfo, LoadBalanceInfo, WorkerStatusInfo, CacheStatusInfo
+from rtp_llm.ops import (
+    CacheStatusInfo,
+    EngineScheduleInfo,
+    LoadBalanceInfo,
+    WorkerStatusInfo,
+)
 from rtp_llm.server.misc import format_exception
 from rtp_llm.server.worker_status import TaskInfo, WorkStatus
 from rtp_llm.structure.request_extractor import request_id_field_name
@@ -225,6 +230,7 @@ class BackendServer(object):
         return self.model.get_engine_schedule_info(latest_finished_version)
 
         # get worker status
+
     def get_cache_status(self, latest_cache_version: int) -> CacheStatusInfo:
         with Timer() as t:
             cache_status_info: CacheStatusInfo = self.model.get_cache_status_info(
@@ -233,11 +239,15 @@ class BackendServer(object):
         kmonitor.report(AccMetrics.CACHE_STATUS_QPS_METRIC, 1)
         kmonitor.report(GaugeMetrics.CACHE_STATUS_QPS_LATENCY_METRIC, t.cost_ms())
         return cache_status_info
-    
-    def get_worker_status(self, latest_cache_version: int, latest_finished_version: int) -> WorkStatus:
+
+    def get_worker_status(
+        self, latest_cache_version: int, latest_finished_version: int
+    ) -> WorkStatus:
         with Timer() as t:
             load_balance_version = 0
-            worker_status_info: WorkerStatusInfo = self.model.get_worker_status_info(latest_cache_version, latest_finished_version)
+            worker_status_info: WorkerStatusInfo = self.model.get_worker_status_info(
+                latest_cache_version, latest_finished_version
+            )
             available_concurrency = self._global_controller.get_available_concurrency()
             load_balance_info = worker_status_info.load_balance_info
             engine_schedule_info = worker_status_info.engine_schedule_info
@@ -292,7 +302,7 @@ class BackendServer(object):
                 version=load_balance_version,
                 status_version=worker_status_info.status_version,
                 alive=worker_status_info.alive,
-                precision=worker_status_info.precision
+                precision=worker_status_info.precision,
             )
         kmonitor.report(AccMetrics.WORKER_STATUS_QPS_METRIC, 1)
         kmonitor.report(GaugeMetrics.WORKER_STATUS_QPS_LANTENCY_METRIC, t.cost_ms())
@@ -377,3 +387,23 @@ class BackendServer(object):
         if self.model is None:
             return False
         return self.model.decoder_engine_.update_eplb_config(req)
+
+    def pause(self) -> None:
+        if g_parallel_info.is_master and g_parallel_info.world_size > 1:
+            self._gang_server.request_workers(
+                req={}, uri="internal_pause", is_wait=True
+            )
+        self.model.decoder_engine_.pause()
+
+    def internal_pause(self) -> None:
+        self.model.decoder_engine_.pause()
+
+    def restart(self) -> None:
+        if g_parallel_info.is_master and g_parallel_info.world_size > 1:
+            self._gang_server.request_workers(
+                req={}, uri="internal_restart", is_wait=True
+            )
+        self.model.decoder_engine_.restart()
+
+    def internal_restart(self) -> None:
+        self.model.decoder_engine_.restart()
