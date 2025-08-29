@@ -11,8 +11,19 @@ from rtp_llm.models_py.modules.embedding import Embedding
 from rtp_llm.models_py.modules.fmha import FMHAImplBase
 from rtp_llm.models_py.modules.mlp import FusedSiluActDenseMLP
 from rtp_llm.models_py.modules.norm import FusedQKRMSNorm, RMSNorm
+from rtp_llm.models_py.modules.linear import Linear
+
+from rtp_llm.models_py.utils.debug import set_trace_on_tty
 from rtp_llm.ops import KVCache, PyAttentionInputs, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
+
+hip_version = getattr(torch.version, "hip", None)
+if hip_version is not None:
+    from rtp_llm.models_py.modules.rocm.norm import FusedQKRMSNorm, RMSNorm
+    from rtp_llm.models_py.modules.rocm.fmha import FMHAImplBase
+else :
+    from rtp_llm.models_py.modules.norm import FusedQKRMSNorm, RMSNorm
+    from rtp_llm.models_py.modules.fmha import FMHAImplBase
 
 
 class Qwen3Attention(CausalAttention):
@@ -44,6 +55,7 @@ class Qwen3Attention(CausalAttention):
         if hasattr(self, "qk_fuse_norm"):
             qkv = self.qk_fuse_norm(qkv)
         attn_output = torch.empty_like(hidden_states)
+
         attn_output = fmha_impl.forward(qkv, kv_cache)
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)

@@ -7,14 +7,16 @@
 namespace rtp_llm {
 
 enum class FMHAType {
-    NONE,
-    PAGED_TRT_V2,
-    TRT_V2,
-    PAGED_OPEN_SOURCE,
-    OPEN_SOURCE,
-    TRT_V1,
     FLASH_INFER,
-    XQA
+    NONE,
+    OPEN_SOURCE,
+    PAGED_OPEN_SOURCE,
+    PAGED_TRT_V2,
+    TRT_V1,
+    TRT_V2,
+    XQA,
+    AITER_PREFILL,
+    AITER_DECODE
 };
 
 enum AttentionMaskType {

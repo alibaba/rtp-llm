@@ -51,7 +51,6 @@ void registerBasicRocmOps(py::module& rtp_ops_m) {
 
 void registerBaseRocmBindings(py::module& rtp_ops_m) {
     registerBasicRocmOps(rtp_ops_m);
-    rtp_llm::registerFusedRopeKVCacheOp(rtp_ops_m);
 }
 
 }  // namespace torch_ext

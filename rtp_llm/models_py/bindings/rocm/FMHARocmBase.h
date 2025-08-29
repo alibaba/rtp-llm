@@ -10,10 +10,12 @@ class FMHARocmBase {
 public:
     FMHARocmBase(const GptInitParameter& gpt_init_parameter):
         attn_configs_(gpt_init_parameter.getAttentionConfigs()),
+        layer_num_(gpt_init_parameter.num_layers_),
         device_(dynamic_cast<ROCmDevice*>(DeviceFactory::getDefaultDevice())) {}
 
 protected:
     AttentionConfigs attn_configs_;
+    int              layer_num_;
     ROCmDevice*      device_;
 };
 }  // namespace rtp_llm

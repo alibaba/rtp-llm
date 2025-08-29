@@ -11,7 +11,9 @@ void registerFMHAType(py::module m) {
         .value("OPEN_SOURCE", FMHAType::OPEN_SOURCE)
         .value("TRT_V1", FMHAType::TRT_V1)
         .value("FLASH_INFER", FMHAType::FLASH_INFER)
-        .value("XQA", FMHAType::XQA);
+        .value("XQA", FMHAType::XQA)
+        .value("AITER_PREFILL", FMHAType::AITER_PREFILL)
+        .value("AITER_DECODE", FMHAType::AITER_DECODE);
 }
 
 std::string AttentionConfigs::DebugAttentionConfigStr() const {

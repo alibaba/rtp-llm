@@ -7,7 +7,7 @@ from torch import nn
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.models_py.modules.linear_factory import LinearFactory
 from rtp_llm.utils.model_weight import W
-
+hip_version = getattr(torch.version, "hip", None)
 
 class DenseMLP(nn.Module):
     def __init__(
@@ -79,6 +79,10 @@ class FusedSiluActDenseMLP(nn.Module):
         output_shape = gate_up.shape[:-1] + (d,)
         output = torch.empty(output_shape, dtype=gate_up.dtype, device=gate_up.device)
         stream_id = torch.cuda.current_stream().cuda_stream
-        rtp_llm_ops.silu_and_mul(output, gate_up, stream_id)
+        if hip_version is not None:
+            import aiter
+            aiter.silu_and_mul(output, gate_up)
+        else:
+            rtp_llm_ops.silu_and_mul(output, gate_up, stream_id)
         down_proj = self.down_proj(output)
         return down_proj

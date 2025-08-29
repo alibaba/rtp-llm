@@ -9,7 +9,7 @@
 #include "rtp_llm/cpp/th_op/multi_gpu_gpt/EmbeddingHandlerOp.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/utils/AttentionConfig.h"
-
+#include "rtp_llm/cpp/th_op/ConfigModules.h"
 #include "rtp_llm/models_py/bindings/RegisterOps.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 using namespace rtp_llm;

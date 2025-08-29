@@ -343,6 +343,62 @@ class FfnDisAggregateConfig:
     def to_string(self) -> str: ...
     def update_from_env(self) -> None: ...
 
+class FMHAType:
+    """
+    Members:
+
+      NONE
+
+      PAGED_TRT_V2
+
+      TRT_V2
+
+      PAGED_OPEN_SOURCE
+
+      OPEN_SOURCE
+
+      TRT_V1
+
+      FLASH_INFER
+
+      XQA
+
+      AITER_PREFILL
+
+      AITER_DECODE
+    """
+
+    FLASH_INFER: typing.ClassVar[FMHAType]  # value = <FMHAType.FLASH_INFER: 6>
+    NONE: typing.ClassVar[FMHAType]  # value = <FMHAType.NONE: 0>
+    OPEN_SOURCE: typing.ClassVar[FMHAType]  # value = <FMHAType.OPEN_SOURCE: 4>
+    PAGED_OPEN_SOURCE: typing.ClassVar[
+        FMHAType
+    ]  # value = <FMHAType.PAGED_OPEN_SOURCE: 3>
+    PAGED_TRT_V2: typing.ClassVar[FMHAType]  # value = <FMHAType.PAGED_TRT_V2: 1>
+    TRT_V1: typing.ClassVar[FMHAType]  # value = <FMHAType.TRT_V1: 5>
+    TRT_V2: typing.ClassVar[FMHAType]  # value = <FMHAType.TRT_V2: 2>
+    XQA: typing.ClassVar[FMHAType]  # value = <FMHAType.XQA: 7>
+    AITER_PREFILL: typing.ClassVar[FMHAType] # value = <FMHAType.AITER_PREFILL: 8
+    AITER_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_DECODE: 9>
+    
+    __members__: typing.ClassVar[
+        dict[str, FMHAType]
+    ]  # value = {'NONE': <FMHAType.NONE: 0>, 'PAGED_TRT_V2': <FMHAType.PAGED_TRT_V2: 1>, 'TRT_V2': <FMHAType.TRT_V2: 2>, 'PAGED_OPEN_SOURCE': <FMHAType.PAGED_OPEN_SOURCE: 3>, 'OPEN_SOURCE': <FMHAType.OPEN_SOURCE: 4>, 'TRT_V1': <FMHAType.TRT_V1: 5>, 'FLASH_INFER': <FMHAType.FLASH_INFER: 6>, 'XQA': <FMHAType.XQA: 7>}
+    def __eq__(self, other: typing.Any) -> bool: ...
+    def __getstate__(self) -> int: ...
+    def __hash__(self) -> int: ...
+    def __index__(self) -> int: ...
+    def __init__(self, value: int) -> None: ...
+    def __int__(self) -> int: ...
+    def __ne__(self, other: typing.Any) -> bool: ...
+    def __repr__(self) -> str: ...
+    def __setstate__(self, state: int) -> None: ...
+    def __str__(self) -> str: ...
+    @property
+    def name(self) -> str: ...
+    @property
+    def value(self) -> int: ...
+
 class GptInitParameter:
     activation_type: str
     add_bias_linear: bool
@@ -988,6 +1044,13 @@ def get_device() -> DeviceExporter: ...
 class PyModelInitResources:
     k_cache_base: Optional[torch.Tensor]
     v_cache_base: Optional[torch.Tensor]
+
+class KVCache:
+    k_cache_base: torch.Tensor
+    v_cache_base: torch.Tensor
+    k_scale_base: torch.Tensor
+    v_scale_base: torch.Tensor
+    def get_layer_cache(self, idx: int) -> KVCache: ...
 
 class PyAttentionInputs:
     def get_prefill_flash_infer_attn(self) -> typing.Any:
