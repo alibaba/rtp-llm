@@ -362,7 +362,7 @@ def git_deps():
     new_git_repository(
         name = "deep_gemm",
         remote = "https://github.com/deepseek-ai/DeepGEMM.git",
-        commit = "ea9c5d9270226c5dd7a577c212e9ea385f6ef048",
+        commit = "7b6b5563b9d4c1ae07ffbce7f78ad3ac9204827c",
         build_file = clean_dep("//3rdparty/deep_gemm:BUILD"),
         recursive_init_submodules = True,
     )
