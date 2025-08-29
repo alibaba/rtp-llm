@@ -5,6 +5,10 @@ py_library(
     ])
 )
 
+load("//bazel:arch_select.bzl", "requirement", "deep_gemm_deps")
+
+deep_gemm_deps()
+
 py_library(
     name = "utils",
     srcs = glob([
@@ -49,7 +53,6 @@ py_library(
         ":utils",
         ":modules",
         "//rtp_llm/model_loader:loader",
-        "//rtp_llm:deep_ep",
     ] + select({
         "@//:using_cuda12": [
             ":modules_cuda"
@@ -57,6 +60,9 @@ py_library(
         "@//:using_rocm": [
             ":modules_rocm"
         ],
+        "//conditions:default": [],
+    }) + select({
+        "@//:using_cuda12":["deep_gemm"],
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],

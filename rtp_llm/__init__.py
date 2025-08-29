@@ -28,10 +28,6 @@ if os.environ.get("FT_SERVER_TEST") is None:
     except BaseException as e:
         # for compatible with yitian arm machine in prod env, which lacks hippo infras and envs.
         import traceback
-<<<<<<< HEAD
-=======
-        print("failed to init logger config {}: {}\n {}".format(LOGGING_CONFIG, e, traceback.format_exc()))
->>>>>>> support deepgemm epmoe and fp8 block inference
 
         print(
             f"failed to init logger config {LOGGING_CONFIG}: {e}\n {traceback.format_exc()}"
@@ -70,12 +66,8 @@ if os.environ.get("FT_ALOG_CONF_PATH") is None:
 logging.info("init logger end")
 
 import transformers
-<<<<<<< HEAD
 
 logging.info(f"transformers version: {transformers.__version__}")
-=======
-logging.info("transformers version: {}".format(transformers.__version__))
->>>>>>> support deepgemm epmoe and fp8 block inference
 
 # load th_transformer.so
 from .ops import *

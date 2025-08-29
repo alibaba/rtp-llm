@@ -27,7 +27,7 @@ def git_deps():
             "echo '' >> build_aiter_module.py",
             "echo '    md_name = custom_build_args.get(\"md_name\", md_name)' >> build_aiter_module.py",
             "echo '' >> build_aiter_module.py",
- 
+
             "echo '    srcs = d_args[\"srcs\"]' >> build_aiter_module.py",
             "echo '    flags_extra_cc = d_args[\"flags_extra_cc\"]' >> build_aiter_module.py",
             "echo '    flags_extra_hip = d_args[\"flags_extra_hip\"]' >> build_aiter_module.py",
@@ -356,4 +356,13 @@ def git_deps():
     native.bind(
         name = "zlib",
         actual = "@zlib_archive//:zlib",
+    )
+
+    # DeepGEMM dependency for RTP-LLM - using git repository
+    new_git_repository(
+        name = "deep_gemm",
+        remote = "https://github.com/deepseek-ai/DeepGEMM.git",
+        commit = "ea9c5d9270226c5dd7a577c212e9ea385f6ef048",
+        build_file = clean_dep("//3rdparty/deep_gemm:BUILD"),
+        recursive_init_submodules = True,
     )

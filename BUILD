@@ -214,13 +214,6 @@ py_runtime(
     stub_shebang = "#!/opt/conda310/bin/python"
 )
 
-
-
-# DeepGEMM alias for integration
-load("//bazel:arch_select.bzl", "deep_gemm_deps")
-deep_gemm_deps()
-
-
 load("@hedron_compile_commands//:refresh_compile_commands.bzl", "refresh_compile_commands")
 
 refresh_compile_commands(

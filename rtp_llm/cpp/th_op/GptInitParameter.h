@@ -267,10 +267,6 @@ public:
 
     std::string model_name_ = "";
 
-    bool        enable_3fs_                         = false;
-    bool        enable_ep_moe_                      = false;
-    bool        enable_deepep_moe_                  = false;
-
     // multi machine
     std::vector<std::string> worker_addrs_;
     std::vector<std::string> worker_grpc_addrs_;

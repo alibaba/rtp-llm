@@ -97,9 +97,7 @@ requirement([
     "portalocker",
     "concurrent_log_handler",
     "aiter",
-    "deep_ep"
 ] + tensorrt)
-
 
 filegroup(
     name = "cutlass_config",
@@ -398,7 +396,6 @@ py_library(
         "//rtp_llm/aios/kmonitor:kmonitor_py",
         "//rtp_llm/metrics:metrics",
         "//rtp_llm/access_logger:access_logger",
-        "//:deep_gemm",
     ] + select({
         "@//:using_rocm": [":aiter",],
         "//conditions:default": [],

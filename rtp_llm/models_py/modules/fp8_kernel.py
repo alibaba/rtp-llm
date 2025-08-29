@@ -1,4 +1,3 @@
-
 import functools
 import json
 import logging
@@ -7,15 +6,19 @@ from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
-import triton
-import triton.language as tl
 
-from rtp_llm.models_py.modules.utils import align
+import rtp_llm.models_py.modules.utils as utils
 
-from libth_transformer.rtp_llm_ops import per_token_group_quant_int8, per_token_group_quant_fp8
-
+if utils.is_cuda():
+    from libth_transformer.rtp_llm_ops import (
+        per_token_group_quant_fp8,
+        per_token_group_quant_int8,
+    )
+else:
+    logging.warning("can't import from rtp_llm_ops, only support cuda!")
 
 logger = logging.getLogger(__name__)
+
 
 def sgl_per_token_group_quant_fp8(
     x: torch.Tensor,
@@ -28,7 +31,7 @@ def sgl_per_token_group_quant_fp8(
         x.shape[-1] % group_size == 0
     ), "the last dimension of `x` cannot be divisible by `group_size`"
     assert x.is_contiguous(), "`x` is not contiguous"
-    
+
     # Define fp8 dtype and constants
     fp8_dtype = torch.float8_e4m3fn
     finfo = torch.finfo(fp8_dtype)

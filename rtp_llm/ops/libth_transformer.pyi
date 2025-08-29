@@ -53,7 +53,6 @@ __all__ = [
     "get_device",
 ]
 
-
 class ArpcConfig:
     ioThreadNum: int
     queueNum: int
@@ -64,17 +63,14 @@ class ArpcConfig:
     ) -> None: ...
     def to_string(self) -> str: ...
 
-
 class AttentionCommonInputs:
     def __init__(self) -> None: ...
-
 
 class BatchDecodeSchedulerConfig:
     batch_decode_scheduler_batch_size: int
     def __init__(self, batch_decode_scheduler_batch_size: int = 1) -> None: ...
     def to_string(self) -> str: ...
     def update_from_env(self) -> None: ...
-
 
 class CacheStoreConfig:
     cache_store_rdma_mode: bool
@@ -100,18 +96,15 @@ class CacheStoreConfig:
     def to_string(self) -> str: ...
     def update_from_env(self) -> None: ...
 
-
 class Cm2ServiceClient:
     def __init__(
         self, config_str: str, load_balance_policy_name: str, use_local: bool = False
     ) -> None: ...
     def __repr__(self) -> str: ...
-
     def choose_host(self) -> Host:
         """
         Choose a host from the cm2 and load balancer
         """
-
 
 class ConcurrencyConfig:
     concurrency_limit: int
@@ -123,28 +116,22 @@ class ConcurrencyConfig:
     def to_string(self) -> str: ...
     def update_from_env(self) -> None: ...
 
-
 class DeviceExporter:
     def get_device_id(self) -> int: ...
     def get_device_type(self) -> DeviceType: ...
     def pack_int8_tensor_to_packed_int4(self, weight: torch.Tensor) -> torch.Tensor: ...
-
     def preprocess_gemm_weight_by_key(
         self, key: str, weight: torch.Tensor
     ) -> torch.Tensor: ...
-
     def preprocess_weight_scale(
         self, weight: torch.Tensor, scale: torch.Tensor
     ) -> torch.Tensor: ...
-
     def preprocess_weights_for_mixed_gemm(
         self, weight: torch.Tensor, quant_type: typing.Any, arch: str
     ) -> torch.Tensor: ...
-
     def symmetric_quantize_last_axis_of_batched_matrix(
         self, weight: torch.Tensor, quant_type: typing.Any, arch: str
     ) -> list[torch.Tensor]: ...
-
 
 class DeviceResourceConfig:
     device_reserve_memory_bytes: int
@@ -169,7 +156,6 @@ class DeviceResourceConfig:
     ) -> None: ...
     def to_string(self) -> str: ...
     def update_from_env(self) -> None: ...
-
 
 class DeviceType:
     """
@@ -212,22 +198,18 @@ class DeviceType:
     @property
     def value(self) -> int: ...
 
-
 class EmbeddingHandlerOp:
     def __init__(self) -> None: ...
-
     def forward(
         self, hidden_states: torch.Tensor, input_lengths: torch.Tensor
     ) -> torch.Tensor: ...
     def load_tensor(self, weights: dict[str, torch.Tensor]) -> None: ...
-
 
 class EngineScheduleInfo:
     finished_task_info_list: list[EngineTaskInfo]
     last_schedule_delta: int
     running_task_info_list: list[EngineTaskInfo]
     def __init__(self) -> None: ...
-
 
 class EngineTaskInfo:
     end_time_ms: int
@@ -239,7 +221,6 @@ class EngineTaskInfo:
     waiting_time_ms: int
     def __init__(self) -> None: ...
 
-
 class EplbConfig:
     __hash__: typing.ClassVar[None] = None
     mode: EplbMode
@@ -248,7 +229,6 @@ class EplbConfig:
     def __init__(self) -> None: ...
     def __ne__(self, arg0: EplbConfig) -> bool: ...
     def __str__(self) -> str: ...
-
 
 class EplbMode:
     """
@@ -285,7 +265,6 @@ class EplbMode:
     @property
     def value(self) -> int: ...
 
-
 class FIFOSchedulerConfig:
     enable_fast_gen: bool
     enable_partial_fallback: bool
@@ -303,7 +282,6 @@ class FIFOSchedulerConfig:
     ) -> None: ...
     def to_string(self) -> str: ...
     def update_from_env(self) -> None: ...
-
 
 class FMHAConfig:
     disable_flash_infer: bool
@@ -333,10 +311,8 @@ class FMHAConfig:
     def to_string(self) -> str: ...
     def update_from_env(self) -> None: ...
 
-
 class FlashInferOp:
     def __init__(self, gpt_init_parameter: GptInitParameter) -> None: ...
-
     def forward(
         self,
         input: torch.Tensor,
@@ -345,7 +321,6 @@ class FlashInferOp:
         v_cache: torch.Tensor,
         attn_params: typing.Any,
     ) -> None: ...
-
 
 class FfnDisAggregateConfig:
     attention_dp_size: int
@@ -367,7 +342,6 @@ class FfnDisAggregateConfig:
     def is_ffn_service(self) -> bool: ...
     def to_string(self) -> str: ...
     def update_from_env(self) -> None: ...
-
 
 class GptInitParameter:
     activation_type: str
@@ -541,9 +515,6 @@ class GptInitParameter:
     worker_grpc_addrs: list[str]
     worker_port_offset: int
     world_size: int
-    enable_3fs: bool
-    enable_ep_moe: bool
-    enable_deepep_moe: bool
 
     def __init__(
         self,
@@ -554,7 +525,6 @@ class GptInitParameter:
         vocab_size: int,
         hidden_size: int,
     ) -> None: ...
-
     def insertMultiTaskPromptTokens(
         self, task_id: str, tokens_id: list[int]
     ) -> None: ...
@@ -566,6 +536,7 @@ class GptInitParameter:
     def setNormType(self) -> None: ...
     def setTaskType(self, task: str) -> None: ...
     def showDebugInfo(self) -> None: ...
+
 class HWKernelConfig:
     arm_gemm_use_kai: bool
     deep_gemm_num_sm: int
@@ -595,14 +566,12 @@ class HWKernelConfig:
     def to_string(self) -> str: ...
     def update_from_env(self) -> None: ...
 
-
 class Host:
     http_port: int
     ip: str
     rpc_port: int
     def __init__(self, ip: str, http_port: int, rpc_port: int) -> None: ...
     def __repr__(self) -> str: ...
-
 
 class KVCacheConfig:
     multi_task_prompt: str
@@ -634,7 +603,6 @@ class KVCacheConfig:
     def to_string(self) -> str: ...
     def update_from_env(self) -> None: ...
 
-
 class KVCacheInfo:
     available_kv_cache: int
     block_size: int
@@ -642,7 +610,6 @@ class KVCacheInfo:
     total_kv_cache: int
     version: int
     def __init__(self) -> None: ...
-
 
 class LoadBalanceInfo:
     cache_status: KVCacheInfo
@@ -654,7 +621,6 @@ class LoadBalanceInfo:
     total_kv_cache: int
     waiting_query_len: int
     def __init__(self) -> None: ...
-
 
 class WorkerStatusInfo:
     role: RoleType
@@ -669,7 +635,6 @@ class WorkerStatusInfo:
     precision: str
     def __init__(self) -> None: ...
 
-
 class CacheStatusInfo:
     available_kv_cache: int
     block_size: int
@@ -677,7 +642,6 @@ class CacheStatusInfo:
     total_kv_cache: int
     version: int
     def __init__(self) -> None: ...
-
 
 class MiscellaneousConfig:
     load_balance: int
@@ -693,7 +657,6 @@ class MiscellaneousConfig:
     ) -> None: ...
     def to_string(self) -> str: ...
     def update_from_env(self) -> None: ...
-
 
 class MlaOpsType:
     """
@@ -730,7 +693,6 @@ class MlaOpsType:
     @property
     def value(self) -> int: ...
 
-
 class ModelSpecificConfig:
     load_python_model: bool
     max_lora_model_size: int
@@ -740,7 +702,6 @@ class ModelSpecificConfig:
     ) -> None: ...
     def to_string(self) -> str: ...
     def update_from_env(self) -> None: ...
-
 
 class MoeConfig:
     deep_ep_num_sm: int
@@ -772,13 +733,11 @@ class MoeConfig:
     def to_string(self) -> str: ...
     def update_from_env(self) -> None: ...
 
-
 class MultimodalInput:
     mm_type: int
     tensor: torch.Tensor
     url: str
     def __init__(self, url: str, tensor: torch.Tensor, mm_type: int) -> None: ...
-
 
 class ParallelismDistributedConfig:
     dp_size: int
@@ -803,7 +762,6 @@ class ParallelismDistributedConfig:
     ) -> None: ...
     def to_string(self) -> str: ...
     def update_from_env(self) -> None: ...
-
 
 class ProfilingDebugLoggingConfig:
     debug_load_server: bool
@@ -847,7 +805,6 @@ class ProfilingDebugLoggingConfig:
     def to_string(self) -> str: ...
     def update_from_env(self) -> None: ...
 
-
 class QuantAlgo:
     def __getstate__(self) -> tuple: ...
     def __init__(self) -> None: ...
@@ -866,12 +823,10 @@ class QuantAlgo:
     def isWeightOnlyPerCol(self) -> bool: ...
     def setQuantAlgo(self, quant_method: str, bits: int, group_size: int) -> None: ...
 
-
 class RoleSpecialTokens:
     eos_token_ids: list[int]
     token_ids: list[int]
     def __init__(self) -> None: ...
-
 
 class RoleType:
     """
@@ -911,10 +866,8 @@ class RoleType:
     @property
     def value(self) -> int: ...
 
-
 class RtpEmbeddingOp:
     def __init__(self) -> None: ...
-
     def decode(
         self,
         token_ids: torch.Tensor,
@@ -926,10 +879,8 @@ class RtpEmbeddingOp:
     def init(self, model: typing.Any, mm_process_engine: typing.Any) -> None: ...
     def stop(self) -> None: ...
 
-
 class RtpLLMOp:
     def __init__(self) -> None: ...
-
     def add_lora(
         self, adapter_name: str, lora_a_weights: typing.Any, lora_b_weights: typing.Any
     ) -> None: ...
@@ -937,7 +888,6 @@ class RtpLLMOp:
     def get_load_balance_info(self, arg0: int) -> LoadBalanceInfo: ...
     def get_worker_status_info(self, arg0: int, arg1: int) -> WorkerStatusInfo: ...
     def get_cache_status_info(self, arg0: int) -> CacheStatusInfo: ...
-
     def init(
         self,
         model: typing.Any,
@@ -947,7 +897,6 @@ class RtpLLMOp:
     ) -> None: ...
     def ready(self) -> bool: ...
     def remove_lora(self, adapter_name: str) -> None: ...
-
     def start_http_server(
         self,
         model_weights_loader: typing.Any,
@@ -960,7 +909,6 @@ class RtpLLMOp:
     def update_eplb_config(self, config: EplbConfig) -> bool: ...
     def update_scheduler_info(self, arg0: str) -> None: ...
 
-
 class SamplerConfig:
     enable_flashinfer_sample_kernel: bool
     max_batch_size: int
@@ -971,13 +919,11 @@ class SamplerConfig:
     def to_string(self) -> str: ...
     def update_from_env(self) -> None: ...
 
-
 class SchedulerConfig:
     use_batch_decode_scheduler: bool
     def __init__(self, use_batch_decode_scheduler: bool = False) -> None: ...
     def to_string(self) -> str: ...
     def update_from_env(self) -> None: ...
-
 
 class ServiceDiscoveryConfig:
     decode_cm2_config: str
@@ -997,7 +943,6 @@ class ServiceDiscoveryConfig:
     def to_string(self) -> str: ...
     def update_from_env(self) -> None: ...
 
-
 class SpecialTokens:
     assistant: RoleSpecialTokens
     bos_token_id: int
@@ -1009,7 +954,6 @@ class SpecialTokens:
     system: RoleSpecialTokens
     user: RoleSpecialTokens
     def __init__(self) -> None: ...
-
 
 class SpeculativeExecutionConfig:
     gen_num_per_cycle: int
@@ -1033,18 +977,15 @@ class SpeculativeExecutionConfig:
     def to_string(self) -> str: ...
     def update_from_env(self) -> None: ...
 
-
 def create_linear_softmax_handler(
     gpt_init_params: GptInitParameter,
 ) -> EmbeddingHandlerOp: ...
 def get_block_cache_keys(token_ids_list: list[list[int]]) -> list[int]: ...
 def get_device() -> DeviceExporter: ...
 
-
 class PyModelInitResources:
     k_cache_base: Optional[torch.Tensor]
     v_cache_base: Optional[torch.Tensor]
-
 
 class PyAttentionInputs:
     def get_prefill_flash_infer_attn(self) -> typing.Any:
@@ -1053,11 +994,9 @@ class PyAttentionInputs:
     def get_decode_flash_infer_attn(self) -> typing.Any:
         pass
 
-
 class PyModelInputs:
     input_ids: torch.Tensor
     attention_inputs: PyAttentionInputs
-
 
 class PyModelOutputs:
     hidden_states: torch.Tensor

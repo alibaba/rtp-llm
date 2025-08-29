@@ -6,4 +6,3 @@ pyrsmi
 pyyaml
 https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/amd_pkgs/aiter-0.1.0-py3-none-any.whl
 https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis%2FAMD%2Famd_smi%2Fali%2Famd_smi.tar
-deep_ep @ http://search-ad.oss-cn-hangzhou-zmf.aliyuncs.com/wenyang/deep_ep-1.0.0-cp310-cp310-linux_x86_64.whl
