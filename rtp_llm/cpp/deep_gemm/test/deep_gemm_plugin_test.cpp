@@ -1,6 +1,5 @@
 #include <gtest/gtest.h>
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
-#include "trt_plugins/mixtureOfExperts/mixtureOfExpertsPlugin.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/devices/testing/TestBase.h"
 #include "rtp_llm/cpp/utils/SignalUtils.h"

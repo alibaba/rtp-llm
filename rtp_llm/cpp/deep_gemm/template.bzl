@@ -93,7 +93,7 @@ dispatch_template_header = """
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/cuda/cuda_utils.h"
 #include "rtp_llm/cpp/deep_gemm/DeepGemmPlugin.h"
-#include "rtp_llm/cpp/deep_gemm/JIT.h"
+#include "rtp_llm/cpp/deep_gemm/JITRuntime.h"
 
 namespace rtp_llm {
 #ifdef ENABLE_FP8

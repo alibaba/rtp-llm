@@ -9,9 +9,12 @@ load("//rtp_llm/cpp/deep_gemm:template.bzl", "NORMAL_GEMM_CASES", "GROUPED_CONTI
 
 cc_library(
     name = "deep_gemm_utils",
-    hdrs = ["utils.h"],
+    hdrs = ["utils.h", "JIT.h"],
+    srcs = ["JIT.cc"],
     copts = copts(),
-    deps = [],
+    deps = [
+        "//rtp_llm/cpp:utils",
+    ],
     visibility = ["//visibility:public"],
 )
 
@@ -58,6 +61,8 @@ copy_filegroup(
 filegroup(
     name = "jit_includes",
     srcs = [
+        "JITRuntime.h",
+        "JITRuntime.cc",
         ":deep_gemm_jit_srcs",
         ":cutlass_hdrs",
         "interleave_ffma.py"
@@ -69,8 +74,8 @@ filegroup(
 
 cc_library(
     name = "JIT",
-    hdrs = ["JIT.h"],
-    srcs = ["JIT.cc"],
+    hdrs = ["JITRuntime.h"],
+    srcs = ["JITRuntime.cc"],
     data = [":jit_includes"],
     copts = copts(),
     deps = [
@@ -122,7 +127,6 @@ cc_test(
         "@com_google_googletest//:gtest",
         "//rtp_llm/cpp/core:buffer_torch",
         "//rtp_llm/cpp/devices/testing:device_test_utils",
-        "//rtp_llm/cpp/devices/cuda_impl:gpu_base",
         "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
     ],
     timeout = "long",
