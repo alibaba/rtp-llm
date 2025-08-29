@@ -3,11 +3,9 @@ NORMAL_GEMM_CASES = [
     ("2112", "7168", "1", "DeepGemmType::Normal"),
     ("4096", "7168", "1", "DeepGemmType::Normal"),
     ("7168", "2048", "1", "DeepGemmType::Normal"),
-    ("2048", "7168", "1", "DeepGemmType::Normal"),
     ("16384", "512", "1", "DeepGemmType::Normal"),
     ("24576", "1536", "1", "DeepGemmType::Normal"),
     ("7168", "16384", "1", "DeepGemmType::Normal"),
-    ("18432", "7168", "1", "DeepGemmType::Normal"),
     ("36864", "7168", "1", "DeepGemmType::Normal"),
     ("7168", "18432", "1", "DeepGemmType::Normal"),
 ]
@@ -16,20 +14,12 @@ GROUPED_CONTIGUOUS_GEMM_CASES = [
     ("4096", "7168", "256", "DeepGemmType::GroupedContiguous"),
     ("7168", "4096", "256", "DeepGemmType::GroupedContiguous"),
     ("7168", "2048", "256", "DeepGemmType::GroupedContiguous"),
-
-    ("4096", "7168", "32", "DeepGemmType::GroupedContiguous"),
-    ("7168", "4096", "32", "DeepGemmType::GroupedContiguous"),
-    ("7168", "2048", "32", "DeepGemmType::GroupedContiguous"),
 ]
 
 GROUPED_MASKED_GEMM_CASES = [
     ("4096", "7168", "256", "DeepGemmType::GroupedMasked"),
     ("7168", "4096", "256", "DeepGemmType::GroupedMasked"),
     ("7168", "2048", "256", "DeepGemmType::GroupedMasked"),
-
-    ("4096", "7168", "2", "DeepGemmType::GroupedMasked"),
-    ("7168", "4096", "2", "DeepGemmType::GroupedMasked"),
-    ("7168", "2048", "2", "DeepGemmType::GroupedMasked"),
 ]
 
 dpsk_gemm_so_num = len(NORMAL_GEMM_CASES + GROUPED_CONTIGUOUS_GEMM_CASES + GROUPED_MASKED_GEMM_CASES)
@@ -43,44 +33,20 @@ QWEN_NORMAL_CASES = [
     ("4096", "2048", "1", "DeepGemmType::Normal"),
 
     # qwen3-30b-a3b tp=1/2
-    ("5120", "2048", "1", "DeepGemmType::Normal"),
-    ("2048", "4096", "1", "DeepGemmType::Normal"),
-    ("2560", "2048", "1", "DeepGemmType::Normal"),
-    ("2048", "2048", "1", "DeepGemmType::Normal"),
+    # ("5120", "2048", "1", "DeepGemmType::Normal"),
+    # ("2048", "4096", "1", "DeepGemmType::Normal"),
+    # ("2560", "2048", "1", "DeepGemmType::Normal"),
+    # ("2048", "2048", "1", "DeepGemmType::Normal"),
 ]
 
 QWEN_CONTIGUOUS_CASES = [
     ("3072", "4096", "128", "DeepGemmType::GroupedContiguous"),
     ("4096", "1536", "128", "DeepGemmType::GroupedContiguous"),
-
-    ("3072", "4096", "32", "DeepGemmType::GroupedContiguous"),
-    ("4096", "1536", "32", "DeepGemmType::GroupedContiguous"),
-
-    ("3072", "4096", "16", "DeepGemmType::GroupedContiguous"),
-    ("4096", "1536", "16", "DeepGemmType::GroupedContiguous"),
-
-    ("1536", "2048", "128", "DeepGemmType::GroupedContiguous"),
-    ("2048", "768", "128", "DeepGemmType::GroupedContiguous"),
-
-    ("1536", "2048", "64", "DeepGemmType::GroupedContiguous"),
-    ("2048", "768", "64", "DeepGemmType::GroupedContiguous"),
 ]
 
 QWEN_MASKED_CASES = [
     ("3072", "4096", "128", "DeepGemmType::GroupedMasked"),
     ("4096", "1536", "128", "DeepGemmType::GroupedMasked"),
-
-    ("3072", "4096", "32", "DeepGemmType::GroupedMasked"),
-    ("4096", "1536", "32", "DeepGemmType::GroupedMasked"),
-
-    ("3072", "4096", "16", "DeepGemmType::GroupedMasked"),
-    ("4096", "1536", "16", "DeepGemmType::GroupedMasked"),
-
-    ("1536", "2048", "128", "DeepGemmType::GroupedMasked"),
-    ("2048", "768", "128", "DeepGemmType::GroupedMasked"),
-
-    ("1536", "2048", "64", "DeepGemmType::GroupedMasked"),
-    ("2048", "768", "64", "DeepGemmType::GroupedMasked"),
 ]
 
 qwen_gemm_so_num = len(QWEN_NORMAL_CASES + QWEN_CONTIGUOUS_CASES + QWEN_MASKED_CASES)
@@ -199,7 +165,7 @@ dispatch_template = """
 """
 
 dispatch_template_tail = """
-    JIT::runKernel(output, lhs, lhs_scale, rhs, rhs_scale, grouped_layout, m, n, k, bm, bn, bk, num_groups, num_stages, num_tma_multicast, gemm_type, stream, num_sms, smem_size, swap_ab);
+    runKernel(output, lhs, lhs_scale, rhs, rhs_scale, grouped_layout, m, n, k, bm, bn, bk, num_groups, num_stages, num_tma_multicast, gemm_type, stream, num_sms, smem_size, swap_ab);
 }
 #endif
 } // namespace rtp_llm

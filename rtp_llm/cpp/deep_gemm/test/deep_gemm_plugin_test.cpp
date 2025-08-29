@@ -52,9 +52,7 @@ public:
         BufferPtr output = device_->allocateBuffer(
             {DataType::TYPE_BF16, {(unsigned long)m, (unsigned long)n}, AllocationType::DEVICE});
 
-        printf("============\n");
         DeepGemmPlugin::gemmFp8(*lhs, *rhs, *output, 0);
-        printf("============\n");
         auto gemm_output = torch::from_blob(output->data(),
                                             {(int64_t)m, (int64_t)n},
                                             torch::TensorOptions().dtype(torch::kBFloat16).device(torch::kCUDA));

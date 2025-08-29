@@ -10,11 +10,8 @@ load("//rtp_llm/cpp/deep_gemm:template.bzl", "NORMAL_GEMM_CASES", "GROUPED_CONTI
 cc_library(
     name = "deep_gemm_utils",
     hdrs = ["utils.h"],
-    srcs = ["utils.cc"],
     copts = copts(),
-    deps = [
-        "//rtp_llm/cpp:utils",
-    ],
+    deps = [],
     visibility = ["//visibility:public"],
 )
 
@@ -47,21 +44,9 @@ gen_dispatch_code(
 )
 
 filegroup(
-    name = "deep_gemm_utils_hdrs",
-    srcs = ["utils.h", "utils.cc"],
+    name = "deep_gemm_jit_srcs",
+    srcs = ["utils.h", "JIT.h", "JIT.cc"],
     visibility = ["//visibility:public"],
-)
-
-filegroup(
-    name = "deep_gemm_jit_include",
-    srcs = [
-        ":deep_gemm_utils_hdrs",
-        "interleave_ffma.py",
-        "JIT.h",
-        "JIT.cc"
-    ] + glob([
-        "include/*.cuh"
-    ]),
 )
 
 copy_filegroup(
@@ -73,9 +58,12 @@ copy_filegroup(
 filegroup(
     name = "jit_includes",
     srcs = [
-        ":deep_gemm_jit_include",
-        ":cutlass_hdrs"
-    ],
+        ":deep_gemm_jit_srcs",
+        ":cutlass_hdrs",
+        "interleave_ffma.py"
+    ] + glob([
+        "include/*.cuh"
+    ]),
     visibility = ["//visibility:public"],
 )
 
