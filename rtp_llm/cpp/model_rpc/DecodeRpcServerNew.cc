@@ -1,6 +1,4 @@
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServerNew.h"
-#include "rtp_llm/cpp/disaggregate/load_balancer/RRLoadBalancer.h"
-#include "rtp_llm/cpp/disaggregate/load_balancer/WRRLoadBalancer.h"
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 
 namespace rtp_llm {
@@ -14,77 +12,8 @@ grpc::Status DecodeRpcServerNew::init(const EngineInitParams&                   
         return ret;
     }
 
-    if (!initLoadBalancer()) {
-        RTP_LLM_LOG_ERROR("decode rpc server new init load balancer failed");
-        return grpc::Status(grpc::StatusCode::INTERNAL, "init load balancer failed");
-    }
-
     RTP_LLM_LOG_INFO("decode rpc server new init");
     return grpc::Status::OK;
-}
-
-bool DecodeRpcServerNew::ready() {
-    char* decode_cm2_config_env = std::getenv("RTP_LLM_DECODE_CM2_CONFIG");
-    if (!maga_init_params_.gpt_init_parameter.service_discovery_config.use_local && decode_cm2_config_env == nullptr) {
-        RTP_LLM_LOG_INFO("service discovery by master, skip load balancer check");
-        return true;
-    }
-
-    if (!load_balancer_) {
-        RTP_LLM_LOG_INFO("load balance is nullptr, server is not ready");
-        return false;
-    }
-
-    if (!load_balancer_->isReady(prefill_cluster_name_)) {
-        RTP_LLM_LOG_INFO("load balancer is not ready now, cluster not exist", prefill_cluster_name_.c_str());
-        return false;
-    }
-    return true;
-}
-
-bool DecodeRpcServerNew::initLoadBalancer() {
-    LoadBalancerInitParams init_params;
-    init_params.update_interval_ms      = 100;
-    init_params.sync_status_interval_ms = maga_init_params_.gpt_init_parameter.sync_status_interval_ms_;
-
-    if (maga_init_params_.gpt_init_parameter.service_discovery_config.use_local) {
-        char* remote_rpc_server_ip_env = std::getenv("REMOTE_RPC_SERVER_IP");
-        RTP_LLM_CHECK_WITH_INFO(remote_rpc_server_ip_env, "rpc server ip must be not empty");
-
-        prefill_cluster_name_ = "LOCAL";
-        if (!BaseLoadBalancer::makeLocalSubscribeConfig(init_params.subscribe_config,
-                                                        prefill_cluster_name_,
-                                                        remote_rpc_server_ip_env,
-                                                        maga_init_params_.gpt_init_parameter.remote_rpc_server_port_)) {
-            RTP_LLM_LOG_ERROR("make local subscribe config from config %s failed", remote_rpc_server_ip_env);
-            return false;
-        }
-        RTP_LLM_LOG_INFO("init load balancer with local mode, config is %s", remote_rpc_server_ip_env);
-    } else {
-        char* decode_cm2_config_env = std::getenv("RTP_LLM_DECODE_CM2_CONFIG");
-        if (decode_cm2_config_env == nullptr) {
-            RTP_LLM_LOG_INFO("RTP_LLM_DECODE_CM2_CONFIG is not set, use default subscribe config");
-            load_balancer_.reset(nullptr);
-            return true;
-        }
-        if (!BaseLoadBalancer::makeCm2SubscribeConfig(
-                init_params.subscribe_config, prefill_cluster_name_, decode_cm2_config_env)) {
-            RTP_LLM_LOG_ERROR("make cm2 subscribe config from config %s failed", decode_cm2_config_env);
-            return false;
-        }
-        RTP_LLM_LOG_INFO("init load balancer with cm2 mode, config is %s", decode_cm2_config_env);
-    }
-
-    if (maga_init_params_.gpt_init_parameter.load_balance_policy_name_ == "RR") {
-        load_balancer_.reset(new RRLoadBalancer);
-    } else {
-        load_balancer_.reset(new WRRLoadBalancer(maga_init_params_.gpt_init_parameter.cache_store_config));
-    }
-
-    RTP_LLM_CHECK_WITH_INFO(load_balancer_->init(init_params), "load_balancer init failed");
-    RTP_LLM_LOG_INFO("load balancer init success, policy is %s",
-                     maga_init_params_.gpt_init_parameter.load_balance_policy_name_.c_str());
-    return true;
 }
 
 grpc::Status DecodeRpcServerNew::GenerateStreamCall(grpc::ServerContext*                   server_context,
@@ -170,15 +99,28 @@ ErrorInfo DecodeRpcServerNew::callPrefill(DecodeGenerateContextNew& decode_conte
 
     auto                        role_addrs = QueryConverter::getRoleAddrs(&decode_context.request->generate_config());
     std::shared_ptr<const Host> host;
+
+    // Check if request specifies host for PREFILL role
     for (auto& role_addr : role_addrs) {
         if (role_addr.role == RoleType::PREFILL) {
             host = std::make_shared<const Host>(role_addr.ip, role_addr.grpc_port, role_addr.http_port);
             break;
         }
     }
-    if (!host && load_balancer_) {
-        host = load_balancer_->chooseHost(prefill_cluster_name_,
-                                          decode_context.request->generate_config().global_request_id());
+
+    // If no host specified in request, check if there's a master role
+    char* decode_cm2_config_env = std::getenv("RTP_LLM_DECODE_CM2_CONFIG");
+    bool  has_master_role =
+        !maga_init_params_.gpt_init_parameter.service_discovery_config.use_local
+        && (decode_cm2_config_env != nullptr
+            || !maga_init_params_.gpt_init_parameter.service_discovery_config.remote_rpc_server_ip.empty());
+
+    // For PD inversion where request directly reaches decode, we need to select prefill machines
+    if (!host && has_master_role) {
+        // This is a PD inversion scenario where request directly reached decode
+        // In this case, we need to select prefill machines
+        RTP_LLM_LOG_DEBUG("request [%s] PD inversion scenario, need to select prefill machines",
+                          decode_context.request_key.c_str());
     }
 
     if (!host || host->ip.empty()) {

@@ -122,7 +122,7 @@ class BackendRPCServerVisitor:
             route_logger.debug(f"routing to master done")
 
         kmonitor.report(GaugeMetrics.ROUTE_RT_METRIC, route_timer.cost_ms())
-        if self.separated_frontend and not input.generate_config.role_addrs:
+        if not input.generate_config.role_addrs:
             raise FtRuntimeException(
                 ExceptionType.ROUTE_ERROR,
                 f"request <{input.request_id}> no backend role addresses found after routing",
@@ -180,7 +180,7 @@ class BackendRPCServerVisitor:
             )
 
         # Only route IPs for separated_frontend
-        if self.host_service.service_available and self.separated_frontend:
+        if self.host_service.service_available:
             await self.route_ips(input)
 
         return self.model_rpc_client.enqueue(input)

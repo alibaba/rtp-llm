@@ -27,11 +27,10 @@ public:
                          py::object render);
     void addLora(const std::string& adapter_name, py::object lora_a_weights, py::object lora_b_weights);
     void removeLora(const std::string& adapter_name);
-    bool ready();
     rtp_llm::LoadBalanceInfo    getLoadBalanceInfo(int64_t latest_version);
     rtp_llm::EngineScheduleInfo getEngineScheduleInfo(int64_t latest_finished_version);
     rtp_llm::WorkerStatusInfo   getWorkerStatusInfo(int64_t latest_cache_version, int64_t latest_finished_version);
-    rtp_llm::KVCacheInfo    getCacheStatusInfo(int64_t latest_cache_version);
+    rtp_llm::KVCacheInfo        getCacheStatusInfo(int64_t latest_cache_version);
     // currently only used in BatchDecodeScheduler
     void updateSchedulerInfo(const std::string& scheduler_info);
     bool updateEplbConfig(const rtp_llm::EplbConfig& config);

@@ -108,9 +108,6 @@ class BackendApp(object):
             if server_shutdown:
                 detail = "this server has been shutdown"
                 ready = False
-            elif self.backend_server.ready() == False:
-                detail = "inference server is not ready"
-                ready = False
 
             if not ready:
                 raise HTTPException(

@@ -2,8 +2,6 @@
 
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/model_rpc/RpcServerRuntimeMeta.h"
-#include "rtp_llm/cpp/disaggregate/load_balancer/RRLoadBalancer.h"
-#include "rtp_llm/cpp/disaggregate/load_balancer/WRRLoadBalancer.h"
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/PrefillGenerateContext.h"
 
@@ -22,26 +20,22 @@ public:
                                     grpc::ServerWriter<GenerateOutputsPB>* writer);
 
     grpc::Status RemoteFinish(grpc::ServerContext* context, const RemoteFinishRequestPB* request, EmptyPB* response);
-    bool         ready();
 
 private:
-    void                   initLoadBalancer();
-    LoadBalancerInitParams makeConfig();
-    ErrorInfo              waitStreamBeforeRun(std::shared_ptr<GenerateStream> stream);
-    grpc::Status           prepareAllocateResource(PrefillGenerateContext& prefill_context);
-    void                   getRpcConnection(PrefillGenerateContext& prefill_context);
-    void                   multimodalProcess(PrefillGenerateContext& prefill_context);
-    void                   remoteAllocateResource(PrefillGenerateContext& prefill_context);
-    void                   enqueueRequest(PrefillGenerateContext& prefill_context);
-    void                   remoteLoadCacheStart(PrefillGenerateContext& prefill_context);
-    void                   pollLocalOutput(PrefillGenerateContext& prefill_context);
-    void                   remoteLoadCacheEnd(PrefillGenerateContext& prefill_context);
-    void                   remoteGenerate(PrefillGenerateContext& prefill_context);
-    void                   pollRemoteOutput(PrefillGenerateContext& prefill_context);
+    ErrorInfo    waitStreamBeforeRun(std::shared_ptr<GenerateStream> stream);
+    grpc::Status prepareAllocateResource(PrefillGenerateContext& prefill_context);
+    void         getRpcConnection(PrefillGenerateContext& prefill_context);
+    void         multimodalProcess(PrefillGenerateContext& prefill_context);
+    void         remoteAllocateResource(PrefillGenerateContext& prefill_context);
+    void         enqueueRequest(PrefillGenerateContext& prefill_context);
+    void         remoteLoadCacheStart(PrefillGenerateContext& prefill_context);
+    void         pollLocalOutput(PrefillGenerateContext& prefill_context);
+    void         remoteLoadCacheEnd(PrefillGenerateContext& prefill_context);
+    void         remoteGenerate(PrefillGenerateContext& prefill_context);
+    void         pollRemoteOutput(PrefillGenerateContext& prefill_context);
 
 private:
-    std::shared_ptr<BaseLoadBalancer> load_balancer_;
-    std::string                       decode_cluster_name_;
+    std::string decode_cluster_name_;
 };
 
 }  // namespace rtp_llm

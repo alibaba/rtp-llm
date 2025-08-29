@@ -59,9 +59,6 @@ class AsyncModel:
     def stop(self):
         self.decoder_engine_.stop()
 
-    def ready(self):
-        return self.decoder_engine_.ready()
-
     @torch.no_grad()
     def enqueue(self, input: GenerateInput):
         if g_parallel_info.tp_size > 1 and g_parallel_info.tp_rank > 0:
@@ -93,10 +90,14 @@ class AsyncModel:
             latest_cache_version, latest_finished_version
         )
 <<<<<<< HEAD
+<<<<<<< HEAD
 
     def get_cache_status_info(self, latest_cache_version: int) -> CacheStatusInfo:
 =======
         
+=======
+
+>>>>>>> refactor - rm load_balance in cpp
     def get_cache_status_info(self, latest_cache_version: int) -> KVCacheInfo:
 >>>>>>> fix: fix grpc status bugs
         return self.decoder_engine_.get_cache_status_info(latest_cache_version)

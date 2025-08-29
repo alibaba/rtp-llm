@@ -517,7 +517,6 @@ cc_library(
         "//rtp_llm/cpp:model_rpc_pool",
         "//rtp_llm/cpp:multimodal_processor",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store",
-        "//rtp_llm/cpp/disaggregate/load_balancer:load_balancer",
         "@havenask//aios/autil:net",
     ],
     visibility = ["//visibility:public"]

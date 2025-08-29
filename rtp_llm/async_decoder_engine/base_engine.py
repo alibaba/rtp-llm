@@ -22,10 +22,6 @@ class BaseEngine:
         raise NotImplementedError()
 
     @abstractmethod
-    def ready(self) -> bool:
-        raise NotImplementedError()
-
-    @abstractmethod
     def decode(self, input: Any) -> AsyncGenerator[Any, None]:
         raise NotImplementedError()
 

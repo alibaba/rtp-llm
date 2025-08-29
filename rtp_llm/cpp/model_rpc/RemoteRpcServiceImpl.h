@@ -67,8 +67,9 @@ public:
         return decode_server_->RemoteGenerate(context, stream);
     }
 
-     grpc::Status RemoteGenerateNew(grpc::ServerContext* context,
-                const RemoteGenerateRequestPBNew* request, RemoteGenerateResponsePBNew* response) override {
+    grpc::Status RemoteGenerateNew(grpc::ServerContext*              context,
+                                   const RemoteGenerateRequestPBNew* request,
+                                   RemoteGenerateResponsePBNew*      response) override {
         if (!prefill_server_new_) {
             auto error_msg = "server not implement RemoteGenerateNew";
             RTP_LLM_LOG_ERROR(error_msg);
@@ -77,8 +78,9 @@ public:
         return prefill_server_new_->RemoteGenerateNew(context, request, response);
     }
 
-    grpc::Status RemoteStore(grpc::ServerContext* context, const RemoteStoreRequestPB* request,
-                              RemoteStoreResponsePB* response) override {
+    grpc::Status RemoteStore(grpc::ServerContext*        context,
+                             const RemoteStoreRequestPB* request,
+                             RemoteStoreResponsePB*      response) override {
         if (!prefill_server_new_) {
             auto error_msg = "server not implement RemoteStore";
             RTP_LLM_LOG_ERROR(error_msg);
@@ -87,22 +89,14 @@ public:
         return prefill_server_new_->RemoteStore(context, request, response);
     }
 
-    grpc::Status RemoteFinishNew(grpc::ServerContext* context, const RemoteFinishRequestPB* request,
-                                 EmptyPB* response) override {
+    grpc::Status
+    RemoteFinishNew(grpc::ServerContext* context, const RemoteFinishRequestPB* request, EmptyPB* response) override {
         if (!prefill_server_new_) {
             auto error_msg = "server not implement RemoteFinishNew";
             RTP_LLM_LOG_ERROR(error_msg);
             return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
         }
         return prefill_server_new_->RemoteFinish(context, request, response);
-    }
-
-    bool ready() override {
-        if (prefill_server_) {
-            return prefill_server_->ready();
-        } else {
-            return decode_server_->ready();
-        }
     }
 
     void stop() override {
@@ -114,11 +108,11 @@ public:
     }
 
 private:
-    std::shared_ptr<PrefillRpcServer> prefill_server_;
-    std::shared_ptr<DecodeRpcServer> decode_server_;
-    bool decode_entrance_ = false;
+    std::shared_ptr<PrefillRpcServer>    prefill_server_;
+    std::shared_ptr<DecodeRpcServer>     decode_server_;
+    bool                                 decode_entrance_ = false;
     std::shared_ptr<PrefillRpcServerNew> prefill_server_new_;
-    std::shared_ptr<DecodeRpcServerNew> decode_server_new_;
+    std::shared_ptr<DecodeRpcServerNew>  decode_server_new_;
 };
 
 }  // namespace rtp_llm

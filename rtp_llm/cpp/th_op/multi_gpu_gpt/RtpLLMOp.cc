@@ -178,11 +178,6 @@ void RtpLLMOp::initRPCServer(const rtp_llm::EngineInitParams                    
     RTP_LLM_LOG_INFO("Server exit on %s", server_address.c_str());
 }
 
-bool RtpLLMOp::ready() {
-    pybind11::gil_scoped_release release;
-    return model_rpc_service_->ready();
-}
-
 void RtpLLMOp::startHttpServer(py::object model_weights_loader,
                                py::object lora_infos,
                                py::object gang_info,
@@ -289,7 +284,6 @@ void registerRtpLLMOp(const py::module& m) {
         .def("get_cache_status_info", &torch_ext::RtpLLMOp::getCacheStatusInfo, py::arg("latest_cache_version"))
         .def("update_scheduler_info", &torch_ext::RtpLLMOp::updateSchedulerInfo, py::arg("scheduler_info"))
         .def("stop", &torch_ext::RtpLLMOp::stop)
-        .def("ready", &torch_ext::RtpLLMOp::ready)
         .def("update_eplb_config", &torch_ext::RtpLLMOp::updateEplbConfig, py::arg("config"))
         .def("pause", &torch_ext::RtpLLMOp::pause)
         .def("restart", &torch_ext::RtpLLMOp::restart);

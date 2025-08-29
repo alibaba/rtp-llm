@@ -4,7 +4,13 @@ from typing import Dict, List, Optional
 from rtp_llm.frontend.token_processor import TokenProcessor
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.propose_model.propose_model import ProposeModel
-from rtp_llm.ops import EngineScheduleInfo, EplbConfig, EplbMode, LoadBalanceInfo, WorkerStatusInfo, KVCacheInfo
+from rtp_llm.ops import (
+    EngineScheduleInfo,
+    EplbConfig,
+    EplbMode,
+    KVCacheInfo,
+    LoadBalanceInfo,
+)
 from rtp_llm.ops import RtpLLMOp as CppRtpLLMOp
 from rtp_llm.ops import WorkerStatusInfo
 from rtp_llm.utils.mm_process_engine import MMProcessEngine
@@ -33,9 +39,6 @@ class RtpLLMOp:
 
     def stop(self):
         self.ft_op.stop()  # type: ignore
-
-    def ready(self):
-        return self.ft_op.ready()
 
     def get_load_balance_info(self, latest_cache_version: int) -> LoadBalanceInfo:
         return self.ft_op.get_load_balance_info(latest_cache_version)  # type: ignore

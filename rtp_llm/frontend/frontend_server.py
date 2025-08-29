@@ -64,8 +64,9 @@ class FrontendServer(object):
                     self._frontend_worker.backend_rpc_server_visitor,
                 )
 
-    def ready(self):
-        return True
+    def stop(self):
+        if self._frontend_worker is not None:
+            self._frontend_worker.stop()
 
     # use asyncio.sleep(0) to correctly exit when client closed https://github.com/tiangolo/fastapi/issues/4146
     async def stream_response(

@@ -691,7 +691,6 @@ class WorkerStatusInfo:
     precision: str
     def __init__(self) -> None: ...
 
-
 class MiscellaneousConfig:
     load_balance: int
     step_records_max_size: int
@@ -944,7 +943,6 @@ class RtpLLMOp:
         propose_model: typing.Any,
         token_processor: typing.Any,
     ) -> None: ...
-    def ready(self) -> bool: ...
     def remove_lora(self, adapter_name: str) -> None: ...
     def start_http_server(
         self,

@@ -84,10 +84,6 @@ public:
         return local_server_->onflightRequestNum();
     }
 
-    virtual bool ready() {
-        return local_server_->ready();
-    }
-
     virtual void stop() {
         if (local_server_) {
             local_server_->stop();

@@ -32,9 +32,6 @@ class FakeModel(BaseModel):
     def load(self, ckpt_path: str):
         pass
 
-    def ready(self):
-        return True
-
     def stop(self):
         pass
 

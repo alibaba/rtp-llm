@@ -20,9 +20,6 @@ public:
                             const BroadcastLoadRequestPB* request,
                             BroadcastLoadResponsePB*      response);
 
-    bool ready() {
-        return true;
-    }
     class LoadKVCacheContext {
     public:
         LoadKVCacheContext(int64_t                         request_id,

@@ -78,96 +78,7 @@ grpc::Status PrefillRpcServer::init(const EngineInitParams&                     
     if (!ret.ok()) {
         return ret;
     }
-    initLoadBalancer();
     return grpc::Status::OK;
-}
-
-void PrefillRpcServer::initLoadBalancer() {
-    auto config = makeConfig();
-    if (maga_init_params_.gpt_init_parameter.load_balance_policy_name_ == "RR") {
-        load_balancer_ = std::make_shared<RRLoadBalancer>();
-    } else {
-        load_balancer_ = std::make_shared<WRRLoadBalancer>(maga_init_params_.gpt_init_parameter.cache_store_config);
-    }
-    RTP_LLM_CHECK_WITH_INFO(load_balancer_->init(config), "load_balancer init failed");
-    RTP_LLM_LOG_INFO("load balancer init success");
-}
-
-LoadBalancerInitParams PrefillRpcServer::makeConfig() {
-    char*                  domains_config_env = std::getenv("RTP_LLM_DECODE_DOMAINS_CONFIG");
-    SubscribeServiceConfig subscribe_config;
-    if (maga_init_params_.gpt_init_parameter.service_discovery_config.use_local) {
-        // fake test
-
-        vector<string> remote_addrs =
-            split(maga_init_params_.gpt_init_parameter.service_discovery_config.remote_rpc_server_ip, ',');
-        RTP_LLM_CHECK_WITH_INFO(!remote_addrs.empty(), "REMOTE_RPC_SERVER_IP contains no valid addresses");
-
-        decode_cluster_name_ = "LOCAL";
-        LocalSubscribeServiceConfig local_config;
-
-        if (remote_addrs.size() > 1) {
-            for (const string& addr : remote_addrs) {
-                auto [ip, port_str] = split_ip_port(addr);
-                RTP_LLM_CHECK_WITH_INFO(!ip.empty() && !port_str.empty(),
-                                        "Invalid address format in REMOTE_RPC_SERVER_IP_LIST: " + addr);
-                uint32_t port = parse_port(port_str);
-                RTP_LLM_LOG_INFO("Adding remote rpc server addr: %s:%u", ip.c_str(), port);
-                // rpc port, http port
-                local_config.nodes.emplace_back(decode_cluster_name_, ip, port, port + 4);
-            }
-        } else {
-            const auto& addr    = remote_addrs.front();
-            auto [ip, port_str] = split_ip_port(addr);
-            uint32_t port;
-
-            if (ip.empty() || port_str.empty()) {
-                RTP_LLM_LOG_WARNING("Using Deprecated method to get remote rpc server addr");
-                ip   = remote_addrs.front();
-                port = maga_init_params_.gpt_init_parameter.remote_rpc_server_port_;
-            } else {
-                port = parse_port(port_str);
-            }
-
-            RTP_LLM_LOG_INFO("Adding remote rpc server addr: %s:%u", ip.c_str(), port);
-            // rpc port, http port
-            local_config.nodes.emplace_back(decode_cluster_name_, ip, port, port + 4);
-        }
-
-        subscribe_config.local_configs.push_back(local_config);
-    } else if (domains_config_env) {
-        string                       domains_config_str = std::string(domains_config_env);
-        DomainSubscribeServiceConfig domain_service_config;
-        try {
-            FromJsonString(domain_service_config, domains_config_str);
-        } catch (autil::legacy::ExceptionBase& e) {
-            RTP_LLM_CHECK_WITH_INFO("create domain config from json str[%s] failed", domains_config_str.c_str());
-        }
-        decode_cluster_name_ = domain_service_config.domain;
-        subscribe_config.domain_configs.push_back(domain_service_config);
-    } else {
-        string decode_cm2_config_str = maga_init_params_.gpt_init_parameter.service_discovery_config.decode_cm2_config;
-        RTP_LLM_CHECK_WITH_INFO(!decode_cm2_config_str.empty(), "decode_cm2_config must be not empty");
-
-        Cm2ClusterConfig decode_cm2_config;
-        try {
-            FromJsonString(decode_cm2_config, decode_cm2_config_str);
-        } catch (autil::legacy::ExceptionBase& e) {
-            RTP_LLM_CHECK_WITH_INFO(false, "create json from str[%s] failed", decode_cm2_config_str.c_str());
-        }
-        decode_cluster_name_ = decode_cm2_config.cluster_name;
-        CM2SubscribeServiceConfig cm2_service_config;
-        cm2_service_config.zk_host       = decode_cm2_config.zk_host;
-        cm2_service_config.zk_path       = decode_cm2_config.zk_path;
-        cm2_service_config.zk_timeout_ms = 10 * 1000;
-        cm2_service_config.clusters      = {decode_cm2_config.cluster_name};
-        subscribe_config.cm2_configs.push_back(cm2_service_config);
-    }
-    LoadBalancerInitParams params;
-    params.subscribe_config        = subscribe_config;
-    params.update_interval_ms      = 100;
-    params.sync_status_interval_ms = maga_init_params_.gpt_init_parameter.sync_status_interval_ms_;
-    return params;
 }
 
 ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> stream) {
@@ -204,6 +115,8 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
 
     auto&                       role_addrs = prefill_context.generate_input->generate_config->role_addrs;
     std::shared_ptr<const Host> host;
+
+    // Check if request specifies host for DECODE role
     for (auto& role_addr : role_addrs) {
         if (role_addr.role == RoleType::DECODE) {
             host = std::make_shared<const Host>(role_addr.ip, role_addr.grpc_port, role_addr.http_port);
@@ -211,9 +124,19 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
         }
     }
 
-    if (!host) {
-        host = load_balancer_->chooseHost(decode_cluster_name_,
-                                          prefill_context.rpc_context.request->generate_config().global_request_id());
+    // If no host specified in request, check if there's a master role
+    bool has_master_role =
+        !maga_init_params_.gpt_init_parameter.service_discovery_config.use_local
+        && !maga_init_params_.gpt_init_parameter.service_discovery_config.remote_rpc_server_ip.empty();
+
+    // If no host specified in request and no master role, this is a direct prefill request
+    // In this case, we still need to select decode machines as specified in the requirements
+    if (!host && !has_master_role) {
+        // For direct prefill requests without master role, we still need to select decode machines
+        // The current logic will fail as expected since no host is available
+        RTP_LLM_LOG_DEBUG(
+            "request [%ld] no host specified in request and no master role, need to select decode machines",
+            prefill_context.request_id);
     }
 
     if (!host || host->ip.empty()) {
@@ -488,18 +411,6 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
     RTP_LLM_LOG_DEBUG("request [%ld] all done", prefill_context.request_id);
 
     return grpc::Status::OK;
-}
-
-bool PrefillRpcServer::ready() {
-    if (!load_balancer_) {
-        RTP_LLM_LOG_INFO("load balance is nullptr, server is not ready");
-        return false;
-    }
-    auto ret = load_balancer_->isReady(decode_cluster_name_);
-    if (!ret) {
-        RTP_LLM_LOG_INFO("load balancer is not ready now");
-    }
-    return ret;
 }
 
 grpc::Status

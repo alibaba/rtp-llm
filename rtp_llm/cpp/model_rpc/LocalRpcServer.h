@@ -71,10 +71,6 @@ public:
 
     virtual size_t onflightRequestNum();
 
-    bool ready() {
-        return true;
-    }
-
     void stop() {
         (void)engine_->stop();
     }
