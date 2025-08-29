@@ -504,11 +504,13 @@ KVBlockArray ROCmDevice::getKVBlockArray(const AttentionModuleParams& params,
     }
     KvCacheDataType cache_type = KvCacheDataType::BASE;
 #ifdef ENABLE_FP8
-    if (use_fp8_fmha) {
+    if (use_fp8_fmha_) {
         cache_type = KvCacheDataType::FP8;
     } else
 #endif
-        if (kv_cache->k_scale_buffer && params.configs.kv_cache_dtype == KvCacheDataType::INT8) {
+        if (use_fp8_fmha) {
+        cache_type = KvCacheDataType::FP8;
+    } else if (kv_cache->k_scale_buffer && params.configs.kv_cache_dtype == KvCacheDataType::INT8) {
         RTP_LLM_LOG_DEBUG("now use kv_cache int8");
         cache_type = KvCacheDataType::INT8;
     }
@@ -529,12 +531,12 @@ ParamsPtr ROCmDevice::PrepareCKAttn(const AttentionConfigs& configs,
     }
     auto ck_attn = std::make_shared<CKAttn>();
     KvCacheDataType cache_type = KvCacheDataType::BASE;
-    #ifdef ENABLE_FP8
+#ifdef ENABLE_FP8
     if (use_fp8_fmha_) {
         cache_type = KvCacheDataType::FP8;
     } else
-    #endif
-    if (configs.kv_cache_dtype == KvCacheDataType::INT8) {
+#endif
+	if (configs.kv_cache_dtype == KvCacheDataType::INT8) {
         RTP_LLM_LOG_DEBUG("now use kv_cache int8");
         cache_type = KvCacheDataType::INT8;
     }

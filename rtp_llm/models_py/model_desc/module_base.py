@@ -2,22 +2,8 @@ import logging
 from typing import Optional
 import torch
 from torch import nn
-
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_loader.model_weight_info import ModelWeights
-hip_version = getattr(torch.version, "hip", None)
-if  not hip_version:
-    from rtp_llm.models_py.modules.fmha import (
-        DECODE_MHA_IMPS,
-        PREFILL_MHA_IMPS,
-        FMHAImplBase,
-    )
-else:
-    from rtp_llm.models_py.modules.rocm.fmha import (
-        DECODE_MHA_IMPS,
-        PREFILL_MHA_IMPS,
-        FMHAImplBase,
-    )
 from rtp_llm.ops import (
     DeviceType,
     KVCache,
@@ -28,6 +14,11 @@ from rtp_llm.ops import (
     get_device,
 )
 
+from rtp_llm.models_py.modules import (
+    DECODE_MHA_IMPS,
+    PREFILL_MHA_IMPS,
+    FMHAImplBase,
+)
 
 class GptModelBase(nn.Module):
     def __init__(self, config: GptInitModelParameters, weight: ModelWeights) -> None:

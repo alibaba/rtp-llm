@@ -1,6 +1,7 @@
 import torch
 import logging
 from typing import Optional, Any, List
+from rtp_llm.models_py.modules.fmha import FMHAImplBase
 from rtp_llm.ops import PyAttentionInputs, FMHAType, KVCache
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from libth_transformer.rtp_llm_ops import FusedRopeKVCachePrefillOp, FusedRopeKVCacheDecodeOp
@@ -20,53 +21,6 @@ class FMHAParams:
         self.kv_cache_block_id_host = kv_cache_block_id_host
         self.kv_cache_block_id_device = kv_cache_block_id_device
         self.input_lengths = input_lengths
-
-class FMHAImplBase(object):
-    fmha_impl: Any
-    fmha_params: Any
-    rope_params: Any
-    rope_kvcache_impl: Any
-    attn_inputs: PyAttentionInputs
-    support_: bool = False
-
-    def __init__(self,
-                 fmha_impl: Any,
-                 rope_kvcache_impl: Any,
-                 attn_inputs: PyAttentionInputs,
-                 init_params: bool = True) -> None:
-        self.fmha_impl = fmha_impl
-        self.support_: bool = self.fmha_impl.support(attn_inputs)
-        self.fmha_params = None
-        self.rope_params = None
-        if self.support_ and init_params:
-            self.rope_kvcache_impl = rope_kvcache_impl
-            self.prepare(attn_inputs)
-            self.attn_inputs = attn_inputs
-
-    def forward(self, qkv: torch.Tensor, kv_cache: Optional[KVCache]) -> torch.Tensor:
-        assert self.rope_kvcache_impl is not None and self.rope_params is not None
-        
-        fmha_input = self.rope_kvcache_impl.forward(
-            qkv, self.fmha_type(), kv_cache, self.rope_params
-        )
-        assert self.fmha_impl is not None
-
-        res = self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
-        return res
-
-    @staticmethod
-    def fmha_type() -> FMHAType:
-        return FMHAType.NONE
-
-    def support(self): # type: ignore
-        return self.support_
-
-    def prepare(self, attn_inputs: PyAttentionInputs):
-        assert self.fmha_impl is not None
-        self.fmha_params = self.fmha_impl.prepare(attn_inputs)
-        assert self.rope_kvcache_impl is not None
-        self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
-
 
 class FMHAPrefillImplBase(FMHAImplBase):
 

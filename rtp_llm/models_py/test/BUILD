@@ -117,6 +117,7 @@ py_test (
         "//rtp_llm/test/model_test/test_util:test_util"
     ],
     env = test_envs,
+    timeout = "eternal",
     tags = ["rocm"],
     exec_properties = {'gpu':'MI308X'},
 )

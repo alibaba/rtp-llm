@@ -8,44 +8,6 @@
 
 namespace rtp_llm {
 
-torch::Tensor genNormalCosSin(int rope_dim, int rope_theta, float rope_scale, int max_position_embeddings) {
-    auto inv_freq =
-        1.0 / torch::pow(rope_theta, torch::arange(0, rope_dim, 2, torch::kInt64).to(torch::kFloat32) / rope_dim);
-    auto t = torch::arange(max_position_embeddings, torch::kInt64).to(torch::kFloat32);
-    t.div_(rope_scale);
-    auto freqs   = torch::outer(t, inv_freq);
-    auto cos     = freqs.cos().to(torch::kFloat32);
-    auto sin     = freqs.sin().to(torch::kFloat32);
-    auto cos_sin = torch::stack({cos, sin}, 0).permute({1, 2, 0}).reshape({cos.size(0), -1}).contiguous();
-    return cos_sin.cuda();
-}
-
-torch::Tensor getRopeCosSin(
-    RopeStyle rope_style, int rope_dim, int rope_theta, float rope_scale, int max_position_embeddings = 128000) {
-    RTP_LLM_LOG_INFO("rope: style = %d, dim = %d, theta = %d, scale = %f, max_position_embeddings = %d",
-                     rope_style,
-                     rope_dim,
-                     rope_theta,
-                     rope_scale,
-                     max_position_embeddings);
-    torch::Tensor cos_sin;
-
-    switch (rope_style) {
-        case RopeStyle::No:
-            break;
-
-        case RopeStyle::Base:
-            cos_sin = genNormalCosSin(rope_dim, rope_theta, rope_scale, max_position_embeddings);
-            break;
-
-        default:
-            RTP_LLM_LOG_WARNING("unsupported rope_style = %d, not use rope_cache", rope_style);
-            break;
-    }
-
-    return cos_sin;
-}
-
 FusedRopeKVCachePrefillOp::FusedRopeKVCachePrefillOp(const GptInitParameter& gpt_init_parameter):
     FMHARocmBase(gpt_init_parameter) {}
 
@@ -298,10 +260,6 @@ torch::Tensor FusedRopeKVCacheDecodeOp::forward(const torch::Tensor&            
     bool   store_q     = true;
     bool   store_kv    = false;
     bool   store_cache = kv_cache.has_value();
-    // static torch::Tensor cos_sin_cache = getRopeCosSin(attn_configs_.rope_config.style,
-    //                                                    attn_configs_.rope_config.dim,
-    //                                                    attn_configs_.rope_config.base,
-    //                                                    attn_configs_.rope_config.scale);
 
     if (bool(autil::EnvUtil::getEnv("USE_AITER_PA", 0L))) {
         // Use the offset_kv_block_array for AITER_PA path

@@ -6,7 +6,6 @@ import torch
 import torch.nn.functional as F
 from aiter import dtypes
 import aiter
-import pytest
 from typing import Optional, List, Tuple
     
 def construct_local_mask(
