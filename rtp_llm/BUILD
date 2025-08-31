@@ -6,6 +6,8 @@ load("//bazel:arch_select.bzl", "requirement", "whl_deps", "internal_deps", "jit
 load("//open_source/bazel:arch_select.bzl", "platform_deps")
 load("//bazel:bundle.bzl", "bundle_files", "bundle_tar")
 
+load("@version//:defs.bzl", "VERSION")
+
 load(
     "@local_config_rocm//rocm:build_defs.bzl",
     "rocm_default_copts",
@@ -478,7 +480,7 @@ py_wheel(
     distribution = "rtp_llm",
     python_tag = "py3",
     tags = ["manual", "local", "no-remote"],
-    version = "0.2.0",
+    version = VERSION,
     deps = [
         ":rtp_llm_package",
         "//deps:extension_package",
@@ -503,19 +505,19 @@ py_wheel(
 
 rename_wheel_aarch64(
     name = "rtp_llm_aarch64",
-    package_name = "rtp_llm-0.2.0",
+    package_name = "rtp_llm-%s" % VERSION,
     src = ":rtp_llm_whl",
 )
 
 rename_wheel(
     name = "rtp_llm",
-    package_name = "rtp_llm-0.2.0",
+    package_name = "rtp_llm-%s" % VERSION,
     src = ":rtp_llm_whl",
 )
 
 rename_wheel(
     name = "rtp_llm_cuda12",
-    package_name = "rtp_llm-0.2.0+cuda121",
+    package_name = "rtp_llm-%s+cuda121" % VERSION,
     src = ":rtp_llm_whl",
 )
 
