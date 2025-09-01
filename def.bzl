@@ -207,3 +207,14 @@ def gen_cpp_code(name, elements_list, template_header, template, template_tail,
         name = name,
         srcs = files
     )
+
+
+def _read_release_version_impl(repository_ctx):
+    release_version = repository_ctx.read(repository_ctx.path(Label("//:release_version"))).strip()
+    repository_ctx.file("BUILD", "")
+    repository_ctx.file("defs.bzl", "RELEASE_VERSION = '{}'".format(release_version))
+
+read_release_version = repository_rule(
+    implementation = _read_release_version_impl,
+    attrs = {},
+)
