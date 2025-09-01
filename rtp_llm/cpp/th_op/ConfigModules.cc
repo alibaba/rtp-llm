@@ -11,7 +11,7 @@ namespace rtp_llm {
 int         StaticConfig::user_deep_gemm_num_sm          = -1;
 bool        StaticConfig::user_arm_gemm_use_kai          = false;
 bool        StaticConfig::user_ft_core_dump_on_exception = false;
-bool        StaticConfig::user_disable_pdl               = false;
+bool        StaticConfig::user_disable_pdl               = true;
 std::string StaticConfig::user_torch_cuda_profiler_dir   = "";
 bool        StaticConfig::use_aiter_pa                   = true;
 
@@ -587,7 +587,7 @@ void MiscellaneousConfig::update_from_env_for_test() {
     load_balance            = autil::EnvUtil::getEnv("LOAD_BALANCE", 0);
     step_records_time_range = autil::EnvUtil::getEnv("STEP_RECORDS_TIME_RANGE", 60 * 1000 * 1000);
     step_records_max_size   = autil::EnvUtil::getEnv("STEP_RECORDS_MAX_SIZE", 1000);
-    disable_pdl             = bool_from_env_for_test("DISABLE_PDL", false);
+    disable_pdl             = bool_from_env_for_test("DISABLE_PDL", true);
 }
 
 void register_misc_config(pybind11::module& m) {
@@ -596,7 +596,7 @@ void register_misc_config(pybind11::module& m) {
              pybind11::arg("load_balance")            = 0,
              pybind11::arg("step_records_time_range") = 60 * 1000 * 1000,
              pybind11::arg("step_records_max_size")   = 1000,
-             pybind11::arg("disable_pdl")             = false)
+             pybind11::arg("disable_pdl")             = true)
         .def("to_string", &MiscellaneousConfig::to_string)
         .def("update_from_env", &MiscellaneousConfig::update_from_env_for_test)
         .def_readwrite("load_balance", &MiscellaneousConfig::load_balance)

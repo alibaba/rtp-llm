@@ -39,6 +39,6 @@ def init_misc_group_args(parser):
         "--disable_pdl",
         env_name="DISABLE_PDL",
         type=str2bool,
-        default=False,
+        default=True,
         help="是否禁用PDL",
     )

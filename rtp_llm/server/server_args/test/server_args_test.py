@@ -267,7 +267,7 @@ class ServerArgsDefaultTest(TestCase):
         self.assertEqual(env.get("LOAD_BALANCE"), "0")
         self.assertEqual(env.get("STEP_RECORDS_TIME_RANGE"), "60000000")
         self.assertEqual(env.get("STEP_RECORDS_MAX_SIZE"), "1000")
-        self.assertEqual(env.get("DISABLE_PDL"), "0")
+        self.assertEqual(env.get("DISABLE_PDL"), "1")
 
 
 class ServerArgsSetTest(TestCase):

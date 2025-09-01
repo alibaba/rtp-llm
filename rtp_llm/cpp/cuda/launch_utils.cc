@@ -11,7 +11,7 @@ bool getEnvEnablePDL() {
     static bool           enablePDL = true;
 
     std::call_once(flag, [&]() {
-        enablePDL = StaticConfig::user_disable_pdl;
+        enablePDL = !StaticConfig::user_disable_pdl;
         RTP_LLM_LOG_INFO("RTPLLM_ENABLE_PDL: %d", int(enablePDL));
     });
     return enablePDL;

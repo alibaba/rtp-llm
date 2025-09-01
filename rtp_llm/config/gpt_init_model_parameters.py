@@ -758,7 +758,7 @@ class GptInitModelParameters:
                 "STEP_RECORDS_TIME_RANGE", 60 * 1000 * 1000
             ),
             step_records_max_size=get_env_int("STEP_RECORDS_MAX_SIZE", 1000),
-            disable_pdl=get_env_bool("DISABLE_PDL", False),
+            disable_pdl=get_env_bool("DISABLE_PDL", True),
         )
 
         # ArpcConfig
@@ -1103,7 +1103,8 @@ class GptInitModelParameters:
             logging.info(f"decode_entrance: {self.decode_entrance}")
 
             if (not self.decode_entrance and self.role_type in [RoleType.PREFILL]) or (
-                self.decode_entrance and self.role_type in [RoleType.DECODE]):
+                self.decode_entrance and self.role_type in [RoleType.DECODE]
+            ):
                 self.load_balance_policy_name = os.environ.get(
                     "LOAD_BALANCE_POLICY_NAME", "RR"
                 )
