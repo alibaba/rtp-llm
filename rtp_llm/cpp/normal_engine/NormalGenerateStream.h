@@ -15,8 +15,9 @@ public:
                          const rtp_llm::GptInitParameter&      params,
                          const ResourceContext&                resource_context,
                          kmonitor::MetricsReporterPtr          metrics_reporter,
-                         size_t                                extra_reserve_token_num = 0):
-        GenerateStream(query, params, resource_context, metrics_reporter, extra_reserve_token_num),
+                         size_t                                extra_reserve_token_num = 0,
+                         bool                                  perf_test               = false):
+        GenerateStream(query, params, resource_context, metrics_reporter, extra_reserve_token_num, perf_test),
         request_id_(query->request_id) {
         generate_outputs_queue_.setCapacity(1000);
     }

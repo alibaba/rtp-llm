@@ -74,10 +74,9 @@ NormalEngine::~NormalEngine() {
 
 absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<GenerateInput>& generate_input,
                                                        preRunMode                            mode) {
-    auto stream = std::make_shared<NormalGenerateStream>(generate_input, params_, resource_context_, nullptr);
-    if (mode == preRunMode::prefill_warm_up) {
-        stream->setPerfTest(true);
-    } else if (mode == preRunMode::decode_warm_up) {
+    auto stream = std::make_shared<NormalGenerateStream>(
+        generate_input, params_, resource_context_, nullptr, 0, mode == preRunMode::prefill_warm_up);
+    if (mode == preRunMode::decode_warm_up) {
         stream->setIsContextStream(false);
         stream->fakeInitKVBlock();
     } else if (mode == preRunMode::build_system_prompt) {

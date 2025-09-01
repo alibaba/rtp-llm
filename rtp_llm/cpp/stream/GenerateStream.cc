@@ -21,7 +21,8 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
                                const rtp_llm::GptInitParameter& params,
                                const ResourceContext&           resource_context,
                                kmonitor::MetricsReporterPtr     metrics_reporter,
-                               size_t                           extra_reserve_token_num):
+                               size_t                           extra_reserve_token_num,
+                               bool                             perf_test):
     generate_input_(input),
     max_seq_len_(params.max_seq_len_),
     vocab_size_(params.vocab_size_),
@@ -42,7 +43,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     }
 
     // batch size depends on perf_test_, initialize it first
-    perf_test_ = autil::EnvUtil::getEnv("PERF_TEST", false);
+    perf_test_ = perf_test || autil::EnvUtil::getEnv("PERF_TEST", false);
     if (perf_test_ && hasNumBeams()) {
         // TODO(zhangjianning.zjn): support perf test for beam search
         RTP_LLM_LOG_WARNING("beam search does not support PERF_TEST for now");

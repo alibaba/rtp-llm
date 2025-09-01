@@ -157,12 +157,15 @@ void SpeculativeEngine::initLoadBalance() {
 
 absl::StatusOr<GenerateStreamPtr> SpeculativeEngine::preRun(const std::shared_ptr<GenerateInput>& generate_input,
                                                             preRunMode                            mode) {
-    std::shared_ptr<GenerateStream> score_stream = std::make_shared<NormalGenerateStream>(
-        generate_input, score_model_params_.gpt_init_parameter, resource_context_, nullptr);
+    std::shared_ptr<GenerateStream> score_stream =
+        std::make_shared<NormalGenerateStream>(generate_input,
+                                               score_model_params_.gpt_init_parameter,
+                                               resource_context_,
+                                               nullptr,
+                                               0,
+                                               mode == preRunMode::prefill_warm_up);
     std::shared_ptr<GenerateStream> propose_stream = nullptr;
-    if (mode == preRunMode::prefill_warm_up) {
-        score_stream->setPerfTest(true);
-    } else if (mode == preRunMode::decode_warm_up) {
+    if (mode == preRunMode::decode_warm_up) {
         score_stream->setIsContextStream(false);
     } else if (mode == preRunMode::build_system_prompt) {
         THROW_IF_STATUSOR_ERROR(score_stream->initKVBlock(0, 0));

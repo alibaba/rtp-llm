@@ -80,7 +80,8 @@ public:
                    const rtp_llm::GptInitParameter&      params,
                    const ResourceContext&                resource_context,
                    kmonitor::MetricsReporterPtr          metrics_reporter,
-                   size_t                                extra_reserve_token_num = 0);
+                   size_t                                extra_reserve_token_num = 0,
+                   bool                                  pert_test               = false);
     virtual ~GenerateStream() {
         reportMetric();
         releaseResource();
