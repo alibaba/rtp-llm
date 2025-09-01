@@ -34,6 +34,7 @@ def build_lib(head_dim, page_size, group_size, xqa_name, xqa_kernel_name, input_
             "@local_config_cuda//cuda:cuda_headers",
             "@local_config_cuda//cuda:cudart",
             "@local_config_cuda//cuda:cuda_driver",
+            "//3rdparty:cuda_driver"
         ],
         copts = cuda_copts() + addition_cuda_copts,
         visibility = ["//visibility:public"],
