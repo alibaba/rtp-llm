@@ -37,11 +37,3 @@ def is_hip():
         return True
     else:
         return False
-
-
-def is_ppu():
-    device_type = get_device().get_device_type()
-    if device_type == DeviceType.Ppu:
-        return True
-    else:
-        return False

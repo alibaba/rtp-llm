@@ -1,7 +1,10 @@
+import logging
 from typing import Optional
 
 import torch
 from torch import nn
+
+logger = logging.getLogger(__name__)
 
 try:
     from rtp_llm.models_py.modules.fp8_kernel import sgl_per_token_group_quant_fp8
@@ -17,6 +20,44 @@ try:
     from deep_gemm import fp8_gemm_nt
 
     DEEPGEMM_AVAILABLE = True
+
+    # Setup CUTLASS include paths for JIT compilation
+    import os
+
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+
+    # Search for CUTLASS headers
+    cutlass_paths = []
+    parts = current_dir.split("/")
+    for i in range(len(parts)):
+        base_path = "/".join(parts[: i + 1])
+        for subpath in [
+            "deep_gemm/third-party/cutlass/include",
+            "external/deep_gemm/third-party/cutlass/include",
+        ]:
+            path = os.path.join(base_path, subpath)
+            if os.path.exists(path):
+                cutlass_paths.append(path)
+
+    # Check runfiles directory
+    if "runfiles" in current_dir:
+        runfiles_root = current_dir.split("runfiles")[0] + "runfiles"
+        for subdir in ["deep_gemm", "external/deep_gemm"]:
+            path = os.path.join(runfiles_root, subdir, "third-party/cutlass/include")
+            if os.path.exists(path):
+                cutlass_paths.append(path)
+
+    # Set environment variables if CUTLASS found
+    if cutlass_paths:
+        cutlass_path = cutlass_paths[0]
+        for env_var in ["CPLUS_INCLUDE_PATH", "C_INCLUDE_PATH", "CPATH"]:
+            current_val = os.environ.get(env_var, "")
+            os.environ[env_var] = (
+                f"{cutlass_path}:{current_val}" if current_val else cutlass_path
+            )
+
+        nvcc_flags = os.environ.get("NVCC_PREPEND_FLAGS", "")
+        os.environ["NVCC_PREPEND_FLAGS"] = f"-I{cutlass_path} {nvcc_flags}".strip()
 except ImportError:
     DEEPGEMM_AVAILABLE = False
 
@@ -55,67 +96,78 @@ class Fp8Linear(nn.Module):
             input_bf16 = input
 
         # Quantize input to FP8
-        if FP8_AVAILABLE:
-            alignment = self._get_small_batch_padding(input_m)
-            target_m = (input_m + alignment - 1) // alignment * alignment
-            need_padding = target_m > input_m
-            if need_padding:
-                input_for_quant = torch.zeros(
-                    target_m, input_k, dtype=torch.bfloat16, device=input.device
-                )
-                input_for_quant[:input_m, :] = input_bf16
-            else:
-                input_for_quant = input_bf16
-
-            # Quantize using sgl_per_token_group_quant_fp8
-            quantization_eps = 1e-4
-            use_column_major = need_padding
-            input_fp8, input_scales = sgl_per_token_group_quant_fp8(
-                input_for_quant,
-                group_size=128,
-                eps=quantization_eps,
-                column_major_scales=use_column_major,
+        if not FP8_AVAILABLE:
+            # FP8 not available - fail fast for easier debugging
+            error_msg = (
+                "FP8 quantization is not available but required for Fp8Linear. "
+                "Please ensure FP8 kernel is properly installed and imported."
             )
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
 
-            FP8_E4M3_MAX = 448.0
-            min_scale_threshold = 1e-4 / FP8_E4M3_MAX
-            input_scales = torch.clamp(input_scales, min=min_scale_threshold)
-            input_scales = input_scales.to(torch.float32)
-            output_m = input_for_quant.shape[0]
-            output = torch.zeros(
-                output_m, output_n, dtype=torch.bfloat16, device=input.device
+        alignment = self._get_padding_size(input_m)
+        target_m = (input_m + alignment - 1) // alignment * alignment
+        need_padding = target_m > input_m
+
+        if need_padding:
+            input_for_quant = torch.zeros(
+                target_m, input_k, dtype=torch.bfloat16, device=input.device
             )
-
-            # Call DeepGEMM
-            if DEEPGEMM_AVAILABLE:
-                deepgemm_input_scales = input_scales
-                input_fp8 = input_fp8.contiguous()
-                deepgemm_input_scales = deepgemm_input_scales.contiguous()
-                weight = self.weight.contiguous()
-                weight_scales = self.weight_scales.contiguous()
-                output = output.contiguous()
-                try:
-                    fp8_gemm_nt(
-                        (input_fp8, deepgemm_input_scales),
-                        (weight, weight_scales),
-                        output,
-                        c=None,
-                        disable_ue8m0_cast=True,
-                    )
-                except Exception as e:
-                    # DeepGEMM call failed, fallback to torch
-                    print(f"Fp8Linear forward error type: {type(e)}")
-                    import traceback
-
-                    traceback.print_exc()
-                    raise
-            else:
-                # DeepGEMM not available
-                output = self._torch_fallback(input_fp8, input_scales)
+            input_for_quant[:input_m, :] = input_bf16
         else:
-            # FP8 not available, use FP16 fallback
-            output = self._fp16_fallback(input_bf16)
-            need_padding = False
+            input_for_quant = input_bf16
+
+        # Quantize using sgl_per_token_group_quant_fp8
+        quantization_eps = 1e-4
+        use_column_major = need_padding
+        input_fp8, input_scales = sgl_per_token_group_quant_fp8(
+            input_for_quant,
+            group_size=128,
+            eps=quantization_eps,
+            column_major_scales=use_column_major,
+        )
+
+        FP8_E4M3_MAX = 448.0
+        min_scale_threshold = 1e-4 / FP8_E4M3_MAX
+        input_scales = torch.clamp(input_scales, min=min_scale_threshold)
+        input_scales = input_scales.to(torch.float32)
+        output_m = input_for_quant.shape[0]
+        output = torch.zeros(
+            output_m, output_n, dtype=torch.bfloat16, device=input.device
+        )
+
+        # Call DeepGEMM
+        if DEEPGEMM_AVAILABLE:
+            deepgemm_input_scales = input_scales
+            input_fp8 = input_fp8.contiguous()
+            deepgemm_input_scales = deepgemm_input_scales.contiguous()
+            weight = self.weight.contiguous()
+            weight_scales = self.weight_scales.contiguous()
+            output = output.contiguous()
+            try:
+                fp8_gemm_nt(
+                    (input_fp8, deepgemm_input_scales),
+                    (weight, weight_scales),
+                    output,
+                    c=None,
+                    disable_ue8m0_cast=True,
+                )
+            except Exception as e:
+                # DeepGEMM call failed - log error and re-raise
+                error_msg = f"DeepGEMM fp8_gemm_nt call failed: {type(e).__name__}: {e}"
+                logger.error(error_msg)
+                import traceback
+
+                logger.error(f"Traceback: {traceback.format_exc()}")
+                raise RuntimeError(error_msg) from e
+        else:
+            # DeepGEMM not available - fail fast for easier debugging
+            error_msg = (
+                "DeepGEMM is not available but required for FP8 computation. "
+                "Please ensure DeepGEMM is properly installed and imported."
+            )
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
 
         if need_padding:
             output = output[:input_m, :]
@@ -126,31 +178,18 @@ class Fp8Linear(nn.Module):
         final_output = output
         return final_output
 
-    def _get_small_batch_padding(self, m):
-        """Calculate padding size for memory alignment optimization."""
-        # Small batch optimization: use smaller padding to reduce memory waste
-        if m < 64:
-            return 16 if m < 16 else 8
+    def _get_padding_size(self, m):
+        """Calculate padding size based on DeepGEMM requirements."""
+        if self._gemm_swap_ab_heuristic(m):
+            if m < 16:
+                return 16
+            else:
+                return 8
         else:
-            # Large batch: use standard padding for optimal performance
             return 64
 
-    def _torch_fallback(self, input_fp8, input_scales):
-        """Fallback implementation using torch."""
-        expanded_input_scales = self._expand_input_scales(input_scales, input_fp8.shape)
-        input_fp32 = input_fp8.to(torch.float32) * expanded_input_scales
-        weight_fp32 = self.weight.to(torch.float32) * self._expand_weight_scales()
-        # Perform matrix multiplication: [m, k] @ [n, k].T = [m, n]
-        output = torch.matmul(input_fp32, weight_fp32.T)
-        return output.to(torch.bfloat16)
-
-    def _fp16_fallback(self, input_tensor):
-        """Pure FP16 fallback logic."""
-        weight_fp32 = self.weight.to(torch.float32) * self._expand_weight_scales()
-        weight_fp16 = weight_fp32.to(torch.float16)
-        input_fp16 = input_tensor.to(torch.float16)
-        output = torch.matmul(input_fp16, weight_fp16.T)
-        return output.to(torch.bfloat16)
+    def _gemm_swap_ab_heuristic(self, m):
+        return False
 
     def _expand_input_scales(self, input_scales, target_shape):
         """Expand input scales to target shape."""

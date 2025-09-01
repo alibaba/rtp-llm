@@ -6,8 +6,6 @@ from typing import Literal, Optional
 
 import torch
 
-# from sglang.srt.managers.expert_location import get_global_expert_location_metadata
-
 
 @dataclass
 class ExpertLocationDispatchInfo:

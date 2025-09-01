@@ -13,29 +13,9 @@ from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.utils.model_weight import W
 
-try:
-    from libth_transformer import init_device
+if utils.is_cuda():
     from libth_transformer.rtp_llm_ops import FusedMoEOp, SelectTopkOp
 
-    FP8_SUPPORT_AVAILABLE = True
-except ImportError:
-    SelectTopkOp = None
-    FusedMoEOp = None
-    init_device = None
-    FP8_SUPPORT_AVAILABLE = False
-
-# Import DeepGEMM kernels
-try:
-    import deep_gemm
-    from deep_gemm import fp8_m_grouped_gemm_nt_masked, m_grouped_fp8_gemm_nt_contiguous
-
-    DEEPGEMM_AVAILABLE = True
-except ImportError:
-    DEEPGEMM_AVAILABLE = False
-
-_ENABLE_JIT_DEEPGEMM = True
-
-if utils.is_cuda():
     from rtp_llm.models_py.modules.ep.kernels import (
         ep_gather,
         ep_scatter,
@@ -48,6 +28,10 @@ if utils.is_cuda():
         silu_and_mul_triton_kernel,
         tma_align_input_scale,
     )
+else:
+    logging.info("can't import from rtp_llm_ops and ep.kernels, only support cuda!")
+    FusedMoEOp = None
+    SelectTopkOp = None
 
 from rtp_llm.models_py.modules.ep.expert_location_dispatch import (
     ExpertLocationDispatchInfo,
