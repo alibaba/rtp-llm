@@ -83,15 +83,6 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
     //     fmha_type == FMHAType::TRT_V2 && prefix_prompt_param.kv_block_array.cache_type == KvCacheDataType::FP8;
     // tmp not use qkv fp8 buffer
     bool use_qkv_fp8 = false;
-    // DISPATCH_CUDA_FUNCTION_DATA_TYPE(torchDTypeToDataType(qkv.dtype()),
-    //                                  invoke_debug_kernel2,
-    //                                  qkv.data_ptr(),
-    //                                  3584,
-    //                                  10,
-    //                                  10,
-    //                                  4608,
-    //                                  device_->getStream());
-    // invoke_debug_kernel2(params->cu_seqlens.data_ptr<int>(), 0, 1, 2, 4608, device_->getStream());
     DISPATCH_CUDA_FUNCTION_DATA_TYPE(torchDTypeToDataType(qkv.dtype()),
                                      invokeAddFusedQKVBiasTranspose,
                                      q_no_transpose_output.data_ptr(),
@@ -125,14 +116,6 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
                                      store_kv,
                                      store_cache,
                                      device_->getStream());
-    // DISPATCH_CUDA_FUNCTION_DATA_TYPE(torchDTypeToDataType(qkv.dtype()),
-    //                                  invoke_debug_kernel2,
-    //                                  qkv.data_ptr(),
-    //                                  3584,
-    //                                  10,
-    //                                  10,
-    //                                  4608,
-    //                                  device_->getStream());
     if (use_qkv_fp8) {
         return qkv_fp8;
     } else if (fmha_type == FMHAType::PAGED_TRT_V2) {

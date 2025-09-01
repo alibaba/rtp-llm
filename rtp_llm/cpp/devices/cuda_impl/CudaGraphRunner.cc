@@ -263,7 +263,7 @@ void CudaGraphRunner::initCapture() {
             torch::zeros({int(max_bs_), ((max_seq_len_ + seq_size_per_block_ - 1) / seq_size_per_block_)}, options3);
         inputs.attention_inputs.kv_cache_block_id_host =
             torch::zeros({int(max_bs_), ((max_seq_len_ + seq_size_per_block_ - 1) / seq_size_per_block_)}, options2);
-        inputs.attention_inputs.dtype = torch::kBFloat16;
+        inputs.attention_inputs.dtype = torch::kBFloat16;  // py_model support `kBFloat16` as input type.
         capture_mem_hold_             = CaptureMemoryHold(output, inputs, kv_cache_block_offset_, is_embedding_);
         initKernelInternalMemory();
         capture();
