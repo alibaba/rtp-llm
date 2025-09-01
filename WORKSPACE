@@ -40,6 +40,3 @@ pip_gpu_cuda12_torch_install_deps()
 
 load("@pip_gpu_rocm_torch//:requirements.bzl", pip_gpu_rocm_torch_install_deps = "install_deps")
 pip_gpu_rocm_torch_install_deps()
-
-load("//:def.bzl", "read_version")
-read_version(name = "version")
