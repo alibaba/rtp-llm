@@ -15,16 +15,16 @@ namespace rtp_llm {
 class PyWrappedModel: public GptModel {
 public:
     // py_instance is `py_model` indeedly.
-    PyWrappedModel(const GptModelInitParams& params, py::object py_instance);
+    PyWrappedModel(const GptModelInitParams& params, py::object py_instance, bool is_embedding = false);
     ~PyWrappedModel();
 
     GptModelOutputs forward(const GptModelInputs& inputs) override;
     GptModelOutputs forwardMicroBatched(const GptModelInputs& inputs);
 
 private:
-    GraphBase*    graph_runner_;
+    GraphBase*    graph_runner_{nullptr};
     py::object    py_model_;
-    bool          enable_cuda_graph_;
+    bool          enable_cuda_graph_{false};
     torch::Tensor k_cache_base_tensor_;
     torch::Tensor v_cache_base_tensor_;
     torch::Tensor k_scale_base_tensor_;
@@ -32,7 +32,7 @@ private:
 };
 
 // NOTE(wangyin): constructor can not be compiled correctly when placed in cc file.
-inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params, py::object py_instance):
+inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params, py::object py_instance, bool is_embedding):
     GptModel(params), enable_cuda_graph_(params.device->initParams().hw_kernel_config.enable_cuda_graph) {
     if (setenv("PYTHONUNBUFFERED", "TRUE", 1) != 0) {
         RTP_LLM_LOG_WARNING("Failed to set PYTHONUNBUFFERED environment variable on POSIX.");
@@ -62,10 +62,11 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params, py::obje
     }
     py::object py_init_result;
     if (enable_cuda_graph_) {
-        graph_runner_             = device_->getDeviceGraphRunner(params.device->initParams(),
-                                                      std::move(py_instance),
-                                                      k_cache_buffer_->shape()[0] * k_cache_buffer_->shape()[1]);
-        auto py_initialize_method = graph_runner_->py_instance_.attr("initialize");
+        int kv_cache_offset = is_embedding ? 0 : k_cache_buffer_->shape()[0] * k_cache_buffer_->shape()[1];
+        graph_runner_ =
+            device_->getDeviceGraphRunner(params.device->initParams(), py_instance, kv_cache_offset, is_embedding);
+        RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be null");
+        auto py_initialize_method = py_instance.attr("initialize");
         py_init_result            = py_initialize_method(init_resources);
         graph_runner_->initCapture();
     } else {

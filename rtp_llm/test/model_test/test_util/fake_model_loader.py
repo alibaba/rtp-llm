@@ -16,6 +16,7 @@ class FakeModelLoader(object):
         model_type: str,
         tokenizer_path: str,
         ckpt_path: str,
+        act_type: str = "bf16",
         max_seq_len: int = 0,
         quantization: str = "",
         data_type: str = WEIGHT_TYPE.AUTO.to_str(),
@@ -34,6 +35,7 @@ class FakeModelLoader(object):
         self.warm_up = warm_up
         self.data_type = data_type
         self.kv_cache_type = kv_cache_type
+        self.act_type = act_type
 
         logging.info(f"tokenizer path: {self.tokenizer_path}")
         logging.info(f"check point path: {self.ckpt_path}")
@@ -52,6 +54,7 @@ class FakeModelLoader(object):
             ckpt_path=self.ckpt_path,
             model_type=self.model_type,
             tokenizer_path=self.tokenizer_path,
+            act_type=self.act_type,
             max_seq_len=64,
             seq_size_per_block=64,
             gen_num_per_circle=1,

@@ -86,11 +86,8 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
                                              seq_len,
                                              seq_len_with_prefix,
                                              token_num,
-                                             kv_block_array,
-                                             false,
-                                             false,
-                                             params.common.linear_bias_slopes != nullptr,
-                                             false);
+                                             params.common.context_total_kv_length,
+                                             kv_block_array);
             if (need_quant_fmha_out) {
                 DataType quant_out_data_type = DataType::TYPE_FP8_E4M3;
                 auto     quant_params =
@@ -154,11 +151,7 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
                                         batch_size,
                                         seq_len,
                                         token_num,
-                                        kv_block_array,
-                                        false,
-                                        false,
-                                        params.common.linear_bias_slopes != nullptr,
-                                        false);
+                                        kv_block_array);
             if (need_quant_fmha_out) {
                 DataType quant_out_data_type = DataType::TYPE_FP8_E4M3;
                 auto     quant_params =

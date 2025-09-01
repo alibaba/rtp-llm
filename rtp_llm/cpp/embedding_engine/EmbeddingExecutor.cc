@@ -68,7 +68,7 @@ EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, rtp_llm::De
 
     if (!params.py_model.is_none()) {
         RTP_LLM_LOG_INFO("init executor with python model");
-        model_.reset(new PyWrappedModel(model_init_params, params.py_model));
+        model_.reset(new PyWrappedModel(model_init_params, params.py_model, true));
     } else {
         RTP_LLM_LOG_INFO("init legacy c++ gpt model");
         model_.reset(new GptModel(model_init_params));

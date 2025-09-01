@@ -14,9 +14,11 @@ public:
     CudaGraphRunner(const DeviceInitParams& params,
                     py::object              py_instance,
                     int                     kv_cache_block_offset,
-                    DeviceBase*             device):
-        GraphBase(py_instance),
+                    DeviceBase*             device,
+                    bool                    is_embedding = false):
+        GraphBase(std::move(py_instance)),
         enable_cuda_graph_(params.hw_kernel_config.enable_cuda_graph),
+        is_embedding_(is_embedding),
         concurrency_limit_(params.concurrency_config.concurrency_limit),
         capture_stream_(at::cuda::getStreamFromPool()),
         enable_cuda_graph_debug_mode_(params.hw_kernel_config.enable_cuda_graph_debug_mode),
@@ -29,6 +31,7 @@ public:
         if (!py_instance_ || py_instance_.is_none()) {
             throw std::runtime_error("CudaGraphRunner constructor: Python instance is null or none.");
         }
+
         py_forward_method_ = py_instance_.attr("forward");
         RTP_LLM_LOG_INFO("Initialize CudaGraphRunner with parameters below: \n \
             enable_cuda_graph_: %d, concurrency_limit_: %d, enable_cuda_graph_debug_mode_: %d, hidden_size_: %d, max_seq_len_: %d, seq_size_per_block_: %d, kv_cache_block_offset_: %d",
@@ -59,8 +62,10 @@ public:
 private:
     void                 copySmallerIntoLarger(const torch::Tensor& source_tensor, torch::Tensor& target_tensor);
     std::vector<int>     getBatchSizesToCapture(int concurrency_limit);
+    bool                 tryGetRealGraphBatchSize(PyModelInputs& inputs);
     py::object           py_forward_method_;
     bool                 enable_cuda_graph_{false};
+    bool                 is_embedding_{false};
     int                  concurrency_limit_{32};
     at::cuda::CUDAStream capture_stream_;
     bool                 enable_cuda_graph_debug_mode_{false};
@@ -73,6 +78,7 @@ private:
     int                  max_seq_len_{0};
     int                  seq_size_per_block_{0};
     int                  kv_cache_block_offset_{0};
+    int                  seq_len_sum_{0};
     std::vector<int>     capture_range_;
     std::unordered_map<int, GraphInstance> graph_instances_;
     CaptureMemoryHold                      capture_mem_hold_;

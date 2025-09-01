@@ -20,7 +20,9 @@ class SliceStopWordListTest(TestCase):
             os.getcwd(),
             "rtp_llm/test/model_test/fake_test/testdata/llama/fake/hf_source",
         )
-        model = FakeModelLoader("llama", ckpt_path, ckpt_path, 1024).load_model()
+        model = FakeModelLoader(
+            "llama", ckpt_path, ckpt_path, max_seq_len=1024
+        ).load_model()
         self.pipeline = Pipeline(model, model.config, model.tokenizer)
 
     async def mock_generate(self):

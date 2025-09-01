@@ -18,6 +18,7 @@ public:
            size_t            head_num,
            size_t            kv_head_num,
            size_t            size_per_head,
+           size_t            seq_size_per_block,
            float             q_scaling,
            bool              use_linear_bias_slopes,
            bool              can_use_trtv1_fmha,
@@ -59,13 +60,10 @@ public:
                       uint32_t*    tile_counter_ptr,
                       float*       attention_output_orig_quant_scale,
                       size_t       batch_size,
-                      size_t       seq_len,
+                      size_t       max_seq_len,
                       size_t       token_num,
                       KVBlockArray kv_block_array,
-                      bool         mFMHAForceFP32Acc   = false,
-                      bool         mRemovePadding      = false,
-                      bool         is_alibi            = false,
-                      bool         is_alibi_with_sacle = false);
+                      void*        custom_mask = nullptr);
 
     void runTrtV2FmhaPaged(void*        input,
                            void*        cu_q_seqlens,
@@ -74,14 +72,12 @@ public:
                            uint32_t*    tile_counter_ptr,
                            float*       attention_output_orig_quant_scale,
                            size_t       batch_size,
-                           size_t       input_seq_len,
+                           size_t       max_input_seq_len,
                            size_t       max_past_kv_len,
                            size_t       token_num,
+                           size_t       token_num_kv,
                            KVBlockArray kv_block_array,
-                           bool         mFMHAForceFP32Acc   = false,
-                           bool         mRemovePadding      = false,
-                           bool         is_alibi            = false,
-                           bool         is_alibi_with_sacle = false);
+                           void*        custom_mask = nullptr);
 
     void runOpenSourceFmha(void*            q,
                            void*            k,
@@ -123,6 +119,8 @@ public:
                         bool              use_linear_bias_slopes);
 
 private:
+    cudaStream_t getStream();
+
     bool initTrtV1FmhaAndCheckSupport();
 
     bool initTrtV2FmhaAndCheckSupport();
@@ -131,7 +129,21 @@ private:
 
     bool initOpenSourceFmhaAndCheckSupport();
 
-    static int roundMultiple(int x, int m) {
+    tensorrt_llm::kernels::MHARunnerFixedParams createMHARunnerFixedParams(bool paged);
+    tensorrt_llm::kernels::MHARunnerParams      createMHARunnerParams(void*        input,
+                                                                      void*        cu_seqlens,
+                                                                      void*        cu_kv_seqlens,
+                                                                      void*        output,
+                                                                      uint32_t*    tile_counter_ptr,
+                                                                      float*       attention_output_orig_quant_scale,
+                                                                      size_t       batch_size,
+                                                                      size_t       max_input_length,
+                                                                      size_t       max_kv_length,
+                                                                      size_t       total_q_seq_len,
+                                                                      size_t       total_kv_seq_len,
+                                                                      KVBlockArray kv_block_array,
+                                                                      void*        custom_mask = nullptr);
+    static int                                  roundMultiple(int x, int m) {
         return (x + m - 1) / m * m;
     }
 
@@ -163,6 +175,8 @@ private:
     size_t head_num_;
     size_t kv_head_num_;
     size_t size_per_head_;
+    size_t size_per_head_v_;
+    size_t seq_size_per_block_;
     float  q_scaling_;
     bool   use_linear_bias_slopes_;
     bool   support_trt_v1_fmha_;

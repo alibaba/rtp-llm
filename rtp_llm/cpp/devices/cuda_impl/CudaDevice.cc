@@ -406,6 +406,7 @@ CudaDevice::selectCuFMHARunner(const AttentionConfigs& configs, DataType attn_dt
                        configs.head_num,
                        configs.kv_head_num,
                        configs.size_per_head,
+                       configs.tokens_per_block,
                        configs.q_scaling / configs.softmax_extra_scale,  // div scale for DeepSeek V2
                        has_alibi_slopes,
                        use_trtv1_fmha,

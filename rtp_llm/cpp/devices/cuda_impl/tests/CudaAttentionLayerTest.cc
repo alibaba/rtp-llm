@@ -17,7 +17,7 @@ TEST_F(AttentionLayerTestFp16, testSimpleContextAttention) {
     AttentionConfigs attention_conf;
     attention_conf.head_num         = 4;
     attention_conf.kv_head_num      = 4;
-    attention_conf.size_per_head    = 8;
+    attention_conf.size_per_head    = 32;
     attention_conf.tokens_per_block = 4;
 
     attention_conf.rope_config.style = RopeStyle::Base;

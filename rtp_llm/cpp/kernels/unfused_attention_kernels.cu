@@ -1305,6 +1305,56 @@ inline __device__ type_out* reinterpret_ptr(void* ptr, size_t offset) {
     return reinterpret_cast<type_out*>(reinterpret_cast<type_in*>(ptr) + offset);
 }
 
+#include <cstdio>
+
+// Helper function to convert to float (specialized for each type)
+__device__ float convert_to_float(__nv_bfloat16 val) {
+    return __bfloat162float(val);
+}
+
+__device__ float convert_to_float(__half val) {
+    return __half2float(val);
+}
+
+__device__ float convert_to_float(float val) {
+    return val;
+}
+
+__device__ float convert_to_float(int val) {
+    return float(val);
+}
+
+template<typename T>
+__global__ void debug_kernel2(T* data, int start_col, int m, int n, int row_len) {
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
+        printf("debug_kernel2 start\n");
+        for (int i = 0; i < m; i++) {
+            for (int j = start_col; j < start_col + n; j++) {
+                int   index = i * row_len + j;
+                float value = convert_to_float(data[index]);
+                printf("%f ", value);
+            }
+            printf("\n");
+        }
+        printf("debug_kernel2 end\n");
+    }
+}
+
+template<typename T>
+void invoke_debug_kernel2(T* data, int start_col, int m, int n, int row_len, cudaStream_t stream) {
+    debug_kernel2<<<1, 1, 0, stream>>>(data, start_col, m, n, row_len);
+}
+
+#define INSTANTIATEDEBUGKERNEL2(T)                                                                                     \
+    template void invoke_debug_kernel2(T* data, int start_col, int m, int n, int row_len, cudaStream_t stream)
+INSTANTIATEDEBUGKERNEL2(float);
+INSTANTIATEDEBUGKERNEL2(half);
+INSTANTIATEDEBUGKERNEL2(int);
+#ifdef ENABLE_BF16
+INSTANTIATEDEBUGKERNEL2(__nv_bfloat16);
+#endif
+#undef INSTANTIATEDEBUGKERNEL2
+
 // Bandwidth-bound kernel by reading cos/sin coefficients from global memory (pre-computed and saved as weights).
 
 template<typename T, typename Tcache, bool PREFIX_PROMPT, bool USE_PAGED_FMHA, RopeStyle ROPE_STYLE>

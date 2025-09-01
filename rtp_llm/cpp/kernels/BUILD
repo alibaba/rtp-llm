@@ -64,6 +64,7 @@ cc_library(
     }),
     copts = cuda_copts(),
     include_prefix = "src",
+    linkstatic = True,
     visibility = ["//visibility:public"],
 )
 

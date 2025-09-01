@@ -66,14 +66,12 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
         }
         py_attn_inputs.dtype      = torch::kBFloat16;
         py_attn_inputs.is_prefill = !py_attn_inputs.sequence_lengths.size(0);
-        // todo cuda graph
-        if (!py_attn_inputs.is_prefill) {
-            static torch::Tensor cu_seqlens =
-                torch::zeros({device_->initParams().concurrency_config.concurrency_limit + 1},
-                             torch::TensorOptions(torch::kInt32).device(torch::kCPU));
-            cu_seqlens.pin_memory();
-            py_attn_inputs.cu_seqlens = cu_seqlens;
-        }
+        torch::Tensor cu_seqlens  = torch::zeros({device_->initParams().concurrency_config.concurrency_limit + 1},
+                                                torch::TensorOptions(torch::kInt32).device(torch::kCPU));
+        int           batch_size  = py_attn_inputs.input_lengths.size(0);
+        cu_seqlens                = cu_seqlens.cuda();
+        cu_seqlens.slice(0, 1, batch_size + 1) = py_attn_inputs.input_lengths.cumsum(0);
+        py_attn_inputs.cu_seqlens              = cu_seqlens;
 
         torch::Tensor token_ids = Buffer2torchTensor(micro_inputs.combo_tokens).cuda();
 
@@ -161,13 +159,13 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         attention_inputs.dtype      = torch::kBFloat16;
         attention_inputs.is_prefill = !attention_inputs.sequence_lengths.size(0);
 
-        if (!enable_cuda_graph_ && !attention_inputs.is_prefill) {
-            static torch::Tensor cu_seqlens =
-                torch::zeros({device_->initParams().concurrency_config.concurrency_limit + 1},
-                             torch::TensorOptions(torch::kInt32).device(torch::kCPU));
-            cu_seqlens.pin_memory();
-            attention_inputs.cu_seqlens = cu_seqlens;
-        }
+        torch::Tensor cu_seqlens = torch::zeros({device_->initParams().concurrency_config.concurrency_limit + 1},
+                                                torch::TensorOptions(torch::kInt32).device(torch::kCPU));
+        int           batch_size = attention_inputs.input_lengths.size(0);
+        cu_seqlens               = cu_seqlens.cuda();
+        cu_seqlens.slice(0, 1, batch_size + 1) = attention_inputs.input_lengths.cumsum(0);
+        attention_inputs.cu_seqlens            = cu_seqlens;
+
         auto           py_model_inputs = PyModelInputs({token_ids, attention_inputs});
         PyModelOutputs py_model_outputs;
         // Cast the Python object to PyModelOutputs and extract hidden states
@@ -179,7 +177,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             py_model_outputs      = outputs.cast<PyModelOutputs>();
         }
         auto hidden_states_tensor = py_model_outputs.hidden_states;
-        auto hidden_states        = torchTensor2Buffer(hidden_states_tensor);
+        // std::cout << "hidden_states_tensor: " << hidden_states_tensor << std::endl;
+        auto hidden_states = torchTensor2Buffer(hidden_states_tensor);
 
         RTP_LLM_LOG_INFO("Python object instance forward method called successfully.");
 

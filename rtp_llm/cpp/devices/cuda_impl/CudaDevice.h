@@ -66,6 +66,7 @@ struct TRTAttn {
     torch::Tensor cu_kv_seqlens;
     torch::Tensor input_lengths;
     torch::Tensor sequence_lengths;
+    torch::Tensor cu_mask_rows;
     int           max_seq_len;
     bool          decode_plan;
 
@@ -110,8 +111,10 @@ public:
     DeviceEventPtr   createEvent() override;
     DeviceEventPtr   createTorchEvent() override;
     bool             useGroupGemm() const;
-    GraphBase*
-    getDeviceGraphRunner(const DeviceInitParams& params, py::object py_instance, int kv_cache_block_offset) override;
+    GraphBase*       getDeviceGraphRunner(const DeviceInitParams& params,
+                                          py::object              py_instance,
+                                          int                     kv_cache_block_offset,
+                                          bool                    is_embedding = false) override;
 
 private:
     void         checkUseOpenSourceFMHA();
@@ -328,7 +331,7 @@ private:
     NcclParam dp_tp_nccl_param_;
     NcclParam ffn_tp_nccl_param_;
 
-    GraphBase* graph_runner_;
+    GraphBase* graph_runner_{nullptr};
 
     BufferPtr curandstate_buf_;  // for sampler use.
 

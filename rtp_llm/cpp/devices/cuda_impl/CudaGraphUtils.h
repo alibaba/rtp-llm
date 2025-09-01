@@ -11,7 +11,7 @@ class CaptureMemoryHold {
 public:
     CaptureMemoryHold() {}
 
-    CaptureMemoryHold(at::Tensor hidden_states, PyModelInputs& inputs, int kv_cache_block_offset):
+    CaptureMemoryHold(at::Tensor hidden_states, PyModelInputs& inputs, int kv_cache_block_offset, bool is_embedding):
         decoder_layer_hidden_states_(hidden_states) {
         py_model_inputs_.attention_inputs.input_lengths            = inputs.attention_inputs.input_lengths;
         py_model_inputs_.attention_inputs.sequence_lengths         = inputs.attention_inputs.sequence_lengths;
@@ -20,8 +20,8 @@ public:
         py_model_inputs_.attention_inputs.prefix_lengths           = inputs.attention_inputs.prefix_lengths;
         py_model_inputs_.input_ids                                 = inputs.input_ids;
         py_model_inputs_.attention_inputs.cu_seqlens               = inputs.attention_inputs.cu_seqlens;
-        py_model_inputs_.attention_inputs.is_prefill               = false;
-        py_model_inputs_.attention_inputs.dtype                    = caffe2::TypeMeta::Make<c10::Half>();
+        py_model_inputs_.attention_inputs.is_prefill               = is_embedding;
+        py_model_inputs_.attention_inputs.dtype                    = inputs.attention_inputs.dtype;
         py_model_inputs_.attention_inputs.kv_block_offset          = kv_cache_block_offset;
     }
 

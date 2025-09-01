@@ -130,6 +130,9 @@ void invokeSplitQKV(T*           q_buf,
                     cudaStream_t stream);
 
 template<typename T>
+void invoke_debug_kernel2(T* data, int start_col, int m, int n, int row_len, cudaStream_t stream);
+
+template<typename T>
 void invokeAddFusedQKVBiasTranspose(T*                             q_no_transpose_buf,
                                     T*                             q_buf,
                                     T*                             k_buf,

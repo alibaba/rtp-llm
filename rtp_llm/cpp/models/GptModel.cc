@@ -176,8 +176,10 @@ rtp_llm::AttentionCommonInputs GptModel::prepareAttentionInputs(const GptModelIn
                                      max_context_seq_len);
         attention_inputs.cu_kv_seqlens =
             device_->clone({*vector2Buffer(cu_kv_seqlens_data), AllocationType::DEVICE, {"cu_kv_seqlens"}});
+        attention_inputs.context_total_kv_length = cu_kv_seqlens_data[context_batch_size];
     } else {
-        attention_inputs.cu_kv_seqlens = attention_inputs.cu_seqlens;
+        attention_inputs.cu_kv_seqlens           = attention_inputs.cu_seqlens;
+        attention_inputs.context_total_kv_length = cu_seqlens_data[context_batch_size];
     }
     device_->checkError();
 

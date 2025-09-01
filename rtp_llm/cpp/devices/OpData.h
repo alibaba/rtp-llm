@@ -523,11 +523,12 @@ struct AttentionCommonInputs {
     ConstBufferPtr cu_kv_seqlens;
     ConstBufferPtr padding_offset;
 
-    size_t context_batch_size  = 0;
-    size_t decoder_batch_size  = 0;
-    size_t context_max_seq_len = 0;
-    size_t decoder_max_seq_len = 0;
-    size_t context_token_num   = 0;
+    size_t context_batch_size      = 0;
+    size_t decoder_batch_size      = 0;
+    size_t context_max_seq_len     = 0;
+    size_t decoder_max_seq_len     = 0;
+    size_t context_token_num       = 0;
+    size_t context_total_kv_length = 0;
 
     BufferPtr      position_ids;
     BufferPtr      attention_mask;

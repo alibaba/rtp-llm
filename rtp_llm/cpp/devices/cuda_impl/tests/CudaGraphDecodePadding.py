@@ -61,6 +61,9 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
         ) or current_real_graph_size == (int(math.ceil(batch_size / 16)) * 16)
         print(f"outputs1.hidden_states: {outputs1.hidden_states[0]}")
         print(f"outputs2.hidden_states: {outputs2.hidden_states[0]}")
+        outputs2.hidden_states = outputs2.hidden_states.type(
+            outputs1.hidden_states.dtype
+        )
         torch.testing.assert_close(
             outputs1.hidden_states[:batch_size], outputs2.hidden_states
         )

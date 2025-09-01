@@ -5,10 +5,12 @@
 using namespace torch_ext;
 namespace rtp_llm {
 
-GraphBase*
-CudaDevice::getDeviceGraphRunner(const DeviceInitParams& params, py::object py_instance, int kv_cache_block_offset) {
+GraphBase* CudaDevice::getDeviceGraphRunner(const DeviceInitParams& params,
+                                            py::object              py_instance,
+                                            int                     kv_cache_block_offset,
+                                            bool                    is_embedding) {
     if (!graph_runner_) {
-        graph_runner_ = new CudaGraphRunner(params, py_instance, kv_cache_block_offset, this);
+        graph_runner_ = new CudaGraphRunner(params, std::move(py_instance), kv_cache_block_offset, this, is_embedding);
     }
     return graph_runner_;
 }
@@ -32,26 +34,31 @@ void CudaGraphRunner::captureOneBatchSize(int bs) {
         auto outputs        = py_outputs_obj.cast<PyModelOutputs>();
         graph_instances_[bs].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
         graph.capture_end();
-        // retrieve from private cache first
-        int                                   input_token_num  = std::max(MIN_CACHE_INPUT_TOKEN_NUM, bs);
-        int                                   batch_size       = std::max(MIN_CACHE_BATCH_SIZE, bs);
-        std::shared_ptr<FlashInferAttnParams> param_shared_ptr = nullptr;
-        auto cache = FlashInferAttnParams::isDecode(input_token_num) ? &PRIVATE_DECODE_PARAMS_CACHE :
-                                                                       &PRIVATE_PREFILL_PARAMS_CACHE;
-        if (!cache->empty()) {
-            auto params = cache->back();
-            if (batch_size <= params->batch_size && input_token_num <= params->input_token_num) {
-                param_shared_ptr = params;
+        // embedding model uses trtv2 attention
+        if (!is_embedding_) {
+            // retrieve from private cache first
+            int                                   input_token_num  = std::max(MIN_CACHE_INPUT_TOKEN_NUM, bs);
+            int                                   batch_size       = std::max(MIN_CACHE_BATCH_SIZE, bs);
+            std::shared_ptr<FlashInferAttnParams> param_shared_ptr = nullptr;
+            auto cache = FlashInferAttnParams::isDecode(input_token_num) ? &PRIVATE_DECODE_PARAMS_CACHE :
+                                                                           &PRIVATE_PREFILL_PARAMS_CACHE;
+            if (!cache->empty()) {
+                auto params = cache->back();
+                if (batch_size <= params->batch_size && input_token_num <= params->input_token_num) {
+                    param_shared_ptr = params;
+                }
             }
+            if (param_shared_ptr == nullptr) {
+                auto param_ptr = FlashInferAttnParams::get(batch_size, input_token_num);
+                FlashInferAttnParams::recycle(param_ptr);
+                param_shared_ptr = std::shared_ptr<FlashInferAttnParams>(param_ptr);
+                cache->push_back(param_shared_ptr);
+            }
+            graph_instances_[bs].mem_hold_.params_ = param_shared_ptr;
+            RTP_LLM_CHECK_WITH_INFO(graph_instances_[bs].mem_hold_.params_ != nullptr,
+                                    "capture params can't be nullptr");
         }
-        if (param_shared_ptr == nullptr) {
-            auto param_ptr = FlashInferAttnParams::get(batch_size, input_token_num);
-            FlashInferAttnParams::recycle(param_ptr);
-            param_shared_ptr = std::shared_ptr<FlashInferAttnParams>(param_ptr);
-            cache->push_back(param_shared_ptr);
-        }
-        graph_instances_[bs].mem_hold_.params_ = param_shared_ptr;
-        RTP_LLM_CHECK_WITH_INFO(graph_instances_[bs].mem_hold_.params_ != nullptr, "capture params can't be nullptr");
+
         if (enable_cuda_graph_debug_mode_) {
             graph.debug_dump(output_dot_filename);
         }
@@ -78,10 +85,12 @@ void CudaGraphRunner::capture() {
         inputs.attention_inputs.cu_seqlens =
             capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens.slice(0, 0, bs + 1);
         inputs.attention_inputs.prefix_lengths = capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths;
+        inputs.attention_inputs.dtype          = torch::kBFloat16;
         graph_instances_[bs].mem_hold_ =
             CaptureMemoryHold(capture_mem_hold_.decoder_layer_hidden_states_.slice(0, 0, bs * num_tokens_per_bs_),
                               inputs,
-                              kv_cache_block_offset_);
+                              kv_cache_block_offset_,
+                              is_embedding_);
         captureOneBatchSize(bs);
         RTP_LLM_LOG_INFO("capture success for batch size: %d", bs);
     }
@@ -114,41 +123,51 @@ void CudaGraphRunner::copySmallerIntoLarger(const torch::Tensor& source_tensor, 
 
 void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
     auto& py_model_inputs_ = graph_instances_[current_real_graph_bs_].mem_hold_.py_model_inputs_;
-    py_model_inputs_.input_ids.fill_(0);
-    py_model_inputs_.input_ids.slice(0, 0, current_batch_size_ * num_tokens_per_bs_) = inputs.input_ids;
     py_model_inputs_.attention_inputs.input_lengths.slice(0, 0, current_batch_size_) =
         inputs.attention_inputs.input_lengths;
-    py_model_inputs_.attention_inputs.sequence_lengths.slice(0, 0, current_batch_size_) =
-        inputs.attention_inputs.sequence_lengths;
-    copySmallerIntoLarger(inputs.attention_inputs.kv_cache_block_id_device,
-                          py_model_inputs_.attention_inputs.kv_cache_block_id_device);
     // pinned memory
-    inputs.attention_inputs.cu_seqlens =
-        py_model_inputs_.attention_inputs.cu_seqlens.slice(0, 0, current_batch_size_ + 1);
-    graph_instances_[current_real_graph_bs_].mem_hold_.params_->fillFlashInfer(
-        nullptr,
-        torchTensor2Buffer(inputs.attention_inputs.sequence_lengths),
-        torchTensor2Buffer(inputs.attention_inputs.input_lengths),
-        torchTensor2Buffer(inputs.attention_inputs.kv_cache_block_id_host),
-        current_batch_size_,
-        seq_size_per_block_);
-    graph_instances_[current_real_graph_bs_].mem_hold_.params_->refreshFlashInferBuf(
-        dynamic_cast<CudaDevice*>(device_), current_batch_size_, inputs.attention_inputs.input_lengths.size(0));
+    py_model_inputs_.attention_inputs.cu_seqlens.slice(0, 0, current_batch_size_ + 1) =
+        inputs.attention_inputs.cu_seqlens.slice(0, 0, current_batch_size_ + 1);
+    if (!is_embedding_) {
+        py_model_inputs_.input_ids.fill_(0);
+        py_model_inputs_.input_ids.slice(0, 0, inputs.input_ids.size(0)) = inputs.input_ids;
+        py_model_inputs_.attention_inputs.sequence_lengths.slice(0, 0, current_batch_size_) =
+            inputs.attention_inputs.sequence_lengths;
+        copySmallerIntoLarger(inputs.attention_inputs.kv_cache_block_id_device,
+                              py_model_inputs_.attention_inputs.kv_cache_block_id_device);
+        graph_instances_[current_real_graph_bs_].mem_hold_.params_->fillFlashInfer(
+            nullptr,
+            torchTensor2Buffer(inputs.attention_inputs.sequence_lengths),
+            torchTensor2Buffer(inputs.attention_inputs.input_lengths),
+            torchTensor2Buffer(inputs.attention_inputs.kv_cache_block_id_host),
+            current_batch_size_,
+            seq_size_per_block_);
+        graph_instances_[current_real_graph_bs_].mem_hold_.params_->refreshFlashInferBuf(
+            dynamic_cast<CudaDevice*>(device_), current_batch_size_, inputs.attention_inputs.input_lengths.size(0));
+    } else {
+        py_model_inputs_.input_ids.fill_(0);
+        auto lengths = inputs.attention_inputs.input_lengths.data_ptr<int>();
+        for (int i = 0; i < current_batch_size_; i++) {
+            int start_idx = 0;
+            py_model_inputs_.input_ids.slice(0, i * num_tokens_per_bs_, i * num_tokens_per_bs_ + lengths[i]) =
+                inputs.input_ids.slice(0, start_idx, start_idx + lengths[i]);
+            start_idx += lengths[i];
+        }
+    }
 }
 
 PyModelOutputs CudaGraphRunner::forward(PyModelInputs& inputs) {
     PyModelOutputs outputs;
     // decode only
-    if (enable_cuda_graph_ && !inputs.attention_inputs.is_prefill && canRun(inputs)) {
+    if (canRun(inputs)) {
         RTP_LLM_LOG_INFO("Replay Start");
         prepareInputs(inputs);
         replay(current_real_graph_bs_);
-        outputs.hidden_states = graph_instances_[current_real_graph_bs_].mem_hold_.decoder_layer_hidden_states_;
+        outputs.hidden_states =
+            graph_instances_[current_real_graph_bs_].mem_hold_.decoder_layer_hidden_states_.slice(0, 0, seq_len_sum_);
         RTP_LLM_LOG_INFO("Replay End");
     } else {
-        // we need to set `cu_seq_lengths`
-        inputs.attention_inputs.cu_seqlens = capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens;
-        auto py_outputs_obj                = py_forward_method_(inputs);
+        auto py_outputs_obj = py_forward_method_(inputs);
         // Cast the Python object to PyModelOutputs and extract hidden states
         outputs = py_outputs_obj.cast<PyModelOutputs>();
     }
@@ -159,18 +178,24 @@ void CudaGraphRunner::replay(int bs) {
     graph_instances_[bs].graph_.replay();
 }
 
-bool CudaGraphRunner::canRun(PyModelInputs& inputs) {
-    int cuda_graph_bs   = inputs.attention_inputs.sequence_lengths.size(0);
+bool CudaGraphRunner::tryGetRealGraphBatchSize(PyModelInputs& inputs) {
+    int cuda_graph_bs   = inputs.attention_inputs.input_lengths.size(0);
     current_batch_size_ = cuda_graph_bs;
     RTP_LLM_LOG_INFO("canRun judge for batch size: %d", cuda_graph_bs);
-    bool is_bs_supported = (cuda_graph_bs <= max_bs_);
-    if (is_bs_supported) {
-        auto it                = std::lower_bound(capture_range_.begin(), capture_range_.end(), current_batch_size_);
-        current_real_graph_bs_ = *it;
-        RTP_LLM_CHECK_WITH_INFO(it != capture_range_.end(), "batch size used in replay: %d", current_real_graph_bs_);
-    }
+    bool is_bs_supported   = (cuda_graph_bs <= max_bs_);
+    auto it                = std::lower_bound(capture_range_.begin(), capture_range_.end(), current_batch_size_);
+    current_real_graph_bs_ = *it;
+    RTP_LLM_CHECK_WITH_INFO(it != capture_range_.end(), "batch size used in replay: %d", current_real_graph_bs_);
+    seq_len_sum_ = inputs.attention_inputs.input_lengths.sum(0).item<int>();
     RTP_LLM_LOG_INFO("can run cuda graph: %d", is_bs_supported);
     return is_bs_supported;
+}
+
+bool CudaGraphRunner::canRun(PyModelInputs& inputs) {
+    if (!enable_cuda_graph_ || (inputs.attention_inputs.is_prefill && !is_embedding_)) {
+        return false;
+    }
+    return tryGetRealGraphBatchSize(inputs);
 }
 
 void CudaGraphRunner::initKernelInternalMemory() {
@@ -206,6 +231,12 @@ std::vector<int> CudaGraphRunner::getBatchSizesToCapture(int concurrency_limit) 
 void CudaGraphRunner::initCapture() {
     if (enable_cuda_graph_) {
         RTP_LLM_LOG_INFO("CUDA graph capture is enabled");
+        if (is_embedding_) {
+            RTP_LLM_LOG_INFO("CUDA graph capture for embedding");
+            // for embedding model which is prefill-only, the `input_ids` shape should be: [bs, max_seq_len_].
+            // we will do mask for extra tokens in attention mechenism.
+            num_tokens_per_bs_ = max_seq_len_;
+        }
         // Capture
         at::cuda::CUDAGraph graph;
         capture_range_ = CudaGraphRunner::getBatchSizesToCapture(concurrency_limit_);
@@ -216,13 +247,13 @@ void CudaGraphRunner::initCapture() {
         auto options2  = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
         auto options3  = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
         PyModelInputs inputs;
-        inputs.attention_inputs.is_prefill = false;
+        inputs.attention_inputs.is_prefill = is_embedding_;
         // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
         inputs.input_ids = torch::zeros({max_num_token_}, options3);
         // prefix_lengths [batch_size, int32] (for attention `prepare`)
-        inputs.attention_inputs.prefix_lengths = torch::empty(0, options2);
+        inputs.attention_inputs.prefix_lengths = torch::full({int(max_bs_)}, num_tokens_per_bs_, options2);
         // input_lengths [batch_size, int32] (decode only)
-        inputs.attention_inputs.input_lengths = torch::ones({int(max_bs_)}, options2);
+        inputs.attention_inputs.input_lengths = torch::full({int(max_bs_)}, num_tokens_per_bs_, options2);
         // sequence_lengths [batch_size, int32] (decode only)
         // sequence_length should in pinned memory
         inputs.attention_inputs.sequence_lengths = torch::ones({int(max_bs_)}, options2);
@@ -232,7 +263,8 @@ void CudaGraphRunner::initCapture() {
             torch::zeros({int(max_bs_), ((max_seq_len_ + seq_size_per_block_ - 1) / seq_size_per_block_)}, options3);
         inputs.attention_inputs.kv_cache_block_id_host =
             torch::zeros({int(max_bs_), ((max_seq_len_ + seq_size_per_block_ - 1) / seq_size_per_block_)}, options2);
-        capture_mem_hold_ = CaptureMemoryHold(output, inputs, kv_cache_block_offset_);
+        inputs.attention_inputs.dtype = torch::kBFloat16;
+        capture_mem_hold_             = CaptureMemoryHold(output, inputs, kv_cache_block_offset_, is_embedding_);
         initKernelInternalMemory();
         capture();
     } else {

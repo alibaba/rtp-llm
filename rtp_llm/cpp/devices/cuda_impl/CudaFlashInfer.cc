@@ -346,6 +346,7 @@ bool FlashInferAttnParams::checkPrefill(rtp_llm::DeviceBase*             device,
                                         const BufferPtr&                 input_lengths_host,
                                         DataType                         dtype,
                                         bool                             skip_no_prefix) {
+    RTP_LLM_LOG_DEBUG("%s", attn_configs.DebugAttentionConfigStr());
     if (!check(device, attn_configs, dtype, true)) {
         return false;
     }
@@ -523,6 +524,8 @@ void FlashInferAttnParams::run(const AttentionModuleParams& params,
                                        stream);
     } else {
         RTP_LLM_LOG_DEBUG("prefill flashinfer");
+        // reference to flashinfer doc:
+        // https://docs.flashinfer.ai/api/attention.html#flashinfer.prefill.BatchPrefillWithRaggedKVCacheWrapper.run
         BatchPrefillWithPagedKVCacheRun(float_workspace_d,         // float_workspace_buffer
                                         int_workspace_d,           // int_workspace_buffer
                                         plan,                      // plan_info_vec
