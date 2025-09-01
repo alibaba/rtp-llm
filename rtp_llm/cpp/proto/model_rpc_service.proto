@@ -329,7 +329,7 @@ message CacheStatusPB {
   int64 total_kv_cache = 2;
   int64 block_size = 3;
   int64 version = 4;
-  repeated int64 cache_keys = 5;
+  map<int64, bool> cache_keys = 5;
 }
 
 message TaskInfoPB {
