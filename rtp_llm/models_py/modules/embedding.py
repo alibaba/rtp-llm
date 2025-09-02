@@ -1,8 +1,5 @@
-from typing import Optional
-
 import torch
 from libth_transformer import rtp_llm_ops
-from torch import dtype as _dtype
 from torch import nn
 from torch.nn import functional as F
 

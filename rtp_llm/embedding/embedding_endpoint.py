@@ -1,6 +1,5 @@
-import asyncio
 import json
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple
 
 from rtp_llm.async_decoder_engine.async_model import AsyncModel
 from rtp_llm.async_decoder_engine.embedding.embedding_engine import EmbeddingCppEngine
@@ -8,7 +7,6 @@ from rtp_llm.async_decoder_engine.embedding.interface import EngineOutputs
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
 from rtp_llm.models.downstream_modules.custom_module import CustomModule
-from rtp_llm.ops import MultimodalInputCpp
 
 
 class EmbeddingEndpoint(object):

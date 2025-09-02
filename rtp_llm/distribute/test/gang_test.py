@@ -2,12 +2,10 @@ import logging
 import multiprocessing
 import os
 import random
-import signal
 import socket
 import time
 import unittest
 from multiprocessing import Process
-from threading import Thread
 from typing import List
 from unittest import mock
 
@@ -19,10 +17,9 @@ from rtp_llm.config.py_config_modules import StaticConfig
 torch.cuda.set_device = lambda x: None
 
 from rtp_llm.distribute.gang_info import get_c2_members, get_gang_info
-from rtp_llm.distribute.test.fake_model import FakeModel
-from rtp_llm.distribute.worker_info import WorkerInfo, g_parallel_info, g_worker_info
+from rtp_llm.distribute.worker_info import WorkerInfo, g_parallel_info
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
-from rtp_llm.server.frontend_server import FrontendServer, FrontendWorker
+from rtp_llm.server.frontend_server import FrontendWorker
 from rtp_llm.start_backend_server import main
 
 
@@ -224,7 +221,6 @@ class GangTest(unittest.TestCase):
             multiprocessing.set_start_method("spawn")
         except RuntimeError as e:
             logging.warn(str(e))
-            pass
 
         torch_device_count.return_value = 2
         g_parallel_info.reload()
@@ -333,7 +329,6 @@ class GangTest(unittest.TestCase):
             multiprocessing.set_start_method("spawn")
         except RuntimeError as e:
             logging.warn(str(e))
-            pass
 
         torch_device_count.return_value = 2
         g_parallel_info.reload()
@@ -400,7 +395,6 @@ class GangTest(unittest.TestCase):
             multiprocessing.set_start_method("spawn")
         except RuntimeError as e:
             logging.warn(str(e))
-            pass
 
         torch_device_count.return_value = 2
         g_parallel_info.reload()

@@ -95,7 +95,6 @@ def moe_kernel_quantize_input(
     quant_dtype: Union[None, torch.dtype, str],
     per_act_token_quant: bool,
     block_shape: Optional[list[int]] = None,
-    is_fp4_scale_swizzled: bool = True,
 ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
     if quant_dtype == torch.float8_e4m3fn:
         raise NotImplementedError("float8 not supported yet")

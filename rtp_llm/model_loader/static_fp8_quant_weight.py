@@ -23,7 +23,6 @@ from rtp_llm.utils.model_weight import (
     WeightStyle,
     concat_0,
     concat_w13,
-    concat_w13_2,
     get_tensor_from_scalar,
     get_tensor_reciprocal,
     identity,

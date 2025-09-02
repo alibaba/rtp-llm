@@ -1,4 +1,3 @@
-import asyncio
 import json
 import logging
 from typing import List, Optional, Tuple
@@ -70,7 +69,6 @@ class MasterClient:
                 "request_priority": request_priority,
             }
         headers = {"Content-Type": "application/json"}
-
 
         # connect to master using long connection
         try:

@@ -15,7 +15,6 @@ from PIL import Image
 from transformers import CLIPImageProcessor, CLIPVisionConfig, CLIPVisionModel
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.distribute.worker_info import g_parallel_info
 from rtp_llm.models.llava_utils import (
     expand2square,
     get_anyres_image_grid_shape,
@@ -29,7 +28,6 @@ from rtp_llm.models.multimodal.multimodal_common import (
 from rtp_llm.utils.multimodal_util import MMUrlType
 
 try:
-    import av
     from decord import VideoReader, cpu
 except ImportError:
     print("Please install pyav to use video processing functions.")
@@ -948,7 +946,6 @@ class SigLipPreTrainedModel(PreTrainedModel):
 
     def _init_weights(self, module):
         """Initialize the weights"""
-        pass
 
 
 # Copied from transformers.models.clip.modeling_clip.CLIPEncoder with CLIP->SigLip

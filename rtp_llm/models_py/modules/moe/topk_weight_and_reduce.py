@@ -1,5 +1,3 @@
-from typing import Optional
-
 import torch
 
 import rtp_llm.models_py.modules.moe.fused_moe as mm

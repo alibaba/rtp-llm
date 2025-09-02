@@ -4,7 +4,6 @@ import sys
 import unittest
 
 import torch
-from numpy import append
 
 from rtp_llm.cpp.devices.cuda_impl.tests.libtest_cuda_graph_ops import (
     CudaGraphDecodePaddingOp,
@@ -14,7 +13,6 @@ from rtp_llm.cpp.devices.cuda_impl.tests.libtest_cuda_graph_ops import (
 from rtp_llm.models_py.model_desc.module_base import (  # load libth_transformer by default
     GptModelBase,
 )
-from rtp_llm.models_py.model_desc.qwen3 import Qwen3Model
 from rtp_llm.test.model_test.test_util.fake_model_loader import FakeModelLoader
 from rtp_llm.utils.weight_type import WEIGHT_TYPE
 

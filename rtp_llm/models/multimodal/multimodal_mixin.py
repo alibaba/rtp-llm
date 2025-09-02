@@ -221,7 +221,7 @@ class MultiModalMixin:
     ):
         # check whether VIT tensorrt exist
         try:
-            import tensorrt
+            pass
         except ImportError:
             raise RuntimeError("tensorrt library not fonnd")
 

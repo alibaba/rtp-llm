@@ -1,6 +1,6 @@
 import copy
 import functools
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Union
 
 import torch
 
@@ -26,7 +26,6 @@ from rtp_llm.utils.model_weight import (
     merge_te_qkv,
     mla_pad,
     mla_pad_scale,
-    multipy_identity,
     pad,
     pad_w13,
     sp_0,

@@ -1,7 +1,6 @@
 import logging
 import os
-import time
-from multiprocessing import Lock, Process, Value
+from multiprocessing import Lock, Value
 from typing import Optional
 
 from rtp_llm.config.py_config_modules import StaticConfig

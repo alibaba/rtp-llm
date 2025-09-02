@@ -1,6 +1,5 @@
 from typing import Any, Dict, List
 
-import torch
 from transformers.models.gpt2.tokenization_gpt2_fast import GPT2TokenizerFast
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters

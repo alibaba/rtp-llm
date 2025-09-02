@@ -6,7 +6,7 @@ from rtp_llm.model_loader.model_weight_info import (
     ModelDeployWeightInfo,
     ModelWeightInfo,
 )
-from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
+from rtp_llm.model_loader.weight_module import AtomicWeight
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,

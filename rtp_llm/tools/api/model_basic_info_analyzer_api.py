@@ -1,5 +1,4 @@
 import json
-import logging.config
 from typing import Any, Dict, Union
 
 from fastapi import APIRouter

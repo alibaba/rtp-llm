@@ -15,10 +15,6 @@ from rtp_llm.openai.renderers.custom_renderer import (
     RenderedInputs,
     RendererParams,
 )
-from rtp_llm.openai.renderers.llama_template import (
-    Template,
-    get_template_and_fix_tokenizer,
-)
 
 
 class ChatGlm4Renderer(CustomChatRenderer):

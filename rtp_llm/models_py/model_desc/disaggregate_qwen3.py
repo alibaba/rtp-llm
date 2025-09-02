@@ -1,30 +1,20 @@
-import logging
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import List, Tuple
 
 import torch
-import torch.distributed as dist
 from torch import nn
-from typing_extensions import Unpack
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.distribute.collective import Group, recv, send
 from rtp_llm.distribute.worker_info import g_parallel_info
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
-from rtp_llm.models_py.model_desc.qwen3 import Qwen3Model
 from rtp_llm.models_py.modules.attention_pure import CausalAttentionPure
 from rtp_llm.models_py.modules.embedding import Embedding
-from rtp_llm.models_py.modules.fmha import FMHAImplBase
 from rtp_llm.models_py.modules.linear import Linear
 from rtp_llm.models_py.modules.mlp import FusedSiluActDenseMLP
 from rtp_llm.models_py.modules.norm import FusedQKRMSNorm, RMSNorm
-from rtp_llm.ops import (
-    PyAttentionInputs,
-    PyModelInitResources,
-    PyModelInputs,
-    PyModelOutputs,
-)
+from rtp_llm.ops import PyModelInitResources, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 from rtp_llm.utils.util import check_with_info
 

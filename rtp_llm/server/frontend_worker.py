@@ -1,25 +1,11 @@
 import asyncio
-import copy
-import json
 import logging
 import os
 import pathlib
 import sys
 import traceback
 from functools import partial
-from typing import (
-    Any,
-    AsyncGenerator,
-    Dict,
-    List,
-    NamedTuple,
-    Optional,
-    Set,
-    Tuple,
-    Union,
-)
-
-import torch
+from typing import Any, AsyncGenerator, Dict, List, Optional, Set, Tuple, Union
 
 from rtp_llm.config.py_config_modules import StaticConfig
 

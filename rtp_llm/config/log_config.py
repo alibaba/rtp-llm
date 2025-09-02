@@ -1,5 +1,3 @@
-import os
-
 from rtp_llm.config.py_config_modules import StaticConfig
 
 ## reserve this env

@@ -1,5 +1,4 @@
 import enum
-import os
 from itertools import product
 
 ################################################################################

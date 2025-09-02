@@ -1,14 +1,10 @@
 import itertools
-import math
 from unittest import SkipTest, TestCase, main
 
 import torch
 from torch import dtype as _dtype
-from torch.profiler import ProfilerActivity, profile, record_function
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.models_py.modules.norm import FusedQKRMSNorm, QKRMSNorm
-from rtp_llm.utils.model_weight import W
 
 
 class FusedQKRMSNormTest(TestCase):

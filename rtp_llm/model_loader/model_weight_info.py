@@ -1,7 +1,6 @@
 import functools
 import gc
 import logging
-import os
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
@@ -9,7 +8,6 @@ import torch
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.config.quant_config import QuantizationConfig
-from rtp_llm.distribute.worker_info import ParallelInfo
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
 from rtp_llm.model_loader.ffn_weight import FfnConfig, FfnWeight, MoeWithSharedWeight
 from rtp_llm.model_loader.load_config import LoadConfig

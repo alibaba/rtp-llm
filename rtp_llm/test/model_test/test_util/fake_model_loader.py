@@ -2,8 +2,6 @@ import json
 import logging
 import os
 
-import torch
-
 from rtp_llm.async_decoder_engine.async_model import AsyncModel
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_factory import ModelConfig, ModelFactory

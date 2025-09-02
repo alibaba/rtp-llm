@@ -1,13 +1,11 @@
 import logging
 import math
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint
-from torch.nn import CrossEntropyLoss, LayerNorm
+from torch.nn import LayerNorm
 
 from rtp_llm.models.qwen2_vl.activations import ACT2FN
 from rtp_llm.utils.flash_attn_utils import can_use_flash_attn

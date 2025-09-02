@@ -1,18 +1,14 @@
 import json
 import logging
 import os
-import re
 import shutil
 import threading
-from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Union
 
 import aiohttp
-import pynvml
-import requests
 import torch
-from aiohttp import ClientConnectorError, ClientTimeout, ServerTimeoutError
+from aiohttp import ClientConnectorError, ServerTimeoutError
 
 from rtp_llm import _ft_pickler
 

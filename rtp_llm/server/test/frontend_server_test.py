@@ -1,11 +1,9 @@
 import asyncio
 import json
-import os
 from typing import Any
 from unittest import TestCase, main
 
-from fastapi import Request as RawRequest
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from rtp_llm.server.frontend_server import FrontendServer
 from rtp_llm.utils.complete_response_async_generator import (
@@ -30,7 +28,7 @@ class FakeFrontendWorker(object):
     async def _inference(self, prompt: str, *args: Any, **kwargs: Any):
         yield FakePipelinResponse(res=prompt)
 
-    def is_streaming(self, *args: Any, **kawrgs: Any):
+    def is_streaming(self, *args: Any, **kwargs: Any):
         return False
 
 

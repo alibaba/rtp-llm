@@ -160,7 +160,6 @@ class MasterService:
                     route_logger.error(
                         f"Failed to get master address from {master_addr}, error: {e}"
                     )
-                    pass
             route_logger.debug(f"master address refreshed: {master_addr}")
             self.cached_master_addr = master_addr
             time.sleep(1)

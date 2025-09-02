@@ -1,4 +1,3 @@
-from threading import Lock
 from typing import Any, List, Tuple, Union
 
 import torch
@@ -11,7 +10,6 @@ except ModuleNotFoundError:
 from PIL import Image, ImageFile
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
-import pillow_avif
 from pillow_heif import register_heif_opener
 
 register_heif_opener()

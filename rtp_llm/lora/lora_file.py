@@ -2,8 +2,7 @@ import json
 import logging
 import os
 import re
-from pathlib import Path, PosixPath
-from typing import Any, Dict, List, NamedTuple, Optional, Set, Union
+from typing import Any, Dict, List, NamedTuple, Union
 
 import torch
 

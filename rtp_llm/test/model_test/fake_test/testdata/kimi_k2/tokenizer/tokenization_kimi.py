@@ -1,27 +1,18 @@
 import os
-import tiktoken
-
 from logging import getLogger
 from pathlib import Path
-from typing import (
-    cast,
-    Tuple,
-    Dict,
-    Iterator,
-    List,
-    Union,
-    Optional,
-)
 from shutil import copyfile
+from typing import Dict, Iterator, List, Optional, Tuple, Union, cast
+
+import tiktoken
 from tiktoken.load import load_tiktoken_bpe
-from tokenizers import AddedToken, pre_tokenizers, Regex
-from transformers.tokenization_utils import PreTrainedTokenizer
+from tokenizers import AddedToken
 from transformers.models.gpt2.tokenization_gpt2 import bytes_to_unicode
-
-
+from transformers.tokenization_utils import PreTrainedTokenizer
 
 logger = getLogger(__name__)
 VOCAB_FILES_NAMES = {"vocab_file": "tiktoken.model"}
+
 
 class TikTokenTokenizer(PreTrainedTokenizer):
     """
@@ -71,31 +62,31 @@ class TikTokenTokenizer(PreTrainedTokenizer):
     def __init__(
         self,
         vocab_file,
-        bos_token: Union[str, AddedToken]="[BOS]",
-        eos_token: Union[str, AddedToken]="[EOS]",
-        unk_token: Union[str, AddedToken, None]=None,
-        pad_token: Union[str, AddedToken, None]=None,
-        additional_special_tokens: List[str]=None,
+        bos_token: Union[str, AddedToken] = "[BOS]",
+        eos_token: Union[str, AddedToken] = "[EOS]",
+        unk_token: Union[str, AddedToken, None] = None,
+        pad_token: Union[str, AddedToken, None] = None,
+        additional_special_tokens: List[str] = None,
         added_tokens_decoder: Optional[dict] = None,
         **kwargs,
     ):
         assert os.path.isfile(vocab_file), vocab_file
 
         if additional_special_tokens is None:
-            additional_special_tokens  = [
+            additional_special_tokens = [
                 "<|im_end|>",
-                "<|im_user|>", 
-                "<|im_assistant|>", 
-                "<|start_header_id|>", 
-                "<|end_header_id|>", 
-                "[EOT]", 
-                "<|im_system|>", 
+                "<|im_user|>",
+                "<|im_assistant|>",
+                "<|start_header_id|>",
+                "<|end_header_id|>",
+                "[EOT]",
+                "<|im_system|>",
                 "<|im_middle|>",
-            ] 
-        
+            ]
+
         special_tokens_mapping = {
-        i: added_tokens_decoder[i].content for i in added_tokens_decoder
-    }
+            i: added_tokens_decoder[i].content for i in added_tokens_decoder
+        }
 
         self.vocab_file = vocab_file
         mergeable_ranks = load_tiktoken_bpe(vocab_file)
@@ -106,8 +97,6 @@ class TikTokenTokenizer(PreTrainedTokenizer):
                 num_base_tokens, num_base_tokens + self.num_reserved_special_tokens + 2
             )
         }
-
-
 
         self.model = tiktoken.Encoding(
             name=Path(vocab_file).name,
@@ -134,10 +123,14 @@ class TikTokenTokenizer(PreTrainedTokenizer):
         self.decoder = {}
         for i in range(self.n_words):
             # Taken from https://gist.github.com/xenova/a452a6474428de0182b17605a98631ee
-            decoding = ''.join([
-                self.byte_encoder[ord(char)] for char in
-                self.model.decode_single_token_bytes(i).decode('latin-1')
-            ])
+            decoding = "".join(
+                [
+                    self.byte_encoder[ord(char)]
+                    for char in self.model.decode_single_token_bytes(i).decode(
+                        "latin-1"
+                    )
+                ]
+            )
             self.decoder[i] = decoding
 
         self.encoder = {}
@@ -156,10 +149,7 @@ class TikTokenTokenizer(PreTrainedTokenizer):
         self.all_special_ids_set = set(self.all_special_ids)
 
     def encode(
-        self,
-        text: str,
-        allow_special_tokens: bool = True,
-        **kwargs
+        self, text: str, allow_special_tokens: bool = True, **kwargs
     ) -> List[int]:
         """
         Encodes a string into a list of token IDs.
@@ -175,7 +165,7 @@ class TikTokenTokenizer(PreTrainedTokenizer):
         # NOTE: our encode method is not compatible with the super().encode method,
         #   e.g. split_special_tokens' default is True in our encode method.
         if len(kwargs) > 0:
-            logger.warning( f"Calling super().encode with {kwargs}" )
+            logger.warning(f"Calling super().encode with {kwargs}")
             return super().encode(text, **kwargs)
 
         assert type(text) is str
@@ -197,7 +187,7 @@ class TikTokenTokenizer(PreTrainedTokenizer):
                 substr
                 for i in range(0, len(text), TIKTOKEN_MAX_ENCODE_CHARS)
                 for substr in self._split_whitespaces_or_nonwhitespaces(
-                    text[i: i + TIKTOKEN_MAX_ENCODE_CHARS], MAX_NO_WHITESPACES_CHARS
+                    text[i : i + TIKTOKEN_MAX_ENCODE_CHARS], MAX_NO_WHITESPACES_CHARS
                 )
             )
             all_substrs.extend(substrs)
@@ -223,11 +213,7 @@ class TikTokenTokenizer(PreTrainedTokenizer):
 
         return t
 
-    def decode(
-        self,
-        token_ids: Union[int, List[int]],
-        **kwargs
-    ) -> str:
+    def decode(self, token_ids: Union[int, List[int]], **kwargs) -> str:
         """
         Decodes a list of token IDs into a string.
 
@@ -280,8 +266,8 @@ class TikTokenTokenizer(PreTrainedTokenizer):
         """
         return [text]
 
-
     """ ----- Below are the abstract methods required by PreTrainedTokenizer ----- """
+
     @property
     def vocab_size(self) -> int:
         return self.n_words
@@ -290,10 +276,7 @@ class TikTokenTokenizer(PreTrainedTokenizer):
         return self.encoder
 
     def _tokenize(self, text: str, **kwargs) -> List[str]:
-        return [
-            self.decoder[t]
-            for t in self.encode(text)
-        ]
+        return [self.decoder[t] for t in self.encode(text)]
 
     def _convert_token_to_id(self, token: str) -> int:
         return self.encoder.get(token, self.unk_id)
@@ -306,18 +289,28 @@ class TikTokenTokenizer(PreTrainedTokenizer):
         return out_string
 
     def convert_tokens_to_string(self, tokens: List[str]) -> str:
-        text = ''.join(tokens)
-        text = bytearray([self.byte_decoder[c] for c in text]).decode('utf-8', 'replace')
+        text = "".join(tokens)
+        text = bytearray([self.byte_decoder[c] for c in text]).decode(
+            "utf-8", "replace"
+        )
         return text
 
-    def save_vocabulary(self, save_directory: str, filename_prefix: Optional[str] = None) -> Tuple[str]:
+    def save_vocabulary(
+        self, save_directory: str, filename_prefix: Optional[str] = None
+    ) -> Tuple[str]:
         if not os.path.isdir(save_directory):
-            raise ValueError(f"vocabulary path ({save_directory}) should be a directory")
+            raise ValueError(
+                f"vocabulary path ({save_directory}) should be a directory"
+            )
         out_vocab_file = os.path.join(
-            save_directory, (filename_prefix + "-" if filename_prefix else "") + VOCAB_FILES_NAMES["vocab_file"]
+            save_directory,
+            (filename_prefix + "-" if filename_prefix else "")
+            + VOCAB_FILES_NAMES["vocab_file"],
         )
 
-        if os.path.abspath(self.vocab_file) != os.path.abspath(out_vocab_file) and os.path.isfile(self.vocab_file):
+        if os.path.abspath(self.vocab_file) != os.path.abspath(
+            out_vocab_file
+        ) and os.path.isfile(self.vocab_file):
             copyfile(self.vocab_file, out_vocab_file)
 
         return (out_vocab_file,)

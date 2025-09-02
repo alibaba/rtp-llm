@@ -1,5 +1,5 @@
 import logging
-from typing import AsyncGenerator, List, Optional, Union
+from typing import AsyncGenerator, Optional, Union
 
 from transformers import Qwen2Tokenizer
 
@@ -14,7 +14,6 @@ from rtp_llm.openai.renderer_factory_register import register_renderer
 from rtp_llm.openai.renderers.custom_renderer import (
     RenderedInputs,
     StreamResponseObject,
-    StreamStatus,
 )
 from rtp_llm.openai.renderers.qwen_agent.utils.tool_function_converter import (
     convert_function_to_tool_response,

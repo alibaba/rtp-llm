@@ -1,7 +1,6 @@
 from concurrent import futures
 
 import grpc
-import torch
 
 from rtp_llm.cpp.proto.model_rpc_service_pb2 import (
     MMPreprocessConfigPB,
@@ -17,7 +16,7 @@ from rtp_llm.distribute.worker_info import g_worker_info
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.utils.grpc_util import trans_from_tensor, trans_tensor
 from rtp_llm.utils.mm_process_engine import MMEmbeddingRes, MMProcessEngine
-from rtp_llm.utils.multimodal_util import MMPreprocessConfig, MMUrlType
+from rtp_llm.utils.multimodal_util import MMUrlType
 
 
 def trans_config(mm_process_config_pb: MMPreprocessConfigPB):

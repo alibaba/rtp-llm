@@ -3,7 +3,6 @@ from unittest import SkipTest, TestCase, main
 
 import torch
 from torch import dtype as _dtype
-from torch.profiler import ProfilerActivity, profile, record_function
 
 from rtp_llm.models_py.modules.embedding import Embedding, EmbeddingTorch
 

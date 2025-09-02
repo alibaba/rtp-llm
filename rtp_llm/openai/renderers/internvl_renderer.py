@@ -1,13 +1,8 @@
 import copy
-import dataclasses
 import functools
 import json
-import logging
 import os
-import re
-from dataclasses import dataclass
-from enum import Enum, IntEnum, auto
-from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple, Union
+from typing import List
 
 from transformers import PreTrainedTokenizerBase
 
@@ -15,25 +10,18 @@ from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.models.base_model import GenerateOutput
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
-    ChatCompletionResponseStreamChoice,
     ChatMessage,
-    ContentPart,
     ContentPartTypeEnum,
-    DeltaMessage,
     FinisheReason,
-    FunctionCall,
-    GPTFunctionDefinition,
     RoleEnum,
-    UsageInfo,
 )
 from rtp_llm.openai.renderer_factory_register import register_renderer
-from rtp_llm.openai.renderers.basic_renderer import BasicRenderer, PromptWithMMInput
+from rtp_llm.openai.renderers.basic_renderer import PromptWithMMInput
 from rtp_llm.openai.renderers.custom_renderer import (
     CustomChatRenderer,
     OutputDelta,
     RenderedInputs,
     RendererParams,
-    StreamResponseObject,
     StreamStatus,
 )
 from rtp_llm.openai.renderers.llava_renderer import Conversation, SeparatorStyle

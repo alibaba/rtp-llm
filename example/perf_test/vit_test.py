@@ -8,7 +8,7 @@ from random import randint
 import torch
 from PIL import Image
 
-from rtp_llm.model_factory import ModelConfig, ModelFactory
+from rtp_llm.model_factory import ModelConfig
 from rtp_llm.model_factory_register import _model_factory
 from rtp_llm.utils.multimodal_util import MMPreprocessConfig, MMUrlType
 

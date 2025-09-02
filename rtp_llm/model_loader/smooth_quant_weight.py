@@ -21,7 +21,6 @@ from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
     WeightStyle,
-    concat_0,
     concat_w13,
     identity,
     merge_qkv_hf,
@@ -339,7 +338,7 @@ class SmoothQuantWeightInfo(CompositeWeight, QuantWeight):
                     concat_w13,
                     data_type=torch.float32,
                     config=src_weight.config,
-                )
+                ),
             ]
         else:
             if ffn_w_name == W.ffn_w1:
@@ -618,7 +617,7 @@ class TrtEngineSmoothQuantWeightInfo(SmoothQuantWeightInfo):
                     concat_w13,
                     data_type=torch.float32,
                     config=src_weight.config,
-                )
+                ),
             ]
         else:
             if ffn_w_name == W.ffn_w1:

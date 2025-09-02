@@ -26,37 +26,21 @@
 
 import logging
 import math
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Optional, Tuple
 
 import torch
+import torch.library as tl
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn import CrossEntropyLoss
 from transformers.activations import ACT2FN
-from transformers.cache_utils import (
-    Cache,
-    DynamicCache,
-    SlidingWindowCache,
-    StaticCache,
-)
-from transformers.generation import GenerationMixin
-from transformers.modeling_attn_mask_utils import AttentionMaskConverter
-from transformers.modeling_outputs import BaseModelOutputWithPast, ModelOutput
-from transformers.modeling_utils import PreTrainedModel
-from transformers.utils import (
-    add_start_docstrings,
-    add_start_docstrings_to_model_forward,
-    replace_return_docstrings,
-)
 
 from rtp_llm.utils.flash_attn_utils import can_use_flash_attn
 
-import torch.library as tl
-
 if not hasattr(tl, "wrap_triton"):
+
     def wrap_triton(fn):
         return fn
+
     tl.wrap_triton = wrap_triton
 
 default_attn_impl = "sdpa"
@@ -394,7 +378,7 @@ class Qwen2_5_VLVisionSdpaAttention(nn.Module):
         attention_mask = torch.zeros(
             [1, seq_length, seq_length], device=q.device, dtype=torch.bool
         )
-        if 'MI308X' in device_name:
+        if "MI308X" in device_name:
             attention_mask = torch.zeros(
                 [1, seq_length, seq_length], device=q.device, dtype=torch.float32
             )

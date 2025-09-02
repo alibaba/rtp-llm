@@ -1,6 +1,4 @@
-import copy
 import math
-from typing import Any, Dict, List, Tuple
 
 from PIL import Image
 
@@ -10,8 +8,7 @@ except ModuleNotFoundError:
     VideoReader = None
     cpu = None
 import torch
-import torch.nn as nn
-from torchvision import io, transforms
+from torchvision import transforms
 from torchvision.transforms import InterpolationMode
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
@@ -23,7 +20,7 @@ from rtp_llm.models.qwen2_vl.image_processing_qwen2_vl import Qwen2VLImageProces
 from rtp_llm.models.qwen2_vl.modeling_qwen2_vl import (
     Qwen2VisionTransformerPretrainedModel,
 )
-from rtp_llm.utils.multimodal_util import MMPreprocessConfig, MMUrlType
+from rtp_llm.utils.multimodal_util import MMUrlType
 
 IMAGE_FACTOR = 28
 MIN_PIXELS = 4 * 28 * 28

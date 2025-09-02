@@ -1,6 +1,5 @@
 import json
 import logging
-import os
 from typing import Any, List, Optional, Union
 
 import torch
@@ -128,7 +127,6 @@ class LoadConfig(BaseModel):
         phy_exp_num: int,
         ep_size: int,
         num_nodes: int,
-        PHY2LOG_PATH_KEY: str = "PHY2LOG_PATH",
     ):
         if expert_num == 0:
             return None

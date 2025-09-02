@@ -1,9 +1,8 @@
 import functools
 import json
 import logging
-import os
-from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional, Tuple
+from abc import ABC
+from typing import List, Optional, Tuple
 
 from jinja2 import BaseLoader, Environment
 from transformers import PreTrainedTokenizerBase
@@ -71,7 +70,6 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
 
     def _setup_stop_words(self):
         """设置额外的停止词，子类可以重写"""
-        pass
 
     def _create_detector(
         self, request: ChatCompletionRequest

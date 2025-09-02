@@ -59,7 +59,7 @@ from rtp_llm.ops import (
     SpeculativeExecutionConfig,
 )
 from rtp_llm.utils.gemm_utils.cutlass_config import load_cutlass_gemm_config
-from rtp_llm.utils.util import closest_power_of_2, str_to_bool
+from rtp_llm.utils.util import closest_power_of_2
 from rtp_llm.utils.weight_type import WEIGHT_TYPE
 
 updated_params: Set[str] = set()
@@ -1293,11 +1293,9 @@ class GptInitModelParameters:
             if data_type == WEIGHT_TYPE.FP32:
                 # Upcasting to float32 is allowed.
                 logging.info("Upcasting %s to %s.", config_dtype, data_type)
-                pass
             elif config_dtype == WEIGHT_TYPE.FP32:
                 # Downcasting from float32 to float16 or bfloat16 is allowed.
                 logging.info("Downcasting %s to %s.", config_dtype, data_type)
-                pass
             else:
                 # Casting between float16 and bfloat16 is allowed with a warning.
                 logging.warning("Casting %s to %s.", config_dtype, data_type)

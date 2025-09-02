@@ -1,10 +1,10 @@
-from typing import Any, List, NamedTuple
+from typing import Any, List
 
 import torch
 from pydantic import BaseModel
 
-from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
-from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, FfnConfig, FfnWeight
+from rtp_llm.model_loader.attn_weight import AttnAtomicWeight
+from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight
 from rtp_llm.model_loader.model_weight_info import (
     ModelDeployWeightInfo,
     ModelWeightInfo,

@@ -10,7 +10,6 @@ from rtp_llm.models_py.modules.moe import (
     BatchedDataRouter,
     BatchedTritonExperts,
     FusedMoe,
-    NaiveBatchedExperts,
 )
 
 

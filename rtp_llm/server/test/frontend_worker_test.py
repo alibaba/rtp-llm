@@ -5,17 +5,12 @@ from unittest import TestCase, main
 
 from rtp_llm.async_decoder_engine.async_model import AsyncModel
 from rtp_llm.config.log_config import LOGGING_CONFIG
-from rtp_llm.distribute.worker_info import (
-    DEFAULT_START_PORT,
-    g_worker_info,
-    update_master_info,
-)
+from rtp_llm.distribute.worker_info import g_worker_info, update_master_info
 from rtp_llm.pipeline.pipeline import Pipeline
 from rtp_llm.server.frontend_worker import BatchPipelineResponse, FrontendWorker
 from rtp_llm.structure.request_extractor import request_id_field_name
 from rtp_llm.test.model_test.test_util.fake_model_loader import FakeModelLoader
 from rtp_llm.test.utils.port_util import PortManager
-from rtp_llm.utils.weight_type import WEIGHT_TYPE
 
 
 class FakeFrontendWorker(FrontendWorker):

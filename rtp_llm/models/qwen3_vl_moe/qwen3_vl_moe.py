@@ -1,25 +1,12 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from transformers.activations import ACT2FN
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_factory_register import register_model
-from rtp_llm.models.multimodal.multimodal_mixin import (
-    BaseMultiModalWeightInfo,
-    BaseVitWeights,
-    MultiModalMixin,
-)
-from rtp_llm.models.qwen2_5_vl.modeling_qwen2_5_vl import (
-    Qwen2_5_VisionTransformerPretrainedModel,
-    Qwen2_5_VLVisionConfig,
-)
+from rtp_llm.models.multimodal.multimodal_mixin import BaseMultiModalWeightInfo
 from rtp_llm.models.qwen2_5_vl.qwen2_5_vl import QWen2_5_VL, Qwen2_5_VLImageEmbedding
-from rtp_llm.models.qwen2_vl.qwen2_vl import (
-    QWen2_VL,
-    QWen2VLWeightInfo,
-    QwenVL2VitWeight,
-)
+from rtp_llm.models.qwen2_vl.qwen2_vl import QwenVL2VitWeight
 from rtp_llm.models.qwen3_vl_moe.modeling_qwen3_vl_moe import (
     Qwen3_VL_MOEVisionTransformerPretrainedModel,
 )

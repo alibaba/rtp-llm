@@ -1,21 +1,15 @@
 import asyncio
-import copy
-import functools
 import json
 import logging
-import logging.config
 import os
 import threading
 import time
-import traceback
-from typing import Any, Callable, Dict, List, Union
+from typing import Any, Dict, List, Union
 
-import orjson
 import requests
 import torch
 from fastapi import Request
-from fastapi import Request as RawRequest
-from fastapi.responses import ORJSONResponse, StreamingResponse
+from fastapi.responses import ORJSONResponse
 from pydantic import BaseModel
 
 from rtp_llm.access_logger.access_logger import AccessLogger
@@ -41,13 +35,11 @@ from rtp_llm.server.misc import format_exception
 from rtp_llm.server.worker_status import TaskInfo, WorkStatus
 from rtp_llm.structure.request_extractor import request_id_field_name
 from rtp_llm.utils.concurrency_controller import (
-    ConcurrencyController,
     ConcurrencyException,
     get_global_controller,
 )
 from rtp_llm.utils.fuser import _nfs_manager
-from rtp_llm.utils.time_util import Timer, current_time_ms
-from rtp_llm.utils.util import AtomicCounter, check_with_info
+from rtp_llm.utils.time_util import Timer
 from rtp_llm.utils.version_info import VersionInfo
 
 StreamObjectType = Union[Dict[str, Any], BaseModel]

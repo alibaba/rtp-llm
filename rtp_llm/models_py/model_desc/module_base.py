@@ -1,7 +1,6 @@
 import logging
 from typing import Optional
 
-import torch
 from torch import nn
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
@@ -12,7 +11,6 @@ from rtp_llm.models_py.modules.fmha import (
     FMHAImplBase,
 )
 from rtp_llm.ops import (
-    DeviceExporter,
     DeviceType,
     KVCache,
     PyAttentionInputs,

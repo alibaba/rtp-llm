@@ -1,5 +1,4 @@
-import functools
-from typing import Any, List, Union
+from typing import Any, List
 
 import torch
 from pydantic import BaseModel

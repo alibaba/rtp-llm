@@ -1,32 +1,20 @@
 import copy
-import json
-import logging
-import re
-from dataclasses import dataclass
-from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple, Union
+from typing import List
 
 from transformers import PreTrainedTokenizerBase
 
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
-    ChatCompletionResponseStreamChoice,
     ChatMessage,
-    ContentPart,
     ContentPartTypeEnum,
-    DeltaMessage,
-    FinisheReason,
-    FunctionCall,
-    GPTFunctionDefinition,
     RoleEnum,
-    UsageInfo,
 )
 from rtp_llm.openai.renderer_factory_register import register_renderer
-from rtp_llm.openai.renderers.basic_renderer import BasicRenderer, PromptWithMMInput
+from rtp_llm.openai.renderers.basic_renderer import PromptWithMMInput
 from rtp_llm.openai.renderers.custom_renderer import (
     CustomChatRenderer,
     RenderedInputs,
     RendererParams,
-    StreamResponseObject,
 )
 from rtp_llm.utils.multimodal_util import MMPreprocessConfig, MMUrlType
 

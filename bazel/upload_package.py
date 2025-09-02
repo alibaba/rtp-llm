@@ -2,8 +2,6 @@
 
 import datetime
 import os
-import sys
-import time
 
 package_name = (
     "{pkg_prefix}" + datetime.datetime.now().strftime("%Y-%m-%d-%H-%M") + ".tar.gz"

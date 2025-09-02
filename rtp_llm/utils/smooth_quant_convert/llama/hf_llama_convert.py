@@ -31,8 +31,6 @@ from tqdm import tqdm
 from transformers import LlamaForCausalLM, LlamaTokenizer
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer
 
-from rtp_llm.config.py_config_modules import StaticConfig
-
 
 def merge_qkv_scales(q_name, hf_model, scales, llama_qkv_para):
     layer_name_q = q_name.replace(".weight", "")

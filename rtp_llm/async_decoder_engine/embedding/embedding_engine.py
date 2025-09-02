@@ -1,12 +1,10 @@
 import asyncio
 import logging
-from typing import AsyncGenerator, Dict
 
 from typing_extensions import override
 
 from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 from rtp_llm.async_decoder_engine.embedding.interface import EngineInputs, EngineOutputs
-from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.ops import LoadBalanceInfo, MultimodalInputCpp, RtpEmbeddingOp
 from rtp_llm.utils.mm_process_engine import MMProcessEngine

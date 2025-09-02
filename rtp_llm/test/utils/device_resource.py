@@ -7,7 +7,7 @@ import sys
 import time
 import traceback
 from contextlib import ExitStack
-from typing import Any, List, Tuple
+from typing import Any, List
 
 from filelock import FileLock, Timeout
 

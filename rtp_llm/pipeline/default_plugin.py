@@ -1,6 +1,6 @@
 import inspect
 from functools import lru_cache
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple
 
 from transformers import PreTrainedTokenizerBase
 

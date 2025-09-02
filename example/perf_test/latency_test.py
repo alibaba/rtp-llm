@@ -1,14 +1,11 @@
 import argparse
 import asyncio
-import copy
-import json
 import logging
 import multiprocessing
 import os
 import sys
 import threading
 import time
-from pathlib import Path
 from typing import Any, Dict, List
 
 import torch
@@ -24,7 +21,7 @@ CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 
 from example.perf_test.test_util import get_prompt, origin_prompt, write_odps
 from rtp_llm.distribute.worker_info import update_master_info
-from rtp_llm.model_factory import AsyncModel, ModelFactory
+from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models.base_model import ModelConfig
 from rtp_llm.pipeline.pipeline import Pipeline
 from rtp_llm.utils.weight_type import WEIGHT_TYPE

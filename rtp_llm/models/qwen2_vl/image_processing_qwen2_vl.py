@@ -45,7 +45,7 @@ from transformers.image_utils import (
     valid_images,
     validate_preprocess_arguments,
 )
-from transformers.utils import TensorType, is_vision_available, logging
+from transformers.utils import TensorType, logging
 
 VideoInput = Union[
     List["PIL.Image.Image"],

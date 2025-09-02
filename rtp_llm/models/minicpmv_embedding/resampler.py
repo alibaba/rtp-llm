@@ -4,20 +4,13 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
-from collections import OrderedDict
 from functools import partial
-from io import BytesIO
-from typing import Callable, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
-import requests
 import torch
-from PIL import Image
 from torch import nn
 from torch.nn import functional as F
 from torch.nn.init import trunc_normal_
-from torchvision import transforms
-from torchvision.transforms import InterpolationMode
 
 
 def get_abs_pos(abs_pos, tgt_size):

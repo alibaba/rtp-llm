@@ -97,7 +97,6 @@ class QuantizationConfig(ABC):
 class WeightOnlyInt8PerChannelQuantConfig(QuantizationConfig):
     def __init__(self):
         super().__init__(bits=8, group_size=0, is_quanted=False)
-        pass
 
     @classmethod
     def get_method(cls) -> str:

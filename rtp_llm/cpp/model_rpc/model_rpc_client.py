@@ -1,48 +1,31 @@
-import asyncio
 import functools
 import logging
-import os
-import sys
-from typing import Any, AsyncGenerator, Optional
+from typing import AsyncGenerator, Optional
 
 import grpc
-import numpy as np
-import torch
 from grpc import StatusCode
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.config.generate_config import RoleType
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.cpp.proto.model_rpc_service_pb2 import (
     ErrorDetailsPB,
     GenerateInputPB,
     GenerateOutputsPB,
-    MMPreprocessConfigPB,
     MultimodalInputPB,
     RoleAddrPB,
-    TensorPB,
 )
 from rtp_llm.cpp.proto.model_rpc_service_pb2_grpc import RpcServiceStub
-from rtp_llm.distribute.gang_info import GangInfo, get_gang_info
-from rtp_llm.distribute.worker_info import (
-    WorkerInfo,
-    g_master_info,
-    g_parallel_info,
-    g_worker_info,
-)
+from rtp_llm.distribute.gang_info import get_gang_info
+from rtp_llm.distribute.worker_info import g_parallel_info, g_worker_info
 from rtp_llm.models.base_model import (
     AuxInfo,
     GenerateConfig,
     GenerateInput,
     GenerateOutput,
     GenerateOutputs,
-    RoleType,
-)
-from rtp_llm.utils.concurrency_controller import (
-    ConcurrencyException,
-    get_global_controller,
 )
 from rtp_llm.utils.grpc_util import trans_option, trans_option_cast, trans_tensor
-from rtp_llm.utils.util import AtomicCounter
 
 MAX_GRPC_TIMEOUT_SECONDS = 3600
 
@@ -314,9 +297,15 @@ class ModelRpcClient(object):
 
         for role_addr in input_py.generate_config.role_addrs:
             if (
-                (self.model_config.decode_entrance and role_addr.role == RoleType.DECODE)
+                (
+                    self.model_config.decode_entrance
+                    and role_addr.role == RoleType.DECODE
+                )
                 or role_addr.role == RoleType.PDFUSION
-                or (not self.model_config.decode_entrance and role_addr.role == RoleType.PREFILL)
+                or (
+                    not self.model_config.decode_entrance
+                    and role_addr.role == RoleType.PREFILL
+                )
             ):
                 if role_addr.ip != "":
                     address_list = [role_addr.ip + ":" + str(role_addr.grpc_port)]

@@ -1,12 +1,10 @@
 import argparse
 import logging
 import os
-import sys
 
-import numpy as np
 import torch
 
-from rtp_llm.utils.gemm_utils.device_map import DeviceMap, get_device
+from rtp_llm.utils.gemm_utils.device_map import get_device
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 

@@ -9,7 +9,6 @@ from partial_json_parser.core.options import Allow
 from rtp_llm.openai.renderers.sglang_helpers.entrypoints.openai.protocol import Tool
 from rtp_llm.openai.renderers.sglang_helpers.function_call.core_types import (
     StreamingParseResult,
-    StructureInfo,
     ToolCallItem,
     _GetInfoFunc,
 )

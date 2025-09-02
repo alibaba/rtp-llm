@@ -1,12 +1,8 @@
-import logging
-from typing import Any, AsyncGenerator, Dict, Generator, Iterator, List, Optional, Union
+from typing import Any, List
 
-import torch
-
-from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_factory_register import register_model
-from rtp_llm.models.base_model import BaseModel, GenerateOutput
+from rtp_llm.models.base_model import BaseModel
 
 
 class FakeTokenizer(object):

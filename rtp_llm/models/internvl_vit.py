@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union
 
 from PIL import Image
 
@@ -530,8 +530,6 @@ except Exception:
     logging.warning(
         "discovered apex but it failed to load, falling back to InternRMSNorm"
     )
-    pass
-
 
 NORM2FN = {
     "rms_norm": InternRMSNorm,

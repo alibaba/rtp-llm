@@ -10,11 +10,9 @@ from typing import Any
 from unittest import TestCase, main
 
 import requests
-import uvicorn
-from fastapi import FastAPI
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
-from rtp_llm.distribute.worker_info import g_parallel_info, g_worker_info
+from rtp_llm.distribute.worker_info import g_worker_info
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.ops import LoadBalanceInfo
 from rtp_llm.server.backend_app import BackendApp

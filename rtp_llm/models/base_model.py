@@ -1,12 +1,11 @@
 import logging
-from enum import Enum
 from typing import Any, Dict, List, NamedTuple, Optional, Union
 
 import torch
 from pydantic import BaseModel as PyBaseModel
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
-from rtp_llm.config.generate_config import GenerateConfig, RoleType
+from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.gpt_init_model_parameters import ConfigMode, GptInitModelParameters
 from rtp_llm.config.task_type import TaskType
 from rtp_llm.distribute.gang_info import get_gang_info
@@ -21,7 +20,6 @@ from rtp_llm.utils.database import CkptDatabase
 from rtp_llm.utils.multimodal_util import MultimodalInput
 from rtp_llm.utils.time_util import timer_wrapper
 from rtp_llm.utils.util import to_torch_dtype
-from rtp_llm.utils.weight_type import WEIGHT_TYPE
 
 FT_DEFAULT_MAX_NEW_TOKENS = 2048
 

@@ -24,7 +24,6 @@ import os
 from pathlib import Path
 
 import datasets
-import numpy as np
 import torch
 import torch.multiprocessing as multiprocessing
 
@@ -34,7 +33,7 @@ from smoothquant import capture_activation_range, smooth_gemm, smooth_gemm_mlp
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM  # transformers-4.10.0-py3
 from transformers import AutoTokenizer, GenerationConfig
-from utils import str_dtype_to_torch, torch_to_numpy
+from utils import str_dtype_to_torch
 
 now_dir = os.path.dirname(os.path.abspath(__file__))
 

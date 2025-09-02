@@ -1,15 +1,8 @@
 import logging
-import os
-from typing import Any, Dict, List, NamedTuple, Optional
+from typing import Dict, List
 
 import torch
 import torch.serialization
-
-from rtp_llm.distribute.worker_info import g_parallel_info
-from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
-from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, FfnConfig, FfnWeight
-from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
-from rtp_llm.utils.database import BaseDatabase
 
 
 class LoRAWeights:

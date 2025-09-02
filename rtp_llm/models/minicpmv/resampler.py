@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 from torch.nn.functional import *
-from torch.nn.init import constant_, trunc_normal_, xavier_normal_, xavier_uniform_
+from torch.nn.init import trunc_normal_
 from torch.nn.modules.activation import *
 from transformers.integrations import is_deepspeed_zero3_enabled
 

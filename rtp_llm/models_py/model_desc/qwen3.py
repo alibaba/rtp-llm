@@ -1,9 +1,7 @@
-import logging
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional
 
 import torch
 from torch import nn
-from typing_extensions import Unpack
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_loader.model_weight_info import ModelWeights
@@ -11,10 +9,8 @@ from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules.attention import CausalAttention
 from rtp_llm.models_py.modules.embedding import Embedding
 from rtp_llm.models_py.modules.fmha import FMHAImplBase
-from rtp_llm.models_py.modules.linear import Linear
 from rtp_llm.models_py.modules.mlp import FusedSiluActDenseMLP
 from rtp_llm.models_py.modules.norm import FusedQKRMSNorm, RMSNorm
-from rtp_llm.models_py.utils.debug import set_trace_on_tty
 from rtp_llm.ops import KVCache, PyAttentionInputs, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 

@@ -1,10 +1,8 @@
-import logging.config
 from typing import Any, Dict
 
 from fastapi import FastAPI
 from fastapi import Request as RawRequest
 
-from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
 from rtp_llm.utils.util import async_request_server
 
 

@@ -7,7 +7,7 @@ import threading
 import time
 from enum import Enum
 from subprocess import check_call
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 from urllib.parse import urlparse
 
 import requests

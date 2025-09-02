@@ -15,7 +15,6 @@ from rtp_llm.models_py.modules.moe import FusedMoe
 from rtp_llm.models_py.modules.moe.fused_batched_moe import (
     BatchedDataRouter,
     BatchedTritonExperts,
-    NaiveBatchedExperts,
 )
 from rtp_llm.models_py.modules.norm import RMSNorm
 from rtp_llm.ops import KVCache, PyAttentionInputs, PyModelInputs, PyModelOutputs

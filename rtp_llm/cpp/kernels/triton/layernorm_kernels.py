@@ -1,11 +1,3 @@
-# Based on https://github.com/Dao-AILab/flash-attention/blob/main/flash_attn/ops/triton/layer_norm.py
-# This is faster for dimensions up to 8k, but after that it's much slower due to register spilling.
-# The models we train have hidden dim up to 8k anyway (e.g. Llama 70B), so this is fine.
-
-import math
-
-import torch
-import torch.nn.functional as F
 import triton
 import triton.language as tl
 

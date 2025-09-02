@@ -1,12 +1,6 @@
 import copy
 import json
-import logging
-import os
-import pathlib
-import sys
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Union
-
-import torch
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig, RequestFormat

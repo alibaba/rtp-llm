@@ -1,5 +1,4 @@
 import logging
-import os
 from typing import Any, Callable, List, Optional, Protocol, Tuple
 
 from rtp_llm.config.py_config_modules import StaticConfig

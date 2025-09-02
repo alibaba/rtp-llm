@@ -1,5 +1,4 @@
 import glob
-import json
 import logging
 import logging.config
 import multiprocessing
@@ -10,29 +9,21 @@ import sys
 import time
 import traceback
 from multiprocessing import Process
-from typing import Any, Dict, Generator, List, Union
+from typing import List
 
 import torch
-import uvicorn
 from setproctitle import setproctitle
 
-from rtp_llm.config.py_config_modules import (
-    GangConfig,
-    PyEnvConfigs,
-    StaticConfig,
-    VitConfig,
-)
+from rtp_llm.config.py_config_modules import GangConfig, PyEnvConfigs, VitConfig
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
-from rtp_llm.config.log_config import LOGGING_CONFIG
 from rtp_llm.distribute.worker_info import g_parallel_info, g_worker_info
 from rtp_llm.server.backend_app import BackendApp
 from rtp_llm.server.vit_rpc_server import vit_start_server
 from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
-    init_controller,
     set_global_controller,
 )
 from rtp_llm.utils.util import copy_gemm_config
@@ -68,7 +59,6 @@ def multi_rank_start(global_controller: ConcurrencyController):
         multiprocessing.set_start_method("spawn")
     except RuntimeError as e:
         logging.warn(str(e))
-        pass
 
     local_world_size = min(torch.cuda.device_count(), g_parallel_info.world_size)
     if "LOCAL_WORLD_SIZE" in os.environ:

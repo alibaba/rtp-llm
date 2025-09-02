@@ -1,8 +1,8 @@
-from typing import Any, List
+from typing import List
 from unittest import TestCase, main
 
 from rtp_llm.pipeline.default_plugin import DefaultPlugin
-from rtp_llm.utils.tokenizer_utils import DecodingState, IncrementDecodingUtils
+from rtp_llm.utils.tokenizer_utils import DecodingState
 
 
 class FakeTokenizer(object):

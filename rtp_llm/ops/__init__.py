@@ -100,6 +100,7 @@ try:
     from libth_transformer import (
         ArpcConfig,
         BatchDecodeSchedulerConfig,
+        CacheStatusInfo,
         CacheStoreConfig,
         ConcurrencyConfig,
         DeviceExporter,
@@ -118,8 +119,6 @@ try:
         KVCacheConfig,
         KVCacheInfo,
         LoadBalanceInfo,
-        WorkerStatusInfo,
-        CacheStatusInfo,
         MiscellaneousConfig,
         MlaOpsType,
         ModelSpecificConfig,
@@ -142,6 +141,7 @@ try:
         ServiceDiscoveryConfig,
         SpecialTokens,
         SpeculativeExecutionConfig,
+        WorkerStatusInfo,
         get_block_cache_keys,
         get_device,
     )

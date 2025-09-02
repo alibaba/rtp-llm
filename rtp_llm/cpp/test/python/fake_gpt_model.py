@@ -13,7 +13,6 @@ if test_srcdir:
 for path in sys.path:
     print(f"sys.path: {path}")
 
-import torch
 from subs.test_sub_module import TestSubModule
 
 
@@ -35,7 +34,6 @@ def set_trace_on_tty():
         import traceback
 
         traceback.print_exc()
-        pass
 
 
 # TODO(wangyin): how to import python modules (like torch) from c++?

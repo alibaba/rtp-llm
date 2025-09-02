@@ -2,7 +2,6 @@ import logging
 import logging.config
 import os
 import random
-import sys
 from unittest import TestCase, main
 
 from rtp_llm.models.llama import LlamaTokenizer

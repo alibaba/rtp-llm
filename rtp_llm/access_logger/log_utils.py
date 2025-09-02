@@ -1,5 +1,4 @@
 import logging
-import os
 from typing import Optional
 
 from concurrent_log_handler import ConcurrentRotatingFileHandler

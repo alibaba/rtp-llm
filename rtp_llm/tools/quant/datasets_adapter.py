@@ -1,4 +1,3 @@
-import logging
 import os
 from enum import Enum
 from typing import Any, Dict, NamedTuple, Optional
@@ -7,7 +6,7 @@ from urllib.parse import urlparse
 import datasets
 
 from rtp_llm.utils.fuser import fetch_remote_file_to_local
-from rtp_llm.utils.time_util import Timer, timer_wrapper
+from rtp_llm.utils.time_util import timer_wrapper
 
 
 class DatasetParams(NamedTuple):

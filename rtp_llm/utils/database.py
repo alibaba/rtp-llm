@@ -2,12 +2,12 @@ import json
 import logging
 import os
 import re
-from pathlib import Path, PosixPath
-from typing import Any, Dict, List, NamedTuple, Optional, Set, Union
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 import torch
 
-from rtp_llm.lora.lora_file import LoraCkpt, LoraConfig
+from rtp_llm.lora.lora_file import LoraCkpt
 from rtp_llm.utils.ckpt_file_info import CkptFileInfo, FinetuneType
 
 

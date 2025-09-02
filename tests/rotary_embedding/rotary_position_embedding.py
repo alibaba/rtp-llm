@@ -3,7 +3,6 @@ import math
 import os
 import unittest
 
-import einops
 import torch
 from deepseek_yarn_rotary_embedding import (
     DeepseekV2YarnRotaryEmbedding,

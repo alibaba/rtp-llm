@@ -1,6 +1,5 @@
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
-import numpy as np
 import torch
 from pydantic import BaseModel
 from torch.nn.utils.rnn import pad_sequence

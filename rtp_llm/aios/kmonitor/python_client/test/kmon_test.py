@@ -1,8 +1,6 @@
-import logging
 import unittest
 
 from rtp_llm.aios.kmonitor.python_client.kmonitor.kmonitor import KMonitor, MetricTypes
-from rtp_llm.aios.kmonitor.python_client.kmonitor.metrics.acc_metric import AccMetric
 from rtp_llm.aios.kmonitor.python_client.kmonitor.metrics.metric_factory import (
     MetricFactory,
 )

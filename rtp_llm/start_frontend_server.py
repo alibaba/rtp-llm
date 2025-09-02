@@ -1,11 +1,8 @@
-import json
 import logging
 import logging.config
 import os
 import sys
-import time
 import traceback
-from typing import Any, Dict, Generator, List, Union
 
 from setproctitle import setproctitle
 
@@ -14,12 +11,10 @@ from rtp_llm.config.py_config_modules import PyEnvConfigs
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
-from rtp_llm.config.log_config import LOGGING_CONFIG
 from rtp_llm.distribute.worker_info import FrontendServerInfo
 from rtp_llm.server.frontend_app import FrontendApp
 from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
-    init_controller,
     set_global_controller,
 )
 

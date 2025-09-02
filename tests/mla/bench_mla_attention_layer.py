@@ -8,7 +8,6 @@ from typing import List
 
 import torch
 from rotary_util import create_cos_sin_cache
-from test_util import compare_tensor_diff_with_ratio
 
 os.environ["DEVICE_RESERVE_MEMORY_BYTES"] = "128000000"
 

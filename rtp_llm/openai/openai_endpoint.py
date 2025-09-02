@@ -1,20 +1,8 @@
 import json
 import logging
-import os
 from functools import partial
-from typing import (
-    Any,
-    AsyncGenerator,
-    Coroutine,
-    Dict,
-    Generator,
-    Iterator,
-    List,
-    Optional,
-    Union,
-)
+from typing import AsyncGenerator, List, Optional
 
-import torch
 from fastapi import Request
 from transformers import PreTrainedTokenizerBase
 
@@ -48,8 +36,6 @@ from rtp_llm.openai.renderers.custom_renderer import (
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
-from rtp_llm.utils.mm_process_engine import MMProcessEngine
-from rtp_llm.utils.util import str_to_bool
 
 
 class OpenaiEndpoint(object):

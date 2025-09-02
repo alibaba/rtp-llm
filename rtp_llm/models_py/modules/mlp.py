@@ -1,4 +1,4 @@
-from typing import Dict, Optional
+from typing import Dict
 
 import torch
 from libth_transformer import rtp_llm_ops

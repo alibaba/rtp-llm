@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional, Tuple, TypedDict
+from typing import Optional, Tuple
 
 import torch
 from libth_transformer import rtp_llm_ops
@@ -63,7 +63,9 @@ class RMSResNormTorch(BaseResNorm):
         stream_id = torch.cuda.current_stream().cuda_stream
         hidden_states = hidden_states + residual
         output = torch.empty_like(hidden_states)
-        rtp_llm_ops.rmsnorm(output, hidden_states, self.weight.data, self.variance_epsilon)
+        rtp_llm_ops.rmsnorm(
+            output, hidden_states, self.weight.data, self.variance_epsilon
+        )
         return output
 
 

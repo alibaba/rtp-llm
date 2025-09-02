@@ -1,7 +1,7 @@
 import glob
 import os
 from collections import defaultdict
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 

@@ -14,4 +14,3 @@ def set_trace_on_tty():
         import traceback
 
         traceback.print_exc()
-        pass

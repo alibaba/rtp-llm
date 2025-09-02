@@ -1,5 +1,3 @@
-import asyncio
-import logging
 from typing import AsyncGenerator, Dict, Optional
 
 from typing_extensions import override
@@ -16,7 +14,6 @@ from rtp_llm.ops import (
 )
 from rtp_llm.ops.rtp_llm.rtp_llm_op import RtpLLMOp
 from rtp_llm.utils.mm_process_engine import MMProcessEngine
-from rtp_llm.utils.time_util import Timer
 from rtp_llm.utils.token_processor import TokenProcessor
 
 

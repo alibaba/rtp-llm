@@ -1,28 +1,18 @@
-import functools
-import json
-import os
-from typing import Any, Dict, List, Tuple, Union
-
 import torch
-from torchvision import io, transforms
+from torchvision import transforms
 from torchvision.transforms import InterpolationMode
-from transformers import AutoTokenizer
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_factory_register import register_model
-from rtp_llm.models.base_model import BaseModel, MultimodalInput
-from rtp_llm.models.multimodal.multimodal_mixin import MultiModalMixin
-from rtp_llm.models.qwen2_vl.qwen2_vl import (
-    QWen2_VL,
-    QWen2VLWeightInfo,
-    QwenVL2VitWeight,
-)
+from rtp_llm.models.qwen2_vl.qwen2_vl import QWen2_VL, QwenVL2VitWeight
 
 try:
     from decord import VideoReader, cpu
 except ModuleNotFoundError:
     VideoReader = None
     cpu = None
+
+import torch.library as tl
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.models.qwen2_5_vl.modeling_qwen2_5_vl import (
@@ -44,11 +34,11 @@ from rtp_llm.models.qwen2_vl.qwen2_vl_vit import (
     smart_resize,
 )
 
-import torch.library as tl
-
 if not hasattr(tl, "wrap_triton"):
+
     def wrap_triton(fn):
         return fn
+
     tl.wrap_triton = wrap_triton
 
 

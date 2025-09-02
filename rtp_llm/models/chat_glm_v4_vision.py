@@ -1,5 +1,3 @@
-import os
-
 import torch
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters

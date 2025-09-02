@@ -6,7 +6,6 @@ import torch
 from rtp_llm.models.base_model import GenerateOutput, GenerateOutputs
 from rtp_llm.pipeline.pipeline import Pipeline
 from rtp_llm.test.model_test.test_util.fake_model_loader import FakeModelLoader
-from rtp_llm.utils.weight_type import WEIGHT_TYPE
 
 os.environ["KV_CACHE_MEM_MB"] = "100"
 os.environ["RESERVER_RUNTIME_MEM_MB"] = "1"

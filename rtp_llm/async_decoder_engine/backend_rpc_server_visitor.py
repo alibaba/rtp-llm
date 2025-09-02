@@ -1,10 +1,9 @@
 import logging
-from typing import AsyncGenerator, Dict, List, Optional
+from typing import AsyncGenerator, List
 
 import torch
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient

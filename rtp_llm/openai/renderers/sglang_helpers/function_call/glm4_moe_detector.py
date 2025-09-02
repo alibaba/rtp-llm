@@ -10,7 +10,6 @@ from rtp_llm.openai.renderers.sglang_helpers.function_call.base_format_detector 
 )
 from rtp_llm.openai.renderers.sglang_helpers.function_call.core_types import (
     StreamingParseResult,
-    StructureInfo,
     _GetInfoFunc,
 )
 from rtp_llm.openai.renderers.sglang_helpers.function_call.ebnf_composer import (

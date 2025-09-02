@@ -1,13 +1,11 @@
 import logging
-import os
 import re
 
 import psutil
 import torch
 
-from rtp_llm.config.py_config_modules import StaticConfig
-from rtp_llm.device.device_base import DeviceBase, DeviceType, MemInfo
-from rtp_llm.ops import DeviceExporter, DeviceType
+from rtp_llm.device.device_base import DeviceBase, MemInfo
+from rtp_llm.ops import DeviceExporter
 from rtp_llm.utils.model_weight import W
 
 

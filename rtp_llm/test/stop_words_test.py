@@ -1,7 +1,4 @@
-import os
-from unittest import TestCase, main, mock
-
-import torch
+from unittest import TestCase, main
 
 from rtp_llm.utils.word_util import truncate_response_with_stop_words
 

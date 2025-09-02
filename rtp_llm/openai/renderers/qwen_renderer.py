@@ -2,38 +2,30 @@ import copy
 import functools
 import json
 import logging
-import re
-from dataclasses import dataclass, field
-from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple, Union
+from dataclasses import dataclass
+from typing import List, Optional, Tuple, Union
 
 import torch
 from transformers import Qwen2Tokenizer
-from typing_extensions import override
 
-from rtp_llm.config.generate_config import GenerateConfig
-from rtp_llm.models.base_model import GenerateOutput, GenerateOutputs
+from rtp_llm.models.base_model import GenerateOutput
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
-    ChatCompletionResponseStreamChoice,
     ChatMessage,
     DeltaMessage,
     FinisheReason,
     FunctionCall,
     GPTFunctionDefinition,
-    PromptTokensDetails,
     RendererInfo,
     RoleEnum,
-    UsageInfo,
 )
 from rtp_llm.openai.renderer_factory_register import register_renderer
 from rtp_llm.openai.renderers.basic_renderer import BasicRenderer
 from rtp_llm.openai.renderers.custom_renderer import (
-    THINK_START_TAG,
     CustomChatRenderer,
     OutputDelta,
     RenderedInputs,
     RendererParams,
-    StreamResponseObject,
     StreamStatus,
     StreamStatusSync,
     ThinkStatus,
@@ -41,15 +33,8 @@ from rtp_llm.openai.renderers.custom_renderer import (
 from rtp_llm.openai.renderers.qwen_reasoning_tool_renderer import (
     QwenReasoningToolRenderer,
 )
-from rtp_llm.openai.renderers.reasoning_tool_base_renderer import (
-    ReasoningToolStreamStatus,
-)
 from rtp_llm.tokenizer.tokenization_qwen import QWenTokenizer
-from rtp_llm.utils.word_util import (
-    get_stop_word_slices,
-    is_truncated,
-    truncate_response_with_stop_words,
-)
+from rtp_llm.utils.word_util import is_truncated, truncate_response_with_stop_words
 
 QwenTokenizerTypes = Union[QWenTokenizer, Qwen2Tokenizer]
 

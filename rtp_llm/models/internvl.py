@@ -1,10 +1,7 @@
 import json
-import logging
-import math
 import os
 from typing import Any, Dict, List
 
-import torch
 from transformers import AutoTokenizer
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters

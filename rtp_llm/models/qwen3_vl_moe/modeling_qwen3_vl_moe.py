@@ -1,45 +1,22 @@
 import logging
 import math
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Optional, Tuple
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn import CrossEntropyLoss
 from transformers.activations import ACT2FN
-from transformers.cache_utils import (
-    Cache,
-    DynamicCache,
-    SlidingWindowCache,
-    StaticCache,
-)
 from transformers.configuration_utils import PretrainedConfig
-from transformers.generation import GenerationMixin
-from transformers.modeling_attn_mask_utils import AttentionMaskConverter
-from transformers.modeling_outputs import (
-    BaseModelOutputWithPast,
-    ModelOutput,
-    MoeModelOutputWithPast,
-)
 from transformers.modeling_rope_utils import rope_config_validation
 from transformers.modeling_utils import PreTrainedModel
-from transformers.utils import (
-    add_start_docstrings,
-    add_start_docstrings_to_model_forward,
-    is_flash_attn_2_available,
-    is_flash_attn_greater_or_equal_2_10,
-    is_torchdynamo_compiling,
-    replace_return_docstrings,
-)
 
 from rtp_llm.utils.flash_attn_utils import can_use_flash_attn
 
 default_attn_impl = "sdpa"
 try:
     if can_use_flash_attn():
-        from flash_attn import _flash_attention_forward, flash_attn_varlen_func
+        from flash_attn import flash_attn_varlen_func
         from flash_attn.layers.rotary import apply_rotary_emb
 
         # from ...modeling_flash_attention_utils import apply_rotary_emb, flash_attn_varlen_func, _flash_attention_forward

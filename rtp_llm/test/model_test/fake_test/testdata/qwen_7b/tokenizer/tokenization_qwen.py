@@ -5,15 +5,12 @@
 
 """Tokenization classes for QWen."""
 
-from __future__ import absolute_import, division, print_function, unicode_literals
-
 import base64
-import json
 import logging
 import os
 import unicodedata
 from io import open
-from typing import List, Optional, Tuple, Union
+from typing import List, Tuple, Union
 
 import tiktoken
 from transformers import AddedToken, PreTrainedTokenizer

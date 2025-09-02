@@ -1,14 +1,5 @@
-from transformers import AutoTokenizer
-
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.config.task_type import TaskType
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.bert import Bert
-from rtp_llm.models.downstream_modules import RobertaRerankerModule
-from rtp_llm.models.downstream_modules.classifier.roberta_classifier import (
-    RobertaClassifierModule,
-)
-from rtp_llm.models.downstream_modules.custom_module import CustomModule
 from rtp_llm.models.jina_bert.jina_bert_weight import JinaBertWeightInfo
 
 # jina bert相比于bert有3点区别

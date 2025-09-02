@@ -2,7 +2,7 @@ import gc
 import logging
 import os
 from collections import OrderedDict
-from typing import List, Optional
+from typing import Optional
 
 import safetensors
 import torch

@@ -1,6 +1,5 @@
 import os
 import unittest
-from pathlib import Path
 
 from rtp_llm.utils.database import CkptDatabase
 

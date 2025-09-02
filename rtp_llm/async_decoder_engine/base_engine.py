@@ -1,8 +1,6 @@
 from abc import abstractmethod
 from typing import Any, AsyncGenerator, Dict
 
-from pydantic import BaseModel
-
 from rtp_llm.ops import (
     CacheStatusInfo,
     EngineScheduleInfo,

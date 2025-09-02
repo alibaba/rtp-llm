@@ -15,24 +15,15 @@
 """PyTorch Qwen2Audio model."""
 
 import math
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Optional, Tuple
 
 import torch
 import torch.utils.checkpoint
 from torch import nn
-from transformers import AutoModel, AutoModelForCausalLM, PreTrainedModel
+from transformers import PreTrainedModel
 from transformers.activations import ACT2FN
-from transformers.cache_utils import Cache, StaticCache
-from transformers.modeling_outputs import BaseModelOutput, ModelOutput
-from transformers.utils import (
-    add_start_docstrings,
-    add_start_docstrings_to_model_forward,
-    is_flash_attn_2_available,
-    is_flash_attn_greater_or_equal_2_10,
-    logging,
-    replace_return_docstrings,
-)
+from transformers.modeling_outputs import BaseModelOutput
+from transformers.utils import add_start_docstrings, is_flash_attn_2_available, logging
 
 from rtp_llm.models.qwen_v2_audio.configuration_qwen2_audio import (
     Qwen2AudioConfig,
@@ -42,7 +33,6 @@ from rtp_llm.models.qwen_v2_audio.configuration_qwen2_audio import (
 if is_flash_attn_2_available():
     pass
     # from ...modeling_flash_attention_utils import _flash_attention_forward
-
 
 logger = logging.get_logger(__name__)
 

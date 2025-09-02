@@ -1,29 +1,23 @@
-import json
 import logging
-import logging.config
 import multiprocessing
 import os
-import signal
 import sys
 import time
-import traceback
-from typing import Any, Dict, Generator, List, Union
 
 import requests
 
-from rtp_llm.config.py_config_modules import PyEnvConfigs, ServerConfig
+from rtp_llm.config.py_config_modules import ServerConfig
 from rtp_llm.metrics import kmonitor
 from rtp_llm.ops import ProfilingDebugLoggingConfig
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
-from rtp_llm.config.log_config import LOGGING_CONFIG
-from rtp_llm.distribute.worker_info import DEFAULT_START_PORT, WorkerInfo
+from rtp_llm.distribute.worker_info import WorkerInfo
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.start_backend_server import start_backend_server
 from rtp_llm.start_frontend_server import start_frontend_server
-from rtp_llm.utils.concurrency_controller import ConcurrencyController, init_controller
+from rtp_llm.utils.concurrency_controller import init_controller
 
 
 def check_server_health(server_port):
@@ -123,7 +117,6 @@ def main():
         multiprocessing.set_start_method("spawn")
     except RuntimeError as e:
         logging.warn(str(e))
-        pass
 
     global_controller = init_controller()
 

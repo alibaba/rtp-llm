@@ -15,12 +15,11 @@
 """ PyTorch Siglip model. """
 # Copied from  HuggingFaceM4/siglip-so400m-14-980-flash-attn2-navit and add tgt_sizes
 
-
 import math
 import os
 import warnings
 from dataclasses import dataclass
-from typing import Any, Optional, Tuple, Union
+from typing import Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -37,7 +36,6 @@ from transformers.utils import (
     ModelOutput,
     add_start_docstrings,
     add_start_docstrings_to_model_forward,
-    is_flash_attn_2_available,
     logging,
     replace_return_docstrings,
 )
@@ -820,7 +818,6 @@ SIGLIP_START_DOCSTRING = r"""
             Initializing with a config file does not load the weights associated with the model, only the
             configuration. Check out the [`~PreTrainedModel.from_pretrained`] method to load the model weights.
 """
-
 
 SIGLIP_VISION_INPUTS_DOCSTRING = r"""
     Args:

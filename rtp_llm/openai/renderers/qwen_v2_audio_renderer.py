@@ -1,27 +1,14 @@
-from dataclasses import dataclass
-from enum import Enum, auto
 from typing import Any, Dict, List, Union
-
-from transformers import PreTrainedTokenizerBase
 
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
-    ChatMessage,
     ContentPart,
     ContentPartTypeEnum,
-    FunctionCall,
-    GPTFunctionDefinition,
     RoleEnum,
 )
 from rtp_llm.openai.renderer_factory_register import register_renderer
-from rtp_llm.openai.renderers.basic_renderer import BasicRenderer, PromptWithMMInput
-from rtp_llm.openai.renderers.conversation import get_conv_template
-from rtp_llm.openai.renderers.custom_renderer import (
-    CustomChatRenderer,
-    RenderedInputs,
-    RendererParams,
-    StreamResponseObject,
-)
+from rtp_llm.openai.renderers.basic_renderer import BasicRenderer
+from rtp_llm.openai.renderers.custom_renderer import CustomChatRenderer, RenderedInputs
 from rtp_llm.utils.util import check_with_info
 
 

@@ -1,4 +1,3 @@
-import os
 from typing import Optional
 
 from transformers import PreTrainedTokenizerBase
@@ -14,8 +13,6 @@ from rtp_llm.models.downstream_modules import (
     RerankerModule,
     SparseEmbeddingModule,
 )
-from rtp_llm.models.downstream_modules.plugin_loader import UserModuleLoader
-from rtp_llm.utils.util import get_config_from_path
 
 
 def create_custom_module(

@@ -1,17 +1,9 @@
 import asyncio
-import copy
-import functools
 import json
 import logging
-import logging.config
-import os
 import threading
-import time
-import traceback
 from typing import Any, Callable, Dict, Union
 
-import orjson
-import torch
 from fastapi import Request
 from fastapi import Request as RawRequest
 from fastapi.responses import ORJSONResponse, StreamingResponse
@@ -21,11 +13,9 @@ from rtp_llm.access_logger.access_logger import AccessLogger
 from rtp_llm.config.generate_config import RoleType
 from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.config.task_type import TaskType
-from rtp_llm.embedding.embedding_endpoint import EmbeddingEndpoint
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
-from rtp_llm.ops import EngineScheduleInfo, LoadBalanceInfo
 from rtp_llm.server.frontend_worker import FrontendWorker, TokenizerEncodeResponse
 from rtp_llm.server.misc import format_exception
 from rtp_llm.structure.request_extractor import request_id_field_name
@@ -36,9 +26,8 @@ from rtp_llm.utils.concurrency_controller import (
     ConcurrencyException,
     get_global_controller,
 )
-from rtp_llm.utils.time_util import Timer, current_time_ms
-from rtp_llm.utils.util import AtomicCounter, check_with_info
-from rtp_llm.utils.version_info import VersionInfo
+from rtp_llm.utils.time_util import current_time_ms
+from rtp_llm.utils.util import check_with_info
 
 StreamObjectType = Union[Dict[str, Any], BaseModel]
 

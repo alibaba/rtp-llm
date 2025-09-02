@@ -3,7 +3,6 @@ import os
 import tempfile
 import unittest
 
-import aiter
 import torch
 from aiter.fused_moe import fused_topk
 from aiter.ops.moe_op import fmoe_fp8_blockscale_g1u1

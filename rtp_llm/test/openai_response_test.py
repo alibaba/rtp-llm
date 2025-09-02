@@ -1,14 +1,13 @@
 import asyncio
 import functools
 import json
-import logging
 import os
 from contextlib import asynccontextmanager, contextmanager
 from typing import Any, AsyncGenerator, List
-from unittest import IsolatedAsyncioTestCase, TestCase, main
+from unittest import IsolatedAsyncioTestCase, main
 
 import torch
-from transformers import AutoTokenizer, PreTrainedTokenizer
+from transformers import AutoTokenizer
 from typing_extensions import override
 
 from rtp_llm.config.generate_config import GenerateConfig
@@ -39,7 +38,6 @@ from rtp_llm.openai.renderers.qwen3_code_renderer import Qwen3CoderRenderer
 from rtp_llm.openai.renderers.qwen_reasoning_tool_renderer import (
     QwenReasoningToolRenderer,
 )
-from rtp_llm.openai.renderers.qwen_renderer import QwenRenderer
 from rtp_llm.test.utils.stream_util import (
     is_valid_tool_call_chunk,
     merge_stream_responses,
@@ -186,7 +184,6 @@ class BaseToolCallTestSuite:
     # 可选重写的方法
     def _setup_additional_environment(self):
         """设置额外的环境变量 - 子类可以重写"""
-        pass
 
     def _create_tokenizer(self, tokenizer_path):
         """创建tokenizer - 子类可以重写"""
@@ -230,11 +227,9 @@ class BaseToolCallTestSuite:
 
     def _validate_renderer(self, chat_renderer):
         """验证renderer类型 - 子类可以重写"""
-        pass
 
     def _validate_stream_chunk(self, chunk, stream):
         """验证流式chunk - 子类可以重写"""
-        pass
 
     def _setup_environment(self):
         """设置测试环境"""

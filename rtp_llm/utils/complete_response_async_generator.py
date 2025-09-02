@@ -1,4 +1,4 @@
-from typing import Any, AsyncGenerator, Callable, List
+from typing import Any, AsyncGenerator, Callable
 
 
 class CompleteResponseAsyncGenerator:

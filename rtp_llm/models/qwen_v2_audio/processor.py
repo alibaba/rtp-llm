@@ -2,7 +2,6 @@ from io import BytesIO
 from typing import Dict
 
 import librosa
-import numpy.typing
 import torch
 from transformers.models.whisper.feature_extraction_whisper import (
     WhisperFeatureExtractor,
@@ -21,7 +20,7 @@ from rtp_llm.models.qwen_v2_audio.modeling_qwen2_audio import (
     Qwen2AudioEncoder,
     Qwen2AudioMultiModalProjector,
 )
-from rtp_llm.utils.util import get_config_from_path, to_torch_dtype
+from rtp_llm.utils.util import get_config_from_path
 
 
 class Processor(AudioEmbeddingInterface):

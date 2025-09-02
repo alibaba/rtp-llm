@@ -35,7 +35,6 @@ from rtp_llm.utils.model_weight import (
     kv_split1,
     kv_split2,
     mla_pad_t,
-    multipy_identity,
     stack_,
     stack_moe_w1,
     transpose,

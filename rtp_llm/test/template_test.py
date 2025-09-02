@@ -6,39 +6,20 @@ from abc import ABC, abstractmethod
 from typing import Any, List
 from unittest import TestCase, main
 
-import torch
-from transformers import AutoTokenizer, PreTrainedTokenizer
+from transformers import AutoTokenizer
 from transformers.models.qwen2.tokenization_qwen2 import Qwen2Tokenizer
 
-from rtp_llm.config.py_config_modules import StaticConfig
-from rtp_llm.models.llava import LlavaTokenizer
-from rtp_llm.models.starcoder import StarcoderTokenizer
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatMessage,
-    ContentPart,
-    ContentPartTypeEnum,
-    FunctionCall,
     GPTFunctionDefinition,
     GPTToolDefinition,
-    RendererInfo,
     RoleEnum,
-    ToolCall,
 )
-from rtp_llm.openai.renderer_factory import (
-    ChatRendererFactory,
-    CustomChatRenderer,
-    FastChatRenderer,
-    LlamaTemplateRenderer,
-    RendererParams,
-)
+from rtp_llm.openai.renderer_factory import ChatRendererFactory, RendererParams
 from rtp_llm.openai.renderers.qwen_agent_renderer import QwenAgentRenderer
 from rtp_llm.openai.renderers.qwen_agent_tool_renderer import QwenAgentToolRenderer
-from rtp_llm.openai.renderers.qwen_reasoning_tool_renderer import (
-    QwenReasoningToolRenderer,
-)
 from rtp_llm.openai.renderers.qwen_renderer import QwenRenderer
-from rtp_llm.pipeline.chatapi_format import encode_chatapi
 from rtp_llm.tokenizer.tokenization_qwen import QWenTokenizer
 
 
@@ -48,27 +29,22 @@ class BaseRendererTestMixin(ABC):
     @abstractmethod
     def get_tokenizer(self):
         """获取tokenizer实例"""
-        pass
 
     @abstractmethod
     def get_render_params(self) -> RendererParams:
         """获取渲染参数"""
-        pass
 
     @abstractmethod
     def get_step1_expected_renderer_prompt(self) -> str:
         """获取步骤1的期望prompt"""
-        pass
 
     @abstractmethod
     def get_step2_expected_renderer_prompt(self) -> str:
         """获取步骤2的期望prompt"""
-        pass
 
     @abstractmethod
     def get_step3_expected_renderer_prompt(self) -> str:
         """获取步骤3的期望prompt"""
-        pass
 
     def get_tools(self) -> List[GPTToolDefinition]:
         """获取工具定义 - 通用实现"""

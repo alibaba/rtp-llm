@@ -1,28 +1,13 @@
-from dataclasses import dataclass
-from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple, Union
-
 from transformers import PreTrainedTokenizerBase
 
-from rtp_llm.openai.api_datatype import (
-    ChatCompletionRequest,
-    ChatCompletionResponseStreamChoice,
-    ChatMessage,
-    GPTFunctionDefinition,
-    RendererInfo,
-    RoleEnum,
-)
+from rtp_llm.openai.api_datatype import ChatCompletionRequest, RendererInfo, RoleEnum
 from rtp_llm.openai.renderers.custom_renderer import (
     CustomChatRenderer,
     RenderedInputs,
     RendererParams,
-    StreamResponseObject,
-)
-from rtp_llm.openai.renderers.llama_template import (
-    Template,
-    get_template_and_fix_tokenizer,
 )
 
-from .conversation import Conversation, get_conv_template
+from .conversation import get_conv_template
 
 
 class FastChatRenderer(CustomChatRenderer):

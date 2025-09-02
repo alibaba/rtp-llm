@@ -1,24 +1,19 @@
-import copy
-import json
 import logging
 import pathlib
-import re
-from dataclasses import dataclass, field
-from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple, Union
+from dataclasses import dataclass
+from typing import AsyncGenerator, Optional, Union
 
 import torch
 from transformers import Qwen2Tokenizer
 
 from rtp_llm.config.generate_config import GenerateConfig
-from rtp_llm.models.base_model import GenerateOutput, GenerateOutputs
+from rtp_llm.models.base_model import GenerateOutputs
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatCompletionResponseStreamChoice,
-    ChatMessage,
     DeltaMessage,
     FinisheReason,
     FunctionCall,
-    GPTFunctionDefinition,
     RendererInfo,
     RoleEnum,
     UsageInfo,

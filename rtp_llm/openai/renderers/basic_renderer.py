@@ -1,35 +1,21 @@
 import json
 import logging
-import os
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Union
+from typing import Dict, List
 
 import jinja2
-import torch
 from jinja2.exceptions import TemplateError
 from jinja2.sandbox import ImmutableSandboxedEnvironment
 from packaging import version
 from transformers import PreTrainedTokenizerBase
 
-from rtp_llm.config.py_config_modules import StaticConfig
-from rtp_llm.models.base_model import GenerateOutput
-from rtp_llm.openai.api_datatype import (
-    ChatCompletionRequest,
-    ChatCompletionResponseStreamChoice,
-    ChatMessage,
-    DeltaMessage,
-    FinisheReason,
-    GPTFunctionDefinition,
-    RoleEnum,
-    UsageInfo,
-)
+from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.openai.renderers.custom_renderer import (
     CustomChatRenderer,
     RenderedInputs,
     RendererInfo,
     RendererParams,
-    StreamResponseObject,
 )
 from rtp_llm.utils.multimodal_util import MMPreprocessConfig, MMUrlType
 

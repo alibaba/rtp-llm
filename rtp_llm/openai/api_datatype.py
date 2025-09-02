@@ -1,7 +1,6 @@
 import time
-import uuid
 from enum import Enum
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 from pydantic import BaseModel, Field
 
@@ -63,9 +62,11 @@ class MMPreprocessConfigPart(BaseModel):
     min_frames: Optional[int] = None
     max_frames: Optional[int] = None
 
+
 class IgraphInfo(BaseModel):
     table_name: str
     item_id: str
+
 
 class ImageURL(BaseModel):
     url: str
@@ -162,7 +163,7 @@ class ChatCompletionRequest(BaseModel):
     def get_chat_template_kwargs(self):
         if (
             self.extra_configs is not None
-            and  self.extra_configs.chat_template_kwargs is not None
+            and self.extra_configs.chat_template_kwargs is not None
         ):
             return self.extra_configs.chat_template_kwargs
         else:

@@ -6,7 +6,6 @@ import torch
 from transformers import AutoTokenizer
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.distribute.worker_info import g_parallel_info
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel, MultimodalInput
 from rtp_llm.models.multimodal.multimodal_common import ImageEmbeddingInterface
@@ -14,7 +13,6 @@ from rtp_llm.models.multimodal.multimodal_mixin import MultiModalMixin
 from rtp_llm.models.qwen import QWen
 from rtp_llm.models.qwen_vl_vit import VisionTransformer as QWen_VL_ViT
 from rtp_llm.models.qwen_vl_weight import QwenVLVitWeight, QWenVLWeightInfo
-from rtp_llm.utils.util import to_torch_dtype
 
 
 class QwenVLImageEmbedding(ImageEmbeddingInterface):

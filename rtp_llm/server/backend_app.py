@@ -1,16 +1,9 @@
 import asyncio
-import json
 import logging
-import logging.config
-import os
 import socket
-import sys
 import threading
-import time
-from functools import cached_property
 from typing import Any, Dict, List, Optional, Union
 
-import uvicorn
 from anyio import CapacityLimiter
 from anyio.lowlevel import RunVar
 from fastapi import FastAPI, HTTPException
@@ -23,22 +16,14 @@ from typing_extensions import override
 from uvicorn import Config, Server
 from uvicorn.loops.auto import auto_loop_setup
 
-from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.py_config_modules import PyEnvConfigs, StaticConfig
 from rtp_llm.config.uvicorn_config import UVICORN_LOGGING_CONFIG
-from rtp_llm.distribute.worker_info import WorkerInfo, g_parallel_info, g_worker_info
+from rtp_llm.distribute.worker_info import WorkerInfo
 from rtp_llm.embedding.backend_embedding_app import register_backend_embedding_api
-from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models.base_model import BaseModel
-from rtp_llm.ops import (
-    CacheStatusInfo,
-    EngineScheduleInfo,
-    LoadBalanceInfo,
-    WorkerStatusInfo,
-)
 from rtp_llm.server.backend_server import BackendServer
 from rtp_llm.server.misc import check_is_master, check_is_worker
-from rtp_llm.server.worker_status import CacheStatus, TaskInfo, WorkStatus
+from rtp_llm.server.worker_status import CacheStatus
 from rtp_llm.utils.util import AtomicCounter
 from rtp_llm.utils.version_info import VersionInfo
 

@@ -1,7 +1,6 @@
 import math
-import os
 from argparse import Namespace
-from typing import Any, List, Union
+from typing import Any, List
 
 import torch
 from torch import nn

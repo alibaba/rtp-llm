@@ -3,12 +3,9 @@ from typing import Any
 from unittest import TestCase, main
 
 from transformers import AutoTokenizer
-from transformers.models.qwen2.tokenization_qwen2 import Qwen2Tokenizer
 
-from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.config.py_config_modules import StaticConfig
-from rtp_llm.models.starcoder import StarcoderTokenizer
 from rtp_llm.pipeline.pipeline import Pipeline
 from rtp_llm.tokenizer.tokenization_qwen import QWenTokenizer
 

@@ -1,11 +1,9 @@
-import logging
 import multiprocessing as mp
 import os
 import tempfile
 import unittest
 
 import torch
-from aiter import aiter
 from aiter.fused_moe import fused_topk
 from aiter.test_common import checkAllclose
 

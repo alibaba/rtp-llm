@@ -33,7 +33,6 @@ from rtp_llm.cpp.model_rpc.model_rpc_client import (
 )
 from rtp_llm.cpp.proto.model_rpc_service_pb2 import (
     GenerateInputPB,
-    GenerateOutputPB,
     GenerateOutputsPB,
     TensorPB,
 )

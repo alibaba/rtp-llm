@@ -5,24 +5,22 @@ import logging
 import os
 import time
 import traceback
-from concurrent.futures import Future, ThreadPoolExecutor, wait
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import timedelta
 from threading import Thread
 from typing import Any, Dict, List, Union
 
 import requests
-import torch.distributed as dist
 import uvicorn
 from fastapi import FastAPI
 
 from rtp_llm.config.py_config_modules import PyEnvConfigs, StaticConfig
 from rtp_llm.config.uvicorn_config import UVICORN_LOGGING_CONFIG
-from rtp_llm.distribute.gang_info import JSON_GANG_PARTS_ENV, GangInfo, get_gang_info
+from rtp_llm.distribute.gang_info import GangInfo, get_gang_info
 
 # for ut
 from rtp_llm.distribute.gang_test_util import create_store, store_based_barrier
 from rtp_llm.distribute.worker_info import (
-    DEFAULT_START_PORT,
     WorkerInfo,
     g_master_info,
     g_parallel_info,

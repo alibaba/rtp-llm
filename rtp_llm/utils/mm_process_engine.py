@@ -1,22 +1,14 @@
-import asyncio
 import gc
-import os
-from concurrent.futures import Future, ThreadPoolExecutor
-from io import BytesIO
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
 import torch
 
-from rtp_llm.utils.multimodal_util import (
-    MMPreprocessConfig,
-    MMUrlType,
-    get_bytes_io_from_url,
-    vit_emb_cache_,
-)
-from rtp_llm.utils.util import check_with_info, to_torch_dtype
 from rtp_llm.metrics import kmonitor
-from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
+from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
+from rtp_llm.utils.multimodal_util import MMPreprocessConfig, MMUrlType
 from rtp_llm.utils.time_util import Timer
+from rtp_llm.utils.util import check_with_info
+
 
 class MMEmbeddingRes:
     embeddings: List[torch.Tensor] = []
@@ -49,7 +41,9 @@ class MMProcessEngine:
         if self.run_batch:
             with Timer() as route_timer:
                 res, pos = self.model.mm_part.mm_embedding(urls, types, tensors)
-            kmonitor.report(GaugeMetrics.VIT_PREPROCESS_RT_METRIC, route_timer.cost_ms())
+            kmonitor.report(
+                GaugeMetrics.VIT_PREPROCESS_RT_METRIC, route_timer.cost_ms()
+            )
             return MMEmbeddingRes(res, pos)
         if types is None or len(types) == 0:
             types = [MMUrlType.DEFAULT] * len(urls)

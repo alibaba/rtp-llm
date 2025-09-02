@@ -1,17 +1,9 @@
 import asyncio
-import json
 import logging
-import logging.config
-import os
 import socket
-import sys
 import threading
-import time
-from functools import cached_property
 from typing import Any, Dict, List, Optional, Union
 
-import requests
-import uvicorn
 from anyio import CapacityLimiter
 from anyio.lowlevel import RunVar
 from fastapi import Body, FastAPI, HTTPException
@@ -24,19 +16,13 @@ from typing_extensions import override
 from uvicorn import Config, Server
 from uvicorn.loops.auto import auto_loop_setup
 
-from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.py_config_modules import PyEnvConfigs, StaticConfig
 from rtp_llm.config.uvicorn_config import UVICORN_LOGGING_CONFIG
 from rtp_llm.distribute.worker_info import g_worker_info
 from rtp_llm.embedding.frontend_embedding_app import register_frontend_embedding_api
 from rtp_llm.models.base_model import BaseModel
-from rtp_llm.openai.api_datatype import (
-    ChatCompletionRequest,
-    ChatCompletionStreamResponse,
-)
-from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
+from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.server.frontend_server import FrontendServer
-from rtp_llm.utils.concurrency_controller import ConcurrencyController
 from rtp_llm.utils.util import AtomicCounter, async_request_server
 from rtp_llm.utils.version_info import VersionInfo
 
@@ -162,7 +148,7 @@ class FrontendApp(object):
             return await async_request_server(
                 "get", g_worker_info.backend_server_port, "", {}
             )
-            
+
         @app.get("/cache_status")
         @app.post("/cache_status")
         @app.get("/rtp_llm/cache_status")
@@ -173,7 +159,7 @@ class FrontendApp(object):
             query_params = (
                 dict(request.query_params) if request.method == "GET" else (data or {})
             )
-            
+
             logging.info(f"cache_status request {data}")
             response = await async_request_server(
                 "post", g_worker_info.backend_server_port, "cache_status", query_params
@@ -184,7 +170,7 @@ class FrontendApp(object):
                 )
             logging.info(f"cache_status response {response}")
             return response
-        
+
         @app.get("/worker_status")
         @app.post("/worker_status")
         @app.get("/rtp_llm/worker_status")

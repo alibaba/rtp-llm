@@ -1,11 +1,9 @@
 import logging
-import os
-from typing import Any, Dict, Union
+from typing import Any, Dict
 
 from rtp_llm.access_logger.json_util import dump_json
 from rtp_llm.access_logger.log_utils import get_handler
 from rtp_llm.access_logger.py_access_log import PyAccessLog, RequestLog, ResponseLog
-from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.structure.request_extractor import request_id_field_name
 
 ACCESS_LOGGER_NAME = "access_logger"

@@ -1,7 +1,6 @@
 import copy
 import logging
-import os
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Optional
 
 from transformers import PreTrainedTokenizerBase
 

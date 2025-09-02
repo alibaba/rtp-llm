@@ -1,4 +1,3 @@
-import logging.config
 from typing import Any, Dict
 
 from fastapi import FastAPI

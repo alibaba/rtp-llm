@@ -1,19 +1,17 @@
-import torch
 import itertools
-from unittest import TestCase, main, SkipTest
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.utils.model_weight import W
-from rtp_llm.models_py.modules.rocm.norm import QKRMSNorm, FusedQKRMSNorm
+from unittest import SkipTest, TestCase, main
+
+import torch
 from torch import dtype as _dtype
-import math
-from torch.profiler import profile, ProfilerActivity, record_function
+
+from rtp_llm.models_py.modules.rocm.norm import FusedQKRMSNorm, QKRMSNorm
 
 
 class FusedQKRMSNormTest(TestCase):
     DTYPES = [torch.half, torch.bfloat16]
     NUM_TOKENS = [7, 83, 4096]
     HEAD_NUM = [40]
-    KV_HEAD_NUM =  [40, 8, 4]
+    KV_HEAD_NUM = [40, 8, 4]
     SIZE_PER_HEAD = [128]
 
     # DTYPES = [torch.bfloat16]
@@ -27,8 +25,14 @@ class FusedQKRMSNormTest(TestCase):
             raise SkipTest("CUDA is not available")
         torch.set_default_device("cuda")
 
-
-    def _run_fused_qk_rmsnorm_test(self, num_tokens: int, head_num: int, kv_head_num: int, size_per_head: int, dtype: _dtype):
+    def _run_fused_qk_rmsnorm_test(
+        self,
+        num_tokens: int,
+        head_num: int,
+        kv_head_num: int,
+        size_per_head: int,
+        dtype: _dtype,
+    ):
         torch.manual_seed(0)
 
         hidden_size = head_num * size_per_head + 2 * kv_head_num * size_per_head
@@ -37,7 +41,9 @@ class FusedQKRMSNormTest(TestCase):
         k_weight = torch.randn(size_per_head, dtype=dtype)
 
         qkrmsnorm = QKRMSNorm(q_weight, k_weight, head_num, kv_head_num, size_per_head)
-        fused_qkrmsnorm = FusedQKRMSNorm(q_weight, k_weight, head_num, kv_head_num, size_per_head)
+        fused_qkrmsnorm = FusedQKRMSNorm(
+            q_weight, k_weight, head_num, kv_head_num, size_per_head
+        )
 
         x = torch.randn(num_tokens, hidden_size, dtype=dtype)
 
@@ -50,25 +56,27 @@ class FusedQKRMSNormTest(TestCase):
         #         out = fused_qkrmsnorm(x)
         # print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=100))
 
-        self.assertTrue(torch.allclose(qkrmsnorm(x), fused_qkrmsnorm(x), atol=1e-2, rtol=1e-2))
+        self.assertTrue(
+            torch.allclose(qkrmsnorm(x), fused_qkrmsnorm(x), atol=1e-2, rtol=1e-2)
+        )
 
     def test_fusedqkrmsnorm(self):
         for params in itertools.product(
-                self.NUM_TOKENS,
-                self.HEAD_NUM,
-                self.KV_HEAD_NUM,
-                self.SIZE_PER_HEAD,
-                self.DTYPES,
+            self.NUM_TOKENS,
+            self.HEAD_NUM,
+            self.KV_HEAD_NUM,
+            self.SIZE_PER_HEAD,
+            self.DTYPES,
         ):
             with self.subTest(
-                    num_tokens=params[0],
-                    head_num=params[1],
-                    kv_head_num=params[2],
-                    size_per_head=params[3],
-                    dtype=params[4]
+                num_tokens=params[0],
+                head_num=params[1],
+                kv_head_num=params[2],
+                size_per_head=params[3],
+                dtype=params[4],
             ):
                 self._run_fused_qk_rmsnorm_test(*params)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

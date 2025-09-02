@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import torch
 
 # from flash_attn import flash_attn_varlen_func
-from test_util import MlaOpsType, compare_tensor_diff_with_ratio
+from test_util import MlaOpsType
 
 os.environ["DEVICE_RESERVE_MEMORY_BYTES"] = "128000000"
 

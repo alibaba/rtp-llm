@@ -2,7 +2,6 @@ import copy
 from typing import Any, Dict, List, Union
 
 import torch
-import torch.nn as nn
 from transformers import PreTrainedTokenizerBase
 
 from rtp_llm.async_decoder_engine.embedding.interface import EngineInputs, EngineOutputs

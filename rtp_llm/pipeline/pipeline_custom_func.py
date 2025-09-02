@@ -1,7 +1,6 @@
 import logging
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Union
+from typing import Any, Callable, Union
 
-from rtp_llm.async_decoder_engine.async_model import AsyncModel
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.pipeline.default_plugin import DefaultPlugin
 from rtp_llm.utils.ft_plugin import (

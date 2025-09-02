@@ -14,7 +14,7 @@ TODO(wangyin.yx): import fastchat as a dependency in the future if possible.
 
 import dataclasses
 from enum import IntEnum, auto
-from typing import Any, Dict, List, Tuple, Union
+from typing import Dict, List, Tuple, Union
 
 
 class SeparatorStyle(IntEnum):
@@ -601,7 +601,6 @@ register_conv_template(
     )
 )
 
-
 # Tulu default template
 register_conv_template(
     Conversation(
@@ -1101,7 +1100,6 @@ register_conv_template(
     )
 )
 
-
 # ehartford/dolphin-2.2.1-mistral-7b template
 # reference: https://huggingface.co/ehartford/dolphin-2.2.1-mistral-7b#training
 register_conv_template(
@@ -1115,7 +1113,6 @@ register_conv_template(
         stop_token_ids=[32000, 32001],
     )
 )
-
 
 # teknium/OpenHermes-2.5-Mistral-7B template
 # source: https://huggingface.co/teknium/OpenHermes-2.5-Mistral-7B
@@ -1132,7 +1129,6 @@ register_conv_template(
     )
 )
 
-
 # NousResearch/Nous-Hermes-2-Mixtral-8x7B-DPO template
 # source: https://huggingface.co/NousResearch/Nous-Hermes-2-Mixtral-8x7B-DPO
 register_conv_template(
@@ -1146,7 +1142,6 @@ register_conv_template(
         stop_token_ids=[32000, 32001],
     )
 )
-
 
 # Qwen-chat default template
 # source: https://huggingface.co/Qwen/Qwen-7B-Chat/blob/main/qwen_generation_utils.py#L130
@@ -1183,7 +1178,6 @@ register_conv_template(
         stop_str="<|endoftext|>",
     )
 )
-
 
 # AquilaChat default template
 # source: https://github.com/FlagAI-Open/FlagAI/blob/master/examples/Aquila/Aquila-chat/cyg_conversation.py
@@ -1460,7 +1454,6 @@ register_conv_template(
         stop_str="</s>",
     )
 )
-
 
 # yuan 2.0 template
 # reference:https://github.com/IEIT-Yuan/Yuan-2.0

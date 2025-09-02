@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import json
 import logging
 import os
@@ -10,7 +8,6 @@ from typing import Any, Dict
 import torch
 
 from rtp_llm.config.py_config_modules import (
-    DEFAULT_START_PORT,
     MASTER_INFO_PORT_NUM,
     MIN_WORKER_INFO_PORT_NUM,
     WORKER_INFO_PORT_NUM,
@@ -103,11 +100,11 @@ class ParallelInfo(object):
         return self.world_rank == 0
 
     @staticmethod
-    def from_env() -> ParallelInfo:
+    def from_env() -> "ParallelInfo":
         return ParallelInfo.from_params(dict(os.environ))
 
     @staticmethod
-    def from_params(params: Dict[str, str]) -> ParallelInfo:
+    def from_params(params: Dict[str, str]) -> "ParallelInfo":
         world_size = int(params.get("WORLD_SIZE", "1"))
         if "LOCAL_WORLD_SIZE" in params:
             local_world_size = int(params["LOCAL_WORLD_SIZE"])

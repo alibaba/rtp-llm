@@ -1,5 +1,4 @@
 import copy
-import os
 
 # region youmi
 # 因为openai本地包和线上包重名，所以这里先删除本地包，然后再导入

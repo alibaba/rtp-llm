@@ -124,7 +124,6 @@ class FusedMoe(torch.nn.Module):
         a2_scale: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         extra_expert_args: Optional[Dict[str, Any]] = None,
-        extra_prepare_args: Optional[Dict[str, Any]] = None,
         extra_finalize_args: Optional[Dict[str, Any]] = None,
     ) -> torch.Tensor:
         a1 = hidden_states

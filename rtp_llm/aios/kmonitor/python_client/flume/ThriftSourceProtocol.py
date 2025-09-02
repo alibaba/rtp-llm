@@ -7,17 +7,8 @@
 #
 
 import logging
-import sys
 
-from thrift.protocol.TProtocol import TProtocolException
-from thrift.Thrift import (
-    TApplicationException,
-    TException,
-    TFrozenDict,
-    TMessageType,
-    TProcessor,
-    TType,
-)
+from thrift.Thrift import TApplicationException, TMessageType, TProcessor, TType
 from thrift.transport import TTransport
 
 from .ttypes import *
@@ -29,14 +20,12 @@ class Iface(object):
         Parameters:
          - event
         """
-        pass
 
     def appendBatch(self, events):
         """
         Parameters:
          - events
         """
-        pass
 
 
 class Client(Iface):

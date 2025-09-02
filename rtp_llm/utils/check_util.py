@@ -1,6 +1,3 @@
-import os
-
-
 def is_positive_integer(value) -> bool:
     return isinstance(value, int) and value >= 0
 

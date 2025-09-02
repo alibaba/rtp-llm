@@ -2,10 +2,9 @@ import base64
 import io
 import logging
 import tempfile
-import time
 import unittest
 
-from PIL import Image, ImageDraw
+from PIL import Image
 
 from rtp_llm.utils.multimodal_util import get_bytes_io_from_url
 

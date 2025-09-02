@@ -2,9 +2,7 @@ import os
 from collections import defaultdict
 from typing import Any, Dict, List, Union
 
-import numpy as np
 import torch
-from numpy.typing import NDArray
 from transformers import PreTrainedTokenizerBase
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters

@@ -4,7 +4,6 @@ import math
 import os
 from typing import Any, Dict, List
 
-import torch
 from transformers.models.llama.tokenization_llama import (
     LlamaTokenizer as LlamaTokenizerOrigin,
 )
