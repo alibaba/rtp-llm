@@ -2,7 +2,6 @@
 #include "rtp_llm/cpp/th_op/GptInitParameter.h"
 #include "rtp_llm/cpp/dataclass/LoadBalance.h"
 #include "rtp_llm/cpp/dataclass/EngineScheduleInfo.h"
-#include "rtp_llm/cpp/dataclass/CacheStatusInfo.h"
 #include "rtp_llm/cpp/dataclass/WorkerStatusInfo.h"
 #include "rtp_llm/cpp/th_op/GptInitParameterRegister.h"
 #include "rtp_llm/cpp/th_op/common/blockUtil.h"
