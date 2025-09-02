@@ -28,7 +28,8 @@ public:
         return FakeMultimodalProcessor(py::none(), params);
     }
 
-    ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs) {
+    ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,
+                                                      std::string                                 ip_port = "") {
         MultimodalOutput res = MultimodalOutput();
         for (auto& mm_input : mm_inputs) {
             res.mm_features.push_back(torch::randn({std::stoi(mm_input.url), 2}));

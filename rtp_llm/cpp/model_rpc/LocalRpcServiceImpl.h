@@ -50,8 +50,8 @@ public:
         return local_server_->getWorkerStatusInfo(latest_cache_version, latest_finished_version, needLoadBalanceInfo);
     }
 
-    KVCacheInfo getCacheStatusInfo(int64_t latest_cache_version) {
-        return local_server_->getCacheStatusInfo(latest_cache_version);
+    KVCacheInfo getCacheStatusInfo(int64_t latest_cache_version, bool need_cache_keys) {
+        return local_server_->getCacheStatusInfo(latest_cache_version, need_cache_keys);
     }
 
     LoadBalanceInfo getLoadBalanceInfo(int64_t latest_version) {

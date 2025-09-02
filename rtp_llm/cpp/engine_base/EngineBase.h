@@ -86,7 +86,7 @@ public:
         return LoadBalanceInfo();
     }
 
-    virtual KVCacheInfo getCacheStatusInfo(int64_t latest_version) {
+    virtual KVCacheInfo getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) {
         return KVCacheInfo();
     }
 

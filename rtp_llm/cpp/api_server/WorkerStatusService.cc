@@ -32,10 +32,10 @@ void WorkerStatusService::workerStatus(const std::unique_ptr<http_server::HttpRe
     }
 
     LoadBalanceInfo load_balance_info;
-    KVCacheInfo cache_status;
+    KVCacheInfo     cache_status;
     if (engine_) {
         load_balance_info = engine_->getLoadBalanceInfo(-1);
-        cache_status      = engine_->getCacheStatusInfo(-1);
+        cache_status      = engine_->getCacheStatusInfo(-1, true);
     } else {
         RTP_LLM_LOG_WARNING("worker status service call worker status error, engine is null");
     }

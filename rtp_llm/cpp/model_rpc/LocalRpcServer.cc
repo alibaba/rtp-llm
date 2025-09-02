@@ -153,14 +153,14 @@ LocalRpcServer::GetCacheStatus(grpc::ServerContext* context, const CacheVersionP
     RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s, request cache version: [%d]",
                       context->peer().c_str(),
                       request->latest_cache_version());
-    KVCacheInfo cache_status = getCacheStatusInfo(request->latest_cache_version());
+    KVCacheInfo cache_status = getCacheStatusInfo(request->latest_cache_version(), request->need_cache_keys());
     response->set_available_kv_cache(cache_status.available_kv_cache);
     response->set_total_kv_cache(cache_status.total_kv_cache);
     response->set_block_size(cache_status.block_size);
     response->set_version(cache_status.version);
     auto* cache_map = response->mutable_cache_keys();
     for (const auto& key : cache_status.cached_keys) {
-        (*cache_map)[static_cast<int64_t>(key)] = true; 
+        (*cache_map)[static_cast<int64_t>(key)] = true;
     }
     return grpc::Status::OK;
 }
@@ -169,8 +169,8 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
                                              const StatusVersionPB* request,
                                              WorkerStatusPB*        response) {
     int64_t request_begin_time_us   = currentTimeUs();
-    int64_t     latest_cache_version    = request->latest_cache_version();
-    int64_t     latest_finished_version = request->latest_finished_version();
+    int64_t latest_cache_version    = request->latest_cache_version();
+    int64_t latest_finished_version = request->latest_finished_version();
     RTP_LLM_LOG_DEBUG(
         "receive workerStatus rpc request from client: %s, latest_cache_version : %ld, latest_finished_version: %ld, config role_type: %d",
         context->peer().c_str(),
@@ -179,11 +179,10 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
         maga_init_params_.gpt_init_parameter.role_type_);
 
     WorkerStatusInfo status_info = getWorkerStatusInfo(latest_cache_version, latest_finished_version, false);
-    int64_t     request_after_ws_time_us = currentTimeUs();
-    RTP_LLM_LOG_DEBUG("getWorkerStatusInfo took %ld us",
-                     request_after_ws_time_us - request_begin_time_us);
-    const auto& load_balance_info        = status_info.load_balance_info;
-    const auto& engine_schedule_info     = status_info.engine_schedule_info;
+    int64_t          request_after_ws_time_us = currentTimeUs();
+    RTP_LLM_LOG_DEBUG("getWorkerStatusInfo took %ld us", request_after_ws_time_us - request_begin_time_us);
+    const auto& load_balance_info    = status_info.load_balance_info;
+    const auto& engine_schedule_info = status_info.engine_schedule_info;
     response->set_role(status_info.role);
 
     for (const auto& task : engine_schedule_info.running_task_info_list) {
@@ -225,8 +224,6 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
     return grpc::Status::OK;
 }
 
-
-
 WorkerStatusInfo LocalRpcServer::getWorkerStatusInfo(int64_t latest_cache_version,
                                                      int64_t latest_finished_version,
                                                      bool    needLoadBalanceInfo) {
@@ -254,10 +251,10 @@ WorkerStatusInfo LocalRpcServer::getWorkerStatusInfo(int64_t latest_cache_versio
         default:
             status_info.role = "RoleType.UNKNOWN";
     }
-    status_info.dp_size = maga_init_params_.gpt_init_parameter.dp_size_;
-    status_info.tp_size = maga_init_params_.gpt_init_parameter.tp_size_;
-    status_info.version = 1;
-    status_info.dp_rank = maga_init_params_.gpt_init_parameter.dp_rank_;
+    status_info.dp_size        = maga_init_params_.gpt_init_parameter.dp_size_;
+    status_info.tp_size        = maga_init_params_.gpt_init_parameter.tp_size_;
+    status_info.version        = 1;
+    status_info.dp_rank        = maga_init_params_.gpt_init_parameter.dp_rank_;
     status_info.status_version = currentTimeUs();
     status_info.alive          = true;
     auto quant_method          = maga_init_params_.gpt_init_parameter.quant_algo_.getQuantMethod();
@@ -300,9 +297,9 @@ LoadBalanceInfo LocalRpcServer::getLoadBalanceInfo(int64_t latest_version) {
     return engine_->getLoadBalanceInfo(latest_version);
 }
 
-KVCacheInfo LocalRpcServer::getCacheStatusInfo(int64_t latest_version) {
-    int64_t request_begin_time_us = currentTimeUs();
-    const auto& cache_info = engine_->getCacheStatusInfo(latest_version);
+KVCacheInfo LocalRpcServer::getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) {
+    int64_t     request_begin_time_us = currentTimeUs();
+    const auto& cache_info            = engine_->getCacheStatusInfo(latest_version, need_cache_keys);
     reportCacheStatusTime(request_begin_time_us);
     return cache_info;
 }
@@ -321,10 +318,10 @@ size_t LocalRpcServer::onflightRequestNum() {
 }
 
 EngineScheduleInfo LocalRpcServer::getEngineScheduleInfo(int64_t latest_finished_version) {
-    EngineScheduleInfo info = meta_->getEngineScheduleInfo(latest_finished_version);
+    EngineScheduleInfo                        info = meta_->getEngineScheduleInfo(latest_finished_version);
     std::vector<EngineScheduleInfo::TaskInfo> running_task_info_list = engine_->getScheduler().runningTaskList();
     for (auto& task_info : info.running_task_info_list) {
-        for(auto& running_task : running_task_info_list) {
+        for (auto& running_task : running_task_info_list) {
             if (task_info.inter_request_id == running_task.inter_request_id) {
                 task_info.is_waiting = false;
             }
@@ -389,8 +386,8 @@ EngineScheduleInfo LocalRpcServer::getEngineScheduleInfo(int64_t latest_finished
 
 void LocalRpcServer::reportWorkerStatusTime(int64_t request_begin_time_us, int64_t request_after_ws_time_us) {
     RpcWorkerStatusMetricsCollector collector;
-    collector.qps                        = true;
-    collector.total_rt_us                = request_after_ws_time_us - request_begin_time_us;
+    collector.qps         = true;
+    collector.total_rt_us = request_after_ws_time_us - request_begin_time_us;
     if (metrics_reporter_) {
         metrics_reporter_->report<RpcWorkerStatusMetrics, RpcWorkerStatusMetricsCollector>(nullptr, &collector);
     }

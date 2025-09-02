@@ -101,7 +101,6 @@ try:
     from libth_transformer import (
         ArpcConfig,
         BatchDecodeSchedulerConfig,
-        CacheStatusInfo,
         CacheStoreConfig,
         ConcurrencyConfig,
         DeviceExporter,

@@ -206,8 +206,8 @@ absl::Status NormalEngine::initSystemPrompt() {
     return absl::OkStatus();
 }
 
-KVCacheInfo NormalEngine::getCacheStatusInfo(int64_t latest_version)  {
-    return resource_context_.cache_manager->getKVCacheInfo(latest_version);
+KVCacheInfo NormalEngine::getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) {
+    return resource_context_.cache_manager->getKVCacheInfo(latest_version, need_cache_keys);
 }
 
 LoadBalanceInfo NormalEngine::getLoadBalanceInfo(int64_t latest_version) {
@@ -216,8 +216,7 @@ LoadBalanceInfo NormalEngine::getLoadBalanceInfo(int64_t latest_version) {
                            (int64_t)step_recorder_.getStepPerMin(),
                            (int64_t)scheduler_->onflightStreams(),
                            (int64_t)scheduler_->waitingQueryLen(),
-                           (int64_t)scheduler_->runningQueryLen()
-                           };
+                           (int64_t)scheduler_->runningQueryLen()};
 }
 
 absl::Status NormalEngine::startLoop() {

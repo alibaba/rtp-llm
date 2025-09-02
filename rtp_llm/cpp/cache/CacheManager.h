@@ -129,7 +129,7 @@ public:
     const CacheConfig&   cacheConfig() const;
     size_t               freeBlockNums() const;
     size_t               availableBlockNums() const;
-    KVCacheInfo          getKVCacheInfo(int64_t latest_version) const;
+    KVCacheInfo          getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
     uint32_t             maxSeqLen() const;
     const KVCacheBuffer& kvCacheBuffer() const;
 

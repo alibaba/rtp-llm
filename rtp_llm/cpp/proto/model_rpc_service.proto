@@ -324,6 +324,7 @@ message StatusVersionPB {
 
 message CacheVersionPB {
   int64 latest_cache_version = 1;
+  bool need_cache_keys = 2;
 }
 
 message CacheStatusPB {
