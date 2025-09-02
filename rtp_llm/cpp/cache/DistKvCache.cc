@@ -96,6 +96,7 @@ bool DistKvCache::initDefaultMetas() {
     default_metas_["USE_MLA"]            = std::to_string(static_cast<int>(cache_config.use_mla));
     default_metas_["TP_SIZE"]            = std::to_string(gpt_init_params_.tp_size_);
     default_metas_["TP_RANK"]            = std::to_string(gpt_init_params_.tp_rank_);
+    default_metas_["LAYOUT_VERSION"]     = "v2";
 
     auto biz_name = autil::EnvUtil::getEnv("BIZ_NAME", std::string(""));
     if (biz_name.empty()) {

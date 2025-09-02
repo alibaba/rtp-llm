@@ -175,10 +175,10 @@ std::shared_ptr<DistStorage3FSFile> DistStorage3FS::getFile(const DistStorage::I
 
 std::string DistStorage3FS::makeFilepath(const std::map<std::string, std::string>& metas) const {
     // kvcache filename format:
-    // /mountpoint/root_dir/biz_name/ckpt_path_hash(/lora_path_hash)/seq_size_per_block/dtype/use_mla/tp_size/tp_rank/last_cache_key
+    // /mountpoint/root_dir/biz_name/ckpt_path_hash(/lora_path_hash)/seq_size_per_block/dtype/use_mla/tp_size/tp_rank/layout_version/last_cache_key
     try {
         const auto filepath = std::filesystem::path(init_params_.mountpoint) / init_params_.root_dir
-                              / metas.at("BIZ_NAME") / metas.at("CKPT_PATH") / metas.at("LORA_CKPT_PATH")
+                              / metas.at("BIZ_NAME") / metas.at("LAYOUT_VERSION") / metas.at("CKPT_PATH") / metas.at("LORA_CKPT_PATH")
                               / metas.at("SEQ_SIZE_PER_BLOCK") / metas.at("DTYPE") / metas.at("USE_MLA")
                               / metas.at("TP_SIZE") / metas.at("TP_RANK") / metas.at("ITEM_KEY");
         return filepath.lexically_normal().string();
