@@ -21,7 +21,8 @@ std::string TokenProcessor::decode(const std::vector<int>& token_ids) {
 
 std::vector<int> TokenProcessor::encode(const std::string& prompt) {
     py::gil_scoped_acquire acquire;
-    auto                   res = token_processor_.attr("encode")(prompt);
+    py::bytes              py_prompt_bytes(prompt);
+    auto                   res = token_processor_.attr("encode")(py_prompt_bytes);
     std::vector<int>       vecInt;
     if (!py::isinstance<py::list>(res)) {
         throw HttpApiServerException(HttpApiServerException::TOKENIZER_ERROR,

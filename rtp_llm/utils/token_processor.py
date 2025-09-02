@@ -1,7 +1,7 @@
 import asyncio
 import os
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Union
 
 import torch
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
@@ -29,9 +29,14 @@ class TokenProcessor:
     def decode(self, token_id: List[int]) -> str:
         return self.tokenizer.decode(token_id)
 
-    def encode(self, prompt: str) -> torch.tensor:
-        th = self.tokenizer.encode(prompt)
-        return th
+    def encode(self, prompt: Union[str, bytes]) -> torch.tensor:
+        try:
+            if isinstance(prompt, bytes):
+                prompt = prompt.decode("utf-8", errors="ignore")
+            th = self.tokenizer.encode(prompt)
+            return th
+        except Exception as e:
+            raise e
 
 
 class TokenProcessorPerStream:
