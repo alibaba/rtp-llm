@@ -7,6 +7,7 @@ try:
     from libth_transformer.rtp_llm_ops import (
         FusedRopeKVCacheDecodeOp,
         FusedRopeKVCachePrefillOp,
+        WriteCacheStoreOp,
     )
 except ImportError:
     logging.info("rope kv cache not available, skipped.")
@@ -20,6 +21,7 @@ class FMHAImplBase(object):
     fmha_params: Any
     rope_params: Any
     rope_kvcache_impl: Any
+    write_cache_store_impl: Any
     attn_inputs: PyAttentionInputs
     support_: bool = False
 
@@ -27,6 +29,7 @@ class FMHAImplBase(object):
         self,
         fmha_impl: Any,
         rope_kvcache_impl: Any,
+        write_cache_store_impl: Any,
         attn_inputs: PyAttentionInputs,
         init_params: bool = True,
     ) -> None:
@@ -34,18 +37,22 @@ class FMHAImplBase(object):
         self.support_: bool = self.fmha_impl.support(attn_inputs)
         self.fmha_params = None
         self.rope_params = None
+        self.write_cache_store_impl = None
         if self.support_ and init_params:
             self.rope_kvcache_impl = rope_kvcache_impl
             self.prepare(attn_inputs)
             self.attn_inputs = attn_inputs
+            if attn_inputs.cache_store_inputs:
+                self.write_cache_store_impl = write_cache_store_impl
 
     def forward(self, qkv: torch.Tensor, kv_cache: Optional[KVCache]) -> torch.Tensor:
         assert self.rope_kvcache_impl is not None and self.rope_params is not None
         fmha_input = self.rope_kvcache_impl.forward(
             qkv, self.fmha_type(), kv_cache, self.rope_params
         )
+        if self.attn_inputs.cache_store_inputs and self.write_cache_store_impl:
+            self.write_cache_store_impl.forward(self.attn_inputs, kv_cache)
         assert self.fmha_impl is not None
-
         res = self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
         return res
 
@@ -71,7 +78,12 @@ class FMHAPrefillImplBase(FMHAImplBase):
         attn_inputs: PyAttentionInputs,
         config: GptInitModelParameters,
     ) -> None:
-        super().__init__(fmha_impl, FusedRopeKVCachePrefillOp(config), attn_inputs)
+        super().__init__(
+            fmha_impl,
+            FusedRopeKVCachePrefillOp(config),
+            WriteCacheStoreOp(config),
+            attn_inputs,
+        )
 
 
 class FMHADecodeImplBase(FMHAImplBase):
@@ -82,7 +94,12 @@ class FMHADecodeImplBase(FMHAImplBase):
         attn_inputs: PyAttentionInputs,
         config: GptInitModelParameters,
     ) -> None:
-        super().__init__(fmha_impl, FusedRopeKVCacheDecodeOp(config), attn_inputs)
+        super().__init__(
+            fmha_impl,
+            FusedRopeKVCacheDecodeOp(config),
+            WriteCacheStoreOp(config),
+            attn_inputs,
+        )
 
 
 PREFILL_MHA_IMPS: List[type[FMHAPrefillImplBase]] = []

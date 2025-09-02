@@ -12,8 +12,8 @@ struct KVCache {
     torch::Tensor v_cache_base;
     torch::Tensor k_scale_base;
     torch::Tensor v_scale_base;
-
-    KVCache getLayerCache(int idx) {
+    int           layer_id = -1;
+    KVCache       getLayerCache(int idx) {
         KVCache layer_cache;
         layer_cache.k_cache_base = k_cache_base[idx];
         layer_cache.v_cache_base = v_cache_base[idx];
@@ -21,12 +21,30 @@ struct KVCache {
             layer_cache.k_scale_base = k_scale_base[idx];
             layer_cache.v_scale_base = v_scale_base[idx];
         }
+        layer_cache.layer_id = idx;
         return layer_cache;
     }
 };
 
 struct PyModelInitResources {
     std::optional<KVCache> kv_cache;
+};
+
+struct PyCacheStoreInputs {
+    size_t                   context_batch_size = 0;
+    size_t                   decoder_batch_size = 0;
+    torch::Tensor            request_id;
+    torch::Tensor            request_pd_separation;
+    std::vector<std::string> cache_keys;  // [context_batch_size]
+    size_t                   tokens_per_block;
+    size_t                   k_block_size;
+    size_t                   v_block_size;
+    size_t                   scale_block_size;
+    bool                     pd_separation   = false;
+    size_t                   model_id        = 0;
+    bool                     decode_entrance = false;
+    bool                     warmup          = false;
+    bool                     mla_kvcache     = false;
 };
 
 struct PyAttentionInputs {
@@ -40,7 +58,11 @@ struct PyAttentionInputs {
     int              kv_block_offset = 0;
     // for `FusedRopeKVCacheDecodeOp`.
     torch::Tensor cu_seqlens;
-    torch::Tensor padding_offset;
+
+    // for write cache store
+
+    std::optional<PyCacheStoreInputs> cache_store_inputs;
+    torch::Tensor                     padding_offset;
 };
 
 struct PyModelInputs {

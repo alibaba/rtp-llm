@@ -1,5 +1,6 @@
 #pragma once
 #include "rtp_llm/cpp/models/GptModel.h"
+#include <optional>
 #include <string>
 #include <mutex>
 
@@ -23,6 +24,9 @@ public:
 
     GptModelOutputs forward(const GptModelInputs& inputs) override;
     GptModelOutputs forwardMicroBatched(const GptModelInputs& inputs);
+
+private:
+    std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs);
 
 private:
     // Helper functions to reduce code duplication

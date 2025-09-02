@@ -120,6 +120,8 @@ public:
 
     void writeCacheStore(const WriteCacheParams& params);
 
+    void writeCacheStore(const CacheStoreInputs& cache_store_inputs, const KvCacheInfo& kv_cache, bool mla_kvcache);
+
     DeviceInitParams initParams() {
         return init_params_;
     }

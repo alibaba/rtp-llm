@@ -9,6 +9,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readonly("v_cache_base", &KVCache::v_cache_base, "Value cache base tensor")
         .def_readonly("k_scale_base", &KVCache::k_scale_base, "Key cache scale tensor")
         .def_readonly("v_scale_base", &KVCache::v_scale_base, "Value cache scale tensor")
+        .def_readonly("layer_id", &KVCache::layer_id, "kv cache layer id")
         .def("get_layer_cache", &KVCache::getLayerCache);
 
     pybind11::class_<PyModelInitResources>(m, "PyModelInitResources")
@@ -16,6 +17,8 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readonly("kv_cache", &PyModelInitResources::kv_cache, "kv cache");
 
     pybind11::class_<caffe2::TypeMeta>(m, "TypeMeta").def(pybind11::init<>());
+
+    pybind11::class_<PyCacheStoreInputs>(m, "PyCacheStoreInputs").def(pybind11::init<>());
 
     pybind11::class_<PyAttentionInputs>(m, "PyAttentionInputs")
         .def(pybind11::init<>())
@@ -26,7 +29,9 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readonly("kv_cache_block_id_host", &PyAttentionInputs::kv_cache_block_id_host)
         .def_readonly("kv_cache_block_id_device", &PyAttentionInputs::kv_cache_block_id_device)
         .def_readonly("kv_block_offset", &PyAttentionInputs::kv_block_offset)
-        .def_readonly("dtype", &PyAttentionInputs::dtype);
+        .def_readonly("dtype", &PyAttentionInputs::dtype)
+        .def_readonly("cu_seqlens", &PyAttentionInputs::cu_seqlens)
+        .def_readonly("cache_store_inputs", &PyAttentionInputs::cache_store_inputs);
 
     pybind11::class_<PyModelInputs>(m, "PyModelInputs")
         .def(pybind11::init<>())

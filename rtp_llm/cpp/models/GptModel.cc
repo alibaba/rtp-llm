@@ -108,13 +108,6 @@ rtp_llm::AttentionCommonInputs GptModel::prepareAttentionInputs(const GptModelIn
         device_->clone({*inputs.sequence_lengths}),
     });
     attention_inputs.position_ids = combo_position_ids;
-    attention_inputs.warmup       = inputs.warmup;
-    if (!inputs.warmup && inputs.pd_separation) {
-        RTP_LLM_CHECK_WITH_INFO(inputs.input_lengths && inputs.prefix_lengths && inputs.kv_cache_block_id,
-                                "failed to get information for pd seperation store cache");
-        CacheStoreInputs cache_store_inputs({inputs.input_lengths, inputs.prefix_lengths, inputs.kv_cache_block_id});
-        attention_inputs.cache_store_inputs = cache_store_inputs;
-    }
     if (inputs.kv_cache_block_id) {
         checkKvBlocksShape(inputs.kv_cache_block_id);
         KvCacheInfo kv_cache;
@@ -227,23 +220,38 @@ rtp_llm::AttentionCommonInputs GptModel::prepareAttentionInputs(const GptModelIn
                                   (bool)weights_.linear_bias_slopes});
     device_->checkError();
 
-    if (inputs.cache_keys) {
-        vector<int64_t> cache_keys_vec = rtp_llm::buffer2vector<int64_t>(*inputs.cache_keys);
-        attention_inputs.cache_keys    = transVectorToString(cache_keys_vec);
-    }
     attention_inputs.decode_flash_infer_attn.swap(prep_output.decode_flash_infer_attn);
     attention_inputs.prefill_flash_infer_attn.swap(prep_output.prefill_flash_infer_attn);
     attention_inputs.decode_trt_attn.swap(prep_output.decode_trt_attn);
     attention_inputs.prefill_trt_attn.swap(prep_output.prefill_trt_attn);
     attention_inputs.decode_aiter_attn.swap(prep_output.decode_aiter_attn);
-    attention_inputs.request_id            = inputs.request_id;
-    attention_inputs.request_pd_separation = inputs.request_pd_separation;
-    attention_inputs.k_block_size          = inputs.k_block_size;
-    attention_inputs.v_block_size          = inputs.v_block_size;
-    attention_inputs.scale_block_size      = inputs.scale_block_size;
-    attention_inputs.pd_separation         = inputs.pd_separation;
-    attention_inputs.model_id              = model_id_;
-    attention_inputs.decode_entrance       = inputs.decode_entrance;
+    if (!inputs.warmup && inputs.pd_separation) {
+        RTP_LLM_CHECK_WITH_INFO(inputs.input_lengths && inputs.prefix_lengths && inputs.kv_cache_block_id,
+                                "failed to get information for pd seperation store cache");
+        vector<int64_t> cache_keys_vec;
+        if (inputs.cache_keys) {
+            cache_keys_vec = rtp_llm::buffer2vector<int64_t>(*inputs.cache_keys);
+        }
+        CacheStoreInputs cache_store_inputs({
+            inputs.input_lengths,
+            inputs.prefix_lengths,
+            inputs.kv_cache_block_id,
+            attention_inputs.context_batch_size,
+            attention_inputs.decoder_batch_size,
+            inputs.request_id,
+            inputs.request_pd_separation,
+            transVectorToString(cache_keys_vec),
+            inputs.seq_size_per_block,
+            inputs.k_block_size,
+            inputs.v_block_size,
+            inputs.scale_block_size,
+            inputs.pd_separation,
+            model_id_,
+            inputs.decode_entrance,
+            inputs.warmup,
+        });
+        attention_inputs.cache_store_inputs = cache_store_inputs;
+    }
 
     if (context_batch_size && prep_output.need_mask) {
         attention_inputs.attention_mask =
@@ -1172,9 +1180,11 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(const GptLayerInputs&     
     }
     device_->checkError();
 
-    attention_common_inputs.layer_id = layer_id;
-    const auto& layer                = weights_.layers[layer_id];
-    bool        enable_sp            = inputs.enable_sp;
+    if (attention_common_inputs.cache_store_inputs.has_value()) {
+        attention_common_inputs.cache_store_inputs.value().layer_id = layer_id;
+    }
+    const auto& layer     = weights_.layers[layer_id];
+    bool        enable_sp = inputs.enable_sp;
 
     // here hidden->dtype maybe int8, so use dytpe of embedding lookup result instead
     size_t    rank_pad_token_num   = enable_sp ? inputs.pad_token_num / device_props_.tp_size : hidden->shape()[0];

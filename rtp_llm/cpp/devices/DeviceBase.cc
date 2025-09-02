@@ -11,6 +11,7 @@
 #include "torch/types.h"
 #include <numeric>
 #include "rtp_llm/cpp/th_op/ConfigModules.h"
+
 using namespace std;
 using namespace rtp_llm;
 
@@ -148,7 +149,15 @@ void DeviceBase::setCacheStore(std::shared_ptr<rtp_llm::CacheStore> cache_store)
 }
 
 void DeviceBase::writeCacheStore(const WriteCacheParams& params) {
-    auto& param = params.common;
+    if (params.cache_store_inputs.has_value() && params.kv_cache.has_value()) {
+        writeCacheStore(params.cache_store_inputs.value(), params.kv_cache.value(), params.mla_kvcache);
+    }
+}
+
+void DeviceBase::writeCacheStore(const CacheStoreInputs& cache_store_inputs,
+                                 const KvCacheInfo&      kv_cache,
+                                 bool                    mla_kvcache) {
+    auto& param = cache_store_inputs;
     if (param.warmup) {
         RTP_LLM_LOG_DEBUG("is warmup, so ignore writeCacheStore");
         return;
@@ -160,13 +169,12 @@ void DeviceBase::writeCacheStore(const WriteCacheParams& params) {
         return;
     }
 
-    RTP_LLM_CHECK_WITH_INFO(param.cache_store_inputs.has_value() && param.cache_store_inputs->host_kv_cache_offset,
-                            "failed to get host_kv_cache_offset");
-    const auto max_blocks_per_batch = param.cache_store_inputs->host_kv_cache_offset->shape()[1];
-    const auto seq_size_per_block   = params.configs.tokens_per_block;
-    auto       offset_addr          = param.cache_store_inputs->host_kv_cache_offset->data<int32_t>();
-    auto       k_cache_data         = (uint64_t*)param.kv_cache->k_cache_buffer->data();
-    auto       v_cache_data         = (uint64_t*)param.kv_cache->v_cache_buffer->data();
+    RTP_LLM_CHECK_WITH_INFO(param.host_kv_cache_offset != nullptr, "failed to get host_kv_cache_offset");
+    const auto max_blocks_per_batch = param.host_kv_cache_offset->shape()[1];
+    const auto seq_size_per_block   = param.tokens_per_block;
+    auto       offset_addr          = param.host_kv_cache_offset->data<int32_t>();
+    auto       k_cache_data         = (uint64_t*)kv_cache.k_cache_buffer->data();
+    auto       v_cache_data         = (uint64_t*)kv_cache.v_cache_buffer->data();
     // auto k_scale_data = (uint64_t*)(param.kv_cache->k_scale_buffer ? param.kv_cache->k_scale_buffer->data() :
     // nullptr); auto v_scale_data = (uint64_t*)(param.kv_cache->v_scale_buffer ? param.kv_cache->v_scale_buffer->data()
     // : nullptr);
@@ -181,16 +189,14 @@ void DeviceBase::writeCacheStore(const WriteCacheParams& params) {
         if (*(param.request_pd_separation->dataWithOffset<bool>(batch_id)) == false) {
             continue;
         }
-        RTP_LLM_CHECK_WITH_INFO(param.cache_store_inputs.has_value() && param.cache_store_inputs->prefix_lengths_host
-                                    && param.cache_store_inputs->input_lengths_host,
+        RTP_LLM_CHECK_WITH_INFO(param.prefix_lengths_host && param.input_lengths_host,
                                 "failed to get prefix_length_host and input_length_host for cache store");
-        RTP_LLM_CHECK_WITH_INFO(
-            param.cache_store_inputs->prefix_lengths_host->data<int>()[batch_id] % seq_size_per_block == 0,
-            "prefix_length \% seq_size_per_block != 0");
-        int reuse_block_num = param.cache_store_inputs->prefix_lengths_host->data<int>()[batch_id] / seq_size_per_block;
-        int block_num = (param.cache_store_inputs->input_lengths_host->data<int>()[param.decoder_batch_size + batch_id]
-                         + seq_size_per_block - 1)
-                        / seq_size_per_block;
+        RTP_LLM_CHECK_WITH_INFO(param.prefix_lengths_host->data<int>()[batch_id] % seq_size_per_block == 0,
+                                "prefix_length \% seq_size_per_block != 0");
+        int reuse_block_num = param.prefix_lengths_host->data<int>()[batch_id] / seq_size_per_block;
+        int block_num =
+            (param.input_lengths_host->data<int>()[param.decoder_batch_size + batch_id] + seq_size_per_block - 1)
+            / seq_size_per_block;
         auto request_id     = *(param.request_id->dataWithOffset<int64_t>(batch_id));
         auto request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), createEvent());
         RTP_LLM_LOG_DEBUG(
@@ -199,10 +205,10 @@ void DeviceBase::writeCacheStore(const WriteCacheParams& params) {
             auto block_id = *(offset_addr + (param.decoder_batch_size + batch_id) * max_blocks_per_batch + index);
             std::string cache_key;
             if (param.decode_entrance) {
-                cache_key = makeCacheKey(params.common.model_id, std::to_string(block_id), param.layer_id);
+                cache_key = makeCacheKey(param.model_id, std::to_string(block_id), param.layer_id);
             } else {
                 cache_key = makeCacheKey(
-                    params.common.model_id, param.cache_keys[batch_id * max_blocks_per_batch + index], param.layer_id);
+                    param.model_id, param.cache_keys[batch_id * max_blocks_per_batch + index], param.layer_id);
             }
             // FT_LOG_DEBUG("write kv cache_key %s", cache_key.c_str());
             void*                 k_addr = (void*)((int8_t*)k_cache_data + block_id * param.k_block_size);
@@ -215,7 +221,7 @@ void DeviceBase::writeCacheStore(const WriteCacheParams& params) {
             //     true);
             // }
             // mla kvcache 不存储 v_cache
-            if (params.mla_kvcache) {
+            if (mla_kvcache) {
                 continue;
             }
             void*                 v_addr = (void*)((int8_t*)v_cache_data + block_id * param.v_block_size);

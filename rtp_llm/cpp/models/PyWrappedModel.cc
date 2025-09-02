@@ -1,16 +1,17 @@
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
+#include "rtp_llm/cpp/core/BufferHelper.h"
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/utils/utils.h"
 #include "rtp_llm/cpp/utils/AttentionConfig.h"
+#include <cstdint>
 #include <stdexcept>
 #include <mutex>
+#include <vector>
 #include "rtp_llm/cpp/utils/PyUtils.h"
 
 #include <cstdlib>
 #include <iostream>
-
-using namespace torch_ext;
 
 namespace rtp_llm {
 
@@ -120,6 +121,35 @@ PyWrappedModel::callForwardPostLayers(BufferPtr hidden_states, const GptModelInp
                              is_forward_method);
 }
 
+std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const GptModelInputs& inputs) {
+    std::optional<PyCacheStoreInputs> params;
+    if (!inputs.warmup && inputs.pd_separation) {
+        const auto           decoder_batch_size = inputs.sequence_lengths->shape()[0];
+        const auto           context_batch_size = inputs.input_lengths->shape()[0] - decoder_batch_size;
+        std::vector<int64_t> cache_keys_vec;
+        if (inputs.cache_keys) {
+            cache_keys_vec = rtp_llm::buffer2vector<int64_t>(*inputs.cache_keys);
+        }
+        PyCacheStoreInputs cache_store_inputs{context_batch_size,
+                                              decoder_batch_size,
+                                              Buffer2torchTensor(inputs.request_id),
+                                              Buffer2torchTensor(inputs.request_pd_separation),
+                                              transVectorToString(cache_keys_vec),
+                                              inputs.seq_size_per_block,
+                                              inputs.k_block_size,
+                                              inputs.v_block_size,
+                                              inputs.scale_block_size,
+                                              inputs.pd_separation,
+                                              model_id_,
+                                              inputs.decode_entrance,
+                                              inputs.warmup,
+                                              description_.attention_conf.use_mla
+                                                  && device_->mla_ops_type != rtp_llm::MlaOpsType::MHA};
+        params = cache_store_inputs;
+    }
+    return params;
+}
+
 GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs) {
     py::object py_forward_method = py_model_.attr("forward_micro_batch");
     if (device_props_.ffn_as_service) {
@@ -201,6 +231,25 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
 
         auto      attention_inputs = buildPyAttentionInputs(inputs);
         BufferPtr kv_cache_block_id_device;
+        if (k_cache_buffer_) {
+            kv_cache_block_id_device =
+                device_->clone({*inputs.kv_cache_block_id, AllocationType::DEVICE, {"kv_cache_block_id"}});
+            attention_inputs.kv_cache_block_id_host   = Buffer2torchTensor(inputs.kv_cache_block_id);
+            attention_inputs.kv_cache_block_id_device = Buffer2torchTensor(kv_cache_block_id_device, false);
+            attention_inputs.kv_block_offset =
+                k_cache_buffer_ ? k_cache_buffer_->shape()[0] * k_cache_buffer_->shape()[1] : 0;
+        }
+        attention_inputs.dtype      = torch::kBFloat16;
+        attention_inputs.is_prefill = !attention_inputs.sequence_lengths.size(0);
+        if (!inputs.warmup && inputs.pd_separation) {
+            attention_inputs.cache_store_inputs = prepareWriteCacheParams(inputs);
+        }
+        torch::Tensor cu_seqlens = torch::zeros({device_->initParams().concurrency_config.concurrency_limit + 1},
+                                                torch::TensorOptions(torch::kInt32).device(torch::kCPU));
+        int           batch_size = attention_inputs.input_lengths.size(0);
+        cu_seqlens               = cu_seqlens.cuda();
+        cu_seqlens.slice(0, 1, batch_size + 1) = attention_inputs.input_lengths.cumsum(0);
+        attention_inputs.cu_seqlens            = cu_seqlens;
         setupKVCacheForAttentionInputs(attention_inputs, inputs, kv_cache_block_id_device);
         calculatePaddingOffset(attention_inputs);
 
