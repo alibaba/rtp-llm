@@ -130,9 +130,11 @@ struct HIE_ALIGN(2) __Bf16Impl {
 
     // from bf16 to float
     static float bfloat162float(__Bf16Impl v) {
-        std::uint32_t val  = static_cast<uint32_t>(v.__x) << 16;
-        const float*  vptr = reinterpret_cast<const float*>(&val);
-        return *vptr;
+        std::uint32_t tmp = static_cast<std::uint32_t>(v.__x);
+        std::uint32_t val = tmp << 16;
+        float result;
+        std::memcpy(&result, &val, sizeof(result));
+        return result;
     }
 
     static double bfloat162double(__Bf16Impl v) {

@@ -127,14 +127,30 @@ BufferPtr ArmCpuDevice::activation(const ActivationParams& params) {
         gate = params.gate.value().get().data();
         printBufferData(params.gate.value().get(), "ffn activation gate");
         if (states->type() == DataType::TYPE_FP16) {
+            #pragma omp parallel for if (m > 1)
             for (size_t i = 0; i < m; i++) {
-                for (size_t j = 0; j < n; j++) {
+                size_t j;
+                for (j = 0; j <= n - 8; j += 8) {
+                    float16x8_t gate_vec = vld1q_f16((__fp16*)gate + i * n + j);
+                    float16x8_t state_vec = vld1q_f16((__fp16*)states->dataWithOffset(i * n + j));
+                    state_vec = vmulq_f16(state_vec, gate_vec);
+                    vst1q_f16((__fp16*)states->dataWithOffset(i * n + j), state_vec);
+                }
+                for (; j < n; j++) {
                     *(__fp16*)(states->dataWithOffset(i * n + j)) *= ((__fp16*)gate)[i * n + j];
                 }
             }
         } else if (states->type() == DataType::TYPE_FP32) {
+            #pragma omp parallel for if (m > 1)
             for (size_t i = 0; i < m; i++) {
-                for (size_t j = 0; j < n; j++) {
+                size_t j;
+                for (j = 0; j <= n - 4; j += 4) {
+                    float32x4_t gate_vec = vld1q_f32((float*)gate + i * n + j);
+                    float32x4_t state_vec = vld1q_f32((float*)states->dataWithOffset(i * n + j));
+                    state_vec = vmulq_f32(state_vec, gate_vec);
+                    vst1q_f32((float*)states->dataWithOffset(i * n + j), state_vec);
+                }
+                for (; j < n; j++) {
                     *(float*)(states->dataWithOffset(i * n + j)) *= ((float*)gate)[i * n + j];
                 }
             }

@@ -48,10 +48,10 @@ torch::Tensor ArmCpuDevice::preprocessWeightsForMixedGemm(torch::Tensor row_majo
     return row_major_quantized_weight;
 }
 
-torch::Tensor ArmCpuDevice::preprocessWeightScale(torch::Tensor qweight, torch::Tensor scales) {
+torch::Tensor ArmCpuDevice::preprocessWeightScale(torch::Tensor qweight, torch::Tensor scales, const std::string& key) {
     auto qweightBuffer = torchTensor2Buffer(qweight);
     auto scaleBuffer = torchTensor2Buffer(scales);
-    auto retBuffer = prepareGemmOptForGPTQInt4(qweightBuffer, scaleBuffer, "");
+    auto retBuffer = prepareGemmOptForGPTQInt4(qweightBuffer, scaleBuffer, key);
 
     return Buffer2torchTensor(*retBuffer, false);
 }
