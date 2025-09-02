@@ -3,6 +3,8 @@
 #include "rtp_llm/cpp/core/allocator.h"
 #include "rtp_llm/cpp/core/cpu_allocator.h"
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
+#include "rtp_llm/cpp/devices/arm_impl/ArmDispatch.h"
+
 #include <cstring>
 #include <arm_neon.h>
 #include <algorithm> //std::all_of
@@ -1002,12 +1004,12 @@ LayernormOutput ArmCpuDevice::layernorm(const LayernormParams& params) {
     int         m           = input->shape()[0];
     int         n           = input->shape()[1];
     const auto data_type = input->type();
-    if (!params.is_inplace && params.qscheme == QScheme::NoQuantize) {
+    if (!params.is_inplace && (params.qscheme == QScheme::NoQuantize || params.qscheme == QScheme::Qfp8PerTokenBlock)) {
         norm_output = allocateBufferLike(*params.input);
     } else if (params.qscheme == Qint8PerToken) {
         throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }
-   
+
     int convert_gamma = 0;
     int convert_beta = 0;
     int convert_bias = 0;
@@ -1462,5 +1464,179 @@ LayernormOutput ArmCpuDevice::layernorm(const LayernormParams& params) {
     }
     else throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }  
+
+template <typename T>
+inline void layernorm(T* out,
+                      const T* in,
+                      const T* gamma,
+                      const T* beta,
+                      int norm_size,
+                      float eps) {
+    float mean = 0.0f;
+    float var = 0.0f;
+
+    for (int i = 0; i < norm_size; ++i) {
+        mean += static_cast<float>(in[i]);
+    }
+    mean /= norm_size;
+
+    for (int i = 0; i < norm_size; ++i) {
+        float diff = static_cast<float>(in[i]) - mean;
+        var += diff * diff;
+    }
+    var /= norm_size;
+    float inv_std = 1.0f / std::sqrt(var + eps);
+
+    for (int i = 0; i < norm_size; ++i) {
+        float x = (static_cast<float>(in[i]) - mean) * inv_std;
+        float g = static_cast<float>(gamma[i]);
+        float b = beta ? static_cast<float>(beta[i]) : 0.0f;
+        out[i] = static_cast<T>(x * g + b);
+    }
+}
+
+template <typename T, typename GammaT>
+inline void rmsnorm(T* out,
+                    const T* in,
+                    const GammaT* gamma,
+                    const T* beta,
+                    int norm_size,
+                    float eps,
+                    bool is_beta) {
+    float sum_sq = 0.0f;
+
+    for (int i = 0; i < norm_size; ++i) {
+        float val = static_cast<float>(in[i]);
+        sum_sq += val * val;
+    }
+
+    float scale = 1.0f / std::sqrt(sum_sq / norm_size + eps);
+    for (int i = 0; i < norm_size; ++i) {
+        float val = static_cast<float>(in[i]) * scale * static_cast<float>(gamma[i]);
+        if (is_beta)
+            val += static_cast<float>(beta[i]);
+
+        out[i] = static_cast<T>(val);
+    }
+}
+
+template <typename T>
+void invokeLayerNormWithStride(T* output,
+                             int out_stride,
+                             const T* input,
+                             int in_stride,
+                             const T* gamma,
+                             const T* beta,
+                             float eps,
+                             int m,
+                             int n,
+                             int norm_size) {
+    assert(n % norm_size == 0);
+    const int num_groups = n / norm_size;
+
+    for (int row = 0; row < m; ++row) {
+        for (int group = 0; group < num_groups; ++group) {
+            int in_offset  = row * in_stride  + group * norm_size;
+            int out_offset = row * out_stride + group * norm_size;
+
+            layernorm(&output[out_offset],
+                    &input[in_offset],
+                    gamma,
+                    beta,
+                    norm_size,
+                    eps);
+        }
+    }
+}
+
+template <typename T, typename GammaT>
+void invokeRmsNormWithStride(T* output,
+                             int out_stride,
+                             const T* input,
+                             int in_stride,
+                             const GammaT* gamma,
+                             const T* beta,
+                             float eps,
+                             int m,
+                             int n,
+                             int norm_size) {
+    assert(n % norm_size == 0);
+    const int num_groups = n / norm_size;
+
+    for (int row = 0; row < m; ++row) {
+        for (int group = 0; group < num_groups; ++group) {
+            int in_offset  = row * in_stride  + group * norm_size;
+            int out_offset = row * out_stride + group * norm_size;
+
+            rmsnorm(&output[out_offset],
+                    &input[in_offset],
+                    gamma,
+                    beta,
+                    norm_size,
+                    eps,
+                    beta != nullptr);
+        }
+    }
+}
+
+LayernormOutput ArmCpuDevice::layernormWithStride(const LayernormWithStrideParams& params) {
+    RTP_LLM_CHECK_WITH_INFO(params.qscheme == QScheme::NoQuantize, "qscheme must be NoQuantize in layernormWithStride");
+    const auto data_type = params.input->type();
+    const auto m = params.input->shape()[0];
+    const auto in_stride = params.input->shape()[1];
+    const auto norm_weight = params.norm_weight;
+    const auto& gamma = norm_weight ? norm_weight->get().gamma.get()->data() : nullptr;
+    const auto& beta = (norm_weight && norm_weight->get().beta) ? norm_weight->get().beta.get()->data() : nullptr;
+    const auto eps = params.eps;
+
+    auto gamma_type = gamma ? norm_weight->get().gamma->type() : DataType::TYPE_FP32;  
+
+    int out_stride;
+    int out_offset;
+    BufferPtr norm_output;
+
+    // if not in_place, we hope that the output is contiguous
+    if (params.in_place) {
+        norm_output = params.input;
+        out_stride = in_stride;
+        out_offset = params.offset;
+    } else {
+        norm_output = allocateBuffer({data_type, {m, params.norm_group_size}, AllocationType::DEVICE}, {"norm_with_stride_output"});
+        out_stride = params.norm_group_size;
+        out_offset = 0;
+    }
+
+    if (params.norm_type == NormType::layernorm) {
+        DISPATCH_ARM_FUNCTION_DATA_TYPE(data_type,
+                                        invokeLayerNormWithStride,
+                                        norm_output->dataWithOffset(out_offset),
+                                        out_stride,
+                                        params.input->dataWithOffset(params.offset),
+                                        in_stride,
+                                        gamma,
+                                        beta,
+                                        eps,
+                                        m,
+                                        params.norm_group_size,
+                                        norm_weight->get().gamma.get()->shape()[0]);
+        return LayernormOutput({norm_output, nullptr});
+    } else if (params.norm_type == NormType::rmsnorm) {
+        DISPATCH_ARM_FUNCTION_TWO_DATA_TYPES(gamma_type, data_type,
+                                        invokeRmsNormWithStride,
+                                        norm_output->dataWithOffset(out_offset),
+                                        out_stride,
+                                        params.input->dataWithOffset(params.offset),
+                                        in_stride,
+                                        gamma,
+                                        beta,
+                                        eps,
+                                        m,
+                                        params.norm_group_size,
+                                        norm_weight->get().gamma.get()->shape()[0]);
+        return LayernormOutput({norm_output, nullptr});
+    } else {
+        throw std::runtime_error(autil::StringUtil::formatString("unsupported layernorm type for layernormWithStride: %d", int(params.norm_type)));
+    }
+}
 
 }
