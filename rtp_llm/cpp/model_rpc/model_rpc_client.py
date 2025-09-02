@@ -198,7 +198,7 @@ def trans_multimodal_input(
 def trans_output(
     input_py: GenerateInput, outputs_pb: GenerateOutputsPB, stream_state: StreamState
 ) -> GenerateOutputs:
-    logging.debug("outputs_pb = " + str(outputs_pb))
+    logging.debug("outputs_pb = %s", outputs_pb)
     logits_index = input_py.generate_config.logits_index
     outputs_py = GenerateOutputs()
     for i, output_pb in enumerate(outputs_pb.generate_outputs):
