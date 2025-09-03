@@ -4,7 +4,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import requests
 from pydantic import BaseModel, Field
@@ -92,7 +92,6 @@ class HostServiceArgs:
         use_local = False
 
         service_route_config_str = os.environ.get("MODEL_SERVICE_CONFIG", "")
-        logging.info(f"Service route config: {service_route_config_str}")
         if service_route_config_str:
             server_route_config = ServiceRoute.model_validate(
                 json.loads(service_route_config_str)
@@ -175,20 +174,40 @@ class HostService:
         use_local = args.use_local
         self.master_vip = VipServerWrapper(args.master_domain, use_local)
         self.master_service = MasterService(self.master_vip)
-        self.pdfusion_vip = VipServerWrapper(args.pdfusion_domain, use_local)
-        self.prefill_vip = VipServerWrapper(args.prefill_domain, use_local)
-        self.decode_vip = VipServerWrapper(args.decode_domain, use_local)
-        self.vit_vip = VipServerWrapper(args.vit_domain, use_local)
-        self.service_available = (
-            bool(self.master_vip.domain)
-            or bool(self.pdfusion_vip.domain)
-            or (bool(self.prefill_vip.domain) and bool(self.decode_vip.domain))
+        self.role_vip_map: Dict[RoleType, str] = {
+            RoleType.PDFUSION: (
+                VipServerWrapper(args.pdfusion_domain, use_local)
+                if args.pdfusion_domain
+                else None
+            ),
+            RoleType.PREFILL: (
+                VipServerWrapper(args.prefill_domain, use_local)
+                if args.prefill_domain
+                else None
+            ),
+            RoleType.DECODE: (
+                VipServerWrapper(args.decode_domain, use_local)
+                if args.decode_domain
+                else None
+            ),
+            RoleType.VIT: (
+                VipServerWrapper(args.vit_domain, use_local)
+                if args.vit_domain
+                else None
+            ),
+        }
+        self.master_service = MasterService(self.master_vip)
+
+        self.service_available = bool(self.master_vip.domain) or any(
+            self.role_vip_map.values()
         )
 
     def get_master_addr(self) -> Optional[str]:
         return self.master_service.get_master_addr()
 
-    def get_backend_role_addrs(self, refresh: bool = False) -> List[RoleAddr]:
+    def get_backend_role_addrs(
+        self, role_list: List[RoleType], refresh: bool = False
+    ) -> List[RoleAddr]:
         def _create_role_addr(
             role: RoleType, vip: VipServerWrapper
         ) -> Optional[RoleAddr]:
@@ -197,13 +216,9 @@ class HostService:
                 return RoleAddr(role=role, ip=host.ip, grpc_port=int(host.port) + 1, http_port=int(host.port))  # type: ignore
             return None
 
-        pdfusion_ip = _create_role_addr(RoleType.PDFUSION, self.pdfusion_vip)
-        prefill_ip = _create_role_addr(RoleType.PREFILL, self.prefill_vip)
-        decode_ip = _create_role_addr(RoleType.DECODE, self.decode_vip)
-        vit_ip = _create_role_addr(RoleType.VIT, self.vit_vip)
-
         role_addrs: List[RoleAddr] = []
-        for role_addr in [pdfusion_ip, prefill_ip, decode_ip, vit_ip]:
+        for role in role_list:
+            role_addr = _create_role_addr(role, self.role_vip_map.get(role))
             if role_addr:
                 role_addrs.append(role_addr)
         return role_addrs

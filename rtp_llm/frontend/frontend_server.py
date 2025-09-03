@@ -358,22 +358,8 @@ class FrontendServer(object):
 
     def check_health(self):
         assert self._frontend_worker is not None
-        backend_role_addrs = self._frontend_worker.backend_rpc_server_visitor.host_service.get_backend_role_addrs(
-            refresh=False
+        return (
+            self._frontend_worker.backend_rpc_server_visitor.is_backend_service_ready(
+                refresh=False
+            )
         )
-        has_pdfusion = False
-        has_prefill = False
-        has_decode = False
-
-        for role_addr in backend_role_addrs:
-            if role_addr.role == RoleType.PDFUSION:
-                has_pdfusion = True
-            elif role_addr.role == RoleType.PREFILL:
-                has_prefill = True
-            elif role_addr.role == RoleType.DECODE:
-                has_decode = True
-
-        if has_pdfusion or (has_prefill and has_decode):
-            return True
-
-        return False

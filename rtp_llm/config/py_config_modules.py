@@ -10,6 +10,11 @@ from rtp_llm.ops import (
     ModelSpecificConfig,
     ParallelismDistributedConfig,
     ProfilingDebugLoggingConfig,
+    RoleType,
+    SamplerConfig,
+    SchedulerConfig,
+    ServiceDiscoveryConfig,
+    SpeculativeExecutionConfig,
 )
 from rtp_llm.utils.fuser import MountRwMode, fetch_remote_file_to_local
 from rtp_llm.utils.weight_type import WEIGHT_TYPE
@@ -473,7 +478,7 @@ class PyKvCacheConfig:
         self.test_block_num: int = 0
         self.use_block_cache: Optional[int] = None
         self.blockwise_use_fp8_kv_cache: int = 0
-        self.kv_cache_dtype: Optional[str] = None
+        self.reuse_cache: bool = False
 
     def update_from_env(self):
         self.int8_kv_cache = int(os.environ.get("INT8_KV_CACHE", self.int8_kv_cache))
@@ -502,6 +507,7 @@ class PyKvCacheConfig:
             self.kv_cache_dtype = WEIGHT_TYPE.FP32.to_str()
         if not self.kv_cache_dtype:
             self.kv_cache_dtype = WEIGHT_TYPE.AUTO.to_str()
+        self.reuse_cache = get_env_bool("REUSE_CACHE", self.reuse_cache)
 
     def to_string(self):
         return (
@@ -513,6 +519,7 @@ class PyKvCacheConfig:
             f"test_block_num: {self.test_block_num}\n"
             f"use_block_cache: {self.use_block_cache}\n"
             f"blockwise_use_fp8_kv_cache: {self.blockwise_use_fp8_kv_cache}\n"
+            f"reuse_cache: {self.reuse_cache}"
         )
 
 
@@ -602,6 +609,116 @@ class EmbeddingConfig:
         )
 
 
+class RoleConfig:
+    def __init__(self):
+        self.role_type: RoleType = RoleType.PDFUSION
+
+    def update_from_env(self):
+        self.role_type = self._trans_role_type(os.environ.get("ROLE_TYPE", ""))
+
+    def to_string(self):
+        return f"role_type: {self.role_type.name}"
+
+    @staticmethod
+    def _trans_role_type(role_type: str) -> RoleType:
+        role_type = role_type.upper()
+        if role_type == "PDFUSION":
+            return RoleType.PDFUSION
+        elif role_type == "PREFILL":
+            return RoleType.PREFILL
+        elif role_type == "DECODE":
+            return RoleType.DECODE
+        elif role_type == "VIT":
+            return RoleType.VIT
+        elif role_type == "FRONTEND":
+            return RoleType.FRONTEND
+        else:
+            return RoleType.PDFUSION
+
+
+class PdSeparationConfig:
+    def __init__(self):
+        # Prefill related configuration
+        self.prefill_retry_times: int = 0
+        self.prefill_retry_timeout_ms: int = 20
+        self.prefill_max_wait_timeout_ms: int = 600 * 1000
+
+        # Decode related configuration
+        self.decode_retry_times: int = 100
+        self.decode_retry_timeout_ms: int = 100
+        self.decode_polling_kv_cache_step_ms: int = 30
+        self.decode_entrance: int = 0
+
+        # RDMA related configuration
+        self.rdma_connect_retry_times: int = 0
+        self.load_cache_timeout_ms: int = 5000
+
+        # Load balance configuration
+        self.load_balance_policy_name: str = "RR"
+        self.sync_status_interval_ms: int = 50
+
+    def update_from_env(self):
+        # Prefill related configuration
+        self.prefill_retry_times = int(
+            os.environ.get("PREFILL_RETRY_TIMES", self.prefill_retry_times)
+        )
+        self.prefill_retry_timeout_ms = int(
+            os.environ.get("PREFILL_RETRY_TIMEOUT_MS", self.prefill_retry_timeout_ms)
+        )
+        self.prefill_max_wait_timeout_ms = int(
+            os.environ.get(
+                "PREFILL_MAX_WAIT_TIMEOUT_MS", self.prefill_max_wait_timeout_ms
+            )
+        )
+
+        # Decode related configuration
+        self.decode_retry_times = int(
+            os.environ.get("DECODE_RETRY_TIMES", self.decode_retry_times)
+        )
+        self.decode_retry_timeout_ms = int(
+            os.environ.get("DECODE_RETRY_TIMEOUT_MS", self.decode_retry_timeout_ms)
+        )
+        self.decode_polling_kv_cache_step_ms = int(
+            os.environ.get(
+                "DECODE_POLLING_KV_CACHE_STEP_MS", self.decode_polling_kv_cache_step_ms
+            )
+        )
+        self.decode_entrance = int(
+            os.environ.get("DECODE_ENTRANCE", self.decode_entrance)
+        )
+
+        # RDMA related configuration
+        self.rdma_connect_retry_times = int(
+            os.environ.get("RDMA_CONNECT_RETRY_TIMES", self.rdma_connect_retry_times)
+        )
+        self.load_cache_timeout_ms = int(
+            os.environ.get("LOAD_CACHE_TIMEOUT_MS", self.load_cache_timeout_ms)
+        )
+
+        # Load balance configuration
+        self.load_balance_policy_name = os.environ.get(
+            "LOAD_BALANCE_POLICY_NAME", self.load_balance_policy_name
+        )
+        self.sync_status_interval_ms = int(
+            os.environ.get("SYNC_STATUS_INTERVAL_MS", self.sync_status_interval_ms)
+        )
+
+    def to_string(self):
+        return (
+            f"prefill_retry_times: {self.prefill_retry_times}\n"
+            f"prefill_retry_timeout_ms: {self.prefill_retry_timeout_ms}\n"
+            f"prefill_max_wait_timeout_ms: {self.prefill_max_wait_timeout_ms}\n"
+            f"decode_retry_times: {self.decode_retry_times}\n"
+            f"decode_retry_timeout_ms: {self.decode_retry_timeout_ms}\n"
+            f"decode_polling_kv_cache_step_ms: {self.decode_polling_kv_cache_step_ms}\n"
+            f"decode_entrance: {self.decode_entrance}\n"
+            f"rdma_connect_retry_times: {self.rdma_connect_retry_times}\n"
+            f"load_cache_timeout_ms: {self.load_cache_timeout_ms}\n"
+            f"load_balance_policy_name: {self.load_balance_policy_name}\n"
+            f"sync_status_interval_ms: {self.sync_status_interval_ms}"
+        )
+
+
 class WorkerConfig:
     def __init__(self):
         self.worker_info_port_num: int = MIN_WORKER_INFO_PORT_NUM
@@ -655,6 +772,8 @@ class PyEnvConfigs:
         self.engine_config: EngineConfig = EngineConfig()
         self.embedding_config: EmbeddingConfig = EmbeddingConfig()
         self.worker_config: WorkerConfig = WorkerConfig()
+        self.role_config: RoleConfig = RoleConfig()
+        self.pd_separation_config: PdSeparationConfig = PdSeparationConfig()
         self.parallelism_distributed_config: ParallelismDistributedConfig = (
             ParallelismDistributedConfig()
         )
@@ -684,6 +803,8 @@ class PyEnvConfigs:
         self.engine_config.update_from_env()
         self.embedding_config.update_from_env()
         self.worker_config.update_from_env()
+        self.role_config.update_from_env()
+        self.pd_separation_config.update_from_env()
         ## in gpt model parameters, we should update it from g_parallel_info
         self.parallelism_distributed_config.update_from_env()
         self.model_specific_config.update_from_env()
@@ -720,6 +841,8 @@ class PyEnvConfigs:
             "[engine_config]\n" + self.engine_config.to_string() + "\n\n"
             "[embedding_config]\n" + self.embedding_config.to_string() + "\n\n"
             "[worker_config]\n" + self.worker_config.to_string() + "\n\n"
+            "[role_config]\n" + self.role_config.to_string() + "\n\n"
+            "[pd_separation_config]\n" + self.pd_separation_config.to_string() + "\n\n"
             "[parallelism_distributed_config]\n"
             + self.parallelism_distributed_config.to_string()
             + "\n\n"

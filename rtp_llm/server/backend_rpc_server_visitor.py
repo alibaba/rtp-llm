@@ -10,8 +10,9 @@ from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
-from rtp_llm.ops import get_block_cache_keys
-from rtp_llm.server.host_service import HostService
+from rtp_llm.models.base_model import GenerateInput, GenerateOutputs
+from rtp_llm.ops.rtp_llm.rtp_llm_op import get_block_cache_keys
+from rtp_llm.server.host_service import HostService, HostServiceArgs
 from rtp_llm.server.master_client import MasterClient
 from rtp_llm.server.misc import format_exception
 from rtp_llm.utils.base_model_datatypes import GenerateInput, GenerateOutputs
@@ -27,9 +28,49 @@ class BackendRPCServerVisitor:
         self.config = model_config
         assert self.config.max_seq_len > 0
         self.model_rpc_client = ModelRpcClient(self.config)
-        self.host_service = HostService()
+        host_args = HostServiceArgs.create_from_env()
+        self.backend_role_list = self.get_backend_role_list(self.config, host_args)
+        self.host_service = HostService(host_args)
         self.master_client = MasterClient()
         self.separated_frontend = separated_frontend
+
+    @staticmethod
+    def get_backend_role_list(
+        config: GptInitModelParameters, host_args: HostServiceArgs
+    ) -> List[RoleType]:
+        role_list: List[RoleType] = []
+
+        # Convert config.role_type to the correct enum if needed
+        config_role_type = config.role_type
+        if hasattr(config.role_type, "value"):
+            config_role_type = config.role_type.value
+
+        if config.vit_separation == 1 and host_args.vit_domain:
+            role_list.append(RoleType.VIT)
+            logging.info("Added VIT role")
+
+        if config_role_type == RoleType.PREFILL.value and not config.decode_entrance:
+            role_list.append(RoleType.DECODE)
+            logging.info("Added DECODE role for PREFILL type")
+        elif config_role_type == RoleType.DECODE.value and config.decode_entrance:
+            role_list.append(RoleType.PREFILL)
+            logging.info("Added PREFILL role for DECODE type")
+        elif config_role_type == RoleType.FRONTEND.value:
+            logging.info(
+                f"Checking FRONTEND roles: decode_domain={host_args.decode_domain}, prefill_domain={host_args.prefill_domain}, pdfusion_domain={host_args.pdfusion_domain}"
+            )
+            if host_args.decode_domain:
+                role_list.append(RoleType.DECODE)
+                logging.info("Added DECODE role for FRONTEND type")
+            if host_args.prefill_domain:
+                role_list.append(RoleType.PREFILL)
+                logging.info("Added PREFILL role for FRONTEND type")
+            if host_args.pdfusion_domain:
+                role_list.append(RoleType.PDFUSION)
+                logging.info("Added PDFUSION role for FRONTEND type")
+
+        logging.info(f"configured backend role list: {role_list}")
+        return role_list
 
     async def get_master_route_addrs(self, master_addr: str, input: GenerateInput):
         token_ids = []
@@ -78,7 +119,13 @@ class BackendRPCServerVisitor:
             kmonitor.report(AccMetrics.MASTER_ROUTE_QPS_METRIC, 1)
 
     async def get_domain_route_addrs(self, input: GenerateInput):
-        role_addrs = self.host_service.get_backend_role_addrs()
+        specified_roles = {addr.role for addr in input.generate_config.role_addrs}
+        missing_roles = [
+            role for role in self.backend_role_list if role not in specified_roles
+        ]
+        role_addrs: List[RoleAddr] = self.host_service.get_backend_role_addrs(
+            missing_roles
+        )
         if role_addrs:
             input.generate_config.role_addrs = role_addrs
             route_logger.warning(
@@ -114,7 +161,12 @@ class BackendRPCServerVisitor:
                 route_logger.warning(
                     f"master address: {master_addr} or input token batched: {input_token_batched} is not valid, fallback to domain routing"
                 )
-            if not input.generate_config.role_addrs:
+            specified_roles = {addr.role for addr in input.generate_config.role_addrs}
+            # 预先计算是否需要调用
+            need_domain_routing = not set(self.backend_role_list).issubset(
+                specified_roles
+            )
+            if not input.generate_config.role_addrs or need_domain_routing:
                 with Timer() as domain_route_timer:
                     await self.get_domain_route_addrs(input)
                 kmonitor.report(
@@ -180,8 +232,19 @@ class BackendRPCServerVisitor:
                 f"request length is {input.prompt_length}, max_new_tokens is {max_new_tokens}",
             )
 
-        # Only route IPs for separated_frontend
         if self.host_service.service_available:
             await self.route_ips(input)
 
         return self.model_rpc_client.enqueue(input)
+
+    def is_backend_service_ready(self, refresh: bool = False) -> bool:
+        roles: List[RoleAddr] = self.host_service.get_backend_role_addrs(
+            self.backend_role_list, refresh
+        )
+        if not roles:
+            return False
+        for role in self.backend_role_list:
+            if role not in [r.role for r in roles]:
+                logging.warning(f"role {role} not in available roles {roles}")
+                return False
+        return True

@@ -192,22 +192,6 @@ class ConfigMode(Enum):
     ComplexMode = 2
 
 
-def trans_role_type(role_type: str) -> RoleType:
-    role_type = role_type.upper()
-    if role_type == "PDFUSION":
-        return RoleType.PDFUSION
-    elif role_type == "PREFILL":
-        return RoleType.PREFILL
-    elif role_type == "DECODE":
-        return RoleType.DECODE
-    elif role_type == "VIT":
-        return RoleType.VIT
-    elif role_type == "FRONTEND":
-        return RoleType.FRONTEND
-    else:
-        return RoleType.PDFUSION
-
-
 class GptInitModelParameters:
     __slots__ = {
         "gpt_init_params",
@@ -480,8 +464,6 @@ class GptInitModelParameters:
         self.is_mtp = False
         self.qk_norm = False
         self.quant_config = None
-        self.role_type = RoleType.PDFUSION
-        self.config_dtype = None
 
         # For cpp, we use `gpt_init_params`, `py_env_configs` for python.
         # There are some common envs in cpp and python, so they will
@@ -494,6 +476,14 @@ class GptInitModelParameters:
         )
         StaticConfig.parallelism_distributed_config = (
             self.gpt_init_params.parallelism_distributed_config
+        )
+
+        self.vit_separation = self.py_env_configs.vit_config.vit_separation
+        logging.info(f"vit_separation: {self.vit_separation}")
+        self.role_type = (
+            RoleType.VIT
+            if self.vit_separation == 1
+            else self.py_env_configs.role_config.role_type
         )
 
         for k, v in kwargs.items():
@@ -1036,9 +1026,6 @@ class GptInitModelParameters:
         )
         logging.info(f"warm_up_with_loss: {self.warm_up_with_loss}")
 
-        self.vit_separation = self.py_env_configs.vit_config.vit_separation
-        logging.info(f"vit_separation: {self.vit_separation}")
-
         self.fast_gen_max_context_len = (
             1024
             if self.fifo_scheduler_config.fast_gen_context_budget == -1
@@ -1056,51 +1043,49 @@ class GptInitModelParameters:
         )
         logging.info(f"max_batch_tokens_size: {self.max_batch_tokens_size}")
 
-        role_type = os.environ.get("ROLE_TYPE", "PDFUSION").upper()
-        if self.vit_separation == 1:
-            role_type = "VIT"
-        self.role_type = trans_role_type(role_type)
-        logging.info(f"role_type: {self.role_type}")
-
         if self.role_type in [RoleType.PREFILL]:
-            self.prefill_retry_times = int(os.environ.get("PREFILL_RETRY_TIMES", 0))
+            self.prefill_retry_times = (
+                self.py_env_configs.pd_separation_config.prefill_retry_times
+            )
             logging.info(f"prefill_retry_times: {self.prefill_retry_times}")
-            self.prefill_retry_timeout_ms = int(
-                os.environ.get("PREFILL_RETRY_TIMEOUT_MS", 20)
+            self.prefill_retry_timeout_ms = (
+                self.py_env_configs.pd_separation_config.prefill_retry_timeout_ms
             )
             logging.info(f"prefill_retry_timeout_ms: {self.prefill_retry_timeout_ms}")
-            self.prefill_max_wait_timeout_ms = int(
-                os.environ.get("PREFILL_MAX_WAIT_TIMEOUT_MS", 600 * 1000)
+            self.prefill_max_wait_timeout_ms = (
+                self.py_env_configs.pd_separation_config.prefill_max_wait_timeout_ms
             )
             logging.info(
                 f"prefill_max_wait_timeout_ms: {self.prefill_max_wait_timeout_ms}"
             )
 
         if self.role_type in [RoleType.PREFILL, RoleType.DECODE]:
-            self.cache_store_rdma_mode = bool(
-                int(os.environ.get("CACHE_STORE_RDMA_MODE", 0))
+            self.cache_store_rdma_mode = (
+                self.gpt_init_params.cache_store_config.cache_store_rdma_mode
             )
             logging.info(f"cache_store_rdma_mode: {self.cache_store_rdma_mode}")
 
-            self.load_cache_timeout_ms = int(
-                os.environ.get("LOAD_CACHE_TIMEOUT_MS", 5000)
+            self.load_cache_timeout_ms = (
+                self.py_env_configs.pd_separation_config.load_cache_timeout_ms
             )
             logging.info(f"load_cache_timeout_ms: {self.load_cache_timeout_ms}")
 
-            self.decode_retry_times = int(os.environ.get("DECODE_RETRY_TIMES", 100))
+            self.decode_retry_times = (
+                self.py_env_configs.pd_separation_config.decode_retry_times
+            )
             logging.info(f"decode_retry_times: {self.decode_retry_times}")
-            self.decode_retry_timeout_ms = int(
-                os.environ.get("DECODE_RETRY_TIMEOUT_MS", 100)
+            self.decode_retry_timeout_ms = (
+                self.py_env_configs.pd_separation_config.decode_retry_timeout_ms
             )
             logging.info(f"decode_retry_timeout_ms: {self.decode_retry_timeout_ms}")
 
-            self.rdma_connect_retry_times = int(
-                os.environ.get("RDMA_CONNECT_RETRY_TIMES", 0)
+            self.rdma_connect_retry_times = (
+                self.py_env_configs.pd_separation_config.rdma_connect_retry_times
             )
             logging.info(f"rdma_connect_retry_times: {self.rdma_connect_retry_times}")
 
-            self.decode_polling_kv_cache_step_ms = int(
-                os.environ.get("DECODE_POLLING_KV_CACHE_STEP_MS", 30)
+            self.decode_polling_kv_cache_step_ms = (
+                self.py_env_configs.pd_separation_config.decode_polling_kv_cache_step_ms
             )
             logging.info(
                 f"decode_polling_kv_cache_step_ms: {self.decode_polling_kv_cache_step_ms}"
@@ -1113,14 +1098,16 @@ class GptInitModelParameters:
                 f"decode_polling_call_prefill_ms: {self.decode_polling_call_prefill_ms}"
             )
 
-            self.decode_entrance = bool(int(os.environ.get("DECODE_ENTRANCE", 0)))
+            self.decode_entrance = bool(
+                self.py_env_configs.pd_separation_config.decode_entrance
+            )
             logging.info(f"decode_entrance: {self.decode_entrance}")
 
             if (not self.decode_entrance and self.role_type in [RoleType.PREFILL]) or (
                 self.decode_entrance and self.role_type in [RoleType.DECODE]
             ):
-                self.load_balance_policy_name = os.environ.get(
-                    "LOAD_BALANCE_POLICY_NAME", "RR"
+                self.load_balance_policy_name = (
+                    self.py_env_configs.pd_separation_config.load_balance_policy_name
                 )
                 logging.info(
                     f"load_balance_policy_name: {self.load_balance_policy_name}"
@@ -1131,8 +1118,8 @@ class GptInitModelParameters:
                         f"load_balance_policy_name {self.load_balance_policy_name} "
                         f"is not right, it must in {policy_list}"
                     )
-                self.sync_status_interval_ms = int(
-                    os.environ.get("SYNC_STATUS_INTERVAL_MS", 50)
+                self.sync_status_interval_ms = (
+                    self.py_env_configs.pd_separation_config.sync_status_interval_ms
                 )
                 logging.info(f"sync_status_interval_ms: {self.sync_status_interval_ms}")
 
@@ -1142,7 +1129,7 @@ class GptInitModelParameters:
         logging.info(
             f"scheduler_reserve_resource_ratio: {self.scheduler_reserve_resource_ratio}"
         )
-        self.reuse_cache = bool(int(os.environ.get("REUSE_CACHE", 0)))
+        self.reuse_cache = self.py_env_configs.py_kv_cache_config.reuse_cache
         logging.info(f"reuse_cache: {self.reuse_cache}")
         self.pre_allocate_op_mem = bool(int(os.environ.get("PRE_ALLOCATE_OP_MEM", 1)))
         logging.info(f"pre_allocate_op_mem: {self.pre_allocate_op_mem}")
