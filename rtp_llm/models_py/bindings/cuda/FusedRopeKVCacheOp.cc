@@ -4,7 +4,9 @@
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/devices/cuda_impl/CudaFlashInfer.h"
+#include "rtp_llm/cpp/core/BufferHelper.h"
 namespace rtp_llm {
+
 FusedRopeKVCachePrefillOp::FusedRopeKVCachePrefillOp(const GptInitParameter& gpt_init_parameter):
     FMHACudaBase(gpt_init_parameter) {}
 
@@ -26,12 +28,12 @@ TRTAttnPtr FusedRopeKVCachePrefillOp::prepare(torch_ext::PyAttentionInputs attn_
     } else {
         attn_params = std::make_shared<TRTAttn>();
     }
-
     attn_params->attn_type                 = torchDTypeToDataType(attn_inputs.dtype);
     attn_params->cu_seqlens                = cu_seqlens;
     attn_params->cu_kv_seqlens             = cu_kv_seqlens;
     attn_params->max_seq_len               = attn_inputs.input_lengths.max().item<int32_t>();
     attn_params->kv_block_array.cache_type = attn_configs_.kv_cache_dtype;
+    attn_params->padding_offset            = attn_inputs.padding_offset;
     return attn_params;
 }
 
@@ -40,7 +42,6 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
                                                  std::optional<torch_ext::KVCache> kv_cache,
                                                  const TRTAttnPtr&                 params) {
     // bool store_cache = params.common.kv_cache.has_value();
-
     const int     local_head_num        = attn_configs_.head_num;
     const int     local_head_num_kv     = attn_configs_.kv_head_num;
     const int     size_per_head         = attn_configs_.size_per_head;
@@ -73,6 +74,7 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
         // }
     }
     // not support fp8 now
+
     bool store_qkv =
         fmha_type != FMHAType::PAGED_TRT_V2 && fmha_type != FMHAType::NONE && fmha_type != FMHAType::FLASH_INFER;
     bool store_q_no_transpose = fmha_type == FMHAType::FLASH_INFER;
@@ -81,41 +83,43 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
     bool store_cache          = kv_cache.has_value();
     // bool use_qkv_fp8 =
     //     fmha_type == FMHAType::TRT_V2 && prefix_prompt_param.kv_block_array.cache_type == KvCacheDataType::FP8;
+
     // tmp not use qkv fp8 buffer
     bool use_qkv_fp8 = false;
-    DISPATCH_CUDA_FUNCTION_DATA_TYPE(torchDTypeToDataType(qkv.dtype()),
-                                     invokeAddFusedQKVBiasTranspose,
-                                     q_no_transpose_output.data_ptr(),
-                                     q_output.data_ptr(),
-                                     k_output.data_ptr(),
-                                     v_output.data_ptr(),
-                                     &prefix_prompt_param,
-                                     qkv.data_ptr(),
-                                     use_qkv_fp8 ? qkv_fp8.data_ptr() : nullptr,
-                                     nullptr,  // params.common.position_ids ?
-                                               // params.common.position_ids->dataWithOffset<int>(decoder_batch_size *
-                                               // params.configs.rope_config.index_factor): nullptr,
-                                     nullptr,  // params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias ?
-                                               // params.weights.qkv_weight->bias->data() : nullptr,
-                                     nullptr,  // params.common.padding_offset->data<int>(),
-                                     params->cu_seqlens.data_ptr<int>(),
-                                     batch_size,
-                                     params->max_seq_len,  // seq_len
-                                     token_num,
-                                     local_head_num,
-                                     local_head_num_kv,
-                                     size_per_head,
-                                     attn_configs_.rope_config,
-                                     attn_configs_.use_logn_attn,
-                                     nullptr,  // scale_out_ptr,
-                                     0,        // int8_mode,
-                                     fmha_type == FMHAType::PAGED_TRT_V2,
-                                     store_qkv,
-                                     store_q_no_transpose,
-                                     store_q,
-                                     store_kv,
-                                     store_cache,
-                                     device_->getStream());
+    DISPATCH_CUDA_FUNCTION_DATA_TYPE(
+        torchDTypeToDataType(qkv.dtype()),
+        invokeAddFusedQKVBiasTranspose,
+        q_no_transpose_output.data_ptr(),
+        q_output.data_ptr(),
+        k_output.data_ptr(),
+        v_output.data_ptr(),
+        &prefix_prompt_param,
+        qkv.data_ptr(),
+        use_qkv_fp8 ? qkv_fp8.data_ptr() : nullptr,
+        nullptr,  // params.common.position_ids ? params.common.position_ids->dataWithOffset<int>(decoder_batch_size *
+                  // params.configs.rope_config.index_factor): nullptr,
+        nullptr,  // params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias ?
+                  // params.weights.qkv_weight->bias->data() : nullptr,
+        params->padding_offset.data_ptr<int>(),
+        params->cu_seqlens.data_ptr<int>(),
+        batch_size,
+        params->max_seq_len,  // seq_len
+        token_num,
+        local_head_num,
+        local_head_num_kv,
+        size_per_head,
+        attn_configs_.rope_config,
+        attn_configs_.use_logn_attn,
+        nullptr,  // scale_out_ptr,
+        0,        // int8_mode,
+        fmha_type == FMHAType::PAGED_TRT_V2,
+        store_qkv,
+        store_q_no_transpose,
+        store_q,
+        store_kv,
+        store_cache,
+        device_->getStream());
+
     if (use_qkv_fp8) {
         return qkv_fp8;
     } else if (fmha_type == FMHAType::PAGED_TRT_V2) {

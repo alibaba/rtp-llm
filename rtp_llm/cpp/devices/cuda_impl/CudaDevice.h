@@ -62,6 +62,7 @@ struct TRTAttn {
     BufferPtr    kv_cache_offset;
     BufferPtr    kv_cache_offset_h;
 
+    torch::Tensor padding_offset;
     torch::Tensor cu_seqlens;
     torch::Tensor cu_kv_seqlens;
     torch::Tensor input_lengths;

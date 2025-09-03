@@ -14,6 +14,26 @@ using namespace torch_ext;
 
 namespace rtp_llm {
 
+void getPaddingOffset(
+    int32_t* padding_offset, int32_t* prefill_length, int32_t* prefix_length, int32_t batch_size, int32_t max_seq_len) {
+    // do cumulated sum
+    int32_t cum_offset = 0;
+    int32_t index      = 0;
+    for (int32_t i = 0; i < batch_size; i++) {
+        int32_t seq_len = prefill_length[i];
+        if (prefix_length) {
+            seq_len += prefix_length[i];
+        }
+        if (padding_offset) {
+            for (int32_t j = 0; j < seq_len; j++) {
+                padding_offset[index] = cum_offset;
+                index++;
+            }
+        }
+        cum_offset += max_seq_len - seq_len;
+    }
+}
+
 PyWrappedModel::~PyWrappedModel() {
     try {
         py::gil_scoped_acquire gil;
@@ -162,9 +182,22 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         torch::Tensor cu_seqlens = torch::zeros({device_->initParams().concurrency_config.concurrency_limit + 1},
                                                 torch::TensorOptions(torch::kInt32).device(torch::kCPU));
         int           batch_size = attention_inputs.input_lengths.size(0);
-        cu_seqlens               = cu_seqlens.cuda();
         cu_seqlens.slice(0, 1, batch_size + 1) = attention_inputs.input_lengths.cumsum(0);
+        int32_t total_tokens                   = cu_seqlens[batch_size].item<int32_t>();
+        cu_seqlens                             = cu_seqlens.cuda();
         attention_inputs.cu_seqlens            = cu_seqlens;
+
+        // inputs_length:  [1,2,1,1] ,total_tokens = 5
+        // padding_offsets: [0,1,1,1,2]
+        int  max_seq_len = attention_inputs.input_lengths.max().item<int32_t>();
+        auto padding_offset_host =
+            torch::zeros({total_tokens}, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
+        getPaddingOffset(padding_offset_host.data_ptr<int32_t>(),
+                         attention_inputs.input_lengths.data_ptr<int32_t>(),
+                         attention_inputs.prefix_lengths.data_ptr<int32_t>(),
+                         batch_size,
+                         max_seq_len);
+        attention_inputs.padding_offset = padding_offset_host.cuda();
 
         auto           py_model_inputs = PyModelInputs({token_ids, attention_inputs});
         PyModelOutputs py_model_outputs;

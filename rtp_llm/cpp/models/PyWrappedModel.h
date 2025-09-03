@@ -12,6 +12,9 @@ namespace py = pybind11;
 
 namespace rtp_llm {
 
+void getPaddingOffset(
+    int32_t* padding_offset, int32_t* prefill_length, int32_t* prefix_length, int32_t batch_size, int32_t max_seq_len);
+
 class PyWrappedModel: public GptModel {
 public:
     // py_instance is `py_model` indeedly.

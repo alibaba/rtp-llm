@@ -87,6 +87,7 @@ void CudaGraphRunner::capture() {
         // pinned memory
         inputs.attention_inputs.cu_seqlens =
             capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens.slice(0, 0, bs + 1);
+        inputs.attention_inputs.padding_offset = capture_mem_hold_.py_model_inputs_.attention_inputs.padding_offset;
         inputs.attention_inputs.prefix_lengths = capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths;
         inputs.attention_inputs.dtype          = torch::kBFloat16;
         graph_instances_[bs].mem_hold_ =
@@ -131,6 +132,9 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
     // pinned memory
     py_model_inputs_.attention_inputs.cu_seqlens.slice(0, 0, current_batch_size_ + 1) =
         inputs.attention_inputs.cu_seqlens.slice(0, 0, current_batch_size_ + 1);
+    int total_tokens = inputs.attention_inputs.padding_offset.size(0);
+    py_model_inputs_.attention_inputs.padding_offset.slice(0, 0, total_tokens) =
+        inputs.attention_inputs.padding_offset.slice(0, 0, total_tokens);
     if (!is_embedding_) {
         py_model_inputs_.input_ids.fill_(0);
         py_model_inputs_.input_ids.slice(0, 0, inputs.input_ids.size(0)) = inputs.input_ids;
@@ -266,8 +270,10 @@ void CudaGraphRunner::initCapture() {
             torch::zeros({int(max_bs_), ((max_seq_len_ + seq_size_per_block_ - 1) / seq_size_per_block_)}, options3);
         inputs.attention_inputs.kv_cache_block_id_host =
             torch::zeros({int(max_bs_), ((max_seq_len_ + seq_size_per_block_ - 1) / seq_size_per_block_)}, options2);
-        inputs.attention_inputs.dtype = torch::kBFloat16;  // py_model support `kBFloat16` as input type.
-        capture_mem_hold_             = CaptureMemoryHold(output, inputs, kv_cache_block_offset_, is_embedding_);
+        // padding_offset [max_num_token_, int32] (for attention padding)
+        inputs.attention_inputs.padding_offset = torch::zeros({max_num_token_}, options3);
+        inputs.attention_inputs.dtype          = torch::kBFloat16;  // py_model support `kBFloat16` as input type.
+        capture_mem_hold_ = CaptureMemoryHold(output, inputs, kv_cache_block_offset_, is_embedding_);
         initKernelInternalMemory();
         capture();
     } else {
