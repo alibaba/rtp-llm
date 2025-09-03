@@ -9,6 +9,7 @@ def copy_so(target):
         srcs = [target],
         outs = [so_name],
         cmd = "cp $(SRCS) $(@D)",
+        tags = ["no-remote"],
     )
 
 def copy_so_inst(target, inst_num):
@@ -20,6 +21,7 @@ def copy_so_inst(target, inst_num):
             srcs = [target + '_' + str(i) + '_inst'],
             outs = [so_name],
             cmd = "cp $(SRCS) $@",
+            tags = ["no-remote"],
         )
 
     native.filegroup(
@@ -292,7 +294,7 @@ def _copy_files_impl(ctx):
         f_in = ctx.files.srcs[i]
         f_out = output_files[i]
         commands.append("cp {input} {output}".format(input = f_in.path, output = f_out.path))
-    
+
     ctx.actions.run_shell(
         inputs = ctx.files.srcs,
         outputs = output_files,
