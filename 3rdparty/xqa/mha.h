@@ -116,6 +116,7 @@ void run_xqa_sm90(uint32_t head_dim, uint32_t page_size, uint32_t group_size, bo
     void* pool, // global pool of pages
     KVCachePageIndex const*
         kvCachePageList, // device pointer. shape: KVCachePageIndex[batchSize][beamWidth][2][maxNbPagesPerSeq].
+    uint32_t maxNbPagesPerSeq,
 #else
     void* kvCacheData,
 #endif

@@ -43,6 +43,7 @@ bool supportXqa(DataType input_type,
  * @param kv_head_num
  * @param head_dim
  * @param batch_size
+ * @param max_blocks_per_seq
  * @param max_seq_len max kv seq len
  * @param page_size
  * @param kv_cache_pool head ptr [block_nums, kv_head_num, page_size, head_dim]
@@ -64,6 +65,7 @@ void runXqa(void*       input,
             size_t      kv_head_num,
             size_t      head_dim,
             size_t      batch_size,
+            size_t      max_blocks_per_seq,
             size_t      max_seq_len,
             size_t      page_size,
             void*       kv_cache_pool,

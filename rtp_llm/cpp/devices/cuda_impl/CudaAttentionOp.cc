@@ -447,7 +447,7 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
                                          kv_block_array,
                                          params.input.data(),
                                          params.common.position_ids ? params.common.position_ids->data<int>() :
-                                                                      +params.common.sequence_lengths->data<int>(),
+                                                                      params.common.sequence_lengths->data<int>(),
                                          params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias ?
                                              params.weights.qkv_weight->bias->data() :
                                              nullptr,
@@ -485,6 +485,7 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
                local_kv_head_num,
                size_per_head,
                params.common.decoder_batch_size,
+               static_cast<size_t>(kv_block_array.mMaxBlocksPerSeq),
                params.common.decoder_max_seq_len + 1,
                local_tokens_per_block,
                kv_block_array.mPrimaryPoolPtr,

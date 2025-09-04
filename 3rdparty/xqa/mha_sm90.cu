@@ -2935,6 +2935,7 @@ void XQA_FUNC_SM90(cudaDeviceProp const& prop,
                    GMemCacheHead*          pool,             // global pool of pages
                    KVCachePageIndex const* kvCachePageList,  // device pointer. shape:
                                                              // KVCachePage[batchSize][beamWidth][2][maxNbPagesPerSeq]
+                   uint32_t maxNbPagesPerSeq,
 #else
                    GMemKVCacheHead* kvCacheData,
 #endif
@@ -2991,7 +2992,6 @@ void XQA_FUNC_SM90(cudaDeviceProp const& prop,
     dim3 const dimCta{warp_size * gmmaWarpsPerGrp, 1, 3};
     auto const launchCfg = makeLaunchConfig(dimGrid, dimCta, hostSmemSize, stream, ENABLE_FDL != 0);
 #if USE_PAGED_KV_CACHE
-    uint32_t const          maxNbPagesPerSeq = exactDiv(maxSeqLen, tokensPerPage);
     KVCacheList<true> const cacheList{pool, kvCachePageList, seqLen, maxNbPagesPerSeq};
     auto const              dtype = [] {
         if (std::is_same_v<CacheElem, half>) {

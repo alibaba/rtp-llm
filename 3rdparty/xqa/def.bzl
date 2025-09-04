@@ -40,6 +40,7 @@ def build_lib(head_dim, page_size, group_size, xqa_name, xqa_kernel_name, input_
         visibility = ["//visibility:public"],
     )
 
+
 def compile_xqa_libs():
     xqa_libs = []
     for head_dim in [64, 128, 256]:

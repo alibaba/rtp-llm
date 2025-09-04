@@ -89,6 +89,7 @@ void runXqa(void*       input,
             size_t      kv_head_num,
             size_t      head_dim,
             size_t      batch_size,
+            size_t      max_blocks_per_seq,
             size_t      max_seq_len,
             size_t      page_size,
             void*       kv_cache_pool,
@@ -104,13 +105,14 @@ void runXqa(void*       input,
             uint32_t    beam_width) {
     if (!input || !output || !head_num || !kv_head_num || (head_num / kv_head_num > 16)
         || (head_dim != 64 && head_dim != 128 && head_dim != 256) || !batch_size || batch_size > max_batch_size
-        || !max_seq_len || (page_size != 16 && page_size != 32 && page_size != 64 && page_size != 128) || !kv_cache_pool
+        || !max_blocks_per_seq || !max_seq_len
+        || (page_size != 16 && page_size != 32 && page_size != 64 && page_size != 128) || !kv_cache_pool
         || !kv_cache_page_list || !sequence_lengths || !device || (max_q_len > 0 && !q_cu_seqlens)) {
         RTP_LLM_LOG_ERROR(
-            "xqa params error: input = %p, is_input_bf16 = %d, output = %p, head_num = %zu, kv_head_num = %zu, head_dim = %zu, "
-            "batch_size = %zu, max_seq_len = %zu, page_size = %zu, kv_cache_pool = %p, kv_cache_page_list = %p, is_kv_cache_fp8 = %d, "
-            "sequence_lengths = %p, device = %p, rcp_out_scale = %p, q_scale = %f, max_batch_size = %zu, beam_width = %zu, max_q_len = %d, "
-            "q_cu_seqlens = %p",
+            "xqa params error: input = %p, is_input_bf16 = %d, output = %p, head_num = %zu, kv_head_num = %zu, "
+            "head_dim = %zu, batch_size = %zu, max_blocks_per_seq = %zu, max_seq_len = %zu, page_size = %zu, "
+            "kv_cache_pool = %p, kv_cache_page_list = %p, is_kv_cache_fp8 = %d, sequence_lengths = %p, device = %p, "
+            "rcp_out_scale = %p, q_scale = %f, max_batch_size = %zu, beam_width = %zu, max_q_len = %d, q_cu_seqlens = %p",
             input,
             is_input_bf16,
             output,
@@ -118,6 +120,7 @@ void runXqa(void*       input,
             kv_head_num,
             head_dim,
             batch_size,
+            max_blocks_per_seq,
             max_seq_len,
             page_size,
             kv_cache_pool,
@@ -161,6 +164,7 @@ void runXqa(void*       input,
                  output,
                  kv_cache_pool,
                  reinterpret_cast<KVCachePageIndex*>(kv_cache_page_list),
+                 static_cast<uint32_t>(max_blocks_per_seq),
                  static_cast<uint32_t>(max_seq_len),
                  sequence_lengths,
                  static_cast<uint32_t>(batch_size),

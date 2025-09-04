@@ -14,6 +14,7 @@
         reinterpret_cast<Vec<it, c_head_dim> const*>(input),                                                           \
         reinterpret_cast<Vec<kvt, c_head_dim>*>(pool),                                                                 \
         kvCachePageList,                                                                                               \
+        maxNbPagesPerSeq,                                                                                              \
         maxSeqLen,                                                                                                     \
         seqLen,                                                                                                        \
         batchSize,                                                                                                     \
@@ -33,6 +34,7 @@
         reinterpret_cast<Vec<it, c_head_dim> const*>(input),                                                           \
         reinterpret_cast<Vec<kvt, c_head_dim>*>(pool),                                                                 \
         kvCachePageList,                                                                                               \
+        maxNbPagesPerSeq,                                                                                              \
         maxSeqLen,                                                                                                     \
         seqLen,                                                                                                        \
         batchSize,                                                                                                     \
@@ -51,6 +53,7 @@
         reinterpret_cast<Vec<it, c_head_dim> const*>(input),                                                           \
         reinterpret_cast<Vec<kvt, c_head_dim>*>(pool),                                                                 \
         kvCachePageList,                                                                                               \
+        maxNbPagesPerSeq,                                                                                              \
         maxSeqLen,                                                                                                     \
         seqLen,                                                                                                        \
         batchSize,                                                                                                     \
@@ -69,6 +72,7 @@
         reinterpret_cast<Vec<it, c_head_dim> const*>(input),                                                           \
         reinterpret_cast<Vec<kvt, c_head_dim>*>(pool),                                                                 \
         kvCachePageList,                                                                                               \
+        maxNbPagesPerSeq,                                                                                              \
         maxSeqLen,                                                                                                     \
         seqLen,                                                                                                        \
         batchSize,                                                                                                     \
@@ -174,13 +178,11 @@ void run_xqa_sm90(
 #endif
     float qScale,
     void* output,
-#if LOW_PREC_OUTPUT
-    float const* rcpOutScale,
-#endif
 #if USE_PAGED_KV_CACHE
     void* pool,  // global pool of pages
     KVCachePageIndex const*
-        kvCachePageList,  // device pointer. shape: KVCachePageIndex[batchSize][beamWidth][2][maxNbPagesPerSeq].
+             kvCachePageList,  // device pointer. shape: KVCachePageIndex[batchSize][beamWidth][2][maxNbPagesPerSeq].
+    uint32_t maxNbPagesPerSeq,
 #else
     void* kvCacheData,
 #endif
@@ -201,7 +203,7 @@ void run_xqa_sm90(
     XQA_DISPATCH_HEAD_DIM_SM90(64)
     XQA_DISPATCH_HEAD_DIM_SM90(128)
     XQA_DISPATCH_HEAD_DIM_SM90(256)
-    std::cout << "xqa unsupported dispatch: head_dim = " << head_dim << ", page_size = " << page_size
+    std::cerr << "xqa unsupported dispatch: head_dim = " << head_dim << ", page_size = " << page_size
               << ", group_size = " << group_size << std::endl;
 }
 

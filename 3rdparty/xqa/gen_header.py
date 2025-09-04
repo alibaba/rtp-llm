@@ -33,6 +33,7 @@ void {func_name}(cudaDeviceProp const& prop, uint32_t nbKHeads,
     Vec<{kv_cache_type}, {head_dim}>* pool, // global pool of pages
     KVCachePageIndex const*
         kvCachePageList, // device pointer. shape: KVCachePageIndex[batchSize][beamWidth][2][maxNbPagesPerSeq].
+    uint32_t maxNbPagesPerSeq,
     uint32_t maxSeqLen, uint32_t const* seqLen,
     uint32_t batchSize,
     float const* __restrict__ kvCacheScale, // Device memory scalar. Same scale for K and V cache. Used only for

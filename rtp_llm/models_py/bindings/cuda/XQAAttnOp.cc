@@ -72,6 +72,7 @@ XQAAttnOp::forward(const torch::Tensor& input, std::optional<torch_ext::KVCache>
            local_head_num_kv,
            size_per_head,
            params->batch_size,
+           static_cast<size_t>(kv_block_array.mMaxBlocksPerSeq),
            params->max_seq_len + 1,
            attn_configs_.tokens_per_block,
            kv_cache.value().k_cache_base.data_ptr(),  // params->kv_block_array.mPrimaryPoolPtr,
