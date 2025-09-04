@@ -143,7 +143,7 @@ public:
     void freeWithCache(FreeInfo& free_info);
     // returns the number of new available blocks if given blocks are freed
     size_t newFreeBlocks(const std::vector<int>& indice);
-    void insertResidentCache(FreeInfo& free_info);
+    void   insertResidentCache(FreeInfo& free_info);
 
     virtual void setKVBlockValue(int block_index, int layer_id, rtp_llm::Buffer& k_buffer, rtp_llm::Buffer& v_buffer);
     virtual void setKVBlockValue(int block_index, rtp_llm::Buffer& k_buffer, rtp_llm::Buffer& v_buffer);
@@ -209,11 +209,11 @@ protected:
 private:
     bool initDistKvCache();
     void matchInDistKvCache(const AdvancedMallocInfo& malloc_info, BlockCache::MatchResult& match_result);
-    bool putCacheForAllRank(const std::vector<int64_t>& cache_keys,
-                            const std::vector<int32_t>& block_indices,
-                            size_t                      ignore_block_num,
-                            int64_t                     request_id,
-                            const std::string&          adapter_name) const;
+    bool putToDistKvCache(const std::vector<int64_t>& cache_keys,
+                          const std::vector<int32_t>& block_indices,
+                          size_t                      ignore_block_num,
+                          int64_t                     request_id,
+                          const std::string&          adapter_name) const;
     std::map<std::string, std::string> getLoraInfo() const;
     std::string                        getLoraCkptPath(const std::string& adapter_name) const;
 

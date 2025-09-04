@@ -30,6 +30,7 @@ CacheManager::CacheManager(const CacheConfig&                 config,
                            const GptInitParameter&            params):
     config_(config),
     seq_size_per_block_(config.seq_size_per_block),
+    block_cache_(config.seq_size_per_block),
     device_(device),
     metrics_reporter_(metrics_reporter),
     params_(params) {
@@ -420,16 +421,17 @@ CacheManager::MatchInfo CacheManager::matchImpl(const AdvancedMallocInfo& malloc
     // match in gpu
     auto match_result = block_cache_.match(malloc_info.cache_keys);
     incrRefCounter(match_result.block_indices);
-    auto local_match_len = match_result.matched_len;
+    auto local_match_len = match_result.block_indices.size();
 
     // match in dist kvcache if cache keys not fully matched
-    if (enable_dist_kvcache_ && malloc_info.enable_3fs && match_result.matched_len < malloc_info.cache_keys.size()) {
+    if (enable_dist_kvcache_ && malloc_info.enable_3fs && !malloc_info.need_loss
+        && local_match_len < malloc_info.cache_keys.size()) {
         matchInDistKvCache(malloc_info, match_result);
     }
 
     int cache_block_num = match_result.block_indices.size();
-    int reuse_block_num = std::min(
-        match_result.matched_len, static_cast<size_t>((malloc_info.token_ids.size()) - 1) / config_.seq_size_per_block);
+    int reuse_block_num =
+        std::min(cache_block_num, static_cast<int>((malloc_info.token_ids.size() - 1) / config_.seq_size_per_block));
     // common length must large than reuse_length, when need calculate loss
     if ((!match_result.loss.empty()) && reuse_block_num) {
         reuse_block_num -= 1;
@@ -613,8 +615,8 @@ void CacheManager::insertIntoCache(FreeInfo& free_info) {
                                   std::vector<float>{free_info.loss.begin(), free_info.loss.begin() + token_len},
                        free_info.is_resident};
         std::vector<int> indices = block_cache_.put(item);
-        if (enable_dist_kvcache_ && free_info.enable_3fs) {
-            putCacheForAllRank(item.cache_key, item.block_indices, 0, free_info.request_id, free_info.adapter_name);
+        if (enable_dist_kvcache_ && free_info.enable_3fs && free_info.loss.empty()) {
+            putToDistKvCache(item.cache_key, item.block_indices, 0, free_info.request_id, free_info.adapter_name);
         }
         freeImpl(indices);
         freeImpl(std::vector<int>(free_info.block_indices.begin() + block_len, free_info.block_indices.end()));
@@ -889,7 +891,7 @@ bool CacheManager::initDistKvCache() {
 void CacheManager::matchInDistKvCache(const AdvancedMallocInfo& malloc_info, BlockCache::MatchResult& match_result) {
     const auto cache_keys        = malloc_info.cache_keys;
     const auto request_id        = malloc_info.request_id;
-    const auto local_matched_len = match_result.matched_len;
+    const auto local_matched_len = match_result.block_indices.size();
 
     if (local_matched_len >= cache_keys.size()) {
         return;
@@ -911,7 +913,7 @@ void CacheManager::matchInDistKvCache(const AdvancedMallocInfo& malloc_info, Blo
     if (need_block_num <= 0) {
         return;
     }
-    auto [success, resource] = malloc(SimpleMallocInfo(-1, static_cast<uint32_t>(need_block_num), true));
+    auto [success, resource] = malloc(SimpleMallocInfo(request_id, static_cast<uint32_t>(need_block_num), true));
     if (!success) {
         RTP_LLM_LOG_WARNING(
             "prefix matched in dist kvcache but free block index not enough, need block num: %d, free block index len: %lu",
@@ -927,16 +929,15 @@ void CacheManager::matchInDistKvCache(const AdvancedMallocInfo& malloc_info, Blo
         return;
     }
 
-    match_result.matched_len = matched_len;
     match_result.block_indices.insert(
         match_result.block_indices.end(), resource.block_id.begin(), resource.block_id.end());
 }
 
-bool CacheManager::putCacheForAllRank(const std::vector<int64_t>& cache_keys,
-                                      const std::vector<int32_t>& block_indices,
-                                      size_t                      ignore_block_num,
-                                      int64_t                     request_id,
-                                      const std::string&          adapter_name) const {
+bool CacheManager::putToDistKvCache(const std::vector<int64_t>& cache_keys,
+                                    const std::vector<int32_t>& block_indices,
+                                    size_t                      ignore_block_num,
+                                    int64_t                     request_id,
+                                    const std::string&          adapter_name) const {
     if (cache_keys.empty()) {
         return true;
     }

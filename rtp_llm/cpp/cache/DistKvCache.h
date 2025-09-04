@@ -35,45 +35,46 @@ public:
     DistKvCache(CacheManager*                       cache_manager,
                 const GptInitParameter&             gpt_init_params,
                 const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr);
-    ~DistKvCache();
+    virtual ~DistKvCache();
 
-    bool init(const DistKvCacheInitParams& init_params);
+    virtual bool init(const DistKvCacheInitParams& init_params);
 
 public:
-    int32_t matchForAllRank(const std::vector<int64_t>&        cache_keys,
-                            size_t                             ignore_block_num,
-                            int64_t                            request_id,
-                            std::map<std::string, std::string> extra_metas);
+    // virtual for mock test
+    virtual int32_t matchForAllRank(const std::vector<int64_t>&        cache_keys,
+                                    size_t                             ignore_block_num,
+                                    int64_t                            request_id,
+                                    std::map<std::string, std::string> extra_metas);
 
-    int32_t match(const std::vector<int64_t>&               cache_keys,
-                  size_t                                    ignore_block_num,
-                  int64_t                                   request_id,
-                  std::map<std::string, std::string>        extra_metas,
-                  const std::shared_ptr<std::atomic<bool>>& stop) const;
+    virtual int32_t match(const std::vector<int64_t>&               cache_keys,
+                          size_t                                    ignore_block_num,
+                          int64_t                                   request_id,
+                          std::map<std::string, std::string>        extra_metas,
+                          const std::shared_ptr<std::atomic<bool>>& stop) const;
 
-    bool getForAllRank(const std::vector<int64_t>&        cache_keys,
-                       const std::vector<int32_t>&        block_indices,
-                       size_t                             ignore_block_num,
-                       int64_t                            request_id,
-                       std::map<std::string, std::string> extra_metas) const;
+    virtual bool getForAllRank(const std::vector<int64_t>&        cache_keys,
+                               const std::vector<int32_t>&        block_indices,
+                               size_t                             ignore_block_num,
+                               int64_t                            request_id,
+                               std::map<std::string, std::string> extra_metas) const;
 
-    bool get(const std::vector<int64_t>&        cache_keys,
-             const std::vector<int32_t>&        block_indices,
-             size_t                             ignore_block_num,
-             int64_t                            request_id,
-             std::map<std::string, std::string> extra_metas) const;
+    virtual bool get(const std::vector<int64_t>&        cache_keys,
+                     const std::vector<int32_t>&        block_indices,
+                     size_t                             ignore_block_num,
+                     int64_t                            request_id,
+                     std::map<std::string, std::string> extra_metas) const;
 
-    bool putForAllRank(const std::vector<int64_t>&        cache_keys,
-                       const std::vector<int32_t>&        block_indices,
-                       size_t                             ignore_block_num,
-                       int64_t                            request_id,
-                       std::map<std::string, std::string> extra_metas) const;
+    virtual bool putForAllRank(const std::vector<int64_t>&        cache_keys,
+                               const std::vector<int32_t>&        block_indices,
+                               size_t                             ignore_block_num,
+                               int64_t                            request_id,
+                               std::map<std::string, std::string> extra_metas) const;
 
-    bool put(const std::vector<int64_t>&        cache_keys,
-             const std::vector<int32_t>&        block_indices,
-             size_t                             ignore_block_num,
-             int64_t                            request_id,
-             std::map<std::string, std::string> extra_metas) const;
+    virtual bool put(const std::vector<int64_t>&        cache_keys,
+                     const std::vector<int32_t>&        block_indices,
+                     size_t                             ignore_block_num,
+                     int64_t                            request_id,
+                     std::map<std::string, std::string> extra_metas) const;
 
     bool initDefaultMetas();
 

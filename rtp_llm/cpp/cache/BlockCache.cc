@@ -46,7 +46,15 @@ BlockCache::MatchResult BlockCache::match(const std::vector<int64_t>& cache_key)
     if (matched_len > 0) {
         lru_cache_.get(matched_item.item_key);
     }
-    return {matched_len, matched_item.block_indices, matched_item.loss};
+
+    auto matched_block_indices =
+        std::vector<int>(matched_item.block_indices.begin(), matched_item.block_indices.begin() + matched_len);
+    std::vector<float> matched_loss;
+    if (!matched_item.loss.empty() && matched_len * seq_size_per_block_ <= matched_item.loss.size()) {
+        matched_loss = std::vector<float>(matched_item.loss.begin(),
+                                          matched_item.loss.begin() + matched_len * seq_size_per_block_);
+    }
+    return {matched_block_indices, matched_loss};
 }
 
 std::vector<int> BlockCache::put(CacheItem& item) {

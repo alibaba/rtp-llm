@@ -26,14 +26,14 @@ const size_t kCacheMaxCapacity = 1000000;
 class BlockCache {
 public:
     struct MatchResult {
-        size_t             matched_len = 0;
         std::vector<int>   block_indices;
         std::vector<float> loss;
     };
     using CacheSnapshot = typename LRUCache<size_t, CacheItem>::CacheSnapshot;
 
 public:
-    BlockCache(): lru_cache_(kCacheMaxCapacity) {}
+    explicit BlockCache(size_t seq_size_per_block):
+        lru_cache_(kCacheMaxCapacity), seq_size_per_block_(seq_size_per_block) {}
 
     static size_t prefixLength(const std::vector<int64_t>& left, const std::vector<int64_t>& right);
 
@@ -63,6 +63,7 @@ private:
     mutable std::mutex                   mutex_;
     mutable std::unordered_map<int, int> hold_blocks_;
     mutable int                          total_hold_blocks_ = 0;
+    size_t                               seq_size_per_block_;
 };
 
 }  // namespace rtp_llm

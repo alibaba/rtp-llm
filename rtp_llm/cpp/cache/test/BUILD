@@ -23,7 +23,9 @@ cc_test(
     ],
     data = [],
     copts = test_copts,
-    deps = test_deps,
+    deps = test_deps + [
+        ":mock_dist_kvcache",
+    ],
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
@@ -42,4 +44,11 @@ cc_test(
         "TEST_USING_DEVICE": "CUDA",
     },
     exec_properties = {'gpu':'A10'},
+)
+
+cc_library(
+    name = "mock_dist_kvcache",
+    hdrs = [
+        "mock/MockDistKvCache.h",
+    ],
 )
