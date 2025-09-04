@@ -9,6 +9,7 @@ from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.model_desc.qwen3 import Qwen3Attention
 from rtp_llm.models_py.modules.embedding import Embedding
+from rtp_llm.models_py.modules.ep.layers import DeepEPContinMoE
 from rtp_llm.models_py.modules.fmha import FMHAImplBase
 from rtp_llm.models_py.modules.linear import Linear
 from rtp_llm.models_py.modules.moe import FusedMoe
@@ -35,6 +36,7 @@ class Qwen3MoeLayer(nn.Module):
     ):
         super().__init__()
 
+        self.config = config
         self.hidden_dim = config.hidden_size
         self.ffn_dim = config.moe_inter_padding_size
         self.num_experts = config.expert_num
@@ -53,18 +55,21 @@ class Qwen3MoeLayer(nn.Module):
             config.max_generate_batch_size + config.tp_size - 1
         ) // config.tp_size
 
-        router = BatchedDataRouter(
-            max_num_tokens=max_num_tokens,
-            num_local_experts=self.num_experts,
-            num_dispatchers=1,
-            rank=0,
-        )
+        if self.config.enable_deepep_moe:
+            self.fused_moe = DeepEPContinMoE(config, weights)
+        else:
+            router = BatchedDataRouter(
+                max_num_tokens=max_num_tokens,
+                num_local_experts=self.num_experts,
+                num_dispatchers=1,
+                rank=0,
+            )
 
-        experts = BatchedTritonExperts(
-            max_num_tokens=max_num_tokens, num_dispatchers=1, w1=self.w1, w2=self.w2
-        )
+            experts = BatchedTritonExperts(
+                max_num_tokens=max_num_tokens, num_dispatchers=1, w1=self.w1, w2=self.w2
+            )
 
-        self.fused_moe = FusedMoe(router, experts)
+            self.fused_moe = FusedMoe(router, experts)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape

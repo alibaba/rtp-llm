@@ -7,11 +7,17 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import torch
 from torch.nn import Module
+import math
+from libth_transformer import rtp_llm_ops
+from libth_transformer.rtp_llm_ops import trt_fp8_quantize_128
 
 import rtp_llm.models_py.modules.utils as utils
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_loader.model_weight_info import ModelWeights
+from rtp_llm.models_py.modules.ep.deepep_normal_router import DeepepNormalRouter
+from rtp_llm.models_py.modules.utils import ceil_div
 from rtp_llm.utils.model_weight import W
+from rtp_llm.models_py.modules.deepgemm import DEEPGEMM_SCALE_UE8M0
 
 if utils.is_cuda():
     from libth_transformer.rtp_llm_ops import FusedMoEOp, SelectTopkOp
@@ -515,3 +521,285 @@ class DeepEPMoE(EPMoE):
     #     )
 
     #     return down_output
+
+def align_up_math(n, alignment=128):
+    return int(math.ceil(n / alignment)) * alignment
+
+
+router = None
+
+
+def get_router(config: GptInitModelParameters):
+    global router
+    if config.ep_size == 1:
+        return None
+    if router is None:
+        router = DeepepNormalRouter(config)
+    return router
+class DeepEPContinMoE(torch.nn.Module):
+    def __init__(
+        self,
+        config: GptInitModelParameters,
+        weights: Dict[str, torch.Tensor],
+    ):
+        super().__init__()
+
+        self.config = config
+
+        self.ep_size = config.ep_size
+        self.ep_rank = config.ep_rank
+
+        self.num_experts = config.expert_num
+        assert self.num_experts % self.ep_size == 0
+        self.num_experts_per_partition = self.num_experts // self.ep_size
+        self.start_expert_id = self.ep_rank * self.num_experts_per_partition
+        self.end_expert_id = self.start_expert_id + self.num_experts_per_partition - 1
+
+        self.top_k = config.moe_k
+        self.intermediate_size = config.moe_inter_padding_size
+        self.activation = config.activation_type.lower()
+        self.renormalize = True
+        self.router = get_router(config)
+
+        self.use_fp8_w8a8 = True
+        self.use_block_quant = True
+
+        # 权重初始化
+        self.w13_weight = weights.get(W.moe_w1, None)
+        self.w2_weight = weights.get(W.moe_w2, None)
+
+        # FP8量化情况：权重和scales都从checkpoint直接加载
+        if self.use_block_quant:
+            # Block量化：使用scale_inv
+            self.w13_weight_scale_inv = weights.get(W.moe_s1, None)
+            self.w2_weight_scale_inv = weights.get(W.moe_s2, None)
+            self.w13_weight_scale = None
+            self.w2_weight_scale = None
+        else:
+            # Per-tensor量化：使用scale
+            self.w13_weight_scale = weights.get(W.moe_s1, None)
+            self.w2_weight_scale = weights.get(W.moe_s2, None)
+            self.w13_weight_scale_inv = None
+            self.w2_weight_scale_inv = None
+
+        self.w13_weight_fp8 = (
+            self.w13_weight,
+            (
+                self.w13_weight_scale_inv
+                if self.use_block_quant
+                else self.w13_weight_scale
+            ),
+        )
+        self.w2_weight_fp8 = (
+            self.w2_weight,
+            self.w2_weight_scale_inv if self.use_block_quant else self.w2_weight_scale,
+        )
+
+        # 输入缩放因子初始化为None，会在forward中动态计算
+        self.w13_input_scale = None
+        self.w2_input_scale = None
+
+
+    def forward(self,
+                hidden_states: torch.Tensor, 
+                topk_weights: torch.Tensor,
+                topk_ids: torch.Tensor,
+                activation: str = "silu"):
+        if self.config.ep_size > 1:
+            assert self.router is not None, "router is not initialized"
+            expert_forward_payload = self.router.prepare(
+                hidden_states,
+                None,
+                None,
+                topk_weights,
+                topk_ids,
+                self.config.expert_num,
+                None,
+            )
+            topk_weights = expert_forward_payload.expert_topk_weights
+            topk_ids = expert_forward_payload.expert_topk_ids
+            hidden_states_fp8 = expert_forward_payload.expert_x
+            hidden_states_scale = expert_forward_payload.expert_x_scale
+            num_recv_tokens_per_expert = (
+                expert_forward_payload.expert_tokens_meta.expert_num_tokens
+            )
+        else:
+            expert_forward_payload = None
+            hidden_states_fp8, hidden_states_scale = trt_fp8_quantize_128(
+                hidden_states, False
+            )
+            reorder_topk_ids, src2dst, seg_indptr = run_moe_ep_preproess(
+                topk_ids, self.num_experts
+            )
+            num_recv_tokens_per_expert_tensor = torch.bincount(
+                reorder_topk_ids, minlength=self.num_experts
+            )
+            num_recv_tokens_per_expert = num_recv_tokens_per_expert_tensor.tolist()
+            num_recv_tokens_per_expert = [
+                align_up_math(x) for x in num_recv_tokens_per_expert
+            ]
+
+        dispatch_output = (
+            (hidden_states_fp8, hidden_states_scale),
+            topk_ids,
+            topk_weights,
+            num_recv_tokens_per_expert,
+        )
+        hidden_states = self.forward_deepgemm_contiguous(dispatch_output)
+
+        if self.config.ep_size > 1:
+            assert dispatch_output is not None, "dispatch_output is not initialized"
+            assert self.router is not None, "router is not initialized"
+            hidden_states = self.router.finalize(
+                hidden_states,
+                None,
+                None,
+                False,
+                None,
+                expert_forward_payload.extra_finalize_args,
+            )
+        return hidden_states
+
+    def forward_deepgemm_contiguous(
+        self,
+        dispatch_output,
+    ):
+        hidden_states_fp8, topk_idx, topk_weights, num_recv_tokens_per_expert = (
+            dispatch_output
+        )
+        hidden_states_fp8, hidden_states_scale = hidden_states_fp8
+        # assert self.quant_method is not None
+        # assert self.activation == "silu"
+        if num_recv_tokens_per_expert is None:
+            return hidden_states_fp8.bfloat16()
+        all_tokens = sum(num_recv_tokens_per_expert)
+        if all_tokens <= 0:
+            return hidden_states_fp8.bfloat16()
+        M, K = hidden_states_fp8.size()
+        N = self.w13_weight.size(1)
+        scale_block_size = 128
+
+        hidden_states_fp8_shape = hidden_states_fp8.shape
+        hidden_states_fp8_device = hidden_states_fp8.device
+        hidden_states_fp8_dtype = hidden_states_fp8.dtype
+
+        input_tensor = [
+            torch.empty(
+                (all_tokens, K),
+                device=hidden_states_fp8.device,
+                dtype=hidden_states_fp8.dtype,
+            ),
+            (
+                # TODO check whether need `zeros`
+                torch.zeros(
+                    (ceil_div(K // 128, 4), all_tokens),
+                    device=hidden_states_fp8.device,
+                    dtype=torch.int,
+                ).transpose(0, 1)
+                if DEEPGEMM_SCALE_UE8M0
+                else torch.empty(
+                    (all_tokens, K // 128),
+                    device=hidden_states_fp8.device,
+                    dtype=torch.float32,
+                )
+            ),
+        ]
+        m_indices = torch.empty(
+            all_tokens, device=hidden_states_fp8.device, dtype=torch.int32
+        )
+        output_index = torch.empty_like(topk_idx)
+
+        num_recv_tokens_per_expert_gpu = torch.tensor(
+            num_recv_tokens_per_expert,
+            dtype=torch.int32,
+            pin_memory=True,
+            device="cpu",
+        ).cuda(non_blocking=True)
+        expert_start_loc = torch.empty_like(num_recv_tokens_per_expert_gpu)
+
+        ep_scatter(
+            hidden_states_fp8,
+            hidden_states_scale,
+            topk_idx,
+            num_recv_tokens_per_expert_gpu,
+            expert_start_loc,
+            input_tensor[0],
+            input_tensor[1],
+            m_indices,
+            output_index,
+            scale_ue8m0=DEEPGEMM_SCALE_UE8M0,
+        )
+        dispose_tensor(hidden_states_fp8)
+
+        gateup_output = torch.empty(
+            (all_tokens, N),
+            device=hidden_states_fp8_device,
+            dtype=torch.bfloat16,
+        )
+
+        if not DEEPGEMM_SCALE_UE8M0:
+            input_tensor[1] = tma_align_input_scale(input_tensor[1])
+
+        if not input_tensor[0].is_contiguous():
+            input_tensor[0] = input_tensor[0].contiguous()
+        if not input_tensor[1].is_contiguous():
+            input_tensor[1] = input_tensor[1].contiguous()
+        if not self.w13_weight_fp8[0].is_contiguous():
+            self.w13_weight_fp8[0] = self.w13_weight_fp8[0].contiguous()
+        if not self.w13_weight_fp8[1].is_contiguous():
+            self.w13_weight_fp8[1] = self.w13_weight_fp8[1].contiguous()
+        if not gateup_output.is_contiguous():
+            gateup_output = gateup_output.contiguous()
+        if not m_indices.is_contiguous():
+            m_indices = m_indices.contiguous()
+        if not output_index.is_contiguous():
+            output_index = output_index.contiguous()
+        grouped_gemm_nt_f8f8bf16_contig(
+            input_tensor,
+            self.w13_weight_fp8,
+            gateup_output,
+            m_indices,
+            disable_ue8m0_cast=True,
+        )
+        del input_tensor
+        down_input = torch.empty(
+            (
+                all_tokens,
+                N // 2,
+            ),
+            device=gateup_output.device,
+            dtype=torch.bfloat16,
+        )
+        stream_id = torch.cuda.current_stream().cuda_stream
+        gateup_output = gateup_output.view(-1, N)
+        gateup_output = torch.cat(
+            (gateup_output[:, N // 2 :], gateup_output[:, : N // 2]), dim=1
+        )
+        rtp_llm_ops.silu_and_mul(down_input, gateup_output, stream_id)
+        del gateup_output
+        down_output = torch.empty(
+            (all_tokens, K),
+            device=hidden_states_fp8_device,
+            dtype=torch.bfloat16,
+        )
+        down_input_fp8, down_input_scale = trt_fp8_quantize_128(down_input, False)
+        del down_input
+        if not DEEPGEMM_SCALE_UE8M0:
+            down_input_scale = tma_align_input_scale(down_input_scale)
+        grouped_gemm_nt_f8f8bf16_contig(
+            (down_input_fp8, down_input_scale),
+            self.w2_weight_fp8,
+            down_output,
+            m_indices,
+            disable_ue8m0_cast=True,
+        )
+        del down_input_fp8, down_input_scale
+
+        gather_out = torch.empty(
+            hidden_states_fp8_shape,
+            device=hidden_states_fp8_device,
+            dtype=torch.bfloat16,
+        )
+        ep_gather(down_output, topk_idx, topk_weights, output_index, gather_out)
+
+        return gather_out
