@@ -4,10 +4,10 @@ from typing import Any, List, Optional
 import torch
 
 try:
+    from libth_transformer import rtp_llm_ops
     from libth_transformer.rtp_llm_ops import (
         FusedRopeKVCacheDecodeOp,
         FusedRopeKVCachePrefillOp,
-        WriteCacheStoreOp,
     )
 except ImportError:
     logging.info("rope kv cache not available, skipped.")
@@ -29,7 +29,6 @@ class FMHAImplBase(object):
         self,
         fmha_impl: Any,
         rope_kvcache_impl: Any,
-        write_cache_store_impl: Any,
         attn_inputs: PyAttentionInputs,
         init_params: bool = True,
     ) -> None:
@@ -42,16 +41,23 @@ class FMHAImplBase(object):
             self.rope_kvcache_impl = rope_kvcache_impl
             self.prepare(attn_inputs)
             self.attn_inputs = attn_inputs
-            if attn_inputs.cache_store_inputs:
-                self.write_cache_store_impl = write_cache_store_impl
 
     def forward(self, qkv: torch.Tensor, kv_cache: Optional[KVCache]) -> torch.Tensor:
         assert self.rope_kvcache_impl is not None and self.rope_params is not None
         fmha_input = self.rope_kvcache_impl.forward(
             qkv, self.fmha_type(), kv_cache, self.rope_params
         )
-        if self.attn_inputs.cache_store_inputs and self.write_cache_store_impl:
-            self.write_cache_store_impl.forward(self.attn_inputs, kv_cache)
+        if (
+            self.attn_inputs.is_prefill
+            and self.attn_inputs.cache_store_inputs
+        ):
+            rtp_llm_ops.write_cache_store(
+                self.attn_inputs.input_lengths,
+                self.attn_inputs.prefix_lengths,
+                self.attn_inputs.kv_cache_block_id_host,
+                self.attn_inputs.cache_store_inputs,
+                kv_cache,
+            )
         assert self.fmha_impl is not None
         res = self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
         return res
@@ -80,8 +86,7 @@ class FMHAPrefillImplBase(FMHAImplBase):
     ) -> None:
         super().__init__(
             fmha_impl,
-            FusedRopeKVCachePrefillOp(config),
-            WriteCacheStoreOp(config),
+            FusedRopeKVCachePrefillOp(config.gpt_init_params),
             attn_inputs,
         )
 
@@ -96,8 +101,7 @@ class FMHADecodeImplBase(FMHAImplBase):
     ) -> None:
         super().__init__(
             fmha_impl,
-            FusedRopeKVCacheDecodeOp(config),
-            WriteCacheStoreOp(config),
+            FusedRopeKVCacheDecodeOp(config.gpt_init_params),
             attn_inputs,
         )
 
@@ -113,7 +117,7 @@ try:
         def __init__(
             self, config: GptInitModelParameters, attn_inputs: PyAttentionInputs
         ) -> None:
-            super().__init__(FlashInferPrefillOp(config), attn_inputs, config)
+            super().__init__(FlashInferPrefillOp(config.gpt_init_params), attn_inputs, config)
 
         @staticmethod
         def fmha_type() -> FMHAType:
@@ -132,7 +136,7 @@ try:
         def __init__(
             self, config: GptInitModelParameters, attn_inputs: PyAttentionInputs
         ) -> None:
-            super().__init__(FlashInferDecodeOp(config), attn_inputs, config)
+            super().__init__(FlashInferDecodeOp(config.gpt_init_params), attn_inputs, config)
 
         @staticmethod
         def fmha_type() -> FMHAType:
@@ -151,7 +155,7 @@ try:
         def __init__(
             self, config: GptInitModelParameters, attn_inputs: PyAttentionInputs
         ) -> None:
-            super().__init__(TRTAttnOp(config), attn_inputs, config)
+            super().__init__(TRTAttnOp(config.gpt_init_params), attn_inputs, config)
 
         @staticmethod
         def fmha_type() -> FMHAType:
@@ -172,7 +176,7 @@ try:
         def __init__(
             self, config: GptInitModelParameters, attn_inputs: PyAttentionInputs
         ) -> None:
-            super().__init__(XQAAttnOp(config), attn_inputs, config)
+            super().__init__(XQAAttnOp(config.gpt_init_params), attn_inputs, config)
 
         @staticmethod
         def fmha_type() -> FMHAType:

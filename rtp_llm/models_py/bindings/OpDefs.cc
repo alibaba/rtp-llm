@@ -30,7 +30,6 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readonly("kv_cache_block_id_device", &PyAttentionInputs::kv_cache_block_id_device)
         .def_readonly("kv_block_offset", &PyAttentionInputs::kv_block_offset)
         .def_readonly("dtype", &PyAttentionInputs::dtype)
-        .def_readonly("cu_seqlens", &PyAttentionInputs::cu_seqlens)
         .def_readonly("cache_store_inputs", &PyAttentionInputs::cache_store_inputs);
 
     pybind11::class_<PyModelInputs>(m, "PyModelInputs")

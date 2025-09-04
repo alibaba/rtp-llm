@@ -3,6 +3,7 @@
 #include "rtp_llm/models_py/bindings/common/RtpNorm.h"
 #include "rtp_llm/models_py/bindings/common/RtpEmbeddingLookup.h"
 #include "rtp_llm/models_py/bindings/common/FusedQKRmsNorm.h"
+#include "rtp_llm/models_py/bindings/common/WriteCacheStoreOp.h"
 #include "rtp_llm/models_py/bindings/cuda/FlashInferOp.h"
 #include "rtp_llm/models_py/bindings/cuda/FusedMoEOp.h"
 #include "rtp_llm/models_py/bindings/cuda/SelectTopkOp.h"
@@ -16,6 +17,15 @@ using namespace rtp_llm;
 namespace torch_ext {
 
 void registerBasicCudaOps(py::module& rtp_ops_m) {
+    rtp_ops_m.def("write_cache_store",
+                  &WriteCacheStoreOp,
+                  "WriteCacheStoreOp kernel",
+                  py::arg("input_lengths"),
+                  py::arg("prefix_lengths"),
+                  py::arg("kv_cache_block_id_host"),
+                  py::arg("cache_store_member"),
+                  py::arg("kv_cache") = 0);
+
     rtp_ops_m.def("rmsnorm",
                   &rmsnorm,
                   "RMSNorm kernel",

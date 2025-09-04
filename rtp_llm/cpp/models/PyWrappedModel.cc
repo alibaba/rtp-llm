@@ -231,25 +231,9 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
 
         auto      attention_inputs = buildPyAttentionInputs(inputs);
         BufferPtr kv_cache_block_id_device;
-        if (k_cache_buffer_) {
-            kv_cache_block_id_device =
-                device_->clone({*inputs.kv_cache_block_id, AllocationType::DEVICE, {"kv_cache_block_id"}});
-            attention_inputs.kv_cache_block_id_host   = Buffer2torchTensor(inputs.kv_cache_block_id);
-            attention_inputs.kv_cache_block_id_device = Buffer2torchTensor(kv_cache_block_id_device, false);
-            attention_inputs.kv_block_offset =
-                k_cache_buffer_ ? k_cache_buffer_->shape()[0] * k_cache_buffer_->shape()[1] : 0;
-        }
-        attention_inputs.dtype      = torch::kBFloat16;
-        attention_inputs.is_prefill = !attention_inputs.sequence_lengths.size(0);
         if (!inputs.warmup && inputs.pd_separation) {
             attention_inputs.cache_store_inputs = prepareWriteCacheParams(inputs);
         }
-        torch::Tensor cu_seqlens = torch::zeros({device_->initParams().concurrency_config.concurrency_limit + 1},
-                                                torch::TensorOptions(torch::kInt32).device(torch::kCPU));
-        int           batch_size = attention_inputs.input_lengths.size(0);
-        cu_seqlens               = cu_seqlens.cuda();
-        cu_seqlens.slice(0, 1, batch_size + 1) = attention_inputs.input_lengths.cumsum(0);
-        attention_inputs.cu_seqlens            = cu_seqlens;
         setupKVCacheForAttentionInputs(attention_inputs, inputs, kv_cache_block_id_device);
         calculatePaddingOffset(attention_inputs);
 

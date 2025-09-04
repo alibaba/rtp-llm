@@ -58,11 +58,11 @@ struct PyAttentionInputs {
     int              kv_block_offset = 0;
     // for `FusedRopeKVCacheDecodeOp`.
     torch::Tensor cu_seqlens;
+    torch::Tensor padding_offset;
 
     // for write cache store
 
     std::optional<PyCacheStoreInputs> cache_store_inputs;
-    torch::Tensor                     padding_offset;
 };
 
 struct PyModelInputs {
