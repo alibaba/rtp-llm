@@ -1,6 +1,7 @@
 import asyncio
 import os
 
+import rtp_llm.models
 from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.distribute.worker_info import g_worker_info, update_master_info
 from rtp_llm.model_factory import ModelFactory

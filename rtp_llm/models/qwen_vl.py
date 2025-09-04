@@ -40,7 +40,7 @@ class QWen_VL(QWen, MultiModalMixin):
     @classmethod
     def _create_config(cls, ckpt_path: str):
         config = GptInitModelParameters(
-            head_num=0, size_per_head=0, layer_num=0, max_seq_len=0, vocab_size=0
+            head_num=0, size_per_head=0, layer_num=0, max_seq_len=1024, vocab_size=0
         )
         QWen_VL._common_config(config, ckpt_path)
         return config

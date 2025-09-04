@@ -5,6 +5,7 @@ from transformers import AutoTokenizer
 
 class BaseTokenizer:
     def __init__(self, tokenizer_path: str, config_json: Dict[str, Any] = {}):
+        self.path = tokenizer_path
         self.config_json = config_json
         self.init_tokenizer(tokenizer_path, self.config_json)
 
@@ -47,7 +48,7 @@ class BaseTokenizer:
     @property
     def eos_token_id(self):
         if self.tokenizer.eos_token_id is None:
-            return self.config_json.get("eos_token_id", 0)
+            return self.config_json.get("eos_token_id") or 0
         else:
             return self.tokenizer.eos_token_id
 

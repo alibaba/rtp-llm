@@ -382,7 +382,7 @@ py_library(
 )
 
 py_library(
-    name = "rtp_llm_lib",
+    name = "rtp_llm_frontend_lib",
     deps = [
         ":utils",
         ":eplb",
@@ -404,6 +404,16 @@ py_library(
         "//rtp_llm/aios/kmonitor:kmonitor_py",
         "//rtp_llm/metrics:metrics",
         "//rtp_llm/access_logger:access_logger",
+    ],
+    data = [
+        "//rtp_llm/libs:libs"
+    ]
+)
+
+py_library(
+    name = "rtp_llm_lib",
+    deps = [
+        ":rtp_llm_frontend_lib",
     ] + select({
         "@//:frontend": [],
         "@//:using_rocm": [
@@ -423,6 +433,16 @@ py_library(
     data = [
         "//rtp_llm/libs:libs"
     ]
+)
+
+py_package(
+    name = "rtp_llm_frontend_package",
+    deps = [
+        ":rtp_llm_frontend_lib",
+    ],
+    packages = [
+        "rtp_llm"
+    ],
 )
 
 py_package(
@@ -491,6 +511,19 @@ whl_reqs = [
     "portalocker",
     "concurrent_log_handler",
 ] + whl_deps() + platform_deps() + xft_dep
+
+py_wheel(
+    name = "rtp_llm_frontend_whl",
+    distribution = "rtp_llm_frontend",
+    python_tag = "py3",
+    tags = ["manual", "local"],
+    version = RELEASE_VERSION,
+    deps = [
+        ":rtp_llm_frontend_package",
+        "//deps:extension_package_frontend"
+    ],
+    requires = whl_reqs
+)
 
 # target for wheel
 py_wheel(

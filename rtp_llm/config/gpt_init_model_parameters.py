@@ -945,7 +945,8 @@ class GptInitModelParameters:
         if max_seq_len != 0:
             self.max_seq_len = max_seq_len
         if self.max_seq_len < 1:
-            self.max_seq_len = 1024
+            # frontend not load ckpt config max_seq_len, use default 8192 or env
+            self.max_seq_len = 8192
         logging.info(f"max_seq_len: {self.max_seq_len}")
 
         self.update_task_type_use_kvcache()

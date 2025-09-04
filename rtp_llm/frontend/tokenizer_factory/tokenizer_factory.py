@@ -11,6 +11,7 @@ from rtp_llm.frontend.tokenizer_factory.tokenizer_factory_register import (
     _tokenizer_factory,
 )
 from rtp_llm.frontend.tokenizer_factory.tokenizers.base_tokenizer import BaseTokenizer
+from rtp_llm.utils.fuser import fetch_remote_file_to_local
 from rtp_llm.utils.util import check_with_info
 
 
@@ -20,6 +21,10 @@ class TokenizerFactory:
         ckpt_path = StaticConfig.model_config.checkpoint_path
         tokenizer_path = StaticConfig.model_config.tokenizer_path
         model_type = StaticConfig.model_config.model_type
+
+        tokenizer_path = fetch_remote_file_to_local(tokenizer_path)
+        ckpt_path = fetch_remote_file_to_local(ckpt_path)
+
         return TokenizerFactory.create(ckpt_path, tokenizer_path, model_type)
 
     @staticmethod

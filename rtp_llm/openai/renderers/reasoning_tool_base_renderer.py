@@ -77,7 +77,7 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
             logging.warning(
                 "Tokenizer does not have a chat template, try load default."
             )
-            tokenizer_path = self.tokenizer.name_or_path
+            tokenizer_path = self.tokenizer.path
             if tokenizer_path and os.path.exists(tokenizer_path):
                 default_template_path = os.path.join(
                     tokenizer_path, "chat_template.jinja"

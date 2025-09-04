@@ -56,6 +56,7 @@ class ModelFactory:
             tokenizer_path=model_config.tokenizer_path,
             quantization=model_config.quantization,
             data_type=model_config.act_type,
+            kv_cache_type=model_config.kv_cache_type,
             max_seq_len=model_config.max_seq_len,
             seq_size_per_block=model_config.seq_size_per_block,
             gen_num_per_circle=model_config.gen_num_per_circle,

@@ -16,7 +16,7 @@ class LlamaTokenizer(BaseTokenizer):
     def init_tokenizer(self, tokenizer_path: str, config_json: Dict[str, Any] = {}):
         tokenizer_config_file = os.path.join(tokenizer_path, "tokenizer_config.json")
         if os.path.exists(tokenizer_config_file):
-            super().__init__(tokenizer_path, config_json)
+            super().init_tokenizer(tokenizer_path, config_json)
         else:
             self.tokenizer = LlamaTokenizerOrigin.from_pretrained(tokenizer_path)
 

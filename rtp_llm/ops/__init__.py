@@ -138,9 +138,6 @@ try:
     )
 
 except BaseException as e:
-    import traceback
-
-    print(f"Exception: {e}, traceback: {traceback.format_exc()}")
     logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
 
 
@@ -170,8 +167,5 @@ except BaseException as e:
             rtp_llm_ops
         ) = EmptyClass
     else:
-        import traceback
-
-        print(f"Exception: {e}, traceback: {traceback.format_exc()}")
         logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
         raise e

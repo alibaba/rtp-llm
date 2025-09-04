@@ -7,8 +7,12 @@ from typing import Any, List
 from unittest import TestCase, main
 
 from transformers import AutoTokenizer
-from transformers.models.qwen2.tokenization_qwen2 import Qwen2Tokenizer
 
+from rtp_llm.frontend.tokenizer_factory.tokenizers import (
+    BaseTokenizer,
+    QWenTokenizer,
+    QWenV2Tokenizer,
+)
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatMessage,
@@ -20,7 +24,6 @@ from rtp_llm.openai.renderer_factory import ChatRendererFactory, RendererParams
 from rtp_llm.openai.renderers.qwen_agent_renderer import QwenAgentRenderer
 from rtp_llm.openai.renderers.qwen_agent_tool_renderer import QwenAgentToolRenderer
 from rtp_llm.openai.renderers.qwen_renderer import QwenRenderer
-from rtp_llm.tokenizer.tokenization_qwen import QWenTokenizer
 
 
 class BaseRendererTestMixin(ABC):
@@ -521,7 +524,7 @@ get_current_weather: Get the current weather in a given location. 输入参数�
         assert prompt == expected_prompt
 
     def test_qwen_with_chat_template(self):
-        tokenizer = Qwen2Tokenizer.from_pretrained(
+        tokenizer = QWenV2Tokenizer(
             f"{self.test_data_path}/tokenizer_test/testdata/qwen2_tokenizer"
         )
         render_params = RendererParams(
@@ -572,9 +575,8 @@ template ends here"""
             self.test_instance = test_instance
 
         def get_tokenizer(self):
-            return AutoTokenizer.from_pretrained(
+            return BaseTokenizer(
                 f"{self.test_instance.test_data_path}/model_test/fake_test/testdata/qwen3_30b/tokenizer/",
-                trust_remote_code=True,
             )
 
         def get_render_params(self) -> RendererParams:
@@ -601,9 +603,8 @@ template ends here"""
             self.test_instance = test_instance
 
         def get_tokenizer(self):
-            return AutoTokenizer.from_pretrained(
+            return BaseTokenizer(
                 f"{self.test_instance.test_data_path}/model_test/fake_test/testdata/qwen3_30b_thinking_0527/tokenizer/",
-                trust_remote_code=True,
             )
 
         def get_render_params(self) -> RendererParams:
@@ -630,9 +631,8 @@ template ends here"""
             self.test_instance = test_instance
 
         def get_tokenizer(self):
-            return AutoTokenizer.from_pretrained(
+            return BaseTokenizer(
                 f"{self.test_instance.test_data_path}/model_test/fake_test/testdata/kimi_k2/tokenizer/",
-                trust_remote_code=True,
             )
 
         def get_render_params(self) -> RendererParams:
@@ -659,9 +659,8 @@ template ends here"""
             self.test_instance = test_instance
 
         def get_tokenizer(self):
-            return AutoTokenizer.from_pretrained(
+            return BaseTokenizer(
                 f"{self.test_instance.test_data_path}/model_test/fake_test/testdata/qwen3_coder/tokenizer/",
-                trust_remote_code=True,
             )
 
         def get_render_params(self) -> RendererParams:
@@ -688,7 +687,7 @@ template ends here"""
             self.test_instance = test_instance
 
         def get_tokenizer(self):
-            return AutoTokenizer.from_pretrained(
+            return BaseTokenizer(
                 f"{self.test_instance.test_data_path}/model_test/fake_test/testdata/glm45/tokenizer/"
             )
 
@@ -716,9 +715,8 @@ template ends here"""
             self.test_instance = test_instance
 
         def get_tokenizer(self):
-            return AutoTokenizer.from_pretrained(
+            return BaseTokenizer(
                 f"{self.test_instance.test_data_path}/model_test/fake_test/testdata/deepseek_v31/tokenizer/",
-                trust_remote_code=True,
             )
 
         def get_render_params(self) -> RendererParams:

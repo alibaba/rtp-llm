@@ -16,6 +16,7 @@ def get_handler(file_name: str) -> Optional[logging.Handler]:
         return ConcurrentRotatingFileHandler(
             filename=f"{log_path}/{file_name}",
             mode="a",
-            maxBytes=10 * 1024 * 1024,
+            maxBytes=100 * 1024 * 1024,
             backupCount=StaticConfig.profiling_debug_config.log_file_backup_count,
+            use_gzip=True,
         )
