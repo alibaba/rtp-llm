@@ -1,9 +1,13 @@
 from typing import Dict, Optional
 
 import torch
+import torch.distributed as dist
 from torch import nn
 
+dist.all_reduce
+
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.distribute.collective import Group, all_reduce
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules.attention import CausalAttention
@@ -31,8 +35,8 @@ class Qwen3Attention(CausalAttention):
             self.qk_fuse_norm = FusedQKRMSNorm(
                 weights[W.q_ln_gamma],
                 weights[W.k_ln_gamma],
-                config.head_num,
-                config.head_num_kv,
+                config.head_num // config.tp_size,
+                config.head_num_kv // config.tp_size,
                 config.size_per_head,
                 config.layernorm_eps,
             )
@@ -53,11 +57,9 @@ class Qwen3Attention(CausalAttention):
         attn_output = fmha_impl.forward(qkv, kv_cache)
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
+        if self.config.tp_size > 1:
+            attn_output = all_reduce(attn_output, group=Group.TP)
         return attn_output
-
-
-from rtp_llm.ops import PyAttentionInputs, PyModelInputs, PyModelOutputs
-from rtp_llm.utils.model_weight import W
 
 
 class Qwen3DecoderLayer(nn.Module):
@@ -102,7 +104,7 @@ class Qwen3Model(GptModelBase):
     def __init__(self, config: GptInitModelParameters, weights: ModelWeights):
         super().__init__(config, weights)
 
-        self.embed_tokens = Embedding(weights.get_global_weight(W.embedding))
+        self.embed_tokens = Embedding(config, weights.get_global_weight(W.embedding))
         self.layers = nn.ModuleList(
             [
                 Qwen3DecoderLayer(config, weights.weights[idx])

@@ -3,6 +3,7 @@ from enum import Enum
 from typing import Dict
 
 import torch
+from torch.distributed.distributed_c10d import AllreduceOptions, ReduceOp
 
 
 class Group(Enum):
@@ -46,12 +47,12 @@ try:
     def all_reduce(
         tensor: torch.Tensor, group: Group = Group.DP_AND_TP
     ) -> torch.Tensor:
-        return _get_group(group).all_reduce([tensor])
+        return _get_group(group).all_reduce([tensor])[0]
 
     def all_gather(
         tensor: torch.Tensor, group: Group = Group.DP_AND_TP
     ) -> torch.Tensor:
-        raise NotImplementedError("AllGather is not implemented")
+        return _get_group(group).all_gather([tensor])[0]
 
 except ImportError:
     logging.info("RtpProcessGroup not available, skipped. Defining dummy functions.")
