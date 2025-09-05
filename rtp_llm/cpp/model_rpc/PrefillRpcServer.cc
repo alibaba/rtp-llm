@@ -352,6 +352,12 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
     generate_request.set_client_id(process_id_);
     generate_request.set_request_id(prefill_context.request_id);
     generate_request.set_first_generate_token_id(first_token);
+    if (stream->getContextPositionIds()) {
+        auto context_position_ids = stream->getContextPositionIds();
+        generate_request.mutable_position_ids()->CopyFrom(
+            {context_position_ids->data<int32_t>(),
+             context_position_ids->data<int32_t>() + context_position_ids->size()});
+    }
     generate_request.mutable_propose_token_ids()->CopyFrom(
         {stream->getProposeToken().begin(), stream->getProposeToken().end()});
     generate_request.set_stage(RemoteStage::GENERATE);

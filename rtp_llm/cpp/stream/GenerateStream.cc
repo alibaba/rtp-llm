@@ -517,7 +517,7 @@ rtp_llm::BufferPtr GenerateStream::generateContextPositionIds(rtp_llm::DeviceBas
 
 void GenerateStream::generateNextPositionId(int32_t* now_pos, rtp_llm::DeviceBase* device) {
     if (!context_position_ids_) {
-        generateContextPositionIds(device);
+        return;
     }
     PositionIdsGenerator::generateNextPositionId(
         now_pos, seqLength(), mm_position_ids_style_, context_position_ids_.value());

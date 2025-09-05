@@ -146,15 +146,27 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
     generate_stream->setIsContextStream(false);
     generate_stream->step();
 
-    auto new_tokens     = engine_->getDevice()->allocateBuffer({rtp_llm::DataType::TYPE_INT32,
-                                                                {(size_t)generate_stream->nextBatchSize(), (size_t)1},
-                                                                rtp_llm::AllocationType::HOST},
-                                                               {});
+    auto new_tokens = engine_->getDevice()->allocateBuffer({rtp_llm::DataType::TYPE_INT32,
+                                                            {(size_t)generate_stream->nextBatchSize(), (size_t)1},
+                                                            rtp_llm::AllocationType::HOST},
+                                                           {});
+
     auto data           = new_tokens->data<int32_t>();
     auto first_token_id = generate_request.first_generate_token_id();
     *data               = first_token_id;
     generate_stream->incLastOutputPos();
     generate_stream->update({new_tokens, 1, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr});
+    if (generate_request.position_ids_size() > 0) {
+        auto context_position_ids =
+            engine_->getDevice()->allocateBuffer({rtp_llm::DataType::TYPE_INT32,
+                                                  {(size_t)generate_request.position_ids_size()},
+                                                  rtp_llm::AllocationType::HOST},
+                                                 {});
+        memcpy(context_position_ids->data<int32_t>(),
+               generate_request.position_ids().data(),
+               generate_request.position_ids_size() * sizeof(int32_t));
+        generate_stream->setContextPositionIds(context_position_ids);
+    }
     if (propose_maga_init_params_) {
         generate_stream->setReuseLength(generate_stream->seqLength() - 1);
         generate_stream->setFallbackPrefixLength(generate_stream->reuseLength());
@@ -604,8 +616,8 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                         // if (addr_info.k_scale_addr) {
                         //     void* k_scale_addr = (void*)((int64_t)addr_info.k_scale_addr + i * scale_block_size);
                         //     std::shared_ptr<void> k_block_scale_addr(k_scale_addr, [](void* p) {});
-                        //     load_layer_cache->addBlock("k_scale" + cache_key, k_block_scale_addr, scale_block_size,
-                        //     true, true);
+                        //     load_layer_cache->addBlock("k_scale" + cache_key, k_block_scale_addr,
+                        //     scale_block_size, true, true);
                         // }
                         if (sp_cache_manager->cacheConfig().use_mla) {
                             continue;
@@ -616,8 +628,8 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                         // if (addr_info.v_scale_addr) {
                         //     void* v_scale_addr = (void*)((int64_t)addr_info.v_scale_addr + i * scale_block_size);
                         //     std::shared_ptr<void> v_block_scale_addr(v_scale_addr, [](void* p) {});
-                        //     load_layer_cache->addBlock("v_scale" + cache_key, v_block_scale_addr, scale_block_size,
-                        //     true, true);
+                        //     load_layer_cache->addBlock("v_scale" + cache_key, v_block_scale_addr,
+                        //     scale_block_size, true, true);
                         // }
                     }
                     layer_caches.push_back(load_layer_cache);

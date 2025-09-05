@@ -215,6 +215,7 @@ message GenerateRequestPB {
     GenerateInputPB input = 6;
     repeated string peer_addrs = 7;
     repeated int32 propose_token_ids = 8;
+    repeated int32 position_ids = 9;
 }
 
 // in tp case, decode master broadcast to decode worker
@@ -282,9 +283,9 @@ message RemoteStoreRequestPB {
     string client_id = 9;
 }
 
-message RemoteStoreResponsePB { 
+message RemoteStoreResponsePB {
     RpcErrorPB error_info = 1;
-    int64 done_time_us = 2; 
+    int64 done_time_us = 2;
 }
 
 enum DistKvCacheOp {
@@ -361,11 +362,11 @@ service RpcService {
     rpc RemoteGenerate(stream GenerateRequestPB) returns (stream GenerateOutputsPB);
     rpc RemoteFinish(RemoteFinishRequestPB) returns (EmptyPB);
     rpc RemoteFinishNew(RemoteFinishRequestPB) returns (EmptyPB);
-    
+
 
     rpc RemoteGenerateNew(RemoteGenerateRequestPBNew) returns (RemoteGenerateResponsePBNew);
     rpc RemoteStore(RemoteStoreRequestPB) returns (RemoteStoreResponsePB);
-    
+
     rpc DistKvCache(DistKvCacheRequestPB) returns (DistKvCacheResponsePB);
 }
 

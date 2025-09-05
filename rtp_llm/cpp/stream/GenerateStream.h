@@ -279,6 +279,14 @@ public:
 
     void generateNextPositionId(int32_t* now_pos, rtp_llm::DeviceBase* device);
 
+    rtp_llm::BufferPtr getContextPositionIds() const {
+        return context_position_ids_.has_value() ? context_position_ids_.value() : nullptr;
+    }
+
+    void setContextPositionIds(rtp_llm::BufferPtr context_position_ids) {
+        context_position_ids_ = context_position_ids;
+    }
+
     int64_t vocabSize() const {
         return vocab_size_;
     }
