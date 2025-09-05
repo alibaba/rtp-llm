@@ -194,8 +194,8 @@ absl::Status SpeculativeEngine::initCacheManager(std::optional<WarmUpResult> war
                                                                 isEagle());
         auto        scorer_cache_config   = std::get<0>(config);
         auto        proposer_cache_config = std::get<1>(config);
-        resource_context_.cache_manager =
-            make_shared<CacheManager>(scorer_cache_config, device_, false, metrics_reporter_);
+        resource_context_.cache_manager   = make_shared<CacheManager>(
+            scorer_cache_config, device_, false, metrics_reporter_, score_model_params_.gpt_init_parameter);
         if (isMTPEagle()) {
             auto layer_num = propose_model_params_->getGptInitParameter().gen_num_per_circle_;
             if (isEagle()) {
@@ -214,7 +214,8 @@ absl::Status SpeculativeEngine::initCacheManager(std::optional<WarmUpResult> war
 
     } else {
         const auto& config = CacheConfigCreator::createConfig(score_model_params_.gpt_init_parameter, warm_up_result);
-        resource_context_.cache_manager = make_shared<CacheManager>(config, device_, false, metrics_reporter_);
+        resource_context_.cache_manager = make_shared<CacheManager>(
+            config, device_, false, metrics_reporter_, score_model_params_.gpt_init_parameter);
     }
     return absl::OkStatus();
 }
