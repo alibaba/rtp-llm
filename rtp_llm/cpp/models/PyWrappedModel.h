@@ -25,6 +25,14 @@ public:
     GptModelOutputs forwardMicroBatched(const GptModelInputs& inputs);
 
 private:
+    // Helper functions to reduce code duplication
+    torch_ext::PyAttentionInputs buildPyAttentionInputs(const GptModelInputs& inputs);
+    void                         setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs,
+                                                                const GptModelInputs&         inputs,
+                                                                BufferPtr&                    kv_cache_block_id_device);
+    void                         calculatePaddingOffset(torch_ext::PyAttentionInputs& py_attn_inputs);
+    GptModelOutputs
+                  callForwardPostLayers(BufferPtr hidden_states, const GptModelInputs& inputs, bool is_forward_method);
     GraphBase*    graph_runner_{nullptr};
     py::object    py_model_;
     bool          enable_cuda_graph_{false};
