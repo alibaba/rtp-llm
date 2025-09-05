@@ -18,7 +18,7 @@ BufferPtr DeviceBase::mhaQKVGemm(const AttentionLayerParams& params) {
 
     auto      lora_linear_params = LoraLinearParams(qkv_gemm_params, params.common.lora_input.qkv_lora_input);
     BufferPtr qkv;
-    if (!params.configs.fuse_qkv_add_bias && params.weights.qkv_weight) {
+    if (!params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias) {
         ActivationParams act_params(ActivationType::Identity,
                                     nullptr,
                                     mayGetRef(params.weights.qkv_weight->bias),
