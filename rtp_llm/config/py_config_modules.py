@@ -478,6 +478,7 @@ class PyKvCacheConfig:
         self.test_block_num: int = 0
         self.use_block_cache: Optional[int] = None
         self.blockwise_use_fp8_kv_cache: int = 0
+        self.kv_cache_dtype: Optional[str] = None
         self.reuse_cache: bool = False
 
     def update_from_env(self):
