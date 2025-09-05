@@ -311,11 +311,12 @@ TEST_F(StreamCacheResourceTest, testReuseCache) {
     stream_->releaseResource();
 
     ASSERT_EQ(cache_manager_->freeBlockNums(), 3);
-    ASSERT_EQ(cache_manager_->cacheItemNum(), 2);
+    ASSERT_EQ(cache_manager_->cacheItemNum(), 3);
+    ASSERT_TRUE(cache_manager_->blockCache().hasKey({1, 2, 3, 4}));
     ASSERT_TRUE(cache_manager_->blockCache().hasKey({1, 2, 3, 4, 5, 6, 7, 8}));
     ASSERT_TRUE(cache_manager_->blockCache().hasKey({1, 2, 3, 4, 5, 6, 9, 10}));
-    ASSERT_EQ(allocator_->blockRefCounter().getRefCounter(1), 2);
-    ASSERT_EQ(allocator_->blockRefCounter().getRefCounter(2), 2);
+    ASSERT_EQ(allocator_->blockRefCounter().getRefCounter(1), 3);
+    ASSERT_EQ(allocator_->blockRefCounter().getRefCounter(2), 3);
     ASSERT_EQ(allocator_->blockRefCounter().getRefCounter(3), 2);
     ASSERT_EQ(allocator_->blockRefCounter().getRefCounter(4), 1);
     ASSERT_EQ(allocator_->blockRefCounter().getRefCounter(5), 0);
@@ -380,7 +381,8 @@ TEST_F(StreamCacheResourceTest, testReuseCacheWithFastGen) {
     stream_->releaseResource();
     ASSERT_EQ(cache_manager_->freeBlockNums(), 5);
 
-    ASSERT_EQ(cache_manager_->cacheItemNum(), 1);
+    ASSERT_EQ(cache_manager_->cacheItemNum(), 2);
+    ASSERT_TRUE(cache_manager_->blockCache().hasKey({1, 2, 3, 4}));
     ASSERT_TRUE(cache_manager_->blockCache().hasKey({1, 2, 3, 4, 5, 6}));
 
     // test another stream
@@ -444,7 +446,7 @@ TEST_F(StreamCacheResourceTest, testReuseCacheWithFastGen) {
     stream_->setPaused();
     ASSERT_EQ(cache_manager_->freeBlockNums(), 3);
     ASSERT_EQ(cache_manager_->availableBlockNums(), 8);
-    ASSERT_EQ(cache_manager_->cacheItemNum(), 2);
+    ASSERT_EQ(cache_manager_->cacheItemNum(), 4);
     ASSERT_EQ(stream_->maxBlockSize(), 0);
 
     // first chunk again
