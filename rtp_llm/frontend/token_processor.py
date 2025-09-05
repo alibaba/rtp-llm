@@ -70,7 +70,8 @@ class TokenProcessorPerStream:
         return_incremental: bool = False,
     ):
         if not self.has_num_beams:
-            if len(self.ouput_tokens_list[i]) == 0:
+            # Handle case when self.ouput_tokens_list[i] is empty
+            if self.ouput_tokens_list[i].size == 0:
                 self.ouput_tokens_list[i] = tokens
             else:
                 self.ouput_tokens_list[i] = np.concatenate(

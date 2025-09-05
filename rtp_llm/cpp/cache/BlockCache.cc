@@ -61,7 +61,6 @@ std::vector<int> BlockCache::put(CacheItem& item) {
     if (item.token_list.empty() || item.block_indices.empty()) {
         return {};
     }
-
     item.item_key = hashVector(item.token_list);
 
     std::lock_guard<std::mutex> lock(mutex_);
