@@ -147,7 +147,7 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         Returns:
             str: 格式化后的提示文本
         """
-        context = request.model_dump(exclude_none=True)
+        context = request.model_dump(exclude_none=True, mode="json")
 
         # 只要不是已经有assistant消息, 则需要添加生成提示
         if request.messages[-1].role != RoleEnum.assistant:
