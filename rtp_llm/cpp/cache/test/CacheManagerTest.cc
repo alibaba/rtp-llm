@@ -1099,7 +1099,7 @@ TEST_F(CacheManagerTest, testInsertIntoCache_TokenLenLessThan1_FreeAllBlocks) {
     std::vector<int>       token_ids  = {1000};  // size <= 1 triggers full free
     auto                   cache_keys = constructCacheKey(cache_manager, token_ids);
     CacheManager::FreeInfo free_info(request_id, token_ids, cache_keys, idx);
-    cache_manager.insertIntoCache(free_info);
+    cache_manager.insertCacheThenFree(free_info);
 
     ASSERT_EQ(cache_manager.freeBlockNums(), free0);
     ASSERT_FALSE(cache_manager.blockCache().hasKey({1000}));
@@ -1120,7 +1120,7 @@ TEST_F(CacheManagerTest, testInsertIntoCache_PutToBlockCache) {
     std::vector<int>       token_ids  = {200, 201, 202};
     auto                   cache_keys = constructCacheKey(cache_manager, token_ids);
     CacheManager::FreeInfo free_info(request_id, token_ids, cache_keys, idx);
-    cache_manager.insertIntoCache(free_info);
+    cache_manager.insertCacheThenFree(free_info);
 
     // One tail block freed back
     ASSERT_EQ(cache_manager.freeBlockNums(), free_after_malloc + 1);
@@ -1145,17 +1145,80 @@ TEST_F(CacheManagerTest, testInsertIntoCache_PutToBlockCacheTwice) {
     std::vector<int>       token_ids  = {200, 201, 202};
     auto                   cache_keys = constructCacheKey(cache_manager, token_ids);
     CacheManager::FreeInfo free_info(request_id, token_ids, cache_keys, idx);
-    cache_manager.insertIntoCache(free_info);
+    cache_manager.insertCacheThenFree(free_info);
 
     ASSERT_TRUE(cache_manager.blockCache().hasKey({200, 201}));
     ASSERT_TRUE(allocator->blockRefCounter().getRefCounter(idx[0]) == 2);
     ASSERT_TRUE(allocator->blockRefCounter().getRefCounter(idx[1]) == 2);
 
-    cache_manager.insertIntoCache(free_info);
+    cache_manager.insertCacheThenFree(free_info);
     ASSERT_TRUE(cache_manager.blockCache().hasKey({200, 201}));
     // ref count should be decremented
     ASSERT_TRUE(allocator->blockRefCounter().getRefCounter(idx[0]) == 1);
     ASSERT_TRUE(allocator->blockRefCounter().getRefCounter(idx[1]) == 1);
+}
+
+// Test insertIntoCache with valid input (token_ids.size() > 1)
+TEST_F(CacheManagerTest, testInsertIntoCache_ValidInput) {
+    auto cache_config               = initConfig();
+    cache_config.block_nums         = 10;
+    cache_config.seq_size_per_block = 1;
+    CacheManager cache_manager(cache_config, device_);
+    auto         allocator = cache_manager.kvCacheAllocator();
+
+    auto [ok, idx] = cache_manager.mallocIndex({request_id, 2});
+    ASSERT_TRUE(ok);
+
+    std::vector<int>       token_ids  = {200, 201, 202};
+    auto                   cache_keys = constructCacheKey(cache_manager, token_ids);
+    CacheManager::FreeInfo free_info(request_id, token_ids, cache_keys, idx);
+
+    // Before insertIntoCache, cache should not have the key
+    ASSERT_FALSE(cache_manager.blockCache().hasKey({200, 201}));
+
+    // Call insertIntoCache
+    cache_manager.insertIntoCache(free_info);
+
+    // After insertIntoCache, cache should have the key
+    ASSERT_TRUE(cache_manager.blockCache().hasKey({200, 201}));
+
+    // Check ref counter is incremented
+
+    ASSERT_TRUE(allocator->blockRefCounter().getRefCounter(idx[0]) == 2);
+    ASSERT_TRUE(allocator->blockRefCounter().getRefCounter(idx[0]) == 2);
+}
+
+// Test insertIntoCache with token_ids.size() <= 1 (should not insert)
+TEST_F(CacheManagerTest, testInsertIntoCache_TokenLenLessThanEqualOne) {
+    auto cache_config               = initConfig();
+    cache_config.block_nums         = 10;
+    cache_config.seq_size_per_block = 1;
+    CacheManager cache_manager(cache_config, device_);
+
+    auto [ok, idx] = cache_manager.mallocIndex({request_id, 2});
+    ASSERT_TRUE(ok);
+
+    // Test with empty token_ids
+    std::vector<int>       token_ids_empty  = {};
+    auto                   cache_keys_empty = constructCacheKey(cache_manager, token_ids_empty);
+    CacheManager::FreeInfo free_info_empty(request_id, token_ids_empty, cache_keys_empty, idx);
+
+    // Call insertIntoCache with empty token_ids
+    cache_manager.insertIntoCache(free_info_empty);
+
+    // Cache should remain empty
+    ASSERT_EQ(cache_manager.cacheItemNum(), 0u);
+
+    // Test with single token_id
+    std::vector<int>       token_ids_single  = {100};
+    auto                   cache_keys_single = constructCacheKey(cache_manager, token_ids_single);
+    CacheManager::FreeInfo free_info_single(request_id, token_ids_single, cache_keys_single, idx);
+
+    // Call insertIntoCache with single token_id
+    cache_manager.insertIntoCache(free_info_single);
+
+    // Cache should remain empty
+    ASSERT_EQ(cache_manager.cacheItemNum(), 0u);
 }
 
 // loss present -> do NOT put to dist

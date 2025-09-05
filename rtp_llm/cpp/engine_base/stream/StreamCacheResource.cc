@@ -12,6 +12,29 @@ void StreamCacheResource::init(int batch_size) {
     constructCacheKey();
 }
 
+std::string StreamCacheResource::debugString() const {
+    std::stringstream debug_string;
+    debug_string << "StreamCacheResource { stream_id: " << stream_->streamId()
+                 << ",need_release_resource: " << need_release_resource_ << ", batch_resource: [";
+
+    for (size_t i = 0; i < batch_resource_.batchSize(); i++) {
+        debug_string << " [";
+        for (size_t j = 0; j < batch_resource_.batch_block_id[i].size(); j++) {
+            debug_string << batch_resource_.batch_block_id[i][j] << ", ";
+        }
+        debug_string << "],";
+    }
+    debug_string << ", cache_keys: ";
+    for (size_t i = 0; i < batch_resource_.batchSize(); i++) {
+        debug_string << " [";
+        for (size_t j = 0; j < batch_resource_.cache_keys[i].size(); j++) {
+            debug_string << batch_resource_.cache_keys[i][j] << ", ";
+        }
+        debug_string << "],";
+    }
+    debug_string << "}";
+    return debug_string.str();
+}
 void StreamCacheResource::freeBatchBlocks(size_t batch_id, vector<int>& blocks) {
     if (blocks.empty()) {
         return;
@@ -135,7 +158,28 @@ absl::StatusOr<int> StreamCacheResource::initKVBlock(int token_capacity, size_t 
         }
     }
 
-    return incrKVBlock(token_capacity, reserve_step);
+    auto res = incrKVBlock(token_capacity, reserve_step);
+    if (reuseCache()
+        && !stream_->calculateLoss()) {  // 如果开启query内部reuse cache，在insert cache的时候还不知道loss，无法复用
+        insertIntoCache();
+    }
+    return res;
+}
+
+void StreamCacheResource::insertIntoCache() {
+    reConstructCacheKeys();
+    for (size_t batch_id = 0; batch_id < batch_resource_.batchSize(); batch_id++) {
+        const auto&   blocks     = batch_resource_.blocks(batch_id);
+        auto          tokens_id  = stream_->completeTokenIdsVec(batch_id);
+        const auto&   cache_keys = stream_->cacheKeys(batch_id);
+        vector<float> loss;
+        if (stream_->getLoss()) {
+            loss = rtp_llm::buffer2vector<float>(*(stream_->getLoss()));
+        }
+        CacheManager::FreeInfo free_info(stream_->streamId(), tokens_id, cache_keys, blocks, loss, adapter_name_);
+        resource_context_.cache_manager->insertIntoCache(free_info);
+    }
+    return;
 }
 
 absl::StatusOr<int> StreamCacheResource::incrKVBlock(int token_capacity, size_t reserve_step) {
