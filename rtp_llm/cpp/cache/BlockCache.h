@@ -6,7 +6,7 @@
 #include <vector>
 #include <mutex>
 #include <unordered_map>
-
+#include <sstream>
 #include "rtp_llm/cpp/utils/LRUCache.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
@@ -19,6 +19,20 @@ struct CacheItem {
     std::vector<float>   loss;
     bool                 is_resident = false;
     size_t               item_key;
+    std::string          debugString() {
+        std::stringstream debug_string;
+        debug_string << "FreeInfo item_key: " << item_key << ", token_ids: ";
+        debug_string << " cache_keys: ";
+        for (auto& v : cache_key) {
+            debug_string << v << ", ";
+        }
+        debug_string << " block_indices: ";
+        for (auto& v : block_indices) {
+            debug_string << v << ", ";
+        }
+
+        return debug_string.str();
+    }
 };
 
 const size_t kCacheMaxCapacity = 1000000;
