@@ -87,8 +87,6 @@ public:
     DeviceBase* device_{nullptr};
 
 private:
-    static const int                                  MIN_CACHE_INPUT_TOKEN_NUM = 512;
-    static const int                                  MIN_CACHE_BATCH_SIZE      = 256;
     std::deque<std::shared_ptr<FlashInferAttnParams>> PRIVATE_DECODE_PARAMS_CACHE;
     std::deque<std::shared_ptr<FlashInferAttnParams>> PRIVATE_PREFILL_PARAMS_CACHE;
 };

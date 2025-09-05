@@ -139,7 +139,7 @@ build:arm --copt=-Wno-array-parameter # boringssl
 # 3fs
 build:3fs --copt="-DENABLE_3FS=1"
 
-build:debug --copt -g --copt -O0 --copt -U_FORTIFY_SOURCE
+build:debug --copt -g --copt -O0 --copt -U_FORTIFY_SOURCE --copt -DEXCLUDE_SM_100=1 --copt -DEXCLUDE_SM_120=1
 build:trace --copt="-DCUTLASS_DEBUG_TRACE_LEVEL=1"
 
 build:cicd --remote_upload_local_results

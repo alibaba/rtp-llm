@@ -5,6 +5,9 @@
 using namespace torch_ext;
 namespace rtp_llm {
 
+static const int MIN_CACHE_INPUT_TOKEN_NUM = 512;
+static const int MIN_CACHE_BATCH_SIZE      = 256;
+
 GraphBase* CudaDevice::getDeviceGraphRunner(const DeviceInitParams& params,
                                             py::object              py_instance,
                                             int                     kv_cache_block_offset,
