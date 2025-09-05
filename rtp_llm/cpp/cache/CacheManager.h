@@ -18,6 +18,7 @@
 #include "rtp_llm/cpp/cache/KvCacheInfo.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/MemoryBlockCache.h"
+#include <sstream>
 
 namespace rtp_llm {
 
@@ -31,6 +32,17 @@ public:
         size_t             remote_reuse_length = 0;
         std::vector<int>   cache_blocks;
         std::vector<float> loss;
+        std::string        debugString() const {
+            std::stringstream debug_string;
+            debug_string << "MatchInfo reuse_length: " << reuse_length << ", local_reuse_length: " << local_reuse_length
+                         << ",remote_reuse_length: " << remote_reuse_length << ";cache_blocks: ";
+
+            for (auto& v : cache_blocks) {
+                debug_string << v << ", ";
+            }
+
+            return debug_string.str();
+        }
     };
 
     struct AdvancedMallocInfo {
@@ -91,6 +103,23 @@ public:
         const std::string           adapter_name;
         bool                        enable_3fs                = false;
         bool                        enable_memory_block_cache = false;
+        std::string                 debugString() const {
+            std::stringstream debug_string;
+            debug_string << "FreeInfo request_id: " << request_id << ", token_ids: ";
+            /*for (auto& v : token_ids) {
+                debug_string << v << ", ";
+            }*/
+            debug_string << " cache_keys: ";
+            for (auto& v : cache_keys) {
+                debug_string << v << ", ";
+            }
+            debug_string << " block_indices: ";
+            for (auto& v : block_indices) {
+                debug_string << v << ", ";
+            }
+
+            return debug_string.str();
+        }
     };
 
 public:
@@ -120,6 +149,7 @@ public:
     // returns the number of new available blocks if given blocks are freed
     size_t newFreeBlocks(const std::vector<int>& indice);
     void   insertResidentCache(FreeInfo& free_info);
+    void   insertIntoCache(FreeInfo& free_info);
 
     virtual void setKVBlockValue(int block_index, int layer_id, rtp_llm::Buffer& k_buffer, rtp_llm::Buffer& v_buffer);
     virtual void setKVBlockValue(int block_index, rtp_llm::Buffer& k_buffer, rtp_llm::Buffer& v_buffer);
@@ -161,11 +191,7 @@ protected:
     void                               maybeFreeBlockFromCache(int nums);
 
     void freeWithoutLock(const std::vector<int>& indice);
-    void insertIntoCache(FreeInfo& free_info);
-
-    void incrQueryRefCounter(const std::vector<int>& blocks);
-    void decrQueryRefCounter(const std::vector<int>& blocks);
-
+    void insertCacheThenFree(FreeInfo& free_info);
     void reportMetricsLoop();
 
     const std::shared_ptr<KVCacheAllocator>& kvCacheAllocator() const;
@@ -185,6 +211,9 @@ private:
     void putToMemoryBlockCache(const CacheItem& item, const FreeInfo& free_info);
 
     void incrBlockRefCounter(const std::vector<int>& blocks);
+    void decrBlockRefCounter(const std::vector<int>& blocks);
+    void incrQueryRefCounter(const std::vector<int>& blocks);
+    void decrQueryRefCounter(const std::vector<int>& blocks);
 
 protected:
     CacheConfig          config_;
