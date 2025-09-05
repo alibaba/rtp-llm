@@ -1,6 +1,7 @@
 import functools
 import json
 import logging
+import os
 from abc import ABC
 from typing import List, Optional, Tuple
 
@@ -65,8 +66,33 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
     ):
         super().__init__(tokenizer, renderer_params)
         self._setup_stop_words()
+        self._setup_chat_template()
         # 避免短期内多次encode prompt的开销
         self._cached_encode = functools.lru_cache()(self.tokenizer.encode)
+
+    def _setup_chat_template(self):
+        """设置聊天模板, 兼容自定义读取chat_template的情况, 目前主要用于支持kimi-0905和GLM45"""
+        self.chat_template = self.tokenizer.chat_template
+        if not self.chat_template:
+            logging.warning(
+                "Tokenizer does not have a chat template, try load default."
+            )
+            tokenizer_path = self.tokenizer.name_or_path
+            if tokenizer_path and os.path.exists(tokenizer_path):
+                default_template_path = os.path.join(
+                    tokenizer_path, "chat_template.jinja"
+                )
+                if os.path.exists(default_template_path):
+                    with open(default_template_path, "r") as f:
+                        # load all content
+                        self.chat_template = f.read()
+                    logging.info(
+                        f"loaded default chat template from {default_template_path}"
+                    )
+                else:
+                    logging.warning(
+                        f"Default chat template not found at {default_template_path}, using empty template."
+                    )
 
     def _setup_stop_words(self):
         """设置额外的停止词，子类可以重写"""
@@ -145,7 +171,7 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         self._customize_jinja_env(env)
 
         try:
-            template = env.from_string(self.tokenizer.chat_template)
+            template = env.from_string(self.chat_template)
             rendered_prompt = template.render(**context)
             return rendered_prompt
         except Exception as e:

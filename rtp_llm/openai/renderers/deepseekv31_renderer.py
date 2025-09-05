@@ -120,30 +120,9 @@ class DeepseekV31Renderer(ReasoningToolBaseRenderer):
     3. ReasoningParser只有在渲染的prompt以<think>结尾时 且在think_mode下, 才会创建reasoning解析
     """
 
-    def __init__(
-        self, tokenizer: PreTrainedTokenizerBase, renderer_params: RendererParams
-    ):
-        super().__init__(tokenizer, renderer_params)
-
+    @override
+    def _setup_chat_template(self):
         self.chat_template = TOOL_CHAT_TEMPLATE_DEEPSEEKV31
-
-        # self.chat_template = self.tokenizer.chat_template
-        # tokenizer_path = self.tokenizer.name_or_path
-        # if tokenizer_path and os.path.exists(tokenizer_path):
-        #     default_template_path = os.path.join(
-        #         tokenizer_path, "tool_chat_template_deepseekv31.jinja"
-        #     )
-        #     if os.path.exists(default_template_path):
-        #         with open(default_template_path, "r") as f:
-        #             # load all content
-        #             self.chat_template = f.read()
-        #         logging.info(
-        #             f"loaded default chat template from {default_template_path}"
-        #         )
-        #     else:
-        #         logging.warning(
-        #             f"Default chat template not found at {default_template_path}, using empty template."
-        #         )
 
     def _build_prompt(self, request: ChatCompletionRequest) -> str:
         """

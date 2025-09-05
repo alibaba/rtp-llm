@@ -25,33 +25,6 @@ from rtp_llm.openai.renderers.sglang_helpers.reasoning_parser import ReasoningPa
 class ChatGlm45Renderer(ReasoningToolBaseRenderer):
     """ChatGLM45Renderer 使用 GLM4MoeDetector 进行工具调用解析"""
 
-    def __init__(
-        self, tokenizer: PreTrainedTokenizerBase, renderer_params: RendererParams
-    ):
-        super().__init__(tokenizer, renderer_params)
-
-        self.chat_template = self.tokenizer.chat_template
-        if not self.chat_template:
-            logging.warning(
-                "Glm 4 tokenizer does not have a chat template, try load default."
-            )
-            tokenizer_path = self.tokenizer.name_or_path
-            if tokenizer_path and os.path.exists(tokenizer_path):
-                default_template_path = os.path.join(
-                    tokenizer_path, "chat_template.jinja"
-                )
-                if os.path.exists(default_template_path):
-                    with open(default_template_path, "r") as f:
-                        # load all content
-                        self.chat_template = f.read()
-                    logging.info(
-                        f"loaded default chat template from {default_template_path}"
-                    )
-                else:
-                    logging.warning(
-                        f"Default chat template not found at {default_template_path}, using empty template."
-                    )
-
     @override
     def _setup_stop_words(self):
         """设置GLM45特定的停止词"""
