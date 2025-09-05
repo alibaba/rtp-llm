@@ -47,7 +47,7 @@ private:
     ErrorInfo getStrHash(int32_t* token_ids, std::string& url, int mm_emb_len);
 
     virtual ErrorResult<MultimodalOutput>
-    MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs) = 0;
+    MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs, std::string ip_port = "") = 0;
 
     ErrorResult<ExpandedOutput> expandTokenIds(const std::vector<torch::Tensor>&           mm_embedding,
                                                rtp_llm::BufferPtr                          token_ids,
@@ -64,7 +64,7 @@ public:
     ErrorInfo updateMultimodalFeatures(std::shared_ptr<rtp_llm::EmbeddingInput>&    input,
                                        const std::vector<rtp_llm::MultimodalInput>& mm_inputs);
 
-    ErrorResult<MultimodalFeature> getMultimodalFeatures(const rtp_llm::BufferPtr&                    input_ids,
+    ErrorResult<MultimodalFeature> getMultimodalFeatures(const rtp_llm::BufferPtr&                    input_ids, 
                                                          const std::vector<rtp_llm::MultimodalInput>& mm_inputs);
 };
 

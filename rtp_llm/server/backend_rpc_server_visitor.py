@@ -45,7 +45,7 @@ class BackendRPCServerVisitor:
         if hasattr(config.role_type, "value"):
             config_role_type = config.role_type.value
 
-        if config.vit_separation == 1 and host_args.vit_domain:
+        if config.vit_separation == 2 and host_args.vit_domain:
             role_list.append(RoleType.VIT)
             logging.info("Added VIT role")
 

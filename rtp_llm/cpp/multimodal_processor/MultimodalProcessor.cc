@@ -191,7 +191,17 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
     if (input->generate_config && input->generate_config->calculate_loss) {
         return ErrorInfo(ErrorCode::MM_NOT_SUPPORTED_ERROR, "cannot calculate loss in multimodal query");
     }
-    CHECK_AND_RETURN_REF(mm_embedding_res, MultimodalEmbedding(input->multimodal_inputs.value()));
+    std::string ip_port = "";
+    if (input->generate_config) {
+        for(auto & role_addr : input->generate_config->role_addrs) {
+            if (role_addr.role == RoleType::VIT) {
+                ip_port = role_addr.ip + ":" + std::to_string(role_addr.grpc_port);
+                break;
+            }
+        }
+    }
+
+    CHECK_AND_RETURN_REF(mm_embedding_res, MultimodalEmbedding(input->multimodal_inputs.value(), ip_port));
     input->multimodal_features = std::move(mm_embedding_res.mm_features);
     input->mm_position_ids     = std::move(mm_embedding_res.mm_position_ids);
     CHECK_AND_RETURN_REF(
@@ -206,7 +216,7 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
 
 ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm::EmbeddingInput>&    input,
                                                         const std::vector<rtp_llm::MultimodalInput>& mm_inputs) {
-    CHECK_AND_RETURN_REF(mm_embedding_res, MultimodalEmbedding(mm_inputs));
+    CHECK_AND_RETURN_REF(mm_embedding_res, MultimodalEmbedding(mm_inputs, ""));
     MultimodalFeature mm_features;
     mm_features.features = std::move(mm_embedding_res.mm_features);
     CHECK_AND_RETURN_REF(expanded_ids,
