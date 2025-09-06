@@ -126,6 +126,12 @@ def deep_ep_deps():
         actual = "@deep_ep//:deep_ep"
     )
 
+def deep_ep_py_deps():
+    native.alias(
+        name = "deep_ep_py",
+        actual = "//rtp_llm:empty_target",
+    )
+
 def deep_gemm_deps():
     native.alias(
         name = "deep_gemm",

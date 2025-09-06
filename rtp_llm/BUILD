@@ -106,6 +106,13 @@ filegroup(
 )
 
 py_library(
+    name = "empty_target",
+    srcs = [],
+    deps = [],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "utils",
     srcs = glob([
         "utils/**/*.py",
