@@ -73,7 +73,6 @@ private:
     int                           token_capacity_           = 0;
     std::atomic<bool>             stop_                     = false;
     std::mutex                    lock_;
-    mutable std::shared_mutex     read_write_lock_;
     std::condition_variable       cond_;
     kmonitor::MetricsReporterPtr  metrics_reporter_ = nullptr;
     std::atomic<int64_t> waiting_query_len_{0};

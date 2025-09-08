@@ -90,7 +90,7 @@ void FIFOScheduler::evictDoneStreams(list<GenerateStreamPtr>& streams, StreamSta
 
 absl::Status FIFOScheduler::enqueue(const GenerateStreamPtr& stream) {
     {
-        std::unique_lock<std::shared_mutex> lock(read_write_lock_);
+        std::lock_guard<std::mutex> lock(lock_);
         waiting_streams_.emplace_back(stream);
         waiting_query_len_.fetch_add(stream->inputLength(), std::memory_order_relaxed);
     }
@@ -100,7 +100,7 @@ absl::Status FIFOScheduler::enqueue(const GenerateStreamPtr& stream) {
 
 absl::Status FIFOScheduler::batchEnqueue(const vector<GenerateStreamPtr>& streams) {
     {
-        std::unique_lock<std::shared_mutex> lock(read_write_lock_);
+        std::lock_guard<std::mutex> lock(lock_);
         waiting_streams_.insert(waiting_streams_.end(), streams.begin(), streams.end());
         for (const auto& stream : streams) {
             waiting_query_len_.fetch_add(stream->inputLength(), std::memory_order_relaxed);
@@ -338,22 +338,22 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule(size_t reserve_s
 }
 
 int64_t FIFOScheduler::waitingStreamsSize() {
-    std::shared_lock<std::shared_mutex> lock(read_write_lock_);
+    std::lock_guard<mutex> lock(lock_);
     return waiting_streams_.size();
 }
 
 int64_t FIFOScheduler::runningStreamsSize() {
-    std::shared_lock<std::shared_mutex> lock(read_write_lock_);
+    std::lock_guard<mutex> lock(lock_);
     return running_streams_.size();
 }
 
 int64_t FIFOScheduler::onflightStreams() {
-    std::shared_lock<std::shared_mutex> lock(read_write_lock_);
+    std::lock_guard<mutex> lock(lock_);
     return waiting_streams_.size() + running_streams_.size();
 }
 
 std::vector<EngineScheduleInfo::TaskInfo> FIFOScheduler::waitingTaskList() {
-    std::shared_lock<std::shared_mutex> lock(read_write_lock_);
+    std::lock_guard<mutex> lock(lock_);
     waiting_task_list_.clear();
     waiting_task_list_.reserve(waiting_streams_.size());
     for (const auto& stream : waiting_streams_) {
@@ -367,7 +367,7 @@ std::vector<EngineScheduleInfo::TaskInfo> FIFOScheduler::waitingTaskList() {
 }
 
 std::vector<EngineScheduleInfo::TaskInfo> FIFOScheduler::runningTaskList() {
-    std::shared_lock<std::shared_mutex> lock(read_write_lock_);
+    std::lock_guard<mutex> lock(lock_);
     running_task_list_.clear();
     running_task_list_.reserve(running_streams_.size());
     for (const auto& stream : running_streams_) {
