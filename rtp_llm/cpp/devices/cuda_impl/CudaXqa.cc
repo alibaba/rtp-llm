@@ -21,10 +21,10 @@ BufferPtr getKVCacheScale(CudaDevice* device) {
 
 BufferPtr
 getSemaphores(CudaDevice* device, size_t kv_head_num, size_t group_size, size_t max_q_len, size_t max_batch_size) {
-    size_t nb_blocks_per_grp =
-        std::max(div_up(max_q_len * group_size, M_TILESIZE), div_up(max_q_len, M_TILESIZE / group_size));
-    size_t    sem_size      = kv_head_num * nb_blocks_per_grp * max_batch_size;
-    size_t    real_sem_size = round_up<size_t>(sem_size, 2) + 2 + sem_size + 2;
+    size_t    nb_blocks_per_grp = std::max(ceil_div<size_t>(max_q_len * group_size, M_TILESIZE),
+                                        ceil_div<size_t>(max_q_len, M_TILESIZE / group_size));
+    size_t    sem_size          = kv_head_num * nb_blocks_per_grp * max_batch_size;
+    size_t    real_sem_size     = round_up<size_t>(sem_size, 2) + 2 + sem_size + 2;
     BufferPtr semaphores =
         device->allocateBuffer({DataType::TYPE_UINT32, {real_sem_size}, AllocationType::DEVICE}, {"semaphores"});
     device->bufMemset(*semaphores, 0);
@@ -44,9 +44,8 @@ void* getScratch(CudaDevice* device, size_t group_size, uint32_t beam_width) {
 }
 
 BufferPtr getSpecQMask(CudaDevice* device, size_t max_q_len, size_t max_batch_size) {
-    const size_t num_bits_per_packed_mask = sizeof(uint32_t) * 8;
-    const size_t num_packed_masks_per_token =
-        static_cast<size_t>((max_q_len + num_bits_per_packed_mask - 1) / num_bits_per_packed_mask);
+    const size_t          num_bits_per_packed_mask   = sizeof(uint32_t) * 8;
+    const size_t          num_packed_masks_per_token = ceil_div<size_t>(max_q_len, num_bits_per_packed_mask);
     std::vector<bool>     host_mask(max_q_len * max_q_len);
     std::vector<uint32_t> host_packed_mask(max_batch_size * max_q_len * num_packed_masks_per_token);
     for (uint32_t i = 0; i < max_batch_size; ++i) {

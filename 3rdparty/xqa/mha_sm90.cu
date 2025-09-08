@@ -2969,9 +2969,14 @@ void XQA_FUNC_SM90(cudaDeviceProp const& prop,
         return size;
     }();
     // printf("smemSize = %u\n", hostSmemSize);
-    uint32_t const nbVHeads       = nbKHeads;
-    uint32_t const nbQHeads       = nbKHeads * headGrpSize;
-    uint32_t const nbQKVHeads     = nbQHeads + nbKHeads + nbVHeads;
+    uint32_t const nbVHeads   = nbKHeads;
+    uint32_t const nbQHeads   = nbKHeads * headGrpSize;
+    uint32_t const nbQKVHeads = nbQHeads + nbKHeads + nbVHeads;
+#if SPEC_DEC
+    uint32_t const qSeqLen = specDecParams.qSeqLen;
+#else
+    uint32_t const qSeqLen = 1;
+#endif
     uint32_t const nbSubSeqPerSeq = [&]() -> uint32_t {
         auto const env = std::getenv("XQA_NB_SUB_SEQ");
         if (env != nullptr) {
@@ -2980,16 +2985,20 @@ void XQA_FUNC_SM90(cudaDeviceProp const& prop,
                 return val;
             }
         }
-        float const factor = 0.25f;
+#if SPEC_DEC
+        return mha::max<uint32_t>(
+            1U, prop.multiProcessorCount / (divUp(qSeqLen, inputTokensPerCta) * batchSize * nbKHeads));
+#else
+        float const factor = mha::min<float>(
+            0.75f,
+            mha::max<float>(0.25f,
+                            std::sqrt(static_cast<float>(batchSize * nbKHeads))
+                                * mha::min<float>(1.f, static_cast<float>(maxSeqLen) / 8192.f) * 0.07f));
         return mha::min<uint32_t>(
             mha::max<uint32_t>(1U, (uint32_t)round(prop.multiProcessorCount * 3 / (batchSize * nbKHeads) * factor)),
             divUp(maxSeqLen, gemm0CtaTileNbTokens));
-    }();
-#if SPEC_DEC
-    uint32_t const qSeqLen = specDecParams.qSeqLen;
-#else
-    uint32_t const qSeqLen = 1;
 #endif
+    }();
     // gridDim.z == nbKHeads * batchSize && gridDim.y == nbSubSeqPerSeq && gridDim.x == nbInputSeqSplit
     dim3 const dimGrid{divUp(qSeqLen, inputTokensPerCta), nbSubSeqPerSeq, nbKHeads * batchSize};
     dim3 const dimCta{warp_size * gmmaWarpsPerGrp, 1, 3};
