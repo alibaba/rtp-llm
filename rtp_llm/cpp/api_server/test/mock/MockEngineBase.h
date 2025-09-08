@@ -20,6 +20,7 @@ public:
     MOCK_METHOD0(stop, absl::Status());
     MOCK_METHOD2(preRun, absl::StatusOr<GenerateStreamPtr>(const std::shared_ptr<GenerateInput>&, preRunMode));
     MOCK_METHOD1(getLoadBalanceInfo, LoadBalanceInfo(int64_t));
+    MOCK_METHOD2(getCacheStatusInfo, KVCacheInfo(int64_t, bool));
 };
 
 }  // namespace rtp_llm

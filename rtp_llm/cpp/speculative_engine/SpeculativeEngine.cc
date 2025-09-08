@@ -204,12 +204,12 @@ absl::Status SpeculativeEngine::initCacheManager(std::optional<WarmUpResult> war
             RTP_LLM_LOG_INFO("mtp cache manager init use layer num : %d", layer_num);
             for (int i = 0; i < layer_num; i++) {
                 RTP_LLM_CHECK(proposer_cache_config.layer_num == 1);
-                resource_context_.mtp_cache_managers.push_back(
-                    std::make_shared<CacheManager>(proposer_cache_config, device_, false, metrics_reporter_));
+                resource_context_.mtp_cache_managers.push_back(std::make_shared<CacheManager>(
+                    proposer_cache_config, device_, false, metrics_reporter_, score_model_params_.gpt_init_parameter));
             }
         } else {
-            resource_context_.propose_cache_manager =
-                make_shared<CacheManager>(proposer_cache_config, device_, false, metrics_reporter_);
+            resource_context_.propose_cache_manager = make_shared<CacheManager>(
+                proposer_cache_config, device_, false, metrics_reporter_, score_model_params_.gpt_init_parameter);
         }
 
     } else {
@@ -279,8 +279,7 @@ LoadBalanceInfo SpeculativeEngine::getLoadBalanceInfo(int64_t latest_version) {
                            (int64_t)step_recorder_.getStepPerMin(),
                            (int64_t)scheduler_->onflightStreams(),
                            (int64_t)scheduler_->waitingQueryLen(),
-                           (int64_t)scheduler_->runningQueryLen()
-                           };
+                           (int64_t)scheduler_->runningQueryLen()};
 }
 
 absl::Status SpeculativeEngine::startLoop() {
@@ -727,6 +726,10 @@ bool SpeculativeEngine::updateEplbConfig(const EplbConfig& config) {
         return score_executor_->updateEplbConfig(config) && propose_executor_->updateEplbConfig(config);
     }
     return true;
+}
+
+KVCacheInfo SpeculativeEngine::getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) {
+    return resource_context_.cache_manager->getKVCacheInfo(latest_version, need_cache_keys);
 }
 
 }  // namespace rtp_llm
