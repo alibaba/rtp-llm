@@ -1,9 +1,10 @@
 import copy
 import json
+import logging
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Union
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.config.generate_config import GenerateConfig, RequestFormat
+from rtp_llm.config.generate_config import GenerateConfig, RequestFormat, RoleAddr
 
 request_id_field_name = "__request_id__"
 
@@ -72,6 +73,27 @@ class RequestExtractor:
         self, kwargs: Dict[str, Any]
     ) -> Tuple[GenerateConfig, Dict[str, Any]]:
         generate_config, remain_kwargs = self._format_generate_config(kwargs)
+
+        # Handle role_addrs parsing - convert dict to RoleAddr objects
+        if hasattr(generate_config, "role_addrs") and generate_config.role_addrs:
+            try:
+                # Check if we have dict objects that need conversion
+                if generate_config.role_addrs and isinstance(
+                    generate_config.role_addrs[0], dict
+                ):
+                    generate_config.role_addrs = [
+                        (
+                            RoleAddr(**addr_data)
+                            if isinstance(addr_data, dict)
+                            else addr_data
+                        )
+                        for addr_data in generate_config.role_addrs
+                    ]
+                # Store original role_addrs for PD separation scenario
+                generate_config.original_role_addrs = generate_config.role_addrs.copy()
+            except Exception as e:
+                logging.warning(f"Failed to parse role_addrs: {e}")
+
         return self._format_chat_api_messages(generate_config, remain_kwargs)
 
     def _get_text(self, kwargs: Dict[str, Any]):

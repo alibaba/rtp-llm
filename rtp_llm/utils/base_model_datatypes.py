@@ -3,7 +3,7 @@ from typing import Any, Dict, List, NamedTuple, Optional
 import torch
 from pydantic import BaseModel as PyBaseModel
 
-from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.config.generate_config import GenerateConfig, RoleAddr, RoleType
 from rtp_llm.utils.multimodal_util import MultimodalInput
 from rtp_llm.utils.weight_type import WEIGHT_TYPE
 

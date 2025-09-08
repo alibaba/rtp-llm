@@ -127,7 +127,7 @@ class BackendRPCServerVisitor:
             missing_roles
         )
         if role_addrs:
-            input.generate_config.role_addrs = role_addrs
+            input.generate_config.role_addrs.extend(role_addrs)
             route_logger.warning(
                 f"fallback to host service, request <{input.request_id}> route to address: {role_addrs}"
             )
