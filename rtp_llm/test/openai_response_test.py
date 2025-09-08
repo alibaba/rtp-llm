@@ -14,9 +14,6 @@ from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
-from rtp_llm.frontend.tokenizer_factory.tokenizers.tokenization_chatglm3 import (
-    ChatGLMTokenizer,
-)
 from rtp_llm.frontend.tokenizer_factory.tokenizers.tokenization_qwen import (
     QWenTokenizer,
 )
@@ -333,9 +330,11 @@ class BaseToolCallTestSuite:
         merged_result: ChatCompletionStreamResponse = merge_stream_responses(chunk_list)
         self._validate_merged_result(merged_result)
 
+
 class QwenTestTokenizer(BaseTokenizer):
-    def __init__(self, vocab_file):
-        self.tokenizer = QWenTokenizer(vocab_file)
+    def init_tokenizer(self, tokenizer_path: str, config_json={}):
+        self.tokenizer = QWenTokenizer(tokenizer_path)
+
 
 class OpenaiResponseTest(IsolatedAsyncioTestCase):
     def __init__(self, *args: Any, **kwargs: Any):
