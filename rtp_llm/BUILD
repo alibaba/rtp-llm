@@ -512,19 +512,6 @@ whl_reqs = [
     "concurrent_log_handler",
 ] + whl_deps() + platform_deps() + xft_dep
 
-py_wheel(
-    name = "rtp_llm_frontend_whl",
-    distribution = "rtp_llm_frontend",
-    python_tag = "py3",
-    tags = ["manual", "local"],
-    version = RELEASE_VERSION,
-    deps = [
-        ":rtp_llm_frontend_package",
-        "//deps:extension_package_frontend"
-    ],
-    requires = whl_reqs
-)
-
 # target for wheel
 py_wheel(
     name = "rtp_llm_whl",
@@ -532,10 +519,16 @@ py_wheel(
     python_tag = "py3",
     tags = ["manual", "local", "no-remote"],
     version = RELEASE_VERSION,
-    deps = [
-        ":rtp_llm_package",
-        "//deps:extension_package",
-    ],
+    deps = select({
+        "@//:frontend": [
+            ":rtp_llm_frontend_package",
+            "//deps:extension_package_frontend"
+        ],
+        "//conditions:default": [
+            ":rtp_llm_package",
+            "//deps:extension_package"
+        ],
+    }),
     requires = whl_reqs,
 )
 
