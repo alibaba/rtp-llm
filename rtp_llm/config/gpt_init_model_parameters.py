@@ -464,6 +464,7 @@ class GptInitModelParameters:
         self.is_mtp = False
         self.qk_norm = False
         self.quant_config = None
+        self.config_dtype = None
 
         # For cpp, we use `gpt_init_params`, `py_env_configs` for python.
         # There are some common envs in cpp and python, so they will

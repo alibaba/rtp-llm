@@ -14,6 +14,7 @@ from rtp_llm.ops import (
 from rtp_llm.ops import RtpLLMOp as CppRtpLLMOp
 from rtp_llm.ops import WorkerStatusInfo
 from rtp_llm.utils.mm_process_engine import MMProcessEngine
+from rtp_llm.ops import get_block_cache_keys as cpp_get_block_cache_keys
 
 
 class RtpLLMOp:
