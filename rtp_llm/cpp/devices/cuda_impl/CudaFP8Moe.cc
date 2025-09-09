@@ -368,7 +368,7 @@ FfnLayerOutput CudaDevice::moeFfnFp8Masked(const FfnLayerParams& params, const M
                                                    (token_num <= 120 ? pad_to_multiple_of_120(token_num) :
                                                                        pad_to_multiple_of_128(token_num)))))));
     size_t max_num_rows            = token_num * top_k;
-    size_t expected_m              = ceil_div<size_t>(max_num_rows, num_experts_per_node);
+    size_t expected_m              = std::min(padding_size, ceil_div<size_t>(max_num_rows, num_experts));
     auto   permuted_src_row_to_dst = allocateBuffer({DataType::TYPE_INT32, {max_num_rows}}, {"permuted_rows"});
     auto   masked_m                = allocateBuffer({DataType::TYPE_INT32, {num_experts_per_node}}, {"masked_m"});
     computeSrc2Dst(expert_first_token_offset->data<int64_t>(),
