@@ -22,7 +22,7 @@ class TaskInfo(BaseModel):
 
 class CacheStatus(BaseModel):
     available_kv_cache: int = -1
-    total_kv_cache: int  = -1
+    total_kv_cache: int = -1
     block_size: int = -1
     version: int = -1
     cached_keys: Optional[List[int]] = None
@@ -91,6 +91,6 @@ class ServerStatus(BaseModel):
 
 class ScheduleMeta(BaseModel):
     server_status: List[ServerStatus]
-    cache_local: int  # 0: LOCAL, 1: REMOTE
+    cache_local: int = 0  # 0: LOCAL, 1: REMOTE
     inter_request_id: int
     code: int = 200  # 200: OK
