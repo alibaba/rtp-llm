@@ -75,7 +75,7 @@ def gen_cu_and_lib(name, params_list, split_num, template_header, template, temp
 
     native.cc_library(
         name = name + "_inst",
-        hdrs = ["DeepGemmPlugin.h"],
+        hdrs = ["DeepGemmPlugin.h", "ConfigUtils.h"],
         srcs = ["DeepGemmPlugin.cpp"] + [
             ":" + name + "_" + str(i) + "_inst" for i in range((len(params_list) + split_num - 1) // split_num)
         ],

@@ -115,7 +115,8 @@ public:
         calcDiff(ref_output, gemm_output);
     }
 
-    void RunDeepGeemPluginGroupedMaskedTest(int m, int n, int k, int num_groups) {
+    void
+    RunDeepGeemPluginGroupedMaskedTest(int m, int n, int k, int num_groups, int expected_m = 0, bool run_v2 = false) {
         auto input = torch::randn({(int)1, (int)m, (int)k}, torch::device(torch::kCUDA))
                          .to(torch::kFloat8_e4m3fn)
                          .repeat({num_groups, 1, 1})
@@ -165,7 +166,14 @@ public:
             {DataType::TYPE_BF16, {(unsigned long)num_groups, (size_t)m, (unsigned long)n}, AllocationType::DEVICE});
         device_->bufMemset(*output, 0);
         auto masked_m_b = torchTensor2Buffer(masked_m);
-        DeepGemmPlugin::groupedGemmFp8Masked(*lhs, *rhs, *output, *masked_m_b, m, 0);
+        if (!expected_m) {
+            expected_m = m;
+        }
+        if (run_v2) {
+            DeepGemmPlugin::groupedGemmFp8Masked_V2(*lhs, *rhs, *output, *masked_m_b, expected_m, 0);
+        } else {
+            DeepGemmPlugin::groupedGemmFp8Masked(*lhs, *rhs, *output, *masked_m_b, expected_m, 0);
+        }
         auto gemm_output = torch::from_blob(output->data(),
                                             {(int64_t)num_groups, (int64_t)m, (int64_t)n},
                                             torch::TensorOptions().dtype(torch::kBFloat16).device(torch::kCUDA));
@@ -196,4 +204,5 @@ TEST_F(DeepGemmPluginTest, GroupedTest) {
     RunDeepGemmPluginGroupedContiguousTest(128, 4096, 7168, 2);
     RunDeepGeemPluginGroupedMaskedTest(16, 3072, 4096, 16);
     RunDeepGeemPluginGroupedMaskedTest(128, 3072, 4096, 16);
+    RunDeepGeemPluginGroupedMaskedTest(120, 6144, 8192, 5);
 }

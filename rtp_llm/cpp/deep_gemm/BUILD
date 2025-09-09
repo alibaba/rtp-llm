@@ -91,7 +91,7 @@ cc_library(
 
 cc_library(
     name = "deep_gemm_plugins_impl",
-    hdrs = ["DeepGemmPlugin.h"],
+    hdrs = ["DeepGemmPlugin.h", "ConfigUtils.h"],
     srcs = ["DeepGemmPlugin.cpp", ":deepgemm_dispatch"],
     copts = copts(),
     deps = [
@@ -110,6 +110,35 @@ cc_test(
     name = "deep_gemm_plugin_test",
     srcs = [
         "test/deep_gemm_plugin_test.cpp",
+    ],
+    copts = copts(),
+    linkopts = [
+        "-lpython3.10",
+        "-ltorch",
+        "-lc10",
+        "-ltorch_cpu",
+        "-ltorch_python",
+        "-L/usr/local/cuda/lib64",
+        "-lnvToolsExt",
+        "-L/usr/local/cuda/extras/CUPTI/lib64",
+        "-lcupti",
+    ],
+    deps = [
+        ":deep_gemm_plugins_impl",
+        "@com_google_googletest//:gtest",
+        "//rtp_llm/cpp/core:buffer_torch",
+        "//rtp_llm/cpp/devices/testing:device_test_utils",
+        "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
+    ],
+    timeout = "long",
+    tags = ["open_skip", "H20"],
+    exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
+    name = "config_utils_test",
+    srcs = [
+        "test/config_utils_test.cpp",
     ],
     copts = copts(),
     linkopts = [
