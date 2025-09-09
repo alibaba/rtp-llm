@@ -27,3 +27,18 @@ filegroup(
 #     exec_properties = {'gpu':'A10','gpu_count':'2'},
 #     env = {"GPU_COUNT": "2"},
 # )
+
+py_test (
+    name = "deep_ep_test",
+    srcs = ["deep_ep_test.py"],
+    deps = [
+        "//rtp_llm:config",
+        "//rtp_llm:testlib",
+        "//rtp_llm/distribute:deep_ep",
+        "//rtp_llm/distribute:process_group_state",
+        "//rtp_llm/test/model_test/test_util:test_util"
+    ],
+    env = {"GPU_COUNT": "2"},
+    tags = ["open_skip", "H20"],
+    exec_properties = {'gpu':'H20', 'gpu_count':'2'},
+)
