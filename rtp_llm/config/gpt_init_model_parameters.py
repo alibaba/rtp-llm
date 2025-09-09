@@ -234,6 +234,7 @@ class GptInitModelParameters:
         "quant_config",
         "py_env_configs",
         "config_dtype",
+        "th_nccl_port",
     }
 
     # copy from rtp_llm/ops/libth_transformer.pyi for python intelligence
@@ -258,6 +259,7 @@ class GptInitModelParameters:
     dp_rank: int
     dp_size: int
     dp_tp_nccl_port: int
+    th_nccl_port: int
     embedding_size: int
     enable_eplb: bool
     enable_fast_gen: bool
@@ -452,6 +454,7 @@ class GptInitModelParameters:
         self.nccl_ip = g_master_info.ip
         self.tp_nccl_port = g_master_info.tp_nccl_port
         self.dp_tp_nccl_port = g_master_info.dp_tp_nccl_port
+        self.th_nccl_port = g_master_info.th_nccl_port
         self.ffn_tp_nccl_port = g_master_info.ffn_tp_nccl_port
         self.model_rpc_port = g_worker_info.rpc_server_port
         self.http_port = g_worker_info.http_port
