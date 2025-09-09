@@ -113,7 +113,7 @@ void TokenProcessorPerStream::init(bool                                   use_be
                                    int                                    size,
                                    const std::shared_ptr<TokenProcessor>& token_processor_cpp) {
     py::gil_scoped_acquire acquire;
-    py::module             token_processor = py::module::import("rtp_llm.utils.token_processor");
+    py::module             token_processor = py::module::import("rtp_llm.frontend.token_processor");
     py::object             cls             = token_processor.attr("TokenProcessorPerStream");
     token_processor_stream_                = cls(use_beam_search, size, token_processor_cpp->getPyObject());
 }
