@@ -22,6 +22,10 @@
 #include "3rdparty/flashinfer/flashinfer.h"
 #include "rtp_llm/cpp/th_op/ConfigModules.h"
 
+#ifdef USING_CUDA12
+#include "rtp_llm/cpp/devices/cuda_impl/CudaXqa.h"
+#endif
+
 using namespace std;
 using namespace rtp_llm;
 using namespace tensorrt_llm;
@@ -420,6 +424,30 @@ CudaDevice::selectCuFMHARunner(const AttentionConfigs& configs, DataType attn_dt
     return cufmha_runner_;
 }
 
+bool CudaDevice::checkSpec(const DevicePrepParams& params, bool skip_no_prefix) {
+    bool has_prefix = params.prefix_lengths != nullptr && params.prefix_lengths->size();
+    if (!params.configs.use_mla && has_prefix) {
+        auto input_lengths_host = params.input_lengths->slice(params.decoder_batch_size, params.context_batch_size);
+        const int batch_size    = input_lengths_host->shape()[0];
+        size_t    sp_seq_len    = init_params_.sp_config.gen_num_per_cycle;
+        size_t    max_context_input_seq_len =
+            *std::max_element(input_lengths_host->data<int>(), input_lengths_host->data<int>() + batch_size);
+        size_t min_prefix_len =
+            *std::min_element(params.prefix_lengths->data<int>(), params.prefix_lengths->data<int>() + batch_size);
+
+        RTP_LLM_LOG_DEBUG("max_context_input_seq_len %d min_prefix_len %d sp_seq_len %d.",
+                          max_context_input_seq_len,
+                          min_prefix_len,
+                          sp_seq_len);
+
+        if (skip_no_prefix && (min_prefix_len == 0 || max_context_input_seq_len > sp_seq_len + 1)) {
+            return false;
+        }
+    }
+
+    return has_prefix;
+}
+
 DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
     if (init_params_.model_specific_config.load_python_model) {
         assert(!(params.context_batch_size && params.decoder_batch_size));
@@ -435,8 +463,25 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
         selectCuFMHARunner(params.configs, params.attn_dtype, params.has_alibi_slopes);
         bool paged_kv_fmha =
             params.diff_qkv_len && params.k_cache && (params.configs.kv_cache_dtype != KvCacheDataType::INT8);
-        if (output.prefill_flash_infer_attn != nullptr && !params.configs.use_mla) {
-            fmha_type_ = FMHAType::FLASH_INFER;
+
+        if (!params.configs.use_mla && checkSpec(params)) {
+#ifdef USING_CUDA12
+            if (use_xqa && use_fp8_fmha_
+                && supportXqa(DataType::TYPE_BF16,
+                              DataType::TYPE_BF16,
+                              DataType::TYPE_FP8_E4M3,
+                              params.configs.head_num / params.configs.kv_head_num,
+                              params.configs.size_per_head,
+                              params.configs.tokens_per_block)) {
+                fmha_type_ = FMHAType::XQA;
+            } else if (output.prefill_flash_infer_attn != nullptr) {
+                fmha_type_ = FMHAType::FLASH_INFER;
+            }
+#else
+            if (output.prefill_flash_infer_attn != nullptr) {
+                fmha_type_ = FMHAType::FLASH_INFER;
+            }
+#endif
         } else if (paged_kv_fmha) {
             if (use_trtv2_fmha_paged && cufmha_runner_->trtV2FmhaPagedSupport()) {
                 fmha_type_ = FMHAType::PAGED_TRT_V2;

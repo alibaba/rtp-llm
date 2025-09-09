@@ -329,7 +329,7 @@ bool FlashInferAttnParams::check(rtp_llm::DeviceBase*             device,
         const int group_size    = attn_configs.head_num / attn_configs.kv_head_num;
         if ((dtype != DataType::TYPE_FP16 && dtype != DataType::TYPE_BF16 && dtype != DataType::TYPE_FP8_E4M3)
             || (attn_configs.kv_cache_dtype != KvCacheDataType::BASE
-                && !(attn_configs.kv_cache_dtype == KvCacheDataType::FP8 && dtype == DataType::TYPE_FP8_E4M3))
+                && attn_configs.kv_cache_dtype != KvCacheDataType::FP8)
             || (attn_configs.rope_config.style != RopeStyle::Base && attn_configs.rope_config.style != RopeStyle::No)
             || attn_configs.mask_type != causalMask || attn_configs.q_scaling != 1.0f || attn_configs.use_logn_attn
             || (size_per_head != 64 && size_per_head != 128 && size_per_head != 192)
@@ -347,34 +347,7 @@ bool FlashInferAttnParams::checkPrefill(rtp_llm::DeviceBase*             device,
                                         DataType                         dtype,
                                         bool                             skip_no_prefix) {
     RTP_LLM_LOG_DEBUG("%s", attn_configs.DebugAttentionConfigStr());
-    if (!check(device, attn_configs, dtype, true)) {
-        return false;
-    }
-    bool has_prefix = prefix_lengths_host && prefix_lengths_host->size();
-    if (attn_configs.use_mla == false && has_prefix) {
-        const int batch_size = input_lengths_host->shape()[0];
-        size_t    sp_seq_len = device->initParams().sp_config.gen_num_per_cycle;
-        size_t    max_context_input_seq_len =
-            *std::max_element(input_lengths_host->data<int>(), input_lengths_host->data<int>() + batch_size);
-        size_t min_prefix_len =
-            *std::min_element(prefix_lengths_host->data<int>(), prefix_lengths_host->data<int>() + batch_size);
-
-        RTP_LLM_LOG_DEBUG("max_context_input_seq_len %d min_prefix_len %d sp_seq_len %d.",
-                          max_context_input_seq_len,
-                          min_prefix_len,
-                          sp_seq_len);
-
-        if (skip_no_prefix && (min_prefix_len == 0 || max_context_input_seq_len > sp_seq_len + 1)) {
-            return false;
-        }
-    }
-
-    const int group_size = attn_configs.head_num / attn_configs.kv_head_num;
-    if (!has_prefix && group_size <= 5) {
-        return false;
-    }
-
-    return true;
+    return check(device, attn_configs, dtype, true);
 }
 
 bool FlashInferAttnParams::checkDecode(rtp_llm::DeviceBase*             device,
@@ -398,20 +371,13 @@ ParamsPtr FlashInferAttnParams::prepare(rtp_llm::DeviceBase*             device,
     if (batch_size == 0) {
         return nullptr;
     }
-    bool check_input = true;
-    bool is_prefill  = prefix_lengths_host != nullptr && prefix_lengths_host->size();
+    bool is_prefill = prefix_lengths_host != nullptr && prefix_lengths_host->size();
     // to underlay buffer dtype
     if (dtype == DataType::TYPE_QFP8_E4M3) {
         dtype = DataType::TYPE_FP8_E4M3;
     }
-    if (is_prefill) {
-        check_input =
-            checkPrefill(device, attn_configs, prefix_lengths_host, input_lengths_host, dtype, skip_no_prefix);
-    } else {
-        check_input = checkDecode(device, attn_configs, dtype);
-    }
     // tmp double check when models py
-    if (!check_input) {
+    if (!check(device, attn_configs, dtype, is_prefill)) {
         return nullptr;
     }
     auto       cuda_device  = dynamic_cast<CudaDevice*>(device);

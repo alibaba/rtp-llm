@@ -37,6 +37,7 @@ bool supportXqa(DataType input_type,
  * @brief run xqa for decoding attention
  *
  * @param input q [batch_size, beam_width, head_num, head_dim]
+ *              spec q [batch_size, beam_width, max_q_len, head_num, head_dim]
  * @param is_input_bf16
  * @param output [batch_size, beam_width, head_num, head_dim]
  * @param head_num
@@ -49,13 +50,13 @@ bool supportXqa(DataType input_type,
  * @param kv_cache_pool head ptr [block_nums, kv_head_num, page_size, head_dim]
  * @param kv_cache_page_list [batch_size, beam_width, 2, max_pages_per_seq]
  * @param is_kv_cache_fp8
- * @param sequence_lengths kv seq len
+ * @param sequence_lengths kv seq len [batch_size]
  * @param device
  * @param rcp_out_scale for fp8 output
  * @param max_q_len max q seqlen
- * @param q_cu_seqlens accumulate q seqlen
+ * @param q_cu_seqlens accumulate q seqlen [batch_size + 1]
+ * @param max_batch_size for semaphores and spec q mask
  * @param q_scale
- * @param max_batch_size for semaphores
  * @param beam_width
  */
 void runXqa(void*       input,
@@ -74,10 +75,10 @@ void runXqa(void*       input,
             uint32_t*   sequence_lengths,
             CudaDevice* device,
             float*      rcp_out_scale  = nullptr,
-            size_t      max_q_len      = 0,
+            size_t      max_q_len      = 2,
             void*       q_cu_seqlens   = nullptr,
+            size_t      max_batch_size = 4096,
             float       q_scale        = 1.f,
-            size_t      max_batch_size = 1024,
             uint32_t    beam_width     = 1);
 
 }  // namespace rtp_llm

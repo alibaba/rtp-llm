@@ -266,6 +266,7 @@ public:
 
 protected:
     DevicePrepOutput prepareModelRunCommon(const DevicePrepParams& params);
+    bool             checkSpec(const DevicePrepParams& params, bool skip_no_prefix = true);
 
     void InvokeSmoothQaunt(const GemmParams& params, const CudaGemmArguments arguments, BufferPtr output);
     void InvokeWeightOnlyGemm(const GemmParams& params, const CudaGemmArguments arguments, BufferPtr output);

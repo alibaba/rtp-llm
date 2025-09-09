@@ -138,9 +138,10 @@ rtp_llm::AttentionCommonInputs GptModel::prepareAttentionInputs(const GptModelIn
                             prefix_lengths->size(),
                             context_batch_size);
     attention_inputs.max_prefix_length =
-        context_batch_size && prefix_lengths ? *std::max_element(
-            prefix_lengths->data<int32_t>(), prefix_lengths->data<int32_t>() + prefix_lengths->size()) :
-                                               0;
+        context_batch_size && prefix_lengths ?
+            *std::max_element(prefix_lengths->data<int32_t>(),
+                              prefix_lengths->data<int32_t>() + prefix_lengths->size()) :
+            0;
     const auto max_decoder_seq_len = decoder_batch_size ?
                                          *std::max_element(sequence_lengths->data<int32_t>(),
                                                            sequence_lengths->data<int32_t>() + decoder_batch_size) :
@@ -173,11 +174,22 @@ rtp_llm::AttentionCommonInputs GptModel::prepareAttentionInputs(const GptModelIn
                                      prefix_lengths->data<int32_t>(),
                                      context_batch_size,
                                      max_context_seq_len);
+
+        std::vector<uint32_t> kv_seqlens_data(context_batch_size);
+        for (int i = 0; i < context_batch_size; i++) {
+            kv_seqlens_data[i] = cu_kv_seqlens_data[i + 1] - cu_kv_seqlens_data[i];
+        }
+
         attention_inputs.cu_kv_seqlens =
             device_->clone({*vector2Buffer(cu_kv_seqlens_data), AllocationType::DEVICE, {"cu_kv_seqlens"}});
+        attention_inputs.kv_seqlens =
+            device_->clone({*vector2Buffer(kv_seqlens_data), AllocationType::DEVICE, {"kv_seqlens"}});
         attention_inputs.context_total_kv_length = cu_kv_seqlens_data[context_batch_size];
     } else {
-        attention_inputs.cu_kv_seqlens           = attention_inputs.cu_seqlens;
+        attention_inputs.cu_kv_seqlens = attention_inputs.cu_seqlens;
+        std::vector<uint32_t> kv_seqlens_data(context_batch_size, 0);
+        attention_inputs.kv_seqlens =
+            device_->clone({*vector2Buffer(kv_seqlens_data), AllocationType::DEVICE, {"kv_seqlens"}});
         attention_inputs.context_total_kv_length = cu_seqlens_data[context_batch_size];
     }
     device_->checkError();
@@ -1669,8 +1681,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, rtp_llm::DeviceBase* device) {
     const size_t mm_features_num = shape_hints_ptr[GptModelInputIndex::mmFeaturesNum];
     if (mm_features_num) {
         mm_features_shape     = device->allocateBuffer({rtp_llm::DataType::TYPE_INT32,
-                                                    {(size_t)shape_hints_ptr[GptModelInputIndex::mmFeaturesNum]},
-                                                    rtp_llm::AllocationType::HOST});
+                                                        {(size_t)shape_hints_ptr[GptModelInputIndex::mmFeaturesNum]},
+                                                        rtp_llm::AllocationType::HOST});
         mm_features_shape_ptr = mm_features_shape->data<int32_t>();
         for (auto i = 0; i < mm_features_num; ++i) {
             mm_features_shape_ptr[i] =
@@ -1691,8 +1703,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, rtp_llm::DeviceBase* device) {
         auto context_batch_size = (size_t)shape_hints_ptr[GptModelInputIndex::prefixLengths];
 
         inputs.combo_tokens  = device->allocateBuffer({rtp_llm::DataType::TYPE_INT32,
-                                                      {(size_t)shape_hints_ptr[GptModelInputIndex::comboTokens]},
-                                                      rtp_llm::AllocationType::HOST});
+                                                       {(size_t)shape_hints_ptr[GptModelInputIndex::comboTokens]},
+                                                       rtp_llm::AllocationType::HOST});
         inputs.input_lengths = device->allocateBuffer({rtp_llm::DataType::TYPE_INT32,
                                                        {(size_t)shape_hints_ptr[GptModelInputIndex::inputLengths]},
                                                        rtp_llm::AllocationType::HOST});

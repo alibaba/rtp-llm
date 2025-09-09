@@ -168,7 +168,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
     auto kv_head_num         = params.configs.kv_head_num;
     auto size_per_head       = params.configs.size_per_head;
 
-    // for flashinfer
+    // for flashinfer/xqa
     auto q_no_transpose_output = allocateBuffer(
         {params.input.type(), {token_num, head_num, size_per_head}, AllocationType::DEVICE}, {"q_no_transpose_output"});
 
@@ -184,7 +184,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
         {"v_output"});
 
     BufferPtr qkv_buf_fp8;
-    if (use_fp8_fmha_) {
+    if (use_fp8_fmha_ && fmha_type_ != FMHAType::FLASH_INFER && fmha_type_ != FMHAType::XQA) {
         qkv_buf_fp8 = allocateBuffer({DataType::TYPE_FP8_E4M3,
                                       {batch_size, (head_num + kv_head_num * 2), seq_len_with_prefix, size_per_head},
                                       AllocationType::DEVICE},
@@ -233,9 +233,9 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
                                     && !params.configs.fuse_qkv_add_bias && fmha_type_ != FMHAType::NONE);
     RTP_LLM_LOG_DEBUG("skip_add_bias_transpose: %d", skip_add_bias_transpose);
     if (!skip_add_bias_transpose) {
-        bool store_qkv =
-            fmha_type_ != FMHAType::PAGED_TRT_V2 && fmha_type_ != FMHAType::NONE && fmha_type_ != FMHAType::FLASH_INFER;
-        bool store_q_no_transpose = fmha_type_ == FMHAType::FLASH_INFER;
+        bool store_qkv = fmha_type_ != FMHAType::PAGED_TRT_V2 && fmha_type_ != FMHAType::NONE
+                         && fmha_type_ != FMHAType::FLASH_INFER && fmha_type_ != FMHAType::XQA;
+        bool store_q_no_transpose = fmha_type_ == FMHAType::FLASH_INFER || fmha_type_ == FMHAType::XQA;
         bool store_q              = fmha_type_ == FMHAType::PAGED_TRT_V2 || fmha_type_ == FMHAType::NONE;
         bool store_kv             = fmha_type_ == FMHAType::NONE;
         // if use mla cache, no need to store cache
@@ -495,7 +495,8 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
                this,
                params.output.type() == DataType::TYPE_FP8_E4M3 ?
                    reinterpret_cast<float*>(params.weights.static_scale_reciprocal_weight->kernel->data()) :
-                   nullptr);
+                   nullptr,
+               static_cast<size_t>(init_params_.sp_config.gen_num_per_cycle + 1));
 
         return;
     }

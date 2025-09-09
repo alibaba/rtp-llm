@@ -941,7 +941,7 @@ __launch_bounds__(128 * 3, headElems* ctaNbQHeads <= 128 * 16 ? 3 : 2)
 
         if (threadIdx.x < smem.gemm1AccColMax.size) {
             auto const idx           = threadIdx.x;
-            smem.gemm1AccColMax[idx] = mha::numeric_limits<float>::lowest();
+            smem.gemm1AccColMax[idx] = safeInitRowMax;
             smem.gemm1AccColSum[idx] = 0;
         }
         smem.gemm1WarpGrpBar.arrive_and_wait();
@@ -1844,7 +1844,7 @@ __device__ inline void warpGrpApplyMask(uint32_t warpRank, Gemm0Acc& acc, uint32
             for (uint32_t n = 0; n < acc.cols; n++) {
 #pragma unroll
                 for (uint32_t j = 0; j < GmmaAccCoreMat::cols; j++) {
-                    acc(m, n)(i, j) = mha::numeric_limits<float>::lowest();
+                    acc(m, n)(i, j) = safeInitRowMax;
                 }
             }
         }
@@ -2068,8 +2068,11 @@ warpGrpApplyMask(Gemm0Acc& acc, SpecDec const& specDec, uint32_t cacheSeqLen, ui
                 for (uint32_t j = 0; j < GmmaAccCoreMat::cols; j++) {
                     uint32_t const col = GmmaAccCoreMat::cols * (4 * n + idxInQuad) + j;
                     assert((col < nbValidCols) == bool(endMask & (1ULL << col)));
-                    if (((mask >> col) & 1) == 0) {
-                        acc(m, n)(i, j) = mha::numeric_limits<float>::lowest();
+                    if ((mask == uint64_t{0}) && col == 0 && blockIdx.y > 0) {
+                        continue;
+                    }
+                    if ((mask & (1ULL << col)) == 0) {
+                        acc(m, n)(i, j) = safeInitRowMax;
                     }
                 }
             }
@@ -2091,7 +2094,7 @@ __device__ inline void warpGrpApplyMask(Gemm0Acc& acc, uint32_t validColBeg, uin
             for (uint32_t m = 0; m < acc.rows; m++) {
 #pragma unroll
                 for (uint32_t i = 0; i < GmmaAccCoreMat::rows; i++) {
-                    acc(m, n)(i, j) = mha::numeric_limits<float>::lowest();
+                    acc(m, n)(i, j) = safeInitRowMax;
                 }
             }
         }

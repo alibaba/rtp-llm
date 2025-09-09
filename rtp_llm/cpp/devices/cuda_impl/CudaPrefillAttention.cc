@@ -10,6 +10,10 @@
 #include "3rdparty/flashinfer/flashinfer.h"
 #include "rtp_llm/cpp/devices/cuda_impl/CudaFlashInfer.h"
 
+#ifdef USING_CUDA12
+#include "rtp_llm/cpp/devices/cuda_impl/CudaXqa.h"
+#endif
+
 namespace rtp_llm {
 
 void CudaDevice::prefillAttention(const AttentionModuleParams& params,
@@ -38,6 +42,32 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
         cudaMemsetAsync(tiled_counter_ptr->data(), 0, sizeof(uint32_t), stream);
     }
     switch (fmha_type) {
+#ifdef USING_CUDA12
+        case FMHAType::XQA: {
+            RTP_LLM_CHECK_WITH_INFO(q_no_transpose_output != nullptr, "q_no_transpose_output must be provided for xqa");
+            runXqa(q_no_transpose_output->data(),
+                   q_no_transpose_output->type() == DataType::TYPE_BF16,
+                   params.output.data(),
+                   head_num,
+                   kv_head_num,
+                   size_per_head,
+                   batch_size,
+                   static_cast<size_t>(kv_block_array.mMaxBlocksPerSeq),
+                   seq_len_with_prefix,
+                   params.configs.tokens_per_block,
+                   kv_block_array.mPrimaryPoolPtr,
+                   reinterpret_cast<int32_t*>(const_cast<KVCacheIndex*>(kv_block_array.data)),
+                   params.common.kv_cache->k_cache_buffer->type() == DataType::TYPE_FP8_E4M3,
+                   params.common.kv_seqlens->data<uint32_t>(),
+                   this,
+                   params.output.type() == DataType::TYPE_FP8_E4M3 ?
+                       reinterpret_cast<float*>(params.weights.static_scale_reciprocal_weight->kernel->data()) :
+                       nullptr,
+                   seq_len,
+                   params.common.cu_seqlens->data());
+            break;
+        }
+#endif
         case FMHAType::FLASH_INFER: {
             RTP_LLM_CHECK_WITH_INFO(q_no_transpose_output != nullptr,
                                     "q_no_transpose_output must be provided for flashinfer");
