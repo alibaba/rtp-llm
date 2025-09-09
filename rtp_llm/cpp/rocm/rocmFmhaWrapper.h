@@ -53,6 +53,23 @@ public:
                        bool   i_perm_            = false,  // if true, will be batch * nhead * seqlen * hdim
                        bool   o_perm_            = false   // if false, will be batch * seqlen * nhead * hdim
     );
+    uint32_t runCKFmhaV2(void*  q,
+                         void*  k,
+                         void*  v,
+                         void*  output,
+                         void*  softmax_lse_,
+                         size_t batch_size,
+                         size_t seq_len,
+                         size_t max_prefix_prompt_length,
+                         void*  seqstart_q,
+                         void*  seqstart_k,
+                         void*  lse_acc_buf,
+                         void*  linear_bias_slopes = nullptr,
+                         void*  biasBuffer         = nullptr,
+                         size_t token_num          = 0,
+                         bool   i_perm_            = false,  // if true, will be batch * nhead * seqlen * hdim
+                         bool   o_perm_            = false   // if false, will be batch * seqlen * nhead * hdim
+    );
     uint32_t runCKFmhaMLA(void*  q,
                           void*  k,
                           void*  v,

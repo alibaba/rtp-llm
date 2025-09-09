@@ -615,7 +615,6 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
         printBufferData(*params.common.cu_seqlens, "cu_seqlens");
         printBufferData(*params.common.cu_kv_seqlens, "cu_kv_seqlens");
     }
-    printBufferData(params.input, "fa_input");
 
     // int8
     float* scale_out_ptr = nullptr;
@@ -763,6 +762,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
     printBufferData(*q_output, "run_ck_q_output");
     printBufferData(*k_output, "run_ck_k_output");
     printBufferData(*v_output, "run_ck_v_output");
+    printBufferData(params.input, "run_ck_input");
     if (skip_add_bias_transpose) {
         // not implemented reuse cache for this branch
         fmha_runner_->runCKFmha(params.input.data(),
@@ -781,76 +781,136 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                                 nullptr,
                                 false,
                                 false);
-    } else if (fmha_runner_->runCKFmha(q_output->data(),
-                                       k_output->data(),
-                                       v_output->data(),
-                                       params.output.data(),
-                                       nullptr,  // buffer for store out softmax_lse, looks like not used by RTP
-                                       batch_size,
-                                       seq_len,
-                                       prefix_prompt_param.max_prefix_prompt_length,
-                                       // context_token_num,
-                                       params.common.cu_seqlens->data(),
-                                       params.common.cu_kv_seqlens->data(),
-                                       lse_acc_buf->data(),
-                                       params.common.linear_bias_slopes ? params.common.linear_bias_slopes->data() :
-                                                                          nullptr,
-                                       nullptr,
-                                       true,
-                                       false)) {
-        printBufferData(params.output, "run_ck_data_output");
-        return;
     } else {
-        RTP_LLM_CHECK_WITH_INFO(
-            q_output && k_output && v_output,
-            "q_output/k_output/v_output must be provided for default context attention implementation");
-        q_output->updateShape({batch_size, kv_head_num, (head_num / kv_head_num) * seq_len, size_per_head});
-        auto qk_output = gemm({*q_output,
-                               *k_output,
-                               std::nullopt,
-                               nullptr,
-                               DataType::TYPE_FP32,
-                               DataType::TYPE_FP32,
-                               TransposeOperation::NONE,
-                               TransposeOperation::TRANSPOSE});
-        qk_output->updateShape({batch_size, head_num, seq_len, seq_len_with_prefix});
-        printBufferData(*qk_output, "qk_output: ");
-        float scale = (1.0f / sqrtf(size_per_head * 1.0f));  // * params.configs.softmax_extra_scale;
-        auto  lengths_host =
-            clone({params.common.input_lengths->view(decoder_batch_size, batch_size), AllocationType::HOST});
-        auto prefix_lengths_host =
-            params.common.prefix_prompt_lengths ?
-                clone({*params.common.prefix_prompt_lengths, AllocationType::HOST}) :
-                BufferPtr(new Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_INVALID, {0}, nullptr));
-        auto attention_mask    = attentionMask({*lengths_host,
-                                                *prefix_lengths_host,
-                                                q_output->type(),
-                                                params.configs.mask_type == AttentionMaskType::causalMask});
-        auto softmax_qk_output = softmax({std::move(qk_output), *attention_mask, nullopt, scale, datatype});
-        softmax_qk_output->updateShape(
-            {batch_size, kv_head_num, (head_num / kv_head_num) * seq_len, seq_len_with_prefix});
-        printBufferData(*softmax_qk_output, "softmax_qk_output: ");
+        // Processing continuous/variable-length sequences
+        torch::Tensor q_output_tensor, k_output_tensor, v_output_tensor;
+        auto          q_contiguous = allocateBuffer(
+            {params.input.type(), {head_num, seq_len * batch_size, size_per_head}, AllocationType::DEVICE},
+            {"q_contiguous"});
+        bufMemset(*q_contiguous, 0);
+        auto k_contiguous = allocateBuffer({params.input.type(),
+                                            {kv_head_num, seq_len_with_prefix * batch_size, size_per_head},
+                                            AllocationType::DEVICE},
+                                           {"k_contiguous"});
+        bufMemset(*k_contiguous, 0);
+        auto v_contiguous = allocateBuffer({params.input.type(),
+                                            {kv_head_num, seq_len_with_prefix * batch_size, size_per_head},
+                                            AllocationType::DEVICE},
+                                           {"v_contiguous"});
+        bufMemset(*v_contiguous, 0);
+        const int hidden_size_q  = head_num * size_per_head;
+        const int hidden_size_kv = kv_head_num * size_per_head;
 
-        auto qkv_output =
-            gemm({*softmax_qk_output, *v_output, std::nullopt, nullptr, DataType::TYPE_INVALID, params.compute_type});
-        qkv_output->updateShape({batch_size, head_num, seq_len, size_per_head});
-        printBufferData(*qkv_output, "qkv_output");
-        auto& qkv_transpose_output = params.output;
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
-                                         invokeTransposeAttentionOutRemovePadding,
-                                         qkv_output->data(),
-                                         qkv_transpose_output.data(),
-                                         token_num,
+                                         invokeGatherSequences,
+                                         q_contiguous->data(),
+                                         q_output->data(),
+                                         params.common.cu_seqlens->data<int>(),
                                          batch_size,
                                          seq_len,
                                          head_num,
                                          size_per_head,
-                                         params.common.padding_offset->data<int>(),
-                                         nullptr,
-                                         0,
                                          stream_);
-        printBufferData(params.output, "run_ck_data_output");
-        return;
+        DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
+                                         invokeGatherSequences,
+                                         k_contiguous->data(),
+                                         k_output->data(),
+                                         params.common.cu_kv_seqlens->data<int>(),
+                                         batch_size,
+                                         seq_len_with_prefix,
+                                         kv_head_num,
+                                         size_per_head,
+                                         stream_);
+
+        DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
+                                         invokeGatherSequences,
+                                         v_contiguous->data(),
+                                         v_output->data(),
+                                         params.common.cu_kv_seqlens->data<int>(),
+                                         batch_size,
+                                         seq_len_with_prefix,
+                                         kv_head_num,
+                                         size_per_head,
+                                         stream_);
+        printBufferData(*q_contiguous, "q_contiguous");
+        printBufferData(*k_contiguous, "k_contiguous");
+        printBufferData(*v_contiguous, "v_contiguous");
+
+        fmha_runner_->setup(
+            datatype, params.configs.mask_type, head_num, kv_head_num, size_per_head, params.configs.q_scaling);
+
+        auto lse_acc_buf = allocateBuffer({DataType::TYPE_FP32, {1, 1, 1, 1}, AllocationType::DEVICE}, {"lse_acc_buf"});
+        if (fmha_runner_->runCKFmhaV2(q_contiguous->data(),
+                                      k_contiguous->data(),
+                                      v_contiguous->data(),
+                                      params.output.data(),
+                                      nullptr,
+                                      batch_size,
+                                      seq_len,
+                                      params.common.max_prefix_length,
+                                      params.common.cu_seqlens->data(),
+                                      params.common.cu_kv_seqlens->data(),
+                                      lse_acc_buf->data(),
+                                      params.common.linear_bias_slopes ? params.common.linear_bias_slopes->data() :
+                                                                         nullptr,
+                                      nullptr,
+                                      token_num,
+                                      true,
+                                      false)) {
+            printBufferData(params.output, "run_ck_data_output");
+            return;
+        } else {
+            RTP_LLM_CHECK_WITH_INFO(
+                q_output && k_output && v_output,
+                "q_output/k_output/v_output must be provided for default context attention implementation");
+            q_output->updateShape({batch_size, kv_head_num, (head_num / kv_head_num) * seq_len, size_per_head});
+            auto qk_output = gemm({*q_output,
+                                   *k_output,
+                                   std::nullopt,
+                                   nullptr,
+                                   DataType::TYPE_FP32,
+                                   DataType::TYPE_FP32,
+                                   TransposeOperation::NONE,
+                                   TransposeOperation::TRANSPOSE});
+            qk_output->updateShape({batch_size, head_num, seq_len, seq_len_with_prefix});
+            printBufferData(*qk_output, "qk_output: ");
+            float scale = (1.0f / sqrtf(size_per_head * 1.0f));  // * params.configs.softmax_extra_scale;
+            auto  lengths_host =
+                clone({params.common.input_lengths->view(decoder_batch_size, batch_size), AllocationType::HOST});
+            auto prefix_lengths_host =
+                params.common.prefix_prompt_lengths ?
+                    clone({*params.common.prefix_prompt_lengths, AllocationType::HOST}) :
+                    BufferPtr(new Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_INVALID, {0}, nullptr));
+            auto attention_mask    = attentionMask({*lengths_host,
+                                                    *prefix_lengths_host,
+                                                    q_output->type(),
+                                                    params.configs.mask_type == AttentionMaskType::causalMask});
+            auto softmax_qk_output = softmax({std::move(qk_output), *attention_mask, nullopt, scale, datatype});
+            softmax_qk_output->updateShape(
+                {batch_size, kv_head_num, (head_num / kv_head_num) * seq_len, seq_len_with_prefix});
+            printBufferData(*softmax_qk_output, "softmax_qk_output: ");
+
+            auto qkv_output = gemm(
+                {*softmax_qk_output, *v_output, std::nullopt, nullptr, DataType::TYPE_INVALID, params.compute_type});
+            qkv_output->updateShape({batch_size, head_num, seq_len, size_per_head});
+            printBufferData(*qkv_output, "qkv_output");
+            auto& qkv_transpose_output = params.output;
+            DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
+                                             invokeTransposeAttentionOutRemovePadding,
+                                             qkv_output->data(),
+                                             qkv_transpose_output.data(),
+                                             token_num,
+                                             batch_size,
+                                             seq_len,
+                                             head_num,
+                                             size_per_head,
+                                             params.common.padding_offset->data<int>(),
+                                             nullptr,
+                                             0,
+                                             stream_);
+            printBufferData(params.output, "run_ck_data_output");
+            return;
+        }
     }
 }
 

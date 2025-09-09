@@ -3026,7 +3026,6 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel(T*                   
         if constexpr (USE_PAGED_FMHA) {
             dest_q_idx = (pre_len + seq_idx) * size_per_head * head_num + head_idx * size_per_head + tidx * vec_size;
         }
-
         *reinterpret_cast<Vec_t*>(&q_buf[dest_q_idx]) = q;
     }
 
@@ -3417,6 +3416,42 @@ __global__ void load_prefix_KVCache_kernel(T*                            q_buf,
 }
 
 #if USING_ROCM
+template<typename T>
+__global__ void gather_sequences_kernel(T*         output,  // output：[Head][Total_Tokens][Size_per_head]
+                                        const T*   input,   // input：[Batch][Head][Sequence][Size_per_head]
+                                        const int* cu_seqlens,
+                                        int        batch_size,
+                                        int        max_seq_len,
+                                        int        head_num,
+                                        int        size_per_head) {
+    int tid = threadIdx.x + blockIdx.x * blockDim.x;
+    if (tid >= cu_seqlens[batch_size])
+        return;
+
+    int sample_id     = 0;
+    int pos_in_sample = tid;
+    while (sample_id < batch_size && pos_in_sample >= (cu_seqlens[sample_id + 1] - cu_seqlens[sample_id])) {
+        pos_in_sample -= (cu_seqlens[sample_id + 1] - cu_seqlens[sample_id]);
+        sample_id++;
+    }
+    // 新的输出索引计算：
+    for (int h = 0; h < head_num; ++h) {
+        for (int s = 0; s < size_per_head; ++s) {
+            // compute input index
+            int input_idx = sample_id * head_num * max_seq_len * size_per_head + h * max_seq_len * size_per_head
+                            + pos_in_sample * size_per_head + s;
+
+            // compute output index（[Head][Total_Tokens][Size_per_head]）：
+            int output_idx = h * max_seq_len * batch_size * size_per_head  // Head dim
+                             + tid * size_per_head                         // token position
+                             + s;                                          // size_per_head dim
+
+            output[output_idx] = input[input_idx];
+            float output_val   = output[output_idx];
+        }
+    }
+}
+
 template<typename T, typename Tcache>
 __global__ void load_prefix_KVCache_kernel_aiter(T*                            q_buf,
                                                  T*                            k_buf,
@@ -3513,6 +3548,22 @@ void invokeLoadPrefixKVCache(T*                             q_buf,
 }
 
 #if USING_ROCM
+template<typename T>
+void invokeGatherSequences(T*           output,
+                           const T*     input,
+                           const int*   cu_seqlens,
+                           int          batch_size,
+                           int          max_seq_len,
+                           int          head_num,
+                           int          size_per_head,
+                           cudaStream_t stream) {
+    int total_tokens      = cu_seqlens[batch_size];
+    int threads_per_block = 256;
+    int blocks_per_grid   = (total_tokens + threads_per_block - 1) / threads_per_block;
+    gather_sequences_kernel<<<blocks_per_grid, threads_per_block, 0, stream>>>(
+        output, input, cu_seqlens, batch_size, max_seq_len, head_num, size_per_head);
+}
+
 template<typename T>
 void invokeLoadPrefixKVCacheAiter(T*                             q_buf,
                                   T*                             k_buf,
@@ -3758,6 +3809,18 @@ INSTANTIATEINVOKELOADPREFIXKVCACHEAITER(half);
 INSTANTIATEINVOKELOADPREFIXKVCACHEAITER(__nv_bfloat16);
 #endif
 #undef INSTANTIATEINVOKELOADPREFIXKVCACHEAITER
+
+#define INSTANTIATEINVOKEGATHERSEQUENCES(T)                                                                            \
+    template void invokeGatherSequences<T>(T*, const T*, const int*, int, int, int, int, cudaStream_t);
+
+INSTANTIATEINVOKEGATHERSEQUENCES(float);
+INSTANTIATEINVOKEGATHERSEQUENCES(half);
+
+#ifdef ENABLE_BF16
+INSTANTIATEINVOKEGATHERSEQUENCES(__nv_bfloat16);
+#endif
+
+#undef INSTANTIATEINVOKEGATHERSEQUENCES
 #endif
 
 #define INSTANTIATEINVOKELOADPREFIXKVCACHE(T)                                                                          \
