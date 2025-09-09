@@ -33,6 +33,10 @@ py_library(
     visibility = ["//visibility:public"],
 )
 
+requirement([
+    "flashinfer-python",
+])
+
 py_library(
     name = "modules",
     srcs = glob([
@@ -43,6 +47,7 @@ py_library(
         ":utils",
         ":kernels",
         ":distributed",
+        ":flashinfer-python",
     ],
     visibility = ["//visibility:public"],
 )
