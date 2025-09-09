@@ -6,7 +6,7 @@ from typing import Dict, Iterator, List, Optional, Tuple, Union, cast
 
 import tiktoken
 from tiktoken.load import load_tiktoken_bpe
-from tokenizers import AddedToken
+from tokenizers import AddedToken, Regex, pre_tokenizers
 from transformers.models.gpt2.tokenization_gpt2 import bytes_to_unicode
 from transformers.tokenization_utils import PreTrainedTokenizer
 

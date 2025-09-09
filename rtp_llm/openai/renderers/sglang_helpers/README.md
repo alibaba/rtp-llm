@@ -50,3 +50,6 @@ Qwen3_coder_detector中, 没有正确的处理工具参数值与类型的关系,
 ```python
 normal_text = text[:idx] if idx != -1 else text
 ```
+
+### 7. 修复kimi_k2 detector中streaming场景下, tool_call_id没有正确传递的问题
+增加了self.function_idx以透传对应id

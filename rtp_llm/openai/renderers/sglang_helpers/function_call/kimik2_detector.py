@@ -55,6 +55,7 @@ class KimiK2Detector(BaseFormatDetector):
         )
 
         self._last_arguments = ""
+        self.function_idx: int | None = None
 
     def has_tool_call(self, text: str) -> bool:
         """Check if the text contains a KimiK2 format tool call."""
@@ -84,7 +85,6 @@ class KimiK2Detector(BaseFormatDetector):
                 function_id, function_args = match
                 function_name = function_id.split(".")[1].split(":")[0]
                 function_idx = int(function_id.split(".")[1].split(":")[1])
-
                 logger.info(f"function_name {function_name}")
 
                 tool_calls.append(
@@ -135,6 +135,7 @@ class KimiK2Detector(BaseFormatDetector):
                 function_args = match.group("function_arguments")
 
                 function_name = function_id.split(".")[1].split(":")[0]
+                self.function_idx = int(function_id.split(".")[1].split(":")[1])
 
                 # Initialize state if this is the first tool call
                 if self.current_tool_id == -1:

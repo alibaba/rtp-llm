@@ -1,4 +1,4 @@
-import secrets
+import uuid
 from typing import List
 
 from rtp_llm.openai.api_datatype import FunctionCall, GPTToolDefinition, ToolCall
@@ -27,7 +27,7 @@ def streaming_parse_result_to_tool_calls(
     tool_calls: List[ToolCall] = []
     for call in result.calls:
         # 只有当 name 不为空时才生成新的 ID
-        call_id = f"call_{secrets.token_hex(8)}" if call.name else None
+        call_id = f"call_{uuid.uuid4().hex[:24]}" if call.name else None
 
         tool_call = ToolCall(
             index=call.tool_index,

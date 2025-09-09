@@ -31,7 +31,8 @@ class ChatGlm45Renderer(ReasoningToolBaseRenderer):
         """设置GLM45特定的停止词"""
         self.add_extra_stop_words(["<|user|>", "<|observation|>"])
 
-    def _preprocess_messages(self, messages):
+    @override
+    def _preprocess_messages(self, messages: list[dict]) -> list[dict]:
         """预处理消息，确保 tool_calls 中的 arguments 是字典对象"""
         processed_messages = []
         for message in messages:
@@ -83,49 +84,6 @@ class ChatGlm45Renderer(ReasoningToolBaseRenderer):
         if not self.in_think_mode(request):
             return None
         return ReasoningParser(model_type="glm45")
-
-    @override
-    def _build_prompt(self, request: ChatCompletionRequest) -> str:
-        """
-        构建提示文本
-        Args:
-            request: 聊天完成请求
-        Returns:
-            str: 格式化后的提示文本
-        """
-        context = request.model_dump(exclude_none=True)
-
-        # 只要不是已经有assistant消息, 则需要添加生成提示
-        if request.messages[-1].role != RoleEnum.assistant:
-            context["add_generation_prompt"] = True
-
-        messages = self._preprocess_messages(context["messages"])
-        context.update({"messages": messages})
-
-        # 合并chat_template_kwargs
-        if request.chat_template_kwargs is not None:
-            context.update(request.chat_template_kwargs)
-
-        if (
-            request.extend_fields is not None
-            and "chat_template_kwargs" in request.extend_fields
-            and isinstance(request.extend_fields["chat_template_kwargs"], dict)
-        ):
-            context.update(request.extend_fields["chat_template_kwargs"])
-
-        # 创建Jinja2环境
-        env = Environment(loader=BaseLoader(), trim_blocks=True, lstrip_blocks=True)
-
-        # 允许子类自定义环境
-        self._customize_jinja_env(env)
-
-        try:
-            template = env.from_string(self.chat_template)
-            rendered_prompt = template.render(**context)
-            return rendered_prompt
-        except Exception as e:
-            logging.error(f"构建提示文本失败: {str(e)}")
-            raise ValueError(f"Error rendering prompt template: {str(e)}")
 
     @override
     def _customize_jinja_env(self, env: Environment) -> None:

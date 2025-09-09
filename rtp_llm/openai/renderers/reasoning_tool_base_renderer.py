@@ -153,6 +153,9 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         if request.messages[-1].role != RoleEnum.assistant:
             context["add_generation_prompt"] = True
 
+        messages = self._preprocess_messages(context["messages"])
+        context.update({"messages": messages})
+
         # 合并chat_template_kwargs
         if request.chat_template_kwargs is not None:
             context.update(request.chat_template_kwargs)
@@ -177,6 +180,12 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         except Exception as e:
             logging.error(f"构建提示文本失败: {str(e)}")
             raise ValueError(f"Error rendering prompt template: {str(e)}")
+
+    def _preprocess_messages(self, messages: List[dict]) -> List[dict]:
+        """
+        预处理消息，子类可以重写
+        """
+        return messages
 
     def _customize_jinja_env(self, env: Environment) -> None:
         """

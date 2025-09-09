@@ -430,22 +430,19 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         print(response.choices[0].model_dump_json())
         self.assertEqual(1, len(response.choices))
         self.assertEqual(
-            json.loads(response.choices[0].model_dump_json()),
+            json.loads(response.choices[0].model_dump_json(exclude_none=True)),
             {
                 "index": 0,
                 "message": {
                     "role": "assistant",
                     "content": "Thought: 我可以使用 get_current_weather API。",
-                    "reasoning_content": None,
                     "function_call": {
                         "name": "get_current_weather",
                         "arguments": '{"location": "洛杉矶, 美国", "unit": "fahrenheit"}',
                     },
-                    "tool_calls": None,
                     "partial": False,
                 },
                 "finish_reason": "function_call",
-                "logprobs": None,
             },
         )
 
@@ -584,22 +581,19 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             print(response.choices[0].model_dump_json())
         self.assertEqual(1, len(response.choices))
         self.assertEqual(
-            json.loads(response.choices[0].model_dump_json()),
+            json.loads(response.choices[0].model_dump_json(exclude_none=True)),
             {
                 "index": 0,
                 "message": {
                     "role": "assistant",
                     "content": "我需要调用get_current_weather API来获取天气",
-                    "reasoning_content": None,
                     "function_call": {
                         "name": "get_current_weather",
                         "arguments": '{"location": "洛杉矶, 美国", "unit": "fahrenheit"}',
                     },
-                    "tool_calls": None,
                     "partial": False,
                 },
                 "finish_reason": "function_call",
-                "logprobs": None,
             },
         )
         # 非functioncall 格式返回，输入没有functions
@@ -620,19 +614,15 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             print(response.choices[0].model_dump_json())
         self.assertEqual(1, len(response.choices))
         self.assertEqual(
-            json.loads(response.choices[0].model_dump_json()),
+            json.loads(response.choices[0].model_dump_json(exclude_none=True)),
             {
                 "index": 0,
                 "message": {
                     "role": "assistant",
                     "content": ': 我需要调用get_current_weather API来获取天气✿FUNCTION✿: get_current_weather\n✿ARGS✿: {"location": "洛杉矶, 美国", "unit": "fahrenheit"}',
-                    "reasoning_content": None,
-                    "function_call": None,
-                    "tool_calls": None,
                     "partial": False,
                 },
                 "finish_reason": "stop",
-                "logprobs": None,
             },
         )
 
@@ -741,7 +731,9 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             response = await generate.gen_complete_response_once()
             print(response.choices[0].model_dump_json())
         self.assertEqual(1, len(response.choices))
-        target_delta = json.loads(response.choices[0].model_dump_json())
+        target_delta = json.loads(
+            response.choices[0].model_dump_json(exclude_none=True)
+        )
         target_delta["message"]["tool_calls"][0]["id"] = "id"
         self.assertEqual(
             target_delta,
@@ -750,8 +742,6 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
                 "message": {
                     "role": "assistant",
                     "content": "我需要调用get_current_weather API来获取天气",
-                    "reasoning_content": None,
-                    "function_call": None,
                     "tool_calls": [
                         {
                             "index": 0,
@@ -766,7 +756,6 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
                     "partial": False,
                 },
                 "finish_reason": "tool_calls",
-                "logprobs": None,
             },
         )
         # 非functioncall 格式返回，输入没有functions
@@ -787,19 +776,15 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             print(response.choices[0].model_dump_json())
         self.assertEqual(1, len(response.choices))
         self.assertEqual(
-            json.loads(response.choices[0].model_dump_json()),
+            json.loads(response.choices[0].model_dump_json(exclude_none=True)),
             {
                 "index": 0,
                 "message": {
                     "role": "assistant",
                     "content": ': 我需要调用get_current_weather API来获取天气✿FUNCTION✿: get_current_weather\n✿ARGS✿: {"location": "洛杉矶, 美国", "unit": "fahrenheit"}',
-                    "reasoning_content": None,
-                    "function_call": None,
-                    "tool_calls": None,
                     "partial": False,
                 },
                 "finish_reason": "stop",
-                "logprobs": None,
             },
         )
 
@@ -964,38 +949,24 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             return "kimi_k2/tokenizer/"
 
         def _get_test_data(self, include_stop_word=False):
-            """获取测试数据"""
+            """获取测试数据: 注意到, 这里是多轮对话的产物, idx不是从0开始的
+            杭州天气很好，所以我再为您查询北京和南京的天气：<|tool_calls_section_begin|><|tool_call_begin|>functions.get_current_weather:1<|tool_call_argument_begin|>{"location": "北京"}<|tool_call_end|><|tool_call_begin|>functions.get_current_weather:2<|tool_call_argument_begin|>{"location": "南京"}<|tool_call_end|><|tool_calls_section_end|>
+            """
             test_ids = [
-                35659,
+                12365,
+                8597,
+                6523,
+                378,
+                24888,
+                1295,
                 19183,
                 13021,
-                12365,
+                3372,
                 488,
-                42930,
-                8622,
-                8597,
-                2267,
-                292,
+                10525,
+                65070,
+                2648,
                 163595,
-                163597,
-                41937,
-                1150,
-                20254,
-                21055,
-                2800,
-                25,
-                15,
-                163598,
-                8264,
-                5791,
-                1289,
-                414,
-                12365,
-                11,
-                220,
-                10462,
-                16934,
-                163599,
                 163597,
                 41937,
                 1150,
@@ -1010,6 +981,22 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
                 1289,
                 414,
                 3372,
+                16934,
+                163599,
+                163597,
+                41937,
+                1150,
+                20254,
+                21055,
+                2800,
+                25,
+                17,
+                163598,
+                8264,
+                5791,
+                1289,
+                414,
+                10525,
                 16934,
                 163599,
                 163596,
@@ -1032,22 +1019,25 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         def _assert_tool_call_response(
             self,
             response_delta,
-            expected_content="我来为您查询杭州和北京的当前天气情况。",
+            expected_content="杭州天气很好，所以我再为您查询北京和南京的天气：",
         ):
             """断言工具调用响应的内容"""
             assert response_delta.content.strip() == expected_content.strip()
             assert response_delta.tool_calls[0].function.name == "get_current_weather"
             assert (
                 response_delta.tool_calls[0].function.arguments
-                == '{"location": "杭州, 浙江"}'
+                == '{"location": "北京"}'
             )
             assert response_delta.tool_calls[1].function.name == "get_current_weather"
             assert (
                 response_delta.tool_calls[1].function.arguments
-                == '{"location": "北京"}'
+                == '{"location": "南京"}'
             )
             assert response_delta.tool_calls[0].index == 0
             assert response_delta.tool_calls[1].index == 1
+            # kimi需要校验tool_call id的值
+            assert response_delta.tool_calls[0].id == "get_current_weather:1"
+            assert response_delta.tool_calls[1].id == "get_current_weather:2"
 
         async def test_no_stream_stop_words(self):
             """测试KimiK2工具调用非流式场景（包含停止词）"""
@@ -1164,6 +1154,8 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             )
             assert response_delta.tool_calls[0].index == 0
             assert response_delta.tool_calls[1].index == 1
+            assert response_delta.tool_calls[0].id == "get-current-weather:0"
+            assert response_delta.tool_calls[1].id == "get-current-weather:1"
 
     class ChatGLM45TestSuite(BaseToolCallTestSuite):
         """GLM45相关测试的内嵌测试套件"""
@@ -2142,24 +2134,25 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         print(response.choices[0].model_dump_json())
         self.assertEqual(1, len(response.choices))
         self.assertEqual(
-            json.loads(response.choices[0].model_dump_json()),
+            json.loads(response.choices[0].model_dump_json(exclude_none=True)),
             {
                 "index": 0,
                 "message": {
                     "role": "assistant",
                     "content": "我使用使用使用",
                     "reasoning_content": "我可以可以可以",
-                    "function_call": None,
-                    "tool_calls": None,
                     "partial": False,
                 },
                 "finish_reason": "stop",
-                "logprobs": None,
             },
         )
         self.assertEqual(
-            json.loads(response.usage.completion_tokens_details.model_dump_json()),
-            {"audio_tokens": None, "reasoning_tokens": 5},
+            json.loads(
+                response.usage.completion_tokens_details.model_dump_json(
+                    exclude_none=True
+                )
+            ),
+            {"reasoning_tokens": 5},
         )
 
     @think_mode
@@ -2197,24 +2190,25 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         print(response.choices[0].model_dump_json())
         self.assertEqual(1, len(response.choices))
         self.assertEqual(
-            json.loads(response.choices[0].model_dump_json()),
+            json.loads(response.choices[0].model_dump_json(exclude_none=True)),
             {
                 "index": 0,
                 "message": {
                     "role": "assistant",
                     "content": "我使用使用使用",
                     "reasoning_content": "可以",
-                    "function_call": None,
-                    "tool_calls": None,
                     "partial": False,
                 },
                 "finish_reason": "stop",
-                "logprobs": None,
             },
         )
         self.assertEqual(
-            json.loads(response.usage.completion_tokens_details.model_dump_json()),
-            {"audio_tokens": None, "reasoning_tokens": 5},
+            json.loads(
+                response.usage.completion_tokens_details.model_dump_json(
+                    exclude_none=True
+                )
+            ),
+            {"reasoning_tokens": 5},
         )
 
     @think_mode
@@ -2253,19 +2247,16 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         print(response.choices[0].model_dump_json())
         self.assertEqual(1, len(response.choices))
         self.assertEqual(
-            json.loads(response.choices[0].model_dump_json()),
+            json.loads(response.choices[0].model_dump_json(exclude_none=True)),
             {
                 "index": 0,
                 "message": {
                     "role": "assistant",
                     "content": "\n使用使用使用",
                     "reasoning_content": "\n可以可以可以",
-                    "function_call": None,
-                    "tool_calls": None,
                     "partial": False,
                 },
                 "finish_reason": "stop",
-                "logprobs": None,
             },
         )
         self.assertEqual(

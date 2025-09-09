@@ -94,6 +94,7 @@ class ChatMessage(BaseModel):
     function_call: Optional[FunctionCall] = None
     tool_calls: Optional[List[ToolCall]] = None
     partial: Optional[bool] = False
+    tool_call_id: Optional[str] = None
 
 
 # NOTE: according to openai api definition, `function_call` is deprecated, and replaced by `tool_calls`.
