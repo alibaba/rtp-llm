@@ -160,9 +160,9 @@ MoeCombineOutput ROCmDevice::epCombine(const MoeCombineParams& params) {
     //     }
     // }
     // 当前卡接受计算完moe的token
-    bool overlapped = false;
 
-    auto all2all_ret = allToAll({{params.input}, params.output_split_sizes, params.input_split_sizes, overlapped});
+
+    auto all2all_ret = allToAll({{params.input}, params.output_split_sizes, params.input_split_sizes, params.overlapped});
 
     return MoeCombineOutput({all2all_ret.outputs[0], nullptr, params, std::move(all2all_ret.comm_barrier_hook)});
 }
