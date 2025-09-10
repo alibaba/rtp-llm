@@ -408,6 +408,10 @@ public:
         return generate_input_->generate_config->inter_request_id;
     }
 
+    std::string traceId() const {
+        return generate_input_->generate_config->trace_id;
+    }
+
     ThinkModeLogitsProcessorPtr getThinkLogitsProcessor() {
         return think_logits_processor_ptr_;
     }

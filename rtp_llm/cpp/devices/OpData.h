@@ -165,8 +165,11 @@ struct GptModelInputs {
     bool warmup          = false;
     bool skip_run        = false;
 
+    // not sync to other tp rank
+    std::vector<std::string> trace_ids;
+
 public:
-    std::string debugString() const;
+    std::string debugString(bool force = false) const;
 };
 
 struct GptModelOutputs {

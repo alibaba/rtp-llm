@@ -123,6 +123,8 @@ class OpenaiEndpoint(object):
     ) -> GenerateConfig:
         # TODO(wangyin): implement this
         config = request.extra_configs or GenerateConfig()
+        if request.trace_id != None:
+            config.trace_id = request.trace_id
         if request.stream != None:
             config.is_streaming = request.stream
         if request.temperature != None:

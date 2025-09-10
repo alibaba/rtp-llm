@@ -81,6 +81,7 @@ public:
     bool             ignore_eos   = false;
     bool             reuse_cache  = true;
     bool             enable_3fs   = true;
+    std::string      trace_id;
 
     bool top1() {
         return top_k == 1;

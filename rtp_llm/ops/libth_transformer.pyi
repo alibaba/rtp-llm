@@ -377,9 +377,9 @@ class FMHAType:
     TRT_V1: typing.ClassVar[FMHAType]  # value = <FMHAType.TRT_V1: 5>
     TRT_V2: typing.ClassVar[FMHAType]  # value = <FMHAType.TRT_V2: 2>
     XQA: typing.ClassVar[FMHAType]  # value = <FMHAType.XQA: 7>
-    AITER_PREFILL: typing.ClassVar[FMHAType] # value = <FMHAType.AITER_PREFILL: 8
+    AITER_PREFILL: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_PREFILL: 8
     AITER_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_DECODE: 9>
-    
+
     __members__: typing.ClassVar[
         dict[str, FMHAType]
     ]  # value = {'NONE': <FMHAType.NONE: 0>, 'PAGED_TRT_V2': <FMHAType.PAGED_TRT_V2: 1>, 'TRT_V2': <FMHAType.TRT_V2: 2>, 'PAGED_OPEN_SOURCE': <FMHAType.PAGED_OPEN_SOURCE: 3>, 'OPEN_SOURCE': <FMHAType.OPEN_SOURCE: 4>, 'TRT_V1': <FMHAType.TRT_V1: 5>, 'FLASH_INFER': <FMHAType.FLASH_INFER: 6>, 'XQA': <FMHAType.XQA: 7>}
@@ -812,23 +812,24 @@ class ParallelismDistributedConfig:
     def update_from_env(self) -> None: ...
 
 class ProfilingDebugLoggingConfig:
-    debug_load_server: bool
-    debug_start_fake_process: int
-    enable_device_perf: bool
-    ft_alog_conf_path: str
-    ft_core_dump_on_exception: bool
-    gen_timeline_sync: bool
-    hack_layer_num: int
-    log_file_backup_count: int
-    log_level: str
-    log_path: str
-    nccl_debug_file: str
     trace_memory: bool
     trace_malloc_stack: bool
+    enable_device_perf: bool
+    ft_core_dump_on_exception: bool
+    ft_alog_conf_path: str
+    log_level: str
+    gen_timeline_sync: bool
     torch_cuda_profiler_dir: str
+    log_path: str
+    log_file_backup_count: int
+    nccl_debug_file: str
+    debug_load_server: bool
+    hack_layer_num: int
+    debug_start_fake_process: int
     dg_print_reg_reuse: bool
     qwen_agent_debug: bool
     disable_dpc_random: bool
+    enable_detail_log: bool
 
     def __init__(
         self,
@@ -849,6 +850,7 @@ class ProfilingDebugLoggingConfig:
         dg_print_reg_reuse: bool = False,
         qwen_agent_debug: bool = False,
         disable_dpc_random: bool = False,
+        enable_detail_log: bool = False,
     ) -> None: ...
     def to_string(self) -> str: ...
     def update_from_env(self) -> None: ...

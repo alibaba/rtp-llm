@@ -103,6 +103,8 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
         RTP_LLM_LOG_DEBUG("decode stream: %s", stream->debugString().c_str());
 
         for (auto i = 0; i < current_batch_size; ++i) {
+            model_input.trace_ids.push_back(stream->traceId());
+
             auto currentTokens = stream->currentExecuteTokens(i);
             if (currentTokens[0] >= input_vocab_size) {
                 std::ostringstream error_msg;
@@ -151,6 +153,8 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
 
         // TODO(xinfei.sxf) deal with adjusted common seq len.
         for (auto i = 0; i < current_batch_size; ++i) {
+            model_input.trace_ids.push_back(stream->traceId());
+
             auto input_tokens = stream->currentExecuteTokens(i);
             auto input_masks  = stream->textTokensMask();
             memcpy(merged_tokens + token_idx, input_tokens.data(), input_tokens.size() * sizeof(int));

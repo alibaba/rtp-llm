@@ -135,6 +135,10 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.reuse_cache = input_py.generate_config.reuse_cache
     generate_config_pb.enable_3fs = input_py.generate_config.enable_3fs
 
+    trans_option_cast(
+        generate_config_pb, input_py.generate_config, "trace_id", functools.partial(str)
+    )
+
     for i in range(len(input_py.generate_config.stop_words_list)):
         stop_words = generate_config_pb.stop_words_list.rows.add()
         stop_words.values.extend(input_py.generate_config.stop_words_list[i])

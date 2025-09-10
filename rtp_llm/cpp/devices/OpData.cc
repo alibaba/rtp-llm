@@ -8,13 +8,24 @@
 
 namespace rtp_llm {
 
-std::string GptModelInputs::debugString() const {
-    if (!Logger::getEngineLogger().isDebugMode()) {
+std::string combineStrings(const std::vector<std::string>& vec) {
+    std::string result = "\" ";
+    // 逐个拼接字符串
+    for (const auto& s : vec) {
+        result += s + ", ";
+    }
+    result += "\"";
+    return result;
+}
+
+std::string GptModelInputs::debugString(bool force) const {
+    if (!Logger::getEngineLogger().isDebugMode() && !force) {
         return "";
     }
     std::stringstream debug_string;
     debug_string << "GptModelInputs { "
-                 << "combo_tokens: " << combo_tokens->debugStringWithData<int32_t>()
+                 << "trace_ids: " << combineStrings(trace_ids)
+                 << ", combo_tokens: " << combo_tokens->debugStringWithData<int32_t>()
                  << ", input_lengths: " << input_lengths->debugStringWithData<int32_t>()
                  << ", sequence_lengths: " << sequence_lengths->debugStringWithData<int32_t>()
                  << ", prefix_lengths: " << prefix_lengths->debugStringWithData<int32_t>();

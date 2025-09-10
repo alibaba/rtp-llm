@@ -17,26 +17,28 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->min_new_tokens                 = config_proto->min_new_tokens();
     generate_config->num_beams                      = config_proto->num_beams();
     generate_config->variable_num_beams.resize(config_proto->variable_num_beams_size());
-    memcpy(generate_config->variable_num_beams.data(), config_proto->variable_num_beams().data(), config_proto->variable_num_beams_size() * sizeof(int));
-    generate_config->num_return_sequences           = config_proto->num_return_sequences();
-    generate_config->return_logits                  = config_proto->return_logits();
-    generate_config->return_incremental             = config_proto->return_incremental();
-    generate_config->return_hidden_states           = config_proto->return_hidden_states();
-    generate_config->hidden_states_cut_dim          = config_proto->hidden_states_cut_dim();
-    generate_config->normalized_hidden_states       = config_proto->normalized_hidden_states();
-    generate_config->calculate_loss                 = config_proto->calculate_loss();
-    generate_config->is_streaming                   = config_proto->is_streaming();
-    generate_config->timeout_ms                     = config_proto->timeout_ms();
-    generate_config->sp_edit                        = config_proto->sp_edit();
-    generate_config->force_disable_sp_run           = config_proto->force_disable_sp_run();
-    generate_config->force_sp_accept                = config_proto->force_sp_accept();
-    generate_config->return_cum_log_probs           = config_proto->return_cum_log_probs();
-    generate_config->return_all_probs               = config_proto->return_all_probs();
-    generate_config->return_softmax_probs           = config_proto->return_softmax_probs();
-    generate_config->can_use_pd_separation          = config_proto->can_use_pd_separation();
-    generate_config->gen_timeline                   = config_proto->gen_timeline();
-    generate_config->profile_step                   = config_proto->profile_step();
-    generate_config->ignore_eos                     = config_proto->ignore_eos();
+    memcpy(generate_config->variable_num_beams.data(),
+           config_proto->variable_num_beams().data(),
+           config_proto->variable_num_beams_size() * sizeof(int));
+    generate_config->num_return_sequences     = config_proto->num_return_sequences();
+    generate_config->return_logits            = config_proto->return_logits();
+    generate_config->return_incremental       = config_proto->return_incremental();
+    generate_config->return_hidden_states     = config_proto->return_hidden_states();
+    generate_config->hidden_states_cut_dim    = config_proto->hidden_states_cut_dim();
+    generate_config->normalized_hidden_states = config_proto->normalized_hidden_states();
+    generate_config->calculate_loss           = config_proto->calculate_loss();
+    generate_config->is_streaming             = config_proto->is_streaming();
+    generate_config->timeout_ms               = config_proto->timeout_ms();
+    generate_config->sp_edit                  = config_proto->sp_edit();
+    generate_config->force_disable_sp_run     = config_proto->force_disable_sp_run();
+    generate_config->force_sp_accept          = config_proto->force_sp_accept();
+    generate_config->return_cum_log_probs     = config_proto->return_cum_log_probs();
+    generate_config->return_all_probs         = config_proto->return_all_probs();
+    generate_config->return_softmax_probs     = config_proto->return_softmax_probs();
+    generate_config->can_use_pd_separation    = config_proto->can_use_pd_separation();
+    generate_config->gen_timeline             = config_proto->gen_timeline();
+    generate_config->profile_step             = config_proto->profile_step();
+    generate_config->ignore_eos               = config_proto->ignore_eos();
     generate_config->select_tokens_id.resize(config_proto->select_tokens_id_size());
     memcpy(generate_config->select_tokens_id.data(),
            config_proto->select_tokens_id().data(),
@@ -81,6 +83,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->inter_request_id = config_proto->inter_request_id();
     generate_config->reuse_cache      = config_proto->reuse_cache();
     generate_config->enable_3fs       = config_proto->enable_3fs();
+    TRANS_OPTIONAL(trace_id);
 
     return generate_config;
 }

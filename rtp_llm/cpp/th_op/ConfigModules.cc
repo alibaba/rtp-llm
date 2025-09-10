@@ -221,6 +221,7 @@ void ProfilingDebugLoggingConfig::update_from_env_for_test() {
     dg_print_reg_reuse        = bool_from_env_for_test("DG_PRINT_REG_REUSE", false);
     qwen_agent_debug          = bool_from_env_for_test("QWEN_AGENT_DEBUG", false);
     disable_dpc_random        = bool_from_env_for_test("DISABLE_DPC_RANDOM", false);
+    enable_detail_log         = bool_from_env_for_test("ENABLE_DETAIL_LOG", false);
 }
 
 void register_profiling_debug_logging_config(pybind11::module& m) {
@@ -237,6 +238,7 @@ void register_profiling_debug_logging_config(pybind11::module& m) {
                             int,
                             std::string,
                             bool,
+                            int,
                             int,
                             bool,
                             bool,
@@ -258,7 +260,8 @@ void register_profiling_debug_logging_config(pybind11::module& m) {
              pybind11::arg("debug_start_fake_process")  = false,
              pybind11::arg("dg_print_reg_reuse")        = false,
              pybind11::arg("qwen_agent_debug")          = false,
-             pybind11::arg("disable_dpc_random")        = false)
+             pybind11::arg("disable_dpc_random")        = false,
+             pybind11::arg("enable_detail_log")         = false)
         .def("to_string", &ProfilingDebugLoggingConfig::to_string)
         .def("update_from_env", &ProfilingDebugLoggingConfig::update_from_env_for_test)
         .def_readwrite("trace_memory", &ProfilingDebugLoggingConfig::trace_memory)
@@ -277,7 +280,8 @@ void register_profiling_debug_logging_config(pybind11::module& m) {
         .def_readwrite("debug_start_fake_process", &ProfilingDebugLoggingConfig::debug_start_fake_process)
         .def_readwrite("dg_print_reg_reuse", &ProfilingDebugLoggingConfig::dg_print_reg_reuse)
         .def_readwrite("qwen_agent_debug", &ProfilingDebugLoggingConfig::qwen_agent_debug)
-        .def_readwrite("disable_dpc_random", &ProfilingDebugLoggingConfig::disable_dpc_random);
+        .def_readwrite("disable_dpc_random", &ProfilingDebugLoggingConfig::disable_dpc_random)
+        .def_readwrite("enable_detail_log", &ProfilingDebugLoggingConfig::enable_detail_log);
 }
 
 // HWKernelConfig
@@ -682,8 +686,10 @@ inline std::string ProfilingDebugLoggingConfig::to_string() const {
         << "hack_layer_num: " << hack_layer_num << "\n"
         << "debug_start_fake_process: " << debug_start_fake_process << "\n"
         << "dg_print_reg_reuse: " << dg_print_reg_reuse << "\n"
-        << "qwen_agent_debug" << qwen_agent_debug << "\n"
-        << "disable_dpc_random" << disable_dpc_random << "\n";
+        << "qwen_agent_debug: " << qwen_agent_debug << "\n"
+        << "disable_dpc_random: " << disable_dpc_random << "\n"
+        << "enable_detail_log: " << enable_detail_log << "\n";
+
     return oss.str();
 }
 

@@ -607,6 +607,9 @@ class GptInitModelParameters:
             threefs_write_iov_size=get_env_int("THREEFS_WRITE_IOV_SIZE", 1 << 32),
         )
 
+        enable_detail_log = get_env_bool("ENABLE_DETAIL_LOG", False)
+        logging.info(f"enable_detail_log = {enable_detail_log}")
+
         # ProfilingDebugLoggingConfig
         self.gpt_init_params.profiling_debug_logging_config = (
             ProfilingDebugLoggingConfig(
@@ -628,9 +631,10 @@ class GptInitModelParameters:
                 debug_start_fake_process=get_env_bool(
                     "DEBUG_START_FAKE_PROCESS", False
                 ),
-                disable_dpc_random=get_env_bool("DISABLE_DPC_RANDOM", False),
-                qwen_agent_debug=get_env_bool("QWEN_AGENT_DEBUG", False),
                 dg_print_reg_reuse=get_env_bool("DG_PRINT_REG_REUSE", False),
+                qwen_agent_debug=get_env_bool("QWEN_AGENT_DEBUG", False),
+                disable_dpc_random=get_env_bool("DISABLE_DPC_RANDOM", False),
+                enable_detail_log=get_env_bool("ENABLE_DETAIL_LOG", False),
             )
         )
         # HWKernelConfig

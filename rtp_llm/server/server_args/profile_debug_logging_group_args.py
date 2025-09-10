@@ -125,3 +125,10 @@ def init_profile_debug_logging_group_args(parser):
         default=None,
         help="控制是否禁用 DPC 的随机性",
     )
+    profile_debug_logging_group.add_argument(
+        "--enable_detail_log",
+        env_name="ENABLE_DETAIL_LOG",
+        type=str2bool,
+        default=None,
+        help="控制是否打印细节日志，为了排查使用",
+    )

@@ -24,7 +24,10 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
     use_all_gather_(params.gpt_init_parameter.use_all_gather_),
     metrics_reporter_(params.metrics_reporter),
     tps_reporter_(MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(metrics_reporter_)) {
-    auto& gpt_param = params.gpt_init_parameter;
+    auto& gpt_param    = params.gpt_init_parameter;
+    enable_detail_log_ = gpt_param.profiling_debug_logging_config.enable_detail_log;
+    RTP_LLM_LOG_INFO("enable_detail_log_ = %d", enable_detail_log_);
+
     if (gpt_param.enable_eplb_ && gpt_param.moe_style_ != 0) {
         // use first moe layer weight as moe weight type
         int  first_moe_layer = gpt_param.moe_layer_index_.front();
@@ -118,7 +121,12 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
             lora_manager_->makeLoraModelInput(model_input.lora_ids, model_input.lora_input_lengths);
     }
     {
-        RTP_LLM_LOG_DEBUG("model_input: %s", model_input.debugString().c_str());
+        bool force = device_->getDeviceProperties().tp_rank == 0 && enable_detail_log_;
+        if (force) {
+            RTP_LLM_LOG_INFO("model_input: %s", model_input.debugString(force).c_str());
+        } else {
+            RTP_LLM_LOG_DEBUG("model_input: %s", model_input.debugString(force).c_str());
+        }
         int64_t start_time_us               = autil::TimeUtility::currentTimeInMicroSeconds();
         model_output                        = std::move(model_->forward(model_input));
         executor_collector.model_forward_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
