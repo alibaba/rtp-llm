@@ -724,6 +724,90 @@ template ends here"""
         def get_step3_expected_renderer_prompt(self) -> str:
             return """<|im_system|>tool_declare<|im_middle|>\n  # Tools\n  [{"type": "function", "function": {"name": "get_current_temperature", "description": "Get current temperature at a location.", "parameters": {"type": "object", "properties": {"location": {"type": "string", "description": "The location to get the temperature for, in the format \\"City, State, Country\\"."}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "The unit to return the temperature in. Defaults to \\"celsius\\"."}}, "required": ["location"]}}}, {"type": "function", "function": {"name": "get_temperature_date", "description": "Get temperature at a location and date.", "parameters": {"type": "object", "properties": {"location": {"type": "string", "description": "The location to get the temperature for, in the format \\"City, State, Country\\"."}, "date": {"type": "string", "description": "The date to get the temperature for, in the format \\"Year-Month-Day\\"."}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "The unit to return the temperature in. Defaults to \\"celsius\\"."}}, "required": ["location", "date"]}}}]<|im_end|><|im_system|>system<|im_middle|>You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nCurrent Date: 2024-09-30<|im_end|><|im_user|>user<|im_middle|>What\'s the temperature in San Francisco now? How about tomorrow?<|im_end|><|im_assistant|>assistant<|im_middle|><|tool_calls_section_begin|><|tool_call_begin|>functions.get_current_temperature:0<|tool_call_argument_begin|>{"location": "San Francisco, CA, USA"}<|tool_call_end|><|tool_call_begin|>functions.get_temperature_date:1<|tool_call_argument_begin|>{"location": "San Francisco, CA, USA", "date": "2024-10-01"}<|tool_call_end|><|tool_calls_section_end|><|im_end|><|im_system|>tool<|im_middle|>## Return of functions.get_current_temperature:0\n    {"temperature": 26.1, "location": "San Francisco, CA, USA", "unit": "celsius"}<|im_end|><|im_system|>tool<|im_middle|>## Return of functions.get_temperature_date:1\n    {"temperature": 25.9, "location": "San Francisco, CA, USA", "date": "2024-10-01", "unit": "celsius"}<|im_end|><|im_assistant|>assistant<|im_middle|>San Francisco今天26.1度, 明天25.9度<|im_end|><|im_user|>user<|im_middle|>那北京明天温度如何<|im_end|><|im_assistant|>assistant<|im_middle|>"""
 
+    class Kimik2RendererErrorCheckTestImpl(Kimik2RendererTestImpl):
+        @override
+        def get_messages_with_tool_response(self) -> List[ChatMessage]:
+            """获取包含工具响应的消息 - 通用实现"""
+            messages = self.get_initial_messages()
+            messages.extend(
+                [
+                    ChatMessage(
+                        **{
+                            "role": RoleEnum.assistant,
+                            "tool_calls": [
+                                {
+                                    "id": "get_current_temperature:0",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "get_current_temperature",
+                                        "arguments": '{"location": "San Francisco, CA, USA"}',
+                                    },
+                                },
+                                {
+                                    "id": "get_temperature_date:1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "get_temperature_date",
+                                        "arguments": '{"location": "San Francisco, CA, USA", "date": "2024-10-01"}',
+                                    },
+                                },
+                            ],
+                        }
+                    ),
+                    ChatMessage(
+                        **{
+                            "role": RoleEnum.tool,
+                            "content": '{"temperature": 26.1, "location": "San Francisco, CA, USA", "unit": "celsius"}',
+                            "tool_call_id": "error_get_current_temperature:0",
+                        }
+                    ),
+                    ChatMessage(
+                        **{
+                            "role": RoleEnum.tool,
+                            "content": '{"temperature": 25.9, "location": "San Francisco, CA, USA", "date": "2024-10-01", "unit": "celsius"}',
+                            "tool_call_id": "error_get_temperature_date:1",
+                        }
+                    ),
+                ]
+            )
+            return messages
+
+        @override
+        def run_renderer_test(self):
+            """运行渲染器测试的通用方法"""
+            tokenizer = self.get_tokenizer()
+            render_params = self.get_render_params()
+            chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
+            tools = self.get_tools()
+
+            # 测试步骤1：初始消息
+            initial_messages = self.get_initial_messages()
+            request = ChatCompletionRequest(messages=initial_messages, tools=tools)
+            renderer_prompt = chat_renderer.render_chat(request).rendered_prompt
+            expected_prompt = self.get_step1_expected_renderer_prompt()
+            logging.info(
+                f"Step 1 prompt: \n{renderer_prompt}\n-----------------------------------"
+            )
+            assert renderer_prompt == expected_prompt, "Step 1 prompt mismatch"
+
+            # 测试步骤2：包含工具响应的消息
+            tool_response_messages = self.get_messages_with_tool_response()
+            request = ChatCompletionRequest(
+                messages=tool_response_messages, tools=tools
+            )
+
+            # 验证是否抛出ValueError
+            try:
+                renderer_prompt = chat_renderer.render_chat(request).rendered_prompt
+                # 如果没有抛出异常，测试失败
+                assert False, "Expected ValueError was not raised in step 2"
+            except ValueError as e:
+                # 预期的异常，测试通过
+                logging.info(f"Step 2 correctly raised ValueError: {e}")
+            except Exception as e:
+                # 抛出了其他异常，测试失败
+                assert False, f"Expected ValueError but got {type(e).__name__}: {e}"
+
     # Qwen3 Coder渲染器测试实现
     class Qwen3CoderRendererTestImpl(BaseRendererTestMixin):
         def __init__(self, test_instance):
@@ -822,6 +906,11 @@ template ends here"""
         """Kimik2渲染器测试"""
         kimik2_test = self.Kimik2RendererTestImpl(self)
         kimik2_test.run_renderer_test()
+
+    def test_kimik2_error_check(self):
+        """Kimik2 Error Check渲染器测试"""
+        kimik2_error_check_test = self.Kimik2RendererErrorCheckTestImpl(self)
+        kimik2_error_check_test.run_renderer_test()
 
     def test_qwen3_coder(self):
         """Qwen3 Coder渲染器测试"""
