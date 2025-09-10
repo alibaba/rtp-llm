@@ -2,15 +2,16 @@ import copy
 import functools
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import AsyncGenerator, List, Optional, Union
 
 import torch
-from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.gpt_init_model_parameters import TemplateType
 from rtp_llm.config.py_config_modules import PyEnvConfigs, StaticConfig
+from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -320,6 +321,28 @@ class CustomChatRenderer:
 
     def getRequest(self, request: str) -> ChatCompletionRequest:
         return ChatCompletionRequest(**(json.loads(request)))
+
+    def _setup_chat_template(self, template_file_name: str = "chat_template.jinja"):
+        """设置聊天模板, 兼容从文件读取chat_template的情况"""
+        self.chat_template = self.tokenizer.chat_template
+        if not self.chat_template:
+            logging.warning(
+                f"Tokenizer try load chat_template from {template_file_name}."
+            )
+            tokenizer_path = self.tokenizer.path
+            if tokenizer_path and os.path.exists(tokenizer_path):
+                default_template_path = os.path.join(tokenizer_path, template_file_name)
+                if os.path.exists(default_template_path):
+                    with open(default_template_path, "r") as f:
+                        # load all content
+                        self.chat_template = f.read()
+                    logging.info(
+                        f"loaded default chat template from {default_template_path}"
+                    )
+                else:
+                    logging.warning(
+                        f"Default chat template not found at {default_template_path}, using empty template."
+                    )
 
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         raise NotImplementedError

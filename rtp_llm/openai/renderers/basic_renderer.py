@@ -59,9 +59,8 @@ class BasicRenderer(CustomChatRenderer):
         self.add_generation_prompt = True
         self.chat_template = None
         self.special_tokens_map = {}
-
         try:
-            self.chat_template = tokenizer.chat_template
+            self._setup_chat_template()
             assert self.chat_template != None
         except:
             try:
