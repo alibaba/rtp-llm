@@ -339,6 +339,9 @@ ErrorInfo PrefillRpcServerNew::waitStoreCacheForAllRankDone(PrefillGenerateConte
             "request [%s] load kv cache failed, err: %s", prefill_context.request_key.c_str(), error_msg.c_str());
         return ErrorInfo(error_code, error_msg);
     }
+
+    // release kv resource
+    prefill_context.getStream()->releaseResource();
     return ErrorInfo::OkStatus();
 }
 
