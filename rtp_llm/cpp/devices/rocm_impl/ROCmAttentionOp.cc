@@ -520,41 +520,43 @@ KVBlockArray ROCmDevice::getKVBlockArray(const AttentionModuleParams& params,
 }
 
 ParamsPtr ROCmDevice::PrepareCKAttn(const AttentionConfigs& configs,
-                                    int kv_block_offset,
-                                    const BufferPtr &kv_cache_block_id,
-                                    int batch_size) {
+                                    int                     kv_block_offset,
+                                    const BufferPtr&        kv_cache_block_id,
+                                    int                     batch_size) {
     RTP_LLM_LOG_DEBUG("PrepareCKAttn: kv_block_offset: %d, batch_size: %d, kv_cache_block_id: %s",
-                      kv_block_offset, batch_size,
+                      kv_block_offset,
+                      batch_size,
                       kv_cache_block_id ? kv_cache_block_id->debugString().c_str() : "nullptr");
     if (kv_block_offset <= 0 || batch_size <= 0 || !kv_cache_block_id) {
         return nullptr;
     }
-    auto ck_attn = std::make_shared<CKAttn>();
+    auto            ck_attn    = std::make_shared<CKAttn>();
     KvCacheDataType cache_type = KvCacheDataType::BASE;
 #ifdef ENABLE_FP8
     if (use_fp8_fmha_) {
         cache_type = KvCacheDataType::FP8;
     } else
 #endif
-	if (configs.kv_cache_dtype == KvCacheDataType::INT8) {
+        if (configs.kv_cache_dtype == KvCacheDataType::INT8) {
         RTP_LLM_LOG_DEBUG("now use kv_cache int8");
         cache_type = KvCacheDataType::INT8;
     }
     const auto max_blocks_per_batch = kv_cache_block_id->shape()[1];
-    auto const  elemSize             = 2;  // 2 for kv cache fp16
-    
-    ck_attn->kv_cache_offset =  allocateBuffer({DataType::TYPE_INT32, {size_t(batch_size), 1, 2, max_blocks_per_batch}, AllocationType::DEVICE},
-                                         {"kv_cache_offset"});
-    ck_attn->kv_block_array = KVBlockArray(batch_size,
-                                            max_blocks_per_batch,
-                                            configs.tokens_per_block,
-                                            configs.kv_head_num * configs.size_per_head * elemSize,
-                                            0,
-                                            0,
-                                            nullptr, // (uint64_t*)k_cache.data(),
-                                            nullptr,
-                                            (rtp_llm::KVCacheIndex*)ck_attn->kv_cache_offset->data<int>());
-    ck_attn->kv_block_array.cache_type = cache_type;
+    auto const elemSize             = 2;  // 2 for kv cache fp16
+
+    ck_attn->kv_cache_offset =
+        allocateBuffer({DataType::TYPE_INT32, {size_t(batch_size), 1, 2, max_blocks_per_batch}, AllocationType::DEVICE},
+                       {"kv_cache_offset"});
+    ck_attn->kv_block_array                     = KVBlockArray(batch_size,
+                                           max_blocks_per_batch,
+                                           configs.tokens_per_block,
+                                           configs.kv_head_num * configs.size_per_head * elemSize,
+                                           0,
+                                           0,
+                                           nullptr,  // (uint64_t*)k_cache.data(),
+                                           nullptr,
+                                           (rtp_llm::KVCacheIndex*)ck_attn->kv_cache_offset->data<int>());
+    ck_attn->kv_block_array.cache_type          = cache_type;
     ck_attn->kv_block_array.mScaleBytesPerBlock = configs.tokens_per_block * configs.kv_head_num * sizeof(float);
     invokeConvertOffsetToBlockArrayData(ck_attn->kv_cache_offset->data<int>(),
                                         kv_cache_block_id->data<int>(),
@@ -763,7 +765,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
     printBufferData(*k_output, "run_ck_k_output");
     printBufferData(*v_output, "run_ck_v_output");
     printBufferData(params.input, "run_ck_input");
-    if (skip_add_bias_transpose) {
+    if (skip_add_bias_transpose || prefix_prompt_param.max_prefix_prompt_length <= 0) {
         // not implemented reuse cache for this branch
         fmha_runner_->runCKFmha(params.input.data(),
                                 params.input.dataWithOffset(hidden_units),
@@ -800,35 +802,20 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
         bufMemset(*v_contiguous, 0);
         const int hidden_size_q  = head_num * size_per_head;
         const int hidden_size_kv = kv_head_num * size_per_head;
-
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
-                                         invokeGatherSequences,
+                                         invokeGatherSequencesCombined,
                                          q_contiguous->data(),
+                                         k_contiguous->data(),
+                                         v_contiguous->data(),
                                          q_output->data(),
+                                         k_output->data(),
+                                         v_output->data(),
                                          params.common.cu_seqlens->data<int>(),
+                                         params.common.cu_kv_seqlens->data<int>(),
                                          batch_size,
                                          seq_len,
+                                         seq_len_with_prefix,
                                          head_num,
-                                         size_per_head,
-                                         stream_);
-        DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
-                                         invokeGatherSequences,
-                                         k_contiguous->data(),
-                                         k_output->data(),
-                                         params.common.cu_kv_seqlens->data<int>(),
-                                         batch_size,
-                                         seq_len_with_prefix,
-                                         kv_head_num,
-                                         size_per_head,
-                                         stream_);
-
-        DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
-                                         invokeGatherSequences,
-                                         v_contiguous->data(),
-                                         v_output->data(),
-                                         params.common.cu_kv_seqlens->data<int>(),
-                                         batch_size,
-                                         seq_len_with_prefix,
                                          kv_head_num,
                                          size_per_head,
                                          stream_);

@@ -3417,37 +3417,92 @@ __global__ void load_prefix_KVCache_kernel(T*                            q_buf,
 
 #if USING_ROCM
 template<typename T>
-__global__ void gather_sequences_kernel(T*         output,  // output：[Head][Total_Tokens][Size_per_head]
-                                        const T*   input,   // input：[Batch][Head][Sequence][Size_per_head]
-                                        const int* cu_seqlens,
-                                        int        batch_size,
-                                        int        max_seq_len,
-                                        int        head_num,
-                                        int        size_per_head) {
-    int tid = threadIdx.x + blockIdx.x * blockDim.x;
-    if (tid >= cu_seqlens[batch_size])
+__global__ void gather_sequences_kernel_combined_v2(T*         output_q,
+                                                    T*         output_k,
+                                                    T*         output_v,
+                                                    const T*   input_q,
+                                                    const T*   input_k,
+                                                    const T*   input_v,
+                                                    const int* cu_seqlens,
+                                                    const int* cu_kv_seqlens,
+                                                    int        batch_size,
+                                                    int        seq_len,
+                                                    int        seq_len_with_prefix,
+                                                    int        head_num_q,
+                                                    int        head_num_k,
+                                                    int        head_num_v,
+                                                    int        size_per_head) {
+    int token_idx = threadIdx.x + blockIdx.x * blockDim.x;
+    int head_idx  = blockIdx.y;
+
+    bool is_q = head_idx < head_num_q;
+    bool is_k = head_idx >= head_num_q && head_idx < head_num_q + head_num_k;
+    bool is_v = head_idx >= head_num_q + head_num_k;
+
+    if (!is_q && !is_k && !is_v)
         return;
 
+    int real_head_idx;
+    int total_tokens;
+    int max_seq_len;
+
+    if (is_q) {
+        real_head_idx = head_idx;
+        total_tokens  = cu_seqlens[batch_size];
+        max_seq_len   = seq_len;
+    } else if (is_k) {
+        real_head_idx = head_idx - head_num_q;
+        total_tokens  = cu_kv_seqlens[batch_size];
+        max_seq_len   = seq_len_with_prefix;
+    } else {
+        real_head_idx = head_idx - head_num_q - head_num_k;
+        total_tokens  = cu_kv_seqlens[batch_size];
+        max_seq_len   = seq_len_with_prefix;
+    }
+
+    if (token_idx >= total_tokens)
+        return;
+
+    // caculate sample_id 和 pos_in_sample
     int sample_id     = 0;
-    int pos_in_sample = tid;
-    while (sample_id < batch_size && pos_in_sample >= (cu_seqlens[sample_id + 1] - cu_seqlens[sample_id])) {
-        pos_in_sample -= (cu_seqlens[sample_id + 1] - cu_seqlens[sample_id]);
+    int pos_in_sample = token_idx;
+
+    const int* current_seqlens = is_q ? cu_seqlens : cu_kv_seqlens;
+
+    while (sample_id < batch_size && pos_in_sample >= (current_seqlens[sample_id + 1] - current_seqlens[sample_id])) {
+        pos_in_sample -= (current_seqlens[sample_id + 1] - current_seqlens[sample_id]);
         sample_id++;
     }
-    // 新的输出索引计算：
-    for (int h = 0; h < head_num; ++h) {
+    if (sample_id >= batch_size)
+        return;
+
+    // caculate input and output index
+    if (is_q) {
+        int input_idx = sample_id * head_num_q * max_seq_len * size_per_head
+                        + real_head_idx * max_seq_len * size_per_head + pos_in_sample * size_per_head;
+
+        int output_idx = real_head_idx * max_seq_len * batch_size * size_per_head + token_idx * size_per_head;
+
         for (int s = 0; s < size_per_head; ++s) {
-            // compute input index
-            int input_idx = sample_id * head_num * max_seq_len * size_per_head + h * max_seq_len * size_per_head
-                            + pos_in_sample * size_per_head + s;
+            output_q[output_idx + s] = input_q[input_idx + s];
+        }
+    } else if (is_k) {
+        int input_idx = sample_id * head_num_k * max_seq_len * size_per_head
+                        + real_head_idx * max_seq_len * size_per_head + pos_in_sample * size_per_head;
 
-            // compute output index（[Head][Total_Tokens][Size_per_head]）：
-            int output_idx = h * max_seq_len * batch_size * size_per_head  // Head dim
-                             + tid * size_per_head                         // token position
-                             + s;                                          // size_per_head dim
+        int output_idx = real_head_idx * max_seq_len * batch_size * size_per_head + token_idx * size_per_head;
 
-            output[output_idx] = input[input_idx];
-            float output_val   = output[output_idx];
+        for (int s = 0; s < size_per_head; ++s) {
+            output_k[output_idx + s] = input_k[input_idx + s];
+        }
+    } else if (is_v) {
+        int input_idx = sample_id * head_num_v * max_seq_len * size_per_head
+                        + real_head_idx * max_seq_len * size_per_head + pos_in_sample * size_per_head;
+
+        int output_idx = real_head_idx * max_seq_len * batch_size * size_per_head + token_idx * size_per_head;
+
+        for (int s = 0; s < size_per_head; ++s) {
+            output_v[output_idx + s] = input_v[input_idx + s];
         }
     }
 }
@@ -3549,19 +3604,45 @@ void invokeLoadPrefixKVCache(T*                             q_buf,
 
 #if USING_ROCM
 template<typename T>
-void invokeGatherSequences(T*           output,
-                           const T*     input,
-                           const int*   cu_seqlens,
-                           int          batch_size,
-                           int          max_seq_len,
-                           int          head_num,
-                           int          size_per_head,
-                           cudaStream_t stream) {
-    int total_tokens      = cu_seqlens[batch_size];
+void invokeGatherSequencesCombined(T*           output_q,
+                                   T*           output_k,
+                                   T*           output_v,
+                                   const T*     input_q,
+                                   const T*     input_k,
+                                   const T*     input_v,
+                                   const int*   cu_seqlens,
+                                   const int*   cu_kv_seqlens,
+                                   int          batch_size,
+                                   int          seq_len,
+                                   int          seq_len_with_prefix,
+                                   int          head_num_q,
+                                   int          head_num_kv,
+                                   int          size_per_head,
+                                   cudaStream_t stream) {
+    int total_heads = head_num_q + 2 * head_num_kv;  // q heads + k heads + v heads
+
+    // 计算最大token数用于网格配置
+    int max_tokens        = max(cu_seqlens[batch_size], cu_kv_seqlens[batch_size]);
     int threads_per_block = 256;
-    int blocks_per_grid   = (total_tokens + threads_per_block - 1) / threads_per_block;
-    gather_sequences_kernel<<<blocks_per_grid, threads_per_block, 0, stream>>>(
-        output, input, cu_seqlens, batch_size, max_seq_len, head_num, size_per_head);
+
+    dim3 block_size(threads_per_block, 1);
+    dim3 grid_size((max_tokens + threads_per_block - 1) / threads_per_block, total_heads);
+
+    gather_sequences_kernel_combined_v2<T><<<grid_size, block_size, 0, stream>>>(output_q,
+                                                                                 output_k,
+                                                                                 output_v,
+                                                                                 input_q,
+                                                                                 input_k,
+                                                                                 input_v,
+                                                                                 cu_seqlens,
+                                                                                 cu_kv_seqlens,
+                                                                                 batch_size,
+                                                                                 seq_len,
+                                                                                 seq_len_with_prefix,
+                                                                                 head_num_q,
+                                                                                 head_num_kv,  // k heads
+                                                                                 head_num_kv,  // v heads
+                                                                                 size_per_head);
 }
 
 template<typename T>
@@ -3810,17 +3891,19 @@ INSTANTIATEINVOKELOADPREFIXKVCACHEAITER(__nv_bfloat16);
 #endif
 #undef INSTANTIATEINVOKELOADPREFIXKVCACHEAITER
 
-#define INSTANTIATEINVOKEGATHERSEQUENCES(T)                                                                            \
-    template void invokeGatherSequences<T>(T*, const T*, const int*, int, int, int, int, cudaStream_t);
+#define INSTANTIATEINVOKEGATHERSEQUENCESCOMBIED(T)                                                                     \
+    template void invokeGatherSequencesCombined<T>(                                                                    \
+        T*, T*, T*, const T*, const T*, const T*, const int*, const int*, int, int, int, int, int, int, cudaStream_t);
 
-INSTANTIATEINVOKEGATHERSEQUENCES(float);
-INSTANTIATEINVOKEGATHERSEQUENCES(half);
+INSTANTIATEINVOKEGATHERSEQUENCESCOMBIED(float);
+INSTANTIATEINVOKEGATHERSEQUENCESCOMBIED(half);
 
 #ifdef ENABLE_BF16
-INSTANTIATEINVOKEGATHERSEQUENCES(__nv_bfloat16);
+INSTANTIATEINVOKEGATHERSEQUENCESCOMBIED(__nv_bfloat16);
 #endif
 
-#undef INSTANTIATEINVOKEGATHERSEQUENCES
+#undef INSTANTIATEINVOKEGATHERSEQUENCESCOMBIED
+
 #endif
 
 #define INSTANTIATEINVOKELOADPREFIXKVCACHE(T)                                                                          \
@@ -3994,9 +4077,8 @@ INSTANTIATEADDRELATIVEATTENTIONBIAS(__nv_bfloat16);
 // m = batch*window_num*window_len
 // mm_qkv is [m, head*3*size_per_head] row-major
 // bias_qkv is [head*3*size_per_head]
-// q_buf_, k_buf_, v_buf_ is [batch*window_num, num_head, window_len, size_per_head] row-major
-// grid(window_len, window_num, 3*batch);
-// block(num_head * size_per_head)
+// q_buf_, k_buf_, v_buf_ is [batch*window_num, num_head, window_len, size_per_head]
+// row-major grid(window_len, window_num, 3*batch); block(num_head * size_per_head)
 template<typename T>
 __global__ void add_head3Size_QKV_bias(const T*  mm_qkv,
                                        const T*  bias_qkv,
@@ -4042,9 +4124,8 @@ __global__ void add_head3Size_QKV_bias(const T*  mm_qkv,
 // m = batch*window_num*window_len
 // mm_qkv is [m, head*3*size_per_head] row-major
 // bias_qkv is [head*3*size_per_head]
-// q_buf_, k_buf_, v_buf_ is [batch*window_num, num_head, window_len, size_per_head] row-major
-// grid(window_len, window_num, 3*batch);
-// block(num_head * size_per_head)
+// q_buf_, k_buf_, v_buf_ is [batch*window_num, num_head, window_len, size_per_head]
+// row-major grid(window_len, window_num, 3*batch); block(num_head * size_per_head)
 template<>
 __global__ void add_head3Size_QKV_bias(const float2* mm_qkv,
                                        const float2* bias_qkv,
@@ -4092,9 +4173,8 @@ __global__ void add_head3Size_QKV_bias(const float2* mm_qkv,
 // m = batch*window_num*window_len
 // mm_qkv is [m, head*3*size_per_head] row-major
 // bias_qkv is [head*3*size_per_head]
-// q_buf_, k_buf_, v_buf_ is [batch*window_num, num_head, window_len, size_per_head] row-major
-// grid(window_len, window_num, batch);
-// block(num_head * size_per_head)
+// q_buf_, k_buf_, v_buf_ is [batch*window_num, num_head, window_len, size_per_head]
+// row-major grid(window_len, window_num, batch); block(num_head * size_per_head)
 template<>
 __global__ void add_head3Size_QKV_bias(const half2* mm_qkv,
                                        const half2* bias_qkv,

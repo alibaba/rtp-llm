@@ -164,14 +164,21 @@ void invokeAddFusedQKVBiasTranspose(T*                             q_no_transpos
 
 #if USING_ROCM
 template<typename T>
-void invokeGatherSequences(T*           output,
-                           const T*     input,
-                           const int*   cu_seqlens,
-                           int          batch_size,
-                           int          max_seq_len,
-                           int          head_num,
-                           int          size_per_head,
-                           cudaStream_t stream);
+void invokeGatherSequencesCombined(T*           output_q,
+                                   T*           output_k,
+                                   T*           output_v,
+                                   const T*     input_q,
+                                   const T*     input_k,
+                                   const T*     input_v,
+                                   const int*   cu_seqlens,
+                                   const int*   cu_kv_seqlens,
+                                   int          batch_size,
+                                   int          seq_len,
+                                   int          seq_len_with_prefix,
+                                   int          head_num,
+                                   int          head_num_kv,
+                                   int          size_per_head,
+                                   cudaStream_t stream);
 
 template<typename T>
 void invokeAddFusedQKVBiasTransposePrefill(T*                             q_buf,
