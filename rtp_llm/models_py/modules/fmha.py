@@ -4,7 +4,6 @@ from typing import Any, List, Optional
 import torch
 
 try:
-    from libth_transformer import rtp_llm_ops
     from libth_transformer.rtp_llm_ops import (
         FusedRopeKVCacheDecodeOp,
         FusedRopeKVCachePrefillOp,
@@ -14,6 +13,7 @@ except ImportError:
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.ops import FMHAType, KVCache, PyAttentionInputs
+from rtp_llm.models_py.modules.kvcache_store import WriteCacheStoreOp
 
 
 class FMHAImplBase(object):
@@ -41,6 +41,16 @@ class FMHAImplBase(object):
             self.rope_kvcache_impl = rope_kvcache_impl
             self.prepare(attn_inputs)
             self.attn_inputs = attn_inputs
+            if (
+                self.attn_inputs.is_prefill
+                and self.attn_inputs.cache_store_inputs
+            ):
+                self.write_cache_store_impl = WriteCacheStoreOp(
+                    self.attn_inputs.input_lengths,
+                    self.attn_inputs.prefix_lengths,
+                    self.attn_inputs.kv_cache_block_id_host,
+                    self.attn_inputs.cache_store_inputs
+                )
 
     def forward(self, qkv: torch.Tensor, kv_cache: Optional[KVCache]) -> torch.Tensor:
         assert self.rope_kvcache_impl is not None and self.rope_params is not None
@@ -50,14 +60,9 @@ class FMHAImplBase(object):
         if (
             self.attn_inputs.is_prefill
             and self.attn_inputs.cache_store_inputs
+            and self.write_cache_store_impl is not None
         ):
-            rtp_llm_ops.write_cache_store(
-                self.attn_inputs.input_lengths,
-                self.attn_inputs.prefix_lengths,
-                self.attn_inputs.kv_cache_block_id_host,
-                self.attn_inputs.cache_store_inputs,
-                kv_cache,
-            )
+            self.write_cache_store_impl(kv_cache)
         assert self.fmha_impl is not None
         res = self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
         return res

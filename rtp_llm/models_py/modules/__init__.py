@@ -27,6 +27,7 @@ else:
         PREFILL_MHA_IMPS,
     )
 
+from rtp_llm.models_py.modules.kvcache_store import WriteCacheStoreOp
 from rtp_llm.models_py.modules.embedding import Embedding
 from rtp_llm.models_py.modules.fmha import FMHAImplBase
 from rtp_llm.models_py.modules.linear import LinearTorch

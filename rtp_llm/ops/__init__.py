@@ -167,6 +167,7 @@ try:
     from libth_transformer import EngineScheduleInfo, KVCacheInfo, LoadBalanceInfo
     from libth_transformer import MultimodalInput as MultimodalInputCpp
     from libth_transformer import (
+        PyCacheStoreInputs,
         PyAttentionInputs,
         PyModelInitResources,
         PyModelInputs,

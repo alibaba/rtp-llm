@@ -24,7 +24,7 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("prefix_lengths"),
                   py::arg("kv_cache_block_id_host"),
                   py::arg("cache_store_member"),
-                  py::arg("kv_cache") = 0);
+                  py::arg("kv_cache"));
 
     rtp_ops_m.def("rmsnorm",
                   &rmsnorm,

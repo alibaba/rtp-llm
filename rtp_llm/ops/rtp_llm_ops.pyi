@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import libth_transformer
 import torch
+from typing import Optional, Any
+from rtp_llm.ops import KVCache, PyCacheStoreInputs
 
 __all__ = [
     "FlashInferAttnParams",
@@ -20,6 +22,7 @@ __all__ = [
     "fused_add_layernorm",
     "fused_add_rmsnorm",
     "fused_qk_rmsnorm",
+    "write_cache_store",
     "layernorm",
     "rmsnorm",
     "silu_and_mul",
@@ -150,6 +153,18 @@ def fused_qk_rmsnorm(
 ) -> None:
     """
     Fused QK RMSNorm kernel
+    """
+
+def write_cache_store(
+    input_lengths: torch.Tensor,
+    prefix_lengths: torch.Tensor,
+    kv_cache_block_id_host: torch.Tensor,
+    cache_store_member: Optional[PyCacheStoreInputs],
+    kv_cache: Optional[KVCache],
+    cuda_stream: int = 0,
+) -> None:
+    """
+    WriteCacheStoreOp kernel
     """
 
 def layernorm(

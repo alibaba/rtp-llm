@@ -1052,6 +1052,9 @@ class KVCache:
     v_scale_base: torch.Tensor
     def get_layer_cache(self, idx: int) -> KVCache: ...
 
+class PyCacheStoreInputs:
+    def __init__(self) -> None: ...
+
 class PyAttentionInputs:
     def get_prefill_flash_infer_attn(self) -> typing.Any:
         pass
