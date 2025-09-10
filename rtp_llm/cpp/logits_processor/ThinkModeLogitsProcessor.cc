@@ -81,7 +81,7 @@ void ThinkModeLogitsProcessor::updateLogitProcessorStatus(const rtp_llm::BufferP
 ThinkModeLogitsProcessorPtr ThinkModeLogitsProcessor::fromGenerateInput(rtp_llm::DeviceBase*           device,
                                                                         std::shared_ptr<GenerateInput> generate_input,
                                                                         int32_t                        num) {
-    if (!generate_input->generate_config->in_think_mode) {
+    if (!generate_input->generate_config->in_think_mode || generate_input->generate_config->max_thinking_tokens == 0) {
         return nullptr;
     }
 
