@@ -31,7 +31,7 @@ class EmbeddingCppEngine(BaseEngine):
         else:
             self.mm_engine = None
         self.cpp_engine.init(self.model, self.mm_engine)
-        self.model.custom_module.handler.init_cpp_handler()
+        #self.model.custom_module.handler.init_cpp_handler()
 
     def decode_sync(self, inputs: EngineInputs, outputs: EngineOutputs):
         multimodal_inputs = [
