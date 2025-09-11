@@ -125,9 +125,8 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         """
         context = request.model_dump(exclude_none=True, mode="json")
 
-        # 只要不是已经有assistant消息, 则需要添加生成提示
-        if request.messages[-1].role != RoleEnum.assistant:
-            context["add_generation_prompt"] = True
+        # 默认添加生成提示
+        context["add_generation_prompt"] = True
 
         messages = self._preprocess_messages(context["messages"])
         context.update({"messages": messages})
