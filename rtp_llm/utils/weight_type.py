@@ -5,7 +5,7 @@ import torch
 
 class WEIGHT_TYPE(Enum):
     # 每个枚举值现在是 (别名列表, torch dtype) 的元组
-    AUTO = ["auto", None]  # 特殊处理
+    AUTO = [["auto"], None]  # 特殊处理
     INT4 = (["int4"], None)  # 特殊处理
     INT8 = (["int8"], torch.int8)
     FP8 = (["fp8", "fp8_e4m3"], torch.float8_e4m3fn)
