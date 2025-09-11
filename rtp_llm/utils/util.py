@@ -2,11 +2,14 @@ import json
 import logging
 import os
 import shutil
+import socket
 import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Union
 
 import aiohttp
+import psutil
 import torch
 from aiohttp import ClientConnectorError, ServerTimeoutError
 
@@ -277,3 +280,58 @@ async def _handle_response(response: aiohttp.ClientResponse) -> Dict[str, Any]:
             "details": str(e),
             "raw_response": text,
         }
+
+
+def wait_sever_done(server_process, port: int, timeout: int = 1600):
+    host = "localhost"
+    retry_interval = 1  # 重试间隔（秒）
+    start_time = time.time()
+
+    port = str(port)
+
+    logging.info(f"等待pid[{server_process.pid}]启动中...\n端口 {port}")
+    while True:
+        try:
+            # 尝试连接到指定的主机和端口
+            sock = socket.create_connection((host, port), timeout=timeout)
+            sock.close()
+            logging.info(f"端口 {port} 已启动成功")
+            return True
+        except (socket.error, ConnectionRefusedError):
+            # 如果连接失败，等待一段时间后重试
+            time.sleep(retry_interval)
+
+            if not psutil.pid_exists(server_process.pid) or server_process.poll():
+                logging.warning(
+                    f"进程:[{server_process.pid}] 状态异常, 服务启动失败,请查看日志文件"
+                )
+                return False
+            # 如果等待时间超过预设的超时时间，则放弃等待
+            if time.time() - start_time > timeout:
+                logging.warning(f"等待端口 {port} 启动超时,请查看日志文件")
+                return False
+
+
+def stop_server(
+    server_process,
+):
+    if server_process is not None and server_process.pid is not None:
+        try:
+            # 如果只kill start_server，会残留 backend/frontend 占用显存。
+            # 部署时容器整体会回收，但测试时需要自己递归 kill
+            # 不适用 setsid/killpg 是因为 setsid 可能会在 test 父进程意外退出的情况遗留 start_server 占用测试资源
+            logging.info("stop server and children: %d", server_process.pid)
+            parent = psutil.Process(server_process.pid)
+            children = list(parent.children(recursive=True))  # 获取所有子进程（递归）
+            for child in children:
+                child.terminate()  # 先尝试优雅终止
+            _, alive = psutil.wait_procs(children, timeout=5)
+            for child in alive:
+                child.kill()  # 强制终止未退出的进程
+            parent.terminate()
+            parent.wait()
+            server_process = None
+        except Exception as e:
+            logging.warning("failed to get process with: " + str(e))
+            server_process = None
+    return True
