@@ -1,12 +1,12 @@
-# 背景
-支持了结构化剪枝 [LLM-Pruner: On the Structural Pruning of Large Language Models](https://arxiv.org/abs/2305.11627)。具体的来说，对于Attention Layer，head_num逐层不同（其中head num可以减到0）；对于FFN Layer，inter_size逐层不同。
-应用于[Large Language Model based Long-tail Query Rewriting in Taobao Search](https://arxiv.org/abs/2311.03758).
+# Background
+Supports structured pruning [LLM-Pruner: On the Structural Pruning of Large Language Models](https://arxiv.org/abs/2305.11627). Specifically, for the Attention Layer, the head_num varies layer by layer (where head num can be reduced to 0); for the FFN Layer, the inter_size varies layer by layer.
+Applied to [Large Language Model based Long-tail Query Rewriting in Taobao Search](https://arxiv.org/abs/2311.03758).
 
-## 使用方法
+## Usage
 
-在模型的config.json中增加两个list，列出每一层head_num和inter_size,且list的元素个数需要与layer_num一致。
-config需要与训练得到的ckpt保持一致。
-例如：
+Add two lists in the model's config.json to specify the head_num and inter_size for each layer, and the number of elements in the list needs to be consistent with layer_num.
+The config needs to be consistent with the trained ckpt.
+For example:
 ``` json
 {
   "layer_head_num": [21, 8, 19, 18, 19, 21, 23, 23, 20, 27, 22, 18, 23, 0, 1, 9, 21, 0, 1, 0],
@@ -15,6 +15,6 @@ config需要与训练得到的ckpt保持一致。
 }
 ```
 
-然后调用即可
+Then you can call it directly.
 
-当前sparse仅支持了Qwen等有限模型，但参考Qwen可以很轻松的拓展到其他模型。
+Currently, sparse only supports limited models such as Qwen, but it can be easily extended to other models with reference to Qwen.

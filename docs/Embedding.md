@@ -1,65 +1,65 @@
-# 背景
+# Background
 
-框架目前提供了多种 embedding 格式:
+The framework currently provides multiple embedding formats:
 
 * DENSE_EMBEDDING
 * ALL_EMBEDDING
 * SPARSE_EMBEDDING
 * COLBERT_EMBEDDING
 
-通过 rtp_llm cpp 框架进行加速
+All accelerated through rtp_llm cpp framework.
 
-# dense embedding
+# Dense Embedding
 
-- 对于 sentence transformer 格式的 checkpoint，支持以 sentence transformer 规定的流程进行计算
-- 对于其他类型的 checkpoint，将 transformer 层的结果进行 normalize 后输出
+- For sentence transformer format checkpoints, supports computation according to sentence transformer prescribed processes
+- For other types of checkpoints, normalizes transformer layer results and outputs
 
-## 请求和响应格式
+## Request and Response Format
 
-与 openai 格式基本一致，详情参考 [openai embedding](https://platform.openai.com/docs/api-reference/embeddings/create) 和`rtp_llm/models/downstream_modules/embedding/api_datatype.py`
+Basically consistent with OpenAI format, see [OpenAI embedding](https://platform.openai.com/docs/api-reference/embeddings/create) and `rtp_llm/models/downstream_modules/embedding/api_datatype.py` for details.
 
-# all embedding
+# All Embedding
 
-* 返回 prompt encode 之后的 token ids，并且返回所有 token 的 embedding
+* Returns token IDs after prompt encoding, and returns embeddings for all tokens
 
-# reranker
+# Reranker
 
-支持部署 bge-reranker-large 等重排模型，请求和响应格式如下，具体可参考 `rtp_llm/models/downstream_modules/reranker/api_datatype.py`
+Supports deployment of reranking models like bge-reranker-large, with request and response formats as follows. See `rtp_llm/models/downstream_modules/reranker/api_datatype.py` for details.
 
-## 请求
+## Request
 
-- query (str) - 请求
-- documents (List[str]) - 需要排序的doc
-- top_k (int, optional, defaults to None) - 返回文档数
-- truncation (bool, optional, defaults to True) - 是否需要截断超长输入
-  -  If True, 截断到模型能接受的最长输入
-  -  If False, 超长报错
+- query (str) - Query input
+- documents (List[str]) - Documents to be ranked
+- top_k (int, optional, defaults to None) - Number of documents to return
+- truncation (bool, optional, defaults to True) - Whether to truncate oversized inputs
+  -  If True, truncate to the longest input the model can accept
+  -  If False, error for oversized inputs
 
-## 响应
+## Response
 
-- results (List[RerankingResult]) - RerankingResult列表，格式如下
-  -  index (int) - 文档在输入中的位置
-  -  document (str) - 文档内容
-  -  relevance_score (float) - 相关性分数
-- total_tokens (int) - 总token数
+- results (List[RerankingResult]) - List of RerankingResult in the following format:
+  -  index (int) - Document position in input
+  -  document (str) - Document content
+  -  relevance_score (float) - Relevance score
+- total_tokens (int) - Total number of tokens
 
-# 使用方法
+# Usage
 
-通过环境变量指定`TASK_TYPE`信息,示例：
+Specify `TASK_TYPE` information through environment variables, example:
 
 ``` python
 ### load model ###
-# 进入容器之后, cd 到 FasterTransformer目录
+# After entering the container, cd to FasterTransformer directory
 # start http service
-TASK_TYPE=ALL_EMBEDDING  TOKENIZER_PATH=/path/to/tokenizer CHECKPOINT_PATH=/path/to/model MODEL_TYPE=your_model_type FT_SERVER_TEST=1 python3 -m rtp_llm.start_server
+TASK_TYPE=ALL_EMBEDDING TOKENIZER_PATH=/path/to/tokenizer CHECKPOINT_PATH=/path/to/model MODEL_TYPE=your_model_type FT_SERVER_TEST=1 python3 -m rtp_llm.start_server
 # request to server
 curl -XPOST http://localhost:8088 -d '{"input": ["hello world", "my name is jack"], "model": "your_model_type"}'
 ```
 
-TASK_TYPE 映射
+TASK_TYPE Mapping
 
-- reranker 模型：TASK_TYPE=RERANKER
-- embedding 模型: TASK_TYPE=DENSE_EMBEDDING
-- all_embedding 模型: TASK_TYPE=ALL_EMBEDDING
+- Reranker model: TASK_TYPE=RERANKER
+- Embedding model: TASK_TYPE=DENSE_EMBEDDING
+- All_embedding model: TASK_TYPE=ALL_EMBEDDING
 
-注意：目前 embedding 模型仅支持 fp16 类型精度
+Note: Currently embedding models only support fp16 precision type

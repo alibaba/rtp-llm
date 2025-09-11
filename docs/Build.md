@@ -1,11 +1,10 @@
-
-# 从零开始编译运行RTP-LLM
-* 操作系统: Linux
+# Building and Running RTP-LLM from Scratch
+* Operating System: Linux
 * Python: 3.10
-* NVIDIA GPU: Compute Capability 7.0 或者更高 (例如V100, T4, RTX20xx, A100, L4, H100等)
+* NVIDIA GPU: Compute Capability 7.0 or higher (e.g., V100, T4, RTX20xx, A100, L4, H100, etc.)
 
-## 一. 环境搭建
-在这篇文章我们将为大家介绍完整的RTP-LLM推理引擎系统的部署和使用路径。本文以一台单机4卡A10的机器为例子进行介绍。首先是我们的机器配置，我们给出GPU配置情况如下:
+## 1. Environment Setup
+In this article, we will introduce the complete deployment and usage path of the RTP-LLM inference engine system. This article uses a single machine with 4 A10 cards as an example. First, let's look at our machine configuration, with the GPU configuration as follows:
 ```shell
 $nvidia-smi
 Fri May 16 14:52:19 2025
@@ -41,27 +40,26 @@ Fri May 16 14:52:19 2025
 |  No running processes found                                                 |
 +-----------------------------------------------------------------------------+
 ```
-接下来我们需要拉取容器环境用于配置安装RTP-LLM。我们准备的容器如下:
+Next, we need to pull the container environment for configuring and installing RTP-LLM. The container we prepared is as follows:
 registry.cn-hangzhou.aliyuncs.com/havenask/rtp_llm:2025_06_03_10_12_c02cc34
 
-镜像名: registry.cn-hangzhou.aliyuncs.com/havenask/rtp_llm
-版本号: 2025_06_03_10_12_c02cc34
+Image name: registry.cn-hangzhou.aliyuncs.com/havenask/rtp_llm
+Version: 2025_06_03_10_12_c02cc34
 
-### 1.1 拉取容器
+### 1.1 Pull Container
 ```shell
 docker pull registry.cn-hangzhou.aliyuncs.com/havenask/rtp_llm:2025_06_03_10_12_c02cc34
 ```
 
-### 1.2 创建 Docker 容器，具体表现挂载盘根据自己本地机器存储来进行
+### 1.2 Create Docker Container, Mount Disks According to Local Machine Storage
 ```shell
-## 1.下面-v是将自己的存储和外部宿主机的存储进行挂载连接，用户可以根据自己本地
-## 存储进行灵活调整
-## 2. --cap-add SYS_ADMIN 是针对高级用户，比如有源码级别开发需求的用户
-## 3. --device <host_path>:<container_path>，保证将设备和宿主机容器进行正确映射
-## 4. --volume 将 Docker 卷挂载到容器的 /usr/local/nvidia 目录中，并设为只读模式
-## 5. -runtime=nvidia 指定容器使用 NVIDIA 运行时来支持 GPU 加速计算
-## 6. --gpus all 保证容器与主机共享gpu
-## 7. --net=host 可以让主机与容器进行网络共享，这对于高级用户而言进行ssh远程连接开发有用
+## 1. The -v below mounts your storage with the external host storage. Users can flexibly adjust according to their local storage.
+## 2. --cap-add SYS_ADMIN is for advanced users, such as users with source code level development needs.
+## 3. --device <host_path>:<container_path> ensures correct mapping of devices and host containers.
+## 4. --volume mounts the Docker volume to the /usr/local/nvidia directory in the container and sets it to read-only mode.
+## 5. -runtime=nvidia specifies that the container uses the NVIDIA runtime to support GPU accelerated computing.
+## 6. --gpus all ensures the container shares GPU with the host.
+## 7. --net=host allows the host and container to share the network, which is useful for advanced users who need SSH remote connection development.
 docker run \
   --cap-add SYS_ADMIN --device /dev/fuse \
   -v /mnt/:/mnt/ \
@@ -80,60 +78,60 @@ docker run \
   /bin/bash
 ```
 
-### 1.3 在容器中创建用户（可选项，默认进去是root，对于高级开发者，可以选择创建自己的用户，不建议root用户进行源码开发）
+### 1.3 Create User in Container (Optional, Default is root. Advanced developers can choose to create their own user. It is not recommended to use root user for source code development)
 ```shell
-## 创建个人开发用户
+## Create personal development user
 docker exec -i user_gpu /usr/sbin/useradd -MU -u <your_UID> <your_username>
-## 将个人用户赋予root用户组, 放入到/etc/sudoers
+## Assign personal user to root group and add to /etc/sudoers
 your_username ALL=(ALL) NOPASSWD:ALL
 ```
 
-### 1.4 进入容器
+### 1.4 Enter Container
 ```shell
-## 1.对于普通用户而言
+## 1. For regular users
 docker exec -it container_name /bin/bash
-## 2.针对高级用户而言，需要进入到自己的个人用户账号下面
-## 获取容器 PID
+## 2. For advanced users, need to enter their personal user account
+## Get container PID
 docker inspect --format="{{ .State.Pid }}" user_gpu
-## 使用 nsenter 进入容器, 如果在容器创建后直接使用docker exec -it进入容器，会出现pam_session相关的权限问题, 本文案例使用的<your_username>为tanboyu.tby
+## Use nsenter to enter container. If you directly use docker exec -it to enter the container after container creation, there will be pam_session related permission issues. The <your_username> used in this example is tanboyu.tby
 sudo nsenter --target PID --mount --uts --ipc --net --pid /usr/bin/su <your_username>
 ```
-## 二. 编译运行
-在上一步当中我们已经完成了环境搭建，接下来我们开始正式的进行RTP-LLM的编译运行。
-### 2.1 代码拉取
+## 2. Compilation and Execution
+In the previous step, we have completed the environment setup. Now we start the formal compilation and execution of RTP-LLM.
+### 2.1 Code Pull
 ```shell
 git clone https://github.com/alibaba/rtp-llm.git FastTransformer
 ```
-### 2.2 依赖安装相关问题说明
+### 2.2 Dependency Installation Related Issues
 ```shell
-## nsightsystem（可选项，针对高级用户，有源码性能调试开发需求）
-容器里面的nsys是放在/usr/local/cuda-12.6/bin/nsys，如果有需求需要将该路径加入到执行路径当中
+## nsightsystem (optional, for advanced users with source code performance debugging development needs)
+The nsys in the container is located at /usr/local/cuda-12.6/bin/nsys. If needed, this path should be added to the execution path.
 ```
-另外如果在编译过程可能会遇到网络问题，建议换源
+In addition, if network issues are encountered during compilation, it is recommended to change the source:
 ```shell
 [global]
 index-url = http://mirrors.aliyun.com/pypi/simple
 trusted-host = mirrors.aliyun.com
 ```
-### 2.3 编译启动服务
-为了方便演示，我们采用的是Qwen2-0.5B小模型
+### 2.3 Compile and Start Service
+For demonstration convenience, we are using the Qwen2-0.5B small model:
 ```python
 from transformers import AutoTokenizer, AutoModel
 
-# 加载 tokenizer
+# Load tokenizer
 tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2-0.5B")
 
-# 加载模型
+# Load model
 model = AutoModel.from_pretrained("Qwen/Qwen2-0.5B")
 
-# 使用模型进行推理
-inputs = tokenizer("这是一个测试句子", return_tensors="pt")
+# Use the model for inference
+inputs = tokenizer("This is a test sentence", return_tensors="pt")
 outputs = model(**inputs)
 
-# 输出一些结果来验证
+# Output some results for verification
 print(outputs)
 ```
-接下来准备服务启动脚本:
+Next, prepare the service startup script:
 ```python
 ### /hio_disk/tanboyu.tby/local_runner.py
 import os
@@ -169,7 +167,7 @@ def wait_server_start(server_thread: Optional[Thread], port: int):
         try:
             if server_thread and not server_thread.is_alive():
                 raise SystemExit("Server thread dead!")
-            res = requests.get(f"http://127.0.0.1:{port}/status")
+            res = requests.get(f"http://localhost:{port}/status")
             print(f"loop res: {res.text}")
             break
         except Exception as e:
@@ -223,11 +221,11 @@ if __name__ == '__main__':
 
     import openai # you want `pip install openai==1.3.9`
     from openai.types.chat import ChatCompletionMessageParam, ChatCompletionUserMessageParam
-    openai.base_url = f"http://127.0.0.1:{int(os.environ['START_PORT'])}/"
+    openai.base_url = f"http://localhost:{int(os.environ['START_PORT'])}/"
     openai.api_key = "none"
 
     typed_messages: List[ChatCompletionMessageParam] = [
-        ChatCompletionUserMessageParam(content="你是谁", role="user")
+        ChatCompletionUserMessageParam(content="Who are you", role="user")
     ]
 
     response1 = openai.chat.completions.create(
@@ -237,35 +235,35 @@ if __name__ == '__main__':
     print(f"response: {response1}")
     script_exit(pgrp_set)
 ```
-然后开始进行编译运行
+Then start compilation and execution:
 ```shell
 #!/bin/bash
 set -x;
-## 设定python的执行命令路径
+## Set Python execution command path
 export PYTHON_BIN=/opt/conda310/bin/python;
-## 指定用户工作目录
+## Specify user working directory
 export USER_HOME=/hio_disk/tanboyu.tby;
-## 可以保证执行时立即打印日志
+## Can ensure immediate log printing during execution
 export PYTHONUNBUFFERED=TRUE;
 
-## 项目导包使用的python路径
+## Python path used for project imports
 export PYTHONPATH=${USER_HOME}/FasterTransformer/:${PYTHONPATH}
-## 指定日志路径
+## Specify log path
 export PY_LOG_PATH=${USER_HOME}/FasterTransformer/logs
 
 cd ${USER_HOME}/FasterTransformer
 
-## 代码编译
+## Code compilation
 bazelisk build //maga_transformer:maga_transformer --verbose_failures --config=cuda12_6 --keep_going || {
     echo "bazel build failed";
     exit 1;
 };
 
-## 创建软连接，因为这两个文件是编译生成的
+## Create symbolic links since these two files are generated during compilation
 ln -s ${USER_HOME}/bazel-bin/maga_transformer/cpp/proto/model_rpc_service_pb2_grpc.py maga_transformer/cpp/proto/;
 ln -s ${USER_HOME}/bazel-bin/maga_transformer/cpp/proto/model_rpc_service_pb2.py maga_transformer/cpp/proto/;
 
-## 用户需自行下载 https://huggingface.co/Qwen/Qwen2-0.5B
+## Users need to download https://huggingface.co/Qwen/Qwen2-0.5B on their own
 export CHECKPOINT_PATH="/mnt/nas1/hf/Qwen2-0.5B";
 export TOKENIZER_PATH=${CHECKPOINT_PATH}
 
@@ -274,32 +272,32 @@ echo $MODEL_TYPE
 export LD_LIBRARY_PATH=/opt/conda310/lib/:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64:/usr/local/cuda-12.6/extras/CUPTI/lib64/
 
 # export FT_SERVER_TEST=1
-## 设置TP并行度
+## Set TP parallelism
 export TP_SIZE=1
-## 设置DP并行度
+## Set DP parallelism
 export DP_SIZE=1
-## 设置EP并行度
+## Set EP parallelism
 export EP_SIZE=$((TP_SIZE * DP_SIZE))
-## 参见docs/MultiGPU.md
+## See docs/MultiGPU.md
 export WORLD_SIZE=$EP_SIZE
-## 参见docs/MultiGPU.md
+## See docs/MultiGPU.md
 export LOCAL_WORLD_SIZE=$EP_SIZE
-## 用户请求的最大文本token数量
+## Maximum number of text tokens requested by users
 export MAX_SEQ_LEN=8192
-## 模型一次性处理的最大上下文大小
+## Maximum context size processed by the model at once
 export MAX_CONTEXT_BATCH_SIZE=1
-## 并发限制
+## Concurrency limit
 export CONCURRENCY_LIMIT=8
 
-## RUNTIME内存容量限制
+## RUNTIME memory capacity limit
 export RESERVER_RUNTIME_MEM_MB=4096
-## 用于GPU内存分区为两份,一份用于KV-Cache,一份用于计算
+## Used to partition GPU memory into two parts, one for KV-Cache and one for computation
 export WARM_UP=1
-## 服务启动端口号
+## Service startup port number
 export START_PORT=61348
-## 是否开启性能打样
+## Whether to enable performance profiling
 export NSIGHT_PERF=0
-## 是否开启CUDA ASAN, 用于内存检测
+## Whether to enable CUDA ASAN for memory detection
 export CUDA_ASAN=0
 
 echo "" > logs/engine.log;
@@ -307,7 +305,7 @@ echo "" > logs/engine.log;
 export DEVICE_RESERVE_MEMORY_BYTES=-2048000000;
 
 if [ $NSIGHT_PERF -eq 1 ]; then
-    ## 选择开启NSIGHT性能打样
+    ## Choose to enable NSIGHT performance profiling
     NSIGHT_CMD="$PYTHON_BIN ${USER_HOME}/local_runner.py";
     rm -rf report*.nsys-rep;
     /usr/local/bin/nsys profile \
@@ -319,17 +317,17 @@ if [ $NSIGHT_PERF -eq 1 ]; then
     --trace='cuda,nvtx' \
     --trace-fork-before-exec=true $NSIGHT_CMD;
 elif [ $CUDA_ASAN -eq 1 ]; then
-    ## 需要进行CUDA ASAN内存检测
+    ## Need to perform CUDA ASAN memory detection
     /usr/local/cuda/compute-sanitizer/compute-sanitizer --print-limit 100000 --target-processes all \
     $PYTHON_BIN ${USER_HOME}/local_runner.py;
 else
-    ## 最朴素的服务启动方案
+    ## Most basic service startup solution
     $PYTHON_BIN ${USER_HOME}/local_runner.py;
 fi
 
-## 执行完脚本杀死进程
-ps xauww  | grep rtp_llm | awk '{print $2}' | xargs kill -9;
+## Kill processes after script execution
+ps xauww  | grep maga_ft | awk '{print $2}' | xargs kill -9;
 ```
-### 2.4 运行结果
-可以看到下面类似的相应返回即可视为成功
+### 2.4 Running Results
+You can consider it successful when you see similar responses returned as below:
 ![](pics/response_success_example.png)

@@ -1,48 +1,47 @@
-# 环境变量配置
+# Environment Variable Configuration
 
-## 常用选项
-| 环境变量名 | 类型 | 说明 |
+## Common Options
+| Environment Variable Name | Type | Description |
 | --- | --- | --- |
-| `TOKENIZER_PATH` | `str`, required | tokenizer路径  |
-| `CHECKPOINT_PATH` | `str`, required | checkpoint路径 |
-| `MODEL_TYPE` | `str`, required | 模型类型 |
-| `MAX_SEQ_LEN` | `str`, optional | 输入+输出最大长度 |
-| `WEIGHT_TYPE` | `str`, optional | 模型加载使用的weight 类型:FP16/INT8 |
-| `CONCURRENCY_LIMIT` | `str`, optional | 模型最大并发数 |
+| `TOKENIZER_PATH` | `str`, required | Tokenizer path |
+| `CHECKPOINT_PATH` | `str`, required | Checkpoint path |
+| `MODEL_TYPE` | `str`, required | Model type |
+| `MAX_SEQ_LEN` | `str`, optional | Maximum input+output length |
+| `WEIGHT_TYPE` | `str`, optional | Weight type used for model loading: FP16/INT8 |
+| `CONCURRENCY_LIMIT` | `str`, optional | Maximum concurrency for the model |
 
+* `TOKENIZER_PATH` and `CHECKPOINT_PATH` must be local paths.
+* `MODEL_TYPE` currently supports `chatglm``chat_glm``chatglm2``chat_glm_2``chatglm3``chat_glm_3``glm_130b``gpt_bigcode``starcoder2``wizardcoder``sgpt_bloom``sgpt_bloom_vector``bloom``llama``gemma``xverse``llava``baichuan``gpt_neox``qwen_7b``qwen_13b``qwen_1b8``qwen_2``qwen_vl``falcon``mpt``internlm``phi``aquila``chatglm4v`
 
-* `TOKENIZER_PATH` 和 `CHECKPOINT_PATH` 必须为本地路径。
-* `MODEL_TYPE` 目前支持 `chatglm``chat_glm``chatglm2``chat_glm_2``chatglm3``chat_glm_3``glm_130b``gpt_bigcode``starcoder2``wizardcoder``sgpt_bloom``sgpt_bloom_vector``bloom``llama``gemma``xverse``llava``baichuan``gpt_neox``qwen_7b``qwen_13b``qwen_1b8``qwen_2``qwen_vl``falcon``mpt``internlm``phi``aquila``chatglm4v`
-
-## 高级选项
-| 环境变量名 | 类型 | 说明 |
+## Advanced Options
+| Environment Variable Name | Type | Description |
 | --- | --- | --- |
-| `INT8_KV_CACHE` | `str`, optional | 高级选项:kv cache 使用int8类型,可节省显存 |
-| `KV_CACHE_MEM_MB` | `str`, optional | kv cache 预留显存大小，单位(MB) |
-| `PRE_ALLOCATE_OP_MEM` | `str`, optional | 是否提前预分配显存,与KV_CACHE_MEM_MB配合使用 |
-| `TP_SPLIT_EMB_AND_LMHEAD` | `str`, optional | TensorParallel时是否切分Emb和LmHead计算(1:打开，0:关闭) |
-| `REUSE_CACHE` | `str`, optional | query之间复用kvcache |
-| `EXTRA_DATA_PATH` | `str`, optional | 除了ckpt/tokenizer,额外需要的数据,比如LLAVA的 VIT数据 |
-| `VIT_TRT` | `int`, optional | 是否使用TRT来加速VIT模型(1:打开，0:关闭) |
-| `FT_DISABLE_CUSTOM_AR` | `int`, optional | 是否关闭Custom All Reduce(1:关闭，其他打开) |
+| `INT8_KV_CACHE` | `str`, optional | Advanced option: Use int8 type for kv cache to save GPU memory |
+| `KV_CACHE_MEM_MB` | `str`, optional | Reserved GPU memory size for kv cache, unit (MB) |
+| `PRE_ALLOCATE_OP_MEM` | `str`, optional | Whether to pre-allocate GPU memory, used in conjunction with KV_CACHE_MEM_MB |
+| `TP_SPLIT_EMB_AND_LMHEAD` | `str`, optional | Whether to split Emb and LmHead computation during TensorParallel (1: enable, 0: disable) |
+| `REUSE_CACHE` | `str`, optional | Reuse kvcache between queries |
+| `EXTRA_DATA_PATH` | `str`, optional | Additional data needed besides ckpt/tokenizer, such as LLAVA's VIT data |
+| `VIT_TRT` | `int`, optional | Whether to use TRT to accelerate VIT model (1: enable, 0: disable) |
+| `FT_DISABLE_CUSTOM_AR` | `int`, optional | Whether to disable Custom All Reduce (1: disable, others: enable) |
 
-## 注意事项
-1. 默认模型运行时的 log_level=WARNING，可以添加环境变量`LOG_LEVEL=INFO` 显示更多日志
-
+## Notes
+1. The default log_level for model runtime is WARNING. You can add the environment variable `LOG_LEVEL=INFO` to display more logs.
+2. You can configure the environment variable `LOAD_CKPT_NUM_PROCESS=x` to load the model with multiple processes. When loading with multiple processes, you need to use `if __name__ == '__main__':` as the entry point, because the default program will use spawn to start multiple processes; at the same time, too many processes may cause cuda out of memory.
 
 # ModelConfig
 
-| 参数名 | 类型 | 说明 |
+| Parameter Name | Type | Description |
 | --- | --- | --- |
-| `model_type` | `str, default=''` | 模型类型 |
-| `ckpt_path` | `str, default=''` | 模型路径 |
-| `tokenizer_path` | `str, default=''` | tokenizer路径 |
-| `weight_type` | `WEIGHT_TYPE, default=WEIGHT_TYPE.FP16` | 模型weights量化类型 |
-| `act_type` | `WEIGHT_TYPE, default=WEIGHT_TYPE.FP16` | 模型weights存储类型 |
-| `max_seq_len` | `bool, default=0` | beam search的个数 |
-| `seq_size_per_block` | `int, default=8` | async模式下每个block的序列长度 |
-| `gen_num_per_circle` | `int, default=1` | 每轮可能新增的token数，仅在投机采样情况下>1 |
-| `ptuning_path` | `Optional[str], default=None` | ptuning ckpt的存储路径 |
-| `lora_infos` | `Optional[Dict[str, str]]` | lora ckpt存储路径 |
+| `model_type` | `str, default=''` | Model type |
+| `ckpt_path` | `str, default=''` | Model path |
+| `tokenizer_path` | `str, default=''` | Tokenizer path |
+| `weight_type` | `WEIGHT_TYPE, default=WEIGHT_TYPE.FP16` | Model weights quantization type |
+| `act_type` | `WEIGHT_TYPE, default=WEIGHT_TYPE.FP16` | Model weights storage type |
+| `max_seq_len` | `bool, default=0` | Number of beam search |
+| `seq_size_per_block` | `int, default=8` | Sequence length per block in async mode |
+| `gen_num_per_circle` | `int, default=1` | Number of tokens that may be added per round, only >1 in speculative sampling cases |
+| `ptuning_path` | `Optional[str], default=None` | Storage path for ptuning ckpt |
+| `lora_infos` | `Optional[Dict[str, str]]` | Storage path for lora ckpt |
 
-目前我们支持的所有模型列表可以在`rtp_llm/models/__init__.py`查看，具体模型对应的`model_type`可以查看模型文件的`register_model`
+The list of all models we currently support can be viewed in `rtp_llm/models/__init__.py`. The corresponding `model_type` for specific models can be viewed in the model file's `register_model`.

@@ -1,11 +1,11 @@
-# RTP-LLM代码调试
+# RTP-LLM Code Debugging
 
-RTP-LLM项目采取的是bazel的编译方式，在上一篇文章[从零开始编译运行RTP-LLM](./Build.md)当中我们已经学会了如何本地从0开始编译运行RTP-LLM，在这篇文章当中我们将会教会大家如何进行代码调试。RTP-LLM主要是由python和c++代码构成，因此我们在本文当中会介绍python源码调试和c++源码调试。
+The RTP-LLM project uses bazel for compilation. In the previous article [Building and Running RTP-LLM from Scratch](./Build.md), we learned how to compile and run RTP-LLM locally from scratch. In this article, we will teach you how to debug the code. RTP-LLM is mainly composed of Python and C++ code, so we will introduce Python source code debugging and C++ source code debugging in this article.
 
-## 一. 测试代码准备
-以本文使用为例，本章所有代码均放在hio_disk/tanboyu.tby/backend_front下面。
+## 1. Test Code Preparation
+For the example used in this article, all code in this chapter is placed under hio_disk/tanboyu.tby/backend_front.
 
-后端服务启动代码:
+Backend service startup code:
 ```python
 ## backend.py
 import os
@@ -42,7 +42,7 @@ def wait_server_start(server_thread: Optional[Thread], port: int):
         try:
             if server_thread and not server_thread.is_alive():
                 raise SystemExit("Server thread dead!")
-            res = requests.get(f"http://127.0.0.1:{port}/status")
+            res = requests.get(f"http://localhost:{port}/status")
             print(f"loop res: {res.text}")
             break
         except Exception as e:
@@ -79,9 +79,9 @@ if __name__ == "__main__":
     print(f"server start done!")
 ```
 
-前端请求代码:
+Frontend request code:
 ```python
-## frontend.py
+## fronted.py
 import os
 import sys
 import logging
@@ -106,10 +106,10 @@ if __name__ == '__main__':
     except Exception as e:
         logging.info(f"setpgrp error: {e}")
 
-    openai.base_url = f"http://127.0.0.1:{int(os.environ['START_PORT'])}/"
+    openai.base_url = f"http://localhost:{int(os.environ['START_PORT'])}/"
     openai.api_key = "none"
     typed_messages: List[ChatCompletionMessageParam] = [
-        ChatCompletionUserMessageParam(content="中国的首都是哪里?", role="user")
+        ChatCompletionUserMessageParam(content="What is the capital of China?", role="user")
     ]
 
     response = openai.chat.completions.create(
@@ -119,38 +119,38 @@ if __name__ == '__main__':
     print(f"response: {response}")
     script_exit(pgrp_set)
 ```
-环境变量加载脚本:
+Environment variable loading script:
 ```shell
 ## prev.sh
 #!/bin/bash
 set -x;
-## 设定python的执行命令路径
+## Set Python execution command path
 export PYTHON_BIN=/opt/conda310/bin/python;
-## 指定用户工作目录
+## Specify user working directory
 export USER_HOME=/hio_disk/tanboyu.tby;
-## 可以保证执行时立即打印日志
+## Can ensure immediate log printing during execution
 export PYTHONUNBUFFERED=TRUE;
 
-## 项目导包使用的python路径
+## Python path used for project imports
 export PYTHONPATH=${USER_HOME}/FasterTransformer/:${PYTHONPATH}
-## 指定日志路径
+## Specify log path
 export PY_LOG_PATH=${USER_HOME}/FasterTransformer/logs
 
 cd ${USER_HOME}/FasterTransformer
 
 if [ $USE_COMPILE eq 1 ]; then
-    ## 代码编译
+    ## Code compilation
     bazelisk build //maga_transformer:maga_transformer --compilation_mode=dbg --verbose_failures --config=cuda12_6 --keep_going --jobs=64 || {
         echo "bazel build failed";
         exit 1;
     };
 fi
 
-## 创建软连接，因为这两个文件是编译生成的
+## Create symbolic links, as these two files are generated during compilation
 ln -s ${USER_HOME}/bazel-bin/maga_transformer/cpp/proto/model_rpc_service_pb2_grpc.py maga_transformer/cpp/proto/;
 ln -s ${USER_HOME}/bazel-bin/maga_transformer/cpp/proto/model_rpc_service_pb2.py maga_transformer/cpp/proto/;
 
-## 用户需自行下载 https://huggingface.co/Qwen/Qwen2-0.5B
+## Users need to download https://huggingface.co/Qwen/Qwen2-0.5B on their own
 export CHECKPOINT_PATH="/mnt/nas1/hf/Qwen2-0.5B";
 export TOKENIZER_PATH=${CHECKPOINT_PATH}
 
@@ -158,32 +158,32 @@ export MODEL_TYPE="qwen_2";
 export LD_LIBRARY_PATH=/opt/conda310/lib/:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64:/usr/local/cuda-12.6/extras/CUPTI/lib64/
 
 # export FT_SERVER_TEST=1
-## 设置TP并行度
+## Set TP parallelism
 export TP_SIZE=2
-## 设置DP并行度
+## Set DP parallelism
 export DP_SIZE=1
-## 设置EP并行度
+## Set EP parallelism
 export EP_SIZE=$((TP_SIZE * DP_SIZE))
-## 参见docs/MultiGPU.md
+## See docs/MultiGPU.md
 export WORLD_SIZE=$EP_SIZE
-## 参见docs/MultiGPU.md
+## See docs/MultiGPU.md
 export LOCAL_WORLD_SIZE=$EP_SIZE
-## 用户请求的最大文本token数量
+## Maximum number of text tokens requested by users
 export MAX_SEQ_LEN=8192
-## 模型一次性处理的最大上下文大小
+## Maximum context size processed by the model at once
 export MAX_CONTEXT_BATCH_SIZE=1
-## 并发限制
+## Concurrency limit
 export CONCURRENCY_LIMIT=8
 
-## RUNTIME内存容量限制
+## RUNTIME memory capacity limit
 export RESERVER_RUNTIME_MEM_MB=4096
-## 用于GPU内存分区为两份,一份用于KV-Cache,一份用于计算
+## Used to partition GPU memory into two parts, one for KV-Cache and one for computation
 export WARM_UP=1
-## 服务启动端口号
+## Service startup port number
 export START_PORT=61348
-## 是否开启性能打样
+## Whether to enable performance profiling
 export NSIGHT_PERF=0
-## 是否开启CUDA ASAN, 用于内存检测
+## Whether to enable CUDA ASAN for memory detection
 export CUDA_ASAN=0
 
 echo "" > logs/engine.log;
@@ -191,7 +191,7 @@ echo "" > logs/engine.log;
 export DEVICE_RESERVE_MEMORY_BYTES=-2048000000;
 ```
 
-后端启动脚本:
+Backend startup script:
 ```shell
 ## backend.sh
 export USE_COMPILE=1
@@ -200,16 +200,16 @@ echo "user_home: $USER_HOME"
 $PYTHON_BIN ${USER_HOME}/backend_front/backend.py
 ```
 
-前端启动脚本:
+Frontend startup script:
 ```shell
-## frontend.sh
+## fronted.sh
 export USE_COMPILE=0
 source prev.sh
 echo $USER_HOME
-$PYTHON_BIN ${USER_HOME}/backend_front/frontend.py
+$PYTHON_BIN ${USER_HOME}/backend_front/fronted.py
 ```
-## 二. Python代码调试
-我们采用vscode进行代码开发调试，python代码调试比较方便使用图形化界面进行处理，比较直观。下面是进行launch调试的配置文件:
+## 2. Python Code Debugging
+We use VSCode for code development and debugging. Python code debugging is convenient with a graphical interface, making it more intuitive. Below is the configuration file for launch debugging:
 ```json
 // launch.json
 {
@@ -219,7 +219,7 @@ $PYTHON_BIN ${USER_HOME}/backend_front/frontend.py
             "name": "Run FasterTransformer with Qwen2-0.5B",
             "type": "debugpy",
             "request": "launch",
-            // "processId": "${command:pickProcess}", // 使用用户选择的进程
+            // "processId": "${command:pickProcess}", // Use the process selected by the user
             "program": "${file}",
             // "console": "integratedTerminal",
             "cwd": "/hio_disk/tanboyu.tby/FasterTransformer",
@@ -231,9 +231,9 @@ $PYTHON_BIN ${USER_HOME}/backend_front/frontend.py
                 "LD_LIBRARY_PATH": "/opt/conda310/lib/:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64:/usr/local/cuda-12.6/extras/CUPTI/lib64/",
                 "TP_SIZE": "2",
                 "DP_SIZE": "1",
-                "EP_SIZE": "1",  // 手动计算 EP_SIZE = TP_SIZE * DP_SIZE
-                "WORLD_SIZE": "2",  // 与 EP_SIZE 一致
-                "LOCAL_WORLD_SIZE": "1",  // 与 EP_SIZE 一致
+                "EP_SIZE": "1",  // Manually calculate EP_SIZE = TP_SIZE * DP_SIZE
+                "WORLD_SIZE": "2",  // Consistent with EP_SIZE
+                "LOCAL_WORLD_SIZE": "1",  // Consistent with EP_SIZE
                 "MAX_SEQ_LEN": "1024",
                 "MAX_CONTEXT_BATCH_SIZE": "1",
                 "CONCURRENCY_LIMIT": "8",
@@ -248,28 +248,28 @@ $PYTHON_BIN ${USER_HOME}/backend_front/frontend.py
     ],
 }
 ```
-在进行调试的时候，需要界面回到/backend_front/backend.py即可，然后我们可以正常进行调试。
+When debugging, you need to switch to /backend_front/backend.py in the interface, and then we can debug normally.
 ![](./pics/python_debug.png)
-实际上代码最后正常执行的会到这里来，这里底层就是调用的maga_transformer/cpp下面的c++代码来启动LocalRpcServer。
+Actually, when the code executes normally, it will come here, where the underlying implementation calls the C++ code under maga_transformer/cpp to start LocalRpcServer.
 ![](./pics/launch_rpc_local_server.png)
 
-## 三. 服务端代码调试
-首先需要启动服务: bash backend.sh，最后下面这样就算服务启动成功。
+## 3. Server Code Debugging
+First, start the service: bash backend.sh. When it looks like the following, the service is successfully started.
 ![](./pics/backend_server_success.png)
-查看相关启动进程如下:
+View the relevant startup processes as follows:
 ```shell
 [tanboyu.tby@mainse-buffer011161048115.na132 /hio_disk/tanboyu.tby/FasterTransformer]
-$ps aux | grep rtp_llm
-tanboyu+  21090  5.7  0.1 41536432 1105896 pts/20 Sl+ 23:55   0:15 rtp_llm_backend_server
-tanboyu+  21251 54.8  0.8 136379296 6902104 pts/20 Sl+ 23:55   2:24 rtp_llm_rank-0
-tanboyu+  21252  122  0.8 142631432 6953340 pts/20 Sl+ 23:55   5:22 rtp_llm_rank-1
-tanboyu+  22451  5.8  0.1 50260920 1167256 pts/20 Sl+ 23:56   0:11 rtp_llm_frontend_server_0
-tanboyu+  22452  5.8  0.1 50260936 1175892 pts/20 Sl+ 23:56   0:11 rtp_llm_frontend_server_1
-tanboyu+  22453  5.6  0.1 50260920 1172820 pts/20 Sl+ 23:56   0:11 rtp_llm_frontend_server_2
-tanboyu+  22454  5.5  0.1 50259900 1167200 pts/20 Sl+ 23:56   0:10 rtp_llm_frontend_server_3
-tanboyu+  23916  0.0  0.0   7996   900 pts/16   S+   23:59   0:00 grep --color=auto rtp_llm
+$ps aux | grep maga_ft
+tanboyu+  21090  5.7  0.1 41536432 1105896 pts/20 Sl+ 23:55   0:15 maga_ft_backend_server
+tanboyu+  21251 54.8  0.8 136379296 6902104 pts/20 Sl+ 23:55   2:24 maga_ft_rank-0
+tanboyu+  21252  122  0.8 142631432 6953340 pts/20 Sl+ 23:55   5:22 maga_ft_rank-1
+tanboyu+  22451  5.8  0.1 50260920 1167256 pts/20 Sl+ 23:56   0:11 maga_ft_frontend_server_0
+tanboyu+  22452  5.8  0.1 50260936 1175892 pts/20 Sl+ 23:56   0:11 maga_ft_frontend_server_1
+tanboyu+  22453  5.6  0.1 50260920 1172820 pts/20 Sl+ 23:56   0:11 maga_ft_frontend_server_2
+tanboyu+  22454  5.5  0.1 50259900 1167200 pts/20 Sl+ 23:56   0:10 maga_ft_frontend_server_3
+tanboyu+  23916  0.0  0.0   7996   900 pts/16   S+   23:59   0:00 grep --color=auto maga_ft
 ```
-服务启动之后，我们会发现存在一个rtp_llm_backend_server进程，这是推理服务启动的主进程，而rtp_llm_rank-0和rtp_llm_rank-1则是对应的子进程，这个数量是由我们的配置决定的，我们设置了TP_SIZE = 2所以这个地方会有对应的两个进程。另外还会默认启动四个rtp_llm_frontend_server前端服务进程，用于接受外部请求。
+After the service starts, we will find that there is a maga_ft_backend_server process, which is the main process of the inference service startup, while maga_ft_rank-0 and maga_ft_rank-1 are the corresponding child processes. This number is determined by our configuration. We set TP_SIZE = 2, so there will be two corresponding processes here. Additionally, four maga_ft_frontend_server frontend service processes will be started by default to receive external requests.
 
-接下来我们开始进行gdb调试: gdb -p 21251，打完断点后，执行bash frontend.sh ，就会命中断点， 然后我们可以根据堆栈查看代码路径。
+Next, we start gdb debugging: gdb -p 21251. After setting breakpoints, execute bash fronted.sh, which will hit the breakpoint. Then we can view the code path according to the stack.
 ![](./pics/rtp-llm_backend_gdb_debug.png)

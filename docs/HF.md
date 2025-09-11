@@ -1,6 +1,6 @@
-# 读取Huggingface模型
+# Loading Huggingface Models
 
-huggingface模型支持从通过模型名从远程下载模型，代码如下：(如果无法访问huggingface需要配置环境变量`HF_ENDPOINT`)
+Huggingface models support downloading models remotely by model name. The code is as follows: (If you cannot access Huggingface, you need to configure the environment variable `HF_ENDPOINT`)
 ``` python
 from rtp_llm.pipeline import Pipeline
 from rtp_llm.model_factory import ModelFactory
@@ -12,13 +12,13 @@ if __name__ == '__main__':
         print(res.batch_response)
     pipeline.stop()
 ```
-其中pipeline中prompt格式是qwen模型的prompt格式，您需要换成您的模型的prompt格式。
+The prompt format in the pipeline is the Qwen model's prompt format. You need to replace it with your model's prompt format.
 
-也支持通过模型路径加载
+It also supports loading through model path
 ``` python
 model = ModelFactory.from_huggingface("/path/to/dir")
 ```
-构建模型时默认使用基础配置参数，也可以通过构建`ModelConfig`自行修改配置，`ModelConfig`参数的介绍在下一节
+When building the model, basic configuration parameters are used by default. You can also modify the configuration by building `ModelConfig`. The introduction to `ModelConfig` parameters is in the next section.
 ``` python
 from rtp_llm.utils.weight_type import WEIGHT_TYPE
 
@@ -29,7 +29,7 @@ model_config = ModelConfig(
 )
 ```
 
-如果存在框架无法推断出模型类型，但是已经适配实现的case，可以自行指定模型类型
+If there are cases where the framework cannot infer the model type but the implementation has already been adapted, you can specify the model type manually
 ``` python
 model_config = ModelConfig(
     model_type='chatglm',

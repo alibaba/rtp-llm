@@ -1,8 +1,9 @@
-# 使用方法
+# Usage Guide
 
-rtp-llm 支持 openai chat 格式的接口调用，可以作为 openai 接口服务的无缝 drop-in 。
+RTP-LLM supports OpenAI chat format API calls and can be used as a seamless drop-in replacement for OpenAI interface services.
 
-启动
+## Getting Started
+
 ```bash
 export TOKENIZER_PATH=/path/to/tokenizer
 export CHECKPOINT_PATH=/path/to/model
@@ -10,16 +11,16 @@ export FT_SERVER_TEST=1
 python3 -m rtp_llm.start_server
 ```
 
-在 server 启动后，我们提供了一个 openai client 兼容的 chat 接口。使用示例如下：
+After the server starts, we provide an OpenAI client compatible chat interface. Usage examples are as follows:
 
 ``` python
 import openai # you want `pip install openai==1.3.9`
 from openai.types.chat import ChatCompletionMessageParam, ChatCompletionUserMessageParam
-openai.base_url = f"http://127.0.0.1:{int(os.environ['START_PORT'])}/"
+openai.base_url = f"http://localhost:{int(os.environ['START_PORT'])}/"
 openai.api_key = "none"
 
 typed_messages: List[ChatCompletionMessageParam] = [
-    ChatCompletionUserMessageParam(content="你是谁", role="user")
+    ChatCompletionUserMessageParam(content="Who are you?", role="user")
 ]
 
 response1 = openai.chat.completions.create(
@@ -41,13 +42,13 @@ for res in response2:
 
 ```
 
-或者，也可以使用 curl 调用，示例如下:
+use curl to get result, Usage example:
 
 ```python
 chat_messages = [
     {
         "role": "user",
-        "content": "你是谁"
+        "content": "Who are you?"
     }
 ]
 openai_request = {
@@ -59,13 +60,13 @@ response = requests.post(f"http://localhost:{port}/v1/chat/completions", json=op
 print(response.json())
 ```
 
-# 配置 chat template
+## Chat Template Configuration
 
-对于使用了 transformers tokenizer 的模型， 服务会读取 tokenizer_config.json 里的 chat_template ，如果 config 里带有这个字段，则会按照这个模板渲染。 chat_template 相关文档详见 https://huggingface.co/docs/transformers/chat_templating 。
+For models using the transformers tokenizer, the service will read the chat_template from tokenizer_config.json. If this field is present in the config, it will be rendered according to this template. See https://huggingface.co/docs/transformers/chat_templating for chat_template documentation.
 
-# function call
+## Function Call
 
-openai 接口可以实现 function 调用。使用例子：
+The OpenAI interface can implement function calling. Usage example:
 ```python
 function_request = {
     "model": "123",
@@ -74,7 +75,7 @@ function_request = {
     "messages": [
         {
             "role": "user",
-            "content": "杭州市余杭区天气如何？",
+            "content": "What's the weather like in Yuhang District, Hangzhou?",
         }
     ],
     "functions": [
@@ -114,18 +115,18 @@ function_request = {
     "messages": [
         {
             "role": "user",
-            "content": "请帮我生成一张杭州西站的图片。",
+            "content": "Please generate an image of Hangzhou West Station.",
         }
     ],
     "functions": [
         {
             "name": "google_search",
-            "description": "谷歌搜索是一个通用搜索引擎，可用于访问互联网、查询百科知识、了解时事新闻等。 Format the arguments as a JSON object.",
+            "description": "Google search is a general-purpose search engine that can be used to access the internet, query encyclopedic knowledge, understand current news, etc. Format the arguments as a JSON object.",
             "parameters": {
                 "type": "object",
                 "properties": [{
                     "name": "search_query",
-                    "description": "搜索关键词或短语",
+                    "description": "Search keywords or phrases",
                     "required": True,
                     "schema": {"type": "string"},
                 }]
@@ -133,12 +134,12 @@ function_request = {
         },
         {
             "name": "image_gen",
-            "description": "image_gen 是一个AI绘画（图像生成）服务，输入文本描述，返回根据文本作画得到的图片的URL。Format the arguments as a JSON object.",
+            "description": "image_gen is an AI painting (image generation) service. Input text description and return the URL of the generated image based on text painting. Format the arguments as a JSON object.",
             "parameters": {
                 "type": "object",
                 "properties": [{
                     "name": "prompt",
-                    "description": "英文关键词，描述了希望图像具有什么内容",
+                    "description": "English keywords describing the desired image content",
                     "required": True,
                     "schema": {"type": "string"},
                 }]
@@ -150,4 +151,4 @@ response = requests.post(f"http://localhost:{port}/v1/chat/completions", json=fu
 print(f"2 function response: {json.dumps(response, indent=4, ensure_ascii=False)}")
 ```
 
-当前 function call 功能当前仅支持 qwen 系列模型，其他模型待扩展。
+Currently, the function call feature only supports qwen series models, with support for other models coming soon.

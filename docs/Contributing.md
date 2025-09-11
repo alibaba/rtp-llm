@@ -1,22 +1,25 @@
-# 贡献指南
-我们鼓励每一位成员为项目做出贡献。无论是通过报告问题、讨论代码的现状、提交修复、提出新功能，还是成为维护者，我们都非常欢迎您的参与！
+# Contributing Guide
 
-下面是您可以做的几种方式：
+We encourage every member to contribute to the project. Whether through reporting issues, discussing the current state of code, submitting fixes, proposing new features, or becoming a maintainer, we warmly welcome your participation!
 
-* 报告错误：如果您发现了错误，请告诉我们。
-* 讨论代码现状：参与现有代码的讨论和评审。
-* 提交修复：如果您能修复问题，请提交您的代码。
-* 提出新功能：我们欢迎任何创新的想法和建议。
-* 成为维护者：如果您愿意长期投身于项目中，可以成为项目的维护者。
-* 如果您想就某些事情进行讨论，欢迎在讨论区自由表达您的观点、意见或其他相关评论。
+Here are several ways you can contribute:
 
-# 贡献流程
-* 提出变更建议：关于您建议的变更，请开一个新的议题(issue)。
-* 获得批准：一旦您的提议获得批准，就可以Fork本仓库并进行更改。
-* 提交 PR：针对最新的开发分支开一个合并请求(PR)。请在PR中详细描述您的更改。
-* 完成。
+* **Report bugs**: If you find an error, please let us know.
+* **Discuss code status**: Participate in discussions and reviews of existing code.
+* **Submit fixes**: If you can fix a problem, please submit your code.
+* **Propose new features**: We welcome any innovative ideas and suggestions.
+* **Become a maintainer**: If you're willing to commit long-term to the project, you can become a project maintainer.
+* **Discussion**: If you want to discuss anything, feel free to express your views, opinions, or other relevant comments in the discussion area.
 
-# 注意事项
-* 新增或删除的代码不应破坏系统的现有流程。
-* 确保在构建结束时移除任何安装或构建依赖。
-* 如果更改需要，更新 README.md 和相关文档，并详细说明接口的更改内容。
+## Contribution Process
+
+1. **Propose changes**: Open a new issue (issue) for any changes you suggest.
+2. **Get approval**: Once your proposal is approved, you can fork this repository and make changes.
+3. **Submit PR**: Open a pull request (PR) for the latest development branch. Please describe your changes in detail in the PR.
+4. **Complete**.
+
+## Notes
+
+* New or removed code should not break the existing flow of the system.
+* Ensure to remove any installation or build dependencies at the end of building.
+* If changes are needed, update README.md and related documentation, and provide detailed explanations of API changes.
