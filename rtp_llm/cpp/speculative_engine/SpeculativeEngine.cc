@@ -565,9 +565,6 @@ absl::Status SpeculativeEngine::prefillMtpStep(std::list<GenerateStreamPtr>& str
         THROW_IF_STATUS_ERROR(propose_executor_->propose(streams, true));
 
         for (const GenerateStreamPtr& stream : streams) {
-            if (stream->queryPdSep()) {
-                stream->setNeedRemoteGenerate(true);
-            }
             BufferPtr   propose_tokens = stream->getProposeStream()->getSPOutputBuffer()->tokens;
             vector<int> propose_tokens_vec;
             for (int i = 0; i < propose_tokens->shape()[1]; ++i) {
@@ -578,6 +575,9 @@ absl::Status SpeculativeEngine::prefillMtpStep(std::list<GenerateStreamPtr>& str
             stream->setFallbackPrefixLength(stream->reuseLength());
             stream->setSpEditRun(false);
             stream->setLastHiddenStates(nullptr);
+            if (stream->queryPdSep()) {
+                stream->setNeedRemoteGenerate(true);
+            }
         }
     }
 
