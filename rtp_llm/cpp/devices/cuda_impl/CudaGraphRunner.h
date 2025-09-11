@@ -59,6 +59,7 @@ public:
     void           initKernelInternalMemory();
     int            getCurrentRealGraphBs();
     PyModelOutputs forward(PyModelInputs& inputs) override;
+    py::object     normalForward(PyModelInputs& inputs);
 
 private:
     void                 copySmallerIntoLarger(const torch::Tensor& source_tensor, torch::Tensor& target_tensor);

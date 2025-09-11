@@ -5,7 +5,7 @@ import unittest
 
 import torch
 
-from rtp_llm.cpp.devices.cuda_impl.tests.libtest_cuda_graph_ops import (
+from rtp_llm.cpp.devices.cuda_impl.tests.libtest_cuda_graph_decode_ops import (
     CudaGraphDecodePaddingOp,
 )
 

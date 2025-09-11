@@ -22,6 +22,7 @@ class FakeModelLoader(object):
         load_py_model: bool = False,
         device_reserve_memory_bytes: int = 0,
         warm_up: bool = False,
+        is_causal: bool = True,
     ) -> None:
         self.model_type = model_type
         self.tokenizer_path = tokenizer_path
@@ -34,6 +35,7 @@ class FakeModelLoader(object):
         self.data_type = data_type
         self.kv_cache_type = kv_cache_type
         self.act_type = act_type
+        self.is_causal = is_causal
 
         logging.info(f"tokenizer path: {self.tokenizer_path}")
         logging.info(f"check point path: {self.ckpt_path}")
@@ -100,7 +102,7 @@ class FakeModelLoader(object):
             gen_num_per_circle=1,
             ptuning_path=None,
         )
-
+        raw_config.is_causal = self.is_causal
         model = model_cls.from_config(raw_config)
         model = AsyncModel(model, None)
         return model

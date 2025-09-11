@@ -75,7 +75,7 @@ PyModelInputs CudaGraphDecodePaddingOp::buildInputs(int64_t batch_size,
     return inputs;
 }
 
-PYBIND11_MODULE(libtest_cuda_graph_ops, m) {
+PYBIND11_MODULE(libtest_cuda_graph_decode_ops, m) {
     py::class_<cuda_graph::CudaGraphDecodePaddingOp>(m, "CudaGraphDecodePaddingOp")
         .def(py::init<>())
         .def("init", &CudaGraphDecodePaddingOp::init)

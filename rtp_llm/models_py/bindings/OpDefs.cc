@@ -26,6 +26,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readonly("prefix_lengths", &PyAttentionInputs::prefix_lengths)
         .def_readonly("sequence_lengths", &PyAttentionInputs::sequence_lengths)
         .def_readonly("input_lengths", &PyAttentionInputs::input_lengths)
+        .def_readonly("cu_seqlens", &PyAttentionInputs::cu_seqlens)
         .def_readonly("kv_cache_block_id_host", &PyAttentionInputs::kv_cache_block_id_host)
         .def_readonly("kv_cache_block_id_device", &PyAttentionInputs::kv_cache_block_id_device)
         .def_readonly("kv_block_offset", &PyAttentionInputs::kv_block_offset)

@@ -6,15 +6,12 @@
 
 #include <pybind11/pybind11.h>
 #include <pybind11/embed.h>
-
+#include "rtp_llm/models_py/bindings/OpDefsUtils.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 
 namespace py = pybind11;
 
 namespace rtp_llm {
-
-void getPaddingOffset(
-    int32_t* padding_offset, int32_t* prefill_length, int32_t* prefix_length, int32_t batch_size, int32_t max_seq_len);
 
 class PyWrappedModel: public GptModel {
 public:
@@ -34,7 +31,6 @@ private:
     void                         setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs,
                                                                 const GptModelInputs&         inputs,
                                                                 BufferPtr&                    kv_cache_block_id_device);
-    void                         calculatePaddingOffset(torch_ext::PyAttentionInputs& py_attn_inputs);
     GptModelOutputs
                   callForwardPostLayers(BufferPtr hidden_states, const GptModelInputs& inputs, bool is_forward_method);
     GraphBase*    graph_runner_{nullptr};

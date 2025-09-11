@@ -35,6 +35,7 @@ cufmha::cufmha(DataType          dtype,
                bool              can_use_trtv2_fmha_paged,
                bool              can_use_open_source_fmha,
                bool              can_use_open_source_fmha_paged,
+               bool              is_s_padded,
                cudaStream_t      stream) {
 
     dtype_         = dtype;
@@ -42,6 +43,7 @@ cufmha::cufmha(DataType          dtype,
     head_num_      = head_num;
     kv_head_num_   = kv_head_num;
     size_per_head_ = size_per_head;
+    is_s_padded_   = is_s_padded;
     // size_per_head_v_ equals to size_per_head in general.
     size_per_head_v_           = size_per_head;
     seq_size_per_block_        = seq_size_per_block;
@@ -112,7 +114,7 @@ void cufmha::runTrtV1Fmha(void*  input,
 #endif
 }
 
-MHARunnerFixedParams cufmha::createMHARunnerFixedParams(bool paged) {
+MHARunnerFixedParams cufmha::createMHARunnerFixedParams(bool paged, bool isSPadded) {
     MHARunnerFixedParams fixedParams;
     fixedParams.dataType     = trtDtypeConvert(dtype_);
     fixedParams.dataTypeKv   = trtDtypeConvert(dtype_);
@@ -121,7 +123,7 @@ MHARunnerFixedParams cufmha::createMHARunnerFixedParams(bool paged) {
     fixedParams.attentionMaskType =
         mtype_ == AttentionMaskType::causalMask ? ContextAttentionMaskType::CAUSAL : ContextAttentionMaskType::PADDING;
     fixedParams.attentionInputLayout      = paged ? AttentionInputLayout::Q_PAGED_KV : AttentionInputLayout::PACKED_QKV;
-    fixedParams.isSPadded                 = false;
+    fixedParams.isSPadded                 = isSPadded;
     fixedParams.numQHeads                 = head_num_;
     fixedParams.numKvHeads                = kv_head_num_;
     fixedParams.numTokensPerBlock         = seq_size_per_block_;
@@ -188,6 +190,15 @@ MHARunnerParams cufmha::createMHARunnerParams(void*        input,
     return runnerParams;
 }
 
+// for cuda graph batch prefill test
+void cufmha::setIsPadded(bool is_s_padded) {
+    is_s_padded_                      = is_s_padded;
+    MHARunnerFixedParams fixedParams1 = createMHARunnerFixedParams(false, is_s_padded_);
+    trtv2_fmha_runner_.reset(new tensorrt_llm::kernels::FusedMHARunnerV2(fixedParams1));
+    MHARunnerFixedParams fixedParams2 = createMHARunnerFixedParams(true, is_s_padded_);
+    trtv2_paged_fmha_runner_.reset(new tensorrt_llm::kernels::FusedMHARunnerV2(fixedParams2));
+}
+
 bool cufmha::initTrtV2FmhaAndCheckSupport() {
     if (get_sm() == tensorrt_llm::kernels::kSM_70) {
         trtv2_sm70_fmha_runner_.reset(new tensorrt_llm::kernels::FusedMHARunnerV2Sm70(
@@ -200,7 +211,7 @@ bool cufmha::initTrtV2FmhaAndCheckSupport() {
         RTP_LLM_LOG_INFO("cuda sm %d < 80, not support trt v2 fmha", get_sm());
         return false;
     }
-    MHARunnerFixedParams fixedParams = createMHARunnerFixedParams(false);
+    MHARunnerFixedParams fixedParams = createMHARunnerFixedParams(false, is_s_padded_);
     trtv2_fmha_runner_.reset(new tensorrt_llm::kernels::FusedMHARunnerV2(fixedParams));
 
     return trtv2_fmha_runner_->isFmhaSupported()
@@ -213,7 +224,7 @@ bool cufmha::initTrtV2FmhaPagedAndCheckSupport() {
         RTP_LLM_LOG_INFO("cuda sm %d < 80, not support trt paged fmha", get_sm());
         return false;
     }
-    MHARunnerFixedParams fixedParams = createMHARunnerFixedParams(true);
+    MHARunnerFixedParams fixedParams = createMHARunnerFixedParams(true, is_s_padded_);
     trtv2_paged_fmha_runner_.reset(new tensorrt_llm::kernels::FusedMHARunnerV2(fixedParams));
     return trtv2_paged_fmha_runner_->isFmhaSupported()
            && (mtype_ == AttentionMaskType::causalMask || mtype_ == AttentionMaskType::noMask)

@@ -125,7 +125,7 @@ torch::Tensor TRTPrefillOp::forward(const torch::Tensor&              input,
     const int            batch_size     = params->input_lengths.size(0);
     torch::TensorOptions options        = torch::TensorOptions(input.dtype()).device(input.device());
 
-    torch::Tensor output        = torch::empty({token_num, local_head_num * size_per_head}, options);
+    torch::Tensor output        = torch::zeros({token_num, local_head_num * size_per_head}, options);
     torch::Tensor tiled_counter = torch::zeros({1}, torch::TensorOptions(torch::kUInt32).device(input.device()));
     bool          use_fp8_fmha  = kv_block_array.cache_type == KvCacheDataType::FP8;
     float*        attention_output_orig_quant_scale = use_fp8_fmha ? static_scale_.data_ptr<float>() : nullptr;
@@ -156,6 +156,7 @@ torch::Tensor TRTPrefillOp::forward(const torch::Tensor&              input,
             fmha_output_ptr = tmp_fmha_output.data_ptr();
         }
         RTP_LLM_CHECK_WITH_INFO(fmha_output_ptr, "fmha_output_ptr must be provided for trt v2 fmha");
+
         cufmha_runner_->runTrtV2Fmha(fmha_input_ptr,
                                      params->cu_seqlens.data_ptr(),
                                      fmha_output_ptr,
@@ -169,6 +170,7 @@ torch::Tensor TRTPrefillOp::forward(const torch::Tensor&              input,
             output = tmp_fmha_output.to(output.dtype());
         }
     }
+
     return output;
 }
 

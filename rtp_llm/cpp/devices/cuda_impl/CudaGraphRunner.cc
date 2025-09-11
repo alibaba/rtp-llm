@@ -18,6 +18,10 @@ GraphBase* CudaDevice::getDeviceGraphRunner(const DeviceInitParams& params,
     return graph_runner_;
 }
 
+py::object CudaGraphRunner::normalForward(PyModelInputs& inputs) {
+    return py_forward_method_(inputs);
+}
+
 void CudaGraphRunner::captureOneBatchSize(int bs) {
     auto inputs = graph_instances_[bs].mem_hold_.py_model_inputs_;
     // WarmUp twice
@@ -91,7 +95,6 @@ void CudaGraphRunner::capture() {
         // pinned memory
         inputs.attention_inputs.cu_seqlens =
             capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens.slice(0, 0, bs + 1);
-        inputs.attention_inputs.padding_offset = capture_mem_hold_.py_model_inputs_.attention_inputs.padding_offset;
         inputs.attention_inputs.prefix_lengths = capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths;
         inputs.attention_inputs.dtype          = torch::kBFloat16;
         graph_instances_[bs].mem_hold_ =
@@ -136,9 +139,10 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
     // pinned memory
     py_model_inputs_.attention_inputs.cu_seqlens.slice(0, 0, current_batch_size_ + 1) =
         inputs.attention_inputs.cu_seqlens.slice(0, 0, current_batch_size_ + 1);
-    int total_tokens = inputs.attention_inputs.padding_offset.size(0);
-    py_model_inputs_.attention_inputs.padding_offset.slice(0, 0, total_tokens) =
-        inputs.attention_inputs.padding_offset.slice(0, 0, total_tokens);
+    // for now cuda graph use padded mode, so we don't need the `padding_offset` for now.
+    // int total_tokens = inputs.attention_inputs.padding_offset.size(0);
+    // py_model_inputs_.attention_inputs.padding_offset.slice(0, 0, total_tokens) =
+    //     inputs.attention_inputs.padding_offset.slice(0, 0, total_tokens);
     if (!is_embedding_) {
         py_model_inputs_.input_ids.fill_(0);
         py_model_inputs_.input_ids.slice(0, 0, inputs.input_ids.size(0)) = inputs.input_ids;
@@ -159,9 +163,9 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
         }
     } else {
         py_model_inputs_.input_ids.fill_(0);
-        auto lengths = inputs.attention_inputs.input_lengths.data_ptr<int>();
+        auto lengths   = inputs.attention_inputs.input_lengths.data_ptr<int>();
+        int  start_idx = 0;
         for (int i = 0; i < current_batch_size_; i++) {
-            int start_idx = 0;
             py_model_inputs_.input_ids.slice(0, i * num_tokens_per_bs_, i * num_tokens_per_bs_ + lengths[i]) =
                 inputs.input_ids.slice(0, start_idx, start_idx + lengths[i]);
             start_idx += lengths[i];
@@ -171,16 +175,95 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
 
 PyModelOutputs CudaGraphRunner::forward(PyModelInputs& inputs) {
     PyModelOutputs outputs;
-    // decode only
+    // decode or embedding model only
     if (canRun(inputs)) {
         RTP_LLM_LOG_INFO("Replay Start");
         prepareInputs(inputs);
         replay(current_real_graph_bs_);
-        outputs.hidden_states =
-            graph_instances_[current_real_graph_bs_].mem_hold_.decoder_layer_hidden_states_.slice(0, 0, seq_len_sum_);
+        if (is_embedding_) {
+            // In embedding mode, extract valid parts from padded decoder_layer_hidden_states_
+            auto& hidden_states = graph_instances_[current_real_graph_bs_].mem_hold_.decoder_layer_hidden_states_;
+            std::cout << "replay hidden_states[64]: " << hidden_states.slice(0, 64, 65) << std::endl;
+            auto input_lengths = inputs.attention_inputs.input_lengths.data_ptr<int32_t>();
+
+            // calculate valid tokens num
+            int32_t total_valid_tokens = 0;
+            for (int i = 0; i < current_batch_size_; i++) {
+                total_valid_tokens += input_lengths[i];
+            }
+
+            // 验证 total_valid_tokens 计算是否正确
+            RTP_LLM_LOG_DEBUG(
+                "total_valid_tokens: %d, hidden_states.size(0): %d", total_valid_tokens, hidden_states.size(0));
+
+            // create output tensor
+            auto options          = torch::TensorOptions().dtype(hidden_states.dtype()).device(hidden_states.device());
+            outputs.hidden_states = torch::empty({total_valid_tokens, hidden_states.size(1)}, options);
+
+            // Extract valid parts for each batch
+            int32_t output_offset = 0;
+            RTP_LLM_LOG_DEBUG(
+                "Extracting valid hidden states for embedding mode - batch_size: %d, total_valid_tokens: %d",
+                current_batch_size_,
+                total_valid_tokens);
+
+            for (int i = 0; i < current_batch_size_; i++) {
+                int32_t actual_length = input_lengths[i];        // actual valid length
+                int32_t batch_start   = i * num_tokens_per_bs_;  // start position in padded tensor
+
+                RTP_LLM_LOG_DEBUG("Batch %d: actual_length=%d, batch_start=%d, output_offset=%d",
+                                  i,
+                                  actual_length,
+                                  batch_start,
+                                  output_offset);
+
+                // 添加边界检查和验证
+                if (actual_length <= 0) {
+                    RTP_LLM_LOG_WARNING("Batch %d: actual_length=%d <= 0, skipping", i, actual_length);
+                    continue;
+                }
+
+                if (batch_start >= hidden_states.size(0)) {
+                    RTP_LLM_LOG_ERROR(
+                        "Batch %d: batch_start=%d >= hidden_states.size(0)=%d", i, batch_start, hidden_states.size(0));
+                    continue;
+                }
+
+                if (batch_start + actual_length > hidden_states.size(0)) {
+                    RTP_LLM_LOG_ERROR("Batch %d: batch_start=%d + actual_length=%d > hidden_states.size(0)=%d",
+                                      i,
+                                      batch_start,
+                                      actual_length,
+                                      hidden_states.size(0));
+                    continue;
+                }
+
+                if (output_offset + actual_length > outputs.hidden_states.size(0)) {
+                    RTP_LLM_LOG_ERROR(
+                        "Batch %d: output_offset=%d + actual_length=%d > outputs.hidden_states.size(0)=%d",
+                        i,
+                        output_offset,
+                        actual_length,
+                        outputs.hidden_states.size(0));
+                    continue;
+                }
+
+                // Extract valid parts from padded tensor
+                auto valid_slice = hidden_states.slice(0, batch_start, batch_start + actual_length);
+                outputs.hidden_states.slice(0, output_offset, output_offset + actual_length).copy_(valid_slice);
+                output_offset += actual_length;
+            }
+
+            // 验证最终结果
+            RTP_LLM_LOG_DEBUG("Final output_offset: %d, expected: %d", output_offset, total_valid_tokens);
+        } else {
+            outputs.hidden_states =
+                graph_instances_[current_real_graph_bs_].mem_hold_.decoder_layer_hidden_states_.slice(
+                    0, 0, seq_len_sum_);
+        }
         RTP_LLM_LOG_INFO("Replay End");
     } else {
-        auto py_outputs_obj = py_forward_method_(inputs);
+        auto py_outputs_obj = normalForward(inputs);
         // Cast the Python object to PyModelOutputs and extract hidden states
         outputs = py_outputs_obj.cast<PyModelOutputs>();
     }
