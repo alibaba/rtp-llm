@@ -1,5 +1,5 @@
 import logging
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 import torch
 import torch.distributed as dist
@@ -8,12 +8,22 @@ from libth_transformer.rtp_llm_ops import trt_fp8_quantize_128
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.distribute.collective import Group
 from rtp_llm.distribute.deep_ep_wrapper import DeepBufferWrapper
-from rtp_llm.models_py.modules.ep.fuesd_moe import (
+from rtp_llm.models_py.modules.moe import (
     ExpertForwardPayload,
     ExpertTokensMetadata,
     FusedMoeDataRouter,
     FusedMoEQuantConfig,
 )
+
+deep_ep_buffer_wrapper: Optional[DeepBufferWrapper] = None
+
+
+def init_deep_ep_buffer_wrapper(config: GptInitModelParameters):
+    global deep_ep_buffer_wrapper
+    if deep_ep_buffer_wrapper is not None:
+        return deep_ep_buffer_wrapper
+    deep_ep_buffer_wrapper = DeepBufferWrapper(config)
+    return deep_ep_buffer_wrapper
 
 
 class DeepepNormalRouter(FusedMoeDataRouter):
@@ -22,6 +32,7 @@ class DeepepNormalRouter(FusedMoeDataRouter):
         config: GptInitModelParameters,
         use_fp8: bool = True,
         async_mode: bool = False,
+        expert_alignment: int = 128,
     ):
         self.config = config
         self.tp_size = config.tp_size
@@ -33,15 +44,13 @@ class DeepepNormalRouter(FusedMoeDataRouter):
         self.expert_num = config.expert_num
         self.expert_num_per_rank = self.expert_num // self.ep_size
         self.top_k = config.moe_topk_group
-        self.deepep_buffer_wrapper = DeepBufferWrapper(config)
+        self.deepep_buffer_wrapper = init_deep_ep_buffer_wrapper(config)
         self.use_fp8 = use_fp8
         self.async_mode = async_mode
+        self.expert_alignment = expert_alignment
         if self.async_mode:
             raise ValueError("DeepEPNormal not supports async mode now")
-
-    def __del__(self):
-        if dist.is_initialized():
-            dist.destroy_process_group()
+        self.handle: Any = None
 
     def prepare(
         self,
@@ -86,20 +95,20 @@ class DeepepNormalRouter(FusedMoeDataRouter):
             num_tokens_per_expert,
             topk_ids,
             topk_weights,
-            expert_alignment=128,
+            expert_alignment=self.expert_alignment,
         )
         if self.use_fp8:
             expert_x, expert_x_scale = output
         else:
             expert_x = output
             expert_x_scale = None
+        self.handle = handle
         return ExpertForwardPayload(
             expert_x,
             expert_x_scale,
-            ExpertTokensMetadata(num_recv_tokens_per_expert_list, None),
+            ExpertTokensMetadata(None, num_recv_tokens_per_expert_list),
             recv_topk_idx,
             recv_topk_weights,
-            extra_finalize_args={"handle": handle},
         )
 
     def finalize(
@@ -109,11 +118,11 @@ class DeepepNormalRouter(FusedMoeDataRouter):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: Any,
-        extra_finalize_args: Optional[dict[str, Any]],
+        extra_finalize_args: Optional[Dict[str, Any]],
     ) -> None:
-        assert extra_finalize_args is not None, "extra_finalize_args is None"
-        handle = extra_finalize_args["handle"]
+        assert self.handle is not None, "handler is None"
         recv_x, _, event = self.deepep_buffer_wrapper.buffer.combine(
-            fused_expert_output, handle
+            fused_expert_output, self.handle
         )
+        self.handle = None
         return recv_x

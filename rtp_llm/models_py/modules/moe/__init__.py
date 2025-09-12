@@ -23,6 +23,7 @@ from rtp_llm.models_py.modules.moe.topk_weight_and_reduce import (
 
 # Import utilities
 from rtp_llm.models_py.modules.moe.utils import (
+    FusedMoEQuantConfig,
     moe_kernel_quantize_input,
     normalize_scales_shape,
 )

@@ -362,8 +362,8 @@ g_master_info = MasterInfo(
 def update_master_info(ip: str, base_port: int):
     g_master_info.ip = ip
     g_master_info.dp_tp_nccl_port = base_port - 10
+    g_master_info.th_nccl_port = base_port - 11
     base_port -= g_parallel_info.dp_rank * MASTER_INFO_PORT_NUM
-    g_master_info.th_nccl_port = base_port - 1
     g_master_info.tp_nccl_port = base_port - 2
     g_master_info.nccl_op_port = base_port - 3
     g_master_info.sp_gpt_nccl_port = base_port - 4

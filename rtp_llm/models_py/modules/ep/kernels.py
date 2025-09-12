@@ -976,3 +976,76 @@ def tma_align_input_scale(input_scale: torch.Tensor):
         BLOCK_SIZE_K=BLOCK_SIZE_K,
     )
     return output.t()[:m]
+
+
+@triton.jit
+def recompute_topk_ids_triton_kernel(
+    topk_ids_ptr,
+    adjusted_topk_ids_ptr,
+    expert_count_ptr,
+    current_expert_start_id,
+    num_local_experts,
+    num_tokens,
+    topk: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    token_start = pid * BLOCK_SIZE
+    token_end = min(token_start + BLOCK_SIZE, num_tokens)
+
+    for token_idx in range(token_start, token_end):
+        offset = token_idx * topk
+        # 向量加载
+        expert_ids = tl.load(topk_ids_ptr + offset + tl.arange(0, topk))
+
+        # 计算局部编号与合法性掩码
+        adjusted = expert_ids - current_expert_start_id
+        valid = (adjusted >= 0) & (adjusted < num_local_experts)
+
+        # 写回局部编号：合法位置写 adjusted，非法写 -1
+        out_ids = tl.where(valid, adjusted, -1)
+        tl.store(adjusted_topk_ids_ptr + offset + tl.arange(0, topk), out_ids)
+
+        # 按掩码原子加计数器
+        tl.atomic_add(expert_count_ptr + adjusted, 1, mask=valid)
+
+
+def recompute_topk_ids_sum_expert_count(
+    topk_ids: torch.Tensor, current_expert_start_id: int, num_local_experts: int
+):
+    """
+    Recompute topk_ids by subtracting current_expert_start_id and count expert tokens.
+
+    Args:
+        topk_ids: Tensor of shape [num_tokens, topk] containing expert IDs
+        current_expert_start_id: Starting expert ID to subtract
+        num_local_experts: Number of local experts
+
+    Returns:
+        tuple: (adjusted_topk_ids, expert_count)
+    """
+    device = topk_ids.device
+    num_tokens, topk = topk_ids.shape
+
+    # Create output tensors
+    adjusted_topk_ids = torch.empty_like(topk_ids)
+    expert_count = torch.zeros(num_local_experts, device=device, dtype=torch.int32)
+
+    # Configure triton kernel parameters
+    # Use smaller block size for better vectorization when topk is large
+    BLOCK_SIZE = min(256, 1024 // max(topk, 1))
+
+    # Launch recompute kernel
+    grid_recompute = (triton.cdiv(num_tokens, BLOCK_SIZE),)
+    recompute_topk_ids_triton_kernel[grid_recompute](
+        topk_ids,
+        adjusted_topk_ids,
+        expert_count,
+        current_expert_start_id,
+        num_local_experts,
+        num_tokens,
+        topk=topk,
+        BLOCK_SIZE=BLOCK_SIZE,
+    )
+
+    return adjusted_topk_ids, expert_count
