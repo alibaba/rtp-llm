@@ -48,9 +48,9 @@ Here’s an example of a VS Code launch.json configuration file for debugging Py
                 "LD_LIBRARY_PATH": "",
                 "TP_SIZE": "2",
                 "DP_SIZE": "1",
-                "EP_SIZE": "2", 
-                "WORLD_SIZE": "2",  
-                "LOCAL_WORLD_SIZE": "1", 
+                "EP_SIZE": "2",
+                "WORLD_SIZE": "2",
+                "LOCAL_WORLD_SIZE": "1",
                 "MAX_SEQ_LEN": "1024",
                 "MAX_CONTEXT_BATCH_SIZE": "1",
                 "CONCURRENCY_LIMIT": "8",
@@ -134,8 +134,8 @@ After loading the core file into GDB, run the bt (backtrace) command to display 
 
 ```bash
 f 4       # check rtp_llm::ScoreStream::ScoreStream info
-info locals     
-p stream         
+info locals
+p stream
 ```
 
 
@@ -144,7 +144,7 @@ p stream
 check propose_stream_ info
 
 ```
-p *(this->propose_stream_._M_ptr->sp_output_buffer_._M_ptr->tokens._M_ptr) 
+p *(this->propose_stream_._M_ptr->sp_output_buffer_._M_ptr->tokens._M_ptr)
 ```
 
 check tokens info
@@ -169,7 +169,7 @@ INT8_MODE=1     \
 SP_INT8_MODE=1     \
 REUSE_CACHE=1     \
 START_PORT=26666   \
-/opt/conda310/bin/python3 -m rtp_llm.start_server 
+/opt/conda310/bin/python3 -m rtp_llm.start_server
 ```
 
 After starting the service, you can view the relevant processes as follows:
@@ -186,7 +186,7 @@ yanxi.w+  41356  40801 20 14:04 pts/8    00:00:11 rtp_llm_frontend_server_0
 To begin debugging with GDB:
 Attach GDB to the target process (e.g., PID 40954):
 ```
-gdb -p 40954  
+gdb -p 40954
 ```
 Set breakpoints in the code
 Use curl to send a test request and trigger the breakpoint:
@@ -222,23 +222,23 @@ Create Test Files:
 Add a .cc test file (e.g., multimodal_processor_test.cc) under the test directory.
 Write Google Test (gtest) cases using assertions like EXPECT_EQ to validate behavior.
 ```cpp
-#include <gtest/gtest.h>  
-TEST(MultimodalProcessorTest, BasicFunctionality) {  
-  // Test logic here  
-  EXPECT_EQ(result, expected_value);  
-}  
+#include <gtest/gtest.h>
+TEST(MultimodalProcessorTest, BasicFunctionality) {
+  // Test logic here
+  EXPECT_EQ(result, expected_value);
+}
 ```
 Define the BUILD File:
 
 ```python
-cc_test(  
-    name = "multimodal_processor_test",  
-    srcs = ["multimodal_processor_test.cc"],  
-    deps = [  
-        "//rtp_llm/cpp/multimodal_processor:main_lib",  
-        "@gtest//:gtest_main",  
-    ],  
-)  
+cc_test(
+    name = "multimodal_processor_test",
+    srcs = ["multimodal_processor_test.cc"],
+    deps = [
+        "//rtp_llm/cpp/multimodal_processor:main_lib",
+        "@gtest//:gtest_main",
+    ],
+)
 
 ```
 Run the Test:
@@ -267,7 +267,7 @@ Implement the Comparer:
     def compare_result(
         self, expect_result: WorkStatus, actual_result: WorkStatus
     ) -> None:
-```       
+```
 Prepare Test Data:
 
 Place JSON files (e.g., expected_worker_status.json) in the smoke test directory for result validation.
@@ -275,5 +275,240 @@ Place JSON files (e.g., expected_worker_status.json) in the smoke test directory
 Run Smoke Tests:
 
 ```
-bazelisk test internal_source/rtp_llm/test/smoke:worker_status_reuse_cache  --config=ppu --test_env='CUDA_VISIBLE_DEVICES=11,12,13' --cache_test_results=no 
+bazelisk test internal_source/rtp_llm/test/smoke:worker_status_reuse_cache  --config=ppu --test_env='CUDA_VISIBLE_DEVICES=11,12,13' --cache_test_results=no
 ```
+
+
+## Part 4: curl request with debugging options
+
+To retrieve debugging information via a curl request, use the following command with verbose output:
+
+Enabling aux_info: true and debug_info: true in the request will return additional auxiliary information and debugging details.
+
+```
+curl -X POST http://127.0.0.1:26000/v1/chat/completions   -H "Content-Type: application/json"   -d '{
+    "messages": [
+      {
+        "role": "user",
+        "content": "杭州的天气怎么样？"
+      }
+    ],
+    "stream": false,
+    "aux_info": true,
+    "max_tokens": 10,
+    "debug_info": true
+  }'
+```
+response:
+
+```
+{
+  "id": "chat-",
+  "object": "chat.completion",
+  "created": 1757660643,
+  "model": "",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "杭州的天气通常是比较湿润的，春秋季节",
+        "partial": false
+      },
+      "finish_reason": "length"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 34,
+    "total_tokens": 44,
+    "completion_tokens": 10
+  },
+  "debug_info": {
+    "input_prompt": "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n<|im_start|>user\n杭州的天气怎么样？<|im_end|>\n<|im_start|>assistant\n",
+    "input_ids": [
+      151644, 8948, 198, 2610, 525, 1207, 16948, 11, 3465, 553, 54364, 14817, 13,
+      1446, 525, 264, 10950, 17847, 13, 151645, 198, 151644, 872, 198, 104130,
+      9370, 104307, 104472, 11319, 151645, 198, 151644, 77091, 198
+    ],
+    "input_urls": [],
+    "tokenizer_info": "Qwen2TokenizerFast(...完整tokenizer信息...)",
+    "max_seq_len": 16384,
+    "eos_token_id": 151645,
+    "stop_word_ids_list": [[151645], [151644], [37763, 367, 25], [151643]],
+    "stop_words_list": ["<|im_end|>", "<|im_start|>", "Observation:", "<|endoftext|>"],
+    "renderer_info": {
+      "class_name": "QwenRenderer",
+      "renderer_model_type": "qwen_2",
+      "extra_stop_word_ids_list": [[37763, 367, 25], [151643]],
+      "extra_stop_words_list": ["Observation:", "<|endoftext|>"],
+      "template": "...(完整模板内容)..."
+    }
+  },
+  "generate_config": {
+    "max_new_tokens": 10,
+    "max_input_tokens": 32000,
+    "max_thinking_tokens": 32000,
+    "in_think_mode": false,
+    "end_think_token_ids": [],
+    "num_beams": 1,
+    "variable_num_beams": [],
+    "do_sample": true,
+    "num_return_sequences": 0,
+    "top_k": 0,
+    "top_p": 1.0,
+    "temperature": 0.7,
+    "repetition_penalty": 1.0,
+    "presence_penalty": 0.0,
+    "frequency_penalty": 0.0,
+    "min_new_tokens": 0,
+    "stop_words_str": ["<|im_end|>", "<|im_start|>", "Observation:", "<|endoftext|>"],
+    "stop_words_list": [[151645], [151644], [37763, 367, 25], [151643], [151645], [151644]],
+    "using_hf_sampling": false,
+    "print_stop_words": false,
+    "timeout_ms": 3600000,
+    "ttft_timeout_ms": -1,
+    "traffic_reject_priority": 100,
+    "request_format": "raw",
+    "calculate_loss": 0,
+    "return_logits": false,
+    "return_incremental": false,
+    "return_hidden_states": false,
+    "hidden_states_cut_dim": 0,
+    "normalized_hidden_states": false,
+    "select_tokens_str": [],
+    "select_tokens_id": [],
+    "return_input_ids": false,
+    "return_output_ids": false,
+    "md5_value": "",
+    "custom_prop": "{}",
+    "sp_advice_prompt": "",
+    "sp_advice_prompt_token_ids": [],
+    "sp_edit": false,
+    "force_disable_sp_run": false,
+    "force_sp_accept": false,
+    "return_cum_log_probs": false,
+    "return_all_probs": false,
+    "return_softmax_probs": false,
+    "can_use_pd_separation": true,
+    "gen_timeline": false,
+    "profile_step": 3,
+    "out_prefix": "",
+    "role_addrs": [],
+    "inter_request_id": -1,
+    "ignore_eos": false,
+    "skip_special_tokens": false,
+    "is_streaming": false,
+    "add_vision_id": true,
+    "tool_call_message_extract_strategy": "default",
+    "global_request_id": -1,
+    "reuse_cache": true,
+    "enable_3fs": true
+  },
+  "aux_info": {
+    "cost_time": 95.082,
+    "iter_count": 10,
+    "prefix_len": 0,
+    "input_len": 34,
+    "reuse_len": 0,
+    "output_len": 10,
+    "step_output_len": 10,
+    "fallback_tokens": 0,
+    "fallback_times": 0,
+    "first_token_cost_time": 16.947,
+    "wait_time": 0.058,
+    "pd_sep": false,
+    "cum_log_probs": [],
+    "beam_responses": [],
+    "softmax_probs": [],
+    "local_reuse_len": 0,
+    "remote_reuse_len": 0
+  }
+}
+
+```
+
+Enabling return_softmax_probs: true in the request will return softmax probs details.
+
+```
+curl -X POST http://127.0.0.1:26000/v1/chat/completions   -H "Content-Type: application/json"   -d '{
+    "messages": [
+      {
+        "role": "user",
+        "content": "杭州的天气怎么样？"
+      }
+    ],
+    "stream": false,
+    "aux_info": true,
+    "max_tokens": 10,
+    "extra_configs": {
+        "return_softmax_probs": true
+    }
+  }'
+```
+response:
+
+```
+{
+  "id": "chat-",
+  "object": "chat.completion",
+  "created": 1757661676,
+  "model": "",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "杭州的天气因季节而异。春季温暖",
+        "partial": false
+      },
+      "finish_reason": "length"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 34,
+    "total_tokens": 44,
+    "completion_tokens": 10
+  },
+  "aux_info": {
+    "cost_time": 95.985,
+    "iter_count": 10,
+    "prefix_len": 0,
+    "input_len": 34,
+    "reuse_len": 0,
+    "output_len": 10,
+    "step_output_len": 10,
+    "fallback_tokens": 0,
+    "fallback_times": 0,
+    "first_token_cost_time": 16.835,
+    "wait_time": 0.061,
+    "pd_sep": false,
+    "cum_log_probs": [],
+    "beam_responses": [],
+    "softmax_probs": [
+      0.5396254658699036,
+      0.46262434124946594,
+      0.9233724474906921,
+      0.01102062501013279,
+      0.9563982486724854,
+      0.7596278190612793,
+      0.9906871914863586,
+      0.5212739706039429,
+      0.27689263224601746,
+      0.21558642387390137
+    ],
+    "local_reuse_len": 0,
+    "remote_reuse_len": 0
+  }
+}
+
+```
+Additional configuration options are available, such as:
+
+ - return_logits
+ - return_cum_log_probs
+ - return_incremental
+ - return_hidden_states
+ - return_output_ids
+ - return_input_ids
+ - return_all_probs
+

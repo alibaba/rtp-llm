@@ -3,15 +3,9 @@ General Guidance
 ==========
 
 .. toctree::
-   :maxdepth: 1
+   :maxdepth: 2
 
    profiling.md
-   ../backed/debug.md
-   ../backed/Environment.md
+   debug.md
+   Environment.md
 
-   troubleshooting.md
-   faq.md
-   learn_more.md
-   modelscope.md
-   environment_variables.md
-   production_metrics.md
