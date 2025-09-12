@@ -35,14 +35,15 @@ public:
         py_forward_method_   = py_instance_.attr("forward");
         py_fmha_type_method_ = py_instance_.attr("get_fmha_type");
         RTP_LLM_LOG_INFO("Initialize CudaGraphRunner with parameters below: \n \
-            enable_cuda_graph_: %d, concurrency_limit_: %d, enable_cuda_graph_debug_mode_: %d, hidden_size_: %d, max_seq_len_: %d, seq_size_per_block_: %d, kv_cache_block_offset_: %d",
+            enable_cuda_graph_: %d, concurrency_limit_: %d, enable_cuda_graph_debug_mode_: %d, hidden_size_: %d, max_seq_len_: %d, seq_size_per_block_: %d, kv_cache_block_offset_: %d, is_embedding_: %d",
                          enable_cuda_graph_,
                          concurrency_limit_,
                          enable_cuda_graph_debug_mode_,
                          hidden_size_,
                          max_seq_len_,
                          seq_size_per_block_,
-                         kv_cache_block_offset_);
+                         kv_cache_block_offset_,
+                         is_embedding_);
     }
     ~CudaGraphRunner() {
         RTP_LLM_LOG_INFO("Release CudaGraphRunner .....");

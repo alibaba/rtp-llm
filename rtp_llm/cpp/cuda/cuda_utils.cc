@@ -19,7 +19,10 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include <cuda.h>
-
+#include <ATen/cuda/CUDAGraph.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <ATen/cuda/CUDAGraphsUtils.cuh>
+#include "rtp_llm/cpp/th_op/ConfigModules.h"
 #include <mutex>
 #include <unordered_map>
 #include <stdio.h>
@@ -95,7 +98,9 @@ template void check<CUresult>(CUresult result, const char* const file, int const
 
 void syncAndCheckInDebug(const char* const file, int const line) {
     if (rtp_llm::Logger::getEngineLogger().isDebugMode()) {
-        cudaDeviceSynchronize();
+        if (at::cuda::currentStreamCaptureStatus() == at::cuda::CaptureStatus::None) {
+            cudaDeviceSynchronize();
+        }
         cudaError_t result = cudaGetLastError();
         check(result, file, line);
         RTP_LLM_LOG_DEBUG(rtp_llm::fmtstr("run syncAndCheckInDebug at %s:%d", file, line));

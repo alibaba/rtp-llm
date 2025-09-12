@@ -182,8 +182,11 @@ PyModelOutputs CudaGraphRunner::forward(PyModelInputs& inputs) {
         replay(current_real_graph_bs_);
         if (is_embedding_) {
             // In embedding mode, extract valid parts from padded decoder_layer_hidden_states_
+
             auto& hidden_states = graph_instances_[current_real_graph_bs_].mem_hold_.decoder_layer_hidden_states_;
-            auto  input_lengths = inputs.attention_inputs.input_lengths.data_ptr<int32_t>();
+            // create output tensor
+            outputs.hidden_states = hidden_states;
+            auto input_lengths    = inputs.attention_inputs.input_lengths.data_ptr<int32_t>();
 
             // calculate valid tokens num
             int32_t total_valid_tokens = 0;
@@ -191,13 +194,11 @@ PyModelOutputs CudaGraphRunner::forward(PyModelInputs& inputs) {
                 total_valid_tokens += input_lengths[i];
             }
 
-            // 验证 total_valid_tokens 计算是否正确
-            RTP_LLM_LOG_DEBUG(
-                "total_valid_tokens: %d, hidden_states.size(0): %d", total_valid_tokens, hidden_states.size(0));
-
-            // create output tensor
-            auto options          = torch::TensorOptions().dtype(hidden_states.dtype()).device(hidden_states.device());
-            outputs.hidden_states = torch::empty({total_valid_tokens, hidden_states.size(1)}, options);
+            // Verify if total_valid_tokens calculation is correct
+            RTP_LLM_LOG_DEBUG("total_valid_tokens: %d, hidden_states.size(0): %d, seq_len_sum_: %d",
+                              total_valid_tokens,
+                              hidden_states.size(0),
+                              seq_len_sum_);
 
             // Extract valid parts for each batch
             int32_t output_offset = 0;
@@ -216,9 +217,9 @@ PyModelOutputs CudaGraphRunner::forward(PyModelInputs& inputs) {
                                   batch_start,
                                   output_offset);
 
-                // 添加边界检查和验证
+                // Add boundary checks and validation
                 if (actual_length <= 0) {
-                    RTP_LLM_LOG_WARNING("Batch %d: actual_length=%d <= 0, skipping", i, actual_length);
+                    RTP_LLM_LOG_ERROR("Batch %d: actual_length=%d <= 0, skipping", i, actual_length);
                     continue;
                 }
 
@@ -248,12 +249,14 @@ PyModelOutputs CudaGraphRunner::forward(PyModelInputs& inputs) {
                 }
 
                 // Extract valid parts from padded tensor
-                auto valid_slice = hidden_states.slice(0, batch_start, batch_start + actual_length);
-                outputs.hidden_states.slice(0, output_offset, output_offset + actual_length).copy_(valid_slice);
+                outputs.hidden_states.slice(0, output_offset, output_offset + actual_length) =
+                    hidden_states.slice(0, batch_start, batch_start + actual_length);
                 output_offset += actual_length;
             }
-
-            // 验证最终结果
+            outputs.hidden_states =
+                graph_instances_[current_real_graph_bs_].mem_hold_.decoder_layer_hidden_states_.slice(
+                    0, 0, total_valid_tokens);
+            // Verify final result
             RTP_LLM_LOG_DEBUG("Final output_offset: %d, expected: %d", output_offset, total_valid_tokens);
         } else {
             outputs.hidden_states =
@@ -266,6 +269,7 @@ PyModelOutputs CudaGraphRunner::forward(PyModelInputs& inputs) {
         // Cast the Python object to PyModelOutputs and extract hidden states
         outputs = py_outputs_obj.cast<PyModelOutputs>();
     }
+
     return outputs;
 }
 
