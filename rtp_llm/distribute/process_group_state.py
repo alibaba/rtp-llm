@@ -75,7 +75,9 @@ def _init_process_group_state(
     for ranks in group_ranks:
         # create a new group for the ranks
         device_group = torch.distributed.new_group(
-            ranks, backend=torch_distributed_backend
+            ranks,
+            backend=torch_distributed_backend,
+            device_id=torch.device(f"cuda:{local_rank}"),
         )
         if rank in ranks:
             # set the world size, ranks, group size, rank in group
@@ -133,7 +135,8 @@ def init_distributed_environment(
     if not torch.distributed.is_initialized():
         print(
             f"[rank: {rank}] initialize process_group: {ip}:{port}, rank: {rank}, world_size: {world_size}, "
-            f"local_rank: {local_rank}, backend: {backend}, timeout: {timeout}"
+            f"local_rank: {local_rank}, backend: {backend}, timeout: {timeout}",
+            flush=True,
         )
         if timeout is not None:
             assert isinstance(timeout, (int)), "timeout must be a number"
