@@ -1,8 +1,7 @@
 # Debugging RTP-LLM
 
 The RTP-LLM project uses the Bazel build system. After learning how to compile and run RTP-LLM locally from scratch, this article will explain how to debug the code. Since RTP-LLM is primarily composed of a combination of Python and C++ code, we will introduce several commonly used debugging methods in this guide.
-
-## Part 1: debug Python Code
+## Debug Python Part
 
 ### Method 1: logging or print
 
@@ -108,7 +107,7 @@ open the file containing start_server.py, set breakpoints, and begin debugging.
 ![alt text](../pics/debug_image-1.png)
 
 
-## Part 1: debug c++ code
+## Debug C++ Part
 ### Method 1: logging
 Add the following log statements for output:
 ```cpp
@@ -196,7 +195,7 @@ curl -X POST http://127.0.0.1:26000/v1/chat/completions   -H "Content-Type: appl
     "messages": [
       {
         "role": "user",
-        "content": "杭州的天气怎么样？"
+        "content": "What's the WEATHER like in Hangzhou?"
       }
     ],
     "stream": false,
@@ -247,39 +246,8 @@ Execute the following command in the project’s container:
 bazelisk test  rtp_llm/cpp/multimodal_processor/test:multimodal_processor_test   --jobs=48 --test_output=streamed --config=cuda12_6
 ```
 
-## Part 3: bazel smoke test
 
-Add Smoke Test Cases:
-
-In rtp_llm/test/smoke/BUILD, define smoke test targets.
-Extend case_runner.py to include new API endpoints and comparers.
-
-```python
-...
-    elif request_endpoint.startswith("/rtp_llm/worker_status"):
-        comparer_cls = WorkerStatusComparer
-...
-```
-
-Implement the Comparer:
-
-```python
-    def compare_result(
-        self, expect_result: WorkStatus, actual_result: WorkStatus
-    ) -> None:
-```
-Prepare Test Data:
-
-Place JSON files (e.g., expected_worker_status.json) in the smoke test directory for result validation.
-
-Run Smoke Tests:
-
-```
-bazelisk test internal_source/rtp_llm/test/smoke:worker_status_reuse_cache  --config=ppu --test_env='CUDA_VISIBLE_DEVICES=11,12,13' --cache_test_results=no
-```
-
-
-## Part 4: curl request with debugging options
+## Debug Running Server
 
 To retrieve debugging information via a curl request, use the following command with verbose output:
 
@@ -290,7 +258,7 @@ curl -X POST http://127.0.0.1:26000/v1/chat/completions   -H "Content-Type: appl
     "messages": [
       {
         "role": "user",
-        "content": "杭州的天气怎么样？"
+        "content": "What's the WEATHER like in Hangzhou?"
       }
     ],
     "stream": false,
@@ -312,7 +280,7 @@ response:
       "index": 0,
       "message": {
         "role": "assistant",
-        "content": "杭州的天气通常是比较湿润的，春秋季节",
+        "content": "The weather in Hangzhou is usually wetter in spring and autumn",
         "partial": false
       },
       "finish_reason": "length"
@@ -324,7 +292,7 @@ response:
     "completion_tokens": 10
   },
   "debug_info": {
-    "input_prompt": "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n<|im_start|>user\n杭州的天气怎么样？<|im_end|>\n<|im_start|>assistant\n",
+    "input_prompt": "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n<|im_start|>user\nWhat's the WEATHER like in Hangzhou?<|im_end|>\n<|im_start|>assistant\n",
     "input_ids": [
       151644, 8948, 198, 2610, 525, 1207, 16948, 11, 3465, 553, 54364, 14817, 13,
       1446, 525, 264, 10950, 17847, 13, 151645, 198, 151644, 872, 198, 104130,
@@ -341,7 +309,7 @@ response:
       "renderer_model_type": "qwen_2",
       "extra_stop_word_ids_list": [[37763, 367, 25], [151643]],
       "extra_stop_words_list": ["Observation:", "<|endoftext|>"],
-      "template": "...(完整模板内容)..."
+      "template": "...(Complete template content)..."
     }
   },
   "generate_config": {
@@ -434,7 +402,7 @@ curl -X POST http://127.0.0.1:26000/v1/chat/completions   -H "Content-Type: appl
     "messages": [
       {
         "role": "user",
-        "content": "杭州的天气怎么样？"
+        "content": "What's the WEATHER like in Hangzhou?"
       }
     ],
     "stream": false,
@@ -458,7 +426,7 @@ response:
       "index": 0,
       "message": {
         "role": "assistant",
-        "content": "杭州的天气因季节而异。春季温暖",
+        "content": "The weather in Hangzhou varies from season to season. Spring warmth",
         "partial": false
       },
       "finish_reason": "length"
@@ -511,4 +479,3 @@ Additional configuration options are available, such as:
  - return_output_ids
  - return_input_ids
  - return_all_probs
-
