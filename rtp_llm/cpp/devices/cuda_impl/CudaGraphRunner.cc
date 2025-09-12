@@ -24,6 +24,7 @@ void CudaGraphRunner::captureOneBatchSize(int bs) {
     py_forward_method_(inputs);
 
     py_forward_method_(inputs);
+
     {
         CudaGraphStreamLife  stream_life(capture_stream_, device_);
         at::cuda::CUDAGraph& graph               = graph_instances_[bs].graph_;
@@ -36,9 +37,12 @@ void CudaGraphRunner::captureOneBatchSize(int bs) {
         auto py_outputs_obj = py_forward_method_(inputs);
         auto outputs        = py_outputs_obj.cast<PyModelOutputs>();
         graph_instances_[bs].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
+        auto fmha_type_obj            = py_fmha_type_method_(inputs.attention_inputs);
+        auto fmha_type                = fmha_type_obj.cast<FMHAType>();
+        graph_instances_[bs].use_xqa_ = fmha_type == FMHAType::XQA;
         graph.capture_end();
         // embedding model uses trtv2 attention
-        if (!is_embedding_) {
+        if (!is_embedding_ && !graph_instances_[bs].use_xqa_) {
             // retrieve from private cache first
             int                                   input_token_num  = std::max(MIN_CACHE_INPUT_TOKEN_NUM, bs);
             int                                   batch_size       = std::max(MIN_CACHE_BATCH_SIZE, bs);
@@ -142,15 +146,17 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
             inputs.attention_inputs.sequence_lengths;
         copySmallerIntoLarger(inputs.attention_inputs.kv_cache_block_id_device,
                               py_model_inputs_.attention_inputs.kv_cache_block_id_device);
-        graph_instances_[current_real_graph_bs_].mem_hold_.params_->fillFlashInfer(
-            nullptr,
-            torchTensor2Buffer(inputs.attention_inputs.sequence_lengths),
-            torchTensor2Buffer(inputs.attention_inputs.input_lengths),
-            torchTensor2Buffer(inputs.attention_inputs.kv_cache_block_id_host),
-            current_batch_size_,
-            seq_size_per_block_);
-        graph_instances_[current_real_graph_bs_].mem_hold_.params_->refreshFlashInferBuf(
-            dynamic_cast<CudaDevice*>(device_), current_batch_size_, inputs.attention_inputs.input_lengths.size(0));
+        if (!graph_instances_[current_real_graph_bs_].use_xqa_) {
+            graph_instances_[current_real_graph_bs_].mem_hold_.params_->fillFlashInfer(
+                nullptr,
+                torchTensor2Buffer(inputs.attention_inputs.sequence_lengths),
+                torchTensor2Buffer(inputs.attention_inputs.input_lengths),
+                torchTensor2Buffer(inputs.attention_inputs.kv_cache_block_id_host),
+                current_batch_size_,
+                seq_size_per_block_);
+            graph_instances_[current_real_graph_bs_].mem_hold_.params_->refreshFlashInferBuf(
+                dynamic_cast<CudaDevice*>(device_), current_batch_size_, inputs.attention_inputs.input_lengths.size(0));
+        }
     } else {
         py_model_inputs_.input_ids.fill_(0);
         auto lengths = inputs.attention_inputs.input_lengths.data_ptr<int>();
@@ -246,35 +252,43 @@ void CudaGraphRunner::initCapture() {
         }
         // Capture
         at::cuda::CUDAGraph graph;
-        capture_range_ = CudaGraphRunner::getBatchSizesToCapture(concurrency_limit_);
-        max_bs_        = *(std::max_element(capture_range_.begin(), capture_range_.end()));
-        max_num_token_ = max_bs_ * num_tokens_per_bs_;
-        auto options1  = torch::TensorOptions().dtype(torch::kFloat16).device(torch::kCUDA).requires_grad(false);
-        auto output    = torch::zeros({max_num_token_, hidden_size_}, options1);
-        auto options2  = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
-        auto options3  = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
+        capture_range_         = CudaGraphRunner::getBatchSizesToCapture(concurrency_limit_);
+        max_bs_                = *(std::max_element(capture_range_.begin(), capture_range_.end()));
+        max_num_token_         = max_bs_ * num_tokens_per_bs_;
+        auto          options1 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
+        auto          options2 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
         PyModelInputs inputs;
         inputs.attention_inputs.is_prefill = is_embedding_;
         // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
-        inputs.input_ids = torch::zeros({max_num_token_}, options3);
+        inputs.input_ids = torch::zeros({max_num_token_}, options2);
         // prefix_lengths [batch_size, int32] (for attention `prepare`)
-        inputs.attention_inputs.prefix_lengths = torch::full({int(max_bs_)}, num_tokens_per_bs_, options2);
+        inputs.attention_inputs.prefix_lengths = torch::full({int(max_bs_)}, num_tokens_per_bs_, options1);
         // input_lengths [batch_size, int32] (decode only)
-        inputs.attention_inputs.input_lengths = torch::full({int(max_bs_)}, num_tokens_per_bs_, options2);
+        inputs.attention_inputs.input_lengths = torch::full({int(max_bs_)}, num_tokens_per_bs_, options1);
         // sequence_lengths [batch_size, int32] (decode only)
         // sequence_length should in pinned memory
-        inputs.attention_inputs.sequence_lengths = torch::ones({int(max_bs_)}, options2);
+        inputs.attention_inputs.sequence_lengths = torch::ones({int(max_bs_)}, options1);
         inputs.attention_inputs.sequence_lengths = inputs.attention_inputs.sequence_lengths.pin_memory();
         // kv_cache_block_id_device [batch_size, block_num]
         inputs.attention_inputs.kv_cache_block_id_device =
-            torch::zeros({int(max_bs_), ((max_seq_len_ + seq_size_per_block_ - 1) / seq_size_per_block_)}, options3);
-        inputs.attention_inputs.kv_cache_block_id_host =
             torch::zeros({int(max_bs_), ((max_seq_len_ + seq_size_per_block_ - 1) / seq_size_per_block_)}, options2);
+        inputs.attention_inputs.kv_cache_block_id_host =
+            torch::zeros({int(max_bs_), ((max_seq_len_ + seq_size_per_block_ - 1) / seq_size_per_block_)}, options1);
         // padding_offset [max_num_token_, int32] (for attention padding)
-        inputs.attention_inputs.padding_offset = torch::zeros({int(max_seq_len_ * max_bs_)}, options3);
+        inputs.attention_inputs.padding_offset = torch::zeros({int(max_seq_len_ * max_bs_)}, options2);
         inputs.attention_inputs.dtype          = torch::kBFloat16;  // py_model support `kBFloat16` as input type.
+        torch::Tensor output;
         capture_mem_hold_ = CaptureMemoryHold(output, inputs, kv_cache_block_offset_, is_embedding_);
         initKernelInternalMemory();
+        // get real output data type
+        auto py_outputs_obj = py_forward_method_(capture_mem_hold_.py_model_inputs_);
+        auto outputs        = py_outputs_obj.cast<PyModelOutputs>();
+        auto options3       = torch::TensorOptions()
+                            .dtype(outputs.hidden_states.dtype().toScalarType())
+                            .device(torch::kCUDA)
+                            .requires_grad(false);
+        output = torch::zeros({max_num_token_, hidden_size_}, options3);
+        capture_mem_hold_.setHiddenStates(output);
         capture();
     } else {
         initKernelInternalMemory();

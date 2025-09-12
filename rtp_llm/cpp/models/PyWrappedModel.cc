@@ -75,7 +75,7 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     cu_seqlens               = cu_seqlens.cuda();
     cu_seqlens.slice(0, 1, batch_size + 1) = py_attn_inputs.input_lengths.cumsum(0);
     py_attn_inputs.cu_seqlens              = cu_seqlens;
-
+    py_attn_inputs.sequence_lengths.pin_memory();
     return py_attn_inputs;
 }
 
@@ -108,8 +108,9 @@ void PyWrappedModel::calculatePaddingOffset(torch_ext::PyAttentionInputs& py_att
 }
 
 // Helper function to call forwardPostLayers with common parameters
-GptModelOutputs
-PyWrappedModel::callForwardPostLayers(BufferPtr hidden_states, const GptModelInputs& inputs, bool is_forward_method) {
+GptModelOutputs PyWrappedModel::callForwardPostLayers(BufferPtr             hidden_states,
+                                                      const GptModelInputs& inputs,
+                                                      bool                  skip_final_layernorm) {
     return forwardPostLayers(hidden_states,
                              inputs.input_lengths->shape()[0] != inputs.sequence_lengths->shape()[0],
                              false,
@@ -118,7 +119,7 @@ PyWrappedModel::callForwardPostLayers(BufferPtr hidden_states, const GptModelInp
                              inputs.combo_tokens->shape()[0],
                              inputs,
                              nullptr,
-                             is_forward_method);
+                             skip_final_layernorm);
 }
 
 std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const GptModelInputs& inputs) {
@@ -248,7 +249,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             py_model_outputs      = outputs.cast<PyModelOutputs>();
         }
         auto hidden_states_tensor = py_model_outputs.hidden_states;
-        // std::cout << "hidden_states_tensor: " << hidden_states_tensor << std::endl;
+
         auto hidden_states = torchTensor2Buffer(hidden_states_tensor);
 
         RTP_LLM_LOG_INFO("Python object instance forward method called successfully.");

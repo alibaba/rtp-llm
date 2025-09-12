@@ -9,6 +9,10 @@ using namespace torch_ext;
 
 class CaptureMemoryHold {
 public:
+    void setHiddenStates(at::Tensor hidden_states) {
+        decoder_layer_hidden_states_ = hidden_states;
+    };
+
     CaptureMemoryHold() {}
 
     CaptureMemoryHold(at::Tensor hidden_states, PyModelInputs& inputs, int kv_cache_block_offset, bool is_embedding):
@@ -38,6 +42,7 @@ class GraphInstance {
 public:
     at::cuda::CUDAGraph graph_;
     CaptureMemoryHold   mem_hold_;
+    bool                use_xqa_{false};
 };
 
 class CudaGraphStreamLife {

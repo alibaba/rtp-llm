@@ -1,9 +1,12 @@
 import logging
 from typing import Optional
+
 import torch
 from torch import nn
+
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_loader.model_weight_info import ModelWeights
+from rtp_llm.models_py.modules import DECODE_MHA_IMPS, PREFILL_MHA_IMPS, FMHAImplBase
 from rtp_llm.ops import (
     DeviceType,
     KVCache,
@@ -14,11 +17,6 @@ from rtp_llm.ops import (
     get_device,
 )
 
-from rtp_llm.models_py.modules import (
-    DECODE_MHA_IMPS,
-    PREFILL_MHA_IMPS,
-    FMHAImplBase,
-)
 
 class GptModelBase(nn.Module):
     def __init__(self, config: GptInitModelParameters, weight: ModelWeights) -> None:
@@ -63,3 +61,7 @@ class GptModelBase(nn.Module):
             if impl.support():
                 return impl
         raise Exception(f"can not find fmha type: {attn_inputs.fmha_type}")
+
+    def get_fmha_type(self, attn_inputs: PyAttentionInputs):
+        fmha_impl = self.get_fmha_impl(attn_inputs)
+        return fmha_impl.fmha_type()

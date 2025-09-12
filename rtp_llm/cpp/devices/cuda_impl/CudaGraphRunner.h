@@ -32,7 +32,8 @@ public:
             throw std::runtime_error("CudaGraphRunner constructor: Python instance is null or none.");
         }
 
-        py_forward_method_ = py_instance_.attr("forward");
+        py_forward_method_   = py_instance_.attr("forward");
+        py_fmha_type_method_ = py_instance_.attr("get_fmha_type");
         RTP_LLM_LOG_INFO("Initialize CudaGraphRunner with parameters below: \n \
             enable_cuda_graph_: %d, concurrency_limit_: %d, enable_cuda_graph_debug_mode_: %d, hidden_size_: %d, max_seq_len_: %d, seq_size_per_block_: %d, kv_cache_block_offset_: %d",
                          enable_cuda_graph_,
@@ -64,6 +65,7 @@ private:
     std::vector<int>     getBatchSizesToCapture(int concurrency_limit);
     bool                 tryGetRealGraphBatchSize(PyModelInputs& inputs);
     py::object           py_forward_method_;
+    py::object           py_fmha_type_method_;
     bool                 enable_cuda_graph_{false};
     bool                 is_embedding_{false};
     int                  concurrency_limit_{32};

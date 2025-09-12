@@ -39,7 +39,7 @@ XQAParamsPtr XQAAttnOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
     params->kv_cache_offset  = Buffer2torchTensor(((TRTAttn*)trt_params.get())->kv_cache_offset, false).clone();
     params->batch_size       = batch_size;
     params->max_seq_len      = attn_inputs.sequence_lengths.max().item<int32_t>();
-    params->sequence_lengths = attn_inputs.sequence_lengths.cuda();
+    params->sequence_lengths = attn_inputs.sequence_lengths;
     params->kv_block_array.cache_type = attn_configs_.kv_cache_dtype;
     return params;
 }
@@ -87,7 +87,7 @@ void registerXQAAttnOp(const py::module& m) {
     pybind11::class_<XQAParams, std::shared_ptr<XQAParams>>(m, "XQAParams").def(pybind11::init<>());
     pybind11::class_<XQAAttnOp>(m, "XQAAttnOp")
         .def(pybind11::init<GptInitParameter>(), py::arg("gpt_init_parameter"))
-        .def("support", &XQAAttnOp::support, py::arg("attn_inputs"))
+        .def("support", &XQAAttnOp::support, py::arg("attn_inputs").noconvert())
         .def("prepare", &XQAAttnOp::prepare, py::arg("attn_inputs"))
         .def("forward", &XQAAttnOp::forward, py::arg("input"), py::arg("kv_cache"), py::arg("params"));
 }
