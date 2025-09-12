@@ -84,6 +84,5 @@ The core features include:
       :caption: References
 
       references/general
-      references/hardware
-      references/advanced_deploy
+
 
