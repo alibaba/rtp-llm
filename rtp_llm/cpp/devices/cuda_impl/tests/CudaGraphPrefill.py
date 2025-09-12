@@ -111,8 +111,8 @@ class TestCudaGraphPrefill(unittest.TestCase):
         torch.testing.assert_close(
             outputs1.hidden_states,
             valid_outputs2_tensor,
-            rtol=1.6e-2,  # 相对误差容忍度
-            atol=1.6e-2,  # 绝对误差容忍度
+            rtol=1e-2,  # 相对误差容忍度
+            atol=1e-2,  # 绝对误差容忍度
         )
 
         print(f"trt padded mode success for batch: {batch_size}!!")
@@ -136,8 +136,8 @@ class TestCudaGraphPrefill(unittest.TestCase):
         torch.testing.assert_close(
             outputs1.hidden_states[:10],
             outputs3.hidden_states[:10],
-            rtol=1.5e-2,  # 相对误差容忍度
-            atol=1.5e-2,  # 绝对误差容忍度
+            rtol=1e-2,  # 相对误差容忍度
+            atol=1e-2,  # 绝对误差容忍度
         )
 
     def test_batch_prefill(self):
