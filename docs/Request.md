@@ -1,7 +1,7 @@
 # Request Format
 ## Request Example
 ```json
-{"prompt": "hello, what is your name", "generate_config: {"max_new_tokens": 1000}}
+{"prompt": "hello, what is your name", "generate_config": {"max_new_tokens": 1000}}
 ```
 We also support OpenAI-style requests, see [OpenAI Interface](OpenAI-Tutorial.md) for details
 

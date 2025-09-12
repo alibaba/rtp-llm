@@ -1,6 +1,6 @@
 
 ## Overview
-RTP-LLM First Release Version:0.0.1(2025.08)
+RTP-LLM First Release Version:0.2.0(2025.09)
 ## Features
 ### Framkework  Advanced Feature
 * [PD Disaggregation](../../backend/pd_disaggregation.md) && [PD Entrance Transpose](../../backend/pd_entrace_transpose.md)
@@ -17,6 +17,7 @@ RTP-LLM First Release Version:0.0.1(2025.08)
 * [Quantization](../../backend/quantization.md)
 * [MultiLoRA](../../backend/lora.ipynb)
 * [Attention FFN Disaggregation](../../backend/af_disaggregation.md)
+* [Frontend/Backend Disaggregation](../../backend/Frontend.md)
 
 
 ### New Models
@@ -34,12 +35,10 @@ RTP-LLM First Release Version:0.0.1(2025.08)
 ### Bug Fixs
 
 ## Question of omission
-* 8TP for QwenCoderMoE may coredump in H20
 * PD Entrance Transpose not worker with front app
 * metrics of 3fs cache hit ratio is not accurate
 * too many dynamic lora need more **reserver_runtime_mem_mb**
 * AMD not support MoE models
-* deepgemm need large memory for jit
 * MoE model without shared_experter cannot use enable-layer-micro-batch
 
 

@@ -1,4 +1,4 @@
-RTP-LLM 0.0.1
+RTP-LLM 0.2.0
 ==========
 
 .. toctree::

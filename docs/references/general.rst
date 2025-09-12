@@ -6,6 +6,9 @@ General Guidance
    :maxdepth: 1
 
    profiling.md
+   ../backed/debug.md
+   ../backed/Environment.md
+
    troubleshooting.md
    faq.md
    learn_more.md

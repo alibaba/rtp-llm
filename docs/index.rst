@@ -33,7 +33,6 @@ The core features include:
    backend/openai_api_embeddings.ipynb
    backend/native_api.ipynb
    backend/cluster_envs.md
-   start/debug.md
 
 .. toctree::
    :maxdepth: 1
