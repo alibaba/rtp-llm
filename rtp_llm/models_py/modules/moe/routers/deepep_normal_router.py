@@ -7,23 +7,13 @@ from libth_transformer.rtp_llm_ops import trt_fp8_quantize_128
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.distribute.collective import Group
-from rtp_llm.distribute.deep_ep_wrapper import DeepBufferWrapper
+from rtp_llm.distribute.deep_ep import get_deepep_wrapper
 from rtp_llm.models_py.modules.moe import (
     ExpertForwardPayload,
     ExpertTokensMetadata,
     FusedMoeDataRouter,
     FusedMoEQuantConfig,
 )
-
-deep_ep_buffer_wrapper: Optional[DeepBufferWrapper] = None
-
-
-def init_deep_ep_buffer_wrapper(config: GptInitModelParameters):
-    global deep_ep_buffer_wrapper
-    if deep_ep_buffer_wrapper is not None:
-        return deep_ep_buffer_wrapper
-    deep_ep_buffer_wrapper = DeepBufferWrapper(config)
-    return deep_ep_buffer_wrapper
 
 
 class DeepepNormalRouter(FusedMoeDataRouter):
@@ -44,7 +34,7 @@ class DeepepNormalRouter(FusedMoeDataRouter):
         self.expert_num = config.expert_num
         self.expert_num_per_rank = self.expert_num // self.ep_size
         self.top_k = config.moe_topk_group
-        self.deepep_buffer_wrapper = init_deep_ep_buffer_wrapper(config)
+        self.deepep_buffer_wrapper = get_deepep_wrapper()
         self.use_fp8 = use_fp8
         self.async_mode = async_mode
         self.expert_alignment = expert_alignment

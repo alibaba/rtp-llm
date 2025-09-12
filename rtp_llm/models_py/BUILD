@@ -1,3 +1,7 @@
+load("//bazel:arch_select.bzl", "requirement", "deep_gemm_deps")
+
+deep_gemm_deps()
+
 py_library(
     name = "kernels",
     srcs = glob([

@@ -11,6 +11,26 @@ from rtp_llm.models_py.modules.moe.fused_batched_moe import (
 )
 from rtp_llm.utils.model_weight import W
 
+# TODO@miji move it to model init process?
+initialized = False
+
+
+def init_deepep_env_once(config: GptInitModelParameters):
+    global initialized
+    if initialized:
+        return
+    initialized = True
+    from rtp_llm.distribute.deep_ep import init_deepep_wrapper
+    from rtp_llm.distribute.process_group_state import (
+        get_ep_group,
+        init_distributed_environment,
+    )
+
+    init_distributed_environment(params=config, backend="nccl", timeout=None)
+    ep_group = get_ep_group()
+    assert ep_group.device_group is not None, "ep group device group is not initialized"
+    init_deepep_wrapper(group=ep_group.device_group, params=config)
+
 
 class FusedMoeFactory(object):
     @staticmethod
@@ -32,6 +52,7 @@ class FusedMoeFactory(object):
             return FusedMoe(router, executor, config.expert_num)
         # ep moe
         else:
+            init_deepep_env_once(config)
             if config.moe_config.use_deepep_low_latency:
                 raise ValueError("deep ep low latency mode not supported yet")
             else:
