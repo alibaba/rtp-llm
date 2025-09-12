@@ -74,6 +74,8 @@ std::shared_ptr<GenerateStream> SpeculativeEngine::enqueueMinFakeQuery(int32_t m
                                          {1, (size_t)score_model_params_.gpt_init_parameter.hidden_size_},
                                          rtp_llm::AllocationType::DEVICE});
         }
+        // avoid logits nan
+        device_->bufMemset(*fake_hidden_states, 0);
         stream->setReturnLastHiddenStates(true);
         BufferPtr new_tokens =
             device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {(size_t)1, 1}, rtp_llm::AllocationType::HOST});
@@ -145,7 +147,12 @@ absl::Status SpeculativeEngine::init() {
 
 void SpeculativeEngine::initLoadBalance() {
     RTP_LLM_LOG_INFO("init load balance start");
-    auto stream = enqueueMinFakeQuery(1, false);
+    std::shared_ptr<GenerateStream> stream;
+    if (score_model_params_.gpt_init_parameter.role_type_ == RoleType::PREFILL) {
+        stream = enqueueMinFakeQuery(1, false);
+    } else {
+        stream = enqueueMinFakeQuery(1, true);
+    }
     while (!stream->finished() && !stream->stopped()) {
         RTP_LLM_LOG_INFO("wait load balance init run over for 1s");
         this_thread::sleep_for(std::chrono::seconds(1));
@@ -375,13 +382,18 @@ absl::Status SpeculativeEngine::step() {
 
         if (streams.empty()) {
             if (score_model_params_.gpt_init_parameter.dp_size_ > 1) {
-                if (score_model_params_.gpt_init_parameter.role_type_ == RoleType::PREFILL) {
-                    enqueueMinFakeQuery(1, false);
-                } else {
-                    enqueueMinFakeQuery(1, true);
+                CHECK_AND_ASSIGN(streams, scheduler_->schedule(reserve_step));
+                if (streams.empty()) {
+                    if (score_model_params_.gpt_init_parameter.role_type_ == RoleType::PREFILL) {
+                        enqueueMinFakeQuery(1, false);
+                    } else {
+                        enqueueMinFakeQuery(1, true);
+                    }
+                    return absl::OkStatus();
                 }
+            } else {
+                return absl::OkStatus();
             }
-            return absl::OkStatus();
         }
         if (score_model_params_.gpt_init_parameter.dp_size_ > 1
             && score_model_params_.gpt_init_parameter.role_type_ != RoleType::PREFILL) {
@@ -568,11 +580,23 @@ absl::Status SpeculativeEngine::prefillMtpStep(std::list<GenerateStreamPtr>& str
             for (int i = 0; i < propose_tokens->shape()[1]; ++i) {
                 propose_tokens_vec.push_back(propose_tokens->data<int>()[i]);
             }
+            RTP_LLM_CHECK_WITH_INFO(propose_tokens_vec.size() > 0, "propose token size should not be empty");
             stream->setProposeToken(propose_tokens_vec);
             stream->setReuseLength(stream->seqLength() - 1);
             stream->setFallbackPrefixLength(stream->reuseLength());
             stream->setSpEditRun(false);
             stream->setLastHiddenStates(nullptr);
+            stream->setSPOutputBuffer(nullptr);
+            auto score_stream   = stream->getScoreStream();
+            auto propose_stream = stream->getProposeStream();
+            if (score_stream) {
+                score_stream->setLastHiddenStates(nullptr);
+                score_stream->setSPOutputBuffer(nullptr);
+            }
+            if (propose_stream) {
+                propose_stream->setLastHiddenStates(nullptr);
+                propose_stream->setSPOutputBuffer(nullptr);
+            }
             if (stream->queryPdSep()) {
                 stream->setNeedRemoteGenerate(true);
             }

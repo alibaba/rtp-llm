@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cuda/allocator_cuda.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include <mutex>
 
 namespace rtp_llm {
@@ -79,13 +80,11 @@ void PurePointerCudaAllocator::free(void** ptr) {
     void* address = *ptr;
     if (address) {
         std::lock_guard<std::mutex> lock(lock_);
-        if (pointer_mapping_->count(address)) {
-            doFree(address);
-            *ptr = nullptr;
-            pointer_mapping_->erase(address);
-        } else {
-            RTP_LLM_LOG_WARNING("pointer_mapping_ does not have information of ptr at %p.", address);
-        }
+        RTP_LLM_CHECK_WITH_INFO(
+            pointer_mapping_->count(address), "pointer_mapping_ does not have information of ptr at %p", address);
+        doFree(address);
+        *ptr = nullptr;
+        pointer_mapping_->erase(address);
     }
     return;
 }

@@ -280,6 +280,10 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
             {context_position_ids->data<int32_t>(),
              context_position_ids->data<int32_t>() + context_position_ids->size()});
     }
+    if (engine_->isMTPEagle()) {
+        RTP_LLM_CHECK_WITH_INFO(stream->getProposeToken().size() > 0,
+                                "mtp remote generate propose token should not be empty");
+    }
     generate_request.mutable_propose_token_ids()->CopyFrom(
         {stream->getProposeToken().begin(), stream->getProposeToken().end()});
     generate_request.set_stage(RemoteStage::GENERATE);
