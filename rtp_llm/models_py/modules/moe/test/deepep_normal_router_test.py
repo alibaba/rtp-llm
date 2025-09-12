@@ -6,10 +6,14 @@ from typing import List
 
 import torch
 import torch.distributed as dist
-from libth_transformer.rtp_llm_ops import trt_fp8_quantize_128
 
-import rtp_llm.ops
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.distribute.deep_ep import init_deepep_wrapper
+from rtp_llm.distribute.process_group_state import (
+    destroy_distributed_environment,
+    get_ep_group,
+    init_distributed_environment,
+)
 from rtp_llm.distribute.worker_info import (
     g_master_info,
     g_parallel_info,
@@ -20,6 +24,9 @@ from rtp_llm.models_py.modules.moe.routers.deepep_normal_router import (
 )
 from rtp_llm.test.utils.port_util import PortsContext
 
+import rtp_llm.ops  # isort:skip
+from libth_transformer.rtp_llm_ops import trt_fp8_quantize_128  # isort:skip
+
 
 def init_router(rank: int, use_fp8: bool):
     g_parallel_info.reload()
@@ -29,6 +36,17 @@ def init_router(rank: int, use_fp8: bool):
     config.moe_config.use_deepep_low_latency = False
     config.expert_num = 16
     config.hidden_size = 1024
+    config.tp_size = g_parallel_info.tp_size
+    config.tp_rank = g_parallel_info.tp_rank
+    config.ep_size = g_parallel_info.ep_size
+    config.ep_rank = g_parallel_info.ep_rank
+    config.dp_size = g_parallel_info.dp_size
+    config.dp_rank = g_parallel_info.dp_rank
+    config.ffn_tp_rank = g_parallel_info.ffn_tp_rank
+    config.ffn_tp_size = g_parallel_info.ffn_tp_size
+    config.local_rank = rank
+    init_distributed_environment(config, backend="nccl", timeout=60)
+    init_deepep_wrapper(group=get_ep_group().device_group, params=config)
     router = DeepepNormalRouter(config, use_fp8, expert_alignment=1)
     return config, router
 
@@ -52,45 +70,46 @@ def dequant_to_bf16(expert_x: torch.Tensor, expert_x_scale: torch.Tensor):
 def worker_function(rank: int, use_fp8: bool, token_num_per_rank: List[int]):
     random.seed(rank)
     config, router = init_router(rank, use_fp8)
-    top_k = config.expert_num
-    # test dispatch
-    current_device = torch.device(f"cuda:{rank}")
-    for i in range(5):
-        token_num = token_num_per_rank[rank]
-        a1 = (
-            torch.randn([token_num, config.hidden_size])
-            .to(current_device)
-            .to(torch.bfloat16)
-        )
-        topk_weights = torch.ones([token_num, top_k]).to(current_device)
-        topk_ids = torch.arange(config.expert_num, device=current_device).repeat(
-            token_num, 1
-        )
-        payload = router.prepare(
-            a1,
-            None,
-            None,
-            topk_weights,
-            topk_ids,
-            config.expert_num,
-            None,
-        )
-        assert payload.expert_tokens_meta.expert_num_tokens_cpu == [
-            sum(token_num_per_rank)
-        ] * (config.expert_num // config.world_size)
-        if router.use_fp8:
-            combine_x = dequant_to_bf16(payload.expert_x, payload.expert_x_scale)
-        else:
-            combine_x = payload.expert_x
-        a2 = router.finalize(
-            combine_x, topk_weights, topk_ids, False, None, payload.extra_finalize_args
-        )
-        if router.use_fp8:
-            x, scale = trt_fp8_quantize_128(a1, False)
-            ref_a2 = dequant_to_bf16(x, scale) * config.world_size
-        else:
-            ref_a2 = a1 * config.world_size
-        torch.testing.assert_close(ref_a2, a2)
+    try:
+        top_k = config.expert_num
+        # test dispatch
+        current_device = torch.device(f"cuda:{rank}")
+        for i in range(5):
+            token_num = token_num_per_rank[rank]
+            a1 = (
+                torch.randn([token_num, config.hidden_size])
+                .to(current_device)
+                .to(torch.bfloat16)
+            )
+            topk_weights = torch.ones([token_num, top_k]).to(current_device)
+            topk_ids = torch.arange(config.expert_num, device=current_device).repeat(
+                token_num, 1
+            )
+            payload = router.prepare(
+                a1,
+                None,
+                None,
+                topk_weights,
+                topk_ids,
+                config.expert_num,
+                None,
+            )
+            assert payload.expert_tokens_meta.expert_num_tokens_cpu == [
+                sum(token_num_per_rank)
+            ] * (config.expert_num // config.world_size)
+            if router.use_fp8:
+                combine_x = dequant_to_bf16(payload.expert_x, payload.expert_x_scale)
+            else:
+                combine_x = payload.expert_x
+            a2 = router.finalize(combine_x, topk_weights, topk_ids, False, None, None)
+            if router.use_fp8:
+                x, scale = trt_fp8_quantize_128(a1, False)
+                ref_a2 = dequant_to_bf16(x, scale) * config.world_size
+            else:
+                ref_a2 = a1 * config.world_size
+            torch.testing.assert_close(ref_a2, a2)
+    finally:
+        destroy_distributed_environment()
 
 
 def test_single(world_size: int, use_fp8: bool):
