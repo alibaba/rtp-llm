@@ -13,12 +13,12 @@ void SelectTopkOp::forward(torch::Tensor router_logits, torch::Tensor expert_ids
     auto         normalization_mode = configs_.has_moe_norm_ ?
                                           tensorrt_llm::kernels::MOEExpertScaleNormalizationMode::RENORMALIZE :
                                           tensorrt_llm::kernels::MOEExpertScaleNormalizationMode::NONE;
-    DataType     topk_t             = configs_.moe_config.use_deepep_moe ? DataType::TYPE_INT64 : DataType::TYPE_INT32;
+    auto         topk_t             = expert_ids.dtype();
     const auto   softmax_out = torch::zeros({token_num, num_expert}, router_logits.options().dtype(torch::kFloat32));
     const auto   source_rows = torch::zeros({token_num, top_k}, router_logits.options().dtype(torch::kInt32));
     cudaStream_t stream      = 0;
     router_logits            = router_logits.contiguous();
-    if (topk_t == DataType::TYPE_INT64) {
+    if (topk_t == torch::kInt64) {
         moe_plugin_->selectExpertsForTokens<int64_t>(router_logits.data_ptr<float>(),
                                                      router_logits.data_ptr<float>(),
                                                      expert_scales.data_ptr<float>(),
@@ -34,7 +34,7 @@ void SelectTopkOp::forward(torch::Tensor router_logits, torch::Tensor expert_ids
                                                      0,
                                                      normalization_mode,
                                                      stream);
-    } else {
+    } else if (topk_t == torch::kInt32) {
         moe_plugin_->selectExpertsForTokens<int32_t>(router_logits.data_ptr<float>(),
                                                      router_logits.data_ptr<float>(),
                                                      expert_scales.data_ptr<float>(),
@@ -50,6 +50,8 @@ void SelectTopkOp::forward(torch::Tensor router_logits, torch::Tensor expert_ids
                                                      0,
                                                      normalization_mode,
                                                      stream);
+    } else {
+        throw std::runtime_error("Unimplemented dtype for SelectTopkOp: " + std::string(topk_t.name()));
     }
 }
 

@@ -5,10 +5,6 @@ py_library(
     ])
 )
 
-load("//bazel:arch_select.bzl", "requirement", "deep_gemm_deps")
-
-deep_gemm_deps()
-
 py_library(
     name = "utils",
     srcs = glob([
@@ -20,7 +16,7 @@ py_library(
     name = "modules",
     srcs = glob([
         "modules/*.py",
-        "modules/*/*.py",
+        "modules/**/*.py",
     ]),
     deps = [
         ":utils",

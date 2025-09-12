@@ -1,22 +1,23 @@
-import sys
-
-import torch
-import torch.distributed as dist
-
-sys.path.append("/data2/baowending.bwd/RTP-LLM")
 import multiprocessing as mp
 import os
 import random
+import sys
+from typing import List
 
+import torch
+import torch.distributed as dist
 from libth_transformer.rtp_llm_ops import trt_fp8_quantize_128
 
+import rtp_llm.ops
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.distribute.worker_info import (
     g_master_info,
     g_parallel_info,
     update_master_info,
 )
-from rtp_llm.models_py.modules.ep.deepep_normal_router import DeepepNormalRouter
+from rtp_llm.models_py.modules.moe.routers.deepep_normal_router import (
+    DeepepNormalRouter,
+)
 from rtp_llm.test.utils.port_util import PortsContext
 
 
@@ -28,7 +29,7 @@ def init_router(rank: int, use_fp8: bool):
     config.moe_config.use_deepep_low_latency = False
     config.expert_num = 16
     config.hidden_size = 1024
-    router = DeepepNormalRouter(config, use_fp8)
+    router = DeepepNormalRouter(config, use_fp8, expert_alignment=1)
     return config, router
 
 
@@ -48,14 +49,14 @@ def dequant_to_bf16(expert_x: torch.Tensor, expert_x_scale: torch.Tensor):
     return combine_x.bfloat16()
 
 
-def worker_function(rank: int, use_fp8: bool):
+def worker_function(rank: int, use_fp8: bool, token_num_per_rank: List[int]):
     random.seed(rank)
     config, router = init_router(rank, use_fp8)
-    top_k = 16
+    top_k = config.expert_num
     # test dispatch
     current_device = torch.device(f"cuda:{rank}")
     for i in range(5):
-        token_num = random.randint(4, 12) // 4 * 4
+        token_num = token_num_per_rank[rank]
         a1 = (
             torch.randn([token_num, config.hidden_size])
             .to(current_device)
@@ -63,7 +64,7 @@ def worker_function(rank: int, use_fp8: bool):
         )
         topk_weights = torch.ones([token_num, top_k]).to(current_device)
         topk_ids = torch.arange(config.expert_num, device=current_device).repeat(
-            token_num, top_k // config.expert_num
+            token_num, 1
         )
         payload = router.prepare(
             a1,
@@ -71,9 +72,12 @@ def worker_function(rank: int, use_fp8: bool):
             None,
             topk_weights,
             topk_ids,
-            config.expert_num // config.world_size,
+            config.expert_num,
             None,
         )
+        assert payload.expert_tokens_meta.expert_num_tokens_cpu == [
+            sum(token_num_per_rank)
+        ] * (config.expert_num // config.world_size)
         if router.use_fp8:
             combine_x = dequant_to_bf16(payload.expert_x, payload.expert_x_scale)
         else:
@@ -98,12 +102,16 @@ def test_single(world_size: int, use_fp8: bool):
 
         # 启动world_size个进程
         processes = []
+        token_num_per_rank = [random.randint(4, 12) // 4 * 4 for _ in range(world_size)]
         for rank in range(world_size):
             # 为每个进程设置环境变量
             os.environ["WORLD_RANK"] = str(rank)
-
             # 创建进程，调用函数留空
-            p = mp.Process(target=worker_function, args=(rank, use_fp8), kwargs={})
+            p = mp.Process(
+                target=worker_function,
+                args=(rank, use_fp8, token_num_per_rank),
+                kwargs={},
+            )
             processes.append(p)
             p.start()
 

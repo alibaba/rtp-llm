@@ -1,5 +1,5 @@
 #include "rtp_llm/models_py/bindings/cuda/TrtFp8QuantOp.h"
-#include "rtp_llm/models_py/bindings/cuda/Torch_ext.h"
+#include "rtp_llm/models_py/bindings/common/Torch_ext.h"
 #include "rtp_llm/cpp/cuda/cuda_fp8_utils.h"
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>

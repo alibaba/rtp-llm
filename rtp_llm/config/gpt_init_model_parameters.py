@@ -378,7 +378,7 @@ class GptInitModelParameters:
     worker_port_offset: int
     world_size: int
     role_type: RoleType
-    quant_config: QuantizationConfig
+    quant_config: Optional[QuantizationConfig]
 
     batch_decode_scheduler_config: BatchDecodeSchedulerConfig
     cache_store_config: CacheStoreConfig
