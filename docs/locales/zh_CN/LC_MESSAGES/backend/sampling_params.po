@@ -1,0 +1,380 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: RTP-LLM 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-12 17:38+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../backend/sampling_params.md:1
+msgid "Sampling Config"
+msgstr "采样配置"
+
+#: ../../backend/sampling_params.md:3
+msgid ""
+"For the OpenAI protocol, **top_p** and **temperature** are specified in "
+"the outer protocol, while other sampling parameters are specified in "
+"**extra_configs**. Example:"
+msgstr "对于 OpenAI 协议，**top_p** 和 **temperature** 在外层协议中指定，而其他采样参数在 **extra_configs** 中指定。示例："
+
+#: ../../backend/sampling_params.md:28
+msgid ""
+"The raw protocol specifies sampling parameters through "
+"**generate_config**. Example:"
+msgstr "原始协议通过 **generate_config** 指定采样参数。示例："
+
+#: ../../backend/sampling_params.md:39
+msgid "Basic Control Parameters"
+msgstr "基础控制参数"
+
+#: ../../backend/sampling_params.md
+msgid "Parameter Name"
+msgstr "参数名称"
+
+#: ../../backend/sampling_params.md
+msgid "Core Function"
+msgstr "核心功能"
+
+#: ../../backend/sampling_params.md
+msgid "temperature"
+msgstr "温度"
+
+#: ../../backend/sampling_params.md
+msgid ""
+"Controls sampling randomness:<br>→ 0: Deterministic mode<br>→ 1: Standard"
+" random mode"
+msgstr "控制采样随机性：<br>→ 0: 确定性模式<br>→ 1: 标准随机模式"
+
+#: ../../backend/sampling_params.md
+msgid "top_k"
+msgstr "top_k"
+
+#: ../../backend/sampling_params.md
+msgid ""
+"Candidate set truncation strategy:<br>→ 0: Disabled<br>→ N: Take top N "
+"high-probability tokens"
+msgstr "候选集截断策略：<br>→ 0: 禁用<br>→ N: 取前 N 个高概率 token"
+
+#: ../../backend/sampling_params.md
+msgid "top_p"
+msgstr "top_p"
+
+#: ../../backend/sampling_params.md
+msgid ""
+"Nucleus sampling strategy:<br>→ 0.95: Take candidate set with cumulative "
+"probability of 95%"
+msgstr "核采样策略：<br>→ 0.95: 取累积概率为 95% 的候选集"
+
+#: ../../backend/sampling_params.md
+msgid "max_new_tokens"
+msgstr "最大新 token 数"
+
+#: ../../backend/sampling_params.md
+msgid ""
+"Maximum generation length:<br>MIN(input_length + max_new_tokens, "
+"MAX_SEQ_LEN)"
+msgstr "最大生成长度：<br>MIN(input_length + max_new_tokens, MAX_SEQ_LEN)"
+
+#: ../../backend/sampling_params.md
+msgid "min_new_tokens"
+msgstr "最小新 token 数"
+
+#: ../../backend/sampling_params.md
+msgid "Enforces minimum generation length"
+msgstr "强制最小生成长度"
+
+#: ../../backend/sampling_params.md:50
+msgid "Advanced Control Parameters"
+msgstr "高级控制参数"
+
+#: ../../backend/sampling_params.md
+msgid "Function Description"
+msgstr "功能描述"
+
+#: ../../backend/sampling_params.md
+msgid "repetition_penalty"
+msgstr "重复惩罚"
+
+#: ../../backend/sampling_params.md
+msgid ""
+"Repetition suppression factor:<br>→ >1.0 suppresses repetition<br>→ <1.0 "
+"encourages repetition"
+msgstr "重复抑制因子：<br>→ >1.0 抑制重复<br>→ <1.0 鼓励重复"
+
+#: ../../backend/sampling_params.md
+msgid "stop_words_list"
+msgstr "停用词列表"
+
+#: ../../backend/sampling_params.md
+msgid "Token ID stop words (better performance):<br>`[[20490,25],[1024]]`"
+msgstr "Token ID 停用词（性能更好）：<br>`[[20490,25],[1024]]`"
+
+#: ../../backend/sampling_params.md
+msgid "stop_words_str"
+msgstr "停用词字符串"
+
+#: ../../backend/sampling_params.md
+msgid ""
+"String stop words (better "
+"compatibility):<br>`[\"<end>\",\"\\nObservation\"]`"
+msgstr "字符串停用词（兼容性更好）：<br>`[\"<end>\",\"\\nObservation\"]`"
+
+#: ../../backend/sampling_params.md
+msgid "random_seed"
+msgstr "随机种子"
+
+#: ../../backend/sampling_params.md
+msgid ""
+"Random seed control:<br>→ None: True random<br>→ Fixed value: "
+"Reproducible generation"
+msgstr "随机种子控制：<br>→ None: 真随机<br>→ 固定值: 可重现生成"
+
+#: ../../backend/sampling_params.md:69
+msgid "<a id=\"返回控制参数\"></a>"
+msgstr ""
+
+#: ../../backend/sampling_params.md:70
+msgid "Return Control Parameters"
+msgstr "返回控制参数"
+
+#: ../../backend/sampling_params.md
+msgid "Effect"
+msgstr "效果"
+
+#: ../../backend/sampling_params.md
+msgid "Use Case"
+msgstr "使用场景"
+
+#: ../../backend/sampling_params.md
+msgid "return_logits"
+msgstr "返回 logits"
+
+#: ../../backend/sampling_params.md
+msgid "Returns logits matrix for each position"
+msgstr "返回每个位置的 logits 矩阵"
+
+#: ../../backend/sampling_params.md
+msgid "Output analysis/post-processing"
+msgstr "输出分析/后处理"
+
+#: ../../backend/sampling_params.md
+msgid "return_hidden_states"
+msgstr "返回隐藏状态"
+
+#: ../../backend/sampling_params.md
+msgid "Returns hidden states of transformer layers"
+msgstr "返回 transformer 层的隐藏状态"
+
+#: ../../backend/sampling_params.md
+msgid "Model debugging/feature extraction"
+msgstr "模型调试/特征提取"
+
+#: ../../backend/sampling_params.md
+msgid "return_input_ids"
+msgstr "返回输入 ID"
+
+#: ../../backend/sampling_params.md
+msgid "Returns input sequence encoding result"
+msgstr "返回输入序列编码结果"
+
+#: ../../backend/sampling_params.md
+msgid "Input validation"
+msgstr "输入验证"
+
+#: ../../backend/sampling_params.md
+msgid "return_output_ids"
+msgstr "返回输出 ID"
+
+#: ../../backend/sampling_params.md
+msgid "Returns output sequence encoding result"
+msgstr "返回输出序列编码结果"
+
+#: ../../backend/sampling_params.md
+msgid "Output decoding validation"
+msgstr "输出解码验证"
+
+#: ../../backend/sampling_params.md:79
+msgid "<a id=\"特殊模式参数\"></a>"
+msgstr ""
+
+#: ../../backend/sampling_params.md:80
+msgid "Special Mode Parameters"
+msgstr "特殊模式参数"
+
+#: ../../backend/sampling_params.md
+msgid "Mode Name"
+msgstr "模式名称"
+
+#: ../../backend/sampling_params.md
+msgid "Control Parameter"
+msgstr "控制参数"
+
+#: ../../backend/sampling_params.md
+msgid "Thinking Mode"
+msgstr "思考模式"
+
+#: ../../backend/sampling_params.md
+msgid "in_think_mode=True"
+msgstr "in_think_mode=True"
+
+#: ../../backend/sampling_params.md
+msgid ""
+"Agent-specific scenario:<br>Control thinking phase length with "
+"max_thinking_tokens"
+msgstr "Agent 特定场景：<br>使用 max_thinking_tokens 控制思考阶段长度"
+
+#: ../../backend/sampling_params.md
+msgid "Streaming Output"
+msgstr "流式输出"
+
+#: ../../backend/sampling_params.md
+msgid "yield_generator=True"
+msgstr "yield_generator=True"
+
+#: ../../backend/sampling_params.md
+msgid "Enable chunked return mechanism"
+msgstr "启用分块返回机制"
+
+#: ../../backend/sampling_params.md
+msgid "Parallel Decoding"
+msgstr "并行解码"
+
+#: ../../backend/sampling_params.md
+msgid "pd_separation=True"
+msgstr "pd_separation=True"
+
+#: ../../backend/sampling_params.md
+msgid "Enable parallel decoding optimization (hardware support required)"
+msgstr "启用并行解码优化（需要硬件支持）"
+
+#: ../../backend/sampling_params.md:88
+msgid "<a id=\"环境变量说明\"></a>"
+msgstr ""
+
+#: ../../backend/sampling_params.md:89
+msgid "Environment Variable Description"
+msgstr "环境变量说明"
+
+#: ../../backend/sampling_params.md:100
+msgid "<a id=\"采样策略说明\"></a>"
+msgstr ""
+
+#: ../../backend/sampling_params.md:101
+msgid "Sampling Strategy Description"
+msgstr "采样策略说明"
+
+#: ../../backend/sampling_params.md:103
+msgid "Combined Strategy Example"
+msgstr "组合策略示例"
+
+#: ../../backend/sampling_params.md:115
+msgid "Strategy Recommended Values"
+msgstr "策略推荐值"
+
+#: ../../backend/sampling_params.md
+msgid "Scenario"
+msgstr "场景"
+
+#: ../../backend/sampling_params.md
+msgid "Code Generation"
+msgstr "代码生成"
+
+#: ../../backend/sampling_params.md
+msgid "0.2-0.4"
+msgstr "0.2-0.4"
+
+#: ../../backend/sampling_params.md
+msgid "0.9"
+msgstr ""
+
+#: ../../backend/sampling_params.md
+msgid "40"
+msgstr ""
+
+#: ../../backend/sampling_params.md
+msgid "Creative Writing"
+msgstr ""
+
+#: ../../backend/sampling_params.md
+msgid "0.7-1.0"
+msgstr ""
+
+#: ../../backend/sampling_params.md
+msgid "0.95"
+msgstr ""
+
+#: ../../backend/sampling_params.md
+msgid "100"
+msgstr ""
+
+#: ../../backend/sampling_params.md
+msgid "Factual Q&A"
+msgstr ""
+
+#: ../../backend/sampling_params.md
+msgid "0.1-0.3"
+msgstr ""
+
+#: ../../backend/sampling_params.md
+msgid "0.8"
+msgstr ""
+
+#: ../../backend/sampling_params.md
+msgid "20"
+msgstr ""
+
+#: ../../backend/sampling_params.md:122
+msgid "<a id=\"参数使用注意事项\"></a>"
+msgstr ""
+
+#: ../../backend/sampling_params.md:123
+msgid "Parameter Usage Notes"
+msgstr "参数使用注意事项"
+
+#: ../../backend/sampling_params.md:125
+msgid "**Stop Words Selection Principles**"
+msgstr "**停用词选择原则**"
+
+#: ../../backend/sampling_params.md:126
+msgid ""
+"Performance priority: Use `stop_words_list` for high-frequency triggering"
+" scenarios"
+msgstr "性能优先：在高频触发场景下使用 `stop_words_list`"
+
+#: ../../backend/sampling_params.md:127
+msgid "Compatibility priority: Use `stop_words_str` for complex pattern matching"
+msgstr "兼容性优先：在复杂模式匹配场景下使用 `stop_words_str`"
+
+#: ../../backend/sampling_params.md:129
+msgid "**Length Limit Coordination**"
+msgstr "**长度限制协调**"
+
+#: ../../backend/sampling_params.md:137
+msgid "**Thinking Mode Special Constraints**"
+msgstr "**思考模式特殊约束**"
+
+#: ../../backend/sampling_params.md:147
+msgid "**Streaming Output Limitations**"
+msgstr "**流式输出限制**"
+
+#: ../../backend/sampling_params.md:148
+msgid "Need to enable `yield_generator=True` simultaneously"
+msgstr "需要同时启用 `yield_generator=True`"
+
+#: ../../backend/sampling_params.md:149
+msgid "`return_logits` only returns complete data in non-streaming mode"
+msgstr "`return_logits` 仅在非流式模式下返回完整数据"
+

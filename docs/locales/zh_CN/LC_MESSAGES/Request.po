@@ -1,0 +1,305 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: RTP-LLM 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-12 17:38+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../Request.md:1
+msgid "Request Format"
+msgstr "请求格式"
+
+#: ../../Request.md:2
+msgid "Request Example"
+msgstr "请求示例"
+
+#: ../../Request.md:6
+msgid ""
+"We also support OpenAI-style requests, see [OpenAI Interface](OpenAI-"
+"Tutorial.md) for details"
+msgstr "我们也支持 OpenAI 风格的请求，详见 [OpenAI 接口](OpenAI-Tutorial.md)"
+
+#: ../../Request.md:8
+msgid "Parameter List"
+msgstr "参数列表"
+
+#: ../../Request.md
+msgid "Parameter Name"
+msgstr "参数名称"
+
+#: ../../Request.md
+msgid "Type"
+msgstr "类型"
+
+#: ../../Request.md
+msgid "Description"
+msgstr "描述"
+
+#: ../../Request.md
+msgid "`prompt` / `prompt_batch` (one of two)"
+msgstr "`prompt` / `prompt_batch`（二者选一）"
+
+#: ../../Request.md
+msgid "`str` / `List[str]`, required"
+msgstr "`str` / `List[str]`，必填"
+
+#: ../../Request.md
+msgid "prompt"
+msgstr "输入提示文本"
+
+#: ../../Request.md
+msgid "`generate_config`"
+msgstr "`generate_config`"
+
+#: ../../Request.md
+#, python-brace-format
+msgid "`dict`, optional, default=`{}`"
+msgstr "`dict`，可选，默认值为 `{}`"
+
+#: ../../Request.md
+msgid "Generation parameters, currently supports the following parameters"
+msgstr "生成参数，当前支持以下参数"
+
+#: ../../Request.md
+msgid "`using_hf_sampling`"
+msgstr "`using_hf_sampling`"
+
+#: ../../Request.md
+msgid "`bool`, optional, default=`False`"
+msgstr "`bool`，可选，默认值为 `False`"
+
+#: ../../Request.md
+msgid "Whether to use hf sampling"
+msgstr "是否使用 Hugging Face 风格的采样方式"
+
+#: ../../Request.md:17
+msgid "generate_config"
+msgstr "生成配置"
+
+#: ../../Request.md
+msgid "`max_new_tokens`"
+msgstr "`max_new_tokens`"
+
+#: ../../Request.md
+msgid "`int`"
+msgstr "`int`"
+
+#: ../../Request.md
+msgid "Maximum number of generated tokens"
+msgstr "最大生成 token 数量"
+
+#: ../../Request.md
+msgid "`top_k`"
+msgstr "`top_k`"
+
+#: ../../Request.md
+msgid "top_k sampling"
+msgstr "Top-K 采样"
+
+#: ../../Request.md
+msgid "`top_p`"
+msgstr "`top_p`"
+
+#: ../../Request.md
+msgid "`float`"
+msgstr "`float`"
+
+#: ../../Request.md
+msgid "top_p sampling"
+msgstr "Top-P 采样（核采样）"
+
+#: ../../Request.md
+msgid "`temperature`"
+msgstr "`temperature`"
+
+#: ../../Request.md
+msgid "logits computation parameter (temperature)"
+msgstr "logits 计算参数（温度）"
+
+#: ../../Request.md
+msgid "`repetition_penalty`"
+msgstr "`repetition_penalty`"
+
+#: ../../Request.md
+msgid "Repetition token penalty coefficient"
+msgstr "重复 token 惩罚系数"
+
+#: ../../Request.md
+msgid "`random_seed`"
+msgstr "`random_seed`"
+
+#: ../../Request.md
+msgid "`long`"
+msgstr "`long`"
+
+#: ../../Request.md
+msgid "Random seed"
+msgstr "随机种子"
+
+#: ../../Request.md
+msgid "`bool`"
+msgstr "`bool`"
+
+#: ../../Request.md
+msgid "`num_beams`"
+msgstr "`num_beams`"
+
+#: ../../Request.md
+msgid "Number of beam search"
+msgstr "束搜索数量"
+
+#: ../../Request.md
+msgid "`print_stop_words`"
+msgstr "`print_stop_words`"
+
+#: ../../Request.md
+msgid "Whether to print stop words"
+msgstr "是否打印停止词"
+
+#: ../../Request.md
+msgid "`stop_words_str`"
+msgstr "`stop_words_str`"
+
+#: ../../Request.md
+msgid "`List[str]`"
+msgstr "`List[str]`"
+
+#: ../../Request.md
+msgid "Stop words strings"
+msgstr "停止词字符串列表"
+
+#: ../../Request.md
+msgid "`stop_words_list`"
+msgstr "`stop_words_list`"
+
+#: ../../Request.md
+msgid "`List[List[int]]`"
+msgstr "`List[List[int]]`"
+
+#: ../../Request.md
+msgid "Stop words token ids"
+msgstr "停止词对应的 token ID 列表"
+
+#: ../../Request.md
+msgid "`calculate_loss`"
+msgstr "`calculate_loss`"
+
+#: ../../Request.md
+msgid ""
+"Whether to calculate loss, 0: no calculation, 1: sum of word loss, 2: "
+"return loss of each token separately"
+msgstr "是否计算损失：0 表示不计算，1 表示返回词损失之和，2 表示单独返回每个 token 的损失"
+
+#: ../../Request.md
+msgid "`return_hidden_states`/`output_hidden_states`"
+msgstr "`return_hidden_states` / `output_hidden_states`"
+
+#: ../../Request.md
+msgid "Whether to return hidden_states"
+msgstr "是否返回隐藏状态（hidden_states）"
+
+#: ../../Request.md
+msgid "`return_logits`/`output_logits`"
+msgstr "`return_logits` / `output_logits`"
+
+#: ../../Request.md
+msgid "Whether to return logits"
+msgstr "是否返回 logits"
+
+#: ../../Request.md
+msgid "`select_tokens_id`"
+msgstr "`select_tokens_id`"
+
+#: ../../Request.md
+msgid "`List[int]`"
+msgstr "`List[int]`"
+
+#: ../../Request.md
+msgid ""
+"Only tokens in the select_tokens_id set return logits, if not specified, "
+"return all."
+msgstr "仅返回在 select_tokens_id 中的 token 的 logits，若未指定则返回全部"
+
+#: ../../Request.md
+msgid "`select_tokens_str`"
+msgstr "`select_tokens_str`"
+
+#: ../../Request.md
+msgid ""
+"The strings in this list will be encoded by tokenizer into corresponding "
+"token ids and appended to select_tokens_id."
+msgstr "此列表中的字符串将通过 tokenizer 编码为对应的 token ID，并追加到 select_tokens_id 中"
+
+#: ../../Request.md
+msgid "`return_input_ids`"
+msgstr "`return_input_ids`"
+
+#: ../../Request.md
+msgid "Whether to return input ids"
+msgstr "是否返回输入 token 的 ID"
+
+#: ../../Request.md
+msgid "`return_output_ids`"
+msgstr "`return_output_ids`"
+
+#: ../../Request.md
+msgid "Whether to return output ids"
+msgstr "是否返回输出 token 的 ID"
+
+#: ../../Request.md
+msgid "`task_id`"
+msgstr "`task_id`"
+
+#: ../../Request.md
+msgid "System prompt id"
+msgstr "系统提示词 ID"
+
+#: ../../Request.md
+msgid "`chat_id`"
+msgstr "`chat_id`"
+
+#: ../../Request.md
+msgid "`str`"
+msgstr "`str`"
+
+#: ../../Request.md
+msgid "Multi-turn conversation id"
+msgstr "多轮对话 ID"
+
+#: ../../Request.md
+msgid "`timeout_ms`"
+msgstr "`timeout_ms`"
+
+#: ../../Request.md
+msgid "Request timeout"
+msgstr "请求超时时间（毫秒）"
+
+#: ../../Request.md
+msgid "`request_format`"
+msgstr "`request_format`"
+
+#: ../../Request.md
+msgid "Request format, values (raw/chatapi)"
+msgstr "请求格式，可选值为 raw 或 chatapi"
+
+#: ../../Request.md
+msgid "`yield_generator`"
+msgstr "`yield_generator`"
+
+#: ../../Request.md
+msgid "Whether to stream output"
+msgstr "是否以流式方式输出结果"

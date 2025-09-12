@@ -1,0 +1,412 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: RTP-LLM 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-12 17:38+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../backend/speculative_decoding.md:1
+msgid "Speculative Decoding"
+msgstr "推测解码"
+
+#: ../../backend/speculative_decoding.md:5
+msgid "1. What is Speculative Sampling"
+msgstr "1. 什么是推测采样"
+
+#: ../../backend/speculative_decoding.md:6
+msgid ""
+"Speculative sampling is a **zero-precision-loss** universal inference "
+"acceleration technique:"
+msgstr ""
+"推测采样是一种**无精度损失**的通用推理加速技术："
+
+#: ../../backend/speculative_decoding.md:7
+msgid ""
+"A lightweight **Propose Model** generates several candidate tokens at "
+"once;"
+msgstr ""
+"一个轻量级的**提议模型（Propose Model）**一次性生成多个候选 token；"
+
+#: ../../backend/speculative_decoding.md:8
+msgid ""
+"The original **Score Model (large model)** then validates these tokens in"
+" parallel;"
+msgstr ""
+"原始的**打分模型（Score Model，即大模型）**随后并行验证这些 token；"
+
+#: ../../backend/speculative_decoding.md:9
+msgid ""
+"Turning \"verification\" into a Prefill operation, thereby improving GPU "
+"compute-to-memory ratio and reducing Decode latency."
+msgstr ""
+"将“验证”转化为 Prefill 操作，从而提升 GPU 计算与内存比，降低 Decode 阶段的延迟。"
+
+#: ../../backend/speculative_decoding.md:13
+msgid "2. Speculative Sampling Algorithms Supported by RTP-LLM"
+msgstr "2. RTP-LLM 支持的推测采样算法"
+
+#: ../../backend/speculative_decoding.md
+msgid "Name"
+msgstr "名称"
+
+#: ../../backend/speculative_decoding.md
+msgid "Introduction"
+msgstr "简介"
+
+#: ../../backend/speculative_decoding.md
+msgid "Source"
+msgstr "来源"
+
+#: ../../backend/speculative_decoding.md
+msgid "**vanilla**"
+msgstr "**vanilla**"
+
+#: ../../backend/speculative_decoding.md
+msgid "The most classic speculative sampling implementation"
+msgstr "最经典的推测采样实现方式"
+
+#: ../../backend/speculative_decoding.md
+msgid ""
+"[Leviathan et al., "
+"ICML'23](https://proceedings.mlr.press/v202/leviathan23a/leviathan23a.pdf)"
+msgstr ""
+"[Leviathan 等，ICML'23](https://proceedings.mlr.press/v202/leviathan23a/leviathan23a.pdf)"
+
+#: ../../backend/speculative_decoding.md
+msgid "**deterministic**"
+msgstr "**deterministic**"
+
+#: ../../backend/speculative_decoding.md
+msgid "Prompt-Lookup + Speculative Edit"
+msgstr "Prompt-Lookup + 推测编辑"
+
+#: ../../backend/speculative_decoding.md
+msgid ""
+"[Prompt Lookup](https://github.com/apoorvumang/prompt-lookup-decoding), "
+"[Cursor Blog](https://fireworks.ai/blog/cursor)"
+msgstr ""
+"[Prompt Lookup](https://github.com/apoorvumang/prompt-lookup-decoding)，"
+"[Cursor 博客](https://fireworks.ai/blog/cursor)"
+
+#: ../../backend/speculative_decoding.md
+msgid "**mtp**"
+msgstr "**mtp**"
+
+#: ../../backend/speculative_decoding.md
+msgid "Speculative sampling framework based on DeepSeek-V3"
+msgstr "基于 DeepSeek-V3 的推测采样框架"
+
+#: ../../backend/speculative_decoding.md
+msgid "[DeepSeek-V3 Tech Report](https://arxiv.org/pdf/2412.19437)"
+msgstr "[DeepSeek-V3 技术报告](https://arxiv.org/pdf/2412.19437)"
+
+#: ../../backend/speculative_decoding.md
+msgid "**eagle3**"
+msgstr "**eagle3**"
+
+#: ../../backend/speculative_decoding.md
+msgid "EAGLE-3"
+msgstr "EAGLE-3"
+
+#: ../../backend/speculative_decoding.md
+msgid "[EAGLE-3 Paper](https://arxiv.org/pdf/2503.01840)"
+msgstr "[EAGLE-3 论文](https://arxiv.org/pdf/2503.01840)"
+
+#: ../../backend/speculative_decoding.md:24
+msgid "3. Using Speculative Sampling in RTP-LLM"
+msgstr "3. 在 RTP-LLM 中使用推测采样"
+
+#: ../../backend/speculative_decoding.md:26
+msgid ""
+"Based on the original basic startup parameters, add the following "
+"environment variables:"
+msgstr ""
+"在原有基础启动参数基础上，添加以下环境变量："
+
+#: ../../backend/speculative_decoding.md
+#: ../../backend/speculative_decoding.md:28
+#: ../../backend/speculative_decoding.md:96
+msgid "vanilla"
+msgstr "vanilla"
+
+#: ../../backend/speculative_decoding.md
+msgid "Arguments"
+msgstr "参数"
+
+#: ../../backend/speculative_decoding.md
+msgid "Value"
+msgstr "值"
+
+#: ../../backend/speculative_decoding.md
+msgid "Description"
+msgstr "说明"
+
+#: ../../backend/speculative_decoding.md
+msgid "--sp_type"
+msgstr "--sp_type"
+
+#: ../../backend/speculative_decoding.md
+msgid "Speculative sampling strategy"
+msgstr "推测采样策略"
+
+#: ../../backend/speculative_decoding.md
+msgid "--sp_checkpoint_path"
+msgstr "--sp_checkpoint_path"
+
+#: ../../backend/speculative_decoding.md
+msgid "<small model ckpt>"
+msgstr "<small model ckpt>"
+
+#: ../../backend/speculative_decoding.md
+msgid "Small model weight path"
+msgstr "小模型权重路径"
+
+#: ../../backend/speculative_decoding.md
+msgid "--sp_model_type"
+msgstr "--sp_model_type"
+
+#: ../../backend/speculative_decoding.md
+msgid "qwen"
+msgstr "qwen"
+
+#: ../../backend/speculative_decoding.md
+msgid "Small model architecture, same as the main model"
+msgstr "小模型架构，与主模型一致"
+
+#: ../../backend/speculative_decoding.md
+msgid "--sp_quantization"
+msgstr "--sp_quantization"
+
+#: ../../backend/speculative_decoding.md
+msgid "FP8_PER_BLOCK/FP8"
+msgstr "FP8_PER_BLOCK/FP8"
+
+#: ../../backend/speculative_decoding.md
+msgid "Small model quantization method: FP8, FP8_PER_BLOCK, etc."
+msgstr "小模型量化方式：FP8、FP8_PER_BLOCK 等"
+
+#: ../../backend/speculative_decoding.md
+msgid "--gen_num_per_cycle"
+msgstr "--gen_num_per_cycle"
+
+#: ../../backend/speculative_decoding.md
+msgid "5"
+msgstr "5"
+
+#: ../../backend/speculative_decoding.md
+msgid "How many tokens the small model proposes per cycle"
+msgstr "小模型每轮生成多少个 token"
+
+#: ../../backend/speculative_decoding.md
+#: ../../backend/speculative_decoding.md:38
+#: ../../backend/speculative_decoding.md:103
+msgid "deterministic"
+msgstr "deterministic"
+
+#: ../../backend/speculative_decoding.md
+msgid "128"
+msgstr "128"
+
+#: ../../backend/speculative_decoding.md
+msgid "--sp_min_token_match"
+msgstr "--sp_min_token_match"
+
+#: ../../backend/speculative_decoding.md
+msgid "2"
+msgstr "2"
+
+#: ../../backend/speculative_decoding.md
+msgid "Minimum length of n-gram token matching"
+msgstr "n-gram token 匹配的最小长度"
+
+#: ../../backend/speculative_decoding.md
+msgid "--sp_max_token_match"
+msgstr "--sp_max_token_match"
+
+#: ../../backend/speculative_decoding.md
+msgid "Maximum length of n-gram token matching"
+msgstr "n-gram token 匹配的最大长度"
+
+#: ../../backend/speculative_decoding.md
+#: ../../backend/speculative_decoding.md:56
+msgid "mtp"
+msgstr "mtp"
+
+#: ../../backend/speculative_decoding.md
+msgid "qwen_2_mtp"
+msgstr "qwen_2_mtp"
+
+#: ../../backend/speculative_decoding.md
+msgid "MTP small model type"
+msgstr "MTP 小模型类型"
+
+#: ../../backend/speculative_decoding.md
+#: ../../backend/speculative_decoding.md:66
+msgid "eagle3"
+msgstr "eagle3"
+
+#: ../../backend/speculative_decoding.md
+msgid "qwen_3_moe_eagle3"
+msgstr "qwen_3_moe_eagle3"
+
+#: ../../backend/speculative_decoding.md
+msgid "EAGLE3 small model type"
+msgstr "EAGLE3 小模型类型"
+
+#: ../../backend/speculative_decoding.md:78
+msgid "4. Performance Observation & Tuning"
+msgstr "4. 性能观察与调优"
+
+#: ../../backend/speculative_decoding.md:81
+msgid "4.1 Performance Observation"
+msgstr "4.1 性能观察"
+
+#: ../../backend/speculative_decoding.md:82
+msgid "Add the following to the request body:"
+msgstr "在请求体中添加以下内容："
+
+#: ../../backend/speculative_decoding.md:86
+msgid "Example response fields:"
+msgstr "示例响应字段："
+
+#: ../../backend/speculative_decoding.md:93
+msgid ""
+"The most important metric for speculative sampling is "
+"avg_tokens_per_iter, higher is better."
+msgstr ""
+"推测采样的最重要指标是 avg_tokens_per_iter，值越高越好。"
+
+#: ../../backend/speculative_decoding.md:95
+msgid "4.2 Tuning"
+msgstr "4.2 调优"
+
+#: ../../backend/speculative_decoding.md:97
+msgid "**Model Selection**:"
+msgstr "**模型选择**："
+
+#: ../../backend/speculative_decoding.md:98
+msgid "Choose a smaller size from the same series (e.g., Qwen2.5-0.5B)."
+msgstr "从同一系列中选择更小的模型（例如 Qwen2.5-0.5B）。"
+
+#: ../../backend/speculative_decoding.md:99
+msgid "Apply INT4 quantization to the small model whenever possible."
+msgstr "尽可能对小模型应用 INT4 量化。"
+
+#: ../../backend/speculative_decoding.md:100
+#: ../../backend/speculative_decoding.md:116
+msgid "**gen_num_per_cycle**:"
+msgstr "**gen_num_per_cycle**："
+
+#: ../../backend/speculative_decoding.md:101
+msgid "Default is 5; can be increased if acceptance rate >40%."
+msgstr "默认为 5；若接受率 >40%，可适当增加。"
+
+#: ../../backend/speculative_decoding.md
+msgid "Parameter"
+msgstr "参数"
+
+#: ../../backend/speculative_decoding.md
+msgid "Recommendation"
+msgstr "建议"
+
+#: ../../backend/speculative_decoding.md
+msgid "Notes"
+msgstr "备注"
+
+#: ../../backend/speculative_decoding.md
+msgid "sp_min/max_token_match"
+msgstr "sp_min/max_token_match"
+
+#: ../../backend/speculative_decoding.md
+msgid "n-gram length range"
+msgstr "n-gram 匹配长度范围"
+
+#: ../../backend/speculative_decoding.md
+msgid "gen_num_per_cycle"
+msgstr "gen_num_per_cycle"
+
+#: ../../backend/speculative_decoding.md
+msgid "128 (batch=1)"
+msgstr "128（batch=1）"
+
+#: ../../backend/speculative_decoding.md
+msgid "Can be increased for long sequence editing scenarios"
+msgstr "在长序列编辑场景中可进一步提高"
+
+#: ../../backend/speculative_decoding.md
+msgid "sp_edit"
+msgstr "sp_edit"
+
+#: ../../backend/speculative_decoding.md
+msgid "Set to 1 for code/text editing, 0 otherwise"
+msgstr "代码/文本编辑设为 1，否则为 0"
+
+#: ../../backend/speculative_decoding.md
+msgid "Controls matching start point"
+msgstr "控制匹配起始点"
+
+#: ../../backend/speculative_decoding.md
+msgid "sp_advice_prompt"
+msgstr "sp_advice_prompt"
+
+#: ../../backend/speculative_decoding.md
+msgid "Only retain suffixes that may actually appear"
+msgstr "仅保留可能实际出现的后缀"
+
+#: ../../backend/speculative_decoding.md
+msgid "Reduce invalid matches"
+msgstr "减少无效匹配"
+
+#: ../../backend/speculative_decoding.md:112
+msgid "mtp / eagle3"
+msgstr "mtp / eagle3"
+
+#: ../../backend/speculative_decoding.md:113
+msgid "**Model Training**:"
+msgstr "**模型训练**："
+
+#: ../../backend/speculative_decoding.md:114
+msgid ""
+"Use https://github.com/SafeAILab/EAGLE to train small models for specific"
+" business scenarios"
+msgstr ""
+"使用 https://github.com/SafeAILab/EAGLE 为特定业务场景训练小模型"
+
+#: ../../backend/speculative_decoding.md:115
+msgid ""
+"Need to ensure 1st token acceptance rate >80%, 2nd token acceptance rate "
+">60%, 3rd token acceptance rate >40%"
+msgstr ""
+"需确保第 1 个 token 接受率 >80%，第 2 个 >60%，第 3 个 >40%"
+
+#: ../../backend/speculative_decoding.md:117
+msgid ""
+"Execution time of MTP small model can be assumed to be about 1ms. Based "
+"on the main model's execution time and acceptance rate, the optimal "
+"GEN_NUM_PER_CIRCLE can be calculated"
+msgstr ""
+"MTP 小模型执行时间可假设约为 1ms。根据主模型执行时间和接受率，可计算最优的 GEN_NUM_PER_CIRCLE"
+
+#: ../../backend/speculative_decoding.md:118
+msgid "**sp_quantization**"
+msgstr "**sp_quantization**"
+
+#: ../../backend/speculative_decoding.md:119
+msgid ""
+"On Hopper series, it is recommended to enable "
+"sp_quantization=FP8_PER_BLOCK"
+msgstr "在 Hopper 系列显卡上，建议启用 sp_quantization=FP8_PER_BLOCK"

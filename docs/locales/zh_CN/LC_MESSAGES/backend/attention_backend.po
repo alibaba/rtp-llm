@@ -1,0 +1,173 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: RTP-LLM 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-12 17:38+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../backend/attention_backend.md:1
+msgid "Attention Backend"
+msgstr "注意力后端"
+
+#: ../../backend/attention_backend.md:3
+msgid "Supporting matrix for different attention backends"
+msgstr "不同注意力后端的支持矩阵"
+
+#: ../../backend/attention_backend.md
+msgid "**Backend**"
+msgstr "**后端**"
+
+#: ../../backend/attention_backend.md
+msgid "**Page Size > 1**"
+msgstr "**页面大小 > 1**"
+
+#: ../../backend/attention_backend.md
+msgid "**Spec Decoding**"
+msgstr "**Spec解码**"
+
+#: ../../backend/attention_backend.md
+msgid "**MLA**"
+msgstr "**MLA**"
+
+#: ../../backend/attention_backend.md
+msgid "**Sliding Window**"
+msgstr "**滑动窗口**"
+
+#: ../../backend/attention_backend.md
+msgid "**Device Support**"
+msgstr "**设备支持**"
+
+#: ../../backend/attention_backend.md
+msgid "**Server Args**"
+msgstr "**服务端参数**"
+
+#: ../../backend/attention_backend.md
+msgid "**Stage**"
+msgstr "**阶段**"
+
+#: ../../backend/attention_backend.md
+msgid "**TRT_V1**"
+msgstr "**TRT_V1**"
+
+#: ../../backend/attention_backend.md
+msgid "❌"
+msgstr "❌"
+
+#: ../../backend/attention_backend.md
+msgid "NV ✅<br> AMD ❌"
+msgstr "NV ✅<br> AMD ❌"
+
+#: ../../backend/attention_backend.md
+msgid "--enable_trtv1_fmha"
+msgstr "--enable_trtv1_fmha"
+
+#: ../../backend/attention_backend.md
+msgid "PREFILL ✅ <br>  DECODE❌"
+msgstr "PREFILL ✅ <br>  DECODE❌"
+
+#: ../../backend/attention_backend.md
+msgid "**TRT_V2**"
+msgstr "**TRT_V2**"
+
+#: ../../backend/attention_backend.md
+msgid "--enable_trt_fmha"
+msgstr "--enable_trt_fmha"
+
+#: ../../backend/attention_backend.md
+msgid "**PAGED_TRT_V2**"
+msgstr "**PAGED_TRT_V2**"
+
+#: ../../backend/attention_backend.md
+msgid "✅"
+msgstr "✅"
+
+#: ../../backend/attention_backend.md
+msgid "--enable_paged_trt_fmha"
+msgstr "--enable_paged_trt_fmha"
+
+#: ../../backend/attention_backend.md
+msgid "**OPEN_SOURCE**"
+msgstr "**OPEN_SOURCE**"
+
+#: ../../backend/attention_backend.md
+msgid "--enable_open_source_fmha"
+msgstr "--enable_open_source_fmha"
+
+#: ../../backend/attention_backend.md
+msgid "**PAGED_OPEN_SOURCE**"
+msgstr "**PAGED_OPEN_SOURCE**"
+
+#: ../../backend/attention_backend.md
+msgid "--enable_paged_open_source_fmha"
+msgstr "--enable_paged_open_source_fmha"
+
+#: ../../backend/attention_backend.md
+msgid "**CKFMHA**"
+msgstr "**CKFMHA**"
+
+#: ../../backend/attention_backend.md
+msgid "NV ❌<br> AMD ✅"
+msgstr "NV ❌<br> AMD ✅"
+
+#: ../../backend/attention_backend.md
+msgid "None"
+msgstr "无"
+
+#: ../../backend/attention_backend.md
+msgid "**FlashInfer**"
+msgstr "**FlashInfer**"
+
+#: ../../backend/attention_backend.md
+msgid "NV ✅<br> AMD ✅"
+msgstr "NV ✅<br> AMD ✅"
+
+#: ../../backend/attention_backend.md
+msgid "--disable_flash_infer"
+msgstr "--disable_flash_infer"
+
+#: ../../backend/attention_backend.md
+msgid "PREFILL ✅ <br>  DECODE✅"
+msgstr "PREFILL ✅ <br>  DECODE✅"
+
+#: ../../backend/attention_backend.md
+msgid "**XQA**"
+msgstr "**XQA**"
+
+#: ../../backend/attention_backend.md
+msgid "NV Hopper ✅<br> AMD ❌"
+msgstr "NV Hopper ✅<br> AMD ❌"
+
+#: ../../backend/attention_backend.md
+msgid "--enable_xqa"
+msgstr "--enable_xqa"
+
+#: ../../backend/attention_backend.md
+msgid "PREFILL ❌ <br>  DECODE✅"
+msgstr "PREFILL ❌ <br>  DECODE✅"
+
+#: ../../backend/attention_backend.md
+msgid "**FlashMLA**"
+msgstr "**FlashMLA**"
+
+#: ../../backend/attention_backend.md
+msgid "**MMHA**"
+msgstr "**MMHA**"
+
+#: ../../backend/attention_backend.md
+msgid "**AiterPA**"
+msgstr "**AiterPA**"
+

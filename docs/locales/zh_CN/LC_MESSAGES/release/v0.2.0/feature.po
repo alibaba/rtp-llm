@@ -1,0 +1,269 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: RTP-LLM 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-12 17:38+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../release/v0.2.0/feature.md:2
+msgid "Overview"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:3
+msgid "RTP-LLM First Release Version:0.2.0(2025.09)"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:4
+msgid "Features"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:5
+msgid "Framkework  Advanced Feature"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:6
+msgid ""
+"[PD Disaggregation](../../backend/pd_disaggregation.md) && [PD Entrance "
+"Transpose](../../backend/pd_entrace_transpose.md)"
+msgstr ""
+"[PD 解聚](../../backend/pd_disaggregation.md) && [PD 入口转置](../../backend/pd_entrace_transpose.md)"
+
+#: ../../release/v0.2.0/feature.md:7
+msgid ""
+"[Attention Support more Backend](../../backend/attention_backend.md): "
+"XQA, FlashInfer"
+msgstr ""
+"[注意力支持更多后端](../../backend/attention_backend.md)：XQA, FlashInfer"
+
+#: ../../release/v0.2.0/feature.md:8
+msgid "[Speculative Decoding](../../backend/speculative_decoding.md)"
+msgstr "[推测解码](../../backend/speculative_decoding.md)"
+
+#: ../../release/v0.2.0/feature.md:9
+msgid "[EPLB](../../references/deepseek/reporter.md#eplb)"
+msgstr "[EPLB](../../references/deepseek/reporter.md#eplb)"
+
+#: ../../release/v0.2.0/feature.md:10
+msgid ""
+"[MicroBatch & Overlapping](../../references/deepseek/reporter.md"
+"#microbatch-overlapping)"
+msgstr ""
+"[微批处理与重叠](../../references/deepseek/reporter.md#microbatch-overlapping)"
+""
+
+#: ../../release/v0.2.0/feature.md:11
+msgid "[MTP](../../references/deepseek/reporter.md#mtp)"
+msgstr "[MTP](../../references/deepseek/reporter.md#mtp)"
+
+#: ../../release/v0.2.0/feature.md:12
+msgid "[DeepEP](../../references/deepseek/reporter.md#deepep-network)"
+msgstr "[DeepEP](../../references/deepseek/reporter.md#deepep-network)"
+
+#: ../../release/v0.2.0/feature.md:13
+msgid "[LoadBalance](../../backend/flexlb.md)"
+msgstr "[负载均衡](../../backend/flexlb.md)"
+
+#: ../../release/v0.2.0/feature.md:14
+msgid "[3FS](../../backend/3fs.md)"
+msgstr "[3FS](../../backend/3fs.md)"
+
+#: ../../release/v0.2.0/feature.md:15
+msgid "[FP8 KVCache](../../backend/KvCache.md)"
+msgstr "[FP8 KV缓存](../../backend/KvCache.md)"
+
+#: ../../release/v0.2.0/feature.md:16
+msgid "[REUSE KV CACHE](../../backend/reuse_kv_cache.md)"
+msgstr "[复用 KV 缓存](../../backend/reuse_kv_cache.md)"
+
+#: ../../release/v0.2.0/feature.md:17
+msgid "[Quantization](../../backend/quantization.md)"
+msgstr "[量化](../../backend/quantization.md)"
+
+#: ../../release/v0.2.0/feature.md:18
+msgid "[MultiLoRA](../../backend/lora.ipynb)"
+msgstr "[多LoRA](../../backend/lora.ipynb)"
+
+#: ../../release/v0.2.0/feature.md:19
+msgid "[Attention FFN Disaggregation](../../backend/af_disaggregation.md)"
+msgstr "[注意力FFN解聚](../../backend/af_disaggregation.md)"
+
+#: ../../release/v0.2.0/feature.md:20
+msgid "[Frontend/Backend Disaggregation](../../backend/Frontend.md)"
+msgstr "[前后端解聚](../../backend/Frontend.md)"
+
+#: ../../release/v0.2.0/feature.md:23
+msgid "New Models"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md
+msgid "**Model Family (Variants)**"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md
+msgid "**Example HuggingFace Identifier**"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md
+msgid "**Description**"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md
+msgid "**Support CardType**"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md
+msgid "**DeepSeek** (v1, v2, v3/R1)"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md
+msgid "`deepseek-ai/DeepSeek-R1`"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md
+msgid ""
+"Series of advanced reasoning-optimized models (including a 671B MoE) "
+"trained with reinforcement learning; <br>top performance on complex "
+"reasoning, math, and code tasks.<br> [RTP-LLM provides Deepseek v3/R1 "
+"model-specific optimizations](../../references/deepseek/reporter.md)"
+msgstr ""
+"一系列先进的推理优化模型（包括一个671B MoE），通过强化学习训练；<br>在复杂推理、数学和代码任务上表现出色。<br>[RTP-LLM 提供 Deepseek v3/R1 模型特定优化](../../references/deepseek/reporter.md)"
+
+#: ../../release/v0.2.0/feature.md
+msgid "NV ✅<br> AMD ✅"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md
+msgid "**Kimi** (Kimi-K2)"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md
+msgid "`moonshotai/Kimi-K2-Instruct`"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md
+msgid ""
+"Moonshot's MoE LLMs with 1 trillion parameters, exceptional on agentic "
+"intellegence"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md
+msgid "**Qwen** (v1, v1.5, v2, v2.5, v3, QWQ, Qwen3-Coder)"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md
+msgid "`Qwen/Qwen3-235B-A22B`"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md
+msgid ""
+"Series of advanced reasoning-optimized models, <br>Significantly improved"
+" performance on reasoning tasks,<br> including logical reasoning, "
+"mathematics, science, coding, and academic benchmarks that typically "
+"require human expertise — achieving state-of-the-art results among open-"
+"source thinking models.<br>Markedly better general capabilities, such as "
+"instruction following, tool usage, text generation, and alignment with "
+"human preferences.<br>Enhanced 256K long-context understanding "
+"capabilities."
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md
+msgid "**QwenVL** (VL2, VL2.5, VL3)"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md
+msgid "`Qwen/Qwen2-VL-2B`"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md
+msgid "Series of advanced  Vision-language model series based on Qwen2.5/Qwen3"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md
+msgid "NV ✅<br> AMD ❌"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md
+msgid "**Llama**"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md
+msgid "`meta-llama/Llama-4-Scout-17B-16E-Instruct`"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md
+msgid ""
+"Meta’s open LLM series, spanning 7B to 400B parameters (Llama 2, 3, and "
+"new Llama 4) with well-recognized performance."
+msgstr ""
+"Meta的开源大语言模型系列，参数规模从7B到400B（Llama 2, 3, 和新Llama 4），性能卓越。"
+
+#: ../../release/v0.2.0/feature.md
+msgid "**TBStars**"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md
+msgid "Alibaba Internal LLM"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md
+msgid "**TBStarsVL**"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md
+msgid "Series of advanced  Vision-language model series based on TBStars"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md
+msgid "**MixTBstars**"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:35
+msgid "Bug Fixs"
+msgstr "错误修复"
+
+#: ../../release/v0.2.0/feature.md:37
+msgid "Question of omission"
+msgstr "遗漏问题"
+
+#: ../../release/v0.2.0/feature.md:38
+msgid "PD Entrance Transpose not worker with front app"
+msgstr "PD入口转置无法与前端应用配合工作"
+
+#: ../../release/v0.2.0/feature.md:39
+msgid "metrics of 3fs cache hit ratio is not accurate"
+msgstr "3fs缓存命中率指标不准确"
+
+#: ../../release/v0.2.0/feature.md:40
+msgid "too many dynamic lora need more **reserver_runtime_mem_mb**"
+msgstr "过多动态lora需要更多 **reserver_runtime_mem_mb**"
+
+#: ../../release/v0.2.0/feature.md:41
+msgid "AMD not support MoE models"
+msgstr "AMD不支持MoE模型"
+
+#: ../../release/v0.2.0/feature.md:42
+msgid "MoE model without shared_experter cannot use enable-layer-micro-batch"
+msgstr "没有shared_experter的MoE模型无法使用enable-layer-micro-batch"
+
+#: ../../release/v0.2.0/feature.md:45
+msgid "Performance"
+msgstr "性能"
+
+#: ../../release/v0.2.0/feature.md:47
+msgid "Compatibility"
+msgstr "兼容性"
+

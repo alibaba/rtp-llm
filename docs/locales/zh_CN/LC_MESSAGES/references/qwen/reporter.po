@@ -1,0 +1,77 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: RTP-LLM 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-12 17:38+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../references/qwen/reporter.md:1
+msgid "Qwen3 MoE"
+msgstr "Qwen3 MoE"
+
+#: ../../references/qwen/reporter.md:3
+msgid ""
+"Qwen3-235B-A22B is smaller in model size compared to DeepSeek-V3 but "
+"supports seamless Thinking Mode switching. For 4K Input/2K Output "
+"scenarios, similar optimization strategies can be adopted, adjusting "
+"parallel modes in combination with specific model parameter "
+"configurations."
+msgstr "与DeepSeek-V3相比，Qwen3-235B-A22B模型规模较小，但支持无缝思考模式切换。对于4K输入/2K输出场景，可以采用类似的优化策略，结合特定模型参数配置调整并行模式。"
+
+#: ../../references/qwen/reporter.md:5
+msgid ""
+"From the KV Cache usage perspective, Qwen3-235B-A22B's per-token KV Cache"
+" overhead is 94×4×128×2=96KB, while DeepSeek-V3 is 61×1536=93KB, which "
+"are close."
+msgstr "从KV缓存使用角度来看，Qwen3-235B-A22B每个token的KV缓存开销是94×4×128×2=96KB，而DeepSeek-V3是61×1536=93KB，两者接近。"
+
+#: ../../references/qwen/reporter.md:7
+#, python-format
+msgid ""
+"From the Attention computation latency perspective, Qwen3-235B-A22B uses "
+"64-head GQA, while DeepSeek-V3 uses 128-head MLA, with computation "
+"latency being approximately 50% of the latter. Considering the impact of "
+"memory access latency, actual latency will be slightly higher."
+msgstr "从注意力计算延迟角度来看，Qwen3-235B-A22B使用64头GQA，而DeepSeek-V3使用128头MLA，计算延迟约为后者的50%。考虑到内存访问延迟的影响，实际延迟会略高。"
+
+#: ../../references/qwen/reporter.md:9
+#, python-format
+msgid ""
+"From the Dispatch/Combine communication perspective, Qwen3-235B-A22B is "
+"about 40% of DeepSeek-V3."
+msgstr "从Dispatch/Combine通信角度来看，Qwen3-235B-A22B约为DeepSeek-V3的40%。"
+
+#: ../../references/qwen/reporter.md:11
+#, python-format
+msgid ""
+"From the MoE GEMM computation latency perspective, due to Qwen3-235B-"
+"A22B's parameter scale being 40%-50%, the computation latency is about "
+"50%."
+msgstr "从MoE GEMM计算延迟角度来看，由于Qwen3-235B-A22B的参数规模为40%-50%，计算延迟约为50%。"
+
+#: ../../references/qwen/reporter.md:13
+msgid ""
+"In summary, in large-scale cluster deployment, comprehensively evaluating"
+" from the two dimensions of KV Cache capacity limitations and MoE "
+"computational efficiency, Qwen3-235B-A22B can adopt similar deployment "
+"modes. Compared to DeepSeek-V3, Qwen3-235B-A22B can support longer "
+"sequence lengths with better performance in terms of latency and "
+"throughput. For compute-constrained cards like H20, EP can be reduced and"
+" TP introduced to reduce network latency while achieving good "
+"computational utilization."
+msgstr "总之，在大规模集群部署中，从KV缓存容量限制和MoE计算效率两个维度综合评估，Qwen3-235B-A22B可以采用类似的部署模式。与DeepSeek-V3相比，Qwen3-235B-A22B可以支持更长的序列长度，在延迟和吞吐量方面表现更好。对于H20等算力受限的卡，可以减少EP并引入TP，以减少网络延迟并实现良好的计算利用率。"
+

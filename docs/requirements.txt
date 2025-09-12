@@ -10,6 +10,7 @@ pandoc
 pillow
 pydantic
 sphinx
+sphinx-intl
 sphinx-book-theme
 sphinx-copybutton
 sphinx-tabs

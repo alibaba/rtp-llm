@@ -1,0 +1,258 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: RTP-LLM 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-12 17:38+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../supported_models/support_new_models.md:1
+msgid "How to Support New Models"
+msgstr "如何支持新模型"
+
+#: ../../supported_models/support_new_models.md:3
+msgid ""
+"This document explains how to add support for new language models and "
+"multimodal large language models (MLLMs) in RTP-LLM. It also covers how "
+"to test new models and register external implementations."
+msgstr "本文档解释了如何在RTP-LLM中添加对新语言模型和多模态大语言模型(MLLMs)的支持。它还涵盖了如何测试新模型和注册外部实现。"
+
+#: ../../supported_models/support_new_models.md:6
+msgid "How to Support a New Language Model"
+msgstr "如何支持新语言模型"
+
+#: ../../supported_models/support_new_models.md:8
+msgid ""
+"To support a new model in RTP-LLM, you only need to add a single file "
+"under the [RTP-LLM Models Directory](http://gitlab.alibaba-"
+"inc.com/foundation_models/RTP-LLM/tree/main/rtp_llm/models_py/). You can "
+"learn from existing model implementations and create a new file for your "
+"model. For most models, you should be able to find a similar model to "
+"start with (e.g., starting from Llama). Also refer how to [port a Model "
+"from vLLM to RTP-LLM](#port-a-model-from-vllm-to-RTP-LLM)"
+msgstr "要在RTP-LLM中支持新模型，您只需要在[RTP-LLM模型目录](http://gitlab.alibaba-inc.com/foundation_models/RTP-LLM/tree/main/rtp_llm/models_py/)下添加一个文件。您可以从现有的模型实现中学习，并为您的模型创建一个新文件。对于大多数模型，您应该能够找到一个类似的模型作为起点（例如，从Llama开始）。另请参考[如何将模型从vLLM移植到RTP-LLM](#port-a-model-from-vllm-to-RTP-LLM)"
+
+#: ../../supported_models/support_new_models.md:14
+msgid "How to Support a New Multimodal Large Language Model"
+msgstr "如何支持新的多模态大语言模型"
+
+#: ../../supported_models/support_new_models.md:16
+msgid ""
+"To support a new multimodal large language model (MLLM) in RTP-LLM, there"
+" are several key components in addition to the standard LLM support:"
+msgstr "在RTP-LLM中支持新的多模态大语言模型(MLLM)，除了标准的LLM支持外，还有几个关键组件："
+
+#: ../../supported_models/support_new_models.md:19
+msgid ""
+"**Register your new model as multimodal**: Extend `is_multimodal_model` "
+"in [model_config.py](http://gitlab.alibaba-inc.com/foundation_models/RTP-"
+"LLM/blob/0ab3f437aba729b348a683ab32b35b214456efc7/python/RTP-"
+"LLM/srt/configs/model_config.py#L561) to return `True` for your model."
+msgstr "**将您的新模型注册为多模态模型**：扩展[model_config.py](http://gitlab.alibaba-inc.com/foundation_models/RTP-LLM/blob/0ab3f437aba729b348a683ab32b35b214456efc7/python/RTP-LLM/srt/configs/model_config.py#L561)中的`is_multimodal_model`函数，使您的模型返回`True`。"
+
+#: ../../supported_models/support_new_models.md:24
+msgid ""
+"**Register a new chat-template** See [conversation.py](http://gitlab"
+".alibaba-inc.com/foundation_models/RTP-"
+"LLM/blob/86a779dbe9e815c02f71ea82574608f6eae016b5/python/RTP-"
+"LLM/srt/conversation.py)"
+msgstr "**注册新的聊天模板** 请参见[conversation.py](http://gitlab.alibaba-inc.com/foundation_models/RTP-LLM/blob/86a779dbe9e815c02f71ea82574608f6eae016b5/python/RTP-LLM/srt/conversation.py)"
+
+#: ../../supported_models/support_new_models.md:27
+msgid ""
+"**Multimodal Data Processor**: Define a new `Processor` class that "
+"inherits from `BaseMultimodalProcessor` and register this processor as "
+"your model’s dedicated processor. See "
+"[multimodal_processor.py](http://gitlab.alibaba-inc.com/foundation_models"
+"/RTP-LLM/blob/main/python/RTP-LLM/srt/managers/multimodal_processor.py) "
+"for more details."
+msgstr "**多模态数据处理器**：定义一个继承自`BaseMultimodalProcessor`的新`Processor`类，并将此处理器注册为您的模型的专用处理器。详见[multimodal_processor.py](http://gitlab.alibaba-inc.com/foundation_models/RTP-LLM/blob/main/python/RTP-LLM/srt/managers/multimodal_processor.py)。"
+
+#: ../../supported_models/support_new_models.md:33
+msgid ""
+"**Handle Multimodal Tokens**: Implement a `pad_input_ids` function for "
+"your new model. In this function, multimodal tokens in the prompt should "
+"be expanded (if necessary) and padded with multimodal-data-hashes so that"
+" RTP-LLM can recognize different multimodal data with `RadixAttention`."
+msgstr "**处理多模态token**：为您的新模型实现一个`pad_input_ids`函数。在此函数中，提示中的多模态token应被扩展（如有必要）并用多模态数据哈希填充，以便RTP-LLM能够通过`RadixAttention`识别不同的多模态数据。"
+
+#: ../../supported_models/support_new_models.md:38
+msgid ""
+"**Adapt to Vision Attention**: Adapt the multi-headed `Attention` of ViT "
+"with RTP-LLM’s `VisionAttention`."
+msgstr "**适应视觉注意力**：使用RTP-LLM的`VisionAttention`来适配ViT的多头`Attention`。"
+
+#: ../../supported_models/support_new_models.md:41
+msgid ""
+"You can refer to [Qwen2VL](http://gitlab.alibaba-"
+"inc.com/foundation_models/RTP-LLM/blob/main/python/RTP-"
+"LLM/srt/models/qwen2_vl.py) or other mllm implementations. These models "
+"demonstrate how to correctly handle both multimodal and textual inputs."
+msgstr "您可以参考[Qwen2VL](http://gitlab.alibaba-inc.com/foundation_models/RTP-LLM/blob/main/python/RTP-LLM/srt/models/qwen2_vl.py)或其他mllm实现。这些模型演示了如何正确处理多模态和文本输入。"
+
+#: ../../supported_models/support_new_models.md:44
+msgid ""
+"You should test the new MLLM locally against Hugging Face models. See the"
+" [ `mmmu`](http://gitlab.alibaba-inc.com/foundation_models/RTP-"
+"LLM/tree/main/benchmark/mmmu) benchmark for an example."
+msgstr "您应该在本地将新的MLLM与Hugging Face模型进行测试。请参见[mmmu](http://gitlab.alibaba-inc.com/foundation_models/RTP-LLM/tree/main/benchmark/mmmu)基准测试作为示例。"
+
+#: ../../supported_models/support_new_models.md:47
+msgid "Test the Correctness"
+msgstr "测试正确性"
+
+#: ../../supported_models/support_new_models.md:49
+msgid "Interactive Debugging"
+msgstr "交互式调试"
+
+#: ../../supported_models/support_new_models.md:51
+msgid ""
+"For interactive debugging, compare the outputs of Hugging "
+"Face/Transformers and RTP-LLM. The following two commands should give the"
+" same text output and very similar prefill logits:"
+msgstr "对于交互式调试，请比较Hugging Face/Transformers和RTP-LLM的输出。以下两个命令应产生相同的文本输出和非常相似的预填充logits："
+
+#: ../../supported_models/support_new_models.md:54
+msgid "Get the reference output:"
+msgstr "获取参考输出："
+
+#: ../../supported_models/support_new_models.md:58
+msgid "Get the RTP-LLM output:"
+msgstr "获取RTP-LLM输出："
+
+#: ../../supported_models/support_new_models.md:63
+msgid "Add the Model to the Test Suite"
+msgstr "将模型添加到测试套件"
+
+#: ../../supported_models/support_new_models.md:65
+msgid ""
+"To ensure the new model is well maintained, add it to the test suite by "
+"including it in the `ALL_OTHER_MODELS` list in the "
+"[test_generation_models.py](http://gitlab.alibaba-"
+"inc.com/foundation_models/RTP-"
+"LLM/blob/main/test/srt/models/test_generation_models.py) file, test the "
+"new model on your local machine and report the results on demonstrative "
+"benchmarks (GSM8K, MMLU, MMMU, MMMU-Pro, etc.) in your PR."
+msgstr "为确保新模型得到良好维护，请通过在[test_generation_models.py](http://gitlab.alibaba-inc.com/foundation_models/RTP-LLM/blob/main/test/srt/models/test_generation_models.py)文件中的`ALL_OTHER_MODELS`列表中包含该模型来将其添加到测试套件中，在本地机器上测试新模型，并在您的PR中报告在示范基准测试（GSM8K、MMLU、MMMU、MMMU-Pro等）上的结果。"
+
+#: ../../supported_models/support_new_models.md:70
+msgid "This is the command to test a new model on your local machine:"
+msgstr "这是在本地机器上测试新模型的命令："
+
+#: ../../supported_models/support_new_models.md:76
+msgid "Port a Model from vLLM to RTP-LLM"
+msgstr "将模型从vLLM移植到RTP-LLM"
+
+#: ../../supported_models/support_new_models.md:78
+msgid ""
+"The [vLLM Models Directory](https://github.com/vllm-"
+"project/vllm/tree/main/vllm/model_executor/models) is a valuable "
+"resource, as vLLM covers many models. RTP-LLM reuses vLLM’s interface and"
+" some layers, making it easier to port models from vLLM to RTP-LLM."
+msgstr "[vLLM模型目录](https://github.com/vllm-project/vllm/tree/main/vllm/model_executor/models)是一个宝贵的资源，因为vLLM涵盖了众多模型。RTP-LLM重用了vLLM的接口和一些层，使得从vLLM移植模型到RTP-LLM变得更加容易。"
+
+#: ../../supported_models/support_new_models.md:82
+msgid "To port a model from vLLM to RTP-LLM:"
+msgstr "将模型从vLLM移植到RTP-LLM："
+
+#: ../../supported_models/support_new_models.md:84
+msgid "Compare these two files for guidance:"
+msgstr "比较这两个文件以获取指导："
+
+#: ../../supported_models/support_new_models.md:85
+msgid ""
+"[RTP-LLM Llama Implementation](http://gitlab.alibaba-"
+"inc.com/foundation_models/RTP-LLM/blob/main/python/RTP-"
+"LLM/srt/models/llama.py)"
+msgstr "[RTP-LLM Llama实现](http://gitlab.alibaba-inc.com/foundation_models/RTP-LLM/blob/main/python/RTP-LLM/srt/models/llama.py)"
+
+#: ../../supported_models/support_new_models.md:86
+msgid ""
+"[vLLM Llama Implementation](https://github.com/vllm-"
+"project/vllm/blob/main/vllm/model_executor/models/llama.py)"
+msgstr "[vLLM Llama实现](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/llama.py)"
+
+#: ../../supported_models/support_new_models.md:87
+msgid "The major differences include:"
+msgstr "主要差异包括："
+
+#: ../../supported_models/support_new_models.md:88
+msgid ""
+"**Replace vLLM’s `Attention` with `RadixAttention`** (ensure you pass "
+"`layer_id` to `RadixAttention`)."
+msgstr "**将vLLM的`Attention`替换为`RadixAttention`**（确保将`layer_id`传递给`RadixAttention`）。"
+
+#: ../../supported_models/support_new_models.md:89
+msgid "**Replace vLLM’s `LogitsProcessor` with RTP-LLM’s `LogitsProcessor`.**"
+msgstr "**将vLLM的`LogitsProcessor`替换为RTP-LLM的`LogitsProcessor`。**"
+
+#: ../../supported_models/support_new_models.md:90
+msgid ""
+"**Replace the multi-headed `Attention` of ViT with RTP-LLM’s "
+"`VisionAttention`.**"
+msgstr "**将ViT的多头`Attention`替换为RTP-LLM的`VisionAttention`。**"
+
+#: ../../supported_models/support_new_models.md:91
+msgid ""
+"**Replace other vLLM layers** (such as `RMSNorm`, `SiluAndMul`) with RTP-"
+"LLM layers."
+msgstr "**替换其他vLLM层**（如`RMSNorm`、`SiluAndMul`）为RTP-LLM层。"
+
+#: ../../supported_models/support_new_models.md:92
+msgid "**Remove `Sample`.**"
+msgstr "**移除`Sample`。**"
+
+#: ../../supported_models/support_new_models.md:93
+msgid "**Change the `forward()` functions** and add a `forward_batch()` method."
+msgstr "**更改`forward()`函数**并添加`forward_batch()`方法。"
+
+#: ../../supported_models/support_new_models.md:94
+msgid "**Add `EntryClass`** at the end."
+msgstr "**在末尾添加`EntryClass`。**"
+
+#: ../../supported_models/support_new_models.md:95
+msgid ""
+"**Ensure that the new implementation uses only RTP-LLM components** and "
+"does not rely on any vLLM components."
+msgstr "**确保新实现仅使用RTP-LLM组件**，不依赖任何vLLM组件。"
+
+#: ../../supported_models/support_new_models.md:97
+msgid ""
+"Note: make sure you add your new model to the supported models list in "
+"the supported models documentation."
+msgstr "注意：请确保将您的新模型添加到支持的模型文档中的支持模型列表中。"
+
+#: ../../supported_models/support_new_models.md:99
+msgid "Registering an External Model Implementation"
+msgstr "注册外部模型实现"
+
+#: ../../supported_models/support_new_models.md:101
+msgid ""
+"In addition to the methods above, you can register your new model with "
+"the `ModelRegistry` before launching the server. This allows you to "
+"integrate your model without modifying the source code."
+msgstr "除了上述方法外，您还可以在启动服务器之前使用`ModelRegistry`注册您的新模型。这样您就可以在不修改源代码的情况下集成您的模型。"
+
+#: ../../supported_models/support_new_models.md:104
+msgid "For example:"
+msgstr "例如："
+
+#: ../../supported_models/support_new_models.md:131
+msgid ""
+"By following these guidelines, you can add support for new language "
+"models and multimodal large language models in RTP-LLM and ensure they "
+"are thoroughly tested and easily integrated into the system."
+msgstr "通过遵循这些指南，您可以为RTP-LLM添加对新语言模型和多模态大语言模型的支持，并确保它们经过充分测试且易于集成到系统中。"

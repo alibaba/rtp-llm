@@ -1,0 +1,44 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: RTP-LLM 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-12 17:38+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../backend/openai_api_embeddings.ipynb:9
+msgid "OpenAI APIs - Embedding"
+msgstr "OpenAI API - Embedding"
+
+#: ../../backend/openai_api_embeddings.ipynb:11
+msgid ""
+"RTP-LLM provides OpenAI-compatible APIs to enable a smooth transition "
+"from OpenAI services to self-hosted local models. A complete reference "
+"for the API is available in the `OpenAI API Reference "
+"<https://platform.openai.com/docs/guides/embeddings>`__."
+msgstr "RTP-LLM提供与OpenAI兼容的API，以实现从OpenAI服务到自托管本地模型的平稳过渡。API的完整参考可在`OpenAI API参考<https://platform.openai.com/docs/guides/embeddings>`__中找到。"
+
+#: ../../backend/openai_api_embeddings.ipynb:23
+msgid "Launch A Server"
+msgstr "启动服务器"
+
+#: ../../backend/openai_api_embeddings.ipynb:54
+msgid "Using Python Requests"
+msgstr "使用Python Requests"
+
+#: ../../backend/openai_api_embeddings.ipynb:86
+msgid "Using OpenAI Python Client"
+msgstr "使用OpenAI Python客户端"

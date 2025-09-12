@@ -1,0 +1,8 @@
+{% extends "sphinx_book_theme/layout.html" %} {% block extrahead %} {{ super()
+}}
+<link
+  rel="stylesheet"
+  href="{{ pathto('_static/css/language-switcher.css', 1) }}"
+/>
+<script src="{{ pathto('_static/js/language-switcher.js', 1) }}"></script>
+{% endblock %}

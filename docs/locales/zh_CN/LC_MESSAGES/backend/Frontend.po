@@ -1,0 +1,185 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: RTP-LLM 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-12 17:38+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../backend/Frontend.md:1
+msgid "Frontend"
+msgstr "前端"
+
+#: ../../backend/Frontend.md:3
+msgid "Overview"
+msgstr "概述"
+
+#: ../../backend/Frontend.md:4
+msgid ""
+"RTP_LLM currently comprises three core components: Frontend, Backend, and"
+" Master."
+msgstr "RTP_LLM 目前包含三个核心组件：前端(Frontend)、后端(Backend)和主控(Master)。"
+
+#: ../../backend/Frontend.md:6
+msgid "Frontend Workflow:"
+msgstr "前端工作流程："
+
+#: ../../backend/Frontend.md:7
+msgid "Accepts incoming requests"
+msgstr "接收传入请求"
+
+#: ../../backend/Frontend.md:8
+msgid ""
+"Converts inputs to token IDs (includes tokenizer decoding and OpenAI "
+"request rendering)"
+msgstr "将输入转换为 token ID（包括分词器解码和 OpenAI 请求渲染）"
+
+#: ../../backend/Frontend.md:9
+msgid "Queries the Master to obtain Backend IP"
+msgstr "查询主控以获取后端 IP"
+
+#: ../../backend/Frontend.md:10
+msgid "Submits requests to Backend and awaits responses"
+msgstr "向后端提交请求并等待响应"
+
+#: ../../backend/Frontend.md:11
+msgid ""
+"Processes responses (includes tokenizer encoding and function call "
+"rendering)"
+msgstr "处理响应（包括分词器编码和函数调用渲染）"
+
+#: ../../backend/Frontend.md:12
+msgid "Role Initialization"
+msgstr "角色初始化"
+
+#: ../../backend/Frontend.md:22
+msgid ""
+"The active role is determined by the ROLE_TYPE environment variable "
+"(default: PDFUSION). Other roles only launch the corresponding component."
+msgstr "活动角色由 ROLE_TYPE 环境变量确定（默认：PDFUSION）。其他角色仅启动相应的组件。"
+
+#: ../../backend/Frontend.md:24
+msgid ""
+"In frontend only deployments, engine initialization is skipped for rapid "
+"tokenizer/renderer debugging."
+msgstr "在仅前端部署中，为快速调试分词器/渲染器而跳过引擎初始化。"
+
+#: ../../backend/Frontend.md:26
+msgid "Backend servers still host Frontend apps (for health checks/debugging)."
+msgstr "后端服务器仍然托管前端应用程序（用于健康检查/调试）。"
+
+#: ../../backend/Frontend.md:28
+msgid ""
+"*Italicized* APIs below are only usable when locally paired with a "
+"Backend server."
+msgstr "下面的*斜体*API 仅在与后端服务器本地配对时可用。"
+
+#: ../../backend/Frontend.md:32
+msgid "Public APIs"
+msgstr "公共 API"
+
+#: ../../backend/Frontend.md:33
+msgid "Health Check Endpoints"
+msgstr "健康检查端点"
+
+#: ../../backend/Frontend.md:34
+msgid ""
+"Verifies Backend status (returns ok/error). Call same endpoints in "
+"Backend."
+msgstr "验证后端状态（返回 ok/error）。在后端调用相同的端点。"
+
+#: ../../backend/Frontend.md:48
+msgid "*Debug Endpoints*"
+msgstr "*调试端点*"
+
+#: ../../backend/Frontend.md:49 ../../backend/Frontend.md:103
+#: ../../backend/Frontend.md:141
+msgid "Proxied to same endpoints in Backend."
+msgstr "代理到后端的相同端点。"
+
+#: ../../backend/Frontend.md:102
+msgid "*Dynamic Update Endpoints*"
+msgstr "*动态更新端点*"
+
+#: ../../backend/Frontend.md:140
+msgid "*Embedding APIs*"
+msgstr "*Embedding APIs*"
+
+#: ../../backend/Frontend.md:154
+msgid "Inference APIs"
+msgstr "推理 APIs"
+
+#: ../../backend/Frontend.md:210
+msgid "Prompt Processing APIs"
+msgstr "提示处理 APIs"
+
+#: ../../backend/Frontend.md:256
+msgid "Internal Communication"
+msgstr "内部通信"
+
+#: ../../backend/Frontend.md:258
+msgid "Frontend → Master: HTTP call to obtain Backend IP."
+msgstr "前端 → 主控：HTTP 调用以获取后端 IP。"
+
+#: ../../backend/Frontend.md:260
+msgid "Frontend → Backend: gRPC call for inference (see model_rpc_service.proto)."
+msgstr "前端 → 后端：用于推理的 gRPC 调用（参见 model_rpc_service.proto）。"
+
+#: ../../backend/Frontend.md:262
+msgid "Master APIs"
+msgstr "主控 APIs"
+
+#: ../../backend/Frontend.md:298
+msgid "Backend grpc APIs"
+msgstr "后端 grpc APIs"
+
+#: ../../backend/Frontend.md:311
+msgid "Debugging Procedures"
+msgstr "调试程序"
+
+#: ../../backend/Frontend.md:313
+msgid "Frontend-Only Deployment"
+msgstr "仅前端部署"
+
+#: ../../backend/Frontend.md:324
+msgid ""
+"No ckpt_path required. Test tokenizers/renderers via prompt processing "
+"APIs."
+msgstr "无需 ckpt_path。通过提示处理 API 测试分词器/渲染器。"
+
+#: ../../backend/Frontend.md:326
+msgid "Post-Processing Debugging"
+msgstr "后处理调试"
+
+#: ../../backend/Frontend.md:327
+msgid "Frontend defaults use localhost:start_port+1 for gRPC call."
+msgstr "前端默认使用 localhost:start_port+1 进行 gRPC 调用。"
+
+#: ../../backend/Frontend.md:329
+msgid "Mock a Master & Backend for function call testing:"
+msgstr "模拟主控和后端进行函数调用测试："
+
+#: ../../backend/Frontend.md:432
+msgid ""
+"Also, you can start server with ROLE_TYPE=PDFUSION to start backend "
+"server engine."
+msgstr "此外，您可以使用 ROLE_TYPE=PDFUSION 启动服务器以启动后端服务器引擎。"
+
+#: ../../backend/Frontend.md:434
+msgid ""
+"In this way, debugging the tokenizer and openai renderer related code "
+"only requires restarting frontend (lightweight)."
+msgstr "这样，调试分词器和 openai 渲染器相关代码只需重启前端（轻量级）。"

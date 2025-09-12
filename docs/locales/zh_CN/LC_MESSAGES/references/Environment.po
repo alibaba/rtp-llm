@@ -1,0 +1,230 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: RTP-LLM 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-12 17:38+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../references/Environment.md:1
+msgid "Environment Variable Development Tutorial"
+msgstr "环境变量开发教程"
+
+#: ../../references/Environment.md:3
+msgid ""
+"We have already processed all environment variable-related code in "
+"RTP_LLM, with only some environment variables related to Test, Monitor, "
+"RDMA, etc. remaining unprocessed. For future development, any new "
+"environment variables should be handled uniformly according to this "
+"document."
+msgstr "我们已经处理了RTP_LLM中所有与环境变量相关的代码，仅剩下一些与测试、监控、RDMA等相关的环境变量未处理。对于未来的开发，任何新的环境变量都应按照本文档统一处理。"
+
+#: ../../references/Environment.md:5
+msgid "Python Parameter Parsing"
+msgstr "Python参数解析"
+
+#: ../../references/Environment.md:7
+msgid ""
+"In `rtp_llm/server/server_args.py`, all user-configurable environment "
+"variables are converted to command-line parameters when starting the "
+"Python service. If you find any comments for the related parameters below"
+" unreasonable, please feel free to modify them directly."
+msgstr "在`rtp_llm/server/server_args.py`中，所有用户可配置的环境变量在启动Python服务时都会转换为命令行参数。如果您发现下面相关参数的注释不合理，请直接修改。"
+
+#: ../../references/Environment.md:9
+msgid ""
+"![image](https://alidocs.oss-cn-"
+"zhangjiakou.aliyuncs.com/res/3M0OzeZrKe6BQqze/img/d0330f3d-f1a0-4a0b-"
+"beb5-6ccfd4d8b480.png)"
+msgstr "![image](https://alidocs.oss-cn-"
+"zhangjiakou.aliyuncs.com/res/3M0OzeZrKe6BQqze/img/d0330f3d-f1a0-4a0b-"
+"beb5-6ccfd4d8b480.png)"
+
+#: ../../references/Environment.md:9 ../../references/Environment.md:37
+msgid "image"
+msgstr "图像"
+
+#: ../../references/Environment.md:11
+msgid ""
+"When adding new parameter information, you need to specify the parameter "
+"type, variable name, default value, and its corresponding specific "
+"meaning. The processing logic here is actually to use the parsed "
+"parameters to update environment variables. The current priority is: "
+"`args > env > default`."
+msgstr "添加新的参数信息时，需要指定参数类型、变量名、默认值及其对应的具体含义。这里的处理逻辑实际上是使用解析的参数来更新环境变量。当前的优先级是：`args > env > default`。"
+
+#: ../../references/Environment.md:13
+msgid "Parameter Propagation"
+msgstr "参数传播"
+
+#: ../../references/Environment.md:15
+msgid ""
+"**We have collected and organized all config-related information and "
+"classified it for processing on both the C++ and Python sides. At the top"
+" level of the C++ side is `GptInitParameter`, which categorizes various "
+"environment variables in C++ into different configuration types. On the "
+"Python side, everything is summarized in `EnvArgs` under "
+"`rtp_llm/config/py_config_modules.py`. `EnvArgs` also categorizes various"
+" configurations, and throughout the system, various configurations are "
+"gradually propagated down to specified locations for use.**"
+msgstr "**我们已经收集和整理了所有与配置相关的信息，并在C++端和Python端都进行了分类处理。在C++端的顶层是`GptInitParameter`，它将C++中的各种环境变量分类到不同的配置类型中。在Python端，所有内容都在`rtp_llm/config/py_config_modules.py`下的`EnvArgs`中进行汇总。`EnvArgs`也对各种配置进行分类，整个系统中，各种配置会逐渐传播到指定位置供使用。**"
+
+#: ../../references/Environment.md:17
+msgid "2.1 C++ Side Parameter Propagation"
+msgstr "2.1 C++端参数传播"
+
+#: ../../references/Environment.md:19
+msgid ""
+"In `rtp_llm/cpp/th_op/ConfigModules.h`, all related parameter information"
+" classifications are placed here. Let's illustrate with the following "
+"example:"
+msgstr "在`rtp_llm/cpp/th_op/ConfigModules.h`中，所有相关的参数信息分类都放在这里。让我们通过以下示例来说明："
+
+#: ../../references/Environment.md:35
+msgid ""
+"For example, after adding a new parameter, you need to specify the "
+"default value and modify the content of both the `to_string` and "
+"`update_from_env_for_test` functions. Additionally, these configurations "
+"are bound and passed to the Python side for interaction through "
+"`Pybind11`."
+msgstr "例如，在添加新参数后，您需要指定默认值并修改`to_string`和`update_from_env_for_test`函数的内容。此外，这些配置通过`Pybind11`绑定并传递到Python端进行交互。"
+
+#: ../../references/Environment.md:37
+msgid ""
+"![image](https://alidocs.oss-cn-"
+"zhangjiakou.aliyuncs.com/res/3M0OzeZrKe6BQqze/img/756afda8-8248-45a9"
+"-b05f-975826997a5e.png)"
+msgstr "![image](https://alidocs.oss-cn-"
+"zhangjiakou.aliyuncs.com/res/3M0OzeZrKe6BQqze/img/756afda8-8248-45a9"
+"-b05f-975826997a5e.png)"
+
+#: ../../references/Environment.md:39
+msgid ""
+"It's important to note that **the parameter order here must be consistent"
+" with the order defined in the struct**. This is a requirement of "
+"`Pybind11` because we need to pass these parameters from the Python side "
+"later. Specifically, in `rtp_llm/config/gpt_init_model_parameters.py`, "
+"when generating `GptInitModelParameters`, it calls "
+"`update_gpt_init_params_from_env` for update processing. The "
+"`GptInitParameter` updated here is actually defined in C++. In "
+"`rtp_llm/cpp/dataclass/EngineInitParameter.h`, parameters are constructed"
+" and updated during initialization. Later, these parameters are "
+"propagated down layer by layer to the corresponding function call "
+"locations as needed (all parameters are propagated down)."
+msgstr "需要注意的是，**这里的参数顺序必须与结构体中定义的顺序一致**。这是`Pybind11`的要求，因为我们需要稍后从Python端传递这些参数。具体来说，在`rtp_llm/config/gpt_init_model_parameters.py`中生成`GptInitModelParameters`时，会调用`update_gpt_init_params_from_env`进行更新处理。这里更新的`GptInitParameter`实际上是在C++中定义的。在`rtp_llm/cpp/dataclass/EngineInitParameter.h`中，参数在初始化期间被构造和更新。随后，这些参数根据需要逐层传播到相应的函数调用位置（所有参数都会向下传播）。"
+
+#: ../../references/Environment.md:41
+msgid ""
+"Another task that needs to be done is, after updating new parameters, "
+"**after the project compilation is complete**, you need to execute the "
+"following operations:"
+msgstr "另一项需要完成的任务是，在更新新参数后，**项目编译完成后**，您需要执行以下操作："
+
+#: ../../references/Environment.md:48
+msgid ""
+"This will generate the corresponding files under `bazel-bin/stubs`. "
+"**Find the modified parts in the generated files and place them in "
+"`rtp_llm/ops`**."
+msgstr "这将在`bazel-bin/stubs`下生成相应的文件。**在生成的文件中找到修改的部分并将其放入`rtp_llm/ops`中**。"
+
+#: ../../references/Environment.md:50
+msgid "**Summary:**"
+msgstr "**总结：**"
+
+#: ../../references/Environment.md:52
+msgid ""
+"Modify `rtp_llm/cpp/th_op/ConfigModules.h` and "
+"`rtp_llm/cpp/th_op/ConfigModules.cc`"
+msgstr "修改`rtp_llm/cpp/th_op/ConfigModules.h`和`rtp_llm/cpp/th_op/ConfigModules.cc`"
+
+#: ../../references/Environment.md:53
+msgid "Modify `rtp_llm/config/gpt_init_model_parameters.py`"
+msgstr "修改`rtp_llm/config/gpt_init_model_parameters.py`"
+
+#: ../../references/Environment.md:54
+msgid "Modify `rtp_llm/server/server_args.py`"
+msgstr "修改`rtp_llm/server/server_args.py`"
+
+#: ../../references/Environment.md:55
+msgid "Modify `rtp_llm/server/test/server_args_test.py`"
+msgstr "修改`rtp_llm/server/test/server_args_test.py`"
+
+#: ../../references/Environment.md:56
+msgid "Modify `rtp_llm/ops/libth_transformer.pyi`"
+msgstr "修改`rtp_llm/ops/libth_transformer.pyi`"
+
+#: ../../references/Environment.md:58
+msgid "**A total of 6 files need to be modified.**"
+msgstr "**总共需要修改6个文件。**"
+
+#: ../../references/Environment.md:60
+msgid "2.2 Python Side Parameter Propagation"
+msgstr "2.2 Python端参数传播"
+
+#: ../../references/Environment.md:62
+msgid ""
+"The Python side has significantly more environment variables than the C++"
+" side, and there is some overlap between the two. We have merged some "
+"Python-specific environment variables into the C++ side's config "
+"classification, while the rest have their own independent configuration "
+"classification sets on the Python side."
+msgstr "Python端的环境变量比C++端多得多，两者之间存在一些重叠。我们将一些Python特有的环境变量合并到了C++端的配置分类中，其余的在Python端有自己独立的配置分类集合。"
+
+#: ../../references/Environment.md:64
+msgid ""
+"Currently, our design considers the current code architecture. Config "
+"retrieval exists in two scenarios: one is in some global methods or "
+"static methods where we directly obtain corresponding configuration "
+"parameters from `StaticConfig` in `rtp_llm/config/py_config_modules.py`, "
+"and for other cases, we obtain them by passing in `py_env_configs` "
+"configuration. Additionally, regarding Python-side environment variable "
+"modifications, we adhere to the following principles:"
+msgstr "目前，我们的设计考虑了当前的代码架构。配置获取存在两种场景：一种是在某些全局方法或静态方法中，我们直接从`rtp_llm/config/py_config_modules.py`中的`StaticConfig`获取相应的配置参数，对于其他情况，我们通过传入`py_env_configs`配置来获取。此外，关于Python端环境变量的修改，我们遵循以下原则："
+
+#: ../../references/Environment.md:66
+msgid ""
+"**Principle: Environment variable settings in tests/Test environment "
+"variables/smoke test environment variables are all preserved. Global "
+"initialization environment variable settings and retrieval are also "
+"preserved (such as internal_source/rtp_llm/models/internal_init.py, "
+"internal_source/scripts/local_server_runner.py). env_param, etc., which "
+"exist for rpc_api transmission specification, are also preserved (such as"
+" rtp_llm/tools/api/model_size_evaluator_api.py).**"
+msgstr "**原则：测试/测试环境变量/冒烟测试环境变量中的环境变量设置都将保留。全局初始化环境变量设置和检索也会保留（例如internal_source/rtp_llm/models/internal_init.py，internal_source/scripts/local_server_runner.py）。用于rpc_api传输规范的env_param等也会保留（例如rtp_llm/tools/api/model_size_evaluator_api.py）。**"
+
+#: ../../references/Environment.md:68
+msgid ""
+"In future development of new environment variables, the above principles "
+"must be followed. Python environment variable modifications are similar "
+"to the C++ side. Here are the specific code locations that need to be "
+"modified:"
+msgstr "在未来开发新环境变量时，必须遵循上述原则。Python环境变量的修改与C++端类似。以下是需要修改的具体代码位置："
+
+#: ../../references/Environment.md:70
+msgid "`rtp_llm/config/py_config_modules.py`"
+msgstr "`rtp_llm/config/py_config_modules.py`"
+
+#: ../../references/Environment.md:71
+msgid ""
+"`rtp_llm/server/server_args.py`(*There are many corresponding classified "
+"configuration files in the same directory that can be modified "
+"accordingly.*)"
+msgstr "`rtp_llm/server/server_args.py`（*在同一目录下有许多相应的分类配置文件可以相应修改。*）"
+
+#: ../../references/Environment.md:72
+msgid "`rtp_llm/server/test/server_args_test.py`"
+msgstr "`rtp_llm/server/test/server_args_test.py`"
+

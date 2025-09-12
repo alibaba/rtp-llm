@@ -38,12 +38,15 @@ extensions = [
     "sphinx.ext.mathjax",
 ]
 
+# 国际化配置
+locale_dirs = ['locales/']   # 翻译文件存放目录
+gettext_compact = False      # 为每个文档生成单独的 .pot 文件
+
 nbsphinx_allow_errors = True
 nbsphinx_execute = "never"
 
 autosectionlabel_prefix_document = True
 nbsphinx_allow_directives = True
-
 
 myst_enable_extensions = [
     "dollarmath",
@@ -62,7 +65,6 @@ nbsphinx_execute_arguments = [
     "--InlineBackend.figure_formats={'svg', 'pdf'}",
     "--InlineBackend.rc={'figure.dpi': 96}",
 ]
-
 
 nb_render_priority = {
     "html": (
@@ -137,12 +139,18 @@ html_context = {
 }
 
 html_static_path = ["_static"]
-html_css_files = ["css/custom_log.css"]
-
+html_css_files = [
+    "css/custom_log.css",
+    "css/language-switcher.css"
+]
+html_js_files = [
+    "js/language-switcher.js"
+]
 
 def setup(app):
     app.add_css_file("css/custom_log.css")
-
+    app.add_css_file("css/language-switcher.css")
+    app.add_js_file("js/language-switcher.js")
 
 myst_enable_extensions = [
     "dollarmath",
@@ -199,7 +207,6 @@ intersphinx_mapping = {
 }
 
 html_theme = "sphinx_book_theme"
-
 
 nbsphinx_prolog = """
 .. raw:: html

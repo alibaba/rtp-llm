@@ -5,12 +5,37 @@ SPHINXAUTOBUILD ?= sphinx-autobuild
 SOURCEDIR     = .
 BUILDDIR      = _build
 PORT          ?= 8003
+PYTHON        ?= python3
 
 help:
 	@$(SPHINXBUILD) -M help "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS) $(O)
 	@echo ""
 	@echo "Additional targets:"
 	@echo "  serve       to build and serve documentation with auto-build and live reload"
+	@echo "  html        to build multi-language HTML documentation (en and zh_CN)"
+	@echo "  html-en     to build English HTML documentation only"
+	@echo "  html-zh     to build Chinese HTML documentation only"
+	@echo "  update      to update translation files (extract messages and update PO files)"
+
+# Build multi-language HTML documentation
+html:
+	@echo "Building multi-language HTML documentation..."
+	@$(PYTHON) build_multilang.py
+
+# Build English HTML documentation only
+html-en:
+	@echo "Building English HTML documentation..."
+	@$(PYTHON) build_multilang.py en
+
+# Build Chinese HTML documentation only
+html-zh:
+	@echo "Building Chinese HTML documentation..."
+	@$(PYTHON) build_multilang.py zh_CN
+
+# Update translation files (extract messages and update PO files)
+update:
+	@echo "Updating translation files..."
+	@$(PYTHON) build_multilang.py update
 
 # Compile Notebook files and record execution time
 compile:
@@ -47,12 +72,23 @@ serve:
 		--watch $(SOURCEDIR) \
 		--re-ignore ".*\.(ipynb_checkpoints|pyc|pyo|pyd|git)"
 
-.PHONY: help Makefile compile clean serve
+.PHONY: help Makefile compile clean serve html html-en html-zh update
 
-%: Makefile
-	@$(SPHINXBUILD) -M $@ "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS) $(O)
+# Override the default html target to use our multi-language build
+# This prevents the default Sphinx html target from being used
+html-single:
+	@$(SPHINXBUILD) -M html "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS) $(O)
 
 clean:
 	find . -name "*.ipynb" -exec nbstripout {} \;
 	rm -rf $(BUILDDIR)
 	rm -rf logs
+	@$(PYTHON) build_multilang.py clean
+
+# Catch-all target for other Sphinx targets (but not html)
+%: Makefile
+	@if [ "$@" = "html" ]; then \
+		$(MAKE) html; \
+	else \
+		$(SPHINXBUILD) -M $@ "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS) $(O); \
+	fi
