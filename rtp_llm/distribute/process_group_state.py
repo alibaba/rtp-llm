@@ -1,9 +1,10 @@
 from __future__ import annotations
+
 import gc
 import os
 import weakref
-from datetime import timedelta
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Callable, Dict, List, Optional, Union
 
 import torch
@@ -73,7 +74,9 @@ def _init_process_group_state(
 
     for ranks in group_ranks:
         # create a new group for the ranks
-        device_group = torch.distributed.new_group(ranks, backend=torch_distributed_backend)
+        device_group = torch.distributed.new_group(
+            ranks, backend=torch_distributed_backend
+        )
         if rank in ranks:
             # set the world size, ranks, group size, rank in group
             world_size = torch.distributed.get_world_size()
@@ -120,6 +123,7 @@ def init_distributed_environment(
     backend: str = "nccl",
     timeout: Optional[int] = None,
 ):
+    assert backend in ["nccl"], "backend current only supports nccl"
     ip = params.nccl_ip
     port = params.th_nccl_port
     rank = params.dp_rank * params.tp_size + params.tp_rank
@@ -134,19 +138,18 @@ def init_distributed_environment(
         if timeout is not None:
             assert isinstance(timeout, (int)), "timeout must be a number"
             assert timeout > 0, "timeout must be positive"
-            timeout = timedelta(seconds=timeout)  # pyright: ignore[reportAssignmentType]
+            timeout = timedelta(
+                seconds=timeout
+            )  # pyright: ignore[reportAssignmentType]
         torch.distributed.init_process_group(
-            backend="nccl",
+            backend=backend,
             init_method=f"tcp://{ip}:{port}",
             world_size=world_size,
             rank=rank,
             device_id=torch.device(f"cuda:{local_rank}"),
             timeout=timeout,  # pyright: ignore[reportArgumentType]
         )
-    torch.cuda.set_device(local_rank)
-    torch.set_default_device(f"cuda:{local_rank}")
-
-    initialize_expert_parallel(params, backend)
+        initialize_expert_parallel(params, backend)
 
 
 _EP: Optional[ProcessGroupState] = None
