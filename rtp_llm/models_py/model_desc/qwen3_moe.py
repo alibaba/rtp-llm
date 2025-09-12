@@ -7,7 +7,7 @@ from torch import nn
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
-from rtp_llm.models_py.model_desc.qwen3 import Qwen3Attention
+from rtp_llm.models_py.modules.attention import CausalAttention
 from rtp_llm.models_py.modules.embedding import Embedding
 from rtp_llm.models_py.modules.fmha import FMHAImplBase
 from rtp_llm.models_py.modules.linear import Linear
@@ -83,7 +83,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
     ):
         super().__init__()
         self.layer_idx = layer_idx
-        self.self_attn = Qwen3Attention(config, weights)
+        self.self_attn = CausalAttention(config, weights)
         self.mlp = Qwen3MoeLayer(config, weights)
 
         self.input_layernorm = RMSNorm(
