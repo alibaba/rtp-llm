@@ -183,8 +183,7 @@ PyModelOutputs CudaGraphRunner::forward(PyModelInputs& inputs) {
         if (is_embedding_) {
             // In embedding mode, extract valid parts from padded decoder_layer_hidden_states_
             auto& hidden_states = graph_instances_[current_real_graph_bs_].mem_hold_.decoder_layer_hidden_states_;
-            std::cout << "replay hidden_states[64]: " << hidden_states.slice(0, 64, 65) << std::endl;
-            auto input_lengths = inputs.attention_inputs.input_lengths.data_ptr<int32_t>();
+            auto  input_lengths = inputs.attention_inputs.input_lengths.data_ptr<int32_t>();
 
             // calculate valid tokens num
             int32_t total_valid_tokens = 0;
