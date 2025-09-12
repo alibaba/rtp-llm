@@ -5,7 +5,7 @@ General Guidance
 .. toctree::
    :maxdepth: 1
 
-   development-guide.md
+   profiling.md
    troubleshooting.md
    faq.md
    learn_more.md
