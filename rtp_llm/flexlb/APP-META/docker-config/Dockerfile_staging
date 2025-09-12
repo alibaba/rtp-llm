@@ -1,0 +1,21 @@
+FROM hub.docker.alibaba-inc.com/aone/flexlb_base:20250911212032536293
+
+############# staging #################
+# 设置spring profile或者自定义的jvm参数。如果需要则打开下面的注释内容
+ENV SERVICE_OPTS="${SERVICE_OPTS} -Dspring.profiles.active=pre"
+# 由于金山云bridge_vpc无法访问公网，因此跳过check
+ENV SKIP_CHECK_STATUS_TAOBAO="true"
+
+COPY environment/common/bin/appctl.sh /home/admin/appctl.sh
+COPY environment/common/bin/appctl.sh /home/admin/$APP_NAME/bin/appctl.sh
+
+RUN echo whale_wave_pre > /etc/ilogtail/user_defined_id && \
+echo whale_wave_pre > /etc/uniagent/user_defined_id && \
+cp /home/admin/$APP_NAME/bin/prestop120.sh /home/admin/prestop120.sh && \
+chmod +x /home/admin/*.sh && \
+chmod +x /home/admin/${APP_NAME}/bin/*.sh
+
+#以下内容为集团安全部应用安全能力中心自动修复添加，用于静态部署RASP
+COPY environment/common/bin/RASP.sh /home/admin
+ENTRYPOINT ["source /home/admin/RASP.sh start &&  /home/admin/start.sh"]
+COPY ${APP_NAME}.tgz /home/admin/${APP_NAME}/target/${APP_NAME}.tgz

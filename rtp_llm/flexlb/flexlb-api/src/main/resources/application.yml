@@ -1,0 +1,120 @@
+whale:
+  service:
+    banner: "The whale load balancer."
+    name: api
+    region: develop
+    cluster: develop
+    group: develop
+    env: develop
+  api:
+    route-manager:
+      redis:
+        uri: @whale.api.redis.uri@
+    auth:
+      cluster:
+        redis-uri: @whale.api.redis.uri@
+        platform-apikey: @whale.auth.platform.apikey@
+        turing-apikey: @whale.auth.turing.apikey@
+        hyper-apikey: @whale.auth.hyper.apikey@
+    sync:
+      cluster:
+        redis-uri: @whale.api.sync.redis.uri@
+        vipserver: @whale.api.sync.vipserver@
+    limit:
+      cluster:
+        redis-uri: @whale.api.redis.uri@
+      single:
+        protect-threshold: @whale.limit.single.protect.threshold@
+    breaker:
+      big-response-size-threshold: @whale.breaker.big.response.size.threshold@
+    meter:
+      trace-span-sampling-rate: @whale.api.trace.span.sampling.rate@
+    log:
+      log-sampling-rate: @whale.api.log.sampling.rate@
+    redis:
+      connection-pool-size: @whale.api.redis.connection.pool.size@
+    backend:
+      batch:
+        redis-uri: @whale.api.redis.uri@
+      request-timeout-millis:
+        @whale.api.request.timeout.millis@
+      response-timeout-seconds:
+        @whale.api.response.timeout.seconds@
+      enable-netty:
+        @whale.api.http.enable.netty@
+      netty-max-chunk-size:
+        @whale.api.netty.max.chunk.size@
+    batch-task:
+      backend:
+        client:
+          impl: web-flux
+          connect-timeout: 1000
+          read-timeout: 30000
+          max-requests: 10000
+      redis:
+        uri: @whale.api.redis.uri@
+  app:
+    env:
+      @whale.app.env@
+    offline:
+      @whale.app.offline@
+    yace:
+      @whale.app.yace@
+  metric:
+    report:
+      period:
+        ms:
+          @whale.metric.report.period.ms@
+
+spring:
+  application:
+    name: whale-api
+  profiles:
+    active: default
+  main:
+    web-application-type: reactive
+  codec:
+    max-in-memory-size: @whale.max.in.memory.size@
+logging:
+  level:
+    root: info
+    io.grpc: info
+    com.google.protobuf: info
+    org.flexlb.utils.LoggingUtils: trace
+server:
+  port: 7001
+  tomcat:
+    max-connections: @whale.server.tomcat.max.connections@
+
+management:
+  server:
+    port: 8803
+  endpoints:
+    web:
+      exposure:
+        include: "*"
+  metrics:
+    tags:
+      application: whale-api
+grpc:
+  server:
+    port: 8807
+tpp:
+  otel:
+    web:
+      filter-order: 0x7fffffff
+      skip-pattern: /status\\.taobao|/checkpreload\\.htm
+    config:
+      service-name: whale-wave
+      instrumentation-name: tpp
+    exporter:
+      otlp:
+        enabled: true
+        endpoint: http://search-uniagent-trace-na61.vip.tbsite.net:4317
+      logging:
+        enabled: true
+        format: json
+otel:
+  exporter:
+    otlp:
+      endpoint: none
