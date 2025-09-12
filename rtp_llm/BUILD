@@ -125,6 +125,7 @@ py_library(
         ":lru-dict",
         ":cpm_kernels",
         ":prettytable",
+        ":psutil",
         "//rtp_llm/aios/kmonitor:kmonitor_py",
     ] + arch_dep + internal_deps()
 )
