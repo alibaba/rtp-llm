@@ -1,7 +1,7 @@
 [English](README.md) [中文](README_cn.md)
 
 ### *News*
-
+- [2025 / 09] RTP-LLM 0.2.0 release.
 - [2025 / 01] RTP-LLM now releases the latest code with support for Prefill/Decode seperation, as well as a detailed technical report.
 - [2025 / 01] Check below for our latest technical reports !
 - [2025 / 01] Qwen series model and bert embedding model are now supported on Yitian ARM CPU.

@@ -84,5 +84,6 @@ The core features include:
       :caption: References
 
       references/general
+      references/developer
 
 
