@@ -11,7 +11,7 @@ cc_library(
         "*.cc",
     ]),
     deps = [
-        "//rtp_llm/cpp/utils:utils",
+        "//rtp_llm/cpp/utils:core_utils",
     ],
     copts = copts(),
 )

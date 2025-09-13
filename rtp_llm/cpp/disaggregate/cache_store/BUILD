@@ -52,7 +52,8 @@ cc_library(
     deps = [
         "@havenask//aios/autil:log",
         "@havenask//aios/autil:env_util",
-        "//rtp_llm/cpp/utils:utils",
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/utils:error_code",
         "//rtp_llm/cpp/utils:rpc_error_code",
         "//rtp_llm/cpp:metrics",
         "//rtp_llm/cpp/core:buffer",

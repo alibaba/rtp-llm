@@ -11,7 +11,8 @@ test_linkopts = [
 ]
 
 test_deps = [
-    "//rtp_llm/cpp/utils:utils",
+    "//rtp_llm/cpp/utils:core_utils",
+    "//rtp_llm/cpp/utils:domain_utils",
     "@havenask//aios/autil:json",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",
@@ -24,7 +25,7 @@ cc_test(
     ],
     data = [],
     copts = test_copts,
-    deps = test_deps,
+    deps = test_deps + ["//rtp_llm/cpp/utils:data_structures"],
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
@@ -57,14 +58,4 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-)
-
-cc_test(
-    name = "net_util_test",
-    srcs = [
-        "NetUtilTest.cc",
-    ],
-    data = [],
-    copts = test_copts,
-    deps = test_deps,
 )

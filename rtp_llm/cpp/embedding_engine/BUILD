@@ -14,7 +14,7 @@ cc_library(
         "//rtp_llm/cpp:models",
         "//rtp_llm/cpp:schedulers",
         "//rtp_llm/cpp:engine_base",
-        "//rtp_llm/cpp/utils:utils",
+        "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp:normal_engine",
         "//rtp_llm/cpp:system_prompt",
         "//rtp_llm/cpp:system_prompt_constructor",
@@ -53,7 +53,7 @@ cc_library(
         "//rtp_llm/cpp:dataclass",
         "//rtp_llm/cpp:models",
         "//:th_op_hdrs",
-        "//rtp_llm/cpp/utils:utils",
+        "//rtp_llm/cpp/utils:core_utils",
     ],
     copts = copts(),
     visibility = ["//visibility:public"]

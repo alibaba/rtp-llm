@@ -2,13 +2,13 @@ load(":aot_triton_kernel.bzl", "aot_triton_kernel_library")
 load("//:def.bzl", "cuda_copts")
 
 cc_library(
-    name="triton_kernel",
+    name= "triton_kernel",
     srcs = ["layernorm_kernels.cu"],
     hdrs = ["layernorm_kernels.h"],
     deps = [
         ":layernorm_kernel_lib",
         "//rtp_llm/cpp/cuda:cuda_utils",
-        "//rtp_llm/cpp/utils:utils",
+        "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/model_utils:model_utils",
     ],
     copts = cuda_copts(),

@@ -23,7 +23,7 @@ cc_library(
     deps = [
         "@havenask//aios/autil:log",
         "@havenask//aios/network/anet",
-        "//rtp_llm/cpp/utils:utils",
+        "//rtp_llm/cpp/utils:core_utils",
     ],
 )
 

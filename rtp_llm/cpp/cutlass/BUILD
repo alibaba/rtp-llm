@@ -174,7 +174,7 @@ cc_library(
     include_prefix = "src",
     deps = [
         ":moe_cu_sm90",
-        "//rtp_llm/cpp/utils:utils",
+        "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/model_utils:model_utils",
     	"//rtp_llm/cpp/cutlass/cutlass_extensions:cutlass_extensions",
         "@cutlass_h_moe//:cutlass",
@@ -193,7 +193,7 @@ cc_shared_library(
     roots = [":moe_cu"],
     preloaded_deps = [
         ":moe_cu_sm90",
-        "//rtp_llm/cpp/utils:utils",
+        "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/model_utils:model_utils",
     	"//rtp_llm/cpp/cutlass/cutlass_extensions:cutlass_extensions",
         "@cutlass_h_moe//:cutlass",
@@ -288,7 +288,7 @@ cc_library(
     ]),
     deps = [
         "//rtp_llm/cpp/cutlass/cutlass_extensions:cutlass_extensions",
-        "//rtp_llm/cpp/utils:utils",
+        "//rtp_llm/cpp/utils:core_utils",
         "@cutlass//:cutlass",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",

@@ -11,7 +11,7 @@ cc_library(
     ],
     deps = torch_deps() + [
         "//rtp_llm/cpp/model_utils:model_utils",
-        "//rtp_llm/cpp/utils:utils",
+        "//rtp_llm/cpp/utils:core_utils",
     ],
     visibility = ["//visibility:public"],
 )

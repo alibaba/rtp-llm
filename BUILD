@@ -78,7 +78,7 @@ cc_library(
         "//rtp_llm/cpp:th_op/GptInitParameterRegister.h",
     ],
     deps = [
-        "//rtp_llm/cpp/utils:utils",
+        "//rtp_llm/cpp/utils:core_utils",
 	    "//rtp_llm/cpp/core:types",
         "//rtp_llm/cpp/model_utils:model_utils",
         "//rtp_llm/cpp/config:config_modules",
@@ -140,7 +140,7 @@ cc_library(
     deps = [
         ":gpt_init_params",
     	":th_op_hdrs",
-        "//rtp_llm/cpp/utils:utils",
+        "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/devices:device_py_export",
         "//rtp_llm/cpp/devices:devices_base",
         "@grpc//:grpc++",
@@ -174,7 +174,7 @@ cc_library(
     deps = [
         ":gpt_init_params",
     	":th_op_hdrs",
-        "//rtp_llm/cpp/utils:utils",
+        "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp:model_rpc_server",
         "@grpc//:grpc++",
     ] + select({
@@ -215,7 +215,7 @@ cc_library(
         "//rtp_llm/cpp:th_op/th_utils.h",
     ],
     deps = [
-        "//rtp_llm/cpp/utils:utils",
+        "//rtp_llm/cpp/utils:core_utils",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],

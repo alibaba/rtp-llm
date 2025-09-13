@@ -14,7 +14,7 @@ cc_library(
         "//rtp_llm/cpp/core:buffer_torch",
         "//rtp_llm/cpp/core:buffer",
         "//rtp_llm/cpp/core:event",
-        "//rtp_llm/cpp/utils:utils",
+        "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:rpc_error_code",
         "//rtp_llm/cpp/config:static_config",
         "//rtp_llm/cpp/model_utils:model_utils",

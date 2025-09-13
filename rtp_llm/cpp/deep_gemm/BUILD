@@ -13,7 +13,7 @@ cc_library(
     srcs = ["JIT.cc"],
     copts = copts(),
     deps = [
-        "//rtp_llm/cpp/utils:utils",
+        "//rtp_llm/cpp/utils:core_utils",
         "@boringssl//:ssl",
     ],
     visibility = ["//visibility:public"],

@@ -47,7 +47,7 @@ cc_library(
     ]),
     deps = [
         "//rtp_llm/cpp/cutlass:cutlass_interface",
-        "//rtp_llm/cpp/utils:utils",
+        "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/kernels:kernels",
         "//rtp_llm/cpp/cutlass:cutlass_kernels_impl",
         "//rtp_llm/cpp/cutlass:cutlass_headers",
