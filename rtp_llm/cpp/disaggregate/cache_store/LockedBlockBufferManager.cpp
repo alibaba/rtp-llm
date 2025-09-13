@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/LockedBlockBufferManager.h"
 
+#include <mutex>
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {

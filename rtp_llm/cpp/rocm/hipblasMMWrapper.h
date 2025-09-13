@@ -3,6 +3,7 @@
 #include "hip_utils.h"
 #include "hipblasAlgoMap.h"
 #include "rtp_llm/cpp/core/allocator.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 
 #include <map>
 #include <mutex>

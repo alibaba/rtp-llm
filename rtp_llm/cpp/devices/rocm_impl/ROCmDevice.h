@@ -166,7 +166,7 @@ public:
     IAllocator* getHostAllocator() override {
         return hostAllocator_.get();
     }
-    void                   copy(const CopyParams& params);
+    void                   copy(const CopyParams& params) override;
     void                   noBlockCopy(const CopyParams& params) override;
     void                   bufMemset(Buffer& buf, int val, DeviceStream stream = DeviceStream::DEFAULT) override;
     TransposeOutput        transpose(const TransposeParams& params) override;
@@ -222,8 +222,8 @@ public:
                                   const torch::Tensor&            mla_out_t,
                                   const MlaAttentionModuleParams& params);
 
-    void         mlaAbsorbAttention(const MlaAttentionModuleParams& params);
-    void         mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params);
+    void                  mlaAbsorbAttention(const MlaAttentionModuleParams& params) override;
+    void         mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params) override;
     SliceOutput  slice(const SliceParams& params) override;
     KVBlockArray getKVBlockArray(const AttentionModuleParams& params,
                                  const Buffer&                kv_cache_offset_pointers,

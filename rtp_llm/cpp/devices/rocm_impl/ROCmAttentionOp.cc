@@ -11,7 +11,10 @@
 #include "rtp_llm/cpp/devices/rocm_impl/aiterPA.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
 
+#include <filesystem>
+
 using namespace std;
+namespace fs = std::filesystem;
 namespace rtp_llm {
 
 // #define DEBUG_PRINT_PARAMS(...) printParams(__VA_ARGS__)

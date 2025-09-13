@@ -39,7 +39,7 @@ public:
                                                               std::nullopt;
         rtp_llm::FfnConfigs ffn_config{
             rtp_llm::getActivationType(params.activation_type_str_),
-            move(moe_configs),
+            std::move(moe_configs),
         };
         rtp_llm::QScheme act_qscheme = rtp_llm::QScheme::NoQuantize;
         if (params.quant_algo_.isPerTensorQuant()) {

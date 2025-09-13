@@ -3,6 +3,12 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/core/Buffer.h"
 #include <memory>
+#include <optional>
+#include <unordered_map>
+#include <list>
+#include <tuple>
+#include <functional>
+#include <sstream>
 
 namespace rtp_llm {
 class DeviceBase;

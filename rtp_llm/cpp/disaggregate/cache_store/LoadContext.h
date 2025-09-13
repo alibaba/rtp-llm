@@ -1,5 +1,12 @@
 #pragma once
 
+#include <condition_variable>
+#include <mutex>
+#include <memory>
+#include <functional>
+#include <vector>
+#include <atomic>
+
 #include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBuffer.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CommonDefine.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"

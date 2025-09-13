@@ -56,9 +56,9 @@ public:
 
     void markRequestEnd(const std::string& requestid);
 
-    void debugInfo();
+    void debugInfo() override;
 
-    const std::shared_ptr<MemoryUtil>& getMemoryUtil() const;
+    const std::shared_ptr<MemoryUtil>& getMemoryUtil() const override;
 
 private:
     bool init(const CacheStoreInitParams& params);
