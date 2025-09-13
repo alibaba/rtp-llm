@@ -5,8 +5,9 @@ def build_lib(head_dim, page_size, group_size, xqa_name, xqa_kernel_name, input_
     addition_cuda_copts = [
         '--cuda-include-ptx=sm_90a',
         '--cuda-gpu-arch=sm_90a',
-        '--expt-relaxed-constexpr',
+        "-nvcc_options=expt-relaxed-constexpr",
         '-nvcc_options=use_fast_math',
+        "-nvcc_options=diag-suppress=177,550,186",
         '-t 0',
         '-res-usage',
         '-DUSE_INPUT_KV=0',

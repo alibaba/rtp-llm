@@ -234,7 +234,7 @@ struct F16QToF8Converter {
     static constexpr uint32_t totalGrains = grainsPerPaddedInputQHeadGrp * beamWidth;
 #else
     static_assert(beamWidth == 1);
-    static constexpr uint32_t totalGrains = grainsPerPaddedInputQHeadGrp * inputTokensPerCta;
+    static constexpr uint32_t totalGrains     = grainsPerPaddedInputQHeadGrp * inputTokensPerCta;
 #endif
     static constexpr uint32_t nbIters = divUp(totalGrains, nbThrds);
 
@@ -597,7 +597,7 @@ CUBIN_EXPORT __global__
 __launch_bounds__(128 * 3, headElems* ctaNbQHeads <= 128 * 16 ? 3 : 2)
 #endif
 #else
-    __launch_bounds__(128 * 3, 1)
+__launch_bounds__(128 * 3, 1)
 #endif
     void XQA_KERNEL_SM90(uint32_t const nbKHeads,
 #if SLIDING_WINDOW
@@ -614,7 +614,7 @@ __launch_bounds__(128 * 3, headElems* ctaNbQHeads <= 128 * 16 ? 3 : 2)
                          Vec<float, validElemsPerHead> const* __restrict__ const ropeCosSin,  // [maxNbPosEmb]
 #endif
 #else
-            IOHead const* __restrict__ const q, // [nbReq][beamWidth][nbQHeads],
+                         IOHead const* __restrict__ const q,  // [nbReq][beamWidth][nbQHeads],
 #endif
                          KVCacheList<usePagedKVCache> const cacheList,
 #if USE_BEAM_SEARCH
@@ -639,9 +639,9 @@ __launch_bounds__(128 * 3, headElems* ctaNbQHeads <= 128 * 16 ? 3 : 2)
     uint32_t const nbInputSeqSplit = gridDim.x;
     assert(nbInputSeqSplit == divUp(specDecParams.qSeqLen, inputTokensPerCta));
 #else
-    uint32_t const     reqInputTokBeg  = idxReq;
-    uint32_t const     reqInputTokEnd  = idxReq + 1;
-    constexpr uint32_t nbInputSeqSplit = 1;
+    uint32_t const            reqInputTokBeg  = idxReq;
+    uint32_t const            reqInputTokEnd  = idxReq + 1;
+    constexpr uint32_t        nbInputSeqSplit = 1;
     assert(gridDim.x == nbInputSeqSplit);
 #endif
     uint32_t const idxHeadGrp = blockIdx.z % nbKHeads;  // inside one request
@@ -650,7 +650,7 @@ __launch_bounds__(128 * 3, headElems* ctaNbQHeads <= 128 * 16 ? 3 : 2)
 #if SPEC_DEC
     uint32_t const cacheSeqLen = cacheSeqLen_past;
 #else
-    uint32_t const cacheSeqLen = cacheSeqLen_past + 1;
+    uint32_t const     cacheSeqLen       = cacheSeqLen_past + 1;
 #endif
     static_assert(gemm0CtaTileNbTokens == gemm1CtaTileNbTokens);
     constexpr uint32_t tileSize = gemm0CtaTileNbTokens;
@@ -673,10 +673,10 @@ __launch_bounds__(128 * 3, headElems* ctaNbQHeads <= 128 * 16 ? 3 : 2)
     uint32_t const nbKTiles = nbCtxKTiles + nbDivergentKTiles;
     uint32_t const nbVTiles = nbKTiles;
 #else
-    uint32_t const nbTiles = useKVCache ? divUp(cacheSeqLen, tileSize) : 0;
+    uint32_t const     nbTiles           = useKVCache ? divUp(cacheSeqLen, tileSize) : 0;
     // uint32_t const nbKTiles = nbTiles;
     // uint32_t const nbVTiles = nbTiles;
-    uint32_t const nbTilesInUse = nbTiles - nbSkipLeadingTiles;
+    uint32_t const nbTilesInUse     = nbTiles - nbSkipLeadingTiles;
 #endif
     uint32_t const maxNbSubSeq      = gridDim.y;
     uint32_t const idxSubSeq        = blockIdx.y;
@@ -826,13 +826,13 @@ __launch_bounds__(128 * 3, headElems* ctaNbQHeads <= 128 * 16 ? 3 : 2)
                         auto const matDescK = addAddr(matDescKBase, &kBuf(64 * m, grainsPerInstK * k));
 #if SWAP_AB
                         gmma::mma_async_shmA<MathElem, ctaNbQHeads>(
-                            reinterpret_cast<float (&)[exactDiv(ctaNbQHeads, gmma::instNBase)][2][2]>(acc(m, 0)),
+                            reinterpret_cast<float(&)[exactDiv(ctaNbQHeads, gmma::instNBase)][2][2]>(acc(m, 0)),
                             matDescK,
                             matDescQ,
                             accHasVal);
 #else
                         gmma::mma_async_shmA<MathElem, ctaNbQHeads>(
-                            reinterpret_cast<float (&)[exactDiv(ctaNbQHeads, gmma::instNBase)][2][2]>(acc(m, 0)),
+                            reinterpret_cast<float(&)[exactDiv(ctaNbQHeads, gmma::instNBase)][2][2]>(acc(m, 0)),
                             matDescQ,
                             matDescK,
                             accHasVal);
@@ -1102,13 +1102,13 @@ __launch_bounds__(128 * 3, headElems* ctaNbQHeads <= 128 * 16 ? 3 : 2)
                     auto const descV =
                         addAddr(descVBase, &vBuf[idxInstM](kOffsetInGrains.get() * cacheElemsPerGrain, 0));
                     gmma::mma_async_shmA<MathElem, ctaNbQHeads, true, false>(
-                        reinterpret_cast<float (&)[exactDiv(ctaNbQHeads, gmma::instNBase)][2][2]>(acc(idxInstM, 0)),
+                        reinterpret_cast<float(&)[exactDiv(ctaNbQHeads, gmma::instNBase)][2][2]>(acc(idxInstM, 0)),
                         descV,
                         descX,
                         true);
 #elif CACHE_ELEM_ENUM == 2
                     gmma::mma_async_regA<MathElem, ctaNbQHeads>(
-                        reinterpret_cast<float (&)[exactDiv(ctaNbQHeads, gmma::instNBase)][2][2]>(acc(idxInstM, 0)),
+                        reinterpret_cast<float(&)[exactDiv(ctaNbQHeads, gmma::instNBase)][2][2]>(acc(idxInstM, 0)),
                         reinterpret_cast<uint32_t const(&)[2][2][1]>(fragA[idxInstM]),
                         descX,
                         true);
@@ -1141,7 +1141,7 @@ __launch_bounds__(128 * 3, headElems* ctaNbQHeads <= 128 * 16 ? 3 : 2)
                     auto const descVT =
                         addAddr(descVTBase, &vtBuf(0, kOffsetInGrains.template mod<SharedMem::VTBuffer::cols>().get()));
                     gmma::mma_async_shmA<MathElem, headElems>(
-                        reinterpret_cast<float (&)[exactDiv(headElems, gmma::instNBase)][2][2]>(acc(m, 0)),
+                        reinterpret_cast<float(&)[exactDiv(headElems, gmma::instNBase)][2][2]>(acc(m, 0)),
                         descX,
                         descVT,
                         true);
@@ -1266,7 +1266,7 @@ __launch_bounds__(128 * 3, headElems* ctaNbQHeads <= 128 * 16 ? 3 : 2)
 #if ROPE_STYLE == 0
                 auto const rotatedPairs = loadHead<InputElem, isNeox, thrdsPerHead, MathElem>(qData[idxHead], tid);
 #else
-                auto const pairs        = loadHead<InputElem, isNeox, thrdsPerHead>(qData[idxHead], tid);
+                auto const pairs = loadHead<InputElem, isNeox, thrdsPerHead>(qData[idxHead], tid);
                 auto const rotatedPairs = applyRoPE<isNeox>(pairs, cosSinPairs);
 #endif
                 storeRotatedPairsForQ<isNeox, thrdsPerHead>(smem.q, rotatedPairs, idxHead, tid);
@@ -1286,16 +1286,11 @@ __launch_bounds__(128 * 3, headElems* ctaNbQHeads <= 128 * 16 ? 3 : 2)
             asm volatile("fence.proxy.async.shared::cta;\n");
             unused(smem.qBar.produced.arrive());
         } else if (warpIdx.x == nbQLdWarps) {  // load k
-            KVTilePartLoader kTilePartLoader{true,
-                                             nbKHeads,
-                                             cacheList,
-                                             idxReq,
-                                             idxHeadGrp,
-                                             tensorMap
+            KVTilePartLoader kTilePartLoader {
+                true, nbKHeads, cacheList, idxReq, idxHeadGrp, tensorMap
 #if USE_PAGED_KV_CACHE
-                                             ,
-                                             nbPages,
-                                             smem.pages[0]
+                    ,
+                    nbPages, smem.pages[0]
 #endif
             };
             for (uint32_t idxIter = 0; idxIter < nbIters; idxIter++) {
@@ -1353,16 +1348,11 @@ __launch_bounds__(128 * 3, headElems* ctaNbQHeads <= 128 * 16 ? 3 : 2)
                 }
             }
         } else if (warpIdx.x == nbQLdWarps + 1) {  // load v
-            KVTilePartLoader vTileLoader{false,
-                                         nbKHeads,
-                                         cacheList,
-                                         idxReq,
-                                         idxHeadGrp,
-                                         tensorMap
+            KVTilePartLoader vTileLoader {
+                false, nbKHeads, cacheList, idxReq, idxHeadGrp, tensorMap
 #if USE_PAGED_KV_CACHE
-                                         ,
-                                         nbPages,
-                                         smem.pages[1]
+                    ,
+                    nbPages, smem.pages[1]
 #endif
             };
             for (uint32_t idxIter = 0; idxIter < nbIters; idxIter++) {
@@ -1654,8 +1644,8 @@ __device__ inline void F16QToF8Converter<nbThrds, beamWidth>::store(
         dst[c.template divBy<grainsPerQPart>().get()].template at<true>(r, c.template mod<grainsPerQPart>().get()) =
             reinterpret_cast<LdGrain const&>(shmData);
 #else
-        auto const& fp16Data = data[iter];
-        ShmVec      shmData;
+        auto const&    fp16Data       = data[iter];
+        ShmVec         shmData;
 #pragma unroll
         for (uint32_t i = 0; i < fp16Data.size; i++) {
             shmData[i] = CacheElem{fp16Data[i]};
@@ -1684,22 +1674,19 @@ __device__ inline KVTilePartLoader::KVTilePartLoader(bool                       
                                                      Vec<KVCachePageIndex, nbPagesPerTile>& pageBuf
 #endif
                                                      ):
-    nbKHeads{nbKHeads},
-    cacheList{cacheList},
-    idxReq{idxReq},
-    idxHeadGrp{idxHeadGrp},
-    tensorMap{tensorMap}
-#if USE_PAGED_KV_CACHE
-    ,
-    nbPages{nbPages},
-    pages{pageBuf},
-    baseOffset{((idxReq * beamWidth) * 2 + (isK ? 0 : 1)) * cacheList.maxNbPagesPerSeq}
-#else
-    ,
-    baseOffset{(idxReq * beamWidth) * 2 + (isK ? 0 : 1)}
-#endif
-{
+    nbKHeads{nbKHeads}, cacheList{cacheList}, idxReq{idxReq}, idxHeadGrp{idxHeadGrp}, tensorMap {
+    tensorMap
 }
+#if USE_PAGED_KV_CACHE
+, nbPages{nbPages}, pages{pageBuf}, baseOffset {
+    ((idxReq * beamWidth) * 2 + (isK ? 0 : 1)) * cacheList.maxNbPagesPerSeq
+}
+#else
+, baseOffset {
+    (idxReq * beamWidth) * 2 + (isK ? 0 : 1)
+}
+#endif
+{}
 
 // tensorMap is for one whole page ([nbKHeads*tokensPerPage][headElems]) or whole cache
 template<uint32_t nbTokens, bool alignedForSwizzle>
@@ -2232,9 +2219,9 @@ transposeVTile(uint32_t warpRank, uint32_t lane, SharedMem::VTBuffer& dst, Share
                                                                   exactDiv(gmma::instM, cacheElemsPerGrain) * m
                                                                       - grainsPerCacheHeadPart * idxPart + warpRank));
             LdGrain const  b = {prmt(a[0], a[1], {0, 4, 2, 6}),
-                                prmt(a[0], a[1], {1, 5, 3, 7}),
-                                prmt(a[2], a[3], {0, 4, 2, 6}),
-                                prmt(a[2], a[3], {1, 5, 3, 7})};
+                               prmt(a[0], a[1], {1, 5, 3, 7}),
+                               prmt(a[2], a[3], {0, 4, 2, 6}),
+                               prmt(a[2], a[3], {1, 5, 3, 7})};
             uint32_t const i = idxMat % 2;
             uint32_t const j = idxMat / 2;
             stmatrix_4x<false>(
@@ -2635,8 +2622,8 @@ __device__ inline void finalizeAndWriteOut_sync(uint32_t                  warpRa
                 if (idxToken >= ctaNbValidTokens) {
                     break;
                 }
-                uint32_t const tokenPad = headGrpSize * (nbKHeads - 1);
-                uint32_t const dstRow   = srcRow + idxToken * tokenPad;
+                uint32_t const tokenPad                                             = headGrpSize * (nbKHeads - 1);
+                uint32_t const dstRow                                               = srcRow + idxToken * tokenPad;
 #else
                 uint32_t const dstRow = srcRow;
 #endif
@@ -2784,11 +2771,13 @@ storeRotatedPairsForQ(SharedMem::QBuffer&                                       
 #pragma unroll
         for (uint32_t iter = 0; iter < nbIters; iter++) {
             uint32_t idx = tid + nbThrds * iter;
+#pragma nv_diag_suppress 186, 39, 179
             if (idx >= nbPadGrains) {
                 break;
             }
-            uint32_t const r                          = idx / nbPadGrainsPerHead;
-            uint32_t const c                          = grainsPerQPart - nbPadGrainsPerHead + idx % nbPadGrainsPerHead;
+            uint32_t const r = idx / nbPadGrainsPerHead;
+            uint32_t const c = grainsPerQPart - nbPadGrainsPerHead + idx % nbPadGrainsPerHead;
+#pragma nv_diag_default 186, 39, 179
             dst[dst.size - 1].template at<true>(r, c) = LdGrain{};
         }
     }

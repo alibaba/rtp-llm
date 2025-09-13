@@ -23,7 +23,7 @@ cc_library(
     copts = cuda_copts() + [
         '--cuda-include-ptx=sm_90a',
         '--cuda-gpu-arch=sm_90a',
-        '--expt-relaxed-constexpr',
+        "-nvcc_options=expt-relaxed-constexpr",
         '-nvcc_options=use_fast_math',
         '-t 0',
         '-res-usage',
