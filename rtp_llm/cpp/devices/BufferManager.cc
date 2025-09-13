@@ -6,7 +6,7 @@
 #include <numeric>
 #include <mutex>
 #include <unistd.h>
-#include "rtp_llm/cpp/th_op/ConfigModules.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 using namespace std;
 using ReadLock  = shared_lock<shared_mutex>;
 using WriteLock = unique_lock<shared_mutex>;

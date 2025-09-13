@@ -1,6 +1,6 @@
 #include "hip_utils.h"
 #include "rtp_llm/cpp/devices/OpData.h"
-#include "rtp_llm/cpp/th_op/ConfigModules.h"
+#include "rtp_llm/cpp/config/StaticConfig.h"
 namespace rtp_llm {
 namespace rocm {
 
@@ -81,7 +81,7 @@ template void check<hipError_t>(hipError_t result, const char* const file, int c
 
 int get_sm() {
     static int sm = []() {
-	int device{-1};
+        int device{-1};
         ROCM_CHECK(hipGetDevice(&device));
         int sm_major = 0;
         int sm_minor = 0;
@@ -94,32 +94,32 @@ int get_sm() {
 
 int getDevice() {
     static int device_id = []() {
-	    int current_dev_id = 0;
-            ROCM_CHECK(hipGetDevice(&current_dev_id));
-            return current_dev_id;
+        int current_dev_id = 0;
+        ROCM_CHECK(hipGetDevice(&current_dev_id));
+        return current_dev_id;
     }();
     return device_id;
 }
 
 int getDeviceCount() {
     static int device_count = []() {
-	    int count = 0;
-            ROCM_CHECK(hipGetDeviceCount(&count));
-            return count;
+        int count = 0;
+        ROCM_CHECK(hipGetDeviceCount(&count));
+        return count;
     }();
     return device_count;
 }
 
 int getMultiProcessorCount(int device_id) {
     static std::unordered_map<int, int> mp_count_cache;
-    static std::mutex cache_mutex;
-    
+    static std::mutex                   cache_mutex;
+
     if (device_id < 0) {
         device_id = getDevice();
     }
-    
+
     std::lock_guard<std::mutex> lock(cache_mutex);
-    auto it = mp_count_cache.find(device_id);
+    auto                        it = mp_count_cache.find(device_id);
     if (it == mp_count_cache.end()) {
         int mp_count;
         ROCM_CHECK(hipDeviceGetAttribute(&mp_count, hipDeviceAttributeMultiprocessorCount, device_id));
@@ -131,14 +131,14 @@ int getMultiProcessorCount(int device_id) {
 
 int getMaxSharedMemoryPerMultiprocessor(int device_id) {
     static std::unordered_map<int, int> max_smem_cache;
-    static std::mutex cache_mutex;
-    
+    static std::mutex                   cache_mutex;
+
     if (device_id < 0) {
         device_id = getDevice();
     }
-    
+
     std::lock_guard<std::mutex> lock(cache_mutex);
-    auto it = max_smem_cache.find(device_id);
+    auto                        it = max_smem_cache.find(device_id);
     if (it == max_smem_cache.end()) {
         int max_smem;
         ROCM_CHECK(hipDeviceGetAttribute(&max_smem, hipDeviceAttributeMaxSharedMemoryPerMultiprocessor, device_id));

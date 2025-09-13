@@ -56,6 +56,7 @@ ReduceOp getReduceOp(c10d::ReduceOp reduce_op) {
             return ReduceOp::Avg;
         default:
             RTP_LLM_CHECK_WITH_INFO(false, "Invalid reduce op !");
+            return ReduceOp::Sum;  // This line should never be reached
     }
 }
 

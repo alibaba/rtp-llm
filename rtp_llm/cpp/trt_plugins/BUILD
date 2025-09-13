@@ -47,10 +47,11 @@ cc_library(
     ]),
     deps = [
         "//rtp_llm/cpp/cutlass:cutlass_interface",
-        "//rtp_llm/cpp:utils",
+        "//rtp_llm/cpp/utils:utils",
         "//rtp_llm/cpp/kernels:kernels",
         "//rtp_llm/cpp/cutlass:cutlass_kernels_impl",
         "//rtp_llm/cpp/cutlass:cutlass_headers",
+        "//rtp_llm/cpp/model_utils:model_utils",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],

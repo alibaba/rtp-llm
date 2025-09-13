@@ -1,6 +1,6 @@
 #include "rtp_llm/cpp/engine_base/TorchProfiler.h"
 #include <string>
-#include "rtp_llm/cpp/th_op/ConfigModules.h"
+#include "rtp_llm/cpp/config/StaticConfig.h"
 namespace rtp_llm {
 namespace tap = torch::autograd::profiler;
 

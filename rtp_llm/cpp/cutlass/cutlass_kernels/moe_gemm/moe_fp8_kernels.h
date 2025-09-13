@@ -9,7 +9,7 @@
 #include <numeric>
 #include <random>
 #include <sstream>
-#include "rtp_llm/cpp/utils/activation_types.h"
+#include "rtp_llm/cpp/model_utils/activation_types.h"
 
 namespace rtp_llm {
 

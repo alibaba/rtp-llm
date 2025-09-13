@@ -20,7 +20,7 @@
 
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "autil/NetUtil.h"
-#include "rtp_llm/cpp/th_op/ConfigModules.h"
+
 namespace rtp_llm {
 
 std::string Logger::log_level_ = "INFO";

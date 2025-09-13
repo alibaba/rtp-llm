@@ -1,22 +1,8 @@
 #pragma once
-#include <cstring>
 #include <string>
-#include <optional>
-#include <torch/custom_class.h>
-#include <torch/script.h>
-#include <torch/extension.h>
+#include <sstream>
 
 namespace rtp_llm {
-
-// these configs are used in static or global method.
-struct StaticConfig {
-    static int         user_deep_gemm_num_sm;
-    static bool        user_arm_gemm_use_kai;
-    static bool        user_ft_core_dump_on_exception;
-    static bool        user_disable_pdl;
-    static bool        use_aiter_pa;
-    static std::string user_torch_cuda_profiler_dir;
-};
 
 struct ParallelismDistributedConfig {
     int         tp_size          = 1;
@@ -352,23 +338,5 @@ struct ArpcConfig {
 
 std::string to_lower(const std::string& s);
 bool        bool_from_env_for_test(std::string env_name, bool default_value);
-void        register_parallelism_distributed_config(pybind11::module& m);
-void        register_concurrency_config(pybind11::module& m);
-void        register_fmha_config(pybind11::module& m);
-void        register_kvcache_config(pybind11::module& m);
-void        register_profiling_debug_logging_config(pybind11::module& m);
-void        register_hwkernel_config(pybind11::module& m);
-void        register_device_resource_config(pybind11::module& m);
-void        register_sampler_config(pybind11::module& m);
-void        register_moe_config(pybind11::module& m);
-void        register_model_specific_config(pybind11::module& m);
-void        register_speculative_execution_config(pybind11::module& m);
-void        register_service_discovery_config(pybind11::module& m);
-void        register_cache_store_config(pybind11::module& m);
-void        register_scheduler_config(pybind11::module& m);
-void        register_batch_decode_scheduler_config(pybind11::module& m);
-void        register_fifo_scheduler_config(pybind11::module& m);
-void        register_misc_config(pybind11::module& m);
-void        register_arpc_config(pybind11::module& m);
-void        register_ffn_disaggregate_config(pybind11::module& m);
+
 }  // namespace rtp_llm

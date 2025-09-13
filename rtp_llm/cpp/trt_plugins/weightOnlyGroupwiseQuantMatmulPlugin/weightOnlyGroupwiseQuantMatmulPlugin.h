@@ -16,7 +16,7 @@
  */
 #pragma once
 
-// #include "rtp_llm/cpp/utils/quantization.h"
+// #include "rtp_llm/cpp/model_utils/quantization.h"
 #include "trt_plugins/weightOnlyQuantMatmulPlugin/weightOnlyQuantMatmulPlugin.h"
 
 #include <cassert>

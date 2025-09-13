@@ -11,7 +11,7 @@ test_linkopts = [
 ]
 
 test_deps = [
-    "//rtp_llm/cpp:utils",
+    "//rtp_llm/cpp/utils:utils",
     "@havenask//aios/autil:json",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",
@@ -30,18 +30,6 @@ cc_test(
     },
 
 )
-
-cc_test(
-    name = "cm2_config_test",
-    srcs = [
-        "Cm2ConfigTest.cc",
-    ],
-    data = [],
-    copts = test_copts,
-    linkopts = test_linkopts,
-    deps = test_deps,
-)
-
 
 cc_test(
     name = "dfa_util_test",

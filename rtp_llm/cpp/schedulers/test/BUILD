@@ -4,7 +4,7 @@ load("//bazel:arch_select.bzl", "torch_deps")
 test_deps = [
     "//rtp_llm/cpp/devices/testing:device_test_utils",
     "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
-    "//rtp_llm/cpp:utils",
+    "//rtp_llm/cpp/utils:utils",
     "//rtp_llm/cpp:normal_engine",
     "//rtp_llm/cpp:schedulers",
     "//:gpt_init_params",

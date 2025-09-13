@@ -16,7 +16,7 @@
 
 #pragma once
 
-#include "rtp_llm/cpp/utils/QuantInfo.h"
+#include "rtp_llm/cpp/model_utils/QuantInfo.h"
 #include "stdlib.h"
 #include <cstdint>
 #include <string>

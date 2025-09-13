@@ -15,7 +15,7 @@
  */
 
 #pragma once
-#include "rtp_llm/cpp/utils/quantization.h"
+#include "rtp_llm/cpp/model_utils/quantization.h"
 #include <cassert>
 #include <cmath>
 #include <cstdint>

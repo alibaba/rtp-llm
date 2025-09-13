@@ -9,7 +9,7 @@
 #include "rtp_llm/cpp/kernels/activation_kernels.h"
 #include "rtp_llm/cpp/kernels/gpt_kernels.h"
 #include "rtp_llm/cpp/cuda/Dispatch.h"
-#include "rtp_llm/cpp/th_op/ConfigModules.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 
 using namespace std;
 

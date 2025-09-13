@@ -3,7 +3,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/embed.h>
 #include <torch/extension.h>
-#include "rtp_llm/cpp/utils/AttentionConfig.h"
+#include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 
 namespace torch_ext {
 

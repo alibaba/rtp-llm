@@ -6,7 +6,7 @@
 #define private public
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
-#include "rtp_llm/cpp/th_op/ConfigModules.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 using namespace std;
 using namespace rtp_llm;
 

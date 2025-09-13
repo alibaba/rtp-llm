@@ -1,7 +1,7 @@
 #pragma once
 #include "rtp_llm/cpp/core/allocator.h"
 #include "rtp_llm/cpp/core/Buffer.h"
-#include "rtp_llm/cpp/th_op/ConfigModules.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 #include <string>
 #include <numeric>
 #include <functional>

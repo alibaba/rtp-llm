@@ -5,7 +5,7 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/Interface.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/test/test_util/MockMemoryUtil.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/test/test_util/BlockBufferUtil.h"
-#include "rtp_llm/cpp/th_op/ConfigModules.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 
 namespace rtp_llm {
 class CacheStoreTestBase: public ::testing::Test {

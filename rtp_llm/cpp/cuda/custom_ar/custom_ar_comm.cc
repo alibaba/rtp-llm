@@ -21,7 +21,7 @@
 #include "rtp_llm/cpp/cuda/memory_utils.h"
 #include "rtp_llm/cpp/cuda/Dispatch.h"
 #include "rtp_llm/cpp/utils/Logger.h"
-#include "rtp_llm/cpp/th_op/ConfigModules.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 #include <climits>
 #include <cstdint>
 #include <sys/types.h>

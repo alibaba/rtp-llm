@@ -872,7 +872,7 @@ void invokeTransposeQKV(T*           dst,
             }
 
 #ifdef ENABLE_BF16
-            else if constexpr (CompileConfig::enable_bf16) {
+            else if constexpr (std::is_same<T, __nv_bfloat16>::value) {
                 transpose<__nv_bfloat162><<<grid, block, 0, stream>>>((__nv_bfloat162*)src,
                                                                       (__nv_bfloat162*)dst,
                                                                       batch_size,
@@ -1156,7 +1156,7 @@ INSTANTIATEADDQKVBIASIA3REBUILDPADDING(half);
 #ifdef ENABLE_BF16
 INSTANTIATEADDQKVBIASIA3REBUILDPADDING(__nv_bfloat16);
 #endif
-#undef INSTANTIATEADDQKVBIASREBUILDPADDING
+#undef INSTANTIATEADDQKVBIASIA3REBUILDPADDING
 
 template<typename T>
 __global__ void transpose_remove_padding(const T*     src,

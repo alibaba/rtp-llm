@@ -89,7 +89,7 @@ cc_library(
         "//rtp_llm/cpp/core:torch_cuda_allocator",
         "//rtp_llm/cpp/core:torch_event",
         "//rtp_llm/cpp/kernels:kernels",
-        "//rtp_llm/cpp:utils",
+        "//rtp_llm/cpp/utils:utils",
         "//rtp_llm/cpp/deep_gemm:deep_gemm_plugins_impl",
         "//:th_utils",
         ":trt_plugins",

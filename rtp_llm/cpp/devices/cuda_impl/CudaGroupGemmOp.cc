@@ -1,6 +1,5 @@
 #include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
 #include "rtp_llm/cpp/devices/CommonDefines.h"
-#include "rtp_llm/cpp/utils/compiler_config.h"
 #include "rtp_llm/cpp/utils/ShapeCheck.h"
 #include "rtp_llm/cpp/core/BufferHelper.h"
 #include "autil/StringUtil.h"

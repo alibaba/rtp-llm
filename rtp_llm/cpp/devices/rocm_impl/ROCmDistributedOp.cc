@@ -2,7 +2,6 @@
 #include "rtp_llm/cpp/devices/CommonDefines.h"
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 #include "rtp_llm/cpp/cuda/Dispatch.h"
-#include "rtp_llm/cpp/utils/compiler_config.h"
 #include "rtp_llm/cpp/cuda/nccl/nccl_utils_torch.h"
 #include "rtp_llm/cpp/cuda/nccl/nccl_utils.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"

@@ -1,7 +1,7 @@
 #include <sstream>
 #include "rtp_llm/cpp/api_server/AccessLogWrapper.h"
 #include "rtp_llm/cpp/utils/Logger.h"
-#include "rtp_llm/cpp/th_op/ConfigModules.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 #include "autil/TimeUtility.h"
 using namespace autil::legacy::json;
 using namespace autil::legacy;

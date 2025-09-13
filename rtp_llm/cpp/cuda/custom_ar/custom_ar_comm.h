@@ -31,6 +31,7 @@
 
 #include "rtp_llm/cpp/cuda/nccl/nccl_utils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 
 namespace rtp_llm {
 

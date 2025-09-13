@@ -1,4 +1,6 @@
 #pragma once
+
+#include <torch/torch.h>
 #include "rtp_llm/cpp/th_op/GptInitParameter.h"
 #include "trt_plugins/mixtureOfExperts/mixtureOfExpertsPlugin.h"
 
@@ -23,5 +25,5 @@ private:
     std::unique_ptr<trt_plugins::MixtureOfExpertsPlugin> moe_plugin_;
 };
 
-void registerFusedMoEOp(const py::module& m);
+void registerFusedMoEOp(const pybind11::module& m);
 }  // namespace rtp_llm

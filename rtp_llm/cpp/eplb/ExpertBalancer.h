@@ -6,7 +6,7 @@
 #include "rtp_llm/cpp/models/GptModel.h"
 #include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "kmonitor/client/MetricsReporter.h"
-#include "rtp_llm/cpp/utils/EplbConfig.h"
+#include "rtp_llm/cpp/config/EplbConfig.h"
 
 namespace rtp_llm {
 

@@ -1,5 +1,5 @@
 #include "rtp_llm/cpp/api_server/TokenizerService.h"
-#include "rtp_llm/cpp/th_op/ConfigModules.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/api_server/ErrorResponse.h"
 #include "rtp_llm/cpp/api_server/TokenizerEncodeResponse.h"
 #include "rtp_llm/cpp/utils/Logger.h"

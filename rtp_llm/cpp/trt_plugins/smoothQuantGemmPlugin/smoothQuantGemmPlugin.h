@@ -16,8 +16,8 @@
  */
 #pragma once
 
-#include "rtp_llm/cpp/utils/quantization.h"
-#include "rtp_llm/cpp/utils/activation_types.h"
+#include "rtp_llm/cpp/model_utils/quantization.h"
+#include "rtp_llm/cpp/model_utils/activation_types.h"
 #include "rtp_llm/cpp/cutlass/interface.h"
 #include <cassert>
 #include <memory>

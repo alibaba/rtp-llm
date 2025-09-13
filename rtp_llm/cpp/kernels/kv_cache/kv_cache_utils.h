@@ -14,9 +14,10 @@
  * limitations under the License.
  */
 #pragma once
-#include "rtp_llm/cpp/utils/EnumUtils.h"
 #include <assert.h>
 #include <cmath>
+#include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include "rtp_llm/cpp/kernels/kv_cache/kv_cache_index.h"
 
 #if USING_CUDA

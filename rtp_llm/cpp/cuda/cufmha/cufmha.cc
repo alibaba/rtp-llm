@@ -2,7 +2,6 @@
 #include "fmha_profiling_interface.h"
 #include "rtp_llm/cpp/kernels/gpt_kernels.h"
 #include "rtp_llm/cpp/cuda/Dispatch.h"
-#include "rtp_llm/cpp/utils/compiler_config.h"
 
 using namespace tensorrt_llm::kernels;
 

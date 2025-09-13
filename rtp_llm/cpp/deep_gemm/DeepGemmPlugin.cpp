@@ -10,7 +10,7 @@
 #include "rtp_llm/cpp/cuda/cuda_utils.h"
 #include "rtp_llm/cpp/core/QBuffer.h"
 #include "rtp_llm/cpp/deep_gemm/DeepGemmPlugin.h"
-#include "rtp_llm/cpp/th_op/ConfigModules.h"
+#include "rtp_llm/cpp/config/StaticConfig.h"
 
 using namespace std;
 

@@ -52,7 +52,8 @@ cc_library(
     deps = [
         "@havenask//aios/autil:log",
         "@havenask//aios/autil:env_util",
-        "//rtp_llm/cpp:utils",
+        "//rtp_llm/cpp/utils:utils",
+        "//rtp_llm/cpp/utils:rpc_error_code",
         "//rtp_llm/cpp:metrics",
         "//rtp_llm/cpp/core:buffer",
         "//rtp_llm/cpp/core:event",
@@ -68,6 +69,7 @@ cc_library(
         ":cache_store_interface",
         "//rtp_llm/cpp/disaggregate/cache_store/proto:cache_store_service_cc_proto",
         "//rtp_llm/cpp/devices:devices_base",
+        "//rtp_llm/cpp/config:config_modules",
         "@havenask//aios/autil:thread",
         "@havenask//aios/autil:net",
         ":arpc_dep",

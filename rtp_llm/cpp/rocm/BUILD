@@ -50,7 +50,7 @@ cc_library(
         "@local_config_rocm//rocm:rocblas",
         "@local_config_rocm//rocm:hipblaslt",
         "//rtp_llm/cpp/devices:devices_base",
-        "//rtp_llm/cpp:utils",
+        "//rtp_llm/cpp/utils:utils",
         "//rtp_llm/cpp/core:allocator",
         "//rtp_llm/cpp/core:types",
         "@composable_kernel//:ck_fmha_example",
@@ -88,7 +88,7 @@ cc_library(
 
     deps=[
         ":rocm_utils",
-        "//rtp_llm/cpp:utils",
+        "//rtp_llm/cpp/utils:utils",
         "//rtp_llm/cpp/core:allocator",
         "@local_config_rocm//rocm:rocm_headers",
         "@local_config_rocm//rocm:rocm",

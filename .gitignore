@@ -51,3 +51,5 @@ cuda_profiler*.json
 normal_profiler*.json
 
 core-*
+
+.specstory

@@ -5,7 +5,7 @@
 #include "rtp_llm/cpp/cuda/cuda_utils.h"
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/th_op/GptInitParameter.h"
-#include "rtp_llm/cpp/th_op/ConfigModules.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 #include "3rdparty/trt_fused_multihead_attention/qkvToContext.h"
 #include "3rdparty/contextFusedMultiHeadAttention/fmhaRunner.h"
 #include <cublasLt.h>

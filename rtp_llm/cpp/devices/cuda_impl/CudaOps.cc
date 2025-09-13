@@ -10,7 +10,6 @@
 #include "rtp_llm/cpp/kernels/batch_copy.h"
 #include "rtp_llm/cpp/kernels/gpt_kernels.h"
 #include "rtp_llm/cpp/kernels/copy_utils.h"
-#include "rtp_llm/cpp/utils/compiler_config.h"
 #include "rtp_llm/cpp/cuda/nccl/nccl_utils_torch.h"
 #include "rtp_llm/cpp/cuda/nccl/nccl_utils.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
@@ -100,11 +99,11 @@ void CudaDevice::batchCopy(const BatchCopyParams& params) {
     cudaStream_t stream = (params.overlapped && init_params_.enable_comm_overlap) ? communication_stream_ : stream_;
 
     BatchCopyParams fallback_copies;
-    bool need_fallback;
+    bool            need_fallback;
 
     for (uint32_t copy_type_enum = 0; copy_type_enum < BatchCopyParams::TYPE_SIZE; ++copy_type_enum) {
-        auto copy_type = BatchCopyParams::CopyType(copy_type_enum);
-        auto &buffers = params.copy_buffers[copy_type];
+        auto   copy_type       = BatchCopyParams::CopyType(copy_type_enum);
+        auto&  buffers         = params.copy_buffers[copy_type];
         size_t copy_batch_size = buffers.sizes.size();
         if (copy_batch_size == 0) {
             continue;
@@ -112,8 +111,8 @@ void CudaDevice::batchCopy(const BatchCopyParams& params) {
 
         switch (copy_type) {
             case BatchCopyParams::D2D: {
-                const size_t org_src_ptrs_bytes = sizeof(void *) * copy_batch_size;
-                const size_t org_dst_ptrs_bytes = sizeof(void *) * copy_batch_size;
+                const size_t org_src_ptrs_bytes = sizeof(void*) * copy_batch_size;
+                const size_t org_dst_ptrs_bytes = sizeof(void*) * copy_batch_size;
                 const size_t org_sizes_bytes    = sizeof(uint64_t) * copy_batch_size;
                 const size_t src_ptrs_bytes     = align_to(org_src_ptrs_bytes, cuda_sector_size);
                 const size_t dst_ptrs_bytes     = align_to(org_dst_ptrs_bytes, cuda_sector_size);
@@ -121,11 +120,12 @@ void CudaDevice::batchCopy(const BatchCopyParams& params) {
                 const size_t workspace_bytes    = src_ptrs_bytes + dst_ptrs_bytes + sizes_bytes;
 
                 // allocate workspace buffer
-                auto workspace = allocateBuffer({TYPE_BYTES, {workspace_bytes}, AllocationType::DEVICE}, {"batch_copy_workspace"});
+                auto workspace =
+                    allocateBuffer({TYPE_BYTES, {workspace_bytes}, AllocationType::DEVICE}, {"batch_copy_workspace"});
 
-                auto src_ptrs = reinterpret_cast<void **>(workspace->data<char>());
-                auto dst_ptrs = reinterpret_cast<void **>(workspace->data<char>() + src_ptrs_bytes);
-                auto sizes    = reinterpret_cast<uint64_t *>(workspace->data<char>() + src_ptrs_bytes + dst_ptrs_bytes);
+                auto src_ptrs = reinterpret_cast<void**>(workspace->data<char>());
+                auto dst_ptrs = reinterpret_cast<void**>(workspace->data<char>() + src_ptrs_bytes);
+                auto sizes    = reinterpret_cast<uint64_t*>(workspace->data<char>() + src_ptrs_bytes + dst_ptrs_bytes);
 
                 // copy params to workspace
                 cudaMemcpyAsync(src_ptrs, buffers.src_ptr.data(), org_src_ptrs_bytes, cudaMemcpyHostToDevice, stream);
@@ -153,8 +153,8 @@ void CudaDevice::batchCopy(const BatchCopyParams& params) {
                 // fallback to copy one by one
                 need_fallback = true;
 
-                fallback_copies.overlapped = params.overlapped;
-                fallback_copies.stream = params.stream;
+                fallback_copies.overlapped              = params.overlapped;
+                fallback_copies.stream                  = params.stream;
                 fallback_copies.copy_buffers[copy_type] = buffers;
             } break;
             default:

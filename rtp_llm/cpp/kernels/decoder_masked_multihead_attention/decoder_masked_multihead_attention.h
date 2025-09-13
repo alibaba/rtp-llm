@@ -16,10 +16,10 @@
 
 #pragma once
 
-#include "rtp_llm/cpp/utils/quantization.h"
+#include "rtp_llm/cpp/model_utils/quantization.h"
 
 #include "rtp_llm/cpp/kernels/kv_cache/kv_cache_utils.h"
-#include "rtp_llm/cpp/utils/RopeConfig.h"
+#include "rtp_llm/cpp/model_utils/RopeConfig.h"
 
 #if USING_CUDA
 #include "rtp_llm/cpp/cuda/cuda_fp8_utils.h"

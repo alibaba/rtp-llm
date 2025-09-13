@@ -1,11 +1,9 @@
 #pragma once
 
-#include <torch/custom_class.h>
-#include <torch/script.h>
-#include <torch/extension.h>
+#include <pybind11/pybind11.h>
 
 namespace rtp_llm {
 
-void registerGptInitParameter(py::module m);
+void registerGptInitParameter(pybind11::module m);
 
 }

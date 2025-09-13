@@ -4,6 +4,8 @@
 
 namespace rtp_llm {
 
+namespace py = pybind11;
+
 SpecialTokens::SpecialTokens() {}
 
 GptInitParameter::GptInitParameter() {}

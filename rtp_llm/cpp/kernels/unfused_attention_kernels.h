@@ -16,8 +16,7 @@
 #pragma once
 
 #include "rtp_llm/cpp/kernels/kv_cache/kv_cache_utils.h"
-#include "rtp_llm/cpp/utils/RopeConfig.h"
-#include "rtp_llm/cpp/utils/compiler_config.h"
+#include "rtp_llm/cpp/model_utils/RopeConfig.h"
 
 namespace rtp_llm {
 

@@ -11,7 +11,7 @@
 #include "rtp_llm/cpp/core/torch_utils/TorchEvent.h"
 #include "rtp_llm/cpp/devices/utils/DevicePerfWrapper.h"
 #include "rtp_llm/cpp/kernels/eplb/experts_stats_kernels.h"
-#include "rtp_llm/cpp/th_op/ConfigModules.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 #include <cstring>
 #include <numeric>
 

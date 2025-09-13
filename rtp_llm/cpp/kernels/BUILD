@@ -1,12 +1,11 @@
 load("//:def.bzl", "copts", "cuda_copts", "rocm_copts", "any_cuda_copts", "gen_cpp_code")
+load("//bazel:arch_select.bzl", "torch_deps")
 load("@rules_cc//examples:experimental_cc_shared_library.bzl", "cc_shared_library")
 package(default_visibility = ["//rtp_llm:__subpackages__"])
 
 any_cuda_deps = select({
     "@//:using_cuda": [
-        "//rtp_llm/cpp/cuda:memory_utils",
         "//rtp_llm/cpp/cuda:cuda_utils",
-        "//3rdparty:cub",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],
@@ -52,13 +51,14 @@ cc_library(
         "rocm/*.h",
     ]),
     deps = [
+        "//rtp_llm/cpp/model_utils:model_utils",
         "//rtp_llm/cpp/cuda:memory_utils",
         "//rtp_llm/cpp/cuda:cuda_utils",
-        "//rtp_llm/cpp:utils",
+        "//rtp_llm/cpp/utils:utils",
         "//3rdparty:cub",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
-    ] + select({
+    ] + torch_deps() + select({
        "//:enable_triton": ["//rtp_llm/cpp/kernels/triton:triton_kernel"],
        "//conditions:default": [],
     }),
@@ -97,7 +97,7 @@ cc_library(
         ":mmha_hdrs",
         ":kernels_cu",
         "@local_config_cuda//cuda:cuda_driver",
-        "//rtp_llm/cpp:utils",
+        "//rtp_llm/cpp/utils:utils",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],
@@ -156,7 +156,7 @@ cc_library(
         "//rtp_llm/cpp/rocm:memory_utils",
         "//rtp_llm/cpp/rocm:rocm_utils",
         "//rtp_llm/cpp/rocm:rocm",
-        "//rtp_llm/cpp:utils",
+        "//rtp_llm/cpp/utils:utils",
         "//rtp_llm/cpp/rocm:rocm_types_hdr",
     ],
     copts = rocm_copts(),
@@ -188,7 +188,7 @@ cc_library(
     deps = [
         "@local_config_rocm//rocm:rocm_headers",
         "@local_config_rocm//rocm:hip",
-        "//rtp_llm/cpp:utils",
+        "//rtp_llm/cpp/utils:utils",
         "//rtp_llm/cpp/cuda:cuda_utils_rocm",
         "//rtp_llm/cpp/rocm:rocm_types_hdr",
         "//rtp_llm/cpp/rocm:rocm_utils",
@@ -235,7 +235,10 @@ cc_library(
         "kv_cache/kv_cache_utils.h",
         "kv_cache/kv_cache_index.h"
     ],
-    deps = any_cuda_deps,
+    deps = any_cuda_deps + [
+        "//rtp_llm/cpp/utils:utils",
+        "//rtp_llm/cpp/model_utils:model_utils",
+    ],
     copts = any_cuda_copts(),
     include_prefix = "src",
     visibility = ["//visibility:public"],
@@ -266,8 +269,7 @@ cc_library(
         ":rocm_utils",
         ":mmha_hdrs",
         ":attn_utils",
-        "//rtp_llm/cpp:utils",
-    ],
+        "//rtp_llm/cpp/utils:utils",    ],
     copts = any_cuda_copts(),
     include_prefix = "src",
     visibility = ["//visibility:public"],
@@ -307,7 +309,7 @@ cc_library(
         ":rocm_utils",
         ":mmha_hdrs",
         ":attn_utils",
-        "//rtp_llm/cpp:utils",
+        "//rtp_llm/cpp/utils:utils",
     ],
     copts = any_cuda_copts(),
     include_prefix = "src",
@@ -321,7 +323,7 @@ cc_shared_library(
         ":rocm_utils",
         ":mmha_hdrs",
         ":attn_utils",
-        "//rtp_llm/cpp:utils",
+        "//rtp_llm/cpp/utils:utils",
     ],
 )
 
@@ -332,7 +334,7 @@ cc_shared_library(
         ":rocm_utils",
         ":mmha_hdrs",
         ":attn_utils",
-        "//rtp_llm/cpp:utils",
+        "//rtp_llm/cpp/utils:utils",
     ],
 )
 
@@ -343,6 +345,6 @@ cc_shared_library(
         ":rocm_utils",
         ":mmha_hdrs",
         ":attn_utils",
-        "//rtp_llm/cpp:utils",
+        "//rtp_llm/cpp/utils:utils",
     ],
 )

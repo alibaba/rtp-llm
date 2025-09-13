@@ -58,7 +58,7 @@ cc_library(
 #     deps = test_deps + [
 #         ":test_utils",
 #         "//rtp_llm/cpp/devices/torch_impl:torch_reference_impl",
-#         "//rtp_llm/cpp:utils",
+#         "//rtp_llm/cpp/utils:utils",
 #     ],
 #     env = device_test_envs(),
 #     exec_properties = {'gpu':'A10'},
@@ -87,7 +87,7 @@ filegroup(
 #     deps = test_deps + [
 #         ":test_utils",
 #         "//rtp_llm/cpp/devices/torch_impl:torch_reference_impl",
-#         "//rtp_llm/cpp:utils",
+#         "//rtp_llm/cpp/utils:utils",
 #     ],
 #     env = device_test_envs(),
 # )
@@ -120,7 +120,7 @@ cc_binary(
     deps = [
         "//rtp_llm/cpp/cutlass:cutlass_kernels_impl",
         "//rtp_llm/cpp/cuda:cuda",
-        "//rtp_llm/cpp:utils",
+        "//rtp_llm/cpp/utils:utils",
         "//rtp_llm/cpp/cuda:allocator_cuda",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
@@ -137,7 +137,7 @@ cc_binary(
     deps = [
         "//rtp_llm/cpp/cutlass:cutlass_kernels_impl",
         "//rtp_llm/cpp/cuda:cuda",
-        "//rtp_llm/cpp:utils",
+        "//rtp_llm/cpp/utils:utils",
         "//rtp_llm/cpp/cuda:allocator_cuda",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
@@ -154,7 +154,7 @@ cc_binary(
     deps = [
         "//rtp_llm/cpp/cutlass:cutlass_kernels_impl",
         "//rtp_llm/cpp/cuda:cuda",
-        "//rtp_llm/cpp:utils",
+        "//rtp_llm/cpp/utils:utils",
         "//rtp_llm/cpp/cuda:allocator_cuda",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
@@ -171,7 +171,7 @@ cc_binary(
     deps = [
         "//rtp_llm/cpp/cutlass:cutlass_kernels_impl",
         "//rtp_llm/cpp/cuda:cuda",
-        "//rtp_llm/cpp:utils",
+        "//rtp_llm/cpp/utils:utils",
         "//rtp_llm/cpp/cuda:allocator_cuda",
         "//:th_utils",
         "@local_config_cuda//cuda:cuda_headers",
@@ -215,7 +215,7 @@ cc_binary(
     ],
     deps = [
         "//rtp_llm/cpp/cuda:cuda",
-        "//rtp_llm/cpp:utils",
+        "//rtp_llm/cpp/utils:utils",
         "//rtp_llm/cpp/cuda:allocator_cuda",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",

@@ -1,8 +1,6 @@
 #pragma once
 
-#include "rtp_llm/cpp/utils/RopeConfig.h"
-#include "rtp_llm/cpp/utils/EnumUtils.h"
-#include <torch/extension.h>
+#include "rtp_llm/cpp/model_utils/RopeConfig.h"
 
 namespace rtp_llm {
 
@@ -24,6 +22,24 @@ enum AttentionMaskType {
     noMask,
     causalMask,
 };
+
+enum class KvCacheDataType : int8_t {
+    BASE = 0,
+    INT8 = 1,
+    FP8  = 2
+};
+
+KvCacheDataType inline loadKvCacheDataTypeFromString(const std::string& str) {
+    if (str == "base" || str == "fp16") {
+        return KvCacheDataType::BASE;
+    } else if (str == "int8") {
+        return KvCacheDataType::INT8;
+    } else if (str == "fp8") {
+        return KvCacheDataType::FP8;
+    } else {
+        return KvCacheDataType::BASE;
+    }
+}
 
 struct AttentionConfigs {
     size_t head_num;
@@ -58,7 +74,5 @@ struct AttentionConfigs {
 public:
     std::string DebugAttentionConfigStr() const;
 };
-
-void registerFMHAType(py::module m);
 
 }  // namespace rtp_llm

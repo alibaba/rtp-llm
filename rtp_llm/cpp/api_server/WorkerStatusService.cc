@@ -1,5 +1,5 @@
 #include "rtp_llm/cpp/api_server/WorkerStatusService.h"
-#include "rtp_llm/cpp/th_op/ConfigModules.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 
 using namespace autil::legacy;
 using namespace autil::legacy::json;

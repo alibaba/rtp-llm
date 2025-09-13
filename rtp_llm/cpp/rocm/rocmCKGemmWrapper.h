@@ -1,5 +1,4 @@
 #include "rtp_llm/cpp/core/Types.h"
-#include "rtp_llm/cpp/utils/EnumUtils.h"
 
 namespace rtp_llm {
 

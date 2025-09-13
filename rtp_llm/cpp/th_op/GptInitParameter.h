@@ -1,16 +1,17 @@
 #pragma once
 
-#include "rtp_llm/cpp/utils/layernorm_types.h"
-#include "rtp_llm/cpp/utils/activation_types.h"
-#include "rtp_llm/cpp/utils/quantization.h"
-#include "rtp_llm/cpp/utils/RopeConfig.h"
-#include "rtp_llm/cpp/utils/MlaConfig.h"
-#include "rtp_llm/cpp/utils/EplbConfig.h"
-#include "rtp_llm/cpp/utils/QuantInfo.h"
-#include "rtp_llm/cpp/utils/AttentionConfig.h"
+#include "rtp_llm/cpp/model_utils/layernorm_types.h"
+#include "rtp_llm/cpp/model_utils/activation_types.h"
+#include "rtp_llm/cpp/model_utils/quantization.h"
+#include "rtp_llm/cpp/model_utils/RopeConfig.h"
+#include "rtp_llm/cpp/model_utils/MlaConfig.h"
+#include "rtp_llm/cpp/model_utils/QuantInfo.h"
+#include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include "rtp_llm/cpp/core/Types.h"
-#include "rtp_llm/cpp/th_op/GptInitParameterRegister.h"
-#include "rtp_llm/cpp/th_op/ConfigModules.h"
+#include "rtp_llm/cpp/config/EplbConfig.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
+#include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
 #include <vector>
 #include <map>
 
@@ -164,11 +165,11 @@ public:
     std::vector<int64_t> moe_layer_index_ = {};
 
     // EPLB
-    bool       enable_eplb_      = false;
-    int64_t    phy_exp_num_      = 0;  // number of physical experts
-    int64_t    eplb_update_time_ = 5000;
-    EplbMode   eplb_mode_        = EplbMode::NONE;
-    py::object py_eplb_;
+    bool             enable_eplb_      = false;
+    int64_t          phy_exp_num_      = 0;  // number of physical experts
+    int64_t          eplb_update_time_ = 5000;
+    EplbMode         eplb_mode_        = EplbMode::NONE;
+    pybind11::object py_eplb_;
 
     bool   has_positional_encoding_    = false;
     bool   has_pre_decoder_layernorm_  = false;
@@ -202,8 +203,8 @@ public:
     int64_t                           mm_position_ids_style_  = 0;  // 0 for default; 1 for chatglm4v; 2 for qwen2 vl
     int64_t                           position_id_len_factor_ = 1;
 
-    bool    pre_allocate_op_mem_ = true;
-    int64_t seq_size_per_block_  = 8;
+    bool    pre_allocate_op_mem_     = true;
+    int64_t seq_size_per_block_      = 8;
     int64_t max_block_size_per_item_ = 16;
 
     int64_t block_nums_                       = 0;

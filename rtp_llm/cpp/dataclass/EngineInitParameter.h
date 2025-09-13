@@ -4,15 +4,13 @@
 #include <tuple>
 
 #include "rtp_llm/cpp/devices/OpData.h"
-#include "rtp_llm/cpp/th_op/ConfigModules.h"
+#include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/devices/Weights.h"
 #include "rtp_llm/cpp/th_op/GptInitParameter.h"
 #include "kmonitor/client/MetricsReporter.h"
-#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/dataclass/LoadBalance.h"
-#include "rtp_llm/cpp/th_op/ConfigModules.h"
 
 namespace th = torch;
 

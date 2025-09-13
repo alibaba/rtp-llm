@@ -243,6 +243,7 @@ void register_profiling_debug_logging_config(pybind11::module& m) {
                             bool,
                             bool,
                             bool,
+                            bool,
                             bool>(),
              pybind11::arg("trace_memory")              = false,
              pybind11::arg("trace_malloc_stack")        = false,

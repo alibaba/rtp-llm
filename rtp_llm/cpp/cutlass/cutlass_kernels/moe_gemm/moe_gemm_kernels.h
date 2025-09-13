@@ -19,7 +19,7 @@
 
 #include "rtp_llm/cpp/cutlass/cutlass_kernels/gemm_configs.h"
 #include "rtp_llm/cpp/cutlass/cutlass_kernels/weight_only_quant_op.h"
-#include "rtp_llm/cpp/utils/activation_types.h"
+#include "rtp_llm/cpp/model_utils/activation_types.h"
 #include "rtp_llm/cpp/cutlass/cutlass_kernels/gemm_lut.h"
 
 #include <array>

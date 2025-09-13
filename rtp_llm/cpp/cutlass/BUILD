@@ -93,6 +93,7 @@ cc_library(
         "cutlass_kernels/int8_gemm/*.h",
     ]),
     deps = [
+        "//rtp_llm/cpp/model_utils:model_utils",
     	"//rtp_llm/cpp/cutlass/cutlass_extensions:cutlass_extensions",
         "@cutlass//:cutlass",
         "@cutlass//:cutlass_utils",
@@ -107,6 +108,7 @@ cc_shared_library(
     name = "int8_gemm",
     roots = [":int8_gemm_cu"],
     preloaded_deps = [
+        "//rtp_llm/cpp/model_utils:model_utils",
     	"//rtp_llm/cpp/cutlass/cutlass_extensions:cutlass_extensions",
         "@cutlass//:cutlass",
         "@cutlass//:cutlass_utils",
@@ -172,7 +174,8 @@ cc_library(
     include_prefix = "src",
     deps = [
         ":moe_cu_sm90",
-        "//rtp_llm/cpp:utils",
+        "//rtp_llm/cpp/utils:utils",
+        "//rtp_llm/cpp/model_utils:model_utils",
     	"//rtp_llm/cpp/cutlass/cutlass_extensions:cutlass_extensions",
         "@cutlass_h_moe//:cutlass",
         "@cutlass_h_moe//:cutlass_utils",
@@ -190,7 +193,8 @@ cc_shared_library(
     roots = [":moe_cu"],
     preloaded_deps = [
         ":moe_cu_sm90",
-        "//rtp_llm/cpp:utils",
+        "//rtp_llm/cpp/utils:utils",
+        "//rtp_llm/cpp/model_utils:model_utils",
     	"//rtp_llm/cpp/cutlass/cutlass_extensions:cutlass_extensions",
         "@cutlass_h_moe//:cutlass",
         "@cutlass_h_moe//:cutlass_utils",
@@ -215,6 +219,7 @@ cc_library(
     include_prefix = "src",
     deps = [
     	"//rtp_llm/cpp/cutlass/cutlass_extensions:cutlass_extensions",
+        "//rtp_llm/cpp/model_utils:model_utils",
         "@cutlass_h_moe//:cutlass",
         "@cutlass_h_moe//:cutlass_utils",
         "@local_config_cuda//cuda:cuda_driver",
@@ -234,6 +239,7 @@ cc_shared_library(
     ],
     preloaded_deps = [
     	"//rtp_llm/cpp/cutlass/cutlass_extensions:cutlass_extensions",
+        "//rtp_llm/cpp/model_utils:model_utils",
         "@cutlass_h_moe//:cutlass",
         "@cutlass_h_moe//:cutlass_utils",
         "@local_config_cuda//cuda:cuda_headers",
@@ -282,7 +288,7 @@ cc_library(
     ]),
     deps = [
         "//rtp_llm/cpp/cutlass/cutlass_extensions:cutlass_extensions",
-        "//rtp_llm/cpp:utils",
+        "//rtp_llm/cpp/utils:utils",
         "@cutlass//:cutlass",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
@@ -297,8 +303,8 @@ cc_library(
     srcs = [
         ":fpA_intB",
         ":int8_gemm",
-	":moe",
-	":moe_sm90",
+	    ":moe",
+	    ":moe_sm90",
     ],
     deps = [
         ":cutlass_kernels_common",

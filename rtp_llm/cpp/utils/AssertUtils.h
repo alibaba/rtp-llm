@@ -6,28 +6,12 @@
 #include <vector>
 #include "rtp_llm/cpp/utils/Exception.h"
 #include "rtp_llm/cpp/utils/Logger.h"
-#include "rtp_llm/cpp/th_op/ConfigModules.h"
+
 namespace rtp_llm {
 
-[[noreturn]] inline void throwRuntimeError(const char* const file, int const line, std::string const& info = "") {
-    auto error_msg =
-        std::string("[FT][ERROR] ") + info + " Assertion fail: " + file + ":" + std::to_string(line) + " \n";
-    fflush(stdout);
-    fflush(stderr);
-    throw FT_EXCEPTION(error_msg);
-}
+[[noreturn]] void throwRuntimeError(const char* const file, int const line, std::string const& info = "");
 
-[[noreturn]] inline void myAssert(const char* const file, int const line, std::string const& info = "") {
-    auto error_msg =
-        std::string("[FT][ERROR] ") + info + " Assertion fail: " + file + ":" + std::to_string(line) + " \n";
-    RTP_LLM_LOG_ERROR("FATAIL ERROR!!! %s", error_msg.c_str());
-    if (StaticConfig::user_ft_core_dump_on_exception) {
-        fflush(stdout);
-        fflush(stderr);
-        abort();
-    }
-    throwRuntimeError(file, line, info);
-}
+[[noreturn]] void myAssert(const char* const file, int const line, std::string const& info = "");
 
 }  // namespace rtp_llm
 

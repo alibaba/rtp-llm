@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/stream/GenerateStream.h"
 #include "rtp_llm/cpp/dataclass/EngineInitParameter.h"
 #include "rtp_llm/cpp/dataclass/LoadBalance.h"
+#include "rtp_llm/cpp/config/EplbConfig.h"
 #include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "rtp_llm/cpp/lora/LoraManager.h"
 #include "rtp_llm/cpp/schedulers/SchedulerBase.h"

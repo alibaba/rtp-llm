@@ -3,7 +3,7 @@
 #include "rtp_llm/cpp/cuda/Dispatch.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include <stdexcept>
-#include "rtp_llm/cpp/utils/RopeConfig.h"
+#include "rtp_llm/cpp/model_utils/RopeConfig.h"
 #include "rtp_llm/cpp/kernels/kv_cache/kv_cache_utils.h"
 
 namespace rtp_llm {

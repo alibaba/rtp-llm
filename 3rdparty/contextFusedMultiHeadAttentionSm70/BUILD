@@ -16,6 +16,7 @@ cc_library(
         "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_common_define_header",
         "//3rdparty:cuda_driver",
         "//rtp_llm/cpp/kernels:kernels",
+        "//rtp_llm/cpp/model_utils:model_utils",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],

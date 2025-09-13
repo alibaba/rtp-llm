@@ -14,7 +14,10 @@ cc_library(
         "//rtp_llm/cpp/core:buffer_torch",
         "//rtp_llm/cpp/core:buffer",
         "//rtp_llm/cpp/core:event",
-        "//rtp_llm/cpp:utils",
+        "//rtp_llm/cpp/utils:utils",
+        "//rtp_llm/cpp/utils:rpc_error_code",
+        "//rtp_llm/cpp/config:static_config",
+        "//rtp_llm/cpp/model_utils:model_utils",
         "//:gpt_init_params",
         "//rtp_llm/cpp/models_weight:weights_define",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
@@ -35,7 +38,8 @@ cc_library(
     ]),
     deps = [
         "devices_base",
-        "//rtp_llm/cpp/core:buffer_torch"
+        "//rtp_llm/cpp/core:buffer_torch",
+        "//rtp_llm/cpp/config:config_modules",
     ],
     visibility = ["//visibility:public"],
     copts = copts(),
@@ -49,6 +53,7 @@ cc_library(
     deps = [
         ":devices_base",
         ":device_utils",
+        "//rtp_llm/cpp/config:config_modules",
     ],
     visibility = ["//visibility:public"],
     copts = copts(),

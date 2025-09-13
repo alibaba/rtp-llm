@@ -2,7 +2,7 @@
 #include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
 #include "rtp_llm/cpp/devices/cuda_impl/tests/CudaTestUtils.h"
 #include "rtp_llm/cpp/devices/base_tests/AttentionOpTest.hpp"
-#include "rtp_llm/cpp/th_op/ConfigModules.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 using namespace rtp_llm;
 
 TEST_F(AttentionOpTest, SelfAttentionOpTest) {

@@ -3,20 +3,18 @@
 #include "rtp_llm/cpp/devices/Weights.h"
 #include "rtp_llm/cpp/devices/LoraWeights.h"
 #include "rtp_llm/cpp/devices/CommonDefines.h"
-#include "rtp_llm/cpp/utils/activation_types.h"
-#include "rtp_llm/cpp/utils/RopeConfig.h"
-#include "rtp_llm/cpp/utils/MlaConfig.h"
-#include "rtp_llm/cpp/utils/AttentionConfig.h"
+#include "rtp_llm/cpp/model_utils/activation_types.h"
+#include "rtp_llm/cpp/model_utils/RopeConfig.h"
+#include "rtp_llm/cpp/model_utils/MlaConfig.h"
+#include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include "rtp_llm/cpp/stats/ExpertStats.h"
 
 #include "rtp_llm/cpp/core/Event.h"
 #include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/core/QBuffer.h"
-#include "rtp_llm/cpp/utils/activation_types.h"
-#include "rtp_llm/cpp/utils/layernorm_types.h"
-#include "rtp_llm/cpp/utils/EnumUtils.h"
+#include "rtp_llm/cpp/model_utils/activation_types.h"
+#include "rtp_llm/cpp/model_utils/layernorm_types.h"
 #include "rtp_llm/cpp/utils/StackTrace.h"
-#include "rtp_llm/cpp/th_op/ConfigModules.h"
 #include <cstddef>
 #include <optional>
 #include <functional>
@@ -75,20 +73,7 @@ public:
 
 class OpException: public std::exception {
 public:
-    OpException(const OpStatus& status): status_(status) {
-        std::stringstream ss;
-        ss << "OpException[" << (int32_t)status_.error_type << "]: " << status_.error_message << std::endl;
-        RTP_LLM_LOG_INFO("%s", ss.str().c_str());
-        const auto stack = rtp_llm::getStackTrace();
-        RTP_LLM_STACKTRACE_LOG_INFO("%s", stack.c_str());
-        ss << stack;
-        detail_str_ = ss.str();
-        if (StaticConfig::user_ft_core_dump_on_exception) {
-            fflush(stdout);
-            fflush(stderr);
-            abort();
-        }
-    }
+    OpException(const OpStatus& status);
 
     const char* what() const noexcept override {
         return detail_str_.c_str();
@@ -422,6 +407,19 @@ struct AddBiasParams {
     BufferPtr     input;
     const Buffer& bias;
     bool          inplace = true;
+};
+
+enum TransposeOperation {
+    NONE,
+    TRANSPOSE,
+};
+
+std::string inline enumToString(TransposeOperation type) {
+    if (type == NONE) {
+        return "NONE";
+    } else {
+        return "TRANSPOSE";
+    }
 };
 
 // D = alpha * op(A) * op(B) + beta * C

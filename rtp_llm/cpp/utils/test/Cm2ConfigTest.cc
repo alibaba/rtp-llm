@@ -2,7 +2,7 @@
 #include "gtest/gtest.h"
 
 #define private public
-#include "rtp_llm/cpp/utils/Cm2Config.h"
+#include "rtp_llm/cpp/config/Cm2Config.h"
 
 using namespace std;
 

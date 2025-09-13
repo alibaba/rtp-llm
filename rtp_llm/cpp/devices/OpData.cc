@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/devices/OpData.h"
 #include "rtp_llm/cpp/utils/ShapeCheck.h"
+#include "rtp_llm/cpp/config/StaticConfig.h"
 
 #include <optional>
 #include <functional>
@@ -16,6 +17,21 @@ std::string combineStrings(const std::vector<std::string>& vec) {
     }
     result += "\"";
     return result;
+}
+
+OpException::OpException(const OpStatus& status): status_(status) {
+    std::stringstream ss;
+    ss << "OpException[" << (int32_t)status_.error_type << "]: " << status_.error_message << std::endl;
+    RTP_LLM_LOG_INFO("%s", ss.str().c_str());
+    const auto stack = rtp_llm::getStackTrace();
+    RTP_LLM_STACKTRACE_LOG_INFO("%s", stack.c_str());
+    ss << stack;
+    detail_str_ = ss.str();
+    if (StaticConfig::user_ft_core_dump_on_exception) {
+        fflush(stdout);
+        fflush(stderr);
+        abort();
+    }
 }
 
 std::string GptModelInputs::debugString(bool force) const {

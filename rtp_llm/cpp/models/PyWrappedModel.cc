@@ -3,7 +3,7 @@
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/utils/utils.h"
-#include "rtp_llm/cpp/utils/AttentionConfig.h"
+#include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include <cstdint>
 #include <stdexcept>
 #include <mutex>

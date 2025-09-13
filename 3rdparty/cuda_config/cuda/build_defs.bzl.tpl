@@ -49,7 +49,8 @@ def cuda_default_copts():
         "-nvcc_options=ftz=true",
         "-nvcc_options=generate-line-info",
         "-nvcc_options=threads=8",
-        "-Xcompiler", "-Wno-deprecated-declarations",
+        "-nvcc_options=Wno-deprecated-declarations",
+        "-nvcc_options=diag-suppress=68",
     ] + %{cuda_extra_copts}) + if_cuda_clang_opt(
         # Some important CUDA optimizations are only enabled at O3.
         ["-O3"]
@@ -66,7 +67,8 @@ def cuda_default_copts_without_arch():
         "-nvcc_options=ftz=true",
         "-nvcc_options=generate-line-info",
         "-nvcc_options=threads=8",
-        "-Xcompiler", "-Wno-deprecated-declarations",
+        "-nvcc_options=Wno-deprecated-declarations",
+        "-nvcc_options=diag-suppress=68",
     ]) + if_cuda_clang_opt(
         # Some important CUDA optimizations are only enabled at O3.
         ["-O3"]

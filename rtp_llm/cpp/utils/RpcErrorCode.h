@@ -1,6 +1,5 @@
 #pragma once
 
-#include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/proto/model_rpc_service.pb.h"

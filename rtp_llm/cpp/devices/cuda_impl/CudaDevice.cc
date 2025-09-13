@@ -10,17 +10,16 @@
 #include "rtp_llm/cpp/core/TrackerAllocator.h"
 #include "rtp_llm/cpp/devices/OpData.h"
 #include "rtp_llm/cpp/utils/Logger.h"
-#include "rtp_llm/cpp/utils/compiler_config.h"
 #include "rtp_llm/cpp/core/torch_utils/torch_cuda_allocator.h"
 #include "rtp_llm/cpp/core/torch_utils/TorchEvent.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/NormalCacheStore.h"
 #include "rtp_llm/cpp/kernels/mask_logits.h"
-#include "rtp_llm/cpp/th_op/ConfigModules.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
 #include <unistd.h>
 #include "3rdparty/flashinfer/flashinfer.h"
-#include "rtp_llm/cpp/th_op/ConfigModules.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 
 #ifdef USING_CUDA12
 #include "rtp_llm/cpp/devices/cuda_impl/CudaXqa.h"
@@ -588,9 +587,6 @@ void CudaDevice::checkUseOpenSourceFMHA() {
 }
 
 void CudaDevice::checkUseTrtV1FMHA() {
-    if (!CompileConfig::use_old_trt_fmha) {
-        return;
-    }
     bool fmha_env = init_params_.fmha_config.enable_trtv1_fmha;
     if (!fmha_env) {
         RTP_LLM_LOG_WARNING("TRTV1 FMHA is not enbaled");
@@ -608,10 +604,6 @@ void CudaDevice::checkUseTrtV2FMHA() {
     bool fmha_env = init_params_.fmha_config.enable_trt_fmha;
     if (!fmha_env) {
         RTP_LLM_LOG_WARNING("TRT FMHA is disabled for by env");
-        return;
-    }
-    if (CompileConfig::cudart_version < 12000) {
-        RTP_LLM_LOG_WARNING("cudart version %d not support need >= 12000!", CompileConfig::cudart_version);
         return;
     }
     RTP_LLM_LOG_INFO("use TRTV2 fmha");
@@ -674,12 +666,6 @@ void CudaDevice::checkUseFlashinferSampleKernel() {
 }
 
 void CudaDevice::checkUseMultiBlockMode() {
-    if constexpr (CompileConfig::cudart_version < 11070) {
-        RTP_LLM_LOG_WARNING("MMHA multi_block_mode for cudart_version %d is disabled", CompileConfig::cudart_version);
-        use_multi_block_mode = false;
-        return;
-    }
-
     if (!init_params_.hw_kernel_config.enable_multi_block_mode) {
         RTP_LLM_LOG_WARNING("MMHA multi_block_mode is disabled");
         use_multi_block_mode = false;

@@ -40,7 +40,7 @@ cc_library(
     copts = copts(),
     deps = [
         ":types",
-        "//rtp_llm/cpp:utils",
+        "//rtp_llm/cpp/utils:utils",
         "@havenask//aios/autil:stack_tracer",
     ],
     include_prefix = "src",
@@ -75,7 +75,7 @@ cc_library(
     copts = copts(),
     deps = [
         ":allocator",
-        "//rtp_llm/cpp:utils",
+        "//rtp_llm/cpp/utils:utils",
     ],
     include_prefix = "src",
     visibility = ["//visibility:public"],
@@ -90,7 +90,7 @@ cc_library(
     ],
     deps = [
         ":types_hdr",
-        "//rtp_llm/cpp:utils",
+        "//rtp_llm/cpp/utils:utils",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
@@ -104,7 +104,7 @@ cc_library(
     ],
     deps = [
         ":buffer_hdr",
-        "//rtp_llm/cpp:utils"
+        "//rtp_llm/cpp/utils:utils"
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
@@ -117,7 +117,7 @@ cc_library(
     ],
     deps = [
         ":buffer",
-        "//rtp_llm/cpp:utils"
+        "//rtp_llm/cpp/utils:utils"
     ] + torch_deps(),
     copts = copts(),
     visibility = ["//visibility:public"],

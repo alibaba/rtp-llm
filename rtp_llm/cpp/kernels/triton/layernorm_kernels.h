@@ -15,7 +15,7 @@
  */
 
 #pragma once
-#include "rtp_llm/cpp/utils/layernorm_types.h"
+#include "rtp_llm/cpp/model_utils/layernorm_types.h"
 #include <assert.h>
 #if USING_CUDA
 #include "rtp_llm/cpp/cuda/cuda_utils.h"

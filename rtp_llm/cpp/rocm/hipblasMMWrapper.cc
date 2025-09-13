@@ -1,5 +1,5 @@
 #include "hipblasMMWrapper.h"
-#include "rtp_llm/cpp/th_op/ConfigModules.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 
 namespace rtp_llm {
 namespace rocm {

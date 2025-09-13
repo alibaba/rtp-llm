@@ -1,8 +1,8 @@
 #include "rtp_llm/cpp/dataclass/EngineInitParameter.h"
 #include "rtp_llm/cpp/utils/PyUtils.h"
-#include "rtp_llm/cpp/utils/PyUtils.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/core/BufferHelper.h"
+#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/models_weight/W.h"
 #include <memory>
 using namespace std;
@@ -12,9 +12,10 @@ namespace rtp_llm {
 rtp_llm::ConstBufferPtr WeightsConverter::CopyTensorToBufferPtr(const torch::Tensor& tensor) {
     auto buffer = torchTensor2Buffer(tensor);
     if (need_copy_) {
-        auto new_buffer = device_->allocateBuffer({buffer->type(), buffer->shape(), AllocationType::DEVICE});
+        auto new_buffer =
+            device_->allocateBuffer(BufferParams(buffer->type(), buffer->shape(), AllocationType::DEVICE));
 
-        device_->noBlockCopy({*new_buffer, *buffer});
+        device_->noBlockCopy(CopyParams{*new_buffer, *buffer});
         return new_buffer;
     } else {
         return buffer;

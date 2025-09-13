@@ -5,7 +5,6 @@
 #include <condition_variable>
 
 #include "rtp_llm/cpp/core/Buffer.h"
-#include "rtp_llm/cpp/utils/NetUtil.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"

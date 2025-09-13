@@ -4,56 +4,6 @@ load("//bazel:arch_select.bzl", "torch_deps")
 load("@rules_cc//examples:experimental_cc_shared_library.bzl", "cc_shared_library")
 package(default_visibility = ["//visibility:public"])
 
-# cc_library(
-#     name = "trt_fmha_impl",
-#     srcs = glob([
-#         "fmhaRunner.cpp",
-#         "**/*.cpp"
-#     ]),
-#     hdrs = glob([
-#         "*.h",
-#     ]),
-#     deps = [
-#         ":trt_fmha_header",
-#         "//3rdparty:cuda_driver",
-#         "//rtp_llm/cpp/kernels:kernels",
-#         "@local_config_cuda//cuda:cuda_headers",
-#         "@local_config_cuda//cuda:cudart",
-#     ],
-#     copts = copts(),
-#     visibility = ["//:__subpackages__"],
-#     alwayslink = True,
-# )
-
-
-# cc_library(
-#     name = "trt_fmha_header",
-#     hdrs = glob([
-#         "*.h",
-#         "**/*.h"
-#     ], exclude=["multiHeadAttentionCommon.h"]),
-#     deps = [
-#         "@local_config_cuda//cuda:cuda_headers",
-#         "@local_config_cuda//cuda:cudart",
-#         ":trt_fmha_common_define_header"
-#     ],
-#     copts = copts(),
-#     visibility = ["//visibility:public"],
-# )
-
-# cc_library(
-#     name = "trt_fmha_common_define_header",
-#     hdrs = glob([
-#         "multiHeadAttentionCommon.h",
-#     ]),
-#     deps = [
-#         "@local_config_cuda//cuda:cuda_headers",
-#         "@local_config_cuda//cuda:cudart",
-#     ],
-#     copts = copts(),
-#     visibility = ["//visibility:public"],
-# )
-
 ## How to upgrade trt:
 ## generate from commit 88ced50ca7 in TensorRT-LLM for now and generate below:
 ## 1. change `reinterpret_cast<bert::Fused_multihead_attention_params_v2 &>(params)` into `convertKernelParmas2BertParams(params)` in cpp/kernels/fmha_v2/setup.py
@@ -91,10 +41,10 @@ cc_library(
         "src/**/*.h",
     ]),
     deps = [
+        ":fmha_v2_header",
+        "//rtp_llm/cpp/kernels:attn_utils",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
-        ":fmha_v2_header",
-        "//rtp_llm/cpp/kernels:kernels",
     ],
     copts = cuda_copts(),
     visibility = ["//visibility:public"],

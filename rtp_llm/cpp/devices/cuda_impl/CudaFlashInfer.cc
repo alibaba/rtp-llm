@@ -8,12 +8,11 @@
 #include "rtp_llm/cpp/devices/CommonDefines.h"
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 #include "rtp_llm/cpp/cuda/Dispatch.h"
-#include "rtp_llm/cpp/utils/compiler_config.h"
 #include "rtp_llm/cpp/kernels/kv_cache/kv_cache_utils.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "3rdparty/flashinfer/flashinfer.h"
 #include "flashmla/flashmla.h"
-#include "rtp_llm/cpp/th_op/ConfigModules.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 
 #ifdef USING_CUDA12
 #include "rtp_llm/cpp/devices/cuda_impl/CudaXqa.h"

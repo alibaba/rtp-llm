@@ -7,7 +7,7 @@ cc_library(
         "*.h",
     ]),
     deps = [
-        "//rtp_llm/cpp:utils",
+        "//rtp_llm/cpp/utils:utils",
         "//rtp_llm/cpp:dataclass",
         "//rtp_llm/cpp/http_server:http_server",
         "@havenask//aios/autil:net",

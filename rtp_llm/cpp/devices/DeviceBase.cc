@@ -5,12 +5,11 @@
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
-#include "rtp_llm/cpp/utils/RpcErrorCode.h"
 #include "rtp_llm/cpp/devices/OpData.h"
 #include "torch/extension.h"
 #include "torch/types.h"
 #include <numeric>
-#include "rtp_llm/cpp/th_op/ConfigModules.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 
 using namespace std;
 using namespace rtp_llm;
@@ -250,8 +249,8 @@ void DeviceBase::writeCacheStore(const CacheStoreInputs& cache_store_inputs,
 
 void DeviceBase::batchCopy(const BatchCopyParams& params) {
     for (uint32_t copy_type_enum = 0; copy_type_enum < BatchCopyParams::TYPE_SIZE; ++copy_type_enum) {
-        auto copy_type = BatchCopyParams::CopyType(copy_type_enum);
-        auto &buffers = params.copy_buffers[copy_type];
+        auto   copy_type       = BatchCopyParams::CopyType(copy_type_enum);
+        auto&  buffers         = params.copy_buffers[copy_type];
         size_t copy_batch_size = buffers.sizes.size();
         if (copy_batch_size == 0) {
             continue;

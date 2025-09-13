@@ -1,5 +1,6 @@
 load(":aot_triton_kernel.bzl", "aot_triton_kernel_library")
 load("//:def.bzl", "cuda_copts")
+
 cc_library(
     name="triton_kernel",
     srcs = ["layernorm_kernels.cu"],
@@ -7,7 +8,8 @@ cc_library(
     deps = [
         ":layernorm_kernel_lib",
         "//rtp_llm/cpp/cuda:cuda_utils",
-        "//rtp_llm/cpp:utils",
+        "//rtp_llm/cpp/utils:utils",
+        "//rtp_llm/cpp/model_utils:model_utils",
     ],
     copts = cuda_copts(),
     include_prefix = "src",

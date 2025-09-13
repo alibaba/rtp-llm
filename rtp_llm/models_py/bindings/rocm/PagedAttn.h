@@ -1,6 +1,6 @@
 #pragma once
 #include "rtp_llm/cpp/kernels/unfused_attention_kernels.h"
-#include "rtp_llm/cpp/utils/RopeConfig.h"
+#include "rtp_llm/cpp/model_utils/RopeConfig.h"
 #include "rtp_llm/models_py/bindings/rocm/FusedRopeKVCacheOp.h"
 #include "rtp_llm/cpp/kernels/kv_cache/kv_cache_utils.h"
 #include "rtp_llm/models_py/bindings/rocm/FMHARocmBase.h"

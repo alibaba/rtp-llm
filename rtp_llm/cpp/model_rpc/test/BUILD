@@ -41,7 +41,7 @@ test_deps = [
 #         "@com_google_googletest//:gtest",
 #         "@com_google_googletest//:gtest_main",
 #         "//rtp_llm/cpp:model_rpc_server",
-#         "//rtp_llm/cpp:utils",
+#         "//rtp_llm/cpp/utils:utils",
 #     ] + torch_deps(),
 # )
 
@@ -55,7 +55,7 @@ cc_test(
         "//rtp_llm/cpp/proto:model_rpc_service_cc_proto",
         "//rtp_llm/cpp:model_rpc_server",
         "//:gpt_init_params",
-        "//rtp_llm/cpp:utils",
+        "//rtp_llm/cpp/utils:utils",
         "//rtp_llm/cpp:dataclass",
         "//rtp_llm/cpp/devices:devices_base",
         "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",

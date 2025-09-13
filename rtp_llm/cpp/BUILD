@@ -1,7 +1,7 @@
 load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "requirement", "whl_deps", "torch_deps")
 load("//bazel:arch_select.bzl", "embedding_arpc_deps")
-package(default_visibility = ["//rtp_llm:__subpackages__"])
+package(default_visibility = ["//:__subpackages__"])
 
 
 requirement([
@@ -11,26 +11,6 @@ requirement([
 embedding_arpc_deps()
 # load("//bazel:tf_proto.bzl", "tf_proto_library")
 
-cc_library(
-    name = "utils",
-    hdrs = glob([
-        "utils/*.h",
-    ]),
-    srcs = glob([
-        "utils/*.cc",
-    ]),
-    deps = torch_deps() + [
-        "@havenask//aios/alog:alog",
-        "@havenask//aios/autil:env_util",
-        "@havenask//aios/autil:net",
-        "@com_google_absl//absl/debugging:stacktrace",
-        "@com_google_absl//absl/debugging:symbolize",
-        "//rtp_llm/cpp/proto:model_rpc_service_cc_proto",
-        "//:config_modules",
-    ],
-    copts = copts(),
-    visibility = ["//visibility:public"],
-)
 
 cc_library(
     name = "dataclass",
@@ -41,12 +21,14 @@ cc_library(
         "dataclass/*.cc",
     ]),
     deps = torch_deps() + [
-        ":utils",
         ":metrics",
         ":tokenizer",
         ":system_prompt",
         ":position_ids_generator",
         "//:gpt_init_params",
+        "//rtp_llm/cpp/utils:utils",
+        "//rtp_llm/cpp/utils:py_utils",
+        "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/devices:devices_base",
         "//rtp_llm/cpp/devices:device_utils",
         "//rtp_llm/cpp/models_weight:weights_define",
@@ -61,7 +43,6 @@ cc_library(
         ],
         "//conditions:default": [],
     }),
-    visibility = ["//visibility:public"],
 )
 
 
@@ -76,9 +57,10 @@ cc_library(
     deps = torch_deps() + [
         ":cache",
         ":dataclass",
-        ":utils",
+        "//rtp_llm/cpp/utils:utils",
+        "//rtp_llm/cpp/utils:py_utils",
+        "//rtp_llm/cpp/config:config_modules",
     ],
-    visibility = ["//visibility:public"],
 )
 
 cc_library(
@@ -93,9 +75,8 @@ cc_library(
         ":models",
         ":cache",
         ":dataclass",
-        ":utils",
+        "//rtp_llm/cpp/utils:utils",
     ],
-    visibility = ["//visibility:public"],
 )
 
 cc_library(
@@ -109,10 +90,9 @@ cc_library(
     deps = torch_deps() + [
         ":dataclass",
         ":stream",
-        ":utils",
         ":cache",
+        "//rtp_llm/cpp/utils:utils",
     ],
-    visibility = ["//visibility:public"],
 )
 
 cc_library(
@@ -123,11 +103,10 @@ cc_library(
     srcs = glob([
     ]),
     deps = torch_deps() + [
-        ":utils",
+        "//rtp_llm/cpp/utils:utils",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
     ],
-    visibility = ["//visibility:public"],
 )
 
 cc_library(
@@ -139,18 +118,17 @@ cc_library(
         "system_prompt/SystemPromptConstructor.cc",
     ]),
     deps = torch_deps() + [
-        ":utils",
         ":cache",
         ":dataclass",
         ":engine_base",
         "//:gpt_init_params",
+        "//rtp_llm/cpp/utils:utils",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "//rtp_llm/cpp/devices:devices_base",
         "//rtp_llm/cpp/devices:device_utils",
         "//rtp_llm/cpp/models_weight:weights_define",
     ],
-    visibility = ["//visibility:public"],
 )
 
 cc_library(
@@ -182,11 +160,11 @@ cc_library(
         "cache/DistKvCache.cc",
     ],
     deps = torch_deps() + [
-        ":utils",
         ":metrics",
         ":dataclass",
         ":model_rpc_pool",
         "//:gpt_init_params",
+        "//rtp_llm/cpp/utils:utils",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "//rtp_llm/cpp/devices:devices_base",
@@ -198,7 +176,6 @@ cc_library(
         ],
         "//conditions:default": [],
     }),
-    visibility = ["//visibility:public"],
 )
 
 cc_library(
@@ -217,7 +194,7 @@ cc_library(
         "cache/ThreeFSMempool.cc",
     ],
     deps = [
-        "//rtp_llm/cpp:utils",
+        "//rtp_llm/cpp/utils:utils",
         "//rtp_llm/cpp/cuda:cuda_utils_base",
         "//3rdparty/3fs:hf3fs",
         "@havenask//aios/autil:lock_free",
@@ -225,7 +202,6 @@ cc_library(
         "@havenask//aios/kmonitor:kmonitor_client_cpp",
         "@local_config_cuda//cuda:cuda_headers",
     ],
-    visibility = ["//visibility:public"],
 )
 
 cc_library(
@@ -239,8 +215,8 @@ cc_library(
     deps = torch_deps() + [
         ":logits_processor",
         ":dataclass",
-        ":utils",
         ":cache",
+        "//rtp_llm/cpp/utils:utils",
         "//rtp_llm/cpp/devices:devices_base",
         "//rtp_llm/models_py/bindings:op_defs"
     ] + select({
@@ -257,7 +233,6 @@ cc_library(
             "//rtp_llm/cpp/devices/cpu_impl:cpu_impl",
         ],
     }),
-    visibility = ["//visibility:public"],
 )
 
 cc_library(
@@ -273,7 +248,6 @@ cc_library(
         ":models",
         "//rtp_llm/cpp/devices:devices_base",
     ],
-    visibility = ["//visibility:public"],
 )
 
 cc_library(
@@ -288,13 +262,12 @@ cc_library(
         ":stream",
         ":dataclass",
         ":metrics",
-        ":utils",
         ":cache",
         ":components",
+        "//rtp_llm/cpp/utils:utils",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
     ],
-    visibility = ["//visibility:public"]
 )
 
 cc_library(
@@ -310,13 +283,12 @@ cc_library(
         ":stream",
         ":dataclass",
         ":models",
-        ":utils",
         ":lora",
         ":system_prompt",
+        "//rtp_llm/cpp/utils:utils",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
     ],
-    visibility = ["//visibility:public"]
 )
 
 cc_library(
@@ -335,11 +307,12 @@ cc_library(
         ":models",
         ":schedulers",
         ":engine_base",
-        ":utils",
         ":system_prompt",
         ":system_prompt_constructor",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
+        "//rtp_llm/cpp/config:eplb_config",
+        "//rtp_llm/cpp/utils:utils",
         "//rtp_llm/cpp/devices:devices_base_impl",
     ] + select({
         "@//:using_cuda": [
@@ -350,7 +323,6 @@ cc_library(
         ],
         "//conditions:default": [],
     }),
-    visibility = ["//visibility:public"]
 )
 
 cc_library(
@@ -374,11 +346,11 @@ cc_library(
         ":schedulers",
         ":engine_base",
         ":normal_engine",
-        ":utils",
         ":system_prompt",
         ":system_prompt_constructor",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
+        "//rtp_llm/cpp/utils:utils",
         "//rtp_llm/cpp/devices:devices_base_impl",
     ] + select({
         "@//:using_cuda": [
@@ -386,7 +358,6 @@ cc_library(
         ],
         "//conditions:default": [],
     }),
-    visibility = ["//visibility:public"]
 )
 
 cc_library(
@@ -398,10 +369,9 @@ cc_library(
         "metrics/*.cc",
     ]),
     deps = [
-        ":utils",
+        "//rtp_llm/cpp/utils:utils",
         "@havenask//aios/kmonitor:kmonitor_client_cpp",
     ],
-    visibility = ["//visibility:public"]
 )
 
 cc_library(
@@ -415,8 +385,9 @@ cc_library(
     deps = [
         ":dataclass",
         "//rtp_llm/cpp/devices:devices_base",
+        "//rtp_llm/cpp/utils:py_utils",
+        "//rtp_llm/cpp/config:config_modules",
     ],
-    visibility = ["//visibility:public"]
 )
 
 cc_library(
@@ -429,8 +400,8 @@ cc_library(
     ]),
     deps = [
         "//rtp_llm/cpp/devices:devices_base",
+        "//rtp_llm/cpp/config:config_modules",
     ],
-    visibility = ["//visibility:public"]
 )
 
 cc_library(
@@ -443,8 +414,8 @@ cc_library(
     ]),
     deps = [
         "//rtp_llm/cpp/devices:devices_base", # for pybind11
+        "//rtp_llm/cpp/utils:py_utils",
     ],
-    visibility = ["//visibility:public"]
 )
 
 cc_library(
@@ -457,7 +428,7 @@ cc_library(
     ]),
     deps = [
         "@havenask//aios/autil:json",
-        "//rtp_llm/cpp:utils",
+        "//rtp_llm/cpp/utils:utils",
         "//rtp_llm/cpp:dataclass",
         "//rtp_llm/cpp:normal_engine",
         "//rtp_llm/cpp/embedding_engine:embedding_engine",
@@ -466,7 +437,6 @@ cc_library(
         "//rtp_llm/cpp/devices:devices_base",
         "//rtp_llm/cpp:multimodal_processor",
     ],
-    visibility = ["//visibility:public"]
 )
 
 cc_library(
@@ -478,7 +448,7 @@ cc_library(
         "api_server/*.h",
     ]),
     deps = [
-        "//rtp_llm/cpp:utils",
+        "//rtp_llm/cpp/utils:utils",
         "//rtp_llm/cpp:openai",
         "//rtp_llm/cpp:dataclass",
         "//rtp_llm/cpp:normal_engine",
@@ -490,7 +460,6 @@ cc_library(
         "@havenask//aios/autil:time",
         "//rtp_llm/cpp/api_server/common:common_service",
     ],
-    visibility = ["//visibility:public"]
 )
 
 cc_library(
@@ -511,6 +480,8 @@ cc_library(
         "//rtp_llm/cpp/devices:devices_base",
         "//rtp_llm/cpp/proto:model_rpc_service_cc_proto",
         "//rtp_llm/cpp:dataclass",
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/config:cm2_config",
         "//rtp_llm/cpp:normal_engine",
         "//rtp_llm/cpp/embedding_engine:embedding_engine",
         "//rtp_llm/cpp:speculative_engine",
@@ -519,7 +490,6 @@ cc_library(
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store",
         "@havenask//aios/autil:net",
     ],
-    visibility = ["//visibility:public"]
 )
 
 py_library(
@@ -529,7 +499,6 @@ py_library(
         ":grpcio",
         "//rtp_llm/cpp/proto:model_rpc_service_py_proto"
     ],
-    visibility = ["//visibility:public"],
 )
 
 exports_files(glob(["th_op/**/*.cc"]))

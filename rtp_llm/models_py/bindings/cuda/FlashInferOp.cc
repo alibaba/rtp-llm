@@ -6,7 +6,6 @@
 #include "rtp_llm/cpp/devices/OpData.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/utils/Logger.h"
-#include "rtp_llm/cpp/utils/EnumUtils.h"
 
 using namespace torch_ext;
 

@@ -17,11 +17,11 @@
 #ifndef TRT_MIXTURE_OF_EXPERTS_PLUGIN_H
 #define TRT_MIXTURE_OF_EXPERTS_PLUGIN_H
 
-#include "rtp_llm/cpp/utils/quantization.h"
+#include "rtp_llm/cpp/model_utils/quantization.h"
 #include "rtp_llm/cpp/cutlass/cutlass_kernels/moe_gemm/moe_kernels.h"
 #include "rtp_llm/cpp/cutlass/cutlass_kernels/moe_gemm/moe_fp8_kernels.h"
 #include "rtp_llm/cpp/cuda/trt_utils.h"
-#include "rtp_llm/cpp/utils/activation_types.h"
+#include "rtp_llm/cpp/model_utils/activation_types.h"
 #include "cutlass/numeric_types.h"
 
 #include <cassert>

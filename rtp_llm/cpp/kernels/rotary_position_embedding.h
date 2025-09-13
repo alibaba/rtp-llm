@@ -1,7 +1,7 @@
 #pragma once
 
 #include "decoder_masked_multihead_attention_utils.h"
-#include "rtp_llm/cpp/utils/RopeConfig.h"
+#include "rtp_llm/cpp/model_utils/RopeConfig.h"
 #include "rtp_llm/cpp/cuda/cuda_type_utils.cuh"
 #if USING_CUDA
 #include "rtp_llm/cpp/cuda/cuda_utils.h"

@@ -1,7 +1,7 @@
 #include "rtp_llm/cpp/api_server/EmbeddingService.h"
 
 #include "rtp_llm/cpp/api_server/Exception.h"
-#include "rtp_llm/cpp/th_op/ConfigModules.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/api_server/AccessLogWrapper.h"
 #include "rtp_llm/cpp/api_server/InferenceDataType.h"
 

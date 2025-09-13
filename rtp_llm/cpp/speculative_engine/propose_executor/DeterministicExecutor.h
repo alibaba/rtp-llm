@@ -1,7 +1,7 @@
 #pragma once
 
 #include "rtp_llm/cpp/speculative_engine/propose_executor/ProposeExecutor.h"
-#include "rtp_llm/cpp/th_op/ConfigModules.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 #include <cstddef>
 #include <cstdint>
 
