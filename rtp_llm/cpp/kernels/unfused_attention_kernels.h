@@ -20,24 +20,6 @@
 
 namespace rtp_llm {
 
-template<typename T>
-void invokeAddQKVBiasIA3Transpose(T*           q_buf,
-                                  T*           k_buf,
-                                  T*           v_buf,
-                                  T*           Q,
-                                  const T*     bias_Q,
-                                  T*           K,
-                                  const T*     bias_K,
-                                  T*           V,
-                                  const T*     bias_V,
-                                  const int    batch_size,
-                                  const int    seq_len,
-                                  const int    head_num,
-                                  const int    size_per_head,
-                                  const int*   ia3_tasks,
-                                  const T*     ia3_key_weights,
-                                  const T*     ia3_value_weights,
-                                  cudaStream_t stream);
 
 template<typename T, typename T_IN>
 struct MaskedSoftmaxParam {
@@ -70,26 +52,6 @@ void invokeTransposeQKV(T*           dst,
                         const int    int8_mode,
                         cudaStream_t stream);
 
-template<typename T>
-void invokeAddQKVBiasIA3RebuildPadding(T*           Q,
-                                       const T*     bias_Q,
-                                       T*           K,
-                                       const T*     bias_K,
-                                       T*           V,
-                                       const T*     bias_V,
-                                       T*           q_buf,
-                                       T*           k_buf,
-                                       T*           v_buf,
-                                       const int    batch_size,
-                                       const int    seq_len,
-                                       const int    head_num,
-                                       const int    size_per_head,
-                                       const int    valid_word_num,
-                                       const int*   mask_offset,
-                                       const int*   ia3_tasks,
-                                       const T*     ia3_key_weights,
-                                       const T*     ia3_value_weights,
-                                       cudaStream_t stream);
 
 template<typename T>
 void invokeTransposeAttentionOutRemovePadding(T*           src,
@@ -128,8 +90,6 @@ void invokeSplitQKV(T*           q_buf,
                     const int    size_per_head,
                     cudaStream_t stream);
 
-template<typename T>
-void invoke_debug_kernel2(T* data, int start_col, int m, int n, int row_len, cudaStream_t stream);
 
 template<typename T>
 void invokeAddFusedQKVBiasTranspose(T*                             q_no_transpose_buf,
@@ -287,48 +247,8 @@ void invokeLoadPrefixKVCacheAiter(T*                             q_buf,
                                   cudaStream_t                   stream);
 #endif
 
-template<typename T>
-void invokeTranspose4d(T*           dst,
-                       T*           src,
-                       const int    local_batch_size,
-                       const int    seq_len,
-                       const int    size_per_head,
-                       const int    local_hidden_units,
-                       const int    local_head_num,
-                       const int    batch_size,
-                       const int    ite,
-                       cudaStream_t stream);
 
-template<typename T>
-void invokeAddRelativeAttentionBias(T*           qk_buf,
-                                    const T*     relative_attention_bias,
-                                    const int    batch_size,
-                                    const int    head_num,
-                                    const int    seq_len,
-                                    cudaStream_t stream);
 
-template<typename T>
-void invokeAddHead3SizeQKVBias(const T*     mm_qkv,
-                               const T*     bias_qkv,
-                               T*           q_buf_,
-                               T*           k_buf_,
-                               T*           v_buf_,
-                               const int    batch,
-                               const int    window_num,
-                               const int    window_len,
-                               const int    head_num,
-                               const int    size_per_head,
-                               cudaStream_t stream);
 
-template<typename T>
-void invokeMaskedSoftMaxWithRelPosBias(T*           qk_buf,
-                                       const T*     attn_mask,
-                                       const T*     relative_pos_bias,
-                                       const int    batch_size,
-                                       const int    num_head,
-                                       const int    window_num,
-                                       const int    window_len,
-                                       const float  qk_scale,
-                                       cudaStream_t stream);
 
 }  // namespace rtp_llm
