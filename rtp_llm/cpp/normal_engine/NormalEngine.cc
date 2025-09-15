@@ -92,7 +92,11 @@ int64_t NormalEngine::getLastScheduleTime() {
 
 WarmUpResult NormalEngine::warmUp(const EngineInitParams& params) {
     if (params_.scheduler_config.use_batch_decode_scheduler) {
-        return decodeWarmUp(params);
+        if (params_.batch_decode_scheduler_config.batch_decode_scheduler_warmup_type == 0) {
+            return decodeWarmUp(params);
+        } else {
+            return prefillWarmUp(params);
+        }
     }
     if (params_.role_type_ == RoleType::PDFUSION || params_.role_type_ == RoleType::PREFILL) {
         return prefillWarmUp(params);

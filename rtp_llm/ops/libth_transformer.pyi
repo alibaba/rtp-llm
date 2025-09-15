@@ -66,7 +66,12 @@ class AttentionCommonInputs:
 
 class BatchDecodeSchedulerConfig:
     batch_decode_scheduler_batch_size: int
-    def __init__(self, batch_decode_scheduler_batch_size: int = 1) -> None: ...
+    batch_decode_scheduler_warmup_type: int
+    def __init__(
+        self,
+        batch_decode_scheduler_batch_size: int = 1,
+        batch_decode_scheduler_warmup_type: int = 0,
+    ) -> None: ...
     def to_string(self) -> str: ...
     def update_from_env(self) -> None: ...
 

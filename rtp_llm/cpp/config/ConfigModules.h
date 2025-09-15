@@ -184,7 +184,9 @@ struct SchedulerConfig {
 };
 
 struct BatchDecodeSchedulerConfig {
-    int64_t     batch_decode_scheduler_batch_size = 1;
+    int64_t batch_decode_scheduler_batch_size = 1;
+    // 0: use decode warmup, others: use prefill warmup
+    int64_t     batch_decode_scheduler_warmup_type = 0;
     std::string to_string() const;
     void        update_from_env_for_test();
 };
