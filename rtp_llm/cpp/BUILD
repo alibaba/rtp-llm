@@ -545,7 +545,6 @@ cc_library(
         "//rtp_llm/cpp/proto:model_rpc_service_cc_proto",
         "//rtp_llm/cpp:dataclass",
         "//rtp_llm/cpp/config:config_modules",
-        "//rtp_llm/cpp/config:cm2_config",
         "//rtp_llm/cpp:normal_engine",
         "//rtp_llm/cpp/embedding_engine:embedding_engine",
         "//rtp_llm/cpp:speculative_engine",

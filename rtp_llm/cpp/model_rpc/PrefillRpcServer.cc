@@ -1,5 +1,4 @@
 #include "autil/TimeUtility.h"
-#include "rtp_llm/cpp/config/Cm2Config.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"

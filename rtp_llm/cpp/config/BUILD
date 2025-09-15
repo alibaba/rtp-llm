@@ -20,15 +20,6 @@ cc_library(
 )
 
 cc_library(
-    name = "cm2_config",
-    hdrs = ["Cm2Config.h"],
-    deps = [
-        "@havenask//aios/autil:json",
-    ],
-    copts = copts(),
-)
-
-cc_library(
     name = "eplb_config",
     hdrs = ["EplbConfig.h"],
     copts = copts(),
