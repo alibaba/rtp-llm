@@ -413,7 +413,6 @@ CudaDevice::selectCuFMHARunner(const AttentionConfigs& configs, DataType attn_dt
     if (!found_cufmha_runner) {
         cufmha_runner_pool_.emplace_back();
         bool is_s_padded = (graph_runner_ != nullptr);
-        is_s_padded      = false;
         cufmha_runner_pool_.back().reset(
             new cufmha(fmha_datatype,
                        configs.mask_type,
