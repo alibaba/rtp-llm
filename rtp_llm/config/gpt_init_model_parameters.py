@@ -719,6 +719,9 @@ class GptInitModelParameters:
             batch_decode_scheduler_batch_size=get_env_int(
                 "BATCH_DECODE_SCHEDULER_BATCH_SIZE", 1
             ),
+            batch_decode_scheduler_warmup_type=get_env_int(
+                "BATCH_DECODE_SCHEDULER_WARMUP_TYPE", 0
+            ),
         )
 
         # FIFOSchedulerConfig
