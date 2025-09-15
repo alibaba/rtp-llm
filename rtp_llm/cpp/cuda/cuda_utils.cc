@@ -22,7 +22,6 @@
 #include <ATen/cuda/CUDAGraph.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <ATen/cuda/CUDAGraphsUtils.cuh>
-#include "rtp_llm/cpp/th_op/ConfigModules.h"
 #include <mutex>
 #include <unordered_map>
 #include <stdio.h>

@@ -235,7 +235,7 @@ cc_library(
         "//rtp_llm/cpp/core:types",
         "@local_config_cuda//cuda:cuda",
         "@local_config_cuda//cuda:cudart",
-    ],
+    ] + torch_deps(),
     implementation_deps = [
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/config:static_config",
