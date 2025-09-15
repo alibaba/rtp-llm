@@ -76,7 +76,6 @@ bool NormalCacheStore::init(const CacheStoreInitParams& params) {
                     if (this->thread_pool_->pushTask(task) != autil::ThreadPoolBase::ERROR_NONE) {
                         RTP_LLM_LOG_WARNING("normal cache store push store task to thread pool failed");
                         callback(false, CacheStoreErrorCode::PushWorkerItemFailed);
-                        return;
                     }
 
                     it = store_tasks_.erase(it);
