@@ -1,15 +1,13 @@
 load("//:def.bzl", "copts", "rocm_copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 load("//rtp_llm/cpp/devices:device_defs.bzl",
-    "device_impl_target", "device_test_envs", "device_linkopts")
+    "device_impl_target", "device_test_envs")
 
 test_copts = [
     "-fno-access-control",
 ] + rocm_copts()
 
 test_linkopts = [
-    "-lpython3.10",
-    "-ltorch",
     "-L/opt/rocm/lib",
     "-lhipsolver",
     "-lhiprtc",

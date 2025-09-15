@@ -5,10 +5,6 @@ test_copts = [
     "-fno-access-control",
 ] + copts()
 
-test_linkopts = [
-    "-lpython3.10",
-    "-ltorch",
-]
 
 test_envs = {
     "TEST_USING_DEVICE": "ARM",
@@ -43,7 +39,6 @@ cc_test(
     env = test_envs,
     tags = test_tags,
     copts = test_copts,
-    linkopts = test_linkopts,
     deps = test_deps + [
         "//rtp_llm/cpp/devices/base_tests:basic_test_cases"
     ],
@@ -56,7 +51,6 @@ cc_test(
     ],
     data = [],
     copts = test_copts,
-    linkopts = test_linkopts,
     deps = test_deps,
     env = test_envs,
     tags = test_tags,
@@ -69,7 +63,6 @@ cc_test(
     ],
     data = [],
     copts = test_copts,
-    linkopts = test_linkopts,
     deps = test_deps,
     env = test_envs,
     tags = test_tags,
@@ -82,7 +75,6 @@ cc_test(
     ],
     data = [],
     copts = test_copts,
-    linkopts = test_linkopts,
     deps = test_deps,
     env = test_envs,
     tags = test_tags,
@@ -95,7 +87,6 @@ cc_test(
     ],
     data = [],
     copts = test_copts,
-    linkopts = test_linkopts,
     deps = test_deps,
     env = test_envs,
     tags = test_tags,
@@ -108,7 +99,6 @@ cc_test(
     ],
     data = [],
     copts = test_copts,
-    linkopts = test_linkopts,
     deps = test_deps,
     env = test_envs,
     tags = test_tags,
@@ -121,7 +111,6 @@ cc_test(
     ],
     data = [],
     copts = test_copts,
-    linkopts = test_linkopts,
     deps = test_deps,
     env = test_envs,
     tags = test_tags,
@@ -134,7 +123,6 @@ cc_test(
     ],
     data = [],
     copts = test_copts,
-    linkopts = test_linkopts,
     deps = test_deps,
     env = test_envs,
     tags = test_tags,

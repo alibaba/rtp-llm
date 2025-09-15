@@ -300,12 +300,6 @@ cc_test(
     data = [],
     env = test_envs,
     copts = copts(),
-    linkopts = [
-        "-L/usr/local/cuda/lib64",
-        "-lnvToolsExt",
-        "-L/usr/local/cuda/extras/CUPTI/lib64",
-        "-lcupti",
-    ],
     deps = test_deps,
     exec_properties = {'gpu':'A10'},
 )

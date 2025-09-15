@@ -1,29 +1,6 @@
 load("//:def.bzl", "copts")
+load("//bazel:arch_select.bzl", "torch_deps")
 
-test_linkopts = [
-    "-lpython3.10",
-    "-ltorch",
-    "-lc10",
-    "-ltorch_cpu",
-    "-ltorch_python",
-    "-lnccl",
-    "-lnvToolsExt",
-    "-L/usr/local/cuda/extras/CUPTI/lib64",
-    "-lcupti",
-] + select({
-    "@//:using_cuda": [
-        "-ltorch_cuda",
-        "-lc10_cuda",
-        "-L/usr/local/cuda/lib64",
-        "-lcudart",
-    ],
-    "@//:using_rocm": [
-        "-ltorch_hip",
-        "-lc10_hip",
-    ],
-    "//conditions:default": [
-    ],
-})
 
 cc_library(
     name = "trt_plugins",

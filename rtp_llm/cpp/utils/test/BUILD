@@ -5,10 +5,6 @@ test_copts = [
     "-fno-access-control",
 ] + copts()
 
-test_linkopts = [
-    "-lpython3.10",
-    "-ltorch",
-]
 
 test_deps = [
     "//rtp_llm/cpp/utils:core_utils",

@@ -1,17 +1,5 @@
 load("//bazel:arch_select.bzl", "torch_deps")
 
-def device_linkopts():
-    return select({
-        "@//:using_cuda": [
-            "-L/usr/local/cuda/lib64",
-            "-lcudart",
-            "-lcuda",
-            "-lnccl",
-            "-lnvToolsExt",
-        ],
-        "//conditions:default": [
-        ],
-    })
 
 def device_test_envs():
     return select({
