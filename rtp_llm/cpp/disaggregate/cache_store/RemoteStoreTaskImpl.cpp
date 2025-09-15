@@ -74,7 +74,6 @@ RemoteStoreTaskImpl::makeAvailableRequest(const std::shared_ptr<RequestBlockBuff
         for (auto [key, block] : blocks) {
             auto iter = to_load_buffers_.find(key);
             if (iter == to_load_buffers_.end()) {
-                RTP_LLM_LOG_INFO("remote store task %s not found key %s", request_->request_id.c_str(), key.c_str());
                 continue;
             }
             transfer_request->buffer_pairs[key] = iter->second;
