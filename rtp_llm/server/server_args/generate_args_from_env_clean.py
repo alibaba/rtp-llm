@@ -6,11 +6,7 @@
 
 import argparse
 import os
-import sys
 from typing import Any, List, Tuple
-
-# 添加项目路径到sys.path
-sys.path.insert(0, "/home/tanboyu.tby/RTP-LLM")
 
 from rtp_llm.server.server_args.server_args import EnvArgumentParser
 
@@ -125,103 +121,10 @@ def generate_args_list(only_env_vars: bool = False) -> List[str]:
     # 创建解析器并设置所有参数
     parser = EnvArgumentParser(description="RTP LLM")
 
-    # 手动调用所有的init函数
-    from rtp_llm.server.server_args.batch_decode_scheduler_group_args import (
-        init_batch_decode_scheduler_group_args,
-    )
-    from rtp_llm.server.server_args.cache_store_group_args import (
-        init_cache_store_group_args,
-    )
-    from rtp_llm.server.server_args.concurrent_group_args import (
-        init_concurrent_group_args,
-    )
-    from rtp_llm.server.server_args.device_resource_group_args import (
-        init_device_resource_group_args,
-    )
-    from rtp_llm.server.server_args.embedding_group_args import (
-        init_embedding_group_args,
-    )
-    from rtp_llm.server.server_args.engine_group_args import init_engine_group_args
-    from rtp_llm.server.server_args.fifo_scheduler_group_args import (
-        init_fifo_scheduler_group_args,
-    )
-    from rtp_llm.server.server_args.fmha_group_args import init_fmha_group_args
-    from rtp_llm.server.server_args.gang_group_args import init_gang_group_args
-    from rtp_llm.server.server_args.generate_group_args import init_generate_group_args
-    from rtp_llm.server.server_args.hw_kernel_group_args import (
-        init_hw_kernel_group_args,
-    )
-    from rtp_llm.server.server_args.jit_group_args import init_jit_group_args
-    from rtp_llm.server.server_args.kv_cache_group_args import init_kv_cache_group_args
-    from rtp_llm.server.server_args.load_group_args import init_load_group_args
-    from rtp_llm.server.server_args.lora_group_args import init_lora_group_args
-    from rtp_llm.server.server_args.misc_group_args import init_misc_group_args
-    from rtp_llm.server.server_args.model_group_args import init_model_group_args
-    from rtp_llm.server.server_args.model_specific_group_args import (
-        init_model_specific_group_args,
-    )
-    from rtp_llm.server.server_args.moe_group_args import init_moe_group_args
-    from rtp_llm.server.server_args.parallel_group_args import init_parallel_group_args
-    from rtp_llm.server.server_args.pd_separation_group_args import (
-        init_pd_separation_group_args,
-    )
-    from rtp_llm.server.server_args.profile_debug_logging_group_args import (
-        init_profile_debug_logging_group_args,
-    )
-    from rtp_llm.server.server_args.quantization_group_args import (
-        init_quantization_group_args,
-    )
-    from rtp_llm.server.server_args.render_group_args import init_render_group_args
-    from rtp_llm.server.server_args.role_group_args import init_role_group_args
-    from rtp_llm.server.server_args.rpc_discovery_group_args import (
-        init_rpc_discovery_group_args,
-    )
-    from rtp_llm.server.server_args.sampling_group_args import init_sampling_group_args
-    from rtp_llm.server.server_args.scheduler_group_args import (
-        init_scheduler_group_args,
-    )
-    from rtp_llm.server.server_args.server_group_args import init_server_group_args
-    from rtp_llm.server.server_args.sparse_group_args import init_sparse_group_args
-    from rtp_llm.server.server_args.speculative_decoding_group_args import (
-        init_speculative_decoding_group_args,
-    )
-    from rtp_llm.server.server_args.vit_group_args import init_vit_group_args
-    from rtp_llm.server.server_args.worker_group_args import init_worker_group_args
+    # 使用统一的函数初始化所有参数组
+    from rtp_llm.server.server_args.server_args import init_all_group_args
 
-    # 初始化所有参数组
-    init_batch_decode_scheduler_group_args(parser)
-    init_cache_store_group_args(parser)
-    init_concurrent_group_args(parser)
-    init_device_resource_group_args(parser)
-    init_embedding_group_args(parser)
-    init_engine_group_args(parser)
-    init_fifo_scheduler_group_args(parser)
-    init_fmha_group_args(parser)
-    init_gang_group_args(parser)
-    init_generate_group_args(parser)
-    init_hw_kernel_group_args(parser)
-    init_kv_cache_group_args(parser)
-    init_load_group_args(parser)
-    init_lora_group_args(parser)
-    init_misc_group_args(parser)
-    init_model_group_args(parser)
-    init_model_specific_group_args(parser)
-    init_moe_group_args(parser)
-    init_parallel_group_args(parser)
-    init_profile_debug_logging_group_args(parser)
-    init_quantization_group_args(parser)
-    init_render_group_args(parser)
-    init_role_group_args(parser)
-    init_rpc_discovery_group_args(parser)
-    init_sampling_group_args(parser)
-    init_scheduler_group_args(parser)
-    init_server_group_args(parser)
-    init_sparse_group_args(parser)
-    init_speculative_decoding_group_args(parser)
-    init_vit_group_args(parser)
-    init_worker_group_args(parser)
-    init_jit_group_args(parser)
-    init_pd_separation_group_args(parser)
+    init_all_group_args(parser)
 
     # 获取所有参数信息
     all_args = get_all_arguments_from_parser(parser)
@@ -237,6 +140,10 @@ def generate_args_list(only_env_vars: bool = False) -> List[str]:
         if default_value is not None:
             # 从环境变量读取值
             env_value = read_env_value(env_name, default_value, arg_type)
+
+            # 跳过空字符串参数
+            if isinstance(env_value, str) and env_value == "":
+                continue
 
             # 根据only_env_vars参数决定是否只输出环境变量中存在的参数
             if only_env_vars:
