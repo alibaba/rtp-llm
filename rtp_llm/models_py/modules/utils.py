@@ -6,7 +6,7 @@ from typing import Any, Dict, Optional
 import torch
 from torch import nn
 
-from rtp_llm.ops import DeviceExporter, DeviceType, get_device
+from rtp_llm.ops import DeviceType, get_device
 
 
 # COPIED FROM DeepGEMM

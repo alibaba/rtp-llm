@@ -423,7 +423,6 @@ py_library(
     deps = [
         ":rtp_llm_frontend_lib",
     ] + select({
-        "@//:frontend": [],
         "@//:using_rocm": [
             ":models",
             ":async_model",

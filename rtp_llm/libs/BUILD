@@ -18,7 +18,8 @@ filegroup(
     name = "copy_aiter",
     srcs = select({
         "@//:using_aiter_src": [":aiter_src_copy",],
-        "//conditions:default": [":aiter_copy"],
+        "@//:using_rocm": [":aiter_copy"],
+        "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],
 )
@@ -110,9 +111,12 @@ filegroup(
     name = "libs",
     srcs = [],
     data = [
-        ":libth_transformer_so",
         ":copy_hf3fs_libs",
         ":copy_aiter",
         ":copy_acclep_libs",
-    ] + kernel_so_deps()
+        ":libth_transformer_frontend_so"
+    ] + kernel_so_deps() + select({
+        "//:frontend": [],
+        "//conditions:default": [":libth_transformer_so"],
+    })
 )

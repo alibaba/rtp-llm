@@ -8,6 +8,7 @@ load("//rtp_llm/cpp/deep_gemm:template.bzl", "dpsk_gemm_so_num", "qwen_gemm_so_n
 
 def copy_all_so():
     copy_so("//:th_transformer")
+    copy_so("//:th_transformer_frontend")
     copy_so("//rtp_llm/cpp/kernels:mmha1")
     copy_so("//rtp_llm/cpp/kernels:mmha2")
     copy_so("//rtp_llm/cpp/kernels:dmmha")

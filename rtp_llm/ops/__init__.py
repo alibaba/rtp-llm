@@ -98,15 +98,12 @@ except BaseException as e:
 
 
 try:
-    from libth_transformer import (
+    from libth_transformer_frontend import (
         ArpcConfig,
         BatchDecodeSchedulerConfig,
         CacheStoreConfig,
         ConcurrencyConfig,
-        DeviceExporter,
         DeviceResourceConfig,
-        DeviceType,
-        EngineScheduleInfo,
         EplbConfig,
         EplbMode,
         FfnDisAggregateConfig,
@@ -115,9 +112,7 @@ try:
         FMHAType,
         GptInitParameter,
         HWKernelConfig,
-        KVCache,
         KVCacheConfig,
-        KVCacheInfo,
         MiscellaneousConfig,
         MlaOpsType,
         ModelSpecificConfig,
@@ -131,12 +126,13 @@ try:
         ServiceDiscoveryConfig,
         SpecialTokens,
         SpeculativeExecutionConfig,
-        WorkerStatusInfo,
     )
-    from libth_transformer import get_block_cache_keys as cpp_get_block_cache_keys
-    from libth_transformer import get_device
+    from libth_transformer_frontend import (
+        get_block_cache_keys as cpp_get_block_cache_keys,
+    )
 
 except BaseException as e:
+    raise e
     logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
 
 
@@ -162,7 +158,14 @@ class EmptyClass:
 
 
 try:
-    from libth_transformer import EngineScheduleInfo, KVCacheInfo
+    from libth_transformer import (
+        DeviceExporter,
+        DeviceType,
+        EngineScheduleInfo,
+        KVCache,
+        KVCacheInfo,
+        LoadBalanceInfo,
+    )
     from libth_transformer import MultimodalInput as MultimodalInputCpp
     from libth_transformer import (
         PyAttentionInputs,
@@ -172,6 +175,8 @@ try:
         PyModelOutputs,
         RtpEmbeddingOp,
         RtpLLMOp,
+        WorkerStatusInfo,
+        get_device,
         rtp_llm_ops,
     )
 except BaseException as e:

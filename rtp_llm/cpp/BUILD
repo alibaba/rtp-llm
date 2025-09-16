@@ -40,7 +40,6 @@ cc_library(
         "@com_google_absl//absl/status:statusor",
         "@havenask//aios/autil:synchronized_queue",
         "@havenask//aios/autil:json",
-
     ] + select({
         "@//:using_arm": [
             "//rtp_llm/cpp/devices/arm_impl:arm_cpu_impl",
