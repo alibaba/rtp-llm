@@ -104,6 +104,7 @@ message MMPreprocessConfigPB {
     int32 fps = 5;
     int32 min_frames = 6;
     int32 max_frames = 7;
+    int32 mm_timeout_ms = 8;
 }
 
 message MultimodalInputPB {
