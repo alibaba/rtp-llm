@@ -1,5 +1,5 @@
 from rtp_llm.models.llama_weight import LlamaWeightInfo
-from rtp_llm.models.multimodal.multimodal_mixin import BaseMultiModalWeightInfo
+from rtp_llm.multimodal.multimodal_mixin import BaseMultiModalWeightInfo
 from rtp_llm.utils.model_weight import W
 
 

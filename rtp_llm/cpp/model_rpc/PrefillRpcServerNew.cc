@@ -6,10 +6,9 @@
 namespace rtp_llm {
 
 grpc::Status PrefillRpcServerNew::init(const EngineInitParams&                                maga_init_params,
-                                       py::object                                             mm_process_engine,
                                        std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params) {
     RTP_LLM_LOG_INFO("prefill rpc server new init");
-    return RemoteRpcServer::init(maga_init_params, mm_process_engine, std::move(propose_params));
+    return RemoteRpcServer::init(maga_init_params, std::move(propose_params));
 }
 
 grpc::Status PrefillRpcServerNew::RemoteGenerateNew(grpc::ServerContext*              context,

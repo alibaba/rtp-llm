@@ -11,7 +11,7 @@ import torch
 from PIL import Image
 from torch import nn
 
-from rtp_llm.models.multimodal.multimodal_common import (
+from rtp_llm.multimodal.multimodal_common import (
     AudioEmbeddingInterface,
     ImageEmbeddingInterface,
     ImageTransform,
