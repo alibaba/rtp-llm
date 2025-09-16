@@ -9,7 +9,7 @@ import sys
 import time
 import traceback
 from multiprocessing import Process
-from typing import List
+from typing import List, Optional
 
 import torch
 from setproctitle import setproctitle
@@ -24,13 +24,11 @@ from rtp_llm.distribute.worker_info import (
     g_worker_info,
     update_worker_info,
 )
-from rtp_llm.ops import VitSeparation
 from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
     set_global_controller,
 )
 from rtp_llm.utils.process_manager import ProcessManager
-
 
 setup_logging()
 
@@ -46,6 +44,7 @@ def local_rank_start(
     start_time = time.time()
     from rtp_llm.server.backend_manager import BackendManager
     from rtp_llm.utils.util import copy_gemm_config
+
     logging.info(f"import BackendManager took {time.time()- start_time:.2f}s")
 
     def signal_handler(signum, frame):
@@ -148,7 +147,8 @@ def _validate_dp_configuration():
 
 
 def _create_rank_processes(
-    global_controller: ConcurrencyController, py_env_configs: PyEnvConfigs
+    global_controller: ConcurrencyController,
+    py_env_configs: PyEnvConfigs,
 ):
     """Create and start rank processes, returns (processes, rank_pipe_readers)"""
     local_world_size = _get_local_world_size()
@@ -344,11 +344,6 @@ def start_backend_server(
         py_env_configs.server_config.worker_info_port_num,
         py_env_configs.distribute_config.remote_server_port,
     )
-
-    # TODO(xinfei.sxf) fix this
-    if py_env_configs.vit_config.vit_separation == VitSeparation.VIT_SEPARATION_ROLE:
-        from rtp_llm.server.vit_rpc_server import vit_start_server
-        return vit_start_server()
 
     if not torch.cuda.is_available():
         return local_rank_start(global_controller, py_env_configs)

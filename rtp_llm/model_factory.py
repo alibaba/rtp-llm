@@ -19,6 +19,7 @@ from rtp_llm.config.py_config_modules import (
     EmbeddingConfig,
     GenerateEnvConfig,
     LoraConfig,
+    PyEnvConfigs,
     QuantizationConfig,
     RenderConfig,
     VitConfig,
@@ -26,7 +27,12 @@ from rtp_llm.config.py_config_modules import (
 from rtp_llm.model_factory_register import _model_factory
 from rtp_llm.model_loader.load_config import LoadMethod
 from rtp_llm.models.propose_model.propose_model import ProposeModel
-from rtp_llm.ops import ProfilingDebugLoggingConfig, SpeculativeType, VitSeparation
+from rtp_llm.ops import (
+    ProfilingDebugLoggingConfig,
+    SpeculativeType,
+    TaskType,
+    VitSeparation,
+)
 from rtp_llm.utils.util import check_with_info
 
 
@@ -193,6 +199,7 @@ class ModelFactory:
             merge_lora: Whether to merge LoRA weights
             propose_model_config: Optional propose model configuration
             generate_env_config: Optional GenerateEnvConfig for loading default generate config
+            mm_process_engine: Optional MMProcessEngine instance for multimodal processing in EmbeddingCppEngine
 
         Returns:
             BaseEngine instance (RPCEngine or EmbeddingCppEngine)
@@ -208,12 +215,7 @@ class ModelFactory:
         if model_type == "fake_model":
             logging.info("create fake_model")
 
-        if (
-            vit_config is not None
-            and vit_config.vit_separation == VitSeparation.VIT_SEPARATION_ROLE
-        ):
-            logging.info("vit role, continue")
-            return model
+        logging.info(f"create model finish")
 
         # Create propose model if provided
         propose_model = ModelFactory.get_sp_model(
@@ -248,13 +250,14 @@ class ModelFactory:
         quantization_config: Optional[QuantizationConfig] = None,
         render_config: Optional[Any] = None,
         eplb_config: Optional[Any] = None,
+        vit_config: Optional[VitConfig] = None,
     ) -> ModelConfig:
         """Create ModelConfig from configuration objects.
 
         This method handles ModelConfig construction and initialization logic for the main model.
 
         The flow is:
-        1. Call model's _create_config to create ModelConfig with model architecture
+        1. Call model's create_config to create ModelConfig with model architecture
         2. Apply ModelArgs to ModelConfig (overwrite with user-provided values)
         3. Build ModelConfig with build_model_config
 
@@ -273,7 +276,7 @@ class ModelFactory:
             ModelConfig instance for the main model
         """
         model_cls = ModelFactory.get_model_cls(model_args.model_type)
-        model_config = model_cls._create_config(model_args.ckpt_path)
+        model_config = model_cls.create_config(model_args.ckpt_path)
         build_model_config(
             model_config=model_config,
             model_args=model_args,
@@ -281,6 +284,7 @@ class ModelFactory:
             profiling_debug_logging_config=profiling_debug_logging_config,
             embedding_config=embedding_config,
             quantization_config=quantization_config,
+            vit_config=vit_config,
         )
 
         # Set model metadata fields
@@ -376,9 +380,9 @@ class ModelFactory:
         propose_model_args.act_type = model_args.act_type
         propose_model_args.mla_ops_type = model_args.mla_ops_type
 
-        # Create propose ModelConfig using _create_config
+        # Create propose ModelConfig using create_config
         propose_model_cls = ModelFactory.get_model_cls(sp_config.model_type)
-        propose_model_config = propose_model_cls._create_config(
+        propose_model_config = propose_model_cls.create_config(
             sp_config.checkpoint_path
         )
         # Ensure max_seq_len matches main model

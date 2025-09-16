@@ -21,42 +21,46 @@ namespace rtp_llm {
 
 RtpEmbeddingOp::RtpEmbeddingOp() {}
 
-void RtpEmbeddingOp::init(py::object model, py::object engine_config, py::object vit_config, py::object mm_process_engine) {
+void RtpEmbeddingOp::init(py::object model,
+                          py::object engine_config,
+                          py::object vit_config,
+                          py::object mm_process_engine) {
     try {
         // Get model_config from model
         auto model_config = model.attr("model_config").cast<ModelConfig>();
-        
+
         // Extract individual config members from engine_config
         auto parallelism_config = engine_config.attr("parallelism_config").cast<ParallelismConfig>();
-        auto runtime_config = engine_config.attr("runtime_config").cast<RuntimeConfig>();
-        auto pd_sep_config = engine_config.attr("pd_sep_config").cast<PDSepConfig>();
+        auto runtime_config     = engine_config.attr("runtime_config").cast<RuntimeConfig>();
+        auto pd_sep_config      = engine_config.attr("pd_sep_config").cast<PDSepConfig>();
         auto concurrency_config = engine_config.attr("concurrency_config").cast<ConcurrencyConfig>();
-        auto fmha_config = engine_config.attr("fmha_config").cast<FMHAConfig>();
-        auto kv_cache_config = engine_config.attr("kv_cache_config").cast<KVCacheConfig>();
-        auto profiling_debug_logging_config = engine_config.attr("profiling_debug_logging_config").cast<ProfilingDebugLoggingConfig>();
-        auto hw_kernel_config = engine_config.attr("hw_kernel_config").cast<HWKernelConfig>();
+        auto fmha_config        = engine_config.attr("fmha_config").cast<FMHAConfig>();
+        auto kv_cache_config    = engine_config.attr("kv_cache_config").cast<KVCacheConfig>();
+        auto profiling_debug_logging_config =
+            engine_config.attr("profiling_debug_logging_config").cast<ProfilingDebugLoggingConfig>();
+        auto hw_kernel_config       = engine_config.attr("hw_kernel_config").cast<HWKernelConfig>();
         auto device_resource_config = engine_config.attr("device_resource_config").cast<DeviceResourceConfig>();
-        auto moe_config = engine_config.attr("moe_config").cast<MoeConfig>();
-        auto model_specific_config = engine_config.attr("model_specific_config").cast<ModelSpecificConfig>();
-        auto sp_config = engine_config.attr("sp_config").cast<SpeculativeExecutionConfig>();
-        auto cache_store_config = engine_config.attr("cache_store_config").cast<CacheStoreConfig>();
-        auto misc_config = engine_config.attr("misc_config").cast<MiscellaneousConfig>();
-        auto arpc_config = engine_config.attr("arpc_config").cast<ArpcConfig>();
-        auto grpc_config = engine_config.attr("grpc_config").cast<GrpcConfig>();
-        
+        auto moe_config             = engine_config.attr("moe_config").cast<MoeConfig>();
+        auto model_specific_config  = engine_config.attr("model_specific_config").cast<ModelSpecificConfig>();
+        auto sp_config              = engine_config.attr("sp_config").cast<SpeculativeExecutionConfig>();
+        auto cache_store_config     = engine_config.attr("cache_store_config").cast<CacheStoreConfig>();
+        auto misc_config            = engine_config.attr("misc_config").cast<MiscellaneousConfig>();
+        auto arpc_config            = engine_config.attr("arpc_config").cast<ArpcConfig>();
+        auto grpc_config            = engine_config.attr("grpc_config").cast<GrpcConfig>();
+
         // Extract vit_config
         VitConfig vit_config_cpp;
         if (!vit_config.is_none()) {
-            vit_config_cpp.vit_separation = vit_config.attr("vit_separation").cast<VitSeparation>();
+            vit_config_cpp.vit_separation = static_cast<VitSeparation>(vit_config.attr("vit_separation").cast<int>());
         }
-        
+
         py::object py_layers_weights = model.attr("weight").attr("weights");
         py::object py_global_weights = model.attr("weight").attr("global_weights");
-        
+
         auto convert    = WeightsConverter(false, model_config.quant_algo);
         auto gpt_weight = convert.createGptWeights(py_layers_weights, py_global_weights);
-        
-        auto py_model = model.attr("py_model");
+
+        auto             py_model = model.attr("py_model");
         EngineInitParams params(0,
                                 model_config,
                                 parallelism_config,
@@ -79,10 +83,10 @@ void RtpEmbeddingOp::init(py::object model, py::object engine_config, py::object
                                 vit_config_cpp,
                                 std::move(*gpt_weight),
                                 py_model);
-        py::object                custom_module = model.attr("custom_module");
-        py::object                py_render     = model.attr("custom_module").attr("renderer");
-        py::object                py_tokenizer  = model.attr("tokenizer");
-        py::object                py_handler    = model.attr("custom_module").attr("handler");
+        py::object       custom_module     = model.attr("custom_module");
+        py::object       py_render         = model.attr("custom_module").attr("renderer");
+        py::object       py_tokenizer      = model.attr("tokenizer");
+        py::object       py_handler        = model.attr("custom_module").attr("handler");
         bool             need_post_process = py_handler.attr("need_post_process").cast<bool>();
 
         if (parallelism_config.tp_rank == 0) {
@@ -95,7 +99,8 @@ void RtpEmbeddingOp::init(py::object model, py::object engine_config, py::object
         }
         embedding_engine_.reset(new EmbeddingEngine(params, py_handler));
         if (!mm_process_engine.is_none()) {
-            mm_processor_.reset(new LocalMultimodalProcessor(mm_process_engine, params.model_config_.mm_model_config, params.model_config_.max_seq_len));
+            mm_processor_.reset(new LocalMultimodalProcessor(
+                mm_process_engine, params.model_config_.mm_model_config, params.model_config_.max_seq_len));
         }
 
         startRpcServer(parallelism_config.model_rpc_port,
@@ -126,7 +131,7 @@ void RtpEmbeddingOp::init(py::object model, py::object engine_config, py::object
 }
 
 void RtpEmbeddingOp::initGrpcServer(int64_t                              embedding_rpc_port,
-                                    const GrpcConfig&                     grpc_config,
+                                    const GrpcConfig&                    grpc_config,
                                     std::shared_ptr<EmbeddingEngine>     embedding_engine,
                                     py::object                           py_render,
                                     py::object                           py_handler,
@@ -190,24 +195,27 @@ void RtpEmbeddingOp::startHttpServer(std::shared_ptr<EmbeddingEngine>     embedd
     }
 }
 
-
-void RtpEmbeddingOp::startRpcServer(int64_t model_rpc_port,
-                                    int64_t arpc_thread_num,
-                                    int64_t arpc_queue_num,
-                                    int64_t arpc_io_thread_num,
-                                    py::object                                    py_render,
-                                    py::object                                    py_tokenizer,
-                                    kmonitor::MetricsReporterPtr                  reporter,
+void RtpEmbeddingOp::startRpcServer(int64_t                              model_rpc_port,
+                                    int64_t                              arpc_thread_num,
+                                    int64_t                              arpc_queue_num,
+                                    int64_t                              arpc_io_thread_num,
+                                    py::object                           py_render,
+                                    py::object                           py_tokenizer,
+                                    kmonitor::MetricsReporterPtr         reporter,
                                     std::shared_ptr<MultimodalProcessor> mm_processor) {
-    auto arpc_service = std::move(createEmbeddingArpcService(
-        model_rpc_port, arpc_thread_num, arpc_queue_num, arpc_io_thread_num, py_render, py_tokenizer, mm_processor, embedding_engine_, reporter));
+    auto arpc_service = std::move(createEmbeddingArpcService(model_rpc_port,
+                                                             arpc_thread_num,
+                                                             arpc_queue_num,
+                                                             arpc_io_thread_num,
+                                                             py_render,
+                                                             py_tokenizer,
+                                                             mm_processor,
+                                                             embedding_engine_,
+                                                             reporter));
     if (arpc_service) {
         RTP_LLM_LOG_INFO("creating arpc service");
-        embedding_rpc_service_.reset(new ArpcServerWrapper(std::move(arpc_service),
-                                                                    arpc_thread_num,
-                                                                    arpc_queue_num,
-                                                                    arpc_io_thread_num,
-                                                                    model_rpc_port));
+        embedding_rpc_service_.reset(new ArpcServerWrapper(
+            std::move(arpc_service), arpc_thread_num, arpc_queue_num, arpc_io_thread_num, model_rpc_port));
         embedding_rpc_service_->start();
     } else {
         RTP_LLM_LOG_INFO("Embedding RPC not supported, skip");
@@ -249,7 +257,12 @@ RtpEmbeddingOp::~RtpEmbeddingOp() {
 void registerRtpEmbeddingOp(const py::module& m) {
     pybind11::class_<RtpEmbeddingOp>(m, "RtpEmbeddingOp")
         .def(pybind11::init<>())
-        .def("init", &RtpEmbeddingOp::init, py::arg("model"), py::arg("engine_config"), py::arg("vit_config"), py::arg("mm_process_engine"))
+        .def("init",
+             &RtpEmbeddingOp::init,
+             py::arg("model"),
+             py::arg("engine_config"),
+             py::arg("vit_config"),
+             py::arg("mm_process_engine"))
         .def("stop", &RtpEmbeddingOp::stop)
         .def("decode",
              &RtpEmbeddingOp::decode,
