@@ -136,69 +136,69 @@ class MultiModalMixin:
             param = eval(w_name)
             _safe_load_from_module(param, w, ctype)
 
-    def init_mm_trt(
-        self,
-        ckpt_path: str,
-        vit_params: VitParameters,
-        tp_size: str,
-        tp_rank: int,
-        device: Union[str, torch.device],
-        dtype: torch.dtype,
-    ):
-        # check whether VIT tensorrt exist
-        try:
-            pass
-        except ImportError:
-            raise RuntimeError("tensorrt library not fonnd")
+    # def init_mm_trt(
+    #     self,
+    #     ckpt_path: str,
+    #     vit_params: VitParameters,
+    #     tp_size: str,
+    #     tp_rank: int,
+    #     device: Union[str, torch.device],
+    #     dtype: torch.dtype,
+    # ):
+    #     # check whether VIT tensorrt exist
+    #     try:
+    #         pass
+    #     except ImportError:
+    #         raise RuntimeError("tensorrt library not fonnd")
 
-        nccl_op_: Optional[NcclOp] = None
-        if tp_size > 1:
-            nccl_op_ = NcclOp()
+    #     nccl_op_: Optional[NcclOp] = None
+    #     if tp_size > 1:
+    #         nccl_op_ = NcclOp()
 
-        try:
-            # TODO(xyz): currently model_name_path is ugly, we should let model_name_path passed by the frontend in
-            # environment variable
-            model_name_path = ckpt_path.replace("/", "_")
+    #     try:
+    #         # TODO(xyz): currently model_name_path is ugly, we should let model_name_path passed by the frontend in
+    #         # environment variable
+    #         model_name_path = ckpt_path.replace("/", "_")
 
-            visual_trt_engine = MultiModalTRTEngine(
-                model_name_path, vit_params.config.get("image_size"), device, dtype
-            )
+    #         visual_trt_engine = MultiModalTRTEngine(
+    #             model_name_path, vit_params.config.get("image_size"), device, dtype
+    #         )
 
-            # TRT engine doesn't support TP, here we only generate trt engine on rank0 if trt engine is not cached
-            if tp_rank == 0 and (
-                (not MultiModalTRTEngine.trt_engine_cached(model_name_path, dtype))
-                or self.vit_config.trt_cache_enabled == 0
-            ):
-                self._load_mm_weight(vit_params, dtype, device)
+    #         # TRT engine doesn't support TP, here we only generate trt engine on rank0 if trt engine is not cached
+    #         if tp_rank == 0 and (
+    #             (not MultiModalTRTEngine.trt_engine_cached(model_name_path, dtype))
+    #             or self.vit_config.trt_cache_enabled == 0
+    #         ):
+    #             self._load_mm_weight(vit_params, dtype, device)
 
-                # create cached dir if not exists
-                output_dir = MultiModalTRTEngine.cache_path(model_name_path, dtype)
-                if not os.path.exists(output_dir):
-                    os.makedirs(output_dir)
+    #             # create cached dir if not exists
+    #             output_dir = MultiModalTRTEngine.cache_path(model_name_path, dtype)
+    #             if not os.path.exists(output_dir):
+    #                 os.makedirs(output_dir)
 
-                visual_trt_engine.export_onnx(self.mm_part.vit, tp_size)
+    #             visual_trt_engine.export_onnx(self.mm_part.vit, tp_size)
 
-                # eagerly gc VIT network, release GPU memory for generating trt engine
-                self.gc_mm_part(vit_params)
+    #             # eagerly gc VIT network, release GPU memory for generating trt engine
+    #             self.gc_mm_part(vit_params)
 
-                visual_trt_engine.generate_trt_engine()
+    #             visual_trt_engine.generate_trt_engine()
 
-                # create a completion file to mark that the trt engine has been generated and cached
-                MultiModalTRTEngine.completion_file_path(model_name_path, dtype).touch()
+    #             # create a completion file to mark that the trt engine has been generated and cached
+    #             MultiModalTRTEngine.completion_file_path(model_name_path, dtype).touch()
 
-            # for TP > 1, only rank0 will generate trt engine, other ranks will wait rank0 to generate trt engine
-            if tp_size > 1:
-                nccl_op_.barrier(torch.device(device))
+    #         # for TP > 1, only rank0 will generate trt engine, other ranks will wait rank0 to generate trt engine
+    #         if tp_size > 1:
+    #             nccl_op_.barrier(torch.device(device))
 
-            self.gc_mm_part(vit_params)
-            # Currently, the multimodel network isn't split between devices. Only Rank 0 loads the weights.
-            # After supporting TP mm network, we will remove the check here.
-            if tp_rank == 0:
-                visual_trt_engine.load_trt_engine()
-                self.mm_part = visual_trt_engine
+    #         self.gc_mm_part(vit_params)
+    #         # Currently, the multimodel network isn't split between devices. Only Rank 0 loads the weights.
+    #         # After supporting TP mm network, we will remove the check here.
+    #         if tp_rank == 0:
+    #             visual_trt_engine.load_trt_engine()
+    #             self.mm_part = visual_trt_engine
 
-        except Exception as e:
-            raise RuntimeError(f"init multimodal trt error: {e}")
+    #     except Exception as e:
+    #         raise RuntimeError(f"init multimodal trt error: {e}")
 
     def gc_mm_part(self, vit_params: VitParameters):
         del self.mm_part
@@ -210,13 +210,14 @@ class MultiModalMixin:
     def load_mm_weight(self, ctype: str, tp_size: int, tp_rank: int, device: str):
 
         if StaticConfig.vit_config.vit_trt == 1:
-            self.init_mm_trt(
-                self.config.ckpt_path,
-                self.config.mm_related_params,
-                tp_size,
-                tp_rank,
-                device,
-            )
+            # self.init_mm_trt(
+            #     self.config.ckpt_path,
+            #     self.config.mm_related_params,
+            #     tp_size,
+            #     tp_rank,
+            #     device,
+            # )
+            raise Exception("trt engine is not supported")
             return
 
         # wait rank0 finish loading weight, otherwise gang_server will die

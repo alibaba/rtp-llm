@@ -8,7 +8,7 @@ from rtp_llm.async_decoder_engine.embedding.interface import EngineInputs, Engin
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.task_type import TaskType
 from rtp_llm.ops import MultimodalInputCpp, RtpEmbeddingOp
-from rtp_llm.utils.mm_process_engine import MMProcessEngine
+from rtp_llm.models.multimodal.mm_process_engine import MMProcessEngine
 
 
 class EmbeddingCppEngine(BaseEngine):
