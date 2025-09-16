@@ -72,6 +72,7 @@ class MMPreprocessConfig:
     fps: int = -1
     min_frames: int = -1
     max_frames: int = -1
+    mm_timeout_ms: int = 30000
 
 
 class MultimodalInput:
@@ -177,7 +178,6 @@ def get_bytes_io_from_url(url: str):
         url_data_cache_.insert_cache(url, res)
         return res
     else:
-        cached_res.seek(0)
         return cached_res
 
 

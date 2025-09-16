@@ -8,18 +8,23 @@ from rtp_llm.models.chat_glm_v4_vision_weight import (
     ChatGlmV4VisionWeightInfo,
 )
 from rtp_llm.models.eva2clip_vit import EVA2CLIPImageEmbedding
+from rtp_llm.models.multimodal.multimodal_common import mm_lock
 from rtp_llm.models.multimodal.multimodal_mixin import MultiModalMixin
+from rtp_llm.utils.multimodal_util import MMUrlType
 from rtp_llm.utils.util import get_config_from_path
 
 
 class ChatGlmV4VisionImageEmbedding(EVA2CLIPImageEmbedding):
     @torch.inference_mode()
-    def mm_process(self, mm_input, **kwargs):
-        embeddings = self.image_embedding([mm_input])[0]
-        pos_ids = [1] * embeddings.shape[0]
+    def embedding(self, data, mm_type: MMUrlType, **kwargs):
+        tensor_images = self.image_transform.encode(
+            [data], self._device, self._data_type
+        )
+        tensor_images = self.vit(tensor_images).to(device=self._device)[0]
+        pos_ids = torch.ones(tensor_images.shape[0], dtype=torch.int32)
         pos_ids[0] = 0
         pos_ids[-1] = 2
-        return embeddings, torch.tensor(pos_ids, dtype=torch.int32)
+        return tensor_images, pos_ids
 
 
 class ChatGlmV4Vision(ChatGlmV4, MultiModalMixin):
