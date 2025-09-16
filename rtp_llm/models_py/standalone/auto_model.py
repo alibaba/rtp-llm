@@ -25,7 +25,6 @@ from rtp_llm.tools.api.hf_model_helper import get_model_info_from_hf
 from rtp_llm.utils.model_weight import W
 
 
-
 class AutoModel:
     def __init__(
         self,
@@ -72,7 +71,7 @@ class AutoModel:
         self.gpt_model = ModelFactory._create_model(
             model_config=model_config,
             engine_config=engine_config,
-            vit_config=None,
+            vit_config=self.py_env_configs.vit_config,
             merge_lora=False,
         )
 

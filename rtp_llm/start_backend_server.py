@@ -9,7 +9,7 @@ import sys
 import time
 import traceback
 from multiprocessing import Process
-from typing import List
+from typing import List, Optional
 
 import torch
 from setproctitle import setproctitle
@@ -24,6 +24,7 @@ from rtp_llm.distribute.worker_info import (
     g_worker_info,
     update_worker_info,
 )
+from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
 from rtp_llm.ops import VitSeparation
 from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
@@ -39,6 +40,7 @@ def local_rank_start(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
     pipe_writer=None,
+    mm_process_engine: Optional[MMProcessEngine] = None,
 ):
     """Start local rank with proper signal handling for graceful shutdown"""
     backend_manager = None
@@ -75,7 +77,7 @@ def local_rank_start(
             setproctitle(f"rtp_llm_rank-{g_parallel_info.local_rank}")
         logging.info(f"start local {g_worker_info}, {g_parallel_info}")
         set_global_controller(global_controller)
-        backend_manager = BackendManager(py_env_configs)
+        backend_manager = BackendManager(py_env_configs, mm_process_engine)
         backend_manager.start()
         logging.info("Backend server initialized successfully, sending ready status")
 
@@ -148,7 +150,9 @@ def _validate_dp_configuration():
 
 
 def _create_rank_processes(
-    global_controller: ConcurrencyController, py_env_configs: PyEnvConfigs
+    global_controller: ConcurrencyController,
+    py_env_configs: PyEnvConfigs,
+    mm_process_engine: Optional[MMProcessEngine] = None,
 ):
     """Create and start rank processes, returns (processes, rank_pipe_readers)"""
     local_world_size = _get_local_world_size()
@@ -167,7 +171,7 @@ def _create_rank_processes(
         logging.info(f"[PROCESS_SPAWN]Start local rank outer {world_rank}")
         proc = Process(
             target=local_rank_start,
-            args=(global_controller, py_env_configs, writer),
+            args=(global_controller, py_env_configs, writer, mm_process_engine),
             name=f"rank-{world_rank}",
         )
         proc.start()
@@ -182,6 +186,7 @@ def multi_rank_start(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
     pipe_writer=None,
+    mm_process_engine: Optional[MMProcessEngine] = None,
 ):
     """Start multi-rank backend server with proper process management"""
     try:
@@ -191,7 +196,7 @@ def multi_rank_start(
 
     # Create processes and get pipe readers
     processes, rank_pipe_readers = _create_rank_processes(
-        global_controller, py_env_configs
+        global_controller, py_env_configs, mm_process_engine
     )
     local_world_size = len(processes)
 
@@ -331,6 +336,7 @@ def start_backend_server(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
     pipe_writer=None,
+    mm_process_engine: Optional[MMProcessEngine] = None,
 ):
     logging.info(f"[PROCESS_START]Start backend server process")
     setproctitle("rtp_llm_backend_server")
@@ -345,11 +351,6 @@ def start_backend_server(
         py_env_configs.distribute_config.remote_server_port,
     )
 
-    # TODO(xinfei.sxf) fix this
-    if py_env_configs.vit_config.vit_separation == VitSeparation.VIT_SEPARATION_ROLE:
-        from rtp_llm.server.vit_rpc_server import vit_start_server
-        return vit_start_server()
-
     if not torch.cuda.is_available():
         return local_rank_start(global_controller, py_env_configs)
 
@@ -363,9 +364,13 @@ def start_backend_server(
         )
 
     if torch.cuda.device_count() > 1 and g_parallel_info.world_size > 1:
-        return multi_rank_start(global_controller, py_env_configs, pipe_writer)
+        return multi_rank_start(
+            global_controller, py_env_configs, pipe_writer, mm_process_engine
+        )
     else:
-        return local_rank_start(global_controller, py_env_configs, pipe_writer)
+        return local_rank_start(
+            global_controller, py_env_configs, pipe_writer, mm_process_engine
+        )
 
 
 def main():

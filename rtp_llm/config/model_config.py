@@ -47,7 +47,7 @@ class VitParameters:
     special_token_ids: Dict[str, Any] = {}
     special_tokens: Dict[str, Any] = {}
     vit_weights: Any = None
-    support_batch: bool = False
+    preprocess_batch_size: int = 1
     eval_param_count = None
     eval_model_size = None
 
@@ -211,7 +211,7 @@ class ModelConfig(CppModelConfig):
         )  # maybe some model donot have lm_head
 
         if self.mm_related_params.eval_model_size:
-            model_size += self.mm_related_params.eval_model_size(self.mm_related_params)
+            model_size += self.mm_related_params.eval_model_size(self)
 
         return model_size
 
@@ -304,9 +304,7 @@ class ModelConfig(CppModelConfig):
         )
 
         if self.mm_related_params.eval_param_count:
-            param_count += self.mm_related_params.eval_param_count(
-                self.mm_related_params
-            )
+            param_count += self.mm_related_params.eval_param_count(self)
         return param_count
 
     def word_emb_param_count(self, vocab_size: int) -> int:

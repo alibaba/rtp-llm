@@ -4,7 +4,6 @@ import os
 from typing import Any, Dict, List
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, FfnConfig, FfnWeight
@@ -13,13 +12,13 @@ from rtp_llm.model_loader.model_weight_info import (
     ModelWeightInfo,
 )
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
-from rtp_llm.models.multimodal.multimodal_mixin import (
+from rtp_llm.models.qwen2_vl.qwen2_vl_vit import Qwen2VLImageEmbedding
+from rtp_llm.models.qwen_vl import QWen_VL
+from rtp_llm.multimodal.multimodal_mixin import (
     BaseMultiModalWeightInfo,
     BaseVitWeights,
     MultiModalMixin,
 )
-from rtp_llm.models.qwen2_vl.qwen2_vl_vit import Qwen2VLImageEmbedding
-from rtp_llm.models.qwen_vl import QWen_VL
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
@@ -218,21 +217,20 @@ class QWen2VLWeightInfo(ModelDeployWeightInfo, BaseMultiModalWeightInfo):
 class QWen2_VL(QWen_VL, MultiModalMixin):
     def _init_multimodal(
         self,
-        mm_model_config,
-        vit_config: VitConfig,
     ):
         # mm_related_params is in model_config, not mm_model_config
-        self.mm_part = Qwen2VLImageEmbedding(
-            self.model_config.mm_related_params, model_config=self.model_config
-        )
+        self.mm_part = Qwen2VLImageEmbedding(self.model_config)
         self.model_config.mm_related_params.vit_weights = QwenVL2VitWeight(
             {"vit": self.mm_part.visual}
         )
 
     @classmethod
-    def _create_config(cls, ckpt_path: str) -> ModelConfig:
+    def _get_mm_module(cls, config: ModelConfig):
+        return Qwen2VLImageEmbedding(config).visual
+
+    @classmethod
+    def _create_config(cls, ckpt_path: str):
         config = ModelConfig()
-        config.ckpt_path = ckpt_path
 
         config_path = os.path.join(ckpt_path, "config.json")
         if not os.path.exists(config_path):
@@ -244,7 +242,6 @@ class QWen2_VL(QWen_VL, MultiModalMixin):
         QWen2_VL._from_hf(config, config_json)
         QWen2_VL._load_vit_param(config, config_json)
         config.mm_related_params.config["ckpt_path"] = ckpt_path
-
         return config
 
     @staticmethod
@@ -255,8 +252,6 @@ class QWen2_VL(QWen_VL, MultiModalMixin):
 
             config.mm_related_params.special_tokens = SpecialTokens()
         config.mm_related_params.special_tokens.update({"default_mm_token": "<img/>"})
-        config.mm_related_params.eval_param_count = QWen2_VL.eval_vit_param_count
-        config.mm_related_params.eval_model_size = QWen2_VL.eval_vit_model_size
         config.mm_model_config.mm_sep_tokens = [
             [config_json["vision_start_token_id"], config_json["vision_end_token_id"]]
         ]
@@ -297,31 +292,6 @@ class QWen2_VL(QWen_VL, MultiModalMixin):
     @staticmethod
     def get_weight_cls():
         return QWen2VLWeightInfo
-
-    @classmethod
-    def eval_vit_model_size(cls, mm_related_params):
-        data_width = 4
-        return QWen2_VL.eval_vit_param_count(mm_related_params) * data_width
-
-    @classmethod
-    def eval_vit_param_count(cls, mm_related_params):
-        vit_config = mm_related_params.config
-        embed_dim = vit_config.get("embed_dim", 1280)
-        hidden_size = vit_config.get("hidden_size", 3584)
-        vit_size = (
-            vit_config.get("temporal_patch_size", 2)
-            * vit_config.get("spatial_patch_size", 14) ** 2
-            * vit_config.get("in_chans", 3)
-            * embed_dim
-        )
-        patch_merger_size = embed_dim * vit_config.get("spatial_merge_size", 2) ** 2
-        vit_size += patch_merger_size**2 + patch_merger_size * hidden_size + embed_dim
-        mlp_hidden_dim = embed_dim * vit_config.get("mlp_ratio", 4)
-        vit_size += vit_config.get("depth", 32) * (
-            embed_dim * 2 + embed_dim * mlp_hidden_dim + embed_dim * embed_dim * 4
-        )
-
-        return vit_size
 
 
 register_model("qwen2_vl", QWen2_VL, ["Qwen2VLForConditionalGeneration"])

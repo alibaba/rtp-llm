@@ -1,8 +1,5 @@
-from rtp_llm.models.multimodal.multimodal_mixin import (
-    BaseMultiModalWeightInfo,
-    BaseVitWeights,
-)
 from rtp_llm.models.qwen import QWenWeight
+from rtp_llm.multimodal.multimodal_mixin import BaseMultiModalWeightInfo, BaseVitWeights
 
 
 class QwenVLVitWeight(BaseVitWeights):

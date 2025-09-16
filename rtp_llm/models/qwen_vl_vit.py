@@ -15,7 +15,7 @@ from torch import nn
 from torch.nn import functional as F
 from torch.nn.init import trunc_normal_
 
-from rtp_llm.models.multimodal.multimodal_common import ImageTransform
+from rtp_llm.multimodal.multimodal_common import ImageTransform
 
 
 def get_abs_pos(abs_pos, tgt_size):
