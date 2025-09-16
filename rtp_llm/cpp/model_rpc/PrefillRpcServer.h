@@ -12,7 +12,6 @@ public:
     PrefillRpcServer() {}
     ~PrefillRpcServer() {}
     grpc::Status init(const EngineInitParams&                                maga_init_params,
-                      py::object                                             mm_process_engine,
                       std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params) override;
 
     grpc::Status GenerateStreamCall(grpc::ServerContext*                   context,
