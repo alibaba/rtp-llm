@@ -174,6 +174,11 @@ FfnLayerOutput CudaDevice::moeFfnFp8Contiguous(const FfnLayerParams& params, con
                                                            stream_);
     check_cuda_error();
 
+    BufferPtr fc1_activation =
+        allocateBuffer({DataType::TYPE_FP8_E4M3, {total_padding_num, (size_t)moe_inter_size}}, {"fc1_activation"});
+    BufferPtr fc1_activation_fp8_scales = allocateBuffer(
+        {DataType::TYPE_FP32, {total_padding_num, (size_t)moe_inter_size / 128}}, {"fc1_activation_fp8_scales"});
+
     BufferPtr fc1_result;
     if (is_gated_activation) {
         fc1_result =
@@ -197,10 +202,6 @@ FfnLayerOutput CudaDevice::moeFfnFp8Contiguous(const FfnLayerParams& params, con
     check_cuda_error();
     using GemmOutputType = __nv_bfloat16;
     using ScaleBiasType  = __nv_bfloat16;
-    BufferPtr fc1_activation =
-        allocateBuffer({DataType::TYPE_FP8_E4M3, {total_padding_num, (size_t)moe_inter_size}}, {"fc1_activation"});
-    BufferPtr fc1_activation_fp8_scales = allocateBuffer(
-        {DataType::TYPE_FP32, {total_padding_num, (size_t)moe_inter_size / 128}}, {"fc1_activation_fp8_scales"});
 
     doActivationContiguous<GemmOutputType, ScaleBiasType>(
         fc1_activation->data<__nv_fp8_e4m3>(),
