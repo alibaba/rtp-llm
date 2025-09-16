@@ -15,7 +15,7 @@ from rtp_llm.openai.renderers.custom_renderer import (
     RenderedInputs,
     RendererParams,
 )
-from rtp_llm.utils.multimodal_util import MMPreprocessConfig, MMUrlType
+from rtp_llm.utils.base_model_datatypes import MMPreprocessConfig, MMUrlType
 
 
 class QwenVLRenderer(CustomChatRenderer):
@@ -92,6 +92,17 @@ class Qwen2VLRenderer(CustomChatRenderer):
         final_messages = []
 
         def get_preprocess_config(config):
+            if config.crop_positions:
+                crop_positions = [float(x) for x in config.crop_positions.split(":")]
+                if len(crop_positions) == 6:
+                    crop_positions = [
+                        crop_positions[0] / crop_positions[4],
+                        crop_positions[1] / crop_positions[5],
+                        crop_positions[2] / crop_positions[4],
+                        crop_positions[3] / crop_positions[5],
+                    ]
+            else:
+                crop_positions = []
             return MMPreprocessConfig(
                 width=config.resized_width or -1,
                 height=config.resized_height or -1,
@@ -100,6 +111,8 @@ class Qwen2VLRenderer(CustomChatRenderer):
                 fps=config.fps or -1,
                 min_frames=config.min_frames or -1,
                 max_frames=config.max_frames or -1,
+                crop_positions=crop_positions,
+                mm_timeout_ms=config.mm_timeout_ms,
             )
 
         for message in messages:

@@ -75,11 +75,10 @@ namespace rtp_llm {
     }
 
 grpc::Status PrefillRpcServer::init(const EngineInitParams&                                maga_init_params,
-                                    py::object                                             mm_process_engine,
                                     std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params) {
     RTP_LLM_CHECK_WITH_INFO(maga_init_params.pd_sep_config.role_type == RoleType::PREFILL,
                             "prefill's role_type must be PREFILL");
-    auto ret = RemoteRpcServer::init(maga_init_params, mm_process_engine, std::move(propose_params));
+    auto ret = RemoteRpcServer::init(maga_init_params, std::move(propose_params));
     if (!ret.ok()) {
         return ret;
     }
@@ -340,10 +339,8 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
             response.mutable_flatten_output()->mutable_aux_info(i)->set_prefill_remote_reuse_len(
                 prefill_remote_reuse_len);
 
-            response.mutable_flatten_output()->mutable_aux_info(i)->set_decode_total_reuse_len(
-                decode_total_reuse_len);
-            response.mutable_flatten_output()->mutable_aux_info(i)->set_decode_local_reuse_len(
-                decode_local_reuse_len);
+            response.mutable_flatten_output()->mutable_aux_info(i)->set_decode_total_reuse_len(decode_total_reuse_len);
+            response.mutable_flatten_output()->mutable_aux_info(i)->set_decode_local_reuse_len(decode_local_reuse_len);
             response.mutable_flatten_output()->mutable_aux_info(i)->set_decode_remote_reuse_len(
                 decode_remote_reuse_len);
         }
