@@ -6,6 +6,7 @@ import time
 import traceback
 
 import requests
+import torch
 
 from rtp_llm.distribute.distributed_server import get_world_info
 from rtp_llm.utils.time_util import timer_wrapper
@@ -16,7 +17,7 @@ sys.path.append(os.path.join(str(CUR_PATH), ".."))
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import setup_and_configure_server
-from rtp_llm.ops import RoleType
+from rtp_llm.ops import RoleType, VitSeparation
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.utils.concurrency_controller import init_controller
 from rtp_llm.utils.process_manager import ProcessManager
@@ -52,10 +53,10 @@ def start_backend_server_impl(
         os._exit(-1)
 
     # Create pipe for subprocess startup status communication
-    pipe_reader, pipe_writer = multiprocessing.Pipe(duplex=False)
+    pipe_reader, pipe_writer = torch.multiprocessing.Pipe(duplex=False)
     logging.info(f"[PROCESS_SPAWN]Start backend server process outer")
 
-    backend_process = multiprocessing.Process(
+    backend_process = torch.multiprocessing.Process(
         target=start_backend_server,
         args=(global_controller, py_env_configs, pipe_writer),
         name="backend_manager",
@@ -115,6 +116,43 @@ def start_backend_server_impl(
         )
 
     return backend_process
+
+
+@timer_wrapper(description="start vit server")
+def start_vit_server_impl(
+    py_env_configs: PyEnvConfigs,
+    process_manager: ProcessManager = None,
+):
+    from rtp_llm.multimodal.vit_start_server import vit_start_server
+
+    server_config = py_env_configs.server_config
+    start_port = server_config.start_port
+    vit_server_port = (
+        WorkerInfo.server_port_offset(0, start_port)
+        if py_env_configs.role_config.role_type == RoleType.VIT
+        else WorkerInfo.vit_http_server_port_offset(0, start_port)
+    )
+
+    vit_process = torch.multiprocessing.Process(
+        target=vit_start_server,
+        args=(py_env_configs, vit_server_port),
+        name="vit_server",
+    )
+    vit_process.start()
+
+    if process_manager and vit_process:
+
+        def check_vit_ready():
+            return check_server_health(vit_server_port)
+
+        process_manager.register_health_check(
+            processes=[vit_process],
+            process_name="vit_server",
+            check_ready_fn=check_vit_ready,
+            retry_interval_seconds=0.1,
+        )
+
+    return vit_process
 
 
 @timer_wrapper(description="start frontend server")
@@ -193,7 +231,8 @@ def start_server(py_env_configs: PyEnvConfigs):
     logging.info(f"[PROCESS_START]Start server")
     start_time = time.time()
     try:
-        multiprocessing.set_start_method("spawn")
+        multiprocessing.set_start_method("spawn", force=True)
+        torch.multiprocessing.set_start_method("spawn", force=True)
     except RuntimeError as e:
         logging.warning(str(e))
 
@@ -213,20 +252,41 @@ def start_server(py_env_configs: PyEnvConfigs):
 
     # Initialize backend_process to None in case role_type is FRONTEND
     backend_process = None
-
     try:
-        if py_env_configs.role_config.role_type != RoleType.FRONTEND:
+        if (
+            py_env_configs.role_config.role_type == RoleType.VIT
+            and py_env_configs.vit_config.vit_separation
+            == VitSeparation.VIT_SEPARATION_ROLE
+        ) or (
+            (
+                py_env_configs.role_config.role_type == RoleType.PDFUSION
+                or py_env_configs.role_config.role_type == RoleType.PREFILL
+            )
+            and py_env_configs.vit_config.vit_separation
+            == VitSeparation.VIT_SEPARATION_LOCAL
+        ):
+            logging.info("start vit server")
+            vit_process = start_vit_server_impl(py_env_configs, process_manager)
+            process_manager.add_process(vit_process)
+
+        if (
+            py_env_configs.role_config.role_type != RoleType.FRONTEND
+            and py_env_configs.role_config.role_type != RoleType.VIT
+        ):
+            # vit and frontend role do not start backend server
             logging.info("start backend server")
             backend_process = start_backend_server_impl(
                 global_controller, py_env_configs, process_manager
             )
             process_manager.add_process(backend_process)
 
-        logging.info("start frontend server")
-        frontend_process = start_frontend_server_impl(
-            global_controller, py_env_configs, process_manager
-        )
-        process_manager.add_processes(frontend_process)
+        if py_env_configs.role_config.role_type != RoleType.VIT:
+            # vit has its own frontend server
+            logging.info("start frontend server")
+            frontend_process = start_frontend_server_impl(
+                global_controller, py_env_configs, process_manager
+            )
+            process_manager.add_processes(frontend_process)
 
         # Start parallel health checks and wait for completion
         if not process_manager.run_health_checks():

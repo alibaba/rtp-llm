@@ -51,7 +51,7 @@ void RtpEmbeddingOp::init(py::object model,
         // Extract vit_config
         VitConfig vit_config_cpp;
         if (!vit_config.is_none()) {
-            vit_config_cpp.vit_separation = vit_config.attr("vit_separation").cast<VitSeparation>();
+            vit_config_cpp.vit_separation = static_cast<VitSeparation>(vit_config.attr("vit_separation").cast<int>());
         }
 
         py::object py_layers_weights = model.attr("weight").attr("weights");

@@ -105,6 +105,8 @@ message MMPreprocessConfigPB {
     int32 fps = 5;
     int32 min_frames = 6;
     int32 max_frames = 7;
+    repeated float crop_positions = 8;
+    int32 mm_timeout_ms = 9;
 }
 
 message MultimodalInputPB {
@@ -460,5 +462,7 @@ service RpcService {
 }
 
 service MultimodalRpcService {
+    rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
+    rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
     rpc RemoteMultimodalEmbedding(MultimodalInputsPB) returns (MultimodalOutputsPB);
 }

@@ -333,10 +333,11 @@ def fetch_model_files_to_local(py_env_configs: PyEnvConfigs):
     if tokenizer_path:
         model_args.tokenizer_path = fetch_remote_file_to_local(tokenizer_path)
 
-    # Fetch extra_data_path from model_args
-    if model_args.extra_data_path:
-        local_extra_data_path = fetch_remote_file_to_local(model_args.extra_data_path)
-        model_args.local_extra_data_path = local_extra_data_path
+    # Fetch extra_data_path from vit_config
+    vit_config = py_env_configs.vit_config
+    if vit_config.extra_data_path:
+        local_extra_data_path = fetch_remote_file_to_local(vit_config.extra_data_path)
+        vit_config.local_extra_data_path = local_extra_data_path
 
     # Fetch ptuning_path from model_args
     if model_args.ptuning_path:
@@ -370,7 +371,7 @@ def fetch_model_files_to_local(py_env_configs: PyEnvConfigs):
         f"Fetched model files - checkpoint_path: {model_args.ckpt_path}, "
         f"tokenizer_path: {model_args.tokenizer_path}, "
         f"ptuning_path: {model_args.ptuning_path}, "
-        f"extra_data_path: {model_args.local_extra_data_path}, "
+        f"extra_data_path: {vit_config.local_extra_data_path}, "
         f"phy2log_path: {model_args.phy2log_path}"
     )
 

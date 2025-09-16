@@ -32,7 +32,6 @@ from rtp_llm.ops import (
 consume_s = time.time() - st
 print(f"import rtp_llm.ops took {consume_s:.2f}s")
 
-
 DEFAULT_START_PORT = 8088
 COORDINATOR_INFO_PORT_NUM = 11
 MIN_WORKER_INFO_PORT_NUM = 8
@@ -241,6 +240,13 @@ class VitConfig:
         self.igraph_vipserver: int = 0
         self.igraph_table_name: str = ""
         self.default_key: Optional[str] = None
+        self.mm_preprocess_max_workers: int = 10
+        self.mm_batch_size: int = 1
+        self.biencoder_preprocess: bool = False
+        self.extra_input_in_mm_embedding = ""
+        self.mm_timeout_ms: Optional[int] = None
+        self.extra_data_path: str = ""
+        self.local_extra_data_path: str = ""
 
     def to_string(self):
         return (
@@ -255,7 +261,14 @@ class VitConfig:
             f"igraph_search_dom: {self.igraph_search_dom}\n"
             f"igraph_vipserver: {self.igraph_vipserver}\n"
             f"igraph_table_name: {self.igraph_table_name}\n"
-            f"igraph_default_key: {self.default_key}"
+            f"igraph_default_key: {self.default_key}\n"
+            f"mm_preprocess_max_workers: {self.mm_preprocess_max_workers}\n"
+            f"mm_batch_size: {self.mm_batch_size}\n"
+            f"biencoder_preprocess: {self.biencoder_preprocess}\n"
+            f"extra_input_in_mm_embedding: {self.extra_input_in_mm_embedding}\n"
+            f"mm_timeout_ms: {self.mm_timeout_ms}\n"
+            f"extra_data_path: {self.extra_data_path}\n"
+            f"local_extra_data_path: {self.local_extra_data_path}"
         )
 
 
@@ -313,13 +326,9 @@ class QuantizationConfig:
 class EmbeddingConfig:
     def __init__(self):
         self.embedding_model: int = 0
-        self.extra_input_in_mm_embedding = ""
 
     def to_string(self):
-        return (
-            f"embedding_model: {self.embedding_model}\n"
-            f"extra_input_in_mm_embedding: {self.extra_input_in_mm_embedding}"
-        )
+        return f"embedding_model: {self.embedding_model}"
 
 
 class RoleConfig:

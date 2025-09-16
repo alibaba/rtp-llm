@@ -204,6 +204,31 @@ py_library(
 )
 
 py_library(
+    name = "multimodal",
+    srcs = glob([
+        "multimodal/*.py",
+        "multimodal/**/*.py",
+    ]),
+    deps = [
+        ":utils",
+        ":Pillow",
+        ":pillow-heif",
+        ":pillow-avif-plugin",
+        ":nest_asyncio",
+        ":matplotlib",
+        ":torchvision",
+        ":protobuf",
+        ":pyOpenSSL",
+    ] + select({
+        "@//:using_arm": [],
+	    "@//:using_rocm": ["pyrsmi", "amdsmi"],
+        "@//:using_cpu": [],
+        "@//:using_cuda12_arm": [],
+        "//conditions:default": ["flash_attn"]
+    }),
+)
+
+py_library(
     name = "models",
     srcs = glob([
         "models/*.py",
@@ -217,22 +242,16 @@ py_library(
         ":pynvml",
         ":tiktoken",
         ":protobuf",
-        ":Pillow",
-        ":pillow-heif",
-        ":pillow-avif-plugin",
         ":torch",
-        ":torchvision",
-        ":pyOpenSSL",
         ":einops",
         ":utils",
         ":ops",
         ":timm",
         ":onnx",
         #":decord",
-        ":nest_asyncio",
-        ":matplotlib",
         "//rtp_llm/model_loader:loader",
         "//rtp_llm/models_py:models",
+        ":multimodal",
     ] + arch_dep + select({
         "@//:using_cuda": deep,
         "//conditions:default": []
@@ -254,12 +273,6 @@ py_library(
         "//conditions:default": [
             "xfastertransformer_devel",
         ],
-    }) + select({
-        "@//:using_arm": [],
-	    "@//:using_rocm": ["pyrsmi", "amdsmi"],
-        "@//:using_cpu": [],
-        "@//:using_cuda12_arm": [],
-        "//conditions:default": ["flash_attn"]
     }) + triton_deps(["triton"]) + internal_deps(),
 )
 
@@ -289,7 +302,8 @@ py_library(
         "config/**/*.py",
     ]),
     deps = [
-        "//rtp_llm/distribute:distribute"
+        "//rtp_llm/distribute:distribute",
+        ":multimodal"
     ],
     data = [":alog_config"]
 )
