@@ -21,8 +21,8 @@ from rtp_llm.utils.base_model_datatypes import (
     GenerateOutput,
     GenerateOutputs,
     GenerateResponse,
+    MultimodalInput,
 )
-from rtp_llm.utils.multimodal_util import MultimodalInput
 from rtp_llm.utils.time_util import current_time_ms
 from rtp_llm.utils.util import AtomicCounter
 from rtp_llm.utils.word_util import (

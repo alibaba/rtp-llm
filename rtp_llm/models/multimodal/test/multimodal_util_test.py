@@ -6,7 +6,7 @@ import unittest
 
 from PIL import Image
 
-from rtp_llm.utils.multimodal_util import get_bytes_io_from_url
+from rtp_llm.models.multimodal.multimodal_util import get_bytes_io_from_url
 
 
 class TestMultiModalUtil(unittest.TestCase):

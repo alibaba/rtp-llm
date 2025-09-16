@@ -1,6 +1,4 @@
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.config.py_config_modules import VitConfig
-from rtp_llm.config.model_config import VitParameters
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.multimodal.multimodal_mixin import (
     BaseMultiModalWeightInfo,
@@ -17,14 +15,15 @@ class QWenV2AudioWeightinfo(QWenV2Weight, BaseMultiModalWeightInfo):
         QWenV2Weight.__init__(self, **kwargs)
         BaseMultiModalWeightInfo.__init__(self, vit_weights=vit_weights, **kwargs)
 
+
 class QWenV2Audio(QWenV2, MultiModalMixin):
     def _init_multimodal(
         self,
-        mm_model_config,
-        vit_config: VitConfig,
     ):
         # mm_related_params is in model_config, not mm_model_config
-        self.mm_part = Processor(self.model_config.mm_related_params, self.model_config.ckpt_path)
+        self.mm_part = Processor(
+            self.model_config.mm_related_params, self.model_config.ckpt_path
+        )
         self.model_config.mm_related_params.vit_weights = BaseVitWeights(
             {
                 "multi_modal_projector": self.mm_part.multi_modal_projector,
@@ -33,6 +32,10 @@ class QWenV2Audio(QWenV2, MultiModalMixin):
             with_prefix=True,
         )
         self.model_config.mm_related_params.vit_weights._ckpt_prefix = ""
+
+    @classmethod
+    def _get_mm_module(cls, config: ModelConfig):
+        return Processor(config).audio_tower
 
     @classmethod
     def _create_config(cls, ckpt_path: str):
@@ -54,12 +57,16 @@ class QWenV2Audio(QWenV2, MultiModalMixin):
         # config.activation_type = config_json["hidden_act"]
         config.inter_size = config_json.get("intermediate_size", 11008)
         config.attn_config.head_num = config_json.get("num_attention_heads", 32)
-        config.attn_config.kv_head_num = config_json.get("num_key_value_heads", config.attn_config.head_num)
-        config.attn_config.size_per_head = config_json.get("hidden_size", 4096) // config.attn_config.head_num
+        config.attn_config.kv_head_num = config_json.get(
+            "num_key_value_heads", config.attn_config.head_num
+        )
+        config.attn_config.size_per_head = (
+            config_json.get("hidden_size", 4096) // config.attn_config.head_num
+        )
         config.num_layers = config_json.get("num_hidden_layers", 32)
-        config.attn_config.rope_config.base = int(config_json.get(
-            "rope_theta", config.attn_config.rope_config.base
-        ))
+        config.attn_config.rope_config.base = int(
+            config_json.get("rope_theta", config.attn_config.rope_config.base)
+        )
         config.vocab_size = config_json["vocab_size"]
         config.attn_config.rope_config.dim = config.attn_config.size_per_head
         config.layernorm_eps = config_json.get("rms_norm_eps", 1e-06)

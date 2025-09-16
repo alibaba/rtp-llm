@@ -4,6 +4,7 @@ import logging
 import threading
 import time
 import traceback
+from datetime import timedelta
 from typing import Any, Dict, List, Optional, Union
 
 import requests
@@ -11,15 +12,12 @@ import torch
 from fastapi import Request
 from fastapi.responses import ORJSONResponse
 from pydantic import BaseModel
-from datetime import timedelta
-
 
 from rtp_llm.access_logger.access_logger import AccessLogger
 from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 from rtp_llm.config.engine_config import EngineConfig, update_worker_addrs
-from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.log_config import get_log_path
-from rtp_llm.ops import TaskType, EngineScheduleInfo, KVCacheInfo, WorkerStatusInfo
+from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.distribute.gang_server import GangServer
 from rtp_llm.distribute.worker_info import g_parallel_info
 from rtp_llm.lora.lora_manager import LoraManager
@@ -27,6 +25,7 @@ from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.model_loader.weight_manager import WeightManager
 from rtp_llm.models_py.distributed.collective_torch import init_distributed_environment
+from rtp_llm.ops import EngineScheduleInfo, KVCacheInfo, TaskType, WorkerStatusInfo
 from rtp_llm.server.misc import format_exception
 from rtp_llm.server.worker_status import TaskInfo, WorkStatus
 from rtp_llm.structure.request_extractor import request_id_field_name
@@ -41,11 +40,15 @@ from rtp_llm.utils.version_info import VersionInfo
 
 class BackendServer(object):
     def __init__(self, py_env_configs: PyEnvConfigs):
-        self._access_logger = AccessLogger(get_log_path(),
-                                           py_env_configs.profiling_debug_logging_config.log_file_backup_count,
-                                           py_env_configs.server_config.rank_id,
-                                           py_env_configs.server_config.frontend_server_id)
-        self._gang_server = GangServer(py_env_configs.gang_config, py_env_configs.server_config)
+        self._access_logger = AccessLogger(
+            get_log_path(),
+            py_env_configs.profiling_debug_logging_config.log_file_backup_count,
+            py_env_configs.server_config.rank_id,
+            py_env_configs.server_config.frontend_server_id,
+        )
+        self._gang_server = GangServer(
+            py_env_configs.gang_config, py_env_configs.server_config
+        )
         self._lora_manager = None
         self._weight_manager = None
         self.thread_lock_ = threading.Lock()
@@ -61,7 +64,7 @@ class BackendServer(object):
             # for debug online
             logging.info("DEBUG_START_FAKE_PROCESS is set, start fake backend server")
             return
-        
+
         self._gang_server.start()
 
         # Create EngineConfig from py_env_configs
@@ -76,7 +79,7 @@ class BackendServer(object):
 
         # Get gang_info from gang_server after start()
         gang_info = self._gang_server._gang_info
-        
+
         # Update worker addresses using gang_info
         update_worker_addrs(
             engine_config.runtime_config,
@@ -85,8 +88,8 @@ class BackendServer(object):
         )
 
         # Store role_type from engine_config
-        self._role_type = 'RoleType.' + engine_config.pd_sep_config.role_type.name
-        
+        self._role_type = "RoleType." + engine_config.pd_sep_config.role_type.name
+
         # Create model configs (ModelConfig construction is handled in ModelFactory)
         model_config = ModelFactory.create_model_config(
             model_args=py_env_configs.model_args,
@@ -99,20 +102,20 @@ class BackendServer(object):
             render_config=py_env_configs.render_config,
             eplb_config=py_env_configs.eplb_config,
         )
-        
+
         # Update engine_config based on model_config
         ModelFactory.update_engine_config_from_model_config(
             engine_config=engine_config,
             model_config=model_config,
         )
-        
+
         # Create propose model config if needed
         propose_model_config = ModelFactory.create_propose_model_config(
             engine_config=engine_config,
             model_config=model_config,
             model_args=py_env_configs.model_args,
         )
-        
+
         # Create engine using new API (returns BaseEngine, not AsyncModel)
         # All metadata is already in model_config (including mm_model_config)
         # vit_config is needed for multimodal models
@@ -123,13 +126,15 @@ class BackendServer(object):
             vit_config=py_env_configs.vit_config,
             propose_model_config=propose_model_config,
             merge_lora=py_env_configs.lora_config.merge_lora,
+            py_env_configs=py_env_configs,
         )
 
         max_lora_model_size = engine_config.model_specific_config.max_lora_model_size
         if model_config.task_type == TaskType.LANGUAGE_MODEL:
-            self._lora_manager = LoraManager(self.engine, max_lora_model_size=max_lora_model_size)
+            self._lora_manager = LoraManager(
+                self.engine, max_lora_model_size=max_lora_model_size
+            )
             self._weight_manager = WeightManager(self.engine)
-
 
     def stop(self) -> None:
         if isinstance(self.engine, BaseEngine):

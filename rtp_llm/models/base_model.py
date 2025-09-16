@@ -1,36 +1,37 @@
-import logging
-from typing import Optional, Union, Any
 import json
+import logging
 import os
+from typing import Any, Optional, Union
 
 import torch
 
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.kv_cache_config import KVCacheConfig
+from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import (
     BaseTokenizer,
     TokenizerFactory,
 )
-from rtp_llm.model_loader.loader import ModelLoader, get_model_loader
 from rtp_llm.model_loader.load_config import LoadMethod
+from rtp_llm.model_loader.loader import ModelLoader, get_model_loader
 from rtp_llm.model_loader.model_weight_info import ModelDeployWeightInfo, ModelWeights
 from rtp_llm.models.downstream_modules.custom_module import CustomModule
 from rtp_llm.models.downstream_modules.utils import create_custom_module
 from rtp_llm.models.multimodal.multimodal_mixin import MultiModalMixin
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
-from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.ops import (
-    VitSeparation,
-    ParallelismConfig,
-    HWKernelConfig,
-    FMHAConfig,
-    MoeConfig,
-    ProfilingDebugLoggingConfig,
     DeviceResourceConfig,
+    FMHAConfig,
+    HWKernelConfig,
+    MoeConfig,
+    ParallelismConfig,
+    ProfilingDebugLoggingConfig,
+    VitSeparation,
 )
 from rtp_llm.utils.database import CkptDatabase
 from rtp_llm.utils.time_util import timer_wrapper
+
 
 class BaseModel(object):
 
@@ -91,16 +92,18 @@ class BaseModel(object):
         self.default_generate_config: GenerateConfig = GenerateConfig()
         self.load_tokenizer()
 
-        if self.kv_cache_config.multi_task_prompt or self.kv_cache_config.multi_task_prompt_str:
+        if (
+            self.kv_cache_config.multi_task_prompt
+            or self.kv_cache_config.multi_task_prompt_str
+        ):
             self.kv_cache_config.load_and_update_task_prompt_config(self.tokenizer)
 
         if self.model_config.generate_env_config:
             self.load_default_generate_config(self.model_config.generate_env_config)
-        
 
     def load_default_generate_config(self, generate_env_config: Optional[Any] = None):
         """Load default generate config from GenerateEnvConfig.
-        
+
         Args:
             generate_env_config: Optional GenerateEnvConfig object
         """
@@ -118,7 +121,6 @@ class BaseModel(object):
                          {json.dumps(self.default_generate_config.model_dump(), indent=4)}"
             )
 
-
     def _get_device_str(self) -> str:
         """Get device string from parallelism_config."""
         return f"cuda:{self.parallelism_config.local_rank}"
@@ -133,7 +135,7 @@ class BaseModel(object):
             raise Exception("current model can't support cuda graph in py model mode")
 
         self._may_init_multimodal()
-        self.custom_module = self._init_custom_module()        
+        self.custom_module = self._init_custom_module()
 
         self.model_weights_loader = self.create_model_loader()
         self.py_eplb = self.model_weights_loader._py_eplb
@@ -170,6 +172,13 @@ class BaseModel(object):
         self.model_weights_loader.force_clean_cuda_memory()
 
     @classmethod
+    def create_config(cls, ckpt_path: str) -> ModelConfig:
+        config = cls._create_config(ckpt_path)
+        if cls.is_multimodal():
+            cls.init_model_weight_evaluator(config)
+        return config
+
+    @classmethod
     def _create_config(cls, ckpt_path: str) -> ModelConfig:
         raise NotImplementedError()
 
@@ -190,7 +199,7 @@ class BaseModel(object):
         device_resource_config: DeviceResourceConfig,
     ) -> "BaseModel":
         """Create model from independent configuration objects.
-        
+
         Args:
             model_config: Model configuration (contains template_type, model_name, lora_infos, mm_model_config)
             parallelism_config: Parallelism configuration
@@ -247,11 +256,8 @@ class BaseModel(object):
         vit_separation = self.vit_config.vit_separation
         if vit_separation != VitSeparation.VIT_SEPARATION_REMOTE:
             self.init_multimodal(
-                mm_model_config=self.model_config.mm_model_config,
-                vit_config=self.vit_config,
                 device=self._get_device_str(),
             )
-
 
     def _init_custom_module(self) -> Optional[CustomModule]:
         return create_custom_module(self.model_config, self.tokenizer)
@@ -265,8 +271,9 @@ class BaseModel(object):
         if self.tokenizer.eos_token_id:
             self.model_config.special_tokens.eos_token_id = self.tokenizer.eos_token_id
 
-    def is_multimodal(self) -> bool:
-        return isinstance(self, MultiModalMixin)
+    @classmethod
+    def is_multimodal(cls) -> bool:
+        return issubclass(cls, MultiModalMixin)
 
     def _load_model_weights(self):
         self.weight: ModelWeights = self.model_weights_loader.load_weights(
@@ -280,7 +287,11 @@ class BaseModel(object):
 
     @timer_wrapper(description="load multimodal")
     def _load_multimodal(self):
-        if self.vit_config is not None and self.vit_config.vit_separation != VitSeparation.VIT_SEPARATION_REMOTE and self.is_multimodal():
+        if (
+            self.vit_config is not None
+            and self.vit_config.vit_separation != VitSeparation.VIT_SEPARATION_REMOTE
+            and self.is_multimodal()
+        ):
             assert isinstance(self, MultiModalMixin)  # for syntax check
             # Convert torch.dtype to string for load_mm_weight
             dtype_str = self.model_config.data_type
@@ -294,7 +305,9 @@ class BaseModel(object):
 
     def create_model_loader(self) -> ModelLoader:
         # Create database locally, only used for model loading
-        database = CkptDatabase(self.model_config.ckpt_path, self.model_config.ptuning_path)
+        database = CkptDatabase(
+            self.model_config.ckpt_path, self.model_config.ptuning_path
+        )
         lora_infos = self.model_config.lora_infos
         static_lora: bool = len(lora_infos) == 1
         if static_lora:
@@ -326,4 +339,3 @@ class BaseModel(object):
             database,
             load_method=self.load_method,
         )
-

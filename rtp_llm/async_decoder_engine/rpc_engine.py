@@ -10,7 +10,6 @@ from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.propose_model.propose_model import ProposeModel
 from rtp_llm.ops import EngineScheduleInfo, KVCacheInfo, WorkerStatusInfo
 from rtp_llm.ops.rtp_llm.rtp_llm_op import RtpLLMOp
-from rtp_llm.utils.mm_process_engine import MMProcessEngine
 
 
 class RPCEngine(BaseEngine):
@@ -38,12 +37,8 @@ class RPCEngine(BaseEngine):
         self.token_processor = TokenProcessor(
             self.tokenizer, self.model.model_config.special_tokens
         )
-        if self.model.is_multimodal():
-            self.mm_engine = MMProcessEngine(self.model, self.model.vit_config)
-        else:
-            self.mm_engine = None
         self.rtp_llm_op_ = RtpLLMOp(
-            engine_config, model, self.mm_engine, propose_model, self.token_processor
+            engine_config, model, propose_model, self.token_processor
         )
 
     @override

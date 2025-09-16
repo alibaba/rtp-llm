@@ -2,9 +2,8 @@ import logging
 import os
 from typing import Optional
 
-from rtp_llm.config.model_args import ModelArgs
 from rtp_llm.config.kv_cache_config import KVCacheConfig
-
+from rtp_llm.config.model_args import ModelArgs
 from rtp_llm.ops import (
     ArpcConfig,
     CacheStoreConfig,
@@ -18,8 +17,8 @@ from rtp_llm.ops import (
     MiscellaneousConfig,
     ModelSpecificConfig,
     MoeConfig,
-    PDSepConfig,
     ParallelismConfig,
+    PDSepConfig,
     ProfilingDebugLoggingConfig,
     RoleType,
     RuntimeConfig,
@@ -30,7 +29,7 @@ from rtp_llm.ops import (
 
 DEFAULT_START_PORT = 8088
 MASTER_INFO_PORT_NUM = 11
-MIN_WORKER_INFO_PORT_NUM = 8
+MIN_WORKER_INFO_PORT_NUM = 10
 WORKER_INFO_PORT_NUM = MIN_WORKER_INFO_PORT_NUM
 
 
@@ -42,8 +41,10 @@ class ServerConfig:
         self.frontend_server_id = 0
         self.rank_id = 0
         self.worker_info_port_num: int = MIN_WORKER_INFO_PORT_NUM
-        self.shutdown_timeout: int = 50  # Default timeout in seconds, -1 means wait indefinitely
-        self.monitor_interval: int = 1   # Monitor interval in seconds
+        self.shutdown_timeout: int = (
+            50  # Default timeout in seconds, -1 means wait indefinitely
+        )
+        self.monitor_interval: int = 1  # Monitor interval in seconds
 
     # update_from_args 方法已不再需要
     # 配置绑定现在通过声明式 bind_to 参数在 add_argument 时自动处理
@@ -63,6 +64,7 @@ class ServerConfig:
 
 class PyMiscellaneousConfig:
     """Python wrapper for C++ MiscellaneousConfig with additional Python-only fields."""
+
     def __init__(self):
         self.misc_config = MiscellaneousConfig()
         # Additional Python-only fields
@@ -82,6 +84,7 @@ class PyMiscellaneousConfig:
             f"dashscope_websocket_url: {self.dashscope_websocket_url}"
         )
 
+
 class LoraConfig:
     def __init__(self):
         self.lora_info: str = "{}"
@@ -96,9 +99,7 @@ class LoadConfig:
         self.load_method: str = "auto"
 
     def to_string(self):
-        return (
-            f"load_method: {self.load_method}"
-        )
+        return f"load_method: {self.load_method}"
 
 
 class RenderConfig:
@@ -115,6 +116,7 @@ class RenderConfig:
             f"default_tool_use_template_key: {self.default_tool_use_template_key}\n"
             f"llava_chat_template: {self.llava_chat_template}"
         )
+
 
 class GangConfig:
     def __init__(self):
@@ -143,6 +145,7 @@ class GangConfig:
             f"lead_address: {self.leader_address}\n"
         )
 
+
 class VitConfig:
     def __init__(self):
         self.vit_separation: VitSeparation = VitSeparation.VIT_SEPARATION_LOCAL
@@ -157,6 +160,10 @@ class VitConfig:
         self.igraph_vipserver: int = 0
         self.igraph_table_name: str = ""
         self.default_key: Optional[str] = None
+        self.mm_preprocess_max_workers: int = 10
+        self.mm_batch_size: int = 1
+        self.biencoder_preprocess: bool = False
+        self.extra_input_in_mm_embedding = ""
 
     def to_string(self):
         return (
@@ -171,7 +178,11 @@ class VitConfig:
             f"igraph_search_dom: {self.igraph_search_dom}\n"
             f"igraph_vipserver: {self.igraph_vipserver}\n"
             f"igraph_table_name: {self.igraph_table_name}\n"
-            f"igraph_default_key: {self.default_key}"
+            f"igraph_default_key: {self.default_key}\n"
+            f"mm_preprocess_max_workers: {self.mm_preprocess_max_workers}\n"
+            f"mm_batch_size: {self.mm_batch_size}\n"
+            f"biencoder_preprocess: {self.biencoder_preprocess}\n"
+            f"extra_input_in_mm_embedding: {self.extra_input_in_mm_embedding}"
         )
 
 
@@ -198,6 +209,7 @@ class GenerateEnvConfig:
             f"generation_config_path: {self.generation_config_path}"
         )
 
+
 class QuantizationConfig:
     def __init__(self):
         self.int8_mode: int = 0
@@ -218,6 +230,7 @@ class QuantizationConfig:
             return "INT8"
         # Check weight_type from environment variable (compatibility logic)
         import os
+
         weight_type = os.environ.get("WEIGHT_TYPE", "").upper()
         if weight_type == "INT8":
             return "INT8"
@@ -227,13 +240,9 @@ class QuantizationConfig:
 class EmbeddingConfig:
     def __init__(self):
         self.embedding_model: int = 0
-        self.extra_input_in_mm_embedding = ""
 
     def to_string(self):
-        return (
-            f"embedding_model: {self.embedding_model}\n"
-            f"extra_input_in_mm_embedding: {self.extra_input_in_mm_embedding}"
-        )
+        return f"embedding_model: {self.embedding_model}"
 
 
 class RoleConfig:
@@ -253,7 +262,9 @@ class RoleConfig:
         elif isinstance(value, RoleType):
             self._role_type = value
         else:
-            raise TypeError(f"role_type must be RoleType enum or str, got {type(value)}")
+            raise TypeError(
+                f"role_type must be RoleType enum or str, got {type(value)}"
+            )
 
     def to_string(self):
         return f"role_type: {self._role_type.name}"
@@ -274,6 +285,7 @@ class RoleConfig:
         else:
             return RoleType.PDFUSION
 
+
 class JITConfig:
     def __init__(self):
         self.remote_jit_dir: str = ""
@@ -289,6 +301,7 @@ class DeepEPConfig:
     If all are None, auto_configure_deepep will be called.
     Otherwise, these values will be copied to moe_config.
     """
+
     def __init__(self):
         self.use_deepep_moe: Optional[bool] = None
         self.use_deepep_internode: Optional[bool] = None
@@ -326,9 +339,7 @@ class PyEnvConfigs:
         self.embedding_config: EmbeddingConfig = EmbeddingConfig()
         self.role_config: RoleConfig = RoleConfig()
         self.pd_separation_config: PDSepConfig = PDSepConfig()
-        self.parallelism_config: ParallelismConfig = (
-            ParallelismConfig()
-        )
+        self.parallelism_config: ParallelismConfig = ParallelismConfig()
         self.ffn_disaggregate_config: FfnDisAggregateConfig = FfnDisAggregateConfig()
         self.model_specific_config = ModelSpecificConfig()
         self.fmha_config = FMHAConfig()

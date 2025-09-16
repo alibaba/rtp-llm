@@ -17,22 +17,39 @@ from setproctitle import setproctitle
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
+from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.distribute.worker_info import (
+    g_parallel_info,
+    g_worker_info,
+    update_worker_info,
+)
 from rtp_llm.ops import VitSeparation
-from rtp_llm.distribute.worker_info import g_parallel_info, g_worker_info, update_worker_info
 from rtp_llm.server.backend_app import BackendApp
-from rtp_llm.server.vit_rpc_server import vit_start_server
+from rtp_llm.server.vit_app import VitEndpointApp
 from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
     set_global_controller,
 )
 from rtp_llm.utils.process_manager import ProcessManager
 from rtp_llm.utils.util import copy_gemm_config
-from rtp_llm.config.log_config import setup_logging
+
 setup_logging()
 
 
-def local_rank_start(global_controller: ConcurrencyController, py_env_configs: PyEnvConfigs):
+def vit_start_server(py_env_configs: PyEnvConfigs):
+    setproctitle("rtp_llm_vit_server")
+    update_worker_info(
+        py_env_configs.server_config.start_port,
+        py_env_configs.server_config.worker_info_port_num,
+    )
+    app = VitEndpointApp(py_env_configs)
+    app.start(g_worker_info)
+
+
+def local_rank_start(
+    global_controller: ConcurrencyController, py_env_configs: PyEnvConfigs
+):
     """Start local rank with proper signal handling for graceful shutdown"""
     app = None
 
@@ -54,7 +71,10 @@ def local_rank_start(global_controller: ConcurrencyController, py_env_configs: P
 
     try:
         # avoid multiprocessing load failed
-        update_worker_info(py_env_configs.server_config.start_port, py_env_configs.server_config.worker_info_port_num)
+        update_worker_info(
+            py_env_configs.server_config.start_port,
+            py_env_configs.server_config.worker_info_port_num,
+        )
         if g_parallel_info.world_size > 1:
             setproctitle(f"rtp_llm_rank-{g_parallel_info.local_rank}")
         logging.info(f"start local {g_worker_info}, {g_parallel_info}")
@@ -103,7 +123,9 @@ def _validate_dp_configuration():
         assert g_parallel_info.world_rank % g_parallel_info.tp_size == 0
 
 
-def _create_rank_processes(global_controller: ConcurrencyController, py_env_configs: PyEnvConfigs) -> List[Process]:
+def _create_rank_processes(
+    global_controller: ConcurrencyController, py_env_configs: PyEnvConfigs
+) -> List[Process]:
     """Create and start rank processes"""
     local_world_size = _get_local_world_size()
     cuda_device_list = _get_cuda_device_list()
@@ -126,7 +148,9 @@ def _create_rank_processes(global_controller: ConcurrencyController, py_env_conf
     return processes
 
 
-def multi_rank_start(global_controller: ConcurrencyController, py_env_configs: PyEnvConfigs):
+def multi_rank_start(
+    global_controller: ConcurrencyController, py_env_configs: PyEnvConfigs
+):
     """Start multi-rank backend server with proper process management"""
     try:
         multiprocessing.set_start_method("spawn")
@@ -143,7 +167,7 @@ def multi_rank_start(global_controller: ConcurrencyController, py_env_configs: P
     # Create manager and monitor processes
     manager = ProcessManager(
         shutdown_timeout=py_env_configs.server_config.shutdown_timeout,
-        monitor_interval=py_env_configs.server_config.monitor_interval
+        monitor_interval=py_env_configs.server_config.monitor_interval,
     )
     manager.set_processes(processes)
     manager.monitor_and_release_processes()
@@ -206,18 +230,19 @@ def clear_jit_filelock():
             os.remove(file)
 
 
-def start_backend_server(global_controller: ConcurrencyController, py_env_configs: PyEnvConfigs):
+def start_backend_server(
+    global_controller: ConcurrencyController, py_env_configs: PyEnvConfigs
+):
     setproctitle("rtp_llm_backend_server")
     os.makedirs("logs", exist_ok=True)
     load_gpu_nic_affinity()
 
     clear_jit_filelock()
 
-    update_worker_info(py_env_configs.server_config.start_port, py_env_configs.server_config.worker_info_port_num)
-
-    # TODO(xinfei.sxf) fix this
-    if py_env_configs.vit_config.vit_separation == VitSeparation.VIT_SEPARATION_ROLE:
-        return vit_start_server()
+    update_worker_info(
+        py_env_configs.server_config.start_port,
+        py_env_configs.server_config.worker_info_port_num,
+    )
 
     if not torch.cuda.is_available():
         return local_rank_start(global_controller, py_env_configs)

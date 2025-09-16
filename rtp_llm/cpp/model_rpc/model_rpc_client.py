@@ -20,6 +20,7 @@ from rtp_llm.utils.base_model_datatypes import (
     GenerateInput,
     GenerateOutput,
     GenerateOutputs,
+    RoleAddr,
 )
 from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
 from rtp_llm.utils.grpc_util import trans_option, trans_option_cast, trans_tensor
@@ -185,6 +186,8 @@ def trans_multimodal_input(
         mm_preprocess_config_pb.fps = mm_input.config.fps
         mm_preprocess_config_pb.min_frames = mm_input.config.min_frames
         mm_preprocess_config_pb.max_frames = mm_input.config.max_frames
+        mm_preprocess_config_pb.crop_positions.extend(mm_input.config.crop_positions)
+        mm_preprocess_config_pb.mm_timeout_ms = mm_input.config.mm_timeout_ms
         input_pb.multimodal_inputs.append(mm_input_pb)
 
 
@@ -375,7 +378,7 @@ class ModelRpcClient(object):
         else:
             grpc_timeout_seconds = request_timeout_ms / 1000
         input_py.generate_config.timeout_ms = (int)(grpc_timeout_seconds * 1000)
-        input_pb = trans_input(input_py)
+
         response_iterator = None
         stream_state = StreamState()
 
@@ -399,6 +402,27 @@ class ModelRpcClient(object):
         
         if not address_list:
             raise ValueError(f"No address found for request: {input_pb.request_id}")
+
+        # frontend cannot get model multimodal info, so add vit role for all requests unless master distribute one
+        add_vit_address = True
+        for role_addr in input_py.generate_config.role_addrs:
+            if role_addr.role == RoleType.VIT:
+                add_vit_address = False
+                break
+        if add_vit_address:
+            # default use rank0 vit address
+            input_py.generate_config.role_addrs.append(
+                RoleAddr(
+                    role=RoleType.VIT,
+                    ip="localhost",
+                    http_port=g_worker_info.vit_http_server_port,
+                    grpc_port=g_worker_info.vit_grpc_server_port,
+                )
+            )
+        logging.info(
+            f"generate config role addrs: {input_py.generate_config.role_addrs}"
+        )
+        input_pb = trans_input(input_py)
 
         try:
             # Select target address
