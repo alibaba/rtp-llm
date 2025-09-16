@@ -46,9 +46,29 @@ cc_test(
     exec_properties = {'gpu':'A10'},
 )
 
+cc_test(
+    name = "dist_storage_3fs_test",
+    srcs = [
+        "DistStorage3FSTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps + [
+        ":mock_dist_storage_3fs_file",
+    ],
+    tags = ["manual"],
+)
+
 cc_library(
     name = "mock_dist_kvcache",
     hdrs = [
         "mock/MockDistKvCache.h",
+    ],
+)
+
+cc_library(
+    name = "mock_dist_storage_3fs_file",
+    hdrs = [
+        "mock/MockDistStorage3FSFile.h",
     ],
 )

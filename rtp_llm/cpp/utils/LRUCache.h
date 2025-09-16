@@ -23,6 +23,8 @@ public:
 
     std::tuple<bool, ValueType> pop();
 
+    void clear();
+
     bool contains(const KeyType& key) const;
 
     void printCache() const;
@@ -99,6 +101,13 @@ std::tuple<bool, ValueType> LRUCache<KeyType, ValueType>::pop() {
     cache_items_map_.erase(last);
     version++;
     return {true, value};
+}
+
+template<typename KeyType, typename ValueType>
+void LRUCache<KeyType, ValueType>::clear() {
+    items_list_.clear();
+    cache_items_map_.clear();
+    version++;
 }
 
 template<typename KeyType, typename ValueType>
