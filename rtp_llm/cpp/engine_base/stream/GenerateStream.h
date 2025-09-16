@@ -311,10 +311,7 @@ public:
         return return_all_hidden_states_;
     }
 
-    bool waitForRemoteGenerate() {
-        std::unique_lock<std::mutex> lock(*output_mutex_);
-        return cv_->wait_for(lock, std::chrono::seconds(2), [this] { return need_remote_generate_; });
-    }
+    bool waitForRemoteGenerate();
 
     void setNeedRemoteGenerate(bool need_remote_generate) {
         std::lock_guard<std::mutex> lock(*output_mutex_);

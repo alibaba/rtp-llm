@@ -589,6 +589,7 @@ absl::Status SpeculativeEngine::prefillMtpStep(std::list<GenerateStreamPtr>& str
                 propose_stream->setSPOutputBuffer(nullptr);
             }
             if (stream->queryPdSep()) {
+                RTP_LLM_LOG_DEBUG("stream [%ld] set setNeedRemoteGenerate", stream->streamId());
                 stream->setNeedRemoteGenerate(true);
             }
         }

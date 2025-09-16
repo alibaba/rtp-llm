@@ -575,6 +575,7 @@ void GenerateStream::setStopWithoutLock(ErrorCode error_code, const std::string&
                         cost_time_ms);
     generate_status_->status     = StreamState::STOPPED;
     generate_status_->error_info = ErrorInfo(error_code, error_msg);
+    cv_->notify_one();
 }
 
 void GenerateStream::setStop(ErrorCode error_code, const std::string& error_msg) {
@@ -620,6 +621,7 @@ bool GenerateStream::setRunning() {
 void GenerateStream::setFinishedWithoutLock() {
     generate_status_->status = StreamState::FINISHED;
     fillSubGenerateStatus(StreamState::FINISHED);
+    cv_->notify_one();
 }
 
 bool GenerateStream::stoppedWithoutLock() {
@@ -747,6 +749,23 @@ void GenerateStream::matchEosToken(int batch_id) {
         && complete_token_ids_->matchEosToken(batch_id, special_tokens_.eos_token_id_)) {
         sub_generate_status_[batch_id].status = StreamState::FINISHED;
     }
+}
+
+bool GenerateStream::waitForRemoteGenerate() {
+    std::unique_lock<std::mutex> lock(*output_mutex_);
+    // Wait until need_remote_generate_ is true or stream status -> done
+    cv_->wait(lock, [this] {
+        return need_remote_generate_ || generate_status_->status == StreamState::STOPPED
+               || generate_status_->status == StreamState::FINISHED;
+    });
+    // If stream status is abnormal, log the error info
+    if (!need_remote_generate_ && generate_status_->status == StreamState::STOPPED) {
+        RTP_LLM_LOG_WARNING("waitForRemoteGenerate exits due to stream [%ld] stopped, error: %s",
+                            streamId(),
+                            generate_status_->error_info.ToString().c_str());
+    }
+
+    return need_remote_generate_;
 }
 
 std::vector<int> GenerateStream::getLatestTokens(size_t token_num) {

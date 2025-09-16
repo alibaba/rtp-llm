@@ -107,7 +107,8 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
         if (stream->needRemoteGenerate()) {
             break;
         }
-        if (stream->queryPdSep() && stream->waitForRemoteGenerate()) {
+        if (stream->queryPdSep()) {
+            stream->waitForRemoteGenerate();
             break;
         }
     }
