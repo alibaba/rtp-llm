@@ -19,6 +19,7 @@ from rtp_llm.config.py_config_modules import (
     EmbeddingConfig,
     GenerateEnvConfig,
     LoraConfig,
+    PyEnvConfigs,
     QuantizationConfig,
     RenderConfig,
     VitConfig,
@@ -26,7 +27,12 @@ from rtp_llm.config.py_config_modules import (
 from rtp_llm.model_factory_register import _model_factory
 from rtp_llm.model_loader.load_config import LoadMethod
 from rtp_llm.models.propose_model.propose_model import ProposeModel
-from rtp_llm.ops import ProfilingDebugLoggingConfig, SpeculativeType, VitSeparation
+from rtp_llm.ops import (
+    ProfilingDebugLoggingConfig,
+    SpeculativeType,
+    TaskType,
+    VitSeparation,
+)
 from rtp_llm.utils.util import check_with_info
 
 
@@ -61,6 +67,7 @@ class ModelFactory:
         engine_config: EngineConfig,
         vit_config: Optional[VitConfig] = None,
         merge_lora: bool = False,
+        create_vit_model: bool = False,
     ):
         """Create model from independent config objects.
 
@@ -79,6 +86,21 @@ class ModelFactory:
         model_name = model_config.model_name or model_cls.__name__
         model_config.model_name = model_name
         engine_config.runtime_config.model_name = model_name
+
+        if create_vit_model:
+            if not model_cls.is_multimodal():
+                return None
+            if (
+                vit_config.vit_separation == VitSeparation.VIT_SEPARATION_REMOTE
+                or model_config.task_type != TaskType.LANGUAGE_MODEL
+            ):
+                return None
+            vit_config.vit_separation = VitSeparation.VIT_SEPARATION_ROLE
+        else:
+            if model_config.task_type == TaskType.LANGUAGE_MODEL:
+                vit_config.vit_separation = VitSeparation.VIT_SEPARATION_REMOTE
+            else:
+                vit_config.vit_separation = VitSeparation.VIT_SEPARATION_LOCAL
 
         model = model_cls.from_config(
             model_config=model_config,
@@ -178,6 +200,7 @@ class ModelFactory:
         vit_config: Optional[VitConfig] = None,
         merge_lora: bool = False,
         propose_model_config: Optional[ModelConfig] = None,
+        py_env_configs: PyEnvConfigs = None,
     ) -> BaseEngine:
         """Create engine from independent config objects, with optional propose model.
 
@@ -230,6 +253,7 @@ class ModelFactory:
             alog_conf_path=alog_conf_path,
             gang_info=gang_info,
             propose_model=propose_model,
+            py_env_configs=py_env_configs,
         )
         engine.start()
         if propose_model:
@@ -254,7 +278,7 @@ class ModelFactory:
         This method handles ModelConfig construction and initialization logic for the main model.
 
         The flow is:
-        1. Call model's _create_config to create ModelConfig with model architecture
+        1. Call model's create_config to create ModelConfig with model architecture
         2. Apply ModelArgs to ModelConfig (overwrite with user-provided values)
         3. Build ModelConfig with build_model_config
 
@@ -273,7 +297,7 @@ class ModelFactory:
             ModelConfig instance for the main model
         """
         model_cls = ModelFactory.get_model_cls(model_args.model_type)
-        model_config = model_cls._create_config(model_args.ckpt_path)
+        model_config = model_cls.create_config(model_args.ckpt_path)
         build_model_config(
             model_config=model_config,
             model_args=model_args,
@@ -309,6 +333,22 @@ class ModelFactory:
         logging.info("model_config: %s", model_config.to_string())
 
         return model_config
+
+    @staticmethod
+    def create_vit_from_env(
+        model_config: ModelConfig,
+        engine_config: EngineConfig,
+        vit_config: VitConfig,
+        py_env_configs: PyEnvConfigs,
+    ):
+        from rtp_llm.models.multimodal.mm_process_engine import MMProcessEngine
+
+        model = ModelFactory._create_model(
+            model_config, engine_config, vit_config, False, True
+        )
+        if model is None:
+            return None
+        return MMProcessEngine(model, py_env_configs)
 
     @staticmethod
     def update_engine_config_from_model_config(
@@ -376,9 +416,9 @@ class ModelFactory:
         propose_model_args.act_type = model_args.act_type
         propose_model_args.mla_ops_type = model_args.mla_ops_type
 
-        # Create propose ModelConfig using _create_config
+        # Create propose ModelConfig using create_config
         propose_model_cls = ModelFactory.get_model_cls(sp_config.model_type)
-        propose_model_config = propose_model_cls._create_config(
+        propose_model_config = propose_model_cls.create_config(
             sp_config.checkpoint_path
         )
         # Ensure max_seq_len matches main model
