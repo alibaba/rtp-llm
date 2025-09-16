@@ -1,3 +1,4 @@
+import logging
 import math
 from argparse import Namespace
 from typing import Any, List
@@ -10,13 +11,14 @@ from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.models.multimodal.multimodal_common import (
     ImageEmbeddingInterface,
     ImageTransform,
+    MMUrlType,
+    mm_lock,
 )
 
 
 class EVA2CLIPImageEmbedding(ImageEmbeddingInterface):
     def __init__(self, config):
         # EVA2CLIPModel is too big, create it in cpu
-        self.config = config
         self.vit = EVA2CLIPModel(config).cpu()
         self.image_transform = ImageTransform(
             config.mm_related_params.config["image_size"]
@@ -26,14 +28,18 @@ class EVA2CLIPImageEmbedding(ImageEmbeddingInterface):
     def _device(self):
         return self.vit.device
 
-    def image_embedding(self, images: List[Any]) -> torch.Tensor:
-        with torch.inference_mode():
-            tensor_images = self.image_transform.encode(
-                images, self._device, self._data_type
-            )
-            tensor_images = self.vit(tensor_images).to(device=self._device)
-        assert tensor_images.shape[0] == len(images)
-        return tensor_images
+    @property
+    def _data_type(self):
+        return self.vit.dtype
+
+    @torch.inference_mode()
+    def embedding(self, data, mm_type: MMUrlType, **kwargs):
+        tensor_images = self.image_transform.encode(
+            data, self._device, self._data_type
+        )
+        tensor_images = self.vit(tensor_images).to(device=self._device)
+        assert tensor_images.shape[0] == len(data)
+        return tensor_images, None
 
 
 class PatchEmbedding(nn.Module):
