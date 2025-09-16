@@ -71,7 +71,7 @@ class AutoModel:
         self.gpt_model = ModelFactory._create_model(
             model_config=model_config,
             engine_config=engine_config,
-            vit_config=None,
+            vit_config=self.py_env_configs.vit_config,
             merge_lora=False,
         )
 

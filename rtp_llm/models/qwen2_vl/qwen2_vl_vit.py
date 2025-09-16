@@ -1,4 +1,5 @@
 import math
+from typing import Any, List, Tuple
 
 from PIL import Image
 
@@ -7,20 +8,27 @@ try:
 except ModuleNotFoundError:
     VideoReader = None
     cpu = None
+
 import torch
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
 
-from rtp_llm.config.model_config import VitParameters
-from rtp_llm.models.multimodal.multimodal_common import (
-    MultiModalEmbeddingInterface,
-    timeout_decorator,
-)
+from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.models.qwen2_vl.image_processing_qwen2_vl import Qwen2VLImageProcessor
 from rtp_llm.models.qwen2_vl.modeling_qwen2_vl import (
     Qwen2VisionTransformerPretrainedModel,
 )
-from rtp_llm.utils.multimodal_util import MMUrlType
+from rtp_llm.multimodal.multimodal_common import (
+    MultiModalEmbeddingInterface,
+    timeout_decorator,
+)
+from rtp_llm.multimodal.multimodal_util import get_bytes_io_from_url
+from rtp_llm.utils.base_model_datatypes import (
+    MMPreprocessConfig,
+    MMUrlType,
+    MultimodalInput,
+)
 
 IMAGE_FACTOR = 28
 MIN_PIXELS = 4 * 28 * 28
@@ -85,45 +93,26 @@ def smart_resize(
 
 
 class Qwen2VLImageEmbedding(MultiModalEmbeddingInterface):
-    def __init__(self, mm_related_params: VitParameters, model_config=None):
-        self.mm_related_params = mm_related_params
-        self.config = model_config
+    def __init__(self, config: ModelConfig):
+        self.data_type = config.compute_dtype
+        self.mm_related_params = config.mm_related_params
         self.image_processor = Qwen2VLImageProcessor.from_pretrained(
-            mm_related_params.config["ckpt_path"]
+            config.mm_related_params.config["ckpt_path"]
         )
+
         self.visual = Qwen2VisionTransformerPretrainedModel(
-            mm_related_params.config
+            config.mm_related_params.config
+        ).share_memory()
+        self.spatial_merge_size = config.mm_related_params.config.get(
+            "spatial_merge_size", 2
         )
 
     @property
     def _device(self):
         return self.visual.get_device()
 
-    @torch.inference_mode()
-    def mm_process(self, mm_input, **kwargs):
-        mm_type = kwargs.get("mm_type")
-        if mm_type == MMUrlType.DEFAULT:
-            raise Exception("cannot infer multimodal input type")
-        elif mm_type == MMUrlType.IMAGE:
-            return self.image_embedding(mm_input)
-        elif mm_type == MMUrlType.VIDEO:
-            return self.video_embedding(mm_input)
-        else:
-            raise Exception("unknown mm url type")
-
-    @timeout_decorator(30)
-    def _mm_preprocess(self, data, **kwargs):
-        mm_type = kwargs.get("mm_type")
-        if mm_type == MMUrlType.DEFAULT:
-            raise Exception("cannot infer multimodal input type")
-        elif mm_type == MMUrlType.IMAGE:
-            return self.load_image(data, **kwargs)
-        elif mm_type == MMUrlType.VIDEO:
-            return self.load_video(data, **kwargs)
-        else:
-            raise Exception("unknown mm url type")
-
-    def load_image(self, data, configs, **kwargs):
+    @staticmethod
+    def load_image(data, configs, **kwargs):
         image = Image.open(data).convert("RGB")
         size_factor = IMAGE_FACTOR
         if configs.height != -1 and configs.width != -1:
@@ -146,7 +135,8 @@ class Qwen2VLImageEmbedding(MultiModalEmbeddingInterface):
         image = image.resize((resized_width, resized_height))
         return image
 
-    def load_video(self, data, configs, **kwargs):
+    @staticmethod
+    def load_video(data, configs, **kwargs):
         vr = VideoReader(data, ctx=cpu(0), num_threads=1)
         frames = len(vr)
 
@@ -199,34 +189,8 @@ class Qwen2VLImageEmbedding(MultiModalEmbeddingInterface):
         ).float()
         return video
 
-    def image_embedding(self, images, **kwargs):
-        device = self._device
-        image_inputs = self.image_processor(
-            images=images, videos=None, return_tensors="pt"
-        )
-        pixel_values = image_inputs["pixel_values"].to(device).to(self._data_type)
-        image_grid_thw = image_inputs["image_grid_thw"].to(device)
-        embeddings = self.visual(pixel_values, grid_thw=image_grid_thw).to(device)
-        pos_id = self.get_position_ids(image_grid_thw)
-        return embeddings, pos_id
-
-    def video_embedding(self, video, **kwargs):
-        device = self._device
-        videos_inputs = self.image_processor(
-            images=None, videos=video, return_tensors="pt"
-        )
-        pixel_values = (
-            videos_inputs["pixel_values_videos"].to(device).to(self._data_type)
-        )
-        video_grid_thw = videos_inputs["video_grid_thw"].to(device)
-        embeddings = self.visual(pixel_values, grid_thw=video_grid_thw).to(device)
-        pos_id = self.get_position_ids(video_grid_thw)
-        return embeddings, pos_id
-
     def get_position_ids(self, grid_thw: torch.Tensor = None) -> torch.Tensor:
-        spatial_merge_size = self.mm_related_params.config.get(
-            "spatial_merge_size", 2
-        )
+        spatial_merge_size = self.spatial_merge_size
 
         t, h, w = (
             grid_thw[0][0].item(),
@@ -245,3 +209,39 @@ class Qwen2VLImageEmbedding(MultiModalEmbeddingInterface):
         )
 
         return torch.stack([t_index, h_index, w_index], dim=1)
+
+    @staticmethod
+    def preprocess_input(
+        mm_inputs: List[MultimodalInput],
+        vit_config: VitConfig,
+        processor,
+    ):
+        assert len(mm_inputs) == 1
+        mm_input = mm_inputs[0]
+        mm_type = mm_input.mm_type
+        data = get_bytes_io_from_url(mm_input.url, vit_config.download_headers)
+        if mm_type == MMUrlType.DEFAULT:
+            raise Exception("cannot infer multimodal input type")
+        elif mm_type == MMUrlType.IMAGE:
+            data = Qwen2VLImageEmbedding.load_image(data, mm_input.config)
+            res = processor(images=data, videos=None, return_tensors="pt")
+            return res["pixel_values"], res["image_grid_thw"]
+        elif mm_type == MMUrlType.VIDEO:
+            data = Qwen2VLImageEmbedding.load_video(data, mm_input.config)
+            res = processor(images=None, videos=data, return_tensors="pt")
+            return res["pixel_values_videos"], res["video_grid_thw"]
+        else:
+            raise Exception("unknown mm url type")
+
+    def get_preprocess_params(self):
+        return {
+            "processor": self.image_processor,
+        }
+
+    @torch.inference_mode()
+    def embedding(self, data, **kwargs):
+        pixel_values = data[0].to(self._device).to(self._data_type)
+        grid_thw = data[1].to(self._device)
+        embeddings = self.visual(pixel_values, grid_thw=grid_thw).to(self._device)
+        pos_id = self.get_position_ids(grid_thw)
+        return embeddings, pos_id

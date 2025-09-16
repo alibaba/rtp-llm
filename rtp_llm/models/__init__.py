@@ -28,9 +28,6 @@ if platform.processor() != "aarch64":
     from .qwen2_5_vl.qwen2_5_vl import QWen2_5_VL
     from .qwen3_vl_moe.qwen3_vl_moe import QWen3_VL_MOE
     from .qwen_v2_audio.qwen_v2_audio import QWenV2Audio
-    from .internvl import InternVL
-    from .minicpmv.minicpmv import MiniCPMV
-    from .minicpmv_embedding.minicpmv_embedding import MiniCPMVEmbedding
 
 from rtp_llm.utils.import_util import has_internal_source
 
