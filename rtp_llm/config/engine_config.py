@@ -222,15 +222,8 @@ class EngineConfig:
         grpc_config = py_env_configs.grpc_config
         load_config = py_env_configs.load_config
 
-        # Setup pd_sep_config role_type based on vit_separation
-        if (
-            py_env_configs.vit_config.vit_separation
-            == VitSeparation.VIT_SEPARATION_ROLE
-        ):
-            pd_sep_config.role_type = RoleType.VIT
-        else:
-            # role_config.role_type property automatically converts string to RoleType enum
-            pd_sep_config.role_type = py_env_configs.role_config.role_type
+        # role_config.role_type property automatically converts string to RoleType enum
+        pd_sep_config.role_type = py_env_configs.role_config.role_type
 
         # Create EngineConfig instance
         engine_config = EngineConfig(
