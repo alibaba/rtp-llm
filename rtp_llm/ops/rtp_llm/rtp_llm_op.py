@@ -8,7 +8,7 @@ from rtp_llm.ops import EngineScheduleInfo, EplbConfig, EplbMode, KVCacheInfo
 from rtp_llm.ops import RtpLLMOp as CppRtpLLMOp
 from rtp_llm.ops import WorkerStatusInfo
 from rtp_llm.ops import get_block_cache_keys as cpp_get_block_cache_keys
-from rtp_llm.utils.mm_process_engine import MMProcessEngine
+from rtp_llm.models.multimodal.mm_process_engine import MMProcessEngine
 
 
 class RtpLLMOp:

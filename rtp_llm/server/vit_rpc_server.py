@@ -15,8 +15,8 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
 from rtp_llm.distribute.worker_info import g_worker_info
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.utils.grpc_util import trans_from_tensor, trans_tensor
-from rtp_llm.utils.mm_process_engine import MMEmbeddingRes, MMProcessEngine
-from rtp_llm.utils.multimodal_util import MMUrlType
+from rtp_llm.models.multimodal.mm_process_engine import MMEmbeddingRes, MMProcessEngine
+from rtp_llm.models.multimodal.multimodal_common import MMUrlType
 
 
 def trans_config(mm_process_config_pb: MMPreprocessConfigPB):
@@ -26,6 +26,9 @@ def trans_config(mm_process_config_pb: MMPreprocessConfigPB):
         mm_process_config_pb.min_pixels,
         mm_process_config_pb.max_pixels,
         mm_process_config_pb.fps,
+        mm_process_config_pb.min_frames,
+        mm_process_config_pb.max_frames,
+        mm_process_config_pb.timeout,
     ]
 
 
@@ -47,10 +50,13 @@ def trans_input(mutlimodal_inputs_pb: MultimodalInputsPB):
 
 def trans_output(res: MMEmbeddingRes):
     output_pb = MultimodalOutputsPB()
+    contain_pos = res.position_ids is not None
     for i in range(len(res.embeddings)):
         output = MultimodalOutputPB(
             multimodal_embedding=trans_from_tensor(res.embeddings[i]),
-            multimodal_pos_id=trans_from_tensor(res.position_ids[i]),
+            multimodal_pos_id=(
+                trans_from_tensor(res.position_ids[i]) if contain_pos else None
+            ),
         )
         output_pb.multimodal_outputs.append(output)
     return output_pb
