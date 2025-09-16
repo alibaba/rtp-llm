@@ -335,6 +335,7 @@ class VitConfig:
         self.igraph_vipserver: int = 0
         self.igraph_table_name: str = ""
         self.default_key: Optional[str] = None
+        self.mm_preprocess_max_workers: int = 10
 
     def update_from_env(self):
         self.vit_separation = int(os.environ.get("VIT_SEPARATION", self.vit_separation))
@@ -361,6 +362,10 @@ class VitConfig:
             "IGRAPH_TABLE_NAME", self.igraph_table_name
         )
         self.default_key = os.environ.get("IGRAPH_DEFAULT_KEY", self.default_key)
+        
+        self.mm_preprocess_max_workers = int(
+            os.environ.get("MM_PREPROCESS_MAX_WORKERS", self.mm_preprocess_max_workers)
+        )
 
     def to_string(self):
         return (
