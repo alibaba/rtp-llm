@@ -37,8 +37,10 @@ from rtp_llm.utils.base_model_datatypes import (
     GenerateInput,
     GenerateOutput,
     GenerateOutputs,
+    MMPreprocessConfig,
+    MMUrlType,
+    MultimodalInput,
 )
-from rtp_llm.utils.multimodal_util import MMPreprocessConfig, MMUrlType, MultimodalInput
 from rtp_llm.utils.util import has_overlap_kmp
 from rtp_llm.utils.word_util import (
     get_stop_word_slices,
@@ -259,7 +261,7 @@ class RenderedInputs:
             )
 
         for url, type, config in zip(input_urls, input_urls_type, preprocess_configs):
-            self.multimodal_inputs.append(MultimodalInput(url, type, config))
+            self.multimodal_inputs.append(MultimodalInput(url, type, None, config))
 
 
 class CustomChatRenderer:

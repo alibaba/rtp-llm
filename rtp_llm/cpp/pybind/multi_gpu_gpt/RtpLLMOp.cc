@@ -109,7 +109,6 @@ RtpLLMOp::RtpLLMOp() {}
 void RtpLLMOp::init(py::object model,
                     py::object engine_config,
                     py::object vit_config,
-                    py::object mm_process_engine,
                     py::object propose_model,
                     py::object token_processor) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
@@ -130,7 +129,6 @@ void RtpLLMOp::init(py::object model,
     grpc_server_thread_ = std::thread(&RtpLLMOp::initRPCServer,
                                       this,
                                       std::move(params),
-                                      std::move(mm_process_engine),
                                       std::move(propose_params),
                                       std::move(token_processor));
     grpc_server_thread_.detach();
@@ -282,7 +280,6 @@ std::unique_ptr<ProposeModelEngineInitParams> RtpLLMOp::initProposeModel(py::obj
 }
 
 void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_init_params,
-                             py::object                                    mm_process_engine,
                              std::unique_ptr<ProposeModelEngineInitParams> propose_params,
                              py::object                                    token_processor) {
     auto http_port      = maga_init_params.parallelism_config.http_port;
@@ -297,8 +294,7 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
         } else {
             model_rpc_service_.reset(new LocalRpcServiceImpl());
         }
-        grpc::Status grpc_status =
-            model_rpc_service_->init(maga_init_params, std::move(mm_process_engine), std::move(propose_params));
+        grpc::Status grpc_status = model_rpc_service_->init(maga_init_params, std::move(propose_params));
         if (!grpc_status.ok()) {
             RTP_LLM_FAIL("init rpc server failed, error msg: %s", grpc_status.error_message().c_str());
         }
@@ -404,7 +400,6 @@ void registerRtpLLMOp(const py::module& m) {
              py::arg("model"),
              py::arg("engine_config"),
              py::arg("vit_config"),
-             py::arg("mm_process_engine"),
              py::arg("propose_model"),
              py::arg("token_processor"))
         .def("start_http_server",

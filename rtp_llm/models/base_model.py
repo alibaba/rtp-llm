@@ -181,6 +181,13 @@ class BaseModel(object):
         self.model_weights_loader.force_clean_cuda_memory()
 
     @classmethod
+    def create_config(cls, ckpt_path: str) -> ModelConfig:
+        config = cls._create_config(ckpt_path)
+        if cls.is_multimodal():
+            cls.init_model_weight_evaluator(config)
+        return config
+
+    @classmethod
     def _create_config(cls, ckpt_path: str) -> ModelConfig:
         raise NotImplementedError()
 
@@ -258,8 +265,6 @@ class BaseModel(object):
         vit_separation = self.vit_config.vit_separation
         if vit_separation != VitSeparation.VIT_SEPARATION_REMOTE:
             self.init_multimodal(
-                mm_model_config=self.model_config.mm_model_config,
-                vit_config=self.vit_config,
                 device=self._get_device_str(),
             )
 
@@ -275,8 +280,9 @@ class BaseModel(object):
         if self.tokenizer.eos_token_id:
             self.model_config.special_tokens.eos_token_id = self.tokenizer.eos_token_id
 
-    def is_multimodal(self) -> bool:
-        return isinstance(self, MultiModalMixin)
+    @classmethod
+    def is_multimodal(cls) -> bool:
+        return issubclass(cls, MultiModalMixin)
 
     def _load_model_weights(self):
         self.weight: ModelWeights = self.model_weights_loader.load_weights(

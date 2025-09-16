@@ -28,7 +28,7 @@ from rtp_llm.distribute.worker_info import (
     update_worker_info,
 )
 from rtp_llm.ops import VitSeparation
-from rtp_llm.server.vit_rpc_server import vit_start_server
+from rtp_llm.server.vit_app import VitEndpointApp
 from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
     set_global_controller,
@@ -39,23 +39,34 @@ from rtp_llm.utils.util import copy_gemm_config
 setup_logging()
 
 
+def vit_start_server(py_env_configs: PyEnvConfigs):
+    setproctitle("rtp_llm_vit_server")
+    update_worker_info(
+        py_env_configs.server_config.start_port,
+        py_env_configs.server_config.worker_info_port_num,
+        py_env_configs.distribute_config.remote_server_port,
+    )
+    app = VitEndpointApp(py_env_configs)
+    app.start(g_worker_info)
+
+
 def local_rank_start(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
     pipe_writer=None,
 ):
     """Start local rank with proper signal handling for graceful shutdown"""
-    app = None
+    backend_manager = None
 
     def signal_handler(signum, frame):
         logging.info(
             f"Local rank received signal {signum}, shutting down gracefully..."
         )
-        if app and hasattr(app, "shutdown"):
+        if backend_manager is not None:
             try:
-                app.shutdown()
+                backend_manager.request_shutdown()
             except Exception as e:
-                logging.error(f"Error during app shutdown: {e}")
+                logging.error(f"Error during backend manager shutdown: {e}")
 
     # Setup signal handlers for graceful shutdown
     signal.signal(signal.SIGTERM, signal_handler)
@@ -341,10 +352,6 @@ def start_backend_server(
         py_env_configs.server_config.worker_info_port_num,
         py_env_configs.distribute_config.remote_server_port,
     )
-
-    # TODO(xinfei.sxf) fix this
-    if py_env_configs.vit_config.vit_separation == VitSeparation.VIT_SEPARATION_ROLE:
-        return vit_start_server()
 
     if not torch.cuda.is_available():
         return local_rank_start(global_controller, py_env_configs)

@@ -21,7 +21,7 @@ from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import setup_and_configure_server
 from rtp_llm.distribute.worker_info import WorkerInfo, g_parallel_info
-from rtp_llm.ops import RoleType
+from rtp_llm.ops import RoleType, VitSeparation
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.utils.concurrency_controller import init_controller
 from rtp_llm.utils.process_manager import ProcessManager
@@ -106,12 +106,41 @@ def start_backend_server_impl(
         pipe_reader.close()
 
 
-def start_frontend_server_impl(
-    global_controller,
-    backend_process,
-    py_env_configs: PyEnvConfigs,
-    process_manager=None,
-):
+def start_vit_server_impl(py_env_configs: PyEnvConfigs):
+    from rtp_llm.start_backend_server import vit_start_server
+
+    vit_process = multiprocessing.Process(
+        target=vit_start_server, args=(py_env_configs,), name="vit_server"
+    )
+    vit_process.start()
+
+    retry_interval_seconds = 5
+    server_config = py_env_configs.server_config
+    start_port = server_config.start_port
+    vit_server_port = (
+        WorkerInfo.vit_http_server_port_offset(0, start_port)
+        if py_env_configs.role_config.role_type == RoleType.VIT
+        else WorkerInfo.vit_http_server_port_offset(0, start_port)
+    )
+
+    while True:
+        if not vit_process.is_alive():
+            logging.error("vit server is not alive")
+            raise Exception("vit server is not alive")
+
+        try:
+            if check_server_health(vit_server_port):
+                logging.info(f"vit server is ready")
+                break
+            else:
+                time.sleep(retry_interval_seconds)
+        except Exception as e:
+            logging.info(f"vit server is not ready")
+            time.sleep(retry_interval_seconds)
+    return vit_process
+
+
+def start_frontend_server_impl(global_controller, py_env_configs):
     from rtp_llm.start_frontend_server import start_frontend_server
 
     frontend_server_count = py_env_configs.server_config.frontend_server_count
@@ -202,18 +231,34 @@ def start_server(py_env_configs: PyEnvConfigs):
         )
 
     try:
-        if py_env_configs.role_config.role_type != RoleType.FRONTEND:
+        if (
+            py_env_configs.role_config.role_type != RoleType.FRONTEND
+            and py_env_configs.role_config.role_type != RoleType.DECODE
+            and py_env_configs.vit_config.vit_separation
+            != VitSeparation.VIT_SEPARATION_REMOTE
+        ):
+            logging.info("start vit server")
+            vit_process = start_vit_server_impl(py_env_configs)
+            process_manager.add_process(vit_process)
+
+        if (
+            py_env_configs.role_config.role_type != RoleType.FRONTEND
+            and py_env_configs.role_config.role_type != RoleType.VIT
+        ):
+            # vit and frontend role do not start backend server
             logging.info("start backend server")
             backend_process = start_backend_server_impl(
                 global_controller, py_env_configs, process_manager
             )
             process_manager.add_process(backend_process)
 
-        logging.info("start frontend server")
-        frontend_process = start_frontend_server_impl(
-            global_controller, backend_process, py_env_configs, process_manager
-        )
-        process_manager.add_processes(frontend_process)
+        if py_env_configs.role_config.role_type != RoleType.VIT:
+            # vit has its own frontend server
+            logging.info("start frontend server")
+            frontend_process = start_frontend_server_impl(
+                global_controller, py_env_configs
+            )
+            process_manager.add_processes(frontend_process)
 
         logging.info(
             f"Backend RPC service is listening on 0.0.0.0, IP/IP range can be customized as needed"

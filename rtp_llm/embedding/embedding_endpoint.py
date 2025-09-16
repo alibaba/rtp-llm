@@ -93,9 +93,22 @@ class EmbeddingEndpoint(object):
         stub = pb2_grpc.EmbeddingRpcServiceStub(channel)
         multimodal_features = []
         for feature in input.multimodal_inputs:
+            preprocess_config = pb2.MMPreprocessConfigPB(
+                width=feature.config.width,
+                height=feature.config.height,
+                min_pixels=feature.config.min_pixels,
+                max_pixels=feature.config.max_pixels,
+                fps=feature.config.fps,
+                min_frames=feature.config.min_frames,
+                max_frames=feature.config.max_frames,
+                crop_positions=feature.config.crop_positions,
+                mm_timeout_ms=feature.config.mm_timeout_ms,
+            )
             multimodal_features.append(
                 pb2.MultimodalInputPB(
-                    multimodal_type=feature.mm_type, multimodal_url=feature.url
+                    multimodal_type=feature.mm_type,
+                    multimodal_url=feature.url,
+                    mm_preprocess_config=preprocess_config,
                 )
             )
         request = pb2.EmbeddingInputPB(

@@ -29,7 +29,7 @@ from rtp_llm.ops import (
 
 DEFAULT_START_PORT = 8088
 MASTER_INFO_PORT_NUM = 11
-MIN_WORKER_INFO_PORT_NUM = 8
+MIN_WORKER_INFO_PORT_NUM = 10
 WORKER_INFO_PORT_NUM = MIN_WORKER_INFO_PORT_NUM
 
 
@@ -162,6 +162,10 @@ class VitConfig:
         self.igraph_vipserver: int = 0
         self.igraph_table_name: str = ""
         self.default_key: Optional[str] = None
+        self.mm_preprocess_max_workers: int = 10
+        self.mm_batch_size: int = 1
+        self.biencoder_preprocess: bool = False
+        self.extra_input_in_mm_embedding = ""
 
     def to_string(self):
         return (
@@ -176,7 +180,11 @@ class VitConfig:
             f"igraph_search_dom: {self.igraph_search_dom}\n"
             f"igraph_vipserver: {self.igraph_vipserver}\n"
             f"igraph_table_name: {self.igraph_table_name}\n"
-            f"igraph_default_key: {self.default_key}"
+            f"igraph_default_key: {self.default_key}\n"
+            f"mm_preprocess_max_workers: {self.mm_preprocess_max_workers}\n"
+            f"mm_batch_size: {self.mm_batch_size}\n"
+            f"biencoder_preprocess: {self.biencoder_preprocess}\n"
+            f"extra_input_in_mm_embedding: {self.extra_input_in_mm_embedding}"
         )
 
 
@@ -234,13 +242,9 @@ class QuantizationConfig:
 class EmbeddingConfig:
     def __init__(self):
         self.embedding_model: int = 0
-        self.extra_input_in_mm_embedding = ""
 
     def to_string(self):
-        return (
-            f"embedding_model: {self.embedding_model}\n"
-            f"extra_input_in_mm_embedding: {self.extra_input_in_mm_embedding}"
-        )
+        return f"embedding_model: {self.embedding_model}"
 
 
 class RoleConfig:

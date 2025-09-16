@@ -75,11 +75,10 @@ namespace rtp_llm {
     }
 
 grpc::Status PrefillRpcServer::init(const EngineInitParams&                                maga_init_params,
-                                    py::object                                             mm_process_engine,
                                     std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params) {
     RTP_LLM_CHECK_WITH_INFO(maga_init_params.pd_sep_config.role_type == RoleType::PREFILL,
                             "prefill's role_type must be PREFILL");
-    auto ret = RemoteRpcServer::init(maga_init_params, mm_process_engine, std::move(propose_params));
+    auto ret = RemoteRpcServer::init(maga_init_params, std::move(propose_params));
     if (!ret.ok()) {
         return ret;
     }
