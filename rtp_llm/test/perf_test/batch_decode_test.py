@@ -177,6 +177,8 @@ def parse_args():
     parser.add_argument("--prec", type=str, default="fp16")
     parser.add_argument("--world_size", type=int, default=0)
     parser.add_argument("--disaggregate", type=int, default=0)
+    # partial test, 0: test all, 1: test decode only, 2: test prefill only
+    parser.add_argument("--partial", type=int, default=0)
     args = parser.parse_args()
     return args
 
@@ -204,29 +206,34 @@ def merge_state(
 
 def run_normal_test(args: argparse.Namespace, running_config: RunningConfig):
     server = start_server(args, running_config.env, "process.log")
-    decode_result = run_single(
-        server.port,
-        args.dp_size,
-        args.tp_size,
-        running_config.batch_size_list,
-        running_config.input_len_list,
-        running_config.input_query_dict,
-        True,
-    )
-    prefill_result = run_single(
-        server.port,
-        args.dp_size,
-        args.tp_size,
-        [1],
-        running_config.input_len_list,
-        running_config.input_query_dict,
-        False,
-    )
+    decode_result = None
+    prefill_result = None
+    if args.partial == 0 or args.partial == 1:
+        decode_result = run_single(
+            server.port,
+            args.dp_size,
+            args.tp_size,
+            running_config.batch_size_list,
+            running_config.input_len_list,
+            running_config.input_query_dict,
+            True,
+        )
+    if args.partial == 0 or args.partial == 2:
+        prefill_result = run_single(
+            server.port,
+            args.dp_size,
+            args.tp_size,
+            [1],
+            running_config.input_len_list,
+            running_config.input_query_dict,
+            False,
+        )
     server.stop_server()
     return decode_result, prefill_result
 
 
 def run_disaggregate_test(args: argparse.Namespace, running_config: RunningConfig):
+    assert args.partial == 0, "disaggregate test only support test all"
     decode_env = json.loads(os.environ.get("DECODE_CONFIG", "{}"))
     decode_env.update(running_config.env)
     decode_env["BATCH_DECODE_SCHEDULER_WARMUP_TYPE"] = "0"
@@ -262,7 +269,7 @@ def run_disaggregate_test(args: argparse.Namespace, running_config: RunningConfi
     return decode_result, prefill_result
 
 
-def create_test_env(max_len: int, max_concurrency: int):
+def create_test_env(max_len: int, max_concurrency: int, partial: int):
     return {
         "USE_BATCH_DECODE_SCHEDULER": "1",
         "FAKE_BALANCE_EXPERT": "1",
@@ -271,7 +278,9 @@ def create_test_env(max_len: int, max_concurrency: int):
         "TORCH_CUDA_PROFILER_DIR": os.environ.get(
             "TEST_UNDECLARED_OUTPUTS_DIR", os.getcwd()
         ),
-        "BATCH_DECODE_SCHEDULER_WARMUP_TYPE": "1",
+        "BATCH_DECODE_SCHEDULER_WARMUP_TYPE": (
+            "0" if (partial == 0 or partial == 1) else "1"
+        ),
     }
 
 
@@ -284,10 +293,12 @@ def main():
             args.dp_size * args.tp_size == args.world_size,
             "dp_size * tp_size must be equal to world_size",
         )
+    if args.partial not in [0, 1, 2]:
+        raise ValueError("partial must be 0, 1, or 2")
     batch_size_list = [int(x) for x in args.batch_size.split(",")]
     input_len_list = [int(x) for x in args.input_len.split(",")]
 
-    test_env = create_test_env(max(input_len_list), max(batch_size_list))
+    test_env = create_test_env(max(input_len_list), max(batch_size_list), args.partial)
 
     input_query_dict = create_query(
         args.model_type, args.tokenizer_path, input_len_list
@@ -304,7 +315,8 @@ def main():
         decode_result, prefill_result = run_normal_test(args, running_config)
     else:
         decode_result, prefill_result = run_disaggregate_test(args, running_config)
-
+    if args.partial != 0:
+        return
     metrics_list = merge_state(decode_result, prefill_result)
     device_name = os.environ.get("DEVICE_NAME", torch.cuda.get_device_name(0))
     # use decode parallel config as odps column for current

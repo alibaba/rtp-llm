@@ -1,0 +1,50 @@
+# RTP-LLM Multi-Benchmark Configuration
+# This file defines various benchmark configurations for distributed inference testing
+
+benchmarks:
+  - name: "H20_Deepseek-R1_Decode_EP32_4K"
+    # git config
+    git_repo_url: "git@gitlab.alibaba-inc.com:foundation_models/RTP-LLM.git"
+    git_checkout_ref: "origin/feature/multi_benchmark"
+    # machine config
+    ip_lists:
+      - "33.126.67.231"
+      - "33.126.67.17"
+      - "33.126.51.159"
+      - "33.126.83.168"
+    run_user: "admin"
+    ssh_port: 2222
+    # model config
+    tokenizer_path: "/mnt/nas1/hf/deepseek_r1_4layers/"
+    checkpoint_path: "/mnt/nas1/hf/deepseek_r1_4layers/"
+    model_type: "deepseek3"
+    # test config
+    is_decode: true
+    batch_size_list: "[1,2,4,8,16,32,48,64,80]"
+    input_len_list: "[4096]"
+    # test suit
+    tp_size: [1,2,4]
+    dp_size: [32,16,8]
+    # build config
+    bazel_build_args: '" --jobs 100 --verbose_failures --config=cuda12_6 "'
+    # file dir config
+    ft_sub_dir: "rtp_llm_perf_test"
+    # model config
+    start_port: 12333
+    concurrency_limit: 80
+    accl_dispatch_num_warp_groups: 4
+    accl_combine_num_warp_groups: 4
+    decode_test_length: 2048
+    warm_up: 1
+    act_type: "bf16"
+    weight_type: "fp16"
+    reserver_runtime_mem_mb: 0
+    device_reserve_memory_bytes: 0
+    load_ckpt_num_process: 96
+    max_context_batch_size: 1
+    enable_merge_w13: true
+    use_deepep_moe: true
+    enable_layer_micro_batch: 2
+    enable_comm_overlap: true
+    redundant_expert: 0
+    accl_low_latency_optimize: 1
