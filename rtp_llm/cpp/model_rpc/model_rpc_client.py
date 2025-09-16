@@ -188,6 +188,7 @@ def trans_multimodal_input(
         mm_preprocess_config_pb.fps = mm_input.config.fps
         mm_preprocess_config_pb.min_frames = mm_input.config.min_frames
         mm_preprocess_config_pb.max_frames = mm_input.config.max_frames
+        mm_preprocess_config_pb.mm_timeout_ms = mm_input.config.mm_timeout_ms
         input_pb.multimodal_inputs.append(mm_input_pb)
 
 

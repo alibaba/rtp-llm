@@ -115,7 +115,8 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
                                    mm_preprocess_config->max_pixels(),
                                    mm_preprocess_config->fps(),
                                    mm_preprocess_config->min_frames(),
-                                   mm_preprocess_config->max_frames());
+                                   mm_preprocess_config->max_frames(),
+                                   mm_preprocess_config->mm_timeout_ms());
         }
         generate_input->multimodal_inputs = std::move(mm_inputs);
     }
@@ -146,7 +147,10 @@ std::vector<MultimodalInput> QueryConverter::transMMInput(const MultimodalInputs
                                 mm_preprocess_config->height(),
                                 mm_preprocess_config->min_pixels(),
                                 mm_preprocess_config->max_pixels(),
-                                mm_preprocess_config->fps());
+                                mm_preprocess_config->fps(),
+                                mm_preprocess_config->min_frames(),
+                                mm_preprocess_config->max_frames(),
+                                mm_preprocess_config->mm_timeout_ms());
     }
     return inputs_vec;
 }
@@ -169,6 +173,9 @@ void QueryConverter::transMMPreprocessConfig(MMPreprocessConfigPB* config_pb, co
     config_pb->set_min_pixels(config.min_pixels);
     config_pb->set_max_pixels(config.max_pixels);
     config_pb->set_fps(config.fps);
+    config_pb->set_min_frames(config.min_frames);
+    config_pb->set_max_frames(config.max_frames);
+    config_pb->set_mm_timeout_ms(config.mm_timeout_ms);
 }
 
 MultimodalOutput QueryConverter::transMMOutput(const MultimodalOutputsPB* outputs_pb) {

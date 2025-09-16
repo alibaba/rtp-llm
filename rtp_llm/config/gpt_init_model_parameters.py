@@ -214,7 +214,7 @@ class GptInitModelParameters:
         "add_special_tokens",
         "template_type",
         "build_position_ids",
-        "vit_run_batch",
+        "mm_batch_size",
         "phy2log",
         "is_mtp",
         "num_nodes",
@@ -456,7 +456,7 @@ class GptInitModelParameters:
         self.template_type = TemplateType.chat
         self.build_position_ids = False
         self.routed_scaling_factor = 1.0
-        self.vit_run_batch = False
+        self.mm_batch_size = 1
 
         self.is_multimodal = False
         self.model_name = ""

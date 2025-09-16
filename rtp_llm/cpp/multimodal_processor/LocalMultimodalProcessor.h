@@ -27,7 +27,8 @@ private:
                                                  mm_input.mm_preprocess_config.max_pixels,
                                                  mm_input.mm_preprocess_config.fps,
                                                  mm_input.mm_preprocess_config.min_frames,
-                                                 mm_input.mm_preprocess_config.max_frames});
+                                                 mm_input.mm_preprocess_config.max_frames,
+                                                 mm_input.mm_preprocess_config.mm_timeout_ms});
             }
             try {
                 py::gil_scoped_acquire acquire;

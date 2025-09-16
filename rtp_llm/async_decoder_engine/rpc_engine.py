@@ -9,7 +9,7 @@ from rtp_llm.models.base_model import BaseModel, GenerateInput, GenerateOutputs
 from rtp_llm.models.propose_model.propose_model import ProposeModel
 from rtp_llm.ops import EngineScheduleInfo, KVCacheInfo, WorkerStatusInfo
 from rtp_llm.ops.rtp_llm.rtp_llm_op import RtpLLMOp
-from rtp_llm.utils.mm_process_engine import MMProcessEngine
+from rtp_llm.models.multimodal.mm_process_engine import MMProcessEngine
 
 
 class RPCEngine(BaseEngine):
