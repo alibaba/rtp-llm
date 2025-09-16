@@ -56,16 +56,16 @@ public:
                        const ThreeFSIovHandle&  write_iov_handle,
                        size_t                   read_timeout_ms  = 1000,
                        size_t                   write_timeout_ms = 2000);
-    ~DistStorage3FSFile();
+    virtual ~DistStorage3FSFile();
 
 public:
-    bool isExist();
-
-    bool open(bool write = false);
-    bool write(const std::vector<DistStorage::Iov>& iovs);
-    bool read(const std::vector<DistStorage::Iov>& iovs);
-    bool del();
-    bool close();
+    // virtual for mock test
+    virtual bool exists() const;
+    virtual bool open(bool write = false);
+    virtual bool write(const std::vector<DistStorage::Iov>& iovs);
+    virtual bool read(const std::vector<DistStorage::Iov>& iovs);
+    virtual bool del();
+    virtual bool close();
 
 private:
     bool doWrite(const std::shared_ptr<ThreeFSHandle>& handle,

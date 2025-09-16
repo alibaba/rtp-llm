@@ -2,7 +2,7 @@
 
 #include "rtp_llm/cpp/cache/DistStorage.h"
 #include "rtp_llm/cpp/cache/DistStorage3FSFile.h"
-#include "rtp_llm/cpp/cache/ThreeFSCudaUtil.h"
+#include "rtp_llm/cpp/utils/LRUCache.h"
 
 namespace rtp_llm::threefs {
 
@@ -22,15 +22,17 @@ public:
 private:
     bool checkInitParams(const DistStorage3FSInitParams& init_params) const;
 
-    std::shared_ptr<threefs::DistStorage3FSFile> getFile(const DistStorage::Item& item, bool read = true);
-    void                                         removeFile(const DistStorage::Item& item);
-    std::string                                  makeFilepath(const std::map<std::string, std::string>& metas) const;
+    std::shared_ptr<DistStorage3FSFile> getFile(const DistStorage::Item& item, bool cache_file = false);
+    std::shared_ptr<DistStorage3FSFile> getFileFromCache(const std::string& key);
+    void        putFileToCache(const std::string& key, const std::shared_ptr<DistStorage3FSFile>& file);
+    void        clearFileCache();
+    std::string makeFilepath(const std::map<std::string, std::string>& metas) const;
 
-    bool initIovHandle(threefs::ThreeFSIovHandle&                       handle,
-                       size_t                                           iov_block_size,
-                       size_t                                           iov_size,
-                       const std::shared_ptr<threefs::ThreeFSCudaUtil>& cuda_util);
-    void releaseIovHandle(threefs::ThreeFSIovHandle& handle);
+    bool initIovHandle(ThreeFSIovHandle&                       handle,
+                       size_t                                  iov_block_size,
+                       size_t                                  iov_size,
+                       const std::shared_ptr<ThreeFSCudaUtil>& cuda_util);
+    void releaseIovHandle(ThreeFSIovHandle& handle);
     void deleteIovShm() const;
 
     struct hf3fs_iov* createIov(const std::string& mountpoint, size_t iov_size, size_t iov_block_size) const;
@@ -44,16 +46,14 @@ private:
     DistStorage3FSInitParams     init_params_;
 
     // for read & write
-    threefs::ThreeFSIovHandle read_iov_handle_;
-    threefs::ThreeFSIovHandle write_iov_handle_;
+    ThreeFSIovHandle read_iov_handle_;
+    ThreeFSIovHandle write_iov_handle_;
 
     // for 3fs async write
     std::shared_ptr<autil::LockFreeThreadPool> write_thread_pool_;
 
-    // TODO change to LRUMap, avoid exceed max handler num
-    const uint32_t                                                                kMaxFileNum = 1000;
-    std::unordered_map<std::string, std::shared_ptr<threefs::DistStorage3FSFile>> file_map_;
-    std::shared_mutex                                                             file_map_mutex_;
+    std::shared_ptr<LRUCache<std::string, std::shared_ptr<DistStorage3FSFile>>> file_cache_;
+    std::mutex                                                                  file_cache_mutex_;
 
     // for metric
     std::atomic<bool> stop_report_metrics_{false};
