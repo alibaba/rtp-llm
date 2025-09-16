@@ -25,7 +25,23 @@ grpc::Status EmbeddingRpcServiceImpl::embedding(grpc::ServerContext*    context,
         input_lengths  = std::vector<int32_t>(request->input_lengths().begin(), request->input_lengths().end());
 
         for (const auto& pb_feature : request->multimodal_features()) {
-            MultimodalInput feature(pb_feature.multimodal_url(), torch::empty(1), pb_feature.multimodal_type());
+            auto               mm_preprocess_config = &pb_feature.mm_preprocess_config();
+            std::vector<float> crop_positions;
+            for (const auto& crop_position : mm_preprocess_config->crop_positions()) {
+                crop_positions.push_back(crop_position);
+            }
+            MultimodalInput feature(pb_feature.multimodal_url(),
+                                    torch::empty(1),
+                                    pb_feature.multimodal_type(),
+                                    mm_preprocess_config->width(),
+                                    mm_preprocess_config->height(),
+                                    mm_preprocess_config->min_pixels(),
+                                    mm_preprocess_config->max_pixels(),
+                                    mm_preprocess_config->fps(),
+                                    mm_preprocess_config->min_frames(),
+                                    mm_preprocess_config->max_frames(),
+                                    crop_positions,
+                                    mm_preprocess_config->mm_timeout_ms());
             multimodal_inputs.emplace_back(std::move(feature));
         }
     } catch (const std::exception& e) {
