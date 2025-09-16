@@ -158,7 +158,7 @@ class TestGetWorldInfo(TestCase):
         self.assertTrue(world_info.initialized)
         self.assertEqual(len(world_info.members), 2)
         self.assertEqual(world_info.members[0].server_port, 20000)
-        self.assertEqual(world_info.members[1].server_port, 20008)
+        self.assertEqual(world_info.members[1].server_port, 20010)
 
 
 class DistributedServerTest(unittest.TestCase):

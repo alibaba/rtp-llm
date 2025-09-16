@@ -13,7 +13,7 @@ from rtp_llm.async_decoder_engine.embedding.interface import EngineInputs, Engin
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.models.downstream_modules.utils import create_custom_module
-
+from rtp_llm.utils.grpc_util import trans_from_tensor
 
 def tensor_pb_to_torch(tensor_pb) -> Optional[torch.Tensor]:
     data_type = tensor_pb.data_type
@@ -49,14 +49,10 @@ class EmbeddingEndpoint(object):
         self,
         model_config,
         grpc_config,
-        server_config,
         tokenizer: BaseTokenizer,
     ):
         self.renderer = create_custom_module(model_config, tokenizer).renderer
         # 创建到服务器的连接
-        self.address = f"localhost:{server_config.embedding_rpc_server_port}"
-        logging.info(f"embedding endpoint connect to rpc addresses: {self.address}")
-        self.options = []
         client_config = grpc_config.get_client_config()
         if client_config is not None:
             for key, value in client_config.items():
@@ -95,9 +91,23 @@ class EmbeddingEndpoint(object):
         stub = pb2_grpc.EmbeddingRpcServiceStub(channel)
         multimodal_features = []
         for feature in input.multimodal_inputs:
+            preprocess_config = pb2.MMPreprocessConfigPB(
+                width=feature.config.width,
+                height=feature.config.height,
+                min_pixels=feature.config.min_pixels,
+                max_pixels=feature.config.max_pixels,
+                fps=feature.config.fps,
+                min_frames=feature.config.min_frames,
+                max_frames=feature.config.max_frames,
+                crop_positions=feature.config.crop_positions,
+                mm_timeout_ms=feature.config.mm_timeout_ms,
+            )
             multimodal_features.append(
                 pb2.MultimodalInputPB(
-                    multimodal_type=feature.mm_type, multimodal_url=feature.url
+                    multimodal_type=feature.mm_type,
+                    multimodal_url=feature.url,
+                    multimodal_tensor=trans_from_tensor(feature.tensor),
+                    mm_preprocess_config=preprocess_config,
                 )
             )
         request = pb2.EmbeddingInputPB(
