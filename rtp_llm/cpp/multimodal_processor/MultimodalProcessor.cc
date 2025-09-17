@@ -89,7 +89,7 @@ ErrorResult<ExpandedOutput> MultimodalProcessor::expandTokenIds(const std::vecto
                0,
                mm_embedding[i].sizes()[0] * token_masks->typeSize());
         if (token_type_ids != nullptr) {
-            memcpy(expanded_token_type_ids->dataWithOffset<int32_t>(new_loc_idx + copy_len),
+            memcpy(expanded_token_type_ids->dataWithOffset<int32_t>(new_loc_idx),
                    token_type_ids->dataWithOffset<int32_t>(old_loc_idx),
                    token_type_ids->typeSize() * copy_len);
         }
