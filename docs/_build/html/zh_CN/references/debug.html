@@ -1,0 +1,1052 @@
+
+<!DOCTYPE html>
+
+
+<html lang="zh-CN" data-content_root="../" >
+
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>RTP-LLM调试 &#8212; RTP-LLM</title>
+  
+  
+  
+  <script data-cfasync="false">
+    document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
+    document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
+  </script>
+  
+  <!-- Loaded before other Sphinx assets -->
+  <link href="../_static/styles/theme.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+<link href="../_static/styles/bootstrap.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+<link href="../_static/styles/pydata-sphinx-theme.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+
+  
+  <link href="../_static/vendor/fontawesome/6.5.2/css/all.min.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+  <link rel="preload" as="font" type="font/woff2" crossorigin href="../_static/vendor/fontawesome/6.5.2/webfonts/fa-solid-900.woff2" />
+<link rel="preload" as="font" type="font/woff2" crossorigin href="../_static/vendor/fontawesome/6.5.2/webfonts/fa-brands-400.woff2" />
+<link rel="preload" as="font" type="font/woff2" crossorigin href="../_static/vendor/fontawesome/6.5.2/webfonts/fa-regular-400.woff2" />
+
+    <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=03e43079" />
+    <link rel="stylesheet" type="text/css" href="../_static/styles/sphinx-book-theme.css?v=eba8b062" />
+    <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../_static/css/custom_log.css" />
+    <link rel="stylesheet" type="text/css" href="../_static/css/language-switcher.css?v=943557c0" />
+    <link rel="stylesheet" type="text/css" href="../_static/css/custom_log.css" />
+    <link rel="stylesheet" type="text/css" href="../_static/css/language-switcher.css?v=943557c0" />
+  
+  <!-- Pre-loaded scripts that we'll load fully later -->
+  <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=dfe6caa3a7d634c4db9b" />
+<link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=dfe6caa3a7d634c4db9b" />
+  <script src="../_static/vendor/fontawesome/6.5.2/js/all.min.js?digest=dfe6caa3a7d634c4db9b"></script>
+
+    <script src="../_static/documentation_options.js?v=8bc30457"></script>
+    <script src="../_static/doctools.js?v=9bcbadda"></script>
+    <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../_static/copybutton.js?v=ccdb6887"></script>
+    <script src="../_static/js/language-switcher.js?v=ebe09c31"></script>
+    <script src="../_static/scripts/sphinx-book-theme.js?v=887ef09a"></script>
+    <script src="../_static/translations.js?v=beaddf03"></script>
+    <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
+    <script>DOCUMENTATION_OPTIONS.pagename = 'references/debug';</script>
+    <script src="../_static/js/language-switcher.js?v=ebe09c31"></script>
+    <link rel="index" title="索引" href="../genindex.html" />
+    <link rel="search" title="搜索" href="../search.html" />
+    <link rel="next" title="Developer Reference" href="developer.html" />
+    <link rel="prev" title="性能分析" href="profiling.html" /> 
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="docsearch:language" content="zh-CN"/>
+    <meta name="docbuild:last-update" content="2025 年 09 月 17 日"/>
+<link
+  rel="stylesheet"
+  href="../_static/css/language-switcher.css"
+/>
+<script src="../_static/js/language-switcher.js"></script>
+
+  </head>
+  
+  
+  <body data-bs-spy="scroll" data-bs-target=".bd-toc-nav" data-offset="180" data-bs-root-margin="0px 0px -60%" data-default-mode="">
+
+  
+  
+  <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
+  
+  <div id="pst-scroll-pixel-helper"></div>
+  
+  <button type="button" class="btn rounded-pill" id="pst-back-to-top">
+    <i class="fa-solid fa-arrow-up"></i>Back to top</button>
+
+  
+  <input type="checkbox"
+          class="sidebar-toggle"
+          id="pst-primary-sidebar-checkbox"/>
+  <label class="overlay overlay-primary" for="pst-primary-sidebar-checkbox"></label>
+  
+  <input type="checkbox"
+          class="sidebar-toggle"
+          id="pst-secondary-sidebar-checkbox"/>
+  <label class="overlay overlay-secondary" for="pst-secondary-sidebar-checkbox"></label>
+  
+  <div class="search-button__wrapper">
+    <div class="search-button__overlay"></div>
+    <div class="search-button__search-container">
+<form class="bd-search d-flex align-items-center"
+      action="../search.html"
+      method="get">
+  <i class="fa-solid fa-magnifying-glass"></i>
+  <input type="search"
+         class="form-control"
+         name="q"
+         id="search-input"
+         placeholder="Search..."
+         aria-label="Search..."
+         autocomplete="off"
+         autocorrect="off"
+         autocapitalize="off"
+         spellcheck="false"/>
+  <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd>K</kbd></span>
+</form></div>
+  </div>
+
+  <div class="pst-async-banner-revealer d-none">
+  <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="Version warning"></aside>
+</div>
+
+  
+    <header class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
+    </header>
+  
+
+  <div class="bd-container">
+    <div class="bd-container__inner bd-page-width">
+      
+      
+      
+      <div class="bd-sidebar-primary bd-sidebar">
+        
+
+  
+  <div class="sidebar-header-items sidebar-primary__section">
+    
+    
+    
+    
+  </div>
+  
+    <div class="sidebar-primary-items__start sidebar-primary__section">
+        <div class="sidebar-primary-item">
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="../index.html">
+  
+  
+  
+  
+  
+    
+    
+      
+    
+    
+    <img src="../_static/logo.png" class="logo__image only-light" alt="RTP-LLM - Home"/>
+    <script>document.write(`<img src="../_static/logo.png" class="logo__image only-dark" alt="RTP-LLM - Home"/>`);</script>
+  
+  
+</a></div>
+        <div class="sidebar-primary-item">
+
+ <script>
+ document.write(`
+   <button class="btn search-button-field search-button__button" title="搜索" aria-label="搜索" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="fa-solid fa-magnifying-glass"></i>
+    <span class="search-button__default-text">搜索</span>
+    <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+   </button>
+ `);
+ </script></div>
+        <div class="sidebar-primary-item"><nav class="bd-links bd-docs-nav" aria-label="Main">
+    <div class="bd-toc-item navbar-nav active">
+        <p aria-level="2" class="caption" role="heading"><span class="caption-text">安装</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../start/install.html">安装 RTP-LLM</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">发布版本</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../release/v0.2.0/release.html">RTP-LLM 0.2.0</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">基本用法</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../backend/send_request.html">发送请求</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/openai_api_completions.html">OpenAI API - 文本生成/会话</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/openai_api_vision.html">OpenAI API - 多模态</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/openai_api_embeddings.html">OpenAI API - Embedding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/native_api.html">RTP-LLM Native API</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">后端教程</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="deepseek/index.html">deepseek</a></li>
+<li class="toctree-l1"><a class="reference internal" href="qwen/index.html">qwen-moe</a></li>
+<li class="toctree-l1"><a class="reference internal" href="kimi/index.html">kimi</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">高级后端配置</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../backend/server_arguments.html">服务器参数</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/sampling_params.html">采样配置</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/attention_backend.html">注意力后端</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">支持的模型</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/generative_models.html">大语言模型</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/multimodal_language_models.html">多模态语言模型</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/embedding_models.html">Embedding 模型</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/support_new_models.html">如何支持新模型</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">高级功能</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../backend/speculative_decoding.html">推测解码</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/reuse_kv_cache.html">重用缓存</a></li>
+
+<li class="toctree-l1"><a class="reference internal" href="../backend/function_calling.html">工具和函数调用</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/quantization.html">量化</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/lora.html">LoRA Serving</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/pd_disaggregation.html">PD解聚</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">参考文献</span></p>
+<ul class="current nav bd-sidenav">
+<li class="toctree-l1 current active has-children"><a class="reference internal" href="general.html">通用指南</a><details open="open"><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="profiling.html">性能分析</a></li>
+<li class="toctree-l2 current active"><a class="current reference internal" href="#">RTP-LLM调试</a></li>
+</ul>
+</details></li>
+<li class="toctree-l1"><a class="reference internal" href="developer.html">Developer Reference</a></li>
+</ul>
+
+    </div>
+</nav></div>
+    </div>
+  
+  
+  <div class="sidebar-primary-items__end sidebar-primary__section">
+  </div>
+  
+  <div id="rtd-footer-container"></div>
+
+
+      </div>
+      
+      <main id="main-content" class="bd-main" role="main">
+        
+        
+
+<div class="sbt-scroll-pixel-helper"></div>
+
+          <div class="bd-content">
+            <div class="bd-article-container">
+              
+              <div class="bd-header-article d-print-none">
+<div class="header-article-items header-article__inner">
+  
+    <div class="header-article-items__start">
+      
+        <div class="header-article-item"><button class="sidebar-toggle primary-toggle btn btn-sm" title="Toggle primary sidebar" data-bs-placement="bottom" data-bs-toggle="tooltip">
+  <span class="fa-solid fa-bars"></span>
+</button></div>
+      
+    </div>
+  
+  
+    <div class="header-article-items__end">
+      
+        <div class="header-article-item">
+
+<div class="article-header-buttons">
+
+
+
+
+
+<div class="dropdown dropdown-source-buttons">
+  <button class="btn dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" aria-label="Source repositories">
+    <i class="fab fa-github"></i>
+  </button>
+  <ul class="dropdown-menu">
+      
+      
+      
+      <li><a href="https://github.com/alibaba/rtp-llm" target="_blank"
+   class="btn btn-sm btn-source-repository-button dropdown-item"
+   title="源码库"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fab fa-github"></i>
+  </span>
+<span class="btn__text-container">Repository</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li><a href="https://github.com/alibaba/rtp-llm/blob/main/references/debug.md?plain=1" target="_blank"
+   class="btn btn-sm btn-source-file-button dropdown-item"
+   title="Show source"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-code"></i>
+  </span>
+<span class="btn__text-container">Show source</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li><a href="https://github.com/alibaba/rtp-llm/edit/main/references/debug.md" target="_blank"
+   class="btn btn-sm btn-source-edit-button dropdown-item"
+   title="Suggest edit"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-pencil-alt"></i>
+  </span>
+<span class="btn__text-container">Suggest edit</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li><a href="https://github.com/alibaba/rtp-llm/issues/new?title=Issue%20on%20page%20%2Freferences/debug.html&body=Your%20issue%20content%20here." target="_blank"
+   class="btn btn-sm btn-source-issues-button dropdown-item"
+   title="创建议题"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-lightbulb"></i>
+  </span>
+<span class="btn__text-container">Open issue</span>
+</a>
+</li>
+      
+  </ul>
+</div>
+
+
+
+
+
+
+<div class="dropdown dropdown-download-buttons">
+  <button class="btn dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" aria-label="下载此页面">
+    <i class="fas fa-download"></i>
+  </button>
+  <ul class="dropdown-menu">
+      
+      
+      
+      <li><a href="../_sources/references/debug.md" target="_blank"
+   class="btn btn-sm btn-download-source-button dropdown-item"
+   title="下载源文件"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-file"></i>
+  </span>
+<span class="btn__text-container">.md</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li>
+<button onclick="window.print()"
+  class="btn btn-sm btn-download-pdf-button dropdown-item"
+  title="列印成 PDF"
+  data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-file-pdf"></i>
+  </span>
+<span class="btn__text-container">.pdf</span>
+</button>
+</li>
+      
+  </ul>
+</div>
+
+
+
+
+<button onclick="toggleFullScreen()"
+  class="btn btn-sm btn-fullscreen-button"
+  title="全屏模式"
+  data-bs-placement="bottom" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-expand"></i>
+  </span>
+
+</button>
+
+
+
+<script>
+document.write(`
+  <button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button" title="light/dark" aria-label="light/dark" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="theme-switch fa-solid fa-sun fa-lg" data-mode="light"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg" data-mode="dark"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"></i>
+  </button>
+`);
+</script>
+
+
+<script>
+document.write(`
+  <button class="btn btn-sm pst-navbar-icon search-button search-button__button" title="搜索" aria-label="搜索" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="fa-solid fa-magnifying-glass fa-lg"></i>
+  </button>
+`);
+</script>
+<button class="sidebar-toggle secondary-toggle btn btn-sm" title="Toggle secondary sidebar" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <span class="fa-solid fa-list"></span>
+</button>
+</div></div>
+      
+    </div>
+  
+</div>
+</div>
+              
+              
+
+<div id="jb-print-docs-body" class="onlyprint">
+    <h1>RTP-LLM调试</h1>
+    <!-- Table of contents -->
+    <div id="print-main-content">
+        <div id="jb-print-toc">
+            
+            <div>
+                <h2> 目录 </h2>
+            </div>
+            <nav aria-label="Page">
+                <ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#debug-python-part">Debug Python Part</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#method-1-logging-or-print">方法一：日志或打印</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#method-2-python-debugger">方法二：Python调试器</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#debug-c-part">Debug C++ Part</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#method-1-logging">方法一：日志记录</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#method-2-gdb-debug">方法二：GDB调试</a><ul class="nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#gdb-debug-core">GDB调试核心</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#gdb-debug-process">GDB调试进程</a></li>
+</ul>
+</li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#method-3-unit-test">方法三：单元测试</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#debug-running-server">Debug Running Server</a></li>
+</ul>
+            </nav>
+        </div>
+    </div>
+</div>
+
+              
+                
+<div id="searchbox"></div>
+                <article class="bd-article">
+                  
+  <section class="tex2jax_ignore mathjax_ignore" id="debugging-rtp-llm">
+<h1>RTP-LLM调试<a class="headerlink" href="#debugging-rtp-llm" title="Link to this heading">#</a></h1>
+<p>RTP-LLM项目使用Bazel构建系统。在了解如何从头开始本地编译和运行RTP-LLM之后，本文将介绍如何调试代码。&quot;由于RTP-LLM主要由Python和C++代码组合而成，我们将在本指南中介绍几种常用的调试方法。&quot;</p>
+<section id="debug-python-part">
+<h2>Debug Python Part<a class="headerlink" href="#debug-python-part" title="Link to this heading">#</a></h2>
+<section id="method-1-logging-or-print">
+<h3>方法一：日志或打印<a class="headerlink" href="#method-1-logging-or-print" title="Link to this heading">#</a></h3>
+<p>在本地运行调试模式时，将rtp_llm/config/py_config_modules.py中ServerConfig类的&quot;self.frontend_server_count = 4修改为1。这个修改确保只启动一个前端服务器，&quot;允许打印语句和日志输出直接在终端中显示。&quot;</p>
+</section>
+<section id="method-2-python-debugger">
+<h3>方法二：Python调试器<a class="headerlink" href="#method-2-python-debugger" title="Link to this heading">#</a></h3>
+<p>假设我们已经有一个现有的容器，访问它并设置SSH端口映射以启用远程连接。&quot;</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>sudo<span class="w"> </span>ssh-keygen<span class="w"> </span>-A
+sudo<span class="w"> </span>/usr/sbin/sshd<span class="w"> </span>-p<span class="w"> </span><span class="m">37228</span>
+</pre></div>
+</div>
+<p>通过VS Code中的SSH扩展访问容器。</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>Host<span class="w"> </span>dev-container
+<span class="w">    </span>HostName<span class="w"> </span>ip
+<span class="w">    </span>User<span class="w"> </span>user
+<span class="w">    </span>Port<span class="w"> </span><span class="m">37228</span>
+</pre></div>
+</div>
+<p>通过VS Code访问容器后，确保Python调试器扩展已安装在容器中。<img alt="替代文本" src="../_images/debug_image-debugger.png" />&quot;</p>
+<p>编写调试用的launch.json配置文件。以下是RTP-LLM项目中用于调试Python和C++代码的&quot;VS Code launch.json配置文件示例（根据需要调整路径）：&quot;</p>
+<div class="highlight-json notranslate"><div class="highlight"><pre><span></span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;version&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;0.2.0&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;configurations&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">        </span><span class="p">{</span>
+<span class="w">            </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Run RTP-LLM with Qwen2-0.5B&quot;</span><span class="p">,</span>
+<span class="w">            </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;debugpy&quot;</span><span class="p">,</span>
+<span class="w">            </span><span class="nt">&quot;request&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;launch&quot;</span><span class="p">,</span>
+<span class="w">            </span><span class="nt">&quot;program&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;${file}&quot;</span><span class="p">,</span>
+<span class="w">            </span><span class="nt">&quot;cwd&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;${path/to/project}/RTP-LLM/&quot;</span><span class="p">,</span>
+<span class="w">            </span><span class="nt">&quot;env&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="nt">&quot;PYTHONPATH&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;$PYTHONPATH:${path/to/project}/RTP-LLM&quot;</span><span class="p">,</span>
+<span class="w">                </span><span class="nt">&quot;PYTHON_BIN&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;/opt/conda310/bin/python&quot;</span><span class="p">,</span>
+<span class="w">                </span><span class="nt">&quot;CUDA_VISIBLE_DEVICES&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2,3&quot;</span><span class="p">,</span>
+<span class="w">                </span><span class="nt">&quot;CHECKPOINT_PATH&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;/mnt/nas1/hf/Qwen2-0.5B&quot;</span><span class="p">,</span>
+<span class="w">                </span><span class="nt">&quot;TOKENIZER_PATH&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;/mnt/nas1/hf/Qwen2-0.5B&quot;</span><span class="p">,</span>
+<span class="w">                </span><span class="nt">&quot;MODEL_TYPE&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;qwen_2&quot;</span><span class="p">,</span>
+<span class="w">                </span><span class="nt">&quot;LD_LIBRARY_PATH&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;&quot;</span><span class="p">,</span>
+<span class="w">                </span><span class="nt">&quot;TP_SIZE&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2&quot;</span><span class="p">,</span>
+<span class="w">                </span><span class="nt">&quot;DP_SIZE&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;1&quot;</span><span class="p">,</span>
+<span class="w">                </span><span class="nt">&quot;EP_SIZE&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2&quot;</span><span class="p">,</span>
+<span class="w">                </span><span class="nt">&quot;WORLD_SIZE&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2&quot;</span><span class="p">,</span>
+<span class="w">                </span><span class="nt">&quot;LOCAL_WORLD_SIZE&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;1&quot;</span><span class="p">,</span>
+<span class="w">                </span><span class="nt">&quot;MAX_SEQ_LEN&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;1024&quot;</span><span class="p">,</span>
+<span class="w">                </span><span class="nt">&quot;MAX_CONTEXT_BATCH_SIZE&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;1&quot;</span><span class="p">,</span>
+<span class="w">                </span><span class="nt">&quot;CONCURRENCY_LIMIT&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;8&quot;</span><span class="p">,</span>
+<span class="w">                </span><span class="nt">&quot;RESERVER_RUNTIME_MEM_MB&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;4096&quot;</span><span class="p">,</span>
+<span class="w">                </span><span class="nt">&quot;WARM_UP&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;1&quot;</span><span class="p">,</span>
+<span class="w">                </span><span class="nt">&quot;START_PORT&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;61348&quot;</span><span class="p">,</span>
+<span class="w">                </span><span class="nt">&quot;NSIGHT_PERF&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;0&quot;</span><span class="p">,</span>
+<span class="w">                </span><span class="nt">&quot;CUDA_ASAN&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;0&quot;</span>
+<span class="w">            </span><span class="p">},</span>
+<span class="w">            </span><span class="nt">&quot;args&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span>
+<span class="w">        </span><span class="p">},</span>
+<span class="w">    </span><span class="p">],</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<p>在运行或调试代码之前设置所需的环境变量。&quot;</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="ch">#!/bin/bash</span>
+<span class="nb">set</span><span class="w"> </span>-x<span class="p">;</span>
+<span class="c1">## set python path</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">PYTHON_BIN</span><span class="o">=</span>/opt/conda310/bin/python<span class="p">;</span>
+<span class="c1">## set user home</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">USER_HOME</span><span class="o">=</span><span class="si">${</span><span class="p">/path/to/home</span><span class="si">}</span><span class="p">;</span>
+
+<span class="nb">export</span><span class="w"> </span><span class="nv">PYTHONUNBUFFERED</span><span class="o">=</span>TRUE<span class="p">;</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">PYTHONPATH</span><span class="o">=</span><span class="si">${</span><span class="nv">path</span><span class="p">/to/project</span><span class="si">}</span>/:<span class="si">${</span><span class="nv">PYTHONPATH</span><span class="si">}</span>
+
+<span class="nb">export</span><span class="w"> </span><span class="nv">PY_LOG_PATH</span><span class="o">=</span><span class="si">${</span><span class="nv">path</span><span class="p">/to/project</span><span class="si">}</span>/logs
+<span class="nb">export</span><span class="w"> </span><span class="nv">CHECKPOINT_PATH</span><span class="o">=</span><span class="s2">&quot;/mnt/nas1/hf/Qwen2-0.5B&quot;</span><span class="p">;</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">TOKENIZER_PATH</span><span class="o">=</span><span class="si">${</span><span class="nv">CHECKPOINT_PATH</span><span class="si">}</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">MODEL_TYPE</span><span class="o">=</span><span class="s2">&quot;qwen_2&quot;</span><span class="p">;</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">LD_LIBRARY_PATH</span><span class="o">=</span>/opt/conda310/lib/:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64:/usr/local/cuda-12.6/extras/CUPTI/lib64/
+
+<span class="nb">export</span><span class="w"> </span><span class="nv">TP_SIZE</span><span class="o">=</span><span class="m">2</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">DP_SIZE</span><span class="o">=</span><span class="m">1</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">EP_SIZE</span><span class="o">=</span><span class="k">$((</span><span class="nv">TP_SIZE</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nv">DP_SIZE</span><span class="k">))</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">WORLD_SIZE</span><span class="o">=</span><span class="nv">$EP_SIZE</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">LOCAL_WORLD_SIZE</span><span class="o">=</span><span class="nv">$EP_SIZE</span>
+<span class="c1">## request max token number</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">MAX_SEQ_LEN</span><span class="o">=</span><span class="m">8192</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">MAX_CONTEXT_BATCH_SIZE</span><span class="o">=</span><span class="m">1</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">CONCURRENCY_LIMIT</span><span class="o">=</span><span class="m">8</span>
+
+<span class="nb">export</span><span class="w"> </span><span class="nv">RESERVER_RUNTIME_MEM_MB</span><span class="o">=</span><span class="m">4096</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">WARM_UP</span><span class="o">=</span><span class="m">1</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">START_PORT</span><span class="o">=</span><span class="m">61348</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">NSIGHT_PERF</span><span class="o">=</span><span class="m">0</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">CUDA_ASAN</span><span class="o">=</span><span class="m">0</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">DEVICE_RESERVE_MEMORY_BYTES</span><span class="o">=</span>-20480000
+</pre></div>
+</div>
+<p>打开包含start_server.py的文件，设置断点，然后开始调试。&quot;</p>
+<p><img alt="替代文本" src="../_images/debug_image-1.png" /></p>
+</section>
+</section>
+<section id="debug-c-part">
+<h2>Debug C++ Part<a class="headerlink" href="#debug-c-part" title="Link to this heading">#</a></h2>
+<section id="method-1-logging">
+<h3>方法一：日志记录<a class="headerlink" href="#method-1-logging" title="Link to this heading">#</a></h3>
+<p>添加以下日志语句进行输出：</p>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="n">RTP_LLM_LOG_DEBUG</span><span class="p">(</span><span class="s">&quot;request [%ld] enqueue success&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">request_id</span><span class="p">);</span>
+</pre></div>
+</div>
+<p>其他类似函数包括：</p>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="n">RTP_LLM_LOG_INFO</span>
+<span class="n">RTP_LLM_LOG_WARNING</span>
+<span class="n">RTP_LLM_LOG_ERROR</span>
+</pre></div>
+</div>
+<p>使用LOG_LEVEL=&quot;INFO&quot;环境变量设置日志级别。</p>
+</section>
+<section id="method-2-gdb-debug">
+<h3>方法二：GDB调试<a class="headerlink" href="#method-2-gdb-debug" title="Link to this heading">#</a></h3>
+<section id="gdb-debug-core">
+<h4>GDB调试核心<a class="headerlink" href="#gdb-debug-core" title="Link to this heading">#</a></h4>
+<p>当代码在容器中崩溃并产生核心转储时，会生成一个核心文件&quot;（例如，core-rtp_llm_backend-78933-1757510512）。调试方法：&quot;</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">gdb</span> <span class="o">/</span><span class="n">opt</span><span class="o">/</span><span class="n">conda310</span><span class="o">/</span><span class="nb">bin</span><span class="o">/</span><span class="n">python3</span> <span class="n">core</span><span class="o">-</span><span class="n">rtp_llm_backend</span><span class="o">-</span><span class="mi">78933</span><span class="o">-</span><span class="mi">1757510512</span>
+</pre></div>
+</div>
+<p>将核心文件加载到GDB后，运行bt（回溯）命令显示错误堆栈跟踪。</p>
+<p><img alt="替代文本" src="../_images/debug_image-2.png" /></p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>f<span class="w"> </span><span class="m">4</span><span class="w">       </span><span class="c1"># check rtp_llm::ScoreStream::ScoreStream info</span>
+info<span class="w"> </span>locals
+p<span class="w"> </span>stream
+</pre></div>
+</div>
+<p><img alt="替代文本" src="../_images/debug_image-3.png" /></p>
+<p>检查propose_stream_信息</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">p</span> <span class="o">*</span><span class="p">(</span><span class="n">this</span><span class="o">-&gt;</span><span class="n">propose_stream_</span><span class="o">.</span><span class="n">_M_ptr</span><span class="o">-&gt;</span><span class="n">sp_output_buffer_</span><span class="o">.</span><span class="n">_M_ptr</span><span class="o">-&gt;</span><span class="n">tokens</span><span class="o">.</span><span class="n">_M_ptr</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>检查token信息</p>
+<p><img alt="替代文本" src="../_images/debug_image-4.png" /></p>
+<p>检测到空指针（data_ = 0），导致memcpy错误。</p>
+</section>
+<section id="gdb-debug-process">
+<h4>GDB调试进程<a class="headerlink" href="#gdb-debug-process" title="Link to this heading">#</a></h4>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nv">MODEL_TYPE</span><span class="o">=</span>qwen_7b<span class="w">     </span><span class="se">\</span>
+<span class="nv">CHECKPOINT_PATH</span><span class="o">=</span>/mnt/nas1/hf/Qwen-7B-Chat/<span class="w">     </span><span class="se">\</span>
+<span class="nv">TOKENIZER_PATH</span><span class="o">=</span>/mnt/nas1/dm/qwen_sp/qwen_tokenizer<span class="w">     </span><span class="se">\</span>
+<span class="nv">TP_SIZE</span><span class="o">=</span><span class="m">1</span><span class="w">     </span><span class="se">\</span>
+<span class="nv">SP_TYPE</span><span class="o">=</span>vanilla<span class="w">     </span><span class="se">\</span>
+<span class="nv">GEN_NUM_PER_CIRCLE</span><span class="o">=</span><span class="m">5</span><span class="w">     </span><span class="se">\</span>
+<span class="nv">SP_MODEL_TYPE</span><span class="o">=</span>qwen_1b8<span class="w">     </span><span class="se">\</span>
+<span class="nv">SP_CHECKPOINT_PATH</span><span class="o">=</span>/mnt/nas1/hf/qwen_1b8_sft/<span class="w">     </span><span class="se">\</span>
+<span class="nv">WARM_UP</span><span class="o">=</span><span class="m">1</span><span class="w">     </span><span class="se">\</span>
+<span class="nv">INT8_MODE</span><span class="o">=</span><span class="m">1</span><span class="w">     </span><span class="se">\</span>
+<span class="nv">SP_INT8_MODE</span><span class="o">=</span><span class="m">1</span><span class="w">     </span><span class="se">\</span>
+<span class="nv">REUSE_CACHE</span><span class="o">=</span><span class="m">1</span><span class="w">     </span><span class="se">\</span>
+<span class="nv">START_PORT</span><span class="o">=</span><span class="m">26666</span><span class="w">   </span><span class="se">\</span>
+/opt/conda310/bin/python3<span class="w"> </span>-m<span class="w"> </span>rtp_llm.start_server
+</pre></div>
+</div>
+<p>启动服务后，您可以按如下方式查看相关进程：</p>
+<p>rtp_llm_backend_server进程将作为推理服务的主进程运行。&quot;如果设置了TP_SIZE=2，您将看到两个子进程（例如，rank-0和rank-1）用于张量并行。&quot;rtp_llm_frontend_server_0前端服务进程将处于活动状态以处理外部请求。&quot;</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>yanxi.w+<span class="w">  </span><span class="m">40954</span><span class="w">  </span><span class="m">40801</span><span class="w"> </span><span class="m">44</span><span class="w"> </span><span class="m">14</span>:03<span class="w"> </span>pts/8<span class="w">    </span><span class="m">00</span>:00:41<span class="w"> </span>rtp_llm_backend_server
+yanxi.w+<span class="w">  </span><span class="m">41356</span><span class="w">  </span><span class="m">40801</span><span class="w"> </span><span class="m">20</span><span class="w"> </span><span class="m">14</span>:04<span class="w"> </span>pts/8<span class="w">    </span><span class="m">00</span>:00:11<span class="w"> </span>rtp_llm_frontend_server_0
+</pre></div>
+</div>
+<p>开始GDB调试：将GDB附加到目标进程（例如，PID 40954）：</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">gdb</span> <span class="o">-</span><span class="n">p</span> <span class="mi">40954</span>
+</pre></div>
+</div>
+<p>在代码中设置断点，使用curl发送测试请求并触发断点：</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://127.0.0.1:26000/v1/chat/completions<span class="w">   </span>-H<span class="w"> </span><span class="s2">&quot;Content-Type: application/json&quot;</span><span class="w">   </span>-d<span class="w"> </span><span class="s1">&#39;{</span>
+<span class="s1">    &quot;messages&quot;: [</span>
+<span class="s1">      {</span>
+<span class="s1">        &quot;role&quot;: &quot;user&quot;,</span>
+<span class="s1">        &quot;content&quot;: &quot;What&#39;</span>s<span class="w"> </span>the<span class="w"> </span>WEATHER<span class="w"> </span>like<span class="w"> </span><span class="k">in</span><span class="w"> </span>Hangzhou?<span class="s2">&quot;</span>
+<span class="s2">      }</span>
+<span class="s2">    ],</span>
+<span class="s2">    &quot;</span>stream<span class="s2">&quot;: false,</span>
+<span class="s2">    &quot;</span>aux_info<span class="s2">&quot;: true,</span>
+<span class="s2">    &quot;</span>max_tokens<span class="s2">&quot;: 10</span>
+<span class="s2">  }&#39;</span>
+</pre></div>
+</div>
+<p>断点将被触发，然后通过检查堆栈跟踪来检查代码路径。</p>
+<p><img alt="替代文本" src="../_images/debug_image-5.png" /></p>
+</section>
+</section>
+<section id="method-3-unit-test">
+<h3>方法三：单元测试<a class="headerlink" href="#method-3-unit-test" title="Link to this heading">#</a></h3>
+<p>示例：ViT模块的单元测试</p>
+<p>ViT模块的文件结构</p>
+<p><img alt="替代文本" src="../_images/debug_image-6.png" /></p>
+<p>创建单元测试的步骤 创建测试文件：</p>
+<p>在测试目录下添加一个.cc测试文件（例如，multimodal_processor_test.cc）。&quot;使用EXPECT_EQ等断言语句编写Google Test（gtest）用例来验证行为。&quot;</p>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;gtest/gtest.h&gt;</span>
+<span class="n">TEST</span><span class="p">(</span><span class="n">MultimodalProcessorTest</span><span class="p">,</span><span class="w"> </span><span class="n">BasicFunctionality</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Test logic here</span>
+<span class="w">  </span><span class="n">EXPECT_EQ</span><span class="p">(</span><span class="n">result</span><span class="p">,</span><span class="w"> </span><span class="n">expected_value</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<p>定义BUILD文件：</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">cc_test</span><span class="p">(</span>
+    <span class="n">name</span> <span class="o">=</span> <span class="s2">&quot;multimodal_processor_test&quot;</span><span class="p">,</span>
+    <span class="n">srcs</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;multimodal_processor_test.cc&quot;</span><span class="p">],</span>
+    <span class="n">deps</span> <span class="o">=</span> <span class="p">[</span>
+        <span class="s2">&quot;//rtp_llm/cpp/multimodal_processor:main_lib&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;@gtest//:gtest_main&quot;</span><span class="p">,</span>
+    <span class="p">],</span>
+<span class="p">)</span>
+
+</pre></div>
+</div>
+<p>Run the Test:
+Execute the following command in the project’s container:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>bazelisk<span class="w"> </span><span class="nb">test</span><span class="w">  </span>rtp_llm/cpp/multimodal_processor/test:multimodal_processor_test<span class="w">   </span>--jobs<span class="o">=</span><span class="m">48</span><span class="w"> </span>--test_output<span class="o">=</span>streamed<span class="w"> </span>--config<span class="o">=</span>cuda12_6
+</pre></div>
+</div>
+</section>
+</section>
+<section id="debug-running-server">
+<h2>Debug Running Server<a class="headerlink" href="#debug-running-server" title="Link to this heading">#</a></h2>
+<p>要通过curl请求获取调试信息，请使用以下带有详细输出的命令：</p>
+<p>在请求中启用aux_info: true和debug_info: true将返回额外的辅助信息和调试详细信息。</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">curl</span> <span class="o">-</span><span class="n">X</span> <span class="n">POST</span> <span class="n">http</span><span class="p">:</span><span class="o">//</span><span class="mf">127.0.0.1</span><span class="p">:</span><span class="mi">26000</span><span class="o">/</span><span class="n">v1</span><span class="o">/</span><span class="n">chat</span><span class="o">/</span><span class="n">completions</span>   <span class="o">-</span><span class="n">H</span> <span class="s2">&quot;Content-Type: application/json&quot;</span>   <span class="o">-</span><span class="n">d</span> <span class="s1">&#39;{</span>
+    <span class="s2">&quot;messages&quot;</span><span class="p">:</span> <span class="p">[</span>
+      <span class="p">{</span>
+        <span class="s2">&quot;role&quot;</span><span class="p">:</span> <span class="s2">&quot;user&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;content&quot;</span><span class="p">:</span> <span class="s2">&quot;What&#39;s the WEATHER like in Hangzhou?&quot;</span>
+      <span class="p">}</span>
+    <span class="p">],</span>
+    <span class="s2">&quot;stream&quot;</span><span class="p">:</span> <span class="n">false</span><span class="p">,</span>
+    <span class="s2">&quot;aux_info&quot;</span><span class="p">:</span> <span class="n">true</span><span class="p">,</span>
+    <span class="s2">&quot;max_tokens&quot;</span><span class="p">:</span> <span class="mi">10</span><span class="p">,</span>
+    <span class="s2">&quot;debug_info&quot;</span><span class="p">:</span> <span class="n">true</span>
+  <span class="p">}</span><span class="s1">&#39;</span>
+</pre></div>
+</div>
+<p>响应：</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="p">{</span>
+  <span class="s2">&quot;id&quot;</span><span class="p">:</span> <span class="s2">&quot;chat-&quot;</span><span class="p">,</span>
+  <span class="s2">&quot;object&quot;</span><span class="p">:</span> <span class="s2">&quot;chat.completion&quot;</span><span class="p">,</span>
+  <span class="s2">&quot;created&quot;</span><span class="p">:</span> <span class="mi">1757660643</span><span class="p">,</span>
+  <span class="s2">&quot;model&quot;</span><span class="p">:</span> <span class="s2">&quot;&quot;</span><span class="p">,</span>
+  <span class="s2">&quot;choices&quot;</span><span class="p">:</span> <span class="p">[</span>
+    <span class="p">{</span>
+      <span class="s2">&quot;index&quot;</span><span class="p">:</span> <span class="mi">0</span><span class="p">,</span>
+      <span class="s2">&quot;message&quot;</span><span class="p">:</span> <span class="p">{</span>
+        <span class="s2">&quot;role&quot;</span><span class="p">:</span> <span class="s2">&quot;assistant&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;content&quot;</span><span class="p">:</span> <span class="s2">&quot;The weather in Hangzhou is usually wetter in spring and autumn&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;partial&quot;</span><span class="p">:</span> <span class="n">false</span>
+      <span class="p">},</span>
+      <span class="s2">&quot;finish_reason&quot;</span><span class="p">:</span> <span class="s2">&quot;length&quot;</span>
+    <span class="p">}</span>
+  <span class="p">],</span>
+  <span class="s2">&quot;usage&quot;</span><span class="p">:</span> <span class="p">{</span>
+    <span class="s2">&quot;prompt_tokens&quot;</span><span class="p">:</span> <span class="mi">34</span><span class="p">,</span>
+    <span class="s2">&quot;total_tokens&quot;</span><span class="p">:</span> <span class="mi">44</span><span class="p">,</span>
+    <span class="s2">&quot;completion_tokens&quot;</span><span class="p">:</span> <span class="mi">10</span>
+  <span class="p">},</span>
+  <span class="s2">&quot;debug_info&quot;</span><span class="p">:</span> <span class="p">{</span>
+    <span class="s2">&quot;input_prompt&quot;</span><span class="p">:</span> <span class="s2">&quot;&lt;|im_start|&gt;system</span><span class="se">\n</span><span class="s2">You are Qwen, created by Alibaba Cloud. You are a helpful assistant.&lt;|im_end|&gt;</span><span class="se">\n</span><span class="s2">&lt;|im_start|&gt;user</span><span class="se">\n</span><span class="s2">What&#39;s the WEATHER like in Hangzhou?&lt;|im_end|&gt;</span><span class="se">\n</span><span class="s2">&lt;|im_start|&gt;assistant</span><span class="se">\n</span><span class="s2">&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;input_ids&quot;</span><span class="p">:</span> <span class="p">[</span>
+      <span class="mi">151644</span><span class="p">,</span> <span class="mi">8948</span><span class="p">,</span> <span class="mi">198</span><span class="p">,</span> <span class="mi">2610</span><span class="p">,</span> <span class="mi">525</span><span class="p">,</span> <span class="mi">1207</span><span class="p">,</span> <span class="mi">16948</span><span class="p">,</span> <span class="mi">11</span><span class="p">,</span> <span class="mi">3465</span><span class="p">,</span> <span class="mi">553</span><span class="p">,</span> <span class="mi">54364</span><span class="p">,</span> <span class="mi">14817</span><span class="p">,</span> <span class="mi">13</span><span class="p">,</span>
+      <span class="mi">1446</span><span class="p">,</span> <span class="mi">525</span><span class="p">,</span> <span class="mi">264</span><span class="p">,</span> <span class="mi">10950</span><span class="p">,</span> <span class="mi">17847</span><span class="p">,</span> <span class="mi">13</span><span class="p">,</span> <span class="mi">151645</span><span class="p">,</span> <span class="mi">198</span><span class="p">,</span> <span class="mi">151644</span><span class="p">,</span> <span class="mi">872</span><span class="p">,</span> <span class="mi">198</span><span class="p">,</span> <span class="mi">104130</span><span class="p">,</span>
+      <span class="mi">9370</span><span class="p">,</span> <span class="mi">104307</span><span class="p">,</span> <span class="mi">104472</span><span class="p">,</span> <span class="mi">11319</span><span class="p">,</span> <span class="mi">151645</span><span class="p">,</span> <span class="mi">198</span><span class="p">,</span> <span class="mi">151644</span><span class="p">,</span> <span class="mi">77091</span><span class="p">,</span> <span class="mi">198</span>
+    <span class="p">],</span>
+    <span class="s2">&quot;input_urls&quot;</span><span class="p">:</span> <span class="p">[],</span>
+    <span class="s2">&quot;tokenizer_info&quot;</span><span class="p">:</span> <span class="s2">&quot;Qwen2TokenizerFast(...完整tokenizer信息...)&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;max_seq_len&quot;</span><span class="p">:</span> <span class="mi">16384</span><span class="p">,</span>
+    <span class="s2">&quot;eos_token_id&quot;</span><span class="p">:</span> <span class="mi">151645</span><span class="p">,</span>
+    <span class="s2">&quot;stop_word_ids_list&quot;</span><span class="p">:</span> <span class="p">[[</span><span class="mi">151645</span><span class="p">],</span> <span class="p">[</span><span class="mi">151644</span><span class="p">],</span> <span class="p">[</span><span class="mi">37763</span><span class="p">,</span> <span class="mi">367</span><span class="p">,</span> <span class="mi">25</span><span class="p">],</span> <span class="p">[</span><span class="mi">151643</span><span class="p">]],</span>
+    <span class="s2">&quot;stop_words_list&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;&lt;|im_end|&gt;&quot;</span><span class="p">,</span> <span class="s2">&quot;&lt;|im_start|&gt;&quot;</span><span class="p">,</span> <span class="s2">&quot;Observation:&quot;</span><span class="p">,</span> <span class="s2">&quot;&lt;|endoftext|&gt;&quot;</span><span class="p">],</span>
+    <span class="s2">&quot;renderer_info&quot;</span><span class="p">:</span> <span class="p">{</span>
+      <span class="s2">&quot;class_name&quot;</span><span class="p">:</span> <span class="s2">&quot;QwenRenderer&quot;</span><span class="p">,</span>
+      <span class="s2">&quot;renderer_model_type&quot;</span><span class="p">:</span> <span class="s2">&quot;qwen_2&quot;</span><span class="p">,</span>
+      <span class="s2">&quot;extra_stop_word_ids_list&quot;</span><span class="p">:</span> <span class="p">[[</span><span class="mi">37763</span><span class="p">,</span> <span class="mi">367</span><span class="p">,</span> <span class="mi">25</span><span class="p">],</span> <span class="p">[</span><span class="mi">151643</span><span class="p">]],</span>
+      <span class="s2">&quot;extra_stop_words_list&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;Observation:&quot;</span><span class="p">,</span> <span class="s2">&quot;&lt;|endoftext|&gt;&quot;</span><span class="p">],</span>
+      <span class="s2">&quot;template&quot;</span><span class="p">:</span> <span class="s2">&quot;...(Complete template content)...&quot;</span>
+    <span class="p">}</span>
+  <span class="p">},</span>
+  <span class="s2">&quot;generate_config&quot;</span><span class="p">:</span> <span class="p">{</span>
+    <span class="s2">&quot;max_new_tokens&quot;</span><span class="p">:</span> <span class="mi">10</span><span class="p">,</span>
+    <span class="s2">&quot;max_input_tokens&quot;</span><span class="p">:</span> <span class="mi">32000</span><span class="p">,</span>
+    <span class="s2">&quot;max_thinking_tokens&quot;</span><span class="p">:</span> <span class="mi">32000</span><span class="p">,</span>
+    <span class="s2">&quot;in_think_mode&quot;</span><span class="p">:</span> <span class="n">false</span><span class="p">,</span>
+    <span class="s2">&quot;end_think_token_ids&quot;</span><span class="p">:</span> <span class="p">[],</span>
+    <span class="s2">&quot;num_beams&quot;</span><span class="p">:</span> <span class="mi">1</span><span class="p">,</span>
+    <span class="s2">&quot;variable_num_beams&quot;</span><span class="p">:</span> <span class="p">[],</span>
+    <span class="s2">&quot;do_sample&quot;</span><span class="p">:</span> <span class="n">true</span><span class="p">,</span>
+    <span class="s2">&quot;num_return_sequences&quot;</span><span class="p">:</span> <span class="mi">0</span><span class="p">,</span>
+    <span class="s2">&quot;top_k&quot;</span><span class="p">:</span> <span class="mi">0</span><span class="p">,</span>
+    <span class="s2">&quot;top_p&quot;</span><span class="p">:</span> <span class="mf">1.0</span><span class="p">,</span>
+    <span class="s2">&quot;temperature&quot;</span><span class="p">:</span> <span class="mf">0.7</span><span class="p">,</span>
+    <span class="s2">&quot;repetition_penalty&quot;</span><span class="p">:</span> <span class="mf">1.0</span><span class="p">,</span>
+    <span class="s2">&quot;presence_penalty&quot;</span><span class="p">:</span> <span class="mf">0.0</span><span class="p">,</span>
+    <span class="s2">&quot;frequency_penalty&quot;</span><span class="p">:</span> <span class="mf">0.0</span><span class="p">,</span>
+    <span class="s2">&quot;min_new_tokens&quot;</span><span class="p">:</span> <span class="mi">0</span><span class="p">,</span>
+    <span class="s2">&quot;stop_words_str&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;&lt;|im_end|&gt;&quot;</span><span class="p">,</span> <span class="s2">&quot;&lt;|im_start|&gt;&quot;</span><span class="p">,</span> <span class="s2">&quot;Observation:&quot;</span><span class="p">,</span> <span class="s2">&quot;&lt;|endoftext|&gt;&quot;</span><span class="p">],</span>
+    <span class="s2">&quot;stop_words_list&quot;</span><span class="p">:</span> <span class="p">[[</span><span class="mi">151645</span><span class="p">],</span> <span class="p">[</span><span class="mi">151644</span><span class="p">],</span> <span class="p">[</span><span class="mi">37763</span><span class="p">,</span> <span class="mi">367</span><span class="p">,</span> <span class="mi">25</span><span class="p">],</span> <span class="p">[</span><span class="mi">151643</span><span class="p">],</span> <span class="p">[</span><span class="mi">151645</span><span class="p">],</span> <span class="p">[</span><span class="mi">151644</span><span class="p">]],</span>
+    <span class="s2">&quot;using_hf_sampling&quot;</span><span class="p">:</span> <span class="n">false</span><span class="p">,</span>
+    <span class="s2">&quot;print_stop_words&quot;</span><span class="p">:</span> <span class="n">false</span><span class="p">,</span>
+    <span class="s2">&quot;timeout_ms&quot;</span><span class="p">:</span> <span class="mi">3600000</span><span class="p">,</span>
+    <span class="s2">&quot;ttft_timeout_ms&quot;</span><span class="p">:</span> <span class="o">-</span><span class="mi">1</span><span class="p">,</span>
+    <span class="s2">&quot;traffic_reject_priority&quot;</span><span class="p">:</span> <span class="mi">100</span><span class="p">,</span>
+    <span class="s2">&quot;request_format&quot;</span><span class="p">:</span> <span class="s2">&quot;raw&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;calculate_loss&quot;</span><span class="p">:</span> <span class="mi">0</span><span class="p">,</span>
+    <span class="s2">&quot;return_logits&quot;</span><span class="p">:</span> <span class="n">false</span><span class="p">,</span>
+    <span class="s2">&quot;return_incremental&quot;</span><span class="p">:</span> <span class="n">false</span><span class="p">,</span>
+    <span class="s2">&quot;return_hidden_states&quot;</span><span class="p">:</span> <span class="n">false</span><span class="p">,</span>
+    <span class="s2">&quot;hidden_states_cut_dim&quot;</span><span class="p">:</span> <span class="mi">0</span><span class="p">,</span>
+    <span class="s2">&quot;normalized_hidden_states&quot;</span><span class="p">:</span> <span class="n">false</span><span class="p">,</span>
+    <span class="s2">&quot;select_tokens_str&quot;</span><span class="p">:</span> <span class="p">[],</span>
+    <span class="s2">&quot;select_tokens_id&quot;</span><span class="p">:</span> <span class="p">[],</span>
+    <span class="s2">&quot;return_input_ids&quot;</span><span class="p">:</span> <span class="n">false</span><span class="p">,</span>
+    <span class="s2">&quot;return_output_ids&quot;</span><span class="p">:</span> <span class="n">false</span><span class="p">,</span>
+    <span class="s2">&quot;md5_value&quot;</span><span class="p">:</span> <span class="s2">&quot;&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;custom_prop&quot;</span><span class="p">:</span> <span class="s2">&quot;</span><span class="si">{}</span><span class="s2">&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;sp_advice_prompt&quot;</span><span class="p">:</span> <span class="s2">&quot;&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;sp_advice_prompt_token_ids&quot;</span><span class="p">:</span> <span class="p">[],</span>
+    <span class="s2">&quot;sp_edit&quot;</span><span class="p">:</span> <span class="n">false</span><span class="p">,</span>
+    <span class="s2">&quot;force_disable_sp_run&quot;</span><span class="p">:</span> <span class="n">false</span><span class="p">,</span>
+    <span class="s2">&quot;force_sp_accept&quot;</span><span class="p">:</span> <span class="n">false</span><span class="p">,</span>
+    <span class="s2">&quot;return_cum_log_probs&quot;</span><span class="p">:</span> <span class="n">false</span><span class="p">,</span>
+    <span class="s2">&quot;return_all_probs&quot;</span><span class="p">:</span> <span class="n">false</span><span class="p">,</span>
+    <span class="s2">&quot;return_softmax_probs&quot;</span><span class="p">:</span> <span class="n">false</span><span class="p">,</span>
+    <span class="s2">&quot;can_use_pd_separation&quot;</span><span class="p">:</span> <span class="n">true</span><span class="p">,</span>
+    <span class="s2">&quot;gen_timeline&quot;</span><span class="p">:</span> <span class="n">false</span><span class="p">,</span>
+    <span class="s2">&quot;profile_step&quot;</span><span class="p">:</span> <span class="mi">3</span><span class="p">,</span>
+    <span class="s2">&quot;out_prefix&quot;</span><span class="p">:</span> <span class="s2">&quot;&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;role_addrs&quot;</span><span class="p">:</span> <span class="p">[],</span>
+    <span class="s2">&quot;inter_request_id&quot;</span><span class="p">:</span> <span class="o">-</span><span class="mi">1</span><span class="p">,</span>
+    <span class="s2">&quot;ignore_eos&quot;</span><span class="p">:</span> <span class="n">false</span><span class="p">,</span>
+    <span class="s2">&quot;skip_special_tokens&quot;</span><span class="p">:</span> <span class="n">false</span><span class="p">,</span>
+    <span class="s2">&quot;is_streaming&quot;</span><span class="p">:</span> <span class="n">false</span><span class="p">,</span>
+    <span class="s2">&quot;add_vision_id&quot;</span><span class="p">:</span> <span class="n">true</span><span class="p">,</span>
+    <span class="s2">&quot;tool_call_message_extract_strategy&quot;</span><span class="p">:</span> <span class="s2">&quot;default&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;global_request_id&quot;</span><span class="p">:</span> <span class="o">-</span><span class="mi">1</span><span class="p">,</span>
+    <span class="s2">&quot;reuse_cache&quot;</span><span class="p">:</span> <span class="n">true</span><span class="p">,</span>
+    <span class="s2">&quot;enable_3fs&quot;</span><span class="p">:</span> <span class="n">true</span>
+  <span class="p">},</span>
+  <span class="s2">&quot;aux_info&quot;</span><span class="p">:</span> <span class="p">{</span>
+    <span class="s2">&quot;cost_time&quot;</span><span class="p">:</span> <span class="mf">95.082</span><span class="p">,</span>
+    <span class="s2">&quot;iter_count&quot;</span><span class="p">:</span> <span class="mi">10</span><span class="p">,</span>
+    <span class="s2">&quot;prefix_len&quot;</span><span class="p">:</span> <span class="mi">0</span><span class="p">,</span>
+    <span class="s2">&quot;input_len&quot;</span><span class="p">:</span> <span class="mi">34</span><span class="p">,</span>
+    <span class="s2">&quot;reuse_len&quot;</span><span class="p">:</span> <span class="mi">0</span><span class="p">,</span>
+    <span class="s2">&quot;output_len&quot;</span><span class="p">:</span> <span class="mi">10</span><span class="p">,</span>
+    <span class="s2">&quot;step_output_len&quot;</span><span class="p">:</span> <span class="mi">10</span><span class="p">,</span>
+    <span class="s2">&quot;fallback_tokens&quot;</span><span class="p">:</span> <span class="mi">0</span><span class="p">,</span>
+    <span class="s2">&quot;fallback_times&quot;</span><span class="p">:</span> <span class="mi">0</span><span class="p">,</span>
+    <span class="s2">&quot;first_token_cost_time&quot;</span><span class="p">:</span> <span class="mf">16.947</span><span class="p">,</span>
+    <span class="s2">&quot;wait_time&quot;</span><span class="p">:</span> <span class="mf">0.058</span><span class="p">,</span>
+    <span class="s2">&quot;pd_sep&quot;</span><span class="p">:</span> <span class="n">false</span><span class="p">,</span>
+    <span class="s2">&quot;cum_log_probs&quot;</span><span class="p">:</span> <span class="p">[],</span>
+    <span class="s2">&quot;beam_responses&quot;</span><span class="p">:</span> <span class="p">[],</span>
+    <span class="s2">&quot;softmax_probs&quot;</span><span class="p">:</span> <span class="p">[],</span>
+    <span class="s2">&quot;local_reuse_len&quot;</span><span class="p">:</span> <span class="mi">0</span><span class="p">,</span>
+    <span class="s2">&quot;remote_reuse_len&quot;</span><span class="p">:</span> <span class="mi">0</span>
+  <span class="p">}</span>
+<span class="p">}</span>
+
+</pre></div>
+</div>
+<p>在请求中启用return_softmax_probs: true将返回softmax概率详细信息。&quot;</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">curl</span> <span class="o">-</span><span class="n">X</span> <span class="n">POST</span> <span class="n">http</span><span class="p">:</span><span class="o">//</span><span class="mf">127.0.0.1</span><span class="p">:</span><span class="mi">26000</span><span class="o">/</span><span class="n">v1</span><span class="o">/</span><span class="n">chat</span><span class="o">/</span><span class="n">completions</span>   <span class="o">-</span><span class="n">H</span> <span class="s2">&quot;Content-Type: application/json&quot;</span>   <span class="o">-</span><span class="n">d</span> <span class="s1">&#39;{</span>
+    <span class="s2">&quot;messages&quot;</span><span class="p">:</span> <span class="p">[</span>
+      <span class="p">{</span>
+        <span class="s2">&quot;role&quot;</span><span class="p">:</span> <span class="s2">&quot;user&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;content&quot;</span><span class="p">:</span> <span class="s2">&quot;What&#39;s the WEATHER like in Hangzhou?&quot;</span>
+      <span class="p">}</span>
+    <span class="p">],</span>
+    <span class="s2">&quot;stream&quot;</span><span class="p">:</span> <span class="n">false</span><span class="p">,</span>
+    <span class="s2">&quot;aux_info&quot;</span><span class="p">:</span> <span class="n">true</span><span class="p">,</span>
+    <span class="s2">&quot;max_tokens&quot;</span><span class="p">:</span> <span class="mi">10</span><span class="p">,</span>
+    <span class="s2">&quot;extra_configs&quot;</span><span class="p">:</span> <span class="p">{</span>
+        <span class="s2">&quot;return_softmax_probs&quot;</span><span class="p">:</span> <span class="n">true</span>
+    <span class="p">}</span>
+  <span class="p">}</span><span class="s1">&#39;</span>
+</pre></div>
+</div>
+<p>响应：</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="p">{</span>
+  <span class="s2">&quot;id&quot;</span><span class="p">:</span> <span class="s2">&quot;chat-&quot;</span><span class="p">,</span>
+  <span class="s2">&quot;object&quot;</span><span class="p">:</span> <span class="s2">&quot;chat.completion&quot;</span><span class="p">,</span>
+  <span class="s2">&quot;created&quot;</span><span class="p">:</span> <span class="mi">1757661676</span><span class="p">,</span>
+  <span class="s2">&quot;model&quot;</span><span class="p">:</span> <span class="s2">&quot;&quot;</span><span class="p">,</span>
+  <span class="s2">&quot;choices&quot;</span><span class="p">:</span> <span class="p">[</span>
+    <span class="p">{</span>
+      <span class="s2">&quot;index&quot;</span><span class="p">:</span> <span class="mi">0</span><span class="p">,</span>
+      <span class="s2">&quot;message&quot;</span><span class="p">:</span> <span class="p">{</span>
+        <span class="s2">&quot;role&quot;</span><span class="p">:</span> <span class="s2">&quot;assistant&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;content&quot;</span><span class="p">:</span> <span class="s2">&quot;The weather in Hangzhou varies from season to season. Spring warmth&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;partial&quot;</span><span class="p">:</span> <span class="n">false</span>
+      <span class="p">},</span>
+      <span class="s2">&quot;finish_reason&quot;</span><span class="p">:</span> <span class="s2">&quot;length&quot;</span>
+    <span class="p">}</span>
+  <span class="p">],</span>
+  <span class="s2">&quot;usage&quot;</span><span class="p">:</span> <span class="p">{</span>
+    <span class="s2">&quot;prompt_tokens&quot;</span><span class="p">:</span> <span class="mi">34</span><span class="p">,</span>
+    <span class="s2">&quot;total_tokens&quot;</span><span class="p">:</span> <span class="mi">44</span><span class="p">,</span>
+    <span class="s2">&quot;completion_tokens&quot;</span><span class="p">:</span> <span class="mi">10</span>
+  <span class="p">},</span>
+  <span class="s2">&quot;aux_info&quot;</span><span class="p">:</span> <span class="p">{</span>
+    <span class="s2">&quot;cost_time&quot;</span><span class="p">:</span> <span class="mf">95.985</span><span class="p">,</span>
+    <span class="s2">&quot;iter_count&quot;</span><span class="p">:</span> <span class="mi">10</span><span class="p">,</span>
+    <span class="s2">&quot;prefix_len&quot;</span><span class="p">:</span> <span class="mi">0</span><span class="p">,</span>
+    <span class="s2">&quot;input_len&quot;</span><span class="p">:</span> <span class="mi">34</span><span class="p">,</span>
+    <span class="s2">&quot;reuse_len&quot;</span><span class="p">:</span> <span class="mi">0</span><span class="p">,</span>
+    <span class="s2">&quot;output_len&quot;</span><span class="p">:</span> <span class="mi">10</span><span class="p">,</span>
+    <span class="s2">&quot;step_output_len&quot;</span><span class="p">:</span> <span class="mi">10</span><span class="p">,</span>
+    <span class="s2">&quot;fallback_tokens&quot;</span><span class="p">:</span> <span class="mi">0</span><span class="p">,</span>
+    <span class="s2">&quot;fallback_times&quot;</span><span class="p">:</span> <span class="mi">0</span><span class="p">,</span>
+    <span class="s2">&quot;first_token_cost_time&quot;</span><span class="p">:</span> <span class="mf">16.835</span><span class="p">,</span>
+    <span class="s2">&quot;wait_time&quot;</span><span class="p">:</span> <span class="mf">0.061</span><span class="p">,</span>
+    <span class="s2">&quot;pd_sep&quot;</span><span class="p">:</span> <span class="n">false</span><span class="p">,</span>
+    <span class="s2">&quot;cum_log_probs&quot;</span><span class="p">:</span> <span class="p">[],</span>
+    <span class="s2">&quot;beam_responses&quot;</span><span class="p">:</span> <span class="p">[],</span>
+    <span class="s2">&quot;softmax_probs&quot;</span><span class="p">:</span> <span class="p">[</span>
+      <span class="mf">0.5396254658699036</span><span class="p">,</span>
+      <span class="mf">0.46262434124946594</span><span class="p">,</span>
+      <span class="mf">0.9233724474906921</span><span class="p">,</span>
+      <span class="mf">0.01102062501013279</span><span class="p">,</span>
+      <span class="mf">0.9563982486724854</span><span class="p">,</span>
+      <span class="mf">0.7596278190612793</span><span class="p">,</span>
+      <span class="mf">0.9906871914863586</span><span class="p">,</span>
+      <span class="mf">0.5212739706039429</span><span class="p">,</span>
+      <span class="mf">0.27689263224601746</span><span class="p">,</span>
+      <span class="mf">0.21558642387390137</span>
+    <span class="p">],</span>
+    <span class="s2">&quot;local_reuse_len&quot;</span><span class="p">:</span> <span class="mi">0</span><span class="p">,</span>
+    <span class="s2">&quot;remote_reuse_len&quot;</span><span class="p">:</span> <span class="mi">0</span>
+  <span class="p">}</span>
+<span class="p">}</span>
+
+</pre></div>
+</div>
+<p>还有其他配置选项可用，例如：</p>
+<ul class="simple">
+<li><p>返回logits</p></li>
+<li><p>返回累积对数概率</p></li>
+<li><p>返回增量</p></li>
+<li><p>返回隐藏状态</p></li>
+<li><p>返回输出ID</p></li>
+<li><p>返回输入ID</p></li>
+<li><p>返回所有概率</p></li>
+</ul>
+</section>
+</section>
+
+
+                </article>
+              
+
+              
+              
+              
+              
+                <footer class="prev-next-footer d-print-none">
+                  
+<div class="prev-next-area">
+    <a class="left-prev"
+       href="profiling.html"
+       title="previous page">
+      <i class="fa-solid fa-angle-left"></i>
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">上一页</p>
+        <p class="prev-next-title">性能分析</p>
+      </div>
+    </a>
+    <a class="right-next"
+       href="developer.html"
+       title="next page">
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">下一页</p>
+        <p class="prev-next-title">Developer Reference</p>
+      </div>
+      <i class="fa-solid fa-angle-right"></i>
+    </a>
+</div>
+                </footer>
+              
+            </div>
+            
+            
+              
+                <div class="bd-sidebar-secondary bd-toc"><div class="sidebar-secondary-items sidebar-secondary__inner">
+
+
+  <div class="sidebar-secondary-item">
+  <div class="page-toc tocsection onthispage">
+    <i class="fa-solid fa-list"></i> 目录
+  </div>
+  <nav class="bd-toc-nav page-toc">
+    <ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#debug-python-part">Debug Python Part</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#method-1-logging-or-print">方法一：日志或打印</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#method-2-python-debugger">方法二：Python调试器</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#debug-c-part">Debug C++ Part</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#method-1-logging">方法一：日志记录</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#method-2-gdb-debug">方法二：GDB调试</a><ul class="nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#gdb-debug-core">GDB调试核心</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#gdb-debug-process">GDB调试进程</a></li>
+</ul>
+</li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#method-3-unit-test">方法三：单元测试</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#debug-running-server">Debug Running Server</a></li>
+</ul>
+  </nav></div>
+
+</div></div>
+              
+            
+          </div>
+          <footer class="bd-footer-content">
+            
+<div class="bd-footer-content__inner container">
+  
+  <div class="footer-item">
+    
+<p class="component-author">
+作者： RTP-LLM Team
+</p>
+
+  </div>
+  
+  <div class="footer-item">
+    
+
+  <p class="copyright">
+    
+      © Copyright 2023-2025, RTP-LLM.
+      <br/>
+    
+  </p>
+
+  </div>
+  
+  <div class="footer-item">
+    <p class="last-updated">
+  最后更新于 2025 年 09 月 17 日.
+  <br/>
+</p>
+  </div>
+  
+  <div class="footer-item">
+    
+  </div>
+  
+</div>
+          </footer>
+        
+
+      </main>
+    </div>
+  </div>
+  
+  <!-- Scripts loaded after <body> so the DOM is not blocked -->
+  <script src="../_static/scripts/bootstrap.js?digest=dfe6caa3a7d634c4db9b"></script>
+<script src="../_static/scripts/pydata-sphinx-theme.js?digest=dfe6caa3a7d634c4db9b"></script>
+
+  <footer class="bd-footer">
+  </footer>
+  </body>
+</html>
