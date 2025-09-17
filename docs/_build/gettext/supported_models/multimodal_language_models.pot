@@ -1,0 +1,261 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: RTP-LLM 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-17 17:12+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: ../../supported_models/multimodal_language_models.md:1
+msgid "Multimodal Language Models"
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:3
+msgid "These models accept multi-modal inputs (e.g., images/video and text) and generate text output. They augment language models with multimodal encoders."
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:5
+msgid "Example launch Command"
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:15
+msgid "Supported models"
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:17
+msgid "Below the supported models are summarized in a table."
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:19
+msgid "If you are unsure if a specific architecture is implemented, you can search for it via GitHub. For example, to search for `Qwen2_5_VLForConditionalGeneration`, use the expression:"
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:25
+msgid "in the GitHub search bar."
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "Model Family (Variants)"
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "Example HuggingFace Identifier"
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "Chat Template"
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "Model Type"
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "Description"
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "**Qwen3-VL** (Qwen3 series)"
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "`Qwen/Qwen3-VL-7B-Instruct`"
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "`qwen3_vl_moe`"
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "Alibaba’s vision-language extension of Qwen3MoE; for example, Qwen3-VL (7B and larger variants) can analyze and converse about image content."
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "**Qwen-VL** (Qwen2.5 series)"
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "`Qwen/Qwen2.5-VL-7B-Instruct`"
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "`qwen2_5_vl`"
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "Alibaba’s vision-language extension of Qwen; for example, Qwen2.5-VL (7B and larger variants) can analyze and converse about image content."
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "**Qwen-VL** (Qwen2 series)"
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "`Qwen/Qwen2-VL-7B-Instruct`"
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "`qwen2_vl`"
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "Alibaba’s vision-language extension of Qwen; for example, Qwen2-VL (7B and larger variants) can analyze and converse about image content."
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "**Qwen-VL** (Qwen series)"
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "`qwen_vl`"
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "Alibaba’s vision-language extension of Qwen; for example, Qwen-VL (7B and larger variants) can analyze and converse about image content."
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "**DeepSeek-VL2**"
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "`deepseek-ai/deepseek-vl2`"
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "`deepseek-vl2`"
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "`qwen2-vl`"
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "Vision-language variant of DeepSeek (with a dedicated image processor), enabling advanced multimodal reasoning on image and text inputs."
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "**MiniCPM-V / MiniCPM-o**"
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "`openbmb/MiniCPM-V-2_6`"
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "`minicpmv`"
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "MiniCPM-V (2.6, ~8B) supports image inputs, and MiniCPM-o adds audio/video; these multimodal LLMs are optimized for end-side deployment on mobile/edge devices."
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "**Llama 3.2 Vision** (11B)"
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "`meta-llama/Llama-3.2-11B-Vision-Instruct`"
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "`llama_3_vision`"
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "`llava`"
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "Vision-enabled variant of Llama 3 (11B) that accepts image inputs for visual question answering and other multimodal tasks."
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "**LLaVA** (v1.5 & v1.6)"
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "*e.g.* `liuhaotian/llava-v1.5-13b`"
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "`vicuna_v1.1`"
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "Open vision-chat models that add an image encoder to LLaMA/Vicuna (e.g. LLaMA2 13B) for following multimodal instruction prompts."
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "**LLaVA-NeXT** (8B, 72B)"
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "`lmms-lab/llava-next-72b`"
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "`chatml-llava`"
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "`llava	`"
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "Improved LLaVA models (with an 8B Llama3 version and a 72B version) offering enhanced visual instruction-following and accuracy on multimodal benchmarks."
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "**LLaVA-OneVision**"
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "`lmms-lab/llava-onevision-qwen2-7b-ov`"
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "Enhanced LLaVA variant integrating Qwen as the backbone; supports multiple images (and even video frames) as inputs via an OpenAI Vision API-compatible format."
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "**ChatGlmV4Vision**"
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "`zai-org/glm-4v-9b`"
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "`chatglm4v`"
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "GLM-4V is a multimodal language model with visual understanding capabilities."
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "**InternVL**"
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "`OpenGVLab/InternVL3-78B`"
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "`internvl`"
+msgstr ""
+
+#: ../../supported_models/multimodal_language_models.md:0
+msgid "A pioneering open-source alternative to GPT-4V"
+msgstr ""
