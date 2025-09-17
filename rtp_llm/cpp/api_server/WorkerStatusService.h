@@ -3,12 +3,10 @@
 #include <atomic>
 
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
-#include "rtp_llm/cpp/dataclass/LoadBalance.h"
 
 #include "rtp_llm/cpp/http_server/http_server/HttpResponseWriter.h"
 #include "rtp_llm/cpp/http_server/http_server/HttpRequest.h"
 #include "rtp_llm/cpp/api_server/ConcurrencyControllerUtil.h"
-
 
 namespace rtp_llm {
 
@@ -21,20 +19,13 @@ public:
         json.Jsonize("available_concurrency", available_concurrency);
         json.Jsonize("available_kv_cache", cache_status.available_kv_cache);
         json.Jsonize("total_kv_cache", cache_status.total_kv_cache);
-        json.Jsonize("step_latency_ms", load_balance_info.step_latency_us / 1000.0);
-        json.Jsonize("step_per_minute", load_balance_info.step_per_minute);
-        json.Jsonize("iterate_count", load_balance_info.iterate_count);
-        json.Jsonize("onflight_requests", load_balance_info.onflight_requests);
-        json.Jsonize("version", load_balance_version);
         json.Jsonize("alive", alive);
     }
 
 public:
-    int             available_concurrency;
-    KVCacheInfo     cache_status;
-    LoadBalanceInfo load_balance_info;
-    int             load_balance_version;
-    bool            alive;
+    int         available_concurrency;
+    KVCacheInfo cache_status;
+    bool        alive;
 };
 
 class WorkerStatusService {

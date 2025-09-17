@@ -280,15 +280,6 @@ absl::Status SpeculativeEngine::initSystemPrompt() {
     return absl::OkStatus();
 }
 
-LoadBalanceInfo SpeculativeEngine::getLoadBalanceInfo(int64_t latest_version) {
-    return LoadBalanceInfo{(int64_t)step_recorder_.getStepLatency(),
-                           (int64_t)step_recorder_.getStepCount(),
-                           (int64_t)step_recorder_.getStepPerMin(),
-                           (int64_t)scheduler_->onflightStreams(),
-                           (int64_t)scheduler_->waitingQueryLen(),
-                           (int64_t)scheduler_->runningQueryLen()};
-}
-
 absl::Status SpeculativeEngine::startLoop() {
     RTP_LLM_LOG_INFO("start init system prompt");
     THROW_IF_STATUS_ERROR(initSystemPrompt());
@@ -752,7 +743,7 @@ bool SpeculativeEngine::updateEplbConfig(const EplbConfig& config) {
     return true;
 }
 
-KVCacheInfo SpeculativeEngine::getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) {
+KVCacheInfo SpeculativeEngine::getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) const {
     return resource_context_.cache_manager->getKVCacheInfo(latest_version, need_cache_keys);
 }
 

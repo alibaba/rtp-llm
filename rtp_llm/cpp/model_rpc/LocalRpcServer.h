@@ -7,7 +7,6 @@
 #include "grpc++/grpc++.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/utils/AtomicUtil.h"
-#include "rtp_llm/cpp/dataclass/LoadBalance.h"
 #include "rtp_llm/cpp/dataclass/WorkerStatusInfo.h"
 #include "rtp_llm/cpp/dataclass/KvCacheInfo.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
@@ -47,10 +46,7 @@ public:
 
     KVCacheInfo getCacheStatusInfo(int64_t latest_cache_version, bool need_cache_keys);
 
-    WorkerStatusInfo
-    getWorkerStatusInfo(int64_t latest_cache_version, int64_t latest_finished_version, bool needLoadBalanceInfo);
-
-    LoadBalanceInfo getLoadBalanceInfo(int64_t latest_version);
+    WorkerStatusInfo getWorkerStatusInfo(int64_t latest_finished_version);
 
     void addLora(const std::string&                        adapter_name,
                  const rtp_llm::lora::loraLayerWeightsMap& lora_a_weights,

@@ -37,26 +37,17 @@ class WorkStatus(BaseModel):
     server_port: Optional[int] = None
     http_port: Optional[int] = None
     grpc_port: Optional[int] = None
-    available_concurrency: int
 
     running_task_info: List[TaskInfo]  # 当前running 的task信息
     finished_task_list: List[TaskInfo]  # 窗口内已经完成的任务状态
-
-    step_latency_ms: float
-    iterate_count: int
 
     dp_size: int
     tp_size: int
     alive: bool
     precision: str = "fp16"
-    version: int
     status_version: Optional[int] = -1  # 时间戳
 
-    cache_status: Optional[CacheStatus] = None  # CacheStatus
     profile_meta: Optional[ProfileMeta] = None  # 统计的处理数据
-
-    waiting_query_len: int = 0
-    running_query_len: int = 0
 
 
 class DebugInfo(BaseModel):
