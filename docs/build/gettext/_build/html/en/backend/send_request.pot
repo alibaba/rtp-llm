@@ -1,0 +1,62 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: RTP-LLM 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-17 18:04+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: ../../_build/html/en/backend/send_request.ipynb:9
+msgid "Sending Requests"
+msgstr ""
+
+#: ../../_build/html/en/backend/send_request.ipynb:11
+msgid "This section provides a quick-start guide for using RTP-LLM in chat completions after successfully installing RTP-LLM."
+msgstr ""
+
+#: ../../_build/html/en/backend/send_request.ipynb:13
+msgid "For multimodal models, refer to `OpenAI APIs - Vision <./openai_api_vision.ipynb>`__."
+msgstr ""
+
+#: ../../_build/html/en/backend/send_request.ipynb:14
+msgid "For embedding models, refer to `OpenAI APIs - Embedding <../backend/openai_api_embeddings.ipynb>`__ and `Encode (embedding model) <../backend/native_api.html#Encode-(embedding-model)>`__."
+msgstr ""
+
+#: ../../_build/html/en/backend/send_request.ipynb:26
+msgid "Launch A Server"
+msgstr ""
+
+#: ../../_build/html/en/backend/send_request.ipynb:63
+msgid "Using cURL"
+msgstr ""
+
+#: ../../_build/html/en/backend/send_request.ipynb:93
+msgid "Using Python Requests"
+msgstr ""
+
+#: ../../_build/html/en/backend/send_request.ipynb:127
+msgid "Using OpenAI Python Client"
+msgstr ""
+
+#: ../../_build/html/en/backend/send_request.ipynb:160
+#: ../../_build/html/en/backend/send_request.ipynb:238
+msgid "Streaming"
+msgstr ""
+
+#: ../../_build/html/en/backend/send_request.ipynb:199
+msgid "Using Native Generation APIs"
+msgstr ""
+
+#: ../../_build/html/en/backend/send_request.ipynb:201
+msgid "You can also use the native ``/generate`` endpoint with requests, which provides more flexibility. An API reference is available at `Sampling Parameters <sampling_params.md>`__."
+msgstr ""

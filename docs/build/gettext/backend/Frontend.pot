@@ -1,0 +1,227 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: RTP-LLM 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-17 18:04+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: ../../backend/Frontend.md:1
+msgid "Frontend"
+msgstr ""
+
+#: ../../backend/Frontend.md:3
+msgid "Overview"
+msgstr ""
+
+#: ../../backend/Frontend.md:4
+msgid "RTP_LLM currently comprises three core components: Frontend, Backend, and Master."
+msgstr ""
+
+#: ../../backend/Frontend.md:6
+msgid "Frontend Workflow:"
+msgstr ""
+
+#: ../../backend/Frontend.md:7
+msgid "Accepts incoming requests"
+msgstr ""
+
+#: ../../backend/Frontend.md:8
+msgid "Converts inputs to token IDs (includes tokenizer decoding and OpenAI request rendering)"
+msgstr ""
+
+#: ../../backend/Frontend.md:9
+msgid "Queries the Master to obtain Backend IP"
+msgstr ""
+
+#: ../../backend/Frontend.md:10
+msgid "Submits requests to Backend and awaits responses"
+msgstr ""
+
+#: ../../backend/Frontend.md:11
+msgid "Processes responses (includes tokenizer encoding and function call rendering)"
+msgstr ""
+
+#: ../../backend/Frontend.md:12
+msgid "Role Initialization"
+msgstr ""
+
+#: ../../backend/Frontend.md:22
+msgid "The active role is determined by the ROLE_TYPE environment variable (default: PDFUSION). Other roles only launch the corresponding component."
+msgstr ""
+
+#: ../../backend/Frontend.md:24
+msgid "In frontend only deployments, engine initialization is skipped for rapid tokenizer/renderer debugging."
+msgstr ""
+
+#: ../../backend/Frontend.md:26
+msgid "Backend servers still host Frontend apps (for health checks/debugging)."
+msgstr ""
+
+#: ../../backend/Frontend.md:28
+msgid "*Italicized* APIs below are only usable when locally paired with a Backend server."
+msgstr ""
+
+#: ../../backend/Frontend.md:32
+msgid "Frontend Debugging Related"
+msgstr ""
+
+#: ../../backend/Frontend.md:34
+msgid "Add chat template / tool parser"
+msgstr ""
+
+#: ../../backend/Frontend.md:36
+msgid "Add chat template for models"
+msgstr ""
+
+#: ../../backend/Frontend.md:38
+msgid "Locate the Renderer:"
+msgstr ""
+
+#: ../../backend/Frontend.md:40
+msgid "Go to the `rtp_llm/openai/renderers` directory and find the renderer used by the model."
+msgstr ""
+
+#: ../../backend/Frontend.md:42
+msgid "Examine how the renderer applies the chat template logic. For example, in the case of BasicRenderer, the chat template can be applied by adding `user_template` key in the request."
+msgstr ""
+
+#: ../../backend/Frontend.md:92
+msgid "For more complex custom chat template rendering"
+msgstr ""
+
+#: ../../backend/Frontend.md:94
+msgid "Create a new renderer under `rtp_llm/openai/renderers/` directory, create a new renderer class that inherits from CustomChatRenderer and implements the `render_chat` interface."
+msgstr ""
+
+#: ../../backend/Frontend.md:96
+msgid "Register renderer by using `register_renderer` and import renderer in `rtp_llm/openai/renderers/__init__.py`. Renderers are selected based on MODEL_TYPE, so related renderers should also be registered to same model type with models."
+msgstr ""
+
+#: ../../backend/Frontend.md:103
+msgid "Add tool parser for models"
+msgstr ""
+
+#: ../../backend/Frontend.md:105
+msgid "The post-processing logic is also handled within the renderer by implementing the `render_response_stream` interface. The engine's response is streamed by default, and the output should also be stream-compatible."
+msgstr ""
+
+#: ../../backend/Frontend.md:107
+msgid "In default implementation, function `_update_single_status` track delta states for each stream. If multiple token IDs decode into a single character, incomplete characters are buffered and emitted only when complete."
+msgstr ""
+
+#: ../../backend/Frontend.md:109
+msgid "Advanced Post-Processing: For `function_call` or other structured outputs, refer to `qwen_agent_renderer`'s implementation."
+msgstr ""
+
+#: ../../backend/Frontend.md:111
+msgid "Debug"
+msgstr ""
+
+#: ../../backend/Frontend.md:113
+msgid "Frontend start server"
+msgstr ""
+
+#: ../../backend/Frontend.md:125
+msgid "No ckpt_path required. Test tokenizers/renderers via prompt processing APIs."
+msgstr ""
+
+#: ../../backend/Frontend.md:127
+msgid "Directly curl `/v1/chat/render` or `/chat/render` to get the renderered result of openai renderer."
+msgstr ""
+
+#: ../../backend/Frontend.md:129
+msgid "Post-Processing Debugging"
+msgstr ""
+
+#: ../../backend/Frontend.md:131
+msgid "Frontend defaults use localhost:start_port+1 for gRPC call."
+msgstr ""
+
+#: ../../backend/Frontend.md:133
+msgid "Mock a backend server to return output ids:"
+msgstr ""
+
+#: ../../backend/Frontend.md:204
+msgid "If need, mock a master server to routing, ensure ports alignment is maintained:"
+msgstr ""
+
+#: ../../backend/Frontend.md:308
+msgid "Also, you can start server with ROLE_TYPE=PDFUSION to start backend server engine."
+msgstr ""
+
+#: ../../backend/Frontend.md:310
+msgid "In this way, debugging the tokenizer and openai renderer related code only requires restarting frontend (lightweight)."
+msgstr ""
+
+#: ../../backend/Frontend.md:314
+msgid "Public APIs"
+msgstr ""
+
+#: ../../backend/Frontend.md:315
+msgid "Health Check Endpoints"
+msgstr ""
+
+#: ../../backend/Frontend.md:316
+msgid "Verifies Backend status (returns ok/error). Call same endpoints in Backend."
+msgstr ""
+
+#: ../../backend/Frontend.md:330
+msgid "*Debug Endpoints*"
+msgstr ""
+
+#: ../../backend/Frontend.md:331
+#: ../../backend/Frontend.md:385
+#: ../../backend/Frontend.md:423
+msgid "Proxied to same endpoints in Backend."
+msgstr ""
+
+#: ../../backend/Frontend.md:384
+msgid "*Dynamic Update Endpoints*"
+msgstr ""
+
+#: ../../backend/Frontend.md:422
+msgid "*Embedding APIs*"
+msgstr ""
+
+#: ../../backend/Frontend.md:436
+msgid "Inference APIs"
+msgstr ""
+
+#: ../../backend/Frontend.md:492
+msgid "Prompt Processing APIs"
+msgstr ""
+
+#: ../../backend/Frontend.md:538
+msgid "Internal Communication"
+msgstr ""
+
+#: ../../backend/Frontend.md:540
+msgid "Frontend → Master: HTTP call to obtain Backend IP."
+msgstr ""
+
+#: ../../backend/Frontend.md:542
+msgid "Frontend → Backend: gRPC call for inference (see model_rpc_service.proto)."
+msgstr ""
+
+#: ../../backend/Frontend.md:544
+msgid "Master APIs"
+msgstr ""
+
+#: ../../backend/Frontend.md:580
+msgid "Backend grpc APIs"
+msgstr ""
+
+#: ../../backend/Frontend.md:581
+msgid "Reference `rtp_llm/cpp/proto/model_rpc/service.proto`"
+msgstr ""

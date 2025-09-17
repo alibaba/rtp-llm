@@ -1,0 +1,192 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: RTP-LLM 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-17 18:04+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: ../../_build/html/zh_CN/backend/pd_disaggregation.ipynb:9
+msgid "PD Disaggregation"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/pd_disaggregation.ipynb:12
+msgid "Why and What is PD Disaggregation?"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/pd_disaggregation.ipynb:14
+msgid "Large Language Models (LLMs) separate Prefill (context preparation) and Decode (token generation) phases to:"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/pd_disaggregation.ipynb:16
+msgid "Boost Efficiency: Prefill precomputes attention keys/values (KV caching) for the input sequence, enabling fast autoregressive decoding by reusing cached data—reducing compute from O(n²) to O(n) per token. Optimize Memory: Caching KV matrices during Prefill avoids redundant recomputation, slashing memory overhead during long-sequence generation. Leverage Hardware: Prefill exploits parallel processing for known inputs (full-sequence batched compute), while Decode optimizes latency-critical step-by-step generation. Scale Applications: Separation allows dynamic resource allocation (e.g., high-throughput Prefill for prompts + low-latency Decode for streaming outputs), vital for real-time use cases like chatbots."
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/pd_disaggregation.ipynb:20
+msgid "start"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/pd_disaggregation.ipynb:23
+msgid "start prefill"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/pd_disaggregation.ipynb:61
+msgid "start decode"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/pd_disaggregation.ipynb:121
+msgid "Advanced Configuration"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/pd_disaggregation.ipynb:123
+msgid "PD Disaggregation supports the following environment variables."
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/pd_disaggregation.ipynb:126
+msgid "Prefill Server Configuration"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/pd_disaggregation.ipynb:129
+msgid "Variable"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/pd_disaggregation.ipynb:129
+msgid "Description"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/pd_disaggregation.ipynb:129
+msgid "Default"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/pd_disaggregation.ipynb:131
+msgid "**PREFILL_RETRY_TIMES**"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/pd_disaggregation.ipynb:131
+msgid "Number of retries for prefill process, 0 means retry disabled"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/pd_disaggregation.ipynb:131
+#: ../../_build/html/zh_CN/backend/pd_disaggregation.ipynb:133
+msgid "``0``"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/pd_disaggregation.ipynb:133
+msgid "**PREFILL_RETRY_TIMEOUT_MS**"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/pd_disaggregation.ipynb:133
+msgid "Total timeout for prefill retries (milliseconds)"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/pd_disaggregation.ipynb:135
+msgid "**PREFILL_MAX_WAIT_TIMEOUT_MS**"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/pd_disaggregation.ipynb:135
+msgid "Maximum wait timeout for prefill execution (milliseconds)"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/pd_disaggregation.ipynb:135
+msgid "``600000``"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/pd_disaggregation.ipynb:137
+msgid "**LOAD_CACHE_TIMEOUT_MS**"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/pd_disaggregation.ipynb:137
+msgid "Timeout for remote KVCache loading (milliseconds)"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/pd_disaggregation.ipynb:137
+#: ../../_build/html/zh_CN/backend/pd_disaggregation.ipynb:143
+msgid "``5000``"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/pd_disaggregation.ipynb:139
+msgid "**DECODE_RETRY_TIMES**"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/pd_disaggregation.ipynb:139
+msgid "Number of retries for decode process, 0 means retry disabled"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/pd_disaggregation.ipynb:139
+#: ../../_build/html/zh_CN/backend/pd_disaggregation.ipynb:141
+msgid "``100``"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/pd_disaggregation.ipynb:141
+msgid "**DECODE_RETRY_TIMEOUT_MS**"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/pd_disaggregation.ipynb:141
+msgid "Total timeout for decode process retries (milliseconds)"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/pd_disaggregation.ipynb:143
+msgid "**RDMA_CONNECT_RETRY_TIMES**"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/pd_disaggregation.ipynb:143
+msgid "Number of retries for RDMA connection establishment"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/pd_disaggregation.ipynb:145
+msgid "**DECODE_POLLING_KV_CACHE_STEP_MS**"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/pd_disaggregation.ipynb:145
+msgid "Interval time for polling KV loading status (milliseconds)"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/pd_disaggregation.ipynb:145
+msgid "``30``"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/pd_disaggregation.ipynb:147
+msgid "**DECODE_ENTRANCE**"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/pd_disaggregation.ipynb:147
+msgid "Whether Decode serves as traffic entry point"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/pd_disaggregation.ipynb:147
+msgid "``false``"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/pd_disaggregation.ipynb:149
+msgid "**LOAD_BALANCE_POLICY_NAME**"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/pd_disaggregation.ipynb:149
+msgid "Load balancing policy: RR (round-robin) or WRR (weighted round-robin)"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/pd_disaggregation.ipynb:149
+msgid "``RR``"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/pd_disaggregation.ipynb:151
+msgid "**SYNC_STATUS_INTERVAL_MS**"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/pd_disaggregation.ipynb:151
+msgid "Status synchronization interval between PDs (milliseconds)"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/pd_disaggregation.ipynb:151
+msgid "``50``"
+msgstr ""

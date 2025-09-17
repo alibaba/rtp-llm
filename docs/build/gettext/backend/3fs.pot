@@ -1,0 +1,85 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: RTP-LLM 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-17 18:04+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: ../../backend/3fs.md:1
+msgid "RTP LLM supports using 3FS for persistent caching of KVCache, providing a secondary cache for KVCache."
+msgstr ""
+
+#: ../../backend/3fs.md:3
+msgid "When model computational complexity is high or GPU memory is insufficient, the already computed KVCache can be offloaded to 3FS and reused in subsequent inference from the KVCache stored in 3FS, reducing TTFT (Time To First Token); at the same time, GPU memory computing resources can also be freed up for other uses."
+msgstr ""
+
+#: ../../backend/3fs.md:5
+msgid "The framework integrates using the 3FS Native Client (USRBIO API) approach to improve KVCache read and write performance."
+msgstr ""
+
+#: ../../backend/3fs.md:9
+msgid "Usage"
+msgstr ""
+
+#: ../../backend/3fs.md:11
+msgid "Currently, 3FS is disabled by default in production. You can enable 3FS by following these steps:"
+msgstr ""
+
+#: ../../backend/3fs.md:15
+msgid "3FS is currently only used in CUDA environments. During compilation, 3FS needs to be actively compiled, and 3FS needs to be actively enabled at runtime."
+msgstr ""
+
+#: ../../backend/3fs.md:23
+msgid "Business containers need to add the following configuration:"
+msgstr ""
+
+#: ../../backend/3fs.md:39
+msgid "Note: The shm size needs to be calculated. One TP requires 8GB (4GB for reading and 4GB for writing). For 4TP, 3FS requires 32GB of shm. Other services also occupy some shm, so it's set to 40GB here. Additionally, the memory size applied for by the business cannot be lower than this shm size."
+msgstr ""
+
+#: ../../backend/3fs.md:43
+msgid "Add RDMA loopback prevention label:"
+msgstr ""
+
+#: ../../backend/3fs.md:55
+msgid "Add environment variables or args at startup:"
+msgstr ""
+
+#: ../../backend/3fs.md:67
+msgid "Perform some validation after the container starts:"
+msgstr ""
+
+#: ../../backend/3fs.md:69
+msgid "After the container is up, verify that the 3fs directory exists:"
+msgstr ""
+
+#: ../../backend/3fs.md:75
+msgid "Verify that the shm size is correct:"
+msgstr ""
+
+#: ../../backend/3fs.md:81
+msgid "Check if /dev/shm is the requested size, such as 40GB. If not, confirm that the total memory requested is not less than 40GB, as shm cannot be smaller than the total memory requested by the pod."
+msgstr ""
+
+#: ../../backend/3fs.md:85
+msgid "Deployment Method"
+msgstr ""
+
+#: ../../backend/3fs.md:87
+msgid "Considering the group's RDMA network architecture, there will be RDMA performance loss when communicating between different network clusters, so currently one network cluster deploys a separate 3FS storage cluster."
+msgstr ""
+
+#: ../../backend/3fs.md:89
+msgid "3FS has already been deployed in HPAI NA61, NA175, Kingsoft Cloud, and Beijing Lingjun data centers. Deployment in other data centers is ongoing."
+msgstr ""

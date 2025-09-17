@@ -1,0 +1,252 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: RTP-LLM 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-17 18:04+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: ../../references/debug.md:1
+msgid "Debugging RTP-LLM"
+msgstr ""
+
+#: ../../references/debug.md:3
+msgid "The RTP-LLM project uses the Bazel build system. After learning how to compile and run RTP-LLM locally from scratch, this article will explain how to debug the code. Since RTP-LLM is primarily composed of a combination of Python and C++ code, we will introduce several commonly used debugging methods in this guide."
+msgstr ""
+
+#: ../../references/debug.md:4
+msgid "Debug Python Part"
+msgstr ""
+
+#: ../../references/debug.md:6
+msgid "Method 1: logging or print"
+msgstr ""
+
+#: ../../references/debug.md:8
+msgid "When running the debug mode locally, modify the self.frontend_server_count = 4 to 1 in the ServerConfig class within rtp_llm/config/py_config_modules.py. This change ensures only one frontend server is launched, allowing print statements and logging outputs to be directly displayed in the terminal."
+msgstr ""
+
+#: ../../references/debug.md:11
+msgid "Method 2: python debugger"
+msgstr ""
+
+#: ../../references/debug.md:12
+msgid "Assuming we already have an existing container, access it and set up an SSH port mapping to enable remote connections."
+msgstr ""
+
+#: ../../references/debug.md:17
+msgid "Access the container via the SSH extension in VS Code."
+msgstr ""
+
+#: ../../references/debug.md:25
+msgid "After accessing the container via VS Code, ensure the Python debugger extension is installed within the container. ![alt text](../pics/debug_image-debugger.png)"
+msgstr ""
+
+#: ../../references/debug.md:25
+#: ../../references/debug.md:107
+#: ../../references/debug.md:132
+#: ../../references/debug.md:141
+#: ../../references/debug.md:151
+#: ../../references/debug.md:208
+#: ../../references/debug.md:216
+msgid "alt text"
+msgstr ""
+
+#: ../../references/debug.md:28
+msgid "Write the launch.json configuration file for debugging. Here’s an example of a VS Code launch.json configuration file for debugging Python and C++ code in the RTP-LLM project (adjust paths as needed):"
+msgstr ""
+
+#: ../../references/debug.md:67
+msgid "Set up the required environment variables before running or debugging the code."
+msgstr ""
+
+#: ../../references/debug.md:105
+msgid "open the file containing start_server.py, set breakpoints, and begin debugging."
+msgstr ""
+
+#: ../../references/debug.md:107
+msgid "![alt text](../pics/debug_image-1.png)"
+msgstr ""
+
+#: ../../references/debug.md:110
+msgid "Debug C++ Part"
+msgstr ""
+
+#: ../../references/debug.md:111
+msgid "Method 1: logging"
+msgstr ""
+
+#: ../../references/debug.md:112
+msgid "Add the following log statements for output:"
+msgstr ""
+
+#: ../../references/debug.md:116
+msgid "other similar functions include:"
+msgstr ""
+
+#: ../../references/debug.md:122
+msgid "Set the log level using the LOG_LEVEL=\"INFO\" environment variable."
+msgstr ""
+
+#: ../../references/debug.md:124
+msgid "Method 2: GDB debug"
+msgstr ""
+
+#: ../../references/debug.md:125
+msgid "GDB debug core"
+msgstr ""
+
+#: ../../references/debug.md:126
+msgid "When the code crashes with a core dump in the container, a core file is generated (e.g., core-rtp_llm_backend-78933-1757510512). To debug:"
+msgstr ""
+
+#: ../../references/debug.md:130
+msgid "After loading the core file into GDB, run the bt (backtrace) command to display the error stack trace."
+msgstr ""
+
+#: ../../references/debug.md:132
+msgid "![alt text](../pics/debug_image-2.png)"
+msgstr ""
+
+#: ../../references/debug.md:141
+msgid "![alt text](../pics/debug_image-3.png)"
+msgstr ""
+
+#: ../../references/debug.md:143
+msgid "check propose_stream_ info"
+msgstr ""
+
+#: ../../references/debug.md:149
+msgid "check tokens info"
+msgstr ""
+
+#: ../../references/debug.md:151
+msgid "![alt text](../pics/debug_image-4.png)"
+msgstr ""
+
+#: ../../references/debug.md:153
+msgid "A null pointer (data_ = 0) was detected, causing a memcpy error."
+msgstr ""
+
+#: ../../references/debug.md:155
+msgid "GDB debug process"
+msgstr ""
+
+#: ../../references/debug.md:174
+msgid "After starting the service, you can view the relevant processes as follows:"
+msgstr ""
+
+#: ../../references/debug.md:177
+msgid "A rtp_llm_backend_server process will be running as the main process for the inference service. If TP_SIZE=2 is set, you will see two child processes (e.g., rank-0 and rank-1) for tensor parallelism. A rtp_llm_frontend_server_0 frontend service process will be active to handle external requests."
+msgstr ""
+
+#: ../../references/debug.md:185
+msgid "To begin debugging with GDB: Attach GDB to the target process (e.g., PID 40954):"
+msgstr ""
+
+#: ../../references/debug.md:190
+msgid "Set breakpoints in the code Use curl to send a test request and trigger the breakpoint:"
+msgstr ""
+
+#: ../../references/debug.md:206
+msgid "The breakpoint will be triggered, and you can then examine the code path by inspecting the stack trace."
+msgstr ""
+
+#: ../../references/debug.md:208
+msgid "![alt text](../pics/debug_image-5.png)"
+msgstr ""
+
+#: ../../references/debug.md:210
+msgid "Method 3: Unit Test"
+msgstr ""
+
+#: ../../references/debug.md:212
+msgid "Example: Unit Testing for the ViT Module"
+msgstr ""
+
+#: ../../references/debug.md:214
+msgid "File Structure of the ViT Module"
+msgstr ""
+
+#: ../../references/debug.md:216
+msgid "![alt text](../pics/debug_image-6.png)"
+msgstr ""
+
+#: ../../references/debug.md:218
+msgid "Steps to Create Unit Tests Create Test Files:"
+msgstr ""
+
+#: ../../references/debug.md:221
+msgid "Add a .cc test file (e.g., multimodal_processor_test.cc) under the test directory. Write Google Test (gtest) cases using assertions like EXPECT_EQ to validate behavior."
+msgstr ""
+
+#: ../../references/debug.md:230
+msgid "Define the BUILD File:"
+msgstr ""
+
+#: ../../references/debug.md:243
+msgid "Run the Test: Execute the following command in the project’s container:"
+msgstr ""
+
+#: ../../references/debug.md:250
+msgid "Debug Running Server"
+msgstr ""
+
+#: ../../references/debug.md:252
+msgid "To retrieve debugging information via a curl request, use the following command with verbose output:"
+msgstr ""
+
+#: ../../references/debug.md:254
+msgid "Enabling aux_info: true and debug_info: true in the request will return additional auxiliary information and debugging details."
+msgstr ""
+
+#: ../../references/debug.md:270
+#: ../../references/debug.md:416
+msgid "response:"
+msgstr ""
+
+#: ../../references/debug.md:398
+msgid "Enabling return_softmax_probs: true in the request will return softmax probs details."
+msgstr ""
+
+#: ../../references/debug.md:473
+msgid "Additional configuration options are available, such as:"
+msgstr ""
+
+#: ../../references/debug.md:475
+msgid "return_logits"
+msgstr ""
+
+#: ../../references/debug.md:476
+msgid "return_cum_log_probs"
+msgstr ""
+
+#: ../../references/debug.md:477
+msgid "return_incremental"
+msgstr ""
+
+#: ../../references/debug.md:478
+msgid "return_hidden_states"
+msgstr ""
+
+#: ../../references/debug.md:479
+msgid "return_output_ids"
+msgstr ""
+
+#: ../../references/debug.md:480
+msgid "return_input_ids"
+msgstr ""
+
+#: ../../references/debug.md:481
+msgid "return_all_probs"
+msgstr ""

@@ -1,0 +1,372 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: RTP-LLM 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-17 18:04+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: ../../backend/speculative_decoding.md:1
+msgid "Speculative Decoding"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:5
+msgid "1. What is Speculative Sampling"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:6
+msgid "Speculative sampling is a **zero-precision-loss** universal inference acceleration technique:"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:7
+msgid "A lightweight **Propose Model** generates several candidate tokens at once;"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:8
+msgid "The original **Score Model (large model)** then validates these tokens in parallel;"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:9
+msgid "Turning \"verification\" into a Prefill operation, thereby improving GPU compute-to-memory ratio and reducing Decode latency."
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:13
+msgid "2. Speculative Sampling Algorithms Supported by RTP-LLM"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "Name"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "Introduction"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "Source"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "**vanilla**"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "The most classic speculative sampling implementation"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "[Leviathan et al., ICML'23](https://proceedings.mlr.press/v202/leviathan23a/leviathan23a.pdf)"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "**deterministic**"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "Prompt-Lookup + Speculative Edit"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "[Prompt Lookup](https://github.com/apoorvumang/prompt-lookup-decoding), [Cursor Blog](https://fireworks.ai/blog/cursor)"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "**mtp**"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "Speculative sampling framework based on DeepSeek-V3"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "[DeepSeek-V3 Tech Report](https://arxiv.org/pdf/2412.19437)"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "**eagle3**"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "EAGLE-3"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "[EAGLE-3 Paper](https://arxiv.org/pdf/2503.01840)"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:24
+msgid "3. Using Speculative Sampling in RTP-LLM"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:26
+msgid "Based on the original basic startup parameters, add the following environment variables:"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+#: ../../backend/speculative_decoding.md:28
+#: ../../backend/speculative_decoding.md:96
+msgid "vanilla"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "Arguments"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "Value"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "Description"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "--sp_type"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "Speculative sampling strategy"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "--sp_checkpoint_path"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "<small model ckpt>"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "Small model weight path"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "--sp_model_type"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "qwen"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "Small model architecture, same as the main model"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "--sp_quantization"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "FP8_PER_BLOCK/FP8"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "Small model quantization method: FP8, FP8_PER_BLOCK, etc."
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "--gen_num_per_cycle"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "5"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "How many tokens the small model proposes per cycle"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+#: ../../backend/speculative_decoding.md:38
+#: ../../backend/speculative_decoding.md:103
+msgid "deterministic"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "128"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "--sp_min_token_match"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "2"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "Minimum length of n-gram token matching"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "--sp_max_token_match"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "Maximum length of n-gram token matching"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+#: ../../backend/speculative_decoding.md:56
+msgid "mtp"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "qwen_2_mtp"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "MTP small model type"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+#: ../../backend/speculative_decoding.md:66
+msgid "eagle3"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "qwen_3_moe_eagle3"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "EAGLE3 small model type"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:78
+msgid "4. Performance Observation & Tuning"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:81
+msgid "4.1 Performance Observation"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:82
+msgid "Add the following to the request body:"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:86
+msgid "Example response fields:"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:93
+msgid "The most important metric for speculative sampling is avg_tokens_per_iter, higher is better."
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:95
+msgid "4.2 Tuning"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:97
+msgid "**Model Selection**:"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:98
+msgid "Choose a smaller size from the same series (e.g., Qwen2.5-0.5B)."
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:99
+msgid "Apply INT4 quantization to the small model whenever possible."
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:100
+#: ../../backend/speculative_decoding.md:116
+msgid "**gen_num_per_cycle**:"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:101
+msgid "Default is 5; can be increased if acceptance rate >40%."
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "Parameter"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "Recommendation"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "Notes"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "sp_min/max_token_match"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "n-gram length range"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "gen_num_per_cycle"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "128 (batch=1)"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "Can be increased for long sequence editing scenarios"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "sp_edit"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "Set to 1 for code/text editing, 0 otherwise"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "Controls matching start point"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "sp_advice_prompt"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "Only retain suffixes that may actually appear"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:0
+msgid "Reduce invalid matches"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:112
+msgid "mtp / eagle3"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:113
+msgid "**Model Training**:"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:114
+msgid "Use https://github.com/SafeAILab/EAGLE to train small models for specific business scenarios"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:115
+msgid "Need to ensure 1st token acceptance rate >80%, 2nd token acceptance rate >60%, 3rd token acceptance rate >40%"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:117
+msgid "Execution time of MTP small model can be assumed to be about 1ms. Based on the main model's execution time and acceptance rate, the optimal GEN_NUM_PER_CIRCLE can be calculated"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:118
+msgid "**sp_quantization**"
+msgstr ""
+
+#: ../../backend/speculative_decoding.md:119
+msgid "On Hopper series, it is recommended to enable sp_quantization=FP8_PER_BLOCK"
+msgstr ""
