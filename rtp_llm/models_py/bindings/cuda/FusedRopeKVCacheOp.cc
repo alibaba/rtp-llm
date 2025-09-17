@@ -217,7 +217,7 @@ torch::Tensor FusedRopeKVCacheDecodeOp::forward(const torch::Tensor&            
 
 void registerFusedRopeKVCacheOp(const py::module& m) {
     pybind11::class_<KVBlockArray>(m, "KVBlockArray").def(pybind11::init<>());
-    pybind11::class_<TRTAttn, std::shared_ptr<TRTAttn>>(m, "TRTAttn").def(pybind11::init<>());
+    pybind11::class_<TRTAttn, std::shared_ptr<TRTAttn>, rtp_llm::ParamsBase>(m, "TRTAttn").def(pybind11::init<>());
     pybind11::class_<FusedRopeKVCachePrefillOp>(m, "FusedRopeKVCachePrefillOp")
         .def(pybind11::init<GptInitParameter>(), py::arg("gpt_init_parameter"))
         .def("prepare", &FusedRopeKVCachePrefillOp::prepare, py::arg("attn_inputs"))

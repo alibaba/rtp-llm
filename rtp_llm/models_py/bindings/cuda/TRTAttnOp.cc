@@ -175,7 +175,6 @@ torch::Tensor TRTPrefillOp::forward(const torch::Tensor&              input,
 }
 
 void registerTRTAttnOp(const py::module& m) {
-    // pybind11::class_<TRTAttn>(m, "TRTAttn").def(pybind11::init<>());
     pybind11::class_<TRTPrefillOp>(m, "TRTAttnOp")
         .def(pybind11::init<GptInitParameter>(), py::arg("gpt_init_parameter"))
         .def("support", &TRTPrefillOp::support, py::arg("attn_inputs"))
