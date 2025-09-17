@@ -50,6 +50,19 @@ size_t DeepGemmPlugin::getPaddingSize(size_t m, DeepGemmType gemm_type) {
     }
 }
 
+size_t DeepGemmPlugin::paddingMasked(const size_t& token_num) {
+    std::vector<size_t> masked_alignment = {16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128};
+
+    size_t alignment = masked_alignment.back();
+    for (auto& a : masked_alignment) {
+        if (token_num <= a) {
+            alignment = a;
+        }
+    }
+
+    return pad(token_num, alignment);
+}
+
 inline int DeepGemmPlugin::getNumSms() {
     static int num_sms = -1;
     if (num_sms != -1) {
