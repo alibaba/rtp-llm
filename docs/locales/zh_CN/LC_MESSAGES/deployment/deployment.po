@@ -1,0 +1,96 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: RTP-LLM 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-17 15:46+0800\n"
+"PO-Revision-Date: 2025-09-17 15:47+0800\n"
+"Last-Translator: 来羽 <xj226049@alibaba-inc.com>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../deployment/deployment.md:1
+msgid "Deployment Guide Using Kubernetes"
+msgstr "使用 Kubernetes 的部署指南"
+
+#: ../../deployment/deployment.md:3
+msgid ""
+"This guide walk you through deploying the RTP-LLM service on Kubernetes. "
+"You can deploy RTP-LLM to Kubernetes using any of the following:"
+msgstr ""
+"本指南将引导您在 Kubernetes 上部署 RTP-LLM 服务。您可以使用以下任一方式将 RTP-LLM 部署到 Kubernetes："
+
+#: ../../deployment/deployment.md:5
+msgid "[Deployment](https://kubernetes.io/docs/concepts/workloads/controllers/deployment/)"
+msgstr "[Deployment](https://kubernetes.io/docs/concepts/workloads/controllers/deployment/)"
+
+#: ../../deployment/deployment.md:6
+msgid "[StatefulSet](https://kubernetes.io/docs/concepts/workloads/controllers/statefulset/)"
+msgstr "[StatefulSet](https://kubernetes.io/docs/concepts/workloads/controllers/statefulset/)"
+
+#: ../../deployment/deployment.md:7
+msgid "[LWS](https://lws.sigs.k8s.io/docs/overview/)"
+msgstr "[LWS](https://lws.sigs.k8s.io/docs/overview/)"
+
+#: ../../deployment/deployment.md:9
+msgid "Deploy with Kubernetes Deployment"
+msgstr "使用 Kubernetes Deployment 部署"
+
+#: ../../deployment/deployment.md:10
+msgid ""
+"You can use a native Kubernetes Deployment to run a single-instance model"
+" service."
+msgstr ""
+"您可以使用原生的 Kubernetes Deployment 来运行单实例模型服务。"
+
+#: ../../deployment/deployment.md:12
+msgid "Create the deployment resource to run the RTP-LLM server. Example:"
+msgstr "创建部署资源来运行 RTP-LLM 服务器。示例："
+
+#: ../../deployment/deployment.md:74
+msgid "Create a Kubernetes Service to expose the RTP-LLM server"
+msgstr "创建 Kubernetes Service 来暴露 RTP-LLM 服务器"
+
+#: ../../deployment/deployment.md:92
+msgid "Deploy and Test"
+msgstr "部署和测试"
+
+#: ../../deployment/deployment.md:94
+msgid "Apply the deployment and service resources using `kubectl`."
+msgstr "使用 `kubectl` 应用部署和服务资源。"
+
+#: ../../deployment/deployment.md:99
+msgid "Send a request to verify the model service is working properly."
+msgstr "发送请求以验证模型服务是否正常工作。"
+
+#: ../../deployment/deployment.md:120
+msgid "Multi-Node Deployment"
+msgstr "多节点部署"
+
+#: ../../deployment/deployment.md:121
+msgid ""
+"When deploying a large-scale model, you may need multiple pods to deploy "
+"a single model service instance. The native Kubernetes Deployments and "
+"StatefulSets cannot manage multiple pods as a single unit throughout "
+"their lifecycle. In this case, you can use the community‑maintained LWS "
+"resource to handle the deployment."
+msgstr ""
+"在部署大规模模型时，您可能需要多个 Pod 来部署单个模型服务实例。原生的 Kubernetes Deployment 和 StatefulSet 无法在整个生命周期中将多个 Pod 作为单个单元进行管理。在这种情况下，您可以使用社区维护的 LWS 资源来处理部署。"
+
+#: ../../deployment/deployment.md:123
+msgid ""
+"As an example, to deploy the Qwen3‑Coder‑480B‑A35B‑Instruct model with "
+"tp=8, request two pods with 4 GPUs each. The lws deployment yaml is as "
+"follows:"
+msgstr ""
+"例如，要部署 Qwen3-Coder-480B-A35B-Instruct 模型并设置 tp=8，需要请求两个 Pod，每个 Pod 配备 4 个 GPU。LWS 部署的 YAML 配置如下："
