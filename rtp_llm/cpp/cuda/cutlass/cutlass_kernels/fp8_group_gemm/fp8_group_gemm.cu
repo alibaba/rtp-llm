@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cutlass/cutlass_kernels/fp8_group_gemm/fp8_group_gemm.h"
+#include "rtp_llm/cpp/cuda/cutlass/cutlass_kernels/fp8_group_gemm/fp8_group_gemm.h"
 
 namespace rtp_llm {
 

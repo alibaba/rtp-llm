@@ -4,8 +4,8 @@
 #include <torch/all.h>
 
 #include "cutlass/cutlass.h"
-#include "rtp_llm/cpp/cutlass/cutlass_kernels/fp8_group_gemm/grouped_mm_c3x.cuh"
-#include "rtp_llm/cpp/cutlass/cutlass_kernels/fp8_group_gemm/fp8_group_gemm.h"
+#include "rtp_llm/cpp/cuda/cutlass/cutlass_kernels/fp8_group_gemm/grouped_mm_c3x.cuh"
+#include "rtp_llm/cpp/cuda/cutlass/cutlass_kernels/fp8_group_gemm/fp8_group_gemm.h"
 using namespace cute;
 
 namespace {

@@ -1,7 +1,7 @@
 #include "rtp_llm/models_py/bindings/RegisterOps.h"
 #include "rtp_llm/models_py/bindings/cuda/RegisterBaseBindings.hpp"
 #include "rtp_llm/models_py/bindings/cuda/RegisterAttnOpBindings.hpp"
-#include "rtp_llm/cpp/cutlass/cutlass_kernels/fp8_group_gemm/fp8_group_gemm.h"
+#include "rtp_llm/cpp/cuda/cutlass/cutlass_kernels/fp8_group_gemm/fp8_group_gemm.h"
 #include "rtp_llm/cpp/kernels/scaled_fp8_quant.h"
 
 namespace rtp_llm {

@@ -3370,17 +3370,17 @@ inline __device__ uint32_t h0_h0(uint16_t a) {
 #endif
 }
 
-#include "_vector_abs_max.h"
-#include "_convert_from_float.h"
-#include "_convert_to_float.h"
-#include "_cast_to_int8.h"
-#include "_add.h"
-#include "_mul.h"
-#include "_fma.h"
-#include "_sum_dot_zero.h"
-#include "_logn_attention.h"
-#include "_convert_from_fp8.h"
-#include "_convert_to_fp8.h"
+#include "rocm_utils/_vector_abs_max.h"
+#include "rocm_utils/_convert_from_float.h"
+#include "rocm_utils/_convert_to_float.h"
+#include "rocm_utils/_cast_to_int8.h"
+#include "rocm_utils/_add.h"
+#include "rocm_utils/_mul.h"
+#include "rocm_utils/_fma.h"
+#include "rocm_utils/_sum_dot_zero.h"
+#include "rocm_utils/_logn_attention.h"
+#include "rocm_utils/_convert_from_fp8.h"
+#include "rocm_utils/_convert_to_fp8.h"
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 

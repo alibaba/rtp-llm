@@ -11,8 +11,8 @@
 #include "cutlass/gemm/collective/collective_builder.hpp"
 #include "cutlass/epilogue/collective/collective_builder.hpp"
 #include "cutlass/gemm/device/gemm_universal_adapter.h"
-#include "rtp_llm/cpp/cutlass/cutlass_kernels/fp8_group_gemm/include/scalar_type.hpp"
-#include "rtp_llm/cpp/cutlass/cutlass_kernels/fp8_group_gemm/include/scaled_mm_epilogues_c3x.hpp"
+#include "rtp_llm/cpp/cuda/cutlass/cutlass_kernels/fp8_group_gemm/include/scalar_type.hpp"
+#include "rtp_llm/cpp/cuda/cutlass/cutlass_kernels/fp8_group_gemm/include/scaled_mm_epilogues_c3x.hpp"
 
 using namespace cute;
 

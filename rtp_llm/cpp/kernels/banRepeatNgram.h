@@ -16,8 +16,14 @@
 
 #pragma once
 
+#if USING_CUDA
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#endif
+#if USING_ROCM
+#include <hip/hip_fp16.h>
+#include <hip/hip_runtime.h>
+#endif
 
 namespace runtime {
 using TokenIdType = int32_t;

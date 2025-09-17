@@ -15,10 +15,19 @@
  */
 #pragma once
 
+#if USING_CUDA
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #ifdef ENABLE_FP8
 #include <cuda_fp8.h>
+#endif
+#endif
+#if USING_ROCM
+#include <hip/hip_fp16.h>
+#include <hip/hip_runtime.h>
+#ifdef ENABLE_FP8
+#include <hip/hip_fp8.h>
+#endif
 #endif
 
 namespace rtp_llm {

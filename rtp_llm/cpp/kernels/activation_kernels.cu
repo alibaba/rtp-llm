@@ -19,7 +19,6 @@
 #if USING_ROCM
 using namespace rtp_llm::rocm;
 #endif
-#include "rtp_llm/cpp/cuda/memory_utils.h"
 
 #if USING_CUDA
 #ifndef CUDART_VERSION

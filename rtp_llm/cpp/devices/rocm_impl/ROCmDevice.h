@@ -245,7 +245,6 @@ protected:
     // void prepareCommBuffer(const PrepareCommBufferParams& params) override;
 
 public:
-    BufferPtr testVecAdd(const BufferPtr a, const BufferPtr b);
     void      setStream(hipStream_t stream) {
         current_stream_ = stream;
         stream_         = stream;

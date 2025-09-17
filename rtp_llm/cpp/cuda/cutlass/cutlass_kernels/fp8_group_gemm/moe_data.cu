@@ -4,7 +4,7 @@
 #include <torch/all.h>
 
 #include <iostream>
-#include "rtp_llm/cpp/cutlass/cutlass_kernels/fp8_group_gemm/fp8_group_gemm.h"
+#include "rtp_llm/cpp/cuda/cutlass/cutlass_kernels/fp8_group_gemm/fp8_group_gemm.h"
 
 constexpr uint64_t THREADS_PER_EXPERT = 512;
 // threshold must match the dispatch logic in run_cutlass_moe_mm_sm90()

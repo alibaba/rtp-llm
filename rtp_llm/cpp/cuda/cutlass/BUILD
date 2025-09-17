@@ -243,8 +243,7 @@ cc_library(
         "cutlass_kernels/fp8_group_gemm/*.cuh",
         "cutlass_kernels/fp8_group_gemm/include/*.hpp",
     ]),
-    deps = [
-        "//rtp_llm/cpp/cuda/cutlass/cutlass_extensions:cutlass_extensions",
+    implementation_deps = [
         "@cutlass4.0//:cutlass",
         "@cutlass4.0//:cutlass_utils",
         "@local_config_cuda//cuda:cuda_headers",

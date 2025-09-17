@@ -27,7 +27,7 @@ cc_library(
         ":fa_hdrs",
         "//rtp_llm/cpp/cuda:allocator_torch",
         "//rtp_llm/cpp/cuda:cuda",
-        "//rtp_llm/cpp/kernels:kernels",
+        "//rtp_llm/cpp/kernels:kernels_cu",
         "//rtp_llm/cpp/pybind:th_utils",
         "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
         "//rtp_llm/cpp/config:gpt_init_params",

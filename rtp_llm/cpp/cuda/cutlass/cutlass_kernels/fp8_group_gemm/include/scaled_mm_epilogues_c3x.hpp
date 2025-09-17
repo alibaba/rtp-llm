@@ -1,7 +1,7 @@
 #pragma once
 
-#include "rtp_llm/cpp/cutlass/cutlass_kernels/fp8_group_gemm/include/broadcast_load_epilogue_array_c3x.hpp"
-#include "rtp_llm/cpp/cutlass/cutlass_kernels/fp8_group_gemm/include/broadcast_load_epilogue_c3x.hpp"
+#include "rtp_llm/cpp/cuda/cutlass/cutlass_kernels/fp8_group_gemm/include/broadcast_load_epilogue_array_c3x.hpp"
+#include "rtp_llm/cpp/cuda/cutlass/cutlass_kernels/fp8_group_gemm/include/broadcast_load_epilogue_c3x.hpp"
 
 /*
    This file defines custom epilogues for fusing channel scales, token scales,
