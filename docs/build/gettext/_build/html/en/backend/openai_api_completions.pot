@@ -1,0 +1,91 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: RTP-LLM 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-17 18:04+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: ../../_build/html/en/backend/openai_api_completions.ipynb:9
+msgid "OpenAI APIs - Completions"
+msgstr ""
+
+#: ../../_build/html/en/backend/openai_api_completions.ipynb:11
+msgid "RTP-LLM provides OpenAI-compatible APIs to enable a smooth transition from OpenAI services to self-hosted local models. This tutorial covers the following popular APIs:"
+msgstr ""
+
+#: ../../_build/html/en/backend/openai_api_completions.ipynb:13
+msgid "``v1/chat/completions``"
+msgstr ""
+
+#: ../../_build/html/en/backend/openai_api_completions.ipynb:15
+msgid "Check out other tutorials to learn about `vision APIs <./openai_api_vision.ipynb>`__ for vision-language models and `embedding APIs <./openai_api_embeddings.ipynb>`__ for embedding models."
+msgstr ""
+
+#: ../../_build/html/en/backend/openai_api_completions.ipynb:27
+msgid "Launch A Server"
+msgstr ""
+
+#: ../../_build/html/en/backend/openai_api_completions.ipynb:29
+msgid "Launch the server in your terminal and wait for it to initialize."
+msgstr ""
+
+#: ../../_build/html/en/backend/openai_api_completions.ipynb:31
+msgid "export CUDA_VISIBLE_DEVICES=1"
+msgstr ""
+
+#: ../../_build/html/en/backend/openai_api_completions.ipynb:62
+msgid "Chat Completions"
+msgstr ""
+
+#: ../../_build/html/en/backend/openai_api_completions.ipynb:65
+#: ../../_build/html/en/backend/openai_api_completions.ipynb:179
+msgid "Usage"
+msgstr ""
+
+#: ../../_build/html/en/backend/openai_api_completions.ipynb:67
+msgid "The server fully implements the OpenAI API. It will automatically apply the chat template specified in the Hugging Face tokenizer, if one is available."
+msgstr ""
+
+#: ../../_build/html/en/backend/openai_api_completions.ipynb:102
+#: ../../_build/html/en/backend/openai_api_completions.ipynb:211
+msgid "Parameters"
+msgstr ""
+
+#: ../../_build/html/en/backend/openai_api_completions.ipynb:104
+msgid "The chat completions API accepts OpenAI Chat Completions API's parameters. Refer to `OpenAI Chat Completions API <https://platform.openai.com/docs/api-reference/chat/create>`__ for more details."
+msgstr ""
+
+#: ../../_build/html/en/backend/openai_api_completions.ipynb:106
+msgid "RTP-LLM extends the standard API with the ``extra_configs`` parameter, allowing for additional customization. One key option within ``extra_configs`` is ``chat_template_kwargs``, which can be used to pass arguments to the chat template processor."
+msgstr ""
+
+#: ../../_build/html/en/backend/openai_api_completions.ipynb:109
+msgid "Enabling Model Thinking/Reasoning"
+msgstr ""
+
+#: ../../_build/html/en/backend/openai_api_completions.ipynb:176
+msgid "Completions"
+msgstr ""
+
+#: ../../_build/html/en/backend/openai_api_completions.ipynb:181
+msgid "Completions API is similar to Chat Completions API, but without the ``messages`` parameter or chat templates."
+msgstr ""
+
+#: ../../_build/html/en/backend/openai_api_completions.ipynb:213
+msgid "The completions API accepts OpenAI Completions API's parameters. Refer to `OpenAI Completions API <https://platform.openai.com/docs/api-reference/completions/create>`__ for more details."
+msgstr ""
+
+#: ../../_build/html/en/backend/openai_api_completions.ipynb:215
+msgid "Here is an example of a detailed completions request:"
+msgstr ""
