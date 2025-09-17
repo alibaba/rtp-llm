@@ -8,9 +8,9 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-12 17:38+0800\n"
-"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
-"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"POT-Creation-Date: 2025-09-15 16:46+0800\n"
+"PO-Revision-Date: 2025-09-17 15:04+0800\n"
+"Last-Translator: 来羽 <xj226049@alibaba-inc.com>\n"
 "Language: zh_CN\n"
 "Language-Team: zh_CN <LL@li.org>\n"
 "Plural-Forms: nplurals=1; plural=0;\n"
@@ -45,13 +45,8 @@ msgid ""
 msgstr "在`rtp_llm/server/server_args.py`中，所有用户可配置的环境变量在启动Python服务时都会转换为命令行参数。如果您发现下面相关参数的注释不合理，请直接修改。"
 
 #: ../../references/Environment.md:9
-msgid ""
-"![image](https://alidocs.oss-cn-"
-"zhangjiakou.aliyuncs.com/res/3M0OzeZrKe6BQqze/img/d0330f3d-f1a0-4a0b-"
-"beb5-6ccfd4d8b480.png)"
-msgstr "![image](https://alidocs.oss-cn-"
-"zhangjiakou.aliyuncs.com/res/3M0OzeZrKe6BQqze/img/d0330f3d-f1a0-4a0b-"
-"beb5-6ccfd4d8b480.png)"
+msgid "![image](../pics/env-1.png)"
+msgstr "![图像](../pics/env-1.png)"
 
 #: ../../references/Environment.md:9 ../../references/Environment.md:37
 msgid "image"
@@ -64,7 +59,9 @@ msgid ""
 "meaning. The processing logic here is actually to use the parsed "
 "parameters to update environment variables. The current priority is: "
 "`args > env > default`."
-msgstr "添加新的参数信息时，需要指定参数类型、变量名、默认值及其对应的具体含义。这里的处理逻辑实际上是使用解析的参数来更新环境变量。当前的优先级是：`args > env > default`。"
+msgstr ""
+"添加新的参数信息时，需要指定参数类型、变量名、默认值及其对应的具体含义。这里的处理逻辑实际上是使用解析的参数来更新环境变量。当前的优先级是：`args"
+" > env > default`。"
 
 #: ../../references/Environment.md:13
 msgid "Parameter Propagation"
@@ -103,13 +100,8 @@ msgid ""
 msgstr "例如，在添加新参数后，您需要指定默认值并修改`to_string`和`update_from_env_for_test`函数的内容。此外，这些配置通过`Pybind11`绑定并传递到Python端进行交互。"
 
 #: ../../references/Environment.md:37
-msgid ""
-"![image](https://alidocs.oss-cn-"
-"zhangjiakou.aliyuncs.com/res/3M0OzeZrKe6BQqze/img/756afda8-8248-45a9"
-"-b05f-975826997a5e.png)"
-msgstr "![image](https://alidocs.oss-cn-"
-"zhangjiakou.aliyuncs.com/res/3M0OzeZrKe6BQqze/img/756afda8-8248-45a9"
-"-b05f-975826997a5e.png)"
+msgid "![image](../pics/env-2.png)"
+msgstr "![图像](../pics/env-2.png)"
 
 #: ../../references/Environment.md:39
 msgid ""
@@ -227,4 +219,3 @@ msgstr "`rtp_llm/server/server_args.py`（*在同一目录下有许多相应的�
 #: ../../references/Environment.md:72
 msgid "`rtp_llm/server/test/server_args_test.py`"
 msgstr "`rtp_llm/server/test/server_args_test.py`"
-

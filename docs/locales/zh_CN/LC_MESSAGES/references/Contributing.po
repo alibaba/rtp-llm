@@ -1,0 +1,111 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: RTP-LLM 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-15 16:46+0800\n"
+"PO-Revision-Date: 2025-09-17 15:03+0800\n"
+"Last-Translator: 来羽 <xj226049@alibaba-inc.com>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../references/Contributing.md:1
+msgid "Contributing Guide"
+msgstr "贡献指南"
+
+#: ../../references/Contributing.md:3
+msgid ""
+"We encourage every member to contribute to the project. Whether through "
+"reporting issues, discussing the current state of code, submitting fixes,"
+" proposing new features, or becoming a maintainer, we warmly welcome your"
+" participation!"
+msgstr ""
+"我们鼓励每位成员为项目做出贡献。无论是通过报告问题、讨论代码现状、提交修复、提出新功能，还是成为维护者，我们都热烈欢迎您的参与！"
+
+#: ../../references/Contributing.md:5
+msgid "Here are several ways you can contribute:"
+msgstr "以下是您可以贡献的几种方式："
+
+#: ../../references/Contributing.md:7
+msgid "**Report bugs**: If you find an error, please let us know."
+msgstr "**报告错误**：如果您发现错误，请告知我们。"
+
+#: ../../references/Contributing.md:8
+msgid ""
+"**Discuss code status**: Participate in discussions and reviews of "
+"existing code."
+msgstr "**讨论代码状态**：参与现有代码的讨论和审查。"
+
+#: ../../references/Contributing.md:9
+msgid "**Submit fixes**: If you can fix a problem, please submit your code."
+msgstr "**提交修复**：如果您能修复问题，请提交您的代码。"
+
+#: ../../references/Contributing.md:10
+msgid "**Propose new features**: We welcome any innovative ideas and suggestions."
+msgstr "**提出新功能**：我们欢迎任何创新的想法和建议。"
+
+#: ../../references/Contributing.md:11
+msgid ""
+"**Become a maintainer**: If you're willing to commit long-term to the "
+"project, you can become a project maintainer."
+msgstr "**成为维护者**：如果您愿意长期致力于该项目，您可以成为项目维护者。"
+
+#: ../../references/Contributing.md:12
+msgid ""
+"**Discussion**: If you want to discuss anything, feel free to express "
+"your views, opinions, or other relevant comments in the discussion area."
+msgstr "**讨论**：如果您想讨论任何事情，请随时在讨论区表达您的观点、意见或其他相关评论。"
+
+#: ../../references/Contributing.md:14
+msgid "Contribution Process"
+msgstr "贡献流程"
+
+#: ../../references/Contributing.md:16
+msgid "**Propose changes**: Open a new issue (issue) for any changes you suggest."
+msgstr "**提出更改**：为您建议的任何更改开启新的问题（issue）。"
+
+#: ../../references/Contributing.md:17
+msgid ""
+"**Get approval**: Once your proposal is approved, you can fork this "
+"repository and make changes."
+msgstr "**获得批准**：一旦您的提案获得批准，您可以 fork 此仓库并进行更改。"
+
+#: ../../references/Contributing.md:18
+msgid ""
+"**Submit PR**: Open a pull request (PR) for the latest development "
+"branch. Please describe your changes in detail in the PR."
+msgstr "**提交 PR**：为最新的开发分支开启拉取请求（PR）。请在 PR 中详细描述您的更改。"
+
+#: ../../references/Contributing.md:19
+msgid "**Complete**."
+msgstr "**完成**。"
+
+#: ../../references/Contributing.md:21
+msgid "Notes"
+msgstr "注意事项"
+
+#: ../../references/Contributing.md:23
+msgid "New or removed code should not break the existing flow of the system."
+msgstr "新增或删除的代码不应破坏系统的现有流程。"
+
+#: ../../references/Contributing.md:24
+msgid ""
+"Ensure to remove any installation or build dependencies at the end of "
+"building."
+msgstr "确保在构建结束时删除任何安装或构建依赖项。"
+
+#: ../../references/Contributing.md:25
+msgid ""
+"If changes are needed, update README.md and related documentation, and "
+"provide detailed explanations of API changes."
+msgstr "如果需要更改，请更新 README.md 和相关文档，并提供 API 更改的详细说明。"

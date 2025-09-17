@@ -1,0 +1,902 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>
+      RTP-LLM - Production-Ready Large Language Model Inference Engine
+    </title>
+    <meta
+      name="description"
+      content="Fast, flexible, and scalable LLM serving framework trusted by Alibaba Group's mission-critical applications."
+    />
+
+    <!-- Fonts -->
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+
+    <!-- Icons -->
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css"
+    />
+
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      body {
+        font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI",
+          Roboto, sans-serif;
+        line-height: 1.6;
+        color: #333;
+        background-color: #ffffff;
+      }
+
+      /* Top Navigation */
+      .top-nav {
+        position: fixed;
+        top: 0;
+        right: 0;
+        z-index: 1000;
+        padding: 20px 30px;
+        display: flex;
+        gap: 15px;
+        align-items: center;
+      }
+
+      .nav-btn {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 16px;
+        background: rgba(255, 255, 255, 0.1);
+        color: white;
+        text-decoration: none;
+        border-radius: 20px;
+        font-size: 0.9rem;
+        font-weight: 500;
+        transition: all 0.3s ease;
+        backdrop-filter: blur(10px);
+        border: 1px solid rgba(255, 255, 255, 0.2);
+      }
+
+      .nav-btn:hover {
+        background: rgba(255, 255, 255, 0.2);
+        transform: translateY(-2px);
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+      }
+
+      .nav-btn i {
+        font-size: 1rem;
+      }
+
+      .lang-switcher {
+        cursor: pointer;
+      }
+
+      .lang-switcher .lang-text {
+        font-size: 0.8rem;
+        opacity: 0.8;
+      }
+
+      /* Scrolled state */
+      .top-nav.scrolled .nav-btn {
+        background: rgba(102, 126, 234, 0.9);
+        color: white;
+        border-color: rgba(102, 126, 234, 0.3);
+      }
+
+      .top-nav.scrolled .nav-btn:hover {
+        background: rgba(102, 126, 234, 1);
+      }
+
+      /* Hero Section */
+      .hero {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        padding: 100px 0;
+        text-align: center;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        position: relative;
+      }
+
+      .hero-content {
+        max-width: 800px;
+        margin: 0 auto;
+        padding: 0 20px;
+      }
+
+      .hero h1 {
+        font-size: 4rem;
+        font-weight: 700;
+        margin-bottom: 1rem;
+        text-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+      }
+
+      .hero .subtitle {
+        font-size: 1.5rem;
+        font-weight: 300;
+        margin-bottom: 2rem;
+        opacity: 0.9;
+      }
+
+      .hero .description {
+        font-size: 1.2rem;
+        line-height: 1.6;
+        margin-bottom: 3rem;
+        opacity: 0.85;
+      }
+
+      .hero-buttons {
+        display: flex;
+        gap: 1rem;
+        justify-content: center;
+        flex-wrap: wrap;
+      }
+
+      .btn {
+        display: inline-block;
+        padding: 15px 35px;
+        border-radius: 30px;
+        text-decoration: none;
+        font-weight: 600;
+        font-size: 1.1rem;
+        transition: all 0.3s ease;
+        border: 2px solid transparent;
+      }
+
+      .btn-primary {
+        background-color: #ffffff;
+        color: #667eea;
+        border-color: #ffffff;
+      }
+
+      .btn-primary:hover {
+        background-color: transparent;
+        color: #ffffff;
+        border-color: #ffffff;
+        transform: translateY(-3px);
+        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.2);
+      }
+
+      .btn-secondary {
+        background-color: transparent;
+        color: #ffffff;
+        border-color: #ffffff;
+      }
+
+      .btn-secondary:hover {
+        background-color: #ffffff;
+        color: #667eea;
+        transform: translateY(-3px);
+        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.2);
+      }
+
+      /* Container */
+      .container {
+        max-width: 1200px;
+        margin: 0 auto;
+        padding: 0 20px;
+      }
+
+      /* Section */
+      .section {
+        padding: 80px 0;
+      }
+
+      .section-title {
+        text-align: center;
+        font-size: 2.5rem;
+        font-weight: 600;
+        margin-bottom: 3rem;
+        color: #2c3e50;
+      }
+
+      /* Features Grid */
+      .features-grid {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 1.5rem;
+        margin-bottom: 4rem;
+      }
+
+      .feature-card {
+        background: white;
+        padding: 1.8rem;
+        border-radius: 15px;
+        box-shadow: 0 5px 25px rgba(0, 0, 0, 0.1);
+        text-align: center;
+        transition: all 0.3s ease;
+        border: 1px solid #f0f0f0;
+      }
+
+      .feature-card:hover {
+        transform: translateY(-10px);
+        box-shadow: 0 15px 40px rgba(0, 0, 0, 0.15);
+      }
+
+      .feature-icon {
+        font-size: 2.8rem;
+        margin-bottom: 1rem;
+        color: #667eea;
+      }
+
+      .feature-card h3 {
+        font-size: 1.2rem;
+        font-weight: 600;
+        margin-bottom: 1rem;
+        color: #2c3e50;
+      }
+
+      .feature-card p {
+        color: #6c757d;
+        line-height: 1.6;
+        font-size: 0.95rem;
+      }
+
+      /* Stats Section */
+      .stats {
+        background: #f8f9fa;
+      }
+
+      .stats-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 2rem;
+        text-align: center;
+      }
+
+      .stat-item h3 {
+        font-size: 2.5rem;
+        font-weight: 700;
+        color: #667eea;
+        margin-bottom: 0.5rem;
+      }
+
+      .stat-item p {
+        color: #6c757d;
+        font-weight: 500;
+      }
+
+      /* Tech Stack */
+      .tech-stack {
+        background: white;
+      }
+
+      .tech-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+        gap: 2rem;
+      }
+
+      .tech-category {
+        background: #f8f9fa;
+        padding: 2rem;
+        border-radius: 10px;
+        border-left: 4px solid #667eea;
+      }
+
+      .tech-category h4 {
+        font-size: 1.2rem;
+        font-weight: 600;
+        margin-bottom: 1rem;
+        color: #2c3e50;
+      }
+
+      .tech-list {
+        list-style: none;
+      }
+
+      .tech-list li {
+        padding: 0.3rem 0;
+        color: #6c757d;
+      }
+
+      .tech-list li:before {
+        content: "✓ ";
+        color: #28a745;
+        font-weight: bold;
+      }
+
+      /* CTA Section */
+      .cta {
+        background: linear-gradient(135deg, #2c3e50 0%, #34495e 100%);
+        color: white;
+        text-align: center;
+      }
+
+      .cta h2 {
+        font-size: 2.5rem;
+        margin-bottom: 1rem;
+      }
+
+      .cta p {
+        font-size: 1.2rem;
+        margin-bottom: 2rem;
+        opacity: 0.9;
+      }
+
+      /* Code Block */
+      .code-block {
+        background: #2d3748;
+        color: #e2e8f0;
+        padding: 2rem;
+        border-radius: 10px;
+        margin: 2rem 0;
+        font-family: "Monaco", "Menlo", "Ubuntu Mono", monospace;
+        overflow-x: auto;
+        position: relative;
+      }
+
+      .code-block::before {
+        content: "bash";
+        position: absolute;
+        top: 10px;
+        right: 15px;
+        font-size: 0.8rem;
+        color: #a0aec0;
+      }
+
+      /* Footer */
+      .footer {
+        background: #2c3e50;
+        color: white;
+        padding: 3rem 0;
+        text-align: center;
+      }
+
+      .footer-links {
+        display: flex;
+        justify-content: center;
+        gap: 2rem;
+        margin-bottom: 2rem;
+        flex-wrap: wrap;
+      }
+
+      .footer-links a {
+        color: white;
+        text-decoration: none;
+        font-weight: 500;
+        transition: color 0.3s ease;
+      }
+
+      .footer-links a:hover {
+        color: #667eea;
+      }
+
+      /* Language Switch Animation */
+      .fade-out {
+        opacity: 0;
+        transform: translateY(10px);
+        transition: all 0.3s ease;
+      }
+
+      .fade-in {
+        opacity: 1;
+        transform: translateY(0);
+        transition: all 0.3s ease;
+      }
+
+      /* Responsive Design */
+      @media (max-width: 1200px) {
+        .features-grid {
+          grid-template-columns: repeat(2, 1fr);
+          gap: 2rem;
+        }
+      }
+
+      @media (max-width: 768px) {
+        .top-nav {
+          padding: 15px 20px;
+          gap: 10px;
+        }
+
+        .nav-btn {
+          padding: 6px 12px;
+          font-size: 0.8rem;
+        }
+
+        .hero h1 {
+          font-size: 2.5rem;
+        }
+
+        .hero .subtitle {
+          font-size: 1.2rem;
+        }
+
+        .hero .description {
+          font-size: 1rem;
+        }
+
+        .hero-buttons {
+          flex-direction: column;
+          align-items: center;
+        }
+
+        .btn {
+          width: 250px;
+        }
+
+        .section-title {
+          font-size: 2rem;
+        }
+
+        .features-grid {
+          grid-template-columns: 1fr;
+          gap: 2rem;
+        }
+
+        .feature-card {
+          padding: 2rem;
+        }
+
+        .feature-icon {
+          font-size: 3rem;
+        }
+
+        .feature-card h3 {
+          font-size: 1.3rem;
+        }
+
+        .feature-card p {
+          font-size: 1rem;
+        }
+      }
+
+      /* Animations */
+      @keyframes fadeInUp {
+        from {
+          opacity: 0;
+          transform: translateY(30px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+
+      .fade-in-up {
+        animation: fadeInUp 0.6s ease-out;
+      }
+
+      /* Scroll indicator */
+      .scroll-indicator {
+        position: absolute;
+        bottom: 30px;
+        left: 50%;
+        transform: translateX(-50%);
+        color: white;
+        font-size: 2rem;
+        animation: bounce 2s infinite;
+      }
+
+      @keyframes bounce {
+        0%,
+        20%,
+        50%,
+        80%,
+        100% {
+          transform: translateX(-50%) translateY(0);
+        }
+        40% {
+          transform: translateX(-50%) translateY(-10px);
+        }
+        60% {
+          transform: translateX(-50%) translateY(-5px);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <!-- Top Navigation -->
+    <nav class="top-nav" id="topNav">
+      <a
+        href="https://github.com/alibaba/rtp-llm"
+        class="nav-btn"
+        target="_blank"
+        id="githubBtn"
+      >
+        <i class="fab fa-github"></i>
+        <span data-en="GitHub" data-zh="GitHub">GitHub</span>
+      </a>
+      <div class="nav-btn lang-switcher" id="langSwitcher">
+        <i class="fas fa-globe"></i>
+        <span class="lang-text" data-en="中文" data-zh="English">中文</span>
+      </div>
+    </nav>
+
+    <!-- Hero Section -->
+    <section class="hero">
+      <div class="hero-content">
+        <h1 class="fade-in-up" data-en="RTP-LLM" data-zh="RTP-LLM">RTP-LLM</h1>
+        <p
+          class="subtitle fade-in-up"
+          data-en="Production-Ready Large Language Model Inference Engine"
+          data-zh="生产级大语言模型推理引擎"
+        >
+          Production-Ready Large Language Model Inference Engine
+        </p>
+        <p
+          class="description fade-in-up"
+          data-en="Fast, flexible, and scalable LLM serving framework trusted by Alibaba Group's mission-critical applications including Taobao, Tmall, and international platforms."
+          data-zh="快速、灵活、可扩展的大语言模型服务框架，受到阿里巴巴集团关键业务应用的信赖，包括淘宝、天猫和国际化平台。"
+        >
+          Fast, flexible, and scalable LLM serving framework trusted by Alibaba
+          Group's mission-critical applications including Taobao, Tmall, and
+          international platforms.
+        </p>
+        <div class="hero-buttons fade-in-up">
+          <a href="/en" class="btn btn-primary">
+            <i class="fas fa-book"></i>
+            <span data-en="Read Documentation" data-zh="阅读文档"
+              >Read Documentation</span
+            >
+          </a>
+          <a
+            href="https://github.com/alibaba/rtp-llm"
+            class="btn btn-secondary"
+            target="_blank"
+          >
+            <i class="fab fa-github"></i>
+            <span data-en="View on GitHub" data-zh="查看源码"
+              >View on GitHub</span
+            >
+          </a>
+        </div>
+      </div>
+      <div class="scroll-indicator">
+        <i class="fas fa-chevron-down"></i>
+      </div>
+    </section>
+
+    <!-- Features Section -->
+    <section class="section">
+      <div class="container">
+        <h2
+          class="section-title"
+          data-en="Why Choose RTP-LLM?"
+          data-zh="为什么选择 RTP-LLM？"
+        >
+          Why Choose RTP-LLM?
+        </h2>
+        <div class="features-grid">
+          <div class="feature-card fade-in-up">
+            <div class="feature-icon">
+              <i class="fas fa-shield-alt"></i>
+            </div>
+            <h3 data-en="Production Proven" data-zh="生产验证">
+              Production Proven
+            </h3>
+            <p
+              data-en="Deployed across Alibaba's ecosystem serving millions of users daily. Powers Taobao Wenwen, Aidge AI platform, and OpenSearch LLM services."
+              data-zh="在阿里巴巴生态系统中部署，每日服务数百万用户。为淘宝问问、Aidge AI 平台和 OpenSearch LLM 服务提供支持。"
+            >
+              Deployed across Alibaba's ecosystem serving millions of users
+              daily. Powers Taobao Wenwen, Aidge AI platform, and OpenSearch LLM
+              services.
+            </p>
+          </div>
+          <div class="feature-card fade-in-up">
+            <div class="feature-icon">
+              <i class="fas fa-tachometer-alt"></i>
+            </div>
+            <h3 data-en="High Performance" data-zh="高性能">
+              High Performance
+            </h3>
+            <p
+              data-en="Advanced CUDA kernels, quantization (INT8/INT4), KV cache optimization, and speculative decoding for maximum throughput."
+              data-zh="先进的 CUDA 内核、量化技术（INT8/INT4）、KV 缓存优化和推测解码，实现最大吞吐量。"
+            >
+              Advanced CUDA kernels, quantization (INT8/INT4), KV cache
+              optimization, and speculative decoding for maximum throughput.
+            </p>
+          </div>
+          <div class="feature-card fade-in-up">
+            <div class="feature-icon">
+              <i class="fas fa-code"></i>
+            </div>
+            <h3 data-en="Developer Friendly" data-zh="开发者友好">
+              Developer Friendly
+            </h3>
+            <p
+              data-en="Seamless HuggingFace integration, multiple weight formats, multi-LoRA serving, and intuitive APIs."
+              data-zh="无缝集成 HuggingFace，支持多种权重格式、多 LoRA 服务和直观的 API。"
+            >
+              Seamless HuggingFace integration, multiple weight formats,
+              multi-LoRA serving, and intuitive APIs.
+            </p>
+          </div>
+          <div class="feature-card fade-in-up">
+            <div class="feature-icon">
+              <i class="fas fa-cubes"></i>
+            </div>
+            <h3 data-en="Extensive Model Support" data-zh="广泛的模型支持">
+              Extensive Model Support
+            </h3>
+            <p
+              data-en="Support for 20+ model families including Llama, Qwen, ChatGLM, multimodal models, and embedding models."
+              data-zh="支持 20+ 个模型系列，包括 Llama、Qwen、ChatGLM、多模态模型和嵌入模型。"
+            >
+              Support for 20+ model families including Llama, Qwen, ChatGLM,
+              multimodal models, and embedding models.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Stats Section -->
+    <section class="section stats">
+      <div class="container">
+        <h2
+          class="section-title"
+          data-en="Trusted by Industry Leaders"
+          data-zh="受行业领导者信赖"
+        >
+          Trusted by Industry Leaders
+        </h2>
+        <div class="stats-grid">
+          <div class="stat-item">
+            <h3>20+</h3>
+            <p data-en="Supported Model Families" data-zh="支持的模型系列">
+              Supported Model Families
+            </p>
+          </div>
+          <div class="stat-item">
+            <h3 data-en="Millions" data-zh="数百万">Millions</h3>
+            <p data-en="Daily Active Users" data-zh="日活跃用户">
+              Daily Active Users
+            </p>
+          </div>
+          <div class="stat-item">
+            <h3 data-en="Production" data-zh="生产">Production</h3>
+            <p data-en="Battle Tested" data-zh="实战验证">Battle Tested</p>
+          </div>
+          <div class="stat-item">
+            <h3 data-en="Open Source" data-zh="开源">Open Source</h3>
+            <p data-en="Community Driven" data-zh="社区驱动">
+              Community Driven
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Tech Stack Section -->
+    <section class="section tech-stack">
+      <div class="container">
+        <h2
+          class="section-title"
+          data-en="Advanced Features"
+          data-zh="先进特性"
+        >
+          Advanced Features
+        </h2>
+        <div class="tech-grid">
+          <div class="tech-category">
+            <h4>
+              <i class="fas fa-bolt"></i>
+              <span data-en="Performance" data-zh="性能">Performance</span>
+            </h4>
+            <ul class="tech-list">
+              <li
+                data-en="RadixAttention for prefix caching"
+                data-zh="RadixAttention 前缀缓存"
+              >
+                RadixAttention for prefix caching
+              </li>
+              <li
+                data-en="Zero-overhead CPU scheduler"
+                data-zh="零开销 CPU 调度器"
+              >
+                Zero-overhead CPU scheduler
+              </li>
+              <li
+                data-en="Prefill-decode disaggregation"
+                data-zh="预填充-解码分离"
+              >
+                Prefill-decode disaggregation
+              </li>
+              <li data-en="Speculative decoding" data-zh="推测解码">
+                Speculative decoding
+              </li>
+              <li
+                data-en="Advanced quantization (FP8, INT4, AWQ, GPTQ)"
+                data-zh="先进量化技术 (FP8, INT4, AWQ, GPTQ)"
+              >
+                Advanced quantization (FP8, INT4, AWQ, GPTQ)
+              </li>
+            </ul>
+          </div>
+          <div class="tech-category">
+            <h4>
+              <i class="fas fa-expand-arrows-alt"></i>
+              <span data-en="Scalability" data-zh="可扩展性">Scalability</span>
+            </h4>
+            <ul class="tech-list">
+              <li data-en="Tensor parallelism" data-zh="张量并行">
+                Tensor parallelism
+              </li>
+              <li data-en="Pipeline parallelism" data-zh="流水线并行">
+                Pipeline parallelism
+              </li>
+              <li data-en="Expert parallelism for MoE" data-zh="MoE 专家并行">
+                Expert parallelism for MoE
+              </li>
+              <li data-en="Multi-LoRA batching" data-zh="多 LoRA 批处理">
+                Multi-LoRA batching
+              </li>
+              <li data-en="Distributed inference" data-zh="分布式推理">
+                Distributed inference
+              </li>
+            </ul>
+          </div>
+          <div class="tech-category">
+            <h4>
+              <i class="fas fa-puzzle-piece"></i>
+              <span data-en="Flexibility" data-zh="灵活性">Flexibility</span>
+            </h4>
+            <ul class="tech-list">
+              <li data-en="Multiple weight formats" data-zh="多种权重格式">
+                Multiple weight formats
+              </li>
+              <li
+                data-en="Multimodal inputs (text + images)"
+                data-zh="多模态输入（文本 + 图像）"
+              >
+                Multimodal inputs (text + images)
+              </li>
+              <li data-en="Structured outputs" data-zh="结构化输出">
+                Structured outputs
+              </li>
+              <li
+                data-en="P-tuning and LoRA support"
+                data-zh="P-tuning 和 LoRA 支持"
+              >
+                P-tuning and LoRA support
+              </li>
+              <li data-en="OpenAI-compatible APIs" data-zh="OpenAI 兼容 API">
+                OpenAI-compatible APIs
+              </li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+    <!-- Footer -->
+    <footer class="footer">
+      <div class="container">
+        <div class="footer-links">
+          <a href="https://github.com/alibaba/rtp-llm" target="_blank">
+            <i class="fab fa-github"></i> GitHub
+          </a>
+          <a href="https://rtp-llm.alibaba-inc.com" target="_blank">
+            <i class="fas fa-book"></i>
+            <span data-en="Documentation" data-zh="文档">Documentation</span>
+          </a>
+          <a href="https://github.com/alibaba/rtp-llm/issues" target="_blank">
+            <i class="fas fa-bug"></i>
+            <span data-en="Issues" data-zh="问题反馈">Issues</span>
+          </a>
+          <a href="https://github.com/alibaba/rtp-llm/releases" target="_blank">
+            <i class="fas fa-tag"></i>
+            <span data-en="Releases" data-zh="版本发布">Releases</span>
+          </a>
+        </div>
+        <p
+          data-en="&copy; 2023-2024 RTP-LLM Team. Open source project by Alibaba Foundation Model Inference Team."
+          data-zh="&copy; 2023-2024 RTP-LLM 团队。阿里巴巴基础模型推理团队开源项目。"
+        >
+          &copy; 2023-2024 RTP-LLM Team. Open source project by Alibaba
+          Foundation Model Inference Team.
+        </p>
+      </div>
+    </footer>
+
+    <script>
+      // Language switching functionality
+      let currentLang = "en";
+
+      function switchLanguage() {
+        const newLang = currentLang === "en" ? "zh" : "en";
+        const elements = document.querySelectorAll("[data-en][data-zh]");
+
+        // Add fade out effect
+        document.body.classList.add("fade-out");
+
+        setTimeout(() => {
+          elements.forEach((element) => {
+            const text = element.getAttribute(`data-${newLang}`);
+            if (text) {
+              element.innerHTML = text;
+            }
+          });
+
+          // Update language attribute
+          document.documentElement.lang = newLang;
+          currentLang = newLang;
+
+          // Update page title
+          const titleText =
+            newLang === "en"
+              ? "RTP-LLM - Production-Ready Large Language Model Inference Engine"
+              : "RTP-LLM - 生产级大语言模型推理引擎";
+          document.title = titleText;
+
+          // Remove fade out effect
+          document.body.classList.remove("fade-out");
+          document.body.classList.add("fade-in");
+
+          setTimeout(() => {
+            document.body.classList.remove("fade-in");
+          }, 300);
+        }, 150);
+      }
+
+      // Top navigation scroll effect
+      function handleNavScroll() {
+        const nav = document.getElementById("topNav");
+        if (window.scrollY > 100) {
+          nav.classList.add("scrolled");
+        } else {
+          nav.classList.remove("scrolled");
+        }
+      }
+
+      // Event listeners
+      document
+        .getElementById("langSwitcher")
+        .addEventListener("click", switchLanguage);
+      window.addEventListener("scroll", handleNavScroll);
+
+      // Smooth scrolling for anchor links
+      document.querySelectorAll('a[href^="#"]').forEach((anchor) => {
+        anchor.addEventListener("click", function (e) {
+          e.preventDefault();
+          document.querySelector(this.getAttribute("href")).scrollIntoView({
+            behavior: "smooth",
+          });
+        });
+      });
+
+      // Fade in animation on scroll
+      const observerOptions = {
+        threshold: 0.1,
+        rootMargin: "0px 0px -50px 0px",
+      };
+
+      const observer = new IntersectionObserver((entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting) {
+            entry.target.classList.add("fade-in-up");
+          }
+        });
+      }, observerOptions);
+
+      document
+        .querySelectorAll(".feature-card, .tech-category, .stat-item")
+        .forEach((el) => {
+          observer.observe(el);
+        });
+
+      // Hide scroll indicator on scroll
+      window.addEventListener("scroll", () => {
+        const scrollIndicator = document.querySelector(".scroll-indicator");
+        if (window.scrollY > 100) {
+          scrollIndicator.style.opacity = "0";
+        } else {
+          scrollIndicator.style.opacity = "1";
+        }
+      });
+    </script>
+  </body>
+</html>

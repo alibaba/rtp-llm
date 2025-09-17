@@ -34,7 +34,7 @@ def process_html_files(build_dir):
 def main():
     # Get the build directory path
     build_dir = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "_build", "html"
+        os.path.dirname(os.path.abspath(__file__)), "build"
     )
     # Process all HTML files
     if os.path.exists(build_dir):

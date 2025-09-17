@@ -30,8 +30,7 @@ def update_translations():
     print("正在更新翻译文件...")
     
     # 1. 提取可翻译消息
-    print("正在提取可翻译消息...")
-    if not run_command("sphinx-build -b gettext . _build/gettext"):
+    if not run_command("sphinx-build -b gettext . build/gettext"):
         print("提取消息失败")
         return False
     
@@ -40,13 +39,12 @@ def update_translations():
     locales_dir.mkdir(exist_ok=True)
     
     # 3. 更新各语言的翻译文件
-    print("正在更新 PO 翻译文件...")
     for lang in LANGUAGES:
         if lang == DEFAULT_LANGUAGE:
             continue
             
         # 使用 sphinx-intl 更新翻译文件
-        cmd = f"sphinx-intl update -p _build/gettext -l {lang}"
+        cmd = f"sphinx-intl update -p build/gettext -l {lang}"
         if not run_command(cmd):
             print(f"更新 {lang} 翻译文件失败")
             return False
@@ -59,15 +57,9 @@ def build_language(lang):
     print(f"正在构建 {lang} 版本的文档...")
     
     # 获取输出目录
-    output_dir = f"_build/html/{lang}"
-    
-    # 直接使用 sphinx-build 命令，参考用户成功的命令格式
-    # make -e SPHINXOPTS="-D language='zh_CN'" html
-    # 等价于: sphinx-build -b html -D language='zh_CN' . _build/html
+    output_dir = f"build/{lang}"
     
     cmd = f"sphinx-build -b html -D language='{lang}' . {output_dir}"
-    
-    print(f"构建命令: {cmd}")
     success = run_command(cmd)
     
     if success:
@@ -90,17 +82,36 @@ def build_all():
             print(f"构建 {lang} 版本失败")
             return False
     
+    # 3. 复制 index.html 到 build/ 目录
+    copy_index_html()
+    
     print("多语言文档构建完成!")
+    print("输出结构:")
+    print("  build/")
+    print("  ├── index.html")
+    print("  ├── en/")
+    print("  ├── zh_CN/")
+    print("  └── gettext/")
     return True
 
 def clean():
     """清理构建文件"""
     print("清理构建文件...")
-    dirs_to_clean = ["_build", "locales"]
+    dirs_to_clean = ["build", "locales"]
     for dir_name in dirs_to_clean:
         if os.path.exists(dir_name):
             shutil.rmtree(dir_name)
             print(f"已删除 {dir_name}")
+
+def copy_index_html():
+    """将 index.html 复制到 build/ 目录"""
+    # 使用 cp 命令复制 index.html
+    if run_command("cp index.html build/"):
+        print("已将 index.html 复制到 build/ 目录")
+        return True
+    else:
+        print("警告: 复制 index.html 失败")
+        return False
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:
@@ -109,7 +120,9 @@ if __name__ == "__main__":
         elif sys.argv[1] == "update":
             update_translations()
         elif sys.argv[1] in LANGUAGES:
-            build_language(sys.argv[1])
+            # 构建单个语言时也复制 index.html
+            if build_language(sys.argv[1]):
+                copy_index_html()
         else:
             print(f"未知命令: {sys.argv[1]}")
             print("可用命令: clean, update, en, zh_CN")
