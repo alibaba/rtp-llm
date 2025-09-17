@@ -1,0 +1,237 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: RTP-LLM 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-17 17:12+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: ../../release/v0.2.0/feature.md:2
+msgid "Overview"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:3
+msgid "RTP-LLM First Release Version:0.2.0(2025.09)"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:4
+msgid "Features"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:5
+msgid "Framkework  Advanced Feature"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:6
+msgid "[PD Disaggregation](../../backend/pd_disaggregation.md) && [PD Entrance Transpose](../../backend/pd_entrace_transpose.md)"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:7
+msgid "[Attention Support more Backend](../../backend/attention_backend.md): XQA, FlashInfer"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:8
+msgid "[Speculative Decoding](../../backend/speculative_decoding.md)"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:9
+msgid "[EPLB](../../references/deepseek/reporter.md#eplb)"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:10
+msgid "[MicroBatch & Overlapping](../../references/deepseek/reporter.md#microbatch-overlapping)"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:11
+msgid "[MTP](../../references/deepseek/reporter.md#mtp)"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:12
+msgid "[DeepEP](../../references/deepseek/reporter.md#deepep-network)"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:13
+msgid "[LoadBalance](../../backend/flexlb.md)"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:14
+msgid "[3FS](../../backend/3fs.md)"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:15
+msgid "[FP8 KVCache](../../backend/KvCache.md)"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:16
+msgid "[REUSE KV CACHE](../../backend/reuse_kv_cache.md)"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:17
+msgid "[Quantization](../../backend/quantization.md)"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:18
+msgid "[MultiLoRA](../../backend/lora.ipynb)"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:19
+msgid "[Attention FFN Disaggregation](../../backend/af_disaggregation.md)"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:20
+msgid "[Frontend/Backend Disaggregation](../../backend/Frontend.md)"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:23
+msgid "New Models"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:0
+msgid "**Model Family (Variants)**"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:0
+msgid "**Example HuggingFace Identifier**"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:0
+msgid "**Description**"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:0
+msgid "**Support CardType**"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:0
+msgid "**DeepSeek** (v1, v2, v3/R1)"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:0
+msgid "`deepseek-ai/DeepSeek-R1`"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:0
+msgid "Series of advanced reasoning-optimized models (including a 671B MoE) trained with reinforcement learning; <br>top performance on complex reasoning, math, and code tasks.<br> [RTP-LLM provides Deepseek v3/R1 model-specific optimizations](../../references/deepseek/reporter.md)"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:0
+msgid "NV ✅<br> AMD ✅"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:0
+msgid "**Kimi** (Kimi-K2)"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:0
+msgid "`moonshotai/Kimi-K2-Instruct`"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:0
+msgid "Moonshot's MoE LLMs with 1 trillion parameters, exceptional on agentic intellegence"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:0
+msgid "**Qwen** (v1, v1.5, v2, v2.5, v3, QWQ, Qwen3-Coder)"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:0
+msgid "`Qwen/Qwen3-235B-A22B`"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:0
+msgid "Series of advanced reasoning-optimized models, <br>Significantly improved performance on reasoning tasks,<br> including logical reasoning, mathematics, science, coding, and academic benchmarks that typically require human expertise — achieving state-of-the-art results among open-source thinking models.<br>Markedly better general capabilities, such as instruction following, tool usage, text generation, and alignment with human preferences.<br>Enhanced 256K long-context understanding capabilities."
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:0
+msgid "**QwenVL** (VL2, VL2.5, VL3)"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:0
+msgid "`Qwen/Qwen2-VL-2B`"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:0
+msgid "Series of advanced  Vision-language model series based on Qwen2.5/Qwen3"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:0
+msgid "NV ✅<br> AMD ❌"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:0
+msgid "**Llama**"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:0
+msgid "`meta-llama/Llama-4-Scout-17B-16E-Instruct`"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:0
+msgid "Meta’s open LLM series, spanning 7B to 400B parameters (Llama 2, 3, and new Llama 4) with well-recognized performance."
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:0
+msgid "**TBStars**"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:0
+msgid "Alibaba Internal LLM"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:0
+msgid "**TBStarsVL**"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:0
+msgid "Series of advanced  Vision-language model series based on TBStars"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:0
+msgid "**MixTBstars**"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:35
+msgid "Bug Fixs"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:37
+msgid "Question of omission"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:38
+msgid "PD Entrance Transpose not worker with front app"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:39
+msgid "metrics of 3fs cache hit ratio is not accurate"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:40
+msgid "too many dynamic lora need more **reserver_runtime_mem_mb**"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:41
+msgid "AMD not support MoE models"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:42
+msgid "MoE model without shared_experter cannot use enable-layer-micro-batch"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:45
+msgid "Performance"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:47
+msgid "Compatibility"
+msgstr ""

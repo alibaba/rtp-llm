@@ -1,0 +1,97 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: RTP-LLM 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-17 17:12+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: ../../references/Update-whl-Deps.md:1
+msgid "Update whl Deps"
+msgstr ""
+
+#: ../../references/Update-whl-Deps.md:3
+msgid "To ensure that Python dependencies are correctly referenced by code and test cases, and properly resolved during packaging, the following three steps need to be completed:"
+msgstr ""
+
+#: ../../references/Update-whl-Deps.md:5
+msgid "Add the required dependency libraries and their version numbers to the requirements description file"
+msgstr ""
+
+#: ../../references/Update-whl-Deps.md:7
+msgid "Generate a hardware-specific locked-version requirements_lock file based on the requirements file"
+msgstr ""
+
+#: ../../references/Update-whl-Deps.md:9
+msgid "Add the corresponding pip package dependencies to the py_library targets that use the relevant libraries in the Bazel BUILD file"
+msgstr ""
+
+#: ../../references/Update-whl-Deps.md:11
+msgid "1. Add the required libraries to the requirements description file"
+msgstr ""
+
+#: ../../references/Update-whl-Deps.md:13
+msgid "All hardware dependencies are based on `open_source/deps/requirements_base.txt` as the foundational dependency configuration. If you need to add or update basic dependencies that apply to all hardware (such as fundamental libraries like transformers), you should add them in this file. For example:"
+msgstr ""
+
+#: ../../references/Update-whl-Deps.md:21
+msgid "If you need to add specialized dependencies for specific hardware (such as torch packages, hardware computation libraries, etc.), you must add these dependencies in the corresponding hardware-specific requirements files."
+msgstr ""
+
+#: ../../references/Update-whl-Deps.md:24
+msgid "2. Generate requirements_lock file"
+msgstr ""
+
+#: ../../references/Update-whl-Deps.md:26
+msgid "Lock files must not be manually modified and can only be automatically generated through relevant commands from the base dependency description files."
+msgstr ""
+
+#: ../../references/Update-whl-Deps.md:28
+msgid "When opening any dependency file starting with requirements_lock, you will typically find the generation command at the top of the file:"
+msgstr ""
+
+#: ../../references/Update-whl-Deps.md:50
+msgid "Note that in actual execution, `bazel` should be replaced with `bazelisk`."
+msgstr ""
+
+#: ../../references/Update-whl-Deps.md:52
+msgid "For each lock file affected by dependency configuration changes (modifying requirements_base.txt will affect all lock files, including those in both open-source and closed-source directories), you need to run the update command specified in the lock file to refresh it."
+msgstr ""
+
+#: ../../references/Update-whl-Deps.md:54
+msgid "**Important note**: If lock file conflicts occur during code merging, do not directly merge the conflicting content manually. Instead, re-run the lock file generation command."
+msgstr ""
+
+#: ../../references/Update-whl-Deps.md:56
+msgid "3. Add the dependencies to the Bazel BUILD file"
+msgstr ""
+
+#: ../../references/Update-whl-Deps.md:59
+msgid "At this point, the dependencies can be installed correctly, but Python files still cannot properly reference these Python libraries. We also need to declare the dependencies in the Bazel BUILD files."
+msgstr ""
+
+#: ../../references/Update-whl-Deps.md:62
+msgid "In the `rtp_llm/BUILD` file, locate the requirement() function and add the new dependency to its internal list to declare the existence of the dependency."
+msgstr ""
+
+#: ../../references/Update-whl-Deps.md:75
+msgid "In the py_library targets that use the corresponding dependency libraries, add the declared dependencies, for example:"
+msgstr ""
+
+#: ../../references/Update-whl-Deps.md:95
+msgid "Add the corresponding pip dependencies in the whl_reqs section of the `rtp_llm/BUILD` file to ensure that dependencies are included during packaging."
+msgstr ""
+
+#: ../../references/Update-whl-Deps.md:110
+msgid "Note: For hardware-related packages, you need to branch and select the appropriate packages based on hardware type in the whl_deps function in the `open_source/bazel/arch_select.bzl` file."
+msgstr ""

@@ -1,0 +1,353 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: RTP-LLM 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-17 17:12+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: ../../backend/sampling_params.md:1
+msgid "Sampling Config"
+msgstr ""
+
+#: ../../backend/sampling_params.md:3
+msgid "For the OpenAI protocol, **top_p** and **temperature** are specified in the outer protocol, while other sampling parameters are specified in **extra_configs**. Example:"
+msgstr ""
+
+#: ../../backend/sampling_params.md:28
+msgid "The raw protocol specifies sampling parameters through **generate_config**. Example:"
+msgstr ""
+
+#: ../../backend/sampling_params.md:39
+msgid "Basic Control Parameters"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "Parameter Name"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "Core Function"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "temperature"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "Controls sampling randomness:<br>→ 0: Deterministic mode<br>→ 1: Standard random mode"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "top_k"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "Candidate set truncation strategy:<br>→ 0: Disabled<br>→ N: Take top N high-probability tokens"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "top_p"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "Nucleus sampling strategy:<br>→ 0.95: Take candidate set with cumulative probability of 95%"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "max_new_tokens"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "Maximum generation length:<br>MIN(input_length + max_new_tokens, MAX_SEQ_LEN)"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "min_new_tokens"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "Enforces minimum generation length"
+msgstr ""
+
+#: ../../backend/sampling_params.md:50
+msgid "Advanced Control Parameters"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "Function Description"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "repetition_penalty"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "Repetition suppression factor:<br>→ >1.0 suppresses repetition<br>→ <1.0 encourages repetition"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "stop_words_list"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "Token ID stop words (better performance):<br>`[[20490,25],[1024]]`"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "stop_words_str"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "String stop words (better compatibility):<br>`[\"<end>\",\"\\nObservation\"]`"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "random_seed"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "Random seed control:<br>→ None: True random<br>→ Fixed value: Reproducible generation"
+msgstr ""
+
+#: ../../backend/sampling_params.md:69
+msgid "<a id=\"返回控制参数\"></a>"
+msgstr ""
+
+#: ../../backend/sampling_params.md:70
+msgid "Return Control Parameters"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "Effect"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "Use Case"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "return_logits"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "Returns logits matrix for each position"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "Output analysis/post-processing"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "return_hidden_states"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "Returns hidden states of transformer layers"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "Model debugging/feature extraction"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "return_input_ids"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "Returns input sequence encoding result"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "Input validation"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "return_output_ids"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "Returns output sequence encoding result"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "Output decoding validation"
+msgstr ""
+
+#: ../../backend/sampling_params.md:79
+msgid "<a id=\"特殊模式参数\"></a>"
+msgstr ""
+
+#: ../../backend/sampling_params.md:80
+msgid "Special Mode Parameters"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "Mode Name"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "Control Parameter"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "Thinking Mode"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "in_think_mode=True"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "Agent-specific scenario:<br>Control thinking phase length with max_thinking_tokens"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "Streaming Output"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "yield_generator=True"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "Enable chunked return mechanism"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "Parallel Decoding"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "pd_separation=True"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "Enable parallel decoding optimization (hardware support required)"
+msgstr ""
+
+#: ../../backend/sampling_params.md:88
+msgid "<a id=\"环境变量说明\"></a>"
+msgstr ""
+
+#: ../../backend/sampling_params.md:89
+msgid "Environment Variable Description"
+msgstr ""
+
+#: ../../backend/sampling_params.md:100
+msgid "<a id=\"采样策略说明\"></a>"
+msgstr ""
+
+#: ../../backend/sampling_params.md:101
+msgid "Sampling Strategy Description"
+msgstr ""
+
+#: ../../backend/sampling_params.md:103
+msgid "Combined Strategy Example"
+msgstr ""
+
+#: ../../backend/sampling_params.md:115
+msgid "Strategy Recommended Values"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "Scenario"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "Code Generation"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "0.2-0.4"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "0.9"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "40"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "Creative Writing"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "0.7-1.0"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "0.95"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "100"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "Factual Q&A"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "0.1-0.3"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "0.8"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "20"
+msgstr ""
+
+#: ../../backend/sampling_params.md:122
+msgid "<a id=\"参数使用注意事项\"></a>"
+msgstr ""
+
+#: ../../backend/sampling_params.md:123
+msgid "Parameter Usage Notes"
+msgstr ""
+
+#: ../../backend/sampling_params.md:125
+msgid "**Stop Words Selection Principles**"
+msgstr ""
+
+#: ../../backend/sampling_params.md:126
+msgid "Performance priority: Use `stop_words_list` for high-frequency triggering scenarios"
+msgstr ""
+
+#: ../../backend/sampling_params.md:127
+msgid "Compatibility priority: Use `stop_words_str` for complex pattern matching"
+msgstr ""
+
+#: ../../backend/sampling_params.md:129
+msgid "**Length Limit Coordination**"
+msgstr ""
+
+#: ../../backend/sampling_params.md:137
+msgid "**Thinking Mode Special Constraints**"
+msgstr ""
+
+#: ../../backend/sampling_params.md:147
+msgid "**Streaming Output Limitations**"
+msgstr ""
+
+#: ../../backend/sampling_params.md:148
+msgid "Need to enable `yield_generator=True` simultaneously"
+msgstr ""
+
+#: ../../backend/sampling_params.md:149
+msgid "`return_logits` only returns complete data in non-streaming mode"
+msgstr ""

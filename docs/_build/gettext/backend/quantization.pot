@@ -1,0 +1,126 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: RTP-LLM 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-17 17:12+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: ../../backend/quantization.md:1
+msgid "Quantization"
+msgstr ""
+
+#: ../../backend/quantization.md:2
+msgid "RTP-LLM currently supports weight only quantization, including int8 and int4. It can significantly reduce the video memory footprint and accelerate the decoding phase. Known issues: Weight Only quantization may cause performance degradation for long sequences during the Prefill phase Currently, all quantization methods are supported in SM70 and above"
+msgstr ""
+
+#: ../../backend/quantization.md:6
+msgid "Support Quant"
+msgstr ""
+
+#: ../../backend/quantization.md:0
+msgid "**CardType**"
+msgstr ""
+
+#: ../../backend/quantization.md:0
+msgid "**Int8WeightOnly**"
+msgstr ""
+
+#: ../../backend/quantization.md:0
+msgid "**Int8W8A8**"
+msgstr ""
+
+#: ../../backend/quantization.md:0
+msgid "**BlockWiseFp8**"
+msgstr ""
+
+#: ../../backend/quantization.md:0
+msgid "**PerTensorFp8**"
+msgstr ""
+
+#: ../../backend/quantization.md:0
+msgid "**INT4**"
+msgstr ""
+
+#: ../../backend/quantization.md:0
+msgid "**PTPC**"
+msgstr ""
+
+#: ../../backend/quantization.md:0
+msgid "**CUDA**"
+msgstr ""
+
+#: ../../backend/quantization.md:0
+msgid "✅"
+msgstr ""
+
+#: ../../backend/quantization.md:0
+msgid "❌"
+msgstr ""
+
+#: ../../backend/quantization.md:0
+msgid "**AMD**"
+msgstr ""
+
+#: ../../backend/quantization.md:13
+msgid "GPTQ/AWQ"
+msgstr ""
+
+#: ../../backend/quantization.md:14
+msgid "Supports int4 and int8. Model weights needs to be quantified in advance(use AutoGPTQForCausalLM/AutoAWQForCausalLM).<br> The model config needs to contain quantization related config, containing bits, group_size, quant_method.<br> GPTQ config example:"
+msgstr ""
+
+#: ../../backend/quantization.md:24
+msgid "Example AWQ config:"
+msgstr ""
+
+#: ../../backend/quantization.md:33
+msgid "W8A8"
+msgstr ""
+
+#: ../../backend/quantization.md:34
+msgid "smoothquant and omniquant are supported You need to include a file called \"smoothquant.ini\" under the ckpt path, or write config"
+msgstr ""
+
+#: ../../backend/quantization.md:43
+msgid "Supports llama, qwen, starcoder. The name of the tensor stored in ckpt is referred to the associated model file."
+msgstr ""
+
+#: ../../backend/quantization.md:46
+msgid "BlockWiseFp8"
+msgstr ""
+
+#: ../../backend/quantization.md:47
+msgid "Support Load Quant or PreQuantified.<br> You can use Load Quant by set args, Example<br>"
+msgstr ""
+
+#: ../../backend/quantization.md:53
+#: ../../backend/quantization.md:75
+msgid "You can Provide PreQuantified Model Weight, The model config needs to contain quantization related config<br>"
+msgstr ""
+
+#: ../../backend/quantization.md:68
+msgid "PerTensorFp8"
+msgstr ""
+
+#: ../../backend/quantization.md:69
+msgid "Support Load Quant or PreQuantified by TRT-LLM/TransformerEngine.<br> You can use Load Quant by set args, Example<br>"
+msgstr ""
+
+#: ../../backend/quantization.md:84
+msgid "Int8WeightOnly"
+msgstr ""
+
+#: ../../backend/quantization.md:85
+msgid "Support Load Quant.You can use Load Quant by set args, Example<br>"
+msgstr ""
