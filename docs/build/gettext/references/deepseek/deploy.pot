@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-17 18:04+0800\n"
+"POT-Creation-Date: 2025-09-17 22:33+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -82,7 +82,7 @@ msgid "960GB"
 msgstr ""
 
 #: ../../references/deepseek/deploy.md:0
-msgid "L20Z/L20X/L20Y/H20"
+msgid "H20"
 msgstr ""
 
 #: ../../references/deepseek/deploy.md:0
@@ -108,8 +108,4 @@ msgstr ""
 
 #: ../../references/deepseek/deploy.md:0
 msgid "250GB"
-msgstr ""
-
-#: ../../references/deepseek/deploy.md:0
-msgid "L20Z/L20X/L20Y"
 msgstr ""
