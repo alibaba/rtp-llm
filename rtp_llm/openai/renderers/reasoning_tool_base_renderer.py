@@ -86,7 +86,7 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         return None
 
     @override
-    def should_enable_think_mode(self, request: ChatCompletionRequest):
+    def should_process_think(self, request: ChatCompletionRequest):
         # 避免在父类中也处理Think
         return False
 

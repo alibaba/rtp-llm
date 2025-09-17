@@ -622,6 +622,18 @@ class CustomChatRenderer:
             )
 
         elif isinstance(item.output_str, DeltaMessage):
+            # 对于已经是 DeltaMessage的情况, 则代表下层已经处理好了tool_calls和reasoning_content
+            if not think_status.is_streaming:
+                think_status.think_tokens = len(
+                    self.tokenizer.tokenize(item.output_str.reasoning_content or "")
+                )
+            else:
+                has_content_or_tool_calls = (
+                    item.output_str.content or item.output_str.tool_calls
+                )
+                has_reasoning = item.output_str.reasoning_content
+                if has_reasoning and not has_content_or_tool_calls:
+                    think_status.think_tokens = item.output_length
             return item.output_str
 
         else:
@@ -777,7 +789,7 @@ class CustomChatRenderer:
         global THINK_MODE
         return THINK_MODE
 
-    def should_enable_think_mode(self, request: ChatCompletionRequest):
+    def should_process_think(self, request: ChatCompletionRequest):
         # 留出方法给子类重写, 避免重复的think处理
         return self.in_think_mode(request)
 
@@ -800,11 +812,10 @@ class CustomChatRenderer:
         nums_output = last_num_beams if last_num_beams != 1 else nums_output
         status_list = await self._create_status_list(nums_output, request)
         index = 0
-        enable_think_mode = self.should_enable_think_mode(request)
         think_status_list = [
             ThinkStatus(
-                enable_think_mode=enable_think_mode,
-                in_think_mode=enable_think_mode,
+                enable_think_mode=bool(self.in_think_mode(request)),
+                in_think_mode=bool(self.should_process_think(request)),
                 think_buffer="",
                 think_tokens=0,
                 is_streaming=generate_config.is_streaming,

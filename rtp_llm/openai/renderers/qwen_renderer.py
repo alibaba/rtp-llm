@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
 
 import torch
+from typing_extensions import override
 
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer, QWenTokenizer
 from rtp_llm.openai.api_datatype import (
@@ -33,10 +34,7 @@ from rtp_llm.openai.renderers.qwen_reasoning_tool_renderer import (
     QwenReasoningToolRenderer,
 )
 from rtp_llm.utils.base_model_datatypes import GenerateOutput
-from rtp_llm.utils.word_util import (
-    is_truncated,
-    truncate_response_with_stop_words,
-)
+from rtp_llm.utils.word_util import is_truncated, truncate_response_with_stop_words
 
 TOOL_DESC = """{name_for_model}: Call this tool to interact with the {name_for_human} API. What is the {name_for_human} API useful for? {description_for_model} Parameters: {parameters}"""
 
@@ -362,6 +360,11 @@ class QwenRenderer(CustomChatRenderer):
         if request.disable_thinking():
             return False
         return super().in_think_mode(request)
+
+    @override
+    def should_process_think(self, request: ChatCompletionRequest):
+        # 留出方法给子类重写, 避免重复的think处理
+        return False
 
     def _parse_function_response(self, response: str) -> Optional[DeltaMessage]:
         func_name, func_args = "", ""
