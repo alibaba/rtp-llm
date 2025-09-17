@@ -90,7 +90,7 @@ msgid "960GB"
 msgstr ""
 
 #: ../../references/qwen/deploy.md
-msgid "L20Z/L20X/L20Y/H20"
+msgid "H20"
 msgstr ""
 
 #: ../../references/qwen/deploy.md
@@ -120,6 +120,6 @@ msgid "250GB"
 msgstr ""
 
 #: ../../references/qwen/deploy.md
-msgid "L20Z/L20X/L20Y"
+msgid "H20"
 msgstr ""
 
