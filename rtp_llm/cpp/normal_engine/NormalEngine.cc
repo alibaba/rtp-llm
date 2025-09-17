@@ -9,7 +9,6 @@
 #include "rtp_llm/cpp/schedulers/BatchDecodeScheduler.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/system_prompt/SystemPromptConstructor.h"
-#include "rtp_llm/cpp/dataclass/LoadBalance.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "autil/TimeUtility.h"
@@ -206,17 +205,8 @@ absl::Status NormalEngine::initSystemPrompt() {
     return absl::OkStatus();
 }
 
-KVCacheInfo NormalEngine::getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) {
+KVCacheInfo NormalEngine::getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) const {
     return resource_context_.cache_manager->getKVCacheInfo(latest_version, need_cache_keys);
-}
-
-LoadBalanceInfo NormalEngine::getLoadBalanceInfo(int64_t latest_version) {
-    return LoadBalanceInfo{(int64_t)step_recorder_.getStepLatency(),
-                           (int64_t)step_recorder_.getStepCount(),
-                           (int64_t)step_recorder_.getStepPerMin(),
-                           (int64_t)scheduler_->onflightStreams(),
-                           (int64_t)scheduler_->waitingQueryLen(),
-                           (int64_t)scheduler_->runningQueryLen()};
 }
 
 absl::Status NormalEngine::startLoop() {

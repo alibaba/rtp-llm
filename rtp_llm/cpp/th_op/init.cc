@@ -1,6 +1,5 @@
 #include <torch/library.h>
 #include "rtp_llm/cpp/th_op/GptInitParameter.h"
-#include "rtp_llm/cpp/dataclass/LoadBalance.h"
 #include "rtp_llm/cpp/dataclass/EngineScheduleInfo.h"
 #include "rtp_llm/cpp/dataclass/WorkerStatusInfo.h"
 #include "rtp_llm/cpp/th_op/GptInitParameterRegister.h"
@@ -452,7 +451,6 @@ void register_misc_config(pybind11::module& m) {
 PYBIND11_MODULE(libth_transformer, m) {
 
     registerKvCacheInfo(m);
-    registerLoadBalanceInfo(m);
     registerWorkerStatusInfo(m);
     registerEngineScheduleInfo(m);
     register_parallelism_distributed_config(m);
