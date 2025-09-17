@@ -63,7 +63,8 @@ py_test(
         "//rtp_llm:config_ops"
     ],
     data = [
-        "//:th_transformer"
+        "//:th_transformer",
+        "//:th_transformer_frontend"
     ],
     exec_properties = {'gpu':'A10'}
 )
