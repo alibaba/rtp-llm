@@ -1,0 +1,97 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: RTP-LLM 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-17 18:04+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: ../../references/profiling.md:1
+msgid "Performance Profiling"
+msgstr ""
+
+#: ../../references/profiling.md:3
+msgid "This document introduces how to do performance profiling for the framework."
+msgstr ""
+
+#: ../../references/profiling.md:5
+msgid "Model Timeline"
+msgstr ""
+
+#: ../../references/profiling.md:7
+msgid "The most straightforward way of analyzing model performance is to print the execution timeline of the model. RTP-LLM provides functionality to directly dump model execution timeline into perfetto trace json."
+msgstr ""
+
+#: ../../references/profiling.md:9
+msgid "Per Request Timeline"
+msgstr ""
+
+#: ../../references/profiling.md:11
+msgid "Add option `\"gen_timeline\": True,` in `generate_config` of request could generate timeline for current request. The complete request looks like"
+msgstr ""
+
+#: ../../references/profiling.md:21
+msgid "The generated timeline json file is located at the workdir where you started rtp-llm."
+msgstr ""
+
+#: ../../references/profiling.md:23
+msgid "Service-Wide Timeline"
+msgstr ""
+
+#: ../../references/profiling.md:25
+msgid "You may use start arg `--gen_timeline_sync` or specify env `GEN_TIMELINE_SYNC=1` to enable service level timeline profiling. When this option is used, every model request would generate a profiling timeline."
+msgstr ""
+
+#: ../../references/profiling.md:27
+msgid "How to visualize timeline"
+msgstr ""
+
+#: ../../references/profiling.md:29
+msgid "Open [perfetto ui](https://ui.perfetto.dev/) to load the timeline json and visualize. You may also use perfetto sql to perform quantized analyzation."
+msgstr ""
+
+#: ../../references/profiling.md:31
+msgid "Query SQLs Example"
+msgstr ""
+
+#: ../../references/profiling.md:33
+msgid "Here are some query sqls that are useful for performance analyze."
+msgstr ""
+
+#: ../../references/profiling.md:35
+msgid "stat are kernel latencies"
+msgstr ""
+
+#: ../../references/profiling.md:57
+msgid "analyze empty time slots"
+msgstr ""
+
+#: ../../references/profiling.md:74
+msgid "sum up all empty slots on timeline"
+msgstr ""
+
+#: ../../references/profiling.md:96
+msgid "use nsight"
+msgstr ""
+
+#: ../../references/profiling.md:98
+msgid "You may also use NVIDIA Nsight or other hardware-manufacturer provided profiling tools."
+msgstr ""
+
+#: ../../references/profiling.md:100
+msgid "To enable nsight profiling with rtp-llm, you could add nsys binary and options before the start command you actually execut:"
+msgstr ""
+
+#: ../../references/profiling.md:114
+msgid "or use bazel `--run_under` option to run a bazel target with nsight profiling"
+msgstr ""
