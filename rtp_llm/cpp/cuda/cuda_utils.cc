@@ -128,6 +128,11 @@ bool is_sm90() {
     return IS_SM90;
 }
 
+bool is_sm100() {
+    static bool IS_SM100 = []() { return get_sm() == 100; }();
+    return IS_SM100;
+}
+
 float timing_function(const std::function<void(cudaStream_t)>& operation,
                       int64_t                                  timing_iterations,
                       cudaStream_t                             stream) {

@@ -2975,8 +2975,10 @@ void XQA_FUNC_SM90(cudaDeviceProp const& prop,
             }
         }
 #if SPEC_DEC
-        return mha::max<uint32_t>(
-            1U, prop.multiProcessorCount / (divUp(qSeqLen, inputTokensPerCta) * batchSize * nbKHeads));
+        return mha::min<uint32_t>(
+            mha::max<uint32_t>(1U,
+                               prop.multiProcessorCount / (divUp(qSeqLen, inputTokensPerCta) * batchSize * nbKHeads)),
+            divUp(maxSeqLen, gemm0CtaTileNbTokens));
 #else
         float const factor = mha::min<float>(
             0.75f,

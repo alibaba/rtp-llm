@@ -423,7 +423,7 @@ CudaDevice::selectCuFMHARunner(const AttentionConfigs& configs, DataType attn_dt
     return cufmha_runner_;
 }
 
-bool CudaDevice::checkSpec(const DevicePrepParams& params, bool skip_no_prefix) {
+bool CudaDevice::checkSpecDecode(const DevicePrepParams& params, bool skip_no_prefix) {
     bool has_prefix = params.prefix_lengths != nullptr && params.prefix_lengths->size();
     if (!params.configs.use_mla && has_prefix) {
         auto input_lengths_host = params.input_lengths->slice(params.decoder_batch_size, params.context_batch_size);
@@ -463,7 +463,7 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
         bool paged_kv_fmha =
             params.diff_qkv_len && params.k_cache && (params.configs.kv_cache_dtype != KvCacheDataType::INT8);
 
-        if (!params.configs.use_mla && checkSpec(params)) {
+        if (!params.configs.use_mla && checkSpecDecode(params)) {
 #ifdef USING_CUDA12
             if (use_xqa && use_fp8_fmha_
                 && supportXqa(DataType::TYPE_BF16,
@@ -622,13 +622,12 @@ void CudaDevice::checkUseTrtV2FMHA() {
 }
 
 void CudaDevice::checkUseXQA() {
-    int sm = get_sm();
-    if (sm < 90) {
-        RTP_LLM_LOG_WARNING("xqa is disabled for sm %d < 90", sm);
+    if (!(is_sm90() || is_sm100())) {
+        RTP_LLM_LOG_WARNING("not use xqa: unsupported sm %d (90 or 100)", get_sm());
         return;
     }
     if (!init_params_.fmha_config.enable_xqa) {
-        RTP_LLM_LOG_WARNING("XQA is disabled by env");
+        RTP_LLM_LOG_WARNING("not use xqa: env disabled");
         return;
     }
     RTP_LLM_LOG_INFO("use xqa");
