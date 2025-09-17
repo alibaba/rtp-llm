@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-17 18:04+0800\n"
+"POT-Creation-Date: 2025-09-17 22:33+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -180,58 +180,38 @@ msgstr ""
 msgid "Meta’s open LLM series, spanning 7B to 400B parameters (Llama 2, 3, and new Llama 4) with well-recognized performance."
 msgstr ""
 
-#: ../../release/v0.2.0/feature.md:0
-msgid "**TBStars**"
-msgstr ""
-
-#: ../../release/v0.2.0/feature.md:0
-msgid "Alibaba Internal LLM"
-msgstr ""
-
-#: ../../release/v0.2.0/feature.md:0
-msgid "**TBStarsVL**"
-msgstr ""
-
-#: ../../release/v0.2.0/feature.md:0
-msgid "Series of advanced  Vision-language model series based on TBStars"
-msgstr ""
-
-#: ../../release/v0.2.0/feature.md:0
-msgid "**MixTBstars**"
-msgstr ""
-
-#: ../../release/v0.2.0/feature.md:35
+#: ../../release/v0.2.0/feature.md:32
 msgid "Bug Fixs"
 msgstr ""
 
-#: ../../release/v0.2.0/feature.md:37
+#: ../../release/v0.2.0/feature.md:34
 msgid "Question of omission"
 msgstr ""
 
-#: ../../release/v0.2.0/feature.md:38
+#: ../../release/v0.2.0/feature.md:35
 msgid "PD Entrance Transpose not worker with front app"
 msgstr ""
 
-#: ../../release/v0.2.0/feature.md:39
+#: ../../release/v0.2.0/feature.md:36
 msgid "metrics of 3fs cache hit ratio is not accurate"
 msgstr ""
 
-#: ../../release/v0.2.0/feature.md:40
+#: ../../release/v0.2.0/feature.md:37
 msgid "too many dynamic lora need more **reserver_runtime_mem_mb**"
 msgstr ""
 
-#: ../../release/v0.2.0/feature.md:41
+#: ../../release/v0.2.0/feature.md:38
 msgid "AMD not support MoE models"
 msgstr ""
 
-#: ../../release/v0.2.0/feature.md:42
+#: ../../release/v0.2.0/feature.md:39
 msgid "MoE model without shared_experter cannot use enable-layer-micro-batch"
 msgstr ""
 
-#: ../../release/v0.2.0/feature.md:45
+#: ../../release/v0.2.0/feature.md:42
 msgid "Performance"
 msgstr ""
 
-#: ../../release/v0.2.0/feature.md:47
+#: ../../release/v0.2.0/feature.md:44
 msgid "Compatibility"
 msgstr ""

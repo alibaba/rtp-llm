@@ -28,9 +28,6 @@ RTP-LLM First Release Version:0.2.0(2025.09)
 | **Qwen** (v1, v1.5, v2, v2.5, v3, QWQ, Qwen3-Coder)| `Qwen/Qwen3-235B-A22B`  | Series of advanced reasoning-optimized models, <br>Significantly improved performance on reasoning tasks,<br> including logical reasoning, mathematics, science, coding, and academic benchmarks that typically require human expertise — achieving state-of-the-art results among open-source thinking models.<br>Markedly better general capabilities, such as instruction following, tool usage, text generation, and alignment with human preferences.<br>Enhanced 256K long-context understanding capabilities.| NV ✅<br> AMD ✅|
 | **QwenVL** (VL2, VL2.5, VL3)| `Qwen/Qwen2-VL-2B`  | Series of advanced  Vision-language model series based on Qwen2.5/Qwen3| NV ✅<br> AMD ❌|
 | **Llama**         | `meta-llama/Llama-4-Scout-17B-16E-Instruct`  | Meta’s open LLM series, spanning 7B to 400B parameters (Llama 2, 3, and new Llama 4) with well-recognized performance.  | NV ✅<br> AMD ✅ |
-| **TBStars** |   | Alibaba Internal LLM | NV ✅<br> AMD ❌|
-| **TBStarsVL** |   |  Series of advanced  Vision-language model series based on TBStars| NV ✅<br> AMD ❌|
-| **MixTBstars** |   | Alibaba Internal LLM| NV ✅<br> AMD ❌|
 
 ### Bug Fixs
 
