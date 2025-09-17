@@ -82,26 +82,27 @@ protected:
 TEST_F(CacheManagerTest, testSimple) {
     auto         cache_config = initConfig();
     CacheManager cache_manager(cache_config, device_);
+    auto         allocator = cache_manager.kvCacheAllocator();
 
     ASSERT_EQ(cache_manager.freeBlockNums(), 3);
 
     auto [success1, index1] = cache_manager.mallocIndex({request_id, 1});
     ASSERT_TRUE(success1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(1), 1);
 
     auto [success2, index2] = cache_manager.mallocIndex({request_id, 2});
     ASSERT_TRUE(success2);
     auto [success3, _] = cache_manager.mallocIndex({request_id, 1});
     ASSERT_FALSE(success3);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(3), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(2), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(3), 1);
 
     cache_manager.free(index1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 0);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(1), 0);
 
     cache_manager.free(index2);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 0);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(3), 0);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(2), 0);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(3), 0);
 
     ASSERT_EQ(cache_manager.freeBlockNums(), 3);
 }
@@ -109,24 +110,25 @@ TEST_F(CacheManagerTest, testSimple) {
 TEST_F(CacheManagerTest, testAllocateWithFreeCache) {
     auto         cache_config = initConfig();
     CacheManager cache_manager(cache_config, device_);
+    auto         allocator = cache_manager.kvCacheAllocator();
 
     auto match_info = mallocWithCache(cache_manager, {1000, 2000, 3000});
     ASSERT_EQ(match_info.cache_blocks, std::vector<int>({1, 2, 3}));
     ASSERT_FALSE(match_info.reuse_length);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(3), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(1), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(2), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(3), 1);
 
     freeWithCache(cache_manager, match_info.cache_blocks, {1000, 2000, 3000});
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(3), 0);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(1), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(2), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(3), 0);
 
     auto [success2, index2] = cache_manager.mallocIndex({request_id, 2});
     ASSERT_EQ(index2, std::vector<int>({1, 2}));
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(3), 0);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(1), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(2), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(3), 0);
     ASSERT_EQ(cache_manager.freeBlockNums(), 1);
 
     // paritial fallback case
@@ -162,46 +164,47 @@ TEST_F(CacheManagerTest, testLossCache) {
 TEST_F(CacheManagerTest, testAllocateWithReuse) {
     auto         cache_config = initConfig();
     CacheManager cache_manager(cache_config, device_);
+    auto         allocator = cache_manager.kvCacheAllocator();
 
     ASSERT_EQ(cache_manager.freeBlockNums(), 3);
     auto [success1, index1] = cache_manager.mallocIndex({request_id, 2});
     ASSERT_EQ(index1, std::vector<int>({1, 2}));
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(3), 0);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(1), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(2), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(3), 0);
     ASSERT_EQ(cache_manager.cacheItemNum(), 0);
 
     freeWithCache(cache_manager, index1, {1000, 1002});
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 0);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(3), 0);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(1), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(2), 0);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(3), 0);
     ASSERT_EQ(cache_manager.cacheItemNum(), 1);
 
     auto match_info = mallocWithCache(cache_manager, {1000, 1002});
     ASSERT_EQ(cache_manager.freeBlockNums(), 1);
     ASSERT_EQ(match_info.cache_blocks, std::vector<int>({1, 2}));
     ASSERT_EQ(match_info.reuse_length, 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 2);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(3), 0);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(1), 2);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(2), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(3), 0);
 
     freeWithCache(cache_manager, match_info.cache_blocks, {1000, 1002});
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 0);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(3), 0);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(1), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(2), 0);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(3), 0);
 
     match_info = mallocWithCache(cache_manager, {1000, 1002, 1003});
     ASSERT_EQ(match_info.cache_blocks, std::vector<int>({1, 2, 3}));
     ASSERT_EQ(match_info.reuse_length, 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 2);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(3), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(1), 2);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(2), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(3), 1);
     ASSERT_EQ(cache_manager.cacheItemNum(), 1);
 
     freeWithCache(cache_manager, match_info.cache_blocks, {1000, 1002, 1003});
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 2);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(3), 0);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(1), 2);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(2), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(3), 0);
     ASSERT_EQ(cache_manager.cacheItemNum(), 2);
 }
 
@@ -210,6 +213,7 @@ TEST_F(CacheManagerTest, testAllocateWithMultimodalReuse) {
     cache_config.block_nums         = 10;
     cache_config.seq_size_per_block = 2;
     CacheManager cache_manager(cache_config, device_);
+    auto         allocator = cache_manager.kvCacheAllocator();
 
     ASSERT_EQ(cache_manager.freeBlockNums(), 9);
     auto [success1, index1] = cache_manager.mallocIndex({request_id, 4});
@@ -217,48 +221,48 @@ TEST_F(CacheManagerTest, testAllocateWithMultimodalReuse) {
     ASSERT_EQ(cache_manager.cacheItemNum(), 0);
 
     freeWithCache(cache_manager, index1, {1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007});
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(3), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(4), 0);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(1), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(2), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(3), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(4), 0);
     ASSERT_EQ(cache_manager.cacheItemNum(), 1);
 
     auto match_info = mallocWithCache(cache_manager, {1000, 1001, 1002, 1003, 1004, 1005, 1006}, {{5, 2}}, false, 4);
     ASSERT_EQ(cache_manager.freeBlockNums(), 4);
     ASSERT_EQ(match_info.cache_blocks, std::vector<int>({1, 2, 4, 5}));
     ASSERT_EQ(match_info.reuse_length, 4);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 2);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 2);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(3), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(4), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(5), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(1), 2);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(2), 2);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(3), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(4), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(5), 1);
 
     freeWithCache(cache_manager, match_info.cache_blocks, {1000, 1001, 1002, 1003, 1004, 1005, 1006});
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(3), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(4), 0);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(5), 0);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(1), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(2), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(3), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(4), 0);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(5), 0);
     ASSERT_EQ(cache_manager.cacheItemNum(), 1);
 
     match_info = mallocWithCache(cache_manager, {1000, 1001, 1002, 1003, 1004, 1015}, {{1, 2}, {3, 2}}, false, 3);
     ASSERT_EQ(match_info.cache_blocks, std::vector<int>({4, 5, 6}));
     ASSERT_EQ(match_info.reuse_length, 0);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(3), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(4), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(5), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(6), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(1), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(2), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(3), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(4), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(5), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(6), 1);
     ASSERT_EQ(cache_manager.cacheItemNum(), 1);
 
     freeWithCache(cache_manager, match_info.cache_blocks, {1000, 1001, 1002, 1003, 1004, 1015});
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(3), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(4), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(5), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(6), 0);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(1), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(2), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(3), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(4), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(5), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(6), 0);
     ASSERT_EQ(cache_manager.cacheItemNum(), 2);
 }
 
@@ -266,92 +270,94 @@ TEST_F(CacheManagerTest, testMatchMaxLen) {
     auto cache_config       = initConfig();
     cache_config.block_nums = 100;
     CacheManager cache_manager(cache_config, device_);
+    auto         allocator = cache_manager.kvCacheAllocator();
     ASSERT_EQ(cache_manager.freeBlockNums(), 99);
 
     // malloc cache item 1
     auto match_info = mallocWithCache(cache_manager, {1000, 1002});
     ASSERT_EQ(match_info.cache_blocks, std::vector<int>({1, 2}));
     ASSERT_EQ(match_info.reuse_length, 0);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(1), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(2), 1);
 
     // insert cache item 1
     freeWithCache(cache_manager, match_info.cache_blocks, {1000, 1002});
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 0);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(1), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(2), 0);
 
     // malloc cache item 2
     match_info = mallocWithCache(cache_manager, {1000, 1002, 1003});
     ASSERT_EQ(match_info.cache_blocks, std::vector<int>({1, 2, 3}));
     ASSERT_EQ(match_info.reuse_length, 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 2);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(3), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(4), 0);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(1), 2);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(2), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(3), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(4), 0);
 
     // insert cache item 2
     freeWithCache(cache_manager, match_info.cache_blocks, {1000, 1002, 1003});
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 2);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(3), 0);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(4), 0);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(1), 2);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(2), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(3), 0);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(4), 0);
 
     // malloc cache item 3
     match_info = mallocWithCache(cache_manager, {1000, 1002, 1003, 1004});
     ASSERT_EQ(match_info.cache_blocks, std::vector<int>({1, 2, 3, 4}));
     ASSERT_EQ(match_info.reuse_length, 2);  // Assuming 2 blocks were reused, replace with actual logic
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 3);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 2);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(3), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(4), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(5), 0);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(6), 0);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(1), 3);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(2), 2);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(3), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(4), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(5), 0);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(6), 0);
 
     // insert cache item 3
     freeWithCache(cache_manager, match_info.cache_blocks, {1000, 1002, 1003, 1004});
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 3);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 2);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(3), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(4), 0);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(5), 0);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(6), 0);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(1), 3);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(2), 2);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(3), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(4), 0);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(5), 0);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(6), 0);
 
     // trigger match max len cache item
     match_info = mallocWithCache(cache_manager, {1000, 1002, 1003, 1004});
     ASSERT_EQ(match_info.cache_blocks, std::vector<int>({1, 2, 3, 4}));
     ASSERT_EQ(match_info.reuse_length, 3);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 4);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 3);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(3), 2);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(4), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(5), 0);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(6), 0);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(7), 0);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(1), 4);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(2), 3);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(3), 2);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(4), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(5), 0);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(6), 0);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(7), 0);
 }
 
 TEST_F(CacheManagerTest, testPopNoResidentCacheItem) {
     auto         cache_config = initConfig();
     CacheManager cache_manager(cache_config, device_);
+    auto         allocator = cache_manager.kvCacheAllocator();
     ASSERT_EQ(cache_manager.freeBlockNums(), 3);
 
     // malloc cache item 1
     auto [success1, index1] = cache_manager.mallocIndex({request_id, 2});
     ASSERT_TRUE(success1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(1), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(2), 1);
 
     // insert cache item 1
     freeWithCache(cache_manager, index1, {1000, 1002});
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 0);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(1), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(2), 0);
 
     // trigger reuse cache, pop cache item 1, malloc from free failed
     auto match_info = mallocWithCache(cache_manager, {1000, 1002, 1003, 1004});
     ASSERT_EQ(match_info.reuse_length, 0);
     ASSERT_EQ(cache_manager.freeBlockNums(), 3);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 0);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 0);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(3), 0);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(1), 0);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(2), 0);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(3), 0);
 
     // trigger malloc block from free failed
     match_info = mallocWithCache(cache_manager, {1000, 1002, 1003, 1004});
@@ -375,6 +381,7 @@ TEST_F(CacheManagerTest, testPopTwoCache) {
     auto cache_config       = initConfig();
     cache_config.block_nums = 7;
     CacheManager cache_manager(cache_config, device_);
+    auto         allocator = cache_manager.kvCacheAllocator();
     ASSERT_EQ(cache_manager.freeBlockNums(), 6);
 
     // insert cache item 1
@@ -409,17 +416,18 @@ TEST_F(CacheManagerTest, testPopWithResident) {
     auto cache_config       = initConfig();
     cache_config.block_nums = 6;
     CacheManager cache_manager(cache_config, device_);
+    auto         allocator = cache_manager.kvCacheAllocator();
     ASSERT_EQ(cache_manager.freeBlockNums(), 5);
 
     // Insert resident cache item
     auto [success1, index1] = cache_manager.mallocIndex({request_id, 2});
     ASSERT_EQ(index1, std::vector<int>({1, 2}));
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(1), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(2), 1);
 
     insertResidentCache(cache_manager, index1, {1000, 1002});
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 0);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(1), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(2), 0);
     ASSERT_TRUE(cache_manager.blockCache().isResident({1000}));
 
     // Insert cache item 2
@@ -445,18 +453,19 @@ TEST_F(CacheManagerTest, testResident) {
     auto cache_config       = initConfig();
     cache_config.block_nums = 100;
     CacheManager cache_manager(cache_config, device_);
+    auto         allocator = cache_manager.kvCacheAllocator();
     ASSERT_EQ(cache_manager.freeBlockNums(), 99);
 
     // Malloc for resident block
     auto [success1, index1] = cache_manager.mallocIndex({request_id, 2});
     ASSERT_EQ(index1, std::vector<int>({1, 2}));
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(1), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(2), 1);
 
     // Insert resident cache item
     insertResidentCache(cache_manager, index1, {1000, 1002});
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 0);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(1), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(2), 0);
     ASSERT_TRUE(cache_manager.blockCache().isResident({1000}));
 
     // Put not pop resident cache item
@@ -470,8 +479,8 @@ TEST_F(CacheManagerTest, testResident) {
     match_info = mallocWithCache(cache_manager, {1000, 1002, 1003});
     ASSERT_EQ(match_info.cache_blocks, std::vector<int>({1, 2, 3}));
     ASSERT_EQ(match_info.reuse_length, 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 2);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(1), 2);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(2), 1);
 
     // Put not pop resident cache item
     freeWithCache(cache_manager, match_info.cache_blocks, {1000, 1002, 1003});
@@ -488,6 +497,7 @@ TEST_F(CacheManagerTest, testSeqSizePerBlock) {
     cache_config.block_nums         = 100;
     cache_config.seq_size_per_block = 2;
     CacheManager cache_manager(cache_config, device_);
+    auto         allocator = cache_manager.kvCacheAllocator();
     ASSERT_EQ(cache_manager.freeBlockNums(), 99);
 
     // Malloc cache item 1
@@ -502,8 +512,8 @@ TEST_F(CacheManagerTest, testSeqSizePerBlock) {
     match_info = mallocWithCache(cache_manager, {1000, 1002, 1003}, {}, false, 2);
     ASSERT_EQ(match_info.cache_blocks, std::vector<int>({1, 2}));
     ASSERT_EQ(match_info.reuse_length, 0);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(3), 0);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(2), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(3), 0);
     // Free cache item 2
     freeWithCache(cache_manager, match_info.cache_blocks, {1000, 1002, 1003});
     ASSERT_TRUE(cache_manager.blockCache().hasKey({1000, 1002}));
@@ -512,9 +522,9 @@ TEST_F(CacheManagerTest, testSeqSizePerBlock) {
     match_info = mallocWithCache(cache_manager, {1000, 1002, 1003, 1004, 1005}, {}, false, 3);
     ASSERT_EQ(match_info.cache_blocks, std::vector<int>({1, 2, 3}));
     ASSERT_EQ(match_info.reuse_length, 2);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 2);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 1);
-    ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(3), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(1), 2);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(2), 1);
+    ASSERT_EQ(allocator->blockRefCounter().getRefCounter(3), 1);
     // Free cache item 3
     freeWithCache(cache_manager, match_info.cache_blocks, {1000, 1002, 1003, 1004, 1005});
 
@@ -1124,12 +1134,13 @@ TEST_F(CacheManagerTest, testInsertIntoCache_PutToBlockCacheTwice) {
     cache_config.block_nums         = 10;
     cache_config.seq_size_per_block = 1;
     CacheManager cache_manager(cache_config, device_);
+    auto         allocator = cache_manager.kvCacheAllocator();
 
     auto [ok, idx] = cache_manager.mallocIndex({request_id, 2});
     ASSERT_TRUE(ok);
     cache_manager.incrBlockRefCounter(idx);
-    ASSERT_TRUE(cache_manager.block_ref_counter_.getRefCounter(idx[0]) == 2);
-    ASSERT_TRUE(cache_manager.block_ref_counter_.getRefCounter(idx[1]) == 2);
+    ASSERT_TRUE(allocator->blockRefCounter().getRefCounter(idx[0]) == 2);
+    ASSERT_TRUE(allocator->blockRefCounter().getRefCounter(idx[1]) == 2);
 
     std::vector<int>       token_ids  = {200, 201, 202};
     auto                   cache_keys = constructCacheKey(cache_manager, token_ids);
@@ -1137,14 +1148,14 @@ TEST_F(CacheManagerTest, testInsertIntoCache_PutToBlockCacheTwice) {
     cache_manager.insertIntoCache(free_info);
 
     ASSERT_TRUE(cache_manager.blockCache().hasKey({200, 201}));
-    ASSERT_TRUE(cache_manager.block_ref_counter_.getRefCounter(idx[0]) == 2);
-    ASSERT_TRUE(cache_manager.block_ref_counter_.getRefCounter(idx[1]) == 2);
+    ASSERT_TRUE(allocator->blockRefCounter().getRefCounter(idx[0]) == 2);
+    ASSERT_TRUE(allocator->blockRefCounter().getRefCounter(idx[1]) == 2);
 
     cache_manager.insertIntoCache(free_info);
     ASSERT_TRUE(cache_manager.blockCache().hasKey({200, 201}));
     // ref count should be decremented
-    ASSERT_TRUE(cache_manager.block_ref_counter_.getRefCounter(idx[0]) == 1);
-    ASSERT_TRUE(cache_manager.block_ref_counter_.getRefCounter(idx[1]) == 1);
+    ASSERT_TRUE(allocator->blockRefCounter().getRefCounter(idx[0]) == 1);
+    ASSERT_TRUE(allocator->blockRefCounter().getRefCounter(idx[1]) == 1);
 }
 
 // loss present -> do NOT put to dist
@@ -1370,7 +1381,7 @@ TEST_F(CacheManagerTest, testMatchInDistKvCache_Success) {
 
     BlockCache::MatchResult match_result;
     // Allocate the two locally matched blocks for this same request to remove them from the free list
-    CacheManager::SimpleMallocInfo block_malloc_info(/*request_id=*/6, 2);
+    KVCacheAllocator::SimpleMallocInfo block_malloc_info(/*request_id=*/6, 2);
     auto [success, resource] = cache_manager.malloc(block_malloc_info);
     ASSERT_TRUE(success);
     ASSERT_EQ(resource.block_id.size(), 2u);

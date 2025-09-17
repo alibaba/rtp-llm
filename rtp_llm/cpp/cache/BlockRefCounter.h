@@ -3,6 +3,7 @@
 #include <cassert>
 #include <unordered_map>
 #include <vector>
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
 
@@ -10,6 +11,13 @@ class BlockRefCounter {
 public:
     BlockRefCounter() {}
     BlockRefCounter(int block_nums) {
+        for (int i = 1; i < block_nums; ++i) {
+            ref_counter[i] = 0;
+        }
+    }
+
+    void init(int block_nums) {
+        ref_counter.clear();
         for (int i = 1; i < block_nums; ++i) {
             ref_counter[i] = 0;
         }

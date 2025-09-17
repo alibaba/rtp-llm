@@ -29,11 +29,11 @@ struct GptModelDescription {
 };
 
 struct GptModelInitParams {
-    rtp_llm::DeviceBase*                             device;
-    const rtp_llm::Weights                           weights;
-    const GptModelDescription                        description;
-    const std::optional<CacheManager::KVCacheBuffer> kv_cache_buffer;
-    size_t                                           model_id;
+    rtp_llm::DeviceBase*                                 device;
+    const rtp_llm::Weights                               weights;
+    const GptModelDescription                            description;
+    const std::optional<KVCacheAllocator::KVCacheBuffer> kv_cache_buffer;
+    size_t                                               model_id;
 };
 
 struct EmbeddingPostOutput {
@@ -151,7 +151,7 @@ struct TokenSliceInfo {
 class GptModel {
 public:
     GptModel(const GptModelInitParams& params);
-    virtual ~GptModel(){};
+    virtual ~GptModel() {};
 
     virtual GptModelOutputs forward(const GptModelInputs& inputs);
 

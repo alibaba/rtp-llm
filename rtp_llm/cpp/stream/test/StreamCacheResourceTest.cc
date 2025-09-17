@@ -32,6 +32,7 @@ protected:
         auto cache_config = init_config();
         cache_manager_    = std::make_shared<CacheManager>(cache_config, device_);
         ASSERT_EQ(cache_manager_->freeBlockNums(), 8);
+        allocator_ = cache_manager_->kvCacheAllocator();
         ResourceContext resource_context;
         resource_context.cache_manager = cache_manager_;
         resource_context.reuse_cache   = reuse_cache;
@@ -62,9 +63,10 @@ protected:
     } while (0)
 
 protected:
-    autil::EnvGuard   perf_scope;
-    GenerateStreamPtr stream_;
-    CacheManagerPtr   cache_manager_;
+    autil::EnvGuard     perf_scope;
+    GenerateStreamPtr   stream_;
+    CacheManagerPtr     cache_manager_;
+    KVCacheAllocatorPtr allocator_;
 };
 
 TEST_F(StreamCacheResourceTest, testAllocateResource) {
@@ -312,13 +314,13 @@ TEST_F(StreamCacheResourceTest, testReuseCache) {
     ASSERT_EQ(cache_manager_->cacheItemNum(), 2);
     ASSERT_TRUE(cache_manager_->blockCache().hasKey({1, 2, 3, 4, 5, 6, 7, 8}));
     ASSERT_TRUE(cache_manager_->blockCache().hasKey({1, 2, 3, 4, 5, 6, 9, 10}));
-    ASSERT_EQ(cache_manager_->blockRefCounter().getRefCounter(1), 2);
-    ASSERT_EQ(cache_manager_->blockRefCounter().getRefCounter(2), 2);
-    ASSERT_EQ(cache_manager_->blockRefCounter().getRefCounter(3), 2);
-    ASSERT_EQ(cache_manager_->blockRefCounter().getRefCounter(4), 1);
-    ASSERT_EQ(cache_manager_->blockRefCounter().getRefCounter(5), 0);
-    ASSERT_EQ(cache_manager_->blockRefCounter().getRefCounter(6), 1);
-    ASSERT_EQ(cache_manager_->blockRefCounter().getRefCounter(7), 0);
+    ASSERT_EQ(allocator_->blockRefCounter().getRefCounter(1), 2);
+    ASSERT_EQ(allocator_->blockRefCounter().getRefCounter(2), 2);
+    ASSERT_EQ(allocator_->blockRefCounter().getRefCounter(3), 2);
+    ASSERT_EQ(allocator_->blockRefCounter().getRefCounter(4), 1);
+    ASSERT_EQ(allocator_->blockRefCounter().getRefCounter(5), 0);
+    ASSERT_EQ(allocator_->blockRefCounter().getRefCounter(6), 1);
+    ASSERT_EQ(allocator_->blockRefCounter().getRefCounter(7), 0);
 
     // test another stream
     std::shared_ptr<GenerateInput>  generate_input(new GenerateInput());
@@ -466,36 +468,36 @@ TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock) {
     ASSERT_TRUE(resource.initKVBlock(token_capacity).ok());
     ASSERT_EQ(cache_manager_->freeBlockNums(), 5);
     ASSERT_EQ(resource.maxBlockSize(), 3);
-    ASSERT_EQ(cache_manager_->blockRefCounter().getRefCounter(1), 2);
-    ASSERT_EQ(cache_manager_->blockRefCounter().getRefCounter(2), 2);
-    ASSERT_EQ(cache_manager_->blockRefCounter().getRefCounter(3), 2);
+    ASSERT_EQ(allocator_->blockRefCounter().getRefCounter(1), 2);
+    ASSERT_EQ(allocator_->blockRefCounter().getRefCounter(2), 2);
+    ASSERT_EQ(allocator_->blockRefCounter().getRefCounter(3), 2);
 
     resource.tryReleaseKVBlock(1);
     ASSERT_EQ(cache_manager_->freeBlockNums(), 6);
     ASSERT_EQ(resource.maxBlockSize(), 2);
 
-    ASSERT_EQ(cache_manager_->blockRefCounter().getRefCounter(1), 2);
-    ASSERT_EQ(cache_manager_->blockRefCounter().getRefCounter(2), 2);
-    ASSERT_EQ(cache_manager_->blockRefCounter().getRefCounter(3), 0);
+    ASSERT_EQ(allocator_->blockRefCounter().getRefCounter(1), 2);
+    ASSERT_EQ(allocator_->blockRefCounter().getRefCounter(2), 2);
+    ASSERT_EQ(allocator_->blockRefCounter().getRefCounter(3), 0);
 
     resource.tryReleaseKVBlock(2);
     ASSERT_EQ(cache_manager_->freeBlockNums(), 8);
     ASSERT_EQ(resource.maxBlockSize(), 0);
 
-    ASSERT_EQ(cache_manager_->blockRefCounter().getRefCounter(1), 0);
-    ASSERT_EQ(cache_manager_->blockRefCounter().getRefCounter(2), 0);
-    ASSERT_EQ(cache_manager_->blockRefCounter().getRefCounter(3), 0);
+    ASSERT_EQ(allocator_->blockRefCounter().getRefCounter(1), 0);
+    ASSERT_EQ(allocator_->blockRefCounter().getRefCounter(2), 0);
+    ASSERT_EQ(allocator_->blockRefCounter().getRefCounter(3), 0);
 
     ASSERT_TRUE(resource.incrKVBlock(token_capacity).ok());
     ASSERT_EQ(cache_manager_->freeBlockNums(), 5);
     ASSERT_EQ(resource.maxBlockSize(), 3);
 
-    ASSERT_EQ(cache_manager_->blockRefCounter().getRefCounter(1), 2);
-    ASSERT_EQ(cache_manager_->blockRefCounter().getRefCounter(2), 2);
-    ASSERT_EQ(cache_manager_->blockRefCounter().getRefCounter(3), 2);
-    ASSERT_EQ(cache_manager_->blockRefCounter().getRefCounter(4), 0);
-    ASSERT_EQ(cache_manager_->blockRefCounter().getRefCounter(5), 0);
-    ASSERT_EQ(cache_manager_->blockRefCounter().getRefCounter(6), 0);
+    ASSERT_EQ(allocator_->blockRefCounter().getRefCounter(1), 2);
+    ASSERT_EQ(allocator_->blockRefCounter().getRefCounter(2), 2);
+    ASSERT_EQ(allocator_->blockRefCounter().getRefCounter(3), 2);
+    ASSERT_EQ(allocator_->blockRefCounter().getRefCounter(4), 0);
+    ASSERT_EQ(allocator_->blockRefCounter().getRefCounter(5), 0);
+    ASSERT_EQ(allocator_->blockRefCounter().getRefCounter(6), 0);
 
     resource.tryReleaseKVBlock(2);
     ASSERT_EQ(cache_manager_->freeBlockNums(), 7);

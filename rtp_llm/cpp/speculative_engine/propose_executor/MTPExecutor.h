@@ -49,7 +49,7 @@ public:
                 {device_,
                  mtp_params->gpt_weights,
                  Executor::genModelDescription(mtp_params->gpt_init_parameter),
-                 cache_manager ? ((std::optional<CacheManager::KVCacheBuffer>)cache_manager->kvCacheBuffer()) :
+                 cache_manager ? ((std::optional<KVCacheAllocator::KVCacheBuffer>)cache_manager->kvCacheBuffer()) :
                                  std::nullopt,
                  mtp_params->model_id});
             std::unique_ptr<GptModel> new_model;

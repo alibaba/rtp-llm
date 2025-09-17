@@ -60,7 +60,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
         {device_,
          params.gpt_weights,
          genModelDescription(params.gpt_init_parameter),
-         cache_manager ? ((optional<CacheManager::KVCacheBuffer>)cache_manager->kvCacheBuffer()) : nullopt,
+         cache_manager ? ((optional<KVCacheAllocator::KVCacheBuffer>)cache_manager->kvCacheBuffer()) : nullopt,
          params.model_id});
 
     if (params.gpt_init_parameter.ffn_disaggregate_config.enable_ffn_disaggregate) {

@@ -66,6 +66,19 @@ cc_library(
     ],
 )
 
+cc_test(
+    name = "kv_cache_allocator_test",
+    srcs = [
+        "KVCacheAllocatorTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'A10'},
+)
 cc_library(
     name = "mock_dist_storage_3fs_file",
     hdrs = [

@@ -171,6 +171,7 @@ cc_library(
         "cache/DistKvCachePlanner.h",
         "cache/DistKvCache.h",
         "cache/DistKvCacheMetrics.h",
+        "cache/KVCacheAllocator.h",
     ],
     srcs = [
         "cache/BatchKVCacheResource.cc",
@@ -182,6 +183,7 @@ cc_library(
         "cache/DistStorageManager.cc",
         "cache/DistKvCachePlanner.cc",
         "cache/DistKvCache.cc",
+        "cache/KVCacheAllocator.cc",
     ],
     deps = torch_deps() + [
         ":metrics",
