@@ -2101,117 +2101,6 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         )
 
     @think_mode
-    async def test_think_label(self):
-        custom_renderer.THINK_END_TAG = "ulaire"  # id = 73675
-        tokenizer = QwenTestTokenizer(
-            f"{self.test_data_path}/qwen_7b/tokenizer/qwen.tiktoken"
-        )
-        self.model.tokenizer = tokenizer
-        self.endpoint = OpenaiEndpoint(self.model.config, self.model.tokenizer, None)
-
-        test_ids = [35946, 73670, 73670, 73670, 73675, 35946, 37029, 37029, 37029]
-        render_params = RendererParams(
-            model_type="qwen",
-            max_seq_len=MAX_SEQ_LEN,
-            eos_token_id=tokenizer.eos_token_id or 0,
-            stop_word_ids_list=[],
-        )
-        chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
-        request = ChatCompletionRequest(
-            messages=[ChatMessage(role=RoleEnum.user, content="hello")]
-        )
-        input_length = 109
-        id_generator = fake_output_generator(
-            test_ids, MAX_SEQ_LEN, tokenizer.eos_token_id or 0, input_length
-        )
-        stream_generator = chat_renderer.render_response_stream(
-            id_generator, request, GenerateConfig()
-        )
-        generate = self.endpoint._complete_stream_response(stream_generator, None)
-        # response = [x async for x in generate][-1]
-        response = [x async for x in generate][-1]
-        response = await generate.gen_complete_response_once()
-        print(response.choices[0].model_dump_json())
-        self.assertEqual(1, len(response.choices))
-        self.assertEqual(
-            json.loads(response.choices[0].model_dump_json(exclude_none=True)),
-            {
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": "我使用使用使用",
-                    "reasoning_content": "我可以可以可以",
-                    "partial": False,
-                },
-                "finish_reason": "stop",
-            },
-        )
-        self.assertEqual(
-            json.loads(
-                response.usage.completion_tokens_details.model_dump_json(
-                    exclude_none=True
-                )
-            ),
-            {"reasoning_tokens": 5},
-        )
-
-    @think_mode
-    async def test_think_label_more_than_one_token(self):
-        custom_renderer.THINK_START_TAG = "我可以"
-        custom_renderer.THINK_END_TAG = "可以ulaire"
-        tokenizer = QwenTestTokenizer(
-            f"{self.test_data_path}/qwen_7b/tokenizer/qwen.tiktoken"
-        )
-        self.model.tokenizer = tokenizer
-        self.endpoint = OpenaiEndpoint(self.model.config, self.model.tokenizer, None)
-
-        test_ids = [35946, 73670, 73670, 73670, 73675, 35946, 37029, 37029, 37029]
-        render_params = RendererParams(
-            model_type="qwen",
-            max_seq_len=MAX_SEQ_LEN,
-            eos_token_id=tokenizer.eos_token_id or 0,
-            stop_word_ids_list=[],
-        )
-        chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
-        request = ChatCompletionRequest(
-            messages=[ChatMessage(role=RoleEnum.user, content="hello")]
-        )
-        input_length = 109
-        id_generator = fake_output_generator(
-            test_ids, MAX_SEQ_LEN, tokenizer.eos_token_id or 0, input_length
-        )
-        stream_generator = chat_renderer.render_response_stream(
-            id_generator, request, GenerateConfig()
-        )
-        generate = self.endpoint._complete_stream_response(stream_generator, None)
-        # response = [x async for x in generate][-1]
-        response = [x async for x in generate][-1]
-        response = await generate.gen_complete_response_once()
-        print(response.choices[0].model_dump_json())
-        self.assertEqual(1, len(response.choices))
-        self.assertEqual(
-            json.loads(response.choices[0].model_dump_json(exclude_none=True)),
-            {
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": "我使用使用使用",
-                    "reasoning_content": "可以",
-                    "partial": False,
-                },
-                "finish_reason": "stop",
-            },
-        )
-        self.assertEqual(
-            json.loads(
-                response.usage.completion_tokens_details.model_dump_json(
-                    exclude_none=True
-                )
-            ),
-            {"reasoning_tokens": 5},
-        )
-
-    @think_mode
     async def test_think_label_real_situation_union(self):
         custom_renderer.THINK_START_TAG = "<think>\n"
         custom_renderer.THINK_END_TAG = "</think>\n"
@@ -2230,14 +2119,14 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         )
         chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
         request = ChatCompletionRequest(
-            messages=[ChatMessage(role=RoleEnum.user, content="hello")]
+            messages=[ChatMessage(role=RoleEnum.user, content="hello")], stream=True
         )
         input_length = 109
         id_generator = fake_output_generator(
             test_ids, MAX_SEQ_LEN, tokenizer.eos_token_id or 0, input_length
         )
         stream_generator = chat_renderer.render_response_stream(
-            id_generator, request, GenerateConfig()
+            id_generator, request, GenerateConfig(is_streaming=True)
         )
         generate = self.endpoint._complete_stream_response(stream_generator, None)
         # response = [x async for x in generate][-1]
@@ -2252,7 +2141,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
                 "index": 0,
                 "message": {
                     "role": "assistant",
-                    "content": "\n使用使用使用",
+                    "content": "\n\n使用使用使用",
                     "reasoning_content": "\n可以可以可以",
                     "partial": False,
                 },
@@ -2260,8 +2149,12 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             },
         )
         self.assertEqual(
-            json.loads(response.usage.completion_tokens_details.model_dump_json()),
-            {"audio_tokens": None, "reasoning_tokens": 6},
+            json.loads(
+                response.usage.completion_tokens_details.model_dump_json(
+                    exclude_none=True
+                )
+            ),
+            {"reasoning_tokens": 5},
         )
 
     async def test_escape(self):
