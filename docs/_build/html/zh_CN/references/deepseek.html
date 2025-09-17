@@ -1,0 +1,724 @@
+
+<!DOCTYPE html>
+
+
+<html lang="zh-CN" data-content_root="../" >
+
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>RTP-LLM DeepSeek复现技术报告 &#8212; RTP-LLM</title>
+  
+  
+  
+  <script data-cfasync="false">
+    document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
+    document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
+  </script>
+  
+  <!-- Loaded before other Sphinx assets -->
+  <link href="../_static/styles/theme.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+<link href="../_static/styles/bootstrap.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+<link href="../_static/styles/pydata-sphinx-theme.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+
+  
+  <link href="../_static/vendor/fontawesome/6.5.2/css/all.min.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+  <link rel="preload" as="font" type="font/woff2" crossorigin href="../_static/vendor/fontawesome/6.5.2/webfonts/fa-solid-900.woff2" />
+<link rel="preload" as="font" type="font/woff2" crossorigin href="../_static/vendor/fontawesome/6.5.2/webfonts/fa-brands-400.woff2" />
+<link rel="preload" as="font" type="font/woff2" crossorigin href="../_static/vendor/fontawesome/6.5.2/webfonts/fa-regular-400.woff2" />
+
+    <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=03e43079" />
+    <link rel="stylesheet" type="text/css" href="../_static/styles/sphinx-book-theme.css?v=eba8b062" />
+    <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../_static/css/custom_log.css" />
+    <link rel="stylesheet" type="text/css" href="../_static/css/language-switcher.css?v=943557c0" />
+    <link rel="stylesheet" type="text/css" href="../_static/css/custom_log.css" />
+    <link rel="stylesheet" type="text/css" href="../_static/css/language-switcher.css?v=943557c0" />
+  
+  <!-- Pre-loaded scripts that we'll load fully later -->
+  <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=dfe6caa3a7d634c4db9b" />
+<link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=dfe6caa3a7d634c4db9b" />
+  <script src="../_static/vendor/fontawesome/6.5.2/js/all.min.js?digest=dfe6caa3a7d634c4db9b"></script>
+
+    <script src="../_static/documentation_options.js?v=8bc30457"></script>
+    <script src="../_static/doctools.js?v=9bcbadda"></script>
+    <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../_static/copybutton.js?v=ccdb6887"></script>
+    <script src="../_static/js/language-switcher.js?v=ebe09c31"></script>
+    <script src="../_static/scripts/sphinx-book-theme.js?v=887ef09a"></script>
+    <script src="../_static/translations.js?v=beaddf03"></script>
+    <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
+    <script>DOCUMENTATION_OPTIONS.pagename = 'references/deepseek';</script>
+    <script src="../_static/js/language-switcher.js?v=ebe09c31"></script>
+    <link rel="index" title="索引" href="../genindex.html" />
+    <link rel="search" title="搜索" href="../search.html" /> 
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="docsearch:language" content="zh-CN"/>
+    <meta name="docbuild:last-update" content="2025 年 09 月 17 日"/>
+<link
+  rel="stylesheet"
+  href="../_static/css/language-switcher.css"
+/>
+<script src="../_static/js/language-switcher.js"></script>
+
+  </head>
+  
+  
+  <body data-bs-spy="scroll" data-bs-target=".bd-toc-nav" data-offset="180" data-bs-root-margin="0px 0px -60%" data-default-mode="">
+
+  
+  
+  <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
+  
+  <div id="pst-scroll-pixel-helper"></div>
+  
+  <button type="button" class="btn rounded-pill" id="pst-back-to-top">
+    <i class="fa-solid fa-arrow-up"></i>Back to top</button>
+
+  
+  <input type="checkbox"
+          class="sidebar-toggle"
+          id="pst-primary-sidebar-checkbox"/>
+  <label class="overlay overlay-primary" for="pst-primary-sidebar-checkbox"></label>
+  
+  <input type="checkbox"
+          class="sidebar-toggle"
+          id="pst-secondary-sidebar-checkbox"/>
+  <label class="overlay overlay-secondary" for="pst-secondary-sidebar-checkbox"></label>
+  
+  <div class="search-button__wrapper">
+    <div class="search-button__overlay"></div>
+    <div class="search-button__search-container">
+<form class="bd-search d-flex align-items-center"
+      action="../search.html"
+      method="get">
+  <i class="fa-solid fa-magnifying-glass"></i>
+  <input type="search"
+         class="form-control"
+         name="q"
+         id="search-input"
+         placeholder="Search..."
+         aria-label="Search..."
+         autocomplete="off"
+         autocorrect="off"
+         autocapitalize="off"
+         spellcheck="false"/>
+  <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd>K</kbd></span>
+</form></div>
+  </div>
+
+  <div class="pst-async-banner-revealer d-none">
+  <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="Version warning"></aside>
+</div>
+
+  
+    <header class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
+    </header>
+  
+
+  <div class="bd-container">
+    <div class="bd-container__inner bd-page-width">
+      
+      
+      
+        
+      
+      <div class="bd-sidebar-primary bd-sidebar">
+        
+
+  
+  <div class="sidebar-header-items sidebar-primary__section">
+    
+    
+    
+    
+  </div>
+  
+    <div class="sidebar-primary-items__start sidebar-primary__section">
+        <div class="sidebar-primary-item">
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="../index.html">
+  
+  
+  
+  
+  
+    
+    
+      
+    
+    
+    <img src="../_static/logo.png" class="logo__image only-light" alt="RTP-LLM - Home"/>
+    <script>document.write(`<img src="../_static/logo.png" class="logo__image only-dark" alt="RTP-LLM - Home"/>`);</script>
+  
+  
+</a></div>
+        <div class="sidebar-primary-item">
+
+ <script>
+ document.write(`
+   <button class="btn search-button-field search-button__button" title="搜索" aria-label="搜索" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="fa-solid fa-magnifying-glass"></i>
+    <span class="search-button__default-text">搜索</span>
+    <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+   </button>
+ `);
+ </script></div>
+        <div class="sidebar-primary-item"><nav class="bd-links bd-docs-nav" aria-label="Main">
+    <div class="bd-toc-item navbar-nav active">
+        <p aria-level="2" class="caption" role="heading"><span class="caption-text">安装</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../start/install.html">安装 RTP-LLM</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">发布版本</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../release/v0.2.0/release.html">RTP-LLM 0.2.0</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">基本用法</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../backend/send_request.html">发送请求</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/openai_api_completions.html">OpenAI API - 文本生成/会话</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/openai_api_vision.html">OpenAI API - 多模态</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/openai_api_embeddings.html">OpenAI API - Embedding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/native_api.html">RTP-LLM Native API</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">后端教程</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="deepseek/index.html">deepseek</a></li>
+<li class="toctree-l1"><a class="reference internal" href="qwen/index.html">qwen-moe</a></li>
+<li class="toctree-l1"><a class="reference internal" href="kimi/index.html">kimi</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">高级后端配置</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../backend/server_arguments.html">服务器参数</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/sampling_params.html">采样配置</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/attention_backend.html">注意力后端</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">支持的模型</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/generative_models.html">大语言模型</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/multimodal_language_models.html">多模态语言模型</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/embedding_models.html">Embedding 模型</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/support_new_models.html">如何支持新模型</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">高级功能</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../backend/speculative_decoding.html">推测解码</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/reuse_kv_cache.html">重用缓存</a></li>
+
+<li class="toctree-l1"><a class="reference internal" href="../backend/function_calling.html">工具和函数调用</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/quantization.html">量化</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/lora.html">LoRA Serving</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/pd_disaggregation.html">PD解聚</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">参考文献</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="general.html">通用指南</a></li>
+<li class="toctree-l1"><a class="reference internal" href="developer.html">Developer Reference</a></li>
+</ul>
+
+    </div>
+</nav></div>
+    </div>
+  
+  
+  <div class="sidebar-primary-items__end sidebar-primary__section">
+  </div>
+  
+  <div id="rtd-footer-container"></div>
+
+
+      </div>
+      
+      <main id="main-content" class="bd-main" role="main">
+        
+        
+
+<div class="sbt-scroll-pixel-helper"></div>
+
+          <div class="bd-content">
+            <div class="bd-article-container">
+              
+              <div class="bd-header-article d-print-none">
+<div class="header-article-items header-article__inner">
+  
+    <div class="header-article-items__start">
+      
+        <div class="header-article-item"><button class="sidebar-toggle primary-toggle btn btn-sm" title="Toggle primary sidebar" data-bs-placement="bottom" data-bs-toggle="tooltip">
+  <span class="fa-solid fa-bars"></span>
+</button></div>
+      
+    </div>
+  
+  
+    <div class="header-article-items__end">
+      
+        <div class="header-article-item">
+
+<div class="article-header-buttons">
+
+
+
+
+
+<div class="dropdown dropdown-source-buttons">
+  <button class="btn dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" aria-label="Source repositories">
+    <i class="fab fa-github"></i>
+  </button>
+  <ul class="dropdown-menu">
+      
+      
+      
+      <li><a href="https://github.com/alibaba/rtp-llm" target="_blank"
+   class="btn btn-sm btn-source-repository-button dropdown-item"
+   title="源码库"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fab fa-github"></i>
+  </span>
+<span class="btn__text-container">Repository</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li><a href="https://github.com/alibaba/rtp-llm/blob/main/references/deepseek.md?plain=1" target="_blank"
+   class="btn btn-sm btn-source-file-button dropdown-item"
+   title="Show source"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-code"></i>
+  </span>
+<span class="btn__text-container">Show source</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li><a href="https://github.com/alibaba/rtp-llm/edit/main/references/deepseek.md" target="_blank"
+   class="btn btn-sm btn-source-edit-button dropdown-item"
+   title="Suggest edit"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-pencil-alt"></i>
+  </span>
+<span class="btn__text-container">Suggest edit</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li><a href="https://github.com/alibaba/rtp-llm/issues/new?title=Issue%20on%20page%20%2Freferences/deepseek.html&body=Your%20issue%20content%20here." target="_blank"
+   class="btn btn-sm btn-source-issues-button dropdown-item"
+   title="创建议题"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-lightbulb"></i>
+  </span>
+<span class="btn__text-container">Open issue</span>
+</a>
+</li>
+      
+  </ul>
+</div>
+
+
+
+
+
+
+<div class="dropdown dropdown-download-buttons">
+  <button class="btn dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" aria-label="下载此页面">
+    <i class="fas fa-download"></i>
+  </button>
+  <ul class="dropdown-menu">
+      
+      
+      
+      <li><a href="../_sources/references/deepseek.md" target="_blank"
+   class="btn btn-sm btn-download-source-button dropdown-item"
+   title="下载源文件"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-file"></i>
+  </span>
+<span class="btn__text-container">.md</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li>
+<button onclick="window.print()"
+  class="btn btn-sm btn-download-pdf-button dropdown-item"
+  title="列印成 PDF"
+  data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-file-pdf"></i>
+  </span>
+<span class="btn__text-container">.pdf</span>
+</button>
+</li>
+      
+  </ul>
+</div>
+
+
+
+
+<button onclick="toggleFullScreen()"
+  class="btn btn-sm btn-fullscreen-button"
+  title="全屏模式"
+  data-bs-placement="bottom" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-expand"></i>
+  </span>
+
+</button>
+
+
+
+<script>
+document.write(`
+  <button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button" title="light/dark" aria-label="light/dark" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="theme-switch fa-solid fa-sun fa-lg" data-mode="light"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg" data-mode="dark"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"></i>
+  </button>
+`);
+</script>
+
+
+<script>
+document.write(`
+  <button class="btn btn-sm pst-navbar-icon search-button search-button__button" title="搜索" aria-label="搜索" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="fa-solid fa-magnifying-glass fa-lg"></i>
+  </button>
+`);
+</script>
+<button class="sidebar-toggle secondary-toggle btn btn-sm" title="Toggle secondary sidebar" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <span class="fa-solid fa-list"></span>
+</button>
+</div></div>
+      
+    </div>
+  
+</div>
+</div>
+              
+              
+
+<div id="jb-print-docs-body" class="onlyprint">
+    <h1>RTP-LLM DeepSeek复现技术报告</h1>
+    <!-- Table of contents -->
+    <div id="print-main-content">
+        <div id="jb-print-toc">
+            
+            <div>
+                <h2> 目录 </h2>
+            </div>
+            <nav aria-label="Page">
+                <ul class="visible nav section-nav flex-column">
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#">RTP-LLM DeepSeek复现技术报告</a></li>
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#overview">概述</a></li>
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#test-results">测试结果</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#settings">设置</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#prefill">预填充</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#decode">解码</a></li>
+</ul>
+</li>
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#implementation-and-tricks">实现和技巧</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#eplb">EPLB</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#microbatch-overlapping">微批处理和重叠</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#mtp">MTP</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#pd-disaggregation">PD解聚</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#deepep-network">DeepEP/网络</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#cuda-kernel-fusion">CUDA内核融合</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#pdl">PDL</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#framework-overhead">框架开销</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#weights-loading">权重加载</a></li>
+</ul>
+</li>
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#limitations-and-future-work">局限性和未来工作</a></li>
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#for-qwen3-moe">对于Qwen3 MoE</a></li>
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#thanks">致谢</a></li>
+</ul>
+
+            </nav>
+        </div>
+    </div>
+</div>
+
+              
+                
+<div id="searchbox"></div>
+                <article class="bd-article">
+                  
+  <section class="tex2jax_ignore mathjax_ignore" id="rtp-llm-deepseek-replay-tech-report">
+<h1>RTP-LLM DeepSeek复现技术报告<a class="headerlink" href="#rtp-llm-deepseek-replay-tech-report" title="Link to this heading">#</a></h1>
+</section>
+<section class="tex2jax_ignore mathjax_ignore" id="overview">
+<h1>概述<a class="headerlink" href="#overview" title="Link to this heading">#</a></h1>
+<p>DeepSeek-V3在多项评估中表现出色，成为最引人注目的开源大模型之一。由于其大规模MoE架构，优化推理性能是工程部署的关键挑战。2月，DeepSeek团队相继开源了DeepEP、DeepGEMM、FlashMLA和EPLB等关键组件。基于开源社区的工作，我们完成了RTP-LLM的优化工作，与DeepSeek推理系统的性能保持一致。</p>
+<p>RTP-LLM是阿里巴巴爱橙技术开发的LLM推理加速引擎，主要服务阿里巴巴集团内部业务。本文将分享一些实现过程中的关键技术点、不足和反思，以感谢开源社区的帮助。相关代码正在整理和重构中，完整代码和复现方法将尽快更新。</p>
+<p>根据<a class="reference external" href="https://github.com/deepseek-ai/open-infra-index/blob/main/202502OpenSourceWeek/day_6_one_more_thing_deepseekV3R1_inference_system_overview.md">DeepSeek推理系统概述</a>中的介绍</p>
+<div class="docutils">
+<p>总输入token数：608B，其中342B个token (56.3%)命中磁盘KV缓存。</p>
+<p>总输出token数：168B。平均输出速度为每秒20-22个token，每个输出token的平均kvcache长度为4,989个token。</p>
+<p>每个H800节点在预填充阶段提供约73.7k tokens/s的平均吞吐量（包括缓存命中）或在解码阶段提供约14.8k tokens/s的输出吞吐量。</p>
+</div>
+<p><strong>在实际生产服务中，DeepSeek推理系统在每个H800节点上实现32.2K的预填充吞吐量</strong>和<strong>每个H800节点14.8K TPS的解码吞吐量</strong>。在RTP-LLM测试中，使用4K输入/2K输出，<strong>在1.6s TTFT和50ms ITL约束下，我们实现了每个H800节点42.6K TPS的预填充性能和每个H800节点14.7K TPS的解码性能</strong>。</p>
+</section>
+<section class="tex2jax_ignore mathjax_ignore" id="test-results">
+<h1>测试结果<a class="headerlink" href="#test-results" title="Link to this heading">#</a></h1>
+<section id="settings">
+<h2>设置<a class="headerlink" href="#settings" title="Link to this heading">#</a></h2>
+<p>我们在<strong>阿里云灵骏H800 RoCE环境中部署，使用PD分离和分布式EP架构</strong>，设置TP=1，DP=EP=GPU数量。预填充单实例规格为4个节点32个GPU，解码单实例规格为18个节点144个GPU。测试期间，我们使用了4个预填充实例和1个解码实例，总计272个H800 GPU。</p>
+<p>测试采用了4:1的PD实例比例，这不是完美的PD比例。在实际生产负载中，将面临更复杂的输入/输出长度波动，需要与调度系统集成以动态和弹性调整PD实例数量。</p>
+</section>
+<section id="prefill">
+<h2>预填充<a class="headerlink" href="#prefill" title="Link to this heading">#</a></h2>
+<p><img alt="image.png" src="../_images/prefill.png" /></p>
+<p>预填充实例使用32个EP部署。在极端压力下，单个GPU执行2个4K请求需要1.5秒，吞吐量为5333 TPS。</p>
+<p>测试没有模拟缓存的影响，这是后续改进的领域之一。</p>
+<p><strong>RTP-LLM还支持混合TP/DP/EP部署。建议在高算力H800 GPU上使用TP=1；在算力受限的卡如H20上，根据延迟约束选择TP=2/4。</strong></p>
+</section>
+<section id="decode">
+<h2>解码<a class="headerlink" href="#decode" title="Link to this heading">#</a></h2>
+<p><img alt="image.png" src="../_images/decode.png" /></p>
+<p>解码实例使用144个EP部署（128+16个冗余）。由于实现差异，主机端耗时减少2ms，但设备端稍慢。分析表明原因是RoCE与IB网络差异、缺少CUDA Graph优化以及一些慢速内核实现。这也是未来优化的方向。</p>
+<p><img alt="image.png" src="../_images/throughput_latency.png" /></p>
+<p>上图显示了解码阶段的压力测试曲线。在较低并发下，单个用户可以达到42 TPS。在13200并发下，达到每个用户20 TPS的SLA限制，单个GPU吞吐量为1850 TPS。</p>
+<p>在DeepEP开源之前，我们通过All2All实现了分布式EP，与单节点设置相比实现了卓越的吞吐量改进，但延迟过高。除了高网络延迟外，All2All还带来了严重的主机同步开销，这对网络和计算时间重叠也是不利的。<strong>建议不支持DeepEP机制的GPU可以等效实现纯设备All2All以实现类似性能；ASIC加速卡可以更进一步，直接执行MoE/Dispatch/Combine重叠。</strong></p>
+</section>
+</section>
+<section class="tex2jax_ignore mathjax_ignore" id="implementation-and-tricks">
+<h1>实现和技巧<a class="headerlink" href="#implementation-and-tricks" title="Link to this heading">#</a></h1>
+<section id="eplb">
+<h2>EPLB<a class="headerlink" href="#eplb" title="Link to this heading">#</a></h2>
+<p>下图显示了EPLB延迟影响测试。我们发现EP平衡状态受测试数据显著影响，<strong>测试数据无法完全模拟真实应用负载状态</strong>。EP负载均衡策略仍是未来深入探索的领域。</p>
+<p><img alt="image.png" src="../_images/eplb.png" /></p>
+</section>
+<section id="microbatch-overlapping">
+<h2>微批处理和重叠<a class="headerlink" href="#microbatch-overlapping" title="Link to this heading">#</a></h2>
+<p>为了使GPU计算和网络通信能够重叠，我们全面实现了Prefill/Decode微批处理解决方案，并将其与DeepEP的重叠机制集成。在此过程中，我们做出了以下观察：</p>
+<ol class="arabic simple">
+<li><p>无论是预填充还是解码，由于Dispatch阶段传输FP8张量而Combine阶段传输FP16张量，Combine阶段的通信时间显著高于Dispatch。因此，<strong>在设计重叠解决方案时，需要考虑更大的时间块来覆盖Combine阶段通信。在推理阶段引入量化通信是未来的潜在改进方向。</strong></p></li>
+<li><p>对于预填充，Attention所花费的时间占比较小。最终的Attention+MoE门控部分和MoE MLP部分花费的时间相似，都能覆盖Combine阶段相对较长的通信时间。只需要请求分割，两个MicroBatch的计算/通信就可以交错进行。一个重要细节是<strong>共享专家计算总是与Combine部分重叠，以确保覆盖Combine的计算时间多于覆盖Dispatch的时间</strong>。</p></li>
+</ol>
+<p>考虑到Qwen3模型，虽然它没有共享专家，但在解码阶段仍可采用相同的重叠方案，使用Attention算子作为边界插入MLP计算，分别覆盖前后Dispatch和Combine通信时间。在框架层面，为了兼容DeepEP和Vanilla All2All通信重叠功能并考虑扩展到各种硬件，我们开发了<strong>统一的通信回调接口，使微批处理能力能够轻松扩展到其他加速卡</strong>。</p>
+</section>
+<section id="mtp">
+<h2>MTP<a class="headerlink" href="#mtp" title="Link to this heading">#</a></h2>
+<p>我们在之前实现的<a class="reference external" href="https://mp.weixin.qq.com/s/EiSRF2ORy22I1pimCCvcPQ">通用推测采样框架</a>中增加了MTP推测采样支持。MTP是DeepSeek ITL优化中最关键的环节。增加解码阶段计算强度的唯一方法是增加GEMM BS。<strong>KV缓存容量限制了全局BS，而MTP只需要BS/2就能达到与原始相同的计算强度</strong>。启用微批处理进行计算-通信重叠会带来延迟增加的副作用。<strong>MTP可以减少平均ITL并补偿微批处理引起的延迟</strong>。双赢局面。</p>
+</section>
+<section id="pd-disaggregation">
+<h2>PD解聚<a class="headerlink" href="#pd-disaggregation" title="Link to this heading">#</a></h2>
+<p>在DeepSeek-V3模型中，由于预填充和解码计算需求存在显著差异以及不同的EP策略，PD分离部署是必要选择。我们扩展了<strong>对不同TP规格的预填充-解码部署的支持，这对低算力卡特别重要</strong>。我们实现了两种PD负载均衡策略：基于KV缓存的均衡和基于BS的均衡。测试数据的BS方差较小，在高压和<strong>高EP流量下，BS均衡对Dispatch/Combine延迟更重要</strong>。在生产环境中，需要综合考虑BS方差和Seq方差因素，或者可以根据流量特征进一步拆分解码实例。</p>
+</section>
+<section id="deepep-network">
+<h2>DeepEP/网络<a class="headerlink" href="#deepep-network" title="Link to this heading">#</a></h2>
+<p>DeepEP主要针对IB环境进行优化。面对实际生产中多样化的底层环境和技术栈，为了实现工程部署和最佳性能，我们进行了以下优化和改进：</p>
+<ol class="arabic simple">
+<li><p>双上联性能修复：通过深入分析Normal内核（少量QP，大消息）和低延迟内核（大量QP，小消息）的特性，我们提供了一个纯IAAS层修复功能，不会引入性能开销。具体而言，我们在NVSHMEM层为Normal内核和低延迟内核提供了消息级和队列级负载均衡解决方案。优化版本保持了双上联的稳定性优势，同时实现了可以匹配甚至略微超越单上联IB网络解决方案的通信性能。</p></li>
+<li><p>通信模式优化：通过综合考虑节点内和节点间网络架构，我们优化了节点内和节点间流量模式，充分利用系统中的可用链路，实现了网络轨道和平面之间的流量平衡，避免了网络流量冲突和碰撞，最大化了整体系统通信效率。在低延迟通信模式下，通信延迟可以减少60%以上。</p></li>
+<li><p>节点内拓扑自修复能力：异常的节点内拓扑报告会影响网卡和GPU之间的通信链路，导致网络性能下降。为了解决这个问题，我们实现了节点内拓扑自修复功能，屏蔽了上层与底层服务器硬件和软件差异，确保不同机器类型间GPU和网卡的亲和关系。</p></li>
+<li><p>虚拟化环境适配：为了灵活支持复杂多变的业务场景，我们支持基于商业卡硬件SRIOV虚拟化的高性能网络解决方案，解决了SRIOV与DeepEP之间的适配问题，并通过优化完成了大规模部署，使VF和PF性能保持一致。</p></li>
+</ol>
+</section>
+<section id="cuda-kernel-fusion">
+<h2>CUDA内核融合<a class="headerlink" href="#cuda-kernel-fusion" title="Link to this heading">#</a></h2>
+<p>我们对CUDA内核执行流程进行了详细分析，并根据模型特点进行了优化：</p>
+<ol class="arabic simple">
+<li><p><strong>将部分矩阵乘法转移到BF16格式计算</strong>。当规模不足时，FP8矩阵乘法由于需要量化操作而产生更大的开销。</p></li>
+<li><p>将旋转Embedding中的转置操作提前到权重加载阶段，以避免引入逐元素操作符。</p></li>
+<li><p>在GEMM计算前融合量化和转置。</p></li>
+<li><p>未来计划包括融合激活和量化。</p></li>
+</ol>
+<p><img alt="image.png" src="../_images/fusion.png" /></p>
+</section>
+<section id="pdl">
+<h2>PDL<a class="headerlink" href="#pdl" title="Link to this heading">#</a></h2>
+<p>Hopper架构引入了程序依赖启动（PDL），允许同一CUDA流上的两个相邻内核执行重叠，使后一个内核在前一个内核执行时提前完成初始化和其他工作。通过将PDL引入GEMM内核，<strong>我们可以在其他内核（如量化）计算期间提前执行GEMM初始化操作，提高整体系统性能</strong>。</p>
+<p>PDL的引入也为内核级优化带来了更多可能性，比如GEMM<strong>权重预取</strong>。通过PDL将量化操作与GEMM重叠后，可以在GEMM内核的重叠部分添加权重预取操作，这样当MMA实际执行时，所需的权重张量已经在L2缓存中，达到加速GEMM内核的目的。</p>
+</section>
+<section id="framework-overhead">
+<h2>框架开销<a class="headerlink" href="#framework-overhead" title="Link to this heading">#</a></h2>
+<p>整体框架开销主要集中在两个部分：<strong>一部分是相邻前向步骤之间的主机开销，约1.5ms；另一部分是内核启动开销，约2ms</strong>。</p>
+<p>前向步骤之间主机开销的主要问题是我们的笨重动态批次实现，其性能开销与BS线性相关。我们轻量化了动态批次实现，异步或使用多线程处理不依赖于下一步的操作。理想情况下，在128 BS条件下，我们可以实现200us以下。当前过多的主机开销主要由于MTP情况下的额外动态批次，这可以进一步优化掉。</p>
+<p><strong>内核启动开销主要是由于GPU内核过多</strong>。启用微批处理后，GPU内核数量翻倍，使问题更加严重。更好的解决方案是CUDA Graph。这里需要平衡性能和架构复杂性。RTP-LLM框架已经通过C++实现避免了主机端启动开销问题。然而，我们观察到<strong>即使启动速度远超内核执行速度，在GPU设备级别仍有一些启动开销</strong>，CUDA Graph可以在一定程度上缓解这个问题。<strong>我们期待NVIDIA能在未来的驱动或硬件版本中彻底解决这个问题</strong>。</p>
+</section>
+<section id="weights-loading">
+<h2>权重加载<a class="headerlink" href="#weights-loading" title="Link to this heading">#</a></h2>
+<p>模型权重加载速度直接影响研发和部署效率。对于671B权重，我们通过优化实现了<strong>分钟级加载</strong>，具体方案如下：</p>
+<ol class="arabic simple">
+<li><p><strong>权重预处理和格式预转换</strong>。RTP-LLM在加载过程中需要对权重执行分割、转置等操作。我们设计了一个预处理系统，提前将原始权重转换为框架所需的权重格式。预处理后，加载过程中的计算开销被消除。</p></li>
+<li><p><strong>直接IO + 固定内存加速大文件读取</strong>。为了解决单个权重文件超过100GB的I/O瓶颈，我们使用直接IO绕过系统页面缓存机制，通过CUDA固定内存建立固定内存池，消除了内核空间和用户空间之间的多次内存拷贝。</p></li>
+</ol>
+</section>
+</section>
+<section class="tex2jax_ignore mathjax_ignore" id="limitations-and-future-work">
+<h1>局限性和未来工作<a class="headerlink" href="#limitations-and-future-work" title="Link to this heading">#</a></h1>
+<ol class="arabic simple">
+<li><p>在算子性能方面，我们尚未完全与DeepSeek对齐。预填充注意力和解码量化等核心算子存在一定的性能差距，需要进一步优化。此外，CUDA Graph也是一个关键的改进方向。</p></li>
+<li><p>EPLB本质上需要算法设计和系统工程之间的深度协作。目前还没有通用且高效的解决方案。对于特定应用场景下的动态负载分布特性，需要探索更多自适应和稳健的负载均衡策略。</p></li>
+<li><p>微批处理并不是计算-通信重叠的唯一解决方案。结合FLUX和Triton-distributed等优秀工作，多种并行模式融合是未来值得探索的方向。</p></li>
+<li><p>在DeepSeek-V3上，纯EP解决方案与6K长度短序列任务匹配良好。对于更长序列场景，受KV缓存容量限制，需要设计更复杂的并行模式来提高MoE计算效率。</p></li>
+<li><p>在大规模测试和部署实践中，我们观察到多起单个GPU故障导致整个144 GPU解码实例故障的情况。为了解决这个问题，我们在PD分离架构中引入了ACCL结合服务发现机制，构建了具有弹性和高可用性的无服务器PD服务。我们计划在未来进一步结合任务调度器和通信库能力，构建具有高容错和弹性扩展能力的无服务器CCL（集体通信库）框架。</p></li>
+<li><p>与H800不同，我们生产环境中可扩展的异构计算卡通常算力较低。在这种情况下，在TTFT和ITL约束下优化吞吐量是一个极具挑战性的问题。同时，如何在各种卡类型和代际间良好地优化性能也是我们需要努力解决的问题。</p></li>
+</ol>
+</section>
+<section class="tex2jax_ignore mathjax_ignore" id="for-qwen3-moe">
+<h1>对于Qwen3 MoE<a class="headerlink" href="#for-qwen3-moe" title="Link to this heading">#</a></h1>
+<p>与DeepSeek-V3相比，Qwen3-235B-A22B模型规模较小，但支持无缝思考模式切换。对于4K输入/2K输出场景，可以采用类似的优化策略，结合特定模型参数配置调整并行模式。</p>
+<p>从KV缓存使用角度来看，Qwen3-235B-A22B每个token的KV缓存开销是94×4×128×2=96KB，而DeepSeek-V3是61×1536=93KB，两者接近。</p>
+<p>从注意力计算延迟角度来看，Qwen3-235B-A22B使用64头GQA，而DeepSeek-V3使用128头MLA，计算延迟约为后者的50%。考虑到内存访问延迟的影响，实际延迟会略高。</p>
+<p>从Dispatch/Combine通信角度来看，Qwen3-235B-A22B约为DeepSeek-V3的40%。</p>
+<p>从MoE GEMM计算延迟角度来看，由于Qwen3-235B-A22B的参数规模为40%-50%，计算延迟约为50%。</p>
+<p>总之，在大规模集群部署中，从KV缓存容量限制和MoE计算效率两个维度综合评估，Qwen3-235B-A22B可以采用类似的部署模式。与DeepSeek-V3相比，Qwen3-235B-A22B可以支持更长的序列长度，在延迟和吞吐量方面表现更好。对于H20等算力受限的卡，可以减少EP并引入TP，以减少网络延迟并实现良好的计算利用率。</p>
+</section>
+<section class="tex2jax_ignore mathjax_ignore" id="thanks">
+<h1>致谢<a class="headerlink" href="#thanks" title="Link to this heading">#</a></h1>
+<p>经过两个月的持续努力，我们已与DeepSeek推理引擎的性能保持一致。我们感谢开源社区分享优秀的开源模型如DeepSeek、Qwen和Llama，以及优秀的工程引擎和优化如FasterTransformer、TensoRT-LLM、FlashAttention、FlashInfer、Transformers、vLLM和SGLang。我们相信开源、开放和交流是实现AGI的必由之路。我们希望通过与社区的深入讨论和交流，共同推进AI技术创新和生态繁荣。</p>
+</section>
+
+
+                </article>
+              
+
+              
+              
+              
+              
+                <footer class="prev-next-footer d-print-none">
+                  
+<div class="prev-next-area">
+</div>
+                </footer>
+              
+            </div>
+            
+            
+              
+                <div class="bd-sidebar-secondary bd-toc"><div class="sidebar-secondary-items sidebar-secondary__inner">
+
+
+  <div class="sidebar-secondary-item">
+  <div class="page-toc tocsection onthispage">
+    <i class="fa-solid fa-list"></i> 目录
+  </div>
+  <nav class="bd-toc-nav page-toc">
+    <ul class="visible nav section-nav flex-column">
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#">RTP-LLM DeepSeek复现技术报告</a></li>
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#overview">概述</a></li>
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#test-results">测试结果</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#settings">设置</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#prefill">预填充</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#decode">解码</a></li>
+</ul>
+</li>
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#implementation-and-tricks">实现和技巧</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#eplb">EPLB</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#microbatch-overlapping">微批处理和重叠</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#mtp">MTP</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#pd-disaggregation">PD解聚</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#deepep-network">DeepEP/网络</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#cuda-kernel-fusion">CUDA内核融合</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#pdl">PDL</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#framework-overhead">框架开销</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#weights-loading">权重加载</a></li>
+</ul>
+</li>
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#limitations-and-future-work">局限性和未来工作</a></li>
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#for-qwen3-moe">对于Qwen3 MoE</a></li>
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#thanks">致谢</a></li>
+</ul>
+
+  </nav></div>
+
+</div></div>
+              
+            
+          </div>
+          <footer class="bd-footer-content">
+            
+<div class="bd-footer-content__inner container">
+  
+  <div class="footer-item">
+    
+<p class="component-author">
+作者： RTP-LLM Team
+</p>
+
+  </div>
+  
+  <div class="footer-item">
+    
+
+  <p class="copyright">
+    
+      © Copyright 2023-2025, RTP-LLM.
+      <br/>
+    
+  </p>
+
+  </div>
+  
+  <div class="footer-item">
+    <p class="last-updated">
+  最后更新于 2025 年 09 月 17 日.
+  <br/>
+</p>
+  </div>
+  
+  <div class="footer-item">
+    
+  </div>
+  
+</div>
+          </footer>
+        
+
+      </main>
+    </div>
+  </div>
+  
+  <!-- Scripts loaded after <body> so the DOM is not blocked -->
+  <script src="../_static/scripts/bootstrap.js?digest=dfe6caa3a7d634c4db9b"></script>
+<script src="../_static/scripts/pydata-sphinx-theme.js?digest=dfe6caa3a7d634c4db9b"></script>
+
+  <footer class="bd-footer">
+  </footer>
+  </body>
+</html>

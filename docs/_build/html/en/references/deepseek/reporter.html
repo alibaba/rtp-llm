@@ -1,0 +1,740 @@
+
+<!DOCTYPE html>
+
+
+<html lang="en" data-content_root="../../" >
+
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>DeepSeek Replay Tech Report &#8212; RTP-LLM</title>
+  
+  
+  
+  <script data-cfasync="false">
+    document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
+    document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
+  </script>
+  
+  <!-- Loaded before other Sphinx assets -->
+  <link href="../../_static/styles/theme.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+<link href="../../_static/styles/bootstrap.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+<link href="../../_static/styles/pydata-sphinx-theme.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+
+  
+  <link href="../../_static/vendor/fontawesome/6.5.2/css/all.min.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+  <link rel="preload" as="font" type="font/woff2" crossorigin href="../../_static/vendor/fontawesome/6.5.2/webfonts/fa-solid-900.woff2" />
+<link rel="preload" as="font" type="font/woff2" crossorigin href="../../_static/vendor/fontawesome/6.5.2/webfonts/fa-brands-400.woff2" />
+<link rel="preload" as="font" type="font/woff2" crossorigin href="../../_static/vendor/fontawesome/6.5.2/webfonts/fa-regular-400.woff2" />
+
+    <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=03e43079" />
+    <link rel="stylesheet" type="text/css" href="../../_static/styles/sphinx-book-theme.css?v=eba8b062" />
+    <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../../_static/css/custom_log.css" />
+    <link rel="stylesheet" type="text/css" href="../../_static/css/language-switcher.css?v=943557c0" />
+    <link rel="stylesheet" type="text/css" href="../../_static/css/custom_log.css" />
+    <link rel="stylesheet" type="text/css" href="../../_static/css/language-switcher.css?v=943557c0" />
+  
+  <!-- Pre-loaded scripts that we'll load fully later -->
+  <link rel="preload" as="script" href="../../_static/scripts/bootstrap.js?digest=dfe6caa3a7d634c4db9b" />
+<link rel="preload" as="script" href="../../_static/scripts/pydata-sphinx-theme.js?digest=dfe6caa3a7d634c4db9b" />
+  <script src="../../_static/vendor/fontawesome/6.5.2/js/all.min.js?digest=dfe6caa3a7d634c4db9b"></script>
+
+    <script src="../../_static/documentation_options.js?v=7f7c277e"></script>
+    <script src="../../_static/doctools.js?v=9bcbadda"></script>
+    <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../../_static/copybutton.js?v=ccdb6887"></script>
+    <script src="../../_static/js/language-switcher.js?v=ebe09c31"></script>
+    <script src="../../_static/scripts/sphinx-book-theme.js?v=887ef09a"></script>
+    <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
+    <script>DOCUMENTATION_OPTIONS.pagename = 'references/deepseek/reporter';</script>
+    <script src="../../_static/js/language-switcher.js?v=ebe09c31"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+    <link rel="next" title="Recommended Deployment" href="deploy.html" />
+    <link rel="prev" title="deepseek" href="index.html" /> 
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="docsearch:language" content="en"/>
+    <meta name="docbuild:last-update" content="Sep 17, 2025"/>
+<link
+  rel="stylesheet"
+  href="../../_static/css/language-switcher.css"
+/>
+<script src="../../_static/js/language-switcher.js"></script>
+
+  </head>
+  
+  
+  <body data-bs-spy="scroll" data-bs-target=".bd-toc-nav" data-offset="180" data-bs-root-margin="0px 0px -60%" data-default-mode="">
+
+  
+  
+  <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
+  
+  <div id="pst-scroll-pixel-helper"></div>
+  
+  <button type="button" class="btn rounded-pill" id="pst-back-to-top">
+    <i class="fa-solid fa-arrow-up"></i>Back to top</button>
+
+  
+  <input type="checkbox"
+          class="sidebar-toggle"
+          id="pst-primary-sidebar-checkbox"/>
+  <label class="overlay overlay-primary" for="pst-primary-sidebar-checkbox"></label>
+  
+  <input type="checkbox"
+          class="sidebar-toggle"
+          id="pst-secondary-sidebar-checkbox"/>
+  <label class="overlay overlay-secondary" for="pst-secondary-sidebar-checkbox"></label>
+  
+  <div class="search-button__wrapper">
+    <div class="search-button__overlay"></div>
+    <div class="search-button__search-container">
+<form class="bd-search d-flex align-items-center"
+      action="../../search.html"
+      method="get">
+  <i class="fa-solid fa-magnifying-glass"></i>
+  <input type="search"
+         class="form-control"
+         name="q"
+         id="search-input"
+         placeholder="Search..."
+         aria-label="Search..."
+         autocomplete="off"
+         autocorrect="off"
+         autocapitalize="off"
+         spellcheck="false"/>
+  <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd>K</kbd></span>
+</form></div>
+  </div>
+
+  <div class="pst-async-banner-revealer d-none">
+  <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="Version warning"></aside>
+</div>
+
+  
+    <header class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
+    </header>
+  
+
+  <div class="bd-container">
+    <div class="bd-container__inner bd-page-width">
+      
+      
+      
+      <div class="bd-sidebar-primary bd-sidebar">
+        
+
+  
+  <div class="sidebar-header-items sidebar-primary__section">
+    
+    
+    
+    
+  </div>
+  
+    <div class="sidebar-primary-items__start sidebar-primary__section">
+        <div class="sidebar-primary-item">
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="../../index.html">
+  
+  
+  
+  
+  
+    
+    
+      
+    
+    
+    <img src="../../_static/logo.png" class="logo__image only-light" alt="RTP-LLM - Home"/>
+    <script>document.write(`<img src="../../_static/logo.png" class="logo__image only-dark" alt="RTP-LLM - Home"/>`);</script>
+  
+  
+</a></div>
+        <div class="sidebar-primary-item">
+
+ <script>
+ document.write(`
+   <button class="btn search-button-field search-button__button" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="fa-solid fa-magnifying-glass"></i>
+    <span class="search-button__default-text">Search</span>
+    <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+   </button>
+ `);
+ </script></div>
+        <div class="sidebar-primary-item"><nav class="bd-links bd-docs-nav" aria-label="Main">
+    <div class="bd-toc-item navbar-nav active">
+        <p aria-level="2" class="caption" role="heading"><span class="caption-text">Installation</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../../start/install.html">Install RTP-LLM</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Release Version</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../../release/v0.2.0/release.html">RTP-LLM 0.2.0</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Basic Usage</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../../backend/send_request.html">Sending Requests</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../backend/openai_api_completions.html">OpenAI APIs - Completions</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../backend/openai_api_vision.html">OpenAI APIs - Vision</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../backend/openai_api_embeddings.html">OpenAI APIs - Embedding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../backend/native_api.html">RTP-LLM Native APIs</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Backend Tutorial</span></p>
+<ul class="current nav bd-sidenav">
+<li class="toctree-l1 current active has-children"><a class="reference internal" href="index.html">deepseek</a><details open="open"><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul class="current">
+<li class="toctree-l2 current active"><a class="current reference internal" href="#">DeepSeek Replay Tech Report</a></li>
+
+
+
+
+
+<li class="toctree-l2"><a class="reference internal" href="deploy.html">Recommended Deployment</a></li>
+
+</ul>
+</details></li>
+<li class="toctree-l1"><a class="reference internal" href="../qwen/index.html">qwen-moe</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../kimi/index.html">kimi</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Advanced Backend Configurations</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../../backend/server_arguments.html">ServerArgs</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../backend/sampling_params.html">Sampling Config</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../backend/attention_backend.html">Attention Backend</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Supported Models</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../../supported_models/generative_models.html">Large Language Models</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../supported_models/multimodal_language_models.html">Multimodal Language Models</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../supported_models/embedding_models.html">Embedding Models</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../supported_models/support_new_models.html">How to Support New Models</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Advanced Features</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../../backend/speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../backend/reuse_kv_cache.html">ReuseCache</a></li>
+
+<li class="toctree-l1"><a class="reference internal" href="../../backend/function_calling.html">Tool and Function Calling</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../backend/quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../backend/lora.html">LoRA Serving</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../backend/pd_disaggregation.html">PD Disaggregation</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">References</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../general.html">General Guidance</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer.html">Developer Reference</a></li>
+</ul>
+
+    </div>
+</nav></div>
+    </div>
+  
+  
+  <div class="sidebar-primary-items__end sidebar-primary__section">
+  </div>
+  
+  <div id="rtd-footer-container"></div>
+
+
+      </div>
+      
+      <main id="main-content" class="bd-main" role="main">
+        
+        
+
+<div class="sbt-scroll-pixel-helper"></div>
+
+          <div class="bd-content">
+            <div class="bd-article-container">
+              
+              <div class="bd-header-article d-print-none">
+<div class="header-article-items header-article__inner">
+  
+    <div class="header-article-items__start">
+      
+        <div class="header-article-item"><button class="sidebar-toggle primary-toggle btn btn-sm" title="Toggle primary sidebar" data-bs-placement="bottom" data-bs-toggle="tooltip">
+  <span class="fa-solid fa-bars"></span>
+</button></div>
+      
+    </div>
+  
+  
+    <div class="header-article-items__end">
+      
+        <div class="header-article-item">
+
+<div class="article-header-buttons">
+
+
+
+
+
+<div class="dropdown dropdown-source-buttons">
+  <button class="btn dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" aria-label="Source repositories">
+    <i class="fab fa-github"></i>
+  </button>
+  <ul class="dropdown-menu">
+      
+      
+      
+      <li><a href="https://github.com/alibaba/rtp-llm" target="_blank"
+   class="btn btn-sm btn-source-repository-button dropdown-item"
+   title="Source repository"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fab fa-github"></i>
+  </span>
+<span class="btn__text-container">Repository</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li><a href="https://github.com/alibaba/rtp-llm/blob/main/references/deepseek/reporter.md?plain=1" target="_blank"
+   class="btn btn-sm btn-source-file-button dropdown-item"
+   title="Show source"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-code"></i>
+  </span>
+<span class="btn__text-container">Show source</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li><a href="https://github.com/alibaba/rtp-llm/edit/main/references/deepseek/reporter.md" target="_blank"
+   class="btn btn-sm btn-source-edit-button dropdown-item"
+   title="Suggest edit"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-pencil-alt"></i>
+  </span>
+<span class="btn__text-container">Suggest edit</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li><a href="https://github.com/alibaba/rtp-llm/issues/new?title=Issue%20on%20page%20%2Freferences/deepseek/reporter.html&body=Your%20issue%20content%20here." target="_blank"
+   class="btn btn-sm btn-source-issues-button dropdown-item"
+   title="Open an issue"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-lightbulb"></i>
+  </span>
+<span class="btn__text-container">Open issue</span>
+</a>
+</li>
+      
+  </ul>
+</div>
+
+
+
+
+
+
+<div class="dropdown dropdown-download-buttons">
+  <button class="btn dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" aria-label="Download this page">
+    <i class="fas fa-download"></i>
+  </button>
+  <ul class="dropdown-menu">
+      
+      
+      
+      <li><a href="../../_sources/references/deepseek/reporter.md" target="_blank"
+   class="btn btn-sm btn-download-source-button dropdown-item"
+   title="Download source file"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-file"></i>
+  </span>
+<span class="btn__text-container">.md</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li>
+<button onclick="window.print()"
+  class="btn btn-sm btn-download-pdf-button dropdown-item"
+  title="Print to PDF"
+  data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-file-pdf"></i>
+  </span>
+<span class="btn__text-container">.pdf</span>
+</button>
+</li>
+      
+  </ul>
+</div>
+
+
+
+
+<button onclick="toggleFullScreen()"
+  class="btn btn-sm btn-fullscreen-button"
+  title="Fullscreen mode"
+  data-bs-placement="bottom" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-expand"></i>
+  </span>
+
+</button>
+
+
+
+<script>
+document.write(`
+  <button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button" title="light/dark" aria-label="light/dark" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="theme-switch fa-solid fa-sun fa-lg" data-mode="light"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg" data-mode="dark"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"></i>
+  </button>
+`);
+</script>
+
+
+<script>
+document.write(`
+  <button class="btn btn-sm pst-navbar-icon search-button search-button__button" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="fa-solid fa-magnifying-glass fa-lg"></i>
+  </button>
+`);
+</script>
+<button class="sidebar-toggle secondary-toggle btn btn-sm" title="Toggle secondary sidebar" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <span class="fa-solid fa-list"></span>
+</button>
+</div></div>
+      
+    </div>
+  
+</div>
+</div>
+              
+              
+
+<div id="jb-print-docs-body" class="onlyprint">
+    <h1>DeepSeek Replay Tech Report</h1>
+    <!-- Table of contents -->
+    <div id="print-main-content">
+        <div id="jb-print-toc">
+            
+            <div>
+                <h2> Contents </h2>
+            </div>
+            <nav aria-label="Page">
+                <ul class="visible nav section-nav flex-column">
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#">DeepSeek Replay Tech Report</a></li>
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#overview">Overview</a></li>
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#test-results">Test Results</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#settings">Settings</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#prefill">Prefill</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#decode">Decode</a></li>
+</ul>
+</li>
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#implementation-and-tricks">Implementation and Tricks</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#eplb">EPLB</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#microbatch-overlapping">MicroBatch &amp; Overlapping</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#mtp">MTP</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#pd-disaggregation">PD Disaggregation</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#deepep-network">DeepEP / Network</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#cuda-kernel-fusion">CUDA Kernel Fusion</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#pdl">PDL</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#framework-overhead">Framework Overhead</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#weights-loading">Weights Loading</a></li>
+</ul>
+</li>
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#limitations-and-future-work">Limitations and Future Work</a></li>
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#thanks">Thanks</a></li>
+</ul>
+
+            </nav>
+        </div>
+    </div>
+</div>
+
+              
+                
+<div id="searchbox"></div>
+                <article class="bd-article">
+                  
+  <section class="tex2jax_ignore mathjax_ignore" id="deepseek-replay-tech-report">
+<h1>DeepSeek Replay Tech Report<a class="headerlink" href="#deepseek-replay-tech-report" title="Link to this heading">#</a></h1>
+</section>
+<section class="tex2jax_ignore mathjax_ignore" id="overview">
+<h1>Overview<a class="headerlink" href="#overview" title="Link to this heading">#</a></h1>
+<p>DeepSeek-V3 has demonstrated strong performance in multiple evaluations, becoming one of the most attention-grabbing open-source large models. Due to its large-scale MoE architecture, optimizing inference performance is a key challenge for engineering deployment. In February, the DeepSeek team successively open-sourced key components including DeepEP, DeepGEMM, FlashMLA, and EPLB. Based on the open-source community’s work, we completed optimization work on RTP-LLM, aligning with the performance of the DeepSeek inference system.</p>
+<p>RTP-LLM is an LLM inference acceleration engine developed by Alibaba Aicheng Technology, primarily serving Alibaba Group’s internal business. This article will share some key technical points, shortcomings, and reflections from the implementation process, as a way to thank the open-source community for their help. The relevant code is being organized and refactored, and complete code and reproduction methods will be updated soon.</p>
+<p>According to the introduction in <a class="reference external" href="https://github.com/deepseek-ai/open-infra-index/blob/main/202502OpenSourceWeek/day_6_one_more_thing_deepseekV3R1_inference_system_overview.md">DeepSeek Inference System Overview</a></p>
+<div class="docutils">
+<p>Total input tokens: 608B, of which 342B tokens (56.3%) hit the on-disk KV cache.</p>
+<p>Total output tokens: 168B. The average output speed was 20–22 tokens per second, and the average kvcache length per output token was 4,989 tokens.</p>
+<p>Each H800 node delivers an average throughput of ~73.7k tokens/s input (including cache hits) during prefilling or ~14.8k tokens/s output during decoding.</p>
+</div>
+<p><strong>In actual production services, the DeepSeek inference system achieves a prefill throughput of 32.2K per H800 node</strong> and <strong>a decode throughput of 14.8K TPS per H800 node</strong>. In RTP-LLM testing, using 4K input/2K output, <strong>under 1.6s TTFT and 50ms ITL constraints, we achieved prefill performance of 42.6K TPS per H800 node and decode performance of 14.7K TPS per H800 node</strong>.</p>
+</section>
+<section class="tex2jax_ignore mathjax_ignore" id="test-results">
+<h1>Test Results<a class="headerlink" href="#test-results" title="Link to this heading">#</a></h1>
+<section id="settings">
+<h2>Settings<a class="headerlink" href="#settings" title="Link to this heading">#</a></h2>
+<p>We deployed in <strong>Alibaba Cloud Lingjun H800 RoCE environment using PD separation and distributed EP architecture</strong>, setting TP=1, DP=EP=number of GPUs. The prefill single-instance specification is 4 nodes with 32 GPUs, and the decode single-instance specification is 18 nodes with 144 GPUs. During testing, we used 4 prefill instances and 1 decode instance, totaling 272 H800 GPUs.</p>
+<p>The test adopted a 4:1 PD instance ratio, which is not the perfect PD ratio. In actual production loads, more complex input/output length fluctuations will be faced, requiring integration with scheduling systems to dynamically and elastically adjust the number of PD instances.</p>
+</section>
+<section id="prefill">
+<h2>Prefill<a class="headerlink" href="#prefill" title="Link to this heading">#</a></h2>
+<p><img alt="image.png" src="../../_images/prefill.png" /></p>
+<p>The prefill instance uses 32 EP deployment. Under extreme pressure, a single GPU executing 2 4K requests takes 1.5s, with a throughput of 5333 TPS.</p>
+<p>The test did not simulate the impact of cache, which is one of the subsequent areas for improvement.</p>
+<p><strong>RTP-LLM also supports hybrid TP/DP/EP deployment. It is recommended to use TP=1 on high-compute H800 GPUs; on compute-constrained cards like H20, choose TP=2/4 based on latency constraints.</strong></p>
+</section>
+<section id="decode">
+<h2>Decode<a class="headerlink" href="#decode" title="Link to this heading">#</a></h2>
+<p><img alt="image.png" src="../../_images/decode.png" /></p>
+<p>The decode instance uses 144 EP deployment (128 + 16 redundant). Due to implementation differences, the host takes 2ms less time, but the device is slightly slower. The analysis indicates that the reasons are RoCE vs. IB network differences, lack of CUDA Graph optimization, and some slow kernel implementations. This is also a direction for future optimization.</p>
+<p><img alt="image.png" src="../../_images/throughput_latency.png" /></p>
+<p>The figure above shows the decode phase pressure test curve. At lower concurrency, a single user can reach 42 TPS. At 13200 concurrency, the SLA limit of 20 TPS per user is reached, with a single GPU throughput of 1850 TPS.</p>
+<p>Before DeepEP was open-sourced, we implemented distributed EP through All2All, achieving excellent throughput improvements compared to single-node setups, but with excessive latency. Besides high network latency, All2All brought severe host synchronization overhead, which was also detrimental to overlapping network and computation time. <strong>It is recommended that GPUs not supporting the DeepEP mechanism can equivalently implement Pure Device All2All to achieve similar performance; ASIC accelerator cards can go further and directly perform MoE/Dispatch/Combine overlap.</strong></p>
+</section>
+</section>
+<section class="tex2jax_ignore mathjax_ignore" id="implementation-and-tricks">
+<h1>Implementation and Tricks<a class="headerlink" href="#implementation-and-tricks" title="Link to this heading">#</a></h1>
+<section id="eplb">
+<h2>EPLB<a class="headerlink" href="#eplb" title="Link to this heading">#</a></h2>
+<p>The figure below shows the EPLB latency impact test. We found that the EP balancing state is significantly affected by test data, <strong>and test data cannot completely simulate real application load states</strong>. EP load balancing strategies remain an area for in-depth exploration in the future.</p>
+<p><img alt="image.png" src="../../_images/eplb.png" /></p>
+</section>
+<section id="microbatch-overlapping">
+<h2>MicroBatch &amp; Overlapping<a class="headerlink" href="#microbatch-overlapping" title="Link to this heading">#</a></h2>
+<p>To enable GPU computation and network communication to overlap, we fully implemented the Prefill/Decode Micro Batching solution and integrated it with DeepEP’s overlap mechanism. During the process, we made the following observations:</p>
+<ol class="arabic simple">
+<li><p>Whether for Prefill or Decode, since the Dispatch phase transfers FP8 tensors while the Combine phase transfers FP16 tensors, the communication time for the Combine phase is significantly higher than Dispatch. Therefore, <strong>when designing overlap solutions, larger time blocks need to be considered to cover the Combine phase communication. Introducing quantized communication in the inference phase is a potential improvement direction for the future.</strong></p></li>
+<li><p>For Prefill, the time spent on Attention accounts for a relatively small proportion. The final Attention+MoE gate portion and the MoE MLP portion spend similar amounts of time, both of which can cover the relatively long communication time of the Combine phase. Only request segmentation is needed, and the computation/communication of two MicroBatches can interleave. An important detail is that <strong>Shared Expert computation is always overlaid in the Combine portion to ensure that the computation time covering Combine is more than that covering Dispatch</strong>.</p></li>
+</ol>
+<p>Considering the Qwen3 model, although it has no Shared Expert, the same overlap scheme can still be adopted in the Decode phase, using the Attention operator as a boundary to insert MLP computation, covering Dispatch and Combine communication times before and after respectively. At the framework level, to be compatible with both DeepEP and Vanilla All2All communication overlap functions and considering extension to various hardware, we developed <strong>a unified communication callback interface, enabling MicroBatch capabilities to be easily extended to other accelerator cards</strong>.</p>
+</section>
+<section id="mtp">
+<h2>MTP<a class="headerlink" href="#mtp" title="Link to this heading">#</a></h2>
+<p>We added MTP speculative sampling support to our previously implemented <a class="reference external" href="https://mp.weixin.qq.com/s/EiSRF2ORy22I1pimCCvcPQ">general speculative sampling framework</a>. MTP is the most critical link in DeepSeek ITL optimization. The only way to increase computational intensity in the decode phase is to increase GEMM BS. <strong>KV Cache capacity limits Global BS, and MTP only requires BS/2 to achieve the same computational intensity as the original</strong>. Enabling MicroBatch for computation-communication overlap has the side effect of increased latency. <strong>MTP can reduce average ITL and compensate for the latency caused by MicroBatch</strong>. A win-win situation.</p>
+</section>
+<section id="pd-disaggregation">
+<h2>PD Disaggregation<a class="headerlink" href="#pd-disaggregation" title="Link to this heading">#</a></h2>
+<p>In the DeepSeek-V3 model, due to significant differences in Prefill and Decode computational requirements and different EP strategies, PD separation deployment is a necessary choice. We extended <strong>support for Prefill-Decode deployment with different TP specifications, which is particularly important for low-compute cards</strong>. We implemented two PD load balancing strategies: KV Cache-based balancing and BS-based balancing. The test data has small BS variance, and under high pressure and <strong>high EP traffic, BS balancing is more important for Dispatch/Combine latency</strong>. In production environments, BS variance and Seq variance factors need to be comprehensively considered, or Decode instances can be further split according to traffic characteristics.</p>
+</section>
+<section id="deepep-network">
+<h2>DeepEP / Network<a class="headerlink" href="#deepep-network" title="Link to this heading">#</a></h2>
+<p>DeepEP is primarily optimized for IB environments. When facing the diverse underlying environments and technology stacks in actual production, to achieve engineering deployment and optimal performance, we made the following optimizations and improvements:</p>
+<ol class="arabic simple">
+<li><p>Dual uplink performance fix: Through in-depth analysis of Normal kernel (few QP, large messages) and Low latency kernel (many QP, small messages) characteristics, we provided a pure IAAS layer fix function without introducing performance overhead. Specifically, we provided message-level and queue-level load balancing solutions for Normal kernel and Low Latency kernel at the NVSHMEM layer. The optimized version maintains the stability advantages of dual uplinks while achieving communication performance that can match or even slightly surpass single uplink IB network solutions.</p></li>
+<li><p>Communication mode optimization: By jointly considering intra-node and inter-node network architectures, we optimized intra-node and inter-node traffic patterns, fully utilized available links in the system, achieved traffic balance between network tracks and planes, avoided network traffic conflicts and collisions, and maximized overall system communication efficiency. In Low Latency communication mode, communication latency can be reduced by 60%+.</p></li>
+<li><p>Intra-node topology self-repair capability: Abnormal intra-node topology reporting affects communication links between network cards and GPUs, leading to network performance degradation. To solve this problem, we implemented intra-node topology self-repair functionality, shielding upper layers from underlying server hardware and software differences, ensuring affinity relationships between GPUs and network cards across different machine types.</p></li>
+<li><p>Virtualization environment adaptation: To flexibly support complex and variable business scenarios, we supported a high-performance network solution based on commercial card hardware SRIOV virtualization, solved the adaptation problem between SRIOV and DeepEP, and completed large-scale deployment through optimization to make VF and PF performance consistent.</p></li>
+</ol>
+</section>
+<section id="cuda-kernel-fusion">
+<h2>CUDA Kernel Fusion<a class="headerlink" href="#cuda-kernel-fusion" title="Link to this heading">#</a></h2>
+<p>We conducted detailed analysis of the CUDA kernel execution flow and optimized based on model characteristics:</p>
+<ol class="arabic simple">
+<li><p><strong>Moved some matrix multiplication to BF16 format computation</strong>. FP8 matrix multiplication incurs greater overhead due to the need for quantization operations when the scale is insufficient.</p></li>
+<li><p>Advanced the transpose in Rotary Embedding to the weight loading phase to avoid introducing Elementwise operators.</p></li>
+<li><p>Fuse Quantization and Transpose before GEMM computation.</p></li>
+<li><p>Future plans include fusing Activation and Quantization.</p></li>
+</ol>
+<p><img alt="image.png" src="../../_images/fusion.png" /></p>
+</section>
+<section id="pdl">
+<h2>PDL<a class="headerlink" href="#pdl" title="Link to this heading">#</a></h2>
+<p>The Hopper architecture introduced Programmatic Dependent Launch (PDL), allowing two adjacent kernels on the same CUDA stream to execute overlapped, enabling the latter kernel to complete initialization and other work in advance while the former kernel is executing. By introducing PDL into GEMM kernels, <strong>we can execute GEMM initialization operations in advance during the computation of other kernels like Quantization, improving overall system performance</strong>.</p>
+<p>The introduction of PDL also brings more possibilities for kernel-level optimization, such as GEMM <strong>Weight Prefetch</strong>. After overlapping Quantization operations with GEMM through PDL, prefetch operations for weights can be added to the overlapping portion of the GEMM kernel, so that when the MMA is actually executed, the required weight tensor is already in the L2 cache, achieving the purpose of accelerating the GEMM kernel.</p>
+</section>
+<section id="framework-overhead">
+<h2>Framework Overhead<a class="headerlink" href="#framework-overhead" title="Link to this heading">#</a></h2>
+<p>Overall framework overhead mainly concentrates on two parts: <strong>one part is host overhead between adjacent Forward Steps, around 1.5ms; the other part is kernel launch overhead, around 2ms</strong>.</p>
+<p>The main issue with host overhead between Forward Steps is our bulky Dynamic Batch implementation, whose performance overhead is linearly related to BS. We lightweighted the Dynamic Batch implementation, processing operations not dependent on the next step asynchronously or with multithreading. Ideally, under 128 BS conditions, we can achieve under 200us. The current excessive host overhead is largely due to an additional Dynamic Batch in MTP situations, which can be further optimized away.</p>
+<p><strong>Kernel Launch Overhead is primarily due to too many GPU kernels</strong>. With MicroBatch enabled, the number of GPU kernels doubles, making the problem more severe. A better solution is CUDA Graph. Here, performance and architecture complexity need to be balanced. The RTP-LLM framework has already avoided host-side launch overhead issues through C++ implementation. However, we observed that <strong>even when launch speed far exceeds kernel execution speed, there is still some launch overhead at the GPU device level</strong>, which CUDA Graph can mitigate to some extent. <strong>We look forward to NVIDIA being able to thoroughly solve this problem in future drivers or hardware versions</strong>.</p>
+</section>
+<section id="weights-loading">
+<h2>Weights Loading<a class="headerlink" href="#weights-loading" title="Link to this heading">#</a></h2>
+<p>Model weight loading speed directly affects R&amp;D and deployment efficiency. For 671B weights, we achieved <strong>minute-level loading</strong> through optimization with the following specific plan:</p>
+<ol class="arabic simple">
+<li><p><strong>Weight preprocessing and format pre-conversion</strong>. RTP-LLM needs to perform Split, Transpose, and other operations on weights during loading. We designed a preprocessing system to convert raw weights into the weight format required by the framework in advance. After preprocessing, computational overhead during loading is eliminated.</p></li>
+<li><p><strong>Direct IO + Pinned Memory acceleration for large file reading</strong>. To address the I/O bottleneck of individual weight files exceeding 100GB, we used Direct IO to bypass the system Page Cache mechanism, established a fixed memory pool through CUDA Pinned Memory, and eliminated multiple memory copies between kernel space and user space.</p></li>
+</ol>
+</section>
+</section>
+<section class="tex2jax_ignore mathjax_ignore" id="limitations-and-future-work">
+<h1>Limitations and Future Work<a class="headerlink" href="#limitations-and-future-work" title="Link to this heading">#</a></h1>
+<ol class="arabic simple">
+<li><p>In terms of operator performance, we have not yet fully aligned with DeepSeek. Core operators such as Prefill Attention and Decode Quantization have certain performance gaps and require further optimization. Additionally, CUDA Graph is also a key improvement direction.</p></li>
+<li><p>EPLB essentially requires deep collaboration between algorithm design and system engineering. Currently, there is no universal and efficient solution. For dynamic load distribution characteristics under specific application scenarios, more adaptive and robust load balancing strategies need to be explored.</p></li>
+<li><p>MicroBatch is not the only solution for computation-communication overlap. Combining excellent work such as FLUX and Triton-distributed, multiple parallel mode fusion is a direction worth exploring in the future.</p></li>
+<li><p>On DeepSeek-V3, the Pure EP solution matches well with 6K length short sequence tasks. For longer sequence scenarios, constrained by KV Cache capacity, more sophisticated parallel modes need to be designed to improve MoE computational efficiency.</p></li>
+<li><p>In large-scale testing and deployment practices, we observed multiple instances where single GPU failures caused the entire 144 GPU decode instance to fail. To address this, we introduced ACCL combined with service discovery mechanisms in the PD separation architecture, building a serverless PD service with elasticity and high availability. We plan to further combine task schedulers and communication library capabilities in the future to build a Serverless CCL (Collective Communication Library) framework with high fault tolerance and elastic scaling capabilities.</p></li>
+<li><p>Unlike H800, the heterogeneous computing cards that can be scaled in our production environment generally have lower compute power. Optimizing throughput under TTFT and ITL constraints in this context is a highly challenging problem. At the same time, how to optimize performance well across various card types and generations is also a problem we need to work to solve.</p></li>
+</ol>
+</section>
+<section class="tex2jax_ignore mathjax_ignore" id="thanks">
+<h1>Thanks<a class="headerlink" href="#thanks" title="Link to this heading">#</a></h1>
+<p>Through two months of continuous effort, we have aligned with the performance of the DeepSeek inference engine. We thank the open-source community for sharing excellent open-source models such as DeepSeek, Qwen, and Llama, as well as excellent engineering engines and optimizations such as FasterTransformer, TensoRT-LLM, FlashAttention, FlashInfer, Transformers, vLLM, and SGLang. We believe that open-source, openness, and communication are the inevitable path to achieving AGI. We hope to jointly promote AI technology innovation and ecosystem prosperity through in-depth discussion and exchange with the community.</p>
+</section>
+
+
+                </article>
+              
+
+              
+              
+              
+              
+                <footer class="prev-next-footer d-print-none">
+                  
+<div class="prev-next-area">
+    <a class="left-prev"
+       href="index.html"
+       title="previous page">
+      <i class="fa-solid fa-angle-left"></i>
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">previous</p>
+        <p class="prev-next-title">deepseek</p>
+      </div>
+    </a>
+    <a class="right-next"
+       href="deploy.html"
+       title="next page">
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">next</p>
+        <p class="prev-next-title">Recommended Deployment</p>
+      </div>
+      <i class="fa-solid fa-angle-right"></i>
+    </a>
+</div>
+                </footer>
+              
+            </div>
+            
+            
+              
+                <div class="bd-sidebar-secondary bd-toc"><div class="sidebar-secondary-items sidebar-secondary__inner">
+
+
+  <div class="sidebar-secondary-item">
+  <div class="page-toc tocsection onthispage">
+    <i class="fa-solid fa-list"></i> Contents
+  </div>
+  <nav class="bd-toc-nav page-toc">
+    <ul class="visible nav section-nav flex-column">
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#">DeepSeek Replay Tech Report</a></li>
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#overview">Overview</a></li>
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#test-results">Test Results</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#settings">Settings</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#prefill">Prefill</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#decode">Decode</a></li>
+</ul>
+</li>
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#implementation-and-tricks">Implementation and Tricks</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#eplb">EPLB</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#microbatch-overlapping">MicroBatch &amp; Overlapping</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#mtp">MTP</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#pd-disaggregation">PD Disaggregation</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#deepep-network">DeepEP / Network</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#cuda-kernel-fusion">CUDA Kernel Fusion</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#pdl">PDL</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#framework-overhead">Framework Overhead</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#weights-loading">Weights Loading</a></li>
+</ul>
+</li>
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#limitations-and-future-work">Limitations and Future Work</a></li>
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#thanks">Thanks</a></li>
+</ul>
+
+  </nav></div>
+
+</div></div>
+              
+            
+          </div>
+          <footer class="bd-footer-content">
+            
+<div class="bd-footer-content__inner container">
+  
+  <div class="footer-item">
+    
+<p class="component-author">
+By RTP-LLM Team
+</p>
+
+  </div>
+  
+  <div class="footer-item">
+    
+
+  <p class="copyright">
+    
+      © Copyright 2023-2025, RTP-LLM.
+      <br/>
+    
+  </p>
+
+  </div>
+  
+  <div class="footer-item">
+    <p class="last-updated">
+  Last updated on Sep 17, 2025.
+  <br/>
+</p>
+  </div>
+  
+  <div class="footer-item">
+    
+  </div>
+  
+</div>
+          </footer>
+        
+
+      </main>
+    </div>
+  </div>
+  
+  <!-- Scripts loaded after <body> so the DOM is not blocked -->
+  <script src="../../_static/scripts/bootstrap.js?digest=dfe6caa3a7d634c4db9b"></script>
+<script src="../../_static/scripts/pydata-sphinx-theme.js?digest=dfe6caa3a7d634c4db9b"></script>
+
+  <footer class="bd-footer">
+  </footer>
+  </body>
+</html>

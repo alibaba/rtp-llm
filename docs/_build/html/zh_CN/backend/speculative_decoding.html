@@ -1,0 +1,883 @@
+
+<!DOCTYPE html>
+
+
+<html lang="zh-CN" data-content_root="../" >
+
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>推测解码 &#8212; RTP-LLM</title>
+  
+  
+  
+  <script data-cfasync="false">
+    document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
+    document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
+  </script>
+  
+  <!-- Loaded before other Sphinx assets -->
+  <link href="../_static/styles/theme.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+<link href="../_static/styles/bootstrap.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+<link href="../_static/styles/pydata-sphinx-theme.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+
+  
+  <link href="../_static/vendor/fontawesome/6.5.2/css/all.min.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+  <link rel="preload" as="font" type="font/woff2" crossorigin href="../_static/vendor/fontawesome/6.5.2/webfonts/fa-solid-900.woff2" />
+<link rel="preload" as="font" type="font/woff2" crossorigin href="../_static/vendor/fontawesome/6.5.2/webfonts/fa-brands-400.woff2" />
+<link rel="preload" as="font" type="font/woff2" crossorigin href="../_static/vendor/fontawesome/6.5.2/webfonts/fa-regular-400.woff2" />
+
+    <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=03e43079" />
+    <link rel="stylesheet" type="text/css" href="../_static/styles/sphinx-book-theme.css?v=eba8b062" />
+    <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../_static/css/custom_log.css" />
+    <link rel="stylesheet" type="text/css" href="../_static/css/language-switcher.css?v=943557c0" />
+    <link rel="stylesheet" type="text/css" href="../_static/css/custom_log.css" />
+    <link rel="stylesheet" type="text/css" href="../_static/css/language-switcher.css?v=943557c0" />
+  
+  <!-- Pre-loaded scripts that we'll load fully later -->
+  <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=dfe6caa3a7d634c4db9b" />
+<link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=dfe6caa3a7d634c4db9b" />
+  <script src="../_static/vendor/fontawesome/6.5.2/js/all.min.js?digest=dfe6caa3a7d634c4db9b"></script>
+
+    <script src="../_static/documentation_options.js?v=8bc30457"></script>
+    <script src="../_static/doctools.js?v=9bcbadda"></script>
+    <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../_static/copybutton.js?v=ccdb6887"></script>
+    <script src="../_static/js/language-switcher.js?v=ebe09c31"></script>
+    <script src="../_static/scripts/sphinx-book-theme.js?v=887ef09a"></script>
+    <script src="../_static/translations.js?v=beaddf03"></script>
+    <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
+    <script>DOCUMENTATION_OPTIONS.pagename = 'backend/speculative_decoding';</script>
+    <script src="../_static/js/language-switcher.js?v=ebe09c31"></script>
+    <link rel="index" title="索引" href="../genindex.html" />
+    <link rel="search" title="搜索" href="../search.html" />
+    <link rel="next" title="重用缓存" href="reuse_kv_cache.html" />
+    <link rel="prev" title="如何支持新模型" href="../supported_models/support_new_models.html" /> 
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="docsearch:language" content="zh-CN"/>
+    <meta name="docbuild:last-update" content="2025 年 09 月 17 日"/>
+<link
+  rel="stylesheet"
+  href="../_static/css/language-switcher.css"
+/>
+<script src="../_static/js/language-switcher.js"></script>
+
+  </head>
+  
+  
+  <body data-bs-spy="scroll" data-bs-target=".bd-toc-nav" data-offset="180" data-bs-root-margin="0px 0px -60%" data-default-mode="">
+
+  
+  
+  <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
+  
+  <div id="pst-scroll-pixel-helper"></div>
+  
+  <button type="button" class="btn rounded-pill" id="pst-back-to-top">
+    <i class="fa-solid fa-arrow-up"></i>Back to top</button>
+
+  
+  <input type="checkbox"
+          class="sidebar-toggle"
+          id="pst-primary-sidebar-checkbox"/>
+  <label class="overlay overlay-primary" for="pst-primary-sidebar-checkbox"></label>
+  
+  <input type="checkbox"
+          class="sidebar-toggle"
+          id="pst-secondary-sidebar-checkbox"/>
+  <label class="overlay overlay-secondary" for="pst-secondary-sidebar-checkbox"></label>
+  
+  <div class="search-button__wrapper">
+    <div class="search-button__overlay"></div>
+    <div class="search-button__search-container">
+<form class="bd-search d-flex align-items-center"
+      action="../search.html"
+      method="get">
+  <i class="fa-solid fa-magnifying-glass"></i>
+  <input type="search"
+         class="form-control"
+         name="q"
+         id="search-input"
+         placeholder="Search..."
+         aria-label="Search..."
+         autocomplete="off"
+         autocorrect="off"
+         autocapitalize="off"
+         spellcheck="false"/>
+  <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd>K</kbd></span>
+</form></div>
+  </div>
+
+  <div class="pst-async-banner-revealer d-none">
+  <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="Version warning"></aside>
+</div>
+
+  
+    <header class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
+    </header>
+  
+
+  <div class="bd-container">
+    <div class="bd-container__inner bd-page-width">
+      
+      
+      
+      <div class="bd-sidebar-primary bd-sidebar">
+        
+
+  
+  <div class="sidebar-header-items sidebar-primary__section">
+    
+    
+    
+    
+  </div>
+  
+    <div class="sidebar-primary-items__start sidebar-primary__section">
+        <div class="sidebar-primary-item">
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="../index.html">
+  
+  
+  
+  
+  
+    
+    
+      
+    
+    
+    <img src="../_static/logo.png" class="logo__image only-light" alt="RTP-LLM - Home"/>
+    <script>document.write(`<img src="../_static/logo.png" class="logo__image only-dark" alt="RTP-LLM - Home"/>`);</script>
+  
+  
+</a></div>
+        <div class="sidebar-primary-item">
+
+ <script>
+ document.write(`
+   <button class="btn search-button-field search-button__button" title="搜索" aria-label="搜索" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="fa-solid fa-magnifying-glass"></i>
+    <span class="search-button__default-text">搜索</span>
+    <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+   </button>
+ `);
+ </script></div>
+        <div class="sidebar-primary-item"><nav class="bd-links bd-docs-nav" aria-label="Main">
+    <div class="bd-toc-item navbar-nav active">
+        <p aria-level="2" class="caption" role="heading"><span class="caption-text">安装</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../start/install.html">安装 RTP-LLM</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">发布版本</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../release/v0.2.0/release.html">RTP-LLM 0.2.0</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">基本用法</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="send_request.html">发送请求</a></li>
+<li class="toctree-l1"><a class="reference internal" href="openai_api_completions.html">OpenAI API - 文本生成/会话</a></li>
+<li class="toctree-l1"><a class="reference internal" href="openai_api_vision.html">OpenAI API - 多模态</a></li>
+<li class="toctree-l1"><a class="reference internal" href="openai_api_embeddings.html">OpenAI API - Embedding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="native_api.html">RTP-LLM Native API</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">后端教程</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../references/deepseek/index.html">deepseek</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../references/qwen/index.html">qwen-moe</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../references/kimi/index.html">kimi</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">高级后端配置</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="server_arguments.html">服务器参数</a></li>
+<li class="toctree-l1"><a class="reference internal" href="sampling_params.html">采样配置</a></li>
+<li class="toctree-l1"><a class="reference internal" href="attention_backend.html">注意力后端</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">支持的模型</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/generative_models.html">大语言模型</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/multimodal_language_models.html">多模态语言模型</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/embedding_models.html">Embedding 模型</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/support_new_models.html">如何支持新模型</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">高级功能</span></p>
+<ul class="current nav bd-sidenav">
+<li class="toctree-l1 current active"><a class="current reference internal" href="#">推测解码</a></li>
+<li class="toctree-l1"><a class="reference internal" href="reuse_kv_cache.html">重用缓存</a></li>
+
+<li class="toctree-l1"><a class="reference internal" href="function_calling.html">工具和函数调用</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quantization.html">量化</a></li>
+<li class="toctree-l1"><a class="reference internal" href="lora.html">LoRA Serving</a></li>
+<li class="toctree-l1"><a class="reference internal" href="pd_disaggregation.html">PD解聚</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">参考文献</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../references/general.html">通用指南</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../references/developer.html">Developer Reference</a></li>
+</ul>
+
+    </div>
+</nav></div>
+    </div>
+  
+  
+  <div class="sidebar-primary-items__end sidebar-primary__section">
+  </div>
+  
+  <div id="rtd-footer-container"></div>
+
+
+      </div>
+      
+      <main id="main-content" class="bd-main" role="main">
+        
+        
+
+<div class="sbt-scroll-pixel-helper"></div>
+
+          <div class="bd-content">
+            <div class="bd-article-container">
+              
+              <div class="bd-header-article d-print-none">
+<div class="header-article-items header-article__inner">
+  
+    <div class="header-article-items__start">
+      
+        <div class="header-article-item"><button class="sidebar-toggle primary-toggle btn btn-sm" title="Toggle primary sidebar" data-bs-placement="bottom" data-bs-toggle="tooltip">
+  <span class="fa-solid fa-bars"></span>
+</button></div>
+      
+    </div>
+  
+  
+    <div class="header-article-items__end">
+      
+        <div class="header-article-item">
+
+<div class="article-header-buttons">
+
+
+
+
+
+<div class="dropdown dropdown-source-buttons">
+  <button class="btn dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" aria-label="Source repositories">
+    <i class="fab fa-github"></i>
+  </button>
+  <ul class="dropdown-menu">
+      
+      
+      
+      <li><a href="https://github.com/alibaba/rtp-llm" target="_blank"
+   class="btn btn-sm btn-source-repository-button dropdown-item"
+   title="源码库"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fab fa-github"></i>
+  </span>
+<span class="btn__text-container">Repository</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li><a href="https://github.com/alibaba/rtp-llm/blob/main/backend/speculative_decoding.md?plain=1" target="_blank"
+   class="btn btn-sm btn-source-file-button dropdown-item"
+   title="Show source"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-code"></i>
+  </span>
+<span class="btn__text-container">Show source</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li><a href="https://github.com/alibaba/rtp-llm/edit/main/backend/speculative_decoding.md" target="_blank"
+   class="btn btn-sm btn-source-edit-button dropdown-item"
+   title="Suggest edit"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-pencil-alt"></i>
+  </span>
+<span class="btn__text-container">Suggest edit</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li><a href="https://github.com/alibaba/rtp-llm/issues/new?title=Issue%20on%20page%20%2Fbackend/speculative_decoding.html&body=Your%20issue%20content%20here." target="_blank"
+   class="btn btn-sm btn-source-issues-button dropdown-item"
+   title="创建议题"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-lightbulb"></i>
+  </span>
+<span class="btn__text-container">Open issue</span>
+</a>
+</li>
+      
+  </ul>
+</div>
+
+
+
+
+
+
+<div class="dropdown dropdown-download-buttons">
+  <button class="btn dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" aria-label="下载此页面">
+    <i class="fas fa-download"></i>
+  </button>
+  <ul class="dropdown-menu">
+      
+      
+      
+      <li><a href="../_sources/backend/speculative_decoding.md" target="_blank"
+   class="btn btn-sm btn-download-source-button dropdown-item"
+   title="下载源文件"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-file"></i>
+  </span>
+<span class="btn__text-container">.md</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li>
+<button onclick="window.print()"
+  class="btn btn-sm btn-download-pdf-button dropdown-item"
+  title="列印成 PDF"
+  data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-file-pdf"></i>
+  </span>
+<span class="btn__text-container">.pdf</span>
+</button>
+</li>
+      
+  </ul>
+</div>
+
+
+
+
+<button onclick="toggleFullScreen()"
+  class="btn btn-sm btn-fullscreen-button"
+  title="全屏模式"
+  data-bs-placement="bottom" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-expand"></i>
+  </span>
+
+</button>
+
+
+
+<script>
+document.write(`
+  <button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button" title="light/dark" aria-label="light/dark" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="theme-switch fa-solid fa-sun fa-lg" data-mode="light"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg" data-mode="dark"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"></i>
+  </button>
+`);
+</script>
+
+
+<script>
+document.write(`
+  <button class="btn btn-sm pst-navbar-icon search-button search-button__button" title="搜索" aria-label="搜索" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="fa-solid fa-magnifying-glass fa-lg"></i>
+  </button>
+`);
+</script>
+<button class="sidebar-toggle secondary-toggle btn btn-sm" title="Toggle secondary sidebar" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <span class="fa-solid fa-list"></span>
+</button>
+</div></div>
+      
+    </div>
+  
+</div>
+</div>
+              
+              
+
+<div id="jb-print-docs-body" class="onlyprint">
+    <h1>推测解码</h1>
+    <!-- Table of contents -->
+    <div id="print-main-content">
+        <div id="jb-print-toc">
+            
+            <div>
+                <h2> 目录 </h2>
+            </div>
+            <nav aria-label="Page">
+                <ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#what-is-speculative-sampling">1. What is Speculative Sampling</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#speculative-sampling-algorithms-supported-by-rtp-llm">2. Speculative Sampling Algorithms Supported by RTP-LLM</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#using-speculative-sampling-in-rtp-llm">3. Using Speculative Sampling in RTP-LLM</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#vanilla">vanilla</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#deterministic">deterministic</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#mtp">mtp</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#eagle3">eagle3</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#performance-observation-tuning">4. Performance Observation &amp; Tuning</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#performance-observation">4.1 性能观察</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#tuning">4.2 调优</a><ul class="nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#id1">vanilla</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#id2">deterministic</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#mtp-eagle3">mtp / eagle3</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+            </nav>
+        </div>
+    </div>
+</div>
+
+              
+                
+<div id="searchbox"></div>
+                <article class="bd-article">
+                  
+  <section class="tex2jax_ignore mathjax_ignore" id="speculative-decoding">
+<h1>推测解码<a class="headerlink" href="#speculative-decoding" title="Link to this heading">#</a></h1>
+<hr class="docutils" />
+<section id="what-is-speculative-sampling">
+<h2>1. What is Speculative Sampling<a class="headerlink" href="#what-is-speculative-sampling" title="Link to this heading">#</a></h2>
+<p>推测采样是一种<strong>无精度损失</strong>的通用推理加速技术：</p>
+<ol class="arabic simple">
+<li><p>一个轻量级的**提议模型（Propose Model）**一次性生成多个候选 token；</p></li>
+<li><p>原始的**打分模型（Score Model，即大模型）**随后并行验证这些 token；</p></li>
+<li><p>将“验证”转化为 Prefill 操作，从而提升 GPU 计算与内存比，降低 Decode 阶段的延迟。</p></li>
+</ol>
+</section>
+<hr class="docutils" />
+<section id="speculative-sampling-algorithms-supported-by-rtp-llm">
+<h2>2. Speculative Sampling Algorithms Supported by RTP-LLM<a class="headerlink" href="#speculative-sampling-algorithms-supported-by-rtp-llm" title="Link to this heading">#</a></h2>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>名称</p></th>
+<th class="head"><p>简介</p></th>
+<th class="head"><p>来源</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><strong>vanilla</strong></p></td>
+<td><p>最经典的推测采样实现方式</p></td>
+<td><p><a class="reference external" href="https://proceedings.mlr.press/v202/leviathan23a/leviathan23a.pdf">Leviathan 等，ICML'23</a></p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>deterministic</strong></p></td>
+<td><p>Prompt-Lookup + 推测编辑</p></td>
+<td><p><a class="reference external" href="https://github.com/apoorvumang/prompt-lookup-decoding">Prompt Lookup</a>，<a class="reference external" href="https://fireworks.ai/blog/cursor">Cursor 博客</a></p></td>
+</tr>
+<tr class="row-even"><td><p><strong>mtp</strong></p></td>
+<td><p>基于 DeepSeek-V3 的推测采样框架</p></td>
+<td><p><a class="reference external" href="https://arxiv.org/pdf/2412.19437">DeepSeek-V3 技术报告</a></p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>eagle3</strong></p></td>
+<td><p>EAGLE-3</p></td>
+<td><p><a class="reference external" href="https://arxiv.org/pdf/2503.01840">EAGLE-3 论文</a></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<hr class="docutils" />
+<section id="using-speculative-sampling-in-rtp-llm">
+<h2>3. Using Speculative Sampling in RTP-LLM<a class="headerlink" href="#using-speculative-sampling-in-rtp-llm" title="Link to this heading">#</a></h2>
+<p>在原有基础启动参数基础上，添加以下环境变量：</p>
+<section id="vanilla">
+<h3>vanilla<a class="headerlink" href="#vanilla" title="Link to this heading">#</a></h3>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>参数</p></th>
+<th class="head"><p>值</p></th>
+<th class="head"><p>说明</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>--sp_type</p></td>
+<td><p>vanilla</p></td>
+<td><p>推测采样策略</p></td>
+</tr>
+<tr class="row-odd"><td><p>--sp_checkpoint_path</p></td>
+<td><p><small model ckpt></p></td>
+<td><p>小模型权重路径</p></td>
+</tr>
+<tr class="row-even"><td><p>--sp_model_type</p></td>
+<td><p>qwen</p></td>
+<td><p>小模型架构，与主模型一致</p></td>
+</tr>
+<tr class="row-odd"><td><p>--sp_quantization</p></td>
+<td><p>FP8_PER_BLOCK/FP8</p></td>
+<td><p>小模型量化方式：FP8、FP8_PER_BLOCK 等</p></td>
+</tr>
+<tr class="row-even"><td><p>--gen_num_per_cycle</p></td>
+<td><p>5</p></td>
+<td><p>小模型每轮生成多少个 token</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section id="deterministic">
+<h3>deterministic<a class="headerlink" href="#deterministic" title="Link to this heading">#</a></h3>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>参数</p></th>
+<th class="head"><p>值</p></th>
+<th class="head"><p>说明</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>--sp_type</p></td>
+<td><p>deterministic</p></td>
+<td><p>推测采样策略</p></td>
+</tr>
+<tr class="row-odd"><td><p>--gen_num_per_cycle</p></td>
+<td><p>128</p></td>
+<td><p>小模型每轮生成多少个 token</p></td>
+</tr>
+<tr class="row-even"><td><p>--sp_min_token_match</p></td>
+<td><p>2</p></td>
+<td><p>n-gram token 匹配的最小长度</p></td>
+</tr>
+<tr class="row-odd"><td><p>--sp_max_token_match</p></td>
+<td><p>2</p></td>
+<td><p>n-gram token 匹配的最大长度</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>And supplement in the request&#39;s `extra_config`:
+```json
+{
+  &quot;sp_advice_prompt&quot;: &quot;&lt;text you expect the LLM to continue generating&gt;&quot;,
+  &quot;sp_edit&quot;: 0          // 0=regular Prompt-Lookup; 1=Speculative Edit
+}
+</pre></div>
+</div>
+</section>
+<section id="mtp">
+<h3>mtp<a class="headerlink" href="#mtp" title="Link to this heading">#</a></h3>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>参数</p></th>
+<th class="head"><p>值</p></th>
+<th class="head"><p>说明</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>--sp_type</p></td>
+<td><p>mtp</p></td>
+<td><p>推测采样策略</p></td>
+</tr>
+<tr class="row-odd"><td><p>--sp_checkpoint_path</p></td>
+<td><p><small model ckpt></p></td>
+<td><p>小模型权重路径</p></td>
+</tr>
+<tr class="row-even"><td><p>--sp_model_type</p></td>
+<td><p>qwen_2_mtp</p></td>
+<td><p>MTP 小模型类型</p></td>
+</tr>
+<tr class="row-odd"><td><p>--gen_num_per_cycle</p></td>
+<td><p>5</p></td>
+<td><p>小模型每轮生成多少个 token</p></td>
+</tr>
+<tr class="row-even"><td><p>--sp_quantization</p></td>
+<td><p>FP8_PER_BLOCK/FP8</p></td>
+<td><p>小模型量化方式：FP8、FP8_PER_BLOCK 等</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section id="eagle3">
+<h3>eagle3<a class="headerlink" href="#eagle3" title="Link to this heading">#</a></h3>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>参数</p></th>
+<th class="head"><p>值</p></th>
+<th class="head"><p>说明</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>--sp_type</p></td>
+<td><p>eagle3</p></td>
+<td><p>推测采样策略</p></td>
+</tr>
+<tr class="row-odd"><td><p>--sp_checkpoint_path</p></td>
+<td><p><small model ckpt></p></td>
+<td><p>小模型权重路径</p></td>
+</tr>
+<tr class="row-even"><td><p>--sp_model_type</p></td>
+<td><p>qwen_3_moe_eagle3</p></td>
+<td><p>EAGLE3 小模型类型</p></td>
+</tr>
+<tr class="row-odd"><td><p>--gen_num_per_cycle</p></td>
+<td><p>5</p></td>
+<td><p>小模型每轮生成多少个 token</p></td>
+</tr>
+<tr class="row-even"><td><p>--sp_quantization</p></td>
+<td><p>FP8_PER_BLOCK/FP8</p></td>
+<td><p>小模型量化方式：FP8、FP8_PER_BLOCK 等</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+</section>
+<hr class="docutils" />
+<section id="performance-observation-tuning">
+<h2>4. Performance Observation &amp; Tuning<a class="headerlink" href="#performance-observation-tuning" title="Link to this heading">#</a></h2>
+<section id="performance-observation">
+<h3>4.1 性能观察<a class="headerlink" href="#performance-observation" title="Link to this heading">#</a></h3>
+<p>在请求体中添加以下内容：</p>
+<div class="highlight-json notranslate"><div class="highlight"><pre><span></span><span class="nt">&quot;aux_info&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span>
+</pre></div>
+</div>
+<p>示例响应字段：</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>cost_time   : 123 ms      // End-to-end
+output_len  : 60 tokens   // Number of output tokens
+iter_count  : 12          // Speculative rounds
+avg_tokens_per_iter = output_len / iter_count = 5 // Average tokens accepted per round
+</pre></div>
+</div>
+<p>推测采样的最重要指标是 avg_tokens_per_iter，值越高越好。</p>
+</section>
+<section id="tuning">
+<h3>4.2 调优<a class="headerlink" href="#tuning" title="Link to this heading">#</a></h3>
+<section id="id1">
+<h4>vanilla<a class="headerlink" href="#id1" title="Link to this heading">#</a></h4>
+<ol class="arabic simple">
+<li><p><strong>模型选择</strong>：</p>
+<ul class="simple">
+<li><p>从同一系列中选择更小的模型（例如 Qwen2.5-0.5B）。</p></li>
+<li><p>尽可能对小模型应用 INT4 量化。</p></li>
+</ul>
+</li>
+<li><p><strong>gen_num_per_cycle</strong>：</p>
+<ul class="simple">
+<li><p>默认为 5；若接受率 &gt;40%，可适当增加。</p></li>
+</ul>
+</li>
+</ol>
+</section>
+<section id="id2">
+<h4>deterministic<a class="headerlink" href="#id2" title="Link to this heading">#</a></h4>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>参数</p></th>
+<th class="head"><p>建议</p></th>
+<th class="head"><p>备注</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>sp_min/max_token_match</p></td>
+<td><p>2</p></td>
+<td><p>n-gram 匹配长度范围</p></td>
+</tr>
+<tr class="row-odd"><td><p>gen_num_per_cycle</p></td>
+<td><p>128（batch=1）</p></td>
+<td><p>在长序列编辑场景中可进一步提高</p></td>
+</tr>
+<tr class="row-even"><td><p>sp_edit</p></td>
+<td><p>代码/文本编辑设为 1，否则为 0</p></td>
+<td><p>控制匹配起始点</p></td>
+</tr>
+<tr class="row-odd"><td><p>sp_advice_prompt</p></td>
+<td><p>仅保留可能实际出现的后缀</p></td>
+<td><p>减少无效匹配</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section id="mtp-eagle3">
+<h4>mtp / eagle3<a class="headerlink" href="#mtp-eagle3" title="Link to this heading">#</a></h4>
+<ol class="arabic simple">
+<li><p><strong>模型训练</strong>：</p>
+<ul class="simple">
+<li><p>使用 https://github.com/SafeAILab/EAGLE 为特定业务场景训练小模型</p></li>
+<li><p>需确保第 1 个 token 接受率 &gt;80%，第 2 个 &gt;60%，第 3 个 &gt;40%</p></li>
+</ul>
+</li>
+<li><p><strong>gen_num_per_cycle</strong>：</p>
+<ul class="simple">
+<li><p>MTP 小模型执行时间可假设约为 1ms。根据主模型执行时间和接受率，可计算最优的 GEN_NUM_PER_CIRCLE</p></li>
+</ul>
+</li>
+<li><p><strong>sp_quantization</strong></p>
+<ul class="simple">
+<li><p>在 Hopper 系列显卡上，建议启用 sp_quantization=FP8_PER_BLOCK</p></li>
+</ul>
+</li>
+</ol>
+</section>
+</section>
+</section>
+</section>
+
+
+                </article>
+              
+
+              
+              
+              
+              
+                <footer class="prev-next-footer d-print-none">
+                  
+<div class="prev-next-area">
+    <a class="left-prev"
+       href="../supported_models/support_new_models.html"
+       title="previous page">
+      <i class="fa-solid fa-angle-left"></i>
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">上一页</p>
+        <p class="prev-next-title">如何支持新模型</p>
+      </div>
+    </a>
+    <a class="right-next"
+       href="reuse_kv_cache.html"
+       title="next page">
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">下一页</p>
+        <p class="prev-next-title">重用缓存</p>
+      </div>
+      <i class="fa-solid fa-angle-right"></i>
+    </a>
+</div>
+                </footer>
+              
+            </div>
+            
+            
+              
+                <div class="bd-sidebar-secondary bd-toc"><div class="sidebar-secondary-items sidebar-secondary__inner">
+
+
+  <div class="sidebar-secondary-item">
+  <div class="page-toc tocsection onthispage">
+    <i class="fa-solid fa-list"></i> 目录
+  </div>
+  <nav class="bd-toc-nav page-toc">
+    <ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#what-is-speculative-sampling">1. What is Speculative Sampling</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#speculative-sampling-algorithms-supported-by-rtp-llm">2. Speculative Sampling Algorithms Supported by RTP-LLM</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#using-speculative-sampling-in-rtp-llm">3. Using Speculative Sampling in RTP-LLM</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#vanilla">vanilla</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#deterministic">deterministic</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#mtp">mtp</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#eagle3">eagle3</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#performance-observation-tuning">4. Performance Observation &amp; Tuning</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#performance-observation">4.1 性能观察</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#tuning">4.2 调优</a><ul class="nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#id1">vanilla</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#id2">deterministic</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#mtp-eagle3">mtp / eagle3</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+  </nav></div>
+
+</div></div>
+              
+            
+          </div>
+          <footer class="bd-footer-content">
+            
+<div class="bd-footer-content__inner container">
+  
+  <div class="footer-item">
+    
+<p class="component-author">
+作者： RTP-LLM Team
+</p>
+
+  </div>
+  
+  <div class="footer-item">
+    
+
+  <p class="copyright">
+    
+      © Copyright 2023-2025, RTP-LLM.
+      <br/>
+    
+  </p>
+
+  </div>
+  
+  <div class="footer-item">
+    <p class="last-updated">
+  最后更新于 2025 年 09 月 17 日.
+  <br/>
+</p>
+  </div>
+  
+  <div class="footer-item">
+    
+  </div>
+  
+</div>
+          </footer>
+        
+
+      </main>
+    </div>
+  </div>
+  
+  <!-- Scripts loaded after <body> so the DOM is not blocked -->
+  <script src="../_static/scripts/bootstrap.js?digest=dfe6caa3a7d634c4db9b"></script>
+<script src="../_static/scripts/pydata-sphinx-theme.js?digest=dfe6caa3a7d634c4db9b"></script>
+
+  <footer class="bd-footer">
+  </footer>
+  </body>
+</html>

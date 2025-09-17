@@ -1,0 +1,142 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: RTP-LLM 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-17 17:12+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: ../../references/Environment.md:1
+msgid "Environment Variable Development Tutorial"
+msgstr ""
+
+#: ../../references/Environment.md:3
+msgid "We have already processed all environment variable-related code in RTP_LLM, with only some environment variables related to Test, Monitor, RDMA, etc. remaining unprocessed. For future development, any new environment variables should be handled uniformly according to this document."
+msgstr ""
+
+#: ../../references/Environment.md:5
+msgid "Python Parameter Parsing"
+msgstr ""
+
+#: ../../references/Environment.md:7
+msgid "In `rtp_llm/server/server_args.py`, all user-configurable environment variables are converted to command-line parameters when starting the Python service. If you find any comments for the related parameters below unreasonable, please feel free to modify them directly."
+msgstr ""
+
+#: ../../references/Environment.md:9
+msgid "![image](../pics/env-1.png)"
+msgstr ""
+
+#: ../../references/Environment.md:9
+#: ../../references/Environment.md:37
+msgid "image"
+msgstr ""
+
+#: ../../references/Environment.md:11
+msgid "When adding new parameter information, you need to specify the parameter type, variable name, default value, and its corresponding specific meaning. The processing logic here is actually to use the parsed parameters to update environment variables. The current priority is: `args > env > default`."
+msgstr ""
+
+#: ../../references/Environment.md:13
+msgid "Parameter Propagation"
+msgstr ""
+
+#: ../../references/Environment.md:15
+msgid "**We have collected and organized all config-related information and classified it for processing on both the C++ and Python sides. At the top level of the C++ side is `GptInitParameter`, which categorizes various environment variables in C++ into different configuration types. On the Python side, everything is summarized in `EnvArgs` under `rtp_llm/config/py_config_modules.py`. `EnvArgs` also categorizes various configurations, and throughout the system, various configurations are gradually propagated down to specified locations for use.**"
+msgstr ""
+
+#: ../../references/Environment.md:17
+msgid "2.1 C++ Side Parameter Propagation"
+msgstr ""
+
+#: ../../references/Environment.md:19
+msgid "In `rtp_llm/cpp/th_op/ConfigModules.h`, all related parameter information classifications are placed here. Let's illustrate with the following example:"
+msgstr ""
+
+#: ../../references/Environment.md:35
+msgid "For example, after adding a new parameter, you need to specify the default value and modify the content of both the `to_string` and `update_from_env_for_test` functions. Additionally, these configurations are bound and passed to the Python side for interaction through `Pybind11`."
+msgstr ""
+
+#: ../../references/Environment.md:37
+msgid "![image](../pics/env-2.png)"
+msgstr ""
+
+#: ../../references/Environment.md:39
+msgid "It's important to note that **the parameter order here must be consistent with the order defined in the struct**. This is a requirement of `Pybind11` because we need to pass these parameters from the Python side later. Specifically, in `rtp_llm/config/gpt_init_model_parameters.py`, when generating `GptInitModelParameters`, it calls `update_gpt_init_params_from_env` for update processing. The `GptInitParameter` updated here is actually defined in C++. In `rtp_llm/cpp/dataclass/EngineInitParameter.h`, parameters are constructed and updated during initialization. Later, these parameters are propagated down layer by layer to the corresponding function call locations as needed (all parameters are propagated down)."
+msgstr ""
+
+#: ../../references/Environment.md:41
+msgid "Another task that needs to be done is, after updating new parameters, **after the project compilation is complete**, you need to execute the following operations:"
+msgstr ""
+
+#: ../../references/Environment.md:48
+msgid "This will generate the corresponding files under `bazel-bin/stubs`. **Find the modified parts in the generated files and place them in `rtp_llm/ops`**."
+msgstr ""
+
+#: ../../references/Environment.md:50
+msgid "**Summary:**"
+msgstr ""
+
+#: ../../references/Environment.md:52
+msgid "Modify `rtp_llm/cpp/th_op/ConfigModules.h` and `rtp_llm/cpp/th_op/ConfigModules.cc`"
+msgstr ""
+
+#: ../../references/Environment.md:53
+msgid "Modify `rtp_llm/config/gpt_init_model_parameters.py`"
+msgstr ""
+
+#: ../../references/Environment.md:54
+msgid "Modify `rtp_llm/server/server_args.py`"
+msgstr ""
+
+#: ../../references/Environment.md:55
+msgid "Modify `rtp_llm/server/test/server_args_test.py`"
+msgstr ""
+
+#: ../../references/Environment.md:56
+msgid "Modify `rtp_llm/ops/libth_transformer.pyi`"
+msgstr ""
+
+#: ../../references/Environment.md:58
+msgid "**A total of 6 files need to be modified.**"
+msgstr ""
+
+#: ../../references/Environment.md:60
+msgid "2.2 Python Side Parameter Propagation"
+msgstr ""
+
+#: ../../references/Environment.md:62
+msgid "The Python side has significantly more environment variables than the C++ side, and there is some overlap between the two. We have merged some Python-specific environment variables into the C++ side's config classification, while the rest have their own independent configuration classification sets on the Python side."
+msgstr ""
+
+#: ../../references/Environment.md:64
+msgid "Currently, our design considers the current code architecture. Config retrieval exists in two scenarios: one is in some global methods or static methods where we directly obtain corresponding configuration parameters from `StaticConfig` in `rtp_llm/config/py_config_modules.py`, and for other cases, we obtain them by passing in `py_env_configs` configuration. Additionally, regarding Python-side environment variable modifications, we adhere to the following principles:"
+msgstr ""
+
+#: ../../references/Environment.md:66
+msgid "**Principle: Environment variable settings in tests/Test environment variables/smoke test environment variables are all preserved. Global initialization environment variable settings and retrieval are also preserved (such as internal_source/rtp_llm/models/internal_init.py, internal_source/scripts/local_server_runner.py). env_param, etc., which exist for rpc_api transmission specification, are also preserved (such as rtp_llm/tools/api/model_size_evaluator_api.py).**"
+msgstr ""
+
+#: ../../references/Environment.md:68
+msgid "In future development of new environment variables, the above principles must be followed. Python environment variable modifications are similar to the C++ side. Here are the specific code locations that need to be modified:"
+msgstr ""
+
+#: ../../references/Environment.md:70
+msgid "`rtp_llm/config/py_config_modules.py`"
+msgstr ""
+
+#: ../../references/Environment.md:71
+msgid "`rtp_llm/server/server_args.py`(*There are many corresponding classified configuration files in the same directory that can be modified accordingly.*)"
+msgstr ""
+
+#: ../../references/Environment.md:72
+msgid "`rtp_llm/server/test/server_args_test.py`"
+msgstr ""
