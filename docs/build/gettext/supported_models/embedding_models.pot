@@ -1,0 +1,101 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: RTP-LLM 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-17 18:04+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: ../../supported_models/embedding_models.md:1
+msgid "Embedding Models"
+msgstr ""
+
+#: ../../supported_models/embedding_models.md:3
+msgid "RTP-LLM supports the deployment of mainstream Embedding, Reranker, and Classifier models, with dedicated handling for multi-embedding architectures such as BGE-M3, enabling hybrid request processing within a single service instance. Built on Sentence Transformers, it allows users to tailor post-processing workflows to standard model architectures."
+msgstr ""
+
+#: ../../supported_models/embedding_models.md:5
+msgid "At the model layer, RTP-LLM leverages high-performance compute kernels to accelerate inference. The engine optimizes both intra- and inter-request sequence batching according to user configuration, eliminating redundant computation and improving GPU utilization."
+msgstr ""
+
+#: ../../supported_models/embedding_models.md:7
+msgid "Example Launch Command"
+msgstr ""
+
+#: ../../supported_models/embedding_models.md:20
+msgid "Example Client Request"
+msgstr ""
+
+#: ../../supported_models/embedding_models.md:21
+msgid "Dense Embedding"
+msgstr ""
+
+#: ../../supported_models/embedding_models.md:31
+msgid "Reranker"
+msgstr ""
+
+#: ../../supported_models/embedding_models.md:47
+msgid "Classifier"
+msgstr ""
+
+#: ../../supported_models/embedding_models.md:63
+msgid "BGE_M3"
+msgstr ""
+
+#: ../../supported_models/embedding_models.md:77
+msgid "Supported models"
+msgstr ""
+
+#: ../../supported_models/embedding_models.md:0
+msgid "Model Family (Embedding)"
+msgstr ""
+
+#: ../../supported_models/embedding_models.md:0
+msgid "Example HuggingFace Identifier"
+msgstr ""
+
+#: ../../supported_models/embedding_models.md:0
+msgid "Chat Template"
+msgstr ""
+
+#: ../../supported_models/embedding_models.md:0
+msgid "Description"
+msgstr ""
+
+#: ../../supported_models/embedding_models.md:0
+msgid "**Qwen3 Embedding/Reranker**"
+msgstr ""
+
+#: ../../supported_models/embedding_models.md:0
+msgid "`Qwen/Qwen3-Embedding-8B`"
+msgstr ""
+
+#: ../../supported_models/embedding_models.md:0
+msgid "N/A"
+msgstr ""
+
+#: ../../supported_models/embedding_models.md:0
+msgid "Support all size of qwen3 embedding/reranker"
+msgstr ""
+
+#: ../../supported_models/embedding_models.md:0
+msgid "**BGE (BgeEmbeddingModel)**"
+msgstr ""
+
+#: ../../supported_models/embedding_models.md:0
+msgid "`BAAI/bge-large-en-v1.5`"
+msgstr ""
+
+#: ../../supported_models/embedding_models.md:0
+msgid "only support BGE family with model_type=`Bert/Roberta/Qwen2`  including bge_m3, not suport `ModernBert` or `NewModel` . Specially, please set `model_type=qwen_2_embedding` for `Alibaba-NLP/gte-Qwen2-7B-instruct`"
+msgstr ""

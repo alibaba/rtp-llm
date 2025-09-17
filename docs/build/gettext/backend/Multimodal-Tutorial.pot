@@ -1,0 +1,78 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: RTP-LLM 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-17 18:04+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: ../../backend/Multimodal-Tutorial.md:1
+msgid "Background"
+msgstr ""
+
+#: ../../backend/Multimodal-Tutorial.md:3
+msgid "Multimodal models refer to models that communicate through multiple modalities with computers, aiming to enable models to process and understand multi-modal information. Currently, common multimodal research directions include images, videos, audio, etc."
+msgstr ""
+
+#: ../../backend/Multimodal-Tutorial.md:5
+msgid "In rtp-llm, the currently supported multimodal models are mainly models that accept images as input, such as [qwen-vl](https://github.com/QwenLM/Qwen-VL) and [llava](https://github.com/haotian-liu/LLaVA)."
+msgstr ""
+
+#: ../../backend/Multimodal-Tutorial.md:7
+msgid "Usage"
+msgstr ""
+
+#: ../../backend/Multimodal-Tutorial.md:9
+msgid "LLaVA"
+msgstr ""
+
+#: ../../backend/Multimodal-Tutorial.md:11
+msgid "The config.json of LLaVA in HF format contains the mm_vision_tower keyword as the path to the ViT, typically using OpenAI's pretrained CLIP."
+msgstr ""
+
+#: ../../backend/Multimodal-Tutorial.md:13
+#: ../../backend/Multimodal-Tutorial.md:21
+msgid "Invocation"
+msgstr ""
+
+#: ../../backend/Multimodal-Tutorial.md:15
+msgid "Consistent with HF format, when calling, use the `<image>` tag in the prompt to indicate the image insertion position, and insert the image sequence in List[str] format: rtp-llm's multimodal interface allows inserting multiple images in a single prompt, but the effect of current supported models on multiple images is not good. Additionally, it is necessary to strictly ensure that the number of image tags matches the number of images."
+msgstr ""
+
+#: ../../backend/Multimodal-Tutorial.md:17
+msgid "Qwen-VL"
+msgstr ""
+
+#: ../../backend/Multimodal-Tutorial.md:19
+msgid "Slightly different from LLaVA, although Qwen-VL's ViT also uses CLIP, its parameters are written together with the LLM part, so the ViT part parameters will be read from the checkpoint."
+msgstr ""
+
+#: ../../backend/Multimodal-Tutorial.md:23
+msgid "Consistent with HF format, when calling, directly use the `<img>{img_url}</img>` tag to mark images in the prompt; additionally, you can also directly use the `<img/>` image placeholder to achieve separation of URL and prompt input."
+msgstr ""
+
+#: ../../backend/Multimodal-Tutorial.md:25
+msgid "Demo"
+msgstr ""
+
+#: ../../backend/Multimodal-Tutorial.md:41
+msgid "Request response in the following way:"
+msgstr ""
+
+#: ../../backend/Multimodal-Tutorial.md:49
+msgid "Or"
+msgstr ""
+
+#: ../../backend/Multimodal-Tutorial.md:56
+msgid "Additionally, if starting as a service:"
+msgstr ""

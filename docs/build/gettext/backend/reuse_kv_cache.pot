@@ -1,0 +1,58 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: RTP-LLM 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-17 18:04+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: ../../backend/reuse_kv_cache.md:1
+msgid "ReuseCache"
+msgstr ""
+
+#: ../../backend/reuse_kv_cache.md:2
+msgid "In multi-turn conversation scenarios, multiple prompts often share common prefixes. The KV cache corresponding to these prefix tokens is identical, and reusing KV cache can reduce computation time for these repeated parts, lowering First Token Latency. Enable KV cache reuse by setting the environment variable `REUSE_CACHE=1`. The startup logs will show \"reuse_cache: True\" when enabled. The environment variable `SEQ_SIZE_PER_BLOCK` specifies the number of sequences corresponding to each KV cache block. **Note: ReuseCache cannot currently use flash attention due to mismatched lengths between Q and KV, requiring `--reuse_cache true` to be added in the CMD**"
+msgstr ""
+
+#: ../../backend/reuse_kv_cache.md:33
+#: ../../backend/reuse_kv_cache.md:37
+msgid "MultiTaskPrompt"
+msgstr ""
+
+#: ../../backend/reuse_kv_cache.md:34
+msgid "Create static cache for long-text System Prompts, directly reading KV cache from static cache in each request instead of recomputing. This method can significantly reduce the model's First Token Latency."
+msgstr ""
+
+#: ../../backend/reuse_kv_cache.md:36
+msgid "Usage"
+msgstr ""
+
+#: ../../backend/reuse_kv_cache.md:38
+msgid "rtp-llm specifies the system prompt information file that needs static caching through the `--multi_task_prompt` parameter. The format is similar to the following:"
+msgstr ""
+
+#: ../../backend/reuse_kv_cache.md:45
+msgid "You can also pass the above JSON through the `multi_task_prompt_str` environment variable."
+msgstr ""
+
+#: ../../backend/reuse_kv_cache.md:47
+msgid "After startup, the model will run the above system prompts and cache the KV cache in GPU memory. During subsequent runs, if a task_id is specified, this prefix can be used. Demo is as follows: **Note: MultiTaskPrompt cannot currently use flash attention due to mismatched lengths between Q and KV, requiring the environment variable `export ENABLE_FMHA=OFF` to be configured before running the code**"
+msgstr ""
+
+#: ../../backend/reuse_kv_cache.md:85
+msgid "Note:"
+msgstr ""
+
+#: ../../backend/reuse_kv_cache.md:86
+msgid "When using MULTI_TASK_PROMPT, if the REUSE_CACHE function is enabled, then KV cache can be reused. Refer to the document [ReuseKVCache](docs/ReuseKVCache-Tutorial.md). When a task ID is specified, the system prompt of the task_id is used to concatenate the request, and the longest matching historical request is found in the KV cache to reuse the KV cache. When no task ID is specified, the user's prompt is used to find the longest matching historical request in the KV cache to reuse the KV cache."
+msgstr ""

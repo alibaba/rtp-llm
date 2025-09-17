@@ -1,0 +1,123 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: RTP-LLM 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-17 18:04+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: ../../_build/html/en/backend/lora.ipynb:9
+msgid "LoRA Serving"
+msgstr ""
+
+#: ../../_build/html/en/backend/lora.ipynb:20
+msgid "RTP-LLM supports **Static LoRA** and **Dynamic LoRA** inference modes. For information on LoRA principles, refer to `Hugging Face Official Documentation <https://huggingface.co/docs/peft/conceptual_guides/lora>`__."
+msgstr ""
+
+#: ../../_build/html/en/backend/lora.ipynb:32
+msgid "Serving Single Adaptor（Static LoRA）"
+msgstr ""
+
+#: ../../_build/html/en/backend/lora.ipynb:35
+#: ../../_build/html/en/backend/lora.ipynb:147
+msgid "Feature"
+msgstr ""
+
+#: ../../_build/html/en/backend/lora.ipynb:35
+#: ../../_build/html/en/backend/lora.ipynb:147
+msgid "Description"
+msgstr ""
+
+#: ../../_build/html/en/backend/lora.ipynb:37
+#: ../../_build/html/en/backend/lora.ipynb:149
+msgid "**Fusion Method**"
+msgstr ""
+
+#: ../../_build/html/en/backend/lora.ipynb:37
+msgid "Before inference, the base model and specified LoRA weights are **permanently fused** (irreversible)."
+msgstr ""
+
+#: ../../_build/html/en/backend/lora.ipynb:39
+#: ../../_build/html/en/backend/lora.ipynb:151
+msgid "**Applicable Scenarios**"
+msgstr ""
+
+#: ../../_build/html/en/backend/lora.ipynb:39
+msgid "Scenarios requiring **single LoRA** with pursuit of optimal performance."
+msgstr ""
+
+#: ../../_build/html/en/backend/lora.ipynb:41
+#: ../../_build/html/en/backend/lora.ipynb:153
+msgid "**Limitations**"
+msgstr ""
+
+#: ../../_build/html/en/backend/lora.ipynb:41
+msgid "After fusion, the base model cannot be restored; the original output before applying LoRA cannot be obtained simultaneously."
+msgstr ""
+
+#: ../../_build/html/en/backend/lora.ipynb:45
+#: ../../_build/html/en/backend/lora.ipynb:157
+msgid "Usage"
+msgstr ""
+
+#: ../../_build/html/en/backend/lora.ipynb:47
+msgid "When the startup parameter ``--lora_info`` contains only **1 element**, it automatically enters static mode."
+msgstr ""
+
+#: ../../_build/html/en/backend/lora.ipynb:48
+msgid "Example: ``--lora_info {\"test0\":\"/mnt/nas1/lora/taoshang_qwen_lora_18000/lora\"}``"
+msgstr ""
+
+#: ../../_build/html/en/backend/lora.ipynb:144
+msgid "Serving Multiple Adaptors(Dynamic LoRA)"
+msgstr ""
+
+#: ../../_build/html/en/backend/lora.ipynb:149
+msgid "Load LoRA dynamically as a plugin during inference, **without modifying base weights**."
+msgstr ""
+
+#: ../../_build/html/en/backend/lora.ipynb:151
+msgid "Scenarios requiring **multiple LoRA switching** or **dynamic selection by request**."
+msgstr ""
+
+#: ../../_build/html/en/backend/lora.ipynb:153
+msgid "Only some models support LoRA"
+msgstr ""
+
+#: ../../_build/html/en/backend/lora.ipynb:159
+msgid "Specify the LoRA to be used for this request through ``generate_config.adapter_name``."
+msgstr ""
+
+#: ../../_build/html/en/backend/lora.ipynb:160
+msgid "Field rules"
+msgstr ""
+
+#: ../../_build/html/en/backend/lora.ipynb:161
+msgid "Type: ``str`` or ``list[str]``"
+msgstr ""
+
+#: ../../_build/html/en/backend/lora.ipynb:162
+msgid "The number of elements and order must be **completely aligned** with ``prompt``"
+msgstr ""
+
+#: ../../_build/html/en/backend/lora.ipynb:163
+msgid "Leave empty or omit to indicate **not using LoRA**"
+msgstr ""
+
+#: ../../_build/html/en/backend/lora.ipynb:164
+msgid "When the startup parameter ``--lora_info`` contains **multiple** elements, it automatically enters dynamic mode."
+msgstr ""
+
+#: ../../_build/html/en/backend/lora.ipynb:165
+msgid "Example: ``--lora_info {\"test0\":\"/mnt/nas1/lora/qwen_lora_18000/lora\", \"test1\":\"/mnt/nas1/lora/qwen_lora_18000/lora\"}``"
+msgstr ""
