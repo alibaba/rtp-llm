@@ -414,7 +414,7 @@ py_library(
         "//rtp_llm/access_logger:access_logger",
     ],
     data = [
-        "//rtp_llm/libs:libs"
+        "//rtp_llm/libs:frontend_libs"
     ]
 )
 
@@ -525,6 +525,25 @@ whl_reqs = [
     "concurrent_log_handler",
 ] + whl_deps() + platform_deps() + xft_dep
 
+py_wheel(
+    name = "rtp_llm_frontend_whl",
+    distribution = "rtp_llm_frontend",
+    python_tag = "py3",
+    tags = ["manual", "local", "no-remote"],
+    version = RELEASE_VERSION,
+    deps = [
+        ":rtp_llm_frontend_package",
+        "//deps:extension_package_frontend"
+    ],
+    requires = whl_reqs,
+)
+
+rename_wheel(
+    name = "rtp_llm_frontend",
+    package_name = "rtp_llm_frontend-%s" % RELEASE_VERSION,
+    src = ":rtp_llm_frontend_whl",
+)
+
 # target for wheel
 py_wheel(
     name = "rtp_llm_whl",
@@ -532,16 +551,10 @@ py_wheel(
     python_tag = "py3",
     tags = ["manual", "local", "no-remote"],
     version = RELEASE_VERSION,
-    deps = select({
-        "@//:frontend": [
-            ":rtp_llm_frontend_package",
-            "//deps:extension_package_frontend"
-        ],
-        "//conditions:default": [
-            ":rtp_llm_package",
-            "//deps:extension_package"
-        ],
-    }),
+    deps = [
+        ":rtp_llm_package",
+        "//deps:extension_package"
+    ],
     requires = whl_reqs,
 )
 

@@ -440,7 +440,7 @@ void register_misc_config(pybind11::module& m) {
 
 // TODO(wangyin.yx): organize these regsiter function into classified registration functions
 
-PYBIND11_MODULE(libth_transformer_frontend, m) {
+PYBIND11_MODULE(libth_transformer_config, m) {
     register_parallelism_distributed_config(m);
     register_concurrency_config(m);
     register_fmha_config(m);

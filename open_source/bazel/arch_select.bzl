@@ -8,7 +8,7 @@ load("//rtp_llm/cpp/deep_gemm:template.bzl", "dpsk_gemm_so_num", "qwen_gemm_so_n
 
 def copy_all_so():
     copy_so("//:th_transformer")
-    copy_so("//:th_transformer_frontend")
+    copy_so("//:th_transformer_config")
     copy_so("//rtp_llm/cpp/kernels:mmha1")
     copy_so("//rtp_llm/cpp/kernels:mmha2")
     copy_so("//rtp_llm/cpp/kernels:dmmha")
@@ -142,7 +142,7 @@ def deep_gemm_deps():
 
 def kernel_so_deps():
     return select({
-        "@//:default_cuda": [":libmmha1_so", ":libmmha2_so", ":libdmmha_so", ":libfa_so", ":libfpA_intB_so", ":libint8_gemm_so", ":libmoe_so", ":libmoe_sm90_so", ":libflashinfer_single_prefill_so", ":libflashinfer_single_decode_so", ":libflashinfer_batch_paged_prefill_so", ":libflashinfer_batch_paged_decode_so", ":libflashinfer_batch_ragged_prefill_so", ":libflashinfer_sm90_so", ":libdeepgemm_dpsk_inst_so", ":libdeepgemm_qwen_inst_so"],
+        "@//:using_cuda": [":libmmha1_so", ":libmmha2_so", ":libdmmha_so", ":libfa_so", ":libfpA_intB_so", ":libint8_gemm_so", ":libmoe_so", ":libmoe_sm90_so", ":libflashinfer_single_prefill_so", ":libflashinfer_single_decode_so", ":libflashinfer_batch_paged_prefill_so", ":libflashinfer_batch_paged_decode_so", ":libflashinfer_batch_ragged_prefill_so", ":libflashinfer_sm90_so", ":libdeepgemm_dpsk_inst_so", ":libdeepgemm_qwen_inst_so"],
         "@//:using_rocm": [":libmmha1_so", ":libmmha2_so", ":libdmmha_so", ":ck_copy"],
         "//conditions:default":[],
     })
@@ -179,8 +179,8 @@ def internal_deps():
 
 def jit_deps():
     return select({
-        "@//:frontend": [],
-        "//conditions:default": ["//rtp_llm/cpp/deep_gemm:jit_includes"],
+        "//:using_cuda": ["//rtp_llm/cpp/deep_gemm:jit_includes"],
+        "//conditions:default": [],
     })
 
 def select_py_bindings():

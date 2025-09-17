@@ -108,15 +108,21 @@ genrule(
 )
 
 filegroup(
+    name = "frontend_libs",
+    srcs = [],
+    data = [
+        ":libth_transformer_config_so"
+    ]
+)
+
+filegroup(
     name = "libs",
     srcs = [],
     data = [
         ":copy_hf3fs_libs",
         ":copy_aiter",
         ":copy_acclep_libs",
-        ":libth_transformer_frontend_so"
-    ] + kernel_so_deps() + select({
-        "//:frontend": [],
-        "//conditions:default": [":libth_transformer_so"],
-    })
+        ":libth_transformer_config_so",
+        ":libth_transformer_so"
+    ] + kernel_so_deps()
 )

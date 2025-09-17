@@ -10,7 +10,7 @@ import torch
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 libs_path = os.path.join(parent_dir, "libs")
-SO_NAME = "libth_transformer.so"
+SO_NAME = "libth_transformer_config.so"
 
 
 # for py test
@@ -55,7 +55,9 @@ def find_th_transformer(current_dir: str):
 
 so_path = os.path.join(libs_path)
 if not os.path.exists(os.path.join(so_path, SO_NAME)):
-    logging.info(f"failed to load libth_transformer.so from libs, try use another path")
+    logging.info(
+        f"failed to load libth_transformer_config.so from libs, try use another path"
+    )
     # for debug useage, read in bazel-bin and bazel-bin's subdir
     bazel_bin_dir = os.path.join(parent_dir, "../bazel-bin")
     so_path = find_th_transformer(bazel_bin_dir)
@@ -96,9 +98,14 @@ try:
 except BaseException as e:
     logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
 
+# frontend cannot load libpython3.10.so, so we need to load it manually
+import sysconfig
+from ctypes import cdll
+
+cdll.LoadLibrary(sysconfig.get_config_var("LIBDIR") + "/libpython3.10.so")
 
 try:
-    from libth_transformer_frontend import (
+    from libth_transformer_config import (
         ArpcConfig,
         BatchDecodeSchedulerConfig,
         CacheStoreConfig,
@@ -127,13 +134,13 @@ try:
         SpecialTokens,
         SpeculativeExecutionConfig,
     )
-    from libth_transformer_frontend import (
+    from libth_transformer_config import (
         get_block_cache_keys as cpp_get_block_cache_keys,
     )
 
 except BaseException as e:
-    raise e
     logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
+    raise e
 
 
 def get_block_cache_keys(token_ids: List[int], block_size: int) -> List[int]:
@@ -164,7 +171,6 @@ try:
         EngineScheduleInfo,
         KVCache,
         KVCacheInfo,
-        LoadBalanceInfo,
     )
     from libth_transformer import MultimodalInput as MultimodalInputCpp
     from libth_transformer import (

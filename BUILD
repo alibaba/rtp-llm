@@ -53,21 +53,6 @@ config_setting(
     values = {"copt": "-DENABLE_3FS=1"},
 )
 
-config_setting(
-    name = "frontend",
-    values = {"define": "frontend=true"}
-)
-
-config_setting(
-    name = "default_cuda",
-    define_values = {"frontend": "false", "using_cuda": "true"}
-)
-
-config_setting(
-    name = "default_cuda12",
-    define_values = {"frontend": "false", "using_cuda12": "true"}
-)
-
 cc_library(
     name = "gpt_init_params",
     srcs = [
@@ -109,19 +94,19 @@ cc_library(
 )
 
 filegroup(
-    name = "th_transformer_frontend_lib_files",
+    name = "th_transformer_config_lib_files",
     srcs = [
         "//rtp_llm/cpp:th_op/GptInitParameter.cc",
-        "//rtp_llm/cpp:th_op/FrontendInit.cc",
+        "//rtp_llm/cpp:th_op/ConfigInit.cc",
         "//rtp_llm/cpp:th_op/common/blockUtil.cc",
     ],
     visibility = ["//visibility:public"],
 )
 
 cc_library(
-    name = "th_transformer_frontend_lib",
+    name = "th_transformer_config_lib",
     srcs = [
-        ":th_transformer_frontend_lib_files"
+        ":th_transformer_config_lib_files"
     ],
     deps = [
         ":gpt_init_params",
@@ -168,7 +153,7 @@ cc_library(
         "//rtp_llm/cpp/devices:devices_base",
         "//rtp_llm/cpp:dataclass",
     ] + select({
-        "@//:default_cuda": [
+        "@//:using_cuda": [
             "//rtp_llm/cpp/cuda:allocator_torch",
         ],
         "//conditions:default": [],
@@ -204,9 +189,9 @@ cc_library(
 )
 
 cc_binary(
-    name = "th_transformer_frontend",
+    name = "th_transformer_config",
     deps = [
-        ":th_transformer_frontend_lib",
+        ":th_transformer_config_lib",
     ],
     copts = copts(),
     linkshared = 1,
