@@ -7,11 +7,17 @@ import math
 from typing import Callable, Dict, List, Optional, Tuple
 
 import torch
-from libth_transformer import rtp_llm_ops
-from libth_transformer.rtp_llm_ops import trt_fp8_quantize_128
 from torch.nn import Module
 
 import rtp_llm.models_py.modules.utils as utils
+
+if utils.is_cuda():
+    from libth_transformer import rtp_llm_ops
+    from libth_transformer.rtp_llm_ops import trt_fp8_quantize_128
+else:
+    rtp_llm_ops = None
+    trt_fp8_quantize_128 = None
+
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.modules.deepgemm import DEEPGEMM_SCALE_UE8M0
