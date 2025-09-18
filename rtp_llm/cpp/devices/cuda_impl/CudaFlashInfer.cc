@@ -134,6 +134,25 @@ FlashInferAttnParams::create(CudaDevice* device, int batch_size, int input_token
     return params.release();
 }
 
+void FlashInferAttnParams::recycleParams() {
+    recycle(this);
+}
+
+void FlashInferAttnParams::fillParams(torch::Tensor sequence_lengths,
+                                      torch::Tensor input_lengths,
+                                      torch::Tensor kv_cache_block_id_host,
+                                      int           batch_size,
+                                      int           seq_size_per_block) {
+    fillFlashInfer(nullptr,
+                   torchTensor2Buffer(sequence_lengths),
+                   torchTensor2Buffer(input_lengths),
+                   torchTensor2Buffer(kv_cache_block_id_host),
+                   batch_size,
+                   seq_size_per_block);
+    refreshFlashInferBuf(
+        dynamic_cast<CudaDevice*>(DeviceFactory::getDefaultDevice()), batch_size, input_lengths.size(0));
+}
+
 void FlashInferAttnParams::fillFlashInfer(const BufferPtr& prefix_lengths_host,
                                           const BufferPtr& sequence_lengths_host,
                                           const BufferPtr& input_lengths_host,

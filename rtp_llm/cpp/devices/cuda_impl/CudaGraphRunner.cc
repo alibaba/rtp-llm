@@ -42,9 +42,8 @@ void CudaGraphRunner::captureOneBatchSize(int bs) {
         auto py_outputs_obj = py_forward_method_(inputs);
         auto outputs        = py_outputs_obj.cast<PyModelOutputs>();
         graph_instances_[bs].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
-        auto fmha_type_obj            = py_fmha_type_method_(inputs.attention_inputs);
-        auto fmha_type                = fmha_type_obj.cast<FMHAType>();
-        graph_instances_[bs].use_xqa_ = fmha_type == FMHAType::XQA;
+        graph_instances_[bs].mem_hold_.params_ptr = outputs.params_ptr;
+        outputs.params_ptr->recycleParams();
         graph.capture_end();
         // embedding model uses trtv2 attention
         if (!is_embedding_ && !graph_instances_[bs].use_xqa_) {
