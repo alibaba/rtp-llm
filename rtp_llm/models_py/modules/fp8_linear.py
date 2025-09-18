@@ -1,8 +1,12 @@
 import logging
+import os
+import sys
 from typing import Optional
 
 import torch
 from torch import nn
+
+from rtp_llm.models_py.modules import utils
 
 logger = logging.getLogger(__name__)
 
@@ -15,51 +19,58 @@ except ImportError as e:
     # FP8 quantization not available
     FP8_AVAILABLE = False
 
-try:
-    import deep_gemm
-    from deep_gemm import fp8_gemm_nt
+if utils.is_cuda():
+    try:
+        import deep_gemm
+        from deep_gemm import fp8_gemm_nt
 
-    DEEPGEMM_AVAILABLE = True
-
-    # Setup CUTLASS include paths for JIT compilation
-    import os
-
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-
-    # Search for CUTLASS headers
-    cutlass_paths = []
-    parts = current_dir.split("/")
-    for i in range(len(parts)):
-        base_path = "/".join(parts[: i + 1])
-        for subpath in [
-            "deep_gemm/third-party/cutlass/include",
-            "external/deep_gemm/third-party/cutlass/include",
-        ]:
-            path = os.path.join(base_path, subpath)
-            if os.path.exists(path):
-                cutlass_paths.append(path)
-
-    # Check runfiles directory
-    if "runfiles" in current_dir:
-        runfiles_root = current_dir.split("runfiles")[0] + "runfiles"
-        for subdir in ["deep_gemm", "external/deep_gemm"]:
-            path = os.path.join(runfiles_root, subdir, "third-party/cutlass/include")
-            if os.path.exists(path):
-                cutlass_paths.append(path)
-
-    # Set environment variables if CUTLASS found
-    if cutlass_paths:
-        cutlass_path = cutlass_paths[0]
-        for env_var in ["CPLUS_INCLUDE_PATH", "C_INCLUDE_PATH", "CPATH"]:
-            current_val = os.environ.get(env_var, "")
-            os.environ[env_var] = (
-                f"{cutlass_path}:{current_val}" if current_val else cutlass_path
-            )
-
-        nvcc_flags = os.environ.get("NVCC_PREPEND_FLAGS", "")
-        os.environ["NVCC_PREPEND_FLAGS"] = f"-I{cutlass_path} {nvcc_flags}".strip()
-except ImportError:
+        DEEPGEMM_AVAILABLE = True
+        # Setup CUTLASS include paths for JIT compilation
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        # Search for CUTLASS headers
+        cutlass_paths = []
+        parts = current_dir.split("/")
+        for i in range(len(parts)):
+            base_path = "/".join(parts[: i + 1])
+            for subpath in [
+                "deep_gemm/third-party/cutlass/include",
+                "external/deep_gemm/third-party/cutlass/include",
+            ]:
+                path = os.path.join(base_path, subpath)
+                if os.path.exists(path):
+                    cutlass_paths.append(path)
+        # Check runfiles directory
+        if "runfiles" in current_dir:
+            runfiles_root = current_dir.split("runfiles")[0] + "runfiles"
+            for subdir in ["deep_gemm", "external/deep_gemm"]:
+                path = os.path.join(
+                    runfiles_root, subdir, "third-party/cutlass/include"
+                )
+                if os.path.exists(path):
+                    cutlass_paths.append(path)
+        # Set environment variables if CUTLASS found
+        if cutlass_paths:
+            cutlass_path = cutlass_paths[0]
+            for env_var in ["CPLUS_INCLUDE_PATH", "C_INCLUDE_PATH", "CPATH"]:
+                current_val = os.environ.get(env_var, "")
+                os.environ[env_var] = (
+                    f"{cutlass_path}:{current_val}" if current_val else cutlass_path
+                )
+            nvcc_flags = os.environ.get("NVCC_PREPEND_FLAGS", "")
+            os.environ["NVCC_PREPEND_FLAGS"] = f"-I{cutlass_path} {nvcc_flags}".strip()
+        logger.info(f"DeepGEMM successfully imported with fp8_gemm_nt: {fp8_gemm_nt}")
+    except ImportError as e:
+        logger.warning(f"DeepGEMM not available: {e}")
+        DEEPGEMM_AVAILABLE = False
+        fp8_gemm_nt = None
+    except Exception as e:
+        logger.warning(f"Error importing DeepGEMM: {e}")
+        DEEPGEMM_AVAILABLE = False
+        fp8_gemm_nt = None
+else:
+    # Not CUDA device, deep_gemm not available
     DEEPGEMM_AVAILABLE = False
+    fp8_gemm_nt = None
 
 
 class Fp8Linear(nn.Module):
@@ -87,13 +98,17 @@ class Fp8Linear(nn.Module):
         input_m = input.shape[0]
         input_k = input.shape[1]
         output_n = self.output_size
-        original_dtype = input.dtype
 
-        # Convert to BF16 if needed
+        # Check input dtype - only accept BF16
         if input.dtype != torch.bfloat16:
-            input_bf16 = input.to(torch.bfloat16)
-        else:
-            input_bf16 = input
+            error_msg = (
+                f"Fp8Linear only accepts bfloat16 input, but got {input.dtype}. "
+                "Please convert input to bfloat16 before calling Fp8Linear."
+            )
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+
+        input_bf16 = input
 
         # Quantize input to FP8
         if not FP8_AVAILABLE:
@@ -119,12 +134,11 @@ class Fp8Linear(nn.Module):
 
         # Quantize using sgl_per_token_group_quant_fp8
         quantization_eps = 1e-4
-        use_column_major = need_padding
         input_fp8, input_scales = sgl_per_token_group_quant_fp8(
             input_for_quant,
             group_size=128,
             eps=quantization_eps,
-            column_major_scales=use_column_major,
+            column_major_scales=False,
         )
 
         FP8_E4M3_MAX = 448.0
@@ -173,10 +187,7 @@ class Fp8Linear(nn.Module):
             output = output[:input_m, :]
         if self.bias is not None:
             output = output + self.bias.to(output.dtype)
-        if output.dtype != original_dtype:
-            output = output.to(original_dtype)
-        final_output = output
-        return final_output
+        return output
 
     def _get_padding_size(self, m):
         """Calculate padding size based on DeepGEMM requirements."""

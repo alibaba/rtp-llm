@@ -1,7 +1,4 @@
-load("//bazel:arch_select.bzl", "requirement", "deep_gemm_deps")
-
-deep_gemm_deps()
-
+load("//bazel:arch_select.bzl", "requirement")
 py_library(
     name = "kernels",
     srcs = glob([
@@ -55,14 +52,12 @@ py_library(
         "//rtp_llm/model_loader:loader",
     ] + select({
         "@//:using_cuda12": [
-            ":modules_cuda"
+            ":modules_cuda",
+            "@deep_gemm_ext//:deep_gemm"
         ],
         "@//:using_rocm": [
             ":modules_rocm"
         ],
-        "//conditions:default": [],
-    }) + select({
-        "@//:using_cuda12":["deep_gemm"],
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],

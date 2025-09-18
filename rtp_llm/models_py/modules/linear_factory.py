@@ -8,14 +8,18 @@ import torch
 from torch import nn
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.models_py.modules import utils
 from rtp_llm.models_py.modules.linear import Linear
 
-# Try to import FP8 Linear
-try:
-    from rtp_llm.models_py.modules.fp8_linear import Fp8Linear
+if utils.is_cuda():
+    try:
+        from rtp_llm.models_py.modules.fp8_linear import Fp8Linear
 
-    FP8_LINEAR_AVAILABLE = True
-except ImportError:
+        FP8_LINEAR_AVAILABLE = True
+    except ImportError:
+        Fp8Linear = None
+        FP8_LINEAR_AVAILABLE = False
+else:
     Fp8Linear = None
     FP8_LINEAR_AVAILABLE = False
 

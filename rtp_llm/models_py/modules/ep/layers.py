@@ -147,7 +147,7 @@ class FusedMoE(torch.nn.Module):
         return final_hidden_states
 
 
-class EPMoE(torch.nn.Module):
+class LegacyEPMoE(torch.nn.Module):
     """
     MoE Expert Parallel Impl
     """

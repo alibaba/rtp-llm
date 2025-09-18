@@ -437,7 +437,10 @@ py_library(
             ":embedding",
             "//rtp_llm/tools/convert:convert",
         ],
-    }),
+            }) + select({
+                "@//:using_cuda12": ["@deep_gemm_ext//:deep_gemm"],
+                "//conditions:default": [],
+            }),
     data = [
         "//rtp_llm/libs:libs"
     ]
@@ -459,8 +462,11 @@ py_package(
         ":rtp_llm_lib",
     ] + jit_deps(),
     packages = [
-        "rtp_llm"
-    ],
+        "rtp_llm",
+    ] + select({
+        "@//:using_cuda12": ["deep_gemm"],
+        "//conditions:default": [],
+    }),
 )
 
 whl_reqs = [

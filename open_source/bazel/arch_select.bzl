@@ -135,7 +135,7 @@ def deep_ep_py_deps():
 def deep_gemm_deps():
     native.alias(
         name = "deep_gemm",
-        actual = "@deep_gemm//:deep_gemm",
+        actual = "@deep_gemm_ext//:deep_gemm",
         visibility = ["//visibility:public"],
     )
 
