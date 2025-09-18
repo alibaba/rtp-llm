@@ -1,0 +1,64 @@
+diff --git deep_gemm/include/deep_gemm/impls/smxx_layout.cuh deep_gemm/include/deep_gemm/impls/smxx_layout.cuh
+index bea7000..7f1f971 100644
+--- deep_gemm/include/deep_gemm/impls/smxx_layout.cuh
++++ deep_gemm/include/deep_gemm/impls/smxx_layout.cuh
+@@ -12,7 +12,7 @@ __global__ void transpose_fp32(const float* sf, float* out, const uint32_t mn) {
+     constexpr static uint32_t SF_VEC_K = SF_K / kNumElemsPerVec;
+ 
+     // Shapes and strides
+-    extern __shared__ float smem_buffer[];
++    extern __shared__ float smem_buffer_float[];
+     constexpr auto kNumTMAAlignedElems = static_cast<uint32_t>(16 / sizeof(float));
+     const auto in_block_mn = min(BLOCK_MN, mn - blockIdx.x * BLOCK_MN);
+     const auto tma_aligned_mn = align<uint32_t>(mn, kNumTMAAlignedElems);
+@@ -30,7 +30,7 @@ __global__ void transpose_fp32(const float* sf, float* out, const uint32_t mn) {
+         const auto& row = i / SF_VEC_K, col = (i % SF_VEC_K) * kNumElemsPerVec;
+         #pragma unroll
+         for (uint32_t j = 0; j < kNumElemsPerVec; ++ j)
+-            smem_buffer[row * PADDED_SF_K + col + j] = in_values[j];
++            smem_buffer_float[row * PADDED_SF_K + col + j] = in_values[j];
+     }
+     __syncthreads();
+ 
+@@ -39,7 +39,7 @@ __global__ void transpose_fp32(const float* sf, float* out, const uint32_t mn) {
+     for (uint32_t i = threadIdx.x; i < in_block_mn * SF_K; i += kNumThreads) {
+         const auto& sf_k_idx = i / in_block_mn, mn_idx = i % in_block_mn;
+         const auto& global_mn_idx = blockIdx.x * BLOCK_MN + mn_idx;
+-        out[sf_k_idx * tma_aligned_mn + global_mn_idx] = ld_shared(smem_buffer + mn_idx * PADDED_SF_K + sf_k_idx);
++        out[sf_k_idx * tma_aligned_mn + global_mn_idx] = ld_shared(smem_buffer_float + mn_idx * PADDED_SF_K + sf_k_idx);
+     }
+ }
+ 
+@@ -47,7 +47,7 @@ __global__ void transpose_fp32(const float* sf, float* out, const uint32_t mn) {
+ 
+ template <uint32_t kNumThreads, uint32_t BLOCK_MN, uint32_t SF_K>
+ __global__ void transpose_and_pack_fp32_into_ue8m0(float* sf, uint32_t* out, const uint32_t mn) {
+-    extern __shared__ uint32_t smem_buffer[];
++    extern __shared__ uint32_t smem_buffer_uint[];
+ 
+     // Shapes and strides
+     constexpr auto kNumPackedSFK = constexpr_ceil_div(SF_K, 4u);
+@@ -67,12 +67,12 @@ __global__ void transpose_and_pack_fp32_into_ue8m0(float* sf, uint32_t* out, con
+     #pragma unroll
+     for (uint32_t i = threadIdx.x; i < num_uint4; i += kNumThreads) {
+         const auto& [x, y, z, w] = __ldg(reinterpret_cast<uint4*>(local_sf) + i);
+-        st_shared(reinterpret_cast<uint4*>(smem_buffer) + i, x, y, z, w);
++        st_shared(reinterpret_cast<uint4*>(smem_buffer_uint) + i, x, y, z, w);
+     }
+ 
+     // Fill unaligned values as well
+     if (const auto unaligned_idx = num_uint4 * 4 + threadIdx.x; unaligned_idx < num_values)
+-        st_shared(smem_buffer + unaligned_idx, __ldg(local_sf + unaligned_idx));
++        st_shared(smem_buffer_uint + unaligned_idx, __ldg(local_sf + unaligned_idx));
+     __syncthreads();
+ 
+     // Pack into UE8M0 and store
+@@ -85,7 +85,7 @@ __global__ void transpose_and_pack_fp32_into_ue8m0(float* sf, uint32_t* out, con
+         #pragma unroll
+         for (uint32_t j = 0; j < 4; ++ j) {
+             const auto sf_k_idx = sf_k_pack_idx * 4 + j;
+-            values[j] = sf_k_idx < SF_K ? ld_shared(smem_buffer + mn_idx * SF_K + sf_k_idx) : 0;
++            values[j] = sf_k_idx < SF_K ? ld_shared(smem_buffer_uint + mn_idx * SF_K + sf_k_idx) : 0;
+         }
+ 
+         // Pack and store
