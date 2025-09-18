@@ -2,7 +2,7 @@ name: Merge Request Trigger
 
 on:
   pull_request:
-    branches: [ "main-github" ]
+    branches: [ "main" ]
 
 jobs:
   trigger-on-merge:
