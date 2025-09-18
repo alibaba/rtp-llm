@@ -1,7 +1,7 @@
 import gc
 import os
 from enum import IntEnum, auto
-from typing import Optional, Tuple
+from typing import Optional
 
 from deep_ep import Buffer as DeepEPBuffer
 from deep_ep import Config as DeepEPConfig
@@ -45,6 +45,7 @@ class DeepEPWrapper:
     _mode: DeepEPMode = DeepEPMode.NORMAL
 
     def __init__(self, group: ProcessGroup, params: GptInitModelParameters) -> None:
+        self._buffer = None
         self._ep_rank = params.ep_rank
         self._ep_size = params.ep_size
         self._hidden_size = params.hidden_size
@@ -52,7 +53,8 @@ class DeepEPWrapper:
         self._num_topk = params.moe_k
         self._num_sms = params.moe_config.deep_ep_num_sm
         self._use_accl_ep = True
-        self._mode, self._buffer = self._init_deepep_buffer(group, params)
+        self._mode = DeepEPMode.NORMAL
+        self._buffer = self._init_deepep_buffer(group, params)
 
     @property
     def buffer(self) -> DeepEPBuffer:
@@ -94,20 +96,17 @@ class DeepEPWrapper:
     def use_accl_ep(self) -> bool:
         return self._use_accl_ep
 
-    def _init_deepep_buffer(
-        self, group: ProcessGroup, params: GptInitModelParameters
-    ) -> Tuple[DeepEPMode, DeepEPBuffer]:
+    def _init_deepep_buffer(self, group: ProcessGroup, params: GptInitModelParameters) -> DeepEPBuffer:
+        if self._buffer is not None:
+            return self._buffer
         # init deep_ep buffer
         ep_rank = params.ep_rank
         use_deepep_low_latency: bool = params.moe_config.use_deepep_low_latency
-        enable_ffn_disaggregate: bool = (
-            params.gpt_init_params.ffn_disaggregate_config.enable_ffn_disaggregate
-        )
+        enable_ffn_disaggregate: bool = params.gpt_init_params.ffn_disaggregate_config.enable_ffn_disaggregate
         if use_deepep_low_latency and enable_ffn_disaggregate:
             if self._use_accl_ep:
-                return DeepEPMode.LOW_LATENCY_M2N, self._init_low_latency_m2n_buffer(
-                    group, params
-                )
+                self._mode = DeepEPMode.LOW_LATENCY_M2N
+                return self._init_low_latency_m2n_buffer(group, params)
             else:
                 raise RuntimeError(
                     f"[rank: {ep_rank}] init deep_ep buffer failed, current deep_ep provider "
@@ -115,9 +114,11 @@ class DeepEPWrapper:
                     f"and enable_ffn_disaggregate: {enable_ffn_disaggregate}"
                 )
         elif use_deepep_low_latency and not enable_ffn_disaggregate:
-            return DeepEPMode.LOW_LATENCY, self._init_low_latency_buffer(group, params)
+            self._mode = DeepEPMode.LOW_LATENCY
+            return self._init_low_latency_buffer(group, params)
         elif not use_deepep_low_latency and not enable_ffn_disaggregate:
-            return DeepEPMode.NORMAL, self._init_normal_buffer(group, params)
+            self._mode = DeepEPMode.NORMAL
+            return self._init_normal_buffer(group, params)
         else:
             raise RuntimeError(
                 f"[rank: {ep_rank}] init deep_ep buffer failed, unsupported "
@@ -125,28 +126,10 @@ class DeepEPWrapper:
                 f"enable_ffn_disaggregate: {enable_ffn_disaggregate}"
             )
 
-    def _calc_low_latency_max_token_per_rank(
-        self, max_generate_batch_size: int, tp_size: int
-    ) -> int:
+    def _calc_low_latency_max_token_per_rank(self, max_generate_batch_size: int, tp_size: int) -> int:
         ll_num_max_token_per_rank = (max_generate_batch_size + tp_size - 1) // tp_size
 
-        matched_tokens = [
-            16,
-            24,
-            32,
-            40,
-            48,
-            56,
-            64,
-            72,
-            80,
-            88,
-            96,
-            104,
-            112,
-            120,
-            128,
-        ]
+        matched_tokens = [16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128]
         if ll_num_max_token_per_rank > 128:
             ll_num_max_token_per_rank = ((ll_num_max_token_per_rank + 127) // 128) * 128
             return ll_num_max_token_per_rank
@@ -156,9 +139,7 @@ class DeepEPWrapper:
                 return ll_num_max_token_per_rank
         return 128
 
-    def _init_normal_buffer(
-        self, group: ProcessGroup, params: GptInitModelParameters
-    ) -> DeepEPBuffer:
+    def _init_normal_buffer(self, group: ProcessGroup, params: GptInitModelParameters) -> DeepEPBuffer:
         num_nvl_bytes = 0
         num_rdma_bytes = 0
         num_qps_per_rank = 1
@@ -194,17 +175,11 @@ class DeepEPWrapper:
             init_kwargs["allow_mnnvl"] = False
         return DeepEPBuffer(**init_kwargs)  # type: ignore
 
-    def _init_low_latency_buffer(
-        self, group: ProcessGroup, params: GptInitModelParameters
-    ) -> DeepEPBuffer:
+    def _init_low_latency_buffer(self, group: ProcessGroup, params: GptInitModelParameters) -> DeepEPBuffer:
         max_generate_batch_size: int = params.max_generate_batch_size
         tp_size: int = params.tp_size
-        assert (
-            max_generate_batch_size > 0 and tp_size > 0
-        ), "max_generate_batch_size and tp_size must be set"
-        ll_num_max_token_per_rank = self._calc_low_latency_max_token_per_rank(
-            max_generate_batch_size, tp_size
-        )
+        assert max_generate_batch_size > 0 and tp_size > 0, "max_generate_batch_size and tp_size must be set"
+        ll_num_max_token_per_rank = self._calc_low_latency_max_token_per_rank(max_generate_batch_size, tp_size)
         self._ll_num_max_token_per_rank = ll_num_max_token_per_rank
 
         num_nvl_bytes = 0
@@ -213,9 +188,7 @@ class DeepEPWrapper:
         hidden_size: int = params.hidden_size
         ep_size: int = params.ep_size
         num_experts: int = params.expert_num
-        assert (
-            hidden_size > 0 and ep_size > 0 and num_experts > 0
-        ), "hidden_size, ep_size and num_experts must be set"
+        assert hidden_size > 0 and ep_size > 0 and num_experts > 0, "hidden_size, ep_size and num_experts must be set"
         num_rdma_bytes = DeepEPBuffer.get_low_latency_rdma_size_hint(
             ll_num_max_token_per_rank,
             hidden_size,
@@ -246,13 +219,9 @@ class DeepEPWrapper:
             init_kwargs["allow_mnnvl"] = False
         return DeepEPBuffer(**init_kwargs)  # type: ignore
 
-    def _init_low_latency_m2n_buffer(
-        self, group: ProcessGroup, params: GptInitModelParameters
-    ) -> DeepEPBuffer:
+    def _init_low_latency_m2n_buffer(self, group: ProcessGroup, params: GptInitModelParameters) -> DeepEPBuffer:
         max_generate_batch_size: int = params.max_generate_batch_size
-        attention_tp_size: int = (
-            params.gpt_init_params.ffn_disaggregate_config.attention_tp_size
-        )
+        attention_tp_size: int = params.gpt_init_params.ffn_disaggregate_config.attention_tp_size
         assert (
             max_generate_batch_size > 0 and attention_tp_size > 0
         ), "max_generate_batch_size and attention_tp_size must be set"
@@ -260,9 +229,7 @@ class DeepEPWrapper:
             max_generate_batch_size, attention_tp_size
         )
 
-        attention_dp_size: int = (
-            params.gpt_init_params.ffn_disaggregate_config.attention_dp_size
-        )
+        attention_dp_size: int = params.gpt_init_params.ffn_disaggregate_config.attention_dp_size
         ffn_dp_size: int = params.gpt_init_params.ffn_disaggregate_config.ffn_dp_size
         ffn_tp_size: int = params.gpt_init_params.ffn_disaggregate_config.ffn_tp_size
         assert (
@@ -275,14 +242,10 @@ class DeepEPWrapper:
         num_rdma_bytes = 0
         num_qps_per_rank = 1
         if not hasattr(DeepEPBuffer, "get_low_latency_rdma_size_hint_m2n"):
-            raise RuntimeError(
-                "current deep_ep provider does not support low-latency m2n"
-            )
+            raise RuntimeError("current deep_ep provider does not support low-latency m2n")
         hidden_size: int = params.hidden_size
         num_experts: int = params.expert_num
-        assert (
-            hidden_size > 0 and num_experts > 0
-        ), "hidden_size and num_experts must be set"
+        assert hidden_size > 0 and num_experts > 0, "hidden_size and num_experts must be set"
         num_rdma_bytes = DeepEPBuffer.get_low_latency_rdma_size_hint_m2n(
             ll_num_max_token_per_rank,
             hidden_size,
@@ -332,9 +295,7 @@ def get_deepep_wrapper() -> DeepEPWrapper:
 
 def init_deepep_wrapper(group: ProcessGroup, params: GptInitModelParameters) -> None:
     global _DEEP_EP
-    _DEEP_EP = DeepEPWrapper(
-        group, params
-    )  # pyright: ignore[reportConstantRedefinition]
+    _DEEP_EP = DeepEPWrapper(group, params)  # pyright: ignore[reportConstantRedefinition]
 
 
 def destroy_deepep_wrapper() -> None:

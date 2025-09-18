@@ -3,25 +3,17 @@
 # Licensed under the Apache License, Version 2.0
 
 import logging
-import math
 from typing import Callable, Dict, List, Optional, Tuple
 
 import torch
-from libth_transformer import rtp_llm_ops
-from libth_transformer.rtp_llm_ops import trt_fp8_quantize_128
 from torch.nn import Module
 
 import rtp_llm.models_py.modules.utils as utils
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_loader.model_weight_info import ModelWeights
-from rtp_llm.models_py.modules.deepgemm import DEEPGEMM_SCALE_UE8M0
-from rtp_llm.models_py.modules.utils import ceil_div, dispose_tensor
 from rtp_llm.utils.model_weight import W
 
 if utils.is_cuda():
-    from deep_gemm import (
-        m_grouped_fp8_gemm_nt_contiguous as grouped_gemm_nt_f8f8bf16_contig,
-    )
     from libth_transformer.rtp_llm_ops import FusedMoEOp, SelectTopkOp
 
     from rtp_llm.models_py.modules.ep.kernels import (
@@ -36,7 +28,6 @@ if utils.is_cuda():
         silu_and_mul_triton_kernel,
         tma_align_input_scale,
     )
-
 else:
     logging.info("can't import from rtp_llm_ops and ep.kernels, only support cuda!")
     FusedMoEOp = None
@@ -413,3 +404,114 @@ class EPMoE(torch.nn.Module):
             BLOCK_SIZE=512,
         )
         return output
+
+
+class DeepEPMoE(EPMoE):
+    """
+    MoE Expert Parallel Impl based on DeepEP (https://github.com/deepseek-ai/DeepEP/tree/main)
+    """
+
+    _has_printed = False
+
+    def __init__(
+        self,
+        config: GptInitModelParameters,
+        weights: Dict[str, torch.Tensor],
+        layer_id: int,
+    ):
+        super().__init__(config, weights, layer_id)
+
+        # self.w13_weight_fp8 = (
+        #     self.w13_weight,
+        #     (
+        #         self.w13_weight_scale_inv
+        #         if isinstance(config.quant_config, Fp8BlockWiseQuantConfig)
+        #         else self.w13_weight_scale
+        #     ),
+        # )
+
+        # self.w2_weight_fp8 = (
+        #     self.w2_weight,
+        #     self.w2_weight_scale_inv if self.use_block_quant else self.w2_weight_scale,
+        # )
+
+    # def forward(
+    #     self,
+    #     hidden_states: torch.Tensor,
+    #     topk_idx: torch.Tensor,
+    #     topk_weights: torch.Tensor,
+    #     reorder_topk_ids: torch.Tensor,
+    #     seg_indptr: torch.Tensor,
+    #     masked_m: torch.Tensor,
+    #     expected_m: int,
+    #     num_recv_tokens_per_expert: List[int],
+    # ):
+    #     if self.config.moe_config.use_deepep_low_latency:
+    #         return self.forward_deepgemm_masked(hidden_states, masked_m, expected_m)
+    #     else:
+    #         logger.error(f'only support low_latency deepep')
+    #         raise Exception(f'only support low_latency deepep')
+
+    # def forward_deepgemm_masked(
+    #     self,
+    #     hidden_states_fp8: Tuple[torch.Tensor, torch.Tensor],
+    #     masked_m: torch.Tensor,
+    #     expected_m: int,
+    # ):
+    #     assert self.quant_method is not None
+    #     assert self.activation == "silu"
+
+    #     # GroupGemm-0
+    #     num_groups, m, k = hidden_states_fp8[0].size()
+    #     n = self.w13_weight.size(1)
+    #     expected_m = min(expected_m, m)
+    #     gateup_output = torch.empty(
+    #         (num_groups, m, n), device=hidden_states_fp8[0].device, dtype=torch.bfloat16
+    #     )
+    #     m_grouped_gemm_fp8_fp8_bf16_nt_masked(
+    #         hidden_states_fp8, self.w13_weight_fp8, gateup_output, masked_m, expected_m
+    #     )
+
+    #     # Act
+    #     down_input = torch.empty(
+    #         (
+    #             gateup_output.shape[0],
+    #             gateup_output.shape[1],
+    #             gateup_output.shape[2] // 2,
+    #         ),
+    #         device=gateup_output.device,
+    #         dtype=self.fp8_dtype,
+    #     )
+    #     scale_block_size = 128
+    #     down_input_scale = torch.empty(
+    #         (
+    #             gateup_output.shape[0],
+    #             gateup_output.shape[1],
+    #             gateup_output.shape[2] // 2 // scale_block_size,
+    #         ),
+    #         device=gateup_output.device,
+    #         dtype=torch.float32,
+    #     )
+    #     silu_and_mul_masked_post_quant_fwd(
+    #         gateup_output,
+    #         down_input,
+    #         down_input_scale,
+    #         scale_block_size,
+    #         masked_m,
+    #     )
+    #     del gateup_output
+
+    #     # GroupGemm-1
+    #     n = self.w2_weight.size(1)
+    #     down_input_fp8 = (
+    #         down_input,
+    #         get_col_major_tma_aligned_tensor(down_input_scale),
+    #     )
+    #     down_output = torch.empty(
+    #         (num_groups, m, n), device=down_input.device, dtype=torch.bfloat16
+    #     )
+    #     m_grouped_gemm_fp8_fp8_bf16_nt_masked(
+    #         down_input_fp8, self.w2_weight_fp8, down_output, masked_m, expected_m
+    #     )
+
+    #     return down_output

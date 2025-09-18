@@ -11,7 +11,6 @@
 #include "rtp_llm/models_py/bindings/cuda/PerTokenGroupQuantFp8.h"
 #include "rtp_llm/models_py/bindings/cuda/MoETopkSoftmax.h"
 #include "3rdparty/flashinfer/flashinfer.h"
-#include "rtp_llm/models_py/bindings/cuda/TrtFp8QuantOp.h"
 
 using namespace rtp_llm;
 
@@ -84,6 +83,9 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("beta"),
                   py::arg("eps"));
 
+    rtp_ops_m.def(
+        "embedding", &embedding, "Embedding lookup kernel", py::arg("output"), py::arg("input"), py::arg("weight"));
+
     rtp_ops_m.def("per_token_group_quant_int8",
                   &per_token_group_quant_int8,
                   "Int8 Gemm Per Token Group",
@@ -93,8 +95,7 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("group_size"),
                   py::arg("eps"),
                   py::arg("int8_min"),
-                  py::arg("int8_max"),
-                  py::arg("scale_ue8m0"));
+                  py::arg("int8_max"));
 
     rtp_ops_m.def("per_token_group_quant_fp8",
                   &per_token_group_quant_fp8,
@@ -105,8 +106,7 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("group_size"),
                   py::arg("eps"),
                   py::arg("fp8_min"),
-                  py::arg("fp8_max"),
-                  py::arg("scale_ue8m0"));
+                  py::arg("fp8_max"));
 
     rtp_ops_m.def("moe_topk_softmax",
                   &moe_topk_softmax,
@@ -125,7 +125,6 @@ void registerBaseCudaBindings(py::module& rtp_ops_m) {
     registerFusedMoEOp(rtp_ops_m);
     registerSelectTopkOp(rtp_ops_m);
     registerRtpProcessGroup(rtp_ops_m);
-    registerTrtFp8QuantOp(rtp_ops_m);
 }
 
 }  // namespace torch_ext

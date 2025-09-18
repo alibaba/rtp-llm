@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/schedulers/SchedulerBase.h"
 #include "rtp_llm/cpp/system_prompt/SystemPrompt.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include "rtp_llm/cpp/dataclass/LoadBalance.h"
 
 namespace rtp_llm {
 
@@ -31,13 +32,13 @@ public:
     absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>& generate_input,
                                              preRunMode                            mode) override;
     absl::Status                      stop() override;
-
-    KVCacheInfo                     getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) const override;
-    absl::Status                    step();
-    absl::Status                    startLoop();
-    int64_t                         getLastScheduleTime() override;
-    const rtp_llm::GptInitParameter gptInitParameter() const;
-    void                            reportMetrics(RtpLLMEngineMetricsCollector collector) {
+    LoadBalanceInfo                   getLoadBalanceInfo(int64_t latest_version) override;
+    KVCacheInfo                       getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) override;
+    absl::Status                      step();
+    absl::Status                      startLoop();
+    int64_t                           getLastScheduleTime() override;
+    const rtp_llm::GptInitParameter   gptInitParameter() const;
+    void                              reportMetrics(RtpLLMEngineMetricsCollector collector) {
         if (metrics_reporter_) {
             metrics_reporter_->report<RtpLLMEngineMetrics, RtpLLMEngineMetricsCollector>(nullptr, &collector);
         }

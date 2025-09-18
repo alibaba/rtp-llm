@@ -6,18 +6,25 @@
 #include "http_server/HttpServer.h"
 #include "http_client/SimpleHttpClient.h"
 
+#include "rtp_llm/cpp/dataclass/LoadBalance.h"
+
 namespace http_server {
 
 class WorkerStatusResponse: public autil::legacy::Jsonizable {
 public:
     void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override {
         json.Jsonize("available_concurrency", available_concurrency);
+        json.Jsonize("step_latency_ms", load_balance_info.step_latency_us / 1000.0);
+        json.Jsonize("step_per_minute", load_balance_info.step_per_minute);
+        json.Jsonize("iterate_count", load_balance_info.iterate_count);
+        json.Jsonize("onflight_requests", load_balance_info.onflight_requests);
         json.Jsonize("alive", alive);
     }
 
 public:
-    int  available_concurrency;
-    bool alive;
+    int                      available_concurrency;
+    rtp_llm::LoadBalanceInfo load_balance_info;
+    bool                     alive;
 };
 
 class HttpClientTest: public ::testing::Test {
@@ -50,6 +57,11 @@ std::shared_ptr<http_server::HttpServer> HttpClientTest::initServer(const std::s
             "available_concurrency": 32,
             "available_kv_cache": 18416,
             "total_kv_cache": 18416,
+            "step_latency_ms": 29.23,
+            "step_per_minute": 2052,
+            "onflight_requests": 0,
+            "iterate_count": 1,
+            "version": 0,
             "alive": true
         })del";
         writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);

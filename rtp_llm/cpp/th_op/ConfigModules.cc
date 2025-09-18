@@ -557,9 +557,7 @@ void BatchDecodeSchedulerConfig::update_from_env_for_test() {
 
 void register_batch_decode_scheduler_config(pybind11::module& m) {
     pybind11::class_<BatchDecodeSchedulerConfig>(m, "BatchDecodeSchedulerConfig")
-        .def(pybind11::init<int64_t, int64_t>(),
-             pybind11::arg("batch_decode_scheduler_batch_size")  = 1,
-             pybind11::arg("batch_decode_scheduler_warmup_type") = 0)
+        .def(pybind11::init<int64_t>(), pybind11::arg("batch_decode_scheduler_batch_size") = 1)
         .def("to_string", &BatchDecodeSchedulerConfig::to_string)
         .def("update_from_env", &BatchDecodeSchedulerConfig::update_from_env_for_test)
         .def_readwrite("batch_decode_scheduler_batch_size",

@@ -21,9 +21,8 @@ void per_token_group_quant_int8(at::Tensor& input,
                                 int64_t     group_size,
                                 double      eps,
                                 double      int8_min,
-                                double      int8_max,
-                                bool        scale_ue8m0) {
-    per_token_group_quant_8bit(input, output_q, output_s, group_size, eps, int8_min, int8_max, scale_ue8m0);
+                                double      int8_max) {
+    per_token_group_quant_8bit(input, output_q, output_s, group_size, eps, int8_min, int8_max);
 }
 
 void per_token_group_quant_fp8(at::Tensor& input,
@@ -32,9 +31,8 @@ void per_token_group_quant_fp8(at::Tensor& input,
                                int64_t     group_size,
                                double      eps,
                                double      fp8_min,
-                               double      fp8_max,
-                               bool        scale_ue8m0) {
-    per_token_group_quant_8bit(input, output_q, output_s, group_size, eps, fp8_min, fp8_max, scale_ue8m0);
+                               double      fp8_max) {
+    per_token_group_quant_8bit(input, output_q, output_s, group_size, eps, fp8_min, fp8_max);
 }
 
 }  // namespace torch_ext

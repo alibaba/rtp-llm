@@ -79,6 +79,15 @@ private:
     std::mutex mutex_;
 };
 
+struct LoadBalanceInfo {
+    int64_t     step_latency_us   = 0;
+    int64_t     iterate_count     = 0;
+    int64_t     step_per_minute   = 0;
+    int64_t     onflight_requests = 0;
+    int64_t     waiting_query_len = 0;
+    int64_t     running_query_len = 0;
+};
+
 struct Host {
     std::string ip;
     uint32_t    rpc_port;
@@ -130,5 +139,7 @@ struct BizHosts {
         std::sort(hosts.begin(), hosts.end(), compare);
     }
 };
+
+void registerLoadBalanceInfo(const pybind11::module& m);
 
 }  // namespace rtp_llm

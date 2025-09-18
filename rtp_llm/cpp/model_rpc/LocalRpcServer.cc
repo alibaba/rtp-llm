@@ -169,17 +169,19 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
                                              const StatusVersionPB* request,
                                              WorkerStatusPB*        response) {
     int64_t request_begin_time_us   = currentTimeUs();
+    int64_t latest_cache_version    = request->latest_cache_version();
     int64_t latest_finished_version = request->latest_finished_version();
     RTP_LLM_LOG_DEBUG(
-        "receive workerStatus rpc request from client: %s, latest_finished_version: %ld, config role_type: %d",
+        "receive workerStatus rpc request from client: %s, latest_cache_version : %ld, latest_finished_version: %ld, config role_type: %d",
         context->peer().c_str(),
+        latest_cache_version,
         latest_finished_version,
         maga_init_params_.gpt_init_parameter.role_type_);
 
-    WorkerStatusInfo status_info              = getWorkerStatusInfo(latest_finished_version);
+    WorkerStatusInfo status_info = getWorkerStatusInfo(latest_cache_version, latest_finished_version, false);
     int64_t          request_after_ws_time_us = currentTimeUs();
     RTP_LLM_LOG_DEBUG("getWorkerStatusInfo took %ld us", request_after_ws_time_us - request_begin_time_us);
-
+    const auto& load_balance_info    = status_info.load_balance_info;
     const auto& engine_schedule_info = status_info.engine_schedule_info;
     response->set_role(status_info.role);
 
@@ -208,8 +210,13 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
         task_info->set_dp_rank(status_info.dp_rank);
         task_info->set_is_waiting(task.is_waiting);
     }
+    response->set_waiting_query_len(load_balance_info.waiting_query_len);
+    response->set_running_query_len(load_balance_info.running_query_len);
+    response->set_step_latency_ms(load_balance_info.step_latency_us / 1000.0);
+    response->set_iterate_count(load_balance_info.iterate_count);
     response->set_dp_size(status_info.dp_size);
     response->set_tp_size(status_info.tp_size);
+    response->set_version(status_info.version);
     response->set_status_version(status_info.status_version);
     response->set_alive(status_info.alive);
     response->set_precision(status_info.precision);
@@ -217,8 +224,13 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
     return grpc::Status::OK;
 }
 
-WorkerStatusInfo LocalRpcServer::getWorkerStatusInfo(int64_t latest_finished_version) {
+WorkerStatusInfo LocalRpcServer::getWorkerStatusInfo(int64_t latest_cache_version,
+                                                     int64_t latest_finished_version,
+                                                     bool    needLoadBalanceInfo) {
     WorkerStatusInfo status_info;
+    if (needLoadBalanceInfo) {
+        status_info.load_balance_info = getLoadBalanceInfo(latest_cache_version);
+    }
     status_info.engine_schedule_info = getEngineScheduleInfo(latest_finished_version);
     switch (maga_init_params_.gpt_init_parameter.role_type_) {
         case RoleType::PDFUSION:
@@ -241,6 +253,7 @@ WorkerStatusInfo LocalRpcServer::getWorkerStatusInfo(int64_t latest_finished_ver
     }
     status_info.dp_size        = maga_init_params_.gpt_init_parameter.dp_size_;
     status_info.tp_size        = maga_init_params_.gpt_init_parameter.tp_size_;
+    status_info.version        = 1;
     status_info.dp_rank        = maga_init_params_.gpt_init_parameter.dp_rank_;
     status_info.status_version = currentTimeUs();
     status_info.alive          = true;
@@ -279,6 +292,9 @@ WorkerStatusInfo LocalRpcServer::getWorkerStatusInfo(int64_t latest_finished_ver
             status_info.precision = "UNKNOWN";
     }
     return status_info;
+}
+LoadBalanceInfo LocalRpcServer::getLoadBalanceInfo(int64_t latest_version) {
+    return engine_->getLoadBalanceInfo(latest_version);
 }
 
 KVCacheInfo LocalRpcServer::getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) {

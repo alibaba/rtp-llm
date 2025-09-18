@@ -255,12 +255,12 @@ def sglang_per_token_group_quant_8bit(
         iinfo = torch.iinfo(dtype)
         int8_max = iinfo.max
         int8_min = iinfo.min
-        per_token_group_quant_int8(x, x_q, x_s, group_size, eps, int8_min, int8_max, False)
+        per_token_group_quant_int8(x, x_q, x_s, group_size, eps, int8_min, int8_max)
     else:
         f8_info = torch.finfo(dtype)
         fp8_max = f8_info.max
         fp8_min = f8_info.min
-        per_token_group_quant_fp8(x, x_q, x_s, group_size, eps, fp8_min, fp8_max, False)
+        per_token_group_quant_fp8(x, x_q, x_s, group_size, eps, fp8_min, fp8_max)
 
     return x_q, x_s
 

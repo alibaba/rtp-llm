@@ -118,6 +118,7 @@ try:
         KVCache,
         KVCacheConfig,
         KVCacheInfo,
+        LoadBalanceInfo,
         MiscellaneousConfig,
         MlaOpsType,
         ModelSpecificConfig,
@@ -162,11 +163,11 @@ class EmptyClass:
 
 
 try:
-    from libth_transformer import EngineScheduleInfo, KVCacheInfo
+    from libth_transformer import EngineScheduleInfo, KVCacheInfo, LoadBalanceInfo
     from libth_transformer import MultimodalInput as MultimodalInputCpp
     from libth_transformer import (
-        PyAttentionInputs,
         PyCacheStoreInputs,
+        PyAttentionInputs,
         PyModelInitResources,
         PyModelInputs,
         PyModelOutputs,
@@ -176,7 +177,7 @@ try:
     )
 except BaseException as e:
     if os.environ.get("ROLE_TYPE") == "FRONTEND":
-        MultimodalInputCpp = EngineScheduleInfo = EmptyClass
+        MultimodalInputCpp = LoadBalanceInfo = EngineScheduleInfo = EmptyClass
         RtpEmbeddingOp = RtpLLMOp = EmptyClass
         PyModelInputs = PyModelOutputs = PyAttentionInputs = PyModelInitResources = (
             rtp_llm_ops

@@ -21,15 +21,15 @@ from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.distribute.deep_ep import (
     DeepEPBuffer,
     DeepEPConfig,
-    destroy_deepep_wrapper,
-    get_deepep_wrapper,
     init_deepep_wrapper,
+    get_deepep_wrapper,
+    destroy_deepep_wrapper,
 )
 from rtp_llm.distribute.process_group_state import (
     ProcessGroupState,
-    destroy_distributed_environment,
     get_ep_group,
     init_distributed_environment,
+    destroy_distributed_environment,
 )
 
 
@@ -45,9 +45,7 @@ def per_token_cast_to_fp8(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     m, n = x.shape
     x_view = x.view(m, -1, 128)
     x_amax = x_view.abs().float().amax(dim=2).view(m, -1).clamp(1e-4)
-    return (x_view * (448.0 / x_amax.unsqueeze(2))).to(torch.float8_e4m3fn).view(
-        m, n
-    ), (x_amax / 448.0).view(m, -1)
+    return (x_view * (448.0 / x_amax.unsqueeze(2))).to(torch.float8_e4m3fn).view(m, n), (x_amax / 448.0).view(m, -1)
 
 
 def per_token_cast_back(x_fp8: torch.Tensor, x_scales: torch.Tensor):
@@ -112,9 +110,7 @@ def bench(
             post_fn()
     torch.cuda.synchronize()
 
-    times = np.array(
-        [s.elapsed_time(e) / 1e3 for s, e in zip(start_events, end_events)]
-    )[1:]
+    times = np.array([s.elapsed_time(e) / 1e3 for s, e in zip(start_events, end_events)])[1:]
     return float(np.average(times)), float(np.min(times)), float(np.max(times))
 
 
@@ -174,9 +170,7 @@ def bench_kineto(
     suppress = suppress_stdout_stderr if suppress_kineto_output else empty_suppress
     with suppress():
         schedule = torch.profiler.schedule(wait=0, warmup=1, active=1, repeat=1)
-        with torch.profiler.profile(
-            activities=[torch.profiler.ProfilerActivity.CUDA], schedule=schedule
-        ) as prof:
+        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA], schedule=schedule) as prof:
             for i in range(2):
                 # NOTES: use a large kernel and a barrier to eliminate the unbalanced CPU launch overhead
                 if barrier_comm_profiling:
@@ -191,17 +185,11 @@ def bench_kineto(
     # Parse the profiling table
     assert isinstance(kernel_names, str) or isinstance(kernel_names, tuple)
     is_tuple = isinstance(kernel_names, tuple)
-    prof_lines = (
-        prof.key_averages()
-        .table(sort_by="cuda_time_total", max_name_column_width=100)
-        .split("\n")
-    )
+    prof_lines = prof.key_averages().table(sort_by="cuda_time_total", max_name_column_width=100).split("\n")
     kernel_names = (kernel_names,) if isinstance(kernel_names, str) else kernel_names
     assert all([isinstance(name, str) for name in kernel_names])
     for name in kernel_names:
-        assert (
-            sum([name in line for line in prof_lines]) == 1
-        ), f"Errors of the kernel {name} in the profiling table"
+        assert sum([name in line for line in prof_lines]) == 1, f"Errors of the kernel {name} in the profiling table"
 
     # Save chrome traces
     if trace_path is not None:
@@ -216,9 +204,7 @@ def bench_kineto(
                 time_str = line.split()[-2]
                 for unit, scale in units.items():
                     if unit in time_str:
-                        kernel_durations.append(
-                            float(time_str.replace(unit, "")) / scale
-                        )
+                        kernel_durations.append(float(time_str.replace(unit, "")) / scale)
                         break
                 break
 
@@ -229,19 +215,14 @@ def bench_kineto(
             profile_data = json.loads(Path(tmp.name).read_text())
 
         for i, kernel_name in enumerate(kernel_names):
-            events = [
-                event
-                for event in profile_data["traceEvents"]
-                if f"::{kernel_name}" in event["name"]
-            ]
+            events = [event for event in profile_data["traceEvents"] if f"::{kernel_name}" in event["name"]]
             events = sorted(events, key=lambda event: event["ts"])
             durations = [event["dur"] / 1e6 for event in events]
             # this assert may cause hang
             # assert len(durations) % num_kernels_per_period == 0
             num_kernel_patterns = len(durations) // num_kernels_per_period
             kernel_durations[i] = [
-                sum(durations[j::num_kernels_per_period]) / num_kernel_patterns
-                for j in range(num_kernels_per_period)
+                sum(durations[j::num_kernels_per_period]) / num_kernel_patterns for j in range(num_kernels_per_period)
             ]
 
     # Return execution durations
@@ -286,33 +267,19 @@ class DeepEPTest(TestCase):
 
         # Random data
         x = torch.ones((num_tokens, hidden), dtype=torch.bfloat16, device="cuda") * rank
-        x_pure_rand = torch.randn(
-            (num_tokens, hidden), dtype=torch.bfloat16, device="cuda"
-        )
+        x_pure_rand = torch.randn((num_tokens, hidden), dtype=torch.bfloat16, device="cuda")
         x_e4m3 = per_token_cast_to_fp8(x) if DeepEPBuffer.is_sm90_compiled() else None
         x_e4m3 = (x_e4m3[0], x_e4m3[1].T.contiguous().T) if x_e4m3 is not None else None
-        scores = (
-            torch.randn(
-                (num_tokens, num_experts), dtype=torch.float32, device="cuda"
-            ).abs()
-            + 1
-        )
+        scores = torch.randn((num_tokens, num_experts), dtype=torch.float32, device="cuda").abs() + 1
         topk_idx = torch.topk(scores, num_topk, dim=-1, largest=True, sorted=False)[1]
-        topk_weights = (
-            torch.ones((num_tokens, num_topk), dtype=torch.float32, device="cuda")
-            * rank
-        )
-        topk_weights_pure_rand = torch.randn(
-            (num_tokens, num_topk), dtype=torch.float32, device="cuda"
-        )
+        topk_weights = torch.ones((num_tokens, num_topk), dtype=torch.float32, device="cuda") * rank
+        topk_weights_pure_rand = torch.randn((num_tokens, num_topk), dtype=torch.float32, device="cuda")
         rank_idx = topk_idx // (num_experts // num_ranks)
         rank_idx.masked_fill_(topk_idx == -1, -1)
         inplace_unique(rank_idx, num_ranks)
 
         # Expert meta
-        num_tokens_per_expert = torch.zeros(
-            (num_experts,), dtype=torch.int, device="cuda"
-        )
+        num_tokens_per_expert = torch.zeros((num_experts,), dtype=torch.int, device="cuda")
         for i in range(num_experts):
             num_tokens_per_expert[i] = (topk_idx == i).sum()
         gbl_num_tokens_per_expert = num_tokens_per_expert.clone()
@@ -320,18 +287,14 @@ class DeepEPTest(TestCase):
 
         # Rank layout meta
         num_tokens_per_rank = torch.empty((num_ranks,), dtype=torch.int, device="cuda")
-        token_idx_in_rank = torch.full(
-            (num_ranks, num_tokens), -1, dtype=torch.long, device="cuda"
-        )
+        token_idx_in_rank = torch.full((num_ranks, num_tokens), -1, dtype=torch.long, device="cuda")
         for i in range(num_ranks):
             num_tokens_per_rank[i] = (rank_idx == i).sum()
             token_sel = (rank_idx == i).max(dim=-1)[0]
             count = token_sel.sum().item()
             tokens = torch.sort(token_sel.to(torch.int), descending=True)[1]
             tokens[:count] = torch.sort(tokens[:count])[0]
-            token_idx_in_rank[i][tokens[:count]] = torch.arange(
-                count, dtype=torch.long, device="cuda"
-            )
+            token_idx_in_rank[i][tokens[:count]] = torch.arange(count, dtype=torch.long, device="cuda")
         token_idx_in_rank = token_idx_in_rank.T.contiguous().to(torch.int)
         is_token_in_rank = token_idx_in_rank >= 0
         gbl_num_tokens_per_rank = num_tokens_per_rank.clone()
@@ -370,9 +333,7 @@ class DeepEPTest(TestCase):
 
         for previous_mode in (False, True):
             for async_mode in (False, True):
-                for current_x in filter(
-                    lambda elem: elem is not None, (x_pure_rand, x, x_e4m3)
-                ):
+                for current_x in filter(lambda elem: elem is not None, (x_pure_rand, x, x_e4m3)):
                     for with_topk in (False, True):
                         if local_rank == 0:
                             print(
@@ -393,9 +354,7 @@ class DeepEPTest(TestCase):
                                 {
                                     "topk_idx": topk_idx,
                                     "topk_weights": (
-                                        topk_weights_pure_rand
-                                        if current_x is x_pure_rand
-                                        else topk_weights
+                                        topk_weights_pure_rand if current_x is x_pure_rand else topk_weights
                                     ),
                                 }
                             )
@@ -410,11 +369,7 @@ class DeepEPTest(TestCase):
                             event,
                         ) = buffer.dispatch(**dispatch_args)
                         event.current_stream_wait() if async_mode else ()
-                        recv_x = (
-                            per_token_cast_back(*recv_x)
-                            if isinstance(recv_x, tuple)
-                            else recv_x
-                        )
+                        recv_x = per_token_cast_back(*recv_x) if isinstance(recv_x, tuple) else recv_x
 
                         # Checks
                         rank_prefix_matrix = handle[0]
@@ -432,10 +387,7 @@ class DeepEPTest(TestCase):
                             # Check `topk_idx`
                             assert (
                                 recv_topk_idx.eq(-1)
-                                | (
-                                    (recv_topk_idx >= 0)
-                                    & (recv_topk_idx < (num_experts // num_ranks))
-                                )
+                                | ((recv_topk_idx >= 0) & (recv_topk_idx < (num_experts // num_ranks)))
                             ).sum().item() == recv_topk_idx.numel()
                             for i, count in enumerate(recv_num_tokens_per_expert_list):
                                 assert recv_topk_idx.eq(i).sum().item() == count
@@ -443,11 +395,9 @@ class DeepEPTest(TestCase):
                             # Check `topk_weights`
                             recv_topk_weights_clone = recv_topk_weights.clone()
                             if current_x is not x_pure_rand:
-                                recv_topk_weights[recv_topk_idx.eq(-1)] = (
-                                    recv_topk_weights.amax(
-                                        dim=1, keepdim=True
-                                    ).expand_as(recv_topk_weights)[recv_topk_idx.eq(-1)]
-                                )
+                                recv_topk_weights[recv_topk_idx.eq(-1)] = recv_topk_weights.amax(
+                                    dim=1, keepdim=True
+                                ).expand_as(recv_topk_weights)[recv_topk_idx.eq(-1)]
                                 check_data(recv_topk_weights, rank_prefix_matrix)
 
                         # Test `num_worst_tokens != 0`
@@ -464,25 +414,19 @@ class DeepEPTest(TestCase):
                             ) = buffer.dispatch(**dispatch_args)
                             event.current_stream_wait() if async_mode else ()
                             recv_worst_x = (
-                                per_token_cast_back(*recv_worst_x)
-                                if isinstance(recv_worst_x, tuple)
-                                else recv_worst_x
+                                per_token_cast_back(*recv_worst_x) if isinstance(recv_worst_x, tuple) else recv_worst_x
                             )
                             assert len(empty_list) == 0
                             assert num_worst_tokens == recv_worst_x.size(0)
                             assert num_worst_tokens == recv_worst_topk_idx.size(0)
                             assert num_worst_tokens == recv_worst_topk_weights.size(0)
                             assert torch.equal(recv_x, recv_worst_x[: recv_x.size(0)])
-                            assert torch.equal(
-                                recv_topk_idx, recv_worst_topk_idx[: recv_x.size(0)]
-                            )
+                            assert torch.equal(recv_topk_idx, recv_worst_topk_idx[: recv_x.size(0)])
                             assert torch.equal(
                                 recv_topk_weights_clone,
                                 recv_worst_topk_weights[: recv_x.size(0)],
                             )
-                            assert torch.all(
-                                recv_worst_topk_idx[recv_x.size(0) :] == -1
-                            ).item()
+                            assert torch.all(recv_worst_topk_idx[recv_x.size(0) :] == -1).item()
 
                         # Test cached dispatch (must without top-k staffs)
                         if not with_topk:
@@ -493,16 +437,10 @@ class DeepEPTest(TestCase):
                                 "async_finish": async_mode,
                             }
                             if previous_mode:
-                                dispatch_args.update(
-                                    {"previous_event": buffer.capture()}
-                                )
+                                dispatch_args.update({"previous_event": buffer.capture()})
                             recv_x, _, _, _, _, event = buffer.dispatch(**dispatch_args)
                             event.current_stream_wait() if async_mode else ()
-                            recv_x = (
-                                per_token_cast_back(*recv_x)
-                                if isinstance(recv_x, tuple)
-                                else recv_x
-                            )
+                            recv_x = per_token_cast_back(*recv_x) if isinstance(recv_x, tuple) else recv_x
                             if current_x is not x_pure_rand:
                                 check_data(recv_x, rank_prefix_matrix)
 
@@ -517,32 +455,19 @@ class DeepEPTest(TestCase):
                             combine_args.update({"topk_weights": recv_topk_weights})
                         if previous_mode:
                             combine_args.update({"previous_event": buffer.capture()})
-                        combined_x, combined_topk_weights, event = buffer.combine(
-                            **combine_args
-                        )
+                        combined_x, combined_topk_weights, event = buffer.combine(**combine_args)
                         event.current_stream_wait() if async_mode else ()
-                        check_x = combined_x.float() / is_token_in_rank.sum(
-                            dim=1
-                        ).unsqueeze(1)
+                        check_x = combined_x.float() / is_token_in_rank.sum(dim=1).unsqueeze(1)
                         ref_x = x_pure_rand if current_x is x_pure_rand else x
                         assert calc_diff(check_x, ref_x) < 5e-6
                         if with_topk:
                             check_topk_weights = (
                                 combined_topk_weights
                                 if (current_x is x_pure_rand)
-                                else (
-                                    combined_topk_weights
-                                    / is_token_in_rank.sum(dim=1).unsqueeze(1)
-                                )
+                                else (combined_topk_weights / is_token_in_rank.sum(dim=1).unsqueeze(1))
                             )
-                            ref_topk_weights = (
-                                topk_weights_pure_rand
-                                if current_x is x_pure_rand
-                                else topk_weights
-                            )
-                            assert (
-                                calc_diff(check_topk_weights, ref_topk_weights) < 1e-9
-                            )
+                            ref_topk_weights = topk_weights_pure_rand if current_x is x_pure_rand else topk_weights
+                            assert calc_diff(check_topk_weights, ref_topk_weights) < 1e-9
 
                         # For later tuning
                         dispatch_bf16_nvl_recv_bytes = recv_x.numel() * 2
@@ -593,16 +518,11 @@ class DeepEPTest(TestCase):
                     [best_results[0], best_results[1]], dtype=torch.int32, device="cuda"
                 )
                 all_best_fp8_results_list = [
-                    torch.zeros_like(best_dispatch_results)
-                    for _ in range(torch.distributed.get_world_size())
+                    torch.zeros_like(best_dispatch_results) for _ in range(torch.distributed.get_world_size())
                 ]
-                dist.all_gather(
-                    all_best_fp8_results_list, best_dispatch_results, group=group
-                )
+                dist.all_gather(all_best_fp8_results_list, best_dispatch_results, group=group)
                 best_dispatch_results = all_best_fp8_results_list[0].tolist()
-        dispatch_config = DeepEPConfig(
-            best_dispatch_results[0], best_dispatch_results[1], nvl_buffer_size
-        )
+        dispatch_config = DeepEPConfig(best_dispatch_results[0], best_dispatch_results[1], nvl_buffer_size)
 
         dispatch_args = {
             "x": x,
@@ -660,37 +580,20 @@ class DeepEPTest(TestCase):
 
         # NOTES: the integers greater than 256 exceed the BF16 precision limit
         rank_offset = 128
-        assert (
-            num_ranks - rank_offset < 257
-        ), "Too many ranks (exceeding test precision limit)"
+        assert num_ranks - rank_offset < 257, "Too many ranks (exceeding test precision limit)"
 
-        x = torch.ones((num_tokens, hidden), dtype=torch.bfloat16, device="cuda") * (
-            rank - rank_offset
-        )
+        x = torch.ones((num_tokens, hidden), dtype=torch.bfloat16, device="cuda") * (rank - rank_offset)
         if os.getenv("ACCL_FP8_CAST_LEVEL", "1") == "2":
-            x[:, -hidden:] = (
-                torch.arange(num_tokens, device="cuda").to(torch.bfloat16).view(-1, 1)
-            )
+            x[:, -hidden:] = torch.arange(num_tokens, device="cuda").to(torch.bfloat16).view(-1, 1)
         else:
-            x[:, -128:] = (
-                torch.arange(num_tokens, device="cuda").to(torch.bfloat16).view(-1, 1)
-            )
-        scores = (
-            torch.randn(
-                (num_tokens, num_experts), dtype=torch.float32, device="cuda"
-            ).abs()
-            + 1
-        )
+            x[:, -128:] = torch.arange(num_tokens, device="cuda").to(torch.bfloat16).view(-1, 1)
+        scores = torch.randn((num_tokens, num_experts), dtype=torch.float32, device="cuda").abs() + 1
         topk_idx = torch.topk(scores, num_topk, dim=-1, largest=True, sorted=True)[1]
-        topk_weights = torch.randn(
-            (num_tokens, num_topk), dtype=torch.float32, device="cuda"
-        ).abs()
+        topk_weights = torch.randn((num_tokens, num_topk), dtype=torch.float32, device="cuda").abs()
 
         # Randomly mask some positions
         for i in range(10):
-            topk_idx[
-                random.randint(0, num_tokens - 1), random.randint(0, num_topk - 1)
-            ] = -1
+            topk_idx[random.randint(0, num_tokens - 1), random.randint(0, num_topk - 1)] = -1
 
         # Check dispatch correctness
         do_check = True
@@ -704,25 +607,21 @@ class DeepEPTest(TestCase):
                             cumulative_local_expert_recv_stats = torch.zeros(
                                 (num_local_experts,), dtype=torch.int, device="cuda"
                             )
-                            packed_recv_x, packed_recv_count, handle, event, hook = (
-                                buffer.low_latency_dispatch(
-                                    x,
-                                    topk_idx,
-                                    num_tokens,
-                                    num_experts,
-                                    use_fp8=dispatch_use_fp8,
-                                    round_scale=round_scale,
-                                    use_ue8m0=use_ue8m0,
-                                    cumulative_local_expert_recv_stats=cumulative_local_expert_recv_stats,
-                                    async_finish=not return_recv_hook,
-                                    return_recv_hook=return_recv_hook,
-                                )
+                            packed_recv_x, packed_recv_count, handle, event, hook = buffer.low_latency_dispatch(
+                                x,
+                                topk_idx,
+                                num_tokens,
+                                num_experts,
+                                use_fp8=dispatch_use_fp8,
+                                round_scale=round_scale,
+                                use_ue8m0=use_ue8m0,
+                                cumulative_local_expert_recv_stats=cumulative_local_expert_recv_stats,
+                                async_finish=not return_recv_hook,
+                                return_recv_hook=return_recv_hook,
                             )
                             hook() if return_recv_hook else event.current_stream_wait()
                         packed_recv_x = (
-                            (packed_recv_x[0], packed_recv_x[1].contiguous())
-                            if dispatch_use_fp8
-                            else packed_recv_x
+                            (packed_recv_x[0], packed_recv_x[1].contiguous()) if dispatch_use_fp8 else packed_recv_x
                         )
                         if os.getenv("ACCL_FP8_CAST_LEVEL", "1") == "2":
                             simulated_gemm_x = (
@@ -751,9 +650,7 @@ class DeepEPTest(TestCase):
                         for i in range(num_local_experts if do_check else 0):
                             expert_id = rank * num_local_experts + i
                             recv_x = (
-                                per_token_cast_back(
-                                    packed_recv_x[0][i], packed_recv_x[1][i]
-                                )
+                                per_token_cast_back(packed_recv_x[0][i], packed_recv_x[1][i])
                                 if dispatch_use_fp8
                                 else packed_recv_x[i]
                             )
@@ -767,70 +664,44 @@ class DeepEPTest(TestCase):
                             int_mask = (2**32) - 1
                             num_valid_tokens = recv_count.item()
                             assert (
-                                cumulative_local_expert_recv_stats[i].item()
-                                == num_valid_tokens
+                                cumulative_local_expert_recv_stats[i].item() == num_valid_tokens
                             ), f"{cumulative_local_expert_recv_stats[i].item()} != {num_valid_tokens}"
                             assert (
-                                num_valid_tokens
-                                == (recv_layout_range & int_mask).sum().item()
+                                num_valid_tokens == (recv_layout_range & int_mask).sum().item()
                             ), f"{num_valid_tokens} != {recv_layout_range & int_mask}.sum().item()"
                             assert (
-                                num_valid_tokens
-                                == (all_topk_idx == expert_id).sum().item()
+                                num_valid_tokens == (all_topk_idx == expert_id).sum().item()
                             ), f"{num_valid_tokens} != {(all_topk_idx == expert_id).sum().item()}"
 
                             # Check received data
                             recv_x = recv_x[:num_valid_tokens]
                             recv_x_amin = recv_x[:, :-128].amin(dim=-1)
                             recv_src_info = recv_src_info[:num_valid_tokens]
-                            assert torch.equal(
-                                recv_x_amin, recv_x[:, :-128].amax(dim=-1)
-                            )
+                            assert torch.equal(recv_x_amin, recv_x[:, :-128].amax(dim=-1))
                             if round_scale:
-                                assert (
-                                    calc_diff(recv_x[:, -1], recv_src_info.view(-1))
-                                    < 0.007
-                                )
+                                assert calc_diff(recv_x[:, -1], recv_src_info.view(-1)) < 0.007
                             else:
-                                assert (
-                                    recv_x[:, -128:]
-                                    - recv_src_info.view(-1, 1) % num_tokens
-                                ).sum().item() == 0
+                                assert (recv_x[:, -128:] - recv_src_info.view(-1, 1) % num_tokens).sum().item() == 0
                             for j in range(num_ranks):
-                                begin_idx, count = (
-                                    recv_layout_range[j] >> 32
-                                ).item(), (recv_layout_range[j] & int_mask).item()
-                                if (
-                                    not round_scale
-                                    and os.getenv("ACCL_FP8_CAST_LEVEL", "1") != "2"
-                                ):
-                                    assert (
-                                        recv_x_amin == j - rank_offset
-                                    ).sum().item() == (
+                                begin_idx, count = (recv_layout_range[j] >> 32).item(), (
+                                    recv_layout_range[j] & int_mask
+                                ).item()
+                                if not round_scale and os.getenv("ACCL_FP8_CAST_LEVEL", "1") != "2":
+                                    assert (recv_x_amin == j - rank_offset).sum().item() == (
                                         all_topk_idx[j] == expert_id
                                     ).sum().item()
-                                assert (
-                                    recv_x[begin_idx : begin_idx + count][:-128] - j
-                                ).sum().item() == 0
+                                assert (recv_x[begin_idx : begin_idx + count][:-128] - j).sum().item() == 0
                             if dispatch_use_fp8:
-                                hash_value ^= hash_tensor(
-                                    packed_recv_x[0][i, :num_valid_tokens]
-                                )
+                                hash_value ^= hash_tensor(packed_recv_x[0][i, :num_valid_tokens])
                                 if os.getenv("ACCL_FP8_CAST_LEVEL", "1") != "2":
-                                    hash_value ^= hash_tensor(
-                                        packed_recv_x[1][i, :num_valid_tokens]
-                                    )
+                                    hash_value ^= hash_tensor(packed_recv_x[1][i, :num_valid_tokens])
                             else:
-                                hash_value ^= hash_tensor(
-                                    packed_recv_x[i, :num_valid_tokens]
-                                )
+                                hash_value ^= hash_tensor(packed_recv_x[i, :num_valid_tokens])
 
                         # Check combine correctness
                         for zero_copy in (False, True):
                             if zero_copy:
-                                buffer.get_next_low_latency_combine_buffer(handle)[
-                                    :, :, :
-                                ] = simulated_gemm_x
+                                buffer.get_next_low_latency_combine_buffer(handle)[:, :, :] = simulated_gemm_x
                             out = torch.empty(
                                 (num_tokens, hidden),
                                 dtype=torch.bfloat16,
@@ -849,10 +720,7 @@ class DeepEPTest(TestCase):
                             hook() if return_recv_hook else event.current_stream_wait()
                             if do_check:
                                 diff = calc_diff(
-                                    x
-                                    * topk_weights.masked_fill(topk_idx == -1, 0)
-                                    .sum(dim=1)
-                                    .view(-1, 1),
+                                    x * topk_weights.masked_fill(topk_idx == -1, 0).sum(dim=1).view(-1, 1),
                                     combined_x,
                                 )
                                 assert torch.isnan(combined_x).sum().item() == 0
@@ -887,9 +755,7 @@ class DeepEPTest(TestCase):
             )
             large_gemm_with_hook(hook) if return_recv_hook else None
             if zero_copy:
-                buffer.get_next_low_latency_combine_buffer(handle)[
-                    :, :, :
-                ] = simulated_gemm_x
+                buffer.get_next_low_latency_combine_buffer(handle)[:, :, :] = simulated_gemm_x
             combined_x, event, hook = buffer.low_latency_combine(
                 simulated_gemm_x,
                 topk_idx,
@@ -902,9 +768,7 @@ class DeepEPTest(TestCase):
 
         # Calculate bandwidth
         if os.getenv("ACCL_FP8_CAST_LEVEL", "1") == "2":
-            num_fp8_bytes, num_bf16_bytes = (
-                hidden + hidden / hidden * 4 + 16
-            ), hidden * 2
+            num_fp8_bytes, num_bf16_bytes = (hidden + hidden / hidden * 4 + 16), hidden * 2
         else:
             num_fp8_bytes, num_bf16_bytes = (hidden + hidden / 128 * 4 + 16), hidden * 2
         num_dispatch_comm_bytes, num_combine_comm_bytes = 0, 0
@@ -914,9 +778,7 @@ class DeepEPTest(TestCase):
             num_combine_comm_bytes += num_bf16_bytes * num_selections
 
         # Dispatch + combine testing
-        avg_t, min_t, max_t = bench(
-            partial(test_func, zero_copy=False, return_recv_hook=False)
-        )
+        avg_t, min_t, max_t = bench(partial(test_func, zero_copy=False, return_recv_hook=False))
         print(
             f"[rank {rank}] Dispatch + combine bandwidth: {(num_dispatch_comm_bytes + num_combine_comm_bytes) / 1e9 / avg_t:.2f} GB/s, "
             f"avg_t={avg_t * 1e6:.2f} us, min_t={min_t * 1e6:.2f} us, max_t={max_t * 1e6:.2f} us",
@@ -971,37 +833,20 @@ class DeepEPTest(TestCase):
 
         # NOTES: the integers greater than 256 exceed the BF16 precision limit
         rank_offset = 128
-        assert (
-            num_ranks - rank_offset < 257
-        ), "Too many ranks (exceeding test precision limit)"
+        assert num_ranks - rank_offset < 257, "Too many ranks (exceeding test precision limit)"
 
-        x = torch.ones((num_tokens, hidden), dtype=torch.bfloat16, device="cuda") * (
-            rank - rank_offset
-        )
+        x = torch.ones((num_tokens, hidden), dtype=torch.bfloat16, device="cuda") * (rank - rank_offset)
         if os.getenv("ACCL_FP8_CAST_LEVEL", "1") == "2":
-            x[:, -hidden:] = (
-                torch.arange(num_tokens, device="cuda").to(torch.bfloat16).view(-1, 1)
-            )
+            x[:, -hidden:] = torch.arange(num_tokens, device="cuda").to(torch.bfloat16).view(-1, 1)
         else:
-            x[:, -128:] = (
-                torch.arange(num_tokens, device="cuda").to(torch.bfloat16).view(-1, 1)
-            )
-        scores = (
-            torch.randn(
-                (num_tokens, num_experts), dtype=torch.float32, device="cuda"
-            ).abs()
-            + 1
-        )
+            x[:, -128:] = torch.arange(num_tokens, device="cuda").to(torch.bfloat16).view(-1, 1)
+        scores = torch.randn((num_tokens, num_experts), dtype=torch.float32, device="cuda").abs() + 1
         topk_idx = torch.topk(scores, num_topk, dim=-1, largest=True, sorted=True)[1]
-        topk_weights = torch.randn(
-            (num_tokens, num_topk), dtype=torch.float32, device="cuda"
-        ).abs()
+        topk_weights = torch.randn((num_tokens, num_topk), dtype=torch.float32, device="cuda").abs()
 
         # Randomly mask some positions
         for i in range(10):
-            topk_idx[
-                random.randint(0, num_tokens - 1), random.randint(0, num_topk - 1)
-            ] = -1
+            topk_idx[random.randint(0, num_tokens - 1), random.randint(0, num_topk - 1)] = -1
 
         # Check dispatch correctness
         if rank < ae_mask:
@@ -1063,9 +908,7 @@ class DeepEPTest(TestCase):
                             if rank >= ae_mask:
                                 topk_idx = torch.full((num_tokens, num_topk), -1)
                         packed_recv_x = (
-                            (packed_recv_x[0], packed_recv_x[1].contiguous())
-                            if dispatch_use_fp8
-                            else packed_recv_x
+                            (packed_recv_x[0], packed_recv_x[1].contiguous()) if dispatch_use_fp8 else packed_recv_x
                         )
                         if os.getenv("ACCL_FP8_CAST_LEVEL", "1") == "2":
                             simulated_gemm_x = (
@@ -1094,9 +937,7 @@ class DeepEPTest(TestCase):
                         for i in range(num_local_experts if do_check else 0):
                             expert_id = rank * num_local_experts + i
                             recv_x = (
-                                per_token_cast_back(
-                                    packed_recv_x[0][i], packed_recv_x[1][i]
-                                )
+                                per_token_cast_back(packed_recv_x[0][i], packed_recv_x[1][i])
                                 if dispatch_use_fp8
                                 else packed_recv_x[i]
                             )
@@ -1110,116 +951,83 @@ class DeepEPTest(TestCase):
                             int_mask = (2**32) - 1
                             num_valid_tokens = recv_count.item()
                             assert (
-                                cumulative_local_expert_recv_stats[i].item()
-                                == num_valid_tokens
+                                cumulative_local_expert_recv_stats[i].item() == num_valid_tokens
                             ), f"{cumulative_local_expert_recv_stats[i].item()} != {num_valid_tokens}"
                             assert (
-                                num_valid_tokens
-                                == (recv_layout_range & int_mask).sum().item()
+                                num_valid_tokens == (recv_layout_range & int_mask).sum().item()
                             ), f"{num_valid_tokens} != {recv_layout_range & int_mask}.sum().item()"
                             assert (
-                                num_valid_tokens
-                                == (all_topk_idx == expert_id).sum().item()
+                                num_valid_tokens == (all_topk_idx == expert_id).sum().item()
                             ), f"{num_valid_tokens} != {(all_topk_idx == expert_id).sum().item()}"
 
                             # Check received data
                             recv_x = recv_x[:num_valid_tokens]
                             recv_x_amin = recv_x[:, :-128].amin(dim=-1)
                             recv_src_info = recv_src_info[:num_valid_tokens]
-                            assert torch.equal(
-                                recv_x_amin, recv_x[:, :-128].amax(dim=-1)
-                            )
+                            assert torch.equal(recv_x_amin, recv_x[:, :-128].amax(dim=-1))
                             if round_scale:
                                 # Skip assertion if no data is received
                                 if recv_src_info.numel() > 0:
-                                    assert (
-                                        calc_diff(recv_x[:, -1], recv_src_info.view(-1))
-                                        < 0.007
-                                    )
+                                    assert calc_diff(recv_x[:, -1], recv_src_info.view(-1)) < 0.007
                             else:
-                                assert (
-                                    recv_x[:, -128:]
-                                    - recv_src_info.view(-1, 1) % num_tokens
-                                ).sum().item() == 0
+                                assert (recv_x[:, -128:] - recv_src_info.view(-1, 1) % num_tokens).sum().item() == 0
                             for j in range(num_ranks):
-                                begin_idx, count = (
-                                    recv_layout_range[j] >> 32
-                                ).item(), (recv_layout_range[j] & int_mask).item()
-                                if (
-                                    not round_scale
-                                    and os.getenv("ACCL_FP8_CAST_LEVEL", "1") != "2"
-                                ):
-                                    assert (
-                                        recv_x_amin == j - rank_offset
-                                    ).sum().item() == (
+                                begin_idx, count = (recv_layout_range[j] >> 32).item(), (
+                                    recv_layout_range[j] & int_mask
+                                ).item()
+                                if not round_scale and os.getenv("ACCL_FP8_CAST_LEVEL", "1") != "2":
+                                    assert (recv_x_amin == j - rank_offset).sum().item() == (
                                         all_topk_idx[j] == expert_id
                                     ).sum().item()
-                                assert (
-                                    recv_x[begin_idx : begin_idx + count][:-128] - j
-                                ).sum().item() == 0
+                                assert (recv_x[begin_idx : begin_idx + count][:-128] - j).sum().item() == 0
                             if dispatch_use_fp8:
-                                hash_value ^= hash_tensor(
-                                    packed_recv_x[0][i, :num_valid_tokens]
-                                )
+                                hash_value ^= hash_tensor(packed_recv_x[0][i, :num_valid_tokens])
                                 if os.getenv("ACCL_FP8_CAST_LEVEL", "1") != "2":
-                                    hash_value ^= hash_tensor(
-                                        packed_recv_x[1][i, :num_valid_tokens]
-                                    )
+                                    hash_value ^= hash_tensor(packed_recv_x[1][i, :num_valid_tokens])
                             else:
-                                hash_value ^= hash_tensor(
-                                    packed_recv_x[i, :num_valid_tokens]
-                                )
+                                hash_value ^= hash_tensor(packed_recv_x[i, :num_valid_tokens])
 
                         # Check combine correctness
                         for zero_copy in (False, True):
                             if zero_copy:
                                 if rank < ae_mask:
-                                    buffer.get_next_low_latency_combine_buffer(handle)[
+                                    buffer.get_next_low_latency_combine_buffer(handle)[:, :, :] = simulated_gemm_x
+                                else:
+                                    buffer.get_next_low_latency_combine_buffer_m2n(handle, hidden)[
                                         :, :, :
                                     ] = simulated_gemm_x
-                                else:
-                                    buffer.get_next_low_latency_combine_buffer_m2n(
-                                        handle, hidden
-                                    )[:, :, :] = simulated_gemm_x
                             out = torch.empty(
                                 (num_tokens, hidden),
                                 dtype=torch.bfloat16,
                                 device="cuda",
                             )
                             if rank < ae_mask:
-                                combined_x, event, hook = (
-                                    buffer.low_latency_combine_recv(
-                                        topk_idx,
-                                        topk_weights,
-                                        handle,
-                                        ae_mask,
-                                        num_tokens,
-                                        num_topk,
-                                        async_finish=not return_recv_hook,
-                                        zero_copy=zero_copy,
-                                        return_recv_hook=return_recv_hook,
-                                        out=out,
-                                    )
+                                combined_x, event, hook = buffer.low_latency_combine_recv(
+                                    topk_idx,
+                                    topk_weights,
+                                    handle,
+                                    ae_mask,
+                                    num_tokens,
+                                    num_topk,
+                                    async_finish=not return_recv_hook,
+                                    zero_copy=zero_copy,
+                                    return_recv_hook=return_recv_hook,
+                                    out=out,
                                 )
                             else:
-                                combined_x, event, hook = (
-                                    buffer.low_latency_combine_send(
-                                        simulated_gemm_x,
-                                        handle,
-                                        num_topk,
-                                        async_finish=not return_recv_hook,
-                                        zero_copy=zero_copy,
-                                        return_recv_hook=return_recv_hook,
-                                        out=out,
-                                    )
+                                combined_x, event, hook = buffer.low_latency_combine_send(
+                                    simulated_gemm_x,
+                                    handle,
+                                    num_topk,
+                                    async_finish=not return_recv_hook,
+                                    zero_copy=zero_copy,
+                                    return_recv_hook=return_recv_hook,
+                                    out=out,
                                 )
                             hook() if return_recv_hook else event.current_stream_wait()
                             if do_check:
                                 diff = calc_diff(
-                                    x
-                                    * topk_weights.masked_fill(topk_idx == -1, 0)
-                                    .sum(dim=1)
-                                    .view(-1, 1),
+                                    x * topk_weights.masked_fill(topk_idx == -1, 0).sum(dim=1).view(-1, 1),
                                     combined_x,
                                 )
                                 assert torch.isnan(combined_x).sum().item() == 0
@@ -1243,46 +1051,38 @@ class DeepEPTest(TestCase):
         # noinspection PyShadowingNames
         def test_func(zero_copy: bool, return_recv_hook: bool):
             if rank < ae_mask:
-                recv_x, recv_count, handle, event, hook = (
-                    buffer.low_latency_dispatch_send(
-                        x,
-                        topk_idx,
-                        num_tokens,
-                        int(num_experts // scale),
-                        ae_mask,
-                        num_topk,
-                        cumulative_local_expert_recv_stats=cumulative_local_expert_recv_stats,
-                        use_fp8=True,
-                        async_finish=False,
-                        return_recv_hook=return_recv_hook,
-                    )
+                recv_x, recv_count, handle, event, hook = buffer.low_latency_dispatch_send(
+                    x,
+                    topk_idx,
+                    num_tokens,
+                    int(num_experts // scale),
+                    ae_mask,
+                    num_topk,
+                    cumulative_local_expert_recv_stats=cumulative_local_expert_recv_stats,
+                    use_fp8=True,
+                    async_finish=False,
+                    return_recv_hook=return_recv_hook,
                 )
             else:
-                recv_x, recv_count, handle, event, hook = (
-                    buffer.low_latency_dispatch_recv(
-                        hidden,
-                        num_topk,
-                        num_tokens,
-                        int(num_experts // scale),
-                        ae_mask,
-                        use_fp8=dispatch_use_fp8,
-                        round_scale=round_scale,
-                        use_ue8m0=use_ue8m0,
-                        cumulative_local_expert_recv_stats=cumulative_local_expert_recv_stats,
-                        async_finish=not return_recv_hook,
-                        return_recv_hook=return_recv_hook,
-                    )
+                recv_x, recv_count, handle, event, hook = buffer.low_latency_dispatch_recv(
+                    hidden,
+                    num_topk,
+                    num_tokens,
+                    int(num_experts // scale),
+                    ae_mask,
+                    use_fp8=dispatch_use_fp8,
+                    round_scale=round_scale,
+                    use_ue8m0=use_ue8m0,
+                    cumulative_local_expert_recv_stats=cumulative_local_expert_recv_stats,
+                    async_finish=not return_recv_hook,
+                    return_recv_hook=return_recv_hook,
                 )
             large_gemm_with_hook(hook) if return_recv_hook else None
             if zero_copy:
                 if rank < ae_mask:
-                    buffer.get_next_low_latency_combine_buffer(handle)[
-                        :, :, :
-                    ] = simulated_gemm_x
+                    buffer.get_next_low_latency_combine_buffer(handle)[:, :, :] = simulated_gemm_x
                 else:
-                    buffer.get_next_low_latency_combine_buffer_m2n(handle, hidden)[
-                        :, :, :
-                    ] = simulated_gemm_x
+                    buffer.get_next_low_latency_combine_buffer_m2n(handle, hidden)[:, :, :] = simulated_gemm_x
             if rank < ae_mask:
                 combined_x, event, hook = buffer.low_latency_combine_recv(
                     topk_idx,
@@ -1308,9 +1108,7 @@ class DeepEPTest(TestCase):
 
         # Calculate bandwidth
         if os.getenv("ACCL_FP8_CAST_LEVEL", "1") == "2":
-            num_fp8_bytes, num_bf16_bytes = (
-                hidden + hidden / hidden * 4 + 16
-            ), hidden * 2
+            num_fp8_bytes, num_bf16_bytes = (hidden + hidden / hidden * 4 + 16), hidden * 2
         else:
             num_fp8_bytes, num_bf16_bytes = (hidden + hidden / 128 * 4 + 16), hidden * 2
         num_dispatch_comm_bytes, num_combine_comm_bytes = 0, 0
@@ -1320,9 +1118,7 @@ class DeepEPTest(TestCase):
             num_combine_comm_bytes += num_bf16_bytes * num_selections
 
         # Dispatch + combine testing
-        avg_t, min_t, max_t = bench(
-            partial(test_func, zero_copy=False, return_recv_hook=False)
-        )
+        avg_t, min_t, max_t = bench(partial(test_func, zero_copy=False, return_recv_hook=False))
         print(
             f"[rank {rank}] Dispatch + combine bandwidth: {(num_dispatch_comm_bytes + num_combine_comm_bytes) / 1e9 / avg_t:.2f} GB/s, "
             f"avg_t={avg_t * 1e6:.2f} us, min_t={min_t * 1e6:.2f} us, max_t={max_t * 1e6:.2f} us",
@@ -1383,8 +1179,6 @@ class DeepEPTest(TestCase):
         params.expert_num = args["expert_num"]
         params.hidden_size = args["hidden_size"]
         # init distributed environment
-        torch.cuda.set_device(rank)
-        torch.set_default_device(torch.device("cuda:{}".format(rank)))
         init_distributed_environment(params=params, backend="nccl", timeout=60)
         group = get_ep_group().device_group
         init_deepep_wrapper(group=group, params=params)
@@ -1441,8 +1235,6 @@ class DeepEPTest(TestCase):
         params.hidden_size = args["hidden_size"]
         params.max_generate_batch_size = args["max_generate_batch_size"]
         # init distributed environment
-        torch.cuda.set_device(rank)
-        torch.set_default_device(torch.device("cuda:{}".format(rank)))
         init_distributed_environment(params=params, backend="nccl", timeout=60)
         group = get_ep_group().device_group
         init_deepep_wrapper(group=group, params=params)
@@ -1464,9 +1256,7 @@ class DeepEPTest(TestCase):
         destroy_distributed_environment()
 
     @staticmethod
-    def _run_deepep_low_latency_m2n_test(
-        rank: int, num_ranks: int, args: Dict[str, Any]
-    ):
+    def _run_deepep_low_latency_m2n_test(rank: int, num_ranks: int, args: Dict[str, Any]):
         # set env
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(num_ranks))
         os.environ["ACCL_DISPATCH_NUM_WARP_GROUPS"] = "4"
@@ -1499,15 +1289,11 @@ class DeepEPTest(TestCase):
         params.expert_num = args["expert_num"]
         params.hidden_size = args["hidden_size"]
         params.max_generate_batch_size = args["max_generate_batch_size"]
-        params.gpt_init_params.ffn_disaggregate_config.attention_dp_size = (
-            num_ranks // 2
-        )
+        params.gpt_init_params.ffn_disaggregate_config.attention_dp_size = num_ranks // 2
         params.gpt_init_params.ffn_disaggregate_config.attention_tp_size = 1
         params.gpt_init_params.ffn_disaggregate_config.ffn_dp_size = num_ranks // 2
         params.gpt_init_params.ffn_disaggregate_config.ffn_tp_size = 1
         # init distributed environment
-        torch.cuda.set_device(rank)
-        torch.set_default_device(torch.device("cuda:{}".format(rank)))
         init_distributed_environment(params=params, backend="nccl", timeout=60)
         group = get_ep_group().device_group
         init_deepep_wrapper(group=group, params=params)

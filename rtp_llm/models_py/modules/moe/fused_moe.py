@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Union, final
+from typing import Any, Dict, Optional, final
 
 import torch
 
@@ -13,8 +13,8 @@ class ExpertTokensMetadata:
     Metadata regarding expert-token routing.
     """
 
-    expert_num_tokens: Optional[torch.Tensor]
-    expert_num_tokens_cpu: Optional[Union[List[int], torch.Tensor]]
+    expert_num_tokens: torch.Tensor
+    expert_num_tokens_cpu: Optional[torch.Tensor]
 
 
 @dataclass
@@ -64,7 +64,7 @@ class FusedMoeDataRouter(ABC):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: TopKWeightAndReduce,
-        extra_finalize_args: Optional[Dict[str, Any]],
+        extra_finalize_args: Optional[dict[str, Any]],
     ) -> torch.Tensor:
         raise NotImplementedError
 
@@ -106,12 +106,10 @@ class FusedMoe(torch.nn.Module):
         self,
         router: FusedMoeDataRouter,
         fused_experts: FusedMoeExpertExecutor,
-        expert_num: int,
     ):
         super().__init__()
         self.router = router
         self.fused_experts = fused_experts
-        self.expert_num = expert_num
 
     def forward(
         self,
@@ -120,6 +118,7 @@ class FusedMoe(torch.nn.Module):
         topk_ids: torch.Tensor,
         inplace: bool = False,
         activation: str = "silu",
+        global_num_experts: int = -1,
         expert_map: Optional[torch.Tensor] = None,
         a1_scale: Optional[torch.Tensor] = None,
         a2_scale: Optional[torch.Tensor] = None,
@@ -129,13 +128,17 @@ class FusedMoe(torch.nn.Module):
     ) -> torch.Tensor:
         a1 = hidden_states
 
+        local_num_experts = self.fused_experts.local_num_experts
+        if global_num_experts == -1:
+            global_num_experts = local_num_experts
+
         payload = self.router.prepare(
             a1,
             a1_scale,
             a2_scale,
             topk_weights,
             topk_ids,
-            self.expert_num,
+            global_num_experts,
             self.fused_experts.quant_config,
         )
 
@@ -158,7 +161,7 @@ class FusedMoe(torch.nn.Module):
             fused_out = self.fused_experts.execute(
                 payload,
                 activation=activation,
-                global_num_experts=self.expert_num,
+                global_num_experts=global_num_experts,
                 expert_map=expert_map,
                 a2_scale=a2_scale,
                 apply_router_weight_on_input=apply_router_weight_on_input,

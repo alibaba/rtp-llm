@@ -129,7 +129,7 @@ class FusedMoeBatchedTest(TestCase):
             max_num_tokens=num_tokens, num_dispatchers=1, w1=w1, w2=w2
         )
 
-        fused_moe = FusedMoe(router, experts, num_experts)
+        fused_moe = FusedMoe(router, experts)
 
         hidden_states = (
             torch.randn(num_tokens, hidden_size, dtype=dtype, device="cuda")
@@ -149,6 +149,7 @@ class FusedMoeBatchedTest(TestCase):
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation="SiGLU",
+            global_num_experts=num_experts,
         )
 
         # Compute reference output using torch_sparse_block_forward

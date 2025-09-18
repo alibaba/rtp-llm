@@ -4,7 +4,6 @@ from unittest import SkipTest, TestCase, main
 import torch
 from torch import dtype as _dtype
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.models_py.modules.embedding import Embedding, EmbeddingTorch
 
 
@@ -21,12 +20,7 @@ class EmbedingTest(TestCase):
     def _run_embeding_test(self, num_tokens: int, hidden_size: int, dtype: _dtype):
         torch.manual_seed(0)
         w = torch.randn(131072, hidden_size, dtype=dtype)
-        embeding = Embedding(
-            GptInitModelParameters(
-                head_num=1, size_per_head=1, layer_num=1, max_seq_len=1, vocab_size=1
-            ),
-            w,
-        )
+        embeding = Embedding(w)
         embeding_torch = EmbeddingTorch(w)
         x = torch.randint(0, hidden_size, (num_tokens,), dtype=torch.int32)
         # with profile(activities=[ProfilerActivity.CUDA], record_shapes=True) as prof:

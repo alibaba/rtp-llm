@@ -43,7 +43,7 @@ DistStorage3FSFile::~DistStorage3FSFile() {
     close();
 }
 
-bool DistStorage3FSFile::exists() const {
+bool DistStorage3FSFile::isExist() {
     struct stat file_stat;
     if (auto ret = ::stat(filepath_.c_str(), &file_stat); ret != 0) {
         return false;
@@ -369,10 +369,10 @@ bool DistStorage3FSFile::read(const std::vector<DistStorage::Iov>& iovs) {
     }
     if (iovs.empty() || read_len == 0 || offset_to_read == -1) {
         RTP_LLM_LOG_DEBUG("read but iovs are invalid, file: %s, size: %zu, len: %zu, offset: %ld",
-                          filepath_.c_str(),
-                          iovs.size(),
-                          read_len,
-                          offset_to_read);
+                            filepath_.c_str(),
+                            iovs.size(),
+                            read_len,
+                            offset_to_read);
         return true;
     }
     if (const auto file_len = getFileLength(); offset_to_read + static_cast<int64_t>(read_len) > file_len) {

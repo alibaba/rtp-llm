@@ -6,11 +6,57 @@ from torch import nn
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
-from rtp_llm.models_py.modules import FusedSiluActDenseMLP, RMSNorm
 from rtp_llm.models_py.modules.attention import CausalAttention
 from rtp_llm.models_py.modules.embedding import Embedding
 from rtp_llm.models_py.modules.fmha import FMHAImplBase
+from rtp_llm.models_py.modules import Linear
+
+from rtp_llm.models_py.utils.debug import set_trace_on_tty
 from rtp_llm.ops import KVCache, PyAttentionInputs, PyModelInputs, PyModelOutputs
+from rtp_llm.utils.model_weight import W
+
+
+from rtp_llm.models_py.modules import FusedQKRMSNorm, RMSNorm
+from rtp_llm.models_py.modules import FMHAImplBase
+from rtp_llm.models_py.modules import FusedSiluActDenseMLP
+
+class Qwen3Attention(CausalAttention):
+    """Multi-headed attention from 'Attention Is All You Need' paper"""
+
+    def __init__(
+        self, config: GptInitModelParameters, weights: Dict[str, torch.Tensor]
+    ):
+        super().__init__(config, weights)
+        if W.q_ln_gamma in weights and W.k_ln_gamma in weights:
+            self.qk_fuse_norm = FusedQKRMSNorm(
+                weights[W.q_ln_gamma],
+                weights[W.k_ln_gamma],
+                config.head_num,
+                config.head_num_kv,
+                config.size_per_head,
+                config.layernorm_eps,
+            )
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        fmha_impl: FMHAImplBase,
+        kv_cache: Optional[KVCache] = None,
+    ) -> torch.Tensor:
+        input_shape = hidden_states.shape[:-1]
+        qkv = self.qkv_proj(hidden_states)
+        # TODO: need qk norm if have
+        if hasattr(self, "qk_fuse_norm"):
+            qkv = self.qk_fuse_norm(qkv)
+        attn_output = torch.empty_like(hidden_states)
+
+        attn_output = fmha_impl.forward(qkv, kv_cache)
+        attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+        attn_output = self.o_proj(attn_output)
+        return attn_output
+
+
+from rtp_llm.ops import PyAttentionInputs, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
 
@@ -19,7 +65,7 @@ class Qwen3DecoderLayer(nn.Module):
         self, config: GptInitModelParameters, weights: Dict[str, torch.Tensor]
     ):
         super().__init__()
-        self.self_attn = CausalAttention(config, weights)
+        self.self_attn = Qwen3Attention(config, weights)
         self.mlp = FusedSiluActDenseMLP(config, weights)
         self.input_layernorm = RMSNorm(
             weights[W.pre_ln_gamma], eps=config.layernorm_eps
@@ -56,7 +102,7 @@ class Qwen3Model(GptModelBase):
     def __init__(self, config: GptInitModelParameters, weights: ModelWeights):
         super().__init__(config, weights)
 
-        self.embed_tokens = Embedding(config, weights.get_global_weight(W.embedding))
+        self.embed_tokens = Embedding(weights.get_global_weight(W.embedding))
         self.layers = nn.ModuleList(
             [
                 Qwen3DecoderLayer(config, weights.weights[idx])

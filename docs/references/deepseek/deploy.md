@@ -16,7 +16,7 @@ The resource requirements and startup parameters for prefill and decode are desc
 Single-node resource specifications requiring 4 nodes for multi-node deployment:
 | CPU Cores | Memory | GPU Cards | GPU Count | Disk Space | RDMA NICs |
 |----------|--------|-----------|-----------|------------|-----------|
-| 96       | 960GB  | H20 | 8         | 180GB      | 8         |
+| 96       | 960GB  | L20Z/L20X/L20Y/H20 | 8         | 180GB      | 8         |
 
 ### Advanced Arguments
 
@@ -77,7 +77,7 @@ ENABLE_MERGE_W13=1 \
 Single-node resource specifications requiring 18 nodes for multi-node deployment:
 | CPU Cores | Memory | GPU Cards | GPU Count | Disk Space | RDMA NICs |
 |----------|--------|-----------|-----------|------------|-----------|
-| 96       | 250GB  | H20 | 8         | 180GB      | 8         |
+| 96       | 250GB  | L20Z/L20X/L20Y | 8         | 180GB      | 8         |
 
 ### Advanced Arguments
 

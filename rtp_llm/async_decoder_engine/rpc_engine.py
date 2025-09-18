@@ -7,7 +7,12 @@ from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient
 from rtp_llm.frontend.token_processor import TokenProcessor
 from rtp_llm.models.base_model import BaseModel, GenerateInput, GenerateOutputs
 from rtp_llm.models.propose_model.propose_model import ProposeModel
-from rtp_llm.ops import EngineScheduleInfo, KVCacheInfo, WorkerStatusInfo
+from rtp_llm.ops import (
+    EngineScheduleInfo,
+    KVCacheInfo,
+    LoadBalanceInfo,
+    WorkerStatusInfo,
+)
 from rtp_llm.ops.rtp_llm.rtp_llm_op import RtpLLMOp
 from rtp_llm.utils.mm_process_engine import MMProcessEngine
 
@@ -45,8 +50,16 @@ class RPCEngine(BaseEngine):
         return self.model_rpc_client.enqueue(input)
 
     @override
-    def get_worker_status_info(self, latest_finished_version: int) -> WorkerStatusInfo:
-        return self.rtp_llm_op_.get_worker_status_info(latest_finished_version)
+    def get_load_balance_info(self, latest_cache_version: int) -> LoadBalanceInfo:
+        return self.rtp_llm_op_.get_load_balance_info(latest_cache_version)
+
+    @override
+    def get_worker_status_info(
+        self, latest_cache_version: int, latest_finished_version: int
+    ) -> WorkerStatusInfo:
+        return self.rtp_llm_op_.get_worker_status_info(
+            latest_cache_version, latest_finished_version
+        )
 
     @override
     def get_cache_status_info(self, latest_cache_version: int) -> KVCacheInfo:

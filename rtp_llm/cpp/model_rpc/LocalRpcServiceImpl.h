@@ -6,6 +6,7 @@
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/proto/model_rpc_service.pb.h"
+#include "rtp_llm/cpp/dataclass/LoadBalance.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalProcessor.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
 
@@ -44,12 +45,17 @@ public:
         return local_server_->GetCacheStatus(context, request, response);
     }
 
-    WorkerStatusInfo getWorkerStatusInfo(int64_t latest_finished_version) {
-        return local_server_->getWorkerStatusInfo(latest_finished_version);
+    WorkerStatusInfo
+    getWorkerStatusInfo(int64_t latest_cache_version, int64_t latest_finished_version, bool needLoadBalanceInfo) {
+        return local_server_->getWorkerStatusInfo(latest_cache_version, latest_finished_version, needLoadBalanceInfo);
     }
 
     KVCacheInfo getCacheStatusInfo(int64_t latest_cache_version, bool need_cache_keys) {
         return local_server_->getCacheStatusInfo(latest_cache_version, need_cache_keys);
+    }
+
+    LoadBalanceInfo getLoadBalanceInfo(int64_t latest_version) {
+        return local_server_->getLoadBalanceInfo(latest_version);
     }
 
     EngineScheduleInfo getEngineScheduleInfo(int64_t latest_finised_version) {

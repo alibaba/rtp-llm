@@ -57,7 +57,7 @@ struct DistStorage3FSInitParams {
             << ", read_iov_size: " << read_iov_size << ", write_iov_block_size: " << write_iov_block_size
             << ", write_iov_size: " << write_iov_size << ", read_timeout_ms: " << read_timeout_ms
             << ", write_timeout_ms: " << write_timeout_ms << ", mountpoint: " << mountpoint
-            << ", root_dir: " << root_dir << ", file_cache_capacity: " << file_cache_capacity;
+            << ", root_dir: " << root_dir;
         return oss.str();
     }
 
@@ -75,8 +75,6 @@ struct DistStorage3FSInitParams {
 
     std::string mountpoint{"/3fs/stage/3fs/"};
     std::string root_dir{"rtp_llm/"};
-
-    size_t file_cache_capacity{20000};
 };
 
 struct DistStorageManagerInitParams {

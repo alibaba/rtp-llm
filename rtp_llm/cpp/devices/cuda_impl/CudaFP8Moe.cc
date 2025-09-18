@@ -174,11 +174,6 @@ FfnLayerOutput CudaDevice::moeFfnFp8Contiguous(const FfnLayerParams& params, con
                                                            stream_);
     check_cuda_error();
 
-    BufferPtr fc1_activation =
-        allocateBuffer({DataType::TYPE_FP8_E4M3, {total_padding_num, (size_t)moe_inter_size}}, {"fc1_activation"});
-    BufferPtr fc1_activation_fp8_scales = allocateBuffer(
-        {DataType::TYPE_FP32, {total_padding_num, (size_t)moe_inter_size / 128}}, {"fc1_activation_fp8_scales"});
-
     BufferPtr fc1_result;
     if (is_gated_activation) {
         fc1_result =
@@ -202,6 +197,10 @@ FfnLayerOutput CudaDevice::moeFfnFp8Contiguous(const FfnLayerParams& params, con
     check_cuda_error();
     using GemmOutputType = __nv_bfloat16;
     using ScaleBiasType  = __nv_bfloat16;
+    BufferPtr fc1_activation =
+        allocateBuffer({DataType::TYPE_FP8_E4M3, {total_padding_num, (size_t)moe_inter_size}}, {"fc1_activation"});
+    BufferPtr fc1_activation_fp8_scales = allocateBuffer(
+        {DataType::TYPE_FP32, {total_padding_num, (size_t)moe_inter_size / 128}}, {"fc1_activation_fp8_scales"});
 
     doActivationContiguous<GemmOutputType, ScaleBiasType>(
         fc1_activation->data<__nv_fp8_e4m3>(),
@@ -354,7 +353,20 @@ FfnLayerOutput CudaDevice::moeFfnFp8Masked(const FfnLayerParams& params, const M
     printBufferData(*expert_first_token_offset, "expert_first_token_offset");
     check_cuda_error();
 
-    size_t padding_size            = DeepGemmPlugin::paddingMasked(token_num);
+    size_t padding_size =
+        token_num <= 16 ?
+            pad_to_multiple_of_16(token_num) :
+            (token_num <= 24 ?
+                 pad_to_multiple_of_24(token_num) :
+                 (token_num <= 32 ?
+                      pad_to_multiple_of_32(token_num) :
+                      (token_num <= 48 ?
+                           pad_to_multiple_of_48(token_num) :
+                           (token_num <= 64 ?
+                                pad_to_multiple_of_64(token_num) :
+                                (token_num <= 96 ? pad_to_multiple_of_96(token_num) :
+                                                   (token_num <= 120 ? pad_to_multiple_of_120(token_num) :
+                                                                       pad_to_multiple_of_128(token_num)))))));
     size_t max_num_rows            = token_num * top_k;
     size_t expected_m              = std::min(padding_size, ceil_div<size_t>(max_num_rows, num_experts));
     auto   permuted_src_row_to_dst = allocateBuffer({DataType::TYPE_INT32, {max_num_rows}}, {"permuted_rows"});

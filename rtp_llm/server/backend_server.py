@@ -13,8 +13,8 @@ from fastapi.responses import ORJSONResponse
 from pydantic import BaseModel
 
 from rtp_llm.access_logger.access_logger import AccessLogger
-from rtp_llm.async_decoder_engine.async_model import AsyncModel
 from rtp_llm.config.py_config_modules import PyEnvConfigs, StaticConfig
+from rtp_llm.async_decoder_engine.async_model import AsyncModel
 from rtp_llm.config.task_type import TaskType
 from rtp_llm.distribute.gang_server import GangServer
 from rtp_llm.distribute.worker_info import g_parallel_info
@@ -23,7 +23,12 @@ from rtp_llm.lora.lora_manager import LoraManager
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
-from rtp_llm.ops import EngineScheduleInfo, KVCacheInfo, WorkerStatusInfo
+from rtp_llm.ops import (
+    KVCacheInfo,
+    EngineScheduleInfo,
+    LoadBalanceInfo,
+    WorkerStatusInfo,
+)
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.server.misc import format_exception
 from rtp_llm.server.worker_status import TaskInfo, WorkStatus
@@ -203,6 +208,11 @@ class BackendServer(object):
                     logging.warn("worker not all ready, error_msg: " + str(e))
                     time.sleep(5)
 
+    def get_load_balance_info(self, latest_cache_version: int) -> LoadBalanceInfo:
+        if self.model is None:
+            return LoadBalanceInfo()
+        return self.model.get_load_balance_info(latest_cache_version)
+
     def get_engine_schedule_info(
         self, latest_finished_version: int
     ) -> EngineScheduleInfo:
@@ -211,7 +221,6 @@ class BackendServer(object):
         return self.model.get_engine_schedule_info(latest_finished_version)
 
         # get worker status
-
     def get_cache_status(self, latest_cache_version: int) -> KVCacheInfo:
         with Timer() as t:
             cache_status_info: KVCacheInfo = self.model.get_cache_status_info(
@@ -221,14 +230,28 @@ class BackendServer(object):
         kmonitor.report(GaugeMetrics.CACHE_STATUS_QPS_LATENCY_METRIC, t.cost_ms())
         return cache_status_info
 
-    def get_worker_status(self, latest_finished_version: int) -> WorkStatus:
+    def get_worker_status(
+        self, latest_cache_version: int, latest_finished_version: int
+    ) -> WorkStatus:
         with Timer() as t:
+            load_balance_version = 0
             worker_status_info: WorkerStatusInfo = self.model.get_worker_status_info(
-                latest_finished_version
+                latest_cache_version, latest_finished_version
             )
+            available_concurrency = self._global_controller.get_available_concurrency()
+            load_balance_info = worker_status_info.load_balance_info
             engine_schedule_info = worker_status_info.engine_schedule_info
+            if (
+                StaticConfig.misc_config.load_balance
+                and load_balance_info.step_per_minute > 0
+                and load_balance_info.step_latency_us > 0
+            ):
+                available_concurrency = load_balance_info.step_per_minute
+                # when use new version available_concurrency need set new load_balance_version
+                load_balance_version = 1
             worker_status: WorkStatus = WorkStatus(
                 role=self.role_type,
+                available_concurrency=available_concurrency,
                 running_task_info=[
                     TaskInfo(
                         **{
@@ -260,8 +283,13 @@ class BackendServer(object):
                     for task in engine_schedule_info.finished_task_info_list
                 ],
                 profile_meta=None,
+                waiting_query_len=load_balance_info.waiting_query_len,
+                running_query_len=load_balance_info.running_query_len,
+                step_latency_ms=float(load_balance_info.step_latency_us / 1000),
+                iterate_count=load_balance_info.iterate_count,
                 dp_size=worker_status_info.dp_size,
                 tp_size=worker_status_info.tp_size,
+                version=load_balance_version,
                 status_version=worker_status_info.status_version,
                 alive=worker_status_info.alive,
                 precision=worker_status_info.precision,

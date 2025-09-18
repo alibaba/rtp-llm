@@ -31,14 +31,16 @@ public:
 
 public:
     // for test
-    int64_t                                   waitingStreamsSize();
-    int64_t                                   runningStreamsSize();
+    int64_t waitingStreamsSize();
+    int64_t runningStreamsSize();
     std::vector<EngineScheduleInfo::TaskInfo> waitingTaskList();
     std::vector<EngineScheduleInfo::TaskInfo> runningTaskList();
-    int64_t                                   onflightStreams() override;
+    int64_t onflightStreams() override;
+    int64_t waitingQueryLen() override;
+    int64_t runningQueryLen() override;
 
 private:
-    void                 evictDoneStreams(std::list<GenerateStreamPtr>& streams);
+    void                 evictDoneStreams(std::list<GenerateStreamPtr>& streams, StreamState state);
     bool                 evaluateNewStream(const std::list<GenerateStreamPtr>& streams,
                                            const GenerateStreamPtr&            new_stream,
                                            size_t                              reserve_step);
@@ -73,7 +75,8 @@ private:
     std::mutex                    lock_;
     std::condition_variable       cond_;
     kmonitor::MetricsReporterPtr  metrics_reporter_ = nullptr;
-
+    std::atomic<int64_t> waiting_query_len_{0};
+    std::atomic<int64_t> running_query_len_{0};
     std::vector<EngineScheduleInfo::TaskInfo> waiting_task_list_;
     std::vector<EngineScheduleInfo::TaskInfo> running_task_list_;
 

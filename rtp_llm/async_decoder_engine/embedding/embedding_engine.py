@@ -6,7 +6,7 @@ from typing_extensions import override
 from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 from rtp_llm.async_decoder_engine.embedding.interface import EngineInputs, EngineOutputs
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.ops import MultimodalInputCpp, RtpEmbeddingOp
+from rtp_llm.ops import LoadBalanceInfo, MultimodalInputCpp, RtpEmbeddingOp
 from rtp_llm.utils.mm_process_engine import MMProcessEngine
 
 
@@ -31,7 +31,7 @@ class EmbeddingCppEngine(BaseEngine):
         else:
             self.mm_engine = None
         self.cpp_engine.init(self.model, self.mm_engine)
-        # self.model.custom_module.handler.init_cpp_handler()
+        #self.model.custom_module.handler.init_cpp_handler()
 
     def decode_sync(self, inputs: EngineInputs, outputs: EngineOutputs):
         multimodal_inputs = [
@@ -53,3 +53,7 @@ class EmbeddingCppEngine(BaseEngine):
         output = EngineOutputs(outputs=None, input_length=0)
         await asyncio.to_thread(self.decode_sync, input, output)
         return output
+
+    @override
+    def get_load_balance_info(self, latest_cache_version: int) -> LoadBalanceInfo:
+        return LoadBalanceInfo()

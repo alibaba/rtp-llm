@@ -16,6 +16,7 @@ from rtp_llm.distribute.worker_info import g_worker_info
 from rtp_llm.frontend.frontend_app import FrontendApp
 from rtp_llm.frontend.frontend_server import FrontendServer, FrontendWorker
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
+from rtp_llm.ops import LoadBalanceInfo
 from rtp_llm.server.backend_app import BackendApp
 from rtp_llm.server.backend_server import BackendServer
 from rtp_llm.utils.complete_response_async_generator import (
@@ -62,11 +63,20 @@ def fake_inference(*args, **kwargs):
     )
 
 
+def fake_load_balance_info(*args, **kwargs):
+    load_balance = LoadBalanceInfo()
+    load_balance.step_latency_us = 1000
+    load_balance.iterate_count = 10
+    load_balance.step_per_minute = 60
+    return load_balance
+
+
 FrontendWorker.__init__ = fake_init
 FrontendWorker.inference = fake_inference
 
 BackendServer.start = fake_start
 BackendServer.ready = fake_ready
+BackendServer.get_load_balance_info = fake_load_balance_info
 BackendServer.model_runtime_meta = lambda x: "fake_model"
 
 OpenaiEndpoint.__init__ = fake_init
@@ -182,9 +192,15 @@ class ConcurrencyLimitTest(TestCase):
 
         os.environ["LOAD_BALANCE"] = "1"
         self.assertEqual(self.get_backend_available_concurrency(), 60)
+        load_balance_info = fake_load_balance_info()
         excepted = {
+            "available_concurrency": load_balance_info.step_per_minute,
             "available_kv_cache": 0,
             "total_kv_cache": 0,
+            "step_latency_ms": load_balance_info.step_latency_us / 1000,
+            "step_per_minute": load_balance_info.step_per_minute,
+            "onflight_requests": load_balance_info.onflight_requests,
+            "iterate_count": load_balance_info.iterate_count,
             "version": 1,
             "alive": True,
             "finished_task_list": [],

@@ -31,16 +31,34 @@ void WorkerStatusService::workerStatus(const std::unique_ptr<http_server::HttpRe
         return;
     }
 
-    KVCacheInfo cache_status;
+    LoadBalanceInfo load_balance_info;
+    KVCacheInfo     cache_status;
     if (engine_) {
-        cache_status = engine_->getCacheStatusInfo(-1, true);
+        load_balance_info = engine_->getLoadBalanceInfo(-1);
+        cache_status      = engine_->getCacheStatusInfo(-1, true);
     } else {
         RTP_LLM_LOG_WARNING("worker status service call worker status error, engine is null");
     }
+
+    int available_concurrency = 0;
+    int load_balance_version  = 0;
+    if (load_balance_env_ && load_balance_info.step_per_minute > 0 && load_balance_info.step_latency_us > 0) {
+        available_concurrency = load_balance_info.step_per_minute;
+        load_balance_version  = 1;
+    } else {
+        if (controller_) {  // controller should not be null
+            available_concurrency = controller_->get_available_concurrency();
+        } else {
+            RTP_LLM_LOG_WARNING("called register worker status route, concurrency controller is null");
+        }
+    }
     WorkerStatusResponse worker_status_response;
-    worker_status_response.cache_status = std::move(cache_status);
-    worker_status_response.alive        = true;
-    auto response_json_str              = ToJsonString(worker_status_response, /*isCompact=*/true);
+    worker_status_response.available_concurrency = available_concurrency;
+    worker_status_response.load_balance_info     = std::move(load_balance_info);
+    worker_status_response.cache_status          = std::move(cache_status);
+    worker_status_response.load_balance_version  = load_balance_version;
+    worker_status_response.alive                 = true;
+    auto response_json_str                       = ToJsonString(worker_status_response, /*isCompact=*/true);
     writer->Write(response_json_str);
 }
 

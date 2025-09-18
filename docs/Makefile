@@ -3,7 +3,7 @@ SPHINXOPTS    ?=
 SPHINXBUILD   ?= sphinx-build
 SPHINXAUTOBUILD ?= sphinx-autobuild
 SOURCEDIR     = .
-BUILDDIR      = build
+BUILDDIR      = _build
 PORT          ?= 8003
 PYTHON        ?= python3
 
@@ -44,7 +44,7 @@ compile:
 	mkdir -p logs; \
 	echo "Notebook execution timings:" > logs/timing.log; \
 	START_TOTAL=$$(date +%s); \
-	find $(SOURCEDIR) -path "*/build/*" -prune -o -name "*.ipynb" -print0 | \
+	find $(SOURCEDIR) -path "*/_build/*" -prune -o -name "*.ipynb" -print0 | \
 		parallel -0 -j3 --halt soon,fail=1 ' \
 		NB_NAME=$$(basename {}); \
 		START_TIME=$$(date +%s); \

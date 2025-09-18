@@ -359,6 +359,7 @@ message WorkerStatusPB {
   int32 iterate_count = 8;
   int32 dp_size = 9;
   int32 tp_size = 10;
+  int32 version = 11;
   int64 status_version = 12;
   bool alive = 13;
   string precision = 14;

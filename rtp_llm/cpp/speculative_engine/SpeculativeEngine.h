@@ -74,7 +74,8 @@ public:
     absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>& generate_input,
                                              preRunMode                            mode) override;
     absl::Status                      stop() override;
-    KVCacheInfo                       getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) const override;
+    LoadBalanceInfo                   getLoadBalanceInfo(int64_t latest_version) override;
+    KVCacheInfo                       getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) override;
     GenerateStreamPtr                 makeMTPStream(const GenerateStreamPtr& stream, size_t propose_step) {
         if (isEagle()) {
             return std::make_shared<EagleStream>(*stream, propose_step);

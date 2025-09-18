@@ -64,6 +64,89 @@ TEST_F(WorkerStatusServiceTest, WorkerStatus_AlreadyStopped) {
     writer_ptr.release();
 }
 
+TEST_F(WorkerStatusServiceTest, WorkerStatus_HasLoadBalanceEnv) {
+    mock_engine_base_->getDevice()->initParamsRef().misc_config.load_balance = 1;
+    auto worker_status_service = std::make_shared<WorkerStatusService>(mock_engine_base_, controller_);
+    mock_engine_base_->getDevice()->initParamsRef().misc_config.load_balance = 0;
+    auto writer = dynamic_cast<http_server::HttpResponseWriter*>(mock_writer_.get());
+    ASSERT_TRUE(writer != nullptr);
+    std::unique_ptr<http_server::HttpResponseWriter> writer_ptr(writer);
+    http_server::HttpRequest                         request;
+
+    LoadBalanceInfo load_balance_info;
+    load_balance_info.step_latency_us                 = 1;
+    load_balance_info.iterate_count                   = 2;
+    load_balance_info.step_per_minute                 = 3;
+    EXPECT_CALL(*mock_engine_base_, getLoadBalanceInfo(testing::_))
+        .WillOnce(testing::Invoke([&load_balance_info](int64_t) { return load_balance_info; }));
+
+    EXPECT_CALL(*mock_writer_, Write)
+        .WillOnce(
+            Invoke([concurrency = load_balance_info.step_per_minute, &load_balance_info](const std::string& data) {
+                WorkerStatusResponse worker_status_response;
+                autil::legacy::FromJsonString(worker_status_response, data);
+                EXPECT_EQ(worker_status_response.available_concurrency, concurrency);
+
+                EXPECT_EQ(worker_status_response.load_balance_info.step_latency_us,
+                          load_balance_info.step_latency_us / 1000);
+                EXPECT_EQ(worker_status_response.load_balance_info.iterate_count, load_balance_info.iterate_count);
+                EXPECT_EQ(worker_status_response.load_balance_info.step_per_minute, load_balance_info.step_per_minute);
+               
+
+                EXPECT_EQ(worker_status_response.load_balance_version, 1);
+                EXPECT_TRUE(worker_status_response.alive);
+                return true;
+            }));
+
+    worker_status_service->workerStatus(writer_ptr, request);
+    EXPECT_EQ(writer_ptr->_type, http_server::HttpResponseWriter::WriteType::Normal);
+    EXPECT_EQ(writer_ptr->_headers.count("Content-Type"), 1);
+    EXPECT_EQ(writer_ptr->_headers.at("Content-Type"), "application/json");
+
+    // 需要手动释放 unique_ptr 的所有权, 避免 double free
+    writer_ptr.release();
+}
+
+TEST_F(WorkerStatusServiceTest, WorkerStatus_NoLoadBalanceEnv) {
+    auto writer = dynamic_cast<http_server::HttpResponseWriter*>(mock_writer_.get());
+    ASSERT_TRUE(writer != nullptr);
+    std::unique_ptr<http_server::HttpResponseWriter> writer_ptr(writer);
+    http_server::HttpRequest                         request;
+
+    LoadBalanceInfo load_balance_info;
+    load_balance_info.step_latency_us                 = 1;
+    load_balance_info.iterate_count                   = 2;
+    load_balance_info.step_per_minute                 = 3;
+    EXPECT_CALL(*mock_engine_base_, getLoadBalanceInfo(testing::_))
+        .WillOnce(testing::Invoke([&load_balance_info](int64_t) { return load_balance_info; }));
+
+    EXPECT_CALL(*mock_writer_, Write)
+        .WillOnce(Invoke(
+            [concurrency = controller_->get_available_concurrency(), &load_balance_info](const std::string& data) {
+                WorkerStatusResponse worker_status_response;
+                autil::legacy::FromJsonString(worker_status_response, data);
+                EXPECT_EQ(worker_status_response.available_concurrency, concurrency);
+
+                EXPECT_EQ(worker_status_response.load_balance_info.step_latency_us,
+                          load_balance_info.step_latency_us / 1000);
+                EXPECT_EQ(worker_status_response.load_balance_info.iterate_count, load_balance_info.iterate_count);
+                EXPECT_EQ(worker_status_response.load_balance_info.step_per_minute, load_balance_info.step_per_minute);
+
+
+                EXPECT_EQ(worker_status_response.load_balance_version, 0);
+                EXPECT_TRUE(worker_status_response.alive);
+                return true;
+            }));
+
+    worker_status_service_->workerStatus(writer_ptr, request);
+    EXPECT_EQ(writer_ptr->_type, http_server::HttpResponseWriter::WriteType::Normal);
+    EXPECT_EQ(writer_ptr->_headers.count("Content-Type"), 1);
+    EXPECT_EQ(writer_ptr->_headers.at("Content-Type"), "application/json");
+
+    // 需要手动释放 unique_ptr 的所有权, 避免 double free
+    writer_ptr.release();
+}
+
 TEST_F(WorkerStatusServiceTest, Stop) {
     WorkerStatusService worker_status_service(nullptr, nullptr);
     EXPECT_FALSE(worker_status_service.is_stopped_.load());
