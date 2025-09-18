@@ -36,6 +36,7 @@ from rtp_llm.utils.util import to_torch_dtype
 
 FT_DEFAULT_MAX_NEW_TOKENS = 2048
 
+
 class BaseModel(object):
 
     config: GptInitModelParameters
@@ -67,6 +68,13 @@ class BaseModel(object):
 
     @timer_wrapper(description="load model")
     def load(self, parallel_info: ParallelInfo = g_parallel_info):
+        if (
+            self.config.model_specific_config.load_python_model
+            and self.config.hw_kernel_config.enable_cuda_graph
+            and self.support_cuda_graph() is False
+        ):
+            raise Exception("current model can't support cuda graph in py model mode")
+
         self.model_weights_loader = self.create_model_loader(parallel_info)
         self._load(self.device)
 
@@ -80,6 +88,9 @@ class BaseModel(object):
 
     def _create_python_model(self) -> Optional[GptModelBase]:
         raise NotImplementedError("Python Model is not implemented for this model.")
+
+    def support_cuda_graph(self) -> bool:
+        return False
 
     def _load(self, device: str):
         # set empty weights for attention service

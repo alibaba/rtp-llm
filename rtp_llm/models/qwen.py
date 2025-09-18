@@ -211,6 +211,9 @@ class QWenBase(BaseModel):
         else:
             self.py_model = Qwen3Model(self.config, self.weight)
 
+    def support_cuda_graph(self) -> bool:
+        return True
+
     @staticmethod
     def _common_config(config, ckpt_path: str) -> GptInitModelParameters:
         config.rotary_embedding_dim = 128
