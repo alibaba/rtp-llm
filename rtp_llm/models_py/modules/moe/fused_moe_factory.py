@@ -105,7 +105,6 @@ class FusedMoeFactory(object):
         from rtp_llm.models_py.modules.moe.routers.deepep_normal_router import (
             DeepepNormalRouter,
         )
-
         if config.ep_size > 1:
             init_deepep_env_once(config)
             if config.moe_config.use_deepep_low_latency:
@@ -149,6 +148,19 @@ class FusedMoeFactory(object):
             )
 
         return FusedMoe(router, executor, config.expert_num)
+
+
+    def create_amd_fused_moe(
+        config: GptInitModelParameters, weights: Dict[str, torch.Tensor]
+    ) -> FusedMoe:
+        
+        init_deepep_env_once(config)
+        from rtp_llm.models_py.modules.moe.executors.rocm_deepep_normal_fused_moe_executor import (
+            FusedMoeExecutor,
+        )
+        router = DeepepNormalRouter(config)
+        executor = FusedMoeExecutor(config, weights)
+        return FusedMoe(router, executor, config.expert_num) 
 
     @staticmethod
     def create_fused_moe(
