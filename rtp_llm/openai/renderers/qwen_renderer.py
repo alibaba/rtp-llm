@@ -8,7 +8,7 @@ from typing import List, Optional, Tuple, Union
 import torch
 from typing_extensions import override
 
-from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer, QWenTokenizer
+from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatMessage,
@@ -132,7 +132,6 @@ def make_context(
     system: str = "",
     max_window_size: int = 6144,
 ):
-    assert isinstance(tokenizer, QWenTokenizer)
     history = copy.deepcopy(history)
     im_start, im_end = "<|im_start|>", "<|im_end|>"
     im_start_tokens = [tokenizer.im_start_id]
