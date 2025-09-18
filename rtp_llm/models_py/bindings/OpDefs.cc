@@ -42,8 +42,27 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("attention_inputs", &PyModelInputs::attention_inputs, "Attention inputs structure");
 
     pybind11::class_<PyModelOutputs>(m, "PyModelOutputs")
-        .def(pybind11::init<torch::Tensor>(), pybind11::arg("hidden_states"), "Initialize with hidden states tensor")
-        .def_readwrite("hidden_states", &PyModelOutputs::hidden_states, "Hidden states output tensor");
+        .def(pybind11::init<>(), "Default constructor")
+        .def(pybind11::init<torch::Tensor, std::shared_ptr<rtp_llm::ParamsBase>>(),
+             pybind11::arg("hidden_states"),
+             pybind11::arg("params_ptr"),
+             "Initialize with hidden states tensor and params pointer")
+        .def(pybind11::init<torch::Tensor>(),
+             pybind11::arg("hidden_states"),
+             "Initialize with hidden states tensor only (params_ptr defaults to nullptr)")
+        .def(pybind11::init<std::shared_ptr<rtp_llm::ParamsBase>>(),
+             pybind11::arg("params_ptr"),
+             "Initialize with params pointer only (hidden_states defaults to empty tensor)")
+        .def(pybind11::init([](torch::Tensor hidden_states, pybind11::object params_obj) {
+                 // Use pybind11's automatic type conversion
+                 auto params_ptr = pybind11::cast<std::shared_ptr<rtp_llm::ParamsBase>>(params_obj);
+                 return PyModelOutputs(hidden_states, params_ptr);
+             }),
+             pybind11::arg("hidden_states"),
+             pybind11::arg("params_ptr"),
+             "Initialize with hidden states tensor and params pointer")
+        .def_readwrite("hidden_states", &PyModelOutputs::hidden_states, "Hidden states output tensor")
+        .def_readwrite("params_ptr", &PyModelOutputs::params_ptr, "Parameters pointer");
 }
 
 }  // namespace torch_ext
