@@ -27,14 +27,25 @@ class HostReactor:
     def start(self):
         if not self.proxy.started:
             self.proxy.start()
-
-        self.started = True
+        if not self.started:
+            self.update_domain_thread.start()
+            logging.info(
+                f"vipserver domain update thread started. to refresh domains: {self.refresh_cache_domain_srv_lst}"
+            )
+            self.started = True
 
     def close(self):
-        self.update_domain_thread.stop_flag = True
+        if self.started:
+            self.update_domain_thread.stop_flag = True
+            self.update_domain_thread.join()
+            self.started = False
+            logging.info(
+                f"vipserver domain update thread stopped. to refresh domains: {self.refresh_cache_domain_srv_lst}"
+            )
+
+        self.update_domain_thread.join()
         if self.proxy.started:
             self.proxy.close()
-        self.started = False
 
     def update_domain_map(self, new_map: dict[str, list[Host]]):
         self.domain_update_lock.acquire()
