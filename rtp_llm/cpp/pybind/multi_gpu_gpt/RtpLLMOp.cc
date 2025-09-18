@@ -160,6 +160,9 @@ void RtpLLMOp::initRPCServer(const rtp_llm::EngineInitParams                    
     grpc::ServerBuilder builder;
     builder.AddChannelArgument(GRPC_ARG_MAX_CONCURRENT_STREAMS, 100000);
     builder.AddChannelArgument(GRPC_ARG_MAX_METADATA_SIZE, 1024 * 1024 * 1024);
+    builder.AddChannelArgument(GRPC_ARG_MAX_CONNECTION_IDLE_MS, 600000);
+    builder.AddChannelArgument(GRPC_ARG_HTTP2_MIN_RECV_PING_INTERVAL_WITHOUT_DATA_MS, 1000);
+    builder.AddChannelArgument(GRPC_ARG_HTTP2_MAX_PING_STRIKES, 1000);
     builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
     builder.RegisterService(model_rpc_service_.get());
 
