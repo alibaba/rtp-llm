@@ -36,7 +36,7 @@ class Qwen3MoeLayer(nn.Module):
         self.top_k = config.moe_k
         self.gate = Linear(weights[W.moe_gate], None)
         self.select_topk_op = SelectTopkOp(config)
-        self.fused_moe: FusedMoe = FusedMoeFactory.create_fused_moe(config, weights)
+        self.fused_moe: FusedMoe = FusedMoeFactory.create_amd_fused_moe(config, weights)
         self.w1 = weights.get(W.moe_w1, None)
         self.w2 = weights.get(W.moe_w2, None)
         assert (
