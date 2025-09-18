@@ -7,15 +7,12 @@ from torch import nn
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
-from rtp_llm.models_py.model_desc.qwen3 import Qwen3Attention
+from rtp_llm.models_py.modules.attention import CausalAttention
 from rtp_llm.models_py.modules.embedding import Embedding
 from rtp_llm.models_py.modules.fmha import FMHAImplBase
 from rtp_llm.models_py.modules.linear import Linear
 from rtp_llm.models_py.modules.moe import FusedMoe
-from rtp_llm.models_py.modules.moe.fused_batched_moe import (
-    BatchedDataRouter,
-    BatchedTritonExperts,
-)
+from rtp_llm.models_py.modules.moe.fused_moe_factory import FusedMoeFactory
 from rtp_llm.models_py.modules.norm import RMSNorm
 from rtp_llm.ops import KVCache, PyAttentionInputs, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
@@ -35,6 +32,7 @@ class Qwen3MoeLayer(nn.Module):
     ):
         super().__init__()
 
+        self.config = config
         self.hidden_dim = config.hidden_size
         self.ffn_dim = config.moe_inter_padding_size
         self.num_experts = config.expert_num
@@ -49,22 +47,7 @@ class Qwen3MoeLayer(nn.Module):
             self.w1 is not None and self.w2 is not None
         ), "Weights w1 and w2 must be provided"
 
-        max_num_tokens = (
-            config.max_generate_batch_size + config.tp_size - 1
-        ) // config.tp_size
-
-        router = BatchedDataRouter(
-            max_num_tokens=max_num_tokens,
-            num_local_experts=self.num_experts,
-            num_dispatchers=1,
-            rank=0,
-        )
-
-        experts = BatchedTritonExperts(
-            max_num_tokens=max_num_tokens, num_dispatchers=1, w1=self.w1, w2=self.w2
-        )
-
-        self.fused_moe = FusedMoe(router, experts)
+        self.fused_moe: FusedMoe = FusedMoeFactory.create_fused_moe(config, weights)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
@@ -100,7 +83,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
     ):
         super().__init__()
         self.layer_idx = layer_idx
-        self.self_attn = Qwen3Attention(config, weights)
+        self.self_attn = CausalAttention(config, weights)
         self.mlp = Qwen3MoeLayer(config, weights)
 
         self.input_layernorm = RMSNorm(
@@ -139,7 +122,7 @@ class Qwen3MoeModel(GptModelBase):
     def __init__(self, config: GptInitModelParameters, weights: ModelWeights):
         super().__init__(config, weights)
 
-        self.embed_tokens = Embedding(weights.get_global_weight(W.embedding))
+        self.embed_tokens = Embedding(config, weights.get_global_weight(W.embedding))
         self.layers = nn.ModuleList(
             [
                 Qwen3MoeDecoderLayer(config, weights.weights[idx], idx)

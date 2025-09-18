@@ -88,13 +88,10 @@ class Qwen3Moe(Qwen2Moe):
         return config
 
     def _create_python_model(self) -> Optional[GptModelBase]:
-        try:
-            from rtp_llm.models.qwen_v3_moe import Qwen3MoeModel
+        from rtp_llm.models_py.model_desc.qwen3_moe import Qwen3MoeModel
 
-            self.py_model = Qwen3MoeModel(self.config, self.weight)
-            return self.py_model
-        except ImportError:
-            return None
+        self.py_model = Qwen3MoeModel(self.config, self.weight)
+        return self.py_model
 
 
 class Qwen3MoeEagle3Weight(QWenV2Weight):

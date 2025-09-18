@@ -705,13 +705,16 @@ def _fwd_kernel_ep_scatter_2(
     grid_num = tl.num_programs(0)
     offset_in = tl.arange(0, HIDDEN_SIZE_PAD)
     mask = offset_in < HIDDEN_SIZE
-    offset_in_s = tl.arange(0, SCALE_HIDDEN_SIZE_PAD)
-    mask_s = offset_in_s < SCALE_HIDDEN_SIZE
+    index_in_s = tl.arange(0, SCALE_HIDDEN_SIZE_PAD)
+    mask_s = index_in_s < SCALE_HIDDEN_SIZE
     for token_id_int32 in range(start_token_id, total_token_num, grid_num):
         token_id = token_id_int32.to(tl.int64)
         to_copy = tl.load(recv_x + token_id * recv_x_stride0 + offset_in, mask=mask)
         to_copy_s = tl.load(
-            recv_x_scale + token_id * recv_x_scale_stride0 + offset_in_s, mask=mask_s
+            recv_x_scale
+            + token_id * recv_x_scale_stride0
+            + index_in_s * recv_x_scale_stride1,
+            mask=mask_s,
         )
         for topk_idx_int32 in tl.range(0, topk_num, 1, num_stages=4):
             topk_index = topk_idx_int32.to(tl.int64)
@@ -730,7 +733,11 @@ def _fwd_kernel_ep_scatter_2(
                     output_tensor_scale + dest_token_index * output_tensor_scale_stride0
                 )
                 tl.store(output_tensor_ptr + offset_in, to_copy, mask=mask)
-                tl.store(output_tensor_scale_ptr + offset_in_s, to_copy_s, mask=mask_s)
+                tl.store(
+                    output_tensor_scale_ptr + index_in_s * output_tensor_scale_stride1,
+                    to_copy_s,
+                    mask=mask_s,
+                )
 
 
 # copy from https://github.com/ModelTC/lightllm/blob/main/lightllm/common/fused_moe/deepep_scatter_gather.py
@@ -745,6 +752,7 @@ def ep_scatter(
     output_tensor_scale: torch.Tensor,
     m_indices: torch.Tensor,
     output_index: torch.Tensor,
+    scale_ue8m0: bool = False,
 ):
     BLOCK_E = 128  # token num of per expert is aligned to 128
     BLOCK_D = 128  # block size of quantization
@@ -753,7 +761,15 @@ def ep_scatter(
     hidden_size = recv_x.shape[1]
     # grid = (triton.cdiv(hidden_size, BLOCK_D), num_experts)
     grid = num_experts
+    scale_hidden_size = hidden_size // BLOCK_D
+    if scale_ue8m0:
+        # ue8m0 scales are packed here (4 scales per int32),
+        # hence the effective size of this dimension is divided by 4.
+        scale_hidden_size = ceil_div(scale_hidden_size, 4)
+
     assert m_indices.shape[0] % BLOCK_E == 0
+    assert recv_x_scale.dtype == output_tensor_scale.dtype
+    assert recv_x_scale.shape[1] == output_tensor_scale.shape[1] == scale_hidden_size
     _fwd_kernel_ep_scatter_1[(grid,)](
         num_recv_tokens_per_expert,
         expert_start_loc,
@@ -789,8 +805,8 @@ def ep_scatter(
         num_warps=num_warps,
         HIDDEN_SIZE=hidden_size,
         HIDDEN_SIZE_PAD=triton.next_power_of_2(hidden_size),
-        SCALE_HIDDEN_SIZE=hidden_size // BLOCK_D,
-        SCALE_HIDDEN_SIZE_PAD=triton.next_power_of_2(hidden_size // BLOCK_D),
+        SCALE_HIDDEN_SIZE=scale_hidden_size,
+        SCALE_HIDDEN_SIZE_PAD=triton.next_power_of_2(scale_hidden_size),
     )
     return
 
@@ -960,3 +976,76 @@ def tma_align_input_scale(input_scale: torch.Tensor):
         BLOCK_SIZE_K=BLOCK_SIZE_K,
     )
     return output.t()[:m]
+
+
+@triton.jit
+def recompute_topk_ids_triton_kernel(
+    topk_ids_ptr,
+    adjusted_topk_ids_ptr,
+    expert_count_ptr,
+    current_expert_start_id,
+    num_local_experts,
+    num_tokens,
+    topk: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    token_start = pid * BLOCK_SIZE
+    token_end = min(token_start + BLOCK_SIZE, num_tokens)
+
+    for token_idx in range(token_start, token_end):
+        offset = token_idx * topk
+        # 向量加载
+        expert_ids = tl.load(topk_ids_ptr + offset + tl.arange(0, topk))
+
+        # 计算局部编号与合法性掩码
+        adjusted = expert_ids - current_expert_start_id
+        valid = (adjusted >= 0) & (adjusted < num_local_experts)
+
+        # 写回局部编号：合法位置写 adjusted，非法写 -1
+        out_ids = tl.where(valid, adjusted, -1)
+        tl.store(adjusted_topk_ids_ptr + offset + tl.arange(0, topk), out_ids)
+
+        # 按掩码原子加计数器
+        tl.atomic_add(expert_count_ptr + adjusted, 1, mask=valid)
+
+
+def recompute_topk_ids_sum_expert_count(
+    topk_ids: torch.Tensor, current_expert_start_id: int, num_local_experts: int
+):
+    """
+    Recompute topk_ids by subtracting current_expert_start_id and count expert tokens.
+
+    Args:
+        topk_ids: Tensor of shape [num_tokens, topk] containing expert IDs
+        current_expert_start_id: Starting expert ID to subtract
+        num_local_experts: Number of local experts
+
+    Returns:
+        tuple: (adjusted_topk_ids, expert_count)
+    """
+    device = topk_ids.device
+    num_tokens, topk = topk_ids.shape
+
+    # Create output tensors
+    adjusted_topk_ids = torch.empty_like(topk_ids)
+    expert_count = torch.zeros(num_local_experts, device=device, dtype=torch.int32)
+
+    # Configure triton kernel parameters
+    # Use smaller block size for better vectorization when topk is large
+    BLOCK_SIZE = min(256, 1024 // max(topk, 1))
+
+    # Launch recompute kernel
+    grid_recompute = (triton.cdiv(num_tokens, BLOCK_SIZE),)
+    recompute_topk_ids_triton_kernel[grid_recompute](
+        topk_ids,
+        adjusted_topk_ids,
+        expert_count,
+        current_expert_start_id,
+        num_local_experts,
+        num_tokens,
+        topk=topk,
+        BLOCK_SIZE=BLOCK_SIZE,
+    )
+
+    return adjusted_topk_ids, expert_count

@@ -100,15 +100,4 @@ bool StepRecorder::empty() {
     return step_records_.empty();
 }
 
-void registerLoadBalanceInfo(const py::module& m) {
-    pybind11::class_<LoadBalanceInfo>(m, "LoadBalanceInfo")
-        .def(pybind11::init<>())
-        .def_readwrite("step_latency_us", &LoadBalanceInfo::step_latency_us)
-        .def_readwrite("step_per_minute", &LoadBalanceInfo::step_per_minute)
-        .def_readwrite("iterate_count", &LoadBalanceInfo::iterate_count)
-        .def_readwrite("onflight_requests", &LoadBalanceInfo::onflight_requests)
-        .def_readwrite("waiting_query_len", &LoadBalanceInfo::waiting_query_len)
-        .def_readwrite("running_query_len", &LoadBalanceInfo::running_query_len);
-}
-
 }  // namespace rtp_llm

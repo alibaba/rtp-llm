@@ -58,7 +58,6 @@ void FIFOScheduler::evaluateRunningRemote() {
             (*it)->setRemoteGenerate();
             remote_running_streams_.emplace_back(*it);
             RTP_LLM_LOG_DEBUG("stream [%ld] move to remote running streams", (*it)->streamId());
-            running_query_len_.fetch_sub((*it)->inputLength(), std::memory_order_relaxed);
             it = running_streams_.erase(it);
         } else {
             ++it;
@@ -70,18 +69,13 @@ int64_t FIFOScheduler::lastScheduleTime() {
     return empty() ? autil::TimeUtility::currentTimeInMilliSeconds() : last_schedule_time_.load();
 }
 
-void FIFOScheduler::evictDoneStreams(list<GenerateStreamPtr>& streams, StreamState state) {
+void FIFOScheduler::evictDoneStreams(list<GenerateStreamPtr>& streams) {
     for (auto it = streams.begin(); it != streams.end();) {
         (*it)->checkTimeout();
         if ((*it)->stopped() || (*it)->finished()) {
             // Immediately free resources to run more streams
             (*it)->releaseResource();
             RTP_LLM_LOG_DEBUG("evict stream [%ld]", (*it)->streamId());
-            if (state == StreamState::RUNNING) {
-                running_query_len_.fetch_sub((*it)->inputLength(), std::memory_order_relaxed);
-            } else if (state == StreamState::WAITING) {
-                waiting_query_len_.fetch_sub((*it)->inputLength(), std::memory_order_relaxed);
-            }
             it = streams.erase(it);
         } else {
             ++it;
@@ -97,7 +91,6 @@ absl::Status FIFOScheduler::enqueue(const GenerateStreamPtr& stream) {
             return absl::OkStatus();
         }
         waiting_streams_.emplace_back(stream);
-        waiting_query_len_.fetch_add(stream->inputLength(), std::memory_order_relaxed);
     }
     cond_.notify_all();
     return absl::OkStatus();
@@ -107,9 +100,6 @@ absl::Status FIFOScheduler::batchEnqueue(const vector<GenerateStreamPtr>& stream
     {
         std::lock_guard<std::mutex> lock(lock_);
         waiting_streams_.insert(waiting_streams_.end(), streams.begin(), streams.end());
-        for (const auto& stream : streams) {
-            waiting_query_len_.fetch_add(stream->inputLength(), std::memory_order_relaxed);
-        }
     }
     cond_.notify_all();
     return absl::OkStatus();
@@ -178,9 +168,7 @@ tuple<int, int> FIFOScheduler::evaluateRunningNext(size_t reserve_step) {
             } else {
                 last_stream->setPaused();
                 waiting_streams_.emplace_front(last_stream);
-                waiting_query_len_.fetch_add(last_stream->inputLength(), std::memory_order_relaxed);
             }
-            running_query_len_.fetch_sub(last_stream->inputLength(), std::memory_order_relaxed);
             running_streams_.pop_back();
             fallback_streams++;
         }
@@ -196,7 +184,6 @@ tuple<int, int> FIFOScheduler::evaluateRunningNext(size_t reserve_step) {
         if (!result.ok()) {
             (*it)->stopAndRelease(ErrorCode::MALLOC_FAILED, "incrKVBlock failed");
             RTP_LLM_LOG_WARNING("stream [%ld] incr block failed", (*it)->streamId());
-            running_query_len_.fetch_sub((*it)->inputLength(), std::memory_order_relaxed);
             it = running_streams_.erase(it);
             error_streams++;
         } else {
@@ -273,7 +260,6 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
             // if setRunning fails, it must be in stopped state, evict it in next iteration
             if (stream->setRunning()) {
                 new_streams.emplace_back(stream);
-                waiting_query_len_.fetch_sub(stream->inputLength(), std::memory_order_relaxed);
                 it = waiting_streams_.erase(it);
             } else {
                 RTP_LLM_LOG_WARNING("stream [%ld] set running failed", stream->streamId());
@@ -305,7 +291,6 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
                 auto& fake_stream = waiting_streams_.back();
                 if (evaluateNewStream(new_streams, fake_stream, 0)) {
                     new_streams.emplace_back(fake_stream);
-                    waiting_query_len_.fetch_sub(fake_stream->inputLength(), std::memory_order_relaxed);
                     waiting_streams_.pop_back();
                 }
             }
@@ -340,18 +325,15 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule(size_t reserve_s
         cond_.wait(lock, [this] { return waitPredicate(); });
     }
     evaluateRunningRemote();
-    evictDoneStreams(waiting_streams_, StreamState::WAITING);
-    evictDoneStreams(running_streams_, StreamState::RUNNING);
-    evictDoneStreams(remote_running_streams_, StreamState::REMOTE_RUNNING);
+    evictDoneStreams(waiting_streams_);
+    evictDoneStreams(running_streams_);
+    evictDoneStreams(remote_running_streams_);
 
     // TODO(xinfei.sxf) Those who just kicked out of running may join running again immediately.
     auto [fallback_streams, error_streams] = evaluateRunningNext(reserve_step);
     auto new_streams                       = scheduleNew(reserve_step);
     accountBatchMetrics(new_streams, running_streams_);
     running_streams_.insert(running_streams_.end(), new_streams.begin(), new_streams.end());
-    for (const auto& stream : new_streams) {
-        running_query_len_.fetch_add(stream->inputLength(), std::memory_order_relaxed);
-    }
     reportMetrics(fallback_streams);
     last_schedule_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
     return running_streams_;
@@ -398,14 +380,6 @@ std::vector<EngineScheduleInfo::TaskInfo> FIFOScheduler::runningTaskList() {
         running_task_list_.emplace_back(task_info);
     }
     return running_task_list_;
-}
-
-int64_t FIFOScheduler::waitingQueryLen() {
-    return waiting_query_len_.load(std::memory_order_relaxed);
-}
-
-int64_t FIFOScheduler::runningQueryLen() {
-    return running_query_len_.load(std::memory_order_relaxed);
 }
 
 void FIFOScheduler::reportMetrics(size_t fallback_stream_size) {

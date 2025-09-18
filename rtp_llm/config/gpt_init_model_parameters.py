@@ -378,7 +378,7 @@ class GptInitModelParameters:
     worker_port_offset: int
     world_size: int
     role_type: RoleType
-    quant_config: QuantizationConfig
+    quant_config: Optional[QuantizationConfig]
 
     batch_decode_scheduler_config: BatchDecodeSchedulerConfig
     cache_store_config: CacheStoreConfig
@@ -718,6 +718,9 @@ class GptInitModelParameters:
         self.gpt_init_params.batch_decode_scheduler_config = BatchDecodeSchedulerConfig(
             batch_decode_scheduler_batch_size=get_env_int(
                 "BATCH_DECODE_SCHEDULER_BATCH_SIZE", 1
+            ),
+            batch_decode_scheduler_warmup_type=get_env_int(
+                "BATCH_DECODE_SCHEDULER_WARMUP_TYPE", 0
             ),
         )
 

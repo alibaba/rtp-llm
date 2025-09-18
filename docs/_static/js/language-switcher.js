@@ -64,30 +64,17 @@
     window.location.href = window.location.origin + newPath;
   }
 
-  // Create language switcher HTML
+  // Create language switcher HTML (single button)
   function createLanguageSwitcher() {
     const currentLang = getCurrentLanguage();
+    const targetLang = currentLang === "en" ? "zh" : "en";
     const switcher = document.createElement("div");
     switcher.className = "language-switcher";
     switcher.innerHTML = `
       <button id="language-toggle" class="btn btn-sm navbar-btn" title="Switch Language">
         <i class="fas fa-globe"></i>
-        <span>${LANGUAGES[currentLang].display}</span>
+        <span>${LANGUAGES[targetLang].display}</span>
       </button>
-      <div class="language-dropdown" id="language-dropdown">
-        <a href="#" class="language-option ${
-          currentLang === "en" ? "active" : ""
-        }" data-lang="en">
-          <span class="flag">🇺🇸</span>
-          <span>English</span>
-        </a>
-        <a href="#" class="language-option ${
-          currentLang === "zh" ? "active" : ""
-        }" data-lang="zh">
-          <span class="flag">🇨🇳</span>
-          <span>中文</span>
-        </a>
-      </div>
     `;
     return switcher;
   }
@@ -105,34 +92,13 @@
   // Initialize event listeners
   function initializeEventListeners(switcher) {
     const toggleButton = switcher.querySelector("#language-toggle");
-    const dropdown = switcher.querySelector("#language-dropdown");
+    const currentLang = getCurrentLanguage();
 
-    // Toggle dropdown
+    // Handle direct language switching
     toggleButton.addEventListener("click", (e) => {
       e.preventDefault();
-      e.stopPropagation();
-      dropdown.classList.toggle("show");
-    });
-
-    // Handle language selection
-    switcher.querySelectorAll(".language-option").forEach((option) => {
-      option.addEventListener("click", (e) => {
-        e.preventDefault();
-        switchLanguage(option.getAttribute("data-lang"));
-      });
-    });
-
-    // Close dropdown when clicking outside or pressing escape
-    document.addEventListener("click", (e) => {
-      if (!switcher.contains(e.target)) {
-        dropdown.classList.remove("show");
-      }
-    });
-
-    document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") {
-        dropdown.classList.remove("show");
-      }
+      const targetLang = currentLang === "en" ? "zh" : "en";
+      switchLanguage(targetLang);
     });
   }
 

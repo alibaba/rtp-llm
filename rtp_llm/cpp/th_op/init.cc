@@ -1,6 +1,5 @@
 #include <torch/library.h>
 #include "rtp_llm/cpp/th_op/GptInitParameter.h"
-#include "rtp_llm/cpp/dataclass/LoadBalance.h"
 #include "rtp_llm/cpp/dataclass/EngineScheduleInfo.h"
 #include "rtp_llm/cpp/dataclass/WorkerStatusInfo.h"
 #include "rtp_llm/cpp/th_op/GptInitParameterRegister.h"
@@ -406,7 +405,9 @@ void register_scheduler_config(pybind11::module& m) {
 // BatchDecodeSchedulerConfig
 void register_batch_decode_scheduler_config(pybind11::module& m) {
     pybind11::class_<BatchDecodeSchedulerConfig>(m, "BatchDecodeSchedulerConfig")
-        .def(pybind11::init<int64_t>(), pybind11::arg("batch_decode_scheduler_batch_size") = 1)
+        .def(pybind11::init<int64_t, int64_t>(),
+             pybind11::arg("batch_decode_scheduler_batch_size")  = 1,
+             pybind11::arg("batch_decode_scheduler_warmup_type") = 0)
         .def("to_string", &BatchDecodeSchedulerConfig::to_string)
         .def("update_from_env", &BatchDecodeSchedulerConfig::update_from_env_for_test)
         .def_readwrite("batch_decode_scheduler_batch_size",
@@ -452,7 +453,6 @@ void register_misc_config(pybind11::module& m) {
 PYBIND11_MODULE(libth_transformer, m) {
 
     registerKvCacheInfo(m);
-    registerLoadBalanceInfo(m);
     registerWorkerStatusInfo(m);
     registerEngineScheduleInfo(m);
     register_parallelism_distributed_config(m);

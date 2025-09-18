@@ -14,7 +14,7 @@ run_cmd("cd $DOC_SITE_PATH; git pull")
 # (Optional) Remove old files
 # run_cmd("rm -rf $ALPA_SITE_PATH/*")
 
-run_cmd("cp -r _build/html/* $DOC_SITE_PATH")
+run_cmd("cp -r build/* $DOC_SITE_PATH")
 
 cmd_message = f"Update {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
 run_cmd(

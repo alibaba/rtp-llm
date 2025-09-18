@@ -4,6 +4,7 @@
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 
+#include "rtp_llm/cpp/cache/ThreeFSCudaUtil.h"
 #include "rtp_llm/cpp/cache/ThreeFSMempool.h"
 #include "rtp_llm/cpp/cache/DistKvCacheMetrics.h"
 
@@ -14,10 +15,9 @@ DistStorage3FS::DistStorage3FS(const kmonitor::MetricsReporterPtr& metrics_repor
 
 DistStorage3FS::~DistStorage3FS() {
     RTP_LLM_LOG_INFO("DistStorage3FS destructor");
-    {
-        std::unique_lock<std::shared_mutex> lock(file_map_mutex_);
-        file_map_.clear();
-    }
+
+    clearFileCache();
+
     if (write_thread_pool_) {
         write_thread_pool_->stop();
         write_thread_pool_->waitFinish();
@@ -40,6 +40,9 @@ bool DistStorage3FS::init(const DistStorage3FSInitParams& init_params) {
         return false;
     }
     init_params_ = init_params;
+
+    file_cache_ =
+        std::make_shared<LRUCache<std::string, std::shared_ptr<DistStorage3FSFile>>>(init_params_.file_cache_capacity);
 
     if (init_params_.enable_async_write) {
         write_thread_pool_ = std::make_shared<autil::LockFreeThreadPool>(
@@ -67,7 +70,7 @@ bool DistStorage3FS::init(const DistStorage3FSInitParams& init_params) {
     }
 
     // write iov
-    if (!initIovHandle(write_iov_handle_, init_params.write_iov_block_size, init_params_.write_iov_size, cuda_util)) {
+    if (!initIovHandle(write_iov_handle_, init_params_.write_iov_block_size, init_params_.write_iov_size, cuda_util)) {
         RTP_LLM_LOG_WARNING("init write iov handle failed");
         releaseIovHandle(read_iov_handle_);
         return false;
@@ -104,23 +107,23 @@ bool DistStorage3FS::checkInitParams(const DistStorage3FSInitParams& init_params
         RTP_LLM_LOG_WARNING("init failed, 3fs root dir not exists: %s", root_dir_path.c_str());
         return false;
     }
+    if (init_params.file_cache_capacity <= 0) {
+        RTP_LLM_LOG_WARNING("init failed, 3fs file cache capacity is invalid: %zu", init_params.file_cache_capacity);
+        return false;
+    }
     return true;
 }
 
 bool DistStorage3FS::lookup(const DistStorage::Item& item) {
     auto file = getFile(item);
-    if (file == nullptr) {
-        return false;
+    if (file) {
+        return file->exists();
     }
-    if (!file->isExist()) {
-        removeFile(item);
-        return false;
-    }
-    return true;
+    return false;
 }
 
 bool DistStorage3FS::get(const DistStorage::Item& item) {
-    auto file = getFile(item);
+    auto file = getFile(item, true);
     if (file) {
         return file->read(item.iovs);
     }
@@ -128,7 +131,7 @@ bool DistStorage3FS::get(const DistStorage::Item& item) {
 }
 
 bool DistStorage3FS::put(const DistStorage::Item& item) {
-    auto file = getFile(item, false);
+    auto file = getFile(item);
     if (file) {
         return file->write(item.iovs);
     }
@@ -138,24 +141,15 @@ bool DistStorage3FS::put(const DistStorage::Item& item) {
 bool DistStorage3FS::del(const DistStorage::Item& item) {
     auto file = getFile(item);
     if (file) {
-        if (!file->del()) {
-            return false;
-        }
-        removeFile(item);
+        return file->del();
     }
-    return true;
+    return false;
 }
 
-std::shared_ptr<DistStorage3FSFile> DistStorage3FS::getFile(const DistStorage::Item& item, bool read) {
-    // TODO: 轮转
+std::shared_ptr<DistStorage3FSFile> DistStorage3FS::getFile(const DistStorage::Item& item, bool cache_file) {
     auto key = item.key;
-
-    if (read) {
-        std::shared_lock<std::shared_mutex> lock(file_map_mutex_);
-        auto                                iter = file_map_.find(key);
-        if (iter != file_map_.end()) {
-            return iter->second;
-        }
+    if (auto file = getFileFromCache(key); file != nullptr) {
+        return file;
     }
 
     const auto filepath = makeFilepath(item.metas);
@@ -166,37 +160,68 @@ std::shared_ptr<DistStorage3FSFile> DistStorage3FS::getFile(const DistStorage::I
     ThreeFSFileConfig config   = {init_params_.mountpoint, filepath, write_thread_pool_, metrics_reporter_};
     auto              new_file = std::make_shared<DistStorage3FSFile>(
         config, read_iov_handle_, write_iov_handle_, init_params_.read_timeout_ms, init_params_.write_timeout_ms);
-    if (read) {
-        std::unique_lock<std::shared_mutex> lock(file_map_mutex_);
-        file_map_[key] = new_file;
+    if (cache_file) {
+        putFileToCache(key, new_file);
     }
     return new_file;
+}
+
+std::shared_ptr<DistStorage3FSFile> DistStorage3FS::getFileFromCache(const std::string& key) {
+    std::unique_lock<std::mutex> lock(file_cache_mutex_);
+    auto [found, file] = file_cache_->get(key);
+    if (found) {
+        return file;
+    }
+    return nullptr;
+}
+
+void DistStorage3FS::putFileToCache(const std::string& key, const std::shared_ptr<DistStorage3FSFile>& file) {
+    std::unique_lock<std::mutex> lock(file_cache_mutex_);
+    file_cache_->put(key, file);
+}
+
+void DistStorage3FS::clearFileCache() {
+    std::unique_lock<std::mutex> lock(file_cache_mutex_);
+    if (file_cache_) {
+        file_cache_->clear();
+    }
 }
 
 std::string DistStorage3FS::makeFilepath(const std::map<std::string, std::string>& metas) const {
     // kvcache filename format:
     // /mountpoint/root_dir/biz_name/ckpt_path_hash(/lora_path_hash)/seq_size_per_block/dtype/use_mla/tp_size/tp_rank/layout_version/last_cache_key
-    try {
-        const auto filepath = std::filesystem::path(init_params_.mountpoint) / init_params_.root_dir
-                              / metas.at("BIZ_NAME") / metas.at("LAYOUT_VERSION") / metas.at("CKPT_PATH") / metas.at("LORA_CKPT_PATH")
-                              / metas.at("SEQ_SIZE_PER_BLOCK") / metas.at("DTYPE") / metas.at("USE_MLA")
-                              / metas.at("TP_SIZE") / metas.at("TP_RANK") / metas.at("ITEM_KEY");
-        return filepath.lexically_normal().string();
-    } catch (const std::exception& e) {
-        std::ostringstream oss;
-        for (const auto& [key, value] : metas) {
-            oss << key << ":" << value << ", ";
+    const std::vector<std::string> required_keys = {"BIZ_NAME",
+                                                    "LAYOUT_VERSION",
+                                                    "CKPT_PATH",
+                                                    "LORA_CKPT_PATH",
+                                                    "SEQ_SIZE_PER_BLOCK",
+                                                    "DTYPE",
+                                                    "USE_MLA",
+                                                    "TP_SIZE",
+                                                    "TP_RANK",
+                                                    "ITEM_KEY"};
+    for (const auto& key : required_keys) {
+        if (metas.find(key) == metas.end()) {
+            RTP_LLM_LOG_WARNING("make filepath failed, metas missing key: %s", key.c_str());
+            return "";
         }
-        RTP_LLM_LOG_WARNING(
-            "found exception when make kvcache filepath. metas: [%s], exception: [%s]", oss.str().c_str(), e.what());
     }
-    return "";
-}
 
-void DistStorage3FS::removeFile(const DistStorage::Item& item) {
-    auto                                key = item.key;
-    std::unique_lock<std::shared_mutex> lock(file_map_mutex_);
-    file_map_.erase(key);
+    const auto& biz_name           = metas.at("BIZ_NAME");
+    const auto& layout_version     = metas.at("LAYOUT_VERSION");
+    const auto& ckpt_path          = metas.at("CKPT_PATH");
+    const auto& lora_ckpt_path     = metas.at("LORA_CKPT_PATH");
+    const auto& seq_size_per_block = metas.at("SEQ_SIZE_PER_BLOCK");
+    const auto& dtype              = metas.at("DTYPE");
+    const auto& use_mla            = metas.at("USE_MLA");
+    const auto& tp_size            = metas.at("TP_SIZE");
+    const auto& tp_rank            = metas.at("TP_RANK");
+    const auto& item_key           = metas.at("ITEM_KEY");
+
+    const auto filepath = std::filesystem::path(init_params_.mountpoint) / init_params_.root_dir / biz_name
+                          / layout_version / ckpt_path / lora_ckpt_path / seq_size_per_block / dtype / use_mla / tp_size
+                          / tp_rank / item_key;
+    return filepath.lexically_normal().string();
 }
 
 void DistStorage3FS::deleteIovShm() const {
@@ -244,10 +269,10 @@ void DistStorage3FS::deleteIovShm() const {
     }
 }
 
-bool DistStorage3FS::initIovHandle(ThreeFSIovHandle&                                handle,
-                                   size_t                                           iov_block_size,
-                                   size_t                                           iov_size,
-                                   const std::shared_ptr<threefs::ThreeFSCudaUtil>& cuda_util) {
+bool DistStorage3FS::initIovHandle(ThreeFSIovHandle&                       handle,
+                                   size_t                                  iov_block_size,
+                                   size_t                                  iov_size,
+                                   const std::shared_ptr<ThreeFSCudaUtil>& cuda_util) {
     if (iov_block_size != 0 && iov_size % iov_block_size != 0) {
         iov_size = (iov_size / iov_block_size + 1) * iov_block_size;
     }

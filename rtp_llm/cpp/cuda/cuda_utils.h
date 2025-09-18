@@ -148,41 +148,16 @@ auto constexpr ceilDiv(T numerator, U denominator) {
     return (numerator + denominator - 1) / denominator;
 }
 
-template<size_t alignment>
-inline size_t pad(const size_t& input) {
+inline size_t pad(const size_t& input, const size_t& alignment) {
     return alignment * ((input + alignment - 1) / alignment);
 }
 
 inline size_t pad_to_multiple_of_16(const size_t& input) {
-    return pad<16>(input);
-}
-
-inline size_t pad_to_multiple_of_24(const size_t& input) {
-    return pad<24>(input);
-}
-
-inline size_t pad_to_multiple_of_32(const size_t& input) {
-    return pad<32>(input);
-}
-
-inline size_t pad_to_multiple_of_48(const size_t& input) {
-    return pad<48>(input);
-}
-
-inline size_t pad_to_multiple_of_64(const size_t& input) {
-    return pad<64>(input);
-}
-
-inline size_t pad_to_multiple_of_96(const size_t& input) {
-    return pad<96>(input);
-}
-
-inline size_t pad_to_multiple_of_120(const size_t& input) {
-    return pad<120>(input);
+    return pad(input, 16);
 }
 
 inline size_t pad_to_multiple_of_128(const size_t& input) {
-    return pad<128>(input);
+    return pad(input, 128);
 }
 
 template<typename T>
@@ -196,6 +171,7 @@ int  get_sm();
 bool is_sm70();
 bool is_sm8x();
 bool is_sm90();
+bool is_sm100();
 
 float                      timing_function(const std::function<void(cudaStream_t)>& operation,
                                            int64_t                                  timing_iterations,

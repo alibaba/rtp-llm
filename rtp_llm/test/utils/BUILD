@@ -32,6 +32,12 @@ py_library(
     ],
 )
 
+py_library(
+    name = "maga_server_manager",
+    srcs = ["maga_server_manager.py"],
+    visibility = ["//visibility:public"],
+)
+
 py_test(
     name = "port_util_test",
     srcs = ["port_util_test.py"],

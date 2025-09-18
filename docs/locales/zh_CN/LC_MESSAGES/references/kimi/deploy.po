@@ -90,8 +90,8 @@ msgid "960GB"
 msgstr "960GB"
 
 #: ../../references/kimi/deploy.md
-msgid "L20Z/L20X/L20Y/H20"
-msgstr "L20Z/L20X/L20Y/H20"
+msgid "H20"
+msgstr "H20"
 
 #: ../../references/kimi/deploy.md
 msgid "8"
@@ -120,6 +120,6 @@ msgid "250GB"
 msgstr "250GB"
 
 #: ../../references/kimi/deploy.md
-msgid "L20Z/L20X/L20Y"
-msgstr "L20Z/L20X/L20Y"
+msgid "H20"
+msgstr "H20"
 

@@ -28,7 +28,6 @@ __all__ = [
     "Host",
     "KVCacheConfig",
     "KVCacheInfo",
-    "LoadBalanceInfo",
     "WorkerStatusInfo",
     "MiscellaneousConfig",
     "MlaOpsType",
@@ -67,7 +66,12 @@ class AttentionCommonInputs:
 
 class BatchDecodeSchedulerConfig:
     batch_decode_scheduler_batch_size: int
-    def __init__(self, batch_decode_scheduler_batch_size: int = 1) -> None: ...
+    batch_decode_scheduler_warmup_type: int
+    def __init__(
+        self,
+        batch_decode_scheduler_batch_size: int = 1,
+        batch_decode_scheduler_warmup_type: int = 0,
+    ) -> None: ...
     def to_string(self) -> str: ...
     def update_from_env(self) -> None: ...
 
@@ -668,25 +672,13 @@ class KVCacheInfo:
     version: int
     def __init__(self) -> None: ...
 
-class LoadBalanceInfo:
-    iterate_count: int
-    onflight_requests: int
-    running_query_len: int
-    step_latency_us: int
-    step_per_minute: int
-    total_kv_cache: int
-    waiting_query_len: int
-    def __init__(self) -> None: ...
-
 class WorkerStatusInfo:
     role: RoleType
-    load_balance_info: LoadBalanceInfo
     engine_schedule_info: EngineScheduleInfo
     status_version: int
     alive: bool
     dp_size: int
     tp_size: int
-    version: int
     dp_rank: int
     precision: str
     def __init__(self) -> None: ...
@@ -935,8 +927,7 @@ class RtpLLMOp:
         self, adapter_name: str, lora_a_weights: typing.Any, lora_b_weights: typing.Any
     ) -> None: ...
     def get_engine_schedule_info(self) -> EngineScheduleInfo: ...
-    def get_load_balance_info(self, arg0: int) -> LoadBalanceInfo: ...
-    def get_worker_status_info(self, arg0: int, arg1: int) -> WorkerStatusInfo: ...
+    def get_worker_status_info(self, arg0: int) -> WorkerStatusInfo: ...
     def get_cache_status_info(self, arg0: int) -> KVCacheInfo: ...
     def init(
         self,

@@ -6,7 +6,6 @@
 #include <grpcpp/grpcpp.h>
 #include <grpcpp/resource_quota.h>
 #include "rtp_llm/cpp/dataclass/EngineInitParameter.h"
-#include "rtp_llm/cpp/dataclass/LoadBalance.h"
 #include "rtp_llm/cpp/dataclass/WorkerStatusInfo.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -109,19 +108,14 @@ void RtpLLMOp::removeLora(const std::string& adapter_name) {
     model_rpc_service_->removeLora(adapter_name);
 }
 
-rtp_llm::LoadBalanceInfo RtpLLMOp::getLoadBalanceInfo(int64_t latest_version) {
-    pybind11::gil_scoped_release release;
-    return model_rpc_service_->getLoadBalanceInfo(latest_version);
-}
-
 rtp_llm::EngineScheduleInfo RtpLLMOp::getEngineScheduleInfo(int64_t latest_finised_version) {
     pybind11::gil_scoped_release release;
     return model_rpc_service_->getEngineScheduleInfo(latest_finised_version);
 }
 
-rtp_llm::WorkerStatusInfo RtpLLMOp::getWorkerStatusInfo(int64_t latest_cache_version, int64_t latest_finished_version) {
+rtp_llm::WorkerStatusInfo RtpLLMOp::getWorkerStatusInfo(int64_t latest_finished_version) {
     pybind11::gil_scoped_release release;
-    return model_rpc_service_->getWorkerStatusInfo(latest_cache_version, latest_finished_version, true);
+    return model_rpc_service_->getWorkerStatusInfo(latest_finished_version);
 }
 
 rtp_llm::KVCacheInfo RtpLLMOp::getCacheStatusInfo(int64_t latest_cache_version) {
@@ -275,12 +269,8 @@ void registerRtpLLMOp(const py::module& m) {
              py::arg("lora_a_weights"),
              py::arg("lora_b_weights"))
         .def("remove_lora", &torch_ext::RtpLLMOp::removeLora, py::arg("adapter_name"))
-        .def("get_load_balance_info", &torch_ext::RtpLLMOp::getLoadBalanceInfo, py::arg("latest_version"))
         .def("get_engine_schedule_info", &torch_ext::RtpLLMOp::getEngineScheduleInfo)
-        .def("get_worker_status_info",
-             &torch_ext::RtpLLMOp::getWorkerStatusInfo,
-             py::arg("latest_cache_version"),
-             py::arg("latest_finished_version"))
+        .def("get_worker_status_info", &torch_ext::RtpLLMOp::getWorkerStatusInfo, py::arg("latest_finished_version"))
         .def("get_cache_status_info", &torch_ext::RtpLLMOp::getCacheStatusInfo, py::arg("latest_cache_version"))
         .def("update_scheduler_info", &torch_ext::RtpLLMOp::updateSchedulerInfo, py::arg("scheduler_info"))
         .def("stop", &torch_ext::RtpLLMOp::stop)

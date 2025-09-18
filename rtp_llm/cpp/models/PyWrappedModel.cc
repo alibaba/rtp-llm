@@ -222,7 +222,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
     py::gil_scoped_acquire gil;
 
     try {
-        RTP_LLM_LOG_INFO("Calling forward method on Python object instance.");
+        RTP_LLM_LOG_DEBUG("Calling forward method on Python object instance.");
 
         if (int(device_props_.enable_layer_micro_batch)) {
             return forwardMicroBatched(inputs);
@@ -252,7 +252,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
 
         auto hidden_states = torchTensor2Buffer(hidden_states_tensor);
 
-        RTP_LLM_LOG_INFO("Python object instance forward method called successfully.");
+        RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
 
         return callForwardPostLayers(hidden_states, inputs, true);
 

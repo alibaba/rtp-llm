@@ -32,7 +32,7 @@ RtpProcessGroup::RtpProcessGroup(RtpProcessGroupType type) {
     }
 }
 
-void RtpProcessGroup::broadcast(std::vector<at::Tensor>& input, const c10d::BroadcastOptions& opts) {
+void RtpProcessGroup::broadcast(std::vector<torch::Tensor>& input, const c10d::BroadcastOptions& opts) {
     std::vector<BufferPtr> buffers;
     for (auto& tensor : input) {
         buffers.push_back(torchTensor2Buffer(tensor));
@@ -60,18 +60,17 @@ ReduceOp getReduceOp(c10d::ReduceOp reduce_op) {
     }
 }
 
-std::vector<at::Tensor> RtpProcessGroup::all_reduce(std::vector<at::Tensor>&      input,
-                                                    const c10d::AllreduceOptions& opts) {
+std::vector<torch::Tensor> RtpProcessGroup::all_reduce(std::vector<torch::Tensor>& input) {
     RTP_LLM_CHECK_WITH_INFO(input.size() == 1, "AllReduce input size must be 1 , but got %d", input.size());
     auto     tensor      = input[0];
     auto     dest_tensor = torch::empty_like(tensor);
-    ReduceOp reduce_op   = getReduceOp(opts.reduceOp);
+    ReduceOp reduce_op   = ReduceOp::Sum;
     device_->allReduce({torchTensor2Buffer(tensor), reduce_op, false, mode_, torchTensor2Buffer(dest_tensor)});
     check_cuda_error();
     return {dest_tensor};
 }
 
-void RtpProcessGroup::send(std::vector<at::Tensor>& input, int dst_rank) {
+void RtpProcessGroup::send(std::vector<torch::Tensor>& input, int dst_rank) {
     RTP_LLM_CHECK_WITH_INFO(input.size() == 1, "Send input size must be 1 , but got %d", input.size());
     BatchSendRecvParams params;
     params.p2p_params.push_back({SendRecvType::kSend, torchTensor2Buffer(input[0]), dst_rank});
@@ -79,12 +78,20 @@ void RtpProcessGroup::send(std::vector<at::Tensor>& input, int dst_rank) {
     check_cuda_error();
 }
 
-void RtpProcessGroup::recv(std::vector<at::Tensor>& input, int src_rank) {
+void RtpProcessGroup::recv(std::vector<torch::Tensor>& input, int src_rank) {
     RTP_LLM_CHECK_WITH_INFO(input.size() == 1, "Send input size must be 1 , but got %d", input.size());
     BatchSendRecvParams params;
     params.p2p_params.push_back({SendRecvType::kRecv, torchTensor2Buffer(input[0]), src_rank});
     device_->batchSendRecv(params, mode_);
     check_cuda_error();
+}
+
+std::vector<torch::Tensor> RtpProcessGroup::all_gather(std::vector<torch::Tensor>& input) {
+    RTP_LLM_CHECK_WITH_INFO(input.size() == 1, "AllGather input size must be 1 , but got %d", input.size());
+    auto output = torch::empty({input[0].size(0), input[0].size(1) * world_size_}, input[0].options());
+    device_->allGather({{torchTensor2Buffer(output)}, mode_, {torchTensor2Buffer(input[0])}, false});
+    check_cuda_error();
+    return {output};
 }
 
 void registerRtpProcessGroup(const py::module& m) {
@@ -99,7 +106,8 @@ void registerRtpProcessGroup(const py::module& m) {
         .def("broadcast", &RtpProcessGroup::broadcast)
         .def("all_reduce", &RtpProcessGroup::all_reduce)
         .def("send", &RtpProcessGroup::send)
-        .def("recv", &RtpProcessGroup::recv);
+        .def("recv", &RtpProcessGroup::recv)
+        .def("all_gather", &RtpProcessGroup::all_gather);
 }
 
 }  // namespace rtp_llm

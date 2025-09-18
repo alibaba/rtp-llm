@@ -137,7 +137,7 @@ class Qwen3GemmPreLayer(nn.Module):
     def __init__(self, config: GptInitModelParameters, weights: ModelWeights):
         super().__init__()
         self.config = config
-        self.embed_tokens = Embedding(weights.get_global_weight(W.embedding))
+        self.embed_tokens = Embedding(config, weights.get_global_weight(W.embedding))
         self.input_layernorm = RMSNorm(
             weights.weights[0][W.pre_ln_gamma], eps=config.layernorm_eps
         )
