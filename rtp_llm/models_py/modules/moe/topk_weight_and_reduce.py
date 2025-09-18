@@ -77,3 +77,42 @@ class TopKWeightAndReduceNaiveBatched(mm.TopKWeightAndReduce):
             output[topks] = output[topks] + rhs
 
         return output
+
+
+class TopKWeightAndReduceContiguous(mm.TopKWeightAndReduce):
+    """
+    TopKWeightAndReduce implementation for a fused_experts output
+    of shape (m, topk, K)
+    """
+
+    def __eq__(self, other):
+        return isinstance(other, TopKWeightAndReduceContiguous)
+
+    def apply(
+        self,
+        fused_expert_output: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        apply_router_weight_on_input: bool,
+    ) -> torch.Tensor:
+
+        m, num_topk = topk_ids.size()
+        k = fused_expert_output.size(-1)
+        if fused_expert_output.ndim == 2:
+            fused_expert_output = fused_expert_output.view(m, num_topk, k)
+
+        assert fused_expert_output.size() == (m, num_topk, k), (
+            f"Expected fused_expert_output size {(m, num_topk, k)}. But got "
+            f"{fused_expert_output.size()}"
+        )
+
+        if not apply_router_weight_on_input:
+            fused_expert_output.mul_(topk_weights.view(m, -1, 1))
+
+        output = torch.empty(
+            (m, k),
+            device=fused_expert_output.device,
+            dtype=fused_expert_output.dtype,
+        )
+        torch.sum(fused_expert_output, dim=1, out=output)
+        return output

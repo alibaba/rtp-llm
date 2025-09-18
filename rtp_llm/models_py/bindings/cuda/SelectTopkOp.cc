@@ -14,10 +14,13 @@ void SelectTopkOp::forward(torch::Tensor router_logits, torch::Tensor expert_ids
                                           tensorrt_llm::kernels::MOEExpertScaleNormalizationMode::RENORMALIZE :
                                           tensorrt_llm::kernels::MOEExpertScaleNormalizationMode::NONE;
     auto         topk_t             = expert_ids.dtype();
-    const auto   softmax_out = torch::zeros({token_num, num_expert}, router_logits.options().dtype(torch::kFloat32));
-    const auto   source_rows = torch::zeros({token_num, top_k}, router_logits.options().dtype(torch::kInt32));
-    cudaStream_t stream      = 0;
-    router_logits            = router_logits.contiguous();
+    const auto   softmax_out    = torch::zeros({token_num, num_expert}, router_logits.options().dtype(torch::kFloat32));
+    const auto   source_rows    = torch::zeros({token_num, top_k}, router_logits.options().dtype(torch::kInt32));
+    cudaStream_t current_stream = 0;
+    if (DeviceFactory::isAlreadyInit()) {
+        current_stream = dynamic_cast<CudaDevice*>(DeviceFactory::getDefaultDevice())->getStream();
+    }
+    router_logits = router_logits.contiguous();
     if (topk_t == torch::kInt64) {
         moe_plugin_->selectExpertsForTokens<int64_t>(router_logits.data_ptr<float>(),
                                                      router_logits.data_ptr<float>(),
@@ -33,7 +36,7 @@ void SelectTopkOp::forward(torch::Tensor router_logits, torch::Tensor expert_ids
                                                      num_expert,
                                                      0,
                                                      normalization_mode,
-                                                     stream);
+                                                     current_stream);
     } else if (topk_t == torch::kInt32) {
         moe_plugin_->selectExpertsForTokens<int32_t>(router_logits.data_ptr<float>(),
                                                      router_logits.data_ptr<float>(),
@@ -49,7 +52,7 @@ void SelectTopkOp::forward(torch::Tensor router_logits, torch::Tensor expert_ids
                                                      num_expert,
                                                      0,
                                                      normalization_mode,
-                                                     stream);
+                                                     current_stream);
     } else {
         throw std::runtime_error("Unimplemented dtype for SelectTopkOp: " + std::string(topk_t.name()));
     }

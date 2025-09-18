@@ -61,6 +61,7 @@ class DeepGemmCountinousRouter(FusedMoeDataRouter):
         )
         return ExpertForwardPayload(
             expert_x,
+            None,
             expert_x_scale,
             ExpertTokensMetadata(num_recv_tokens_per_expert, None),
             adjusted_topk_ids,

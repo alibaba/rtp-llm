@@ -7,11 +7,16 @@ import torch
 from torch import nn
 
 from rtp_llm.models_py.modules import utils
+from rtp_llm.config.quant_config import QuantizationConfig
+
 
 logger = logging.getLogger(__name__)
 
 try:
-    from rtp_llm.models_py.modules.fp8_kernel import sgl_per_token_group_quant_fp8
+    from rtp_llm.models_py.modules.fp8_kernel import (
+        scaled_fp8_per_tensor_quant,
+        sgl_per_token_group_quant_fp8,
+    )
 
     FP8_AVAILABLE = True
     # FP8 quantization available
@@ -73,7 +78,7 @@ else:
     fp8_gemm_nt = None
 
 
-class Fp8Linear(nn.Module):
+class Fp8DeepGEMMLinear(nn.Module):
     """FP8 Linear layer with DeepGEMM quantized matrix multiplication."""
 
     def __init__(
@@ -87,7 +92,6 @@ class Fp8Linear(nn.Module):
         self.hidden_size = weight.shape[0]  # k
         self.output_size = weight.shape[1]  # n
         self.weight = weight.reshape([weight.shape[1], weight.shape[0]])
-
         self.weight_scales = weight_scales.reshape(
             [weight_scales.shape[1], weight_scales.shape[0]]
         )
@@ -114,7 +118,7 @@ class Fp8Linear(nn.Module):
         if not FP8_AVAILABLE:
             # FP8 not available - fail fast for easier debugging
             error_msg = (
-                "FP8 quantization is not available but required for Fp8Linear. "
+                "FP8 quantization is not available but required for Fp8DeepGEMMLinear. "
                 "Please ensure FP8 kernel is properly installed and imported."
             )
             logger.error(error_msg)
@@ -233,3 +237,42 @@ class Fp8Linear(nn.Module):
                 w_end = min((j + 1) * 128, self.weight.shape[1])
                 expanded[h_start:h_end, w_start:w_end] = self.weight_scales[i, j]
         return expanded
+
+
+class Fp8PerTensorLinear(nn.Module):
+    def __init__(
+        self,
+        quant_config: QuantizationConfig,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        input_scale: Optional[torch.Tensor] = None,
+        bias: Optional[torch.Tensor] = None,
+    ) -> None:
+        super().__init__()
+        self.weight = weight.T
+        self.weight_scale = weight_scale
+        self.input_scale = input_scale
+        self.bias = bias
+        self.block_quant = None
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+
+        input_2d = input.view(-1, input.shape[-1])
+        output_shape = [*input.shape[:-1], self.weight.shape[1]]
+
+        qinput, x_scale = scaled_fp8_per_tensor_quant(input_2d, self.input_scale)
+
+        # TODO(serina.wzq): Use high performance kernel
+        output = torch._scaled_mm(
+            qinput,
+            self.weight,
+            out_dtype=input.dtype,
+            scale_a=x_scale,
+            scale_b=self.weight_scale,
+            bias=self.bias,
+        )
+
+        if type(output) is tuple and len(output) == 2:
+            output = output[0]
+
+        return torch.narrow(output, 0, 0, input_2d.shape[0]).view(*output_shape)

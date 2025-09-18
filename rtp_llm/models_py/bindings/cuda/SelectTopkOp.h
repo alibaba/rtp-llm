@@ -3,6 +3,8 @@
 #include <torch/torch.h>
 #include "rtp_llm/cpp/th_op/GptInitParameter.h"
 #include "trt_plugins/mixtureOfExperts/mixtureOfExpertsPlugin.h"
+#include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
+#include "rtp_llm/cpp/devices/DeviceFactory.h"
 
 namespace trt_plugins = tensorrt_llm::plugins;
 

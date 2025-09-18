@@ -314,3 +314,34 @@ py_test (
     tags = ["H20"],
     exec_properties = {'gpu':'H20'},
 )
+
+
+py_test (
+    name = "cutlass_fp8_grouped_gemm_test",
+    srcs = ["cutlass_fp8_grouped_gemm_test.py"],
+    deps = [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm:config",
+        "//rtp_llm:utils",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/model_test/test_util:test_util"
+    ],
+    env = test_envs,
+    tags = ["open_skip", "H20"],
+    exec_properties = {'gpu':'H20'},
+)
+
+py_test (
+    name = "per_tensor_scaled_fp8_quant_test",
+    srcs = ["per_tensor_scaled_fp8_quant_test.py"],
+    deps = [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm:config",
+        "//rtp_llm:utils",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/model_test/test_util:test_util"
+    ],
+    env = test_envs,
+    tags = ["open_skip", "H20"],
+    exec_properties = {'gpu':'H20'},
+)

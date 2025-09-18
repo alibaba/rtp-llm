@@ -3,7 +3,7 @@ import json
 import logging
 import os
 from functools import lru_cache
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 
@@ -11,6 +11,7 @@ import rtp_llm.models_py.modules.utils as utils
 
 if utils.is_cuda():
     from libth_transformer.rtp_llm_ops import (
+        per_tensor_quant_fp8,
         per_token_group_quant_fp8,
         per_token_group_quant_int8,
     )
@@ -76,7 +77,7 @@ def sgl_per_token_group_quant_fp8(
         x.shape[-1] % group_size == 0
     ), "the last dimension of `x` cannot be divisible by `group_size`"
     assert x.is_contiguous(), "`x` is not contiguous"
-    
+
     # Define fp8 dtype and constants
     fp8_dtype = torch.float8_e4m3fn
     finfo = torch.finfo(fp8_dtype)
@@ -94,6 +95,35 @@ def sgl_per_token_group_quant_fp8(
     )
 
     if x.shape[0] > 0:
-        per_token_group_quant_fp8(x, x_q, x_s, group_size, eps, fp8_min, fp8_max, scale_ue8m0)
+        per_token_group_quant_fp8(
+            x, x_q, x_s, group_size, eps, fp8_min, fp8_max, scale_ue8m0
+        )
 
     return x_q, x_s
+
+
+def scaled_fp8_per_tensor_quant(
+    input: torch.Tensor,
+    scale: Optional[torch.Tensor] = None,
+    output: Optional[torch.Tensor] = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    assert input.ndim == 2
+
+    shape: Union[tuple[int, int], torch.Size] = input.shape
+    out_dtype: torch.dtype = torch.float8_e4m3fn
+
+    if output is None:
+        output = torch.empty(shape, device=input.device, dtype=out_dtype)
+    else:
+        assert output.dtype == out_dtype
+
+    if scale is None:
+        # dynamic quant
+        scale = torch.zeros(1, device=input.device, dtype=torch.float32)
+        per_tensor_quant_fp8(input, output, scale, False)
+    else:
+        # static quant
+        assert scale.numel() == 1, f"{scale.shape}"
+        per_tensor_quant_fp8(input, output, scale, True)
+
+    return output, scale

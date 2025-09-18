@@ -6,11 +6,11 @@ import torch
 from rtp_llm.models_py.modules.fp8_linear import (
     DEEPGEMM_AVAILABLE,
     FP8_AVAILABLE,
-    Fp8Linear,
+    Fp8DeepGEMMLinear,
 )
 
 
-class TestFp8Linear(unittest.TestCase):
+class Fp8DeepGEMMLinear(unittest.TestCase):
 
     def setUp(self):
         """Setup test environment"""
@@ -52,8 +52,8 @@ class TestFp8Linear(unittest.TestCase):
         )
 
     def _create_fp8_linear(self, with_bias: bool = True):
-        """Helper method to create Fp8Linear instance"""
-        return Fp8Linear(
+        """Helper method to create Fp8DeepGEMMLinear instance"""
+        return Fp8DeepGEMMLinear(
             weight=self.weight,
             weight_scales=self.weight_scales,
             bias=self.bias if with_bias else None,
@@ -61,7 +61,7 @@ class TestFp8Linear(unittest.TestCase):
         )
 
     def test_module_creation(self):
-        """Test Fp8Linear module creation"""
+        """Test Fp8DeepGEMMLinear module creation"""
         fp8_linear = self._create_fp8_linear(with_bias=True)
         self.assertEqual(fp8_linear.hidden_size, self.hidden_size)
         self.assertEqual(fp8_linear.output_size, self.output_size)
@@ -80,7 +80,7 @@ class TestFp8Linear(unittest.TestCase):
         print(f"DEEPGEMM_AVAILABLE: {DEEPGEMM_AVAILABLE}")
 
         # Test that we can at least import the module
-        self.assertIsNotNone(Fp8Linear)
+        self.assertIsNotNone(Fp8DeepGEMMLinear)
 
         # For unit tests, dependencies MUST be available - fail if not
         self.assertTrue(
@@ -120,7 +120,7 @@ class TestFp8Linear(unittest.TestCase):
         )
         with self.assertRaises(ValueError) as context:
             fp8_linear(input_fp32)
-        self.assertIn("Fp8Linear only accepts bfloat16 input", str(context.exception))
+        self.assertIn("Fp8DeepGEMMLinear only accepts bfloat16 input", str(context.exception))
         self.assertIn("torch.float32", str(context.exception))
 
         # Test with float16 input (should raise ValueError)
@@ -129,7 +129,7 @@ class TestFp8Linear(unittest.TestCase):
         )
         with self.assertRaises(ValueError) as context:
             fp8_linear(input_fp16)
-        self.assertIn("Fp8Linear only accepts bfloat16 input", str(context.exception))
+        self.assertIn("Fp8DeepGEMMLinear only accepts bfloat16 input", str(context.exception))
         self.assertIn("torch.float16", str(context.exception))
 
         # Test with int32 input (should raise ValueError)
@@ -138,7 +138,7 @@ class TestFp8Linear(unittest.TestCase):
         )
         with self.assertRaises(ValueError) as context:
             fp8_linear(input_int32)
-        self.assertIn("Fp8Linear only accepts bfloat16 input", str(context.exception))
+        self.assertIn("Fp8DeepGEMMLinear only accepts bfloat16 input", str(context.exception))
         self.assertIn("torch.int32", str(context.exception))
 
     def test_forward_pass_with_dependencies(self):

@@ -22,6 +22,7 @@ from rtp_llm.distribute.worker_info import (
 from rtp_llm.models_py.modules.moe.routers.deepep_normal_router import (
     DeepepNormalRouter,
 )
+from rtp_llm.models_py.modules.moe.utils import FusedMoEQuantConfig
 from rtp_llm.test.utils.port_util import PortsContext
 
 import rtp_llm.ops  # isort:skip
@@ -85,6 +86,12 @@ def worker_function(rank: int, use_fp8: bool, token_num_per_rank: List[int]):
             topk_ids = torch.arange(config.expert_num, device=current_device).repeat(
                 token_num, 1
             )
+            quant_config = FusedMoEQuantConfig(
+                quant_dtype=torch.float8_e4m3fn,
+                per_act_token_quant=False,
+                per_out_ch_quant=False,
+                block_shape=[128, 128],
+            )
             payload = router.prepare(
                 a1,
                 None,
@@ -93,6 +100,7 @@ def worker_function(rank: int, use_fp8: bool, token_num_per_rank: List[int]):
                 topk_ids,
                 config.expert_num,
                 None,
+                quant_config,
             )
             assert payload.expert_tokens_meta.expert_num_tokens_cpu == [
                 sum(token_num_per_rank)

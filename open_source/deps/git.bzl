@@ -123,6 +123,13 @@ def git_deps():
     )
 
     new_git_repository(
+        name = "cutlass4.0",
+        remote = "https://github.com/NVIDIA/cutlass.git",
+        commit = "dc4817921edda44a549197ff3a9dcf5df0636e7b",
+        build_file = str(Label("//3rdparty/cutlass:cutlass.BUILD")),
+    )
+
+    new_git_repository(
         name = "flashinfer",
         remote = "https://github.com/flashinfer-ai/flashinfer.git",
         commit = "1c88d650eeec97be3a4dcebe4a9912d7785bc250",

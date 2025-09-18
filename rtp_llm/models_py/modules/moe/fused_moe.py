@@ -24,6 +24,7 @@ class ExpertForwardPayload:
     """
 
     expert_x: torch.Tensor
+    expert_x_origin_dtype: Optional[torch.dtype] = None
     expert_x_scale: Optional[torch.Tensor] = None
     expert_tokens_meta: Optional[ExpertTokensMetadata] = None
     expert_topk_ids: Optional[torch.Tensor] = None
@@ -164,6 +165,12 @@ class FusedMoe(torch.nn.Module):
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 extra_expert_args=extra_expert_args,
             )
+
+        # pass a1.shape to finalize for shape check
+        if extra_finalize_args is None:
+            extra_finalize_args = {"a1_shape": a1.shape}
+        else:
+            extra_finalize_args.update({"a1_shape": a1.shape})
 
         output = self.router.finalize(
             fused_out,
