@@ -13,7 +13,7 @@ AUTHOR_NAME=$(git log -1 --pretty=format:%an ${COMMIT_ID})
 AUTHOR_EMAIL=$(git log -1 --pretty=format:%ae ${COMMIT_ID})
 MERGE_MESSAGE=$(git log -1 --pretty=format:%B ${COMMIT_ID})
 MERGE_TYPE="SQUASH"
-SOURCE_BRANCH="open_merge_${COMMIT_ID}"
+SOURCE_BRANCH="open_merge/${COMMIT_ID}"
 TARGET_BRANCH="main"
 
 # Get current timestamp
