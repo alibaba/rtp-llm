@@ -1,0 +1,715 @@
+
+<!DOCTYPE html>
+
+
+<html lang="zh-CN" data-content_root="../" >
+
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>RTP-LLM Performance Benchmark Tool &#8212; RTP-LLM</title>
+  
+  
+  
+  <script data-cfasync="false">
+    document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
+    document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
+  </script>
+  
+  <!-- Loaded before other Sphinx assets -->
+  <link href="../_static/styles/theme.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+<link href="../_static/styles/bootstrap.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+<link href="../_static/styles/pydata-sphinx-theme.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+
+  
+  <link href="../_static/vendor/fontawesome/6.5.2/css/all.min.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+  <link rel="preload" as="font" type="font/woff2" crossorigin href="../_static/vendor/fontawesome/6.5.2/webfonts/fa-solid-900.woff2" />
+<link rel="preload" as="font" type="font/woff2" crossorigin href="../_static/vendor/fontawesome/6.5.2/webfonts/fa-brands-400.woff2" />
+<link rel="preload" as="font" type="font/woff2" crossorigin href="../_static/vendor/fontawesome/6.5.2/webfonts/fa-regular-400.woff2" />
+
+    <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=03e43079" />
+    <link rel="stylesheet" type="text/css" href="../_static/styles/sphinx-book-theme.css?v=eba8b062" />
+    <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../_static/css/custom_log.css" />
+    <link rel="stylesheet" type="text/css" href="../_static/css/language-switcher.css?v=943557c0" />
+    <link rel="stylesheet" type="text/css" href="../_static/css/custom_log.css" />
+    <link rel="stylesheet" type="text/css" href="../_static/css/language-switcher.css?v=943557c0" />
+  
+  <!-- Pre-loaded scripts that we'll load fully later -->
+  <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=dfe6caa3a7d634c4db9b" />
+<link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=dfe6caa3a7d634c4db9b" />
+  <script src="../_static/vendor/fontawesome/6.5.2/js/all.min.js?digest=dfe6caa3a7d634c4db9b"></script>
+
+    <script src="../_static/documentation_options.js?v=8bc30457"></script>
+    <script src="../_static/doctools.js?v=9bcbadda"></script>
+    <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../_static/copybutton.js?v=ccdb6887"></script>
+    <script src="../_static/js/language-switcher.js?v=d38991ab"></script>
+    <script src="../_static/scripts/sphinx-book-theme.js?v=887ef09a"></script>
+    <script src="../_static/translations.js?v=beaddf03"></script>
+    <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
+    <script>DOCUMENTATION_OPTIONS.pagename = 'benchmark/benchmark';</script>
+    <script src="../_static/js/language-switcher.js?v=d38991ab"></script>
+    <link rel="index" title="索引" href="../genindex.html" />
+    <link rel="search" title="搜索" href="../search.html" /> 
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="docsearch:language" content="zh-CN"/>
+    <meta name="docbuild:last-update" content="2025 年 09 月 19 日"/>
+<link
+  rel="stylesheet"
+  href="../_static/css/language-switcher.css"
+/>
+<script src="../_static/js/language-switcher.js"></script>
+
+  </head>
+  
+  
+  <body data-bs-spy="scroll" data-bs-target=".bd-toc-nav" data-offset="180" data-bs-root-margin="0px 0px -60%" data-default-mode="">
+
+  
+  
+  <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
+  
+  <div id="pst-scroll-pixel-helper"></div>
+  
+  <button type="button" class="btn rounded-pill" id="pst-back-to-top">
+    <i class="fa-solid fa-arrow-up"></i>Back to top</button>
+
+  
+  <input type="checkbox"
+          class="sidebar-toggle"
+          id="pst-primary-sidebar-checkbox"/>
+  <label class="overlay overlay-primary" for="pst-primary-sidebar-checkbox"></label>
+  
+  <input type="checkbox"
+          class="sidebar-toggle"
+          id="pst-secondary-sidebar-checkbox"/>
+  <label class="overlay overlay-secondary" for="pst-secondary-sidebar-checkbox"></label>
+  
+  <div class="search-button__wrapper">
+    <div class="search-button__overlay"></div>
+    <div class="search-button__search-container">
+<form class="bd-search d-flex align-items-center"
+      action="../search.html"
+      method="get">
+  <i class="fa-solid fa-magnifying-glass"></i>
+  <input type="search"
+         class="form-control"
+         name="q"
+         id="search-input"
+         placeholder="Search..."
+         aria-label="Search..."
+         autocomplete="off"
+         autocorrect="off"
+         autocapitalize="off"
+         spellcheck="false"/>
+  <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd>K</kbd></span>
+</form></div>
+  </div>
+
+  <div class="pst-async-banner-revealer d-none">
+  <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="Version warning"></aside>
+</div>
+
+  
+    <header class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
+    </header>
+  
+
+  <div class="bd-container">
+    <div class="bd-container__inner bd-page-width">
+      
+      
+      
+        
+      
+      <div class="bd-sidebar-primary bd-sidebar">
+        
+
+  
+  <div class="sidebar-header-items sidebar-primary__section">
+    
+    
+    
+    
+  </div>
+  
+    <div class="sidebar-primary-items__start sidebar-primary__section">
+        <div class="sidebar-primary-item">
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="../index.html">
+  
+  
+  
+  
+  
+    
+    
+      
+    
+    
+    <img src="../_static/logo.png" class="logo__image only-light" alt="RTP-LLM - Home"/>
+    <script>document.write(`<img src="../_static/logo.png" class="logo__image only-dark" alt="RTP-LLM - Home"/>`);</script>
+  
+  
+</a></div>
+        <div class="sidebar-primary-item">
+
+ <script>
+ document.write(`
+   <button class="btn search-button-field search-button__button" title="搜索" aria-label="搜索" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="fa-solid fa-magnifying-glass"></i>
+    <span class="search-button__default-text">搜索</span>
+    <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+   </button>
+ `);
+ </script></div>
+        <div class="sidebar-primary-item"><nav class="bd-links bd-docs-nav" aria-label="Main">
+    <div class="bd-toc-item navbar-nav active">
+        <p aria-level="2" class="caption" role="heading"><span class="caption-text">安装</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../start/install.html">安装 RTP-LLM</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">发布版本</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../release/v0.2.0/release.html">RTP-LLM 0.2.0</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">基本用法</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../backend/send_request.html">发送请求</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/openai_api_completions.html">OpenAI API - 文本生成/会话</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/openai_api_vision.html">OpenAI API - 多模态</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/openai_api_embeddings.html">OpenAI API - Embedding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/native_api.html">RTP-LLM Native API</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">后端教程</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../references/deepseek/index.html">deepseek</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../references/qwen/index.html">qwen-moe</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../references/kimi/index.html">kimi</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">高级后端配置</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../backend/server_arguments.html">服务器参数</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/sampling_params.html">采样配置</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/attention_backend.html">注意力后端</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">支持的模型</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/generative_models.html">大语言模型</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/multimodal_language_models.html">多模态语言模型</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/embedding_models.html">Embedding 模型</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/support_new_models.html">如何支持新模型</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">高级功能</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../backend/speculative_decoding.html">推测解码</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/reuse_kv_cache.html">重用缓存</a></li>
+
+<li class="toctree-l1"><a class="reference internal" href="../backend/function_calling.html">工具和函数调用</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/quantization.html">量化</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/lora.html">LoRA 服务</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/pd_disaggregation.html">PD分离</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">RTP-LLM 路由器</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../backend/flexlb.html">FlexLB（弹性负载均衡器）- 主节点</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">参考文献</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../references/general.html">通用指南</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../references/developer.html">开发者参考</a></li>
+</ul>
+
+    </div>
+</nav></div>
+    </div>
+  
+  
+  <div class="sidebar-primary-items__end sidebar-primary__section">
+  </div>
+  
+  <div id="rtd-footer-container"></div>
+
+
+      </div>
+      
+      <main id="main-content" class="bd-main" role="main">
+        
+        
+
+<div class="sbt-scroll-pixel-helper"></div>
+
+          <div class="bd-content">
+            <div class="bd-article-container">
+              
+              <div class="bd-header-article d-print-none">
+<div class="header-article-items header-article__inner">
+  
+    <div class="header-article-items__start">
+      
+        <div class="header-article-item"><button class="sidebar-toggle primary-toggle btn btn-sm" title="Toggle primary sidebar" data-bs-placement="bottom" data-bs-toggle="tooltip">
+  <span class="fa-solid fa-bars"></span>
+</button></div>
+      
+    </div>
+  
+  
+    <div class="header-article-items__end">
+      
+        <div class="header-article-item">
+
+<div class="article-header-buttons">
+
+
+
+
+
+<div class="dropdown dropdown-source-buttons">
+  <button class="btn dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" aria-label="Source repositories">
+    <i class="fab fa-github"></i>
+  </button>
+  <ul class="dropdown-menu">
+      
+      
+      
+      <li><a href="https://github.com/alibaba/rtp-llm" target="_blank"
+   class="btn btn-sm btn-source-repository-button dropdown-item"
+   title="源码库"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fab fa-github"></i>
+  </span>
+<span class="btn__text-container">Repository</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li><a href="https://github.com/alibaba/rtp-llm/blob/main/benchmark/benchmark.md?plain=1" target="_blank"
+   class="btn btn-sm btn-source-file-button dropdown-item"
+   title="Show source"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-code"></i>
+  </span>
+<span class="btn__text-container">Show source</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li><a href="https://github.com/alibaba/rtp-llm/edit/main/benchmark/benchmark.md" target="_blank"
+   class="btn btn-sm btn-source-edit-button dropdown-item"
+   title="Suggest edit"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-pencil-alt"></i>
+  </span>
+<span class="btn__text-container">Suggest edit</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li><a href="https://github.com/alibaba/rtp-llm/issues/new?title=Issue%20on%20page%20%2Fbenchmark/benchmark.html&body=Your%20issue%20content%20here." target="_blank"
+   class="btn btn-sm btn-source-issues-button dropdown-item"
+   title="创建议题"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-lightbulb"></i>
+  </span>
+<span class="btn__text-container">Open issue</span>
+</a>
+</li>
+      
+  </ul>
+</div>
+
+
+
+
+
+
+<div class="dropdown dropdown-download-buttons">
+  <button class="btn dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" aria-label="下载此页面">
+    <i class="fas fa-download"></i>
+  </button>
+  <ul class="dropdown-menu">
+      
+      
+      
+      <li><a href="../_sources/benchmark/benchmark.md" target="_blank"
+   class="btn btn-sm btn-download-source-button dropdown-item"
+   title="下载源文件"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-file"></i>
+  </span>
+<span class="btn__text-container">.md</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li>
+<button onclick="window.print()"
+  class="btn btn-sm btn-download-pdf-button dropdown-item"
+  title="列印成 PDF"
+  data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-file-pdf"></i>
+  </span>
+<span class="btn__text-container">.pdf</span>
+</button>
+</li>
+      
+  </ul>
+</div>
+
+
+
+
+<button onclick="toggleFullScreen()"
+  class="btn btn-sm btn-fullscreen-button"
+  title="全屏模式"
+  data-bs-placement="bottom" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-expand"></i>
+  </span>
+
+</button>
+
+
+
+<script>
+document.write(`
+  <button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button" title="light/dark" aria-label="light/dark" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="theme-switch fa-solid fa-sun fa-lg" data-mode="light"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg" data-mode="dark"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"></i>
+  </button>
+`);
+</script>
+
+
+<script>
+document.write(`
+  <button class="btn btn-sm pst-navbar-icon search-button search-button__button" title="搜索" aria-label="搜索" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="fa-solid fa-magnifying-glass fa-lg"></i>
+  </button>
+`);
+</script>
+<button class="sidebar-toggle secondary-toggle btn btn-sm" title="Toggle secondary sidebar" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <span class="fa-solid fa-list"></span>
+</button>
+</div></div>
+      
+    </div>
+  
+</div>
+</div>
+              
+              
+
+<div id="jb-print-docs-body" class="onlyprint">
+    <h1>RTP-LLM Performance Benchmark Tool</h1>
+    <!-- Table of contents -->
+    <div id="print-main-content">
+        <div id="jb-print-toc">
+            
+            <div>
+                <h2> 目录 </h2>
+            </div>
+            <nav aria-label="Page">
+                <ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#design-principle">Design Principle</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#single-node-benchmark">Single-Node Benchmark</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#multi-node-benchmark">Multi Node Benchmark</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#benchmark-yaml">Benchmark Yaml</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#run-step">Run step</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#result-format">Result Format</a></li>
+</ul>
+            </nav>
+        </div>
+    </div>
+</div>
+
+              
+                
+<div id="searchbox"></div>
+                <article class="bd-article">
+                  
+  <section class="tex2jax_ignore mathjax_ignore" id="rtp-llm-performance-benchmark-tool">
+<h1>RTP-LLM Performance Benchmark Tool<a class="headerlink" href="#rtp-llm-performance-benchmark-tool" title="Link to this heading">#</a></h1>
+<p>In this chapter, I will present the performance testing tools developed in RTP-LLM, including standalone measurement of model prefill and decode performance under various batch sizes with single-node and multi-node parallelism, timeline recording, and their usage methods.</p>
+<section id="design-principle">
+<h2>Design Principle<a class="headerlink" href="#design-principle" title="Link to this heading">#</a></h2>
+<p>RTP-LLM employs a special batch scheduler that accumulates requests until the specified batch size is reached, then all requests enter the engine simultaneously. The scheduler supports both prefill and decode modes; in decode mode, requests are only allocated KV cache without prefill, enabling accurate and efficient measurement of engine performance.
+In detail, the batch-scheduler profiler is executed three times for a single input:</p>
+<ul class="simple">
+<li><p>Warm-up run, to account for one-time setup such as JIT compilation.</p></li>
+<li><p>Timing run, to measure engine performance.</p></li>
+<li><p>Profiling run, to capture a timeline for subsequent analysis; this step may degrade end-to-end performance.</p></li>
+</ul>
+<p>For every run we use min_new_tokens and max_new_tokens to ensure that all requests perform the same number of decode steps.</p>
+<p>Since in decode mode, we not prefill the KVCache, so hidden_states after every forward step is not real. So we also hack moe gate select for moe model and speculative accept func for mtp. In that way, we get stable result for analyse result.</p>
+</section>
+<section id="single-node-benchmark">
+<h2>Single-Node Benchmark<a class="headerlink" href="#single-node-benchmark" title="Link to this heading">#</a></h2>
+<p>using commands below can start a performance benchmark, mixed prefill and decode</p>
+<div class="highlight-shell notranslate"><div class="highlight"><pre><span></span>bazelisk<span class="w"> </span><span class="nb">test</span><span class="w"> </span>//rtp_llm/test/perf_test:perf_test<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--config<span class="o">=</span>cuda12_6<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--test_arg<span class="o">=</span>--ckpt_path<span class="o">=</span><span class="si">${</span><span class="p">/PATH/TO/CKPT</span><span class="si">}</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--test_arg<span class="o">=</span>--tokenizer_path<span class="o">=</span><span class="si">${</span><span class="p">/PATH/TO/TOKENIZER</span><span class="si">}</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--test_arg<span class="o">=</span>--model_type<span class="o">=</span><span class="si">${</span><span class="nv">MODEL_TYPE</span><span class="si">}</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--test_arg<span class="o">=</span>--dp_size<span class="o">=</span><span class="m">1</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--test_arg<span class="o">=</span>--tp_size<span class="o">=</span><span class="m">1</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--test_arg<span class="o">=</span>--batch_size<span class="o">=</span><span class="s2">&quot;1,2,4,8,16,32&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--test_arg<span class="o">=</span>--input_len<span class="o">=</span><span class="s2">&quot;128,1024,2048,4096&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--test_env<span class="o">=</span><span class="nv">INT8_MODE</span><span class="o">=</span><span class="m">1</span><span class="w"> </span><span class="c1"># optionally using --test_env to using custom env for RTP-LLM setup</span>
+</pre></div>
+</div>
+<p>specially <code class="docutils literal notranslate"><span class="pre">batch_size</span></code> states for the batch in single DP node, when <code class="docutils literal notranslate"><span class="pre">DP_SIZE</span></code> param is setted.</p>
+<p>also we support test prefill or decode only when prefill and decode not share the same config(such as prefill use deepep normal, and decode use deepep masked), in that case user should also set <code class="docutils literal notranslate"><span class="pre">--partial={0:all(default),</span> <span class="pre">1:decode,</span> <span class="pre">2:prefill}</span></code>, below is an example of testing decode only:</p>
+<div class="highlight-shell notranslate"><div class="highlight"><pre><span></span><span class="w">    </span>--test_arg<span class="o">=</span><span class="nv">partial</span><span class="o">=</span><span class="m">1</span>
+</pre></div>
+</div>
+</section>
+<section id="multi-node-benchmark">
+<h2>Multi Node Benchmark<a class="headerlink" href="#multi-node-benchmark" title="Link to this heading">#</a></h2>
+<p>We also provide a Python script to enable multi-node benchmark, but since it requires setting up the environment and starting the script on multiple machines, it still involves more steps than single-node testing.</p>
+<p>For each machine to be tested, you need to create an environment in which RTP-LLM can run and support passwordless SSH access from the current machine’s port.</p>
+<section id="benchmark-yaml">
+<h3>Benchmark Yaml<a class="headerlink" href="#benchmark-yaml" title="Link to this heading">#</a></h3>
+<p>Configure the parameters with reference to <code class="docutils literal notranslate"><span class="pre">rtp_llm/test/perf_test/multi_node/multi_benchmark_config.yaml</span></code>. Below is the detail explaination of yaml structure.</p>
+<p>First part is for cloning code to local in ssh machine, and checkout to the branch you need to test</p>
+<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span class="nt">benchmarks</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;H20_Deepseek-R1_Decode_EP32_4K&quot;</span>
+<span class="w">    </span><span class="c1"># git config</span>
+<span class="w">    </span><span class="nt">git_repo_url</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;git@github.com:alibaba/rtp-llm.git&quot;</span>
+<span class="w">    </span><span class="nt">git_checkout_ref</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;origin/main&quot;</span>
+</pre></div>
+</div>
+<p>Second part describe the machine list, user name and port to ssh</p>
+<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span class="w">    </span><span class="c1"># machine config</span>
+<span class="w">    </span><span class="nt">ip_lists</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;33.126.67.231&quot;</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;33.126.67.17&quot;</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;33.126.51.159&quot;</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;33.126.83.168&quot;</span>
+<span class="w">    </span><span class="nt">run_user</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;admin&quot;</span>
+<span class="w">    </span><span class="nt">ssh_port</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">2222</span>
+<span class="w">    </span><span class="c1"># model config</span>
+</pre></div>
+</div>
+<p>Third part describe the model info which should be pre-download to local machine</p>
+<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span class="w">    </span><span class="nt">tokenizer_path</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;/mnt/nas1/hf/deepseek_r1_4layers/&quot;</span>
+<span class="w">    </span><span class="nt">checkpoint_path</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;/mnt/nas1/hf/deepseek_r1_4layers/&quot;</span>
+<span class="w">    </span><span class="nt">model_type</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;deepseek3&quot;</span>
+</pre></div>
+</div>
+<p>Fourth part describe the test cases, including prefill/decode, batch_size and input_len(they will be used as Cartesian product).Specially, tp_size and dp_size len should be equal as each tuple of them will be started as a parallel config. For example, in below config, script will start three server with <code class="docutils literal notranslate"><span class="pre">TP=1</span> <span class="pre">DP=32</span></code>, <code class="docutils literal notranslate"><span class="pre">TP=2</span> <span class="pre">DP=16</span></code>, <code class="docutils literal notranslate"><span class="pre">TP=4</span> <span class="pre">DP=8</span></code> and benchmark</p>
+<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span class="w">    </span><span class="c1"># test config</span>
+<span class="w">    </span><span class="nt">is_decode</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">    </span><span class="nt">batch_size_list</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;[1,2,4,8,16,32,48,64,80]&quot;</span>
+<span class="w">    </span><span class="nt">input_len_list</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;[4096]&quot;</span>
+<span class="w">    </span><span class="nt">tp_size</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">1</span><span class="p p-Indicator">,</span><span class="nv">2</span><span class="p p-Indicator">,</span><span class="nv">4</span><span class="p p-Indicator">]</span>
+<span class="w">    </span><span class="nt">dp_size</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">32</span><span class="p p-Indicator">,</span><span class="nv">16</span><span class="p p-Indicator">,</span><span class="nv">8</span><span class="p p-Indicator">]</span>
+</pre></div>
+</div>
+<p>bazel_build_args is the flag for bazelisk build, if you want to test in AMD card, change <code class="docutils literal notranslate"><span class="pre">--config=rocm</span></code></p>
+<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span class="w">    </span><span class="c1"># build config</span>
+<span class="w">    </span><span class="nt">bazel_build_args</span><span class="p">:</span><span class="w"> </span><span class="s">&#39;&quot;</span><span class="nv"> </span><span class="s">--jobs</span><span class="nv"> </span><span class="s">100</span><span class="nv"> </span><span class="s">--verbose_failures</span><span class="nv"> </span><span class="s">--config=cuda12_6</span><span class="nv"> </span><span class="s">&quot;&#39;</span>
+<span class="w">    </span><span class="c1"># file dir config</span>
+<span class="w">    </span><span class="nt">ft_sub_dir</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;rtp_llm_perf_test&quot;</span>
+</pre></div>
+</div>
+<p>last part is the model env config, be careful that all env configs type should in <code class="docutils literal notranslate"><span class="pre">[int,</span> <span class="pre">float,</span> <span class="pre">string,</span> <span class="pre">bool]</span></code>, or there maybe unexpected error</p>
+<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span class="w">    </span><span class="c1"># model config</span>
+<span class="w">    </span><span class="nt">start_port</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">12333</span>
+<span class="w">    </span><span class="nt">concurrency_limit</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">80</span>
+<span class="w">    </span><span class="nt">accl_dispatch_num_warp_groups</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">4</span>
+<span class="w">    </span><span class="nt">accl_combine_num_warp_groups</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">4</span>
+<span class="w">    </span><span class="nt">decode_test_length</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">2048</span>
+<span class="w">    </span><span class="nt">warm_up</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1</span>
+<span class="w">    </span><span class="nt">act_type</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;bf16&quot;</span>
+<span class="w">    </span><span class="nt">weight_type</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;fp16&quot;</span>
+<span class="w">    </span><span class="nt">reserver_runtime_mem_mb</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0</span>
+<span class="w">    </span><span class="nt">device_reserve_memory_bytes</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0</span>
+<span class="w">    </span><span class="nt">load_ckpt_num_process</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">96</span>
+<span class="w">    </span><span class="nt">max_context_batch_size</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1</span>
+<span class="w">    </span><span class="nt">enable_merge_w13</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">    </span><span class="nt">use_deepep_moe</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">    </span><span class="nt">enable_layer_micro_batch</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">2</span>
+<span class="w">    </span><span class="nt">enable_comm_overlap</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">    </span><span class="nt">redundant_expert</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0</span>
+<span class="w">    </span><span class="nt">accl_low_latency_optimize</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1</span>
+</pre></div>
+</div>
+</section>
+<section id="run-step">
+<h3>Run step<a class="headerlink" href="#run-step" title="Link to this heading">#</a></h3>
+<div class="highlight-shell notranslate"><div class="highlight"><pre><span></span><span class="c1"># in root of RTP-LLM</span>
+<span class="nb">cd</span><span class="w"> </span>rtp_llm/test/perf_test/multi_node
+<span class="c1"># Configure multi_benchmark_config.yaml</span>
+<span class="c1"># Firstly run use -s to download wheel deps</span>
+/opt/conda310/bin/python3<span class="w"> </span>multi_benchmark.py<span class="w"> </span>-m<span class="w"> </span>run<span class="w"> </span>-s
+<span class="c1"># Second and after</span>
+/opt/conda310/bin/python3<span class="w"> </span>multi_benchmark.py<span class="w"> </span>-m<span class="w"> </span>run
+<span class="c1"># Finally clean running dir in machine</span>
+/opt/conda310/bin/python3<span class="w"> </span>multi_benchmark.py<span class="w"> </span>-m<span class="w"> </span>clean
+</pre></div>
+</div>
+<p>Also, multi-node benchmark dumps profile json in rank0, but currently we don't scp dir to local yet. So please go to rank0 and get profile data manually before clean step</p>
+</section>
+</section>
+<section id="result-format">
+<h2>Result Format<a class="headerlink" href="#result-format" title="Link to this heading">#</a></h2>
+<p>Decode result, where batch size stands for per DP Rank</p>
+<div class="highlight-shell notranslate"><div class="highlight"><pre><span></span>+---------------------------------------------------------------------------------------------+
+<span class="p">|</span><span class="w">                                        </span>Decode<span class="w"> </span>Result<span class="w">                                        </span><span class="p">|</span>
++---------+------------+------------------+--------------+------------------+-----------------+
+<span class="p">|</span><span class="w"> </span>Seq<span class="w"> </span>Len<span class="w"> </span><span class="p">|</span><span class="w"> </span>Batch<span class="w"> </span>Size<span class="w"> </span><span class="p">|</span><span class="w"> </span>Sucess/Total<span class="w"> </span>Req<span class="w"> </span><span class="p">|</span><span class="w"> </span>Input/Output<span class="w"> </span><span class="p">|</span><span class="w"> </span>Waiting<span class="w"> </span>Time<span class="o">(</span>ms<span class="o">)</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>Decode<span class="w"> </span>Time<span class="o">(</span>ms<span class="o">)</span><span class="w"> </span><span class="p">|</span>
++---------+------------+------------------+--------------+------------------+-----------------+
+<span class="p">|</span><span class="w"> </span><span class="m">4096</span><span class="w">    </span><span class="p">|</span><span class="w"> </span><span class="m">1</span><span class="w">          </span><span class="p">|</span><span class="w"> </span><span class="m">1</span>/1<span class="w">              </span><span class="p">|</span><span class="w"> </span><span class="m">4096</span>/2048<span class="w">    </span><span class="p">|</span><span class="w"> </span><span class="m">0</span>.00<span class="w">             </span><span class="p">|</span><span class="w"> </span><span class="m">1</span>.75<span class="w">            </span><span class="p">|</span>
+<span class="p">|</span><span class="w"> </span><span class="m">4096</span><span class="w">    </span><span class="p">|</span><span class="w"> </span><span class="m">2</span><span class="w">          </span><span class="p">|</span><span class="w"> </span><span class="m">2</span>/2<span class="w">              </span><span class="p">|</span><span class="w"> </span><span class="m">4096</span>/2048<span class="w">    </span><span class="p">|</span><span class="w"> </span><span class="m">0</span>.00<span class="w">             </span><span class="p">|</span><span class="w"> </span><span class="m">1</span>.72<span class="w">            </span><span class="p">|</span>
+<span class="p">|</span><span class="w"> </span><span class="m">4096</span><span class="w">    </span><span class="p">|</span><span class="w"> </span><span class="m">4</span><span class="w">          </span><span class="p">|</span><span class="w"> </span><span class="m">4</span>/4<span class="w">              </span><span class="p">|</span><span class="w"> </span><span class="m">4096</span>/2048<span class="w">    </span><span class="p">|</span><span class="w"> </span><span class="m">0</span>.00<span class="w">             </span><span class="p">|</span><span class="w"> </span><span class="m">1</span>.91<span class="w">            </span><span class="p">|</span>
+<span class="p">|</span><span class="w"> </span><span class="m">4096</span><span class="w">    </span><span class="p">|</span><span class="w"> </span><span class="m">8</span><span class="w">          </span><span class="p">|</span><span class="w"> </span><span class="m">8</span>/8<span class="w">              </span><span class="p">|</span><span class="w"> </span><span class="m">4096</span>/2048<span class="w">    </span><span class="p">|</span><span class="w"> </span><span class="m">0</span>.00<span class="w">             </span><span class="p">|</span><span class="w"> </span><span class="m">1</span>.93<span class="w">            </span><span class="p">|</span>
+<span class="p">|</span><span class="w"> </span><span class="m">4096</span><span class="w">    </span><span class="p">|</span><span class="w"> </span><span class="m">16</span><span class="w">         </span><span class="p">|</span><span class="w"> </span><span class="m">16</span>/16<span class="w">            </span><span class="p">|</span><span class="w"> </span><span class="m">4096</span>/2048<span class="w">    </span><span class="p">|</span><span class="w"> </span><span class="m">0</span>.00<span class="w">             </span><span class="p">|</span><span class="w"> </span><span class="m">2</span>.00<span class="w">            </span><span class="p">|</span>
+<span class="p">|</span><span class="w"> </span><span class="m">4096</span><span class="w">    </span><span class="p">|</span><span class="w"> </span><span class="m">32</span><span class="w">         </span><span class="p">|</span><span class="w"> </span><span class="m">32</span>/32<span class="w">            </span><span class="p">|</span><span class="w"> </span><span class="m">4096</span>/2048<span class="w">    </span><span class="p">|</span><span class="w"> </span><span class="m">0</span>.00<span class="w">             </span><span class="p">|</span><span class="w"> </span><span class="m">2</span>.19<span class="w">            </span><span class="p">|</span>
+<span class="p">|</span><span class="w"> </span><span class="m">4096</span><span class="w">    </span><span class="p">|</span><span class="w"> </span><span class="m">48</span><span class="w">         </span><span class="p">|</span><span class="w"> </span><span class="m">48</span>/48<span class="w">            </span><span class="p">|</span><span class="w"> </span><span class="m">4096</span>/2048<span class="w">    </span><span class="p">|</span><span class="w"> </span><span class="m">0</span>.00<span class="w">             </span><span class="p">|</span><span class="w"> </span><span class="m">2</span>.43<span class="w">            </span><span class="p">|</span>
+<span class="p">|</span><span class="w"> </span><span class="m">4096</span><span class="w">    </span><span class="p">|</span><span class="w"> </span><span class="m">64</span><span class="w">         </span><span class="p">|</span><span class="w"> </span><span class="m">64</span>/64<span class="w">            </span><span class="p">|</span><span class="w"> </span><span class="m">4096</span>/2048<span class="w">    </span><span class="p">|</span><span class="w"> </span><span class="m">0</span>.00<span class="w">             </span><span class="p">|</span><span class="w"> </span><span class="m">2</span>.60<span class="w">            </span><span class="p">|</span>
+<span class="p">|</span><span class="w"> </span><span class="m">4096</span><span class="w">    </span><span class="p">|</span><span class="w"> </span><span class="m">80</span><span class="w">         </span><span class="p">|</span><span class="w"> </span><span class="m">80</span>/80<span class="w">            </span><span class="p">|</span><span class="w"> </span><span class="m">4096</span>/2048<span class="w">    </span><span class="p">|</span><span class="w"> </span><span class="m">0</span>.00<span class="w">             </span><span class="p">|</span><span class="w"> </span><span class="m">2</span>.87<span class="w">            </span><span class="p">|</span>
++---------+------------+------------------+--------------+------------------+-----------------+
+</pre></div>
+</div>
+</section>
+</section>
+
+
+                </article>
+              
+
+              
+              
+              
+              
+                <footer class="prev-next-footer d-print-none">
+                  
+<div class="prev-next-area">
+</div>
+                </footer>
+              
+            </div>
+            
+            
+              
+                <div class="bd-sidebar-secondary bd-toc"><div class="sidebar-secondary-items sidebar-secondary__inner">
+
+
+  <div class="sidebar-secondary-item">
+  <div class="page-toc tocsection onthispage">
+    <i class="fa-solid fa-list"></i> 目录
+  </div>
+  <nav class="bd-toc-nav page-toc">
+    <ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#design-principle">Design Principle</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#single-node-benchmark">Single-Node Benchmark</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#multi-node-benchmark">Multi Node Benchmark</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#benchmark-yaml">Benchmark Yaml</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#run-step">Run step</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#result-format">Result Format</a></li>
+</ul>
+  </nav></div>
+
+</div></div>
+              
+            
+          </div>
+          <footer class="bd-footer-content">
+            
+<div class="bd-footer-content__inner container">
+  
+  <div class="footer-item">
+    
+<p class="component-author">
+作者： RTP-LLM Team
+</p>
+
+  </div>
+  
+  <div class="footer-item">
+    
+
+  <p class="copyright">
+    
+      © Copyright 2023-2025, RTP-LLM.
+      <br/>
+    
+  </p>
+
+  </div>
+  
+  <div class="footer-item">
+    <p class="last-updated">
+  最后更新于 2025 年 09 月 19 日.
+  <br/>
+</p>
+  </div>
+  
+  <div class="footer-item">
+    
+  </div>
+  
+</div>
+          </footer>
+        
+
+      </main>
+    </div>
+  </div>
+  
+  <!-- Scripts loaded after <body> so the DOM is not blocked -->
+  <script src="../_static/scripts/bootstrap.js?digest=dfe6caa3a7d634c4db9b"></script>
+<script src="../_static/scripts/pydata-sphinx-theme.js?digest=dfe6caa3a7d634c4db9b"></script>
+
+  <footer class="bd-footer">
+  </footer>
+  </body>
+</html>

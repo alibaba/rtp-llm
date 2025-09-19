@@ -57,7 +57,7 @@
     <link rel="prev" title="更新 whl 依赖" href="Update-whl-Deps.html" /> 
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="zh-CN"/>
-    <meta name="docbuild:last-update" content="2025 年 09 月 17 日"/>
+    <meta name="docbuild:last-update" content="2025 年 09 月 19 日"/>
 <link
   rel="stylesheet"
   href="../_static/css/language-switcher.css"
@@ -213,8 +213,12 @@
 
 <li class="toctree-l1"><a class="reference internal" href="../backend/function_calling.html">工具和函数调用</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../backend/quantization.html">量化</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../backend/lora.html">LoRA Serving</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../backend/pd_disaggregation.html">PD解聚</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/lora.html">LoRA 服务</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/pd_disaggregation.html">PD分离</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">RTP-LLM 路由器</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../backend/flexlb.html">FlexLB（弹性负载均衡器）- 主节点</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">参考文献</span></p>
 <ul class="current nav bd-sidenav">
@@ -522,7 +526,7 @@ $<span class="w"> </span>bash<span class="w"> </span>rtp_llm/ops/gen_pyi.sh
 <h3>2.2 Python端参数传播<a class="headerlink" href="#python-side-parameter-propagation" title="Link to this heading">#</a></h3>
 <p>Python端的环境变量比C++端多得多，两者之间存在一些重叠。我们将一些Python特有的环境变量合并到了C++端的配置分类中，其余的在Python端有自己独立的配置分类集合。</p>
 <p>目前，我们的设计考虑了当前的代码架构。配置获取存在两种场景：一种是在某些全局方法或静态方法中，我们直接从<code class="docutils literal notranslate"><span class="pre">rtp_llm/config/py_config_modules.py</span></code>中的<code class="docutils literal notranslate"><span class="pre">StaticConfig</span></code>获取相应的配置参数，对于其他情况，我们通过传入<code class="docutils literal notranslate"><span class="pre">py_env_configs</span></code>配置来获取。此外，关于Python端环境变量的修改，我们遵循以下原则：</p>
-<p><strong>原则：测试/测试环境变量/冒烟测试环境变量中的环境变量设置都将保留。全局初始化环境变量设置和检索也会保留（例如internal_source/rtp_llm/models/internal_init.py，internal_source/scripts/local_server_runner.py）。用于rpc_api传输规范的env_param等也会保留（例如rtp_llm/tools/api/model_size_evaluator_api.py）。</strong></p>
+<p><strong>Principle: Environment variable settings in tests/Test environment variables/smoke test environment variables are all preserved. Global initialization environment variable settings and retrieval are also preserved (such as internal_source/rtp_llm/models/internal_init.py). env_param, etc., which exist for rpc_api transmission specification, are also preserved (such as rtp_llm/tools/api/model_size_evaluator_api.py).</strong></p>
 <p>在未来开发新环境变量时，必须遵循上述原则。Python环境变量的修改与C++端类似。以下是需要修改的具体代码位置：</p>
 <ol class="arabic simple">
 <li><p><code class="docutils literal notranslate"><span class="pre">rtp_llm/config/py_config_modules.py</span></code></p></li>
@@ -608,7 +612,7 @@ $<span class="w"> </span>bash<span class="w"> </span>rtp_llm/ops/gen_pyi.sh
   
   <div class="footer-item">
     <p class="last-updated">
-  最后更新于 2025 年 09 月 17 日.
+  最后更新于 2025 年 09 月 19 日.
   <br/>
 </p>
   </div>
