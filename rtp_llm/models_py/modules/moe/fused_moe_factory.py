@@ -6,7 +6,11 @@ import torch
 import rtp_llm.models_py.modules.utils as utils
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.config.quant_config import Fp8PerTensorCompressedQuantConfig
-from rtp_llm.models_py.modules.moe import BatchedDataRouter, FusedMoe
+from rtp_llm.models_py.modules.moe import (
+    BatchedDataRouter,
+    DataRouterNoEPStandard,
+    FusedMoe,
+)
 from rtp_llm.utils.model_weight import W
 
 # TODO@miji move it to model init process?
@@ -95,7 +99,7 @@ class FusedMoeFactory(object):
                 max_num_tokens = (
                     config.max_generate_batch_size + config.tp_size - 1
                 ) // config.tp_size
-                router = DeepEPLowLatencyRouter(config)
+                router = DeepEPLowLatencyRouter(config, use_fp8=False)
                 executor = CutlassBatchedExpertsFp8(
                     max_num_tokens=max_num_tokens,
                     num_dispatchers=config.world_size // config.tp_size,
@@ -107,7 +111,7 @@ class FusedMoeFactory(object):
                     a2_scale=weights.get(W.moe_w2_input_sr, None),
                 )
             else:
-                router = DeepepNormalRouter(config)
+                router = DeepepNormalRouter(config, use_fp8=False, expert_alignment=1)
                 executor = CutlassExpertsFp8(
                     w1=weights.get(W.moe_w1, None),
                     w2=weights.get(W.moe_w2, None),

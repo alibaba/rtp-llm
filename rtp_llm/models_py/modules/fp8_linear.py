@@ -6,9 +6,8 @@ from typing import Optional
 import torch
 from torch import nn
 
-from rtp_llm.models_py.modules import utils
 from rtp_llm.config.quant_config import QuantizationConfig
-
+from rtp_llm.models_py.modules import utils
 
 logger = logging.getLogger(__name__)
 
@@ -106,8 +105,8 @@ class Fp8DeepGEMMLinear(nn.Module):
         # Check input dtype - only accept BF16
         if input.dtype != torch.bfloat16:
             error_msg = (
-                f"Fp8Linear only accepts bfloat16 input, but got {input.dtype}. "
-                "Please convert input to bfloat16 before calling Fp8Linear."
+                f"Fp8DeepGEMMLinear only accepts bfloat16 input, but got {input.dtype}. "
+                "Please convert input to bfloat16 before calling Fp8DeepGEMMLinear."
             )
             logger.error(error_msg)
             raise ValueError(error_msg)

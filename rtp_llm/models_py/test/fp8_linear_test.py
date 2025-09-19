@@ -10,7 +10,7 @@ from rtp_llm.models_py.modules.fp8_linear import (
 )
 
 
-class Fp8DeepGEMMLinear(unittest.TestCase):
+class Fp8DeepGEMMLinearTest(unittest.TestCase):
 
     def setUp(self):
         """Setup test environment"""
@@ -120,7 +120,9 @@ class Fp8DeepGEMMLinear(unittest.TestCase):
         )
         with self.assertRaises(ValueError) as context:
             fp8_linear(input_fp32)
-        self.assertIn("Fp8DeepGEMMLinear only accepts bfloat16 input", str(context.exception))
+        self.assertIn(
+            "Fp8DeepGEMMLinear only accepts bfloat16 input", str(context.exception)
+        )
         self.assertIn("torch.float32", str(context.exception))
 
         # Test with float16 input (should raise ValueError)
@@ -129,7 +131,9 @@ class Fp8DeepGEMMLinear(unittest.TestCase):
         )
         with self.assertRaises(ValueError) as context:
             fp8_linear(input_fp16)
-        self.assertIn("Fp8DeepGEMMLinear only accepts bfloat16 input", str(context.exception))
+        self.assertIn(
+            "Fp8DeepGEMMLinear only accepts bfloat16 input", str(context.exception)
+        )
         self.assertIn("torch.float16", str(context.exception))
 
         # Test with int32 input (should raise ValueError)
@@ -138,7 +142,9 @@ class Fp8DeepGEMMLinear(unittest.TestCase):
         )
         with self.assertRaises(ValueError) as context:
             fp8_linear(input_int32)
-        self.assertIn("Fp8DeepGEMMLinear only accepts bfloat16 input", str(context.exception))
+        self.assertIn(
+            "Fp8DeepGEMMLinear only accepts bfloat16 input", str(context.exception)
+        )
         self.assertIn("torch.int32", str(context.exception))
 
     def test_forward_pass_with_dependencies(self):

@@ -289,16 +289,30 @@ class CutlassExpertsFp8(mm.FusedMoeExpertExecutor):
         expert_num_tokens = (
             payload.expert_tokens_meta.expert_num_tokens if expert_map is None else None
         )
-
         E, N, _ = self.w1.size()
         K = self.w2.size(1)
         assert payload.expert_x.dim() == 2  # [total_num_tokens, hidden_size]
         assert topk_ids.size(0) == payload.expert_x.size(0)
         assert topk_ids.dim() == 2
         assert activation == "SiGLU"
-
         M = payload.expert_x.size(0)
         topk = topk_ids.size(1)
+
+        if payload.expert_x.dtype is not torch.float8_e4m3fn:
+            assert payload.expert_x.dtype == torch.bfloat16
+            assert payload.expert_x_scale is None
+            # per tensor quant bf16 input to fp8
+            expert_x, expert_x_scale = moe_kernel_quantize_input(
+                payload.expert_x,
+                None,
+                quant_dtype=torch.float8_e4m3fn,
+                per_act_token_quant=False,
+                block_shape=None,
+            )
+        else:
+            assert payload.expert_x_scale is not None
+            expert_x = payload.expert_x
+            expert_x_scale = payload.expert_x_scale
 
         workspace13_shape = (M * topk, max(N, K))
         workspace2_shape = (M * topk, (N // 2))
@@ -320,7 +334,7 @@ class CutlassExpertsFp8(mm.FusedMoeExpertExecutor):
 
         run_cutlass_moe_fp8(
             output,
-            payload.expert_x,
+            expert_x,
             self.w1,
             self.w2,
             topk_ids,
@@ -329,7 +343,7 @@ class CutlassExpertsFp8(mm.FusedMoeExpertExecutor):
             expert_map,
             self.w1_scale,
             self.w2_scale,
-            payload.expert_x_scale,
+            expert_x_scale,
             a2_scale,
             workspace13,
             workspace2,
@@ -408,7 +422,6 @@ class CutlassBatchedExpertsFp8(mm.FusedMoeExpertExecutor):
         apply_router_weight_on_input: bool,
         extra_expert_args: Optional[dict[str, Any]],
     ) -> torch.Tensor:
-
         topk_ids = payload.expert_topk_ids
         expert_num_tokens = payload.expert_tokens_meta.expert_num_tokens
 
@@ -421,6 +434,40 @@ class CutlassBatchedExpertsFp8(mm.FusedMoeExpertExecutor):
         assert topk_ids.dim() == 2
         assert activation == "SiGLU"
         M = payload.expert_x.size(1)
+
+        if payload.expert_x.dtype is not torch.float8_e4m3fn:
+            assert payload.expert_x.dtype == torch.bfloat16
+            assert payload.expert_x_scale is None
+            # per tensor quant bf16 input to fp8
+            # Note: deepep low latency dispatch not always pad 0, this will cause an incorrect scale to be calculated here.
+            if self.quant_config.is_per_tensor:
+                E, M, H = payload.expert_x.shape
+                x = payload.expert_x.view(-1, H)
+
+                if torch.sum(expert_num_tokens) > 0:
+                    # TODO(serina.wzq): use high performance kernel impl
+                    index = torch.arange(
+                        M,
+                        dtype=expert_num_tokens.dtype,
+                        device=expert_num_tokens.device,
+                    ).repeat(E, 1)
+                    input_mask = (index < (expert_num_tokens.view(-1, 1))).view(-1)
+                    scale_inv = (
+                        x[input_mask].abs().max() / torch.finfo(torch.float8_e4m3fn).max
+                    )
+                    scale = torch.tensor(
+                        [scale_inv], dtype=torch.float32, device=x.device
+                    )
+                else:
+                    scale = torch.tensor([1], dtype=torch.float32, device=x.device)
+                q_x, expert_x_scale = moe_kernel_quantize_input(
+                    x, scale, torch.float8_e4m3fn, False, None
+                )
+                expert_x = q_x.view(E, -1, H)
+        else:
+            assert payload.expert_x_scale is not None
+            expert_x = payload.expert_x
+            expert_x_scale = payload.expert_x_scale
 
         workspace1_shape = (self.local_num_experts, M * self.num_dispatchers, max(N, K))
         workspace2_shape = (self.local_num_experts, M * self.num_dispatchers, (N // 2))
@@ -446,7 +493,7 @@ class CutlassBatchedExpertsFp8(mm.FusedMoeExpertExecutor):
 
         run_cutlass_moe_fp8(
             output,
-            payload.expert_x,
+            expert_x,
             self.w1,
             self.w2,
             topk_ids,
@@ -455,7 +502,7 @@ class CutlassBatchedExpertsFp8(mm.FusedMoeExpertExecutor):
             None,
             self.w1_scale,
             self.w2_scale,
-            payload.expert_x_scale,
+            expert_x_scale,
             a2_scale,
             workspace13,
             workspace2,

@@ -99,7 +99,6 @@ def worker_function(rank: int, use_fp8: bool, token_num_per_rank: List[int]):
                 topk_weights,
                 topk_ids,
                 config.expert_num,
-                None,
                 quant_config,
             )
             assert payload.expert_tokens_meta.expert_num_tokens_cpu == [
