@@ -1,3 +1,4 @@
 #!/bin/sh
 command -v git-lfs >/dev/null 2>&1 || { echo >&2 "\nnot found git-lfs, If you no longer wish to use git-lfs, remove this hook by deleting .githooks/post-checkout.\n"; exit 2; }
 git lfs post-checkout "$@"
+curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/github-opensource/rtp_llm/test/model_test/fake_test/testdata/kimi_k2/tokenizer/chat_template.jinja" -o rtp_llm/test/model_test/fake_test/testdata/kimi_k2/tokenizer/chat_template.jinja
