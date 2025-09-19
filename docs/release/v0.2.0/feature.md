@@ -3,7 +3,7 @@
 RTP-LLM First Release Version:0.2.0(2025.09)
 ## Features
 ### Framkework  Advanced Feature
-* [PD Disaggregation](../../backend/pd_disaggregation.ipynb) && [PD Entrance Transpose](../../backend/pd_entrace_transpose.ipynb)
+* [PD Disaggregation](../../backend/pd_disaggregation.ipynb) && [PD Entrance Transpose](../../backend/pd_entrance_transpose.md)
 * [Attention Support more Backend](../../backend/attention_backend.md): XQA, FlashInfer
 * [Speculative Decoding](../../backend/speculative_decoding.md)
 * [EPLB](../../references/deepseek/reporter.md#eplb)
