@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-12 17:38+0800\n"
+"POT-Creation-Date: 2025-09-19 11:21+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -32,19 +32,25 @@ msgid ""
 "If you need to run **DeepSeek V3/R1**, it is recommended to refer to "
 "[DeepSeek V3/R1 Support](../references/deepseek/index.rst) and use Docker"
 " to run"
-msgstr "如果您需要运行 **DeepSeek V3/R1**，建议参考 [DeepSeek V3/R1 支持](../references/deepseek/index.rst) 并使用 Docker 运行"
+msgstr ""
+"如果您需要运行 **DeepSeek V3/R1**，建议参考 [DeepSeek V3/R1 "
+"支持](../references/deepseek/index.rst) 并使用 Docker 运行"
 
 #: ../../start/install.md:5
 msgid ""
 "If you need to run **Kimi-K2**, it is recommended to refer to [Kimi-K2 "
 "Support](../references/kimi/index.rst) and use Docker to run"
-msgstr "如果您需要运行 **Kimi-K2**，建议参考 [Kimi-K2 支持](../references/kimi/index.rst) 并使用 Docker 运行"
+msgstr ""
+"如果您需要运行 **Kimi-K2**，建议参考 [Kimi-K2 支持](../references/kimi/index.rst) 并使用 "
+"Docker 运行"
 
 #: ../../start/install.md:6
 msgid ""
 "If you need to run **QwenMoE**, it is recommended to refer to [Qwen MoE "
 "Support](../references/qwen/index.rst) and use Docker to run"
-msgstr "如果您需要运行 **QwenMoE**，建议参考 [Qwen MoE 支持](../references/qwen/index.rst) 并使用 Docker 运行"
+msgstr ""
+"如果您需要运行 **QwenMoE**，建议参考 [Qwen MoE 支持](../references/qwen/index.rst) 并使用 "
+"Docker 运行"
 
 #: ../../start/install.md:9
 msgid ""
@@ -93,7 +99,9 @@ msgid ""
 "Compute Capability 7.0 or higher <br> ✅ RTX20xx<br>  ✅RTX30xx<br>  "
 "✅RTX40xx<br>  ✅V100<br>  ✅T4<br>  ✅A10/A30/A100<br>  ✅L40/L20<br>  "
 "✅H100/H200/H20/H800.. <br>"
-msgstr "计算能力7.0或更高 <br> ✅ RTX20xx<br>  ✅RTX30xx<br>  ✅RTX40xx<br>  ✅V100<br>  ✅T4<br>  ✅A10/A30/A100<br>  ✅L40/L20<br>  ✅H100/H200/H20/H800.. <br>"
+msgstr ""
+"计算能力7.0或更高 <br> ✅ RTX20xx<br>  ✅RTX30xx<br>  ✅RTX40xx<br>  ✅V100<br>  "
+"✅T4<br>  ✅A10/A30/A100<br>  ✅L40/L20<br>  ✅H100/H200/H20/H800.. <br>"
 
 #: ../../start/install.md
 msgid "✅MI308X"
@@ -112,4 +120,77 @@ msgid ""
 "More Docker versions can be obtained from [RTP-LLM "
 "Release](../release/index.rst)"
 msgstr "更多Docker版本可以从[RTP-LLM发布页面](../release/index.rst)获取"
+
+#: ../../start/install.md:56
+#, fuzzy
+msgid "Method 4: Using Kubernetes"
+msgstr "方法3：使用Docker"
+
+#: ../../start/install.md:57
+msgid ""
+"This guide walk you through deploying the RTP-LLM service on Kubernetes. "
+"You can deploy RTP-LLM to Kubernetes using any of the following:"
+msgstr ""
+
+#: ../../start/install.md:59
+msgid "[Deployment](https://kubernetes.io/docs/concepts/workloads/controllers/deployment/)"
+msgstr ""
+
+#: ../../start/install.md:60
+msgid "[StatefulSet](https://kubernetes.io/docs/concepts/workloads/controllers/statefulset/)"
+msgstr ""
+
+#: ../../start/install.md:61
+msgid "[LWS](https://lws.sigs.k8s.io/docs/overview/)"
+msgstr ""
+
+#: ../../start/install.md:63
+msgid "Deploy with Kubernetes Deployment"
+msgstr ""
+
+#: ../../start/install.md:64
+msgid ""
+"You can use a native Kubernetes Deployment to run a single-instance model"
+" service."
+msgstr ""
+
+#: ../../start/install.md:66
+msgid "Create the deployment resource to run the RTP-LLM server. Example:"
+msgstr ""
+
+#: ../../start/install.md:128
+msgid "Create a Kubernetes Service to expose the RTP-LLM server"
+msgstr ""
+
+#: ../../start/install.md:146
+msgid "Deploy and Test"
+msgstr ""
+
+#: ../../start/install.md:148
+msgid "Apply the deployment and service resources using `kubectl`."
+msgstr ""
+
+#: ../../start/install.md:153
+msgid "Send a request to verify the model service is working properly."
+msgstr ""
+
+#: ../../start/install.md:174
+msgid "Multi-Node Deployment"
+msgstr ""
+
+#: ../../start/install.md:175
+msgid ""
+"When deploying a large-scale model, you may need multiple pods to deploy "
+"a single model service instance. The native Kubernetes Deployments and "
+"StatefulSets cannot manage multiple pods as a single unit throughout "
+"their lifecycle. In this case, you can use the community‑maintained LWS "
+"resource to handle the deployment."
+msgstr ""
+
+#: ../../start/install.md:177
+msgid ""
+"As an example, to deploy the Qwen3‑Coder‑480B‑A35B‑Instruct model with "
+"tp=8, request two pods with 4 GPUs each. The lws deployment yaml is as "
+"follows:"
+msgstr ""
 
