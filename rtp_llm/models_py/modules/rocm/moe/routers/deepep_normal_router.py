@@ -107,6 +107,7 @@ class DeepepNormalRouter(FusedMoeDataRouter):
         self.handle = handle
         return ExpertForwardPayload(
             expert_x,
+            None,
             expert_x_scale,
             ExpertTokensMetadata(None, num_recv_tokens_per_expert_list),
             recv_topk_idx,

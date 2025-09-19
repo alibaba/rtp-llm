@@ -3,13 +3,17 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 import aiter
-from aiter.ops.shuffle import shuffle_weight
+import logging
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.models_py.modules.moe import (
     ExpertForwardPayload,
     FusedMoeExpertExecutor,
     FusedMoEQuantConfig,
+    TopKWeightAndReduce,
+)
+from rtp_llm.models_py.modules.moe.topk_weight_and_reduce import (
+    TopKWeightAndReduceDelegate,
 )
 from rtp_llm.utils.model_weight import W
 
@@ -27,16 +31,16 @@ class FusedMoeExecutor(FusedMoeExpertExecutor):
         self.ep_size = config.ep_size
         self.ep_rank = config.ep_rank
 
-        self.num_experts = config.expert_num
-        assert self.num_experts % self.ep_size == 0
-        self.num_experts_per_partition = self.num_experts // self.ep_size
-        self.start_expert_id = self.ep_rank * self.num_experts_per_partition
-        self.end_expert_id = self.start_expert_id + self.num_experts_per_partition - 1
+        # self.num_experts = config.expert_num
+        # assert self.num_experts % self.ep_size == 0
+        # self.num_experts_per_partition = self.num_experts // self.ep_size
+        # self.start_expert_id = self.ep_rank * self.num_experts_per_partition
+        # self.end_expert_id = self.start_expert_id + self.num_experts_per_partition - 1
 
-        self.top_k = config.moe_k
-        self.intermediate_size = config.moe_inter_padding_size
-        self.activation = config.activation_type.lower()
-        self.renormalize = True
+        # self.top_k = config.moe_k
+        # self.intermediate_size = config.moe_inter_padding_size
+        # self.activation = config.activation_type.lower()
+        # self.renormalize = True
 
         # self.use_fp8_w8a8 = True
         # self.use_block_quant = True
@@ -56,6 +60,9 @@ class FusedMoeExecutor(FusedMoeExpertExecutor):
         #     self.w2_weight,
         #     self.w2_weight_scale_inv,
         # )
+
+    def finalize_weight_and_reduce_impl(self) -> TopKWeightAndReduce:
+        return TopKWeightAndReduceDelegate()
 
     def parse_sorted_ids(self, sorted_ids: torch.Tensor):
         arr_uint32 = sorted_ids.cpu().numpy().view(np.uint32)
@@ -103,8 +110,6 @@ class FusedMoeExecutor(FusedMoeExpertExecutor):
         # 计算 padding 后的最大长度
         max_num_tokens_padded = topk_ids.numel() + num_experts * block_size - topk
         max_num_m_blocks = (max_num_tokens_padded + block_size - 1) // block_size
-        # print("max_num_tokens_padded: ", max_num_tokens_padded)
-        # print("max_num_m_blocks: ", max_num_m_blocks)
         
         # 分配输出缓冲区
         sorted_ids = torch.empty((max_num_tokens_padded,), dtype=torch.int32, device=device)
@@ -140,48 +145,35 @@ class FusedMoeExecutor(FusedMoeExpertExecutor):
     ) -> torch.Tensor:
         
         # === 输入验证 ===
-        assert payload.expert_x is not None
-        assert payload.expert_topk_ids is not None
-        assert payload.expert_topk_weights is not None
-        
-        w1 = shuffle_weight(self.w13_weight, layout=(16, 16))
-        w2 = shuffle_weight(self.w2_weight, layout=(16, 16))
+        assert payload.expert_x is not None, "expert_x is None"
+        assert payload.expert_topk_ids is not None, "expert_topk_ids is None"
+        assert payload.expert_topk_weights is not None, "expert_topk_weights is None"
         
         a1 = payload.expert_x
-        topk_ids = payload.expert_topk_ids
-        topk_weights = payload.expert_topk_weights
+        topk_ids = payload.expert_topk_ids.to(torch.int32)
+        topk_weights = payload.expert_topk_weights.to(torch.float32)
         
         M, topk = topk_ids.shape
         if M == 0:
-            return torch.empty((0, w2.shape[-1]), dtype=a1.dtype, device=a1.device)
+            return torch.empty((0, a1.shape[-1]), dtype=a1.dtype, device=a1.device)
         
         dtype = a1.dtype
         device = topk_ids.device
-        # print("w1 shape: ", w1.shape)
-        # print("w2 shape: ", w2.shape)
-        model_dim = w2.shape[-1]
-        inter_dim = w1.shape[1]
+        model_dim = a1.shape[-1]
+        inter_dim = self.w13_weight.shape[1]
         
         # === 选择 block_size ===
         block_size = self.get_block_size(M, topk, global_num_experts)
-        #block_size = 32
         
         # === 构建 local_expert_mask（用于 EP）===
-        expert_mask = None
+        expert_mask = torch.zeros(global_num_experts, dtype=torch.int32, device=device)
+        num_experts_per_partition = global_num_experts // self.ep_size
         if self.ep_size > 1:
-            expert_mask = torch.zeros(global_num_experts, dtype=torch.int32, device=device)
-            num_experts_per_partition =global_num_experts // self.ep_size
-            start = 0
+            expert_mask[0:num_experts_per_partition] = 1
+        else:
+            start = self.ep_rank * num_experts_per_partition
             end = start + num_experts_per_partition
             expert_mask[start:end] = 1
-        
-        # print("topk_ids: ", topk_ids)
-        # print("topk_weights: ", topk_weights)
-        # print("global_num_experts: ", global_num_experts)
-        # print("model_dim: ", model_dim)
-        # print("dtype:", dtype)
-        # print("block_size:", block_size)
-        # print("expert_mask: ", expert_mask)
         
         # === MoE Sorting ===
         (
@@ -199,29 +191,17 @@ class FusedMoeExecutor(FusedMoeExpertExecutor):
             block_size=block_size,
             expert_mask=expert_mask,
         )
-        
-        # print("sorted_ids: ", sorted_ids)
-        # print("sorted_weights: ", sorted_weights)
-        # print("sorted_expert_ids:", sorted_expert_ids)
-        # print("num_valid_ids: ", num_valid_ids)
-        # print("moe_buf shape: ", moe_buf.shape)
-        
-        # self.parse_sorted_ids(sorted_ids)
 
         # === Stage 1: Up/Gate Projection + Activation ===
         a2 = torch.empty((M, topk, inter_dim//2), dtype=dtype, device=device)
         fc1_scale = None
         a1_scale = None
-        act_op = 1 if activation == "silu" else 0  # 1 = silu_and_mul
-        
-        # print("a1: ", a1)
-        # print("inter_dim: ", inter_dim)
-        # print("topk: ", topk)
+        # act_op = 1 if activation == "silu" else 0  # 1 = silu_and_mul
         
         aiter.ck_moe_stage1(
             hidden_states=a1,
-            w1=w1,
-            w2=w2,
+            w1=self.w13_weight,
+            w2=self.w2_weight,
             sorted_token_ids=sorted_ids,
             sorted_expert_ids=sorted_expert_ids,
             num_valid_ids=num_valid_ids,
@@ -233,10 +213,7 @@ class FusedMoeExecutor(FusedMoeExpertExecutor):
             sorted_weights=sorted_weights if apply_router_weight_on_input else None,
         )
         
-        # print("a2 shape: ", a2.shape)
-        # print("a2: ", a2)
-        
-        # # Reshape for stage2
+        # Reshape for stage2
         a2 = a2.view(M, topk, -1)
 
         # === Stage 2: Down Projection + Weighted Combine ===
@@ -245,8 +222,8 @@ class FusedMoeExecutor(FusedMoeExpertExecutor):
         
         aiter.ck_moe_stage2(
             inter_states=a2,  # [M*topk, inter_dim//2]
-            w1=w1,
-            w2=w2,
+            w1=self.w13_weight,
+            w2=self.w2_weight,
             sorted_token_ids=sorted_ids,
             sorted_expert_ids=sorted_expert_ids,
             num_valid_ids=num_valid_ids,
@@ -258,7 +235,6 @@ class FusedMoeExecutor(FusedMoeExpertExecutor):
             sorted_weights=sorted_weights if not apply_router_weight_on_input else None,
         )
         
-        # print("moe buf: ", moe_buf)
         return moe_buf
 
 def torch_moe_ref(
