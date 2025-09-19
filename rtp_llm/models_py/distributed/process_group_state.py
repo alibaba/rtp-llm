@@ -77,7 +77,6 @@ def _init_process_group_state(
         device_group = torch.distributed.new_group(
             ranks,
             backend=torch_distributed_backend,
-            device_id=torch.device(f"cuda:{local_rank}"),
         )
         if rank in ranks:
             # set the world size, ranks, group size, rank in group

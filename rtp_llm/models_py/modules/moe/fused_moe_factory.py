@@ -16,6 +16,7 @@ from rtp_llm.utils.model_weight import W
 # TODO@miji move it to model init process?
 initialized = False
 
+from rtp_llm.ops import DeviceType, get_device
 
 def init_deepep_env_once(config: GptInitModelParameters):
     global initialized
@@ -32,7 +33,6 @@ def init_deepep_env_once(config: GptInitModelParameters):
     ep_group = get_ep_group()
     assert ep_group.device_group is not None, "ep group device group is not initialized"
     init_deepep_wrapper(group=ep_group.device_group, params=config)
-
 
 class FusedMoeFactory(object):
     @staticmethod
@@ -149,76 +149,85 @@ class FusedMoeFactory(object):
 
         return FusedMoe(router, executor, config.expert_num)
 
-
+    @staticmethod
     def create_amd_fused_moe(
         config: GptInitModelParameters, weights: Dict[str, torch.Tensor]
     ) -> FusedMoe:
         
         init_deepep_env_once(config)
-        from rtp_llm.models_py.modules.moe.executors.rocm_deepep_normal_fused_moe_executor import (
+        from rtp_llm.models_py.modules.rocm.moe.executors.deepep_normal_fused_moe_executor import (
             FusedMoeExecutor,
+        )
+        from rtp_llm.models_py.modules.rocm.moe.routers.deepep_normal_router import (
+            DeepepNormalRouter,
         )
         router = DeepepNormalRouter(config)
         executor = FusedMoeExecutor(config, weights)
-        return FusedMoe(router, executor, config.expert_num) 
+        return FusedMoe(router, executor, config.expert_num)
 
     @staticmethod
     def create_fused_moe(
         config: GptInitModelParameters, weights: Dict[str, torch.Tensor]
     ) -> FusedMoe:
         # TODO get_method should return enu class other than string
-        if config.quant_config is None:
-            if config.ep_size > 1 and config.moe_config.use_deepep_low_latency:
-                init_deepep_env_once(config)
-                from rtp_llm.models_py.modules.moe.executors.deepgemm_masked_executor import (
-                    DeepGemmMaskedExecutor,
-                )
-                from rtp_llm.models_py.modules.moe.routers.deepep_low_latency_router import (
-                    DeepEpLowLatencyRouter,
-                )
-
-                router = DeepEpLowLatencyRouter(
-                    config,
-                    use_fp8_dispatch=False,
-                    zero_copy=False,
-                    async_finish=False,
-                    return_recv_hook=False,
-                )
-                executor = DeepGemmMaskedExecutor(
-                    config,
-                    weights,
-                    quant_config=FusedMoEQuantConfig(quant_dtype=None),
-                )
-                return FusedMoe(router, executor, expert_num=config.expert_num)
-            else:
-                from rtp_llm.models_py.modules.moe.fused_batched_moe import (
-                    BatchedTritonExperts,
-                )
-
-                max_num_tokens = (
-                    config.max_generate_batch_size + config.tp_size - 1
-                ) // config.tp_size
-                router = BatchedDataRouter(
-                    max_num_tokens=max_num_tokens,
-                    num_local_experts=config.expert_num,
-                    num_dispatchers=1,
-                    rank=0,
-                )
-                experts = BatchedTritonExperts(
-                    max_num_tokens=max_num_tokens,
-                    num_dispatchers=1,
-                    w1=weights[W.moe_w1],
-                    w2=weights[W.moe_w2],
-                )
-                return FusedMoe(router, experts, expert_num=config.expert_num)
-        elif config.quant_config.get_method() == "FP8_PER_BLOCK":
-            return FusedMoeFactory._create_fp8_per_block_fused_moe(config, weights)
-        elif config.quant_config.get_method() in [
-            "FP8_PER_TENSOR_COMPRESSED",
-            "FP8_DYNAMIC_PER_TENSOR",
-        ]:
-            return FusedMoeFactory._create_fp8_per_tensor_fused_moe(config, weights)
+        device_type = get_device().get_device_type()
+        if device_type == DeviceType.ROCm:
+            if config.quant_config is None:
+                if config.ep_size > 1 and config.moe_config.use_deepep_low_latency == False:
+                    return FusedMoeFactory.create_amd_fused_moe(config, weights)
         else:
-            raise ValueError(
-                f"Unsupported quantization method: {config.quant_config.get_method()}"
-            )
+            if config.quant_config is None:
+                if config.ep_size > 1 and config.moe_config.use_deepep_low_latency:
+                    init_deepep_env_once(config)
+                    from rtp_llm.models_py.modules.moe.executors.deepgemm_masked_executor import (
+                        DeepGemmMaskedExecutor,
+                    )
+                    from rtp_llm.models_py.modules.moe.routers.deepep_low_latency_router import (
+                        DeepEpLowLatencyRouter,
+                    )
+
+                    router = DeepEpLowLatencyRouter(
+                        config,
+                        use_fp8_dispatch=False,
+                        zero_copy=False,
+                        async_finish=False,
+                        return_recv_hook=False,
+                    )
+                    executor = DeepGemmMaskedExecutor(
+                        config,
+                        weights,
+                        quant_config=FusedMoEQuantConfig(quant_dtype=None),
+                    )
+                    return FusedMoe(router, executor, expert_num=config.expert_num)
+                else:
+                    from rtp_llm.models_py.modules.moe.fused_batched_moe import (
+                        BatchedTritonExperts,
+                    )
+
+                    max_num_tokens = (
+                        config.max_generate_batch_size + config.tp_size - 1
+                    ) // config.tp_size
+                    router = BatchedDataRouter(
+                        max_num_tokens=max_num_tokens,
+                        num_local_experts=config.expert_num,
+                        num_dispatchers=1,
+                        rank=0,
+                    )
+                    experts = BatchedTritonExperts(
+                        max_num_tokens=max_num_tokens,
+                        num_dispatchers=1,
+                        w1=weights[W.moe_w1],
+                        w2=weights[W.moe_w2],
+                    )
+                    return FusedMoe(router, experts, expert_num=config.expert_num)
+            elif config.quant_config.get_method() == "FP8_PER_BLOCK":
+                return FusedMoeFactory._create_fp8_per_block_fused_moe(config, weights)
+            elif config.quant_config.get_method() in [
+                "FP8_PER_TENSOR_COMPRESSED",
+                "FP8_DYNAMIC_PER_TENSOR",
+            ]:
+                return FusedMoeFactory._create_fp8_per_tensor_fused_moe(config, weights)
+            else:
+                raise ValueError(
+                    f"Unsupported quantization method: {config.quant_config.get_method()}"
+                )
