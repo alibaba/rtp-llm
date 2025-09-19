@@ -77,7 +77,7 @@ The core features include:
    :maxdepth: 1
    :caption: RTP-LLM Router
 
-   router/router.md
+   backend/flexlb.md
 
 .. toctree::
       :maxdepth: 1

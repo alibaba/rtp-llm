@@ -56,7 +56,7 @@
     <link rel="prev" title="Update whl Deps" href="Update-whl-Deps.html" /> 
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
-    <meta name="docbuild:last-update" content="Sep 17, 2025"/>
+    <meta name="docbuild:last-update" content="Sep 19, 2025"/>
 <link
   rel="stylesheet"
   href="../_static/css/language-switcher.css"
@@ -214,6 +214,10 @@
 <li class="toctree-l1"><a class="reference internal" href="../backend/quantization.html">Quantization</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../backend/lora.html">LoRA Serving</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../backend/pd_disaggregation.html">PD Disaggregation</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">RTP-LLM Router</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../backend/flexlb.html">FlexLB (Flexible Load Balancer) - Master Role</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">References</span></p>
 <ul class="current nav bd-sidenav">
@@ -521,7 +525,7 @@ $<span class="w"> </span>bash<span class="w"> </span>rtp_llm/ops/gen_pyi.sh
 <h3>2.2 Python Side Parameter Propagation<a class="headerlink" href="#python-side-parameter-propagation" title="Link to this heading">#</a></h3>
 <p>The Python side has significantly more environment variables than the C++ side, and there is some overlap between the two. We have merged some Python-specific environment variables into the C++ side’s config classification, while the rest have their own independent configuration classification sets on the Python side.</p>
 <p>Currently, our design considers the current code architecture. Config retrieval exists in two scenarios: one is in some global methods or static methods where we directly obtain corresponding configuration parameters from <code class="docutils literal notranslate"><span class="pre">StaticConfig</span></code> in <code class="docutils literal notranslate"><span class="pre">rtp_llm/config/py_config_modules.py</span></code>, and for other cases, we obtain them by passing in <code class="docutils literal notranslate"><span class="pre">py_env_configs</span></code> configuration. Additionally, regarding Python-side environment variable modifications, we adhere to the following principles:</p>
-<p><strong>Principle: Environment variable settings in tests/Test environment variables/smoke test environment variables are all preserved. Global initialization environment variable settings and retrieval are also preserved (such as internal_source/rtp_llm/models/internal_init.py, internal_source/scripts/local_server_runner.py). env_param, etc., which exist for rpc_api transmission specification, are also preserved (such as rtp_llm/tools/api/model_size_evaluator_api.py).</strong></p>
+<p><strong>Principle: Environment variable settings in tests/Test environment variables/smoke test environment variables are all preserved. Global initialization environment variable settings and retrieval are also preserved (such as internal_source/rtp_llm/models/internal_init.py). env_param, etc., which exist for rpc_api transmission specification, are also preserved (such as rtp_llm/tools/api/model_size_evaluator_api.py).</strong></p>
 <p>In future development of new environment variables, the above principles must be followed. Python environment variable modifications are similar to the C++ side. Here are the specific code locations that need to be modified:</p>
 <ol class="arabic simple">
 <li><p><code class="docutils literal notranslate"><span class="pre">rtp_llm/config/py_config_modules.py</span></code></p></li>
@@ -607,7 +611,7 @@ By RTP-LLM Team
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Sep 17, 2025.
+  Last updated on Sep 19, 2025.
   <br/>
 </p>
   </div>
