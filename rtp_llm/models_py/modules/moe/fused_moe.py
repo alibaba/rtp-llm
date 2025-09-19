@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Union, final
 import torch
 
 from rtp_llm.models_py.modules.moe.utils import FusedMoEQuantConfig
+import logging
 
 
 @dataclass
@@ -128,8 +129,9 @@ class FusedMoe(torch.nn.Module):
         extra_expert_args: Optional[Dict[str, Any]] = None,
         extra_finalize_args: Optional[Dict[str, Any]] = None,
     ) -> torch.Tensor:
+        
         a1 = hidden_states
-
+        
         payload = self.router.prepare(
             a1,
             a1_scale,
@@ -145,7 +147,7 @@ class FusedMoe(torch.nn.Module):
         if payload.expert_topk_weights is None:
             payload.expert_topk_weights = topk_weights
 
-        fused_out = None
+        fused_out = None     
 
         if payload.expert_x.numel() == 0:
             # This happens when none of the tokens from the all2all reach this
@@ -185,6 +187,6 @@ class FusedMoe(torch.nn.Module):
             extra_finalize_args,
         )
 
-        assert output.shape == hidden_states.shape
+        assert output.shape == hidden_states.shape, f"output batch size mismatch: expected {hidden_states.shape}, got {output.shape}"
 
         return output

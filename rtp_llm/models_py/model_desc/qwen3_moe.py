@@ -10,18 +10,12 @@ from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules.attention import CausalAttention
 from rtp_llm.models_py.modules.embedding import Embedding
 from rtp_llm.models_py.modules.fmha import FMHAImplBase
-from rtp_llm.models_py.modules.linear import Linear
+from rtp_llm.models_py.modules import Linear
 from rtp_llm.models_py.modules.moe import FusedMoe
 from rtp_llm.models_py.modules.moe.fused_moe_factory import FusedMoeFactory
-from rtp_llm.models_py.modules.norm import RMSNorm
+from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.ops import KVCache, PyAttentionInputs, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
-
-try:
-    from librtp_compute_ops.rtp_llm_ops import SelectTopkOp
-except ImportError:
-    logging.info("SelectTopkOp not available")
-
 
 class Qwen3MoeLayer(nn.Module):
     def __init__(
@@ -67,10 +61,26 @@ class Qwen3MoeLayer(nn.Module):
         )
         topk_ids = torch.zeros(
             (num_tokens, self.top_k),
-            dtype=torch.int64,
+            dtype=torch.int32,
             device=hidden_states.device,
         )
-        self.select_topk_op.forward(router_logits_fp32, topk_ids, topk_weights)
+        
+        from rtp_llm.ops import DeviceType, get_device
+        device_type = get_device().get_device_type()
+        if device_type == DeviceType.ROCm:
+            import aiter
+            token_expert_indicies = torch.empty(hidden_states.shape[0], self.top_k, dtype=torch.int32, device=hidden_states.device)
+            aiter.topk_softmax(
+                topk_weights,
+                topk_ids,
+                token_expert_indicies,
+                router_logits_fp32,  # TODO(woosuk): Optimize this.
+                True,
+            )
+        else:
+            from libth_transformer.rtp_llm_ops import SelectTopkOp
+            select_topk_op = SelectTopkOp(self.config)
+            select_topk_op.forward(router_logits_fp32, topk_ids, topk_weights)
 
         return self.fused_moe(
             hidden_states=hidden_states,

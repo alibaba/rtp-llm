@@ -3,13 +3,14 @@ from torch import dtype as _dtype
 import itertools
 from unittest import TestCase, main, SkipTest
 
-from rtp_llm.models_py.modules.moe.executors.rocm_deepep_normal_fused_moe_executor import torch_moe_ref, FusedMoeExecutor
+from rtp_llm.models_py.modules.rocm.moe.executors.deepep_normal_fused_moe_executor import torch_moe_ref, FusedMoeExecutor
 from rtp_llm.models_py.modules.moe import ExpertForwardPayload
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.utils.model_weight import W
+from aiter.ops.shuffle import shuffle_weight
 
 class FusedMoeTest(TestCase):
-    DTYPES = [torch.half]
+    DTYPES = [torch.bfloat16]
     TOKEN_NUM = [32] 
     HIDDEN_DIM = [512]
     EXPERT_NUM = [32]
@@ -69,6 +70,9 @@ class FusedMoeTest(TestCase):
         model_param.moe_k = top_k
         model_param.moe_inter_padding_size = inter_dim
         model_param.activation_type = "silu"
+        
+        w1 = shuffle_weight(w1, layout=(16, 16))
+        w2 = shuffle_weight(w2, layout=(16, 16))
         
         weights = {
             W.moe_w1 : w1,
