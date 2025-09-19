@@ -1,0 +1,34 @@
+name: Merge Request Trigger
+
+on:
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  trigger-on-merge:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .github/scripts
+
+    if: github.event.pull_request.merged == true
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Make scripts executable
+        run: chmod +x trigger-merge.sh get-merge-result.sh
+
+      - name: Trigger Aone Merge Task
+        id: trigger
+        run: |
+          echo "Triggering Aone merge for commit ${{ github.event.pull_request.head.sha }}"
+          ./trigger-merge.sh "${{ github.event.pull_request.head.sha }}" "${{ secrets.CI_SECRET }}"
+        env:
+          AONE_PROJECT_ID: "3512232" 
+          GITHUB_REPOSITORY: ${{ github.repository }}
+
+      - name: Get Merge Result
+        run: |
+          echo "Polling for merge result of commit ${{ github.event.pull_request.head.sha }}"
+          ./get-merge-result.sh "${{ github.event.pull_request.head.sha }}" "${{ secrets.CI_SECRET }}"
