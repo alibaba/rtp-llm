@@ -42,6 +42,6 @@ curl -v -H "Content-Type: application/json" \
             \"aone\": { \"projectId\": \"${PROJECT_ID}\" },
             \"newBranch\": { \"name\": \"${BRANCH_NAME}\", \"ref\": \"${BRANCH_REF}\" },
             \"pipelineId\": \"${PIPELINE_ID}\",
-            \"params\": {\"cancel-in-progress\": \"${CANCEL_IN_PROGRESS}\", \"github_commit\"：\"${GITHUB_COMMIT_ID}\"}
+            \"params\": {\"cancel-in-progress\": \"${CANCEL_IN_PROGRESS}\", \"github_commit\":\"${GITHUB_COMMIT_ID}\"}
          }" \
      "https://triggerid-to-mq-wjrdhcgbie.cn-hangzhou.fcapp.run"
