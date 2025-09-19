@@ -1,0 +1,261 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: RTP-LLM 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-19 14:01+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: ../../backend/flexlb.md:1
+msgid "FlexLB (Flexible Load Balancer) - Master Role"
+msgstr ""
+
+#: ../../backend/flexlb.md:3
+msgid "Background"
+msgstr ""
+
+#: ../../backend/flexlb.md:5
+msgid "FlexLB (Flexible Load Balancer) is the Master role in RTP-LLM's distributed inference framework. It implements a multi-dimensional Quality of Service (QoS) Load Balance strategy for large model inference, coordinating between inference workers, cache servers, and other components."
+msgstr ""
+
+#: ../../backend/flexlb.md:7
+msgid "The Master role was designed to address the limitations of random load balancing that caused uneven load distribution across machines, improving resource utilization for inference worker clusters scaled between 100-1000 nodes."
+msgstr ""
+
+#: ../../backend/flexlb.md:9
+msgid "System Architecture"
+msgstr ""
+
+#: ../../backend/flexlb.md:10
+msgid "![Architecture](../pics/router.png)"
+msgstr ""
+
+#: ../../backend/flexlb.md:10
+msgid "Architecture"
+msgstr ""
+
+#: ../../backend/flexlb.md:12
+msgid "Key Components"
+msgstr ""
+
+#: ../../backend/flexlb.md:14
+msgid "**SDK/Client**: Core traffic entry point for large models"
+msgstr ""
+
+#: ../../backend/flexlb.md:15
+msgid "Request protocol parsing and traffic monitoring"
+msgstr ""
+
+#: ../../backend/flexlb.md:16
+msgid "Policy-based cluster selection using Weighted Round Robin"
+msgstr ""
+
+#: ../../backend/flexlb.md:18
+msgid "**Load Balance Scheduler (Master Role)**:"
+msgstr ""
+
+#: ../../backend/flexlb.md:19
+msgid "Distributed load balancer with Master-Slave Architecture"
+msgstr ""
+
+#: ../../backend/flexlb.md:20
+msgid "Real-time scheduling decisions with high availability"
+msgstr ""
+
+#: ../../backend/flexlb.md:21
+msgid "Dynamic load balancing based on node metrics (GPU utilization, memory usage, queue length)"
+msgstr ""
+
+#: ../../backend/flexlb.md:22
+msgid "State-aware routing with Prometheus/Grafana monitoring integration"
+msgstr ""
+
+#: ../../backend/flexlb.md:24
+msgid "**FrontApp Cluster**:"
+msgstr ""
+
+#: ../../backend/flexlb.md:25
+msgid "Independent deployment of Prefill Cluster's frontend functionality"
+msgstr ""
+
+#: ../../backend/flexlb.md:26
+msgid "Handles request rendering and tokenization"
+msgstr ""
+
+#: ../../backend/flexlb.md:28
+msgid "**Prefill Cluster**:"
+msgstr ""
+
+#: ../../backend/flexlb.md:29
+msgid "Handles initial input sequence parallel computing tasks"
+msgstr ""
+
+#: ../../backend/flexlb.md:31
+msgid "**Decoder Cluster**:"
+msgstr ""
+
+#: ../../backend/flexlb.md:32
+msgid "Handles subsequent generation step parallel inference tasks"
+msgstr ""
+
+#: ../../backend/flexlb.md:34
+msgid "**Cache Server**:"
+msgstr ""
+
+#: ../../backend/flexlb.md:35
+msgid "Distributed KV storage system for prefix-aware routing"
+msgstr ""
+
+#: ../../backend/flexlb.md:37
+msgid "Load Balancing Strategies"
+msgstr ""
+
+#: ../../backend/flexlb.md:39
+msgid "The Master role implements different load balancing strategies for Prefill and Decode operations to optimize resource utilization and request latency:"
+msgstr ""
+
+#: ../../backend/flexlb.md:41
+msgid "Prefill Strategy"
+msgstr ""
+
+#: ../../backend/flexlb.md:43
+msgid "For Prefill requests, the Master selects the optimal node based on:"
+msgstr ""
+
+#: ../../backend/flexlb.md:44
+msgid "KV cache hit rate across different machines"
+msgstr ""
+
+#: ../../backend/flexlb.md:45
+msgid "Estimated execution time for the request"
+msgstr ""
+
+#: ../../backend/flexlb.md:46
+msgid "Waiting time in the queue"
+msgstr ""
+
+#: ../../backend/flexlb.md:47
+msgid "The strategy aims to minimize the overall request completion time by choosing the node that can process the request most efficiently"
+msgstr ""
+
+#: ../../backend/flexlb.md:49
+msgid "Decode Strategy"
+msgstr ""
+
+#: ../../backend/flexlb.md:51
+msgid "For Decode requests, the Master uses a different approach:"
+msgstr ""
+
+#: ../../backend/flexlb.md:52
+msgid "Selects the node with the least KV cache usage"
+msgstr ""
+
+#: ../../backend/flexlb.md:53
+msgid "This strategy helps distribute the Decode load evenly across available nodes"
+msgstr ""
+
+#: ../../backend/flexlb.md:54
+msgid "Prevents any single node from becoming a bottleneck due to excessive KV cache consumption"
+msgstr ""
+
+#: ../../backend/flexlb.md:56
+msgid "These strategies work together to ensure optimal resource utilization and reduced latency across the entire inference pipeline."
+msgstr ""
+
+#: ../../backend/flexlb.md:58
+msgid "Usage"
+msgstr ""
+
+#: ../../backend/flexlb.md:60
+msgid "To use the FlexLB Master role in your RTP-LLM deployment:"
+msgstr ""
+
+#: ../../backend/flexlb.md:62
+msgid "Configure the Master node with appropriate cluster settings"
+msgstr ""
+
+#: ../../backend/flexlb.md:63
+msgid "Set up monitoring integration with Prometheus/Grafana for state-aware routing"
+msgstr ""
+
+#: ../../backend/flexlb.md:64
+msgid "Deploy FrontApp, Prefill, and Decoder clusters"
+msgstr ""
+
+#: ../../backend/flexlb.md:65
+msgid "Configure SDK/Client to use Weighted Round Robin for cluster selection"
+msgstr ""
+
+#: ../../backend/flexlb.md:67
+msgid "The Master role automatically handles load distribution, prefix-aware routing, and failover scenarios to optimize resource utilization and reduce request latency."
+msgstr ""
+
+#: ../../backend/flexlb.md:69
+msgid "Startup Commands"
+msgstr ""
+
+#: ../../backend/flexlb.md:71
+msgid "1. Build FlexLB"
+msgstr ""
+
+#: ../../backend/flexlb.md:73
+msgid "Navigate to the FlexLB module directory from the project root:"
+msgstr ""
+
+#: ../../backend/flexlb.md:79
+msgid "Run Unit Tests"
+msgstr ""
+
+#: ../../backend/flexlb.md:89
+msgid "Build Package"
+msgstr ""
+
+#: ../../backend/flexlb.md:95
+msgid "2. Docker Image Build"
+msgstr ""
+
+#: ../../backend/flexlb.md:97
+msgid "Prepare Docker Build Context"
+msgstr ""
+
+#: ../../backend/flexlb.md:99
+msgid "After build completion, copy the generated ai-whale.tgz to the Docker build context directory:"
+msgstr ""
+
+#: ../../backend/flexlb.md:109
+msgid "Build Docker Images"
+msgstr ""
+
+#: ../../backend/flexlb.md:111
+msgid "Base image build:"
+msgstr ""
+
+#: ../../backend/flexlb.md:118
+msgid "Production environment image build:"
+msgstr ""
+
+#: ../../backend/flexlb.md:125
+msgid "3. Run FlexLB"
+msgstr ""
+
+#: ../../backend/flexlb.md:127
+msgid "Start the FlexLB service using the built Docker image:"
+msgstr ""
+
+#: ../../backend/flexlb.md:136
+msgid "4. Complete Build Script"
+msgstr ""
+
+#: ../../backend/flexlb.md:138
+msgid "The following is a complete build and deployment script example:"
+msgstr ""

@@ -63,7 +63,7 @@ The Python side has significantly more environment variables than the C++ side, 
 
 Currently, our design considers the current code architecture. Config retrieval exists in two scenarios: one is in some global methods or static methods where we directly obtain corresponding configuration parameters from `StaticConfig` in `rtp_llm/config/py_config_modules.py`, and for other cases, we obtain them by passing in `py_env_configs` configuration. Additionally, regarding Python-side environment variable modifications, we adhere to the following principles:
 
-**Principle: Environment variable settings in tests/Test environment variables/smoke test environment variables are all preserved. Global initialization environment variable settings and retrieval are also preserved (such as internal_source/rtp_llm/models/internal_init.py, internal_source/scripts/local_server_runner.py). env_param, etc., which exist for rpc_api transmission specification, are also preserved (such as rtp_llm/tools/api/model_size_evaluator_api.py).**
+**Principle: Environment variable settings in tests/Test environment variables/smoke test environment variables are all preserved. Global initialization environment variable settings and retrieval are also preserved (such as internal_source/rtp_llm/models/internal_init.py). env_param, etc., which exist for rpc_api transmission specification, are also preserved (such as rtp_llm/tools/api/model_size_evaluator_api.py).**
 
 In future development of new environment variables, the above principles must be followed. Python environment variable modifications are similar to the C++ side. Here are the specific code locations that need to be modified:
 
