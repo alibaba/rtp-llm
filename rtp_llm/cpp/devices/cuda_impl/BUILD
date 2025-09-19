@@ -34,7 +34,7 @@ cc_library(
         "//rtp_llm/cpp/devices:device_utils",
         "//rtp_llm/cpp/core:torch_cuda_allocator",
         "//rtp_llm/cpp/core:torch_event",
-        "//:th_utils",
+        "//rtp_llm/cpp/pybind:th_utils",
     ] + select({
         ":use_accl_ep": [
             "//3rdparty/accl_ep:accl_ep",
@@ -91,9 +91,9 @@ cc_library(
         "//rtp_llm/cpp/kernels:kernels",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:system_utils",
-        "//rtp_llm/cpp/deep_gemm:deep_gemm_plugins_impl",
-        "//:th_utils",
-        ":trt_plugins",
+        "//rtp_llm/cpp/cuda/deep_gemm:deep_gemm_plugins_impl",
+        "//rtp_llm/cpp/pybind:th_utils",
+        "//rtp_llm/cpp/cuda:trt_plugins",
         "@havenask//aios/autil:string_helper",
         "@local_config_cuda//cuda:cuda_headers",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store",

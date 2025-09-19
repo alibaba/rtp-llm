@@ -4,12 +4,11 @@
 #include "rtp_llm/cpp/embedding_engine/EmbeddingExecutor.h"
 #include "rtp_llm/cpp/core/BufferHelper.h"
 #include "rtp_llm/cpp/core/Types.h"
-#include "rtp_llm/cpp/utils/PyUtils.h"
+#include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/models/GptModel.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
-#include "rtp_llm/cpp/engine_base/Executor.h"
 #include <ATen/TensorIndexing.h>
 #include <torch/extension.h>
 #include <pybind11/pybind11.h>

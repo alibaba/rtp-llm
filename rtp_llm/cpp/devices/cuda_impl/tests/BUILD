@@ -72,7 +72,7 @@ cc_binary(
     ]),
     deps = test_deps + [
         "//rtp_llm/cpp/devices/torch_impl:torch_reference_impl",
-        "//rtp_llm/cpp:models",
+        "//rtp_llm/cpp/models:models",
     ],
     visibility = ["//visibility:public"],
     copts = copts(),
@@ -315,7 +315,7 @@ cc_library(
     copts = copts(),
     deps = test_deps + [
         "//rtp_llm/models_py/bindings:op_defs",
-        "//:th_utils"
+        "//rtp_llm/cpp/pybind:th_utils"
     ],
     visibility = ["//visibility:public"],
     alwayslink = True, ## make sure pybind11 link

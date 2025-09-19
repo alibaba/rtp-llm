@@ -4,7 +4,7 @@
 #include <vector>
 #include <torch/python.h>
 #include "absl/status/statusor.h"
-#include "rtp_llm/cpp/utils/PyUtils.h"
+#include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalProcessor.h"

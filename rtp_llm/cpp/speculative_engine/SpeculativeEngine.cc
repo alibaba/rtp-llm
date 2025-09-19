@@ -4,7 +4,7 @@
 #include "rtp_llm/cpp/speculative_engine/SpeculativeEngine.h"
 #include "rtp_llm/cpp/speculative_engine/propose_executor/EagleExecutor.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
-#include "rtp_llm/cpp/stream/StreamCacheResource.h"
+#include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/speculative_engine/propose_executor/MTPStream.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
@@ -12,7 +12,7 @@
 #include "rtp_llm/cpp/speculative_engine/propose_executor/VanillaExecutor.h"
 #include "rtp_llm/cpp/speculative_engine/propose_executor/MTPExecutor.h"
 #include "rtp_llm/cpp/speculative_engine/score_executor/ScoreExecutor.h"
-#include "rtp_llm/cpp/system_prompt/SystemPromptConstructor.h"
+#include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 using namespace std;

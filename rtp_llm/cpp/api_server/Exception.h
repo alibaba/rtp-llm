@@ -6,8 +6,8 @@
 #include "autil/legacy/jsonizable.h"
 
 #include "rtp_llm/cpp/utils/Logger.h"
-#include "rtp_llm/cpp/http_server/http_server/HttpResponseWriter.h"
-#include "rtp_llm/cpp/http_server/http_server/HttpRequest.h"
+#include "rtp_llm/cpp/api_server/http_server/http_server/HttpResponseWriter.h"
+#include "rtp_llm/cpp/api_server/http_server/http_server/HttpRequest.h"
 #include "rtp_llm/cpp/api_server/ApiServerMetrics.h"
 #include "rtp_llm/cpp/api_server/ErrorResponse.h"
 #include "rtp_llm/cpp/api_server/AccessLogWrapper.h"

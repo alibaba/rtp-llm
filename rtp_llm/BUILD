@@ -282,7 +282,7 @@ py_library(
         ":ops",
         ":config",
         ":structure",
-        "//rtp_llm/cpp:model_rpc_client",
+        "//rtp_llm/cpp/model_rpc:model_rpc_client",
     ],
 )
 
@@ -401,7 +401,7 @@ py_library(
         ":structure",
         "//rtp_llm/server:server",
         ":plugins",
-        "//rtp_llm/cpp:model_rpc_client",
+        "//rtp_llm/cpp/model_rpc:model_rpc_client",
         ":openai_api",
         ":lora",
         ":sdk",

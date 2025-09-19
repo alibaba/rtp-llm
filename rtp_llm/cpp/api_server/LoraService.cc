@@ -5,7 +5,7 @@
 #include "rtp_llm/cpp/api_server/GangServer.h"
 #include "rtp_llm/cpp/api_server/ApiServerMetrics.h"
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
-#include "rtp_llm/cpp/lora/LoraManager.h"
+#include "rtp_llm/cpp/models/lora/LoraManager.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 #include "autil/AtomicCounter.h"

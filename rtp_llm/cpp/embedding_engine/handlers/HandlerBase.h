@@ -5,7 +5,7 @@
 #include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/models/GptModel.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
-#include "rtp_llm/cpp/dataclass/MergedQuery.h"
+#include "rtp_llm/cpp/models/SampleInfos.h"
 #include <memory>
 
 namespace th = torch;

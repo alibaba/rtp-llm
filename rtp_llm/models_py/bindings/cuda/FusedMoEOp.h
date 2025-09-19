@@ -1,7 +1,7 @@
 #pragma once
 
 #include <torch/torch.h>
-#include "rtp_llm/cpp/th_op/GptInitParameter.h"
+#include "rtp_llm/cpp/config/GptInitParameter.h"
 #include "trt_plugins/mixtureOfExperts/mixtureOfExpertsPlugin.h"
 
 namespace trt_plugins = tensorrt_llm::plugins;

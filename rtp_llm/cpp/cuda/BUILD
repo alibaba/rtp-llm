@@ -139,10 +139,14 @@ cc_library(
         "nccl/nccl_utils.h",
     ],
     deps = torch_deps() + select({
-        "@//:using_cuda": [":cuda_utils",
-                           "@local_config_cuda//cuda:cuda_headers",
-                           "@local_config_cuda//cuda:cudart",],
-        "@//:using_rocm": ["//rtp_llm/cpp/rocm:rocm_utils"],
+        "@//:using_cuda": [
+            ":cuda_utils",
+            "@local_config_cuda//cuda:cuda_headers",
+            "@local_config_cuda//cuda:cudart",
+        ],
+        "@//:using_rocm": [
+            "//rtp_llm/cpp/rocm:rocm_utils",
+        ],
         "//conditions:default": [],
     }),
     copts = copts(),
@@ -263,12 +267,13 @@ cc_library(
     srcs = [
     ],
     hdrs = [
-        "Dispatch.h"],
+        "Dispatch.h"
+    ],
     deps = [
         ":nccl_util",
         ":cublas",
         ":cufmha",
-        "cuggemm",
+        ":cuggemm",
         ":cuda_utils",
         ":cuda_fmha_utils",
         ":custom_ar",
@@ -357,3 +362,7 @@ cc_library(
     include_prefix = "src",
     visibility = ["//visibility:public"],
 )
+
+
+
+

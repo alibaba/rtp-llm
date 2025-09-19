@@ -1,7 +1,7 @@
 #pragma once
 #include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
-#include "rtp_llm/cpp/stream/GenerateStream.h"
+#include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include <cstddef>
 
 namespace rtp_llm {

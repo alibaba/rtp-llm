@@ -8,14 +8,14 @@ from grpc import StatusCode
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleType
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.cpp.proto.model_rpc_service_pb2 import (
+from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     ErrorDetailsPB,
     GenerateInputPB,
     GenerateOutputsPB,
     MultimodalInputPB,
     RoleAddrPB,
 )
-from rtp_llm.cpp.proto.model_rpc_service_pb2_grpc import RpcServiceStub
+from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import RpcServiceStub
 from rtp_llm.distribute.gang_info import get_gang_info
 from rtp_llm.distribute.worker_info import g_parallel_info, g_worker_info
 from rtp_llm.utils.base_model_datatypes import (

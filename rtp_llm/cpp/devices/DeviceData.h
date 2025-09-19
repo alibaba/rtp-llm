@@ -3,7 +3,7 @@
 #include <stddef.h>
 #include <string>
 #include "rtp_llm/cpp/core/Types.h"
-#include "rtp_llm/cpp/th_op/GptInitParameter.h"
+#include "rtp_llm/cpp/config/GptInitParameter.h"
 
 namespace rtp_llm {
 

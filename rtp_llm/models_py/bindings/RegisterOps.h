@@ -4,7 +4,7 @@
 #include <pybind11/embed.h>
 #include <torch/extension.h>
 
-namespace torch_ext {
+namespace rtp_llm {
 
 void registerPyModuleOps(pybind11::module& m);
 

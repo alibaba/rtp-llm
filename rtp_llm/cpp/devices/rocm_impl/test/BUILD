@@ -225,7 +225,7 @@ cc_binary(
     ],
     deps = test_deps + [
         "//rtp_llm/cpp/devices/torch_impl:torch_reference_impl",
-        "//rtp_llm/cpp:models",
+        "//rtp_llm/cpp/models:models",
     ],
     visibility = ["//visibility:public"],
     copts = test_copts,

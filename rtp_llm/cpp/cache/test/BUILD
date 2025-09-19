@@ -8,8 +8,8 @@ test_copts = [
 test_deps = [
     "//rtp_llm/cpp/devices/testing:device_test_utils",
     "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
-    "//:gpt_init_params",
-    "//rtp_llm/cpp:cache",
+    "//rtp_llm/cpp/config:gpt_init_params",
+    "//rtp_llm/cpp/cache",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",
     "@local_config_cuda//cuda:cuda_headers",

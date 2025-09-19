@@ -1,6 +1,6 @@
 #pragma once
 #include "rtp_llm/cpp/model_rpc/RPCPool.h"
-#include "rtp_llm/cpp/utils/RpcErrorCode.h"
+#include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/RemoteServerResource.h"
 

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "rtp_llm/cpp/schedulers/FIFOScheduler.h"
+#include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 
 namespace rtp_llm {
 

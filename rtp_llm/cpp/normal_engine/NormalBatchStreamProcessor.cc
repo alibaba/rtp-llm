@@ -11,8 +11,8 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
-#include "rtp_llm/cpp/logits_processor/LogitsProcessorStates.h"
-#include "rtp_llm/cpp/dataclass/MergedQuery.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
+#include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 

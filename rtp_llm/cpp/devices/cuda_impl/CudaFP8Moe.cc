@@ -6,8 +6,8 @@
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/kernels/moe/moe_index_kernel.h"
 #ifdef ENABLE_FP8
-#include "rtp_llm/cpp/cutlass/cutlass_kernels/moe_gemm/moe_fp8_kernels.h"
-#include "rtp_llm/cpp/deep_gemm/DeepGemmPlugin.h"
+#include "rtp_llm/cpp/cuda/cutlass/cutlass_kernels/moe_gemm/moe_fp8_kernels.h"
+#include "rtp_llm/cpp/cuda/deep_gemm/DeepGemmPlugin.h"
 
 using namespace std;
 namespace trt = tensorrt_llm::kernels;

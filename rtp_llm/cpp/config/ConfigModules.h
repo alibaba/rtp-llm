@@ -70,7 +70,7 @@ struct ProfilingDebugLoggingConfig {
     std::string nccl_debug_file           = "";
     bool        debug_load_server         = false;
     int         hack_layer_num            = 0;
-    int         debug_start_fake_process  = false;
+    bool        debug_start_fake_process  = false;
     bool        dg_print_reg_reuse        = false;
     bool        qwen_agent_debug          = false;
     bool        disable_dpc_random        = false;

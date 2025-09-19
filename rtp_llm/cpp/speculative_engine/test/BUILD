@@ -16,7 +16,7 @@ cc_library(
     copts = test_copts,
     deps =  [
         "//rtp_llm/cpp/normal_engine/test:mock_engine",
-        "//rtp_llm/cpp:speculative_engine",
+        "//rtp_llm/cpp/speculative_engine:speculative_engine",
     ] + torch_deps(),
     alwayslink = 1,
     visibility = ["//visibility:public"],

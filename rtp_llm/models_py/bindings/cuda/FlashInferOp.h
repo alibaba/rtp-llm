@@ -2,7 +2,7 @@
 
 #include <memory>
 #include "rtp_llm/cpp/devices/cuda_impl/CudaFlashInfer.h"
-#include "rtp_llm/cpp/th_op/GptInitParameter.h"
+#include "rtp_llm/cpp/config/GptInitParameter.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "rtp_llm/models_py/bindings/cuda/FMHACudaBase.h"
 

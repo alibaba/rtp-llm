@@ -15,8 +15,8 @@ cc_library(
 
 test_deps = [
     "//rtp_llm/cpp/devices/testing:device_test_utils",
-    "//rtp_llm/cpp:models",
-    "//:gpt_init_params",
+    "//rtp_llm/cpp/models:models",
+    "//rtp_llm/cpp/config:gpt_init_params",
     ":test_headers",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",
@@ -101,7 +101,7 @@ cc_library(
         "TestMain.cc",
     ],
     deps = test_deps + [
-        "//rtp_llm/cpp:http_api_server",
+        "//rtp_llm/cpp/api_server:http_api_server",
     ],
     copts = test_copts,
     alwayslink = 1,

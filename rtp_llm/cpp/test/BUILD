@@ -17,8 +17,8 @@ cc_library(
 
 test_deps = [
     "//rtp_llm/cpp/devices/testing:device_test_utils",
-    "//rtp_llm/cpp:models",
-    "//:gpt_init_params",
+    "//rtp_llm/cpp/models:models",
+    "//rtp_llm/cpp/config:gpt_init_params",
     ":test_headers",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",
@@ -108,7 +108,7 @@ cc_binary(
         "long_seq.cu",
     ],
     deps = [
-        "//rtp_llm/cpp/cutlass:cutlass_kernels_impl",
+        "//rtp_llm/cpp/cuda/cutlass:cutlass_kernels_impl",
         "//rtp_llm/cpp/cuda:cuda",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/cuda:allocator_cuda",
@@ -125,7 +125,7 @@ cc_binary(
         "int4_perf.cu"
     ],
     deps = [
-        "//rtp_llm/cpp/cutlass:cutlass_kernels_impl",
+        "//rtp_llm/cpp/cuda/cutlass:cutlass_kernels_impl",
         "//rtp_llm/cpp/cuda:cuda",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/cuda:allocator_cuda",
@@ -142,7 +142,7 @@ cc_binary(
         "int8_gemm_perf.cu",
     ],
     deps = [
-        "//rtp_llm/cpp/cutlass:cutlass_kernels_impl",
+        "//rtp_llm/cpp/cuda/cutlass:cutlass_kernels_impl",
         "//rtp_llm/cpp/cuda:cuda",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/cuda:allocator_cuda",
@@ -159,11 +159,11 @@ cc_binary(
         "int8_gemm_test.cu",
     ],
     deps = [
-        "//rtp_llm/cpp/cutlass:cutlass_kernels_impl",
+        "//rtp_llm/cpp/cuda/cutlass:cutlass_kernels_impl",
         "//rtp_llm/cpp/cuda:cuda",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/cuda:allocator_cuda",
-        "//:th_utils",
+        "//rtp_llm/cpp/pybind:th_utils",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],

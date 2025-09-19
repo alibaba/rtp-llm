@@ -4,7 +4,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
-#include "rtp_llm/cpp/th_op/GptInitParameter.h"
+#include "rtp_llm/cpp/config/GptInitParameter.h"
 #include "rtp_llm/cpp/dataclass/EngineInitParameter.h"
 
 namespace rtp_llm {

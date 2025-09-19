@@ -16,7 +16,6 @@ cc_library(
         "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
         "//rtp_llm/models_py/bindings:op_defs",
         "//rtp_llm/models_py/bindings/common:common",
-        "//rtp_llm/cpp/cutlass:fp8_group_cu",
     ],
 )
 
@@ -56,6 +55,7 @@ cc_library(
     copts = copts(),
     deps = [
         "//rtp_llm/models_py/bindings:register_ops_hdr",
+        "//rtp_llm/cpp/cuda/cutlass:fp8_group_cu",
         ":cuda_bindings_base",
         ":cuda_attn_bindings_base"
     ],

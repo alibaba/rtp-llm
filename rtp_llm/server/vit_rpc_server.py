@@ -2,13 +2,13 @@ from concurrent import futures
 
 import grpc
 
-from rtp_llm.cpp.proto.model_rpc_service_pb2 import (
+from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MMPreprocessConfigPB,
     MultimodalInputsPB,
     MultimodalOutputPB,
     MultimodalOutputsPB,
 )
-from rtp_llm.cpp.proto.model_rpc_service_pb2_grpc import (
+from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
     MultimodalRpcServiceServicer,
     add_MultimodalRpcServiceServicer_to_server,
 )

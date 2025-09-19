@@ -26,7 +26,7 @@ cc_library(
         "//rtp_llm/cpp/kernels:gpt_kernels_rocm",
         "//rtp_llm/cpp/kernels:mla_kernels_rocm",
         "//rtp_llm/cpp/cuda:nccl_util",
-        "//:th_utils",
+        "//rtp_llm/cpp/pybind:th_utils",
         "//rtp_llm/cpp/devices/torch_impl:torch_beam_search_op_impl",
     ] + torch_deps() + select({
         "@//:using_aiter_src": [

@@ -6,7 +6,7 @@
 // #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 // #include "rtp_llm/cpp/models/GptModel.h"
 #include <pybind11/pybind11.h>
-#include "rtp_llm/cpp/utils/PyUtils.h"
+#include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 
 namespace cuda_graph {

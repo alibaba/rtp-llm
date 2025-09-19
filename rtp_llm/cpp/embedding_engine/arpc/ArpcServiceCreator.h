@@ -2,10 +2,9 @@
 
 #include <vector>
 #include <google/protobuf/service.h>
-#include "rtp_llm/cpp/th_op/GptInitParameter.h"
+#include "rtp_llm/cpp/config/GptInitParameter.h"
 #include "rtp_llm/cpp/embedding_engine/EmbeddingEngine.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalProcessor.h"
-#include "rtp_llm/cpp/th_op/multi_gpu_gpt/EmbeddingHandlerOp.h"
 
 namespace rtp_llm {
 

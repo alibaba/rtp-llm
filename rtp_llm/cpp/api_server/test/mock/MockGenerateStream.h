@@ -3,7 +3,7 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
-#include "rtp_llm/cpp/stream/GenerateStream.h"
+#include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 
 namespace rtp_llm {
 

@@ -1,7 +1,7 @@
 #pragma once
 
 #include "rtp_llm/cpp/core/Buffer.h"
-#include "rtp_llm/cpp/models_weight/W.h"
+#include "rtp_llm/cpp/models/models_weight/W.h"
 
 #include <optional>
 #include <memory>

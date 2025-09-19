@@ -6,7 +6,7 @@
 #include "rtp_llm/cpp/dataclass/EngineInitParameter.h"
 #include "rtp_llm/cpp/cache/CacheManager.h"
 #include "rtp_llm/cpp/engine_base/Executor.h"
-#include "rtp_llm/cpp/lora/LoraManager.h"
+#include "rtp_llm/cpp/models/lora/LoraManager.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/models/Sampler.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"

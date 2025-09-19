@@ -8,7 +8,7 @@
 #include <stdexcept>
 #include <mutex>
 #include <vector>
-#include "rtp_llm/cpp/utils/PyUtils.h"
+#include "rtp_llm/cpp/pybind/PyUtils.h"
 
 #include <cstdlib>
 #include <iostream>
