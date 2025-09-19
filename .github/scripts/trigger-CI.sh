@@ -15,6 +15,7 @@ BRANCH_REF="main-internal"
 BRANCH_NAME="open_merge/${COMMIT_ID}"
 CANCEL_IN_PROGRESS="true"
 PIPELINE_ID="1346"
+GITHUB_COMMIT_ID="${COMMIT_ID}"
 
 # Get current timestamp
 timestamp=$(date +%s)
@@ -41,6 +42,6 @@ curl -v -H "Content-Type: application/json" \
             \"aone\": { \"projectId\": \"${PROJECT_ID}\" },
             \"newBranch\": { \"name\": \"${BRANCH_NAME}\", \"ref\": \"${BRANCH_REF}\" },
             \"pipelineId\": \"${PIPELINE_ID}\",
-            \"params\": {\"cancel-in-progress\": \"${CANCEL_IN_PROGRESS}\"}
+            \"params\": {\"cancel-in-progress\": \"${CANCEL_IN_PROGRESS}\", \"github_commit\"：\"${GITHUB_COMMIT_ID}\"}
          }" \
      "https://triggerid-to-mq-wjrdhcgbie.cn-hangzhou.fcapp.run"
