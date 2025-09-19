@@ -41,7 +41,7 @@ class DeepEPWrapper:
     _num_topk: int = 0
     _ll_num_max_token_per_rank: int = 0
     _num_sms: int = 24
-    _use_accl_ep: bool = True
+    _use_accl_ep: bool = False
     _mode: DeepEPMode = DeepEPMode.NORMAL
 
     def __init__(self, group: ProcessGroup, params: GptInitModelParameters) -> None:
@@ -190,9 +190,9 @@ class DeepEPWrapper:
             "low_latency_mode": False,
             "num_qps_per_rank": num_qps_per_rank,
         }
-        if self._use_accl_ep:
-            init_kwargs["allow_nvlink_for_low_latency_mode"] = True
-            init_kwargs["allow_mnnvl"] = False
+        # if self._use_accl_ep:
+        #    init_kwargs["allow_nvlink_for_low_latency_mode"] = True
+        #    init_kwargs["allow_mnnvl"] = False
         return DeepEPBuffer(**init_kwargs)  # type: ignore
 
     def _init_low_latency_buffer(
@@ -242,9 +242,9 @@ class DeepEPWrapper:
             "low_latency_mode": True,
             "num_qps_per_rank": num_qps_per_rank,
         }
-        if self._use_accl_ep:
-            init_kwargs["allow_nvlink_for_low_latency_mode"] = True
-            init_kwargs["allow_mnnvl"] = False
+        # if self._use_accl_ep:
+        #    init_kwargs["allow_nvlink_for_low_latency_mode"] = True
+        #    init_kwargs["allow_mnnvl"] = False
         return DeepEPBuffer(**init_kwargs)  # type: ignore
 
     def _init_low_latency_m2n_buffer(
