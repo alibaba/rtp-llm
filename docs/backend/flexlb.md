@@ -66,8 +66,114 @@ To use the FlexLB Master role in your RTP-LLM deployment:
 
 The Master role automatically handles load distribution, prefix-aware routing, and failover scenarios to optimize resource utilization and reduce request latency.
 
+## Startup Commands
+
+### 1. Build FlexLB
+
+Navigate to the FlexLB module directory from the project root:
 
 ```bash
+cd rtp_llm/flexlb
+```
 
+#### Run Unit Tests
 
+```bash
+mvn -B test \
+  -Dmaven.test.failure.ignore=true \
+  -Derror-prone.skip=true \
+  -Dautoconfig.skip=true \
+  -T 1C
+```
+
+#### Build Package
+
+```bash
+mvn clean package -DskipTests -T 1C
+```
+
+### 2. Docker Image Build
+
+#### Prepare Docker Build Context
+
+After build completion, copy the generated ai-whale.tgz to the Docker build context directory:
+
+```bash
+# Check build artifacts
+ls -la flexlb-api/target/
+
+# Copy to Docker build context
+cp flexlb-api/target/ai-whale.tgz APP-META/docker-config/ai-whale.tgz
+```
+
+#### Build Docker Images
+
+Base image build:
+
+```bash
+docker build ./ -f rtp_llm/flexlb/APP-META/docker-config/Dockerfile_base \
+  -t xx_docs.com/rtp_llm_flexlb_base
+```
+
+Production environment image build:
+
+```bash
+docker build ./ -f rtp_llm/flexlb/APP-META/docker-config/Dockerfile_production \
+  -t xx_docs.com/flexlb:latest
+```
+
+### 3. Run FlexLB
+
+Start the FlexLB service using the built Docker image:
+
+```bash
+docker run -d \
+  --name flexlb-master \
+  -p 8080:8080 \
+  xx_docs.com/flexlb:latest
+```
+
+### 4. Complete Build Script
+
+The following is a complete build and deployment script example:
+
+```bash
+#!/bin/bash
+
+echo "=== FlexLB Build and Deploy Script ==="
+
+# Navigate to FlexLB directory
+cd rtp_llm/flexlb
+
+echo "=== Step 1: Running Unit Tests ==="
+mvn -B test \
+  -Dmaven.test.failure.ignore=true \
+  -Derror-prone.
+  s=true \
+  -Dautoconfig.skip=true \
+  -T 1C
+
+echo "=== Step 2: Building Package ==="
+mvn clean package -DskipTests -T 1C
+
+echo "=== Step 3: Preparing Docker Build Context ==="
+if [ -f flexlb-api/target/ai-whale.tgz ]; then
+  echo "Copying ai-whale.tgz to Docker build context"
+  cp flexlb-api/target/ai-whale.tgz APP-META/docker-config/ai-whale.tgz
+  echo "Successfully copied ai-whale.tgz"
+else
+  echo "Error: ai-whale.tgz file not found"
+  exit 1
+fi
+
+echo "=== Step 4: Building Docker Images ==="
+# Build base image
+docker build ./ -f APP-META/docker-config/Dockerfile_base \
+  -t xx_docs.com/rtp_llm_flexlb_base
+
+# Build production image
+docker build ./ -f APP-META/docker-config/Dockerfile_production \
+  -t xx_docs.com/flexlb:latest
+
+echo "=== FlexLB Build Complete ==="
 ```
