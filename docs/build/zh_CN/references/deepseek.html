@@ -56,7 +56,7 @@
     <link rel="search" title="搜索" href="../search.html" /> 
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="zh-CN"/>
-    <meta name="docbuild:last-update" content="2025 年 09 月 17 日"/>
+    <meta name="docbuild:last-update" content="2025 年 09 月 19 日"/>
 <link
   rel="stylesheet"
   href="../_static/css/language-switcher.css"
@@ -214,8 +214,12 @@
 
 <li class="toctree-l1"><a class="reference internal" href="../backend/function_calling.html">工具和函数调用</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../backend/quantization.html">量化</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../backend/lora.html">LoRA Serving</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../backend/pd_disaggregation.html">PD解聚</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/lora.html">LoRA 服务</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/pd_disaggregation.html">PD分离</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">RTP-LLM 路由器</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../backend/flexlb.html">FlexLB（弹性负载均衡器）- 主节点</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">参考文献</span></p>
 <ul class="nav bd-sidenav">
@@ -462,7 +466,7 @@ document.write(`
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#eplb">EPLB</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#microbatch-overlapping">微批处理和重叠</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#mtp">MTP</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#pd-disaggregation">PD解聚</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#pd-disaggregation">PD分离</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#deepep-network">DeepEP/网络</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#cuda-kernel-fusion">CUDA内核融合</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#pdl">PDL</a></li>
@@ -544,7 +548,7 @@ document.write(`
 <p>我们在之前实现的<a class="reference external" href="https://mp.weixin.qq.com/s/EiSRF2ORy22I1pimCCvcPQ">通用推测采样框架</a>中增加了MTP推测采样支持。MTP是DeepSeek ITL优化中最关键的环节。增加解码阶段计算强度的唯一方法是增加GEMM BS。<strong>KV缓存容量限制了全局BS，而MTP只需要BS/2就能达到与原始相同的计算强度</strong>。启用微批处理进行计算-通信重叠会带来延迟增加的副作用。<strong>MTP可以减少平均ITL并补偿微批处理引起的延迟</strong>。双赢局面。</p>
 </section>
 <section id="pd-disaggregation">
-<h2>PD解聚<a class="headerlink" href="#pd-disaggregation" title="Link to this heading">#</a></h2>
+<h2>PD分离<a class="headerlink" href="#pd-disaggregation" title="Link to this heading">#</a></h2>
 <p>在DeepSeek-V3模型中，由于预填充和解码计算需求存在显著差异以及不同的EP策略，PD分离部署是必要选择。我们扩展了<strong>对不同TP规格的预填充-解码部署的支持，这对低算力卡特别重要</strong>。我们实现了两种PD负载均衡策略：基于KV缓存的均衡和基于BS的均衡。测试数据的BS方差较小，在高压和<strong>高EP流量下，BS均衡对Dispatch/Combine延迟更重要</strong>。在生产环境中，需要综合考虑BS方差和Seq方差因素，或者可以根据流量特征进一步拆分解码实例。</p>
 </section>
 <section id="deepep-network">
@@ -652,7 +656,7 @@ document.write(`
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#eplb">EPLB</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#microbatch-overlapping">微批处理和重叠</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#mtp">MTP</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#pd-disaggregation">PD解聚</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#pd-disaggregation">PD分离</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#deepep-network">DeepEP/网络</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#cuda-kernel-fusion">CUDA内核融合</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#pdl">PDL</a></li>
@@ -697,7 +701,7 @@ document.write(`
   
   <div class="footer-item">
     <p class="last-updated">
-  最后更新于 2025 年 09 月 17 日.
+  最后更新于 2025 年 09 月 19 日.
   <br/>
 </p>
   </div>

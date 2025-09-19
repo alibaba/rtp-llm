@@ -8,7 +8,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
-    <title>PD解聚转置 &#8212; RTP-LLM</title>
+    <title>PD分离转置 &#8212; RTP-LLM</title>
   
   
   
@@ -56,7 +56,7 @@
     <link rel="search" title="搜索" href="../search.html" /> 
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="zh-CN"/>
-    <meta name="docbuild:last-update" content="2025 年 09 月 17 日"/>
+    <meta name="docbuild:last-update" content="2025 年 09 月 19 日"/>
 <link
   rel="stylesheet"
   href="../_static/css/language-switcher.css"
@@ -214,8 +214,12 @@
 
 <li class="toctree-l1"><a class="reference internal" href="function_calling.html">工具和函数调用</a></li>
 <li class="toctree-l1"><a class="reference internal" href="quantization.html">量化</a></li>
-<li class="toctree-l1"><a class="reference internal" href="lora.html">LoRA Serving</a></li>
-<li class="toctree-l1"><a class="reference internal" href="pd_disaggregation.html">PD解聚</a></li>
+<li class="toctree-l1"><a class="reference internal" href="lora.html">LoRA 服务</a></li>
+<li class="toctree-l1"><a class="reference internal" href="pd_disaggregation.html">PD分离</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">RTP-LLM 路由器</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="flexlb.html">FlexLB（弹性负载均衡器）- 主节点</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">参考文献</span></p>
 <ul class="nav bd-sidenav">
@@ -440,7 +444,7 @@ document.write(`
               
 
 <div id="jb-print-docs-body" class="onlyprint">
-    <h1>PD解聚转置</h1>
+    <h1>PD分离转置</h1>
     <!-- Table of contents -->
     <div id="print-main-content">
         <div id="jb-print-toc">
@@ -464,11 +468,11 @@ document.write(`
                 <article class="bd-article">
                   
   <section class="tex2jax_ignore mathjax_ignore" id="pd-disaggregation-transpose">
-<h1>PD解聚转置<a class="headerlink" href="#pd-disaggregation-transpose" title="Link to this heading">#</a></h1>
+<h1>PD分离转置<a class="headerlink" href="#pd-disaggregation-transpose" title="Link to this heading">#</a></h1>
 <section id="background">
 <h2>背景<a class="headerlink" href="#background" title="Link to this heading">#</a></h2>
-<p>PD解聚实现默认使用Prefill节点作为请求入口点。Prefill实例计算出第一个token后，需要将KV缓存传输到Decode实例。后续的token生成在Decode实例上完成，结果通过Prefill实例流式返回给用户。实际上，Prefill推理工作在计算出第一个token并将KV缓存传输到Decode实例后就完成了。然而，在Prefill作为前端流接收器的场景中，该实例仍需要充当中继，将Decode实例输出的token返回给用户。</p>
-<p>为了解决这个问题，RTP-LLM提供了PD解聚流接收器反转的功能，即将Decode实例作为请求入口点。在Decode前端流接收实现中，Decode实例会向Prefill实例发送异步loadCache RPC请求。Prefill实例接收到请求后，将开始计算第一个token，生成的KV缓存将按模型层为单位进行传输。每当一层的KV缓存计算完成时，Prefill实例将调用Decode实例的传输RPC接口，让其使用RDMA读取从Prefill实例读取相应的KV缓存块。KV缓存完全加载后，Decode实例将在本地计算后续token，并将结果流式返回给用户。</p>
+<p>PD分离实现默认使用Prefill节点作为请求入口点。Prefill实例计算出第一个token后，需要将KV缓存传输到Decode实例。后续的token生成在Decode实例上完成，结果通过Prefill实例流式返回给用户。实际上，Prefill推理工作在计算出第一个token并将KV缓存传输到Decode实例后就完成了。然而，在Prefill作为前端流接收器的场景中，该实例仍需要充当中继，将Decode实例输出的token返回给用户。</p>
+<p>为了解决这个问题，RTP-LLM提供了PD分离流接收器反转的功能，即将Decode实例作为请求入口点。在Decode前端流接收实现中，Decode实例会向Prefill实例发送异步loadCache RPC请求。Prefill实例接收到请求后，将开始计算第一个token，生成的KV缓存将按模型层为单位进行传输。每当一层的KV缓存计算完成时，Prefill实例将调用Decode实例的传输RPC接口，让其使用RDMA读取从Prefill实例读取相应的KV缓存块。KV缓存完全加载后，Decode实例将在本地计算后续token，并将结果流式返回给用户。</p>
 </section>
 <section id="configuration">
 <h2>配置<a class="headerlink" href="#configuration" title="Link to this heading">#</a></h2>
@@ -541,7 +545,7 @@ document.write(`
   
   <div class="footer-item">
     <p class="last-updated">
-  最后更新于 2025 年 09 月 17 日.
+  最后更新于 2025 年 09 月 19 日.
   <br/>
 </p>
   </div>

@@ -8,7 +8,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
-    <title>PD解聚 &#8212; RTP-LLM</title>
+    <title>PD分离 &#8212; RTP-LLM</title>
   
   
   
@@ -57,11 +57,11 @@
     <script src="../_static/js/language-switcher.js?v=d38991ab"></script>
     <link rel="index" title="索引" href="../genindex.html" />
     <link rel="search" title="搜索" href="../search.html" />
-    <link rel="next" title="&lt;no title&gt;" href="../router/router.html" />
-    <link rel="prev" title="LoRA Serving" href="lora.html" /> 
+    <link rel="next" title="FlexLB（弹性负载均衡器）- 主节点" href="flexlb.html" />
+    <link rel="prev" title="LoRA 服务" href="lora.html" /> 
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="zh-CN"/>
-    <meta name="docbuild:last-update" content="2025 年 09 月 17 日"/>
+    <meta name="docbuild:last-update" content="2025 年 09 月 19 日"/>
 <link
   rel="stylesheet"
   href="../_static/css/language-switcher.css"
@@ -217,8 +217,12 @@
 
 <li class="toctree-l1"><a class="reference internal" href="function_calling.html">工具和函数调用</a></li>
 <li class="toctree-l1"><a class="reference internal" href="quantization.html">量化</a></li>
-<li class="toctree-l1"><a class="reference internal" href="lora.html">LoRA Serving</a></li>
-<li class="toctree-l1 current active"><a class="current reference internal" href="#">PD解聚</a></li>
+<li class="toctree-l1"><a class="reference internal" href="lora.html">LoRA 服务</a></li>
+<li class="toctree-l1 current active"><a class="current reference internal" href="#">PD分离</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">RTP-LLM 路由器</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="flexlb.html">FlexLB（弹性负载均衡器）- 主节点</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">参考文献</span></p>
 <ul class="nav bd-sidenav">
@@ -443,7 +447,7 @@ document.write(`
               
 
 <div id="jb-print-docs-body" class="onlyprint">
-    <h1>PD解聚</h1>
+    <h1>PD分离</h1>
     <!-- Table of contents -->
     <div id="print-main-content">
         <div id="jb-print-toc">
@@ -453,7 +457,7 @@ document.write(`
             </div>
             <nav aria-label="Page">
                 <ul class="visible nav section-nav flex-column">
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#为什么以及什么是PD解聚？">为什么以及什么是PD解聚？</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#为什么以及什么是PD分离？">为什么以及什么是PD分离？</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#开始">开始</a><ul class="visible nav section-nav flex-column">
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#开始预填充">开始预填充</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#开始解码">开始解码</a></li>
@@ -478,10 +482,10 @@ document.write(`
     .output_area.stderr, .output_area.stdout {
         color: #d3d3d3 !important; /* light gray */
     }
-</style><section id="PD解聚">
-<h1>PD解聚<a class="headerlink" href="#PD解聚" title="Link to this heading">#</a></h1>
-<section id="为什么以及什么是PD解聚？">
-<h2>为什么以及什么是PD解聚？<a class="headerlink" href="#为什么以及什么是PD解聚？" title="Link to this heading">#</a></h2>
+</style><section id="PD分离">
+<h1>PD分离<a class="headerlink" href="#PD分离" title="Link to this heading">#</a></h1>
+<section id="为什么以及什么是PD分离？">
+<h2>为什么以及什么是PD分离？<a class="headerlink" href="#为什么以及什么是PD分离？" title="Link to this heading">#</a></h2>
 <p>大语言模型（LLM）将预填充（上下文准备）和解码（token生成）阶段分离以：</p>
 <p>提升效率：预填充为输入序列预计算注意力键/值（KV缓存），通过重用缓存数据实现快速自回归解码——将每个token的计算从O(n²)减少到O(n)。优化内存：在预填充期间缓存KV矩阵避免了冗余的重新计算，减少了长序列生成期间的内存开销。利用硬件：预填充利用并行处理已知输入（全序列批处理计算），而解码则优化延迟关键的逐步生成。扩展应用：分离允许动态资源分配（例如，高吞吐量的提示预填充+低延迟的流式输出解码），对于聊天机器人等实时用例至关重要。</p>
 </section>
@@ -563,7 +567,7 @@ document.write(`
 </section>
 <section id="高级配置">
 <h3>高级配置<a class="headerlink" href="#高级配置" title="Link to this heading">#</a></h3>
-<p>PD解聚支持以下环境变量。</p>
+<p>PD分离支持以下环境变量。</p>
 <section id="预填充服务器配置">
 <h4>预填充服务器配置<a class="headerlink" href="#预填充服务器配置" title="Link to this heading">#</a></h4>
 <div class="pst-scrollable-table-container"><table class="table">
@@ -643,15 +647,15 @@ document.write(`
       <i class="fa-solid fa-angle-left"></i>
       <div class="prev-next-info">
         <p class="prev-next-subtitle">上一页</p>
-        <p class="prev-next-title">LoRA Serving</p>
+        <p class="prev-next-title">LoRA 服务</p>
       </div>
     </a>
     <a class="right-next"
-       href="../router/router.html"
+       href="flexlb.html"
        title="next page">
       <div class="prev-next-info">
         <p class="prev-next-subtitle">下一页</p>
-        <p class="prev-next-title">&lt;no title&gt;</p>
+        <p class="prev-next-title">FlexLB（弹性负载均衡器）- 主节点</p>
       </div>
       <i class="fa-solid fa-angle-right"></i>
     </a>
@@ -671,7 +675,7 @@ document.write(`
   </div>
   <nav class="bd-toc-nav page-toc">
     <ul class="visible nav section-nav flex-column">
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#为什么以及什么是PD解聚？">为什么以及什么是PD解聚？</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#为什么以及什么是PD分离？">为什么以及什么是PD分离？</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#开始">开始</a><ul class="visible nav section-nav flex-column">
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#开始预填充">开始预填充</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#开始解码">开始解码</a></li>
@@ -714,7 +718,7 @@ document.write(`
   
   <div class="footer-item">
     <p class="last-updated">
-  最后更新于 2025 年 09 月 17 日.
+  最后更新于 2025 年 09 月 19 日.
   <br/>
 </p>
   </div>
