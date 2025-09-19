@@ -12,7 +12,7 @@ SECURITY=$2
 REPO_URL="https://github.com/${GITHUB_REPOSITORY}.git"
 PROJECT_ID="2654816"
 BRANCH_REF="main-internal"
-BRANCH_NAME="open_merge_${COMMIT_ID}"
+BRANCH_NAME="open_merge/${COMMIT_ID}"
 CANCEL_IN_PROGRESS="true"
 PIPELINE_ID="1346"
 
