@@ -47,7 +47,7 @@ while true; do
 
     if [ "$status" != "PENDING" ]; then
         echo "Merge process completed with status: $status"
-        if [ "$status" = "success" ]; then
+        if [ "$status" = "true" ]; then
             echo "Merge completed successfully"
             exit 0
         else
