@@ -7,7 +7,6 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/embedding_engine/EmbeddingEngine.h"
-#include "rtp_llm/cpp/pybind/multi_gpu_gpt/EmbeddingHandlerOp.h"
 #include "rtp_llm/cpp/embedding_engine/arpc/ArpcServiceCreator.h"
 #include "rtp_llm/cpp/embedding_engine/arpc/ArpcServerWrapper.h"
 #include "rtp_llm/cpp/multimodal_processor/LocalMultimodalProcessor.h"

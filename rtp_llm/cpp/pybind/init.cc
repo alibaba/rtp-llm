@@ -4,7 +4,6 @@
 #include "rtp_llm/cpp/dataclass/EngineScheduleInfo.h"
 #include "rtp_llm/cpp/pybind/multi_gpu_gpt/RtpLLMOp.h"
 #include "rtp_llm/cpp/pybind/multi_gpu_gpt/RtpEmbeddingOp.h"
-#include "rtp_llm/cpp/pybind/multi_gpu_gpt/EmbeddingHandlerOp.h"
 #include "rtp_llm/models_py/bindings/RegisterOps.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "pybind11/pybind11.h"
@@ -31,7 +30,6 @@ PYBIND11_MODULE(libth_transformer, m) {
 
     registerRtpLLMOp(m);
     registerRtpEmbeddingOp(m);
-    registerEmbeddingHandler(m);
 
     registerDeviceOps(m);
     registerPyOpDefs(m);

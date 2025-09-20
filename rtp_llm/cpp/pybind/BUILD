@@ -42,7 +42,6 @@ cc_library(
         "init.cc",
         "common/InitEngineOps.cc",
         "multi_gpu_gpt/RtpEmbeddingOp.cc",
-        "multi_gpu_gpt/EmbeddingHandlerOp.cc",
         "multi_gpu_gpt/RtpLLMOp.cc",
     ] +  select({
         "@//:using_cuda12": [
@@ -54,7 +53,6 @@ cc_library(
         "common/NcclOp.h",
         "common/InitEngineOps.h",
         "common/blockUtil.h",
-        "multi_gpu_gpt/EmbeddingHandlerOp.h",
         "multi_gpu_gpt/RtpEmbeddingOp.h",
         "multi_gpu_gpt/RtpLLMOp.h",
     ],
@@ -63,7 +61,7 @@ cc_library(
         "//rtp_llm/cpp/devices:device_py_export",
         "//rtp_llm/cpp/devices:devices_base",
         "//rtp_llm/cpp/api_server:http_api_server",
-        "//rtp_llm/cpp/model_rpc:model_rpc_server",        
+        "//rtp_llm/cpp/model_rpc:model_rpc_server",
     ] + torch_deps() + select_py_bindings(),
     copts = copts(),
     alwayslink = True,
