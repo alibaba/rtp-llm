@@ -1,3 +1,1 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:730137f18c49e1619f32c2b0152c2b2ec502e167768c96245b79dbfab5093ca4
-size 2523091
+../../../../../../../test-data/rtp_llm/utils/test/testdata/model_weights_loader_testdata/qwen_14b_megatron_model/iter_0002000/mp_rank_03/odel_rng.pt
