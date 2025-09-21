@@ -56,6 +56,7 @@ class DeepEPWrapper:
 
     @property
     def buffer(self) -> DeepEPBuffer:
+        assert self._buffer is not None, "deep_ep buffer is not initialized"
         return self._buffer
 
     @property
