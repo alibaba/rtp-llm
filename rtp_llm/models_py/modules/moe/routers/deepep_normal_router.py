@@ -1,13 +1,10 @@
-import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import torch
-import torch.distributed as dist
 from libth_transformer.rtp_llm_ops import trt_fp8_quantize_128
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.distribute.collective import Group
-from rtp_llm.distribute.deep_ep import get_deepep_wrapper
+from rtp_llm.models_py.distributed.deepep_wrapper import get_deepep_wrapper
 from rtp_llm.models_py.modules.moe import (
     ExpertForwardPayload,
     ExpertTokensMetadata,

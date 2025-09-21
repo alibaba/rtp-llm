@@ -1,9 +1,6 @@
-import logging
-import math
-from typing import Any, List, Optional
+from typing import Any, Optional
 
 import torch
-import torch.distributed as dist
 from libth_transformer.rtp_llm_ops import trt_fp8_quantize_128
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters

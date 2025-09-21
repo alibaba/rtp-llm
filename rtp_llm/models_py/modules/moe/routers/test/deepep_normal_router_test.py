@@ -1,23 +1,17 @@
 import multiprocessing as mp
 import os
 import random
-import sys
 from typing import List
 
 import torch
-import torch.distributed as dist
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.distribute.deep_ep import init_deepep_wrapper
-from rtp_llm.distribute.process_group_state import (
+from rtp_llm.distribute.worker_info import g_parallel_info, update_master_info
+from rtp_llm.models_py.distributed.deepep_wrapper import init_deepep_wrapper
+from rtp_llm.models_py.distributed.process_group_state import (
     destroy_distributed_environment,
     get_ep_group,
     init_distributed_environment,
-)
-from rtp_llm.distribute.worker_info import (
-    g_master_info,
-    g_parallel_info,
-    update_master_info,
 )
 from rtp_llm.models_py.modules.moe.routers.deepep_normal_router import (
     DeepepNormalRouter,

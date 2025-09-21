@@ -1,19 +1,18 @@
 # Adapt from https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/layers/moe/ep_moe/kernels.py
 # but make some modifications for RTP-LLM
 # Licensed under the Apache License, Version 2.0
-
 import math
 from typing import Any, Dict, Optional
 
 import torch
-from deep_gemm import (
-    m_grouped_fp8_gemm_nt_contiguous as grouped_gemm_nt_f8f8bf16_contig,
-)
 from libth_transformer.rtp_llm_ops import trt_fp8_quantize_128
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.models_py.kernels.activation import silu_and_mul
-from rtp_llm.models_py.modules.deepgemm import DEEPGEMM_SCALE_UE8M0
+from rtp_llm.models_py.kernels.deepgemm_wrapper import (
+    is_deep_gemm_e8m0_used,
+    m_grouped_fp8_gemm_nt_contiguous,
+)
 from rtp_llm.models_py.modules.ep.kernels import (
     ep_gather,
     ep_scatter,
@@ -46,26 +45,20 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
         weights: Dict[str, torch.Tensor],
     ):
         super().__init__(FusedMoEQuantConfig())
-
         self.config = config
-
         self.ep_size = config.ep_size
         self.ep_rank = config.ep_rank
-
         self.num_experts = config.expert_num
         assert self.num_experts % self.ep_size == 0
         self.num_experts_per_partition = self.num_experts // self.ep_size
         self.start_expert_id = self.ep_rank * self.num_experts_per_partition
         self.end_expert_id = self.start_expert_id + self.num_experts_per_partition - 1
-
         self.top_k = config.moe_k
         self.intermediate_size = config.moe_inter_padding_size
         self.activation = config.activation_type.lower()
         self.renormalize = True
-
         self.use_fp8_w8a8 = True
         self.use_block_quant = True
-
         # 权重初始化
         self.w13_weight = weights[W.moe_w1]
         self.w2_weight = weights[W.moe_w2]
@@ -73,7 +66,6 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
         self.w2_weight_scale_inv = weights[W.moe_s2]
         self.w13_weight_scale = None
         self.w2_weight_scale = None
-
         self.w13_weight_fp8 = (
             self.w13_weight,
             self.w13_weight_scale_inv,
@@ -111,12 +103,10 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
         assert (
             payload.expert_tokens_meta is not None
         ), "expert_tokens_meta is not initialized"
-
         hidden_states_fp8 = payload.expert_x
         hidden_states_scale = payload.expert_x_scale
         topk_idx = payload.expert_topk_ids
         topk_weights = payload.expert_topk_weights
-
         if payload.expert_tokens_meta.expert_num_tokens_cpu is not None:
             num_recv_tokens_per_expert = (
                 payload.expert_tokens_meta.expert_num_tokens_cpu
@@ -141,13 +131,10 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
                 device=hidden_states_fp8.device,
                 dtype=torch.bfloat16,
             )
-
         _, K = hidden_states_fp8.size()
         N = self.w13_weight.size(1)
-
         hidden_states_fp8_shape = hidden_states_fp8.shape
         hidden_states_fp8_device = hidden_states_fp8.device
-
         input_tensor = [
             torch.empty(
                 (all_tokens, K),
@@ -160,7 +147,7 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
                     device=hidden_states_fp8.device,
                     dtype=torch.int,
                 ).transpose(0, 1)
-                if DEEPGEMM_SCALE_UE8M0
+                if is_deep_gemm_e8m0_used()
                 else torch.empty(
                     (all_tokens, K // BLOCK_SIZE),
                     device=hidden_states_fp8.device,
@@ -172,7 +159,6 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
             all_tokens, device=hidden_states_fp8.device, dtype=torch.int32
         )
         output_index = torch.empty_like(topk_idx)
-
         num_recv_tokens_per_expert_gpu = torch.tensor(
             num_recv_tokens_per_expert,
             dtype=torch.int32,
@@ -180,7 +166,6 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
             device="cpu",
         ).cuda(non_blocking=True)
         expert_start_loc = torch.empty_like(num_recv_tokens_per_expert_gpu)
-
         ep_scatter(
             hidden_states_fp8,
             hidden_states_scale,
@@ -191,21 +176,17 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
             input_tensor[1],
             m_indices,
             output_index,
-            scale_ue8m0=DEEPGEMM_SCALE_UE8M0,
         )
         dispose_tensor(hidden_states_fp8)
-
         gateup_output = torch.empty(
             (all_tokens, N),
             device=hidden_states_fp8_device,
             dtype=torch.bfloat16,
         )
-
-        if not DEEPGEMM_SCALE_UE8M0:
+        if not is_deep_gemm_e8m0_used():
             input_tensor[1] = tma_align_input_scale(input_tensor[1])
-
-        grouped_gemm_nt_f8f8bf16_contig(
-            input_tensor,
+        m_grouped_fp8_gemm_nt_contiguous(
+            (input_tensor[0], input_tensor[1]),
             self.w13_weight_fp8,
             gateup_output,
             m_indices,
@@ -230,9 +211,9 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
         )
         down_input_fp8, down_input_scale = trt_fp8_quantize_128(down_input, False)
         del down_input
-        if not DEEPGEMM_SCALE_UE8M0:
+        if not is_deep_gemm_e8m0_used():
             down_input_scale = tma_align_input_scale(down_input_scale)
-        grouped_gemm_nt_f8f8bf16_contig(
+        m_grouped_fp8_gemm_nt_contiguous(
             (down_input_fp8, down_input_scale),
             self.w2_weight_fp8,
             down_output,
@@ -240,12 +221,10 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
             disable_ue8m0_cast=True,
         )
         del down_input_fp8, down_input_scale
-
         gather_out = torch.empty(
             hidden_states_fp8_shape,
             device=hidden_states_fp8_device,
             dtype=torch.bfloat16,
         )
         ep_gather(down_output, topk_idx, topk_weights, output_index, gather_out)
-
         return gather_out
