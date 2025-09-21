@@ -56,7 +56,3 @@ curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/github-opensource/rtp_
 curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/github-opensource/rtp_llm/utils/test/testdata/model_weights_loader_testdata/yanghao-qwen-13b-sft/mp_rank_00_001/model_rng.pt" -o rtp_llm/test-data/rtp_llm/utils/test/testdata/model_weights_loader_testdata/yanghao-qwen-13b-sft/mp_rank_00_001/model_rng.pt
 curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/github-opensource/rtp_llm/utils/test/testdata/model_weights_loader_testdata/yanghao-qwen-13b-sft/mp_rank_00_002/model_rng.pt" -o rtp_llm/test-data/rtp_llm/utils/test/testdata/model_weights_loader_testdata/yanghao-qwen-13b-sft/mp_rank_00_002/model_rng.pt
 curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/github-opensource/rtp_llm/utils/test/testdata/model_weights_loader_testdata/yanghao-qwen-13b-sft/mp_rank_00_003/model_rng.pt" -o rtp_llm/test-data/rtp_llm/utils/test/testdata/model_weights_loader_testdata/yanghao-qwen-13b-sft/mp_rank_00_003/model_rng.pt
-
-
-command -v git-lfs >/dev/null 2>&1 || { echo >&2 "\nnot found git-lfs, If you no longer wish to use git-lfs, remove this hook by deleting .githooks/post-checkout.\n"; exit 2; }
-git lfs post-checkout "$@"
