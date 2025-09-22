@@ -20,14 +20,10 @@ else:
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_loader.model_weight_info import ModelWeights
-from rtp_llm.models_py.modules.deepgemm import DEEPGEMM_SCALE_UE8M0
 from rtp_llm.models_py.modules.utils import ceil_div, dispose_tensor
 from rtp_llm.utils.model_weight import W
 
 if utils.is_cuda():
-    from deep_gemm import (
-        m_grouped_fp8_gemm_nt_contiguous as grouped_gemm_nt_f8f8bf16_contig,
-    )
     from libth_transformer.rtp_llm_ops import FusedMoEOp, SelectTopkOp
 
     from rtp_llm.models_py.modules.ep.kernels import (

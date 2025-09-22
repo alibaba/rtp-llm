@@ -2,7 +2,7 @@
 import enum
 import random
 import time
-from typing import Generator, List
+from typing import Generator, List, Tuple
 from unittest import SkipTest, TestCase, main
 
 import torch
@@ -17,14 +17,12 @@ from rtp_llm.models_py.kernels.deepgemm_wrapper import (
 )
 from rtp_llm.models_py.modules.utils import (
     align,
-    bench_kineto,
-    calc_diff,
     ceil_div,
-    count_bytes,
     per_block_cast_to_fp8,
     per_channel_cast_to_fp8,
     per_token_cast_to_fp8,
 )
+from rtp_llm.test.utils.bench_util import bench_kineto, calc_diff, count_bytes
 
 
 class KernelType(enum.Enum):
@@ -65,7 +63,7 @@ def get_ue8m0_usage(kernel_type: KernelType) -> bool:
     return kernel_type.is_1d1d()
 
 
-def get_kernel_types(use_bf16: bool = False) -> tuple:
+def get_kernel_types(use_bf16: bool = False) -> Tuple[KernelType, ...]:
     if use_bf16:
         return (KernelType.KernelNoSF,)
     return (
@@ -75,15 +73,17 @@ def get_kernel_types(use_bf16: bool = False) -> tuple:
     )
 
 
-def get_out_dtype() -> tuple:
+def get_out_dtype() -> Tuple[torch.dtype, ...]:
     return (torch.bfloat16,) if get_arch_major() == 9 else (torch.bfloat16, torch.float)
 
 
-def get_major_ab() -> tuple:
+def get_major_ab() -> Tuple[Tuple[MajorTypeAB, MajorTypeAB], ...]:
     return ((MajorTypeAB.KMajor, MajorTypeAB.KMajor),)
 
 
-def enumerate_normal(use_bf16: bool = False) -> Generator:
+def enumerate_normal(
+    use_bf16: bool = False,
+) -> Generator[Tuple[KernelType, int, int, int, bool, torch.dtype], None, None]:
     for kernel_type in get_kernel_types(use_bf16):
         for m in (128, 4096):
             for n, k in [
@@ -103,7 +103,9 @@ def enumerate_normal(use_bf16: bool = False) -> Generator:
                         yield kernel_type, m, n, k, accumulate, out_dtype
 
 
-def enumerate_m_grouped_contiguous(use_bf16: bool = False) -> Generator:
+def enumerate_m_grouped_contiguous(
+    use_bf16: bool = False,
+) -> Generator[Tuple[KernelType, int, int, int, int], None, None]:
     for kernel_type in get_kernel_types(use_bf16):
         for num_groups, expected_m_per_group, n, k in (
             (4, 8192, 4096, 7168),
@@ -114,7 +116,9 @@ def enumerate_m_grouped_contiguous(use_bf16: bool = False) -> Generator:
             yield kernel_type, num_groups, expected_m_per_group, n, k
 
 
-def enumerate_m_grouped_masked() -> Generator:
+def enumerate_m_grouped_masked() -> (
+    Generator[Tuple[KernelType, int, int, int, int, int], None, None]
+):
     max_m = 4096
     for kernel_type in get_kernel_types():
         for num_groups, m in ((1, 1024), (2, 512), (4, 256)):
@@ -125,7 +129,7 @@ def enumerate_m_grouped_masked() -> Generator:
                 yield kernel_type, num_groups, max_m, m, n, k
 
 
-def enumerate_sf_layout():
+def enumerate_sf_layout() -> Generator[Tuple[int, int, bool, bool, int], None, None]:
     for use_ue8m0 in (False, True):
         for with_transpose in (True, False):
             for mn in (4096, 4097, 8192):
@@ -142,7 +146,7 @@ def generate_normal(
     out_dtype: torch.dtype,
     use_ue8m0: bool = False,
     use_bf16: bool = False,
-):
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     a = torch.randn((m, k), device="cuda", dtype=torch.bfloat16)
     b = torch.randn((n, k), device="cuda", dtype=torch.bfloat16)
     d = (
@@ -173,7 +177,7 @@ def generate_m_grouped_contiguous(
     k: int,
     use_ue8m0: bool = False,
     use_bf16: bool = False,
-):
+) -> Tuple[int, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     actual_ms = [
         int(expected_m_per_group * random.uniform(0.7, 1.3)) for _ in range(num_groups)
     ]
@@ -224,7 +228,7 @@ def generate_m_grouped_masked(
     k: int,
     use_ue8m0: bool = False,
     use_bf16: bool = False,
-):
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     a = torch.randn((num_groups, max_m, k), device="cuda", dtype=torch.bfloat16)
     b = torch.randn((num_groups, n, k), device="cuda", dtype=torch.bfloat16)
     d = torch.empty((num_groups, max_m, n), device="cuda", dtype=torch.bfloat16)
@@ -261,7 +265,7 @@ def generate_m_grouped_masked(
 
 def generate_k_grouped_contiguous(
     num_groups: int, m: int, n: int, ks: List[int], use_ue8m0: bool
-):
+) -> Tuple[int, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     assert get_mk_alignment_for_contiguous_layout() % 128 == 0
     k = sum(ks)
 

@@ -12,7 +12,9 @@ py_library(
     srcs = glob([
         "kernels/*.py",
     ]),
-    deps = select({
+    deps = [
+        "//rtp_llm:utils",
+    ] + select({
         "@//:using_cuda12":["@deep_gemm_ext//:deep_gemm"],
         "//conditions:default": [],
     }),

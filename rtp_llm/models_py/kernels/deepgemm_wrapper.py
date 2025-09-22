@@ -4,7 +4,7 @@ from typing import Any, Callable, List, NoReturn, Optional, Tuple
 
 import torch
 
-from rtp_llm.models_py.utils.module import has_module, resolve_symbol
+from rtp_llm.utils.module_util import has_module, resolve_symbol
 
 __all__ = [
     "fp8_gemm_nt",
@@ -101,6 +101,22 @@ def _lazy_init_deep_gemm(symbols: List[str]) -> None:
             )
 
 
+def _lazy_init_deep_gemm_once():
+    _lazy_init_deep_gemm(
+        [
+            "fp8_gemm_nt",
+            "m_grouped_fp8_gemm_nt_contiguous",
+            "m_grouped_fp8_gemm_nt_masked",
+            "bf16_gemm_nt",
+            "m_grouped_bf16_gemm_nt_contiguous",
+            "m_grouped_bf16_gemm_nt_masked",
+        ]
+    )
+
+
+_lazy_init_deep_gemm_once()
+
+
 def fp8_gemm_nt(
     a: Tuple[torch.Tensor, torch.Tensor],
     b: Tuple[torch.Tensor, torch.Tensor],
@@ -123,7 +139,7 @@ def fp8_gemm_nt(
     Returns:
         None
     """
-    _lazy_init_deep_gemm(["fp8_gemm_nt"])
+    global _fp8_gemm_nt_impl
     if _fp8_gemm_nt_impl is None:
         return _missing_deep_gemm()
     _fp8_gemm_nt_impl(
@@ -160,7 +176,7 @@ def m_grouped_fp8_gemm_nt_contiguous(
         disable_ue8m0_cast (bool, optional): Whether to disable E8M0 type cast for E8M0 scale.
             Defaults to None, which will be set to False if E8M0 scale is used, otherwise True.
     """
-    _lazy_init_deep_gemm(["m_grouped_fp8_gemm_nt_contiguous"])
+    global _m_grouped_fp8_gemm_nt_contiguous_impl
     if _m_grouped_fp8_gemm_nt_contiguous_impl is None:
         return _missing_deep_gemm()
     _m_grouped_fp8_gemm_nt_contiguous_impl(
@@ -198,7 +214,7 @@ def m_grouped_fp8_gemm_nt_masked(
         disable_ue8m0_cast (bool, optional): Whether to disable E8M0 type cast for E8M0 scale.
             Defaults to None, which will be set to False if E8M0 scale is used, otherwise True.
     """
-    _lazy_init_deep_gemm(["m_grouped_fp8_gemm_nt_masked"])
+    global _m_grouped_fp8_gemm_nt_masked_impl
     if _m_grouped_fp8_gemm_nt_masked_impl is None:
         return _missing_deep_gemm()
     _m_grouped_fp8_gemm_nt_masked_impl(
@@ -232,7 +248,7 @@ def bf16_gemm_nt(
         c (Optional[torch.Tensor], optional): Optional bias tensor. Defaults to None.
         compiled_dims (str, optional): Compiled dimensions. Defaults to "nk".
     """
-    _lazy_init_deep_gemm(["bf16_gemm_nt"])
+    global _bf16_gemm_nt_impl
     if _bf16_gemm_nt_impl is None:
         return _missing_deep_gemm()
     _bf16_gemm_nt_impl(a, b, output, c, compiled_dims)
@@ -255,7 +271,7 @@ def m_grouped_bf16_gemm_nt_contiguous(
             The length of m_indices is the a.shape[0], and the corresponding value of valid tokens is group_idx.
         compiled_dims (str, optional): Compiled dimensions. Defaults to "nk".
     """
-    _lazy_init_deep_gemm(["m_grouped_bf16_gemm_nt_contiguous"])
+    global _m_grouped_bf16_gemm_nt_contiguous_impl
     if _m_grouped_bf16_gemm_nt_contiguous_impl is None:
         return _missing_deep_gemm()
     _m_grouped_bf16_gemm_nt_contiguous_impl(
@@ -285,7 +301,7 @@ def m_grouped_bf16_gemm_nt_masked(
         expected_m (int): Expected number of valid tokens in each group.
         compiled_dims (str, optional): Compiled dimensions. Defaults to "nk".
     """
-    _lazy_init_deep_gemm(["m_grouped_bf16_gemm_nt_masked"])
+    global _m_grouped_bf16_gemm_nt_masked_impl
     if _m_grouped_bf16_gemm_nt_masked_impl is None:
         return _missing_deep_gemm()
     _m_grouped_bf16_gemm_nt_masked_impl(

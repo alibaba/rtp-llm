@@ -72,7 +72,6 @@ class FusedMoeFactory(object):
                     quant_config=FusedMoEQuantConfig(
                         quant_dtype=torch.float8_e4m3fn, block_shape=[128, 128]
                     ),
-                    workspace13=None,
                 )
                 return FusedMoe(router, executor, expert_num=config.expert_num)
             else:
@@ -170,7 +169,6 @@ class FusedMoeFactory(object):
                     config,
                     weights,
                     quant_config=FusedMoEQuantConfig(quant_dtype=None),
-                    workspace13=None,
                 )
                 return FusedMoe(router, executor, expert_num=config.expert_num)
             else:

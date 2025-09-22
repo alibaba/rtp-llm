@@ -1,17 +1,12 @@
 # type: ignore
 import itertools
-import json
 import os
 import random
-import sys
-import tempfile
 import time
 from functools import partial
-from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict
 from unittest import TestCase, main
 
-import numpy as np
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -26,20 +21,16 @@ from rtp_llm.models_py.distributed.deepep_wrapper import (
     init_deepep_wrapper,
 )
 from rtp_llm.models_py.distributed.process_group_state import (
-    ProcessGroupState,
     destroy_distributed_environment,
     get_ep_group,
     init_distributed_environment,
 )
 from rtp_llm.models_py.modules.utils import (
     align,
-    bench,
-    bench_kineto,
-    calc_diff,
-    hash_tensor,
     per_token_cast_back,
     per_token_cast_to_fp8,
 )
+from rtp_llm.test.utils.bench_util import bench, bench_kineto, calc_diff, hash_tensor
 
 
 def inplace_unique(x: torch.Tensor, num_slots: int):

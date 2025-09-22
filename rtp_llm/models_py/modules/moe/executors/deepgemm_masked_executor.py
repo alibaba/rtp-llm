@@ -20,7 +20,7 @@ from rtp_llm.models_py.modules.moe.fused_moe import (
 from rtp_llm.models_py.modules.moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
 )
-from rtp_llm.models_py.modules.moe.utils import FusedMoEQuantConfig, resize_cache
+from rtp_llm.models_py.modules.moe.utils import FusedMoEQuantConfig
 from rtp_llm.utils.model_weight import W
 
 
@@ -34,21 +34,16 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
         config: GptInitModelParameters,
         weights: Dict[str, torch.Tensor],
         quant_config: FusedMoEQuantConfig,
-        workspace13: Optional[torch.Tensor] = None,
     ):
-        """
-        block_shape: Block quantization block shape.
-        w1: Weight tensor for the first GroupGEMM.
-        w2: Weight tensor for the second GroupGEMM.
-        w1_scale: Scale tensor for the first GroupGEMM.
-        w2_scale: Scale tensor for the second GroupGEMM.
-        per_act_token_quant: Per activation token quantization flag.
-
+        """Initialize the DeepGemmMaskedExecutor.
+        Args:
+            config: Model configuration.
+            weights: Dictionary containing model weights.
+            quant_config: Quantization configuration.
         """
         super().__init__(quant_config=quant_config)
         self._config = config
         self._weights = weights
-        self._workspace13 = workspace13
         # init weights
         self._w1 = self._weights.get(W.moe_w1, None)
         self._w2 = self._weights.get(W.moe_w2, None)
@@ -114,12 +109,7 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
         assert self._w2.size(1) == K
         assert self._w2.size(2) == N // 2
 
-        if self._workspace13 is None:
-            workspace1 = torch.empty(
-                (E, M, N), device=expert_x.device, dtype=torch.bfloat16
-            )
-        else:
-            workspace1 = resize_cache(self._workspace13, (E, M, N))
+        workspace = torch.empty((E, M, N), device=expert_x.device, dtype=torch.bfloat16)
         output = torch.empty((E, M, K), device=expert_x.device, dtype=torch.bfloat16)
 
         if self._use_fp8:
@@ -135,12 +125,12 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
             m_grouped_fp8_gemm_nt_masked(
                 (expert_x, expert_x_scale),
                 (self._w1, self._w1_scale),
-                workspace1,
+                workspace,
                 expert_num_tokens,
                 M,
             )
             a2q, a2q_scale = silu_mul_fp8_quant_deep_gemm_masked(
-                workspace1,
+                workspace,
                 expert_num_tokens,
                 group_size=self.DEEPGEMM_BLOCK_SHAPE[1],
                 use_ue8m0=is_deep_gemm_e8m0_used(),
@@ -155,10 +145,10 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
             )
         else:
             m_grouped_bf16_gemm_nt_masked(
-                expert_x, self._w1, workspace1, expert_num_tokens, M
+                expert_x, self._w1, workspace, expert_num_tokens, M
             )
             a2q = silu_mul_bf16_deep_gemm_masked(
-                workspace1, expert_num_tokens, group_size=256
+                workspace, expert_num_tokens, group_size=256
             )
             m_grouped_bf16_gemm_nt_masked(a2q, self._w2, output, expert_num_tokens, M)
 

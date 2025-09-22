@@ -4,7 +4,6 @@ from typing import Dict, Tuple
 import torch
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.models_py.kernels.activation import silu_and_mul
 from rtp_llm.models_py.modules.moe.executors.deepgemm_masked_executor import (
     DeepGemmMaskedExecutor,
 )
@@ -13,7 +12,6 @@ from rtp_llm.models_py.modules.moe.fused_moe import (
     ExpertTokensMetadata,
 )
 from rtp_llm.models_py.modules.moe.utils import FusedMoEQuantConfig
-from rtp_llm.models_py.modules.utils import per_token_cast_back
 from rtp_llm.utils.model_weight import W
 
 DP_SIZE = 4
@@ -170,7 +168,6 @@ def test_deepgemm_masked_executor(use_fp8: bool):
             if use_fp8
             else FusedMoEQuantConfig(quant_dtype=None)
         ),
-        workspace13=None,
     )
     # execute
     output = executor.execute(

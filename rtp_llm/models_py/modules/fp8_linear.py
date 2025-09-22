@@ -1,6 +1,5 @@
 import logging
 import os
-import sys
 from typing import Optional
 
 import torch
@@ -19,14 +18,13 @@ try:
 
     FP8_AVAILABLE = True
     # FP8 quantization available
-except ImportError as e:
+except ImportError:
     # FP8 quantization not available
     FP8_AVAILABLE = False
 
 if utils.is_cuda():
     try:
-        import deep_gemm
-        from deep_gemm import fp8_gemm_nt
+        from rtp_llm.models_py.kernels.deepgemm_wrapper import fp8_gemm_nt
 
         DEEPGEMM_AVAILABLE = True
         # Setup CUTLASS include paths for JIT compilation
