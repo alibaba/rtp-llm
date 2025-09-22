@@ -33,8 +33,6 @@ while true; do
         exit 1
     fi
 
-    status_json=$(echo "$response" | jq -r '.status | if test("^\\{") then fromjson.status else . end')
-
     # 检查是否超时
     CURRENT_TIME=$(date +%s)
     ELAPSED_TIME=$((CURRENT_TIME - START_TIME))
@@ -43,22 +41,25 @@ while true; do
         exit 1
     fi
 
+    status_json=$(echo "$response" | jq -r '.status' | jq 'fromjson')
+
+    main_status="UNKNOWN"
     if [[ "$status_json" == "null" ]]; then
         main_status="UNKNOWN"
     else
-        if echo "$status_json" | jq -e 'has("PENDING")' >/dev/null; then
+        if echo "$status_json" | jq -e '.jobs[].status | select(. == "PENDING")' >/dev/null; then
             main_status="PENDING"
-        elif echo "$status_json" | jq -e 'has("CANCELED")' >/dev/null; then
+        elif echo "$status_json" | jq -e '.jobs[].status | select(. == "CANCELED")' >/dev/null; then
             main_status="CANCELED"
-        elif echo "$status_json" | jq -e 'has("RUNNING")' >/dev/null; then
+        elif echo "$status_json" | jq -e '.jobs[].status | select(. == "RUNNING")' >/dev/null; then
             main_status="RUNNING"
-        elif echo "$status_json" | jq -e 'has("FAILED")' >/dev/null; then
+        elif echo "$status_json" | jq -e '.jobs[].status | select(. == "FAILED")' >/dev/null; then
             main_status="FAILED"
-        elif echo "$status_json" | jq -e 'has("NOT_RUN")' >/dev/null; then
+        elif echo "$status_json" | jq -e '.jobs[].status | select(. == "NOT_RUN")' >/dev/null; then
             main_status="NOT_RUN"
-        elif echo "$status_json" | jq -e 'has("UNKNOWN")' >/dev/null; then
+        elif echo "$status_json" | jq -e '.jobs[].status | select(. == "UNKNOWN")' >/dev/null; then
             main_status="UNKNOWN"
-        elif [[ $(echo "$status_json" | jq 'to_entries | all(.key == "SUCCESS")') == "true" ]]; then
+        elif [[ $(echo "$status_json" | jq '[.jobs[].status] | all(. == "SUCCESS")') == "true" ]]; then
             main_status="DONE"
         fi
     fi
