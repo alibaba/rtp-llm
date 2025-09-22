@@ -149,7 +149,7 @@ class FusedMoeFactory(object):
     ) -> FusedMoe:
         # TODO get_method should return enu class other than string
         if config.quant_config is None:
-            if config.moe_config.use_deepep_low_latency:
+            if config.ep_size > 1 and config.moe_config.use_deepep_low_latency:
                 init_deepep_env_once(config)
                 from rtp_llm.models_py.modules.moe.executors.deepgemm_masked_executor import (
                     DeepGemmMaskedExecutor,
