@@ -1,4 +1,5 @@
 #!/bin/sh
+curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/kimi_k2/tokenizer/chat_template.jinja" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/kimi_k2/tokenizer/chat_template.jinja
 curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/kimi_k2/tokenizer/tiktoken.model" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/kimi_k2/tokenizer/tiktoken.model
 curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/llama/fake/expect.pt" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/llama/fake/expect.pt
 curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/llama/fake/hf_out.pt" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/llama/fake/hf_out.pt
