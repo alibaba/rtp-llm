@@ -18,6 +18,7 @@ cc_library(
         "DistKvCache.h",
         "DistKvCacheMetrics.h",
         "KVCacheAllocator.h",
+        "BlockLRUCache.h",
     ],
     srcs = [
         "BatchKVCacheResource.cc",
@@ -30,6 +31,7 @@ cc_library(
         "DistKvCachePlanner.cc",
         "DistKvCache.cc",
         "KVCacheAllocator.cc",
+        "BlockLRUCache.cc",
     ],
     deps = torch_deps() + [
         "//rtp_llm/cpp/metrics:metrics",

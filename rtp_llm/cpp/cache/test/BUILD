@@ -85,3 +85,27 @@ cc_library(
         "mock/MockDistStorage3FSFile.h",
     ],
 )
+
+cc_test(
+    name = "block_ref_counter_test",
+    srcs = [
+        "BlockRefCounterTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps,
+    env = {},
+    exec_properties = {'gpu':'A10'},
+)
+
+cc_test(
+    name = "block_lru_cache_test",
+    srcs = [
+        "BlockLRUCacheTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps,
+    env = {},
+    exec_properties = {'gpu':'A10'},
+)

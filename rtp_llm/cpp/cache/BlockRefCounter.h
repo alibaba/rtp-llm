@@ -11,9 +11,7 @@ class BlockRefCounter {
 public:
     BlockRefCounter() {}
     BlockRefCounter(int block_nums) {
-        for (int i = 1; i < block_nums; ++i) {
-            ref_counter[i] = 0;
-        }
+        init(block_nums);
     }
 
     void init(int block_nums) {
@@ -21,6 +19,7 @@ public:
         for (int i = 1; i < block_nums; ++i) {
             ref_counter[i] = 0;
         }
+        busy_block_num_ = 0;
     }
 
     int getRefCounter(int block_index) const {
@@ -35,6 +34,9 @@ public:
     void incrementRefCounter(const std::vector<int>& block_indices) {
         for (int index : block_indices) {
             ref_counter[index]++;
+            if (ref_counter[index] == 1) {
+                busy_block_num_++;
+            }
         }
     }
 
@@ -45,12 +47,20 @@ public:
                 return;
             } else {
                 ref_counter[index]--;
+                if (ref_counter[index] == 0) {
+                    busy_block_num_--;
+                }
             }
         }
     }
 
+    uint32_t busyBlockNum() const {
+        return busy_block_num_;
+    }
+
 private:
     std::unordered_map<int, int> ref_counter;
+    uint32_t                     busy_block_num_ = 0;
 };
 
 }  // namespace rtp_llm
