@@ -2,7 +2,8 @@ name: Merge Request Trigger
 
 on:
   pull_request:
-    branches: [ "main" ]
+    types:
+      - closed
 
 jobs:
   trigger-on-merge:
