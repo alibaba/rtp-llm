@@ -41,15 +41,13 @@ while true; do
         exit 1
     fi
 
-    status_json=$(echo "$response" | jq -r '
-    .status as $s
-    | try ($s | fromjson) catch $s
-    ')
-    
-    main_status="UNKNOWN"
-    if [[ "$status_json" == "null" ]]; then
-        main_status="UNKNOWN"
-    else
+    status_raw=$(echo "$response" | jq -r '.status')
+
+    # 判断是否为对象（以 { 开头），否则直接用字符串
+    if [[ "$status_raw" =~ ^\{ ]]; then
+        # 可能是被转义的对象字符串，需要 fromjson 一次
+        status_json=$(echo "$status_raw" | jq 'fromjson')
+        # 这里可以继续用 jq 判断 jobs 状态
         if echo "$status_json" | jq -e '.jobs[].status | select(. == "PENDING")' >/dev/null; then
             main_status="PENDING"
         elif echo "$status_json" | jq -e '.jobs[].status | select(. == "CANCELED")' >/dev/null; then
@@ -64,11 +62,16 @@ while true; do
             main_status="UNKNOWN"
         elif [[ $(echo "$status_json" | jq '[.jobs[].status] | all(. == "SUCCESS")') == "true" ]]; then
             main_status="DONE"
+        else
+            main_status="UNKNOWN"
         fi
+    else
+        # 直接用字符串
+        main_status="$status_raw"
     fi
 
     if [[ "$main_status" == "DONE" || "$main_status" == "FAILED" || "$main_status" == "UNKNOWN" || "$main_status" == "CANCELED" || "$main_status" == "NOT_RUN" ]]; then
-        echo "Current status: $status_json"
+        echo "Current status: $status_raw"
         if [[ "$main_status" == "DONE" || "$main_status" == "NOT_RUN" ]]; then
             echo "CI completed successfully"
             exit 0
