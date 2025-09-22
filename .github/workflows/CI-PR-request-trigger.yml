@@ -3,9 +3,11 @@ name: PR Check and Merge Task
 on:
   pull_request:
     branches: [ "main" ]
+  push:
+    branches: [ "main" ]
 
 jobs:
-  # --- Job 1: 运行 CI 检查 ---
+  # --- Job 1 运行 CI 检查 ---
   run-ci:
     runs-on: ubuntu-latest
     defaults:
@@ -20,17 +22,34 @@ jobs:
 
       - name: Trigger CI Task
         run: |
-          echo "Triggering CI for commit ${{ github.event.pull_request.head.sha }}"
-          ./trigger-CI.sh "${{ github.event.pull_request.head.sha }}" "${{ secrets.CI_SECRET }}"
+          # 对于 push 事件, SHA 在 github.sha
+          # 对于 pull_request 事件, SHA 在 github.event.pull_request.head.sha
+          HEAD_SHA=""
+          if [ -n "${{ github.event.pull_request.head.sha }}" ]; then
+            HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          else
+            HEAD_SHA="${{ github.sha }}"
+          fi
+          echo "Triggering CI for commit $HEAD_SHA"
+          ./trigger-CI.sh "$HEAD_SHA" "${{ secrets.CI_SECRET }}"
 
       - name: Get CI Result
         run: |
-          echo "Polling for CI result of commit ${{ github.event.pull_request.head.sha }}"
-          ./get-CI-result.sh "${{ github.event.pull_request.head.sha }}" "${{ secrets.CI_SECRET }}"
+          HEAD_SHA=""
+          if [ -n "${{ github.event.pull_request.head.sha }}" ]; then
+            HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          else
+            HEAD_SHA="${{ github.sha }}"
+          fi
+          echo "Polling for CI result of commit $HEAD_SHA"
+          ./get-CI-result.sh "$HEAD_SHA" "${{ secrets.CI_SECRET }}"
 
-  # --- Job 2: 运行合并任务 (依赖于 Job 1) ---
+  # --- Job 2 运行合并任务 ---
   run-merge-task:
+    # 添加 needs 确保 run-ci 成功后执行
     needs: run-ci
+    # 添加 if 条件，仅在 pull_request 事件时运行
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     defaults:
       run:
