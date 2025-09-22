@@ -19,6 +19,7 @@ cc_library(
         "//rtp_llm/cpp/devices:devices_base_impl",
         "//rtp_llm/cpp/core:allocator",
         "//rtp_llm/cpp/core:types_hdr",
+        "//rtp_llm/cpp/core:torch_event",
         "//rtp_llm/cpp/rocm:rocm_types_hdr",
         "//rtp_llm/cpp/rocm:rocm_host_utils",
         "//rtp_llm/cpp/rocm:rocm_custom_ar",
