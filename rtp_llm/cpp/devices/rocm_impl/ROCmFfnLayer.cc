@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/core/BufferHelper.h"
 #include "rtp_llm/cpp/core/Dispatch.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "rtp_llm/cpp/core/torch_utils/TorchEvent.h"
 #include "rtp_llm/cpp/devices/utils/DevicePerfWrapper.h"
 #include "rtp_llm/cpp/kernels/moe_kernels.h"
 
@@ -64,6 +65,15 @@ MoeDispatchOutput ROCmDevice::epDispatch(const MoeDispatchParams& params) {
             }
         }
     }
+
+    if (params.overlapped && params.compute_stream_event) {
+        const auto casted_event = dynamic_cast<TorchEvent*>(params.compute_stream_event.get());
+        if (!casted_event) {
+            throw OpException({OpErrorType::ERROR_INTERNAL, "compute_stream_event is not TorchEvent"});
+        }
+        casted_event->event->block(*torch_comm_stream_);
+    }
+
     printBufferData(*token_nums_per_rank, "token_nums_per_rank");
     auto token_nums_per_rank_gpu = clone({*token_nums_per_rank, AllocationType::DEVICE, BufferHints(), false, false});
     // all_token_nums_per_rank_gpu[i]: current rank receive token num from other rank
@@ -162,7 +172,8 @@ MoeCombineOutput ROCmDevice::epCombine(const MoeCombineParams& params) {
     // 当前卡接受计算完moe的token
 
 
-    auto all2all_ret = allToAll({{params.input}, params.output_split_sizes, params.input_split_sizes, params.overlapped});
+    auto all2all_ret = allToAll({{params.input}, params.output_split_sizes, params.input_split_sizes, 
+                                  params.overlapped, ParallelMode::DP_AND_TP, params.compute_stream_event});
 
     return MoeCombineOutput({all2all_ret.outputs[0], nullptr, params, std::move(all2all_ret.comm_barrier_hook)});
 }

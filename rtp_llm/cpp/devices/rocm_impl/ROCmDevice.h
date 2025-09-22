@@ -106,6 +106,7 @@ public:
     ~ROCmEvent() override;
 
     void synchronize() const override;
+    hipEvent_t getEvent() const { return event_; }
     bool checkReadiness() const override;
 
 private:
@@ -208,6 +209,7 @@ public:
         ROCM_CHECK(hipSetDevice(device_id_));
     }
     DeviceEventPtr createEvent() override;
+    DeviceEventPtr createTorchEvent() override;
 
     BufferPtr quantize(const QuantizeParams& params) override;
     BufferPtr dequantize(const QuantizeParams& params);
@@ -269,6 +271,8 @@ private:
     std::unique_ptr<IAllocator>                  hostAllocator_;
     c10::hip::HIPCachingAllocator::HIPAllocator* origin_torch_hip_allocator_;
 
+    std::unique_ptr<at::hip::HIPStream> torch_default_stream_;
+    std::unique_ptr<at::hip::HIPStream> torch_comm_stream_;
     hipStream_t     stream_ = nullptr;
     hipStream_t     no_block_copy_stream_;
     hipStream_t     communication_stream_;

@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/cuda/nccl/nccl_utils_torch.h"
 #include "rtp_llm/cpp/cuda/nccl/nccl_utils.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "rtp_llm/cpp/core/torch_utils/TorchEvent.h"
 #include "rtp_llm/cpp/kernels/moe_kernels.h"
 
 using namespace std;
@@ -233,7 +234,7 @@ AllToAllOutput ROCmDevice::allToAll(const AllToAllParams& params) {
     if (world_size < 2) {
         return {{params.buffers}};
     }
-    auto         stream     = (params.overlapped && init_params_.enable_comm_overlap) ? communication_stream_ : stream_;
+    auto stream = params.overlapped ? communication_stream_ : stream_;
     const size_t dims       = params.buffers[0]->dim();
     const auto   batch_size = params.buffers[0]->shape()[0];
     vector<BufferPtr> byte_buffers;
@@ -275,14 +276,23 @@ AllToAllOutput ROCmDevice::allToAll(const AllToAllParams& params) {
         }
     }
     if (stream == communication_stream_) {
-        // NOTE: before starting communication, we need to make sure that the previous computation
-        // has been finished. Otherwise, the communication may overlap with the computation.
-        // We use cuda event to ensure the computation on main stream has been finished.
-        hipEvent_t event;
-        ROCM_CHECK(hipEventCreate(&event));
-        ROCM_CHECK(hipEventRecord(event, stream_));
-        ROCM_CHECK(hipStreamWaitEvent(communication_stream_, event, 0));
-        ROCM_CHECK(hipEventDestroy(event));
+        if (params.compute_stream_event) {
+            const auto casted_event = dynamic_cast<TorchEvent*>(params.compute_stream_event.get());
+            if (!casted_event) {
+                throw OpException({OpErrorType::ERROR_INTERNAL, "compute_stream_event is not TorchEvent"});
+            }
+            // FT_LOG_INFO("alltoall wait compute stream event");
+            casted_event->event->block(*torch_comm_stream_);
+        } else {
+            // NOTE: before starting communication, we need to make sure that the previous computation
+            // has been finished. Otherwise, the communication may overlap with the computation.
+            // We use cuda event to ensure the computation on main stream has been finished.
+            cudaEvent_t event;
+            ROCM_CHECK(hipEventCreate(&event));
+            ROCM_CHECK(hipEventRecord(event, stream_));
+            ROCM_CHECK(hipStreamWaitEvent(communication_stream_, event, 0));
+            ROCM_CHECK(hipEventDestroy(event));
+        }
     }
     BufferPtr output;
     if (params.input_split_sizes.size() || params.output_split_sizes.size()) {
