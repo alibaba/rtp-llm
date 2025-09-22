@@ -41,8 +41,11 @@ while true; do
         exit 1
     fi
 
-    status_json=$(echo "$response" | jq -r '.status' | jq 'fromjson')
-
+    status_json=$(echo "$response" | jq -r '
+    .status as $s
+    | try ($s | fromjson) catch $s
+    ')
+    
     main_status="UNKNOWN"
     if [[ "$status_json" == "null" ]]; then
         main_status="UNKNOWN"
