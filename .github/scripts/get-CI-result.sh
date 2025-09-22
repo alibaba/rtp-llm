@@ -41,34 +41,46 @@ while true; do
         exit 1
     fi
 
-    status_raw=$(echo "$response" | jq -r '.status')
+status_raw=$(echo "$response" | jq -r '.status')
 
-    # 判断是否为对象（以 { 开头），否则直接用字符串
-    if [[ "$status_raw" =~ ^\{ ]]; then
-        # 可能是被转义的对象字符串，需要 fromjson 一次
-        status_json=$(echo "$status_raw" | jq 'fromjson')
-        # 这里可以继续用 jq 判断 jobs 状态
-        if echo "$status_json" | jq -e '.jobs[].status | select(. == "PENDING")' >/dev/null; then
-            main_status="PENDING"
-        elif echo "$status_json" | jq -e '.jobs[].status | select(. == "CANCELED")' >/dev/null; then
-            main_status="CANCELED"
-        elif echo "$status_json" | jq -e '.jobs[].status | select(. == "RUNNING")' >/dev/null; then
-            main_status="RUNNING"
-        elif echo "$status_json" | jq -e '.jobs[].status | select(. == "FAILED")' >/dev/null; then
-            main_status="FAILED"
-        elif echo "$status_json" | jq -e '.jobs[].status | select(. == "NOT_RUN")' >/dev/null; then
-            main_status="NOT_RUN"
-        elif echo "$status_json" | jq -e '.jobs[].status | select(. == "UNKNOWN")' >/dev/null; then
-            main_status="UNKNOWN"
-        elif [[ $(echo "$status_json" | jq '[.jobs[].status] | all(. == "SUCCESS")') == "true" ]]; then
-            main_status="DONE"
-        else
-            main_status="UNKNOWN"
-        fi
+# 判断 status_raw 是否为合法 JSON 对象
+if echo "$status_raw" | jq empty 2>/dev/null; then
+    # 已经是对象，直接用
+    status_json="$status_raw"
+elif [[ "$status_raw" =~ ^\{ ]]; then
+    # 是字符串且以 { 开头，尝试 fromjson
+    status_json=$(echo "$status_raw" | jq 'fromjson')
+else
+    # 普通字符串
+    status_json="$status_raw"
+fi
+
+main_status="UNKNOWN"
+if [[ "$status_json" == "null" ]]; then
+    main_status="UNKNOWN"
+elif echo "$status_json" | jq -e '.jobs' >/dev/null 2>&1; then
+    # 有 jobs 字段，说明是对象
+    if echo "$status_json" | jq -e '.jobs[].status | select(. == "PENDING")' >/dev/null; then
+        main_status="PENDING"
+    elif echo "$status_json" | jq -e '.jobs[].status | select(. == "CANCELED")' >/dev/null; then
+        main_status="CANCELED"
+    elif echo "$status_json" | jq -e '.jobs[].status | select(. == "RUNNING")' >/dev/null; then
+        main_status="RUNNING"
+    elif echo "$status_json" | jq -e '.jobs[].status | select(. == "FAILED")' >/dev/null; then
+        main_status="FAILED"
+    elif echo "$status_json" | jq -e '.jobs[].status | select(. == "NOT_RUN")' >/dev/null; then
+        main_status="NOT_RUN"
+    elif echo "$status_json" | jq -e '.jobs[].status | select(. == "UNKNOWN")' >/dev/null; then
+        main_status="UNKNOWN"
+    elif [[ $(echo "$status_json" | jq '[.jobs[].status] | all(. == "SUCCESS")') == "true" ]]; then
+        main_status="DONE"
     else
-        # 直接用字符串
-        main_status="$status_raw"
+        main_status="UNKNOWN"
     fi
+else
+    # 普通字符串
+    main_status="$status_json"
+fi
 
     if [[ "$main_status" == "DONE" || "$main_status" == "FAILED" || "$main_status" == "UNKNOWN" || "$main_status" == "CANCELED" || "$main_status" == "NOT_RUN" ]]; then
         echo "Current status: $status_raw"
