@@ -67,22 +67,22 @@ while true; do
         fi
     fi
 
-    if [[ "$status" == "DONE" || "$status" == "FAILED" || "$status" == "UNKNOWN" || "$status" == "CANCELED" ]]; then
-        echo "Current status: $status"
-        if [[ "$status" == "DONE" || "$status" == "NOT_RUN" ]]; then
+    if [[ "$main_status" == "DONE" || "$main_status" == "FAILED" || "$main_status" == "UNKNOWN" || "$main_status" == "CANCELED" || "$main_status" == "NOT_RUN" ]]; then
+        echo "Current status: $status_json"
+        if [[ "$main_status" == "DONE" || "$main_status" == "NOT_RUN" ]]; then
             echo "CI completed successfully"
             exit 0
-        elif [[ "$status" == "FAILED" ]]; then
+        elif [[ "$main_status" == "FAILED" ]]; then
             echo "CI failed"
             exit 1
-        elif [[ "$status" == "UNKNOWN" ]]; then
+        elif [[ "$main_status" == "UNKNOWN" ]]; then
             echo "CI status is unknown"
             exit 1
-        elif [[ "$status" == "CANCELED" ]]; then
+        elif [[ "$main_status" == "CANCELED" ]]; then
             echo "CI was canceled"
             exit 1
         else
-            echo "Unexpected status: $status"
+            echo "Unexpected status: $main_status"
             exit 1
         fi
         break
