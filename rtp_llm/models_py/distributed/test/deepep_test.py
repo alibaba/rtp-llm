@@ -4,7 +4,7 @@ import os
 import random
 import time
 from functools import partial
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
 from unittest import TestCase, main
 
 import torch
@@ -25,12 +25,43 @@ from rtp_llm.models_py.distributed.process_group_state import (
     get_ep_group,
     init_distributed_environment,
 )
-from rtp_llm.models_py.modules.utils import (
-    align,
-    per_token_cast_back,
-    per_token_cast_to_fp8,
-)
+from rtp_llm.models_py.modules.utils import align
 from rtp_llm.test.utils.bench_util import bench, bench_kineto, calc_diff, hash_tensor
+
+
+def ceil_to_ue8m0(x: torch.Tensor):
+    assert x.view(-1).amax().item() > 0
+    return torch.pow(2.0, torch.ceil(torch.log2(x.abs())))
+
+
+def per_token_cast_to_fp8(
+    x: torch.Tensor, use_ue8m0: bool
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    assert x.dim() == 2 and x.size(1) % 128 == 0
+    m, n = x.shape
+    x_view = x.view(m, -1, 128)
+    x_amax = x_view.abs().float().amax(dim=2).view(m, -1).clamp(1e-4)
+    sf = x_amax / 448.0
+    sf = ceil_to_ue8m0(sf) if use_ue8m0 else sf
+    return (x_view * (1.0 / sf.unsqueeze(2))).to(torch.float8_e4m3fn).view(m, n), sf
+
+
+def per_token_cast_back(x_fp8: torch.Tensor, x_scales: torch.Tensor):
+    if x_scales.dtype == torch.int:
+        if os.getenv("ACCL_FP8_CAST_LEVEL", "1") == "2":
+            x_scales = x_scales << 23
+        else:
+            x_scales = x_scales.view(dtype=torch.int8).to(torch.int) << 23
+
+        x_scales = x_scales.view(dtype=torch.float)
+
+    if os.getenv("ACCL_FP8_CAST_LEVEL", "1") == "2":
+        x_fp32 = x_fp8.to(torch.float32).view(x_fp8.size(0), -1, x_fp8.size(1))
+    else:
+        x_fp32 = x_fp8.to(torch.float32).view(x_fp8.size(0), -1, 128)
+
+    x_scales = x_scales.view(x_fp8.size(0), -1, 1)
+    return (x_fp32 * x_scales).view(x_fp8.shape).to(torch.bfloat16)
 
 
 def inplace_unique(x: torch.Tensor, num_slots: int):

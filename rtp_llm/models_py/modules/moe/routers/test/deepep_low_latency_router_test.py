@@ -21,13 +21,30 @@ from rtp_llm.models_py.modules.moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
 )
 from rtp_llm.models_py.modules.moe.utils import FusedMoEQuantConfig
-from rtp_llm.models_py.modules.utils import per_token_cast_back
 
 WORLD_SIZE = 2
 NUM_TOKEN_PER_RANK = 32
 HIDDEN_SIZE = 7168
 TOPK = 8
 NUM_EXPERTS = 128
+
+
+def per_token_cast_back(x_fp8: torch.Tensor, x_scales: torch.Tensor):
+    if x_scales.dtype == torch.int:
+        if os.getenv("ACCL_FP8_CAST_LEVEL", "1") == "2":
+            x_scales = x_scales << 23
+        else:
+            x_scales = x_scales.view(dtype=torch.int8).to(torch.int) << 23
+
+        x_scales = x_scales.view(dtype=torch.float)
+
+    if os.getenv("ACCL_FP8_CAST_LEVEL", "1") == "2":
+        x_fp32 = x_fp8.to(torch.float32).view(x_fp8.size(0), -1, x_fp8.size(1))
+    else:
+        x_fp32 = x_fp8.to(torch.float32).view(x_fp8.size(0), -1, 128)
+
+    x_scales = x_scales.view(x_fp8.size(0), -1, 1)
+    return (x_fp32 * x_scales).view(x_fp8.shape).to(torch.bfloat16)
 
 
 def _init_router(rank: int, use_fp8: bool):
