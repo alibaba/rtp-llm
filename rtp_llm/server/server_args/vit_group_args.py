@@ -51,3 +51,38 @@ def init_vit_group_args(parser):
         default=100,
         help="多模态开启的用于URL的Cache的大小",
     )
+    vit_group.add_argument(
+        "--use_igraph_cache",
+        env_name="USE_IGRAPH_CACHE",
+        type=bool,
+        default=True,
+        help="访问igraph是否开启cache",
+    )
+    vit_group.add_argument(
+        "--igraph_search_dom",
+        env_name="IGRAPH_SEARCH_DOM",
+        type=str,
+        default="com.taobao.search.igraph.common",
+        help="访问igraph使用的vipserver地址",
+    )
+    vit_group.add_argument(
+        "--igraph_vipserver",
+        env_name="IGRAPH_VIPSERVER",
+        type=int,
+        default=0,
+        help="是否使用vipserver访问igraph",
+    )
+    vit_group.add_argument(
+        "--igraph_table_name",
+        env_name="IGRAPH_TABLE_NAME",
+        type=str,
+        default="",
+        help="igraph的表名",
+    )
+    vit_group.add_argument(
+        "--igraph_default_key",
+        env_name="IGRAPH_DEFAULT_KEY",
+        type=str,
+        default=None,
+        help="访问igraph失败时默认使用的key",
+    )

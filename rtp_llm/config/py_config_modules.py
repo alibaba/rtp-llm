@@ -331,8 +331,9 @@ class VitConfig:
         self.url_cache_item_num: int = 100
         self.use_igraph_cache: bool = True
         self.igraph_search_dom: str = "com.taobao.search.igraph.common"
-        self.igraph_vipserver: int = 1
+        self.igraph_vipserver: int = 0
         self.igraph_table_name: str = ""
+        self.default_key: Optional[str] = None
 
     def update_from_env(self):
         self.vit_separation = int(os.environ.get("VIT_SEPARATION", self.vit_separation))
@@ -358,6 +359,7 @@ class VitConfig:
         self.igraph_table_name = get_env_str(
             "IGRAPH_TABLE_NAME", self.igraph_table_name
         )
+        self.default_key = os.environ.get("IGRAPH_DEFAULT_KEY", self.default_key)
 
     def to_string(self):
         return (
@@ -371,7 +373,8 @@ class VitConfig:
             f"use_igraph_cache: {self.use_igraph_cache}\n"
             f"igraph_search_dom: {self.igraph_search_dom}\n"
             f"igraph_vipserver: {self.igraph_vipserver}\n"
-            f"igraph_table_name: {self.igraph_table_name}"
+            f"igraph_table_name: {self.igraph_table_name}\n"
+            f"igraph_default_key: {self.default_key}"
         )
 
 

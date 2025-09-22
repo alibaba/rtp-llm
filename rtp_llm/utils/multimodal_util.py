@@ -100,18 +100,27 @@ def get_vit_compute_dtype(dtype: str):
         return torch.half
 
 
+class IgraphItemKeyCountMismatchError(Exception):
+    
+    def __init__(self, requested_count: int, received_count: int, message: str = None):
+        self.requested_count = requested_count
+        self.received_count = received_count
+        super().__init__(
+            message or f"item number from igraph response ({received_count}) diff with keys number from request({requested_count})"
+        )
+
 def retry_on_assertion_error(retries: int = 3):
     def decorator(func):
         def wrapper(*args, **kwargs):
             for attempt in range(1, retries + 1):
                 try:
                     return func(*args, **kwargs)
-                except AssertionError as e:
-                    print(
+                except (AssertionError, ValueError, IgraphItemKeyCountMismatchError) as e:
+                    logger.warning(
                         f"[retry_on_assertion_error] AssertionError on attempt {attempt}: {str(e)}"
                     )
                     if attempt == retries:
-                        print(
+                        logger.error(
                             "[retry_on_assertion_error] Max retries reached, re-raising."
                         )
                         raise
