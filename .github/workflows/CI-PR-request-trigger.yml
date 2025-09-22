@@ -1,0 +1,56 @@
+name: PR Check and Merge Task
+
+on:
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  # --- Job 1: 运行 CI 检查 ---
+  run-ci:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .github/scripts
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Make scripts executable
+        run: chmod +x trigger-CI.sh get-CI-result.sh
+
+      - name: Trigger CI Task
+        run: |
+          echo "Triggering CI for commit ${{ github.event.pull_request.head.sha }}"
+          ./trigger-CI.sh "${{ github.event.pull_request.head.sha }}" "${{ secrets.CI_SECRET }}"
+
+      - name: Get CI Result
+        run: |
+          echo "Polling for CI result of commit ${{ github.event.pull_request.head.sha }}"
+          ./get-CI-result.sh "${{ github.event.pull_request.head.sha }}" "${{ secrets.CI_SECRET }}"
+
+  # --- Job 2: 运行合并任务 (依赖于 Job 1) ---
+  run-merge-task:
+    needs: run-ci
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .github/scripts
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Make scripts executable
+        run: chmod +x trigger-merge.sh get-merge-result.sh
+
+      - name: Trigger Aone Merge Task
+        run: |
+          echo "Triggering Aone merge for commit ${{ github.event.pull_request.head.sha }}"
+          ./trigger-merge.sh "${{ github.event.pull_request.head.sha }}" "${{ secrets.CI_SECRET }}"
+        env:
+          AONE_PROJECT_ID: "3512232"
+          GITHUB_REPOSITORY: ${{ github.repository }}
+
+      - name: Get Merge Result
+        run: |
+          echo "Polling for merge result of commit ${{ github.event.pull_request.head.sha }}"
+          ./get-merge-result.sh "${{ github.event.pull_request.head.sha }}" "${{ secrets.CI_SECRET }}"
