@@ -1,12 +1,10 @@
+#include <cuda_runtime_api.h>
 #include <torch/torch.h>
 #include "rtp_llm/cpp/devices/cuda_impl/CudaGraphRunner.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/devices/cuda_impl/CudaFlashInfer.h"
 using namespace torch_ext;
 namespace rtp_llm {
-
-static const int MIN_CACHE_INPUT_TOKEN_NUM = 512;
-static const int MIN_CACHE_BATCH_SIZE      = 256;
 
 GraphBase* CudaDevice::getDeviceGraphRunner(const DeviceInitParams& params,
                                             py::object              py_instance,
@@ -42,32 +40,12 @@ void CudaGraphRunner::captureOneBatchSize(int bs) {
         auto py_outputs_obj = py_forward_method_(inputs);
         auto outputs        = py_outputs_obj.cast<PyModelOutputs>();
         graph_instances_[bs].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
-        graph_instances_[bs].mem_hold_.params_ptr = outputs.params_ptr;
-        outputs.params_ptr->recycleParams();
         graph.capture_end();
-        // embedding model uses trtv2 attention
-        if (!is_embedding_ && !graph_instances_[bs].use_xqa_) {
-            // retrieve from private cache first
-            int                                   input_token_num  = std::max(MIN_CACHE_INPUT_TOKEN_NUM, bs);
-            int                                   batch_size       = std::max(MIN_CACHE_BATCH_SIZE, bs);
-            std::shared_ptr<FlashInferAttnParams> param_shared_ptr = nullptr;
-            auto cache = FlashInferAttnParams::isDecode(input_token_num) ? &PRIVATE_DECODE_PARAMS_CACHE :
-                                                                           &PRIVATE_PREFILL_PARAMS_CACHE;
-            if (!cache->empty()) {
-                auto params = cache->back();
-                if (batch_size <= params->batch_size && input_token_num <= params->input_token_num) {
-                    param_shared_ptr = params;
-                }
-            }
-            if (param_shared_ptr == nullptr) {
-                auto param_ptr = FlashInferAttnParams::get(batch_size, input_token_num);
-                FlashInferAttnParams::recycle(param_ptr);
-                param_shared_ptr = std::shared_ptr<FlashInferAttnParams>(param_ptr);
-                cache->push_back(param_shared_ptr);
-            }
-            graph_instances_[bs].mem_hold_.params_ = param_shared_ptr;
-            RTP_LLM_CHECK_WITH_INFO(graph_instances_[bs].mem_hold_.params_ != nullptr,
-                                    "capture params can't be nullptr");
+        if (outputs.params_ptr->check_recycle()) {
+            graph_instances_[bs].mem_hold_.params_ptr =
+                ParamsBasePtr(outputs.params_ptr.get(), [&](ParamsBase* ptr) {});
+        } else {
+            graph_instances_[bs].mem_hold_.params_ptr = outputs.params_ptr;
         }
 
         if (enable_cuda_graph_debug_mode_) {
@@ -79,7 +57,7 @@ void CudaGraphRunner::captureOneBatchSize(int bs) {
 void CudaGraphRunner::capture() {
     RTP_LLM_LOG_INFO("Capture Start");
     int capture_range_size = capture_range_.size();
-    for (int i = capture_range_size - 1; i >= 0; i--) {
+    for (int i = 0; i <= capture_range_size - 1; i++) {
         int           bs = capture_range_[i];
         PyModelInputs inputs;
         inputs.input_ids = capture_mem_hold_.py_model_inputs_.input_ids.slice(0, 0, bs * num_tokens_per_bs_);
@@ -103,6 +81,10 @@ void CudaGraphRunner::capture() {
                               kv_cache_block_offset_,
                               is_prefill_cuda_graph_mode_);
         captureOneBatchSize(bs);
+        RTP_LLM_LOG_INFO("replay start check for %d", bs);
+        replay(bs);
+        cudaDeviceSynchronize();
+        RTP_LLM_LOG_INFO("replay end check for %d", bs);
         RTP_LLM_LOG_INFO("capture success for batch size: %d", bs);
     }
     RTP_LLM_LOG_INFO("Capture End");
@@ -150,6 +132,12 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
             inputs.attention_inputs.sequence_lengths;
         copySmallerIntoLarger(inputs.attention_inputs.kv_cache_block_id_device,
                               py_model_inputs_.attention_inputs.kv_cache_block_id_device);
+        graph_instances_[current_real_graph_bs_].mem_hold_.params_ptr->fillParams(
+            inputs.attention_inputs.sequence_lengths,
+            inputs.attention_inputs.input_lengths,
+            inputs.attention_inputs.kv_cache_block_id_host,
+            current_batch_size_,
+            seq_size_per_block_);
     } else {
         py_model_inputs_.input_ids.fill_(0);
         auto lengths   = inputs.attention_inputs.input_lengths.data_ptr<int>();
@@ -160,12 +148,6 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
             start_idx += lengths[i];
         }
     }
-    graph_instances_[current_real_graph_bs_].mem_hold_.params_ptr->fillParams(
-        inputs.attention_inputs.sequence_lengths,
-        inputs.attention_inputs.input_lengths,
-        inputs.attention_inputs.kv_cache_block_id_host,
-        current_batch_size_,
-        seq_size_per_block_);
 }
 
 PyModelOutputs CudaGraphRunner::forward(PyModelInputs& inputs) {

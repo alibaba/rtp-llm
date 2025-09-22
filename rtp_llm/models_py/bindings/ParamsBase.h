@@ -13,8 +13,10 @@ public:
                             torch::Tensor kv_cache_block_id_host,
                             int           batch_size,
                             int           seq_size_per_block) {};
-    // reuse `this` params, so we can give it back to memory cache if it's supported.
-    virtual void recycleParams() {};
+    // check whether the parmas can be recycled automatically.
+    virtual bool check_recycle() {
+        return false;
+    };
 };
 using ParamsBasePtr = std::shared_ptr<ParamsBase>;
 

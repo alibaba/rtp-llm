@@ -332,7 +332,7 @@ cc_library(
     copts = copts(),
     deps = test_deps + [
         "//rtp_llm/models_py/bindings:op_defs",
-        "//:th_utils"
+        "//rtp_llm/cpp/pybind:th_utils"
     ],
     visibility = ["//visibility:public"],
     alwayslink = True, ## make sure pybind11 link
@@ -381,6 +381,8 @@ py_test(
         "HACK_LAYER_NUM" : "1",
         "CUDA_LAUNCH_BLOCKING" : "1",
         # "TORCH_USE_CUDA_DSA" : "1"
+        # "ENABLE_CUDA_GRAPH_DEBUG_MODE" : "1",
+        # "ENABLE_DEVICE_PERF" : "1",
     },
     exec_properties = {'gpu':'A10'},
     # tags = ["manual"],
@@ -401,6 +403,7 @@ py_test(
         "TEST_USING_DEVICE": "CUDA",
         "HACK_LAYER_NUM" : "1",
         "CUDA_LAUNCH_BLOCKING" : "1",
+        "ENABLE_CUDA_GRAPH_DEBUG_MODE" : "1",
     },
     exec_properties = {'gpu':'A10'},
 )

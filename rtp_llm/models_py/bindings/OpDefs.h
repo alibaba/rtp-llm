@@ -4,7 +4,8 @@
 #include <pybind11/embed.h>
 #include <torch/extension.h>
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
-
+#include "rtp_llm/models_py/bindings/ParamsBase.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 namespace torch_ext {
 
 struct KVCache {
@@ -61,7 +62,6 @@ struct PyAttentionInputs {
     torch::Tensor padding_offset;
 
     // for write cache store
-
     std::optional<PyCacheStoreInputs> cache_store_inputs;
 };
 

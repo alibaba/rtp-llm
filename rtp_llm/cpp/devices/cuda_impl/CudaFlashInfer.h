@@ -68,7 +68,7 @@ public:
                              bool                             skip_no_prefix);
 
     static bool checkDecode(rtp_llm::DeviceBase* device, const rtp_llm::AttentionConfigs& attn_configs, DataType dtype);
-
+    bool        check_recycle() override;
     static ParamsPtr prepare(rtp_llm::DeviceBase*             device,
                              const rtp_llm::AttentionConfigs& attn_configs,
                              const BufferPtr&                 prefix_lengths_host,
@@ -107,7 +107,6 @@ public:
                                             torch::Tensor kv_cache_block_id_host,
                                             int           batch_size,
                                             int           seq_size_per_block) override;
-    void                         recycleParams() override;
     void                         fillFlashInfer(const BufferPtr& prefix_lengths_host,
                                                 const BufferPtr& sequence_lengths_host,
                                                 const BufferPtr& input_lengths_host,
