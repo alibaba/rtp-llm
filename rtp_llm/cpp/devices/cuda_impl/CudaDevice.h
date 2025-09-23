@@ -57,7 +57,7 @@ private:
     cudaStream_t comm_stream_;
 };
 
-struct TRTAttn {
+struct TRTAttn: public ParamsBase {
     KVBlockArray kv_block_array;
     BufferPtr    kv_cache_offset;
     BufferPtr    kv_cache_offset_h;

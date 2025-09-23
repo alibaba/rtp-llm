@@ -14,7 +14,7 @@ public:
 
     bool support(torch_ext::PyAttentionInputs attn_inputs);
 
-    FlashInferAttnParamsPtr prepare(torch_ext::PyAttentionInputs attn_inputs);
+    ParamsBasePtr prepare(torch_ext::PyAttentionInputs attn_inputs);
 
     torch::Tensor
     forward(const torch::Tensor& q, std::optional<torch_ext::KVCache> kv_cache, const FlashInferAttnParamsPtr& params);
@@ -23,8 +23,8 @@ public:
 class FlashInferDecodeOp: public FMHACudaBase {
 public:
     FlashInferDecodeOp(const GptInitParameter& gpt_init_parameter);
-    bool                    support(torch_ext::PyAttentionInputs attn_inputs);
-    FlashInferAttnParamsPtr prepare(torch_ext::PyAttentionInputs attn_inputs);
+    bool          support(torch_ext::PyAttentionInputs attn_inputs);
+    ParamsBasePtr prepare(torch_ext::PyAttentionInputs attn_inputs);
 
     torch::Tensor
     forward(const torch::Tensor& q, std::optional<torch_ext::KVCache> kv_cache, const FlashInferAttnParamsPtr& params);

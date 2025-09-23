@@ -32,8 +32,8 @@ public:
             throw std::runtime_error("CudaGraphRunner constructor: Python instance is null or none.");
         }
 
-        py_forward_method_   = py_instance_.attr("forward");
-        py_fmha_type_method_ = py_instance_.attr("get_fmha_type");
+        py_forward_method_     = py_instance_.attr("forward");
+        py_fill_params_method_ = py_instance_.attr("fill_params");
         RTP_LLM_LOG_INFO("Initialize CudaGraphRunner with parameters below: \n \
             enable_cuda_graph_: %d, concurrency_limit_: %d, enable_cuda_graph_debug_mode_: %d, hidden_size_: %d, max_seq_len_: %d, seq_size_per_block_: %d, kv_cache_block_offset_: %d, is_prefill_cuda_graph_mode_: %d",
                          enable_cuda_graph_,
@@ -90,9 +90,5 @@ private:
 
 public:
     DeviceBase* device_{nullptr};
-
-private:
-    std::deque<std::shared_ptr<FlashInferAttnParams>> PRIVATE_DECODE_PARAMS_CACHE;
-    std::deque<std::shared_ptr<FlashInferAttnParams>> PRIVATE_PREFILL_PARAMS_CACHE;
 };
 }  // namespace rtp_llm

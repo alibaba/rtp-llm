@@ -1,5 +1,4 @@
 #pragma once
-
 #include "rtp_llm/cpp/devices/Weights.h"
 #include "rtp_llm/cpp/devices/LoraWeights.h"
 #include "rtp_llm/cpp/devices/CommonDefines.h"
@@ -8,7 +7,7 @@
 #include "rtp_llm/cpp/model_utils/MlaConfig.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
-
+#include "rtp_llm/models_py/bindings/ParamsBase.h"
 #include "rtp_llm/cpp/core/Event.h"
 #include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/core/QBuffer.h"
@@ -564,8 +563,6 @@ struct CacheStoreInputs {
 
     int layer_id = 0;
 };
-
-using ParamsPtr = std::shared_ptr<void>;
 
 struct AttentionCommonInputs {
     // see detailed comments at GptModelInputs

@@ -13,7 +13,7 @@
 #include "3rdparty/flashinfer/flashinfer.h"
 #include "flashmla/flashmla.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
-
+#include "rtp_llm/cpp/devices/DeviceFactory.h"
 #ifdef USING_CUDA12
 #include "rtp_llm/cpp/devices/cuda_impl/CudaXqa.h"
 #endif

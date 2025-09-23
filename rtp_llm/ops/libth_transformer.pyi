@@ -1036,6 +1036,16 @@ class PyModelInputs:
     input_ids: torch.Tensor
     attention_inputs: PyAttentionInputs
 
+class ParamsBase:
+    def fill_params(
+        self,
+        sequence_lengths: torch.Tensor,
+        input_lengths: torch.Tensor,
+        kv_cache_block_id_host: torch.Tensor,
+        batch_size: int,
+        seq_size_per_block: int,
+    ) -> None: ...
+
 class PyModelOutputs:
     hidden_states: torch.Tensor
     params_ptr: ParamsBase

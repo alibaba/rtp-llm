@@ -21,7 +21,7 @@ bool XQAAttnOp::support(torch_ext::PyAttentionInputs attn_inputs) {
                          attn_configs_.tokens_per_block);
 }
 
-XQAParamsPtr XQAAttnOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
+ParamsBasePtr XQAAttnOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
     XQAParamsPtr params     = std::make_shared<XQAParams>();
     int          batch_size = attn_inputs.sequence_lengths.size(0);
     BufferPtr    kv_cache_block_id_host, kv_cache_block_id_device;
@@ -41,7 +41,8 @@ XQAParamsPtr XQAAttnOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
     params->max_seq_len      = attn_inputs.sequence_lengths.max().item<int32_t>();
     params->sequence_lengths = attn_inputs.sequence_lengths;
     params->kv_block_array.cache_type = attn_configs_.kv_cache_dtype;
-    return params;
+
+    return ParamsBasePtr(params);
 }
 
 torch::Tensor
@@ -84,7 +85,8 @@ XQAAttnOp::forward(const torch::Tensor& input, std::optional<torch_ext::KVCache>
 }
 
 void registerXQAAttnOp(const py::module& m) {
-    pybind11::class_<XQAParams, std::shared_ptr<XQAParams>>(m, "XQAParams").def(pybind11::init<>());
+    pybind11::class_<XQAParams, std::shared_ptr<XQAParams>, rtp_llm::ParamsBase>(m, "XQAParams")
+        .def(pybind11::init<>());
     pybind11::class_<XQAAttnOp>(m, "XQAAttnOp")
         .def(pybind11::init<GptInitParameter>(), py::arg("gpt_init_parameter"))
         .def("support", &XQAAttnOp::support, py::arg("attn_inputs").noconvert())

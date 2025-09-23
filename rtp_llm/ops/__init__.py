@@ -174,6 +174,7 @@ try:
     )
     from libth_transformer import MultimodalInput as MultimodalInputCpp
     from libth_transformer import (
+        ParamsBase,
         PyAttentionInputs,
         PyCacheStoreInputs,
         PyModelInitResources,

@@ -19,6 +19,27 @@ void registerPyOpDefs(pybind11::module& m) {
     pybind11::class_<caffe2::TypeMeta>(m, "TypeMeta").def(pybind11::init<>());
 
     pybind11::class_<PyCacheStoreInputs>(m, "PyCacheStoreInputs").def(pybind11::init<>());
+    pybind11::class_<PyCaptureMetaData>(m, "PyCaptureMetaData").def(pybind11::init<>());
+
+    pybind11::class_<rtp_llm::ParamsBase, std::shared_ptr<rtp_llm::ParamsBase>>(m, "ParamsBase")
+        .def(pybind11::init<>())
+        .def(
+            "fill_params",
+            [](rtp_llm::ParamsBase& self,
+               torch::Tensor        sequence_lengths,
+               torch::Tensor        input_lengths,
+               torch::Tensor        kv_cache_block_id_host,
+               int                  batch_size,
+               int                  seq_size_per_block) {
+                self.fillParams(
+                    sequence_lengths, input_lengths, kv_cache_block_id_host, batch_size, seq_size_per_block);
+            },
+            pybind11::arg("sequence_lengths"),
+            pybind11::arg("input_lengths"),
+            pybind11::arg("kv_cache_block_id_host"),
+            pybind11::arg("batch_size"),
+            pybind11::arg("seq_size_per_block"),
+            "Fill parameters for CUDA graph execution");
 
     pybind11::class_<PyAttentionInputs>(m, "PyAttentionInputs")
         .def(pybind11::init<>())
@@ -29,6 +50,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readonly("cu_seqlens", &PyAttentionInputs::cu_seqlens)
         .def_readonly("kv_cache_block_id_host", &PyAttentionInputs::kv_cache_block_id_host)
         .def_readonly("kv_cache_block_id_device", &PyAttentionInputs::kv_cache_block_id_device)
+        .def_readonly("dtype", &PyAttentionInputs::dtype)
         .def_readonly("kv_block_offset", &PyAttentionInputs::kv_block_offset)
         .def_readonly("cu_seqlens", &PyAttentionInputs::cu_seqlens)
         .def_readonly("padding_offset", &PyAttentionInputs::padding_offset)

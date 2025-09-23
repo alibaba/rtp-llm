@@ -48,6 +48,11 @@ struct PyCacheStoreInputs {
     bool                     mla_kvcache     = false;
 };
 
+// for cuda grpah capture
+struct PyCaptureMetaData {
+    int capture_batch_size{1};
+};
+
 struct PyAttentionInputs {
     bool             is_prefill;
     torch::Tensor    prefix_lengths;

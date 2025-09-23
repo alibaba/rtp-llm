@@ -29,7 +29,7 @@ bool FlashInferPrefillOp::support(torch_ext::PyAttentionInputs attn_inputs) {
         device_, attn_configs_, prefix_lengths_host, input_lengths_host, dtype, false);
 }
 
-FlashInferAttnParamsPtr FlashInferPrefillOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
+ParamsBasePtr FlashInferPrefillOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
     auto      prefix_lengths_host   = torchTensor2Buffer(attn_inputs.prefix_lengths);
     auto      sequence_lengths_host = torchTensor2Buffer(attn_inputs.sequence_lengths);
     auto      input_lengths_host    = torchTensor2Buffer(attn_inputs.input_lengths);
@@ -53,7 +53,7 @@ FlashInferAttnParamsPtr FlashInferPrefillOp::prepare(torch_ext::PyAttentionInput
                                                 false);
     FlashInferAttnParamsPtr attn_params(params, (FlashInferAttnParams*)params.get());
     RTP_LLM_CHECK_WITH_INFO(!attn_params->decode_plan, "flash infer params should gen prefill plan");
-    return attn_params;
+    return ParamsBasePtr(attn_params);
 }
 
 torch::Tensor FlashInferPrefillOp::forward(const torch::Tensor&              q,
@@ -108,7 +108,7 @@ bool FlashInferDecodeOp::support(torch_ext::PyAttentionInputs attn_inputs) {
     return FlashInferAttnParams::checkDecode(device_, attn_configs_, torchDTypeToDataType(attn_inputs.dtype));
 }
 
-FlashInferAttnParamsPtr FlashInferDecodeOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
+ParamsBasePtr FlashInferDecodeOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
     auto      sequence_lengths_host = torchTensor2Buffer(attn_inputs.sequence_lengths);
     auto      input_lengths_host    = torchTensor2Buffer(attn_inputs.input_lengths);
     BufferPtr kv_cache_block_id_host, kv_cache_block_id_device;
@@ -127,7 +127,7 @@ FlashInferAttnParamsPtr FlashInferDecodeOp::prepare(torch_ext::PyAttentionInputs
                                                 false);
     FlashInferAttnParamsPtr attn_params(params, (FlashInferAttnParams*)params.get());
     RTP_LLM_CHECK_WITH_INFO(attn_params->decode_plan, "flash infer params should gen decode plan");
-    return attn_params;
+    return ParamsBasePtr(attn_params);
 }
 
 torch::Tensor FlashInferDecodeOp::forward(const torch::Tensor&              q,
@@ -170,7 +170,8 @@ torch::Tensor FlashInferDecodeOp::forward(const torch::Tensor&              q,
 }
 
 void registerFlashInferOp(const py::module& m) {
-    pybind11::class_<FlashInferAttnParams, std::shared_ptr<FlashInferAttnParams>>(m, "FlashInferAttnParams")
+    pybind11::class_<FlashInferAttnParams, std::shared_ptr<FlashInferAttnParams>, rtp_llm::ParamsBase>(
+        m, "FlashInferAttnParams")
         .def(pybind11::init<>());
     pybind11::class_<FlashInferPrefillOp>(m, "FlashInferPrefillOp")
         .def(pybind11::init<GptInitParameter>(), py::arg("gpt_init_parameter"))

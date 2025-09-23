@@ -8,7 +8,7 @@ namespace rtp_llm {
 
 class AttentionConfigs;
 
-struct FlashInferAttnParams {
+struct FlashInferAttnParams: ParamsBase {
 private:
     BufferPtr float_workspace;
     BufferPtr int_workspace;

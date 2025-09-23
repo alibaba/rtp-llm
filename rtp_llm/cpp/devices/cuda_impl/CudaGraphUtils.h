@@ -31,7 +31,8 @@ public:
     }
 
 public:
-    std::shared_ptr<rtp_llm::FlashInferAttnParams> params_{nullptr};
+    // for attention params
+    rtp_llm::ParamsBasePtr params_ptr{nullptr};
     // for output
     at::Tensor decoder_layer_hidden_states_;
     // for input

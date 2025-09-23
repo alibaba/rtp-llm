@@ -1,8 +1,7 @@
 import logging
-from typing import Optional
+from typing import Any, Optional
 
-import torch
-from torch import nn
+from torch import Tensor, nn
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_loader.model_weight_info import ModelWeights
@@ -33,6 +32,8 @@ class GptModelBase(nn.Module):
         self.micro_batch_size: int = (
             1 if config.device_resource_config.enable_layer_micro_batch == 0 else 2
         )
+        ## (batch_size -> fmha_params)
+        self.params_dict: dict[int, Any] = {}
 
         logging.info(
             f"GptModelBase initialized with layer_num={self.layer_num}, "
@@ -51,6 +52,27 @@ class GptModelBase(nn.Module):
             )
         return True
 
+    ## for cuda graph attn kernel params' fill
+    def fill_params(
+        self,
+        sequence_lengths: Tensor,
+        input_lengths: Tensor,
+        kv_cache_block_id_host: Tensor,
+        replay_batch_size: int,
+        capture_batch_size: int,
+        seq_size_per_block: int,
+    ):
+        assert capture_batch_size in self.params_dict
+        params_ptr = self.params_dict[capture_batch_size]
+        assert params_ptr is not None
+        params_ptr.fillParams(
+            sequence_lengths,
+            input_lengths,
+            kv_cache_block_id_host,
+            replay_batch_size,
+            seq_size_per_block,
+        )
+
     def forward(self, inputs: PyModelInputs) -> PyModelOutputs:
         raise NotImplementedError("forward method must be implemented in subclass")
 
@@ -61,7 +83,3 @@ class GptModelBase(nn.Module):
             if impl.support():
                 return impl
         raise Exception(f"can not find fmha type: {attn_inputs.fmha_type}")
-
-    def get_fmha_type(self, attn_inputs: PyAttentionInputs):
-        fmha_impl = self.get_fmha_impl(attn_inputs)
-        return fmha_impl.fmha_type()

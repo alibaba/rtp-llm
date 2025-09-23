@@ -12,13 +12,13 @@ except ImportError:
     logging.info("rope kv cache not available, skipped.")
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.ops import FMHAType, KVCache, PyAttentionInputs
 from rtp_llm.models_py.modules.kvcache_store import WriteCacheStoreOp
+from rtp_llm.ops import FMHAType, KVCache, ParamsBase, PyAttentionInputs
 
 
 class FMHAImplBase(object):
     fmha_impl: Any
-    fmha_params: Any
+    fmha_params: ParamsBase
     rope_params: Any
     rope_kvcache_impl: Any
     write_cache_store_impl: Any
@@ -41,15 +41,12 @@ class FMHAImplBase(object):
             self.rope_kvcache_impl = rope_kvcache_impl
             self.prepare(attn_inputs)
             self.attn_inputs = attn_inputs
-            if (
-                self.attn_inputs.is_prefill
-                and self.attn_inputs.cache_store_inputs
-            ):
+            if self.attn_inputs.is_prefill and self.attn_inputs.cache_store_inputs:
                 self.write_cache_store_impl = WriteCacheStoreOp(
                     self.attn_inputs.input_lengths,
                     self.attn_inputs.prefix_lengths,
                     self.attn_inputs.kv_cache_block_id_host,
-                    self.attn_inputs.cache_store_inputs
+                    self.attn_inputs.cache_store_inputs,
                 )
 
     def forward(self, qkv: torch.Tensor, kv_cache: Optional[KVCache]) -> torch.Tensor:
@@ -125,7 +122,9 @@ try:
         def __init__(
             self, config: GptInitModelParameters, attn_inputs: PyAttentionInputs
         ) -> None:
-            super().__init__(FlashInferPrefillOp(config.gpt_init_params), attn_inputs, config)
+            super().__init__(
+                FlashInferPrefillOp(config.gpt_init_params), attn_inputs, config
+            )
 
         @staticmethod
         def fmha_type() -> FMHAType:
@@ -147,7 +146,9 @@ try:
         def __init__(
             self, config: GptInitModelParameters, attn_inputs: PyAttentionInputs
         ) -> None:
-            super().__init__(FlashInferDecodeOp(config.gpt_init_params), attn_inputs, config)
+            super().__init__(
+                FlashInferDecodeOp(config.gpt_init_params), attn_inputs, config
+            )
 
         @staticmethod
         def fmha_type() -> FMHAType:

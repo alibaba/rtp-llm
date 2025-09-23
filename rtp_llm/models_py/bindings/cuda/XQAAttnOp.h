@@ -14,7 +14,7 @@ public:
     XQAAttnOp(const GptInitParameter& gpt_init_parameter);
     bool support(torch_ext::PyAttentionInputs attn_inputs);
 
-    XQAParamsPtr prepare(torch_ext::PyAttentionInputs attn_inputs);
+    ParamsBasePtr prepare(torch_ext::PyAttentionInputs attn_inputs);
 
     torch::Tensor
     forward(const torch::Tensor& input, std::optional<torch_ext::KVCache> kv_cache, const XQAParamsPtr& params);

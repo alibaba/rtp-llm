@@ -4,7 +4,7 @@
 
 namespace rtp_llm {
 
-struct XQAParams {
+struct XQAParams: public ParamsBase {
     KVBlockArray  kv_block_array;
     size_t        batch_size;
     size_t        max_seq_len;

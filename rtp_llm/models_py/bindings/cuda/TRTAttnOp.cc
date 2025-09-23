@@ -15,7 +15,7 @@ bool TRTPrefillOp::support(torch_ext::PyAttentionInputs attn_inputs) {
     return fmha_config_.enable_paged_trt_fmha && attn_configs_.kv_cache_dtype != KvCacheDataType::INT8;
 }
 
-TRTAttnPtr TRTPrefillOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
+ParamsBasePtr TRTPrefillOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
     static_scale_        = torch::ones({1}, torch::TensorOptions(torch::kFloat32).device(torch::kCUDA));
     int       batch_size = attn_inputs.input_lengths.size(0);
     BufferPtr kv_cache_block_id_host, kv_cache_block_id_device;
@@ -44,7 +44,7 @@ TRTAttnPtr TRTPrefillOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
                               DataType::TYPE_FP8_E4M3 :
                               torchDTypeToDataType(attn_inputs.dtype);
     cufmha_runner_      = device_->selectCuFMHARunner(attn_configs_, attn_dtype, false);
-    return attn_params;
+    return ParamsBasePtr(attn_params);
 }
 
 // template<typename T>

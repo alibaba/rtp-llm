@@ -6,6 +6,7 @@ cc_library(
     hdrs = [
         "OpDefs.h",
         "OpDefsUtils.h",
+        "ParamsBase.h",
     ],
     srcs = [
         "OpDefs.cc",
