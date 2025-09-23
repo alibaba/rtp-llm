@@ -31,12 +31,7 @@ while true; do
         echo "Error: Empty response from merge service"
         exit 1
     fi
-
-    status=$(echo "$response" | grep -o '"status":"[^"]*"' | cut -d':' -f2 | tr -d '"')
-
-    echo "Response: $response"
-    echo "Current status: $status"
-
+    
     # 检查是否超时
     CURRENT_TIME=$(date +%s)
     ELAPSED_TIME=$((CURRENT_TIME - START_TIME))
@@ -45,18 +40,21 @@ while true; do
         exit 1
     fi
 
-    if [ "$status" != "PENDING" ]; then
-        echo "Merge process completed with status: $status"
-        if [ "$status" = "true" ]; then
-            echo "Merge completed successfully"
+    status_json=$(echo "$response" | jq -r '.status')
+
+    if [ "$status_json" == "PENDING" ]; then
+        echo "Merge is still pending..."
+        sleep 5
+        continue
+    else
+        success=$(echo "$status_json" | jq -r '.success')
+        echo "Merge completed with status: $success"
+        echo "Response: $response"
+        if [ "$success" = "true" ]; then
             exit 0
         else
-            echo "Merge failed with status: $status"
-            echo "Response details: $response"
             exit 1
         fi
         break
     fi
-
-    sleep 5
 done
