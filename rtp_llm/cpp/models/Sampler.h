@@ -2,8 +2,8 @@
 
 #include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/utils/DFAUtil.h"
-#include "rtp_llm/cpp/logits_processor/LogitsProcessorStates.h"
-#include "rtp_llm/cpp/dataclass/SampleInfos.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
+#include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/devices/DeviceBase.h"
 

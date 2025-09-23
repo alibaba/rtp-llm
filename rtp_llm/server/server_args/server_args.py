@@ -26,7 +26,6 @@ from rtp_llm.server.server_args.generate_group_args import init_generate_group_a
 from rtp_llm.server.server_args.hw_kernel_group_args import init_hw_kernel_group_args
 from rtp_llm.server.server_args.jit_group_args import init_jit_group_args
 from rtp_llm.server.server_args.kv_cache_group_args import init_kv_cache_group_args
-from rtp_llm.server.server_args.threefs_group_args import init_threefs_group_args
 from rtp_llm.server.server_args.load_group_args import init_load_group_args
 from rtp_llm.server.server_args.lora_group_args import init_lora_group_args
 from rtp_llm.server.server_args.misc_group_args import init_misc_group_args
@@ -57,6 +56,7 @@ from rtp_llm.server.server_args.sparse_group_args import init_sparse_group_args
 from rtp_llm.server.server_args.speculative_decoding_group_args import (
     init_speculative_decoding_group_args,
 )
+from rtp_llm.server.server_args.threefs_group_args import init_threefs_group_args
 from rtp_llm.server.server_args.vit_group_args import init_vit_group_args
 from rtp_llm.server.server_args.worker_group_args import init_worker_group_args
 
@@ -209,9 +209,13 @@ class EnvArgumentParser(argparse.ArgumentParser):
             return self._env_mappings.copy()
 
 
-def setup_args():
-    parser = EnvArgumentParser(description="RTP LLM")
+def init_all_group_args(parser: EnvArgumentParser) -> None:
+    """
+    初始化所有参数组到解析器中
 
+    Args:
+        parser: EnvArgumentParser实例
+    """
     init_batch_decode_scheduler_group_args(parser)
     init_cache_store_group_args(parser)
     init_concurrent_group_args(parser)
@@ -246,6 +250,13 @@ def setup_args():
     init_worker_group_args(parser)
     init_jit_group_args(parser)
     init_pd_separation_group_args(parser)
+
+
+def setup_args():
+    parser = EnvArgumentParser(description="RTP LLM")
+
+    # 使用统一的函数初始化所有参数组
+    init_all_group_args(parser)
 
     parser.parse_args()
 

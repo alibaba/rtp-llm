@@ -20,6 +20,7 @@ from rtp_llm.config.py_config_modules import (
 from rtp_llm.config.quant_config import (
     Fp8BlockWiseQuantConfig,
     Fp8PerChannelCompressedQuantConfig,
+    Fp8PerTensorCompressedQuantConfig,
     QuantizationConfig,
     init_quant_config,
 )
@@ -1256,6 +1257,7 @@ class GptInitModelParameters:
         if quant_method == "compressed-tensors":
             config_groups = quant_config["config_groups"]
             weights_config = config_groups["group_0"]["weights"]
+            activation_config = config_groups["group_0"]["input_activations"]
             bits = weights_config["num_bits"]
             if (
                 weights_config["type"] == "float"
@@ -1263,6 +1265,24 @@ class GptInitModelParameters:
                 and weights_config["strategy"] == "channel"
             ):
                 quant_method = Fp8PerChannelCompressedQuantConfig.get_method()
+            elif (
+                weights_config["type"] == "float"
+                and bits == 8
+                and weights_config["strategy"] == "tensor"
+            ):
+                quant_method = Fp8PerTensorCompressedQuantConfig.get_method()
+                return Fp8PerTensorCompressedQuantConfig.from_config(
+                    {
+                        "bits": bits,
+                        "method": quant_method,
+                        "group_size": group_size,
+                        "is_quanted": True,
+                        "dynamic": activation_config["dynamic"],
+                        "act_scale_suffix": ".input_scale",
+                        "weight_scale_suffix": ".weight_scale",
+                    }
+                )
+
         return QuantizationConfig.from_config(
             {
                 "bits": bits,

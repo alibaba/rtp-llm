@@ -50,7 +50,7 @@ cc_library(
         "@local_config_cuda//cuda:cudart",
         "//3rdparty/trt_fused_multihead_attention:trt_fused_multihead_attention_header",
         ":memory_utils",
-        "//rtp_llm/cpp/kernels:kernels",
+        "//rtp_llm/cpp/kernels:kernels_cu",
         "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_impl",
         "//3rdparty/contextFusedMultiHeadAttentionSm70:trt_sm70_fmha_impl",
         "//3rdparty/trt_fused_multihead_attention:trt_fused_multihead_attention_impl",
@@ -139,10 +139,14 @@ cc_library(
         "nccl/nccl_utils.h",
     ],
     deps = torch_deps() + select({
-        "@//:using_cuda": [":cuda_utils",
-                           "@local_config_cuda//cuda:cuda_headers",
-                           "@local_config_cuda//cuda:cudart",],
-        "@//:using_rocm": ["//rtp_llm/cpp/rocm:rocm_utils"],
+        "@//:using_cuda": [
+            ":cuda_utils",
+            "@local_config_cuda//cuda:cuda_headers",
+            "@local_config_cuda//cuda:cudart",
+        ],
+        "@//:using_rocm": [
+            "//rtp_llm/cpp/rocm:rocm_utils",
+        ],
         "//conditions:default": [],
     }),
     copts = copts(),
@@ -231,7 +235,7 @@ cc_library(
         "//rtp_llm/cpp/core:types",
         "@local_config_cuda//cuda:cuda",
         "@local_config_cuda//cuda:cudart",
-    ],
+    ] + torch_deps(),
     implementation_deps = [
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/config:static_config",
@@ -263,18 +267,19 @@ cc_library(
     srcs = [
     ],
     hdrs = [
-        "Dispatch.h"],
+        "Dispatch.h"
+    ],
     deps = [
         ":nccl_util",
         ":cublas",
         ":cufmha",
-        "cuggemm",
+        ":cuggemm",
         ":cuda_utils",
         ":cuda_fmha_utils",
         ":custom_ar",
         ":comm_buffer",
         ":memory_utils",
-        "//rtp_llm/cpp/kernels:kernels",
+        "//rtp_llm/cpp/kernels:kernels_cu",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:system_utils",
         "@local_config_cuda//cuda:cuda_headers",
@@ -357,3 +362,7 @@ cc_library(
     include_prefix = "src",
     visibility = ["//visibility:public"],
 )
+
+
+
+

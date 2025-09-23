@@ -4,7 +4,8 @@
 #include <pybind11/embed.h>
 #include <torch/extension.h>
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
-
+#include "rtp_llm/models_py/bindings/ParamsBase.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 namespace torch_ext {
 
 struct KVCache {
@@ -61,7 +62,6 @@ struct PyAttentionInputs {
     torch::Tensor padding_offset;
 
     // for write cache store
-
     std::optional<PyCacheStoreInputs> cache_store_inputs;
 };
 
@@ -71,7 +71,19 @@ struct PyModelInputs {
 };
 
 struct PyModelOutputs {
-    torch::Tensor hidden_states;
+    torch::Tensor          hidden_states;
+    rtp_llm::ParamsBasePtr params_ptr{nullptr};
+
+    PyModelOutputs() = default;
+    PyModelOutputs(torch::Tensor hidden_states, std::shared_ptr<rtp_llm::ParamsBase> params_ptr):
+        hidden_states(std::move(hidden_states)), params_ptr(std::move(params_ptr)) {}
+
+    // Constructor with default values
+    PyModelOutputs(torch::Tensor hidden_states): hidden_states(std::move(hidden_states)), params_ptr(nullptr) {}
+
+    // Constructor with default hidden_states
+    PyModelOutputs(std::shared_ptr<rtp_llm::ParamsBase> params_ptr):
+        hidden_states(torch::Tensor()), params_ptr(std::move(params_ptr)) {}
 };
 
 void registerPyOpDefs(pybind11::module& m);

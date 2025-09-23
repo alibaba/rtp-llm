@@ -12,7 +12,7 @@
 #include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/devices/arm_impl/ArmDevice.h"
-#include "rtp_llm/cpp/models_weight/W.h"
+#include "rtp_llm/cpp/models/models_weight/W.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
 #include "kai/ukernels/matmul/matmul_clamp_f32_bf16p_bf16p/kai_matmul_clamp_f32_bf16p8x4_bf16p12x4b_8x12_neon_mmla.h"

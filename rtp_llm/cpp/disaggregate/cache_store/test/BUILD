@@ -1,7 +1,7 @@
 package(default_visibility = ["//rtp_llm/cpp/disaggregate/cache_store:__subpackages__"])
 
 load("//:def.bzl", "copts")
-load("//rtp_llm/cpp/devices:device_defs.bzl", "device_impl_target", "device_test_envs", "device_linkopts")
+load("//rtp_llm/cpp/devices:device_defs.bzl", "device_impl_target", "device_test_envs")
 
 test_base_sources = [
     "test_util/BlockBufferUtil.cpp",
@@ -42,7 +42,6 @@ cc_test(
         "DEVICE_RESERVE_MEMORY_BYTES": "128000000",
     },
     copts = ["-fno-access-control"] + copts(),
-    linkopts = device_linkopts(),
     exec_properties = {'gpu':'A10'},
     linkstatic = 1,
 )

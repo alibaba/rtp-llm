@@ -1,7 +1,7 @@
 #pragma once
 
-#include "rtp_llm/cpp/http_server/http_server/HttpResponseWriter.h"
-#include "rtp_llm/cpp/http_server/http_server/HttpRequest.h"
+#include "rtp_llm/cpp/api_server/http_server/http_server/HttpResponseWriter.h"
+#include "rtp_llm/cpp/api_server/http_server/http_server/HttpRequest.h"
 #include "rtp_llm/cpp/api_server/WeightsLoader.h"
 
 namespace autil {

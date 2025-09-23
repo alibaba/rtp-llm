@@ -6,9 +6,9 @@
 
 #define private public
 #include "rtp_llm/cpp/multimodal_processor/MultimodalProcessor.h"
-#include "rtp_llm/cpp/dataclass/Query.h"
+#include "rtp_llm/cpp/multimodal_processor/MultimodalTypes.h"
 #include "rtp_llm/cpp/devices/testing/TestBase.h"
-#include "rtp_llm/cpp/th_op/GptInitParameter.h"
+#include "rtp_llm/cpp/config/GptInitParameter.h"
 
 using namespace std;
 

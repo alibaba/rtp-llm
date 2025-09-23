@@ -6,7 +6,7 @@
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/models/NativeDeviceGraphModel.h"
 #include "rtp_llm/cpp/models/Sampler.h"
-#include "rtp_llm/cpp/th_op/GptInitParameter.h"
+#include "rtp_llm/cpp/config/GptInitParameter.h"
 
 using namespace std;
 
@@ -60,7 +60,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
         {device_,
          params.gpt_weights,
          genModelDescription(params.gpt_init_parameter),
-         cache_manager ? ((optional<CacheManager::KVCacheBuffer>)cache_manager->kvCacheBuffer()) : nullopt,
+         cache_manager ? ((optional<KVCacheAllocator::KVCacheBuffer>)cache_manager->kvCacheBuffer()) : nullopt,
          params.model_id});
 
     if (params.gpt_init_parameter.ffn_disaggregate_config.enable_ffn_disaggregate) {

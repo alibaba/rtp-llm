@@ -1,8 +1,8 @@
 #include "rtp_llm/cpp/models/Sampler.h"
 #include "rtp_llm/cpp/utils/ScopeGuard.h"
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
-#include "rtp_llm/cpp/logits_processor/BaseLogitsProcessor.h"
-#include "rtp_llm/cpp/logits_processor/LogitsProcessorStates.h"
+#include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
 #include <unordered_set>
 
 using namespace std;

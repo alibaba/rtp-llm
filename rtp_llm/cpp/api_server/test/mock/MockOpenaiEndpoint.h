@@ -3,7 +3,7 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
-#include "rtp_llm/cpp/openai/OpenaiEndpoint.h"
+#include "rtp_llm/cpp/api_server/openai/OpenaiEndpoint.h"
 
 namespace rtp_llm {
 

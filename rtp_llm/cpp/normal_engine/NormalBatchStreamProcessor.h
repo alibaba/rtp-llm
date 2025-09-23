@@ -1,9 +1,9 @@
 #pragma once
 
 #include "rtp_llm/cpp/devices/DeviceBase.h"
-#include "rtp_llm/cpp/th_op/GptInitParameter.h"
-#include "rtp_llm/cpp/dataclass/MergedQuery.h"
-#include "rtp_llm/cpp/stream/StreamGroups.h"
+#include "rtp_llm/cpp/config/GptInitParameter.h"
+#include "rtp_llm/cpp/models/SampleInfos.h"
+#include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
 #include "absl/status/statusor.h"
 #include "absl/status/status.h"
 

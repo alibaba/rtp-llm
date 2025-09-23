@@ -1,7 +1,7 @@
 load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 load("//rtp_llm/cpp/devices:device_defs.bzl",
-    "device_impl_target", "device_test_envs", "device_linkopts")
+    "device_impl_target", "device_test_envs")
 
 test_copts = [
     "-fno-access-control",
@@ -11,7 +11,7 @@ py_test (
     name = "model_rpc_client_test",
     srcs = ["model_rpc_client_test.py"],
     deps = [
-        "//rtp_llm/cpp:model_rpc_client",
+        "//rtp_llm/cpp/model_rpc:model_rpc_client",
         "//rtp_llm:testlib",
         "//rtp_llm/test/model_test/test_util:test_util",
     ],
@@ -23,8 +23,8 @@ py_test (
 
 test_deps = [
     "//rtp_llm/cpp/devices/testing:device_test_utils",
-    "//rtp_llm/cpp:models",
-    "//:gpt_init_params",
+    "//rtp_llm/cpp/models:models",
+    "//rtp_llm/cpp/config:gpt_init_params",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",
 ] + device_impl_target()
@@ -36,11 +36,11 @@ test_deps = [
 #     ],
 #     copts = test_copts,
 #     deps = [
-#         "//rtp_llm/cpp/proto:model_rpc_service_cc_proto",
+#         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
 #         "//rtp_llm/cpp:components",
 #         "@com_google_googletest//:gtest",
 #         "@com_google_googletest//:gtest_main",
-#         "//rtp_llm/cpp:model_rpc_server",
+#         "//rtp_llm/cpp/model_rpc:model_rpc_server",
 #         "//rtp_llm/cpp/utils:utils",
 #     ] + torch_deps(),
 # )
@@ -52,11 +52,11 @@ cc_test(
     ],
     copts = test_copts,
     deps = [
-        "//rtp_llm/cpp/proto:model_rpc_service_cc_proto",
-        "//rtp_llm/cpp:model_rpc_server",
-        "//:gpt_init_params",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "//rtp_llm/cpp/model_rpc:model_rpc_server",
+        "//rtp_llm/cpp/config:gpt_init_params",
         "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp:dataclass",
+        "//rtp_llm/cpp/dataclass:dataclass",
         "//rtp_llm/cpp/devices:devices_base",
         "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
         "//rtp_llm/cpp/devices/testing:device_test_utils",

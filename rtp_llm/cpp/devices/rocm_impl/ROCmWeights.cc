@@ -1,6 +1,6 @@
 #include "rtp_llm/cpp/devices/rocm_impl/ROCmDevice.h"
 #include "rtp_llm/cpp/rocm/quantizePreprocessors.h"
-#include "rtp_llm/cpp/th_op/th_utils.h"
+#include "rtp_llm/cpp/pybind/th_utils.h"
 
 using namespace std;
 using namespace torch_ext;

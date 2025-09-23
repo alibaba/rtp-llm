@@ -8,32 +8,12 @@
 #include <stdexcept>
 #include <mutex>
 #include <vector>
-#include "rtp_llm/cpp/utils/PyUtils.h"
+#include "rtp_llm/cpp/pybind/PyUtils.h"
 
 #include <cstdlib>
 #include <iostream>
 
 namespace rtp_llm {
-
-void getPaddingOffset(
-    int32_t* padding_offset, int32_t* prefill_length, int32_t* prefix_length, int32_t batch_size, int32_t max_seq_len) {
-    // do cumulated sum
-    int32_t cum_offset = 0;
-    int32_t index      = 0;
-    for (int32_t i = 0; i < batch_size; i++) {
-        int32_t seq_len = prefill_length[i];
-        if (prefix_length) {
-            seq_len += prefix_length[i];
-        }
-        if (padding_offset) {
-            for (int32_t j = 0; j < seq_len; j++) {
-                padding_offset[index] = cum_offset;
-                index++;
-            }
-        }
-        cum_offset += max_seq_len - seq_len;
-    }
-}
 
 PyWrappedModel::~PyWrappedModel() {
     try {
@@ -88,23 +68,6 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
             device_->clone({*inputs.kv_cache_block_id, AllocationType::DEVICE, {"kv_cache_block_id"}});
         py_attn_inputs.kv_cache_block_id_device = Buffer2torchTensor(kv_cache_block_id_device, false);
     }
-}
-
-// Helper function to calculate and set padding offset
-void PyWrappedModel::calculatePaddingOffset(torch_ext::PyAttentionInputs& py_attn_inputs) {
-    int     batch_size   = py_attn_inputs.input_lengths.size(0);
-    int32_t total_tokens = py_attn_inputs.cu_seqlens[batch_size].item<int32_t>();
-
-    // inputs_length:  [1,2,1,1] ,total_tokens = 5
-    // padding_offsets: [0,1,1,1,2]
-    int  max_seq_len         = py_attn_inputs.input_lengths.max().item<int32_t>();
-    auto padding_offset_host = torch::zeros({total_tokens}, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
-    getPaddingOffset(padding_offset_host.data_ptr<int32_t>(),
-                     py_attn_inputs.input_lengths.data_ptr<int32_t>(),
-                     py_attn_inputs.prefix_lengths.data_ptr<int32_t>(),
-                     batch_size,
-                     max_seq_len);
-    py_attn_inputs.padding_offset = padding_offset_host.cuda();
 }
 
 // Helper function to call forwardPostLayers with common parameters
@@ -249,8 +212,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             py_model_outputs      = outputs.cast<PyModelOutputs>();
         }
         auto hidden_states_tensor = py_model_outputs.hidden_states;
-
-        auto hidden_states = torchTensor2Buffer(hidden_states_tensor);
+        auto hidden_states        = torchTensor2Buffer(hidden_states_tensor);
 
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
 

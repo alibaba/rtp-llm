@@ -6,7 +6,7 @@
 #include "rtp_llm/cpp/devices/OpData.h"
 #include "rtp_llm/cpp/core/Event.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
-#include "rtp_llm/cpp/stats/ExpertStats.h"
+#include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
 #include "rtp_llm/cpp/devices/GraphBase.h"
 #include "rtp_llm/cpp/devices/NativeGraphRunnerBase.h"
 
@@ -87,7 +87,7 @@ public:
     }
 
     void         traceMemoryUsage();
-    virtual void printDebugInfo(){};
+    virtual void printDebugInfo() {};
     bool         enableDevicePerf() const {
         return enable_device_perf_;
     }
@@ -113,7 +113,7 @@ public:
     virtual GraphBase*       getDeviceGraphRunner(const DeviceInitParams& params,
                                                   py::object              py_instance,
                                                   int                     kv_cache_block_offset,
-                                                  bool                    is_embedding = false) {
+                                                  bool                    is_prefill_cuda_graph_mode = false) {
         throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }
     void setCacheStore(std::shared_ptr<rtp_llm::CacheStore> cache_store);
@@ -199,10 +199,10 @@ protected:
     AllocationType getMemAllocationType(const MemoryType type);
 
 private:
-    DeviceBase(const DeviceBase&) = delete;
+    DeviceBase(const DeviceBase&)            = delete;
     DeviceBase& operator=(const DeviceBase&) = delete;
     DeviceBase(DeviceBase&&)                 = delete;
-    DeviceBase& operator=(DeviceBase&&) = delete;
+    DeviceBase& operator=(DeviceBase&&)      = delete;
 
 private:
     virtual IAllocator* getAllocator()     = 0;

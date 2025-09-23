@@ -25,7 +25,8 @@ build --experimental_cc_implementation_deps
 build --copt -DOPENSSL_IS_BORINGSSL
 build --experimental_cc_shared_library
 build --linkopt="-lm"
-build --action_env LIBRARY_PATH=/opt/conda310/lib
+build --action_env LIBRARY_PATH="/lib64:/opt/conda310/lib/"
+build --host_action_env LIBRARY_PATH="/lib64:/opt/conda310/lib/"
 build --define=grpc_no_ares=true
 build --define=xft_use_icx=true
 build --define=frontend=false
@@ -83,10 +84,6 @@ build:cuda12_6 --config=cuda12
 build:cuda12_6 --action_env TF_CUDA_VERSION="12.6"
 build:cuda12_6 --host_action_env TF_CUDA_VERSION="12.6"
 build:cuda12_6 --copt="-D_GLIBCXX_USE_CXX11_ABI=1"
-
-build:frontend --config=cuda12_6
-build:frontend --define=frontend=true
-build:frontend --copt="-DUSE_FRONTEND=1"
 
 build:cpu --copt="-DENABLE_BF16=1"
 build:cpu --define=using_cuda=false --define=using_cuda_nvcc=false --define=using_cpu=true

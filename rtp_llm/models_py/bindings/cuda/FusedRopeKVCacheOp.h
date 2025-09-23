@@ -1,7 +1,7 @@
 #pragma once
 
 #include "rtp_llm/models_py/bindings/cuda/FMHACudaBase.h"
-#include "rtp_llm/cpp/th_op/GptInitParameter.h"
+#include "rtp_llm/cpp/config/GptInitParameter.h"
 #include "rtp_llm/cpp/kernels/kv_cache/kv_cache_utils.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include <optional>

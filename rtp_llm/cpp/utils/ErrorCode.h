@@ -43,6 +43,7 @@ enum class ErrorCode {
     DECODE_MALLOC_FAILED                  = 8211,
     LOAD_KV_CACHE_FAILED                  = 8212,
     WAIT_TO_RUN_TIMEOUT                   = 8213,
+    KEEP_ALIVE_TIMEOUT                    = 8214,
 
     // cache store error
     LOAD_CACHE_TIMEOUT                   = 8300,
@@ -111,6 +112,8 @@ inline std::string ErrorCodeToString(ErrorCode code) {
             return "REMOTE_LOAD_KV_CACHE_FAILED";
         case ErrorCode::WAIT_TO_RUN_TIMEOUT:
             return "WAIT_TO_RUN_TIMEOUT";
+        case ErrorCode::KEEP_ALIVE_TIMEOUT:
+            return "KEEP_ALIVE_TIMEOUT";
         case ErrorCode::REMOTE_GENERATE_FAILED:
             return "REMOTE_GENERATE_FAILED";
         case ErrorCode::RPC_FINISH_FAILED:

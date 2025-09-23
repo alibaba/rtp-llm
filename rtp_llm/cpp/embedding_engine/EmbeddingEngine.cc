@@ -1,6 +1,5 @@
 #include "rtp_llm/cpp/embedding_engine/EmbeddingEngine.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
-#include "rtp_llm/cpp/engine_base/EngineBase.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include <exception>
 

@@ -12,11 +12,13 @@ from rtp_llm.utils.model_weight import W
 if utils.is_cuda():
     from libth_transformer.rtp_llm_ops import FusedMoEOp, SelectTopkOp
 
-    from rtp_llm.models_py.modules.ep.layers import EPMoE
+    # Import EP MoE implementations
+    from rtp_llm.models_py.modules.ep.ep_moe import create_ep_moe_instance
 else:
     logging.info("can't import from rtp_llm_ops and ep.layers, only support cuda!")
     FusedMoEOp = None
     SelectTopkOp = None
+    create_ep_moe_instance = None
 
 
 class ModelMoESparseBlock(nn.Module):
@@ -59,7 +61,7 @@ class ModelMoESparseBlock(nn.Module):
                     weights, W.moe_gate, None, None, config
                 )
             # Use EP MoE for FP8 quantized models
-            self.experts = EPMoE(config, weights, layer_idx)
+            self.experts = create_ep_moe_instance(config, weights, layer_idx)
             self.use_fp8_path = True
         else:
             # Use traditional MoE path
@@ -74,8 +76,8 @@ class ModelMoESparseBlock(nn.Module):
                 self.fused_moe_op = FusedMoEOp(config)
                 self.use_fp8_path = False
             else:
-                # Fallback to EP MoE
-                self.experts = EPMoE(config, weights, layer_idx)
+                # Use EP MoE implementation
+                self.experts = create_ep_moe_instance(config, weights, layer_idx)
                 self.use_fp8_path = True
 
     def _should_use_fp8_linear(

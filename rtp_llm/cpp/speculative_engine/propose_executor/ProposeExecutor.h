@@ -3,9 +3,9 @@
 #include "absl/status/status.h"
 #include "rtp_llm/cpp/dataclass/EngineInitParameter.h"
 #include "rtp_llm/cpp/cache/CacheManager.h"
-#include "rtp_llm/cpp/stream/GenerateStream.h"
+#include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/Executor.h"
-#include "rtp_llm/cpp/lora/LoraManager.h"
+#include "rtp_llm/cpp/models/lora/LoraManager.h"
 
 namespace rtp_llm {
 

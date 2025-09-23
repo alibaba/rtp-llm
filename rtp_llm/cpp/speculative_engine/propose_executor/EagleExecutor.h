@@ -1,7 +1,7 @@
 #pragma once
 
 #include "rtp_llm/cpp/cache/CacheManager.h"
-#include "rtp_llm/cpp/dataclass/MergedQuery.h"
+#include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/cpp/models/GptModel.h"
 #include "rtp_llm/cpp/models/MTPModel.h"
 #include "rtp_llm/cpp/models/Eagle3Model.h"

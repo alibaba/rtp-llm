@@ -22,6 +22,8 @@ namespace rtp_llm {
         string new_error_msg  = "decode addr is " + prefill_context.decode_addr + ", ";                                \
         new_error_msg += "execute time is " + std::to_string(prefill_context.executeTimeMs()) + "ms, ";                \
         new_error_msg += "request timeout is " + std::to_string(prefill_context.request_timeout_ms) + "ms, ";          \
+        new_error_msg += "rpc connection pointer is "                                                                  \
+                         + std::to_string((int64_t)prefill_context.grpc_connection.channel.get()) + ", ";              \
         if (prefill_context.getStream()) {                                                                             \
             auto first_token_rt_ms = prefill_context.getStream()->getTimeInfo().first_token_rt_us / 1000;              \
             if (first_token_rt_ms) {                                                                                   \
@@ -49,6 +51,9 @@ namespace rtp_llm {
                 prefill_context.closeGrpcConnection();                                                                 \
             } else if (error_msg.find("Deadline Exceeded") != std::string::npos) {                                     \
                 new_error_code = ErrorCode::DEADLINE_EXCEEDED;                                                         \
+                prefill_context.closeGrpcConnection();                                                                 \
+            } else if (error_msg.find("keepalive watchdog timeout") != std::string::npos) {                            \
+                new_error_code = ErrorCode::KEEP_ALIVE_TIMEOUT;                                                        \
                 prefill_context.closeGrpcConnection();                                                                 \
             }                                                                                                          \
             new_error_msg += error_msg;                                                                                \

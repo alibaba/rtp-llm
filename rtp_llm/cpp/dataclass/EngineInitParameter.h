@@ -8,7 +8,7 @@
 #include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/devices/Weights.h"
-#include "rtp_llm/cpp/th_op/GptInitParameter.h"
+#include "rtp_llm/cpp/config/GptInitParameter.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/dataclass/LoadBalance.h"
 

@@ -3,7 +3,7 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
-#include "rtp_llm/cpp/http_server/http_server/HttpResponseWriter.h"
+#include "rtp_llm/cpp/api_server/http_server/http_server/HttpResponseWriter.h"
 
 namespace http_server {
 

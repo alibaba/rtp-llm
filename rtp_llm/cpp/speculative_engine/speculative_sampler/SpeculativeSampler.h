@@ -2,7 +2,7 @@
 
 #include "absl/status/statusor.h"
 #include "rtp_llm/cpp/dataclass/EngineInitParameter.h"
-#include "rtp_llm/cpp/stream/GenerateStream.h"
+#include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 
 namespace rtp_llm {
 

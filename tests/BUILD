@@ -1,7 +1,6 @@
 load("//:def.bzl", "copts", "cuda_copts", "rocm_copts")
 load("//bazel:arch_select.bzl", "torch_deps", "fa_deps", "cuda_register")
 
-
 ################################ py test ################################
 fa_deps()
 cuda_register()
@@ -28,10 +27,10 @@ cc_library(
         ":fa_hdrs",
         "//rtp_llm/cpp/cuda:allocator_torch",
         "//rtp_llm/cpp/cuda:cuda",
-        "//rtp_llm/cpp/kernels:kernels",
-        "//:th_utils",
+        "//rtp_llm/cpp/kernels:kernels_cu",
+        "//rtp_llm/cpp/pybind:th_utils",
         "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
-        "//:gpt_init_params",
+        "//rtp_llm/cpp/config:gpt_init_params",
     ],
     copts = cuda_copts(),
     alwayslink = True,
@@ -449,21 +448,10 @@ cc_test(
     copts = cuda_copts(),
     deps = [
         "@com_google_googletest//:gtest",
-        "//rtp_llm/cpp/kernels:kernels_cu"
-    ],
+        "//rtp_llm/cpp/kernels:kernels_cu",
+        "@local_config_cuda//cuda:cuda_driver",
+    ] + torch_deps(),
     data = [
-    ],
-    linkopts = [
-        "-lpython3.10",
-        "-ltorch",
-        "-lc10",
-        "-ltorch_cpu",
-        "-ltorch_python",
-        "-L/usr/local/cuda/lib64",
-        "-lnvToolsExt",
-        "-L/usr/local/cuda/extras/CUPTI/lib64",
-        "-lcupti",
-        "-lcuda"
     ],
     exec_properties = {'gpu':'A10'},
 )

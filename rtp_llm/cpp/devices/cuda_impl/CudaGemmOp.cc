@@ -4,7 +4,7 @@
 #include "rtp_llm/cpp/kernels/activation_kernels.h"
 #include "rtp_llm/cpp/utils/ShapeCheck.h"
 #include "rtp_llm/cpp/core/BufferHelper.h"
-#include "rtp_llm/cpp/deep_gemm/DeepGemmPlugin.h"
+#include "rtp_llm/cpp/cuda/deep_gemm/DeepGemmPlugin.h"
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 #include "autil/StringUtil.h"
 

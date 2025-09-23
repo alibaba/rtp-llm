@@ -1,5 +1,5 @@
 #include "rtp_llm/cpp/devices/arm_impl/ArmDevice.h"
-#include "rtp_llm/cpp/th_op/th_utils.h"
+#include "rtp_llm/cpp/pybind/th_utils.h"
 #include "rtp_llm/cpp/devices/arm_impl/gemm_opt/ArmGemmKernel.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 

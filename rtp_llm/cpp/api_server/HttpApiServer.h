@@ -9,7 +9,7 @@
 #include "rtp_llm/cpp/embedding_engine/EmbeddingEngine.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalProcessor.h"
 
-#include "rtp_llm/cpp/http_server/http_server/HttpServer.h"
+#include "rtp_llm/cpp/api_server/http_server/http_server/HttpServer.h"
 #include "rtp_llm/cpp/api_server/ConcurrencyControllerUtil.h"
 #include "rtp_llm/cpp/api_server/TokenProcessor.h"
 #include "rtp_llm/cpp/api_server/EmbeddingEndpoint.h"

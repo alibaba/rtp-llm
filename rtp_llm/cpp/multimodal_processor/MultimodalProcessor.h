@@ -2,13 +2,13 @@
 
 #include <vector>
 #include <torch/python.h>
-#include "rtp_llm/cpp/dataclass/Query.h"
-#include "rtp_llm/cpp/dataclass/EmbeddingQuery.h"
+#include "rtp_llm/cpp/multimodal_processor/MultimodalTypes.h"
+#include "rtp_llm/cpp/embedding_engine/EmbeddingQuery.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
-#include "rtp_llm/cpp/utils/PyUtils.h"
+#include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/core/Buffer.h"
-#include "rtp_llm/cpp/th_op/GptInitParameter.h"
+#include "rtp_llm/cpp/config/GptInitParameter.h"
 
 namespace py = pybind11;
 

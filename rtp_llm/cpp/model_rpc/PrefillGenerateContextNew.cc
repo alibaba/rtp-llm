@@ -6,7 +6,7 @@
 namespace rtp_llm {
 
 ErrorInfo PrefillGenerateContextNew::init(const std::shared_ptr<EngineBase>& engine) {
-    RTP_LLM_LOG_INFO("request [%s] start to prepare generate context", request_key.c_str());
+    RTP_LLM_LOG_DEBUG("request [%s] start to prepare generate context", request_key.c_str());
 
     generate_input                                        = QueryConverter::transQuery(&request->input());
     generate_input->generate_config->pd_separation        = true;

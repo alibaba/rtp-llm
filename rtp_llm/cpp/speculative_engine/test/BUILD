@@ -5,28 +5,6 @@ test_copts = [
     "-fno-access-control",
 ] + copts()
 
-test_linkopts = [
-    "-lpython3.10",
-    "-ltorch",
-    "-lc10",
-    "-ltorch_cpu",
-    "-ltorch_python",
-    "-L/usr/local/cuda/lib64",
-    "-lcudart",
-    "-lnccl",
-    "-lnvToolsExt",
-] + select({
-    "@//:using_cuda": [
-        "-ltorch_cuda",
-        "-lc10_cuda",
-    ],
-    "@//:using_rocm": [
-        "-ltorch_hip",
-        "-lc10_hip",
-    ],
-    "//conditions:default": [
-    ],
-})
 
 cc_library(
     name = "sp_mock_engine",
@@ -38,7 +16,7 @@ cc_library(
     copts = test_copts,
     deps =  [
         "//rtp_llm/cpp/normal_engine/test:mock_engine",
-        "//rtp_llm/cpp:speculative_engine",
+        "//rtp_llm/cpp/speculative_engine:speculative_engine",
     ] + torch_deps(),
     alwayslink = 1,
     visibility = ["//visibility:public"],
@@ -51,7 +29,6 @@ cc_test(
     ]),
     data = [],
     copts = test_copts,
-    linkopts = test_linkopts,
     deps =  [
         ":sp_mock_engine",
     ],
@@ -68,7 +45,6 @@ cc_test(
     ]),
     data = [],
     copts = test_copts,
-    linkopts = test_linkopts,
     deps =  [
         ":sp_mock_engine",
     ],

@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-15 16:46+0800\n"
+"POT-Creation-Date: 2025-09-19 11:21+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -21,35 +21,45 @@ msgstr ""
 
 #: ../../README.md:1
 msgid "添加文档手册"
-msgstr ""
+msgstr "添加文档手册"
 
 #: ../../README.md:3
 msgid "1. 添加文档"
-msgstr ""
+msgstr "1. 添加文档"
 
-#: ../../README.md:5
-msgid "2. 添加索引"
-msgstr ""
+#: ../../README.md:4
+msgid "如果是设计可以添加MD文档，如果是使用文档可以在Jupyter Notebook 上运行则建议添加ipynb文档"
+msgstr "如果是设计可以添加MD文档，如果是使用文档可以在Jupyter Notebook 上运行则建议添加ipynb文档"
 
 #: ../../README.md:7
-msgid "3. 增加中文"
-msgstr ""
+msgid "2. 添加索引"
+msgstr "2. 添加索引"
 
-#: ../../README.md:9
-msgid "进入 docs 目录。"
-msgstr ""
-
-#: ../../README.md:10
-msgid "运行命令 `make update`。此命令会提取所有可翻译的消息并更新 PO 翻译文件。"
-msgstr ""
+#: ../../README.md:8
+msgid "docs 的索引由.rst 文件构建，添加好文档之后根据文档的用途将文档放到对应的目录结构"
+msgstr "docs 的索引由.rst 文件构建，添加好文档之后根据文档的用途将文档放到对应的目录结构"
 
 #: ../../README.md:11
-msgid "手动修改新增的翻译文件，文件位于 docs/locales/zh_CN/LC_MESSAGES 下，补全对应语言的 msgstr 字段。"
-msgstr ""
+msgid "3. 增加中文"
+msgstr "3. 增加中文"
 
-#: ../../README.md:12
+#: ../../README.md:13
+msgid "进入 docs 目录。"
+msgstr "进入 docs 目录。"
+
+#: ../../README.md:14
+msgid "运行命令 `make update`。此命令会提取所有可翻译的消息并更新 PO 翻译文件。"
+msgstr "运行命令 `make update`。此命令会提取所有可翻译的消息并更新 PO 翻译文件。"
+
+#: ../../README.md:15
+msgid "手动修改新增的翻译文件，文件位于 docs/locales/zh_CN/LC_MESSAGES 下，补全对应语言的 msgstr 字段。"
+msgstr "手动修改新增的翻译文件，文件位于 docs/locales/zh_CN/LC_MESSAGES 下，补全对应语言的 msgstr 字段。"
+
+#: ../../README.md:16
 msgid ""
 "运行命令 `make html`，此命令会同时生成中英两语的 HTML 版本。您也可以分别运行 `make html-zh` 和 `make "
 "html-en` 命令生成中英文两个版本。"
 msgstr ""
+"运行命令 `make html`，此命令会同时生成中英两语的 HTML 版本。您也可以分别运行 `make html-zh` 和 `make "
+"html-en` 命令生成中英文两个版本。"
 

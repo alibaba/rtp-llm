@@ -6,8 +6,8 @@
 #include <vector>
 
 #include "rtp_llm/cpp/utils/StringUtil.h"
-#include "rtp_llm/cpp/tokenizer/Tokenizer.h"
-#include "rtp_llm/cpp/th_op/GptInitParameter.h"
+#include "rtp_llm/cpp/api_server/tokenizer/Tokenizer.h"
+#include "rtp_llm/cpp/config/GptInitParameter.h"
 #include "autil/legacy/jsonizable.h"
 
 namespace rtp_llm {

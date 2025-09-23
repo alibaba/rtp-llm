@@ -26,10 +26,12 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readonly("prefix_lengths", &PyAttentionInputs::prefix_lengths)
         .def_readonly("sequence_lengths", &PyAttentionInputs::sequence_lengths)
         .def_readonly("input_lengths", &PyAttentionInputs::input_lengths)
+        .def_readonly("cu_seqlens", &PyAttentionInputs::cu_seqlens)
         .def_readonly("kv_cache_block_id_host", &PyAttentionInputs::kv_cache_block_id_host)
         .def_readonly("kv_cache_block_id_device", &PyAttentionInputs::kv_cache_block_id_device)
         .def_readonly("kv_block_offset", &PyAttentionInputs::kv_block_offset)
-        .def_readonly("dtype", &PyAttentionInputs::dtype)
+        .def_readonly("cu_seqlens", &PyAttentionInputs::cu_seqlens)
+        .def_readonly("padding_offset", &PyAttentionInputs::padding_offset)
         .def_readonly("cache_store_inputs", &PyAttentionInputs::cache_store_inputs);
 
     pybind11::class_<PyModelInputs>(m, "PyModelInputs")
@@ -41,8 +43,33 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("attention_inputs", &PyModelInputs::attention_inputs, "Attention inputs structure");
 
     pybind11::class_<PyModelOutputs>(m, "PyModelOutputs")
-        .def(pybind11::init<torch::Tensor>(), pybind11::arg("hidden_states"), "Initialize with hidden states tensor")
-        .def_readwrite("hidden_states", &PyModelOutputs::hidden_states, "Hidden states output tensor");
+        .def(pybind11::init<>(), "Default constructor")
+        .def(pybind11::init<torch::Tensor, std::shared_ptr<rtp_llm::ParamsBase>>(),
+             pybind11::arg("hidden_states"),
+             pybind11::arg("params_ptr"),
+             "Initialize with hidden states tensor and params pointer")
+        .def(pybind11::init<torch::Tensor>(),
+             pybind11::arg("hidden_states"),
+             "Initialize with hidden states tensor only (params_ptr defaults to nullptr)")
+        .def(pybind11::init<std::shared_ptr<rtp_llm::ParamsBase>>(),
+             pybind11::arg("params_ptr"),
+             "Initialize with params pointer only (hidden_states defaults to empty tensor)")
+        .def(pybind11::init([](torch::Tensor hidden_states, pybind11::object params_obj) {
+                 // Try to cast to shared_ptr, return nullptr if conversion fails
+                 std::shared_ptr<rtp_llm::ParamsBase> params_ptr = nullptr;
+                 try {
+                     params_ptr = pybind11::cast<std::shared_ptr<rtp_llm::ParamsBase>>(params_obj);
+                 } catch (const pybind11::cast_error& e) {
+                     // Conversion failed, params_ptr remains nullptr
+                     RTP_LLM_LOG_INFO("Failed to cast params_obj to shared_ptr<ParamsBase>: %s", e.what());
+                 }
+                 return PyModelOutputs(hidden_states, params_ptr);
+             }),
+             pybind11::arg("hidden_states"),
+             pybind11::arg("params_ptr"),
+             "Initialize with hidden states tensor and params pointer")
+        .def_readwrite("hidden_states", &PyModelOutputs::hidden_states, "Hidden states output tensor")
+        .def_readwrite("params_ptr", &PyModelOutputs::params_ptr, "Parameters pointer");
 }
 
 }  // namespace torch_ext

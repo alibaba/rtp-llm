@@ -5,11 +5,6 @@ test_copts = [
     "-fno-access-control",
 ] + copts()
 
-test_linkopts = [
-    "-lpython3.10",
-    "-ltorch",
-    "-lstdc++",
-]
 
 test_deps = [
     "//rtp_llm/cpp/devices/cpu_impl:cpu_impl",
@@ -25,7 +20,6 @@ cc_test(
     data = [],
     tags = ["cpu", ],
     copts = test_copts,
-    linkopts = test_linkopts,
     deps = test_deps,
 )
 
@@ -37,7 +31,6 @@ cc_test(
     data = [],
     tags = ["cpu", ],
     copts = test_copts,
-    linkopts = test_linkopts,
     deps = test_deps,
 )
 
@@ -49,7 +42,6 @@ cc_test(
     data = [],
     tags = ["cpu", ],
     copts = test_copts,
-    linkopts = test_linkopts,
     deps = test_deps,
 )
 
@@ -61,7 +53,6 @@ cc_test(
     data = [],
     tags = ["cpu", ],
     copts = test_copts,
-    linkopts = test_linkopts,
     deps = test_deps,
 )
 
@@ -73,7 +64,6 @@ cc_test(
     data = [],
     tags = ["cpu", "manual"],
     copts = test_copts,
-    linkopts = test_linkopts,
     deps = test_deps,
 )
 
@@ -85,7 +75,6 @@ cc_test(
     data = [],
     tags = ["cpu", "manual"],
     copts = test_copts,
-    linkopts = test_linkopts,
     deps = test_deps,
 )
 
@@ -97,6 +86,5 @@ cc_test(
     data = [],
     tags = ["cpu", ],
     copts = test_copts,
-    linkopts = test_linkopts,
     deps = test_deps,
 )

@@ -7,8 +7,8 @@
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
-#include "rtp_llm/cpp/lora/LoraManager.h"
-#include "rtp_llm/cpp/eplb/ExpertBalancer.h"
+#include "rtp_llm/cpp/models/lora/LoraManager.h"
+#include "rtp_llm/cpp/models/eplb/ExpertBalancer.h"
 
 namespace rtp_llm {
 

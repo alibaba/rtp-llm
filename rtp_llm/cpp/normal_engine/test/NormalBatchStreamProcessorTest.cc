@@ -5,8 +5,7 @@
 #define private public
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
-#include "rtp_llm/cpp/dataclass/Query.h"
-#include "rtp_llm/cpp/dataclass/MergedQuery.h"
+#include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/core/BufferHelper.h"
 #include "rtp_llm/cpp/devices/testing/TestBase.h"

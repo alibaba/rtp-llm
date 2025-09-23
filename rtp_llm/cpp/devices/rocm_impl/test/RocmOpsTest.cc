@@ -50,28 +50,6 @@ TEST_F(RocmOpsTest, MemoryCopy) {
     // TODO: calculate bandwidth
 }
 
-TEST_F(RocmOpsTest, TestOp) {
-    GTEST_LOG_(INFO) << "\n\n************************\n TestOp(vector add)\n************************";
-
-    unsigned long len           = 64;
-    ROCmDevice*   rocmDev       = static_cast<ROCmDevice*>(device_);
-    auto          torchDataType = dataTypeToTorchType(DataType::TYPE_FP32);
-
-    torch::Tensor tensorA = torch::rand({1, (long)len}, torch::Device(torch::kCPU)).to(torchDataType);
-    torch::Tensor tensorB = torch::rand({1, (long)len}, torch::Device(torch::kCPU)).to(torchDataType);
-    torch::print(tensorA);
-    torch::print(tensorB);
-    torch::Tensor tensorC_ref = torch::add(tensorA, tensorB);
-
-    BufferPtr     d_bufferA    = tensorToBuffer(tensorA);
-    BufferPtr     d_bufferB    = tensorToBuffer(tensorB);
-    BufferPtr     d_bufferC    = rocmDev->testVecAdd(d_bufferA, d_bufferB);
-    torch::Tensor tensorC_rslt = bufferToTensor(*d_bufferC);
-    torch::print(tensorC_rslt);
-
-    assertTensorClose(tensorC_rslt, tensorC_ref);
-}
-
 TEST_F(RocmOpsTest, testSelect) {
     auto src   = createBuffer<float>({6, 5}, {0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14,
                                               15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29});

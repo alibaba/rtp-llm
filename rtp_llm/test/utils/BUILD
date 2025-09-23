@@ -5,6 +5,12 @@ requirement([
     "torch",
 ])
 
+py_library(
+    name = "bench_util",
+    deps = [],
+    srcs = ["bench_util.py"],
+)
+
 py_binary(
     name = "gpu_lock",
     deps = [":torch"],

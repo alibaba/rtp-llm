@@ -275,7 +275,7 @@ class BaseFormatDetector(ABC):
 
                     # If the tool is still being parsed, send incremental changes
                     elif prev_arguments:
-                        prev_args_json = json.dumps(prev_arguments)
+                        prev_args_json = json.dumps(prev_arguments, ensure_ascii=False)
                         if cur_args_json != prev_args_json:
                             prefix = _find_common_prefix(prev_args_json, cur_args_json)
                             argument_diff = prefix[sent:]

@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-12 17:38+0800\n"
+"POT-Creation-Date: 2025-09-19 11:21+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -37,17 +37,17 @@ msgstr ""
 
 #: ../../release/v0.2.0/feature.md:6
 msgid ""
-"[PD Disaggregation](../../backend/pd_disaggregation.md) && [PD Entrance "
-"Transpose](../../backend/pd_entrace_transpose.md)"
+"[PD Disaggregation](../../backend/pd_disaggregation.ipynb) && [PD Entrance "
+"Transpose](../../backend/pd_entrance_transpose.md)"
 msgstr ""
-"[PD 解聚](../../backend/pd_disaggregation.md) && [PD 入口转置](../../backend/pd_entrace_transpose.md)"
+"[PD 分离](../../backend/pd_disaggregation.ipynb) && [PD "
+"入口转置](../../backend/pd_entrance_transpose.md)"
 
 #: ../../release/v0.2.0/feature.md:7
 msgid ""
 "[Attention Support more Backend](../../backend/attention_backend.md): "
 "XQA, FlashInfer"
-msgstr ""
-"[注意力支持更多后端](../../backend/attention_backend.md)：XQA, FlashInfer"
+msgstr "[注意力支持更多后端](../../backend/attention_backend.md)：XQA, FlashInfer"
 
 #: ../../release/v0.2.0/feature.md:8
 msgid "[Speculative Decoding](../../backend/speculative_decoding.md)"
@@ -61,9 +61,7 @@ msgstr "[EPLB](../../references/deepseek/reporter.md#eplb)"
 msgid ""
 "[MicroBatch & Overlapping](../../references/deepseek/reporter.md"
 "#microbatch-overlapping)"
-msgstr ""
-"[微批处理与重叠](../../references/deepseek/reporter.md#microbatch-overlapping)"
-""
+msgstr "[微批处理与重叠](../../references/deepseek/reporter.md#microbatch-overlapping)"
 
 #: ../../release/v0.2.0/feature.md:11
 msgid "[MTP](../../references/deepseek/reporter.md#mtp)"
@@ -140,7 +138,8 @@ msgid ""
 "reasoning, math, and code tasks.<br> [RTP-LLM provides Deepseek v3/R1 "
 "model-specific optimizations](../../references/deepseek/reporter.md)"
 msgstr ""
-"一系列先进的推理优化模型（包括一个671B MoE），通过强化学习训练；<br>在复杂推理、数学和代码任务上表现出色。<br>[RTP-LLM 提供 Deepseek v3/R1 模型特定优化](../../references/deepseek/reporter.md)"
+"一系列先进的推理优化模型（包括一个671B MoE），通过强化学习训练；<br>在复杂推理、数学和代码任务上表现出色。<br>[RTP-LLM "
+"提供 Deepseek v3/R1 模型特定优化](../../references/deepseek/reporter.md)"
 
 #: ../../release/v0.2.0/feature.md
 msgid "NV ✅<br> AMD ✅"
@@ -208,62 +207,55 @@ msgstr ""
 msgid ""
 "Meta’s open LLM series, spanning 7B to 400B parameters (Llama 2, 3, and "
 "new Llama 4) with well-recognized performance."
-msgstr ""
-"Meta的开源大语言模型系列，参数规模从7B到400B（Llama 2, 3, 和新Llama 4），性能卓越。"
+msgstr "Meta的开源大语言模型系列，参数规模从7B到400B（Llama 2, 3, 和新Llama 4），性能卓越。"
 
-#: ../../release/v0.2.0/feature.md
-msgid "**TBStars**"
-msgstr ""
-
-#: ../../release/v0.2.0/feature.md
-msgid "Alibaba Internal LLM"
-msgstr ""
-
-#: ../../release/v0.2.0/feature.md
-msgid "**TBStarsVL**"
-msgstr ""
-
-#: ../../release/v0.2.0/feature.md
-msgid "Series of advanced  Vision-language model series based on TBStars"
-msgstr ""
-
-#: ../../release/v0.2.0/feature.md
-msgid "**MixTBstars**"
-msgstr ""
-
-#: ../../release/v0.2.0/feature.md:35
+#: ../../release/v0.2.0/feature.md:32
 msgid "Bug Fixs"
 msgstr "错误修复"
 
-#: ../../release/v0.2.0/feature.md:37
+#: ../../release/v0.2.0/feature.md:34
 msgid "Question of omission"
 msgstr "遗漏问题"
 
-#: ../../release/v0.2.0/feature.md:38
+#: ../../release/v0.2.0/feature.md:35
 msgid "PD Entrance Transpose not worker with front app"
 msgstr "PD入口转置无法与前端应用配合工作"
 
-#: ../../release/v0.2.0/feature.md:39
+#: ../../release/v0.2.0/feature.md:36
 msgid "metrics of 3fs cache hit ratio is not accurate"
 msgstr "3fs缓存命中率指标不准确"
 
-#: ../../release/v0.2.0/feature.md:40
+#: ../../release/v0.2.0/feature.md:37
 msgid "too many dynamic lora need more **reserver_runtime_mem_mb**"
 msgstr "过多动态lora需要更多 **reserver_runtime_mem_mb**"
 
-#: ../../release/v0.2.0/feature.md:41
+#: ../../release/v0.2.0/feature.md:38
 msgid "AMD not support MoE models"
 msgstr "AMD不支持MoE模型"
 
-#: ../../release/v0.2.0/feature.md:42
+#: ../../release/v0.2.0/feature.md:39
 msgid "MoE model without shared_experter cannot use enable-layer-micro-batch"
 msgstr "没有shared_experter的MoE模型无法使用enable-layer-micro-batch"
 
-#: ../../release/v0.2.0/feature.md:45
+#: ../../release/v0.2.0/feature.md:42
 msgid "Performance"
 msgstr "性能"
 
-#: ../../release/v0.2.0/feature.md:47
+#: ../../release/v0.2.0/feature.md:44
 msgid "Compatibility"
 msgstr "兼容性"
 
+#~ msgid "**TBStars**"
+#~ msgstr ""
+
+#~ msgid "Alibaba Internal LLM"
+#~ msgstr ""
+
+#~ msgid "**TBStarsVL**"
+#~ msgstr ""
+
+#~ msgid "Series of advanced  Vision-language model series based on TBStars"
+#~ msgstr ""
+
+#~ msgid "**MixTBstars**"
+#~ msgstr ""

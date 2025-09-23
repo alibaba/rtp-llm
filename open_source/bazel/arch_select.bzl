@@ -4,26 +4,27 @@ load("@pip_arm_torch//:requirements.bzl", requirement_arm="requirement")
 load("@pip_gpu_cuda12_torch//:requirements.bzl", requirement_gpu_cuda12="requirement")
 load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm="requirement")
 load("//bazel:defs.bzl", "copy_so", "copy_so_inst")
-load("//rtp_llm/cpp/deep_gemm:template.bzl", "dpsk_gemm_so_num", "qwen_gemm_so_num")
+load("//rtp_llm/cpp/cuda/deep_gemm:template.bzl", "dpsk_gemm_so_num", "qwen_gemm_so_num")
 
 def copy_all_so():
     copy_so("//:th_transformer")
+    copy_so("//:th_transformer_config")
     copy_so("//rtp_llm/cpp/kernels:mmha1")
     copy_so("//rtp_llm/cpp/kernels:mmha2")
     copy_so("//rtp_llm/cpp/kernels:dmmha")
     copy_so("//rtp_llm/cpp/cuda:fa")
-    copy_so("//rtp_llm/cpp/cutlass:fpA_intB")
-    copy_so("//rtp_llm/cpp/cutlass:moe")
-    copy_so("//rtp_llm/cpp/cutlass:moe_sm90")
-    copy_so("//rtp_llm/cpp/cutlass:int8_gemm")
+    copy_so("//rtp_llm/cpp/cuda/cutlass:fpA_intB")
+    copy_so("//rtp_llm/cpp/cuda/cutlass:moe")
+    copy_so("//rtp_llm/cpp/cuda/cutlass:moe_sm90")
+    copy_so("//rtp_llm/cpp/cuda/cutlass:int8_gemm")
     copy_so("@flashinfer//:flashinfer_single_prefill")
     copy_so("@flashinfer//:flashinfer_single_decode")
     copy_so("@flashinfer//:flashinfer_batch_paged_prefill")
     copy_so("@flashinfer//:flashinfer_batch_paged_decode")
     copy_so("@flashinfer//:flashinfer_batch_ragged_prefill")
     # num of so
-    copy_so_inst("//rtp_llm/cpp/deep_gemm:deepgemm_dpsk", dpsk_gemm_so_num)
-    copy_so_inst("//rtp_llm/cpp/deep_gemm:deepgemm_qwen", qwen_gemm_so_num)
+    copy_so_inst("//rtp_llm/cpp/cuda/deep_gemm:deepgemm_dpsk", dpsk_gemm_so_num)
+    copy_so_inst("//rtp_llm/cpp/cuda/deep_gemm:deepgemm_qwen", qwen_gemm_so_num)
     copy_so("@flashinfer//:flashinfer_sm90")
     copy_so("@deep_ep//:deep_ep_cu")
 
@@ -135,13 +136,13 @@ def deep_ep_py_deps():
 def deep_gemm_deps():
     native.alias(
         name = "deep_gemm",
-        actual = "@deep_gemm//:deep_gemm",
+        actual = "@deep_gemm_ext//:deep_gemm",
         visibility = ["//visibility:public"],
     )
 
 def kernel_so_deps():
     return select({
-        "@//:default_cuda": [":libmmha1_so", ":libmmha2_so", ":libdmmha_so", ":libfa_so", ":libfpA_intB_so", ":libint8_gemm_so", ":libmoe_so", ":libmoe_sm90_so", ":libflashinfer_single_prefill_so", ":libflashinfer_single_decode_so", ":libflashinfer_batch_paged_prefill_so", ":libflashinfer_batch_paged_decode_so", ":libflashinfer_batch_ragged_prefill_so", ":libflashinfer_sm90_so", ":libdeepgemm_dpsk_inst_so", ":libdeepgemm_qwen_inst_so"],
+        "@//:using_cuda": [":libmmha1_so", ":libmmha2_so", ":libdmmha_so", ":libfa_so", ":libfpA_intB_so", ":libint8_gemm_so", ":libmoe_so", ":libmoe_sm90_so", ":libflashinfer_single_prefill_so", ":libflashinfer_single_decode_so", ":libflashinfer_batch_paged_prefill_so", ":libflashinfer_batch_paged_decode_so", ":libflashinfer_batch_ragged_prefill_so", ":libflashinfer_sm90_so", ":libdeepgemm_dpsk_inst_so", ":libdeepgemm_qwen_inst_so"],
         "@//:using_rocm": [":libmmha1_so", ":libmmha2_so", ":libdmmha_so", ":ck_copy"],
         "//conditions:default":[],
     })
@@ -154,10 +155,7 @@ def arpc_deps():
 def trt_plugins():
     native.alias(
         name = "trt_plugins",
-        actual = select({
-            "@//:using_cuda12": "//rtp_llm/cpp/trt_plugins:trt_plugins",
-            "//conditions:default": "//rtp_llm/cpp/trt_plugins:trt_plugins",
-        })
+        actual = "//rtp_llm/cpp/cuda/nv_trt_plugins:nv_trt_plugins",
     )
 
 def cuda_register():
@@ -178,8 +176,8 @@ def internal_deps():
 
 def jit_deps():
     return select({
-        "@//:frontend": [],
-        "//conditions:default": ["//rtp_llm/cpp/deep_gemm:jit_includes"],
+        "//:using_cuda": ["//rtp_llm/cpp/cuda/deep_gemm:jit_includes"],
+        "//conditions:default": [],
     })
 
 def select_py_bindings():

@@ -46,8 +46,13 @@ batchCopyRowAlignedKernel(char* const* __restrict__ dst, char const* const* __re
 
         CopyUnit* __restrict__ row_dst = reinterpret_cast<CopyUnit*>(base_dst_char + row_idx * SEG_SIZE);
 
+#if USING_CUDA
         CopyUnit temp = __ldcs(&row_src[lane_id]);
         __stcs(&row_dst[lane_id], temp);
+#elif USING_ROCM
+        CopyUnit temp = row_src[lane_id];
+        row_dst[lane_id] = temp;
+#endif
     }
 
     if constexpr (NeedsCleanup) {
@@ -107,20 +112,35 @@ static __global__ void batchCopy(char* __restrict__ const* __restrict__ dst,
             char* const       seg_dst = cur_dst + offset;
 
             if constexpr (IsAligned) {
+#if USING_CUDA
                 const auto tmp = __ldcs(reinterpret_cast<uint4 const*>(seg_src));
                 __stcs(reinterpret_cast<uint4*>(seg_dst), tmp);
+#elif USING_ROCM
+                const auto tmp = *reinterpret_cast<uint4 const*>(seg_src);
+                *reinterpret_cast<uint4*>(seg_dst) = tmp;
+#endif
             } else {
                 const int seg_offset = from_seg_offset + SEG_SIZE;
                 if (seg_offset <= cur_bytes) {
                     // aligned to segment size
+#if USING_CUDA
                     const auto tmp = __ldcs(reinterpret_cast<uint4 const*>(seg_src));
                     __stcs(reinterpret_cast<uint4*>(seg_dst), tmp);
+#elif USING_ROCM
+                    const auto tmp = *reinterpret_cast<uint4 const*>(seg_src);
+                    *reinterpret_cast<uint4*>(seg_dst) = tmp;
+#endif
                 } else {
                     // not aligned to segment size
                     if (offset + sizeof(uint4) <= cur_bytes) {
                         // aligned to sizeof(uint4)
+#if USING_CUDA
                         const auto tmp = __ldcs(reinterpret_cast<uint4 const*>(seg_src));
                         __stcs(reinterpret_cast<uint4*>(seg_dst), tmp);
+#elif USING_ROCM
+                        const auto tmp = *reinterpret_cast<uint4 const*>(seg_src);
+                        *reinterpret_cast<uint4*>(seg_dst) = tmp;
+#endif
                     }
 
                     const int rest_bytes = cur_bytes % sizeof(uint4);
@@ -128,11 +148,20 @@ static __global__ void batchCopy(char* __restrict__ const* __restrict__ dst,
                         // not aligned to sizeof(uint4)
                         const int byte_offset = cur_bytes - rest_bytes + lane_id;
                         if (byte_offset < cur_bytes) {
+#if USING_CUDA
                             const auto tmp = __ldcs(cur_src + byte_offset);
                             __stcs(cur_dst + byte_offset, tmp);
+#elif USING_ROCM
+                            const auto tmp = *(cur_src + byte_offset);
+                            *(cur_dst + byte_offset) = tmp;
+#endif
                         }
                     }
+#if USING_CUDA
                     __syncwarp();
+#elif USING_ROCM
+                    __syncthreads();
+#endif
                 }
             }
         }

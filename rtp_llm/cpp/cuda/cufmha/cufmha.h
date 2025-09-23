@@ -26,6 +26,7 @@ public:
            bool              can_use_trtv2_fmha_paged,
            bool              can_use_open_source_fmha,
            bool              can_use_open_source_fmha_paged,
+           bool              is_s_padded,
            cudaStream_t      stream);
 
     ~cufmha() = default;
@@ -117,6 +118,13 @@ public:
                         size_t            size_per_head,
                         float             q_scaling,
                         bool              use_linear_bias_slopes);
+    // for cuda graph batch prefill test
+    bool getIsPadded() {
+        return is_s_padded_;
+    }
+
+    // for cuda graph batch prefill test
+    void setIsPadded(bool is_s_padded);
 
 private:
     cudaStream_t getStream();
@@ -129,7 +137,7 @@ private:
 
     bool initOpenSourceFmhaAndCheckSupport();
 
-    tensorrt_llm::kernels::MHARunnerFixedParams createMHARunnerFixedParams(bool paged);
+    tensorrt_llm::kernels::MHARunnerFixedParams createMHARunnerFixedParams(bool paged, bool isSPadded = false);
     tensorrt_llm::kernels::MHARunnerParams      createMHARunnerParams(void*        input,
                                                                       void*        cu_seqlens,
                                                                       void*        cu_kv_seqlens,
@@ -172,18 +180,18 @@ private:
     DataType          dtype_;
     AttentionMaskType mtype_;
 
-    size_t head_num_;
-    size_t kv_head_num_;
-    size_t size_per_head_;
-    size_t size_per_head_v_;
-    size_t seq_size_per_block_;
-    float  q_scaling_;
-    bool   use_linear_bias_slopes_;
-    bool   support_trt_v1_fmha_;
-    bool   support_trt_v2_fhma_;
-    bool   support_trt_v2_paged_fmha_;
-    bool   support_open_source_fmha_;
-
+    size_t       head_num_;
+    size_t       kv_head_num_;
+    size_t       size_per_head_;
+    size_t       size_per_head_v_;
+    size_t       seq_size_per_block_;
+    float        q_scaling_;
+    bool         use_linear_bias_slopes_;
+    bool         support_trt_v1_fmha_;
+    bool         support_trt_v2_fhma_;
+    bool         support_trt_v2_paged_fmha_;
+    bool         support_open_source_fmha_;
+    bool         is_s_padded_{false};
     cudaStream_t stream_;
 };
 

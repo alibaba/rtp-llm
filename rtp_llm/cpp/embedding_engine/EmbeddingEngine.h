@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/embedding_engine/EmbeddingStream.h"
 #include "rtp_llm/cpp/embedding_engine/EmbeddingScheduler.h"
+#include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 
 namespace rtp_llm {
 

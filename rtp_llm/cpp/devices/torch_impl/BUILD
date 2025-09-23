@@ -12,14 +12,9 @@ cc_library(
     deps = [
         "//rtp_llm/cpp/devices:devices_base",
         "//rtp_llm/cpp/devices:device_utils",
-    ],
+    ] + torch_deps(),
     visibility = ["//visibility:public"],
     copts = copts(),
-    linkopts = [
-        "-lpython3.10",
-        "-ltorch",
-        "-lc10",
-    ],
 )
 
 cc_library(
@@ -30,9 +25,4 @@ cc_library(
     deps = torch_deps(),
     visibility = ["//visibility:public"],
     copts = copts(),
-    linkopts = [
-        "-lpython3.10",
-        "-ltorch",
-        "-lc10",
-    ],
 )

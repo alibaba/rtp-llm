@@ -16,7 +16,7 @@ cc_library(
         "//rtp_llm/cpp/devices:devices_base_impl",
         "//rtp_llm/cpp/core:cpu_allocator",
         "//rtp_llm/cpp/devices/arm_impl/type_bf16:hie_bfloat16",
-        "//:th_utils",
+        "//rtp_llm/cpp/pybind:th_utils",
         "@arm_compute//arm_compute:core_headers",
         "@arm_compute//arm_compute:runtime_headers",
         "@arm_compute//support",

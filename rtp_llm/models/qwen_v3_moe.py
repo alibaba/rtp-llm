@@ -8,6 +8,7 @@ from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
 from rtp_llm.models.qwen_v2 import QWenV2, QWenV2Weight
 from rtp_llm.models.qwen_v2_moe import Qwen2Moe, QWenV2MoeWeight
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
+from rtp_llm.models_py.model_desc.qwen3_moe import Qwen3MoeModel
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
@@ -88,8 +89,6 @@ class Qwen3Moe(Qwen2Moe):
         return config
 
     def _create_python_model(self) -> Optional[GptModelBase]:
-        from rtp_llm.models_py.model_desc.qwen3_moe import Qwen3MoeModel
-
         self.py_model = Qwen3MoeModel(self.config, self.weight)
         return self.py_model
 

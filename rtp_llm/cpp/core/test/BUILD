@@ -1,12 +1,6 @@
 load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 
-test_linkopts = [
-    "-lpython3.10",
-    "-ltorch",
-#     # "-ltorch_cpu",
-#     # "-ltorch_python",
-]
 
 
 test_deps = [
@@ -20,7 +14,6 @@ cc_test(
         "QBufferTest.cc",
     ],
     copts = copts(),
-    linkopts = test_linkopts,
     deps = test_deps + [
         "//rtp_llm/cpp/core:buffer",
         "//rtp_llm/cpp/core:types",

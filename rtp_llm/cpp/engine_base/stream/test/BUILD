@@ -1,0 +1,43 @@
+load("//:def.bzl", "copts")
+load("//bazel:arch_select.bzl", "torch_deps")
+
+test_copts = [
+    "-fno-access-control",
+] + copts()
+
+test_deps = [
+    "//rtp_llm/cpp/normal_engine:normal_engine",
+    "//rtp_llm/cpp/dataclass:dataclass",
+    "//rtp_llm/cpp/engine_base/stream:stream",
+    "//rtp_llm/cpp/devices/testing:device_test_utils",
+    "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
+    "//rtp_llm/cpp/config:gpt_init_params",
+] + torch_deps()
+
+cc_test(
+    name = "stream_cache_resource_test",
+    srcs = [
+        "StreamCacheResourceTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'A10'},
+)
+
+cc_test(
+    name = "generate_stream_test",
+    srcs = [
+        "GenerateStreamTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'A10'},
+)

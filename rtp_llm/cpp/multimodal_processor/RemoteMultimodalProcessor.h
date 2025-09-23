@@ -6,10 +6,10 @@
 #include <vector>
 #include <torch/python.h>
 #include "absl/status/statusor.h"
-#include "rtp_llm/cpp/dataclass/Query.h"
+#include "rtp_llm/cpp/multimodal_processor/MultimodalTypes.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
-#include "rtp_llm/cpp/utils/PyUtils.h"
+#include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/model_rpc/RPCPool.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalProcessor.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"

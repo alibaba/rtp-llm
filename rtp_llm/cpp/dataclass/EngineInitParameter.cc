@@ -1,9 +1,9 @@
 #include "rtp_llm/cpp/dataclass/EngineInitParameter.h"
-#include "rtp_llm/cpp/utils/PyUtils.h"
+#include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/core/BufferHelper.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
-#include "rtp_llm/cpp/models_weight/W.h"
+#include "rtp_llm/cpp/models/models_weight/W.h"
 #include <memory>
 using namespace std;
 

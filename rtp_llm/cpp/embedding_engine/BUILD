@@ -10,54 +10,15 @@ cc_library(
         "*.cc",
     ]),
     deps = [
-        "//rtp_llm/cpp:dataclass",
-        "//rtp_llm/cpp:models",
-        "//rtp_llm/cpp:schedulers",
-        "//rtp_llm/cpp:engine_base",
+        "//rtp_llm/cpp/engine_base:engine_base",
+        "//rtp_llm/cpp/engine_base/stream:stream",
+        "//rtp_llm/cpp/dataclass:dataclass",
+        "//rtp_llm/cpp/models:models",
         "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp:normal_engine",
-        "//rtp_llm/cpp:system_prompt",
-        "//rtp_llm/cpp:system_prompt_constructor",
-        ":embedding_handler_base",
-        ":embedding_handler",
     ],
     visibility = ["//visibility:public"]
 )
 
-cc_library(
-    name = "embedding_handler_base",
-    hdrs = [
-        "handlers/HandlerBase.h",
-    ],
-    deps = [
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/status:statusor",
-    ],
-    copts = copts(),
-    visibility = ["//visibility:public"]
-)
-
-cc_library(
-    name = "embedding_handler",
-    hdrs = glob([
-        "handlers/*.h",
-    ], exclude = [
-        "handlers/HandlerBase.h"
-    ]),
-    srcs = glob([
-        "handlers/*.cc",
-    ]),
-    deps = [
-        "//rtp_llm/cpp:stream",
-        ":embedding_handler_base",
-        "//rtp_llm/cpp:dataclass",
-        "//rtp_llm/cpp:models",
-        "//:th_op_hdrs",
-        "//rtp_llm/cpp/utils:core_utils",
-    ],
-    copts = copts(),
-    visibility = ["//visibility:public"]
-)
 
 cc_library(
     name = "embedding_engine_arpc_server_header",
@@ -86,7 +47,7 @@ cc_library(
         "@havenask//aios/network/arpc:arpc",
         ":embedding_engine",
         ":embedding_engine_arpc_server_header",
-        "//rtp_llm/cpp:multimodal_processor",
+        "//rtp_llm/cpp/multimodal_processor:multimodal_processor",
     ],
     visibility = ["//visibility:public"]
 )

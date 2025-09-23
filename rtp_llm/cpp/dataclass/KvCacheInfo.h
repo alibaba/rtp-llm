@@ -2,7 +2,7 @@
 
 #include <iostream>
 #include <vector>
-#include "rtp_llm/cpp/utils/PyUtils.h"
+#include "rtp_llm/cpp/pybind/PyUtils.h"
 namespace rtp_llm {
 struct KVCacheInfo {
     size_t               available_kv_cache = 0;

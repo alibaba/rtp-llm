@@ -320,7 +320,7 @@ msgstr ""
 
 #: ../../references/deepseek.md:73
 msgid "PD Disaggregation"
-msgstr "PD解聚"
+msgstr "PD分离"
 
 #: ../../references/deepseek.md:75
 msgid ""

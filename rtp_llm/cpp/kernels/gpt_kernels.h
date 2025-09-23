@@ -16,10 +16,12 @@
 
 #pragma once
 
+#include <cstdint>  // for uint64_t, int32_t, etc.
+#include <stdint.h>  // for compatibility with older compilers
+
 #if USING_CUDA
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
-#include "rtp_llm/cpp/cuda/memory_utils.h"
 #endif
 #if USING_ROCM
 #include <hip/hip_runtime.h>

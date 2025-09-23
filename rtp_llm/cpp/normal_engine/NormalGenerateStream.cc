@@ -178,7 +178,14 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     }
 
     // TODO: move it to better position
+    RTP_LLM_LOG_DEBUG("stream [%ld] finished: %d, pd_sep: %d, is_streaming: %d, need_remote_generate: %d",
+                      streamId(),
+                      finished_,
+                      queryPdSep(),
+                      isStreaming(),
+                      update_info.update_remote_generate);
     if (!finished_ && queryPdSep() && update_info.update_remote_generate) {
+        RTP_LLM_LOG_DEBUG("stream [%ld] set need_remote_generate", streamId());
         setNeedRemoteGenerateWithoutLock(true);
     }
 

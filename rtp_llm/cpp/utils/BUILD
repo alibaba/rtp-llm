@@ -4,17 +4,6 @@ load("//bazel:arch_select.bzl", "torch_deps")
 package(default_visibility = ["//:__subpackages__"])
 
 
-cc_library(
-    name = "rpc_error_code",
-    hdrs = [
-        "RpcErrorCode.h",
-    ],
-    deps = [
-        "//rtp_llm/cpp/proto:model_rpc_service_cc_proto",
-    ],
-    copts = copts(),
-    visibility = ["//visibility:public"],
-)
 
 # New modular targets
 cc_library(
@@ -110,15 +99,3 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-cc_library(
-    name = "py_utils",
-    hdrs = [
-        "PyUtils.h",
-    ],
-    srcs = [
-        "PyUtils.cc",
-    ],
-    deps = torch_deps(),
-    copts = copts(),
-    visibility = ["//visibility:public"],
-)

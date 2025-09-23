@@ -14,7 +14,6 @@ __all__ = [
     "DeviceExporter",
     "DeviceResourceConfig",
     "DeviceType",
-    "EmbeddingHandlerOp",
     "EngineScheduleInfo",
     "EngineTaskInfo",
     "EplbConfig",
@@ -46,7 +45,6 @@ __all__ = [
     "ServiceDiscoveryConfig",
     "SpecialTokens",
     "SpeculativeExecutionConfig",
-    "create_linear_softmax_handler",
     "get_block_cache_keys",
     "get_device",
 ]
@@ -200,13 +198,6 @@ class DeviceType:
     def name(self) -> str: ...
     @property
     def value(self) -> int: ...
-
-class EmbeddingHandlerOp:
-    def __init__(self) -> None: ...
-    def forward(
-        self, hidden_states: torch.Tensor, input_lengths: torch.Tensor
-    ) -> torch.Tensor: ...
-    def load_tensor(self, weights: dict[str, torch.Tensor]) -> None: ...
 
 class EngineScheduleInfo:
     finished_task_info_list: list[EngineTaskInfo]
@@ -1017,9 +1008,6 @@ class SpeculativeExecutionConfig:
     def to_string(self) -> str: ...
     def update_from_env(self) -> None: ...
 
-def create_linear_softmax_handler(
-    gpt_init_params: GptInitParameter,
-) -> EmbeddingHandlerOp: ...
 def get_block_cache_keys(token_ids_list: list[list[int]]) -> list[int]: ...
 def get_device() -> DeviceExporter: ...
 
@@ -1050,5 +1038,8 @@ class PyModelInputs:
 
 class PyModelOutputs:
     hidden_states: torch.Tensor
-
+    params_ptr: ParamsBase
+    def __init__(self) -> None: ...
+    def __init__(self, hidden_states: torch.Tensor, params_ptr: ParamsBase) -> None: ...
     def __init__(self, hidden_states: torch.Tensor) -> None: ...
+    def __init__(self, params_ptr: ParamsBase) -> None: ...

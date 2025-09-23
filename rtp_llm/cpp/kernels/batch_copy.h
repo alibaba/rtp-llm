@@ -15,7 +15,11 @@ void invokeBatchCopy(void* const*           dst,
                      size_t*                bytes,
                      size_t                 batch_size,
                      const BatchCopyConfig& config,
+#if USING_CUDA
                      cudaStream_t           stream);
+#elif USING_ROCM
+                     hipStream_t            stream);
+#endif
 
 }  // namespace kernels
 }  // namespace rtp_llm

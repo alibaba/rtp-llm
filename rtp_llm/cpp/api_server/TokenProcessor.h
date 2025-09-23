@@ -2,8 +2,8 @@
 
 #include <any>
 
-#include "rtp_llm/cpp/utils/PyUtils.h"
-#include "rtp_llm/cpp/dataclass/Query.h"
+#include "rtp_llm/cpp/pybind/PyUtils.h"
+#include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/api_server/TokenizerEncodeResponse.h"
 
 namespace rtp_llm {

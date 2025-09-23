@@ -1,18 +1,17 @@
-import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import torch
-import torch.distributed as dist
 from libth_transformer.rtp_llm_ops import trt_fp8_quantize_128
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.distribute.collective import Group
-from rtp_llm.distribute.deep_ep import get_deepep_wrapper
+from rtp_llm.models_py.distributed.deepep_wrapper import get_deepep_wrapper
 from rtp_llm.models_py.modules.moe import (
     ExpertForwardPayload,
     ExpertTokensMetadata,
     FusedMoeDataRouter,
     FusedMoEQuantConfig,
+    TopKWeightAndReduceContiguous,
+    TopKWeightAndReduceDelegate,
 )
 
 
@@ -33,6 +32,8 @@ class DeepepNormalRouter(FusedMoeDataRouter):
         self.ep_rank = config.ep_rank
         self.expert_num = config.expert_num
         self.expert_num_per_rank = self.expert_num // self.ep_size
+        self.num_dispatchers = config.world_size // config.tp_size
+        self.rank_expert_offset = self.ep_rank * self.expert_num_per_rank
         self.top_k = config.moe_topk_group
         self.deepep_buffer_wrapper = get_deepep_wrapper()
         self.use_fp8 = use_fp8
@@ -54,13 +55,14 @@ class DeepepNormalRouter(FusedMoeDataRouter):
     ) -> ExpertForwardPayload:
         if a1_scale is not None or a2_scale is not None:
             raise ValueError("DeepEPNormal a1_scale or a2_scale should be None")
+
         if self.use_fp8:
             a1, a1_scale = trt_fp8_quantize_128(a1, False)
             input = (a1, a1_scale)
         else:
             input = a1
         # pre dispatch
-        topk_ids = topk_ids.long()
+        # topk_ids = topk_ids.long()
         (
             num_tokens_per_rank,
             num_tokens_per_rdma_rank,
@@ -74,7 +76,7 @@ class DeepepNormalRouter(FusedMoeDataRouter):
             recv_topk_idx,
             recv_topk_weights,
             num_recv_tokens_per_expert_list,
-            handle,
+            self.handle,
             event2,
         ) = self.deepep_buffer_wrapper.buffer.dispatch(
             input,
@@ -92,12 +94,26 @@ class DeepepNormalRouter(FusedMoeDataRouter):
         else:
             expert_x = output
             expert_x_scale = None
-        self.handle = handle
+
+        expert_num_tokens = torch.tensor(
+            num_recv_tokens_per_expert_list, device=expert_x.device, dtype=torch.int32
+        )
+
+        if recv_topk_idx.numel() != 0 and not self.use_fp8:
+            expert_topk_ids = torch.where(
+                recv_topk_idx == -1,
+                num_experts - 1 if self.rank_expert_offset == 0 else 0,
+                recv_topk_idx + self.rank_expert_offset,
+            )
+        else:
+            expert_topk_ids = recv_topk_idx
+
         return ExpertForwardPayload(
             expert_x,
+            a1.dtype,
             expert_x_scale,
-            ExpertTokensMetadata(None, num_recv_tokens_per_expert_list),
-            recv_topk_idx,
+            ExpertTokensMetadata(expert_num_tokens, num_recv_tokens_per_expert_list),
+            expert_topk_ids,
             recv_topk_weights,
         )
 
@@ -109,10 +125,22 @@ class DeepepNormalRouter(FusedMoeDataRouter):
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: Any,
         extra_finalize_args: Optional[Dict[str, Any]],
-    ) -> None:
+    ) -> torch.Tensor:
+        if fused_expert_output.numel() != 0:
+            if isinstance(weight_and_reduce_impl, TopKWeightAndReduceDelegate):
+                weight_and_reduce_impl = TopKWeightAndReduceContiguous()
+            if weight_and_reduce_impl is not None and not self.use_fp8:
+                fused_expert_output = weight_and_reduce_impl.apply(
+                    fused_expert_output=fused_expert_output,
+                    topk_weights=topk_weights,
+                    topk_ids=topk_ids,
+                    apply_router_weight_on_input=apply_router_weight_on_input,
+                )
+
         assert self.handle is not None, "handler is None"
-        recv_x, _, event = self.deepep_buffer_wrapper.buffer.combine(
+        out_token, _, event = self.deepep_buffer_wrapper.buffer.combine(
             fused_expert_output, self.handle
         )
         self.handle = None
-        return recv_x
+        # out_token should be a tensor with shape and dtype like a1
+        return out_token

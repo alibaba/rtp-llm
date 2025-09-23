@@ -4,7 +4,7 @@
 #include <iterator>
 #include <torch/python.h>
 
-#include "rtp_llm/cpp/utils/PyUtils.h"
+#include "rtp_llm/cpp/pybind/PyUtils.h"
 
 #include "rtp_llm/cpp/api_server/Exception.h"
 #include "rtp_llm/cpp/api_server/ErrorResponse.h"

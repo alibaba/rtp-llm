@@ -1,7 +1,7 @@
 #pragma once
 
 #include "rtp_llm/cpp/cuda/cuda_utils.h"
-#include "rtp_llm/cpp/th_op/th_utils.h"
+#include "rtp_llm/cpp/pybind/th_utils.h"
 #include "trt_plugins/common/trtPluginsInterface.h"
 
 namespace trt_cutlass = tensorrt_llm::kernels::cutlass_kernels;

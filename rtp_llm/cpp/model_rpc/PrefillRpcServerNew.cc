@@ -339,13 +339,16 @@ ErrorInfo PrefillRpcServerNew::waitStoreCacheForAllRankDone(PrefillGenerateConte
             "request [%s] load kv cache failed, err: %s", prefill_context.request_key.c_str(), error_msg.c_str());
         return ErrorInfo(error_code, error_msg);
     }
+
+    // release kv resource
+    prefill_context.getStream()->releaseResource();
     return ErrorInfo::OkStatus();
 }
 
 grpc::Status PrefillRpcServerNew::RemoteStore(grpc::ServerContext*        server_context,
                                               const RemoteStoreRequestPB* request,
                                               RemoteStoreResponsePB*      response) {
-    RTP_LLM_LOG_INFO("request [%s] remote store", request->request_key().c_str());
+    RTP_LLM_LOG_DEBUG("request [%s] remote store", request->request_key().c_str());
     if (request->dp_rank() != maga_init_params_.gpt_init_parameter.dp_rank_) {
         RTP_LLM_LOG_WARNING("only load when in dp group, skip load for dp rank %d", request->dp_rank());
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "error dp rank");

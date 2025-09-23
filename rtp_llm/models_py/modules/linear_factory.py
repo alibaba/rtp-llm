@@ -8,15 +8,20 @@ import torch
 from torch import nn
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.models_py.modules import utils
 from rtp_llm.models_py.modules.linear import Linear
 
-# Try to import FP8 Linear
-try:
-    from rtp_llm.models_py.modules.fp8_linear import Fp8Linear
+if utils.is_cuda():
+    from rtp_llm.models_py.modules.fp8_linear import Fp8PerTensorLinear
+    try:
+        from rtp_llm.models_py.modules.fp8_linear import Fp8DeepGEMMLinear
 
-    FP8_LINEAR_AVAILABLE = True
-except ImportError:
-    Fp8Linear = None
+        FP8_LINEAR_AVAILABLE = True
+    except ImportError:
+        Fp8DeepGEMMLinear = None
+        FP8_LINEAR_AVAILABLE = False
+else:
+    Fp8DeepGEMMLinear = None
     FP8_LINEAR_AVAILABLE = False
 
 
@@ -39,7 +44,12 @@ class LinearFactory:
         # Check quantization method if available
         if hasattr(config.quant_config, "get_method"):
             quant_method = config.quant_config.get_method()
-            fp8_methods = ["FP8", "FP8_PER_BLOCK", "FP8_PER_CHANNEL_COMPRESSED"]
+            fp8_methods = [
+                "FP8",
+                "FP8_PER_BLOCK",
+                "FP8_PER_CHANNEL_COMPRESSED",
+                "FP8_PER_TENSOR_COMPRESSED",
+            ]
             if quant_method not in fp8_methods:
                 return False
 
@@ -54,6 +64,7 @@ class LinearFactory:
     def create_linear(
         weight: torch.Tensor,
         weight_scales: Optional[torch.Tensor] = None,
+        input_scales: Optional[torch.Tensor] = None,
         bias: Optional[torch.Tensor] = None,
         config: Optional[GptInitModelParameters] = None,
         force_fp8: bool = False,
@@ -62,13 +73,22 @@ class LinearFactory:
         if force_fp8 or (
             weight_scales is not None and weight.dtype == torch.float8_e4m3fn
         ):
-            if not FP8_LINEAR_AVAILABLE:
-                raise RuntimeError("FP8 linear layer requested but not available")
             if weight_scales is None:
                 raise ValueError("FP8 linear layer requires weight_scales")
             if config is None:
                 raise ValueError("FP8 linear layer requires config")
-            return Fp8Linear(weight, weight_scales, bias, config)
+            else:
+                quant_config = config.quant_config
+                if quant_config.get_method() == "FP8_PER_TENSOR_COMPRESSED":
+                    return Fp8PerTensorLinear(
+                        config.quant_config, weight, weight_scales, input_scales, bias
+                    )
+                else:
+                    if not FP8_LINEAR_AVAILABLE:
+                        raise RuntimeError(
+                            "FP8 DeepGEMMLinear layer requested but not available"
+                        )
+                    return Fp8DeepGEMMLinear(weight, weight_scales, bias, config)
         else:
             return Linear(weight, bias)
 

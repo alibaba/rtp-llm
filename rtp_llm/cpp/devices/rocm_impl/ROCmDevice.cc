@@ -8,7 +8,6 @@
 #include "rtp_llm/cpp/cuda/Dispatch.h"
 #include <cstring>
 
-#include "rtp_llm/cpp/kernels/hello_world.h"
 #include "rtp_llm/cpp/kernels/rmsnormKernels.h"
 #include "rtp_llm/cpp/kernels/activation_kernels.h"
 #include "rtp_llm/cpp/cuda/nccl/nccl_utils_torch.h"
@@ -459,21 +458,6 @@ BufferPtr ROCmDevice::embeddingLookup(const EmbeddingLookupParams& params) {
                                      stream_);
 
     return embeddings;
-}
-
-BufferPtr ROCmDevice::testVecAdd(const BufferPtr a, const BufferPtr b) {
-    BufferPtr           output;
-    DataType            dtype  = a.get()->type();
-    std::vector<size_t> dshape = a.get()->shape();
-
-    output = allocateBuffer({dtype, dshape, AllocationType::DEVICE}, {"vec_add_rslt"});
-    invokeHelloWorld<float>((const float*)(a.get()->data()),
-                            ((const float*)b.get()->data()),
-                            ((float*)output.get()->data()),
-                            output.get()->size(),
-                            stream_);
-
-    return output;
 }
 
 MemoryStatus ROCmDevice::getDeviceMemoryStatus() {

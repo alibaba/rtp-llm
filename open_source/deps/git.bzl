@@ -123,6 +123,13 @@ def git_deps():
     )
 
     new_git_repository(
+        name = "cutlass4.0",
+        remote = "https://github.com/NVIDIA/cutlass.git",
+        commit = "dc4817921edda44a549197ff3a9dcf5df0636e7b",
+        build_file = str(Label("//3rdparty/cutlass:cutlass.BUILD")),
+    )
+
+    new_git_repository(
         name = "flashinfer",
         remote = "https://github.com/flashinfer-ai/flashinfer.git",
         commit = "1c88d650eeec97be3a4dcebe4a9912d7785bc250",
@@ -360,9 +367,23 @@ def git_deps():
 
     # DeepGEMM dependency for RTP-LLM - using git repository
     new_git_repository(
-        name = "deep_gemm",
+        name = "deep_gemm_ext",
         remote = "https://github.com/deepseek-ai/DeepGEMM.git",
-        commit = "7b6b5563b9d4c1ae07ffbce7f78ad3ac9204827c",
+        commit = "79f48ee15a82dd5fad5cd9beaa393c1f755e6b55",
         build_file = clean_dep("//3rdparty/deep_gemm:BUILD"),
+        patches = [
+            "//3rdparty/deep_gemm:0001-fix-smem_buffer.patch",
+        ],
+        patch_args = ["-p0"],
         recursive_init_submodules = True,
+        patch_cmds = [
+            "mkdir -p deep_gemm_headers_temp",
+            "cp -r third-party/cutlass/include/* deep_gemm_headers_temp/ || true",
+            "mkdir -p deep_gemm_headers_temp/cute",
+            "if [ -d third-party/cutlass/include/cute ]; then cp -r third-party/cutlass/include/cute/* deep_gemm_headers_temp/cute/; fi || true",
+            "mkdir -p deep_gemm_headers_temp/deep_gemm",
+            "if [ -d deep_gemm/include ]; then find deep_gemm/include -name '*.h' -o -name '*.hpp' -o -name '*.cuh' | while read f; do rel=${f#deep_gemm/include/}; if [[ $rel != deep_gemm/* ]]; then mkdir -p deep_gemm_headers_temp/deep_gemm/$(dirname $rel); cp $f deep_gemm_headers_temp/deep_gemm/$rel; fi; done; fi || true",
+            "if [ -d deep_gemm/include/deep_gemm ]; then cp -r deep_gemm/include/deep_gemm/* deep_gemm_headers_temp/deep_gemm/; fi || true",
+            "rm -rf deep_gemm/include && mv deep_gemm_headers_temp deep_gemm/include",
+        ],
     )

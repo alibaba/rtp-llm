@@ -295,3 +295,53 @@ py_test (
     tags = ["rocm"],
     exec_properties = {'gpu':'MI308X'},
 )
+
+py_test (
+    name = "fp8_linear_test",
+    srcs = ["fp8_linear_test.py"],
+    deps = [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:config",
+        "//rtp_llm:utils",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/model_test/test_util:test_util",
+    ] + get_triton_deps(["triton", "torch", "numpy"]) + select({
+        "@//:using_cuda12": ["@deep_gemm_ext//:deep_gemm"],
+        "//conditions:default": [],
+    }),
+    env = test_envs,
+    tags = ["H20"],
+    exec_properties = {'gpu':'H20'},
+)
+
+
+py_test (
+    name = "cutlass_fp8_grouped_gemm_test",
+    srcs = ["cutlass_fp8_grouped_gemm_test.py"],
+    deps = [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm:config",
+        "//rtp_llm:utils",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/model_test/test_util:test_util"
+    ],
+    env = test_envs,
+    tags = ["open_skip", "H20"],
+    exec_properties = {'gpu':'H20'},
+)
+
+py_test (
+    name = "per_tensor_scaled_fp8_quant_test",
+    srcs = ["per_tensor_scaled_fp8_quant_test.py"],
+    deps = [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm:config",
+        "//rtp_llm:utils",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/model_test/test_util:test_util"
+    ],
+    env = test_envs,
+    tags = ["open_skip", "H20"],
+    exec_properties = {'gpu':'H20'},
+)

@@ -6,8 +6,8 @@
 #include "rtp_llm/cpp/cuda/cublas/cublasMMWrapper.h"
 #include "rtp_llm/cpp/cuda/cuda_utils.h"
 #include "rtp_llm/cpp/cuda/memory_utils.h"
-#include "rtp_llm/cpp/cutlass/cutlass_kernels/gemm_lut_utils.h"
-#include "rtp_llm/cpp/cutlass/interface.h"
+#include "rtp_llm/cpp/cuda/cutlass/cutlass_kernels/gemm_lut_utils.h"
+#include "rtp_llm/cpp/cuda/cutlass/interface.h"
 
 #include "rtp_llm/cpp/cuda/allocator_cuda.h"
 #include "rtp_llm/cpp/cuda/cublas/cublas.h"

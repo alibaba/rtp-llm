@@ -16,8 +16,14 @@
 
 #pragma once
 
+#if USING_CUDA
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#endif
+#if USING_ROCM
+#include <hip/hip_fp16.h>
+#include <hip/hip_runtime.h>
+#endif
 
 namespace rtp_llm {
 
@@ -34,6 +40,10 @@ void invokeBanBadWords(T*           logits,
                        int          id_offset,
                        int          vocab_size_padded,
                        size_t       step,
+#if USING_CUDA
                        cudaStream_t stream);
+#elif USING_ROCM
+                       hipStream_t stream);
+#endif
 
 }  // namespace rtp_llm

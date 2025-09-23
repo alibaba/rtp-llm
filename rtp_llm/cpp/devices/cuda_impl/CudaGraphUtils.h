@@ -42,7 +42,6 @@ class GraphInstance {
 public:
     at::cuda::CUDAGraph graph_;
     CaptureMemoryHold   mem_hold_;
-    bool                use_xqa_{false};
 };
 
 class CudaGraphStreamLife {

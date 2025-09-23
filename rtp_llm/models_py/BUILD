@@ -1,19 +1,36 @@
-load("//bazel:arch_select.bzl", "requirement", "deep_gemm_deps")
-
-deep_gemm_deps()
-
-py_library(
-    name = "kernels",
-    srcs = glob([
-        "kernels/*.py",
-    ])
-)
+load("//bazel:arch_select.bzl", "requirement")
 
 py_library(
     name = "utils",
     srcs = glob([
         "utils/*.py",
     ]),
+)
+
+py_library(
+    name = "kernels",
+    srcs = glob([
+        "kernels/*.py",
+    ]),
+    deps = [
+        "//rtp_llm:utils",
+    ] + select({
+        "@//:using_cuda12":["@deep_gemm_ext//:deep_gemm"],
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "distributed",
+    srcs = glob([
+        "distributed/*.py",
+    ]),
+    deps = [
+        "//rtp_llm/models_py/distributed:deepep_wrapper",
+        "//rtp_llm/models_py/distributed:process_group_state",
+    ],
+    visibility = ["//visibility:public"],
 )
 
 py_library(
@@ -25,6 +42,7 @@ py_library(
     deps = [
         ":utils",
         ":kernels",
+        ":distributed",
     ],
     visibility = ["//visibility:public"],
 )
@@ -55,14 +73,12 @@ py_library(
         "//rtp_llm/model_loader:loader",
     ] + select({
         "@//:using_cuda12": [
-            ":modules_cuda"
+            ":modules_cuda",
+            "@deep_gemm_ext//:deep_gemm"
         ],
         "@//:using_rocm": [
             ":modules_rocm"
         ],
-        "//conditions:default": [],
-    }) + select({
-        "@//:using_cuda12":["deep_gemm"],
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],

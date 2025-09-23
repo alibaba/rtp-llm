@@ -1,26 +1,20 @@
 from __future__ import annotations
 
-from enum import Enum
-from typing import Any, Dict, Optional
-
 import torch
-from torch import nn
 
-from rtp_llm.ops import DeviceExporter, DeviceType, get_device
+from rtp_llm.ops import DeviceType, get_device
 
 
-# COPIED FROM DeepGEMM
 def ceil_div(x: int, y: int) -> int:
     return (x + y - 1) // y
 
 
-# COPIED FROM DeepGEMM
 def align(x: int, y: int) -> int:
     return ceil_div(x, y) * y
 
 
 def dispose_tensor(x: torch.Tensor):
-    x.set_(torch.empty((0,), device=x.device, dtype=x.dtype))
+    x.set_(torch.empty((0,), device=x.device, dtype=x.dtype))  # type: ignore
 
 
 def is_cuda():

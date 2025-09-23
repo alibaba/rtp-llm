@@ -16,52 +16,20 @@
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/dataclass/KvCacheInfo.h"
+#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 
 namespace rtp_llm {
 
 class DistKvCache;
 
-struct BlockIdPair {
-    int src;
-    int dst;
-};
-
 class CacheManager {
 public:
-    struct SeqPosition {
-        int index;
-        int offset;
-    };
-
-    struct KVCacheBuffer {
-        rtp_llm::BufferPtr k_blocks;
-        rtp_llm::BufferPtr v_blocks;
-        rtp_llm::BufferPtr k_scale;
-        rtp_llm::BufferPtr v_scale;
-    };
-
     struct MatchInfo {
         size_t             reuse_length        = 0;
         size_t             local_reuse_length  = 0;
         size_t             remote_reuse_length = 0;
         std::vector<int>   cache_blocks;
         std::vector<float> loss;
-    };
-
-    struct BlockAddrInfo {
-        void* k_addr       = nullptr;
-        void* v_addr       = nullptr;
-        void* k_scale_addr = nullptr;
-        void* v_scale_addr = nullptr;
-    };
-
-    struct SimpleMallocInfo {
-        SimpleMallocInfo(int64_t request_id, uint32_t block_nums, bool verbose = false):
-            request_id(request_id), block_nums(block_nums), verbose(verbose) {}
-
-        int64_t  request_id;
-        uint32_t block_nums;
-        bool     verbose = false;
     };
 
     struct AdvancedMallocInfo {
@@ -126,14 +94,14 @@ public:
                  const GptInitParameter&            params           = GptInitParameter{});
     ~CacheManager();
 
-    const CacheConfig&   cacheConfig() const;
-    size_t               freeBlockNums() const;
-    size_t               availableBlockNums() const;
-    KVCacheInfo          getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
-    uint32_t             maxSeqLen() const;
-    const KVCacheBuffer& kvCacheBuffer() const;
+    const CacheConfig&                     cacheConfig() const;
+    size_t                                 freeBlockNums() const;
+    size_t                                 availableBlockNums() const;
+    KVCacheInfo                            getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
+    uint32_t                               maxSeqLen() const;
+    const KVCacheAllocator::KVCacheBuffer& kvCacheBuffer() const;
 
-    std::tuple<bool, KVCacheResource> malloc(const SimpleMallocInfo& malloc_info);
+    std::tuple<bool, KVCacheResource> malloc(const KVCacheAllocator::SimpleMallocInfo& malloc_info);
     MatchInfo                         mallocWithCache(const AdvancedMallocInfo& malloc_info);
     void                              reserveBlocks(int nums);
     void                              incrRefCounter(const std::vector<int>& blocks_index);
@@ -155,7 +123,7 @@ public:
     void blockBatchCopy(const rtp_llm::Buffer& copy_mapping);
     void blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end);
 
-    BlockAddrInfo convertIndexToAddr(int block_index, int layer_id) const;
+    KVCacheAllocator::BlockAddrInfo convertIndexToAddr(int block_index, int layer_id) const;
 
     void regUserMr(size_t model_id);
 
@@ -171,41 +139,26 @@ public:
                          const std::map<std::string, std::string>& extra_metas) const;
 
 protected:
-    const BlockCache&                  blockCache() const;
-    size_t                             cacheItemNum() const;
-    uint32_t                           totalBlocks() const;
-    void                               initFreeBlock();
-    rtp_llm::BufferPtr                 tryAllocateMaxBuffer();
-    void                               allocateAndSync();
-    void                               initFakeKVCache();
-    void                               initKvCache();
-    void                               initKvCacheNormal();
-    void                               initKvCacheMla();
-    void                               initKVCacheScale();
-    size_t                             getKBlockSize() const;
-    size_t                             getVBlockSize() const;
+    const BlockCache&  blockCache() const;
+    size_t             cacheItemNum() const;
+    uint32_t           totalBlocks() const;
+    void               initFreeBlock();
+    rtp_llm::BufferPtr tryAllocateMaxBuffer();
+    void               allocateAndSync();
+
     MatchInfo                          matchImpl(const AdvancedMallocInfo& malloc_info);
-    void                               deregUserMr();
-    std::tuple<bool, std::vector<int>> mallocIndex(const SimpleMallocInfo& malloc_info);
-    std::tuple<bool, std::vector<int>> mallocImpl(const SimpleMallocInfo& malloc_info);
+    std::tuple<bool, std::vector<int>> mallocIndex(const KVCacheAllocator::SimpleMallocInfo& malloc_info);
     void                               maybeFreeBlockFromCache(int nums);
 
     void freeWithoutLock(const std::vector<int>& indice);
-    void freeImpl(const std::vector<int>& indice);
     void insertIntoCache(FreeInfo& free_info);
 
-    void        copyKvCacheFromSeqIdxs(const std::vector<int>& block_indice_list,
-                                       const std::vector<int>& src_index,
-                                       const std::vector<int>& target_index);
-    SeqPosition getSeqPosition(const std::vector<int>& block_indice_list, int idx);
-    void        copyKvCacheFromSeqPosition(const SeqPosition& src_seq_position, const SeqPosition& dst_seq_position);
-
-    const BlockRefCounter& blockRefCounter() const;
-    void                   incrBlockRefCounter(const std::vector<int>& blocks);
-    void                   incrQueryRefCounter(const std::vector<int>& blocks);
-    void                   decrQueryRefCounter(const std::vector<int>& blocks);
+    void incrQueryRefCounter(const std::vector<int>& blocks);
+    void decrQueryRefCounter(const std::vector<int>& blocks);
 
     void reportMetricsLoop();
+
+    const std::shared_ptr<KVCacheAllocator>& kvCacheAllocator() const;
 
 private:
     bool initDistKvCache();
@@ -218,26 +171,21 @@ private:
     std::map<std::string, std::string> getLoraInfo() const;
     std::string                        getLoraCkptPath(const std::string& adapter_name) const;
 
+    void incrBlockRefCounter(const std::vector<int>& blocks);
+
 protected:
     CacheConfig          config_;
     int                  seq_size_per_block_;
-    std::set<int>        free_blocks_index_;
-    BlockRefCounter      block_ref_counter_;
     BlockRefCounter      query_ref_counter_;
     int                  available_blocks_;
     BlockCache           block_cache_;
-    KVCacheBuffer        kv_cache_;
     rtp_llm::DeviceBase* device_;
 
-    rtp_llm::BufferPtr cache_aligned_buffer_;
-    void*              cache_base_ptr_;
+    std::shared_ptr<KVCacheAllocator> allocator_;
 
     bool                         stop_ = false;
     std::thread                  metrics_reporter_thread_;
     kmonitor::MetricsReporterPtr metrics_reporter_;
-
-    bool    kvcache_reg_mr_  = false;
-    int64_t mr_cost_time_ms_ = 0;
 
     std::mutex mutex_;
 
