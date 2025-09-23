@@ -52,6 +52,7 @@ while true; do
             exit 0
         else
             echo "Merge failed with status: $status"
+            echo "Response details: $response"
             exit 1
         fi
         break
