@@ -1,19 +1,12 @@
 load("//:def.bzl", "cuda_copts", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 load("//rtp_llm/cpp/devices:device_defs.bzl",
-    "device_impl_target", "device_test_envs", "device_linkopts")
+    "device_impl_target", "device_test_envs")
 
 test_copts = [
     "-fno-access-control",
 ] + copts()
 
-test_linkopts = [
-    "-lpython3.10",
-    "-ltorch",
-    "-lc10",
-    "-ltorch_cpu",
-    "-ltorch_python",
-] + device_linkopts()
 
 cc_library(
     name = "test_headers",
@@ -24,8 +17,8 @@ cc_library(
 
 test_deps = [
     "//rtp_llm/cpp/devices/testing:device_test_utils",
-    "//rtp_llm/cpp:models",
-    "//:gpt_init_params",
+    "//rtp_llm/cpp/models:models",
+    "//rtp_llm/cpp/config:gpt_init_params",
     ":test_headers",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",
@@ -54,8 +47,7 @@ cc_library(
 #         "//rtp_llm/test/model_test/fake_test/testdata:testdata",
 #     ],
 #     copts = test_copts,
-#     linkopts = test_linkopts,
-#     deps = test_deps + [
+# #     deps = test_deps + [
 #         ":test_utils",
 #         "//rtp_llm/cpp/devices/torch_impl:torch_reference_impl",
 #         "//rtp_llm/cpp/utils:core_utils",
@@ -83,8 +75,7 @@ filegroup(
 #         "//rtp_llm:torch",
 #     ],
 #     copts = test_copts,
-#     linkopts = test_linkopts,
-#     deps = test_deps + [
+# #     deps = test_deps + [
 #         ":test_utils",
 #         "//rtp_llm/cpp/devices/torch_impl:torch_reference_impl",
 #         "//rtp_llm/cpp/utils:core_utils",
@@ -101,7 +92,6 @@ cc_test(
         "//rtp_llm/test/model_test/fake_test/testdata:testdata"
     ],
     copts = test_copts,
-    linkopts = test_linkopts,
     deps = test_deps + [
         ":test_utils",
     ],
@@ -118,7 +108,7 @@ cc_binary(
         "long_seq.cu",
     ],
     deps = [
-        "//rtp_llm/cpp/cutlass:cutlass_kernels_impl",
+        "//rtp_llm/cpp/cuda/cutlass:cutlass_kernels_impl",
         "//rtp_llm/cpp/cuda:cuda",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/cuda:allocator_cuda",
@@ -135,7 +125,7 @@ cc_binary(
         "int4_perf.cu"
     ],
     deps = [
-        "//rtp_llm/cpp/cutlass:cutlass_kernels_impl",
+        "//rtp_llm/cpp/cuda/cutlass:cutlass_kernels_impl",
         "//rtp_llm/cpp/cuda:cuda",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/cuda:allocator_cuda",
@@ -152,7 +142,7 @@ cc_binary(
         "int8_gemm_perf.cu",
     ],
     deps = [
-        "//rtp_llm/cpp/cutlass:cutlass_kernels_impl",
+        "//rtp_llm/cpp/cuda/cutlass:cutlass_kernels_impl",
         "//rtp_llm/cpp/cuda:cuda",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/cuda:allocator_cuda",
@@ -169,11 +159,11 @@ cc_binary(
         "int8_gemm_test.cu",
     ],
     deps = [
-        "//rtp_llm/cpp/cutlass:cutlass_kernels_impl",
+        "//rtp_llm/cpp/cuda/cutlass:cutlass_kernels_impl",
         "//rtp_llm/cpp/cuda:cuda",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/cuda:allocator_cuda",
-        "//:th_utils",
+        "//rtp_llm/cpp/pybind:th_utils",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],
@@ -199,12 +189,10 @@ cc_test(
         "//rtp_llm/cpp/core:allocator",
         "//rtp_llm/cpp/core:memory_tracker",
         "//rtp_llm/cpp/cuda:allocator_cuda",
-        "@com_google_googletest//:gtest"
+        "@com_google_googletest//:gtest",
+        "@local_config_cuda//cuda:cuda_driver",
     ],
     copts = copts(),
-    linkopts = [
-        "-lcuda"
-    ],
     exec_properties = {'gpu':'A10'},
 )
 

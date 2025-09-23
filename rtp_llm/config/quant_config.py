@@ -208,6 +208,38 @@ class CompressedTensorsQuantConfig(QuantizationConfig):
         return CompressedTensorsQuantConfig()
 
 
+class Fp8PerTensorCompressedQuantConfig(CompressedTensorsQuantConfig):
+    def __init__(self, bits: int = 8, is_quanted: bool = False, **kwargs: Any):
+        super().__init__(bits=bits, is_quanted=is_quanted)
+        self._dynamic = kwargs.get("dynamic", False)
+        self._weight_s_suffix = kwargs.get("weight_scale_suffix", None)
+        self._act_s_suffix = kwargs.get("act_scale_suffix", None)
+
+    @classmethod
+    def get_method(cls) -> str:
+        return "FP8_PER_TENSOR_COMPRESSED"
+
+    @classmethod
+    def get_algo(cls) -> str:
+        return "fp8"
+
+    def get_supported_act_dtypes(self) -> List[torch.dtype]:
+        return [torch.float16, torch.bfloat16]
+
+    def get_supported_compute_dtypes(self) -> List[torch.dtype]:
+        return [torch.float16, torch.bfloat16]
+
+    def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
+        return [torch.float16, torch.bfloat16, torch.float8_e4m3fn]
+
+    def is_dynamic(self) -> bool:
+        return self._dynamic
+
+    @classmethod
+    def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
+        return Fp8PerTensorCompressedQuantConfig(**config)
+
+
 class Fp8PerChannelCompressedQuantConfig(CompressedTensorsQuantConfig):
     def __init__(self, bits: int = 8, is_quanted: bool = False, **kwargs: Any):
         super().__init__(bits=bits, is_quanted=is_quanted)

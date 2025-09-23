@@ -5,7 +5,7 @@
 #include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "rtp_llm/cpp/devices/OpData.h"
 #include "rtp_llm/cpp/devices/Weights.h"
-#include "rtp_llm/cpp/stats/ExpertStats.h"
+#include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
 #include "rtp_llm/cpp/cache/CacheManager.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include <string>
@@ -29,11 +29,11 @@ struct GptModelDescription {
 };
 
 struct GptModelInitParams {
-    rtp_llm::DeviceBase*                             device;
-    const rtp_llm::Weights                           weights;
-    const GptModelDescription                        description;
-    const std::optional<CacheManager::KVCacheBuffer> kv_cache_buffer;
-    size_t                                           model_id;
+    rtp_llm::DeviceBase*                                 device;
+    const rtp_llm::Weights                               weights;
+    const GptModelDescription                            description;
+    const std::optional<KVCacheAllocator::KVCacheBuffer> kv_cache_buffer;
+    size_t                                               model_id;
 };
 
 struct EmbeddingPostOutput {
@@ -151,7 +151,7 @@ struct TokenSliceInfo {
 class GptModel {
 public:
     GptModel(const GptModelInitParams& params);
-    virtual ~GptModel(){};
+    virtual ~GptModel() {};
 
     virtual GptModelOutputs forward(const GptModelInputs& inputs);
 

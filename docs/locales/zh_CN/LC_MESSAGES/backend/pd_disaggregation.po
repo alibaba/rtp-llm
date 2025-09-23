@@ -21,11 +21,11 @@ msgstr ""
 
 #: ../../backend/pd_disaggregation.ipynb:9
 msgid "PD Disaggregation"
-msgstr "PD解聚"
+msgstr "PD分离"
 
 #: ../../backend/pd_disaggregation.ipynb:12
 msgid "Why and What is PD Disaggregation?"
-msgstr "为什么以及什么是PD解聚？"
+msgstr "为什么以及什么是PD分离？"
 
 #: ../../backend/pd_disaggregation.ipynb:14
 msgid ""
@@ -66,7 +66,7 @@ msgstr "高级配置"
 
 #: ../../backend/pd_disaggregation.ipynb:123
 msgid "PD Disaggregation supports the following environment variables."
-msgstr "PD解聚支持以下环境变量。"
+msgstr "PD分离支持以下环境变量。"
 
 #: ../../backend/pd_disaggregation.ipynb:126
 msgid "Prefill Server Configuration"
@@ -206,4 +206,3 @@ msgstr "PD之间状态同步的时间间隔（毫秒）"
 #: ../../backend/pd_disaggregation.ipynb:151
 msgid "``50``"
 msgstr "``50``"
-

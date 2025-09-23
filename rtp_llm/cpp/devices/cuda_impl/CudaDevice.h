@@ -115,7 +115,7 @@ public:
     GraphBase*       getDeviceGraphRunner(const DeviceInitParams& params,
                                           py::object              py_instance,
                                           int                     kv_cache_block_offset,
-                                          bool                    is_embedding = false) override;
+                                          bool                    is_prefill_cuda_graph_mode = false) override;
 
 private:
     void         checkUseOpenSourceFMHA();
@@ -263,6 +263,8 @@ public:
 
     std::shared_ptr<cufmha>
     selectCuFMHARunner(const AttentionConfigs& configs, DataType attn_dtype, bool has_alibi_slopes);
+    // only for cuda graph test
+    void setIsPadded(bool is_s_padded);
 
 protected:
     DevicePrepOutput prepareModelRunCommon(const DevicePrepParams& params);

@@ -1,0 +1,295 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: RTP-LLM 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-19 11:21+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../backend/flexlb.md:1
+msgid "FlexLB (Flexible Load Balancer) - Master Role"
+msgstr "FlexLB（弹性负载均衡器）- 主节点"
+
+#: ../../backend/flexlb.md:3
+msgid "Background"
+msgstr "背景"
+
+#: ../../backend/flexlb.md:5
+msgid ""
+"FlexLB (Flexible Load Balancer) is the Master role in RTP-LLM's "
+"distributed inference framework. It implements a multi-dimensional "
+"Quality of Service (QoS) Load Balance strategy for large model inference,"
+" coordinating between inference workers, cache servers, and other "
+"components."
+msgstr ""
+"FlexLB（弹性负载均衡器）是 RTP-LLM 分布式推理框架中的主节点角色。它为大模型推理实现了多维服务质量（QoS）负载均衡策略，协调推理工作节点、缓存服务器等组件。"
+
+#: ../../backend/flexlb.md:7
+msgid ""
+"The Master role was designed to address the limitations of random load "
+"balancing that caused uneven load distribution across machines, improving"
+" resource utilization for inference worker clusters scaled between "
+"100-1000 nodes."
+msgstr ""
+"主节点角色旨在解决随机负载均衡导致的机器间负载不均问题，提升 100-1000 节点规模的推理工作集群资源利用率。"
+
+#: ../../backend/flexlb.md:9
+msgid "System Architecture"
+msgstr "系统架构"
+
+#: ../../backend/flexlb.md:10
+msgid "![Architecture](../pics/router.png)"
+msgstr "![架构图](../pics/router.png)"
+
+#: ../../backend/flexlb.md:10
+msgid "Architecture"
+msgstr "架构图"
+
+#: ../../backend/flexlb.md:12
+msgid "Key Components"
+msgstr "核心组件"
+
+#: ../../backend/flexlb.md:14
+msgid "**SDK/Client**: Core traffic entry point for large models"
+msgstr "**SDK/客户端**：大模型流量核心入口"
+
+#: ../../backend/flexlb.md:15
+msgid "Request protocol parsing and traffic monitoring"
+msgstr "请求协议解析与流量监控"
+
+#: ../../backend/flexlb.md:16
+msgid "Policy-based cluster selection using Weighted Round Robin"
+msgstr "基于策略的加权轮询集群选择"
+
+#: ../../backend/flexlb.md:18
+msgid "**Load Balance Scheduler (Master Role)**:"
+msgstr "**负载均衡调度器（主节点）**："
+
+#: ../../backend/flexlb.md:19
+msgid "Distributed load balancer with Master-Slave Architecture"
+msgstr "采用主从架构的分布式负载均衡器"
+
+#: ../../backend/flexlb.md:20
+msgid "Real-time scheduling decisions with high availability"
+msgstr "高可用实时调度决策"
+
+#: ../../backend/flexlb.md:21
+msgid ""
+"Dynamic load balancing based on node metrics (GPU utilization, memory "
+"usage, queue length)"
+msgstr "基于节点指标（GPU利用率、内存使用、队列长度）的动态负载均衡"
+
+#: ../../backend/flexlb.md:22
+msgid "State-aware routing with Prometheus/Grafana monitoring integration"
+msgstr "集成 Prometheus/Grafana 监控的状态感知路由"
+
+#: ../../backend/flexlb.md:24
+msgid "**FrontApp Cluster**:"
+msgstr "**前端应用集群**："
+
+#: ../../backend/flexlb.md:25
+msgid "Independent deployment of Prefill Cluster's frontend functionality"
+msgstr "独立部署的前置填充集群前端功能"
+
+#: ../../backend/flexlb.md:26
+msgid "Handles request rendering and tokenization"
+msgstr "处理请求渲染与分词"
+
+#: ../../backend/flexlb.md:28
+msgid "**Prefill Cluster**:"
+msgstr "**前置填充集群**："
+
+#: ../../backend/flexlb.md:29
+msgid "Handles initial input sequence parallel computing tasks"
+msgstr "处理初始输入序列的并行计算任务"
+
+#: ../../backend/flexlb.md:31
+msgid "**Decoder Cluster**:"
+msgstr "**解码器集群**："
+
+#: ../../backend/flexlb.md:32
+msgid "Handles subsequent generation step parallel inference tasks"
+msgstr "处理后续生成步骤的并行推理任务"
+
+#: ../../backend/flexlb.md:34
+msgid "**Cache Server**:"
+msgstr "**缓存服务器**："
+
+#: ../../backend/flexlb.md:35
+msgid "Distributed KV storage system for prefix-aware routing"
+msgstr "支持前缀感知路由的分布式键值存储系统"
+
+#: ../../backend/flexlb.md:37
+msgid "Load Balancing Strategies"
+msgstr "负载均衡策略"
+
+#: ../../backend/flexlb.md:39
+msgid ""
+"The Master role implements different load balancing strategies for "
+"Prefill and Decode operations to optimize resource utilization and "
+"request latency:"
+msgstr "主节点针对前置填充和解码操作实施不同的负载均衡策略，以优化资源利用率和请求延迟："
+
+#: ../../backend/flexlb.md:41
+msgid "Prefill Strategy"
+msgstr "前置填充策略"
+
+#: ../../backend/flexlb.md:43
+msgid "For Prefill requests, the Master selects the optimal node based on:"
+msgstr "对于前置填充请求，主节点基于以下因素选择最优节点："
+
+#: ../../backend/flexlb.md:44
+msgid "KV cache hit rate across different machines"
+msgstr "跨机器的键值缓存命中率"
+
+#: ../../backend/flexlb.md:45
+msgid "Estimated execution time for the request"
+msgstr "请求的预估执行时间"
+
+#: ../../backend/flexlb.md:46
+msgid "Waiting time in the queue"
+msgstr "队列等待时间"
+
+#: ../../backend/flexlb.md:47
+msgid ""
+"The strategy aims to minimize the overall request completion time by "
+"choosing the node that can process the request most efficiently"
+msgstr "该策略通过选择能最高效处理请求的节点，旨在最小化整体请求完成时间"
+
+#: ../../backend/flexlb.md:49
+msgid "Decode Strategy"
+msgstr "解码策略"
+
+#: ../../backend/flexlb.md:51
+msgid "For Decode requests, the Master uses a different approach:"
+msgstr "对于解码请求，主节点采用不同策略："
+
+#: ../../backend/flexlb.md:52
+msgid "Selects the node with the least KV cache usage"
+msgstr "选择键值缓存使用最少的节点"
+
+#: ../../backend/flexlb.md:53
+msgid ""
+"This strategy helps distribute the Decode load evenly across available "
+"nodes"
+msgstr "该策略有助于在可用节点间均匀分配解码负载"
+
+#: ../../backend/flexlb.md:54
+msgid ""
+"Prevents any single node from becoming a bottleneck due to excessive KV "
+"cache consumption"
+msgstr "防止因键值缓存过度消耗导致单节点瓶颈"
+
+#: ../../backend/flexlb.md:56
+msgid ""
+"These strategies work together to ensure optimal resource utilization and"
+" reduced latency across the entire inference pipeline."
+msgstr "这些策略协同工作，确保整个推理流水线实现最优资源利用和低延迟。"
+
+#: ../../backend/flexlb.md:58
+msgid "Usage"
+msgstr "使用方式"
+
+#: ../../backend/flexlb.md:60
+msgid "To use the FlexLB Master role in your RTP-LLM deployment:"
+msgstr "在 RTP-LLM 部署中使用 FlexLB 主节点："
+
+#: ../../backend/flexlb.md:62
+msgid "Configure the Master node with appropriate cluster settings"
+msgstr "配置主节点的集群参数"
+
+#: ../../backend/flexlb.md:63
+msgid ""
+"Set up monitoring integration with Prometheus/Grafana for state-aware "
+"routing"
+msgstr "集成 Prometheus/Grafana 监控实现状态感知路由"
+
+#: ../../backend/flexlb.md:64
+msgid "Deploy FrontApp, Prefill, and Decoder clusters"
+msgstr "部署前端应用、前置填充和解码器集群"
+
+#: ../../backend/flexlb.md:65
+msgid "Configure SDK/Client to use Weighted Round Robin for cluster selection"
+msgstr "配置 SDK/客户端使用加权轮询进行集群选择"
+
+#: ../../backend/flexlb.md:67
+msgid ""
+"The Master role automatically handles load distribution, prefix-aware "
+"routing, and failover scenarios to optimize resource utilization and "
+"reduce request latency."
+msgstr "主节点自动处理负载分配、前缀感知路由和故障转移场景，优化资源利用率并降低请求延迟。"
+
+#: ../../backend/flexlb.md:69
+msgid "Startup Commands"
+msgstr "启动命令"
+
+#: ../../backend/flexlb.md:71
+msgid "1. Build FlexLB"
+msgstr "1. 构建 FlexLB"
+
+#: ../../backend/flexlb.md:73
+msgid "Navigate to the FlexLB module directory from the project root:"
+msgstr "从项目根目录进入 FlexLB 模块目录："
+
+#: ../../backend/flexlb.md:79
+msgid "Run Unit Tests"
+msgstr "运行单元测试"
+
+#: ../../backend/flexlb.md:89
+msgid "Build Package"
+msgstr "构建安装包"
+
+#: ../../backend/flexlb.md:95
+msgid "2. Docker Image Build"
+msgstr "2. Docker 镜像构建"
+
+#: ../../backend/flexlb.md:97
+msgid "Prepare Docker Build Context"
+msgstr "准备 Docker 构建上下文"
+
+#: ../../backend/flexlb.md:99
+msgid ""
+"After build completion, copy the generated ai-whale.tgz to the Docker "
+"build context directory:"
+msgstr "构建完成后，将生成的 ai-whale.tgz 复制到 Docker 构建上下文目录："
+
+#: ../../backend/flexlb.md:109
+msgid "Build Docker Images"
+msgstr "构建 Docker 镜像"
+
+#: ../../backend/flexlb.md:111
+msgid "Base image build:"
+msgstr "基础镜像构建："
+
+#: ../../backend/flexlb.md:118
+msgid "Production environment image build:"
+msgstr "生产环境镜像构建："
+
+#: ../../backend/flexlb.md:125
+msgid "3. Run FlexLB"
+msgstr "3. 运行 FlexLB"
+
+#: ../../backend/flexlb.md:127
+msgid "Start the FlexLB service using the built Docker image:"
+msgstr "使用构建的 Docker 镜像启动 FlexLB 服务："
+
+#: ../../backend/flexlb.md:136
+msgid "4. Complete Build Script"
+msgstr "4. 完整构建脚本"
+
+#: ../../backend/flexlb.md:138
+msgid "The following is a complete build and deployment script example:"
+msgstr "以下是完整的构建部署脚本示例："

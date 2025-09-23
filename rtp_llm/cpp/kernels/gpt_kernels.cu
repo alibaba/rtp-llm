@@ -28,7 +28,6 @@
 #endif
 #endif
 #include "rtp_llm/cpp/kernels/gpt_kernels.h"
-#include "rtp_llm/cpp/cuda/memory_utils.h"
 
 namespace rtp_llm {
 

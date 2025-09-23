@@ -1,7 +1,6 @@
 #pragma once
 
 #include <queue>
-#include "rtp_llm/cpp/schedulers/SchedulerBase.h"
 #include "rtp_llm/cpp/embedding_engine/EmbeddingStream.h"
 
 namespace rtp_llm {

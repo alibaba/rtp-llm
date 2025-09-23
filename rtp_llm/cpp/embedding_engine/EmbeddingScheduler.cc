@@ -1,6 +1,6 @@
 #include "rtp_llm/cpp/embedding_engine/EmbeddingScheduler.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
-#include "rtp_llm/cpp/th_op/GptInitParameter.h"
+#include "rtp_llm/cpp/config/GptInitParameter.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include <mutex>
 

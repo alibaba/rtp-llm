@@ -115,6 +115,6 @@ class VIPServerProxy:
                     raise e
             raise Exception("all vip srv is fail.")
         except Exception as e:
-            logging.error("failed to req api", e)
+            logging.error("failed to req api: %s", str(e))
         finally:
             self.srv_update_lock.release()

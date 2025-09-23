@@ -104,7 +104,7 @@ __host__ __device__ inline float special_cast<float, amd_bfloat16>(amd_bfloat16 
 
 #define cudaError_t hipError_t
 #define cudaSuccess hipSuccess
-#define check_cuda_error() rocm::syncAndCheckInDebug(__FILE__, __LINE__)
+#define check_cuda_error() rtp_llm::rocm::syncAndCheckInDebug(__FILE__, __LINE__)
 #define cudaDeviceProp hipDeviceProp_t
 
 #define cudaErrorNotReady hipErrorNotReady

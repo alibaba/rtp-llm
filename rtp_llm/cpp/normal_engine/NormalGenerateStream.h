@@ -1,5 +1,5 @@
 #pragma once
-#include "rtp_llm/cpp/stream/GenerateStream.h"
+#include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include <cstdint>
 
 namespace rtp_llm {

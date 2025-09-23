@@ -3,7 +3,7 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
-#include "rtp_llm/cpp/tokenizer/Tokenizer.h"
+#include "rtp_llm/cpp/api_server/tokenizer/Tokenizer.h"
 
 namespace rtp_llm {
 

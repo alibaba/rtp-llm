@@ -1,68 +1,81 @@
 import logging
+import os
 from typing import Optional
 
 import torch
 from torch import nn
 
+from rtp_llm.config.quant_config import QuantizationConfig
+from rtp_llm.models_py.modules import utils
+
 logger = logging.getLogger(__name__)
 
 try:
-    from rtp_llm.models_py.modules.fp8_kernel import sgl_per_token_group_quant_fp8
+    from rtp_llm.models_py.modules.fp8_kernel import (
+        scaled_fp8_per_tensor_quant,
+        sgl_per_token_group_quant_fp8,
+    )
 
     FP8_AVAILABLE = True
     # FP8 quantization available
-except ImportError as e:
+except ImportError:
     # FP8 quantization not available
     FP8_AVAILABLE = False
 
-try:
-    import deep_gemm
-    from deep_gemm import fp8_gemm_nt
+if utils.is_cuda():
+    try:
+        from rtp_llm.models_py.kernels.deepgemm_wrapper import fp8_gemm_nt
 
-    DEEPGEMM_AVAILABLE = True
-
-    # Setup CUTLASS include paths for JIT compilation
-    import os
-
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-
-    # Search for CUTLASS headers
-    cutlass_paths = []
-    parts = current_dir.split("/")
-    for i in range(len(parts)):
-        base_path = "/".join(parts[: i + 1])
-        for subpath in [
-            "deep_gemm/third-party/cutlass/include",
-            "external/deep_gemm/third-party/cutlass/include",
-        ]:
-            path = os.path.join(base_path, subpath)
-            if os.path.exists(path):
-                cutlass_paths.append(path)
-
-    # Check runfiles directory
-    if "runfiles" in current_dir:
-        runfiles_root = current_dir.split("runfiles")[0] + "runfiles"
-        for subdir in ["deep_gemm", "external/deep_gemm"]:
-            path = os.path.join(runfiles_root, subdir, "third-party/cutlass/include")
-            if os.path.exists(path):
-                cutlass_paths.append(path)
-
-    # Set environment variables if CUTLASS found
-    if cutlass_paths:
-        cutlass_path = cutlass_paths[0]
-        for env_var in ["CPLUS_INCLUDE_PATH", "C_INCLUDE_PATH", "CPATH"]:
-            current_val = os.environ.get(env_var, "")
-            os.environ[env_var] = (
-                f"{cutlass_path}:{current_val}" if current_val else cutlass_path
-            )
-
-        nvcc_flags = os.environ.get("NVCC_PREPEND_FLAGS", "")
-        os.environ["NVCC_PREPEND_FLAGS"] = f"-I{cutlass_path} {nvcc_flags}".strip()
-except ImportError:
+        DEEPGEMM_AVAILABLE = True
+        # Setup CUTLASS include paths for JIT compilation
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        # Search for CUTLASS headers
+        cutlass_paths = []
+        parts = current_dir.split("/")
+        for i in range(len(parts)):
+            base_path = "/".join(parts[: i + 1])
+            for subpath in [
+                "deep_gemm/third-party/cutlass/include",
+                "external/deep_gemm/third-party/cutlass/include",
+            ]:
+                path = os.path.join(base_path, subpath)
+                if os.path.exists(path):
+                    cutlass_paths.append(path)
+        # Check runfiles directory
+        if "runfiles" in current_dir:
+            runfiles_root = current_dir.split("runfiles")[0] + "runfiles"
+            for subdir in ["deep_gemm", "external/deep_gemm"]:
+                path = os.path.join(
+                    runfiles_root, subdir, "third-party/cutlass/include"
+                )
+                if os.path.exists(path):
+                    cutlass_paths.append(path)
+        # Set environment variables if CUTLASS found
+        if cutlass_paths:
+            cutlass_path = cutlass_paths[0]
+            for env_var in ["CPLUS_INCLUDE_PATH", "C_INCLUDE_PATH", "CPATH"]:
+                current_val = os.environ.get(env_var, "")
+                os.environ[env_var] = (
+                    f"{cutlass_path}:{current_val}" if current_val else cutlass_path
+                )
+            nvcc_flags = os.environ.get("NVCC_PREPEND_FLAGS", "")
+            os.environ["NVCC_PREPEND_FLAGS"] = f"-I{cutlass_path} {nvcc_flags}".strip()
+        logger.info(f"DeepGEMM successfully imported with fp8_gemm_nt: {fp8_gemm_nt}")
+    except ImportError as e:
+        logger.warning(f"DeepGEMM not available: {e}")
+        DEEPGEMM_AVAILABLE = False
+        fp8_gemm_nt = None
+    except Exception as e:
+        logger.warning(f"Error importing DeepGEMM: {e}")
+        DEEPGEMM_AVAILABLE = False
+        fp8_gemm_nt = None
+else:
+    # Not CUDA device, deep_gemm not available
     DEEPGEMM_AVAILABLE = False
+    fp8_gemm_nt = None
 
 
-class Fp8Linear(nn.Module):
+class Fp8DeepGEMMLinear(nn.Module):
     """FP8 Linear layer with DeepGEMM quantized matrix multiplication."""
 
     def __init__(
@@ -76,7 +89,6 @@ class Fp8Linear(nn.Module):
         self.hidden_size = weight.shape[0]  # k
         self.output_size = weight.shape[1]  # n
         self.weight = weight.reshape([weight.shape[1], weight.shape[0]])
-
         self.weight_scales = weight_scales.reshape(
             [weight_scales.shape[1], weight_scales.shape[0]]
         )
@@ -87,19 +99,23 @@ class Fp8Linear(nn.Module):
         input_m = input.shape[0]
         input_k = input.shape[1]
         output_n = self.output_size
-        original_dtype = input.dtype
 
-        # Convert to BF16 if needed
+        # Check input dtype - only accept BF16
         if input.dtype != torch.bfloat16:
-            input_bf16 = input.to(torch.bfloat16)
-        else:
-            input_bf16 = input
+            error_msg = (
+                f"Fp8DeepGEMMLinear only accepts bfloat16 input, but got {input.dtype}. "
+                "Please convert input to bfloat16 before calling Fp8DeepGEMMLinear."
+            )
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+
+        input_bf16 = input
 
         # Quantize input to FP8
         if not FP8_AVAILABLE:
             # FP8 not available - fail fast for easier debugging
             error_msg = (
-                "FP8 quantization is not available but required for Fp8Linear. "
+                "FP8 quantization is not available but required for Fp8DeepGEMMLinear. "
                 "Please ensure FP8 kernel is properly installed and imported."
             )
             logger.error(error_msg)
@@ -119,12 +135,11 @@ class Fp8Linear(nn.Module):
 
         # Quantize using sgl_per_token_group_quant_fp8
         quantization_eps = 1e-4
-        use_column_major = need_padding
         input_fp8, input_scales = sgl_per_token_group_quant_fp8(
             input_for_quant,
             group_size=128,
             eps=quantization_eps,
-            column_major_scales=use_column_major,
+            column_major_scales=False,
         )
 
         FP8_E4M3_MAX = 448.0
@@ -173,10 +188,7 @@ class Fp8Linear(nn.Module):
             output = output[:input_m, :]
         if self.bias is not None:
             output = output + self.bias.to(output.dtype)
-        if output.dtype != original_dtype:
-            output = output.to(original_dtype)
-        final_output = output
-        return final_output
+        return output
 
     def _get_padding_size(self, m):
         """Calculate padding size based on DeepGEMM requirements."""
@@ -222,3 +234,42 @@ class Fp8Linear(nn.Module):
                 w_end = min((j + 1) * 128, self.weight.shape[1])
                 expanded[h_start:h_end, w_start:w_end] = self.weight_scales[i, j]
         return expanded
+
+
+class Fp8PerTensorLinear(nn.Module):
+    def __init__(
+        self,
+        quant_config: QuantizationConfig,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        input_scale: Optional[torch.Tensor] = None,
+        bias: Optional[torch.Tensor] = None,
+    ) -> None:
+        super().__init__()
+        self.weight = weight.T
+        self.weight_scale = weight_scale
+        self.input_scale = input_scale
+        self.bias = bias
+        self.block_quant = None
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+
+        input_2d = input.view(-1, input.shape[-1])
+        output_shape = [*input.shape[:-1], self.weight.shape[1]]
+
+        qinput, x_scale = scaled_fp8_per_tensor_quant(input_2d, self.input_scale)
+
+        # TODO(serina.wzq): Use high performance kernel
+        output = torch._scaled_mm(
+            qinput,
+            self.weight,
+            out_dtype=input.dtype,
+            scale_a=x_scale,
+            scale_b=self.weight_scale,
+            bias=self.bias,
+        )
+
+        if type(output) is tuple and len(output) == 2:
+            output = output[0]
+
+        return torch.narrow(output, 0, 0, input_2d.shape[0]).view(*output_shape)

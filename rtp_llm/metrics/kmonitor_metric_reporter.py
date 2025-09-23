@@ -23,6 +23,11 @@ class AccMetrics(Enum):
     MASTER_ROUTE_QPS_METRIC = "py_rtp_master_route_qps"
     DOMAIN_ROUTE_QPS_METRIC = "py_rtp_domain_route_qps"
     MASTER_ROUTE_ERROR_QPS_METRIC = "py_rtp_master_route_error_qps"
+    
+    # igraph
+    IGRAPH_QPS_METRIC = "py_rtp_igraph_qps"
+    IGRAPH_ERROR_QPS_METRIC = "py_rtp_igraph_error_qps"
+    IGRAPH_EMPTY_QPS_METRIC = "py_rtp_igraph_empty_qps"
 
 
 class GaugeMetrics(Enum):

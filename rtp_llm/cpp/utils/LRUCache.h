@@ -4,6 +4,7 @@
 #include <vector>
 #include <unordered_map>
 #include <utility>
+#include <functional>
 
 template<typename KeyType, typename ValueType>
 class LRUCache {
@@ -22,6 +23,8 @@ public:
     std::tuple<bool, ValueType> get(const KeyType& key);
 
     std::tuple<bool, ValueType> pop();
+
+    std::tuple<bool, ValueType> popWithCond(const std::function<bool(const KeyType&, const ValueType&)>& cond);
 
     void clear();
 
@@ -91,16 +94,32 @@ std::tuple<bool, ValueType> LRUCache<KeyType, ValueType>::get(const KeyType& key
 
 template<typename KeyType, typename ValueType>
 std::tuple<bool, ValueType> LRUCache<KeyType, ValueType>::pop() {
+    return popWithCond([](const KeyType&, const ValueType&) { return true; });
+}
+
+template<typename KeyType, typename ValueType>
+std::tuple<bool, ValueType>
+LRUCache<KeyType, ValueType>::popWithCond(const std::function<bool(const KeyType&, const ValueType&)>& cond) {
     if (items_list_.empty()) {
         return {false, ValueType()};
     }
-    // 删除最不常用的项
-    auto last  = items_list_.back().first;
-    auto value = items_list_.back().second;
-    items_list_.pop_back();
-    cache_items_map_.erase(last);
-    version++;
-    return {true, value};
+
+    // 从最不常用的项开始查找符合条件的项
+    auto it = items_list_.rbegin();
+    while (it != items_list_.rend()) {
+        if (cond(it->first, it->second)) {
+            auto key   = it->first;
+            auto value = it->second;
+            // 将 reverse_iterator 转换为 iterator 进行删除
+            auto forward_it = std::next(it).base();
+            items_list_.erase(forward_it);
+            cache_items_map_.erase(key);
+            version++;
+            return {true, value};
+        }
+        ++it;
+    }
+    return {false, ValueType()};
 }
 
 template<typename KeyType, typename ValueType>

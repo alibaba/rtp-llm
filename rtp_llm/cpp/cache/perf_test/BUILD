@@ -9,7 +9,7 @@ cc_binary(
         "KVCacheReadWriteMain.cc",
     ],
     deps = [
-        "//rtp_llm/cpp:cache",
+        "//rtp_llm/cpp/cache",
         "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
         "@havenask//aios/autil:option_parser",
     ],
@@ -21,6 +21,6 @@ cc_binary(
         "DistStorage3FSTest.cc",
     ],
     deps = [
-        "//rtp_llm/cpp:storage_3fs",
+        "//rtp_llm/cpp/cache:storage_3fs",
     ],
 )

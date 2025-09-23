@@ -13,8 +13,8 @@
 #include "rtp_llm/cpp/dataclass/EngineInitParameter.h"
 #include "rtp_llm/cpp/engine_base/Executor.h"
 #include "rtp_llm/cpp/models/GptModel.h"
-#include "rtp_llm/cpp/schedulers/SchedulerBase.h"
-#include "rtp_llm/cpp/system_prompt/SystemPrompt.h"
+#include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
+#include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 
 namespace rtp_llm {

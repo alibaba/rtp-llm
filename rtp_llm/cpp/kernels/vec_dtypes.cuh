@@ -16,10 +16,18 @@
 #ifndef VEC_DTYPES_CUH_
 #define VEC_DTYPES_CUH_
 
+#if USING_CUDA
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
+#endif
+#if USING_ROCM
+#include <hip/hip_bf16.h>
+#include <hip/hip_fp16.h>
+#include <hip/hip_fp8.h>
+#include <hip/hip_runtime.h>
+#endif
 
 #include <type_traits>
 
@@ -121,10 +129,17 @@ struct vec_cast<half, float> {
 
 template<typename T>
 constexpr FLASHINFER_INLINE int get_exponent_bits() {
+#if USING_CUDA
     if constexpr (std::is_same_v<T, __nv_fp8_e4m3>) {
         return 4;
     } else if constexpr (std::is_same_v<T, __nv_fp8_e5m2>) {
         return 5;
+#elif USING_ROCM
+    if constexpr (std::is_same_v<T, __hip_fp8_e4m3>) {
+        return 4;
+    } else if constexpr (std::is_same_v<T, __hip_fp8_e5m2>) {
+        return 5;
+#endif
     } else if constexpr (std::is_same_v<T, half>) {
         return 5;
     } else if constexpr (std::is_same_v<T, nv_bfloat16>) {

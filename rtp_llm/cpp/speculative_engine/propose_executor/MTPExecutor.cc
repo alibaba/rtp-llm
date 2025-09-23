@@ -1,7 +1,7 @@
 #include "rtp_llm/cpp/speculative_engine/propose_executor/MTPExecutor.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
-#include "rtp_llm/cpp/stream/GenerateStream.h"
-#include "rtp_llm/cpp/stream/StreamGroups.h"
+#include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
+#include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
 #include "rtp_llm/cpp/speculative_engine/propose_executor/MTPStream.h"
 
 namespace rtp_llm {

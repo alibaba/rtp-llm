@@ -12,7 +12,6 @@
 #include "rtp_llm/cpp/cuda/Dispatch.h"
 #include <cstring>
 
-#include "rtp_llm/cpp/kernels/hello_world.h"
 #include "rtp_llm/cpp/kernels/rmsnormKernels.h"
 #include "rtp_llm/cpp/kernels/activation_kernels.h"
 

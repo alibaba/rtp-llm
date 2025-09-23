@@ -5,7 +5,7 @@
 
 #include "rtp_llm/cpp/cuda/cuda_utils.h"
 #include "rtp_llm/cpp/utils/memory_utils.h"
-#include "rtp_llm/cpp/cutlass/interface.h"
+#include "rtp_llm/cpp/cuda/cutlass/interface.h"
 
 struct Dim2 {
     int k;

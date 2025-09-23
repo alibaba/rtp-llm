@@ -1,5 +1,5 @@
 #include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
-#include "rtp_llm/cpp/th_op/th_utils.h"
+#include "rtp_llm/cpp/pybind/th_utils.h"
 #include "rtp_llm/cpp/cuda/quantize_utils.h"
 
 using namespace std;

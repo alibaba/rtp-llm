@@ -22,10 +22,17 @@
 #include "rtp_llm/cpp/cuda/launch_utils.h"
 
 #include <cstddef>
+#if USING_CUDA
 #include <cublasLt.h>
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
 #include <nvml.h>
+#endif
+#if USING_ROCM
+#include <hip/hip_runtime.h>
+#include "rtp_llm/cpp/rocm/hip_utils.h"
+#include "rtp_llm/cpp/rocm/cuda_shims.h"
+#endif
 #include <fstream>
 #include <iostream>
 #include <string>
@@ -33,11 +40,21 @@
 #include <functional>
 
 #ifdef ENABLE_BF16
+#if USING_CUDA
 #include <cuda_bf16.h>
+#endif
+#if USING_ROCM
+#include <hip/hip_bf16.h>
+#endif
 #endif
 
 #ifdef ENABLE_FP8
+#if USING_CUDA
 #include <cuda_fp8.h>
+#endif
+#if USING_ROCM
+#include <hip/hip_fp8.h>
+#endif
 #endif
 
 #ifndef _WIN32  // Linux
@@ -228,6 +245,7 @@ CublasDataType getCublasDataType() {
 }
 
 template<typename T>
+#if USING_CUDA
 cudaDataType_t getCudaDataType() {
     if (std::is_same<T, half>::value) {
         return CUDA_R_16F;
@@ -244,6 +262,24 @@ cudaDataType_t getCudaDataType() {
         return CUDA_R_32F;
     }
 }
+#elif USING_ROCM
+hipDataType getCudaDataType() {
+    if (std::is_same<T, half>::value) {
+        return HIP_R_16F;
+    }
+#ifdef ENABLE_BF16
+    else if (std::is_same<T, __nv_bfloat16>::value) {
+        return HIP_R_16BF;
+    }
+#endif
+    else if (std::is_same<T, float>::value) {
+        return HIP_R_32F;
+    } else {
+        RTP_LLM_CHECK(false);
+        return HIP_R_32F;
+    }
+}
+#endif
 
 template<CublasDataType T>
 struct getTypeFromCudaDataType {

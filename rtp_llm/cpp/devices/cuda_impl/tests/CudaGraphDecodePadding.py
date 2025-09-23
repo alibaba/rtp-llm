@@ -5,7 +5,7 @@ import unittest
 
 import torch
 
-from rtp_llm.cpp.devices.cuda_impl.tests.libtest_cuda_graph_ops import (
+from rtp_llm.cpp.devices.cuda_impl.tests.libtest_cuda_graph_decode_ops import (
     CudaGraphDecodePaddingOp,
 )
 
@@ -38,6 +38,8 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
         self.op = CudaGraphDecodePaddingOp()
         self.op.init(model)
         self.model = model
+        normal_model = self.build_model()
+        self.normal_model = normal_model
 
     def _test_single(self, batch_size: int):
         max_seq_len = 64
@@ -46,8 +48,11 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
         inputs = self.op.buildInputs(
             batch_size, max_seq_len, num_tokens_per_bs, seq_size_per_block
         )
-        outputs2 = self.model.forward(inputs)
+        inputs2 = self.op.buildInputs(
+            batch_size, max_seq_len, num_tokens_per_bs, seq_size_per_block
+        )
         outputs1 = self.op.forward(inputs)
+        outputs2 = self.normal_model.forward(inputs2)
         current_real_graph_size = self.op.getCurrentRealGraphSize()
         print(
             f"current_real_graph_size: {current_real_graph_size}, batch_size: {batch_size}"

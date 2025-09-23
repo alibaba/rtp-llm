@@ -1,15 +1,15 @@
 #pragma once
 
 #include "absl/status/status.h"
-#include "rtp_llm/cpp/stream/GenerateStream.h"
+#include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
+#include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
 #include "rtp_llm/cpp/dataclass/EngineInitParameter.h"
 #include "rtp_llm/cpp/dataclass/LoadBalance.h"
-#include "rtp_llm/cpp/config/EplbConfig.h"
-#include "rtp_llm/cpp/devices/DeviceBase.h"
-#include "rtp_llm/cpp/lora/LoraManager.h"
-#include "rtp_llm/cpp/schedulers/SchedulerBase.h"
-#include "rtp_llm/cpp/disaggregate/cache_store/NormalCacheStore.h"
 #include "rtp_llm/cpp/dataclass/KvCacheInfo.h"
+#include "rtp_llm/cpp/models/eplb/EplbConfig.h"
+#include "rtp_llm/cpp/models/lora/LoraManager.h"
+#include "rtp_llm/cpp/devices/DeviceBase.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/NormalCacheStore.h"
 
 namespace rtp_llm {
 

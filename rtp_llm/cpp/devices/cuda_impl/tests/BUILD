@@ -72,7 +72,7 @@ cc_binary(
     ]),
     deps = test_deps + [
         "//rtp_llm/cpp/devices/torch_impl:torch_reference_impl",
-        "//rtp_llm/cpp:models",
+        "//rtp_llm/cpp/models:models",
     ],
     visibility = ["//visibility:public"],
     copts = copts(),
@@ -300,18 +300,12 @@ cc_test(
     data = [],
     env = test_envs,
     copts = copts(),
-    linkopts = [
-        "-L/usr/local/cuda/lib64",
-        "-lnvToolsExt",
-        "-L/usr/local/cuda/extras/CUPTI/lib64",
-        "-lcupti",
-    ],
     deps = test_deps,
     exec_properties = {'gpu':'A10'},
 )
 
 cc_library(
-    name = "test_cuda_graph_libs",
+    name = "test_cuda_graph_decode_libs",
     srcs = glob([
         "CudaGraphDecodePaddingOp.cc"
     ]),
@@ -321,16 +315,43 @@ cc_library(
     copts = copts(),
     deps = test_deps + [
         "//rtp_llm/models_py/bindings:op_defs",
-        "//:th_utils"
+        "//rtp_llm/cpp/pybind:th_utils"
+    ],
+    visibility = ["//visibility:public"],
+    alwayslink = True, ## make sure pybind11 link
+)
+
+cc_library(
+    name = "test_cuda_graph_prefill_libs",
+    srcs = glob([
+        "CudaGraphPrefillOp.cc"
+    ]),
+    hdrs = [
+        "CudaGraphPrefillOp.h"
+    ],
+    copts = copts(),
+    deps = test_deps + [
+        "//rtp_llm/models_py/bindings:op_defs",
+        "//rtp_llm/cpp/pybind:th_utils"
     ],
     visibility = ["//visibility:public"],
     alwayslink = True, ## make sure pybind11 link
 )
 
 cc_binary(
-    name = "test_cuda_graph_ops",
+    name = "test_cuda_graph_decode_ops",
     deps = [
-        ":test_cuda_graph_libs",
+        ":test_cuda_graph_decode_libs",
+        # "//:th_transformer"
+    ],
+    linkshared = 1,
+    visibility = ["//visibility:public"],
+)
+
+cc_binary(
+    name = "test_cuda_graph_prefill_ops",
+    deps = [
+        ":test_cuda_graph_prefill_libs",
         # "//:th_transformer"
     ],
     linkshared = 1,
@@ -346,7 +367,7 @@ py_test(
         # "//rtp_llm/test/model_test/fake_test/testdata:testdata",
         # ":py_testdata",
         # "//rtp_llm/test/model_test/test_util:test_util"
-        ":test_cuda_graph_ops"
+        ":test_cuda_graph_decode_ops"
     ],
     deps = [
         # "//rtp_llm:torch",
@@ -360,7 +381,29 @@ py_test(
         "HACK_LAYER_NUM" : "1",
         "CUDA_LAUNCH_BLOCKING" : "1",
         # "TORCH_USE_CUDA_DSA" : "1"
+        # "ENABLE_CUDA_GRAPH_DEBUG_MODE" : "1",
+        # "ENABLE_DEVICE_PERF" : "1",
     },
     exec_properties = {'gpu':'A10'},
     # tags = ["manual"],
+)
+
+py_test(
+    name = "CudaGraphPrefill",
+    srcs = [
+        "CudaGraphPrefill.py",
+    ],
+    data = [
+        ":test_cuda_graph_prefill_ops"
+    ],
+    deps = [
+        "//rtp_llm/test/model_test/test_util:test_util",
+    ],
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+        "HACK_LAYER_NUM" : "1",
+        "CUDA_LAUNCH_BLOCKING" : "1",
+        "ENABLE_CUDA_GRAPH_DEBUG_MODE" : "1",
+    },
+    exec_properties = {'gpu':'A10'},
 )

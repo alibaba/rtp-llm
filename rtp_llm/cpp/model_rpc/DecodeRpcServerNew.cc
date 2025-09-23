@@ -202,11 +202,6 @@ ErrorInfo DecodeRpcServerNew::callPrefill(DecodeGenerateContextNew& decode_conte
         }
     }
 
-    auto block_ids = decode_context.getStream()->kvCache().blocks(0);
-    for (auto block_id : block_ids) {
-        auto [k_buffer, v_buffer] = engine_->resourceContext().cache_manager->getKVBlockValue(block_id);
-    }
-
     decode_context.load_cache_from_prefill_done_time_us = currentTimeUs();
     RTP_LLM_LOG_DEBUG("request [%s] call prefill done", decode_context.request_key.c_str());
     return ErrorInfo::OkStatus();

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "rtp_llm/cpp/utils/PyUtils.h"
+#include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/embedding_engine/EmbeddingEngine.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalProcessor.h"
 

@@ -74,6 +74,9 @@ class FMHAImplBase(object):
     def support(self):
         return self.support_
 
+    def support_cuda_graph(self) -> bool:
+        return False
+
     def prepare(self, attn_inputs: PyAttentionInputs):
         assert self.fmha_impl is not None
         self.fmha_params = self.fmha_impl.prepare(attn_inputs)
@@ -128,6 +131,9 @@ try:
         def fmha_type() -> FMHAType:
             return FMHAType.FLASH_INFER
 
+        def support_cuda_graph(self) -> bool:
+            return True
+
     PREFILL_MHA_IMPS.append(FlashInferPrefillImpl)
 except ImportError:
     logging.info("FlashInferPrefillImpl not available, skipped.")
@@ -147,10 +153,12 @@ try:
         def fmha_type() -> FMHAType:
             return FMHAType.FLASH_INFER
 
+        def support_cuda_graph(self) -> bool:
+            return True
+
     DECODE_MHA_IMPS.append(FlashInferDecodeImpl)
 except ImportError:
     logging.info("FlashInferDecodeOp not available, skipped.")
-
 
 try:
     from libth_transformer.rtp_llm_ops import TRTAttnOp
@@ -165,6 +173,9 @@ try:
         @staticmethod
         def fmha_type() -> FMHAType:
             return FMHAType.TRT_V2
+
+        def support_cuda_graph(self) -> bool:
+            return True
 
     PREFILL_MHA_IMPS.append(TRTMHAImpl)
     # PREFILL_MHA_IMPS.insert(0, TRTMHAImpl)
@@ -186,6 +197,9 @@ try:
         @staticmethod
         def fmha_type() -> FMHAType:
             return FMHAType.XQA
+
+        def support_cuda_graph(self) -> bool:
+            return True
 
     DECODE_MHA_IMPS.append(XQAImpl)
 except ImportError:

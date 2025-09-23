@@ -53,149 +53,26 @@ config_setting(
     values = {"copt": "-DENABLE_3FS=1"},
 )
 
-config_setting(
-    name = "frontend",
-    values = {"define": "frontend=true"}
-)
-
-config_setting(
-    name = "default_cuda",
-    define_values = {"frontend": "false", "using_cuda": "true"}
-)
-
-config_setting(
-    name = "default_cuda12",
-    define_values = {"frontend": "false", "using_cuda12": "true"}
-)
-
-cc_library(
-    name = "gpt_init_params",
-    srcs = [
-        "//rtp_llm/cpp:th_op/GptInitParameter.cc",
-    ],
-    hdrs = [
-        "//rtp_llm/cpp:th_op/GptInitParameter.h",
-        "//rtp_llm/cpp:th_op/GptInitParameterRegister.h",
-    ],
+cc_binary(
+    name = "th_transformer_config",
     deps = [
-        "//rtp_llm/cpp/utils:core_utils",
-	    "//rtp_llm/cpp/core:types",
-        "//rtp_llm/cpp/model_utils:model_utils",
-        "//rtp_llm/cpp/config:config_modules",
-        "//rtp_llm/cpp/config:eplb_config",
-    ] + torch_deps(),
-    copts = copts(),
-    visibility = ["//visibility:public"],
-)
-
-filegroup(
-    name = "th_op_hdrs_files",
-    srcs = [
-        "//rtp_llm/cpp:th_op/common/NcclOp.h",
-        "//rtp_llm/cpp:th_op/common/InitEngineOps.h",
-        "//rtp_llm/cpp:th_op/common/blockUtil.h",
-        "//rtp_llm/cpp:th_op/multi_gpu_gpt/EmbeddingHandlerOp.h",
-        "//rtp_llm/cpp:th_op/multi_gpu_gpt/RtpEmbeddingOp.h",
-        "//rtp_llm/cpp:th_op/multi_gpu_gpt/RtpLLMOp.h",
+        "//rtp_llm/cpp/pybind:th_transformer_config_lib",
     ],
-)
-
-cc_library(
-    name = "th_op_hdrs",
-    hdrs = [
-        ":th_op_hdrs_files",
-    ],
-    visibility = ["//visibility:public"],
-)
-
-filegroup(
-    name = "th_transformer_lib_files",
-    srcs = [
-        "//rtp_llm/cpp:th_op/GptInitParameter.cc",
-        "//rtp_llm/cpp:th_op/init.cc",
-        "//rtp_llm/cpp:th_op/common/InitEngineOps.cc",
-        "//rtp_llm/cpp:th_op/common/blockUtil.cc",
-    ] + select({
-        "@//:frontend": [],
-        "@//:default_cuda": [
-            "//rtp_llm/cpp:th_op/multi_gpu_gpt/RtpEmbeddingOp.cc",
-            "//rtp_llm/cpp:th_op/multi_gpu_gpt/EmbeddingHandlerOp.cc",
-            "//rtp_llm/cpp:th_op/multi_gpu_gpt/RtpLLMOp.cc",
-            "//rtp_llm/cpp:th_op/common/NcclOp.cc",
-        ],
-        "//conditions:default": [
-            "//rtp_llm/cpp:th_op/multi_gpu_gpt/RtpEmbeddingOp.cc",
-            "//rtp_llm/cpp:th_op/multi_gpu_gpt/EmbeddingHandlerOp.cc",
-            "//rtp_llm/cpp:th_op/multi_gpu_gpt/RtpLLMOp.cc",
-        ],
-    }),
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
-    name = "th_transformer_lib",
-    srcs = [
-        ":th_transformer_lib_files"
-    ],
-    deps = [
-        ":gpt_init_params",
-    	":th_op_hdrs",
-        "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/devices:device_py_export",
-        "//rtp_llm/cpp/devices:devices_base",
-        "@grpc//:grpc++",
-    ] + select({
-        "@//:frontend": [
-            "//rtp_llm/cpp:dataclass",
-        ],
-        "@//:default_cuda": [
-            "//rtp_llm/cpp:http_api_server",
-            "//rtp_llm/cpp:model_rpc_server",
-            "//rtp_llm/cpp/cuda:allocator_torch",
-        ],
-        "//conditions:default": [
-            "//rtp_llm/cpp:http_api_server",
-            "//rtp_llm/cpp:model_rpc_server",
-        ],
-    }) + select_py_bindings(),
     copts = copts(),
-    alwayslink = True,
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
-    name = "th_transformer_gpu",
-    srcs = select({
-        "@//:using_cuda12": [
-            "//rtp_llm/cpp:th_op/common/CutlassConfigOps.cc",
-        ],
-        "//conditions:default": [],
-    }),
-    deps = [
-        ":gpt_init_params",
-    	":th_op_hdrs",
-        "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp:model_rpc_server",
-        "@grpc//:grpc++",
-    ] + select({
-        "@//:using_cuda": [
-            "//rtp_llm/cpp/cuda:allocator_torch",
-        ],
-        "//conditions:default": [],
-    }),
-    copts = copts(),
-    alwayslink = True,
+    linkshared = 1,
+    linkopts = [
+        "-Wl,-rpath='$$ORIGIN'",
+    ],
     visibility = ["//visibility:public"],
 )
 
 cc_binary(
     name = "th_transformer",
     deps = [
-        ":th_transformer_lib",
-        ":gpt_init_params",
+        "//rtp_llm/cpp/pybind:th_transformer_lib",
     ] + select({
-        "@//:default_cuda": [
-            ":th_transformer_gpu",
+        "@//:using_cuda12": [
+            "//rtp_llm/cpp/pybind:th_transformer_gpu",
         ],
         "//conditions:default": [],
     }),
@@ -209,17 +86,6 @@ cc_binary(
     visibility = ["//visibility:public"],
 )
 
-cc_library(
-    name = "th_utils",
-    hdrs = [
-        "//rtp_llm/cpp:th_op/th_utils.h",
-    ],
-    deps = [
-        "//rtp_llm/cpp/utils:core_utils",
-    ],
-    copts = copts(),
-    visibility = ["//visibility:public"],
-)
 
 py_runtime(
     name = "python310",
@@ -234,6 +100,6 @@ load("@hedron_compile_commands//:refresh_compile_commands.bzl", "refresh_compile
 refresh_compile_commands(
     name = "refresh_compdb",
     targets = {
-        "//rtp_llm/cpp:model_rpc_server": "--config=cuda12_6 --config=debug --sandbox_base=/mnt/ram/",
+        "//rtp_llm/cpp/model_rpc:model_rpc_server": "--config=cuda12_6 --config=debug --sandbox_base=/mnt/ram/",
     },
 )

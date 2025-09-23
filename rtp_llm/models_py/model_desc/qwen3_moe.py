@@ -22,32 +22,38 @@ try:
 except ImportError:
     logging.info("SelectTopkOp not available")
 
-from rtp_llm.ops import PyAttentionInputs, PyModelInputs, PyModelOutputs
-from rtp_llm.utils.model_weight import W
-
 
 class Qwen3MoeLayer(nn.Module):
     def __init__(
         self, config: GptInitModelParameters, weights: Dict[str, torch.Tensor]
     ):
         super().__init__()
-
         self.config = config
+
         self.hidden_dim = config.hidden_size
         self.ffn_dim = config.moe_inter_padding_size
         self.num_experts = config.expert_num
         self.top_k = config.moe_k
-
         self.gate = Linear(weights[W.moe_gate], None)
+        self.select_topk_op = SelectTopkOp(config)
+        self.fused_moe: FusedMoe = FusedMoeFactory.create_fused_moe(config, weights)
         self.w1 = weights.get(W.moe_w1, None)
         self.w2 = weights.get(W.moe_w2, None)
-        self.select_topk_op = SelectTopkOp(config)
-
         assert (
             self.w1 is not None and self.w2 is not None
         ), "Weights w1 and w2 must be provided"
+        self.num_local_experts = self.w1.shape[0]
 
-        self.fused_moe: FusedMoe = FusedMoeFactory.create_fused_moe(config, weights)
+        self.expert_map = self.build_expert_map()
+
+    def build_expert_map(self):
+        num_local_experts = self.num_local_experts
+        global_num_experts = self.num_experts
+        expert_map = torch.full((global_num_experts,), fill_value=-1, dtype=torch.int32)
+        start_id = self.config.ep_rank * num_local_experts
+        end_id = start_id + num_local_experts
+        expert_map[start_id:end_id] = torch.tensor(list(range(num_local_experts)))
+        return expert_map.to(device=torch.cuda.current_device(), dtype=torch.int32)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
@@ -61,7 +67,7 @@ class Qwen3MoeLayer(nn.Module):
         )
         topk_ids = torch.zeros(
             (num_tokens, self.top_k),
-            dtype=torch.int32,
+            dtype=torch.int64,
             device=hidden_states.device,
         )
         self.select_topk_op.forward(router_logits_fp32, topk_ids, topk_weights)
@@ -71,6 +77,7 @@ class Qwen3MoeLayer(nn.Module):
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation="SiGLU",
+            expert_map=self.expert_map,
         )
 
 
@@ -121,7 +128,6 @@ class Qwen3MoeDecoderLayer(nn.Module):
 class Qwen3MoeModel(GptModelBase):
     def __init__(self, config: GptInitModelParameters, weights: ModelWeights):
         super().__init__(config, weights)
-
         self.embed_tokens = Embedding(config, weights.get_global_weight(W.embedding))
         self.layers = nn.ModuleList(
             [

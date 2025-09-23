@@ -6,8 +6,8 @@
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #include "rtp_llm/cpp/dataclass/EngineInitParameter.h"
 
-#include "rtp_llm/cpp/http_server/http_server/HttpResponseWriter.h"
-#include "rtp_llm/cpp/http_server/http_server/HttpRequest.h"
+#include "rtp_llm/cpp/api_server/http_server/http_server/HttpResponseWriter.h"
+#include "rtp_llm/cpp/api_server/http_server/http_server/HttpRequest.h"
 
 #include "rtp_llm/cpp/api_server/TokenProcessor.h"
 #include "rtp_llm/cpp/api_server/ApiServerMetrics.h"

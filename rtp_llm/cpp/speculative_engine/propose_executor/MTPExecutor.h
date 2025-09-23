@@ -1,7 +1,7 @@
 #pragma once
 
 #include "rtp_llm/cpp/cache/CacheManager.h"
-#include "rtp_llm/cpp/dataclass/MergedQuery.h"
+#include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/cpp/models/GptModel.h"
 #include "rtp_llm/cpp/models/MTPModel.h"
 #include "rtp_llm/cpp/models/Eagle3Model.h"
@@ -49,7 +49,7 @@ public:
                 {device_,
                  mtp_params->gpt_weights,
                  Executor::genModelDescription(mtp_params->gpt_init_parameter),
-                 cache_manager ? ((std::optional<CacheManager::KVCacheBuffer>)cache_manager->kvCacheBuffer()) :
+                 cache_manager ? ((std::optional<KVCacheAllocator::KVCacheBuffer>)cache_manager->kvCacheBuffer()) :
                                  std::nullopt,
                  mtp_params->model_id});
             std::unique_ptr<GptModel> new_model;

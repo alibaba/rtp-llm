@@ -1,12 +1,12 @@
 #include <memory>
 #include <chrono>
-#include "rtp_llm/cpp/dataclass/Query.h"
+#include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #include "rtp_llm/cpp/speculative_engine/SpeculativeEngine.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
-#include "rtp_llm/cpp/proto/model_rpc_service.pb.h"
+#include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 
 using namespace std;
 
@@ -107,7 +107,8 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
         if (stream->needRemoteGenerate()) {
             break;
         }
-        if (stream->queryPdSep() && stream->waitForRemoteGenerate()) {
+        if (stream->queryPdSep()) {
+            stream->waitForRemoteGenerate();
             break;
         }
     }

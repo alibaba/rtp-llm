@@ -1,18 +1,10 @@
 load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
-load("//rtp_llm/cpp/devices:device_defs.bzl", "device_impl_target", "device_test_envs", "device_linkopts")
+load("//rtp_llm/cpp/devices:device_defs.bzl", "device_impl_target", "device_test_envs")
 
 test_copts = [
     "-fno-access-control",
 ] + copts()
-
-test_linkopts = [
-    "-lpython3.10",
-    "-ltorch",
-    "-lc10",
-    "-ltorch_cpu",
-    "-ltorch_python",
-] + device_linkopts()
 
 cc_library(
     name = "test_headers",
@@ -23,8 +15,8 @@ cc_library(
 
 test_deps = [
     "//rtp_llm/cpp/devices/testing:device_test_utils",
-    "//rtp_llm/cpp:models",
-    "//:gpt_init_params",
+    "//rtp_llm/cpp/models:models",
+    "//rtp_llm/cpp/config:gpt_init_params",
     ":test_headers",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",
@@ -109,10 +101,9 @@ cc_library(
         "TestMain.cc",
     ],
     deps = test_deps + [
-        "//rtp_llm/cpp:http_api_server",
+        "//rtp_llm/cpp/api_server:http_api_server",
     ],
     copts = test_copts,
-    linkopts = test_linkopts,
     alwayslink = 1,
 )
 

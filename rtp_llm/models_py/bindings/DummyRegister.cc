@@ -1,7 +1,7 @@
 #include "rtp_llm/models_py/bindings/RegisterOps.h"
 
-namespace torch_ext {
+namespace rtp_llm {
 
 void registerPyModuleOps(pybind11::module& m) {}
 
-}  // namespace torch_ext
+}

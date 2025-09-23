@@ -3,7 +3,7 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
-#include "rtp_llm/cpp/lora/LoraManager.h"
+#include "rtp_llm/cpp/models/lora/LoraManager.h"
 
 namespace rtp_llm::lora {
 

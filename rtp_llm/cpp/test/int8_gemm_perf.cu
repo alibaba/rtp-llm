@@ -9,7 +9,7 @@
 #include "rtp_llm/cpp/cuda/cublas/cublas.h"
 
 #include "rtp_llm/cpp/cuda/cublas/cublasMMWrapper.h"
-#include "rtp_llm/cpp/cutlass/interface.h"
+#include "rtp_llm/cpp/cuda/cutlass/interface.h"
 
 namespace tk = tensorrt_llm::common;
 namespace tc = tensorrt_llm::cutlass_extensions;

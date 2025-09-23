@@ -3,7 +3,7 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
-#include "rtp_llm/cpp/openai/ChatRender.h"
+#include "rtp_llm/cpp/api_server/openai/ChatRender.h"
 
 namespace rtp_llm {
 

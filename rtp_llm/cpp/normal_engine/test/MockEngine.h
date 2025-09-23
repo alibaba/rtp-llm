@@ -9,11 +9,11 @@
 #include "torch/all.h"
 
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
-#include "rtp_llm/cpp/schedulers/FIFOScheduler.h"
+#include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/devices/testing/TestBase.h"
-#include "rtp_llm/cpp/models_weight/W.h"
+#include "rtp_llm/cpp/models/models_weight/W.h"
 
 using namespace std;
 namespace W = rtp_llm::W;

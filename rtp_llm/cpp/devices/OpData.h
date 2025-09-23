@@ -7,7 +7,7 @@
 #include "rtp_llm/cpp/model_utils/RopeConfig.h"
 #include "rtp_llm/cpp/model_utils/MlaConfig.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
-#include "rtp_llm/cpp/stats/ExpertStats.h"
+#include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
 
 #include "rtp_llm/cpp/core/Event.h"
 #include "rtp_llm/cpp/core/Buffer.h"

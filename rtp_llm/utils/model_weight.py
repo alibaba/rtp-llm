@@ -115,6 +115,22 @@ def get_tensor_from_scalar(ts: List[torch.Tensor]) -> torch.Tensor:
     return ts[0].reshape(-1)
 
 
+def get_list_tensor_reciprocal(ts: List[torch.Tensor]) -> torch.Tensor:
+    for i in range(len(ts)):
+        if (ts[i] == 0).any():
+            raise ValueError(
+                f"Tensor at index {i} contains zero elements, causing division by zero."
+            )
+        ts[i] = 1.0 / ts[i].reshape(-1)
+    return concat_0(ts)
+
+
+def get_list_tensor_from_scalar(ts: List[torch.Tensor]) -> torch.Tensor:
+    for i in range(len(ts)):
+        ts[i] = ts[i].reshape(-1)
+    return concat_0(ts)
+
+
 def tolerate_failed(
     ts: List[torch.Tensor], origin_func: Callable[[List[torch.Tensor]], torch.Tensor]
 ) -> torch.Tensor:
@@ -1092,6 +1108,12 @@ class W:
     post_ffn_ln_static_quant_reciprocal = (
         "post_ffn_layernorm_weights.static_quant_reciprocal"
     )
+
+    # moe per static tensor quant
+    moe_w1_input_s = "moe_w1_activation.static_quant"
+    moe_w1_input_sr = "moe_w1_activation.static_quant_reciprocal"
+    moe_w2_input_s = "moe_w2_activation.static_quant"
+    moe_w2_input_sr = "moe_w2_activation.static_quant_reciprocal"
 
     # rotary embedding cos sin cache
     rope_cos_sin_cache = "rotary_embedding.cos_sin_cache"

@@ -4,6 +4,8 @@ from typing import Optional, Union
 
 import torch
 
+from rtp_llm.models_py.modules.fp8_kernel import scaled_fp8_per_tensor_quant
+
 # Type alias for quantization dtype
 QuantDtype = Union[None, torch.dtype, str]
 
@@ -89,6 +91,35 @@ def normalize_scales_shape(scales: Optional[torch.Tensor]) -> Optional[torch.Ten
     return scales
 
 
+def _fp8_perm(m: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
+    """
+    A permutation routine that works on fp8 types.
+    """
+    if torch.is_floating_point(m) and m.dtype.itemsize == 1:
+        return m.view(dtype=torch.uint8)[idx, ...].view(dtype=m.dtype)
+    else:
+        return m[idx, ...]
+
+
+def _fp8_quantize(
+    A: torch.Tensor,
+    A_scale: Optional[torch.Tensor],
+    per_act_token: bool,
+    block_shape: Optional[list[int]] = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Perform fp8 quantization on the inputs.  If a block_shape
+    is provided, the output will be blocked.
+    """
+    if block_shape is None:
+        assert not per_act_token
+        A_q, A_scale = scaled_fp8_per_tensor_quant(A, A_scale)
+    else:
+        raise NotImplementedError("per token group fp8 quant not supported yet")
+
+    return A_q, A_scale
+
+
 def moe_kernel_quantize_input(
     A: torch.Tensor,
     A_scale: Optional[torch.Tensor],
@@ -97,7 +128,7 @@ def moe_kernel_quantize_input(
     block_shape: Optional[list[int]] = None,
 ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
     if quant_dtype == torch.float8_e4m3fn:
-        raise NotImplementedError("float8 not supported yet")
+        return _fp8_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == torch.int8:
         raise NotImplementedError("int8 not supported yet")
     elif quant_dtype == torch.uint8:  # nvfp4

@@ -43,6 +43,10 @@ void FlashInferAttnParams::recycle(void* p) {
     }
 }
 
+bool FlashInferAttnParams::check_recycle() {
+    return true;
+}
+
 FlashInferAttnParams* FlashInferAttnParams::get(int batch_size, int input_token_num) {
     auto cache = isDecode(input_token_num) ? &ParamsCache::DECODE_PARAMS_CACHE : &ParamsCache::PREFILL_PARAMS_CACHE;
     if (!cache->empty()) {
@@ -132,6 +136,21 @@ FlashInferAttnParams::create(CudaDevice* device, int batch_size, int input_token
     ALLOC_BUFFER(d, AllocationType::DEVICE);
 
     return params.release();
+}
+
+void FlashInferAttnParams::fillParams(torch::Tensor sequence_lengths,
+                                      torch::Tensor input_lengths,
+                                      torch::Tensor kv_cache_block_id_host,
+                                      int           batch_size,
+                                      int           seq_size_per_block) {
+    fillFlashInfer(nullptr,
+                   torchTensor2Buffer(sequence_lengths),
+                   torchTensor2Buffer(input_lengths),
+                   torchTensor2Buffer(kv_cache_block_id_host),
+                   batch_size,
+                   seq_size_per_block);
+    refreshFlashInferBuf(
+        dynamic_cast<CudaDevice*>(DeviceFactory::getDefaultDevice()), batch_size, input_lengths.size(0));
 }
 
 void FlashInferAttnParams::fillFlashInfer(const BufferPtr& prefix_lengths_host,

@@ -11,7 +11,7 @@ struct KVCacheParam {
     uint              block_nums;
     uint              local_head_num_kv;
     uint              size_per_head;
-    uint              seq_size_per_block        = 1;
+    uint              seq_size_per_block = 1;
     rtp_llm::DataType dtype;
 };
 
@@ -20,17 +20,17 @@ struct MlaCacheParam {
     uint              block_nums;
     uint              kv_lora_rank;
     uint              rope_head_dim;
-    uint              seq_size_per_block        = 1;
+    uint              seq_size_per_block = 1;
     rtp_llm::DataType dtype;
 };
 
 struct CacheConfig {
-    uint32_t          layer_num                 = 0;
-    uint32_t          block_nums                = 0;
-    uint32_t          local_head_num_kv         = 0;
-    uint32_t          size_per_head             = 0;
-    uint32_t          seq_size_per_block        = 1;
-    rtp_llm::DataType dtype                     = rtp_llm::TYPE_INVALID;
+    uint32_t          layer_num          = 0;
+    uint32_t          block_nums         = 0;
+    uint32_t          local_head_num_kv  = 0;
+    uint32_t          size_per_head      = 0;
+    uint32_t          seq_size_per_block = 1;
+    rtp_llm::DataType dtype              = rtp_llm::TYPE_INVALID;
 
     size_t block_size   = 0;
     size_t k_block_size = 0;
@@ -158,6 +158,26 @@ struct CacheConfig {
 
     size_t getKVScaleShape() const {
         return getKVScaleBlockStride() / rtp_llm::getTypeSize(dtype);
+    }
+
+    size_t getKBlockSize() const {
+        if (use_mla) {
+            return rtp_llm::getTypeSize(dtype) * (size_t)layer_num * (size_t)block_nums * (size_t)seq_size_per_block
+                   * (size_t)kv_lora_rank;
+        } else {
+            return rtp_llm::getTypeSize(dtype) * (size_t)layer_num * (size_t)block_nums * (size_t)local_head_num_kv
+                   * (size_t)seq_size_per_block * (size_t)size_per_head;
+        }
+    }
+
+    size_t getVBlockSize() const {
+        if (use_mla) {
+            return rtp_llm::getTypeSize(dtype) * (size_t)layer_num * (size_t)block_nums * (size_t)seq_size_per_block
+                   * (size_t)rope_head_dim;
+        } else {
+            return rtp_llm::getTypeSize(dtype) * (size_t)layer_num * (size_t)block_nums * (size_t)local_head_num_kv
+                   * (size_t)seq_size_per_block * (size_t)size_per_head;
+        }
     }
 
     std::string debugString() const {
