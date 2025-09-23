@@ -1,6 +1,6 @@
 #!/bin/bash
 
-if [ $# -ne 2 ]; then
+if [ $# -ne 5 ]; then
     echo "Usage: $0 <COMMIT_ID> <SECURITY> <AUTHOR_EMAIL> <AUTHOR_NAME> <MERGE_MESSAGE>"
     exit 1
 fi
