@@ -1,7 +1,7 @@
 #!/bin/bash
 
 if [ $# -ne 2 ]; then
-    echo "Usage: $0 <COMMIT_ID> <SECURITY>"
+    echo "Usage: $0 <COMMIT_ID> <SECURITY> <AUTHOR_EMAIL> <AUTHOR_NAME> <MERGE_MESSAGE>"
     exit 1
 fi
 
@@ -9,6 +9,9 @@ COMMIT_ID=$1
 SECURITY=$2
 REPO_URL="https://github.com/${GITHUB_REPOSITORY}.git"
 AONE_PROJECT_ID="2654816"
+AUTHOR_EMAIL=$3
+AUTHOR_NAME=$4
+MERGE_MESSAGE=$5
 MERGE_TYPE="SQUASH"
 SOURCE_BRANCH="open_merge/${COMMIT_ID}"
 TARGET_BRANCH="main-internal"
