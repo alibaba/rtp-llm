@@ -11,7 +11,7 @@ REPO_URL="https://github.com/${GITHUB_REPOSITORY}.git"
 AONE_PROJECT_ID="2654816"
 AUTHOR_NAME=$(git log -1 --pretty=format:%an ${COMMIT_ID})
 AUTHOR_EMAIL=$(git log -1 --pretty=format:%ae ${COMMIT_ID})
-MERGE_MESSAGE=$(git log -1 --pretty=format:%B ${COMMIT_ID})
+MERGE_MESSAGE="auto-merge: github commit $(git log -1 --pretty=format:%B ${COMMIT_ID})"
 MERGE_TYPE="SQUASH"
 SOURCE_BRANCH="open_merge/${COMMIT_ID}"
 TARGET_BRANCH="main"
