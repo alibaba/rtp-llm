@@ -2,6 +2,14 @@
 #include <cstdint>
 #include <vector>
 
+#if USING_ROCM
+#include "c10/hip/HIPStream.h"
+#include "c10/hip/HIPGraphsC10Utils.h"
+#define GET_CURRENT_STREAM() at::hip::getCurrentHIPStream().stream()
+#else
+#define GET_CURRENT_STREAM() at::cuda::getCurrentCUDAStream().stream()
+#endif
+
 namespace th = torch;
 
 namespace torch_ext {
@@ -31,7 +39,7 @@ void NcclOp::broadcast_tp(std::vector<th::Tensor> tensors, int64_t root, bool ti
         return;
     }
 
-    auto stream = at::cuda::getCurrentCUDAStream().stream();
+    auto stream = GET_CURRENT_STREAM();
 
     if (tensor_para_.world_size_ > 1) {
         rtp_llm::ftNcclGroupStart();
