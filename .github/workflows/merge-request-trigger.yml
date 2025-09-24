@@ -23,7 +23,11 @@ jobs:
         id: trigger
         run: |
           echo "Triggering Aone merge for commit ${{ github.event.pull_request.head.sha }}"
-          ./trigger-merge.sh "${{ github.event.pull_request.head.sha }}" "${{ secrets.CI_SECRET }}" "${{ github.actor_id }}${{ github.actor }}@users.noreply.github.com" "${{ github.actor }}" "auto-merge: github commit${{ github.event.head_commit.message }}" 
+          if [ "${{ github.event.pull_request.merged }}" = "true" ]; then
+            ./trigger-merge.sh "${{ github.event.pull_request.head.sha }}" "${{ secrets.CI_SECRET }}" "${{ github.actor_id }}${{ github.actor }}@users.github.com" "${{ github.actor }}" "auto-merge: github commit${{ github.event.head_commit.message }}" 
+          else
+            echo "Pull request was closed without merge."
+            exit 0
         env:
           AONE_PROJECT_ID: "3512232" 
           GITHUB_REPOSITORY: ${{ github.repository }}
