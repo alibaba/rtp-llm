@@ -1,6 +1,14 @@
 #include "rtp_llm/cpp/kernels/eplb/experts_stats_kernels.h"
 #include "rtp_llm/cpp/cuda/launch_utils.h"
 
+#if USING_CUDA
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
+#endif
+
+#if USING_ROCM
+#include "rtp_llm/cpp/rocm/hip_host_utils.h"
+#endif
+
 namespace rtp_llm {
 template<typename T>
 __global__ void euqal_expert_balance_kernel(T*         experts_ids,

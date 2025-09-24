@@ -3,7 +3,7 @@
 #include "rtp_llm/cpp/devices/OpData.h"
 #include "rtp_llm/cpp/cuda/cufmha/cufmha.h"
 #include "rtp_llm/cpp/devices/DeviceBase.h"
-#include "rtp_llm/cpp/cuda/cuda_utils.h"
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 #include "rtp_llm/cpp/cuda/cublas/cublas.h"
 #include "rtp_llm/cpp/cuda/cuggemm/cuggemm.h"
 #include "rtp_llm/cpp/cuda/custom_ar/custom_ar_comm.h"

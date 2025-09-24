@@ -39,6 +39,13 @@ class StreamResponseMerger:
         for choice_index in sorted(self.choice_states.keys()):
             merged_choice = self._build_merged_choice(choice_index)
             merged_choices.append(merged_choice)
+        # 合并 extra_outputs
+        # TODO(zhangjianning.zjn) implement proper merge procedure for extra)_outputs
+        extra_outputs = None
+        for response in responses:
+            if response.extra_outputs is not None:
+                extra_outputs = response.extra_outputs
+                break
         # 构建最终的响应（使用基础响应的元数据）
         return ChatCompletionStreamResponse(
             id=base_response.id,
@@ -49,6 +56,7 @@ class StreamResponseMerger:
             usage=base_response.usage,  # 可以用最后一个响应的usage，但这里简化处理
             debug_info=base_response.debug_info,
             aux_info=base_response.aux_info,
+            extra_outputs=extra_outputs,
         )
 
     def _merge_single_response(self, response: ChatCompletionStreamResponse):

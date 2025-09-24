@@ -18,11 +18,21 @@
 #include "rtp_llm/cpp/kernels/kv_cache/kv_cache_utils.h"
 #include "rtp_llm/cpp/utils/utils.h"
 
+#if USING_CUDA
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
+#endif
+#if USING_ROCM
+#include "rtp_llm/cpp/rocm/hip_host_utils.h"
+#endif
+
 #include <assert.h>
 #include <float.h>
 #include <type_traits>
 
 namespace rtp_llm {
+#if USING_ROCM
+using namespace rocm;
+#endif
 
 template<typename T,
          typename T_cache,

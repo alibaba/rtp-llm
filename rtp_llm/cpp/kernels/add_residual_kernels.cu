@@ -16,17 +16,15 @@
 
 #include "rtp_llm/cpp/kernels/add_residual_kernels.h"
 #include "rtp_llm/cpp/cuda/cuda_type_utils.cuh"
+#include "rtp_llm/cpp/cuda/launch_utils.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 #if USING_ROCM
-#include "rtp_llm/cpp/rocm/hip_utils.h"
+#include "rtp_llm/cpp/rocm/cuda_shims.h"
 #endif
 
 // wont't support new features
 namespace rtp_llm {
-#if USING_ROCM
-using namespace rocm;
-#endif
 
 template<typename T, int RESIDUAL_NUM, typename T2 = T>
 __global__ void addBiasResidual(T*           output,

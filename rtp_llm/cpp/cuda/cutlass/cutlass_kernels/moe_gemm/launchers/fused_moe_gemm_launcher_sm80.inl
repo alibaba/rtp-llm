@@ -27,7 +27,6 @@
 #include "cutlass_extensions/gemm/kernel/fused_moe_kernel.cuh"
 
 #include "rtp_llm/cpp/cuda/trt_utils.h"
-#include "rtp_llm/cpp/cuda/cuda_utils.h"
 
 namespace tensorrt_llm::kernels::cutlass_kernels
 {

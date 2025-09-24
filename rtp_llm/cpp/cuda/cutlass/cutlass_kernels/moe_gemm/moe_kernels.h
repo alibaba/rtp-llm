@@ -18,7 +18,7 @@
 #pragma once
 #include <cuda_runtime_api.h>
 #include "cutlass/gemm/gemm.h"
-#include "rtp_llm/cpp/cuda/cuda_utils.h"
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 #include "rtp_llm/cpp/cuda/trt_utils.h"
 #include "rtp_llm/cpp/cuda/cutlass/cutlass_kernels/moe_gemm/moe_gemm_kernels.h"
 #include "rtp_llm/cpp/cuda/cutlass/cutlass_kernels/weight_only_quant_op.h"

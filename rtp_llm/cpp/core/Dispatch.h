@@ -5,16 +5,6 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/core/Types.h"
 
-#if USING_CUDA
-#include <cuda_runtime.h>
-#ifdef ENABLE_BF16
-#include <cuda_bf16.h>
-#endif
-#endif
-#if USING_ROCM
-#include "rtp_llm/cpp/rocm/cuda_shims.h"
-#endif
-
 #include <fstream>
 #include <iostream>
 #include <string>
@@ -117,7 +107,7 @@ template<typename CastedTuple,
          typename... Args,
          std::enable_if_t<!std::is_constructible_v<CastedTuple>, bool> = 0>
 CastedTuple castArgs(const std::tuple<Args...>& args) {
-    return move(args);
+    return args;
 }
 
 #define ARG_CASTED_FUNC_CALL(T, func_name, ...)                                                                        \

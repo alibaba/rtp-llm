@@ -4,7 +4,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cuda/cutlass/cutlass_kernels/fpA_intB_gemm/fpA_intB_gemm.h"
-#include "rtp_llm/cpp/cuda/cuda_utils.h"
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 #include "rtp_llm/cpp/cuda/memory_utils.h"
 
 struct Dim2 {

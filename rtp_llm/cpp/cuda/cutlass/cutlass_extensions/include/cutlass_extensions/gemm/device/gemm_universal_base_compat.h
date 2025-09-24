@@ -51,7 +51,7 @@
 #include "cutlass/gemm/kernel/default_gemm_universal.h"
 
 #include "cutlass/trace.h"
-#include "rtp_llm/cpp/cuda/cuda_utils.h"
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 ////////////////////////////////////////////////////////////////////////////////
 
 namespace cutlass

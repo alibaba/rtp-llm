@@ -32,6 +32,24 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# DFA utilities - includes PrefixToCandidateTokens functionality
+cc_library(
+    name = "dfa_utils",
+    hdrs = [
+        "logits_processor/DFAUtil.h",
+        "logits_processor/PrefixToCandidateTokens.h",
+    ],
+    deps = [
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/config:config_modules",
+    ],
+    implementation_deps = [
+        "//rtp_llm/cpp/config:static_config",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
 # Logits processor - model output processing
 cc_library(
     name = "logits_processor",
@@ -51,15 +69,13 @@ cc_library(
     ],
     deps = [
         ":sample_infos",
+        ":dfa_utils",
         "//rtp_llm/cpp/engine_base/stream:generate_types",
         "//rtp_llm/cpp/multimodal_processor:multimodal_types",
         "//rtp_llm/cpp/cache",
         "//rtp_llm/cpp/dataclass:dataclass",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:error_code",
-        "//rtp_llm/cpp/utils:system_utils",
-        "//rtp_llm/cpp/utils:data_structures",
-        "//rtp_llm/cpp/utils:domain_utils",
         "//rtp_llm/cpp/pybind:py_utils",
         "//rtp_llm/cpp/config:config_modules",
     ],
@@ -82,7 +98,6 @@ cc_library(
         "//rtp_llm/cpp/core:types",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:error_code", 
-        "//rtp_llm/cpp/utils:system_utils",
     ],
     visibility = ["//visibility:public"],
 )
@@ -101,9 +116,8 @@ cc_library(
         "//rtp_llm/cpp/dataclass:dataclass",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:error_code",
-        "//rtp_llm/cpp/utils:system_utils",
-        "//rtp_llm/cpp/utils:data_structures",
-        "//rtp_llm/cpp/utils:domain_utils",
+        ":dfa_utils",
+        "@havenask//aios/autil:scope",
         "//rtp_llm/cpp/devices:devices_base",
         "//rtp_llm/models_py/bindings:op_defs"
     ] + select({
@@ -158,9 +172,7 @@ cc_library(
         ":eplb_config",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:error_code",
-        "//rtp_llm/cpp/utils:system_utils",
-        "//rtp_llm/cpp/utils:data_structures",
-        "//rtp_llm/cpp/utils:domain_utils",
+        ":dfa_utils",
         "//rtp_llm/cpp/devices:devices_base",
         "//rtp_llm/cpp/pybind:py_utils",
         "@com_google_absl//absl/status",

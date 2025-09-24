@@ -5,6 +5,63 @@ package(default_visibility=["//rtp_llm:__subpackages__"])
 trt_plugins()
 
 cc_library(
+    name = "cuda_host_utils",
+    srcs = [
+        "cuda_host_utils.cc",
+    ],
+    hdrs = [
+        "cuda_host_utils.h",
+    ],
+    deps = [
+        "//rtp_llm/cpp/utils:core_utils",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+    implementation_deps = [
+        "//rtp_llm/cpp/utils:stack_trace",
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/config:static_config",
+        "@local_config_cuda//cuda:nvml",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "cuda_utils_cu",
+    hdrs = [
+        "cuda_fp8_utils.h",
+        "cuda_type_utils.cuh",
+        "cuda_bf16_fallbacks.cuh",
+        "reduce_kernel_utils.cuh"
+    ] + select({
+        "@//:using_rocm": [
+            "//rtp_llm/cpp/rocm:rocm_types_hdr",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "launch_utils",
+    srcs = [
+        "launch_utils.cc",
+    ],
+    hdrs = [
+        "launch_utils.h",
+    ],
+    implementation_deps = [
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/config:static_config",
+        "//rtp_llm/cpp/utils:core_utils",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "cublas",
     srcs = [
         "cublas/cublasAlgoMap.cc",
@@ -16,8 +73,9 @@ cc_library(
         "cublas/cublas.h",
     ],
     deps = [
-        ":cuda_utils",
+        ":cuda_host_utils",
         "//rtp_llm/cpp/core:allocator",
+        "@havenask//aios/autil:scope",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
         "@local_config_cuda//cuda:cublas_headers",
@@ -25,7 +83,6 @@ cc_library(
         "@local_config_cuda//cuda:cublasLt",
     ],
     copts = copts(),
-    include_prefix = "src",
     visibility = ["//visibility:public"],
 )
 
@@ -43,21 +100,20 @@ cc_library(
     ],
     deps = [
         ":fa_hdrs",
-        ":cuda_utils",
+        ":cuda_host_utils",
         "//rtp_llm/cpp/core:types",
+        "//rtp_llm/cpp/core:types_hdr",
         "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/kernels:kernels_tensor_ops",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
         "//3rdparty/trt_fused_multihead_attention:trt_fused_multihead_attention_header",
-        ":memory_utils",
-        "//rtp_llm/cpp/kernels:kernels_cu",
         "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_impl",
         "//3rdparty/contextFusedMultiHeadAttentionSm70:trt_sm70_fmha_impl",
         "//3rdparty/trt_fused_multihead_attention:trt_fused_multihead_attention_impl",
         "//rtp_llm/cpp/devices:devices_base"
     ],
     copts = copts(),
-    include_prefix = "src",
     visibility = ["//visibility:public"],
 )
 
@@ -70,7 +126,7 @@ cc_library(
         "cuggemm/cuggemm.h",
     ],
     deps = [
-        ":cuda_utils",
+        ":cuda_host_utils",
         "//rtp_llm/cpp/core:types",
         "//rtp_llm/cpp/model_utils:model_utils",
         "@local_config_cuda//cuda:cuda_headers",
@@ -78,7 +134,6 @@ cc_library(
         ":trt_plugins",
     ],
     copts = copts(),
-    include_prefix = "src",
     visibility = ["//visibility:public"],
 )
 
@@ -92,16 +147,15 @@ cc_library(
     ],
     deps = [
         ":nccl_util",
-        ":cuda_utils",
-        ":memory_utils",
+        ":cuda_host_utils",
         "//rtp_llm/cpp/core:types",
+        "//rtp_llm/cpp/core:types_hdr",
         "//rtp_llm/cpp/kernels:kernels_cu",
         "//rtp_llm/cpp/config:config_modules",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],
     copts = copts(),
-    include_prefix = "src",
     visibility = ["//visibility:public"],
 )
 
@@ -116,15 +170,14 @@ cc_library(
     deps = [
         ":nccl_util",
         ":custom_ar",
-        ":cuda_utils",
-        ":memory_utils",
+        ":cuda_host_utils",
         "//rtp_llm/cpp/core:types",
+        "//rtp_llm/cpp/core:types_hdr",
         "//rtp_llm/cpp/kernels:kernels_cu",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],
     copts = copts(),
-    include_prefix = "src",
     visibility = ["//visibility:public"],
 )
 
@@ -140,17 +193,16 @@ cc_library(
     ],
     deps = torch_deps() + select({
         "@//:using_cuda": [
-            ":cuda_utils",
+            ":cuda_host_utils",
             "@local_config_cuda//cuda:cuda_headers",
             "@local_config_cuda//cuda:cudart",
         ],
         "@//:using_rocm": [
-            "//rtp_llm/cpp/rocm:rocm_utils",
+            "//rtp_llm/cpp/rocm:rocm_host_utils",
         ],
         "//conditions:default": [],
     }),
     copts = copts(),
-    include_prefix = "src",
     visibility = ["//visibility:public"],
 )
 
@@ -164,40 +216,18 @@ cc_library(
     ],
     deps = [
         ":cuda_utils_cu",
-        ":cuda_utils_base",
+        ":cuda_host_utils",
+        ":launch_utils",
         "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/utils:system_utils",
         "//rtp_llm/cpp/core:types",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],
     copts = cuda_copts(),
-    include_prefix = "src",
     visibility = ["//visibility:public"],
 )
 
-cc_library(
-    name = "cuda_utils_cu",
-    srcs = [
-        "cuda_fp8_utils.cu"
-    ],
-    hdrs = [
-        "cuda_fp8_utils.h",
-        "cuda_type_utils.cuh",
-        "cuda_bf16_fallbacks.cuh",
-        "reduce_kernel_utils.cuh"
-    ],
-    deps = [
-        ":cuda_utils_base",
-        "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/utils:system_utils",
-        "@local_config_cuda//cuda:cuda",
-        "@local_config_cuda//cuda:cudart",
-    ],
-    copts = cuda_copts(),
-    include_prefix = "src",
-    visibility = ["//visibility:public"],
-)
+
 
 cc_library(
     name = "cuda_fmha_utils",
@@ -205,60 +235,40 @@ cc_library(
         "cuda_fmha_utils.h",
     ],
     deps = [
-        ":cuda_utils",
+        ":cuda_host_utils",
         "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/utils:system_utils",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],
     copts = copts(),
-    include_prefix = "src",
     visibility = ["//visibility:public"],
 )
 
 cc_library(
-    name = "cuda_utils_base",
-    srcs = [
-        "cuda_utils.cc",
-        "launch_utils.cc",
-    ],
+    name = "quantize_utils",
     hdrs = [
-        "launch_utils.h",
-        "cuda_utils.h",
-        "Dispatch.h",
-        "trt_utils.h",
         "quantize_utils.h",
     ],
     deps = [
-        "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/utils:system_utils",
-        "//rtp_llm/cpp/core:types",
-        "@local_config_cuda//cuda:cuda",
-        "@local_config_cuda//cuda:cudart",
-    ] + torch_deps(),
-    implementation_deps = [
-        "//rtp_llm/cpp/config:config_modules",
-        "//rtp_llm/cpp/config:static_config",
+        "//rtp_llm/cpp/cuda:cuda_host_utils",
+        "//rtp_llm/cpp/pybind:th_utils",
+        ":trt_plugins",
     ],
     copts = copts(),
-    include_prefix = "src",
     visibility = ["//visibility:public"],
 )
 
 cc_library(
-    name = "cuda_utils",
+    name = "trt_utils",
+    hdrs = [
+        "trt_utils.h",
+    ],
     deps = [
-        ":cuda_utils_cu",
-        ":cuda_utils_base",
+        "//rtp_llm/cpp/cuda:cuda_host_utils",
+        "//rtp_llm/cpp/utils:math_utils",
         "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/utils:system_utils",
-        "//rtp_llm/cpp/core:types",
-        "@local_config_cuda//cuda:cuda_headers",
-        "@local_config_cuda//cuda:cudart",
-        "@local_config_cuda//cuda:nvml",
     ],
     copts = copts(),
-    include_prefix = "src",
     visibility = ["//visibility:public"],
 )
 
@@ -266,28 +276,21 @@ cc_library(
     name = "cuda",
     srcs = [
     ],
-    hdrs = [
-        "Dispatch.h"
-    ],
     deps = [
         ":nccl_util",
         ":cublas",
         ":cufmha",
         ":cuggemm",
-        ":cuda_utils",
+        ":cuda_host_utils",
         ":cuda_fmha_utils",
         ":custom_ar",
         ":comm_buffer",
-        ":memory_utils",
-        "//rtp_llm/cpp/kernels:kernels_cu",
         "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/utils:system_utils",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
         "//3rdparty/trt_beam_search:trt_beam_search_impl",
     ],
     copts = copts(),
-    include_prefix = "src",
     visibility = ["//visibility:public"],
 )
 
@@ -302,9 +305,8 @@ cc_library(
     copts = copts(),
     deps = [
         "//rtp_llm/cpp/core:allocator",
-        ":cuda_utils",
+        ":cuda_host_utils",
     ],
-    include_prefix = "src",
     visibility = ["//visibility:public"],
 )
 
@@ -320,49 +322,5 @@ cc_library(
     deps = torch_deps() + [
         ":allocator_cuda",
     ],
-    include_prefix = "src",
     visibility = ["//visibility:public"],
 )
-
-cc_library(
-    name = "tensor_utils",
-    srcs = [
-        "tensor_utils.cc"
-    ],
-    hdrs = [
-        "tensor_utils.h"
-    ],
-    copts = copts(),
-    deps = torch_deps(),
-    include_prefix = "src",
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
-    name = "cuda_utils_rocm",
-    srcs = [
-        "launch_utils.cc",
-    ],
-    hdrs = [
-        "launch_utils.h",
-        "cuda_utils.h",
-        "Dispatch.h",
-        "memory_utils.h",
-        "cuda_fp8_utils.h",
-        "cuda_type_utils.cuh",
-        "cuda_bf16_fallbacks.cuh",
-        "reduce_kernel_utils.cuh"
-    ],
-    deps = [
-        "//rtp_llm/cpp/rocm:rocm_types_hdr",
-        "//rtp_llm/cpp/core:types",
-        "//rtp_llm/cpp/rocm:rocm_utils",
-    ],
-    copts = copts(),
-    include_prefix = "src",
-    visibility = ["//visibility:public"],
-)
-
-
-
-

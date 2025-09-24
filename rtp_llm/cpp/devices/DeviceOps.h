@@ -106,7 +106,8 @@ public:
     virtual void perfRangePop() const;
 
     // for device-specific weights preprocess
-    static torch::Tensor preprocessGemmWeightByKey(const std::string& key, torch::Tensor weight);
+    static torch::Tensor
+    preprocessGemmWeightByKey(const std::string& key, torch::Tensor weight, bool user_arm_gemm_use_kai);
     static torch::Tensor packInt8TensorToPackedInt4(torch::Tensor weight);
     static torch::Tensor
     preprocessWeightsForMixedGemm(torch::Tensor weight, torch::ScalarType quant_type, const std::string& arch);

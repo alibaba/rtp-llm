@@ -6,10 +6,9 @@
 #include "rtp_llm/cpp/devices/rocm_impl/ROCmAllocator.h"
 #include "rtp_llm/cpp/core/TrackerAllocator.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
-#include "rtp_llm/cpp/kernels/gpt_kernels.h"
 #include "rtp_llm/cpp/kernels/add_residual_kernels.h"
-#include "rtp_llm/cpp/utils/ShapeCheck.h"
-#include "rtp_llm/cpp/cuda/Dispatch.h"
+#include "rtp_llm/cpp/devices/ShapeCheck.h"
+#include "rtp_llm/cpp/core/Dispatch.h"
 #include <cstring>
 
 #include "rtp_llm/cpp/kernels/rmsnormKernels.h"

@@ -53,7 +53,7 @@ class GaugeMetrics(Enum):
     ROUTE_RT_METRIC = "py_rtp_route_rt"
     MASTER_ROUTE_RT_METRIC = "py_rtp_master_route_rt"
     DOMAIN_ROUTE_RT_METRIC = "py_rtp_domain_route_rt"
-    
+
     # igraph
     IGRAPH_RT_METRIC = "py_rtp_igraph_rt"
     PARSE_IGRAPH_RESPONSE_RT_METRIC = "py_rtp_parse_igraph_response_rt"
@@ -67,8 +67,6 @@ class MetricReporter(object):
         self._kmon = kmonitor
         self._matic_map: Dict[str, Any] = {}
         self._inited = False
-        ## we will update this for every FrontendServer in `start_frontend_server_impl`
-        self.frontend_server_id = 0
 
     def report(
         self,
@@ -78,7 +76,6 @@ class MetricReporter(object):
     ):
         if g_parallel_info.dp_size > 1:
             tags["dp_rank"] = str(g_parallel_info.dp_rank)
-        tags["frontend_server_id"] = str(self.frontend_server_id)
         kmon_metric = self._matic_map.get(metric.value, None)
         if kmon_metric is None:
             logging.warning(f"no metric named {metric.name}")

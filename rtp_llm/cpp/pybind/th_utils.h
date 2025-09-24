@@ -32,7 +32,7 @@
 #endif
 #if USING_ROCM
 #include <hip/hip_runtime.h>
-#include "rtp_llm/cpp/rocm/hip_utils.h"
+#include "rtp_llm/cpp/rocm/hip_host_utils.h"
 #endif
 
 #define CHECK_TYPE(x, st) TORCH_CHECK(x.scalar_type() == st, "Inconsistency of Tensor type: " #x)

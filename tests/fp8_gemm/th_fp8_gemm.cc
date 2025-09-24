@@ -5,9 +5,9 @@
 #include <torch/custom_class.h>
 #include <torch/script.h>
 
-#include "rtp_llm/cpp/cuda/cuda_utils.h"
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 #include "rtp_llm/cpp/cuda/memory_utils.h"
-#include "rtp_llm/cpp/cuda/cuda_fp8_utils.h"
+#include "rtp_llm/cpp/kernels/scaled_fp8_quant.h"
 #include "rtp_llm/cpp/cuda/cutlass/interface.h"
 #include "rtp_llm/cpp/pybind/th_utils.h"
 #include "rtp_llm/cpp/cuda/cublas/cublasAlgoMap.h"
@@ -20,6 +20,14 @@
 using torch::Tensor;
 
 namespace torch_ext {
+
+
+template<typename T>
+T getCudaValue(const T* ptr, int index) {
+    T tmp;
+    check_cuda_value(cudaMemcpy(&tmp, ptr + index, sizeof(T), cudaMemcpyDeviceToHost));
+    return tmp;
+}
 
 namespace tkc = tensorrt_llm::kernels::cutlass_kernels;
 namespace tc  = tensorrt_llm::cutlass_extensions;
@@ -47,10 +55,9 @@ Tensor fp8_quant_gemm_helper(Tensor A, Tensor B, Tensor act_scale, Tensor w_scal
     __nv_fp8_e4m3* weight_tensor = get_ptr<__nv_fp8_e4m3>(B);
     float*         a_scale       = get_ptr<float>(act_scale);
     float*         b_scale       = get_ptr<float>(w_scale);
-    rtp_llm::print_bsd(0, "input", input_tensor, 1, m, k);
 
-    float input_scale  = rtp_llm::getCudaValue<float>(a_scale, 0);
-    float weight_scale = rtp_llm::getCudaValue<float>(b_scale, 0);
+    float input_scale  = getCudaValue<float>(a_scale, 0);
+    float weight_scale = getCudaValue<float>(b_scale, 0);
     float alpha        = input_scale * weight_scale;
 
     auto output_tensor = torch::empty({m, n}, torch::dtype(torch::kFloat32).device(torch::kCUDA).requires_grad(false));
@@ -88,9 +95,7 @@ Tensor fp8_gemm_helper(Tensor A, Tensor B, Tensor act_scale, Tensor w_scale) {
         torch::empty({m, k}, torch::dtype(torch::kInt8).device(torch::kCUDA).requires_grad(false));
     __nv_fp8_e4m3* quanted_input_fp8 = get_ptr<__nv_fp8_e4m3>(quanted_input_tensor);
     float*         a_scale           = get_ptr<float>(act_scale);
-    rtp_llm::print_bsd(0, "input", input_tensor, 1, m, k);
-    rtp_llm::print_bsd(0, "quanted_input_fp8", reinterpret_cast<const __nv_fp8_e4m3*>(quanted_input_fp8), 1, m, k);
-    tensorrt_llm::common::invokeQuantizeMatrix(
+  rtp_llm::invokeQuantizeMatrix(
         quanted_input_fp8, a_scale, input_tensor, m * k, m, tensorrt_llm::common::QuantizeMode::PER_TENSOR, stream);
     return fp8_quant_gemm_helper<T>(quanted_input_tensor, B, act_scale, w_scale);
 }

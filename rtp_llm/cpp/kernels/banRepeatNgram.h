@@ -20,9 +20,11 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #endif
+
 #if USING_ROCM
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
+#include "rtp_llm/cpp/rocm/cuda_shims.h"
 #endif
 
 namespace runtime {

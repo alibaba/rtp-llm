@@ -91,8 +91,10 @@ def gen_cu_and_lib(name, params_list, split_num, template_header, template, temp
         deps = [
             "//rtp_llm/cpp/cuda/deep_gemm:deep_gemm_utils",
             "//rtp_llm/cpp/core:buffer_torch",
-            "//rtp_llm/cpp/cuda:cuda_utils_base",
+            "//rtp_llm/cpp/utils:math_utils",
             "//rtp_llm/cpp/config:static_config",
+            "//rtp_llm/cpp/cuda:cuda_host_utils",
+            "//rtp_llm/cpp/cuda:launch_utils",
             "@local_config_cuda//cuda:cuda_headers",
             "@local_config_cuda//cuda:cudart",
         ] + torch_deps(),

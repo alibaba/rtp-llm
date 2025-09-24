@@ -12,7 +12,7 @@
 #include "cutlass_extensions/gemm/kernel/group_gemm_traits.h"
 
 #include "rtp_llm/cpp/cuda/cutlass/cutlass_kernels/group_gemm/group_gemm.h"
-#include "rtp_llm/cpp/cuda/cuda_utils.h"
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 namespace rtp_llm {
 
 template <typename dtype, typename arch>

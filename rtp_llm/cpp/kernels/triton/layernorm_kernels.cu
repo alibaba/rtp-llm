@@ -15,11 +15,14 @@
  */
 
 #include "rtp_llm/cpp/kernels/triton/layernorm_kernels.h"
+
+#ifdef ENABLE_TRITON
 extern "C" {
 #include "rtp_llm/cpp/kernels/triton/aot/layernorm_kernel_bf16.h"
 #include "rtp_llm/cpp/kernels/triton/aot/layernorm_kernel_fp16.h"
 #include "rtp_llm/cpp/kernels/triton/aot/layernorm_kernel_fp32.h"
 }
+#endif
 
 // wont't support new features
 namespace rtp_llm {
@@ -37,6 +40,7 @@ unsigned int nextPowerOf2(unsigned int n) {
     return n + 1;
 }
 
+#ifdef ENABLE_TRITON
 #define TRITON_LAYERNORM_KERNEL(T, LEN, WARPS, HAS_BIAS, ...)                                                          \
     do {                                                                                                               \
         if constexpr (std::is_same_v<T, float>) {                                                                      \
@@ -56,6 +60,12 @@ unsigned int nextPowerOf2(unsigned int n) {
                 check_cuda_value(layernorm_kernel_bf16_0x0x##LEN##_##warps##WARPS##xstages3(__VA_ARGS__));             \
         }                                                                                                              \
     } while (0)
+#else
+#define TRITON_LAYERNORM_KERNEL(T, LEN, WARPS, HAS_BIAS, ...)                                                          \
+    do {                                                                                                               \
+        /* Triton kernels not available */                                                                             \
+    } while (0)
+#endif
 
 template<typename T, typename QUANT_OUT_T, bool HAS_BIAS>
 void invokeTritonLayerNorm(T*           out,

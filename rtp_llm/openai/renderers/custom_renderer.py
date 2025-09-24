@@ -13,6 +13,7 @@ from rtp_llm.config.gpt_init_model_parameters import TemplateType
 from rtp_llm.config.py_config_modules import PyEnvConfigs, StaticConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
+    ChatCompletionExtraOutputs,
     ChatCompletionRequest,
     ChatCompletionResponse,
     ChatCompletionResponseChoice,
@@ -177,6 +178,7 @@ class StreamResponseObject:
     choices: List[ChatCompletionResponseStreamChoice] = field(default_factory=list)
     usage: Optional[UsageInfo] = None
     aux_info: Optional[AuxInfo] = None
+    extra_outputs: Optional[ChatCompletionExtraOutputs] = None
 
 
 @dataclass
@@ -203,6 +205,7 @@ class OutputDelta:
     input_length: int
     output_length: int
     reuse_length: int
+    extra_outputs: Optional[ChatCompletionExtraOutputs] = None
 
 
 @dataclass
@@ -506,6 +509,30 @@ class CustomChatRenderer:
 
         return chat_logprob
 
+    async def _generate_extra_outputs(
+        self, output: GenerateOutput, generate_config: GenerateConfig
+    ) -> Optional[ChatCompletionExtraOutputs]:
+        final_result = None
+
+        def result():
+            nonlocal final_result
+            if final_result is None:
+                final_result = ChatCompletionExtraOutputs()
+            return final_result
+
+        if generate_config.return_hidden_states and output.hidden_states is not None:
+            result().hidden_states = output.hidden_states.tolist()
+        if generate_config.calculate_loss != 0 and output.loss is not None:
+            result().loss = output.loss.tolist()
+        if generate_config.return_logits and output.logits is not None:
+            result().logits = output.logits.tolist()
+        if generate_config.return_output_ids and output.output_ids is not None:
+            result().output_ids = output.output_ids.tolist()
+        if generate_config.return_input_ids and output.input_ids is not None:
+            result().input_ids = output.input_ids.tolist()
+
+        return final_result
+
     async def _update_single_status(
         self,
         status: StreamStatus,
@@ -686,6 +713,8 @@ class CustomChatRenderer:
                     else None
                 ),
             ),
+            # TODO(zhangjianning.zjn): merge all extra outputs for streaming request
+            extra_outputs=items[-1].extra_outputs,
         )
 
     async def _flush_buffer(
@@ -832,16 +861,19 @@ class CustomChatRenderer:
                 )
             delta_list: List[OutputDelta] = []
             for status, output in zip(status_list, outputs.generate_outputs):
-                delta_list.append(
-                    await self._update_single_status(
-                        status,
-                        output,
-                        generate_config.max_new_tokens,
-                        generate_config.stop_words_str,
-                        stop_word_slice_list,
-                        generate_config.is_streaming,
-                    )
+                delta = await self._update_single_status(
+                    status,
+                    output,
+                    generate_config.max_new_tokens,
+                    generate_config.stop_words_str,
+                    stop_word_slice_list,
+                    generate_config.is_streaming,
                 )
+                if delta.extra_outputs is None:
+                    delta.extra_outputs = await self._generate_extra_outputs(
+                        output, generate_config
+                    )
+                delta_list.append(delta)
             yield await self._generate_stream_response(delta_list, think_status_list)
             if self._check_all_finished(status_list):
                 break

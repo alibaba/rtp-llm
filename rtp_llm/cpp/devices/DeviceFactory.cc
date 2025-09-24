@@ -123,7 +123,8 @@ void DeviceFactory::initDevices(const GptInitParameter& params) {
     RTP_LLM_LOG_INFO("enable comm overlap: %d, enable layer micro batch: %d",
                      device_params.enable_comm_overlap,
                      device_params.enable_layer_micro_batch);
-
+    device_params.user_deep_gemm_num_sm  = params.hw_kernel_config.deep_gemm_num_sm;
+    device_params.use_aiter_pa           = params.hw_kernel_config.use_aiter_pa;
     device_params.use_deepep_moe         = params.moe_config.use_deepep_moe;
     device_params.use_deepep_internode   = params.moe_config.use_deepep_internode;
     device_params.use_deepep_low_latency = params.moe_config.use_deepep_low_latency;
@@ -230,7 +231,8 @@ void registerDeviceOps(py::module& m) {
         .def("preprocess_gemm_weight_by_key",
              &DeviceExporter::preprocessGemmWeightByKey,
              py::arg("key"),
-             py::arg("weight"))
+             py::arg("weight"),
+             py::arg("user_arm_gemm_use_kai"))
         .def("pack_int8_tensor_to_packed_int4", &DeviceExporter::packInt8TensorToPackedInt4, py::arg("weight"))
         .def("preprocess_weights_for_mixed_gemm",
              &DeviceExporter::preprocessWeightsForMixedGemm,

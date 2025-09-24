@@ -27,9 +27,6 @@ cc_library(
         "@com_google_absl//absl/status:statusor",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:error_code",
-        "//rtp_llm/cpp/utils:system_utils",
-        "//rtp_llm/cpp/utils:data_structures",
-        "//rtp_llm/cpp/utils:domain_utils",
         "//rtp_llm/cpp/devices:devices_base_impl",
     ] + select({
         "@//:using_cuda": [

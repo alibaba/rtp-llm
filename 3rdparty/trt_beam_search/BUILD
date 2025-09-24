@@ -11,7 +11,10 @@ cc_library(
     ]),
     deps = [
         ":trt_beam_search_header",
-        "//rtp_llm/cpp/kernels:kernels_cu",
+        "//rtp_llm/cpp/cuda:trt_utils",
+        "//rtp_llm/cpp/cuda:cuda_host_utils",
+        "//rtp_llm/cpp/cuda:cuda_utils_cu",
+        "//rtp_llm/cpp/utils:math_utils",
         "@local_config_cuda//cuda:cuda",
         "@local_config_cuda//cuda:cudart",
     ],

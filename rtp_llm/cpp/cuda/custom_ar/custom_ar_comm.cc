@@ -17,9 +17,8 @@
 #include "custom_ar_comm.h"
 
 #include "rtp_llm/cpp/core/Types.h"
-#include "rtp_llm/cpp/cuda/cuda_utils.h"
-#include "rtp_llm/cpp/cuda/memory_utils.h"
-#include "rtp_llm/cpp/cuda/Dispatch.h"
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
+#include "rtp_llm/cpp/core/Dispatch.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include <climits>

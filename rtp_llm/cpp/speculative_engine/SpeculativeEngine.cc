@@ -201,6 +201,8 @@ absl::Status SpeculativeEngine::initCacheManager(std::optional<WarmUpResult> war
                                                                 isEagle());
         auto        scorer_cache_config   = std::get<0>(config);
         auto        proposer_cache_config = std::get<1>(config);
+        scorer_cache_config.mtp_model_type   = "score_model";
+        proposer_cache_config.mtp_model_type = "propose_model";
         resource_context_.cache_manager   = make_shared<CacheManager>(
             scorer_cache_config, device_, false, metrics_reporter_, score_model_params_.gpt_init_parameter);
         if (isMTPEagle()) {

@@ -1,5 +1,5 @@
 #include "rtp_llm/cpp/devices/OpData.h"
-#include "rtp_llm/cpp/utils/ShapeCheck.h"
+#include "rtp_llm/cpp/devices/ShapeCheck.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
 
 #include <optional>

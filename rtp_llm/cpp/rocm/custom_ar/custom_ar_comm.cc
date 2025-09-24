@@ -1,6 +1,6 @@
 #include "custom_ar_comm.h"
 #include "rtp_llm/cpp/core/Types.h"
-#include "rtp_llm/cpp/rocm/hip_utils.h"
+#include "rtp_llm/cpp/rocm/hip_host_utils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "c10/hip/HIPStream.h"
 #include "c10/hip/HIPGraphsC10Utils.h"

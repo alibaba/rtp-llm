@@ -6,7 +6,7 @@ namespace tpi = torch::profiler::impl;
 
 class CudaProfiler {
 public:
-    CudaProfiler(const std::string& prefix);
+    CudaProfiler(const std::string& prefix, std::string user_torch_cuda_profiler_dir = "");
     ~CudaProfiler();
     void start();
     void stop();

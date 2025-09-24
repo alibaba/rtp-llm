@@ -228,6 +228,7 @@ cc_binary(
         "//rtp_llm/cpp/models:models",
     ],
     visibility = ["//visibility:public"],
+    linkstatic = False,
     copts = test_copts,
 )
 

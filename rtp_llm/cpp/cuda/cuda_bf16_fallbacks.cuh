@@ -17,9 +17,10 @@
 #pragma once
 
 #if USING_CUDA
-#include "rtp_llm/cpp/cuda/cuda_utils.h"
 #include <cuda_fp16.h>
+#include <cuda_bf16.h>
 #endif
+
 #if USING_ROCM
 #include "rtp_llm/cpp/rocm/cuda_shims.h"
 #endif

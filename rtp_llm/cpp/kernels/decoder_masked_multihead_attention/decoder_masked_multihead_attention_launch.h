@@ -26,13 +26,18 @@
 #include <cuda_fp8.h>
 #endif
 #endif
+
 #if USING_ROCM
-#include "rtp_llm/cpp/rocm/hip_utils.h"
+#include "rtp_llm/cpp/rocm/hip_host_utils.h"
 #endif
 
 #include <type_traits>
 
 namespace rtp_llm {
+
+#if USING_ROCM
+using namespace rocm;
+#endif
 
 template<typename T, int Dh, bool DO_MULTI_BLOCK, bool DO_CROSS_ATTENTION>
 inline size_t smem_size_in_bytes(Multihead_attention_params<T, DO_CROSS_ATTENTION>& params, int threads_per_block) {

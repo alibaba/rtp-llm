@@ -4,8 +4,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 #include "comm_buffer.h"
-#include "rtp_llm/cpp/cuda/Dispatch.h"
-#include "rtp_llm/cpp/cuda/cuda_utils.h"
+#include "rtp_llm/cpp/core/Dispatch.h"
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 
 namespace rtp_llm {
 

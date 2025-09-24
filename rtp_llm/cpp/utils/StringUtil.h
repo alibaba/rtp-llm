@@ -89,21 +89,4 @@ inline std::vector<std::string> split(const std::string& s, char delimiter) {
     return tokens;
 }
 
-inline std::pair<std::string, std::string> split_ip_port(const std::string& addr) {
-    size_t colon_pos = addr.find_last_of(':');
-    if (colon_pos == std::string::npos || colon_pos == 0 || colon_pos == addr.length() - 1) {
-        return {"", ""};
-    }
-    return {addr.substr(0, colon_pos), addr.substr(colon_pos + 1)};
-}
-
-inline uint32_t parse_port(const std::string& port_str) {
-    try {
-        unsigned long port = stoul(port_str);
-        return static_cast<uint32_t>(port);
-    } catch (const std::exception& e) {
-        return 0;
-    }
-}
-
 }  // namespace rtp_llm

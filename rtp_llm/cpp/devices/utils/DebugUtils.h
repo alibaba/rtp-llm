@@ -6,6 +6,10 @@
 
 namespace rtp_llm {
 
+void printBufferSample(const std::string& hint, Buffer& buffer, uint32_t n_samples);
+
+void printTorchBufferSample(const std::string& hint, torch::Tensor& tensor, uint32_t n_samples);
+
 #define printBufferData(buffer, hint)                                                                                  \
     do {                                                                                                               \
         if (rtp_llm::Logger::getEngineLogger().isTraceMode()) {                                                        \

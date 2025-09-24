@@ -1,9 +1,9 @@
 #include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
 #include "rtp_llm/cpp/devices/CommonDefines.h"
 #include "rtp_llm/cpp/kernels/activation_kernels.h"
-#include "rtp_llm/cpp/cuda/Dispatch.h"
+#include "rtp_llm/cpp/core/Dispatch.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
-#include "rtp_llm/cpp/cuda/cuda_fp8_utils.h"
+#include "rtp_llm/cpp/kernels/scaled_fp8_quant.h"
 #include "3rdparty/flashinfer/flashinfer.h"
 
 using namespace std;
@@ -86,7 +86,7 @@ BufferPtr CudaDevice::activation(const ActivationParams& params) {
                                              AllocationType::DEVICE});
             auto act_zeros = BufferPtr(new Buffer(act_scale->where(), DataType::TYPE_INVALID, {0}, nullptr));
             if (params.atype == ActivationType::Swiglu || params.atype == ActivationType::Silu) {
-                tensorrt_llm::common::computeFP8ActivationAndQuantize(act_output->data<__nv_fp8_e4m3>(),
+                rtp_llm::computeFP8ActivationAndQuantize(act_output->data<__nv_fp8_e4m3>(),
                                                                       act_scale->data<float>(),
                                                                       params.states->data<__nv_bfloat16>(),
                                                                       params.output_buffer->shape()[0],

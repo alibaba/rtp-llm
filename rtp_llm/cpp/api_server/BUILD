@@ -36,9 +36,6 @@ cc_library(
         "@havenask//aios/autil:json",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:error_code",
-        "//rtp_llm/cpp/utils:system_utils",
-        "//rtp_llm/cpp/utils:data_structures",
-        "//rtp_llm/cpp/utils:domain_utils",
         "//rtp_llm/cpp/dataclass:dataclass",
         "//rtp_llm/cpp/engine_base/stream:generate_types",
         "//rtp_llm/cpp/normal_engine:normal_engine",
@@ -61,9 +58,6 @@ cc_library(
     deps = [
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:error_code",
-        "//rtp_llm/cpp/utils:system_utils",
-        "//rtp_llm/cpp/utils:data_structures",
-        "//rtp_llm/cpp/utils:domain_utils",
         ":openai",
         "//rtp_llm/cpp/dataclass:dataclass",
         "//rtp_llm/cpp/normal_engine:normal_engine",
@@ -125,8 +119,6 @@ cc_test(
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
         "@havenask//aios/autil:net",
-        "//rtp_llm/cpp/dataclass:dataclass",
     ],
     copts = ["-fno-access-control",],
-    linkstatic = 1,
 )

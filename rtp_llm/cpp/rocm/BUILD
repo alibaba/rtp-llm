@@ -34,7 +34,7 @@ cc_library(
 )
 
 cc_library(
-    name = "rocm_utils",
+    name = "rocm_host_utils",
     srcs = glob([
         "*.cc",
         "int4_gemm_kernels/*.cc",
@@ -51,7 +51,6 @@ cc_library(
         "@local_config_rocm//rocm:hipblaslt",
         "//rtp_llm/cpp/devices:devices_base",
         "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/utils:system_utils",
         "//rtp_llm/cpp/core:allocator",
         "//rtp_llm/cpp/core:types",
         "@composable_kernel//:ck_fmha_example",
@@ -70,32 +69,9 @@ cc_library(
 cc_library(
     name = "rocm",
     deps = [
-        ":rocm_utils",
+        ":rocm_host_utils",
     ],
     copts=rocm_copts(),
     include_prefix = "src",
     visibility = ["//visibility:public"],
-)
-
-cc_library(
-    name="memory_utils",
-    srcs=[
-        # "memory_utils.cu",
-    ],
-
-    hdrs=[
-        # "memory_utils.h",
-    ],
-
-    deps=[
-        ":rocm_utils",
-        "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/utils:system_utils",
-        "//rtp_llm/cpp/core:allocator",
-        "@local_config_rocm//rocm:rocm_headers",
-        "@local_config_rocm//rocm:rocm",
-    ],
-    copts=rocm_copts(),
-    include_prefix="src",
-    visibility=["//visibility:public"],
 )

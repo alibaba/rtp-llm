@@ -25,7 +25,7 @@
 #if USING_CUDA
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
-#include "rtp_llm/cpp/cuda/cuda_utils.h"
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 #endif
 
 namespace rtp_llm {

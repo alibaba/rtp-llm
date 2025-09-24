@@ -15,7 +15,7 @@
  */
 
 #include "cublasMMWrapper.h"
-#include "rtp_llm/cpp/utils/ScopeGuard.h"
+#include "autil/Scope.h"
 #include <algorithm>
 #include "nvToolsExt.h"
 
@@ -164,20 +164,20 @@ void cublasMMWrapper::cublasLtGemm(cublasHandle_t          handle,
     // Create descriptors for the original matrices
     check_cuda_value(
         cublasLtMatrixLayoutCreate(&Adesc, Atype, transa == CUBLAS_OP_N ? m : k, transa == CUBLAS_OP_N ? k : m, lda));
-    RTP_LLM_SCOPE_GUARD([&]() { cublasLtMatrixLayoutDestroy(Adesc); });
+    autil::ScopeGuard guard1([&]() { cublasLtMatrixLayoutDestroy(Adesc); });
     check_cuda_value(
         cublasLtMatrixLayoutCreate(&Bdesc, Btype, transb == CUBLAS_OP_N ? k : n, transb == CUBLAS_OP_N ? n : k, ldb));
-    RTP_LLM_SCOPE_GUARD([&]() { cublasLtMatrixLayoutDestroy(Bdesc); });
+    autil::ScopeGuard guard2([&]() { cublasLtMatrixLayoutDestroy(Bdesc); });
     check_cuda_value(cublasLtMatrixLayoutCreate(&Cdesc, Ctype, m, n, ldc));
-    RTP_LLM_SCOPE_GUARD([&]() { cublasLtMatrixLayoutDestroy(Cdesc); });
+    autil::ScopeGuard guard3([&]() { cublasLtMatrixLayoutDestroy(Cdesc); });
     check_cuda_value(cublasLtMatrixLayoutCreate(&Ddesc, Btype, m, n, ldc));
-    RTP_LLM_SCOPE_GUARD([&]() { cublasLtMatrixLayoutDestroy(Ddesc); });
+    autil::ScopeGuard guard4([&]() { cublasLtMatrixLayoutDestroy(Ddesc); });
 #if (CUDART_VERSION >= 11000)
     check_cuda_value(cublasLtMatmulDescCreate(&operationDesc, computeType, scaleType));
 #else
     check_cuda_value(cublasLtMatmulDescCreate(&operationDesc, computeType));
 #endif
-    RTP_LLM_SCOPE_GUARD([&]() { cublasLtMatmulDescDestroy(operationDesc); });
+    autil::ScopeGuard guard5([&]() { cublasLtMatmulDescDestroy(operationDesc); });
 
     if (math_sm_count > 0) {
         check_cuda_value(cublasLtMatmulDescSetAttribute(
@@ -530,15 +530,15 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
     cublasLtEpilogue_t     epi = CUBLASLT_EPILOGUE_BIAS;
     check_cuda_value(cublasLtMatrixLayoutCreate(
         &Adesc, Atype, (transa == CUBLAS_OP_N) ? m : k, (transa == CUBLAS_OP_N) ? k : m, lda));
-    RTP_LLM_SCOPE_GUARD([&]() { cublasLtMatrixLayoutDestroy(Adesc); });
+    autil::ScopeGuard guard1([&]() { cublasLtMatrixLayoutDestroy(Adesc); });
     check_cuda_value(cublasLtMatrixLayoutCreate(
         &Bdesc, Btype, (transb == CUBLAS_OP_N) ? k : n, (transb == CUBLAS_OP_N) ? n : k, ldb));
-    RTP_LLM_SCOPE_GUARD([&]() { cublasLtMatrixLayoutDestroy(Bdesc); });
+    autil::ScopeGuard guard2([&]() { cublasLtMatrixLayoutDestroy(Bdesc); });
     check_cuda_value(cublasLtMatrixLayoutCreate(&Cdesc, Ctype, m, n, ldc));
-    RTP_LLM_SCOPE_GUARD([&]() { cublasLtMatrixLayoutDestroy(Cdesc); });
+    autil::ScopeGuard guard3([&]() { cublasLtMatrixLayoutDestroy(Cdesc); });
 
     check_cuda_value(cublasLtMatmulDescCreate(&operationDesc, computeType, scaleType));
-    RTP_LLM_SCOPE_GUARD([&]() { cublasLtMatmulDescDestroy(operationDesc); });
+    autil::ScopeGuard guard4([&]() { cublasLtMatmulDescDestroy(operationDesc); });
     check_cuda_value(
         cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transa, sizeof(cublasOperation_t)));
     check_cuda_value(
@@ -709,7 +709,7 @@ std::pair<bool, cublasLtMatmulAlgo_t> cublasMMWrapper::findHeuristicAlgo(cublasL
     cublasLtMatmulHeuristicResult_t result;
     cublasLtMatmulPreference_t      preference;
     check_cuda_value(cublasLtMatmulPreferenceCreate(&preference));
-    RTP_LLM_SCOPE_GUARD([&]() { cublasLtMatmulPreferenceDestroy(preference); });
+    autil::ScopeGuard guard1([&]() { cublasLtMatmulPreferenceDestroy(preference); });
     check_cuda_value(cublasLtMatmulPreferenceInit(preference));
     uint64_t workspace_size = CUBLAS_WORKSPACE_SIZE;
     check_cuda_value(cublasLtMatmulPreferenceSetAttribute(
@@ -754,7 +754,7 @@ std::pair<bool, cublasLtMatmulAlgo_t> cublasMMWrapper::findBestAlgo(cublasLtHand
     std::vector<cublasLtMatmulHeuristicResult_t> heuristics(200);
     cublasLtMatmulPreference_t                   preference;
     check_cuda_value(cublasLtMatmulPreferenceCreate(&preference));
-    RTP_LLM_SCOPE_GUARD([&]() { cublasLtMatmulPreferenceDestroy(preference); });
+    autil::ScopeGuard guard1([&]() { cublasLtMatmulPreferenceDestroy(preference); });
     check_cuda_value(cublasLtMatmulPreferenceInit(preference));
     uint64_t workspace_size = CUBLAS_WORKSPACE_SIZE;
     check_cuda_value(cublasLtMatmulPreferenceSetAttribute(
@@ -782,9 +782,9 @@ std::pair<bool, cublasLtMatmulAlgo_t> cublasMMWrapper::findBestAlgo(cublasLtHand
     std::map<int, std::vector<float>> algo_results;
     cudaEvent_t                       start_event, stop_event;
     check_cuda_value(cudaEventCreate(&start_event));
-    RTP_LLM_SCOPE_GUARD([&]() { cudaEventDestroy(start_event); });
+    autil::ScopeGuard guard4([&]() { cudaEventDestroy(start_event); });
     check_cuda_value(cudaEventCreate(&stop_event));
-    RTP_LLM_SCOPE_GUARD([&]() { cudaEventDestroy(stop_event); });
+    autil::ScopeGuard guard5([&]() { cudaEventDestroy(stop_event); });
 
     for (int i = 0; i < int(heuristics.size()); i++) {
         const auto&          heuristic = heuristics[i];
@@ -954,14 +954,14 @@ void cublasMMWrapper::_Int8Gemm(const int     m,
     // --------------------------------------
     // Create descriptors for the original matrices
     check_cuda_value(cublasLtMatrixLayoutCreate(&Adesc, dataType, k, m, lda));
-    RTP_LLM_SCOPE_GUARD([&]() { cublasLtMatrixLayoutDestroy(Adesc); });
+    autil::ScopeGuard guard1([&]() { cublasLtMatrixLayoutDestroy(Adesc); });
     check_cuda_value(cublasLtMatrixLayoutCreate(&Bdesc, dataType, k, n, ldb));
-    RTP_LLM_SCOPE_GUARD([&]() { cublasLtMatrixLayoutDestroy(Bdesc); });
+    autil::ScopeGuard guard2([&]() { cublasLtMatrixLayoutDestroy(Bdesc); });
     check_cuda_value(cublasLtMatrixLayoutCreate(&Cdesc, resultType, m, n, ldc));
-    RTP_LLM_SCOPE_GUARD([&]() { cublasLtMatrixLayoutDestroy(Cdesc); });
+    autil::ScopeGuard guard3([&]() { cublasLtMatrixLayoutDestroy(Cdesc); });
 
     check_cuda_value(cublasLtMatmulDescCreate(&operationDesc, computeType, scaleType));
-    RTP_LLM_SCOPE_GUARD([&]() { cublasLtMatmulDescDestroy(operationDesc); });
+    autil::ScopeGuard guard4([&]() { cublasLtMatmulDescDestroy(operationDesc); });
 
     auto pointer_mode = CUBLASLT_POINTER_MODE_HOST;
     if (mode == 0) {

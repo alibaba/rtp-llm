@@ -1,6 +1,6 @@
 // #define private public
 #include "rtp_llm/cpp/devices/rocm_impl/ROCmDevice.h"
-#include "rtp_llm/cpp/rocm/hip_utils.h"
+#include "rtp_llm/cpp/rocm/hip_host_utils.h"
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include <torch/torch.h>

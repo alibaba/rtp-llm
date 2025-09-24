@@ -2,11 +2,11 @@
 #include "rtp_llm/cpp/devices/rocm_impl/ROCmAllocator.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/devices/CommonDefines.h"
-#include "rtp_llm/cpp/utils/ShapeCheck.h"
+#include "rtp_llm/cpp/devices/ShapeCheck.h"
 #include "autil/StringUtil.h"
 #include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/core/BufferHelper.h"
-#include "rtp_llm/cpp/cuda/Dispatch.h"
+#include "rtp_llm/cpp/core/Dispatch.h"
 #include "rtp_llm/cpp/rocm/quantizePreprocessors.h"
 #include "rtp_llm/cpp/kernels/rocm/quantization_rocm.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
@@ -25,6 +25,13 @@ using namespace std;
 
 namespace rtp_llm {
 using namespace rocm;
+
+template<typename T>
+T getRocmValue(const T* ptr, int index) {
+    T tmp;
+    ROCM_CHECK(hipMemcpy(&tmp, ptr + index, sizeof(T), hipMemcpyDeviceToHost));
+    return tmp;
+}
 
 hipblasOperation_t opConvert(TransposeOperation op) {
     switch (op) {

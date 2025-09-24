@@ -49,6 +49,7 @@ cc_library(
         "//rtp_llm/cpp/speculative_engine:speculative_engine",
         "//rtp_llm/cpp/multimodal_processor:multimodal_processor",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store",
+        "//rtp_llm/cpp/utils:atomic_util",
         "@havenask//aios/autil:net",
     ],
     visibility = ["//visibility:public"],

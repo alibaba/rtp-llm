@@ -1,20 +1,20 @@
 // #include "DecoderSelfAttention.h"
 // #include "rtp_llm/cpp/devices/rocm_impl/ROCmDevice.h"
 // #include "rtp_llm/cpp/devices/CommonDefines.h"
-// #include "rtp_llm/cpp/cuda/Dispatch.h"
+// #include "rtp_llm/cpp/core/Dispatch.h"
 // #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 // #include "rtp_llm/cpp/rocm/cuda_shims.h"
-// #include "rtp_llm/cpp/rocm/hip_utils.h"
+// #include "rtp_llm/cpp/rocm/hip_host_utils.h"
 // #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 // #include "rtp_llm/cpp/devices/rocm_impl/aiterPA.h"
 // #include "rtp_llm/models_py/bindings/rocm/PagedAttn.h"
 // #include "rtp_llm/models_py/bindings/rocm/FMHARocmBase.h"
 
 #include "rtp_llm/cpp/devices/CommonDefines.h"
-#include "rtp_llm/cpp/cuda/Dispatch.h"
+#include "rtp_llm/cpp/core/Dispatch.h"
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 #include "rtp_llm/cpp/rocm/cuda_shims.h"
-#include "rtp_llm/cpp/rocm/hip_utils.h"
+#include "rtp_llm/cpp/rocm/hip_host_utils.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/devices/rocm_impl/aiterPA.h"
 #include "rtp_llm/models_py/bindings/rocm/PagedAttn.h"
@@ -24,7 +24,7 @@ namespace rtp_llm {
 PagedAttnDecodeOp::PagedAttnDecodeOp(const GptInitParameter& gpt_init_parameter):
     FMHARocmBase(gpt_init_parameter),
     kv_block_offset_(gpt_init_parameter.num_layers_ * gpt_init_parameter.block_nums_) {
-    use_aiter_pa_ = bool(autil::EnvUtil::getEnv("USE_AITER_PA", 0L));
+    use_aiter_pa_ = gpt_init_parameter.hw_kernel_config.use_aiter_pa;
 }
 
 bool PagedAttnDecodeOp::support(torch_ext::PyAttentionInputs attn_inputs) {
@@ -74,7 +74,7 @@ forward_param PagedAttnDecodeOp::forward(const torch::Tensor&              qkv,
     const int token_num         = qkv.size(0);
     const int batch_size        = params->sequence_lengths.size(0);
 
-    if (bool(autil::EnvUtil::getEnv("USE_AITER_PA", 0L))) {
+    if (use_aiter_pa_) {
         PrefixPromptBatchWeightsParam prefix_prompt_param;
         prefix_prompt_param.kv_block_array = kv_block_array;
 

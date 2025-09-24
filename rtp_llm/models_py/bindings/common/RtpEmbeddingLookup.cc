@@ -1,5 +1,5 @@
 
-#include "rtp_llm/cpp/kernels/gpt_kernels.h"
+#include "rtp_llm/cpp/kernels/embedding_kernels.h"
 #include "rtp_llm/models_py/bindings/common/Torch_ext.h"
 #include <cstdint>
 #include <iostream>
@@ -27,7 +27,7 @@ void embedding(at::Tensor& output, at::Tensor& input, at::Tensor& weight) {
     DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FP16(weight.scalar_type(), c_type, [&] {
         const int vecSize = sizeof(float4) / sizeof(c_type);
         if (hidden_size % vecSize == 0) {
-            invokeEmebeddingLookupVec(static_cast<c_type*>(output.data_ptr()),
+            invokeEmbeddingLookupVec(static_cast<c_type*>(output.data_ptr()),
                                       static_cast<const c_type*>(weight.data_ptr()),
                                       1.0,
                                       static_cast<const c_type*>(nullptr),  // postition_table
@@ -40,7 +40,7 @@ void embedding(at::Tensor& output, at::Tensor& input, at::Tensor& weight) {
                                       hidden_size,
                                       stream);
         } else {
-            invokeEmebeddingLookup(static_cast<c_type*>(output.data_ptr()),
+            invokeEmbeddingLookup(static_cast<c_type*>(output.data_ptr()),
                                    static_cast<const c_type*>(weight.data_ptr()),
                                    1.0,
                                    static_cast<const c_type*>(nullptr),  // postition_table

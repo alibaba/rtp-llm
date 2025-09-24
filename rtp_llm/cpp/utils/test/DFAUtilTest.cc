@@ -2,7 +2,7 @@
 #include "gtest/gtest.h"
 
 #define private public
-#include "rtp_llm/cpp/utils/DFAUtil.h"
+#include "rtp_llm/cpp/models/logits_processor/DFAUtil.h"
 
 #include <chrono>
 #include <memory>

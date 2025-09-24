@@ -11,10 +11,6 @@ from rtp_llm.ops import (
     ParallelismDistributedConfig,
     ProfilingDebugLoggingConfig,
     RoleType,
-    SamplerConfig,
-    SchedulerConfig,
-    ServiceDiscoveryConfig,
-    SpeculativeExecutionConfig,
 )
 from rtp_llm.utils.fuser import MountRwMode, fetch_remote_file_to_local
 from rtp_llm.utils.weight_type import WEIGHT_TYPE
@@ -750,6 +746,65 @@ class JITConfig:
         return f"remote_jit_dir: {self.remote_jit_dir}"
 
 
+class PyHwKernelConfig:
+    def __init__(self):
+        self.deep_gemm_num_sm: int = -1
+        self.arm_gemm_use_kai: bool = False
+        self.enable_stable_scatter_add: bool = False
+        self.enable_multi_block_mode: bool = True
+        self.ft_disable_custom_ar: bool = True
+        self.rocm_hipblaslt_config: str = "gemm_config.csv"
+        self.enable_cuda_graph: bool = False
+        self.enable_cuda_graph_debug_mode: bool = False
+        self.use_aiter_pa: bool = True
+        self.enable_native_cuda_graph: bool = False
+        self.num_native_cuda_graph: int = 200
+
+    def update_from_env(self):
+        self.deep_gemm_num_sm = get_env_int("DEEP_GEMM_NUM_SM", self.deep_gemm_num_sm)
+        self.arm_gemm_use_kai = get_env_bool("ARM_GEMM_USE_KAI", self.arm_gemm_use_kai)
+        self.enable_stable_scatter_add = get_env_bool(
+            "ENABLE_STABLE_SCATTER_ADD", self.enable_stable_scatter_add
+        )
+        self.enable_multi_block_mode = get_env_bool(
+            "ENABLE_MULTI_BLOCK_MODE", self.enable_multi_block_mode
+        )
+        self.ft_disable_custom_ar = get_env_bool(
+            "FT_DISABLE_CUSTOM_AR", self.ft_disable_custom_ar
+        )
+        self.rocm_hipblaslt_config = get_env_str(
+            "ROCM_HIPBLASLT_CONFIG", self.rocm_hipblaslt_config
+        )
+        self.enable_cuda_graph = get_env_bool(
+            "ENABLE_CUDA_GRAPH", self.enable_cuda_graph
+        )
+        self.enable_cuda_graph_debug_mode = get_env_bool(
+            "ENABLE_CUDA_GRAPH_DEBUG_MODE", self.enable_cuda_graph_debug_mode
+        )
+        self.use_aiter_pa = get_env_bool("USE_AITER_PA", self.use_aiter_pa)
+        self.enable_native_cuda_graph = get_env_bool(
+            "ENABLE_NATIVE_CUDA_GRAPH", self.enable_native_cuda_graph
+        )
+        self.num_native_cuda_graph = get_env_int(
+            "NUM_NATIVE_CUDA_GRAPH", self.num_native_cuda_graph
+        )
+
+    def to_string(self):
+        return (
+            f"deep_gemm_num_sm: {self.deep_gemm_num_sm}\n"
+            f"arm_gemm_use_kai: {self.arm_gemm_use_kai}\n"
+            f"enable_stable_scatter_add: {self.enable_stable_scatter_add}\n"
+            f"enable_multi_block_mode: {self.enable_multi_block_mode}\n"
+            f"ft_disable_custom_ar: {self.ft_disable_custom_ar}\n"
+            f"rocm_hipblaslt_config: {self.rocm_hipblaslt_config}\n"
+            f"enable_cuda_graph: {self.enable_cuda_graph}\n"
+            f"enable_cuda_graph_debug_mode: {self.enable_cuda_graph_debug_mode}\n"
+            f"use_aiter_pa: {self.use_aiter_pa}\n"
+            f"enable_native_cuda_graph: {self.enable_native_cuda_graph}\n"
+            f"num_native_cuda_graph: {self.num_native_cuda_graph}"
+        )
+
+
 class PyEnvConfigs:
     def __init__(self):
         self.server_config: ServerConfig = ServerConfig()
@@ -787,6 +842,7 @@ class PyEnvConfigs:
         self.misc_config = MiscellaneousConfig()
         self.concurrency_config = ConcurrencyConfig()
         self.jit_config = JITConfig()
+        self.py_hw_kernel_config = PyHwKernelConfig()
 
     def update_from_env(self):
         self.server_config.update_from_env()
@@ -817,6 +873,7 @@ class PyEnvConfigs:
         self.concurrency_config.update_from_env()
         self.ffn_disaggregate_config.update_from_env()
         self.jit_config.update_from_env()
+        self.py_hw_kernel_config.update_from_env()
         logging.info(self.to_string())
 
     def to_string(self):
@@ -857,6 +914,7 @@ class PyEnvConfigs:
             "[misc_config]\n" + self.misc_config.to_string() + "\n\n"
             "[concurrency_config]\n" + self.concurrency_config.to_string() + "\n\n"
             "[jit_config]\n" + self.jit_config.to_string() + "\n\n"
+            "[py_hw_kernel_config]\n" + self.py_hw_kernel_config.to_string() + "\n\n"
         )
 
 

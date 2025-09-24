@@ -5,7 +5,6 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
-#include "rtp_llm/cpp/utils/PrefixToCandidateTokens.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/core/Types.h"
@@ -834,15 +833,19 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
     // TODO(xinfei.sxf) fix this (update_queue)
     updateOutput(update_info);
 
-    if (finishedWithoutLock() || stoppedWithoutLock()) {
-        return;
+    bool is_done = finishedWithoutLock() || stoppedWithoutLock();
+
+    if (!is_done) {
+        updateLogitProcessorStatus(update_info);
     }
 
-    updateLogitProcessorStatus(update_info);
-
-    if (!updateKvCacheBlocks(update_info.src_batch_indices)) {
-        setStopWithoutLock(ErrorCode::MALLOC_FAILED, "update kv cache blocks failed");
-        return;
+    if (!is_done || reuseCache()) {
+        // kv cache blocks must be updated if REUSE_CACHE is on, even the stream is done
+        auto update_res = updateKvCacheBlocks(update_info.src_batch_indices);
+        if (!update_res) {
+            setStopWithoutLock(ErrorCode::MALLOC_FAILED, "update kv cache blocks failed");
+            return;
+        }
     }
 }
 

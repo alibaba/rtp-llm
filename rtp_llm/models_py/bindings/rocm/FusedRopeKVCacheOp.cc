@@ -1,6 +1,6 @@
 #include "rtp_llm/models_py/bindings/rocm/FusedRopeKVCacheOp.h"
 #include "rtp_llm/cpp/kernels/unfused_attention_kernels.h"
-#include "rtp_llm/cpp/cuda/Dispatch.h"
+#include "rtp_llm/cpp/core/Dispatch.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include <stdexcept>
 #include "rtp_llm/cpp/model_utils/RopeConfig.h"
@@ -73,7 +73,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
     bool store_q     = true;   // 存储到独立 Q 缓冲区
     bool store_kv    = true;   // 存储到独立 K、V 缓冲区
     bool store_cache = kv_cache.has_value();
-    if (bool(autil::EnvUtil::getEnv("USE_AITER_PA", 0L))) {
+    if (hw_kernel_config_.use_aiter_pa) {
         hipStream_t stream_ = device_->getStream();
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(torchDTypeToDataType(qkv.dtype()),
                                          invokeAddFusedQKVBiasTransposePrefill,
@@ -261,7 +261,7 @@ torch::Tensor FusedRopeKVCacheDecodeOp::forward(const torch::Tensor&            
     bool   store_kv    = false;
     bool   store_cache = kv_cache.has_value();
 
-    if (bool(autil::EnvUtil::getEnv("USE_AITER_PA", 0L))) {
+    if (hw_kernel_config_.use_aiter_pa) {
         // Use the offset_kv_block_array for AITER_PA path
         if (params->prefix_lengths.defined() && params->prefix_lengths.numel() > 0) {
             prefix_prompt_param.d_prefix_prompt_lengths  = params->prefix_lengths.data_ptr<int>();

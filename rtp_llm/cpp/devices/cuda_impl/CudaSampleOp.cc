@@ -5,7 +5,6 @@
 #include "rtp_llm/cpp/kernels/sampling_topp_kernels.h"
 #include "rtp_llm/cpp/kernels/sampling_penalty_kernels.h"
 #include "rtp_llm/cpp/kernels/banRepeatNgram.h"
-#include "rtp_llm/cpp/cuda/memory_utils.h"
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "3rdparty/flashinfer/flashinfer.h"

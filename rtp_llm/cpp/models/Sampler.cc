@@ -1,5 +1,5 @@
 #include "rtp_llm/cpp/models/Sampler.h"
-#include "rtp_llm/cpp/utils/ScopeGuard.h"
+#include "autil/Scope.h"
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
@@ -26,7 +26,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
 
 #define SCOPED_UPDATE_BUFFER_SHAPE(buffer, ...)                                                                        \
     const auto org_##buffer##_shape__ = buffer.shape();                                                                \
-    RTP_LLM_SCOPE_GUARD([&]() { buffer.updateShape(org_##buffer##_shape__); });                                        \
+    autil::ScopeGuard guard_##buffer([&]() { buffer.updateShape(org_##buffer##_shape__); });                           \
     buffer.updateShape(__VA_ARGS__);
 
     preprocessLogits(inputs);

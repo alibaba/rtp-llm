@@ -17,8 +17,6 @@
 
 #pragma once
 
-#include "rtp_llm/cpp/cuda/cuda_utils.h"
-
 namespace rtp_llm {
 
 template<typename T, typename IdxT>

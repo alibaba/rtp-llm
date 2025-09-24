@@ -43,6 +43,5 @@ cc_test(
     },
     copts = ["-fno-access-control"] + copts(),
     exec_properties = {'gpu':'A10'},
-    linkstatic = 1,
 )
 

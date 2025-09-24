@@ -20,13 +20,12 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 #if USING_CUDA
-#include "rtp_llm/cpp/cuda/cuda_utils.h"
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #endif
 
 #if USING_ROCM
-#include "rtp_llm/cpp/rocm/hip_utils.h"
+#include "rtp_llm/cpp/rocm/cuda_shims.h"
 #endif
 
 namespace rtp_llm {

@@ -50,7 +50,8 @@ public:
 #ifdef GEMM_DEBUG
     static void print_time();
 #endif
-    static torch::Tensor preprocessGemmWeightByKey(const std::string& key, torch::Tensor weight);
+    static torch::Tensor
+    preprocessGemmWeightByKey(const std::string& key, torch::Tensor weight, bool user_arm_gemm_use_kai);
 
     static torch::Tensor packInt8TensorToPackedInt4(torch::Tensor weight);
     static torch::Tensor preprocessWeightsForMixedGemm(torch::Tensor      row_major_quantized_weight,
@@ -78,21 +79,21 @@ private:
     void       logTime(std::chrono::microseconds diff, size_t index);
     uint64_t   a_cnt_[16]  = {0};
     uint64_t   a_tmin_[16] = {999999999,
-                            999999999,
-                            999999999,
-                            999999999,
-                            999999999,
-                            999999999,
-                            999999999,
-                            999999999,
-                            999999999,
-                            999999999,
-                            999999999,
-                            999999999,
-                            999999999,
-                            999999999,
-                            999999999,
-                            999999999};
+                              999999999,
+                              999999999,
+                              999999999,
+                              999999999,
+                              999999999,
+                              999999999,
+                              999999999,
+                              999999999,
+                              999999999,
+                              999999999,
+                              999999999,
+                              999999999,
+                              999999999,
+                              999999999,
+                              999999999};
     uint64_t   a_tmax_[16] = {0};
     uint64_t   a_tave_[16] = {0};
     GemmKernel gemm_kernel_;

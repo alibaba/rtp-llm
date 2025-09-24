@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include "rtp_llm/cpp/cuda/cuda_utils.h"
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 #include <cublasLt.h>
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
@@ -56,6 +56,15 @@ typedef struct {
     int                       customOption;
     float                     wavesCount;
 } customMatmulPerf_t;
+
+
+enum CublasDataType {
+    FLOAT_DATATYPE    = 0,
+    HALF_DATATYPE     = 1,
+    BFLOAT16_DATATYPE = 2,
+    INT8_DATATYPE     = 3,
+    FP8_DATATYPE      = 4
+};
 
 struct cublasAlgoConfig_t {
     int            batch_count;

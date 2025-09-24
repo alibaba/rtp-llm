@@ -6,6 +6,8 @@
 #pragma once
 
 #include <assert.h>
+#include <vector>
+#include <stdint.h>
 
 #if USING_CUDA
 #include <cuda_fp16.h>
@@ -15,7 +17,6 @@
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 #endif
-#include "rtp_llm/cpp/cuda/cuda_utils.h"
 
 #define NVTE_MAX_REGIONS 16
 #define NVTE_MAX_NVLINK 32

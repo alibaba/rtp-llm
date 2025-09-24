@@ -1,5 +1,20 @@
 load("//:def.bzl", "copts")
 
+
+# Shape checking utilities - standalone functions
+cc_library(
+    name = "shape_check",
+    hdrs = [
+        "ShapeCheck.h",
+    ],
+    srcs = [
+        "ShapeCheck.cc",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+
 cc_library(
     name = "devices_base",
     hdrs = glob([
@@ -15,6 +30,7 @@ cc_library(
         "//rtp_llm/cpp/core:buffer",
         "//rtp_llm/cpp/core:event",
         "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/utils:kv_cache_utils",
         "//rtp_llm/cpp/config:static_config",
         "//rtp_llm/cpp/model_utils:model_utils",
         "//rtp_llm/cpp/config:gpt_init_params",

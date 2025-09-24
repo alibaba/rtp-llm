@@ -1,6 +1,6 @@
 #include "rtp_llm/models_py/bindings/cuda/FusedRopeKVCacheOp.h"
 #include "rtp_llm/cpp/kernels/unfused_attention_kernels.h"
-#include "rtp_llm/cpp/cuda/Dispatch.h"
+#include "rtp_llm/cpp/core/Dispatch.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/devices/cuda_impl/CudaFlashInfer.h"

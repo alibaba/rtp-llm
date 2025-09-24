@@ -54,6 +54,7 @@ cc_library(
         "@havenask//aios/autil:env_util",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:error_code",
+        "//rtp_llm/cpp/utils:time_util",
         "//rtp_llm/cpp/model_rpc:rpc_error_code",
         "//rtp_llm/cpp/metrics:metrics",
         "//rtp_llm/cpp/core:buffer",

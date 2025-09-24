@@ -1,10 +1,10 @@
 #include "rtp_llm/cpp/devices/rocm_impl/ROCmDevice.h"
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 #include "rtp_llm/cpp/core/BufferHelper.h"
-#include "rtp_llm/cpp/cuda/Dispatch.h"
+#include "rtp_llm/cpp/core/Dispatch.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
-#include "rtp_llm/cpp/kernels/gpt_kernels.h"
 #include "rtp_llm/cpp/devices/utils/DevicePerfWrapper.h"
+#include "rtp_llm/cpp/kernels/moe_kernels.h"
 
 // aiter kernels
 #include "aiter_enum.h"

@@ -291,7 +291,8 @@ void DeviceOps::multiCopy(const MultiCopyParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-torch::Tensor DeviceOps::preprocessGemmWeightByKey(const std::string& key, torch::Tensor weight) {
+torch::Tensor
+DeviceOps::preprocessGemmWeightByKey(const std::string& key, torch::Tensor weight, bool user_arm_gemm_use_kai) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 

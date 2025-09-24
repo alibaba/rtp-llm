@@ -5,6 +5,10 @@ cc_library(
     name = "types_hdr",
     hdrs = [
         "Types.h",
+        "Dispatch.h",
+    ],
+    deps = [
+        "//rtp_llm/cpp/utils:core_utils",
     ],
     visibility = ["//visibility:public"],
 )
@@ -41,7 +45,7 @@ cc_library(
     deps = [
         ":types",
         "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/utils:system_utils",
+        "//rtp_llm/cpp/utils:stack_trace",
         "@havenask//aios/autil:stack_tracer",
     ],
     include_prefix = "src",
@@ -119,7 +123,7 @@ cc_library(
     deps = [
         ":buffer",
         "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/utils:system_utils"
+        "//rtp_llm/cpp/utils:stack_trace"
     ] + torch_deps(),
     copts = copts(),
     visibility = ["//visibility:public"],

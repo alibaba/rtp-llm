@@ -2,14 +2,15 @@
 #include "rtp_llm/cpp/devices/rocm_impl/ROCmAllocator.h"
 #include "rtp_llm/cpp/core/TrackerAllocator.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
-#include "rtp_llm/cpp/kernels/gpt_kernels.h"
 #include "rtp_llm/cpp/kernels/add_residual_kernels.h"
-#include "rtp_llm/cpp/utils/ShapeCheck.h"
-#include "rtp_llm/cpp/cuda/Dispatch.h"
+#include "rtp_llm/cpp/devices/ShapeCheck.h"
+#include "rtp_llm/cpp/core/Dispatch.h"
 #include <cstring>
 
 #include "rtp_llm/cpp/kernels/rmsnormKernels.h"
 #include "rtp_llm/cpp/kernels/activation_kernels.h"
+#include "rtp_llm/cpp/kernels/tensor_ops_kernels.h"
+#include "rtp_llm/cpp/kernels/embedding_kernels.h"
 #include "rtp_llm/cpp/cuda/nccl/nccl_utils_torch.h"
 #include "rtp_llm/cpp/cuda/nccl/nccl_utils.h"
 
@@ -443,7 +444,7 @@ BufferPtr ROCmDevice::embeddingLookup(const EmbeddingLookupParams& params) {
     auto embeddings = allocateBuffer({data_type, {token_num, hidden_size}}, {"embedding"});
 
     DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type,
-                                     invokeEmebeddingLookup,
+                                     invokeEmbeddingLookup,
                                      embeddings->data(),
                                      embedding_table.data(),
                                      params.input_embedding_scalar,

@@ -49,6 +49,7 @@ struct CacheConfig {
     bool     use_mla       = false;
     uint32_t kv_lora_rank  = 0;
     uint32_t rope_head_dim = 0;
+    std::string mtp_model_type    = "";
 
     CacheConfig() {}
 

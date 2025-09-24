@@ -5,14 +5,14 @@
 #include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
 #include "rtp_llm/cpp/devices/cuda_impl/CudaFlashInfer.h"
 #include "rtp_llm/cpp/devices/CommonDefines.h"
-#include "rtp_llm/cpp/cuda/Dispatch.h"
+#include "rtp_llm/cpp/core/Dispatch.h"
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 #include "rtp_llm/cpp/kernels/layernorm_kernels.h"
 #include "rtp_llm/cpp/kernels/activation_kernels.h"
-#include "rtp_llm/cpp/kernels/gpt_kernels.h"
 #include "rtp_llm/cpp/kernels/unfused_attention_kernels.h"
 #include "rtp_llm/cpp/kernels/decoder_masked_multihead_attention/decoder_masked_multihead_attention.h"
 #include "rtp_llm/cpp/kernels/kv_cache/kv_cache_utils.h"
+#include "rtp_llm/cpp/kernels/kv_cache_kernels.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 
 #ifdef USING_CUDA12

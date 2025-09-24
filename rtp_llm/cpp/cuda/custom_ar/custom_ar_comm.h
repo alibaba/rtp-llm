@@ -26,7 +26,7 @@
 #include "rtp_llm/cpp/kernels/custom_ar_kernels.h"
 
 #if USING_CUDA
-#include "rtp_llm/cpp/cuda/cuda_utils.h"
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 #endif
 
 #include "rtp_llm/cpp/cuda/nccl/nccl_utils.h"

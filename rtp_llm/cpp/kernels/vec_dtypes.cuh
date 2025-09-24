@@ -30,6 +30,7 @@
 #endif
 
 #include <type_traits>
+#include <stdint.h>
 
 namespace rtp_llm {
 

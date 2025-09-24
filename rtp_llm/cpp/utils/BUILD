@@ -5,6 +5,16 @@ package(default_visibility = ["//:__subpackages__"])
 
 
 
+# KVCache utilities - simple inline functions, no external dependencies
+cc_library(
+    name = "kv_cache_utils",
+    hdrs = [
+        "KVCacheUtils.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
 # New modular targets
 cc_library(
     name = "core_utils",
@@ -43,22 +53,36 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# Signal handling utilities
 cc_library(
-    name = "system_utils",
+    name = "signal_utils",
     hdrs = [
         "SignalUtils.h",
-        "StackTrace.h",
-        "TimeUtil.h",
-        "ScopeGuard.h",
     ],
     srcs = [
         "SignalUtils.cc",
+    ],
+    deps = [
+        ":core_utils",
+        ":stack_trace",
+        "@havenask//aios/autil:env_util",
+        "@havenask//aios/autil:net",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+# Stack trace utilities
+cc_library(
+    name = "stack_trace",
+    hdrs = [
+        "StackTrace.h",
+    ],
+    srcs = [
         "StackTrace.cc",
     ],
     deps = [
         ":core_utils",
-        "@havenask//aios/autil:env_util",
-        "@havenask//aios/autil:net",
         "@com_google_absl//absl/debugging:stacktrace",
         "@com_google_absl//absl/debugging:symbolize",
     ],
@@ -66,36 +90,57 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# Time utilities
 cc_library(
-    name = "data_structures",
+    name = "time_util",
+    hdrs = [
+        "TimeUtil.h",
+    ],
+    deps = [
+        "@havenask//aios/autil:time",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+# LRU Cache implementation
+cc_library(
+    name = "lru_cache",
     hdrs = [
         "LRUCache.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+# Hash utilities
+cc_library(
+    name = "hash_util",
+    hdrs = [
         "HashUtil.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+# Atomic utilities
+cc_library(
+    name = "atomic_util",
+    hdrs = [
         "AtomicUtil.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
 )
 
+# Math utilities
 cc_library(
-    name = "domain_utils",
+    name = "math_utils",
     hdrs = [
-        "KVCacheUtils.h",
-        "ShapeCheck.h",
-        "DFAUtil.h",
-        "PrefixToCandidateTokens.h",
-    ],
-    srcs = [
-        "ShapeCheck.cc",
-    ],
-    deps = [
-        ":core_utils",
-        "//rtp_llm/cpp/config:config_modules",
-    ],
-    implementation_deps = [
-        "//rtp_llm/cpp/config:static_config",
+        "math_utils.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
 )
+
 

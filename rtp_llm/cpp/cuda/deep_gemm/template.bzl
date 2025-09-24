@@ -91,7 +91,6 @@ dispatch_template_header = """
 #include <cuda.h>
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/cuda/deep_gemm/utils.h"
-#include "rtp_llm/cpp/cuda/cuda_utils.h"
 #include "rtp_llm/cpp/cuda/deep_gemm/DeepGemmPlugin.h"
 #include "rtp_llm/cpp/cuda/deep_gemm/JITRuntime.h"
 

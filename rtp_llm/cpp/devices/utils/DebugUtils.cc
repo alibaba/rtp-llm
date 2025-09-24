@@ -13,6 +13,48 @@ namespace fs = std::filesystem;
 
 namespace rtp_llm {
 
+void printBufferSample(const std::string& hint, Buffer& buffer, uint32_t n_samples) {
+    auto device      = DeviceFactory::getDefaultDevice();
+    auto host_buffer = device->allocateBuffer({buffer.type(), buffer.shape(), AllocationType::HOST});
+    device->copy({*host_buffer, buffer});
+    device->syncAndCheck();
+
+    torch::Tensor tensor = torch::from_blob(
+        host_buffer->data(),
+        bufferShapeToTorchShape(buffer),
+        c10::TensorOptions().device(torch::Device(torch::kCPU)).dtype(dataTypeToTorchType(buffer.type())));
+    printTorchBufferSample(hint, tensor, n_samples);
+}
+
+void printTorchBufferSample(const std::string& hint, torch::Tensor& tensor, uint32_t n_samples) {
+    const uint32_t SEED = 10086;
+
+    auto    flat  = tensor.to(torch::kCPU).to(torch::kF32).view({-1}).contiguous();
+    int64_t total = flat.numel();
+
+    // LCG状态变量
+    uint64_t       lcg_state = SEED;
+    const uint64_t LCG_A     = 1103515245ULL;
+    const uint64_t LCG_C     = 12345ULL;
+    const uint64_t LCG_MOD   = 0x7fffffffULL;
+
+    std::stringstream ss;
+    ss << "[BufferSample] " << hint << " (Shape: " << tensor.sizes() << ", total: " << total << "): ";
+
+    size_t cnt = 0;
+    while (cnt < n_samples) {
+        // LCG生成下一个随机索引
+        lcg_state    = (lcg_state * LCG_A + LCG_C) & LCG_MOD;
+        uint64_t idx = lcg_state % total;
+
+        float val = flat[idx].item<float>();
+        ss << std::fixed << std::setprecision(6) << val << " ";
+        ++cnt;
+    }
+
+    RTP_LLM_LOG_INFO(ss.str());
+}
+
 void printBuffer1d(const std::string&  hint,
                    torch::Tensor&      tensor,
                    std::vector<size_t> dims,

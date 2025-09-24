@@ -73,29 +73,12 @@ def read_env_value(env_name: str, default_value: Any, arg_type: type) -> Any:
 def format_argument_value(value: Any) -> str:
     """
     格式化参数值为字符串
+    只处理非字符串类型，字符串类型由 format_argument_pair 跳过
     """
     if value is None:
         return ""
     elif isinstance(value, bool):
         return "1" if value else "0"
-    elif isinstance(value, str):
-        # 如果是空字符串，显示为 ''
-        if value == "":
-            return "''"
-
-        # 处理字符串中的特殊字符，将换行符等转换为转义序列
-        processed_value = (
-            value.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
-        )
-
-        # 如果字符串包含空格、换行符或特殊字符，需要加引号
-        if (
-            " " in processed_value
-            or "\\" in processed_value
-            or any(char in processed_value for char in ['"', "'"])
-        ):
-            return f'"{processed_value}"'
-        return processed_value
     else:
         return str(value)
 
@@ -103,7 +86,12 @@ def format_argument_value(value: Any) -> str:
 def format_argument_pair(long_option: str, value: Any) -> List[str]:
     """
     格式化参数对为列表，支持 --xx xx 格式
+    跳过字符串类型的参数
     """
+    # 跳过字符串类型的参数
+    if isinstance(value, str):
+        return []
+
     formatted_value = format_argument_value(value)
     if formatted_value:
         return [long_option, formatted_value]
@@ -205,7 +193,9 @@ def main():
 
         # 输出环境变量设置命令（如果用户指定了 --export-env 选项）
         if args.export_env:
-            print(f"\nexport env_args='{env_args_value}'")
+            # 转义单引号，使用双引号包围整个值
+            escaped_value = env_args_value.replace("'", "'\"'\"'")
+            print(f"\nexport env_args='{escaped_value}'")
 
         # 保存到文件
         if args.output_file:

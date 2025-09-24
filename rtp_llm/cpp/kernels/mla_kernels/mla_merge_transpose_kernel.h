@@ -1,11 +1,12 @@
 #pragma once
 
 #ifdef USING_ROCM
-#include <hip/hip_fp16.h>
-#include "rtp_llm/cpp/rocm/hip_utils.h"
-#else
+#include "rtp_llm/cpp/rocm/cuda_shims.h"
+#endif
+
+#if USING_CUDA
 #include <cuda_fp16.h>
-#include "rtp_llm/cpp/cuda/cuda_utils.h"
+#include <cuda_bf16.h>
 #endif
 
 namespace rtp_llm {

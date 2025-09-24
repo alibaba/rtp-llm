@@ -14,7 +14,7 @@
 #include "rtp_llm/cpp/cuda/nccl/nccl_utils.h"
 
 #include "rtp_llm/cpp/devices/DeviceBase.h"
-#include "rtp_llm/cpp/rocm/hip_utils.h"
+#include "rtp_llm/cpp/rocm/hip_host_utils.h"
 #include "rtp_llm/cpp/rocm/hipblasMMWrapper.h"
 #include "rtp_llm/cpp/rocm/rocmFmhaWrapper.h"
 #include "rtp_llm/cpp/rocm/quantizePreprocessors.h"

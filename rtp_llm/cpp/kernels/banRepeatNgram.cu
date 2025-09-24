@@ -14,14 +14,12 @@
  * limitations under the License.
  */
 
-#if USING_CUDA
-#include "rtp_llm/cpp/cuda/cuda_utils.h"
-#endif
-#if USING_ROCM
-#include "rtp_llm/cpp/rocm/hip_utils.h"
-#endif
-
 #include "rtp_llm/cpp/kernels/banRepeatNgram.h"
+
+#if USING_CUDA
+#include <cuda_fp16.h>
+#include <cuda_bf16.h>
+#endif
 
 using namespace runtime;
 
@@ -177,7 +175,6 @@ void invokeBanRepeatNgram(T*                   logits,
         no_repeat_ngram_size_buf,
         vocab_size_padded,
         sequence_lengths);
-    check_cuda_error();
 }
 
 #define INVOKE_BAN_REPEAT_NGRAM(T)                                                                                     \

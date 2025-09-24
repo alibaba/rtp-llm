@@ -13,7 +13,7 @@ cc_library(
         "@cutlass//:cutlass",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
-        "//rtp_llm/cpp/cuda:cuda_utils",
+        "//rtp_llm/cpp/cuda:cuda_host_utils",
         "//3rdparty:cuda_driver",
     ],
     copts = copts(),

@@ -32,7 +32,9 @@ class ArmCpuImpl(CpuImpl):
     def maybe_rewrite_weight_by_key(
         self, key: str, weight: torch.Tensor
     ) -> torch.Tensor:
-        return self.exported_device.preprocess_gemm_weight_by_key(key, weight)
+        return self.exported_device.preprocess_gemm_weight_by_key(
+            key, weight, self.py_env_configs.py_hw_kernel_config.arm_gemm_use_kai
+        )
 
     def unpack_int32_into_int16(self, w_packed: torch.Tensor, int8: bool):
         if int8:

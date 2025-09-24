@@ -251,6 +251,14 @@ class ChatCompletionResponseChoice(BaseModel):
     logprobs: Optional[ChoiceLogprobs] = None
 
 
+class ChatCompletionExtraOutputs(BaseModel):
+    hidden_states: Optional[Union[List[float], List[List[float]]]] = None
+    loss: Optional[Union[float, List[float]]] = None
+    logits: Optional[Union[List[float], List[List[float]]]] = None
+    output_ids: Optional[List[List[int]]] = None
+    input_ids: Optional[List[List[int]]] = None
+
+
 class ChatCompletionResponse(BaseModel):
     id: str = Field(default_factory=lambda: f"chat-")
     object: str = "chat.completion"
@@ -260,6 +268,7 @@ class ChatCompletionResponse(BaseModel):
     usage: UsageInfo
     debug_info: Optional[Union[DebugInfo, str]] = None
     aux_info: Optional[AuxInfo] = None
+    extra_outputs: Optional[ChatCompletionExtraOutputs] = None
 
 
 class DeltaMessage(BaseModel):
@@ -286,3 +295,4 @@ class ChatCompletionStreamResponse(BaseModel):
     usage: Optional[UsageInfo] = Field(default=None)
     debug_info: Optional[Union[DebugInfo, str]] = None
     aux_info: Optional[AuxInfo] = None
+    extra_outputs: Optional[ChatCompletionExtraOutputs] = None

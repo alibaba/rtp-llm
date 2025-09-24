@@ -2,7 +2,7 @@
 #include "rtp_llm/cpp/devices/CommonDefines.h"
 #include "rtp_llm/cpp/kernels/layernorm_kernels.h"
 #include "rtp_llm/cpp/kernels/activation_kernels.h"
-#include "rtp_llm/cpp/utils/ShapeCheck.h"
+#include "rtp_llm/cpp/devices/ShapeCheck.h"
 #include "rtp_llm/cpp/core/BufferHelper.h"
 #include "rtp_llm/cpp/cuda/deep_gemm/DeepGemmPlugin.h"
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
@@ -333,11 +333,11 @@ void CudaDevice::InvokeDeepGemm(const GemmParams& params, CudaGemmArguments argu
         auto padding_size = DeepGemmPlugin::getPaddingSize(params.A.shape()[0], DeepGemmType::Normal);
         quanted_input     = quantize(QuantizeParams(
             params.A, DataType::TYPE_QFP8_E4M3, params.A.dim() - 1, QScheme::Qfp8PerTokenBlock, padding_size));
-        DeepGemmPlugin::gemmFp8(*quanted_input, params.B, *gemm_output, stream_);
+        DeepGemmPlugin::gemmFp8(*quanted_input, params.B, *gemm_output, init_params_.user_deep_gemm_num_sm, stream_);
         output = gemm_output->slice(0, params.A.shape()[0], false);
         output->updateParent(gemm_output);
     } else {
-        DeepGemmPlugin::gemmFp8(params.A, params.B, *gemm_output, stream_);
+        DeepGemmPlugin::gemmFp8(params.A, params.B, *gemm_output, init_params_.user_deep_gemm_num_sm, stream_);
     }
 }
 /// @brief   basic gemm ops

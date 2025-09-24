@@ -81,6 +81,9 @@ uint32_t CacheManager::maxSeqLen() const {
 }
 
 void CacheManager::reportMetricsLoop() {
+    kmonitor::MetricsTags tags;
+    tags.AddTag("mtp_model_type", config_.mtp_model_type);
+    
     while (!stop_) {
         if (metrics_reporter_) {
             RtpLLMCacheMetricsCollector collector;
@@ -94,7 +97,7 @@ void CacheManager::reportMetricsLoop() {
                 collector.kv_cache_used_ratio       = 100.0 * (totalBlocks() - available_blocks) / totalBlocks();
                 collector.mr_cost_time_ms           = allocator_->getMrCostTimeMs();
             }
-            metrics_reporter_->report<RtpLLMCacheMetrics, RtpLLMCacheMetricsCollector>(nullptr, &collector);
+            metrics_reporter_->report<RtpLLMCacheMetrics, RtpLLMCacheMetricsCollector>(&tags, &collector);
             std::this_thread::sleep_for(std::chrono::seconds(1));  // 1s
         }
     }
@@ -186,7 +189,9 @@ CacheManager::MatchInfo CacheManager::mallocWithCache(const AdvancedMallocInfo& 
         collector.gpu_input_length   = static_cast<int32_t>(malloc_info.cache_keys.size()) * config_.seq_size_per_block;
         collector.gpu_reuse_length   = match_info.local_reuse_length;
         collector.gpu_cache_hit_rate = collector.gpu_reuse_length * 100 / collector.gpu_input_length;
-        metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(nullptr, &collector);
+        kmonitor::MetricsTags tags;
+        tags.AddTag("mtp_model_type", config_.mtp_model_type);
+        metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(&tags, &collector);
     }
     return match_info;
 }

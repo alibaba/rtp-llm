@@ -20,7 +20,7 @@
 #include <stdint.h>
 #include <vector>
 
-#include "rtp_llm/cpp/cuda/cuda_utils.h"
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 
 namespace tensorrt_llm
 {

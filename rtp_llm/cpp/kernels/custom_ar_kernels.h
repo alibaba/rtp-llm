@@ -19,11 +19,11 @@
 #include <assert.h>
 
 #if USING_CUDA
-#include <cuda_fp16.h>
-#include "rtp_llm/cpp/cuda/cuda_utils.h"
+#include <cuda_runtime.h>
 #endif
+
 #if USING_ROCM
-#include "rtp_llm/cpp/rocm/hip_utils.h"
+#include "rtp_llm/cpp/rocm/cuda_shims.h"
 #endif
 
 #include <iostream>
@@ -40,13 +40,6 @@ enum AllReduceStrategyType {
     ONESHOT,
     TWOSHOT,
 };
-
-typedef struct bf168 {
-    __nv_bfloat162 x;
-    __nv_bfloat162 y;
-    __nv_bfloat162 z;
-    __nv_bfloat162 w;
-} bf168;
 
 struct CustomAllReduceParameters {
     size_t                elts_total_num;

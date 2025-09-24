@@ -1,5 +1,5 @@
 #include "rtp_llm/cpp/utils/StringUtil.h"
-#include "rtp_llm/cpp/rocm/hip_utils.h"
+#include "rtp_llm/cpp/rocm/hip_host_utils.h"
 #include "rtp_llm/cpp/rocm/quantizePreprocessors.h"
 
 // #include "cutlass_extensions/gemm/kernel/mixed_gemm_B_layout.h"

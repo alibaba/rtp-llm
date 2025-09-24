@@ -20,11 +20,9 @@
 #endif
 
 #include "rtp_llm/cpp/kernels/penalty_types.h"
-#if USING_CUDA
-#include "rtp_llm/cpp/cuda/cuda_utils.h"
-#endif
+
 #if USING_ROCM
-#include "rtp_llm/cpp/rocm/hip_utils.h"
+#include "rtp_llm/cpp/rocm/cuda_shims.h"
 #endif
 
 namespace rtp_llm {

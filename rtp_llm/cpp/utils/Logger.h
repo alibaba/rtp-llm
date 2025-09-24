@@ -25,6 +25,7 @@
 #include <string>
 #include <string>
 #include <unistd.h>
+#include <stdint.h>
 
 #include "alog/Appender.h"
 #include "alog/Logger.h"

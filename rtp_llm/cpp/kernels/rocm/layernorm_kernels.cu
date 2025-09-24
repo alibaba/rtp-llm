@@ -23,14 +23,11 @@
 #endif
 
 #if USING_ROCM
-#include "rtp_llm/cpp/rocm/hip_utils.h"
+#include "rtp_llm/cpp/rocm/cuda_shims.h"
 #endif
 
 // wont't support new features
 namespace rtp_llm {
-#if USING_ROCM
-using namespace rocm;
-#endif
 
 __device__ __forceinline__ int64_t loadOffset(int head_num, int size_per_head) {
     // [[q_head_1],[q_head_2]...[k_head_1],[k_head_2]...[v_head_1],[v_head_2]...]

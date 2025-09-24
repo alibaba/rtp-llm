@@ -1,6 +1,6 @@
 #pragma once
 
-#include "rtp_llm/cpp/cuda/cuda_utils.h"
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 #define CHECK_CUDA_ERROR(cuda_call)                                                                                    \
