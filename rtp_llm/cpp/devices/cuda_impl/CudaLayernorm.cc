@@ -5,7 +5,6 @@
 #include "rtp_llm/cpp/kernels/rmsnormKernels.h"
 #include "rtp_llm/cpp/kernels/layernorm_kernels.h"
 #include "rtp_llm/cpp/kernels/add_residual_kernels.h"
-#include "rtp_llm/cpp/kernels/alpha_layernorm_kernels.h"
 #include "rtp_llm/cpp/kernels/fused_qk_rmsnorm.h"
 
 using namespace std;
