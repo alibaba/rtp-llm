@@ -93,6 +93,7 @@ std::string FMHAConfig::to_string() const {
 // KVCacheConfig
 void KVCacheConfig::update_from_env_for_test() {
     reuse_cache              = bool_from_env_for_test("REUSE_CACHE", false);
+    reuse_query_cache        = reuse_cache and bool_from_env_for_test("REUSE_QUERY_CACHE", true);
     multi_task_prompt        = autil::EnvUtil::getEnv("MULTI_TASK_PROMPT", "");
     multi_task_prompt_str    = autil::EnvUtil::getEnv("MULTI_TASK_PROMPT_STR", "");
     enable_3fs               = bool_from_env_for_test("ENABLE_3FS", false);
@@ -109,6 +110,7 @@ void KVCacheConfig::update_from_env_for_test() {
 std::string KVCacheConfig::to_string() const {
     std::ostringstream oss;
     oss << "reuse_cache: " << reuse_cache << "\n"
+        << "reuse_query_cache: " << reuse_query_cache << "\n"
         << "multi_task_prompt: " << multi_task_prompt << "\n"
         << "multi_task_prompt_str: " << multi_task_prompt_str << "\n"
         << "enable_3fs: " << enable_3fs << "\n"

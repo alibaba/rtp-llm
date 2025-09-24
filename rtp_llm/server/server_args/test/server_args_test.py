@@ -328,6 +328,8 @@ class ServerArgsSetTest(TestCase):
             # 4. KV Cache 相关配置
             "--reuse_cache",
             "True",
+            "--reuse_query_cache",
+            "False",
             "--multi_task_prompt",
             "/tmp/another_prompt.json",
             "--multi_task_prompt_str",
@@ -742,6 +744,7 @@ class ServerArgsSetTest(TestCase):
 
         # 4. KV Cache 相关配置
         self.assertEqual(env["REUSE_CACHE"], "1")
+        self.assertEqual(env["REUSE_QUERY_CACHE"], "0")
         self.assertEqual(env["MULTI_TASK_PROMPT"], "/tmp/another_prompt.json")
         self.assertEqual(env["MULTI_TASK_PROMPT_STR"], '{"task": "another"}')
         self.assertEqual(env["INT8_KV_CACHE"], "1")

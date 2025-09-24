@@ -25,6 +25,7 @@ EngineInitParams createMockEngineInitParams(DeviceBase* device) {
     params.head_num_kv_             = 2;
     params.block_nums_              = 100;
     params.reuse_cache_             = false;
+    params.reuse_query_cache_       = false;
     params.max_generate_batch_size_ = 128;
     params.max_context_batch_size_  = 128;
     params.kv_cache_data_type_      = DataType::TYPE_FP16;

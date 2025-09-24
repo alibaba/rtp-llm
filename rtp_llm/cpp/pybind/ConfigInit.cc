@@ -122,8 +122,10 @@ void register_fmha_config(pybind11::module& m) {
 // KVCacheConfig
 void register_kvcache_config(pybind11::module& m) {
     pybind11::class_<KVCacheConfig>(m, "KVCacheConfig")
-        .def(pybind11::init<bool, std::string, std::string, bool, int, int, int, int, int, int, int64_t, int64_t>(),
+        .def(pybind11::
+                 init<bool, bool, std::string, std::string, bool, int, int, int, int, int, int, int64_t, int64_t>(),
              pybind11::arg("reuse_cache")              = false,
+             pybind11::arg("reuse_query_cache")        = true,
              pybind11::arg("multi_task_prompt")        = "",
              pybind11::arg("multi_task_prompt_str")    = "",
              pybind11::arg("enable_3fs")               = false,
@@ -439,7 +441,6 @@ void register_misc_config(pybind11::module& m) {
         .def_readwrite("disable_pdl", &MiscellaneousConfig::disable_pdl);
 }
 
-
 void registerGptInitParameter(py::module m) {
     py::enum_<MlaOpsType>(m, "MlaOpsType")
         .value("AUTO", MlaOpsType::AUTO)
@@ -628,6 +629,7 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(kv_cache_mem_mb, kv_cache_mem_mb_)                                                                    \
     DEF_PROPERTY(reserve_runtime_mem_mb, reserve_runtime_mem_mb_)                                                      \
     DEF_PROPERTY(reuse_cache, reuse_cache_)                                                                            \
+    DEF_PROPERTY(reuse_query_cache, reuse_query_cache_)                                                                \
     DEF_PROPERTY(enable_partial_fallback, enable_partial_fallback_)                                                    \
     DEF_PROPERTY(enable_fast_gen, enable_fast_gen_)                                                                    \
     DEF_PROPERTY(warm_up, warm_up_)                                                                                    \
@@ -776,4 +778,4 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     registerCommon(m);
 }
 
-}  // namespace torch_ext
+}  // namespace rtp_llm

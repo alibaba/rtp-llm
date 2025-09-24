@@ -15,6 +15,7 @@ struct ResourceContext {
     std::shared_ptr<CacheManager>              propose_cache_manager = nullptr;
     std::shared_ptr<SystemPrompt>              system_prompt         = nullptr;
     bool                                       reuse_cache{false};
+    bool                                       reuse_query_cache{true};
     bool                                       enable_3fs{false};
     bool                                       use_cache_store{false};
     std::vector<std::shared_ptr<CacheManager>> mtp_cache_managers;
@@ -104,6 +105,7 @@ public:
     }
 
     bool        reuseCache() const;
+    bool        reuseQueryCache() const;  // 同一批推理的stream内部是否开启kvcache 复用
     bool        enable3FS() const;
     std::string debugString() const;
 

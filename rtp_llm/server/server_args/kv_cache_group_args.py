@@ -14,6 +14,13 @@ def init_kv_cache_group_args(parser):
         help="控制是否激活KV Cache的重用机制。设置为 True 启用 , False 关闭",
     )
     kv_cache_group.add_argument(
+        "--reuse_query_cache",
+        env_name="REUSE_QUERY_CACHE",
+        type=str2bool,
+        default=True,
+        help="打开KV Cache重用机制的前提下，是否打开Query内部KV Cache复用；默认打开，设置False 关闭",
+    )
+    kv_cache_group.add_argument(
         "--multi_task_prompt",
         env_name="MULTI_TASK_PROMPT",
         type=str,

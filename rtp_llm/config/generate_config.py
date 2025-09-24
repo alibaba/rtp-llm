@@ -127,6 +127,9 @@ class GenerateConfig(BaseModel):
     # 只有开启环境变量 REUSE_CACHE 时才生效
     reuse_cache: bool = True
 
+    # 默认和REUSE_CACHE一致，关闭REUSE_QUERY_CACHE时才是False
+    reuse_query_cache: bool = True
+
     # 只有开启环境变量 ENABLE_3FS 时才生效
     enable_3fs: bool = True
 

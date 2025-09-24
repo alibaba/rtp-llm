@@ -92,6 +92,7 @@ message GenerateConfigPB {
     bool enable_3fs = 48;
     repeated int32 variable_num_beams = 49;
     google.protobuf.StringValue trace_id = 50;
+    bool reuse_query_cache = 51;
 }
 
 message MMPreprocessConfigPB {

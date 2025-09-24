@@ -591,6 +591,8 @@ class GptInitModelParameters:
         # KVCacheConfig
         self.gpt_init_params.kv_cache_config = KVCacheConfig(
             reuse_cache=get_env_bool("REUSE_CACHE", False),
+            reuse_query_cache=get_env_bool("REUSE_CACHE", False)
+            and get_env_bool("REUSE_CACHE", True),
             multi_task_prompt=get_env_str("MULTI_TASK_PROMPT"),
             multi_task_prompt_str=get_env_str("MULTI_TASK_PROMPT_STR"),
             enable_3fs=get_env_bool("ENABLE_3FS", False),
@@ -1140,6 +1142,10 @@ class GptInitModelParameters:
         )
         self.reuse_cache = self.py_env_configs.py_kv_cache_config.reuse_cache
         logging.info(f"reuse_cache: {self.reuse_cache}")
+        self.reuse_query_cache = (
+            self.py_env_configs.py_kv_cache_config.reuse_query_cache
+        )
+        logging.info(f"reuse_query_cache: {self.reuse_query_cache}")
         self.pre_allocate_op_mem = bool(int(os.environ.get("PRE_ALLOCATE_OP_MEM", 1)))
         logging.info(f"pre_allocate_op_mem: {self.pre_allocate_op_mem}")
         logging.info(f"tp_split_emb_and_lm_head: {self.tp_split_emb_and_lm_head}")
