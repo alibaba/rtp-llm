@@ -51,7 +51,7 @@
         return __VA_ARGS__();                                                                                          \
     }
 
-#ifdef ENABLE_FP8
+#if defined(ENABLE_FP8) || defined(USING_ROCM)
 #define ENABLE_FP8_CASE(NAME, TYPE, ...) FT_SWITCH_ONE_CASE_T(NAME, KvCacheDataType::FP8, TYPE, __VA_ARGS__)
 #else
 #define ENABLE_FP8_CASE(NAME, TYPE, ...)

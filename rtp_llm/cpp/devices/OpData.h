@@ -614,6 +614,7 @@ struct AttentionModuleParams {
     const AttentionConfigs&      configs;
     const QScheme                qscheme;
     const DataType               compute_type = DataType::TYPE_INVALID;
+    const BufferPtr              rotary_embedding_coefficient_cache = nullptr;
 };
 
 struct MlaRotaryWriteKVCacheParams {
@@ -698,6 +699,7 @@ struct AttentionLayerParams {
     const DataType               compute_type;
     bool                         enable_sp;
     size_t                       pad_token_num;
+    const BufferPtr              rotary_embedding_coefficient_cache = nullptr;
 };
 
 struct MoeConfigs {

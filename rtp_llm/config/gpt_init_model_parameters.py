@@ -647,12 +647,17 @@ class GptInitModelParameters:
             rocm_hipblaslt_config=get_env_str(
                 "ROCM_HIPBLASLT_CONFIG", "gemm_config.csv"
             ),
+            use_swizzleA = (
+                get_env_bool("USE_SWIZZLEA", False)
+                and get_env_str("MODEL_TYPE", "") in ("qwen_2", "qwen_3")
+            ),
             ft_disable_custom_ar=get_env_bool("FT_DISABLE_CUSTOM_AR", True),
             enable_cuda_graph=get_env_bool("ENABLE_CUDA_GRAPH", False),
             enable_cuda_graph_debug_mode=get_env_bool(
                 "ENABLE_CUDA_GRAPH_DEBUG_MODE", False
             ),
             use_aiter_pa=get_env_bool("USE_AITER_PA", True),
+            use_asm_pa=get_env_bool("USE_ASM_PA", True),
             enable_native_cuda_graph=get_env_bool("ENABLE_NATIVE_CUDA_GRAPH", False),
             num_native_cuda_graph=get_env_int("NUM_NATIVE_CUDA_GRAPH", 200),
         )
@@ -815,14 +820,14 @@ class GptInitModelParameters:
                     inter_size
                     + (
                         get_pad_size(inter_size, align_size)
-                        if self.quant_algo.isQuant()
+                        if (self.quant_algo.isQuant() or self.gpt_init_params.hw_kernel_config.use_swizzleA)
                         else 0
                     )
                 )
             self.layer_inter_padding_size = layer_inter_padding_size
         self.inter_padding_size = self.inter_size + (
             get_pad_size(self.inter_size, align_size)
-            if self.quant_algo.isQuant()
+            if (self.quant_algo.isQuant() or self.gpt_init_params.hw_kernel_config.use_swizzleA)
             else 0
         )
         if self.head_num_kv <= 0:
@@ -1119,6 +1124,9 @@ class GptInitModelParameters:
         self.pre_allocate_op_mem = bool(int(os.environ.get("PRE_ALLOCATE_OP_MEM", 1)))
         logging.info(f"pre_allocate_op_mem: {self.pre_allocate_op_mem}")
         logging.info(f"tp_split_emb_and_lm_head: {self.tp_split_emb_and_lm_head}")
+
+        if os.environ.get("ROCM_KV_CACHE_DATATYPE", "") == "fp8":
+            self.kv_cache_data_type = WEIGHT_TYPE.FP8.to_str()
 
         # use environment variables to update stop_words_str and stop_words_id
         env_stop_words_str = self.py_env_configs.generate_env_config.stop_words_str

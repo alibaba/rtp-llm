@@ -87,9 +87,11 @@ struct HWKernelConfig {
     bool        enable_multi_block_mode      = true;
     bool        ft_disable_custom_ar         = true;
     std::string rocm_hipblaslt_config        = "gemm_config.csv";
+    bool        use_swizzleA                 = false;
     bool        enable_cuda_graph            = false;
     bool        enable_cuda_graph_debug_mode = false;
     bool        use_aiter_pa                 = true;
+    bool        use_asm_pa                   = true;
     bool        enable_native_cuda_graph     = false;
     int         num_native_cuda_graph        = 200;
     std::string to_string() const;
