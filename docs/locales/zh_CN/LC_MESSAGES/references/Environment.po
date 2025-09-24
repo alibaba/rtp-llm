@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-15 16:46+0800\n"
+"POT-Creation-Date: 2025-09-24 14:39+0800\n"
 "PO-Revision-Date: 2025-09-17 15:04+0800\n"
 "Last-Translator: 来羽 <xj226049@alibaba-inc.com>\n"
 "Language: zh_CN\n"
@@ -187,14 +187,14 @@ msgid ""
 msgstr "目前，我们的设计考虑了当前的代码架构。配置获取存在两种场景：一种是在某些全局方法或静态方法中，我们直接从`rtp_llm/config/py_config_modules.py`中的`StaticConfig`获取相应的配置参数，对于其他情况，我们通过传入`py_env_configs`配置来获取。此外，关于Python端环境变量的修改，我们遵循以下原则："
 
 #: ../../references/Environment.md:66
+#, fuzzy
 msgid ""
 "**Principle: Environment variable settings in tests/Test environment "
 "variables/smoke test environment variables are all preserved. Global "
 "initialization environment variable settings and retrieval are also "
-"preserved (such as internal_source/rtp_llm/models/internal_init.py, "
-"internal_source/scripts/local_server_runner.py). env_param, etc., which "
-"exist for rpc_api transmission specification, are also preserved (such as"
-" rtp_llm/tools/api/model_size_evaluator_api.py).**"
+"preserved (such as internal_source/rtp_llm/models/internal_init.py). "
+"env_param, etc., which exist for rpc_api transmission specification, are "
+"also preserved (such as rtp_llm/tools/api/model_size_evaluator_api.py).**"
 msgstr "**原则：测试/测试环境变量/冒烟测试环境变量中的环境变量设置都将保留。全局初始化环境变量设置和检索也会保留（例如internal_source/rtp_llm/models/internal_init.py，internal_source/scripts/local_server_runner.py）。用于rpc_api传输规范的env_param等也会保留（例如rtp_llm/tools/api/model_size_evaluator_api.py）。**"
 
 #: ../../references/Environment.md:68
@@ -219,3 +219,4 @@ msgstr "`rtp_llm/server/server_args.py`（*在同一目录下有许多相应的�
 #: ../../references/Environment.md:72
 msgid "`rtp_llm/server/test/server_args_test.py`"
 msgstr "`rtp_llm/server/test/server_args_test.py`"
+
