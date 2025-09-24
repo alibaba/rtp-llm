@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-12 17:38+0800\n"
+"POT-Creation-Date: 2025-09-24 14:39+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -85,7 +85,8 @@ msgid "Default"
 msgstr "默认值"
 
 #: ../../backend/pd_disaggregation.ipynb:131
-msgid "**PREFILL_RETRY_TIMES**"
+#, fuzzy
+msgid "**PREFILL\\_RETRY\\_TIMES**"
 msgstr "**PREFILL_RETRY_TIMES**"
 
 #: ../../backend/pd_disaggregation.ipynb:131
@@ -98,7 +99,8 @@ msgid "``0``"
 msgstr "``0``"
 
 #: ../../backend/pd_disaggregation.ipynb:133
-msgid "**PREFILL_RETRY_TIMEOUT_MS**"
+#, fuzzy
+msgid "**PREFILL\\_RETRY\\_TIMEOUT\\_MS**"
 msgstr "**PREFILL_RETRY_TIMEOUT_MS**"
 
 #: ../../backend/pd_disaggregation.ipynb:133
@@ -106,7 +108,8 @@ msgid "Total timeout for prefill retries (milliseconds)"
 msgstr "预填充重试的总超时时间（毫秒）"
 
 #: ../../backend/pd_disaggregation.ipynb:135
-msgid "**PREFILL_MAX_WAIT_TIMEOUT_MS**"
+#, fuzzy
+msgid "**PREFILL\\_MAX\\_WAIT\\_TIMEOUT\\_MS**"
 msgstr "**PREFILL_MAX_WAIT_TIMEOUT_MS**"
 
 #: ../../backend/pd_disaggregation.ipynb:135
@@ -118,7 +121,8 @@ msgid "``600000``"
 msgstr "``600000``"
 
 #: ../../backend/pd_disaggregation.ipynb:137
-msgid "**LOAD_CACHE_TIMEOUT_MS**"
+#, fuzzy
+msgid "**LOAD\\_CACHE\\_TIMEOUT\\_MS**"
 msgstr "**LOAD_CACHE_TIMEOUT_MS**"
 
 #: ../../backend/pd_disaggregation.ipynb:137
@@ -131,7 +135,8 @@ msgid "``5000``"
 msgstr "``5000``"
 
 #: ../../backend/pd_disaggregation.ipynb:139
-msgid "**DECODE_RETRY_TIMES**"
+#, fuzzy
+msgid "**DECODE\\_RETRY\\_TIMES**"
 msgstr "**DECODE_RETRY_TIMES**"
 
 #: ../../backend/pd_disaggregation.ipynb:139
@@ -144,7 +149,8 @@ msgid "``100``"
 msgstr "``100``"
 
 #: ../../backend/pd_disaggregation.ipynb:141
-msgid "**DECODE_RETRY_TIMEOUT_MS**"
+#, fuzzy
+msgid "**DECODE\\_RETRY\\_TIMEOUT\\_MS**"
 msgstr "**DECODE_RETRY_TIMEOUT_MS**"
 
 #: ../../backend/pd_disaggregation.ipynb:141
@@ -152,7 +158,8 @@ msgid "Total timeout for decode process retries (milliseconds)"
 msgstr "解码过程重试的总超时时间（毫秒）"
 
 #: ../../backend/pd_disaggregation.ipynb:143
-msgid "**RDMA_CONNECT_RETRY_TIMES**"
+#, fuzzy
+msgid "**RDMA\\_CONNECT\\_RETRY\\_TIMES**"
 msgstr "**RDMA_CONNECT_RETRY_TIMES**"
 
 #: ../../backend/pd_disaggregation.ipynb:143
@@ -160,7 +167,8 @@ msgid "Number of retries for RDMA connection establishment"
 msgstr "RDMA连接建立的重试次数"
 
 #: ../../backend/pd_disaggregation.ipynb:145
-msgid "**DECODE_POLLING_KV_CACHE_STEP_MS**"
+#, fuzzy
+msgid "**DECODE\\_POLLING\\_KV\\_CACHE\\_STEP\\_MS**"
 msgstr "**DECODE_POLLING_KV_CACHE_STEP_MS**"
 
 #: ../../backend/pd_disaggregation.ipynb:145
@@ -172,7 +180,8 @@ msgid "``30``"
 msgstr "``30``"
 
 #: ../../backend/pd_disaggregation.ipynb:147
-msgid "**DECODE_ENTRANCE**"
+#, fuzzy
+msgid "**DECODE\\_ENTRANCE**"
 msgstr "**DECODE_ENTRANCE**"
 
 #: ../../backend/pd_disaggregation.ipynb:147
@@ -184,7 +193,8 @@ msgid "``false``"
 msgstr "``false``"
 
 #: ../../backend/pd_disaggregation.ipynb:149
-msgid "**LOAD_BALANCE_POLICY_NAME**"
+#, fuzzy
+msgid "**LOAD\\_BALANCE\\_POLICY\\_NAME**"
 msgstr "**LOAD_BALANCE_POLICY_NAME**"
 
 #: ../../backend/pd_disaggregation.ipynb:149
@@ -196,7 +206,8 @@ msgid "``RR``"
 msgstr "``RR``"
 
 #: ../../backend/pd_disaggregation.ipynb:151
-msgid "**SYNC_STATUS_INTERVAL_MS**"
+#, fuzzy
+msgid "**SYNC\\_STATUS\\_INTERVAL\\_MS**"
 msgstr "**SYNC_STATUS_INTERVAL_MS**"
 
 #: ../../backend/pd_disaggregation.ipynb:151
@@ -206,3 +217,4 @@ msgstr "PD之间状态同步的时间间隔（毫秒）"
 #: ../../backend/pd_disaggregation.ipynb:151
 msgid "``50``"
 msgstr "``50``"
+

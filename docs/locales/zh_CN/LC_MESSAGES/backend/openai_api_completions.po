@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-12 17:38+0800\n"
+"POT-Creation-Date: 2025-09-24 14:39+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -39,7 +39,9 @@ msgid ""
 "Check out other tutorials to learn about `vision APIs "
 "<./openai_api_vision.ipynb>`__ for vision-language models and `embedding "
 "APIs <./openai_api_embeddings.ipynb>`__ for embedding models."
-msgstr "查看其他教程了解视觉语言模型的`视觉API <./openai_api_vision.ipynb>`__和嵌入模型的`嵌入API <./openai_api_embeddings.ipynb>`__。"
+msgstr ""
+"查看其他教程了解视觉语言模型的`视觉API <./openai_api_vision.ipynb>`__和嵌入模型的`嵌入API "
+"<./openai_api_embeddings.ipynb>`__。"
 
 #: ../../backend/openai_api_completions.ipynb:27
 msgid "Launch A Server"
@@ -50,7 +52,8 @@ msgid "Launch the server in your terminal and wait for it to initialize."
 msgstr "在终端中启动服务器并等待其初始化完成。"
 
 #: ../../backend/openai_api_completions.ipynb:31
-msgid "export CUDA_VISIBLE_DEVICES=1"
+#, fuzzy
+msgid "export CUDA\\_VISIBLE\\_DEVICES=1"
 msgstr "export CUDA_VISIBLE_DEVICES=1"
 
 #: ../../backend/openai_api_completions.ipynb:62
@@ -80,7 +83,9 @@ msgid ""
 "parameters. Refer to `OpenAI Chat Completions API "
 "<https://platform.openai.com/docs/api-reference/chat/create>`__ for more "
 "details."
-msgstr "聊天补全API接受OpenAI聊天补全API的参数。更多详情请参考`OpenAI聊天补全API <https://platform.openai.com/docs/api-reference/chat/create>`__。"
+msgstr ""
+"聊天补全API接受OpenAI聊天补全API的参数。更多详情请参考`OpenAI聊天补全API "
+"<https://platform.openai.com/docs/api-reference/chat/create>`__。"
 
 #: ../../backend/openai_api_completions.ipynb:106
 msgid ""
@@ -88,7 +93,9 @@ msgid ""
 "allowing for additional customization. One key option within "
 "``extra_configs`` is ``chat_template_kwargs``, which can be used to pass "
 "arguments to the chat template processor."
-msgstr "RTP-LLM通过``extra_configs``参数扩展了标准API，允许进行额外的自定义。``extra_configs``中的一个关键选项是``chat_template_kwargs``，可用于向聊天模板处理器传递参数。"
+msgstr ""
+"RTP-"
+"LLM通过``extra_configs``参数扩展了标准API，允许进行额外的自定义。``extra_configs``中的一个关键选项是``chat_template_kwargs``，可用于向聊天模板处理器传递参数。"
 
 #: ../../backend/openai_api_completions.ipynb:109
 msgid "Enabling Model Thinking/Reasoning"
@@ -109,7 +116,9 @@ msgid ""
 "The completions API accepts OpenAI Completions API's parameters. Refer to"
 " `OpenAI Completions API <https://platform.openai.com/docs/api-"
 "reference/completions/create>`__ for more details."
-msgstr "补全API接受OpenAI补全API的参数。更多详情请参考`OpenAI补全API <https://platform.openai.com/docs/api-reference/completions/create>`__。"
+msgstr ""
+"补全API接受OpenAI补全API的参数。更多详情请参考`OpenAI补全API "
+"<https://platform.openai.com/docs/api-reference/completions/create>`__。"
 
 #: ../../backend/openai_api_completions.ipynb:215
 msgid "Here is an example of a detailed completions request:"
