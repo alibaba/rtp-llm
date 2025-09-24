@@ -81,9 +81,13 @@ while true; do
         main_status="$status_json"
     fi
 
-    if [[ "$main_status" == "DONE" || "$main_status" == "FAILED" || "$main_status" == "UNKNOWN" || "$main_status" == "CANCELED" || "$main_status" == "NOT_RUN" ]]; then
-        status_count=$(echo "$status_raw" | jq -c '.status')
-        echo "Current status: $status_count"
+    if [[ "$main_status" == "DONE"     || 
+          "$main_status" == "FAILED"   || 
+          "$main_status" == "UNKNOWN"  || 
+          "$main_status" == "CANCELED" || 
+          "$main_status" == "NOT_RUN"     ]]; then
+        status_summary=$(echo "$status_raw" | jq -c '.status')
+        echo "Current status: $status_summary"
         if [[ "$main_status" == "DONE" || "$main_status" == "NOT_RUN" ]]; then
             echo "CI completed successfully"
             exit 0
