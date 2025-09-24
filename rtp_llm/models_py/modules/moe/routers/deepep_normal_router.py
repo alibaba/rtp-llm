@@ -5,6 +5,7 @@ from libth_transformer.rtp_llm_ops import trt_fp8_quantize_128
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.models_py.distributed.deepep_wrapper import get_deepep_wrapper
+from rtp_llm.models_py.modules.fp8_kernel import scaled_fp8_per_token_quant
 from rtp_llm.models_py.modules.moe import (
     ExpertForwardPayload,
     ExpertTokensMetadata,
@@ -55,9 +56,15 @@ class DeepepNormalRouter(FusedMoeDataRouter):
     ) -> ExpertForwardPayload:
         if a1_scale is not None or a2_scale is not None:
             raise ValueError("DeepEPNormal a1_scale or a2_scale should be None")
-
+        act_dtype = a1.dtype
         if self.use_fp8:
-            a1, a1_scale = trt_fp8_quantize_128(a1, False)
+            if quant_config.is_per_act_token:
+                a1, a1_scale = scaled_fp8_per_token_quant(a1, None)
+                assert a1.shape[1] % 128 == 0
+                a1_scale = a1_scale.repeat(1, a1.shape[1] // 128)
+            else:
+                a1, a1_scale = trt_fp8_quantize_128(a1, False)
+
             input = (a1, a1_scale)
         else:
             input = a1
@@ -90,7 +97,11 @@ class DeepepNormalRouter(FusedMoeDataRouter):
             expert_alignment=self.expert_alignment,
         )
         if self.use_fp8:
-            expert_x, expert_x_scale = output
+            if quant_config.is_per_act_token:
+                expert_x, expert_x_scale = output
+                expert_x_scale = expert_x_scale[:, 0].unsqueeze(1)
+            else:
+                expert_x, expert_x_scale = output
         else:
             expert_x = output
             expert_x_scale = None
@@ -99,7 +110,9 @@ class DeepepNormalRouter(FusedMoeDataRouter):
             num_recv_tokens_per_expert_list, device=expert_x.device, dtype=torch.int32
         )
 
-        if recv_topk_idx.numel() != 0 and not self.use_fp8:
+        if recv_topk_idx.numel() != 0 and (
+            not self.use_fp8 or quant_config.is_per_act_token
+        ):
             expert_topk_ids = torch.where(
                 recv_topk_idx == -1,
                 num_experts - 1 if self.rank_expert_offset == 0 else 0,
@@ -110,7 +123,7 @@ class DeepepNormalRouter(FusedMoeDataRouter):
 
         return ExpertForwardPayload(
             expert_x,
-            a1.dtype,
+            act_dtype,
             expert_x_scale,
             ExpertTokensMetadata(expert_num_tokens, num_recv_tokens_per_expert_list),
             expert_topk_ids,
@@ -129,7 +142,7 @@ class DeepepNormalRouter(FusedMoeDataRouter):
         if fused_expert_output.numel() != 0:
             if isinstance(weight_and_reduce_impl, TopKWeightAndReduceDelegate):
                 weight_and_reduce_impl = TopKWeightAndReduceContiguous()
-            if weight_and_reduce_impl is not None and not self.use_fp8:
+            if weight_and_reduce_impl is not None:
                 fused_expert_output = weight_and_reduce_impl.apply(
                     fused_expert_output=fused_expert_output,
                     topk_weights=topk_weights,

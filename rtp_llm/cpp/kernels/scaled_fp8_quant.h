@@ -9,10 +9,11 @@
 
 namespace rtp_llm {
 
+#ifdef ENABLE_FP8
+
 // Existing function
 void per_tensor_quant_fp8(at::Tensor input, at::Tensor output_q, at::Tensor output_s, bool is_static);
-
-#ifdef ENABLE_FP8
+void per_token_quant_fp8(at::Tensor input, at::Tensor output_q, at::Tensor output_s);
 // Functions extracted from cuda_fp8_utils
 template<typename T_OUT, typename T_S, typename T_IN>
 void invokeQuantizeMatrix(T_OUT*       output,
@@ -39,5 +40,4 @@ void computeFP8ActivationAndQuantize(__nv_fp8_e4m3*       fp8_output,
                                      const int64_t        dim1,
                                      cudaStream_t         stream);
 #endif  // ENABLE_FP8
-
 }  // namespace rtp_llm
