@@ -160,6 +160,10 @@ public:
         return native_graph_capturing_;
     }
 
+    virtual BufferPtr getRotaryEmbeddingCoefficientCache(const RopeConfig & rope_config) {
+        throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+    }
+
 public:
     // device-independence op implementations
     void         batchCopy(const BatchCopyParams& params) override;

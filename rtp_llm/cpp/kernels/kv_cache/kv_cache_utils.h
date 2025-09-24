@@ -224,12 +224,35 @@ struct KVBlockArray: public KVBlockArrayForContextFMHA {
                + getLocalIdx(globalTokenIdx) * vectorize_size + channelIdx % vectorize_size;
     }
 
-    __host__ __device__ inline int32_t
-    getVLocalIdx(int32_t globalTokenIdx, int32_t headIdx, int32_t dimsPerHead, int32_t channelIdx) const {
+    template <KvCacheDataType CType>
+    __host__ __device__ inline int32_t getVLocalIdx(int32_t globalTokenIdx,
+                                                    int32_t headIdx,
+                                                    int32_t dimsPerHead,
+                                                    int32_t channelIdx) const {
+        constexpr int element_size = ElementSizeInBytes<CType>::value;
+        static_assert(16 % element_size == 0,
+                        "kv cache element size must divide 16");
+        constexpr int vectorize_size = 16 / element_size;
+
+        assert(mTokensPerBlock % vectorize_size == 0);
+        int32_t localTokenIdx = getLocalIdx(globalTokenIdx);
+        // shape:  [numHeads,                    mTokensPerBlock/vs, dimsPerHead, vs]
+        // stride: [mTokensPerBlock*dimsPerHead, dimsPerHead*vs,     vs,          1]
+        return headIdx * dimsPerHead * mTokensPerBlock +
+               localTokenIdx / vectorize_size * dimsPerHead * vectorize_size +
+               channelIdx * vectorize_size +
+               localTokenIdx % vectorize_size;
+    }
+
+    __host__ __device__ inline int32_t getVLocalIdx(int32_t globalTokenIdx,
+                                                    int32_t headIdx,
+                                                    int32_t dimsPerHead,
+                                                    int32_t channelIdx) const {
         // shape: [numHeads, dimsPerHead, mTokensPerBlock]
         // stride: [dimsPerHead*mTokensPerBlock, mTokensPerBlock, 1]
         return headIdx * dimsPerHead * mTokensPerBlock + channelIdx * mTokensPerBlock + getLocalIdx(globalTokenIdx);
     }
+
 #endif
 
     __host__ __device__ inline void* getScaleBlockPtr(DataType const* offsets, int32_t tokenIdx) const {
@@ -272,6 +295,7 @@ struct OffsetIndexedKVBlockArray: public KVBlockArray {
     OffsetIndexedKVBlockArray() = default;
     OffsetIndexedKVBlockArray(KVBlockArray& base, DataType* raw_block_table, int32_t kv_block_offset):
         KVBlockArray(base), kv_block_offset_(kv_block_offset) {
+        cache_type = base.cache_type;
         data = raw_block_table;
     }
     __host__ __device__ inline DataType const* getRowPtr(KVIdxType kvIdx, int32_t seqIdx) const {
