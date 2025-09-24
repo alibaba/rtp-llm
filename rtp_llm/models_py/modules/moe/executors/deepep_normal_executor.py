@@ -80,7 +80,7 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
         return self.num_experts_per_partition
 
     def finalize_weight_and_reduce_impl(self) -> TopKWeightAndReduce:
-        return TopKWeightAndReduceDelegate()
+        return None
 
     def execute(
         self,
