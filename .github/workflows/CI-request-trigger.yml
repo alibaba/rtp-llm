@@ -33,7 +33,7 @@ jobs:
         run: chmod +x trigger-CI.sh get-CI-result.sh
       - name: trigger a CI
         run: |
-          COMMIT_ID=$([ "${{ github.event_name }}" == "pull_request" ] && echo "${{ github.event.pull_request.head.sha }}" || echo "${{ github.sha }}")
+          COMMIT_ID=$([ "${{ github.event_name }}" == "pull_request" ] && echo "${{ github.event.pull_request.head.sha }}" || echo "${{ github.sha }}" || echo "${{ github.event.pull_request.head.repo.clone_url }}")
           echo "Using Commit ID: $COMMIT_ID"
           ./trigger-CI.sh "$COMMIT_ID" "${{ secrets.CI_SECRET }}" "${{ github.event.pull_request.head.repo.clone_url }}"
 
