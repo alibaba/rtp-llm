@@ -43,6 +43,7 @@ deep_gemm_runtime/
 package/requirements*.txt
 package/rtp_llm*.whl
 package/maga_start.sh
+rtp_llm/test-data/*
 
 model_rpc_service_pb2.py
 model_rpc_service_pb2_grpc.py
