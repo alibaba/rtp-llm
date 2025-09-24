@@ -1,5 +1,4 @@
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive", "http_file")
-load("//3rdparty/composable_kernel:repo.bzl", "ck_repo")
 
 def clean_dep(dep):
     return str(Label(dep))
@@ -50,20 +49,10 @@ def http_deps():
     )
 
     http_archive(
-        name = "composable_kernel_archive",
-        sha256 = "b31d8b9b1ebf6d1937198b257a2c36c18c394895bce6325630669f957d583094",
-        urls = [
-	        "https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/amd_pkgs/composable_kernel_archive.tar.gz",
-	    ],
-        build_file = clean_dep("//3rdparty/composable_kernel:ck.BUILD"),
-        strip_prefix = "composable_kernel_archive",
-    )
-
-    http_archive(
         name = "torch_rocm",
-        sha256 = "8ccd35611d0f761e570f7904ecbbe27cfa4f48253abc48884b95e7bfaa936e7c",
+        sha256 = "39287cb8d52e4a71eb7194727365aa6be767da614fa5e44468155c90ba4a4e0c",
         urls = [
-            "https://repo.radeon.com/rocm/manylinux/rocm-rel-6.3/torch-2.4.0%2Brocm6.3.0-cp310-cp310-linux_x86_64.whl"
+            "https://repo.radeon.com/rocm/manylinux/rocm-rel-6.4.1/torch-2.4.1%2Brocm6.4.1.git4e7ae583-cp310-cp310-linux_x86_64.whl"
         ],
         type = "zip",
         build_file = clean_dep("//:BUILD.pytorch"),
@@ -71,11 +60,13 @@ def http_deps():
 
     http_archive(
         name = "aiter",
-        sha256 = "88178ba538a58fd82e2fbccfd9dcb3dbcc85eb5d75814ea5b4243b048beb5898",
+        sha256 = "08e90279560e2e066298e976b7a944d6de54e8b2559a207382b112cc60adcf58",
         urls = [
-	        "https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/amd_pkgs/aiter-0.1.0-py3-none-any.whl",
+	        "https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/RTP/aiter-0.1.0%2Bgit.94934e7d.date.202508252339-py3-none-any.whl",
 	    ],
         type = "zip",
+        patches = ["//3rdparty/aiter:refine-aiter-asm-dir.patch", "//3rdparty/aiter:aiter-flash_attn.patch"],
+        patch_args = ["-p1"],
         build_file = clean_dep("//:BUILD.aiter"),
     )
 
@@ -131,5 +122,3 @@ def http_deps():
         urls = ["https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/3fs/hf3fs-1.3.0-1.alios7.x86_64.rpm"],
         sha256 = "dd375f794557a1135934b40b23a7435569644922c5c7116cb69dd36f699ad5a4"
     )
-
-    ck_repo(name = "composable_kernel")
