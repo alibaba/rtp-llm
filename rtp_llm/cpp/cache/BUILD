@@ -54,6 +54,7 @@ cc_library(
         ],
         "//conditions:default": [],
     }),
+    copts = copts(),
     visibility = ["//visibility:public"],
 )
 

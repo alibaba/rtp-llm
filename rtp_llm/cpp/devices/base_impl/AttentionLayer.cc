@@ -149,7 +149,8 @@ BufferPtr DeviceBase::attentionAttn(const AttentionLayerParams& params) {
                               params.weights,
                               params.configs,
                               params.qscheme,
-                              params.compute_type});
+                              params.compute_type,
+                              params.rotary_embedding_coefficient_cache});
     }
     if (context_batch_size) {
         auto context_qkv    = qkv.view(generate_batch_size, context_token_num);
@@ -165,7 +166,8 @@ BufferPtr DeviceBase::attentionAttn(const AttentionLayerParams& params) {
                           params.weights,
                           params.configs,
                           params.qscheme,
-                          params.compute_type});
+                          params.compute_type,
+                          params.rotary_embedding_coefficient_cache});
     }
     if (layer_kv_cache) {
         params.common.kv_cache->kv_cache_block_id = kv_cache_block_id;
@@ -259,7 +261,8 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
                                         params.qscheme,
                                         params.compute_type,
                                         params.enable_sp,
-                                        params.pad_token_num});
+                                        params.pad_token_num,
+                                        params.rotary_embedding_coefficient_cache});
     return {attentionOutGemm({params.layer_id,
                               *attn_out,
                               params.output,

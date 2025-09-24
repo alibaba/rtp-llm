@@ -35,6 +35,7 @@ from rtp_llm.utils.model_weight import (
     zeros,
 )
 
+from rtp_llm.utils.swizzle_utils import do_swizzle
 
 def scale_reshape(ts: List[torch.Tensor]):
     return ts[0].reshape(-1)
@@ -416,6 +417,9 @@ class QWenV2(QWen):
     def get_weight_cls():
         return QWenV2Weight
 
+    def postprocess_weights(self):
+        if self.config.hw_kernel_config.use_swizzleA and self.weight.weights[0]["self_attention_weights.query_weight.kernel"].dtype != torch.float8_e4m3fnuz:
+            do_swizzle(self.weight.weights)
 
 class QWenV2Embedding(QWenV2):
     @classmethod
