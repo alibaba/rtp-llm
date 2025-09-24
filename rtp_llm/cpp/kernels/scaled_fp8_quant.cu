@@ -402,7 +402,7 @@ __global__ void per_token_quant_fp8_kernel(const T* __restrict__ input,
     float warp_max = warpReduceMax(max_value);
 
     __shared__ float scale;
-    scale = warp_max / FP8_E4M3_MAX;
+    scale = warp_max / tensorrt_llm::common::FP8_E4M3_MAX;
     // Broadcast scale
     if (lane_id == 0) {
         token_scale[0] = scale;
@@ -419,7 +419,7 @@ __global__ void per_token_quant_fp8_kernel(const T* __restrict__ input,
 #pragma unroll
         for (uint32_t j = 0; j < kVecSize; ++j) {
             float val     = static_cast<float>(input_vec[j]) * scale_inv;
-            val           = fmaxf(fminf(val, FP8_E4M3_MAX), -FP8_E4M3_MAX);
+            val           = fmaxf(fminf(val, tensorrt_llm::common::FP8_E4M3_MAX), -tensorrt_llm::common::FP8_E4M3_MAX);
             output_arr[j] = static_cast<DST_DTYPE>(val);
         }
         if constexpr (kVecSize == 16) {
@@ -474,7 +474,7 @@ __global__ void per_token_quant_fp8_small_batch_kernel(const T* __restrict__ inp
 
     __shared__ float scale;
     if (tid == 0) {
-        scale               = max_value / FP8_E4M3_MAX;
+        scale               = max_value / tensorrt_llm::common::FP8_E4M3_MAX;
         output_s[token_idx] = scale;
     }
     __syncthreads();
@@ -489,7 +489,7 @@ __global__ void per_token_quant_fp8_small_batch_kernel(const T* __restrict__ inp
         DST_DTYPE output_arr[kVecSize];
 #pragma unroll
         for (uint32_t j = 0; j < kVecSize; ++j) {
-            float val     = fmaxf(fminf(static_cast<float>(input_vec[j]) * scale_inv, FP8_E4M3_MAX), -FP8_E4M3_MAX);
+            float val     = fmaxf(fminf(static_cast<float>(input_vec[j]) * scale_inv, tensorrt_llm::common::FP8_E4M3_MAX), -tensorrt_llm::common::FP8_E4M3_MAX);
             output_arr[j] = static_cast<DST_DTYPE>(val);
         }
 
