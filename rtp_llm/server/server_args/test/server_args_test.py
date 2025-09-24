@@ -86,10 +86,12 @@ class ServerArgsDefaultTest(TestCase):
         self.assertEqual(env.get("ENABLE_STABLE_SCATTER_ADD"), "0")
         self.assertEqual(env.get("ENABLE_MULTI_BLOCK_MODE"), "1")
         self.assertEqual(env.get("ROCM_HIPBLASLT_CONFIG"), "gemm_config.csv")
+        self.assertEqual(env.get("USE_SWIZZLEA"), "0")
         # self.assertIsNone(env.get("FT_DISABLE_CUSTOM_AR"))
         self.assertEqual(env.get("ENABLE_CUDA_GRAPH"), "0")
         self.assertEqual(env.get("ENABLE_CUDA_GRAPH_DEBUG_MODE"), "0")
         self.assertEqual(env.get("USE_AITER_PA"), "1")
+        self.assertEqual(env.get("USE_ASM_PA"), "1")
         self.assertEqual(env.get("ENABLE_NATIVE_CUDA_GRAPH"), "0")
         self.assertEqual(env.get("NUM_NATIVE_CUDA_GRAPH"), "200")
 
@@ -403,6 +405,8 @@ class ServerArgsSetTest(TestCase):
             "False",
             "--rocm_hipblaslt_config",
             "another_gemm_config.csv",
+            "--use_swizzleA",
+            "False",
             "--ft_disable_custom_ar",
             "False",
             "--enable_cuda_graph",
@@ -410,6 +414,8 @@ class ServerArgsSetTest(TestCase):
             "--enable_cuda_graph_debug_mode",
             "True",
             "--use_aiter_pa",
+            "False",
+            "--use_asm_pa",
             "False",
             "--enable_native_cuda_graph",
             "True",
@@ -789,6 +795,7 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env.get("ENABLE_CUDA_GRAPH"), "1")
         self.assertEqual(env.get("ENABLE_CUDA_GRAPH_DEBUG_MODE"), "1")
         self.assertEqual(env.get("USE_AITER_PA"), "0")
+        self.assertEqual(env.get("USE_ASM_PA"), "0")
         self.assertEqual(env.get("ENABLE_NATIVE_CUDA_GRAPH"), "1")
         self.assertEqual(env.get("NUM_NATIVE_CUDA_GRAPH"), "100")
 

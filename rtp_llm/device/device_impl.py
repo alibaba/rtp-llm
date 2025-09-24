@@ -7,7 +7,7 @@ import torch
 from rtp_llm.device.device_base import DeviceBase, MemInfo
 from rtp_llm.ops import DeviceExporter
 from rtp_llm.utils.model_weight import W
-
+from rtp_llm.utils.swizzle_utils import swizzle_tensor
 
 class CpuImpl(DeviceBase):
     def __init__(self, exported_device: DeviceExporter):
@@ -267,6 +267,9 @@ class GpuImpl(DeviceBase):
 
     def shuffle_gemm_weight(self, x: torch.Tensor) -> torch.Tensor:
         return x
+
+    def swizzle_gemm_weight(self, src: torch.Tensor, col_maj: bool = False) -> torch.Tensor:
+        return src
 
     def convert_fp8_weight_params(
         self, weight: torch.Tensor, weight_scale: torch.Tensor
@@ -561,6 +564,10 @@ class RocmImpl(GpuImpl):
         x_ = x_.contiguous()
         x_ = x_.view(*x.shape)
         return x_
+
+    def swizzle_gemm_weight(self, src: torch.Tensor, col_maj: bool = False) -> torch.Tensor:
+        src = swizzle_tensor(src, False)
+        return src
 
     def convert_fp8_weight_params(
         self, weight: torch.Tensor, weight_scale: torch.Tensor

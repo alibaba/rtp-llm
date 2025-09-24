@@ -18,7 +18,7 @@
 #include "rtp_llm/cpp/rocm/hipblasMMWrapper.h"
 #include "rtp_llm/cpp/rocm/rocmFmhaWrapper.h"
 #include "rtp_llm/cpp/rocm/quantizePreprocessors.h"
-#include "rtp_llm/cpp/rocm/rocmMoeWrapper.h"
+//#include "rtp_llm/cpp/rocm/rocmMoeWrapper.h"
 #include "rtp_llm/cpp/rocm/rocmCKGemmWrapper.h"
 #include "rtp_llm/cpp/kernels/kv_cache/kv_cache_utils.h"
 #include "rtp_llm/cpp/rocm/custom_ar/custom_ar_comm.h"
@@ -230,6 +230,7 @@ public:
                                  int                          batch_size,
                                  bool                         use_fp8_fmha,
                                  bool                         use_offset_array = false);
+    BufferPtr getRotaryEmbeddingCoefficientCache(const RopeConfig & rope_config) override;
 
     std::shared_ptr<NativeGraphRunner> getNativeGraphRunner() override {
         return std::make_shared<NativeHipGraphRunner<GptModelInputs, GptModelOutputs>>(this);
@@ -242,6 +243,7 @@ public:
 protected:
     void InvokeROCmDeepGemm(const GemmParams& params, BufferPtr output);
     void InvokeROCmPTPCGemm(const GemmParams& params, BufferPtr output);
+    void HipblasltPTPCGemm(const GemmParams& params, BufferPtr output);
     // void prepareCommBuffer(const PrepareCommBufferParams& params) override;
 
 public:
@@ -303,7 +305,7 @@ private:
                             NcclParam&         nccl_param);
     NcclParam getNcclParam(ParallelMode mode);
     // moe
-    std::unique_ptr<rocmMoeWrapper> moe_runner_;
+    //std::unique_ptr<rocmMoeWrapper> moe_runner_;
 
     // for custom allreduce use
     std::unique_ptr<CustomAllReduceComm> custom_allreduce_comm_ = nullptr;

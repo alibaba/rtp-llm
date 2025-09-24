@@ -13,12 +13,6 @@
 #include "moe_sorting.h"
 #include "moe_ck.h"
 
-// #include "aiter_meta/csrc/include/aiter_enum.h"
-// #include "aiter_meta/csrc/include/moe_op.h"
-// #include "aiter_meta/csrc/include/quant.h"
-// #include "aiter_meta/csrc/include/moe_sorting.h"
-// #include "aiter_meta/csrc/include/moe_ck.h"
-
 using namespace std;
 
 namespace rtp_llm {
@@ -332,6 +326,7 @@ FfnLayerOutput ROCmDevice::moeFfn(const FfnLayerParams& params, const MoeGateSel
 
     const size_t num_token           = hidden.shape()[0];
     const size_t model_dim           = hidden.shape()[1];
+    const int    inter_dim           = static_cast<int>(params.weights.moe_down_weight->kernel->shape()[2]);
     const size_t num_expert          = moe_conf.expert_num;
     const size_t num_expert_per_rank = moe_conf.expert_num / moe_conf.ep_size;
     const size_t topk                = moe_conf.top_k;
@@ -350,96 +345,131 @@ FfnLayerOutput ROCmDevice::moeFfn(const FfnLayerParams& params, const MoeGateSel
     torch::Tensor topk_ids_tensor     = Buffer2torchTensor(*(gate_outputs.expert_ids), false);
     torch::Tensor topk_weights_tensor = Buffer2torchTensor(*(gate_outputs.expert_scales), false);
 
-    // FIXME(liyangcheng.lyc): Is this division correct? I refer to it from
-    // vLLM(https://github.com/vllm-project/vllm/blob/5ebf66748b8b67731972c389d879ca69c68dc2c4/vllm/model_executor/layers/fused_moe/rocm_aiter_fused_moe.py#L23)
+    // get input
+    torch::Tensor                hidden_tensor;
+    std::optional<torch::Tensor> hidden_scale_tensor;
+    QBufferPtr                   q_hidden;
+    if (params.qscheme == QScheme::NoQuantize) {
+        hidden_tensor = Buffer2torchTensor(hidden, false);
+    } else if (params.input.isQBuffer()) {
+        const QBuffer& qhidden = reinterpret_cast<const QBuffer&>(hidden);
+        hidden_tensor          = Buffer2torchTensor(qhidden.kernel(), false).view({(int)num_token, (int)model_dim});
+        hidden_scale_tensor    = Buffer2torchTensor(qhidden.scales(), false);
+    } else {
+        // ignore groupSize when using per_token quantization
+        q_hidden = std::dynamic_pointer_cast<QBuffer>(
+            quantize(QuantizeParams(hidden, DataType::TYPE_QFP8_E4M3, 1, params.qscheme, 128, 0)));
+        hidden_tensor       = Buffer2torchTensor(q_hidden->kernel(), false);
+        hidden_scale_tensor = Buffer2torchTensor(q_hidden->scales(), false);
+    }
+
+    // get w1 and w2
+    torch::Tensor                w1_tensor, w2_tensor;
+    std::optional<torch::Tensor> w1_scale_tensor, w2_scale_tensor;
+    if (params.qscheme == QScheme::NoQuantize) {
+        w1_tensor = Buffer2torchTensor(*(params.weights.moe_gate_weight->kernel), false);
+        w2_tensor = Buffer2torchTensor(*(params.weights.moe_down_weight->kernel), false);
+    } else {
+        const QBuffer& qmoe_gate_weight = reinterpret_cast<const QBuffer&>(*(params.weights.moe_gate_weight->kernel));
+        const QBuffer& qmoe_down_weight = reinterpret_cast<const QBuffer&>(*(params.weights.moe_down_weight->kernel));
+        w1_tensor                       = Buffer2torchTensor(qmoe_gate_weight.kernel(), false);
+        w1_scale_tensor                 = Buffer2torchTensor(qmoe_gate_weight.scales(), false);
+        w2_tensor                       = Buffer2torchTensor(qmoe_down_weight.kernel(), false);
+        w2_scale_tensor                 = Buffer2torchTensor(qmoe_down_weight.scales(), false);
+    }
+
+    // get expert mask when ep_size > 1
+    BufferPtr local_expert_mask =
+        allocateBuffer({DataType::TYPE_INT32, {(size_t)num_expert}}, {"rocm_moe_local_expert_mask"});
+    torch::Tensor local_expert_mask_tensor = Buffer2torchTensor(*local_expert_mask, false);
+    local_expert_mask_tensor.zero_();
+    if (init_params_.use_deepep_moe) {
+        // deepep has already offset the topk_ids and set the masked expert to num_expert_per_rank
+        local_expert_mask_tensor.index_put_({torch::indexing::Slice(0, num_expert_per_rank)},
+                                            torch::ones(num_expert_per_rank, torch::device(torch::kCUDA)));
+    } else {
+        local_expert_mask_tensor.index_put_({torch::indexing::Slice(moe_conf.ep_rank * num_expert_per_rank,
+                                                                    (moe_conf.ep_rank + 1) * num_expert_per_rank)},
+                                            torch::ones(num_expert_per_rank, torch::device(torch::kCUDA)));
+    }
+
+    // moe sorting
+    int unit_size = 32;
+    if (params.qscheme != QScheme::Qfp8PerTokenBlock) {
+        // get block_size_m, i.e. unit_size
+        const int              cu_num                 = rocmDevProp.multiProcessorCount;
+        const int              tile_n                 = 128;
+        const int              tg_n                   = (inter_dim + tile_n - 1) / tile_n;
+        int                    min_rnd                = std::numeric_limits<int>::max();
+        int                    min_empty              = std::numeric_limits<int>::max();
+        const std::vector<int> unit_size_support_list = {32, 64, 128};
+
+        for (const int& el : unit_size_support_list) {
+            int max_num_tokens = num_token * topk + num_expert_per_rank * el - topk;
+            int tg_num         = tg_n * (max_num_tokens + el - 1) / el;
+            int rnd            = (tg_num + cu_num - 1) / cu_num;
+            int empty          = cu_num - tg_num % cu_num;
+
+            if (rnd < min_rnd) {
+                min_rnd   = rnd;
+                min_empty = empty;
+                unit_size = el;
+            } else if (rnd == min_rnd) {
+                if (empty < min_empty) {
+                    min_empty = empty;
+                    unit_size = el;
+                }
+            }
+        }
+    }
+
+    const int max_num_token_padded = topk_ids_tensor.numel() + num_expert * unit_size - topk;
+    const int max_num_m_block      = (max_num_token_padded + unit_size - 1) / unit_size;
+
+    BufferPtr sorted_ids =
+        allocateBuffer({DataType::TYPE_INT32, {(size_t)max_num_token_padded}}, {"rocm_moe_sorted_ids"});
+    BufferPtr sorted_weights =
+        allocateBuffer({DataType::TYPE_FP32, {(size_t)max_num_token_padded}}, {"rocm_moe_sorted_weights"});
+    BufferPtr sorted_expert_ids =
+        allocateBuffer({DataType::TYPE_INT32, {(size_t)max_num_m_block}}, {"rocm_moe_sorted_expert_ids"});
+    BufferPtr num_valid_ids = allocateBuffer({DataType::TYPE_INT32, {1}}, {"rocm_moe_num_valid_ids"});
+
+    torch::Tensor sorted_ids_tensor        = Buffer2torchTensor(*sorted_ids, false);
+    torch::Tensor sorted_weights_tensor    = Buffer2torchTensor(*sorted_weights, false);
+    torch::Tensor sorted_expert_ids_tensor = Buffer2torchTensor(*sorted_expert_ids, false);
+    torch::Tensor num_valid_ids_tensor     = Buffer2torchTensor(*num_valid_ids, false);
+
+    torch::Tensor moe_out_tensor = Buffer2torchTensor(*moe_out_final, false);
+
+    // invoke aiter moe_sorting kernel
+    moe_sorting_fwd(
+        /*topk_ids=*/topk_ids_tensor,
+        /*topk_weights=*/topk_weights_tensor,
+        /*sorted_token_ids=*/sorted_ids_tensor,
+        /*sorted_weights=*/sorted_weights_tensor,
+        /*sorted_expert_ids=*/sorted_expert_ids_tensor,
+        /*num_valid_ids=*/num_valid_ids_tensor,
+        /*moe_buf=*/moe_out_tensor,
+        /*num_experts=*/num_expert,
+        /*unit_size=*/unit_size,
+        /*local_expert_mask=*/local_expert_mask_tensor,
+        /*num_local_tokens*/ std::nullopt,
+        /*dispatch_policy*/ 0);
+
     if (params.qscheme == QScheme::Qfp8PerTokenBlock) {
         RTP_LLM_CHECK_WITH_INFO(dtype == DataType::TYPE_BF16,
                                 "input hidden datatype should be bf16 when using Qfp8PerTokenBlock");
-        // fp8 w8a8 block scaled moe
-        const int block_scale_n = 128;
-        const int block_scale_k = 128;
-        const int unit_size     = 32;  // used in moe_sorting, meaning?
+        const int block_scale_n                    = 128;
+        const int block_scale_k                    = 128;
+        hidden_scale_tensor                        = hidden_scale_tensor.value().t().contiguous();
+        w1_scale_tensor                            = w1_scale_tensor.value().view({(int)num_expert_per_rank, -1});
+        w2_scale_tensor                            = w2_scale_tensor.value().view({(int)num_expert_per_rank, -1});
+        std::string fmoe_fp8_block_scale_g1u1_name = "";
 
-        torch::Tensor hidden_quant_tensor, hidden_quant_scale_tensor;
-        BufferPtr     hidden_quant, hidden_quant_scale;
-        QBufferPtr    q_hidden;
-        if (params.input.isQBuffer()) {
-            const QBuffer& qhidden = reinterpret_cast<const QBuffer&>(hidden);
-            hidden_quant_tensor    = Buffer2torchTensor(qhidden.kernel(), false).view({(int)num_token, (int)model_dim});
-            hidden_quant_scale_tensor = Buffer2torchTensor(qhidden.scales(), false).t().contiguous();
-        } else {
-            q_hidden = std::dynamic_pointer_cast<QBuffer>(
-                quantize(QuantizeParams(hidden, DataType::TYPE_QFP8_E4M3, 1, QScheme::Qfp8PerTokenBlock, 128, 0)));
-            hidden_quant_tensor       = Buffer2torchTensor(q_hidden->kernelPtr(), false);
-            hidden_quant_scale_tensor = Buffer2torchTensor(q_hidden->scalesPtr(), false).t().contiguous();
-        }
-
-        // step 2. prepare w1 and w2
-        const QBuffer& qmoe_gate_weight = reinterpret_cast<const QBuffer&>(*(params.weights.moe_gate_weight->kernel));
-        Buffer         w1               = qmoe_gate_weight.kernel();
-        Buffer         w1_scale         = qmoe_gate_weight.scales();
-        const QBuffer& qmoe_down_weight = reinterpret_cast<const QBuffer&>(*(params.weights.moe_down_weight->kernel));
-        Buffer         w2               = qmoe_down_weight.kernel();
-        Buffer         w2_scale         = qmoe_down_weight.scales();
-
-        torch::Tensor w1_tensor       = Buffer2torchTensor(w1, false);
-        torch::Tensor w1_scale_tensor = Buffer2torchTensor(w1_scale, false);
-        torch::Tensor w2_tensor       = Buffer2torchTensor(w2, false);
-        torch::Tensor w2_scale_tensor = Buffer2torchTensor(w2_scale, false);
-
-        w1_scale_tensor = w1_scale_tensor.view({(int)num_expert_per_rank, -1});
-        w2_scale_tensor = w2_scale_tensor.view({(int)num_expert_per_rank, -1});
-
-        // step 3. moe sorting
-        const int max_num_token_padded = topk_ids_tensor.numel() + num_expert * unit_size - topk;
-        const int max_num_m_block      = (max_num_token_padded + unit_size - 1) / unit_size;
-
-        BufferPtr sorted_ids =
-            allocateBuffer({DataType::TYPE_INT32, {(size_t)max_num_token_padded}}, {"rocm_moe_sorted_ids"});
-        BufferPtr sorted_weights =
-            allocateBuffer({DataType::TYPE_FP32, {(size_t)max_num_token_padded}}, {"rocm_moe_sorted_weights"});
-        BufferPtr sorted_expert_ids =
-            allocateBuffer({DataType::TYPE_INT32, {(size_t)max_num_m_block}}, {"rocm_moe_sorted_expert_ids"});
-        BufferPtr num_valid_ids = allocateBuffer({DataType::TYPE_INT32, {1}}, {"rocm_moe_num_valid_ids"});
-        BufferPtr local_expert_mask =
-            allocateBuffer({DataType::TYPE_INT32, {(size_t)num_expert}}, {"rocm_moe_local_expert_mask"});
-        torch::Tensor local_expert_mask_tensor = Buffer2torchTensor(*local_expert_mask, false);
-
-        local_expert_mask_tensor.zero_();
-        if (init_params_.use_deepep_moe) {
-            // deepep has already offset the topk_ids and set the masked expert to num_expert_per_rank
-            local_expert_mask_tensor.index_put_({torch::indexing::Slice(0, num_expert_per_rank)},
-                                                torch::ones(num_expert_per_rank, torch::device(torch::kCUDA)));
-        } else {
-            local_expert_mask_tensor.index_put_({torch::indexing::Slice(moe_conf.ep_rank * num_expert_per_rank,
-                                                                        (moe_conf.ep_rank + 1) * num_expert_per_rank)},
-                                                torch::ones(num_expert_per_rank, torch::device(torch::kCUDA)));
-        }
-
-        torch::Tensor sorted_ids_tensor        = Buffer2torchTensor(*sorted_ids, false);
-        torch::Tensor sorted_weights_tensor    = Buffer2torchTensor(*sorted_weights, false);
-        torch::Tensor sorted_expert_ids_tensor = Buffer2torchTensor(*sorted_expert_ids, false);
-        torch::Tensor num_valid_ids_tensor     = Buffer2torchTensor(*num_valid_ids, false);
-
-        torch::Tensor moe_out_tensor = Buffer2torchTensor(*moe_out_final, false);
-
-        // invoke aiter moe_sorting kernel
-        moe_sorting_fwd(
-            /*topk_ids=*/topk_ids_tensor,
-            /*topk_weights=*/topk_weights_tensor,
-            /*sorted_token_ids=*/sorted_ids_tensor,
-            /*sorted_weights=*/sorted_weights_tensor,
-            /*sorted_expert_ids=*/sorted_expert_ids_tensor,
-            /*num_valid_ids=*/num_valid_ids_tensor,
-            /*moe_buf=*/moe_out_tensor,
-            /*num_experts=*/num_expert,
-            /*unit_size=*/unit_size,
-            /*local_expert_mask=*/local_expert_mask_tensor);
-
-        // step 3.4 invoke fused_moe function
+        // invoke aiter moe kernel
         fmoe_fp8_blockscale_g1u1(
             /*out=*/moe_out_tensor,
-            /*input=*/hidden_quant_tensor,
+            /*input=*/hidden_tensor,
             /*gate=*/w1_tensor,
             /*down=*/w2_tensor,
             /*sorted_token_ids=*/sorted_ids_tensor,
@@ -447,60 +477,98 @@ FfnLayerOutput ROCmDevice::moeFfn(const FfnLayerParams& params, const MoeGateSel
             /*sorted_expert_ids=*/sorted_expert_ids_tensor,
             /*num_valid_ids=*/num_valid_ids_tensor,
             /*topk=*/topk,
-            /*input_scale=*/hidden_quant_scale_tensor,
-            /*fc1_scale=*/w1_scale_tensor,
-            /*fc2_scale=*/w2_scale_tensor,
+            /*input_scale=*/hidden_scale_tensor.value(),
+            /*fc1_scale=*/w1_scale_tensor.value(),
+            /*fc2_scale=*/w2_scale_tensor.value(),
+            /*kernel_name*/ fmoe_fp8_block_scale_g1u1_name,
             /*fc_scale_blkn=*/block_scale_n,
             /*fc_scale_blkk*/ block_scale_k,
             /*fc2_smooth_scale=*/nullopt,
             /*activation*/ ::ActivationType::Silu);
+    } else {
+        BufferPtr     a2        = allocateBuffer({dtype, {num_token, topk, (size_t)inter_dim}}, {"rocm_a2"});
+        torch::Tensor a2_tensor = Buffer2torchTensor(*a2, false);
+        // FIXME(liyangcheng.lyc): workaround for two stage moe accuracy issue, see
+        // https://github.com/ROCm/aiter/issues/566
+        a2_tensor.zero_();
+        std::optional<torch::Tensor> a2_scale_tensor;
+        QBufferPtr                   a2_q;
+        std::string                  ck_moe_stage1_kernel_name  = "";
+        std::string                  asm_moe_stage1_kernel_name = "";
+        std::string                  ck_moe_stage2_kernel_name  = "";
 
-        printBufferData(*moe_out_final, "rocm_moe_out_final");
+        auto aiterQscheme = [qscheme = params.qscheme]() {
+            switch (qscheme) {
+                case QScheme::NoQuantize:
+                    return ::QuantType::No;
+                case QScheme::Qfp8PerToken:
+                    return ::QuantType::per_Token;
+                default:
+                    RTP_LLM_FAIL("[ROCm moeFfn]: quant type %d not implemented yet", (int)qscheme);
+            }
+        }();
 
-    } else if (params.qscheme == QScheme::NoQuantize) {
-        const int unit_size = 32;
-
-        torch::Tensor hidden_tensor = Buffer2torchTensor(hidden, false);
-        torch::Tensor w1_tensor     = Buffer2torchTensor(*(params.weights.moe_gate_weight->kernel), false);
-        torch::Tensor w2_tensor     = Buffer2torchTensor(*(params.weights.moe_down_weight->kernel), false);
-
-        // step 1. prepare expert mask
-        BufferPtr local_expert_mask =
-            allocateBuffer({DataType::TYPE_INT32, {(size_t)num_expert}}, {"rocm_moe_local_expert_mask"});
-        torch::Tensor local_expert_mask_tensor = Buffer2torchTensor(*local_expert_mask, false);
-        local_expert_mask_tensor.zero_();
-        if (init_params_.use_deepep_moe) {
-            // deepep has already offset the topk_ids and set the masked expert to num_expert_per_rank
-            local_expert_mask_tensor.index_put_({torch::indexing::Slice(0, num_expert_per_rank)},
-                                                torch::ones(num_expert_per_rank, torch::device(torch::kCUDA)));
+        // invoke aiter two stage moe kernels
+        if (params.qscheme == QScheme::NoQuantize) {
+            ck_moe_stage1(
+                /*hidden_states*/ hidden_tensor,
+                /*w1*/ w1_tensor,
+                /*w2*/ w2_tensor,
+                /*sorted_token_ids*/ sorted_ids_tensor,
+                /*sorted_expert_ids*/ sorted_expert_ids_tensor,
+                /*num_valid_ids*/ num_valid_ids_tensor,
+                /*out*/ a2_tensor,
+                /*topk*/ topk,
+                /*kernelName*/ ck_moe_stage1_kernel_name,
+                /*w1_scale*/ w1_scale_tensor,
+                /*a1_scale*/ hidden_scale_tensor,
+                /*block_m*/ unit_size,
+                /*sorted_weights*/ std::nullopt,
+                /*quant_type*/ static_cast<int>(aiterQscheme),
+                /*activation*/ static_cast<int>(::ActivationType::Silu));
         } else {
-            local_expert_mask_tensor.index_put_({torch::indexing::Slice(moe_conf.ep_rank * num_expert_per_rank,
-                                                                        (moe_conf.ep_rank + 1) * num_expert_per_rank)},
-                                                torch::ones(num_expert_per_rank, torch::device(torch::kCUDA)));
+            moe_stage1_g1u1(
+                /*input*/ hidden_tensor,
+                /*w1*/ w1_tensor,
+                /*w2*/ w2_tensor,
+                /*sorted_token_ids*/ sorted_ids_tensor,
+                /*sorted_expert_ids*/ sorted_expert_ids_tensor,
+                /*num_valid_ids*/ num_valid_ids_tensor,
+                /*out*/ a2_tensor,
+                /*inter_dim*/ inter_dim,
+                /*kernelName*/ asm_moe_stage1_kernel_name,
+                /*block_m*/ unit_size,
+                /*ksplit*/ 0,
+                /*activation*/ ::ActivationType::Silu,
+                /*quant_type*/ aiterQscheme,
+                /*a1_scale*/ hidden_scale_tensor,
+                /*w1_scale*/ w1_scale_tensor,
+                /*sorted_weights*/ std::nullopt);
         }
 
-        // step 2. invoke ck_moe function
-        auto moe_out_tensor = ck_moe(hidden_tensor,
-                                     w1_tensor,
-                                     w2_tensor,
-                                     topk_weights_tensor,
-                                     topk_ids_tensor,
-                                     nullopt,
-                                     nullopt,
-                                     nullopt,
-                                     nullopt,
-                                     unit_size,
-                                     local_expert_mask_tensor);
-
-        BufferPtr moe_out_tensor_buffer = torchTensor2Buffer(moe_out_tensor);
-        copy({*moe_out_final, *moe_out_tensor_buffer, false, DeviceStream::DEFAULT, false});
-        return FfnLayerOutput{moe_out_final};
-    } else if (params.qscheme == QScheme::Qfp8PerToken) {
-        RTP_LLM_FAIL("[ROCm moeFfn]: quant type %d not implemented yet", (int)params.qscheme);
-    } else {
-        RTP_LLM_FAIL("[ROCm moeFfn]: quant type %d not implemented yet", (int)params.qscheme);
+        if (params.qscheme != QScheme::NoQuantize) {
+            a2_q = std::dynamic_pointer_cast<QBuffer>(
+                quantize(QuantizeParams(*a2, DataType::TYPE_QFP8_E4M3, 1, params.qscheme, 128, 0)));
+            a2_tensor       = Buffer2torchTensor(a2_q->kernel(), false).view({(int)num_token, (int)topk, inter_dim});
+            a2_scale_tensor = Buffer2torchTensor(a2_q->scales(), false);
+        }
+        ck_moe_stage2(
+            /*inter_states*/ a2_tensor,
+            /*w1*/ w1_tensor,
+            /*w2*/ w2_tensor,
+            /*sorted_token_ids*/ sorted_ids_tensor,
+            /*sorted_expert_ids*/ sorted_expert_ids_tensor,
+            /*num_valid_ids*/ num_valid_ids_tensor,
+            /*out*/ moe_out_tensor,
+            /*topk*/ topk,
+            /*kernelName*/ ck_moe_stage2_kernel_name,
+            /*w2_scale*/ w2_scale_tensor,
+            /*a2_scale*/ a2_scale_tensor,
+            /*block_m*/ unit_size,
+            /*sorted_weights*/ sorted_weights_tensor,
+            /*quant_type*/ static_cast<int>(aiterQscheme),
+            /*activation*/ static_cast<int>(::ActivationType::Silu));
     }
-
     return {moe_out_final};
 }
 
