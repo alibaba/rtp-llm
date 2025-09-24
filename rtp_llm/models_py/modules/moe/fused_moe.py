@@ -177,7 +177,11 @@ class FusedMoe(torch.nn.Module):
             payload.expert_topk_weights,
             payload.expert_topk_ids,
             apply_router_weight_on_input,
-            self.fused_experts.finalize_weight_and_reduce_impl(),
+            (
+                None
+                if self.fused_experts.finalize_weight_and_reduce_impl is None
+                else self.fused_experts.finalize_weight_and_reduce_impl()
+            ),
             extra_finalize_args,
         )
 

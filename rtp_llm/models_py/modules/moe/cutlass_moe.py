@@ -199,7 +199,9 @@ def run_cutlass_moe_fp8(
 
     activation_callable(c2, c1, torch.cuda.current_stream().cuda_stream)
 
-    a2q, a2q_scale = moe_kernel_quantize_input(c2, a2_scale, torch.float8_e4m3fn, False)
+    a2q, a2q_scale = moe_kernel_quantize_input(
+        c2, a2_scale, torch.float8_e4m3fn, per_act_token
+    )
 
     if expert_map is not None:
         c3.fill_(0)
@@ -252,7 +254,7 @@ class CutlassExpertsFp8(mm.FusedMoeExpertExecutor):
             quant_config=FusedMoEQuantConfig(
                 quant_dtype=torch.float8_e4m3fn,
                 per_act_token_quant=per_act_token_quant,
-                per_out_ch_quant=per_act_token_quant,
+                per_out_ch_quant=per_out_ch_quant,
                 block_shape=block_shape,
             )
         )
@@ -262,7 +264,6 @@ class CutlassExpertsFp8(mm.FusedMoeExpertExecutor):
         self.w2_scale = w2_scale
         self.a1q_scale = a1q_scale
         self.a2_scale = a2_scale
-        assert per_act_token_quant is False
         assert per_out_ch_quant is False
         assert block_shape is None
 
@@ -306,7 +307,7 @@ class CutlassExpertsFp8(mm.FusedMoeExpertExecutor):
                 payload.expert_x,
                 None,
                 quant_dtype=torch.float8_e4m3fn,
-                per_act_token_quant=False,
+                per_act_token_quant=self.quant_config.is_per_act_token,
                 block_shape=None,
             )
         else:
@@ -349,7 +350,7 @@ class CutlassExpertsFp8(mm.FusedMoeExpertExecutor):
             workspace2,
             expert_num_tokens,
             payload.expert_x_origin_dtype,
-            False,
+            self.quant_config.is_per_act_token,
             False,
             False,
         )
@@ -385,7 +386,7 @@ class CutlassBatchedExpertsFp8(mm.FusedMoeExpertExecutor):
             quant_config=FusedMoEQuantConfig(
                 quant_dtype=torch.float8_e4m3fn,
                 per_act_token_quant=per_act_token_quant,
-                per_out_ch_quant=per_act_token_quant,
+                per_out_ch_quant=per_out_ch_quant,
                 block_shape=block_shape,
             )
         )
@@ -400,7 +401,6 @@ class CutlassBatchedExpertsFp8(mm.FusedMoeExpertExecutor):
         self.num_dispatchers = num_dispatchers
         self.num_local_experts = self.w1.size(0)
 
-        assert per_act_token_quant is False
         assert per_out_ch_quant is False
         assert block_shape is None
 
@@ -461,7 +461,7 @@ class CutlassBatchedExpertsFp8(mm.FusedMoeExpertExecutor):
                 else:
                     scale = torch.tensor([1], dtype=torch.float32, device=x.device)
                 q_x, expert_x_scale = moe_kernel_quantize_input(
-                    x, scale, torch.float8_e4m3fn, False, None
+                    x, scale, torch.float8_e4m3fn, per_act_token, None
                 )
                 expert_x = q_x.view(E, -1, H)
         else:
@@ -508,7 +508,7 @@ class CutlassBatchedExpertsFp8(mm.FusedMoeExpertExecutor):
             workspace2,
             expert_num_tokens,
             payload.expert_x_origin_dtype,
-            False,
+            self.quant_config.is_per_act_token,
             False,
             True,
         )

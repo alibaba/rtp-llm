@@ -108,8 +108,13 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
                 use_fp8=self._use_fp8_dispatch,
                 async_finish=self._async_finish,
                 return_recv_hook=self._return_recv_hook,
+                pertoken_quant=quant_config.is_per_act_token,
             )
         )
+
+        if quant_config.is_per_act_token:
+            assert expert_x[0].shape[1] == expert_x[1].shape[1]
+            assert expert_x[1].shape[-1] == 1
 
         # return payload
         return ExpertForwardPayload(
