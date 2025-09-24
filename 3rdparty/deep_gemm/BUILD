@@ -82,7 +82,6 @@ cc_binary(
         ".",
     ],
     linkshared = 1,
-    linkstatic = 1, 
     deps = [
         ":deep_gemm_hdrs",
     ] + torch_deps() + select({

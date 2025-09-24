@@ -1,6 +1,6 @@
 #pragma once
 #include "rtp_llm/cpp/core/allocator.h"
-#include "rtp_llm/cpp/cuda/cuda_utils.h"
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 #include <mutex>
 #include <unordered_set>
 

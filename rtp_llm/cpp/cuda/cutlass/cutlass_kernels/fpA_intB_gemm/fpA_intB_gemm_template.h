@@ -29,7 +29,7 @@
 #include "cutlass_extensions/gemm/kernel/fpA_intB_gemm.h"
 #include "cutlass_extensions/gemm/threadblock/default_mma.h"
 #include "rtp_llm/cpp/cuda/cutlass/cutlass_kernels/gemm_configs.h"
-#include "rtp_llm/cpp/cuda/cuda_utils.h"
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 
 #ifndef _WIN32
 #pragma GCC diagnostic pop
@@ -39,7 +39,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cuda/cutlass/cutlass_kernels/cutlass_heuristic.h"
 #include "rtp_llm/cpp/cuda/cutlass/cutlass_kernels/fpA_intB_gemm/fpA_intB_gemm.h"
-#include "rtp_llm/cpp/cuda/cuda_utils.h"
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 
 namespace tc = tensorrt_llm::cutlass_extensions;
 

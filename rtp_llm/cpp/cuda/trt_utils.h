@@ -1,7 +1,8 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/Exception.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
-#include "rtp_llm/cpp/cuda/cuda_utils.h"
+#include "rtp_llm/cpp/utils/math_utils.h"
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 
 #pragma once
 #define TLLM_LOG_TRACE RTP_LLM_LOG_TRACE

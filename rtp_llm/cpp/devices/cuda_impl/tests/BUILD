@@ -45,6 +45,7 @@ cc_binary(
         "//rtp_llm/cpp/devices/base_tests:distributed_test",
         "@local_config_cuda//cuda:nccl",
     ],
+    linkstatic = False,
     visibility = ["//visibility:public"],
 )
 
@@ -74,8 +75,9 @@ cc_binary(
         "//rtp_llm/cpp/devices/torch_impl:torch_reference_impl",
         "//rtp_llm/cpp/models:models",
     ],
-    visibility = ["//visibility:public"],
     copts = copts(),
+    linkstatic = False,
+    visibility = ["//visibility:public"],
 )
 
 cc_test(
@@ -288,7 +290,6 @@ cc_test(
     env = test_envs,
     copts = copts(),
     deps = test_deps,
-    linkstatic = 1,
     exec_properties = {'gpu':'A10'},
 )
 
@@ -332,6 +333,7 @@ cc_library(
     copts = copts(),
     deps = test_deps + [
         "//rtp_llm/models_py/bindings:op_defs",
+        "//rtp_llm/cpp/devices/cuda_impl:gpu_base",
         "//rtp_llm/cpp/pybind:th_utils"
     ],
     visibility = ["//visibility:public"],
@@ -352,7 +354,6 @@ cc_binary(
     name = "test_cuda_graph_prefill_ops",
     deps = [
         ":test_cuda_graph_prefill_libs",
-        # "//:th_transformer"
     ],
     linkshared = 1,
     visibility = ["//visibility:public"],

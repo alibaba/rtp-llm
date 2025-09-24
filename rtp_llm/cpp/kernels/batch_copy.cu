@@ -1,5 +1,12 @@
 #include "batch_copy.h"
-#include "rtp_llm/cpp/cuda/cuda_utils.h"
+#if USING_CUDA
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
+#endif
+
+#if USING_ROCM
+#include "rtp_llm/cpp/rocm/cuda_shims.h"
+#include "rtp_llm/cpp/rocm/hip_host_utils.h"
+#endif
 
 namespace rtp_llm {
 namespace kernels {

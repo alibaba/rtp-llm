@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+#include <cuda_fp16.h>
+
 #include "beamSearchKernels.h"
 
 using namespace tensorrt_llm::common;

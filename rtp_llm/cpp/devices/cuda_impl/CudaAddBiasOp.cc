@@ -1,5 +1,5 @@
 #include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
-#include "rtp_llm/cpp/cuda/Dispatch.h"
+#include "rtp_llm/cpp/core/Dispatch.h"
 #include "rtp_llm/cpp/kernels/activation_kernels.h"
 #include "rtp_llm/cpp/devices/CommonDefines.h"
 #include "rtp_llm/cpp/kernels/rmsnormKernels.h"

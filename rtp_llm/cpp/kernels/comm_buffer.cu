@@ -7,6 +7,8 @@
 #include "comm_buffer.h"
 #include "vec_dtypes.cuh"
 #include <cstdint>
+#include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 
 namespace rtp_llm {
 

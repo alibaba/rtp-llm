@@ -1,6 +1,6 @@
 #include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
-#include "rtp_llm/cpp/cuda/Dispatch.h"
-#include "rtp_llm/cpp/cuda/cuda_fp8_utils.h"
+#include "rtp_llm/cpp/core/Dispatch.h"
+#include "rtp_llm/cpp/kernels/scaled_fp8_quant.h"
 #include "rtp_llm/cpp/kernels/quantization_tensor.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 using namespace std;
@@ -132,7 +132,7 @@ BufferPtr CudaDevice::quantize(const QuantizeParams& params) {
                                       params.static_scale_reciprocal.value().get().data()));
         switch (params.input.type()) {
             case DataType::TYPE_FP32:
-                trt_common::invokeQuantizeMatrix(kernel->data<__nv_fp8_e4m3>(),
+                rtp_llm::invokeQuantizeMatrix(kernel->data<__nv_fp8_e4m3>(),
                                                  params.static_scale.value().get().data<float>(),
                                                  params.input.data<float>(),
                                                  params.input.size(),
@@ -141,7 +141,7 @@ BufferPtr CudaDevice::quantize(const QuantizeParams& params) {
                                                  stream_);
                 break;
             case DataType::TYPE_FP16:
-                trt_common::invokeQuantizeMatrix(kernel->data<__nv_fp8_e4m3>(),
+                rtp_llm::invokeQuantizeMatrix(kernel->data<__nv_fp8_e4m3>(),
                                                  params.static_scale.value().get().data<float>(),
                                                  params.input.data<half>(),
                                                  params.input.size(),
@@ -151,7 +151,7 @@ BufferPtr CudaDevice::quantize(const QuantizeParams& params) {
                 break;
 #ifdef ENABLE_BF16
             case DataType::TYPE_BF16:
-                trt_common::invokeQuantizeMatrix(kernel->data<__nv_fp8_e4m3>(),
+                rtp_llm::invokeQuantizeMatrix(kernel->data<__nv_fp8_e4m3>(),
                                                  params.static_scale.value().get().data<float>(),
                                                  params.input.data<__nv_bfloat16>(),
                                                  params.input.size(),
@@ -177,7 +177,7 @@ BufferPtr CudaDevice::quantize(const QuantizeParams& params) {
                 std::move(scales),
                 std::move(BufferPtr(new Buffer(params.input.where(), DataType::TYPE_INVALID, {0}, nullptr)))));
         }
-        tensorrt_llm::common::invokeComputeFP8Quantize128(kernel->data<__nv_fp8_e4m3>(),
+        rtp_llm::invokeComputeFP8Quantize128(kernel->data<__nv_fp8_e4m3>(),
                                                           scales->data<float>(),
                                                           params.input.data<__nv_bfloat16>(),
                                                           input_shape[0],

@@ -42,7 +42,7 @@
 #pragma GCC diagnostic pop
 #endif // #ifndef _WIN32
 
-#include "rtp_llm/cpp/cuda/cuda_utils.h"
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 #include "rtp_llm/cpp/cuda/trt_utils.h"
 #include "rtp_llm/cpp/cuda/cutlass/cutlass_kernels/cutlass_heuristic.h"
 #include "rtp_llm/cpp/cuda/cutlass/cutlass_kernels/int8_gemm/int8_gemm.h"

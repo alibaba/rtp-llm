@@ -31,6 +31,8 @@
 #include "fused_multihead_attention_v2.h"
 #include "tmaDescriptor.h"
 
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
+
 namespace tensorrt_llm
 {
 namespace kernels

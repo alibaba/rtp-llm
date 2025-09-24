@@ -6,7 +6,7 @@
 #include <vector>
 #include <cassert>
 #include <cstring>
-#include "rtp_llm/cpp/utils/PrefixToCandidateTokens.h"
+#include "rtp_llm/cpp/models/logits_processor/PrefixToCandidateTokens.h"
 
 namespace rtp_llm {
 

@@ -33,9 +33,8 @@ cc_library(
         "//rtp_llm/cpp/dataclass:dataclass",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:error_code",
-        "//rtp_llm/cpp/utils:system_utils",
-        "//rtp_llm/cpp/utils:data_structures",
-        "//rtp_llm/cpp/utils:domain_utils",
+        "//rtp_llm/cpp/utils:hash_util",
+        "//rtp_llm/cpp/models:dfa_utils",
     ],
     visibility = ["//visibility:public"],
 )

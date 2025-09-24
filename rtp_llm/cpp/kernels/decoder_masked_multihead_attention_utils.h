@@ -18,8 +18,8 @@
 #pragma once
 
 #include "rtp_llm/cpp/cuda/cuda_type_utils.cuh"
-#include "rtp_llm/cpp/cuda/cuda_utils.h"
 #include <stdint.h>
+#include <stdio.h>
 
 #ifdef ENABLE_BF16
 using rtp_llm::bf16hfma2;
@@ -3283,12 +3283,11 @@ __device__ __host__ constexpr inline T const& const_max(T const& a, T const& b) 
 #include <stdint.h>
 #include "rtp_llm/cpp/cuda/cuda_type_utils.cuh"
 #if USING_CUDA
-#include "rtp_llm/cpp/cuda/cuda_utils.h"
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 #endif
 
 #if USING_ROCM
-#include "rtp_llm/cpp/rocm/hip_utils.h"
-using namespace rtp_llm::rocm;
+#include "rtp_llm/cpp/rocm/cuda_shims.h"
 #endif
 
 #ifdef ENABLE_BF16

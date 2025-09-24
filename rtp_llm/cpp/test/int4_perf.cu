@@ -4,7 +4,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cuda/cublas/cublasMMWrapper.h"
-#include "rtp_llm/cpp/cuda/cuda_utils.h"
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 #include "rtp_llm/cpp/cuda/memory_utils.h"
 #include "rtp_llm/cpp/cuda/cutlass/cutlass_kernels/gemm_lut_utils.h"
 #include "rtp_llm/cpp/cuda/cutlass/interface.h"

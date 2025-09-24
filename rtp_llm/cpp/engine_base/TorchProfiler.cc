@@ -6,8 +6,8 @@ namespace tap = torch::autograd::profiler;
 
 size_t CudaProfiler::count = 0;
 
-CudaProfiler::CudaProfiler(const std::string& prefix): prefix_(prefix) {
-    dest_dir_ = (StaticConfig::user_torch_cuda_profiler_dir != "") ? StaticConfig::user_torch_cuda_profiler_dir : ".";
+CudaProfiler::CudaProfiler(const std::string& prefix, std::string user_torch_cuda_profiler_dir): prefix_(prefix) {
+    dest_dir_ = (user_torch_cuda_profiler_dir != "") ? user_torch_cuda_profiler_dir : ".";
     tap::prepareProfiler(config_, activities_);
 }
 

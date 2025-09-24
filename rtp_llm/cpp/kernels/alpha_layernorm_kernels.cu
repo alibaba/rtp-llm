@@ -3,14 +3,12 @@
 #include "rtp_llm/cpp/cuda/reduce_kernel_utils.cuh"
 
 #if USING_ROCM
-#include "rtp_llm/cpp/rocm/hip_utils.h"
+#include "rtp_llm/cpp/rocm/cuda_shims.h"
 #endif
 
 // wont't support new features
 namespace rtp_llm {
-#if USING_ROCM
-using namespace rocm;
-#endif
+
 template<typename T, int N>
 __global__ void alphaAddBiasResidualPostLayerNorm(
     T* out, const T* input, const T* residual1, const T* bias, const T* gamma, const T* beta, T alpha, int m, int n) {

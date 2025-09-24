@@ -9,9 +9,9 @@ load("//rtp_llm/cpp/cuda/deep_gemm:template.bzl", "dpsk_gemm_so_num", "qwen_gemm
 def copy_all_so():
     copy_so("//:th_transformer")
     copy_so("//:th_transformer_config")
-    copy_so("//rtp_llm/cpp/kernels:mmha1")
-    copy_so("//rtp_llm/cpp/kernels:mmha2")
-    copy_so("//rtp_llm/cpp/kernels:dmmha")
+    copy_so("//rtp_llm/cpp/kernels/decoder_masked_multihead_attention:mmha1")
+    copy_so("//rtp_llm/cpp/kernels/decoder_masked_multihead_attention:mmha2")
+    copy_so("//rtp_llm/cpp/kernels/decoder_masked_multihead_attention:dmmha")
     copy_so("//rtp_llm/cpp/cuda:fa")
     copy_so("//rtp_llm/cpp/cuda/cutlass:fpA_intB")
     copy_so("//rtp_llm/cpp/cuda/cutlass:moe")

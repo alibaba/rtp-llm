@@ -19,6 +19,7 @@
 
 #include "rtp_llm/cpp/cuda/trt_utils.h"
 #include "rtp_llm/cpp/cuda/cuda_type_utils.cuh"
+#include "rtp_llm/cpp/cuda/launch_utils.h"
 #include "rtp_llm/cpp/cuda/reduce_kernel_utils.cuh"
 
 #ifndef CUDART_VERSION

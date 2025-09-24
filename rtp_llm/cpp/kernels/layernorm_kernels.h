@@ -19,7 +19,7 @@
 #include "rtp_llm/cpp/model_utils/layernorm_types.h"
 #include <assert.h>
 #if USING_CUDA
-#include "rtp_llm/cpp/cuda/cuda_utils.h"
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #endif

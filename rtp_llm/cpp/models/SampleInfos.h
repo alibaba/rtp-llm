@@ -1,7 +1,6 @@
 #pragma once
 
 #include "rtp_llm/cpp/core/Buffer.h"
-#include "rtp_llm/cpp/utils/DFAUtil.h"
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "rtp_llm/cpp/devices/OpData.h"

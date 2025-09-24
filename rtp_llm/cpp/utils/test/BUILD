@@ -8,7 +8,8 @@ test_copts = [
 
 test_deps = [
     "//rtp_llm/cpp/utils:core_utils",
-    "//rtp_llm/cpp/utils:domain_utils",
+    "//rtp_llm/cpp/utils:kv_cache_utils",
+    "//rtp_llm/cpp/models:dfa_utils",
     "@havenask//aios/autil:json",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",
@@ -21,7 +22,7 @@ cc_test(
     ],
     data = [],
     copts = test_copts,
-    deps = test_deps + ["//rtp_llm/cpp/utils:data_structures"],
+    deps = test_deps + ["//rtp_llm/cpp/utils:lru_cache"],
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },

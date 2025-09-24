@@ -13,10 +13,7 @@ from rtp_llm.ops import ProfilingDebugLoggingConfig
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
-from rtp_llm.distribute.worker_info import (
-    WorkerInfo,
-    g_parallel_info,
-)
+from rtp_llm.distribute.worker_info import WorkerInfo, g_parallel_info
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.utils.concurrency_controller import init_controller
 
@@ -101,7 +98,6 @@ def start_frontend_server_impl(global_controller, backend_process):
 
     for rank in range(local_world_size):
         for i in range(frontend_server_count):
-            kmonitor.frontend_server_id = i
             process = multiprocessing.Process(
                 target=start_frontend_server,
                 args=(rank, i, global_controller),

@@ -76,6 +76,7 @@ cc_shared_library(
     roots = [":fpA_intB_cu"],
     preloaded_deps = [
     	"//rtp_llm/cpp/cuda/cutlass/cutlass_extensions:cutlass_extensions",
+        "//rtp_llm/cpp/cuda:launch_utils",
         "@cutlass//:cutlass",
         "@cutlass//:cutlass_utils",
         "@local_config_cuda//cuda:cuda_headers",
@@ -95,6 +96,7 @@ cc_library(
     ]),
     deps = [
         "//rtp_llm/cpp/model_utils:model_utils",
+        "//rtp_llm/cpp/cuda:trt_utils",
     	"//rtp_llm/cpp/cuda/cutlass/cutlass_extensions:cutlass_extensions",
         "@cutlass//:cutlass",
         "@cutlass//:cutlass_utils",
@@ -110,6 +112,8 @@ cc_shared_library(
     roots = [":int8_gemm_cu"],
     preloaded_deps = [
         "//rtp_llm/cpp/model_utils:model_utils",
+        "//rtp_llm/cpp/cuda:trt_utils",
+        "//rtp_llm/cpp/cuda:launch_utils",
     	"//rtp_llm/cpp/cuda/cutlass/cutlass_extensions:cutlass_extensions",
         "@cutlass//:cutlass",
         "@cutlass//:cutlass_utils",
@@ -165,7 +169,7 @@ cc_library(
         "cutlass_kernels/moe_gemm/*.cu",
     ]) + [
         ":moe_runner",
-	":moe_inst_sm80",
+    ":moe_inst_sm80",
     ],
     hdrs = glob([
         "cutlass_kernels/moe_gemm/*.h",
@@ -177,7 +181,10 @@ cc_library(
         ":moe_cu_sm90",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/model_utils:model_utils",
-    	"//rtp_llm/cpp/cuda/cutlass/cutlass_extensions:cutlass_extensions",
+        "//rtp_llm/cpp/cuda:launch_utils",
+        "//rtp_llm/cpp/cuda:trt_utils",
+        "//rtp_llm/cpp/cuda:cuda_utils_cu",
+        "//rtp_llm/cpp/cuda/cutlass/cutlass_extensions:cutlass_extensions",
         "@cutlass_h_moe//:cutlass",
         "@cutlass_h_moe//:cutlass_utils",
         "@local_config_cuda//cuda:cuda_headers",
@@ -187,6 +194,7 @@ cc_library(
         '-DCOMPILE_HOPPER_TMA_GEMMS',
     ],
     alwayslink = True,
+    visibility = ["//visibility:public"],
 )
 
 cc_shared_library(
@@ -196,7 +204,10 @@ cc_shared_library(
         ":moe_cu_sm90",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/model_utils:model_utils",
-    	"//rtp_llm/cpp/cuda/cutlass/cutlass_extensions:cutlass_extensions",
+        "//rtp_llm/cpp/cuda:trt_utils",
+        "//rtp_llm/cpp/cuda:launch_utils",
+        "//rtp_llm/cpp/cuda:cuda_utils_cu",
+        "//rtp_llm/cpp/cuda/cutlass/cutlass_extensions:cutlass_extensions",
         "@cutlass_h_moe//:cutlass",
         "@cutlass_h_moe//:cutlass_utils",
         "@local_config_cuda//cuda:cuda_headers",
@@ -219,8 +230,9 @@ cc_library(
     ],
     include_prefix = "src",
     deps = [
-    	"//rtp_llm/cpp/cuda/cutlass/cutlass_extensions:cutlass_extensions",
+    "//rtp_llm/cpp/cuda/cutlass/cutlass_extensions:cutlass_extensions",
         "//rtp_llm/cpp/model_utils:model_utils",
+        "//rtp_llm/cpp/cuda:trt_utils",
         "@cutlass_h_moe//:cutlass",
         "@cutlass_h_moe//:cutlass_utils",
         "@local_config_cuda//cuda:cuda_driver",
@@ -264,7 +276,9 @@ cc_shared_library(
         "@local_config_cuda//cuda:cuda_driver",
     ],
     preloaded_deps = [
-    	"//rtp_llm/cpp/cuda/cutlass/cutlass_extensions:cutlass_extensions",
+        "//rtp_llm/cpp/cuda:launch_utils",
+        "//rtp_llm/cpp/cuda:trt_utils",
+        "//rtp_llm/cpp/cuda/cutlass/cutlass_extensions:cutlass_extensions",
         "//rtp_llm/cpp/model_utils:model_utils",
         "@cutlass_h_moe//:cutlass",
         "@cutlass_h_moe//:cutlass_utils",
@@ -314,6 +328,7 @@ cc_library(
     ]),
     deps = [
         "//rtp_llm/cpp/cuda/cutlass/cutlass_extensions:cutlass_extensions",
+        "//rtp_llm/cpp/cuda:trt_utils",
         "//rtp_llm/cpp/utils:core_utils",
         "@cutlass//:cutlass",
         "@local_config_cuda//cuda:cuda_headers",
@@ -329,8 +344,8 @@ cc_library(
     srcs = [
         ":fpA_intB",
         ":int8_gemm",
-	    ":moe",
-	    ":moe_sm90",
+        ":moe",
+        ":moe_sm90",
     ],
     deps = [
         ":cutlass_kernels_common",

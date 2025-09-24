@@ -1,7 +1,7 @@
 #include "rtp_llm/models_py/bindings/cuda/TRTAttnOp.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
-#include "rtp_llm/cpp/cuda/Dispatch.h"
+#include "rtp_llm/cpp/core/Dispatch.h"
 #include "rtp_llm/cpp/kernels/decoder_masked_multihead_attention/decoder_masked_multihead_attention.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 

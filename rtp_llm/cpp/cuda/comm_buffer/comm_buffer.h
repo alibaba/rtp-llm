@@ -12,7 +12,7 @@
 #include <mutex>
 
 #include "rtp_llm/cpp/kernels/comm_buffer.h"
-#include "rtp_llm/cpp/cuda/cuda_utils.h"
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 #include "rtp_llm/cpp/cuda/custom_ar/custom_ar_comm.h"
 #include "rtp_llm/cpp/cuda/nccl/nccl_utils.h"
 

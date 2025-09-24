@@ -24,17 +24,16 @@
 #else
 #include "3rdparty/cub/cub.cuh"
 #endif
-#include "rtp_llm/cpp/cuda/cuda_utils.h"
 #endif
 
 #if USING_ROCM
 #include <hipcub/hipcub.hpp>
-#include "rtp_llm/cpp/rocm/hip_utils.h"
-using namespace rtp_llm::rocm;
+#include "rtp_llm/cpp/rocm/cuda_shims.h"
 #endif
 
 #include "rtp_llm/cpp/cuda/reduce_kernel_utils.cuh"
 #include "rtp_llm/cpp/kernels/sampling_topk_kernels.h"
+#include "rtp_llm/cpp/utils/math_utils.h"
 
 namespace rtp_llm {
 

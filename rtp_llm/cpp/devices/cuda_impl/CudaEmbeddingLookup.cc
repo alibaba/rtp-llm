@@ -1,7 +1,7 @@
 #include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
-#include "rtp_llm/cpp/cuda/Dispatch.h"
+#include "rtp_llm/cpp/core/Dispatch.h"
 #include "rtp_llm/cpp/devices/CommonDefines.h"
-#include "rtp_llm/cpp/kernels/gpt_kernels.h"
+#include "rtp_llm/cpp/kernels/embedding_kernels.h"
 
 using namespace std;
 
@@ -23,7 +23,7 @@ BufferPtr CudaDevice::embeddingLookup(const EmbeddingLookupParams& params) {
     auto embeddings = allocateBuffer({data_type, {token_num, hidden_size}}, {"embedding"});
 
     DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type,
-                                     invokeEmebeddingLookup,
+                                     invokeEmbeddingLookup,
                                      embeddings->data(),
                                      embedding_table.data(),
                                      params.input_embedding_scalar,

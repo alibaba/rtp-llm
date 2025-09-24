@@ -16,7 +16,12 @@ void StreamCacheResource::freeBatchBlocks(size_t batch_id, vector<int>& blocks) 
     if (blocks.empty()) {
         return;
     }
-    if (blocks.size() == batch_resource_.blockSize(batch_id) && reuseCache()) {
+    // only reuse the cache of batch 0 of finished beam search streams
+    // to avoid corrupted states and excessive block cache entries
+    bool should_reuse_cache =
+        reuseCache() && (!stream_->hasNumBeams() || (!stream_->stoppedWithoutLock() && batch_id == 0));
+    // TODO(zhangjianning.zjn) cache all beams of beam search
+    if (blocks.size() == batch_resource_.blockSize(batch_id) && should_reuse_cache) {
         reConstructCacheKeys();
         auto          tokens_id  = stream_->completeTokenIdsVec(batch_id);
         const auto&   cache_keys = stream_->cacheKeys(batch_id);
@@ -37,7 +42,8 @@ void StreamCacheResource::releaseResource() {
     if (!resource_context_.cache_manager) {
         return;
     }
-    if (!need_release_resource_) {
+    // do not reuse cache from stopped beam search streams, whose states are likely corrupted
+    if (!need_release_resource_ && (!stream_->hasNumBeams() || !stream_->stoppedWithoutLock())) {
         reConstructCacheKeys();
         return;
     }

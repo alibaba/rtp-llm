@@ -15,7 +15,15 @@
  */
 
 #include "rtp_llm/cpp/kernels/ban_bad_words.h"
-#include "rtp_llm/cpp/cuda/cuda_utils.h"
+
+#if USING_CUDA
+#include <cuda_bf16.h>
+#include <cuda_fp16.h>
+#endif
+
+#if USING_ROCM
+#include "rtp_llm/cpp/rocm/cuda_shims.h"
+#endif
 
 namespace rtp_llm {
 
@@ -114,7 +122,6 @@ void invokeBanBadWords(T*           logits,
                                               id_offset,
                                               vocab_size_padded,
                                               step);
-    check_cuda_error();
 }
 
 template void invokeBanBadWords(half*        logits,

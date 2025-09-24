@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/utils/ShapeCheck.h"
+#include "rtp_llm/cpp/devices/ShapeCheck.h"
 
 namespace rtp_llm {
 

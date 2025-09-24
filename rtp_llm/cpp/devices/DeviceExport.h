@@ -21,8 +21,8 @@ public:
 
     void updateCurrentTorchStream();
 
-    virtual torch::Tensor preprocessGemmWeightByKey(const std::string& key, torch::Tensor weight) = 0;
-    virtual torch::Tensor packInt8TensorToPackedInt4(torch::Tensor weight)                        = 0;
+    virtual torch::Tensor preprocessGemmWeightByKey(const std::string& key, torch::Tensor weight, bool = false) = 0;
+    virtual torch::Tensor packInt8TensorToPackedInt4(torch::Tensor weight)                                      = 0;
     virtual torch::Tensor
     preprocessWeightsForMixedGemm(torch::Tensor weight, py::object quant_type, const std::string& arch) = 0;
     virtual std::vector<torch::Tensor>
@@ -39,8 +39,8 @@ public:
     DeviceExporterImpl(const rtp_llm::DeviceInitParams& params): DeviceExporter(params) {};
     ~DeviceExporterImpl() {};
 
-    torch::Tensor preprocessGemmWeightByKey(const std::string& key, torch::Tensor weight) {
-        return Device::preprocessGemmWeightByKey(key, weight);
+    torch::Tensor preprocessGemmWeightByKey(const std::string& key, torch::Tensor weight, bool user_arm_gemm_use_kai) {
+        return Device::preprocessGemmWeightByKey(key, weight, user_arm_gemm_use_kai);
     }
 
     torch::Tensor packInt8TensorToPackedInt4(torch::Tensor weight) {

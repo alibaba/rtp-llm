@@ -13,10 +13,10 @@ from rtp_llm.access_logger.access_logger import AccessLogger
 from rtp_llm.config.generate_config import RoleType
 from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.config.task_type import TaskType
+from rtp_llm.frontend.frontend_worker import FrontendWorker, TokenizerEncodeResponse
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
-from rtp_llm.frontend.frontend_worker import FrontendWorker, TokenizerEncodeResponse
 from rtp_llm.server.misc import format_exception
 from rtp_llm.structure.request_extractor import request_id_field_name
 from rtp_llm.utils.complete_response_async_generator import (
@@ -33,13 +33,17 @@ USAGE_HEADER = "USAGE"
 
 
 class FrontendServer(object):
-    def __init__(self, separated_frontend: bool = False):
+    def __init__(
+        self, separated_frontend: bool = False, rank_id: int = 0, server_id: int = 0
+    ):
         self._access_logger = AccessLogger()
         self._frontend_worker = None
         self._openai_endpoint = None
         self.thread_lock_ = threading.Lock()
         self._global_controller = get_global_controller()
         self.separated_frontend = separated_frontend
+        self.rank_id = str(rank_id)
+        self.server_id = str(server_id)
         kmonitor.init()
 
     def start(self):
@@ -91,7 +95,11 @@ class FrontendServer(object):
             kmonitor.report(
                 AccMetrics.CANCEL_QPS_METRIC,
                 1,
-                {"source": request.get("source", "unkown")},
+                {
+                    "rank_id": self.rank_id,
+                    "server_id": self.server_id,
+                    "source": request.get("source", "unkown"),
+                },
             )
         except BaseException as e:
             # 捕获非Cancel以外所有的异常,所以使用BaseException
@@ -101,6 +109,8 @@ class FrontendServer(object):
                 AccMetrics.ERROR_QPS_METRIC,
                 1,
                 {
+                    "rank_id": self.rank_id,
+                    "server_id": self.server_id,
                     "source": request.get("source", "unkown"),
                     "error_code": str(format_e.get("error_code_str", -1)),
                 },
@@ -211,7 +221,11 @@ class FrontendServer(object):
             kmonitor.report(
                 AccMetrics.CANCEL_QPS_METRIC,
                 1,
-                {"source": request.get("source", "unknown")},
+                {
+                    "rank_id": self.rank_id,
+                    "server_id": self.server_id,
+                    "source": request.get("source", "unknown"),
+                },
             )
             self._access_logger.log_exception_access(request, e)
         else:
@@ -219,6 +233,8 @@ class FrontendServer(object):
                 AccMetrics.ERROR_QPS_METRIC,
                 1,
                 {
+                    "rank_id": self.rank_id,
+                    "server_id": self.server_id,
                     "source": request.get("source", "unknown"),
                     "error_code": error_code_str,
                 },
@@ -260,7 +276,14 @@ class FrontendServer(object):
                         GaugeMetrics.RESPONSE_ITER_RT_METRIC,
                         (end_time - last_iterate_time) / step_output_len,
                     )
-                kmonitor.report(AccMetrics.ITER_QPS_METRIC, 1)
+                kmonitor.report(
+                    AccMetrics.ITER_QPS_METRIC,
+                    1,
+                    {
+                        "rank_id": self.rank_id,
+                        "server_id": self.server_id,
+                    },
+                )
                 last_iterate_time = end_time
                 iter_count += 1
                 yield response
@@ -268,7 +291,14 @@ class FrontendServer(object):
             kmonitor.report(
                 GaugeMetrics.LANTENCY_METRIC, current_time_ms() - start_time
             )
-            kmonitor.report(AccMetrics.SUCCESS_QPS_METRIC, 1)
+            kmonitor.report(
+                AccMetrics.SUCCESS_QPS_METRIC,
+                1,
+                {
+                    "rank_id": self.rank_id,
+                    "server_id": self.server_id,
+                },
+            )
 
         assert self._frontend_worker is not None
         start_time = current_time_ms()
@@ -299,7 +329,13 @@ class FrontendServer(object):
     ):
         assert self._frontend_worker is not None
         kmonitor.report(
-            AccMetrics.QPS_METRIC, 1, {"source": req.get("source", "unkown")}
+            AccMetrics.QPS_METRIC,
+            1,
+            {
+                "rank_id": self.rank_id,
+                "server_id": self.server_id,
+                "source": req.get("source", "unkown"),
+            },
         )
         self._access_logger.log_query_access(req)
         is_streaming = self._frontend_worker.is_streaming(req)

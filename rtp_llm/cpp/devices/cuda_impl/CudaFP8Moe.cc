@@ -2,9 +2,9 @@
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 #include "rtp_llm/cpp/core/BufferHelper.h"
 #include "rtp_llm/cpp/kernels/activation_kernels.h"
-#include "rtp_llm/cpp/cuda/Dispatch.h"
+#include "rtp_llm/cpp/core/Dispatch.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
-#include "rtp_llm/cpp/kernels/moe/moe_index_kernel.h"
+#include "rtp_llm/cpp/kernels/moe_kernels.h"
 #ifdef ENABLE_FP8
 #include "rtp_llm/cpp/cuda/cutlass/cutlass_kernels/moe_gemm/moe_fp8_kernels.h"
 #include "rtp_llm/cpp/cuda/deep_gemm/DeepGemmPlugin.h"
@@ -197,6 +197,7 @@ FfnLayerOutput CudaDevice::moeFfnFp8Contiguous(const FfnLayerParams& params, con
                                              *weights.moe_gate_weight->kernel,
                                              *fc1_result,
                                              padding_group_index_device->view(0, total_padding_num),
+                                             init_params_.user_deep_gemm_num_sm,
                                              stream_);
     printBufferData(*fc1_result, "fc1_result");
     check_cuda_error();
@@ -228,6 +229,7 @@ FfnLayerOutput CudaDevice::moeFfnFp8Contiguous(const FfnLayerParams& params, con
                                              *weights.moe_down_weight->kernel,
                                              *fc2_result,
                                              padding_group_index_device->view(0, total_padding_num),
+                                             init_params_.user_deep_gemm_num_sm,
                                              stream_);
     printBufferData(*fc2_result, "fc2_result");
     check_cuda_error();
@@ -409,8 +411,13 @@ FfnLayerOutput CudaDevice::moeFfnFp8Masked(const FfnLayerParams& params, const M
     printBufferData(*permuted_padding_input_fp8, "fc1_input_fp8");
     printBufferData(*weights.moe_gate_weight->kernel, "moe_gate_weight");
     printBufferData(*masked_m, "masked_m");
-    DeepGemmPlugin::groupedGemmFp8Masked_V2(
-        *permuted_padding_input_fp8, *weights.moe_gate_weight->kernel, *fc1_result, *masked_m, expected_m, stream_);
+    DeepGemmPlugin::groupedGemmFp8Masked_V2(*permuted_padding_input_fp8,
+                                            *weights.moe_gate_weight->kernel,
+                                            *fc1_result,
+                                            *masked_m,
+                                            expected_m,
+                                            init_params_.user_deep_gemm_num_sm,
+                                            stream_);
     printBufferData(*fc1_result, "fc1_result");
     check_cuda_error();
     using GemmOutputType     = __nv_bfloat16;
@@ -443,8 +450,13 @@ FfnLayerOutput CudaDevice::moeFfnFp8Masked(const FfnLayerParams& params, const M
                     std::move(fc1_activation_fp8_scales),
                     std::move(BufferPtr(new Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_INVALID, {0}, nullptr)))));
     printBufferData(*fc1_activation_fp8, "fc1_activation_fp8");
-    DeepGemmPlugin::groupedGemmFp8Masked(
-        *fc1_activation_fp8, *weights.moe_down_weight->kernel, *fc2_result, *masked_m, expected_m, stream_);
+    DeepGemmPlugin::groupedGemmFp8Masked(*fc1_activation_fp8,
+                                         *weights.moe_down_weight->kernel,
+                                         *fc2_result,
+                                         *masked_m,
+                                         expected_m,
+                                         init_params_.user_deep_gemm_num_sm,
+                                         stream_);
     printBufferData(*fc2_result, "fc2_result");
     check_cuda_error();
     using OutputType = __nv_bfloat16;
@@ -543,6 +555,7 @@ FfnLayerOutput CudaDevice::deepEpLLMoeFfn(const FfnLayerParams& params, const Mo
                                          *fc1_result,
                                          *masked_m,
                                          token_num / moe_conf.ep_size,
+                                         init_params_.user_deep_gemm_num_sm,
                                          stream_);
 
     check_cuda_error();
@@ -580,6 +593,7 @@ FfnLayerOutput CudaDevice::deepEpLLMoeFfn(const FfnLayerParams& params, const Mo
                                          *fc2_result,
                                          *masked_m,
                                          token_num / moe_conf.ep_size,
+                                         init_params_.user_deep_gemm_num_sm,
                                          stream_);
 
     check_cuda_error();

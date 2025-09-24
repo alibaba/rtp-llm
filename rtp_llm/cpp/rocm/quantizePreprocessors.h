@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <vector>
 
-#include "rtp_llm/cpp/rocm/hip_utils.h"
+#include "rtp_llm/cpp/rocm/hip_host_utils.h"
 
 namespace rtp_llm {
 namespace rocm {

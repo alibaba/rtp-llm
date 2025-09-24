@@ -1,7 +1,7 @@
 #pragma once
 
 #include "rtp_llm/cpp/core/allocator.h"
-#include "rtp_llm/cpp/rocm/hip_utils.h"
+#include "rtp_llm/cpp/rocm/hip_host_utils.h"
 #include <hip/hip_runtime.h>
 
 namespace rtp_llm {

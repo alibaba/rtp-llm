@@ -1,7 +1,7 @@
 #include "rtp_llm/cpp/devices/rocm_impl/RocmTestUtils.h"
 #include "rtp_llm/cpp/devices/base_tests/FfnLayerTest.hpp"
 #include "rtp_llm/cpp/devices/rocm_impl/ROCmDevice.h"
-#include "rtp_llm/cpp/cuda/Dispatch.h"
+#include "rtp_llm/cpp/core/Dispatch.h"
 
 using namespace rtp_llm;
 

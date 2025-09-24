@@ -24,6 +24,7 @@
 
 #include <array>
 #include <cuda_runtime_api.h>
+#include <cuda_fp8.h>
 #include <optional>
 #include <vector>
 

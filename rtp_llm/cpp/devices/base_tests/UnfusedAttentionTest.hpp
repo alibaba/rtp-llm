@@ -8,7 +8,7 @@
 
 #ifdef USING_CUDA12
 #include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
-#include "rtp_llm/cpp/cuda/Dispatch.h"
+#include "rtp_llm/cpp/core/Dispatch.h"
 #endif
 
 using namespace std;

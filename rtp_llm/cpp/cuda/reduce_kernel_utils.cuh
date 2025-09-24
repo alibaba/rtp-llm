@@ -32,10 +32,6 @@ namespace cg = cooperative_groups;
 #endif
 #include "rtp_llm/cpp/cuda/cuda_type_utils.cuh"
 
-#if USING_ROCM
-#include "rtp_llm/cpp/rocm/hip_utils.h"
-#endif
-
 #include <float.h>
 #include <type_traits>
 

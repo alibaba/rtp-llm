@@ -31,7 +31,7 @@
 #include <cuda_bf16.h>
 #endif
 
-#include "rtp_llm/cpp/cuda/cuda_utils.h"
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 #include "rtp_llm/cpp/cuda/memory_utils.h"
 #include "rtp_llm/cpp/cuda/cublas/cublas.h"
 

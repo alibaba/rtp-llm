@@ -5,7 +5,11 @@ import torch
 import rtp_llm.models_py.modules.utils as utils
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.config.quant_config import Fp8PerTensorCompressedQuantConfig
-from rtp_llm.models_py.modules.moe import DataRouterNoEPStandard, FusedMoe
+from rtp_llm.models_py.modules.moe import (
+    BatchedDataRouter,
+    DataRouterNoEPStandard,
+    FusedMoe,
+)
 from rtp_llm.models_py.modules.moe.utils import FusedMoEQuantConfig
 from rtp_llm.utils.model_weight import W
 
@@ -173,7 +177,6 @@ class FusedMoeFactory(object):
                 return FusedMoe(router, executor, expert_num=config.expert_num)
             else:
                 from rtp_llm.models_py.modules.moe.fused_batched_moe import (
-                    BatchedDataRouter,
                     BatchedTritonExperts,
                 )
 

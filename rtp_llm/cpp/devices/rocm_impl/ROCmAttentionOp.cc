@@ -1,12 +1,12 @@
 #include "rtp_llm/cpp/devices/rocm_impl/ROCmDevice.h"
 #include "rtp_llm/cpp/devices/CommonDefines.h"
-#include "rtp_llm/cpp/cuda/Dispatch.h"
+#include "rtp_llm/cpp/core/Dispatch.h"
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 #include "rtp_llm/cpp/kernels/unfused_attention_kernels.h"
-#include "rtp_llm/cpp/kernels/gpt_kernels.h"
 #include "rtp_llm/cpp/kernels/decoder_masked_multihead_attention/decoder_masked_multihead_attention.h"
+#include "rtp_llm/cpp/kernels/kv_cache_kernels.h"
 #include "rtp_llm/cpp/rocm/cuda_shims.h"
-#include "rtp_llm/cpp/rocm/hip_utils.h"
+#include "rtp_llm/cpp/rocm/hip_host_utils.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/devices/rocm_impl/aiterPA.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
@@ -429,7 +429,7 @@ ParamsPtr FlashInferAttnParams::prepareDecodeFlashInferAttnParams(rtp_llm::Devic
 ParamsPtr AiterAttnParams::prepareDecodeAiterAttnParams(rtp_llm::DeviceBase* device,
                                                         const BufferPtr&     sequence_lengths_host) {
 
-    if (!StaticConfig::use_aiter_pa) {
+    if (!device->initParams().use_aiter_pa) {
         return nullptr;
     }
 
@@ -624,7 +624,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
     int    int8_mode     = 0;
 
     if (prefix_prompt_param.max_prefix_prompt_length > 0) {
-        if (StaticConfig::use_aiter_pa) {
+        if (init_params_.use_aiter_pa) {
             DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
                                              invokeLoadPrefixKVCacheAiter,
                                              q_output->data(),
@@ -667,7 +667,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                                     && !params.configs.fuse_qkv_add_bias);
     RTP_LLM_LOG_DEBUG("skip_add_bias_transpose: %d", skip_add_bias_transpose);
     if (!skip_add_bias_transpose) {
-        if (StaticConfig::use_aiter_pa) {
+        if (init_params_.use_aiter_pa) {
             DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
                                              invokeAddFusedQKVBiasTransposePrefill,
                                              q_output->data(),
@@ -1028,7 +1028,7 @@ AttentionModuleOutput ROCmDevice::decoderSelfAttention(const AttentionModulePara
     auto       kv_cache_offset      = allocateBuffer(
         {DataType::TYPE_INT32, {batch_size, 1, 2, max_blocks_per_batch}, AllocationType::DEVICE}, {"kv_cache_offset"});
 
-    if (StaticConfig::use_aiter_pa) {
+    if (init_params_.use_aiter_pa) {
         KVBlockArray kv_block_array = getKVBlockArray(params, *kv_cache_offset, batch_size, false, true);
         PrefixPromptBatchWeightsParam prefix_prompt_param;
         auto                          offset_kv_block_array = OffsetIndexedKVBlockArray(

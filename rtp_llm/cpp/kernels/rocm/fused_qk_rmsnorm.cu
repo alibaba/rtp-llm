@@ -3,13 +3,10 @@
 #include "rtp_llm/cpp/kernels/rocm/fused_qk_rmsnorm.h"
 
 #if USING_ROCM
-#include "rtp_llm/cpp/rocm/hip_utils.h"
+#include "rtp_llm/cpp/rocm/cuda_shims.h"
 #endif
 
 namespace rtp_llm {
-#if USING_ROCM
-using namespace rocm;
-#endif
 
 template<typename Tf, typename T, bool IS_BETA>
 __inline__ __device__ Tf compute_rmsnorm(Tf val, float s_variance, const T* gamma, const T* beta, int i) {

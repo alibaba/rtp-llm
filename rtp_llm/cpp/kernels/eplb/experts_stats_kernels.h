@@ -1,5 +1,14 @@
 #pragma once
-#include "rtp_llm/cpp/cuda/cuda_utils.h"
+
+#include <stdint.h>
+
+#if USING_CUDA
+#include <cuda_runtime.h>
+#endif
+
+#if USING_ROCM
+#include "rtp_llm/cpp/rocm/cuda_shims.h"
+#endif
 
 namespace rtp_llm {
 

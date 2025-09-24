@@ -135,8 +135,8 @@ tuple<int, int> FIFOScheduler::evaluateRunningNext(size_t reserve_step) {
                                  need_block_num);
                 stream->tryReleaseKVBlock(need_block_num);
 
-                if (stream->spIterCount() > 0) {
-                    // sp doesn't support fallback
+                if (stream->spIterCount() > 0 || stream->hasNumBeams()) {
+                    // sp and beam search do not support partial fallback
                     stream->releaseResource();
                     stream->setStop(ErrorCode::MALLOC_FAILED, "cancel stream since lack kv memory");
                 }

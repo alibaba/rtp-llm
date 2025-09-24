@@ -1,11 +1,11 @@
 #include "rtp_llm/cpp/devices/rocm_impl/ROCmDevice.h"
 #include "rtp_llm/cpp/devices/CommonDefines.h"
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
-#include "rtp_llm/cpp/cuda/Dispatch.h"
+#include "rtp_llm/cpp/core/Dispatch.h"
 #include "rtp_llm/cpp/cuda/nccl/nccl_utils_torch.h"
 #include "rtp_llm/cpp/cuda/nccl/nccl_utils.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
-#include "rtp_llm/cpp/kernels/gpt_kernels.h"
+#include "rtp_llm/cpp/kernels/moe_kernels.h"
 
 using namespace std;
 

@@ -7,7 +7,7 @@
 #include <cuda_fp8.h>
 #include <cuda_bf16.h>
 #include "rtp_llm/cpp/utils/AssertUtils.h"
-#include "rtp_llm/cpp/cuda/cuda_utils.h"
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 #include "rtp_llm/cpp/cuda/deep_gemm/utils.h"
 
 namespace rtp_llm {

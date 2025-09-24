@@ -7,7 +7,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 
 #include "rocm/include/hipblaslt/hipblaslt-ext.hpp"
-#include "hip_utils.h"
+#include "hip_host_utils.h"
 
 #include <fstream>
 #include <string>

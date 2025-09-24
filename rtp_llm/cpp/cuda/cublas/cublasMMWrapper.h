@@ -14,7 +14,9 @@
  * limitations under the License.
  */
 
-#include "rtp_llm/cpp/cuda/cuda_utils.h"
+#pragma once
+
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 #include "rtp_llm/cpp/core/allocator.h"
 #include "cublasAlgoMap.h"
 #include <cublasLt.h>
@@ -24,8 +26,25 @@
 #include <mutex>
 #include <string>
 
-#pragma once
 namespace rtp_llm {
+
+template<typename T>
+CublasDataType getCublasDataType() {
+    if (std::is_same<T, half>::value) {
+        return HALF_DATATYPE;
+    }
+#ifdef ENABLE_BF16
+    else if (std::is_same<T, __nv_bfloat16>::value) {
+        return BFLOAT16_DATATYPE;
+    }
+#endif
+    else if (std::is_same<T, float>::value) {
+        return FLOAT_DATATYPE;
+    } else {
+        RTP_LLM_CHECK(false);
+        return FLOAT_DATATYPE;
+    }
+}
 
 class cublasMMWrapper {
 protected:

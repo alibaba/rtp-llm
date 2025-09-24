@@ -9,7 +9,7 @@ cc_library(
     hdrs = [
     ],
     deps = torch_deps() + [
-        "//rtp_llm/cpp/normal_engine:normal_engine",
+        "//rtp_llm/cpp/models:eplb",
         "//rtp_llm/cpp/pybind:th_utils",
     ],
     copts = cuda_copts(),

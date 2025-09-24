@@ -5,12 +5,12 @@
 #include "rtp_llm/cpp/core/BufferHelper.h"
 #include "rtp_llm/cpp/kernels/activation_kernels.h"
 #include "rtp_llm/cpp/kernels/no_aux_tc_kernels.h"
-#include "rtp_llm/cpp/kernels/gpt_kernels.h"
-#include "rtp_llm/cpp/cuda/Dispatch.h"
+#include "rtp_llm/cpp/core/Dispatch.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/core/torch_utils/TorchEvent.h"
 #include "rtp_llm/cpp/devices/utils/DevicePerfWrapper.h"
 #include "rtp_llm/cpp/kernels/eplb/experts_stats_kernels.h"
+#include "rtp_llm/cpp/kernels/moe_kernels.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include <cstring>
 #include <numeric>

@@ -43,6 +43,8 @@ cc_library(
     deps = [
         ":fmha_v2_header",
         "//rtp_llm/cpp/kernels:attn_utils",
+        "//rtp_llm/cpp/cuda:cuda_host_utils",
+        "//rtp_llm/cpp/utils:math_utils",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],
@@ -155,6 +157,5 @@ cc_library(
         "//conditions:default": [],
     }),
     copts = cuda_copts() + ["-DEXCLUDE_SM_100=1", "-DEXCLUDE_SM_120=1"],
-    linkstatic = True,
     visibility = ["//visibility:public"],
 )

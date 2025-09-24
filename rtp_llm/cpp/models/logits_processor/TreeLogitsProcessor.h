@@ -1,7 +1,7 @@
 #pragma once
 
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
-#include "rtp_llm/cpp/utils/DFAUtil.h"
+#include "rtp_llm/cpp/models/logits_processor/DFAUtil.h"
 
 namespace rtp_llm {
 

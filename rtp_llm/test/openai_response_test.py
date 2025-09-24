@@ -1,9 +1,10 @@
 import asyncio
+import copy
 import functools
 import json
 import os
 from contextlib import asynccontextmanager, contextmanager
-from typing import Any, AsyncGenerator, List
+from typing import Any, AsyncGenerator, Callable, List
 from unittest import IsolatedAsyncioTestCase, main
 
 import torch
@@ -25,6 +26,7 @@ from rtp_llm.models.base_model import (
     GenerateOutputs,
 )
 from rtp_llm.openai.api_datatype import (
+    ChatCompletionExtraOutputs,
     ChatCompletionRequest,
     ChatCompletionStreamResponse,
     ChatMessage,
@@ -91,7 +93,11 @@ def think_mode(func):
 
 
 async def fake_output_generator(
-    output_ids: List[int], max_seq_len: int, eos_id: int, seq_len: int
+    output_ids: List[int],
+    max_seq_len: int,
+    eos_id: int,
+    seq_len: int,
+    output_gen: Callable[..., GenerateOutput] = GenerateOutput,
 ) -> AsyncGenerator[GenerateOutputs, None]:
     # 流式的返回结果
     for i in range(0, len(output_ids)):
@@ -106,7 +112,7 @@ async def fake_output_generator(
         aux.input_len = seq_len
         aux.output_len = i + 1
         outputs.generate_outputs.append(
-            GenerateOutput(
+            output_gen(
                 hidden_states=None,
                 output_ids=output_tensor,
                 finished=finished,
@@ -119,7 +125,11 @@ async def fake_output_generator(
 
 
 async def fake_output_generator_once(
-    output_ids: List[int], max_seq_len: int, eos_id: int, seq_len: int
+    output_ids: List[int],
+    max_seq_len: int,
+    eos_id: int,
+    seq_len: int,
+    output_gen: Callable[..., GenerateOutput] = GenerateOutput,
 ) -> AsyncGenerator[GenerateOutputs, None]:
     # 创建包含所有token的完整输出张量, 模拟非流式的返回
     output_tensor = torch.full((1, max_seq_len), eos_id, dtype=torch.int)
@@ -134,7 +144,7 @@ async def fake_output_generator_once(
     aux.output_len = len(output_ids)
 
     outputs.generate_outputs.append(
-        GenerateOutput(
+        output_gen(
             hidden_states=None,
             output_ids=output_tensor,
             finished=finished,
@@ -251,6 +261,12 @@ class BaseToolCallTestSuite:
 
         return tokenizer
 
+    def _create_generate_config(self, stream: bool):
+        return GenerateConfig(is_streaming=stream)
+
+    def _create_generate_output(self, *args: Any, **kwargs: Any):
+        return GenerateOutput(*args, **kwargs)
+
     async def _run_tool_call_test(
         self,
         stream=True,
@@ -278,14 +294,22 @@ class BaseToolCallTestSuite:
 
         if not stream:
             id_generator = fake_output_generator_once(
-                test_ids, MAX_SEQ_LEN, tokenizer.eos_token_id or 0, seq_len_no_use
+                test_ids,
+                MAX_SEQ_LEN,
+                tokenizer.eos_token_id or 0,
+                seq_len_no_use,
+                self._create_generate_output,
             )
         else:
             id_generator = fake_output_generator(
-                test_ids, MAX_SEQ_LEN, tokenizer.eos_token_id or 0, seq_len_no_use
+                test_ids,
+                MAX_SEQ_LEN,
+                tokenizer.eos_token_id or 0,
+                seq_len_no_use,
+                self._create_generate_output,
             )
 
-        generate_config = GenerateConfig(is_streaming=stream)
+        generate_config = self._create_generate_config(stream)
         if stop_words_str:
             generate_config.stop_words_str = stop_words_str
 
@@ -2178,6 +2202,50 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             think_end_tag_from_env.encode("utf-8").decode("unicode_escape"),
         )
         self.assertNotEqual(think_end_tag, think_end_tag_from_env)
+
+    class ExtraOutputsTestSuite(QwenToolTestSuite):
+        def __init__(
+            self,
+            parent_test: "OpenaiResponseTest",
+            generate_config: GenerateConfig,
+            output_gen: Callable[..., GenerateOutput],
+            extra_outputs: ChatCompletionExtraOutputs,
+        ):
+            super().__init__(parent_test)
+            self.generate_config = generate_config
+            self.output_gen = output_gen
+            self.extra_outputs = extra_outputs
+
+        def _create_generate_config(self, stream: bool):
+            generate_config = copy.deepcopy(self.generate_config)
+            generate_config.is_streaming = stream
+            return generate_config
+
+        def _create_generate_output(self, *args: Any, **kwargs: Any):
+            return self.output_gen(*args, **kwargs)
+
+        def _validate_merged_result(self, merged_result):
+            self.parent.assertEqual(merged_result.extra_outputs, self.extra_outputs)
+
+    async def test_openai_extra_outputs_no_stream(self):
+        """测试 Openai Endpoint 非流式场景的 extra_outputs 字段"""
+
+        no_extra_output_test_suite = self.ExtraOutputsTestSuite(
+            self, GenerateConfig(), GenerateOutput, None
+        )
+        await no_extra_output_test_suite.test_no_stream()
+
+        output_ids = [[1, 2, 3]]
+        return_output_ids_test_suite = self.ExtraOutputsTestSuite(
+            self,
+            GenerateConfig(return_output_ids=True),
+            lambda *args, **kwargs: GenerateOutput(
+                *args, **{**kwargs, "output_ids": torch.tensor(output_ids)}
+            ),
+            ChatCompletionExtraOutputs(output_ids=output_ids),
+        )
+
+        await return_output_ids_test_suite.test_no_stream()
 
 
 if __name__ == "__main__":

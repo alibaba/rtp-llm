@@ -15,7 +15,7 @@
  */
 
 #include "rtp_llm/cpp/utils/StringUtil.h"
-#include "rtp_llm/cpp/cuda/cuda_utils.h"
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 #include "rtp_llm/cpp/cuda/cutlass/cutlass_kernels/cutlass_preprocessors.h"
 
 

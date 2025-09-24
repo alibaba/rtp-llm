@@ -13,6 +13,7 @@ cc_binary(
         "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
         "@havenask//aios/autil:option_parser",
     ],
+    linkstatic = False,
 )
 
 cc_binary(
@@ -23,4 +24,5 @@ cc_binary(
     deps = [
         "//rtp_llm/cpp/cache:storage_3fs",
     ],
+    linkstatic = False,
 )

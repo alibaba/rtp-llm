@@ -1,7 +1,7 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/kernels/rocm/quantization_rocm.h"
 #include "rtp_llm/cpp/cuda/reduce_kernel_utils.cuh"
-#include "rtp_llm/cpp/rocm/hip_utils.h"
+#include "rtp_llm/cpp/rocm/hip_host_utils.h"
 
 namespace rtp_llm {
 using namespace rocm;

@@ -3,6 +3,8 @@
 #include "rtp_llm/cpp/devices/cuda_impl/CudaGraphRunner.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/devices/cuda_impl/CudaFlashInfer.h"
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
+
 using namespace torch_ext;
 namespace rtp_llm {
 
@@ -37,10 +39,12 @@ void CudaGraphRunner::captureOneBatchSize(int bs) {
             output_dot_filename = "cuda_graph_visualization.dot";
         }
         graph.capture_begin();
-        auto py_outputs_obj = py_forward_method_(inputs);
-        auto outputs        = py_outputs_obj.cast<PyModelOutputs>();
+        CaptureCheck::in_cuda_graph_capture = true;
+        auto py_outputs_obj                 = py_forward_method_(inputs);
+        auto outputs                        = py_outputs_obj.cast<PyModelOutputs>();
         graph_instances_[bs].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
         graph.capture_end();
+        CaptureCheck::in_cuda_graph_capture = false;
         if (outputs.params_ptr->check_recycle()) {
             graph_instances_[bs].mem_hold_.params_ptr =
                 ParamsBasePtr(outputs.params_ptr.get(), [&](ParamsBase* ptr) {});

@@ -1,11 +1,11 @@
-
 load("//:def.bzl", "copts", "cuda_copts", "rocm_copts", "any_cuda_copts", "gen_cpp_code")
 load("//bazel:arch_select.bzl", "torch_deps")
 load("@rules_cc//examples:experimental_cc_shared_library.bzl", "cc_shared_library")
 package(default_visibility = ["//rtp_llm:__subpackages__"])
 
 cuda_deps = [
-    "//rtp_llm/cpp/cuda:cuda_utils",
+    "//rtp_llm/cpp/cuda:cuda_host_utils",
+    ":cuda_utils_common",
     "@local_config_cuda//cuda:cuda_headers",
     "@local_config_cuda//cuda:cudart",
 ]
@@ -14,58 +14,139 @@ rocm_deps = [
     ":rocm_utils",
     "@local_config_rocm//rocm:rocm_headers",
     "@local_config_rocm//rocm:hip",
-    "//rtp_llm/cpp/cuda:cuda_utils_rocm",
     "//rtp_llm/cpp/rocm:rocm_types_hdr",
-    "//rtp_llm/cpp/rocm:rocm_utils",
+    "//rtp_llm/cpp/rocm:rocm_host_utils",
 ]
 
 any_cuda_deps = select({
     "@//:using_cuda": cuda_deps,
     "@//:using_rocm": rocm_deps,
-    "//conditions:default": [
-    ],
+    "//conditions:default": [],
 })
 
+# =============================================================================
+# CUDA common utilities
+# =============================================================================
+
 cc_library(
-    name = "cuda_cu",
-    srcs = [
-        "no_aux_tc_kernels.cu",  # CUDA-only kernel with cooperative_groups
-        "per_token_group_quant_8bit.cu",  # CUDA-only kernel with ATen/cuda headers
-        "scaled_fp8_quant.cu", # CUDA-only kernel with ATen/cuda headers
-        "moe_topk_softmax_kernels.cu",  # CUDA-only kernel with ATen/cuda headers
-        "comm_buffer.cu",  # CUDA-only kernel with vec_dtypes.cuh
-    ],
+    name = "cuda_utils_common",
     hdrs = [
-        "no_aux_tc_kernels.h",
-        "per_token_group_quant_8bit.h",
-        "scaled_fp8_quant.h",
-        "scaled_fp8_quant_utils.h",
-        "moe_topk_softmax_kernels.h",
-        "comm_buffer.h",
-        "vec_dtypes.cuh",  # CUDA-only header with FP8/BF16 types
+        "vec_dtypes.cuh",
         "util.h",
     ],
     deps = [
-        "//rtp_llm/cpp/cuda:cuda_utils",
+        "//rtp_llm/cpp/cuda:cuda_host_utils",
+        "//rtp_llm/cpp/utils:core_utils",
+    ] + torch_deps(),
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+# =============================================================================
+# CUDA-only kernels - split by functionality
+# =============================================================================
+
+cc_library(
+    name = "cuda_no_aux_tc",
+    srcs = [
+        "no_aux_tc_kernels.cu",
+    ],
+    hdrs = [
+        "no_aux_tc_kernels.h",
+    ],
+    deps = [
+        "//rtp_llm/cpp/cuda:cuda_host_utils",
+        "//rtp_llm/cpp/cuda:launch_utils",
+        "//rtp_llm/cpp/cuda:cuda_utils_cu",
+        ":cuda_utils_common",
+        "//rtp_llm/cpp/utils:core_utils",
+    ],
+    copts = cuda_copts(),
+)
+
+cc_library(
+    name = "scaled_fp8_quant",
+    srcs = [
+        "scaled_fp8_quant.cu",
+    ],
+    hdrs = [
+        "scaled_fp8_quant.h",
+        "scaled_fp8_quant_utils.h",
+    ],
+    deps = [
+        "//rtp_llm/cpp/cuda:cuda_host_utils",
+        "//rtp_llm/cpp/cuda:cuda_utils_cu",
+        "//rtp_llm/cpp/cuda:launch_utils",
+        ":cuda_utils_common",
+        "//rtp_llm/cpp/utils:core_utils",
+    ] + torch_deps(),
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "cuda_quantization",
+    srcs = [
+        "per_token_group_quant_8bit.cu",
+    ],
+    hdrs = [
+        "per_token_group_quant_8bit.h",
+    ],
+    deps = [
+        "//rtp_llm/cpp/cuda:cuda_host_utils",
+        "//rtp_llm/cpp/cuda:cuda_utils_cu",
+        ":cuda_utils_common",
         "//rtp_llm/cpp/utils:core_utils",
     ] + torch_deps(),
     copts = cuda_copts(),
 )
 
+cc_library(
+    name = "cuda_moe",
+    srcs = [
+        "moe_topk_softmax_kernels.cu",
+    ],
+    hdrs = [
+        "moe_topk_softmax_kernels.h",
+    ],
+    deps = [
+        "//rtp_llm/cpp/cuda:cuda_host_utils",
+        ":cuda_utils_common",
+        "//rtp_llm/cpp/utils:core_utils",
+    ] + torch_deps(),
+    copts = cuda_copts(),
+)
 
 cc_library(
-    name = "rocm_cu",
-    srcs = glob([
-        "rocm/*.cu",
-        "mla_kernels_rocm/*.cu",
-    ]),
-    hdrs = glob([
-         "rocm/*.h",
-         "mla_kernels_rocm/*.h",
-    ]),
-    deps = rocm_deps,
-    copts = rocm_copts(),
+    name = "cuda_comm",
+    srcs = [
+        "comm_buffer.cu",
+    ],
+    hdrs = [
+        "comm_buffer.h",
+    ],
+    deps = [
+        "//rtp_llm/cpp/cuda:cuda_host_utils",
+        ":cuda_utils_common",
+        "//rtp_llm/cpp/utils:core_utils",
+    ],
+    copts = cuda_copts(),
 )
+
+cc_library(
+    name = "cuda_cu",
+    deps = [
+        ":cuda_no_aux_tc",
+        ":cuda_quantization", 
+        ":cuda_moe",
+        ":cuda_comm",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+# =============================================================================
+# ROCm kernels - split by functionality
+# =============================================================================
 
 cc_library(
     name = "rocm_utils",
@@ -77,82 +158,166 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# ROCm LayerNorm kernels
 cc_library(
-    name = "kernels_cu",
-    srcs = glob([
-        "*.cu",
-        "mla_kernels/*.cu",
-        "eplb/*.cu",
-        "moe/*.cu",
-    ], exclude = [
-        "no_aux_tc_kernels.cu",  # CUDA-only kernel with cooperative_groups
-        "per_token_group_quant_8bit.cu",  # CUDA-only kernel with ATen/cuda headers
-        "scaled_fp8_quant.cu",  # CUDA-only kernel with ATen/cuda headers
-        "moe_topk_softmax_kernels.cu",  # CUDA-only kernel with ATen/cuda headers
-        "comm_buffer.cu",  # CUDA-only kernel with vec_dtypes.cuh
-    ]) + [
-        ":mmha1",
-        ":mmha2",
-        ":dmmha"
+    name = "rocm_layernorm",
+    srcs = [
+        "rocm/layernorm_kernels.cu",
     ],
-    hdrs = glob([
-        "*.h",
-        "*.cuh",
-        "mla_kernels/*.h",
-        "eplb/*.h",
-        "kv_cache/*.h",
-        "moe/*.h",
-    ]),
-    deps = [
-        ":attn_utils",
-        ":mmha_hdrs",
+    hdrs = [
+        "rocm/layernorm_kernels.h",
+    ],
+    deps = rocm_deps + [
         "//rtp_llm/cpp/model_utils:model_utils",
-        "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/utils:system_utils",
-    ] + select({
-       "//:enable_triton": ["//rtp_llm/cpp/kernels/triton:triton_kernel"],
-       "//conditions:default": [],
-    }) + select({
-        "@//:using_cuda": [
-            ":cuda_cu",
-        ],
-        "@//:using_rocm": [
-            ":rocm_cu",
-        ],
-    }) + any_cuda_deps + torch_deps(),
-    copts = any_cuda_copts(),
-    include_prefix = "src",
-    linkstatic = True,
+        "//rtp_llm/cpp/cuda:cuda_utils_cu",
+    ],
+    copts = rocm_copts(),
     visibility = ["//visibility:public"],
 )
 
-T_Tcache = [('uint16_t', 'uint16_t', '0'), ('__nv_bfloat16', '__nv_bfloat16', '0'),
-            ('uint16_t', 'int8_t', '0'), ('__nv_bfloat16', 'int8_t', '0'),
-            ('uint16_t', '__nv_fp8_e4m3', '1'), ('__nv_bfloat16', '__nv_fp8_e4m3', '1'),
-            ('float', 'float', '0')]
+# ROCm quantization kernels
+cc_library(
+    name = "rocm_quantization",
+    srcs = [
+        "rocm/quantization_rocm.cu",
+    ],
+    hdrs = [
+        "rocm/quantization_rocm.h",
+    ],
+    deps = rocm_deps + [
+        "//rtp_llm/cpp/cuda:cuda_utils_cu",
+    ],
+    copts = rocm_copts(),
+    visibility = ["//visibility:public"],
+)
 
-Dh = ['64', '96', '128', '192', '256']
-DO_MULTI_BLOCK = ['true', 'false']
-ROPE_TYPE = ['RopeStyle::No', 'RopeStyle::Base', 'RopeStyle::Glm2', 'RopeStyle::DynamicNTK', 'RopeStyle::QwenDynamicNTK', 'RopeStyle::Yarn', 'RopeStyle::Llama3', 'RopeStyle::Mrope']
+# ROCm fused QK RMSNorm kernels
+cc_library(
+    name = "rocm_fused_qk_rmsnorm",
+    srcs = [
+        "rocm/fused_qk_rmsnorm.cu",
+    ],
+    hdrs = [
+        "rocm/fused_qk_rmsnorm.h",
+    ],
+    deps = rocm_deps + [
+        "//rtp_llm/cpp/cuda:cuda_utils_cu",
+    ],
+    copts = rocm_copts(),
+    visibility = ["//visibility:public"],
+)
 
-template_header = """
-#include "rtp_llm/cpp/kernels/decoder_masked_multihead_attention/decoder_masked_multihead_attention_launch.h"
-namespace rtp_llm {
-"""
-template = """
-#if defined(ENABLE_FP8) || !{2}
-template void mmha_launch_kernel_ex<{0}, {1}, KVBlockArray, Multihead_attention_params<{0}, false>, {3}, false, {4}, {5}>(
-Multihead_attention_params<{0}, false>&, const KVBlockArray&, const cudaStream_t&, int);
-#endif
-"""
-template_tail = """
-}
-"""
+# Aggregated ROCm basic kernels
+cc_library(
+    name = "rocm_basic",
+    deps = [
+        ":rocm_layernorm",
+        ":rocm_quantization", 
+        ":rocm_fused_qk_rmsnorm",
+    ],
+    visibility = ["//visibility:public"],
+)
 
-gen_cpp_code("mmha_inst_1", [T_Tcache[:4], Dh, DO_MULTI_BLOCK, ROPE_TYPE],
-             template_header, template, template_tail, element_per_file=4, suffix=".cu")
-gen_cpp_code("mmha_inst_2", [T_Tcache[4:], Dh, DO_MULTI_BLOCK, ROPE_TYPE],
-             template_header, template, template_tail, element_per_file=4, suffix=".cu")
+cc_library(
+    name = "rocm_mla",
+    srcs = glob([
+        "mla_kernels_rocm/*.cu",
+    ]),
+    hdrs = glob([
+        "mla_kernels_rocm/*.h",
+    ]),
+    deps = rocm_deps,
+    copts = rocm_copts(),
+)
+
+cc_library(
+    name = "rocm_cu",
+    deps = [
+        ":rocm_basic",
+        ":rocm_mla",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+# =============================================================================
+# Common kernels - split by functionality
+# =============================================================================
+
+cc_library(
+    name = "kernels_activation",
+    srcs = [
+        "activation_kernels.cu",
+    ],
+    hdrs = [
+        "activation_kernels.h",
+    ],
+    deps = any_cuda_deps + [
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/cuda:cuda_utils_cu",
+        "//rtp_llm/cpp/cuda:launch_utils",
+    ],
+    copts = any_cuda_copts(),
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "kernels_layernorm",
+    srcs = [
+        "layernorm_kernels.cu",
+        "alpha_layernorm_kernels.cu",
+        "rmsnormKernels.cu",
+        "fused_qk_rmsnorm.cu",
+    ],
+    hdrs = [
+        "layernorm_kernels.h",
+        "alpha_layernorm_kernels.h",
+        "rmsnormKernels.h",
+        "fused_qk_rmsnorm.h",
+    ],
+    deps = any_cuda_deps + [
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/model_utils:model_utils",
+        "//rtp_llm/cpp/cuda:cuda_utils_cu",
+        "//rtp_llm/cpp/cuda:launch_utils",
+    ] + select({
+        "//:enable_triton": ["//rtp_llm/cpp/kernels/triton:triton_kernel"],
+        "//conditions:default": [],
+     }),
+    copts = any_cuda_copts(),
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "kernels_sampling",
+    srcs = [
+        "sampling_topk_kernels.cu",
+        "sampling_topp_kernels.cu",
+        "sampling_penalty_kernels.cu",
+        "ban_bad_words.cu",
+        "banRepeatNgram.cu",
+        "mask_logits.cu",
+    ],
+    hdrs = [
+        "sampling_topk_kernels.h",
+        "sampling_topp_kernels.h",
+        "sampling_penalty_kernels.h",
+        "ban_bad_words.h",
+        "banRepeatNgram.h",
+        "mask_logits.h",
+        "penalty_types.h",
+    ],
+    deps = any_cuda_deps + [
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/utils:math_utils",
+        "//rtp_llm/cpp/cuda:cuda_utils_cu",
+        "//rtp_llm/cpp/cuda:launch_utils",
+    ],
+    copts = any_cuda_copts(),
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
 
 cc_library(
     name = "attn_utils",
@@ -164,7 +329,6 @@ cc_library(
     ],
     deps = any_cuda_deps + [
         "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/utils:system_utils",
         "//rtp_llm/cpp/model_utils:model_utils",
     ],
     copts = any_cuda_copts(),
@@ -173,48 +337,18 @@ cc_library(
 )
 
 cc_library(
-    name = "mmha_hdrs",
+    name = "kernels_attention",
+    srcs = [
+        "unfused_attention_kernels.cu",
+    ],
     hdrs = [
-        "decoder_masked_multihead_attention/decoder_masked_multihead_attention.h",
+        "unfused_attention_kernels.h",
     ],
-    deps = any_cuda_deps,
-    copts = any_cuda_copts(),
-    include_prefix = "src",
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
-    name = "mmha_cu_1",
-    srcs = [
-        ":mmha_inst_1"
-    ],
-    hdrs = glob([
-        "decoder_masked_multihead_attention/*.h",
-    ], exclude=[
-        "decoder_masked_multihead_attention/decoder_masked_multihead_attention.h",
-    ]),
     deps = any_cuda_deps + [
-        ":mmha_hdrs",
-        ":attn_utils",
         "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/utils:system_utils",    ],
-    copts = any_cuda_copts(),
-    include_prefix = "src",
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
-    name = "mmha_cu_2",
-    srcs = [
-        ":mmha_inst_2"
-    ],
-    hdrs = glob([
-        "decoder_masked_multihead_attention/*.h",
-    ], exclude=[
-        "decoder_masked_multihead_attention/decoder_masked_multihead_attention.h",
-    ]),
-    deps = any_cuda_deps + [
-        ":mmha_hdrs",
+        "//rtp_llm/cpp/model_utils:model_utils",
+        "//rtp_llm/cpp/cuda:cuda_utils_cu",
+        "//rtp_llm/cpp/cuda:launch_utils",
         ":attn_utils",
     ],
     copts = any_cuda_copts(),
@@ -222,56 +356,211 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# =============================================================================
+# Refactored modular kernels (from original gpt_kernels)
+# =============================================================================
+
 cc_library(
-    name = "dmmha_cu",
+    name = "kernels_embedding",
+    srcs = [
+        "embedding_kernels.cu",
+    ],
+    hdrs = [
+        "embedding_kernels.h",
+    ],
+    deps = any_cuda_deps + [
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/cuda:cuda_utils_cu",
+    ],
+    copts = any_cuda_copts(),
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "kernels_tensor_ops",
+    srcs = [
+        "tensor_ops_kernels.cu",
+    ],
+    hdrs = [
+        "tensor_ops_kernels.h",
+    ],
+    deps = any_cuda_deps + [
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/cuda:cuda_utils_cu",
+    ],
+    copts = any_cuda_copts(),
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "kernels_kv_cache",
+    srcs = [
+        "kv_cache_kernels.cu",
+    ],
+    hdrs = [
+        "kv_cache_kernels.h",
+    ],
+    deps = any_cuda_deps + [
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/cuda:cuda_utils_cu",
+    ],
+    copts = any_cuda_copts(),
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "kernels_residual",
+    srcs = [
+        "add_residual_kernels.cu",
+    ],
+    hdrs = [
+        "add_residual_kernels.h",
+    ],
+    deps = any_cuda_deps + [
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/cuda:launch_utils",
+        "//rtp_llm/cpp/cuda:cuda_utils_cu",
+    ],
+    copts = any_cuda_copts(),
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "kernels_copy",
+    srcs = [
+        "batch_copy.cu",
+        "copy_utils.cu",
+    ],
+    hdrs = [
+        "batch_copy.h",
+        "copy_utils.h",
+    ],
+    deps = any_cuda_deps + [
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/cuda:cuda_utils_cu",
+        "//rtp_llm/cpp/cuda:launch_utils",
+    ],
+    copts = any_cuda_copts(),
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "kernels_custom_ar",
+    srcs = [
+        "custom_ar_kernels.cu",
+    ],
+    hdrs = [
+        "custom_ar_kernels.h",
+    ],
+    deps = any_cuda_deps + [
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/cuda:cuda_utils_cu",
+    ],
+    copts = any_cuda_copts(),
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "kernels_quantization",
+    srcs = [
+        "quantization_tensor.cu",
+    ],
+    hdrs = [
+        "quantization_tensor.h",
+    ],
+    deps = any_cuda_deps + [
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/cuda:cuda_utils_cu",
+    ],
+    copts = any_cuda_copts(),
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "kernels_moe",
+    srcs = [
+        "moe_kernels.cu",
+    ],
+    hdrs = [
+        "moe_kernels.h",
+    ],
+    deps = any_cuda_deps + [
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/cuda:cuda_utils_cu",
+    ],
+    copts = any_cuda_copts(),
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "kernels_eplb",
     srcs = glob([
-        "decoder_masked_multihead_attention/*.cu",
+        "eplb/*.cu",
     ]),
     hdrs = glob([
-        "decoder_masked_multihead_attention/*.h",
-    ], exclude=[
-        "decoder_masked_multihead_attention/decoder_masked_multihead_attention.h",
+        "eplb/*.h",
     ]),
     deps = any_cuda_deps + [
-        ":mmha_hdrs",
-        ":attn_utils",
         "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/utils:system_utils",
+        "//rtp_llm/cpp/cuda:launch_utils",
     ],
     copts = any_cuda_copts(),
     include_prefix = "src",
     visibility = ["//visibility:public"],
 )
 
-cc_shared_library(
-    name = "mmha1",
-    roots = [":mmha_cu_1"],
-    preloaded_deps = any_cuda_deps + [
-        ":mmha_hdrs",
-        ":attn_utils",
+cc_library(
+    name = "kernels_mla",
+    srcs = glob([
+        "mla_kernels/*.cu",
+    ]),
+    hdrs = glob([
+        "mla_kernels/*.h",
+    ]),
+    deps = any_cuda_deps + [
         "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/utils:system_utils",
     ],
+    copts = any_cuda_copts(),
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
 )
 
-cc_shared_library(
-    name = "mmha2",
-    roots = [":mmha_cu_2"],
-    preloaded_deps = any_cuda_deps + [
-        ":mmha_hdrs",
-        ":attn_utils",
-        "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/utils:system_utils",
-    ],
-)
-
-cc_shared_library(
-    name = "dmmha",
-    roots = [":dmmha_cu"],
-    preloaded_deps = any_cuda_deps + [
-        ":mmha_hdrs",
-        ":attn_utils",
-        "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/utils:system_utils",
-    ],
+cc_library(
+    name = "kernels_cu",
+    deps = [
+        ":kernels_activation",
+        ":kernels_layernorm",
+        ":kernels_sampling",
+        ":kernels_attention",
+        ":kernels_embedding",
+        ":kernels_tensor_ops", 
+        ":kernels_kv_cache",
+        ":kernels_residual",
+        ":kernels_copy",
+        ":kernels_custom_ar",
+        ":kernels_quantization",
+        ":kernels_moe",
+        ":kernels_eplb",
+        ":kernels_mla",
+        "//rtp_llm/cpp/kernels/decoder_masked_multihead_attention:mmha",
+    ] + select({
+        "@//:using_cuda": [
+            ":cuda_cu",
+        ],
+        "@//:using_rocm": [
+            ":rocm_cu",
+        ],
+        "//conditions:default": [],
+    }) + any_cuda_deps + torch_deps(),
+    copts = any_cuda_copts(),
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
 )

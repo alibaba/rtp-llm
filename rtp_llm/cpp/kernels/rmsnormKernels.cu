@@ -15,13 +15,19 @@
  */
 
 #include "rtp_llm/cpp/cuda/cuda_type_utils.cuh"
+#include "rtp_llm/cpp/cuda/launch_utils.h"
 #include "rtp_llm/cpp/cuda/reduce_kernel_utils.cuh"
 #include "rtp_llm/cpp/kernels/rmsnormKernels.h"
 
-namespace rtp_llm {
-#if USING_ROCM
-using namespace rocm;
+#if USING_CUDA
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 #endif
+
+#if USING_ROCM
+#include "rtp_llm/cpp/rocm/cuda_shims.h"
+#endif
+
+namespace rtp_llm {
 
 template<typename Tf, typename T, bool IS_BETA>
 __inline__ __device__ Tf compute_rmsnorm(Tf val, float s_variance, const T* gamma, const T* beta, int i) {

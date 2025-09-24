@@ -15,7 +15,7 @@
  */
 
 // #include "3rdparty/fp8_qgmma_1x1/fp8_qgmma_1x1_utils.h"
-#include "rtp_llm/cpp/cuda/cuda_utils.h"
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 #include "cublasAlgoMap.h"
 #include "cublasMMWrapper.h"
 #include "rtp_llm/cpp/cuda/cuda_fp8_utils.h"

@@ -16,14 +16,9 @@
 
 #include "rtp_llm/cpp/kernels/activation_kernels.h"
 #include "rtp_llm/cpp/cuda/cuda_type_utils.cuh"
-#if USING_ROCM
-using namespace rtp_llm::rocm;
-#endif
 
-#if USING_CUDA
-#ifndef CUDART_VERSION
-#error CUDART_VERSION Undefined!
-#endif
+#if USING_ROCM
+#include "rtp_llm/cpp/rocm/cuda_shims.h"
 #endif
 
 namespace rtp_llm {

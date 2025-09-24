@@ -1,7 +1,7 @@
 #include "rtp_llm/cpp/devices/rocm_impl/ROCmDevice.h"
 #include <torch/torch.h>
 #include "rtp_llm/cpp/devices/testing/TestBase.h"
-#include "rtp_llm/cpp/rocm/hip_utils.h"
+#include "rtp_llm/cpp/rocm/hip_host_utils.h"
 
 using namespace std;
 using namespace rtp_llm;

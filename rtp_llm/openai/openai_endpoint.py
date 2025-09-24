@@ -152,7 +152,7 @@ class OpenaiEndpoint(object):
         if request.logprobs or request.functions:
             config.is_streaming = True
         config.add_special_tokens(self.model_config.special_tokens)
-        config.convert_select_tokens(self.model_config.vocab_size, self.tokenizer)
+        config.convert_select_tokens(self.tokenizer.vocab_size, self.tokenizer)
         if (
             request.extra_configs
             and request.extra_configs.max_thinking_tokens is not None
@@ -243,6 +243,7 @@ class OpenaiEndpoint(object):
         all_choices = []
         usage = None
         aux_info = None
+        extra_outputs = None
         async for response in choice_generator:
             if len(response.choices) != len(all_choices):
                 if all_choices == []:
@@ -307,6 +308,7 @@ class OpenaiEndpoint(object):
                         all_choices[i].logprobs = response.choices[i].logprobs
             usage = response.usage or usage
             aux_info = response.aux_info or aux_info
+            extra_outputs = response.extra_outputs or extra_outputs
 
         if usage == None:
             logging.warning(f"No usage returned from stream response. use empty value.")
@@ -317,6 +319,7 @@ class OpenaiEndpoint(object):
             aux_info=aux_info,
             model=self.model_config.model_name,
             debug_info=debug_info,
+            extra_outputs=extra_outputs,
         )
 
     def _complete_stream_response(
@@ -332,6 +335,7 @@ class OpenaiEndpoint(object):
                     usage=response.usage,
                     aux_info=response.aux_info,
                     debug_info=debug_info if not debug_info_responded else None,
+                    extra_outputs=response.extra_outputs,
                 )
                 debug_info_responded = True
 

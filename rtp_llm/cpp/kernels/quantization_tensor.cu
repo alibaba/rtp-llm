@@ -16,9 +16,12 @@
 
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/cuda/cuda_type_utils.cuh"
-#include "rtp_llm/cpp/cuda/cuda_utils.h"
 #include "rtp_llm/cpp/cuda/reduce_kernel_utils.cuh"
 #include "rtp_llm/cpp/kernels/quantization_tensor.h"
+
+#if USING_ROCM
+#include "rtp_llm/cpp/rocm/cuda_shims.h"
+#endif
 
 namespace rtp_llm {
 

@@ -16,13 +16,22 @@
 
 #include "custom_ar_kernels.h"
 #include "rtp_llm/cpp/cuda/cuda_type_utils.cuh"
+
 #if USING_ROCM
 #include "rtp_llm/cpp/rocm/cuda_shims.h"
 #endif
+
 #include <cassert>
 #include <cstddef>
 
 namespace rtp_llm {
+
+typedef struct bf168 {
+    __nv_bfloat162 x;
+    __nv_bfloat162 y;
+    __nv_bfloat162 z;
+    __nv_bfloat162 w;
+} bf168;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 

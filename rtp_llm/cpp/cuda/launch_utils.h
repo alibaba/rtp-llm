@@ -1,13 +1,5 @@
 #pragma once
 
-#if USING_CUDA
-#include "rtp_llm/cpp/cuda/cuda_utils.h"
-#endif
-#if USING_ROCM
-#include "rtp_llm/cpp/rocm/hip_utils.h"
-using namespace rtp_llm::rocm;
-#endif
-
 namespace rtp_llm {
 
 bool getEnvEnablePDL();

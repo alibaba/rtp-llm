@@ -16,9 +16,9 @@
 
 #include "fmhaRunner.h"
 #include "fused_multihead_attention_v2.h"
-
 #include "fused_multihead_attention_common.h"
 #include "tmaDescriptor.h"
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 
 #include <cassert>
 #include <cstring>

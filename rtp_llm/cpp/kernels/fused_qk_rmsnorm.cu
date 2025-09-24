@@ -2,6 +2,14 @@
 #include "rtp_llm/cpp/cuda/reduce_kernel_utils.cuh"
 #include "rtp_llm/cpp/kernels/fused_qk_rmsnorm.h"
 
+#if USING_CUDA
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
+#endif
+
+#if USING_ROCM
+#include "rtp_llm/cpp/rocm/cuda_shims.h"
+#endif
+
 namespace rtp_llm {
 
 template<typename Tf, typename T, bool IS_BETA>

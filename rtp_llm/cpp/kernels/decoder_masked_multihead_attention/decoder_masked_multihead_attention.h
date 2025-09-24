@@ -24,12 +24,14 @@
 #if USING_CUDA
 #include "rtp_llm/cpp/cuda/cuda_fp8_utils.h"
 #include <cuda_fp16.h>
+#include <cuda_bf16.h>
 #include <cuda_runtime_api.h>
 #endif
+
 #if USING_ROCM
-#include "rtp_llm/cpp/rocm/hip_utils.h"
-using namespace rtp_llm::rocm;
+#include "rtp_llm/cpp/rocm/cuda_shims.h"
 #endif
+
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>

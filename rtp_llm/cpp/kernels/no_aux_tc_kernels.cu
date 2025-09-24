@@ -16,9 +16,12 @@
  */
 
 #include "rtp_llm/cpp/cuda/cuda_type_utils.cuh"
+#include "rtp_llm/cpp/cuda/launch_utils.h"
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 #include "no_aux_tc_kernels.h"
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
+
 namespace cg = cooperative_groups;
 
 namespace rtp_llm {

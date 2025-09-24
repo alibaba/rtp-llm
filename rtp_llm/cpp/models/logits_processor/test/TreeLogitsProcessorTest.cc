@@ -4,7 +4,7 @@
 #include "rtp_llm/cpp/devices/testing/TestBase.h"
 #include "rtp_llm/cpp/models/logits_processor/TreeLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
-#include "rtp_llm/cpp/utils/PrefixToCandidateTokens.h"
+#include "rtp_llm/cpp/models/logits_processor/PrefixToCandidateTokens.h"
 #include "rtp_llm/cpp/core/BufferHelper.h"
 #include <unistd.h>
 

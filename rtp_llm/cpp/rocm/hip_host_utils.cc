@@ -1,4 +1,4 @@
-#include "hip_utils.h"
+#include "hip_host_utils.h"
 #include "rtp_llm/cpp/devices/OpData.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
 namespace rtp_llm {

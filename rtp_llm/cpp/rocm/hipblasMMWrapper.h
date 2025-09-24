@@ -1,6 +1,6 @@
 #pragma once
 
-#include "hip_utils.h"
+#include "hip_host_utils.h"
 #include "hipblasAlgoMap.h"
 #include "rtp_llm/cpp/core/allocator.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"

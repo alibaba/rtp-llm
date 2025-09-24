@@ -2,11 +2,11 @@
 // but remove all moeGemm part
 
 #pragma once
-#if USING_CUDA
-#include "rtp_llm/cpp/cuda/cuda_utils.h"
-#endif
+
+#include <torch/extension.h>
+
 #if USING_ROCM
-#include "rtp_llm/cpp/rocm/hip_utils.h"
+#include "rtp_llm/cpp/rocm/cuda_shims.h"
 #endif
 namespace rtp_llm {
 void topk_softmax(

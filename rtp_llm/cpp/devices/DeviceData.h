@@ -69,6 +69,8 @@ struct DeviceInitParams {
     bool    ffn_as_service = false;
 
     bool                         use_deepep_moe         = false;
+    int                          user_deep_gemm_num_sm  = -1;
+    bool                         use_aiter_pa           = true;
     bool                         use_deepep_internode   = false;
     bool                         use_deepep_low_latency = false;
     bool                         is_mtp                 = false;

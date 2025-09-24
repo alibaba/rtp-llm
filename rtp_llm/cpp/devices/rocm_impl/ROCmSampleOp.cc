@@ -3,7 +3,6 @@
 #include "rtp_llm/cpp/kernels/sampling_topk_kernels.h"
 #include "rtp_llm/cpp/kernels/sampling_topp_kernels.h"
 #include "rtp_llm/cpp/kernels/sampling_penalty_kernels.h"
-#include "rtp_llm/cpp/cuda/memory_utils.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 
 using namespace std;

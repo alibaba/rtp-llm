@@ -7,7 +7,7 @@ cc_library(
     hdrs = ["layernorm_kernels.h"],
     deps = [
         ":layernorm_kernel_lib",
-        "//rtp_llm/cpp/cuda:cuda_utils",
+        "//rtp_llm/cpp/cuda:cuda_host_utils",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/model_utils:model_utils",
     ],
