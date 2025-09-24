@@ -1,7 +1,5 @@
-#include "layernorm2d_fwd.hpp"
-#include "rmsnorm2d_fwd.hpp"
-// #include "aiter_meta/3rdparty/composable_kernel/example/ck_tile/10_rmsnorm2d/rmsnorm2d_fwd.hpp"
-// #include "aiter_meta/3rdparty/composable_kernel/example/ck_tile/02_layernorm2d/layernorm2d_fwd.hpp"
+#include "norm.h"
+#include "rmsnorm.h"
 #include "rtp_llm/cpp/devices/rocm_impl/ROCmDevice.h"
 #include "rtp_llm/cpp/devices/rocm_impl/ROCmAllocator.h"
 #include "rtp_llm/cpp/core/TrackerAllocator.h"
@@ -19,6 +17,8 @@
 #include "rtp_llm/cpp/kernels/add_residual_kernels.h"
 #include "rtp_llm/cpp/kernels/rmsnormKernels.h"
 #include "rtp_llm/cpp/kernels/rocm/fused_qk_rmsnorm.h"
+#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
+
 namespace rtp_llm {
 using namespace rocm;
 
@@ -168,7 +168,7 @@ LayernormOutput ROCmDevice::layernorm(const LayernormParams& params) {
                                              m,
                                              n,
                                              stream_);
-            check_cuda_error();
+            ROCM_CHECK_ERROR();
             return LayernormOutput({std::move(norm_output), nullptr});
         } else if (params.alpha != 0.f) {
             DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type,
@@ -183,47 +183,68 @@ LayernormOutput ROCmDevice::layernorm(const LayernormParams& params) {
                                              m,
                                              n,
                                              stream_);
-            check_cuda_error();
+            ROCM_CHECK_ERROR();
             return LayernormOutput({std::move(norm_output), nullptr});
         } else {
             throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
         }
     }
+    if ((params.qscheme == QScheme::NoQuantize || params.qscheme == QScheme::Qfp8PerToken) && data_type != DataType::TYPE_FP32 && ((params.norm_type == NormType::layernorm && beta && !params.residual1) || (params.norm_type == NormType::rmsnorm)))
+    {
+        int fused_add = params.residual1 ? 1: 0;
+        int xbias = params.bias? 1: 0;
 
-    if (!(norm_type == NormType::layernorm || norm_type == NormType::rmsnorm)) {
-        throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+        auto input_tensor = Buffer2torchTensor(input, false);
+        auto out_tensor = Buffer2torchTensor(norm_output, false);
+        auto weight_tensor = Buffer2torchTensor(*norm_weight->get().gamma.get(), false);
+
+        if (params.norm_type == NormType::layernorm)
+        {
+            std::optional<torch::Tensor> bias_tensor;
+            if (xbias)
+                bias_tensor = Buffer2torchTensor(params.bias.value().get(), false);
+
+            auto beta_tensor = Buffer2torchTensor(*norm_weight->get().beta.get(), false);
+            if (fused_add)
+            {
+                auto residual_in_tensor = Buffer2torchTensor(params.residual1.value().get(), false);
+                auto residual_out_tensor = Buffer2torchTensor((params.before_norm_output == nullptr) ? params.input:params.before_norm_output, false);
+                layernorm2d_with_add(out_tensor, input_tensor, residual_in_tensor, residual_out_tensor, weight_tensor, beta_tensor, static_cast<double>(eps), bias_tensor);
+            }
+            else
+            {
+                auto res_tensor = layernorm2d(input_tensor, weight_tensor, beta_tensor, static_cast<double>(eps), bias_tensor);
+                copy({*norm_output, *torchTensor2Buffer(res_tensor)});
+            }
+            
+        }
+        else if(params.norm_type == NormType::rmsnorm)
+        {
+            if (fused_add)
+            {
+                auto residual_in_tensor = Buffer2torchTensor(params.residual1.value().get(), false);
+                auto residual_out_tensor = Buffer2torchTensor((params.before_norm_output == nullptr) ? params.input:params.before_norm_output, false);
+                rmsnorm2d_with_add(out_tensor, input_tensor, residual_in_tensor, residual_out_tensor, weight_tensor, static_cast<double>(eps), 0);
+            }
+            else
+            {
+                auto res_tensor = rmsnorm2d(input_tensor, weight_tensor, static_cast<double>(eps), 0);
+                copy({*norm_output, *torchTensor2Buffer(res_tensor)});
+            }    
+
+        }
+        else
+        {
+            throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+        }
     }
-
-    auto quant_data_type = (params.qscheme == QScheme::Qfp8PerTensor) ? DataType::TYPE_FP8_E4M3 : DataType::TYPE_INT8;
-
-    if (params.residual1.has_value() || params.bias.has_value()) {
-        if (params.norm_type == NormType::layernorm) {
-            if ((!params.bias.has_value()) && (data_type == DataType::TYPE_FP16 && m > 32 && n <= 768)) {
-                layernorm2d_fwd_traits traits{"fp16", "fp16", "fp32", "fp32", 0, 1, 0};
-                layernorm2d_fwd_args   args{input->data(),
-                                          params.residual1.value().get().data(),
-                                          nullptr,
-                                          nullptr,
-                                          gamma,
-                                          beta,
-
-                                          norm_output->data(),
-                                          (params.before_norm_output == nullptr) ? input->data() :
-                                                                                     params.before_norm_output->data(),
-                                          nullptr,
-                                          nullptr,  // p_mean, unsupported yet
-                                          nullptr,  // p_invStd, unsupported yet
-
-                                          static_cast<float>(eps),
-                                          static_cast<int32_t>(m),
-                                          static_cast<int32_t>(n),
-                                          static_cast<int32_t>(n),   // x row_stride
-                                          static_cast<int32_t>(n),   // x residule row stride
-                                          static_cast<int32_t>(n),   // y row stride
-                                          static_cast<int32_t>(n)};  // y residule row stride
-
-                layernorm2d_fwd(traits, args, {stream_, false, 0, 0, 1});
-            } else {
+    else
+    {
+        auto quant_data_type = (params.qscheme == QScheme::Qfp8PerTensor) ? DataType::TYPE_FP8_E4M3 : DataType::TYPE_INT8;
+        if (params.norm_type == NormType::layernorm)
+        {
+            if (params.residual1.has_value() || params.bias.has_value())
+            {
                 DISPATCH_CUDA_FUNCTION_DATA_TYPE(
                     data_type,
                     invokeGeneralAddBiasResidualLayerNorm,
@@ -245,115 +266,77 @@ LayernormOutput ROCmDevice::layernorm(const LayernormParams& params) {
                     quant_output,  // out_quant
                     params.return_normed_output);
             }
-            check_cuda_error();
-            return LayernormOutput({norm_output, params.before_norm_output});
-        } else if (params.norm_type == NormType::rmsnorm) {
-            DISPATCH_CUDA_FUNCTION_COMPUTE_QUANT_TYPES(
-                data_type,
-                quant_data_type,
-                invokeAddBiasResidualRmsNorm,
-                params.before_norm_output->data(),  // or null
-                norm_output->data(),
-                input->data(),
-                params.bias ? params.bias.value().get().data() : nullptr,
-                params.residual1 ? params.residual1.value().get().data() : nullptr,
-                params.residual2 ? params.residual2.value().get().data() : nullptr,
-                gamma,
-                beta,
-                eps,
-                m,
-                n,
-                stream_,
-                nullptr,      // scale
-                scales_ptr,   // dynamic_scale
-                quant_output  // out_quant
-            );
-            check_cuda_error();
-            return LayernormOutput({norm_output, params.before_norm_output});
-        }
-    } else {
-        if (params.norm_type == NormType::layernorm) {
-            if (data_type == DataType::TYPE_FP16 && m > 32 && n <= 768) {
-                layernorm2d_fwd_traits traits{"fp16", "fp16", "fp32", "fp32", 0, 0, 0};
-                layernorm2d_fwd_args   args{input->data(),
-                                          nullptr,
-                                          nullptr,
-                                          nullptr,
-                                          gamma,
-                                          beta,
-
-                                          norm_output->data(),
-                                          nullptr,
-                                          nullptr,
-                                          nullptr,  // p_mean, unsupported yet
-                                          nullptr,  // p_invStd, unsupported yet
-
-                                          static_cast<float>(eps),
-                                          static_cast<int32_t>(m),
-                                          static_cast<int32_t>(n),
-                                          static_cast<int32_t>(n),   // x row_stride
-                                          static_cast<int32_t>(n),   // x residule row stride
-                                          static_cast<int32_t>(n),   // y row stride
-                                          static_cast<int32_t>(n)};  // y residule row stride
-
-                layernorm2d_fwd(traits, args, {stream_, false, 0, 0, 1});
-            } else {
-                DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type,
-                                                 invokeGeneralLayerNorm,
-                                                 nullptr,
-                                                 norm_output->data(),
-                                                 input->data(),
-                                                 gamma,
-                                                 beta,
-                                                 eps,
-                                                 m,
-                                                 n,
-                                                 stream_,
-                                                 true,          // use_diff_of_squares
-                                                 nullptr,       // scale
-                                                 scales_ptr,    // dynamic_scale
-                                                 quant_output,  // out_quant
-                                                 params.return_normed_output);
-            }
-            check_cuda_error();
-            return LayernormOutput({norm_output, params.before_norm_output});
-        } else if (params.norm_type == NormType::rmsnorm) {
-            std::string prec_i;
-            if (data_type == DataType::TYPE_FP16)
-                prec_i = "fp16";
-            else if (data_type == DataType::TYPE_BF16)
-                prec_i = "bf16";
             else
-                throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
-
-            rmsnorm2d_fwd_traits traits{prec_i, prec_i, "fp32", "fp32", 0, 0, 0, 0};
-
-            rmsnorm2d_fwd_args args{input->data(),
-                                    nullptr,
-                                    nullptr,
-                                    gamma,
-                                    norm_output->data(),
-                                    nullptr,
-                                    nullptr,
-                                    nullptr,
-                                    nullptr,
-                                    static_cast<float>(eps),
-                                    static_cast<int32_t>(m),
-                                    static_cast<int32_t>(n),
-                                    static_cast<int32_t>(n),
-                                    static_cast<int32_t>(n),
-                                    static_cast<int32_t>(n),
-                                    static_cast<int32_t>(n)};
-
-            float run_time = rmsnorm2d_fwd(traits, args, {stream_, false, 0, 0, 1});
-
-            // std::cout << "rmsnorm2d_fwd run_time: " << run_time * 1.E3 << " us"<< std::endl;
-
-            check_cuda_error();
-            return LayernormOutput({norm_output, params.before_norm_output});
+            {
+                DISPATCH_CUDA_FUNCTION_DATA_TYPE(
+                    data_type,
+                    invokeGeneralLayerNorm,
+                    nullptr,
+                    norm_output->data(),
+                    input->data(),
+                    gamma,
+                    beta,
+                    eps,
+                    m,
+                    n,
+                    stream_,
+                    true,          // use_diff_of_squares
+                    nullptr,       // scale
+                    scales_ptr,    // dynamic_scale
+                    quant_output,  // out_quant
+                    params.return_normed_output);
+            }
+        }
+        else if(params.norm_type == NormType::rmsnorm)
+        {
+            if (params.residual1.has_value() || params.bias.has_value())
+            {
+                DISPATCH_CUDA_FUNCTION_COMPUTE_QUANT_TYPES(
+                    data_type,
+                    quant_data_type,
+                    invokeAddBiasResidualRmsNorm,
+                    params.before_norm_output->data(),  // or null
+                    norm_output->data(),
+                    input->data(),
+                    params.bias ? params.bias.value().get().data() : nullptr,
+                    params.residual1 ? params.residual1.value().get().data() : nullptr,
+                    params.residual2 ? params.residual2.value().get().data() : nullptr,
+                    gamma,
+                    beta,
+                    eps,
+                    m,
+                    n,
+                    stream_,
+                    nullptr,      // scale
+                    scales_ptr,   // dynamic_scale
+                    quant_output);  // out_quant
+            }
+            else
+            {
+                DISPATCH_CUDA_FUNCTION_COMPUTE_QUANT_TYPES(
+                    data_type,
+                    quant_data_type,
+                    invokeGeneralRmsNorm,
+                    norm_output->data(),
+                    input->data(),
+                    gamma,
+                    beta,
+                    eps,
+                    m,
+                    n,
+                    stream_,
+                    nullptr,      // scale
+                    scales_ptr,   // dynamic_scale
+                    quant_output);  // out_quant
+            }
+        }
+        else
+        {
+            throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
         }
     }
-    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+    ROCM_CHECK_ERROR();
+    return LayernormOutput({norm_output, params.before_norm_output});
 }
 
 #define ARGS_DISPATCH(Atype, Dtype, out, bias, gate, gate_bias, m, n, stream)                                          \

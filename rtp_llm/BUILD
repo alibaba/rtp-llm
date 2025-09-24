@@ -435,7 +435,7 @@ py_library(
             ":async_model",
             ":embedding",
             "//rtp_llm/tools/convert:convert",
-            ":aiter",
+            "@patched_aiter//:pkg",
         ],
         "//conditions:default": [
             ":models",

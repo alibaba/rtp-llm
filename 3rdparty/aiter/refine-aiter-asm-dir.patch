@@ -1,0 +1,47 @@
+diff --git a/aiter/jit/core.py b/aiter/jit/core.py
+index 712feea0..012db7e6 100644
+--- a/aiter/jit/core.py
++++ b/aiter/jit/core.py
+@@ -62,35 +62,19 @@ this_dir = os.path.dirname(os.path.abspath(__file__))
+ AITER_ROOT_DIR = os.path.abspath(f"{this_dir}/../../")
+ AITER_LOG_MORE = int(os.getenv("AITER_LOG_MORE", 0))
+ 
+-find_aiter = importlib.util.find_spec("aiter")
+-if find_aiter is not None:
+-    if find_aiter.submodule_search_locations:
+-        package_path = find_aiter.submodule_search_locations[0]
+-    elif find_aiter.origin:
+-        package_path = find_aiter.origin
+-    package_path = os.path.dirname(package_path)
+-    package_parent_path = os.path.dirname(package_path)
+-    import site
+-
+-    site_packages_dirs = site.getsitepackages()
+-    # develop mode
+-    isDevelopMode = (package_path not in site_packages_dirs) and (
+-        package_parent_path not in site_packages_dirs
+-    )
+-    if isDevelopMode:
+-        AITER_META_DIR = AITER_ROOT_DIR
+-    # install mode
+-    else:
+-        AITER_META_DIR = os.path.abspath(f"{AITER_ROOT_DIR}/aiter_meta/")
++meta_path = os.path.abspath(f"{AITER_ROOT_DIR}/aiter_meta")
++if os.path.exists(meta_path):
++    AITER_META_DIR = meta_path
+ else:
+-    AITER_META_DIR = AITER_ROOT_DIR
+-    logger.warning("aiter is not installed.")
++    AITER_META_DIR = os.path.abspath(AITER_ROOT_DIR)
++
+ sys.path.insert(0, AITER_META_DIR)
+ AITER_CSRC_DIR = f"{AITER_META_DIR}/csrc"
+ AITER_GRADLIB_DIR = f"{AITER_META_DIR}/gradlib"
+ gfx = get_gfx()
+ AITER_ASM_DIR = f"{AITER_META_DIR}/hsa/{gfx}/"
+-os.environ["AITER_ASM_DIR"] = AITER_ASM_DIR
++if "AITER_ASM_DIR" not in os.environ:
++    os.environ["AITER_ASM_DIR"] = AITER_ASM_DIR
+ CK_3RDPARTY_DIR = os.environ.get(
+     "CK_DIR", f"{AITER_META_DIR}/3rdparty/composable_kernel"
+ )

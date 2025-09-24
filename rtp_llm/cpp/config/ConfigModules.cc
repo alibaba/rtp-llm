@@ -174,9 +174,11 @@ void HWKernelConfig::update_from_env_for_test() {
     enable_multi_block_mode      = bool_from_env_for_test("ENABLE_MULTI_BLOCK_MODE", true);
     ft_disable_custom_ar         = bool_from_env_for_test("FT_DISABLE_CUSTOM_AR", true);
     rocm_hipblaslt_config        = autil::EnvUtil::getEnv("ROCM_HIPBLASLT_CONFIG", "gemm_config.csv");
+    use_swizzleA                 = bool_from_env_for_test("USE_SWIZZLEA", false);
     enable_cuda_graph            = bool_from_env_for_test("ENABLE_CUDA_GRAPH", false);
     enable_cuda_graph_debug_mode = bool_from_env_for_test("ENABLE_CUDA_GRAPH_DEBUG_MODE", false);
     use_aiter_pa                 = bool_from_env_for_test("USE_AITER_PA", true);
+    use_asm_pa                   = bool_from_env_for_test("USE_ASM_PA", true);
     enable_native_cuda_graph     = bool_from_env_for_test("ENABLE_NATIVE_CUDA_GRAPH", false);
     num_native_cuda_graph        = autil::EnvUtil::getEnv("NUM_NATIVE_CUDA_GRAPH", 200);
 }
@@ -189,9 +191,11 @@ std::string HWKernelConfig::to_string() const {
         << "enable_multi_block_mode: " << enable_multi_block_mode << "\n"
         << "ft_disable_custom_ar: " << ft_disable_custom_ar << "\n"
         << "rocm_hipblaslt_config: " << rocm_hipblaslt_config << "\n"
+        << "use_swizzleA: " << use_swizzleA << "\n"
         << "enable_cuda_graph: " << enable_cuda_graph << "\n"
         << "enable_cuda_graph_debug_mode" << enable_cuda_graph_debug_mode << "\n"
-        << "use_aiter_pa" << use_aiter_pa << "\n"
+        << "use_aiter_pa: " << use_aiter_pa << "\n"
+        << "use_asm_pa: " << use_asm_pa << "\n"
         << "enable_native_cuda_graph" << enable_native_cuda_graph << "\n"
         << "num_native_cuda_graph" << num_native_cuda_graph << "\n";
     return oss.str();
