@@ -41,7 +41,7 @@ private:
         return HIP_IPC_HANDLE_SIZE * world_size;
     }
 
-    std::vector<std::string>
+    std::vector<torch::Tensor>
     prepareP2PBuffer_(const NcclParam& nccl_para, torch::Tensor& local_buffer, hipStream_t stream);
 
     const size_t        rank_               = 0;

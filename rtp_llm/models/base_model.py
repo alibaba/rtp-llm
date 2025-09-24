@@ -145,6 +145,7 @@ class BaseModel(object):
     ) -> "BaseModel":
         model = cls(config)
         model.load(parallel_info)
+        model.postprocess_weights()
         return model
 
     @staticmethod
@@ -294,3 +295,6 @@ class BaseModel(object):
     @staticmethod
     def eval_model_param_count(config: GptInitModelParameters):
         return config.model_param_count
+
+    def postprocess_weights(self):
+        pass
