@@ -3,7 +3,6 @@
 #include "rtp_llm/cpp/kernels/rmsnormKernels.h"
 #include "rtp_llm/cpp/kernels/rocm/layernorm_kernels.h"
 #include "rtp_llm/cpp/kernels/add_residual_kernels.h"
-#include "rtp_llm/cpp/kernels/alpha_layernorm_kernels.h"
 #include "rtp_llm/cpp/devices/base_tests/LayerNormTest.hpp"
 
 #include <torch/torch.h>
