@@ -1,0 +1,187 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: RTP-LLM 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-24 14:39+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../benchmark/benchmark.md:1
+msgid "RTP-LLM Performance Benchmark Tool"
+msgstr ""
+
+#: ../../benchmark/benchmark.md:2
+msgid ""
+"In this chapter, I will present the performance testing tools developed "
+"in RTP-LLM, including standalone measurement of model prefill and decode "
+"performance under various batch sizes with single-node and multi-node "
+"parallelism, timeline recording, and their usage methods."
+msgstr ""
+
+#: ../../benchmark/benchmark.md:3
+msgid "Design Principle"
+msgstr ""
+
+#: ../../benchmark/benchmark.md:4
+msgid ""
+"RTP-LLM employs a special batch scheduler that accumulates requests until"
+" the specified batch size is reached, then all requests enter the engine "
+"simultaneously. The scheduler supports both prefill and decode modes; in "
+"decode mode, requests are only allocated KV cache without prefill, "
+"enabling accurate and efficient measurement of engine performance. In "
+"detail, the batch-scheduler profiler is executed three times for a single"
+" input:"
+msgstr ""
+
+#: ../../benchmark/benchmark.md:6
+msgid "Warm-up run, to account for one-time setup such as JIT compilation."
+msgstr ""
+
+#: ../../benchmark/benchmark.md:7
+msgid "Timing run, to measure engine performance."
+msgstr ""
+
+#: ../../benchmark/benchmark.md:8
+msgid ""
+"Profiling run, to capture a timeline for subsequent analysis; this step "
+"may degrade end-to-end performance."
+msgstr ""
+
+#: ../../benchmark/benchmark.md:10
+msgid ""
+"For every run we use min_new_tokens and max_new_tokens to ensure that all"
+" requests perform the same number of decode steps."
+msgstr ""
+
+#: ../../benchmark/benchmark.md:12
+msgid ""
+"Since in decode mode, we not prefill the KVCache, so hidden_states after "
+"every forward step is not real. So we also hack moe gate select for moe "
+"model and speculative accept func for mtp. In that way, we get stable "
+"result for analyse result."
+msgstr ""
+
+#: ../../benchmark/benchmark.md:13
+msgid "Single-Node Benchmark"
+msgstr ""
+
+#: ../../benchmark/benchmark.md:14
+msgid ""
+"using commands below can start a performance benchmark, mixed prefill and"
+" decode"
+msgstr ""
+
+#: ../../benchmark/benchmark.md:27
+msgid ""
+"specially `batch_size` states for the batch in single DP node, when "
+"`DP_SIZE` param is setted."
+msgstr ""
+
+#: ../../benchmark/benchmark.md:29
+#, python-brace-format
+msgid ""
+"also we support test prefill or decode only when prefill and decode not "
+"share the same config(such as prefill use deepep normal, and decode use "
+"deepep masked), in that case user should also set "
+"`--partial={0:all(default), 1:decode, 2:prefill}`, below is an example of"
+" testing decode only:"
+msgstr ""
+
+#: ../../benchmark/benchmark.md:33
+msgid "Multi Node Benchmark"
+msgstr ""
+
+#: ../../benchmark/benchmark.md:34
+msgid ""
+"We also provide a Python script to enable multi-node benchmark, but since"
+" it requires setting up the environment and starting the script on "
+"multiple machines, it still involves more steps than single-node testing."
+msgstr ""
+
+#: ../../benchmark/benchmark.md:36
+msgid ""
+"For each machine to be tested, you need to create an environment in which"
+" RTP-LLM can run and support passwordless SSH access from the current "
+"machine’s port."
+msgstr ""
+
+#: ../../benchmark/benchmark.md:37
+msgid "Benchmark Yaml"
+msgstr ""
+
+#: ../../benchmark/benchmark.md:38
+msgid ""
+"Configure the parameters with reference to "
+"`rtp_llm/test/perf_test/multi_node/multi_benchmark_config.yaml`. Below is"
+" the detail explaination of yaml structure."
+msgstr ""
+
+#: ../../benchmark/benchmark.md:40
+msgid ""
+"First part is for cloning code to local in ssh machine, and checkout to "
+"the branch you need to test"
+msgstr ""
+
+#: ../../benchmark/benchmark.md:48
+msgid "Second part describe the machine list, user name and port to ssh"
+msgstr ""
+
+#: ../../benchmark/benchmark.md:60
+msgid ""
+"Third part describe the model info which should be pre-download to local "
+"machine"
+msgstr ""
+
+#: ../../benchmark/benchmark.md:66
+msgid ""
+"Fourth part describe the test cases, including prefill/decode, batch_size"
+" and input_len(they will be used as Cartesian product).Specially, tp_size"
+" and dp_size len should be equal as each tuple of them will be started as"
+" a parallel config. For example, in below config, script will start three"
+" server with `TP=1 DP=32`, `TP=2 DP=16`, `TP=4 DP=8` and benchmark"
+msgstr ""
+
+#: ../../benchmark/benchmark.md:75
+msgid ""
+"bazel_build_args is the flag for bazelisk build, if you want to test in "
+"AMD card, change `--config=rocm`"
+msgstr ""
+
+#: ../../benchmark/benchmark.md:82
+msgid ""
+"last part is the model env config, be careful that all env configs type "
+"should in `[int, float, string, bool]`, or there maybe unexpected error"
+msgstr ""
+
+#: ../../benchmark/benchmark.md:104
+msgid "Run step"
+msgstr ""
+
+#: ../../benchmark/benchmark.md:116
+msgid ""
+"Also, multi-node benchmark dumps profile json in rank0, but currently we "
+"don't scp dir to local yet. So please go to rank0 and get profile data "
+"manually before clean step"
+msgstr ""
+
+#: ../../benchmark/benchmark.md:118
+msgid "Result Format"
+msgstr ""
+
+#: ../../benchmark/benchmark.md:119
+msgid "Decode result, where batch size stands for per DP Rank"
+msgstr ""
+

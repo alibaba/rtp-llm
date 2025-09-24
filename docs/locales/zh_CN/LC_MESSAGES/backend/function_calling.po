@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-12 17:38+0800\n"
+"POT-Creation-Date: 2025-09-24 14:39+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -28,7 +28,9 @@ msgid ""
 "This guide demonstrates how to use RTP-LLM’s `Function calling "
 "<https://platform.openai.com/docs/guides/function-calling>`__ "
 "functionality."
-msgstr "本指南演示如何使用RTP-LLM的`函数调用<https://platform.openai.com/docs/guides/function-calling>`__功能。"
+msgstr ""
+"本指南演示如何使用RTP-LLM的`函数调用<https://platform.openai.com/docs/guides/function-"
+"calling>`__功能。"
 
 #: ../../backend/function_calling.ipynb:23
 msgid "OpenAI Compatible API"
@@ -44,10 +46,13 @@ msgstr "目前，RTP-LLM支持以下模型的函数调用功能："
 msgid ""
 "qwen25/qwen3: Qwen 2.5 (e.g. Qwen/Qwen2.5-1.5B-Instruct, Qwen/Qwen2.5-7B-"
 "Instruct) and QwQ (i.e. Qwen/QwQ-32B), Qwen3-235B-A22B, etc."
-msgstr "qwen25/qwen3：Qwen 2.5（例如 Qwen/Qwen2.5-1.5B-Instruct、Qwen/Qwen2.5-7B-Instruct）和 QwQ（即 Qwen/QwQ-32B）、Qwen3-235B-A22B 等。"
+msgstr ""
+"qwen25/qwen3：Qwen 2.5（例如 Qwen/Qwen2.5-1.5B-Instruct、Qwen/Qwen2.5-7B-"
+"Instruct）和 QwQ（即 Qwen/QwQ-32B）、Qwen3-235B-A22B 等。"
 
 #: ../../backend/function_calling.ipynb:37
-msgid "Kimi_k2"
+#, fuzzy
+msgid "Kimi\\_k2"
 msgstr "Kimi_k2"
 
 #: ../../backend/function_calling.ipynb:38
