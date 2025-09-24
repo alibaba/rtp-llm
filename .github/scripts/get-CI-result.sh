@@ -98,5 +98,5 @@ while true; do
         break
     fi
 
-    sleep 5
+    sleep 120
 done
