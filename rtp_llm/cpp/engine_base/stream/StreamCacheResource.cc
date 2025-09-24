@@ -159,8 +159,7 @@ absl::StatusOr<int> StreamCacheResource::initKVBlock(int token_capacity, size_t 
     }
 
     auto res = incrKVBlock(token_capacity, reserve_step);
-    if (reuseCache()
-        && !stream_->calculateLoss()) {  // 如果开启query内部reuse cache，在insert cache的时候还不知道loss，无法复用
+    if (reuseQueryCache()) {  // 如果开启query内部reuse cache，在insert cache的时候还不知道loss，无法复用
         insertIntoCache();
     }
     return res;
@@ -449,6 +448,12 @@ int StreamCacheResource::mallocFailedTimes() const {
 
 bool StreamCacheResource::reuseCache() const {
     return resource_context_.reuse_cache && stream_->reuseCache();
+}
+
+bool StreamCacheResource::reuseQueryCache() const {
+    RTP_LLM_LOG_INFO("resource_context_.reuse_query_cache: %d", resource_context_.reuse_query_cache);
+    return reuseCache() && resource_context_.reuse_query_cache && !stream_->calculateLoss();
+    // 如果开启query内部reuse cache，在insert cache的时候还不知道loss，无法复用
 }
 
 bool StreamCacheResource::enable3FS() const {

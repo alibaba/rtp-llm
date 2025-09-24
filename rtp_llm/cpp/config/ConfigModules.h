@@ -41,6 +41,7 @@ struct FMHAConfig {
 
 struct KVCacheConfig {
     bool        reuse_cache              = false;
+    bool        reuse_query_cache        = false;
     std::string multi_task_prompt        = "";
     std::string multi_task_prompt_str    = "";
     bool        enable_3fs               = false;
