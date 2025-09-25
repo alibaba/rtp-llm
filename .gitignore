@@ -3,6 +3,7 @@
 *.mo
 *build*/
 __pycache__/
+.doctrees/
 .vscode
 .idea
 ./translation
