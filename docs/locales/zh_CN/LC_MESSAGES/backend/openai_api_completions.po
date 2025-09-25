@@ -53,7 +53,7 @@ msgstr "在终端中启动服务器并等待其初始化完成。"
 
 #: ../../backend/openai_api_completions.ipynb:31
 #, fuzzy
-msgid "export CUDA\\_VISIBLE\\_DEVICES=1"
+msgid "export CUDA_VISIBLE_DEVICES=1"
 msgstr "export CUDA_VISIBLE_DEVICES=1"
 
 #: ../../backend/openai_api_completions.ipynb:62

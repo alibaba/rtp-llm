@@ -86,7 +86,7 @@ msgstr "默认值"
 
 #: ../../backend/pd_disaggregation.ipynb:131
 #, fuzzy
-msgid "**PREFILL\\_RETRY\\_TIMES**"
+msgid "**PREFILL_RETRY_TIMES**"
 msgstr "**PREFILL_RETRY_TIMES**"
 
 #: ../../backend/pd_disaggregation.ipynb:131
@@ -100,7 +100,7 @@ msgstr "``0``"
 
 #: ../../backend/pd_disaggregation.ipynb:133
 #, fuzzy
-msgid "**PREFILL\\_RETRY\\_TIMEOUT\\_MS**"
+msgid "**PREFILL_RETRY_TIMEOUT_MS**"
 msgstr "**PREFILL_RETRY_TIMEOUT_MS**"
 
 #: ../../backend/pd_disaggregation.ipynb:133
@@ -109,7 +109,7 @@ msgstr "预填充重试的总超时时间（毫秒）"
 
 #: ../../backend/pd_disaggregation.ipynb:135
 #, fuzzy
-msgid "**PREFILL\\_MAX\\_WAIT\\_TIMEOUT\\_MS**"
+msgid "**PREFILL_MAX_WAIT_TIMEOUT_MS**"
 msgstr "**PREFILL_MAX_WAIT_TIMEOUT_MS**"
 
 #: ../../backend/pd_disaggregation.ipynb:135
@@ -122,7 +122,7 @@ msgstr "``600000``"
 
 #: ../../backend/pd_disaggregation.ipynb:137
 #, fuzzy
-msgid "**LOAD\\_CACHE\\_TIMEOUT\\_MS**"
+msgid "**LOAD_CACHE_TIMEOUT_MS**"
 msgstr "**LOAD_CACHE_TIMEOUT_MS**"
 
 #: ../../backend/pd_disaggregation.ipynb:137
@@ -136,7 +136,7 @@ msgstr "``5000``"
 
 #: ../../backend/pd_disaggregation.ipynb:139
 #, fuzzy
-msgid "**DECODE\\_RETRY\\_TIMES**"
+msgid "**DECODE_RETRY_TIMES**"
 msgstr "**DECODE_RETRY_TIMES**"
 
 #: ../../backend/pd_disaggregation.ipynb:139
@@ -150,7 +150,7 @@ msgstr "``100``"
 
 #: ../../backend/pd_disaggregation.ipynb:141
 #, fuzzy
-msgid "**DECODE\\_RETRY\\_TIMEOUT\\_MS**"
+msgid "**DECODE_RETRY_TIMEOUT_MS**"
 msgstr "**DECODE_RETRY_TIMEOUT_MS**"
 
 #: ../../backend/pd_disaggregation.ipynb:141
@@ -159,7 +159,7 @@ msgstr "解码过程重试的总超时时间（毫秒）"
 
 #: ../../backend/pd_disaggregation.ipynb:143
 #, fuzzy
-msgid "**RDMA\\_CONNECT\\_RETRY\\_TIMES**"
+msgid "**RDMA_CONNECT_RETRY_TIMES**"
 msgstr "**RDMA_CONNECT_RETRY_TIMES**"
 
 #: ../../backend/pd_disaggregation.ipynb:143
@@ -168,7 +168,7 @@ msgstr "RDMA连接建立的重试次数"
 
 #: ../../backend/pd_disaggregation.ipynb:145
 #, fuzzy
-msgid "**DECODE\\_POLLING\\_KV\\_CACHE\\_STEP\\_MS**"
+msgid "**DECODE_POLLING_KV_CACHE_STEP_MS**"
 msgstr "**DECODE_POLLING_KV_CACHE_STEP_MS**"
 
 #: ../../backend/pd_disaggregation.ipynb:145
@@ -181,7 +181,7 @@ msgstr "``30``"
 
 #: ../../backend/pd_disaggregation.ipynb:147
 #, fuzzy
-msgid "**DECODE\\_ENTRANCE**"
+msgid "**DECODE_ENTRANCE**"
 msgstr "**DECODE_ENTRANCE**"
 
 #: ../../backend/pd_disaggregation.ipynb:147
@@ -194,7 +194,7 @@ msgstr "``false``"
 
 #: ../../backend/pd_disaggregation.ipynb:149
 #, fuzzy
-msgid "**LOAD\\_BALANCE\\_POLICY\\_NAME**"
+msgid "**LOAD_BALANCE_POLICY_NAME**"
 msgstr "**LOAD_BALANCE_POLICY_NAME**"
 
 #: ../../backend/pd_disaggregation.ipynb:149
@@ -207,7 +207,7 @@ msgstr "``RR``"
 
 #: ../../backend/pd_disaggregation.ipynb:151
 #, fuzzy
-msgid "**SYNC\\_STATUS\\_INTERVAL\\_MS**"
+msgid "**SYNC_STATUS_INTERVAL_MS**"
 msgstr "**SYNC_STATUS_INTERVAL_MS**"
 
 #: ../../backend/pd_disaggregation.ipynb:151
