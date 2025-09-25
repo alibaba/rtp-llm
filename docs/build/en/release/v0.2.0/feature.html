@@ -51,13 +51,14 @@
     <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
     <script>DOCUMENTATION_OPTIONS.pagename = 'release/v0.2.0/feature';</script>
     <script src="../../_static/js/language-switcher.js?v=d38991ab"></script>
+    <link rel="icon" href="../../_static/logo.ico"/>
     <link rel="index" title="Index" href="../../genindex.html" />
     <link rel="search" title="Search" href="../../search.html" />
     <link rel="next" title="package" href="package.html" />
     <link rel="prev" title="RTP-LLM 0.2.0" href="release.html" /> 
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
-    <meta name="docbuild:last-update" content="Sep 17, 2025"/>
+    <meta name="docbuild:last-update" content="Sep 25, 2025"/>
 <link
   rel="stylesheet"
   href="../../_static/css/language-switcher.css"
@@ -223,6 +224,14 @@
 <li class="toctree-l1"><a class="reference internal" href="../../backend/quantization.html">Quantization</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../backend/lora.html">LoRA Serving</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../backend/pd_disaggregation.html">PD Disaggregation</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">RTP-LLM Router</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../../backend/flexlb.html">FlexLB (Flexible Load Balancer) - Master Role</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Benchmark</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../../benchmark/benchmark.html">RTP-LLM Performance Benchmark Tool</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">References</span></p>
 <ul class="nav bd-sidenav">
@@ -488,14 +497,14 @@ document.write(`
 <section id="framkework-advanced-feature">
 <h2>Framkework  Advanced Feature<a class="headerlink" href="#framkework-advanced-feature" title="Link to this heading">#</a></h2>
 <ul class="simple">
-<li><p><a class="reference internal" href="#../../backend/pd_disaggregation.md"><span class="xref myst">PD Disaggregation</span></a> &amp;&amp; <a class="reference internal" href="#../../backend/pd_entrace_transpose.md"><span class="xref myst">PD Entrance Transpose</span></a></p></li>
+<li><p><a class="reference internal" href="../../backend/pd_disaggregation.html"><span class="std std-doc">PD Disaggregation</span></a> &amp;&amp; <a class="reference internal" href="../../backend/pd_entrance_transpose.html"><span class="std std-doc">PD Entrance Transpose</span></a></p></li>
 <li><p><a class="reference internal" href="../../backend/attention_backend.html"><span class="std std-doc">Attention Support more Backend</span></a>: XQA, FlashInfer</p></li>
 <li><p><a class="reference internal" href="../../backend/speculative_decoding.html"><span class="std std-doc">Speculative Decoding</span></a></p></li>
 <li><p><a class="reference internal" href="../../references/deepseek/reporter.html#eplb"><span class="std std-ref">EPLB</span></a></p></li>
 <li><p><a class="reference internal" href="../../references/deepseek/reporter.html#microbatch-overlapping"><span class="std std-ref">MicroBatch &amp; Overlapping</span></a></p></li>
 <li><p><a class="reference internal" href="../../references/deepseek/reporter.html#mtp"><span class="std std-ref">MTP</span></a></p></li>
 <li><p><a class="reference internal" href="../../references/deepseek/reporter.html#deepep-network"><span class="std std-ref">DeepEP</span></a></p></li>
-<li><p><a class="reference internal" href="#../../backend/flexlb.md"><span class="xref myst">LoadBalance</span></a></p></li>
+<li><p><a class="reference internal" href="../../backend/flexlb.html"><span class="std std-doc">LoadBalance</span></a></p></li>
 <li><p><a class="reference internal" href="../../backend/3fs.html"><span class="std std-doc">3FS</span></a></p></li>
 <li><p><a class="reference internal" href="../../backend/KvCache.html"><span class="std std-doc">FP8 KVCache</span></a></p></li>
 <li><p><a class="reference internal" href="../../backend/reuse_kv_cache.html"><span class="std std-doc">REUSE KV CACHE</span></a></p></li>
@@ -655,7 +664,7 @@ By RTP-LLM Team
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Sep 17, 2025.
+  Last updated on Sep 25, 2025.
   <br/>
 </p>
   </div>

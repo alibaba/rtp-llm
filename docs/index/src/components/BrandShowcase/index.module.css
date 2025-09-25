@@ -1,0 +1,324 @@
+.mainSection {
+  width: 100%;
+  height: auto;
+  min-height: 1210px;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  z-index: 0;
+}
+
+.backgroundImage {
+  width: 100%;
+  height: 1300px;
+  object-fit: cover;
+}
+
+.contentOverlay {
+  overflow: hidden;
+  width: 100%;
+  height: auto;
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  left: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  box-sizing: border-box;
+  justify-content: flex-start;
+}
+
+/* AI Models Section Styles */
+.aiModelsSection {
+  position: relative;
+  width: 100%;
+  padding-bottom: 224px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  z-index: 2;
+  overflow: hidden;
+}
+
+.aiModelsHeader {
+  width: 560px;
+  max-width: 90%;
+  height: 100px;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  margin-bottom: 60px;
+}
+
+.aiModelsIcon {
+  width: 100px;
+  height: 100px;
+  flex-shrink: 0;
+}
+
+.aiModelsHeaderText {
+  width: 436px;
+  height: 57px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin-left: 24px;
+  margin-top: 27px;
+}
+
+.aiModelsTitle {
+  font-size: 24px;
+  font-weight: 600;
+  line-height: 30px;
+  color: #FFFFFF;
+  white-space: nowrap;
+  text-align: center;
+}
+
+.aiModelsDivider {
+  opacity: 0.4;
+  background: linear-gradient(90deg, #FFFFFF00, #FFFFFF80 50%, #FFFFFF00);
+  width: 436px;
+  height: 1px;
+  margin-top: 26px;
+}
+
+.aiModelsRowsContainer {
+  width: 100vw;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  position: relative;
+}
+
+/* 添加渐变遮罩效果到 ai-models-rows-container */
+.aiModelsRowsContainer::before,
+.aiModelsRowsContainer::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  width: 100px;
+  height: 100%;
+  z-index: 10;
+  pointer-events: none;
+}
+
+.aiModelsRowsContainer::before {
+  left: 0;
+  background: linear-gradient(90deg, #14161A 0%, transparent 100%);
+}
+
+.aiModelsRowsContainer::after {
+  right: 0;
+  background: linear-gradient(270deg, #14161A 0%, transparent 100%);
+}
+
+.aiModelCard {
+  border-radius: 20px;
+  background: 
+    linear-gradient(90deg, rgba(0, 0, 0, 0.5) 0%, rgba(0, 0, 0, 0) 100%) padding-box,
+    linear-gradient(90deg, rgba(0, 0, 0, 0.2) -1%, rgba(0, 0, 0, 0.08) 100%) border-box;
+  border: 5px solid transparent;
+  width: 370px;
+  height: 124px;
+  display: flex;
+  flex-direction: column;
+  padding: 20px;
+  box-sizing: border-box;
+  justify-content: center;
+  flex-shrink: 0;
+  backdrop-filter: blur(10px);
+  transition: transform 0.3s ease, box-shadow 0.3s ease;
+  background-clip: padding-box, border-box;
+  background-origin: padding-box, border-box;
+}
+
+.aiModelHeader {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.aiModelLogo {
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+}
+
+.aiModelName {
+  font-family: 阿里巴巴普惠体, AlibabaPuHuiTi, sans-serif;
+  font-size: 18px;
+  font-weight: 500;
+  line-height: 24px;
+  letter-spacing: normal;
+  background: linear-gradient(180deg, #FFFFFF 0%, rgba(255, 255, 255, 0.5) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  text-fill-color: transparent;
+  margin-left: 8px;
+}
+
+.aiModelDescription {
+  font-family: AlibabaPuHuiTi, sans-serif;
+  font-size: 12px;
+  font-weight: normal;
+  line-height: 18px;
+  letter-spacing: normal;
+  background: linear-gradient(180deg, #FFFFFF 0%, rgba(255, 255, 255, 0.5) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  width: 330px;
+  height: 36px;
+  max-width: 100%;
+}
+
+/* Global scroll container styles for AI models */
+:global(.ai-models-scroll-container) {
+  width: 100%;
+  overflow: hidden;
+  position: relative;
+}
+
+:global(.ai-models-scroll-content) {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 20px;
+  padding: 0 20px;
+  width: max-content;
+}
+
+:global(.ai-models-scroll-content.offset) {
+  /* 下行向左偏移半个卡片宽度实现错位效果 */
+  margin-left: -195px;
+}
+
+.dividerLine {
+  opacity: 0.8;
+  border: 2px solid;
+  border-image: linear-gradient(270deg, #D8D8D800, #D8D8D833 54%, #D8D8D800) 2;
+  width: 100%;
+  max-width: 1440px;
+  height: 0px;
+  margin: 0;
+}
+
+.brandRow1 {
+  width: 100%;
+  max-width: 1120px;
+  height: 56px;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  margin: 32px auto;
+  padding: 0 20px;
+  box-sizing: border-box;
+}
+
+.brandLogo {
+  width: 160px;
+  height: 56px;
+  flex-shrink: 0;
+}
+
+.centerSection {
+  width: 100%;
+  max-width: 1440px;
+  height: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin: 32px auto;
+}
+
+.centerText {
+  font-family: Inter, sans-serif;
+  font-size: 34px;
+  font-weight: 500;
+  line-height: 40px;
+  text-align: center;
+  letter-spacing: normal;
+  background: linear-gradient(180deg, #FFFFFF 0%, rgba(255, 255, 255, 0.4) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  text-fill-color: transparent;
+  max-width: 915px;
+  margin: 70px auto;
+  padding: 0 20px;
+}
+
+.brandRow2 {
+  width: 100%;
+  max-width: 960px;
+  height: 56px;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  margin: 32px auto;
+  padding: 0 20px;
+  box-sizing: border-box;
+}
+
+@media (max-width: 768px) {
+  .aiModelsSection {
+    padding: 60px 0;
+  }
+  
+  .aiModelsHeader {
+    flex-direction: column;
+    height: auto;
+    text-align: center;
+    margin-bottom: 40px;
+  }
+  
+  .aiModelsHeaderText {
+    margin-left: 0;
+    margin-top: 20px;
+  }
+  
+  .aiModelsTitle {
+    white-space: normal;
+  }
+  
+  .aiModelsDivider {
+    width: 100%;
+  }
+  
+  .aiModelsRowsContainer {
+    gap: 15px;
+  }
+  
+  :global(.ai-models-scroll-content.offset) {
+    margin-left: -150px;
+  }
+  
+  .aiModelCard {
+    width: 300px;
+    height: 100px;
+    padding: 15px;
+  }
+  
+  .aiModelHeader {
+    width: auto;
+    margin-bottom: 8px;
+  }
+  
+  .aiModelName {
+    width: auto;
+    max-width: 200px;
+  }
+  
+  .aiModelDescription {
+    width: 100%;
+    height: auto;
+  }
+}
