@@ -566,7 +566,7 @@ class RocmImpl(GpuImpl):
         return x_
 
     def swizzle_gemm_weight(self, src: torch.Tensor, col_maj: bool = False) -> torch.Tensor:
-        src = swizzle_tensor(src, False)
+        src = swizzle_tensor(src, col_maj)
         return src
 
     def convert_fp8_weight_params(
