@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-24 14:39+0800\n"
+"POT-Creation-Date: 2025-09-19 11:21+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -154,6 +154,238 @@ msgid ""
 "RTP-LL Runtime also supports classify models. Here we use a classify "
 "model to classify the quality of pairwise generations."
 msgstr "RTP-LL运行时还支持分类模型。这里我们使用分类模型对成对生成的质量进行分类。"
+
+#~ msgid "method_name"
+#~ msgstr "方法名"
+
+#~ msgid "example_request"
+#~ msgstr "请求示例"
+
+#~ msgid "is_post"
+#~ msgstr "是否POST"
+
+#~ msgid "is_get"
+#~ msgstr "是否GET"
+
+#~ msgid "desc"
+#~ msgstr "描述"
+
+#~ msgid "``/``"
+#~ msgstr "``/``"
+
+#~ msgid ""
+#~ "``{\"prompt\": \"Hello\", \"generate_config\": "
+#~ "{\"max_new_tokens\": 10, \"top_k\": 1, "
+#~ "\"top_p\": 0}}``"
+#~ msgstr ""
+#~ "``{\"prompt\": \"Hello\", \"generate_config\": "
+#~ "{\"max_new_tokens\": 10, \"top_k\": 1, "
+#~ "\"top_p\": 0}}``"
+
+#~ msgid "✅"
+#~ msgstr "✅"
+
+#~ msgid "❌"
+#~ msgstr "❌"
+
+#~ msgid ""
+#~ "Basic text-generation endpoint (backward-"
+#~ "compatible with early versions)."
+#~ msgstr "基本文本生成端点（向后兼容早期版本）。"
+
+#~ msgid "``/chat/render``"
+#~ msgstr "``/chat/render``"
+
+#~ msgid "``{\"messages\": [{\"role\": \"user\",\"content\": \"hello？\"}]}``"
+#~ msgstr "``{\"messages\": [{\"role\": \"user\",\"content\": \"hello？\"}]}``"
+
+#~ msgid ""
+#~ "Render the chat template into the "
+#~ "final prompt that will be sent to"
+#~ " the model."
+#~ msgstr "将聊天模板渲染成将发送给模型的最终提示。"
+
+#~ msgid "``/v1/chat/render``"
+#~ msgstr "``/v1/chat/render``"
+
+#~ msgid "v1 path for ``/chat/render`` (POST only)."
+#~ msgstr "``/chat/render``的v1路径（仅POST）。"
+
+#~ msgid "``/tokenizer/encode``"
+#~ msgstr "``/tokenizer/encode``"
+
+#~ msgid "``{\"prompt\": \"hello\"}``"
+#~ msgstr ""
+
+#~ msgid "Encode text into a list of token IDs using the internal tokenizer."
+#~ msgstr "使用内部tokenizer将文本编码成token ID列表。"
+
+#~ msgid "``/tokenize``"
+#~ msgstr "``/tokenize``"
+
+#~ msgid "Lightweight tokenization endpoint that returns an array of tokens."
+#~ msgstr "轻量级tokenization端点，返回token数组。"
+
+#~ msgid "``/rtp_llm/worker_status``"
+#~ msgstr "``/rtp_llm/worker_status``"
+
+#~ msgid "``{ \"latest_cache_version\": -1}``"
+#~ msgstr ""
+
+#~ msgid "Detailed status of a worker in the RTP-LLM framework."
+#~ msgstr "RTP-LLM框架中worker的详细状态。"
+
+#~ msgid "``/worker_status``"
+#~ msgstr "``/worker_status``"
+
+#~ msgid "Query runtime status of the inference worker."
+#~ msgstr "查询推理worker的运行时状态。"
+
+#~ msgid "``/health``"
+#~ msgstr "``/health``"
+
+#~ msgid "``{}``"
+#~ msgstr ""
+
+#~ msgid "Generic health check; returns whether the service is alive."
+#~ msgstr "通用健康检查；返回服务是否存活。"
+
+#~ msgid "``/status``"
+#~ msgstr "``/status``"
+
+#~ msgid ""
+#~ "Retrieve comprehensive status information for"
+#~ " the current service instance."
+#~ msgstr "获取当前服务实例的全面状态信息。"
+
+#~ msgid "``/health_check``"
+#~ msgstr "``/health_check``"
+
+#~ msgid "``{\"latest_cache_version\": -1}``"
+#~ msgstr ""
+
+#~ msgid "Deep health check that includes a cache version number."
+#~ msgstr "深度健康检查，包含缓存版本号。"
+
+#~ msgid "``/update``"
+#~ msgstr "``/update``"
+
+#~ msgid ""
+#~ "``{\"peft_info\": {\"lora_info\": {\"lora_0\": "
+#~ "\"/lora/llama-lora-test/\"}}}``"
+#~ msgstr ""
+
+#~ msgid "Hot-reload LoRA info into the running service."
+#~ msgstr "热加载LoRA信息到运行中的服务。"
+
+#~ msgid "List currently deployed models (OpenAI-compatible)."
+#~ msgstr "列出当前部署的模型（OpenAI兼容）。"
+
+#~ msgid "``{ \"log_level\": \"INFO\"}``"
+#~ msgstr ""
+
+#~ msgid "Dynamically adjust the service log level."
+#~ msgstr "动态调整服务日志级别。"
+
+#~ msgid "``{\"model\": \"EPLB\", \"update_time\":1000}``"
+#~ msgstr ""
+
+#~ msgid "Update the EPLB (Elastic Load Balancer) configuration."
+#~ msgstr "更新EPLB（弹性负载均衡器）配置。"
+
+#~ msgid "``/v1/embeddings``"
+#~ msgstr "``/v1/embeddings``"
+
+#~ msgid "``{\"input\": \"who are u\", \"model\": \"text-embedding-ada-002\"}``"
+#~ msgstr ""
+
+#~ msgid "OpenAI-compatible dense-vector embedding endpoint."
+#~ msgstr "OpenAI兼容的稠密向量嵌入端点。"
+
+#~ msgid "``/v1/embeddings/dense``"
+#~ msgstr "``/v1/embeddings/dense``"
+
+#~ msgid "``{\"input\": \"who are u\"}``"
+#~ msgstr ""
+
+#~ msgid "Return **dense** embeddings only."
+#~ msgstr "仅返回**稠密**嵌入。"
+
+#~ msgid "``/v1/embeddings/sparse``"
+#~ msgstr "``/v1/embeddings/sparse``"
+
+#~ msgid "Return **sparse** embeddings only (e.g., BM25/TF-IDF)."
+#~ msgstr "仅返回**稀疏**嵌入（例如，BM25/TF-IDF）。"
+
+#~ msgid "``/v1/embeddings/colbert``"
+#~ msgstr "``/v1/embeddings/colbert``"
+
+#~ msgid ""
+#~ "``{\"input\":[\"hello, what is your "
+#~ "name?\",\"hello\"],\"model\":\"xx\"}``"
+#~ msgstr ""
+
+#~ msgid ""
+#~ "Return **ColBERT** late-interaction multi-"
+#~ "vector representations for high-accuracy "
+#~ "semantic retrieval."
+#~ msgstr "返回用于高精度语义检索的**ColBERT**后期交互多向量表示。"
+
+#~ msgid "``/v1/embeddings/similarity``"
+#~ msgstr "``/v1/embeddings/similarity``"
+
+#: ../../backend/native_api.ipynb:485
+msgid ""
+"Rerank a list of documents given a query using a cross-encoder model. "
+"Note that this API is only available for cross encoder model like `BAAI"
+"/bge-reranker-v2-m3 <https://huggingface.co/BAAI/bge-reranker-v2-m3>`__ "
+"with ``attention-backend`` ``triton`` and ``torch_native``."
+msgstr ""
+"使用交叉编码器模型对给定查询的文档列表进行重排序。请注意，此API仅适用于像`BAAI/bge-reranker-v2-m3 "
+"<https://huggingface.co/BAAI/bge-reranker-v2-m3>`__这样的交叉编码器模型，并且需要"
+"``attention-backend``为``triton``和``torch_native``。"
+
+#~ msgid ""
+#~ "Accept query–doc pairs and return "
+#~ "pairwise similarities (cosine/dot) directly, "
+#~ "skipping the separate embedding step."
+#~ msgstr "接受查询-文档对，直接返回成对相似度（余弦/点积），跳过单独的嵌入步骤。"
+
+#~ msgid "``/v1/classifier``"
+#~ msgstr "``/v1/classifier``"
+
+#~ msgid ""
+#~ "``{\"input\":[[\"what is panda?\",\"hi\"],[\"what is"
+#~ " panda?\",\"The giant panda (Ailuropoda "
+#~ "melanoleuca), sometimes called a panda "
+#~ "bear or simply panda, is a bear"
+#~ " species endemic to "
+#~ "China.\"]],\"model\":\"xx\"}``"
+#~ msgstr ""
+
+#~ msgid ""
+#~ "Generic text-classification endpoint "
+#~ "supporting tasks such as sentiment or"
+#~ " topic classification."
+#~ msgstr "通用文本分类端点，支持情感分类或主题分类等任务。"
+
+#~ msgid "``/v1/reranker``"
+#~ msgstr "``/v1/reranker``"
+
+#~ msgid ""
+#~ "``{\"query\":\"what is panda? "
+#~ "\",\"documents\":[\"hi\",\"The giant panda "
+#~ "(Ailuropoda melanoleuca), sometimes called a"
+#~ " panda bear or simply panda, is "
+#~ "a bear species endemic to "
+#~ "China.\",\"gg\"]}``"
+#~ msgstr ""
+
+#~ msgid ""
+#~ "Rerank a list of retrieved documents "
+#~ "by relevance and return the reordered"
+#~ " results."
+#~ msgstr "根据相关性重新排序检索到的文档列表并返回重新排序的结果。"
 
 #~ msgid "method_name"
 #~ msgstr "方法名"
