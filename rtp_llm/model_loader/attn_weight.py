@@ -1,10 +1,10 @@
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, List, Optional, Union, Dict
 
 import torch
 from pydantic import BaseModel
-
+from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.weight_module import AtomicWeight
-from rtp_llm.utils.model_weight import CkptWeightInfo, identity
+from rtp_llm.utils.model_weight import CkptWeightInfo, identity, W
 
 
 class AttnConfig(BaseModel):
@@ -30,6 +30,48 @@ class AttnAtomicWeight(AtomicWeight):
         self.config = config
         super().__init__(name, weights, process_fun, data_type, *args, **kwargs)
 
+    def _swizzle_gemm_weight(
+        self,
+        name: str,
+        tensor: Union[torch.Tensor, Dict[str, torch.Tensor]],
+        load_config: LoadConfig,
+    ):
+        if name not in (W.attn_qkv_w, W.attn_o_w):
+            raise ValueError(f"unsupported swizzle name: {name}")
+        if isinstance(tensor, dict):
+            w = tensor.get(name)
+            if isinstance(w, torch.Tensor):
+                w = load_config.exported_device.swizzle_gemm_weight(w, w.dtype != torch.float8_e4m3fn)
+                tensor[name] = w
+            elif isinstance(w, dict):
+                self._swizzle_gemm_weight(name, w, load_config)
+            else:
+                raise TypeError(f"unsupported type at key {name}: {type(w)}")
+
+        elif isinstance(tensor, torch.Tensor):
+            swizzled = load_config.exported_device.swizzle_gemm_weight(tensor, tensor.dtype != torch.float8_e4m3fn)
+            return swizzled
+
+    def _postprocess(
+        self,
+        tensor: Union[torch.Tensor, Dict[str, torch.Tensor]],
+        device: str,
+        load_config: LoadConfig
+    ):
+        if load_config.use_swizzleA:
+            if isinstance(tensor, torch.Tensor):
+                if getattr(self, "name", None) in (W.attn_qkv_w, W.attn_o_w):
+                    tensor = self._swizzle_gemm_weight(self.name, tensor, load_config)
+                return super()._postprocess(tensor, device, load_config)
+
+            for key in (W.attn_qkv_w, W.attn_o_w):
+                w = tensor.get(key)
+                if isinstance(w, dict):
+                    self._swizzle_gemm_weight(key, w, load_config)
+                elif isinstance(w, torch.Tensor):
+                    self._swizzle_gemm_weight(key, tensor, load_config)
+
+        return super()._postprocess(tensor, device, load_config)
 
 class MlaConfig(BaseModel):
     head_num: int = -1

@@ -41,7 +41,7 @@ void runAiterAsmPA(const AttentionModuleParams& params,
     if (key_cache.dtype() == at::kFloat8_e4m3fnuz) {
         K_QScale = Buffer2torchTensor(params.common.kv_cache->k_scale_buffer,false);
         V_QScale = Buffer2torchTensor(params.common.kv_cache->v_scale_buffer,false);
-        pa_fwd(query, key_cache, value_cache, block_tables, context_lens, max_num_blocks, max_seq_len, K_QScale, V_QScale, out_opt, std::nullopt, 2);
+        pa_fwd(query, key_cache, value_cache, block_tables, context_lens, max_num_blocks, max_seq_len, K_QScale, V_QScale, out_opt, std::nullopt, 0);
     } else {
         pa_fwd(query, key_cache, value_cache, block_tables, context_lens, max_num_blocks, max_seq_len, K_QScale, V_QScale, out_opt);
     }

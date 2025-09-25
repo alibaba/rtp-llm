@@ -2419,7 +2419,7 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel_v1(T*                
                                                            bool          store_q,
                                                            bool          store_kv,
                                                            bool          store_cache,
-                                                           const float2* rotary_embedding_coefficient_cache) {
+                                                           const float2* cos_sin_cache) {
     // This kernel add bias to QKV, which has shape [batch_size, seq_len, 3,
     // head_num, size_per_head], and QKV split to 3 split buffer q, k, v and
     // transpose them to [batch_size, head_num, seq_len, size_per_head]. For q and
@@ -2521,7 +2521,7 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel_v1(T*                
                                        PREFIX_PROMPT,
                                        prefix_prompt_length,
                                        param.count_length,
-                                       rotary_embedding_coefficient_cache);
+                                       cos_sin_cache);
 
     if (use_logn_attn) {
         logn_attention(q, seq_idx, rope_config.max_pos);
@@ -2605,32 +2605,32 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel_v1(T*                
 
 template<typename T>
 void invokeAddFusedQKVBiasTransposePrefillV1(T*                             q_buf,
-                                           T*                             k_buf,
-                                           T*                             v_buf,
-                                           PrefixPromptBatchWeightsParam* param_ptr,
-                                           T*                             QKV,
-                                           void*                          QuantizedQKV,
-                                           const int*                     position_ids,
-                                           const T*                       qkv_bias,
-                                           const int*                     padding_offset,
-                                           const int*                     cu_seqlens,
-                                           const int                      batch_size,
-                                           const int                      seq_len,
-                                           const int                      token_num,
-                                           const int                      head_num,
-                                           const int                      head_num_kv,
-                                           const int                      size_per_head,
-                                           const RopeConfig               rope_config,
-                                           const bool                     use_logn_attn,
-                                           const float*                   scale,
-                                           const int                      int8_mode,
-                                           const bool                     use_paged_fmha,
-                                           const bool                     store_qkv,
-                                           const bool                     store_q,
-                                           const bool                     store_kv,
-                                           const bool                     store_cache,
-                                           const float2 *                 rotary_embedding_coefficient_cache,
-                                           cudaStream_t                   stream) {
+                                             T*                             k_buf,
+                                             T*                             v_buf,
+                                             PrefixPromptBatchWeightsParam* param_ptr,
+                                             T*                             QKV,
+                                             void*                          QuantizedQKV,
+                                             const int*                     position_ids,
+                                             const T*                       qkv_bias,
+                                             const int*                     padding_offset,
+                                             const int*                     cu_seqlens,
+                                             const int                      batch_size,
+                                             const int                      seq_len,
+                                             const int                      token_num,
+                                             const int                      head_num,
+                                             const int                      head_num_kv,
+                                             const int                      size_per_head,
+                                             const RopeConfig               rope_config,
+                                             const bool                     use_logn_attn,
+                                             const float*                   scale,
+                                             const int                      int8_mode,
+                                             const bool                     use_paged_fmha,
+                                             const bool                     store_qkv,
+                                             const bool                     store_q,
+                                             const bool                     store_kv,
+                                             const bool                     store_cache,
+                                             const float2*                  cos_sin_cache,
+                                             cudaStream_t                   stream) {
     auto&  param = *param_ptr;
     dim3   block((size_per_head / Vec_t<T>::size + 31) / 32 * 32);
     dim3   grid(token_num, head_num);
@@ -2662,7 +2662,7 @@ void invokeAddFusedQKVBiasTransposePrefillV1(T*                             q_bu
                                                              store_q,
                                                              store_kv,
                                                              store_cache,
-                                                             rotary_embedding_coefficient_cache);
+                                                             cos_sin_cache);
                 });
             });
         });
@@ -2692,7 +2692,7 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel(T*                   
                                                            bool          store_q,
                                                            bool          store_kv,
                                                            bool          store_cache,
-                                                           const float2* rotary_embedding_coefficient_cache) {
+                                                           const float2* cos_sin_cache) {
     // This kernel add bias to QKV, which has shape [batch_size, seq_len, 3,
     // head_num, size_per_head], and QKV split to 3 split buffer q, k, v and
     // transpose them to [batch_size, head_num, seq_len, size_per_head]. For q and
@@ -2794,7 +2794,7 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel(T*                   
                                        PREFIX_PROMPT,
                                        prefix_prompt_length,
                                        param.count_length,
-                                       rotary_embedding_coefficient_cache);
+                                       cos_sin_cache);
 
     if (use_logn_attn) {
         logn_attention(q, seq_idx, rope_config.max_pos);
@@ -2930,7 +2930,7 @@ void invokeAddFusedQKVBiasTransposePrefill(T*                             q_buf,
                                            const bool                     store_q,
                                            const bool                     store_kv,
                                            const bool                     store_cache,
-                                           const float2*                  rotary_embedding_coefficient_cache,
+                                           const float2*                  cos_sin_cache,
                                            cudaStream_t                   stream) {
     auto&  param = *param_ptr;
     dim3   block((size_per_head / Vec_t<T>::size + 31) / 32 * 32);
@@ -2963,7 +2963,7 @@ void invokeAddFusedQKVBiasTransposePrefill(T*                             q_buf,
                                                              store_q,
                                                              store_kv,
                                                              store_cache,
-                                                             rotary_embedding_coefficient_cache);
+                                                             cos_sin_cache);
                 });
             });
         });
@@ -3126,7 +3126,7 @@ __global__ void add_fusedQKV_bias_transpose_decode_kernel(T*                    
                                                           bool          store_q,
                                                           bool          store_kv,
                                                           bool          store_cache,
-                                                          const float2* rotary_embedding_coefficient_cache) {
+                                                          const float2* cos_sin_cache) {
     extern __shared__ __align__(sizeof(float2)) char smem_[];
 
     constexpr int vec_size         = Vec_t<T>::size;
@@ -3203,7 +3203,7 @@ __global__ void add_fusedQKV_bias_transpose_decode_kernel(T*                    
                                          prefix_prompt_length,
                                          true /*count_prefix_length*/,
                                          true /*HANDLE_KV*/,
-                                         rotary_embedding_coefficient_cache);
+                                         cos_sin_cache);
 
     if (use_logn_attn) {
         logn_attention(q, tlength, rope_config.max_pos);
@@ -3290,6 +3290,7 @@ void invokeAddFusedQKVBiasTransposeDecodeV1(T*                             q_buf
                                             const bool                     store_q,
                                             const bool                     store_kv,
                                             const bool                     store_cache,
+                                            const float2*                  cos_sin_cache,
                                             cudaStream_t                   stream) {
     auto&  param = *param_ptr;
     dim3   block((size_per_head / Vec_t<T>::size + 31) / 32 * 32);
@@ -3358,7 +3359,7 @@ void invokeAddFusedQKVBiasTransposeDecode(T*                             q_buf,
                                           const bool                     store_q,
                                           const bool                     store_kv,
                                           const bool                     store_cache,
-                                          const float2*                  rotary_embedding_coefficient_cache,
+                                          const float2*                  cos_sin_cache,
                                           cudaStream_t                   stream) {
     auto&  param = *param_ptr;
     dim3   block((size_per_head / Vec_t<T>::size + 31) / 32 * 32);
@@ -3393,7 +3394,7 @@ void invokeAddFusedQKVBiasTransposeDecode(T*                             q_buf,
                                                              store_q,
                                                              store_kv,
                                                              store_cache,
-                                                             rotary_embedding_coefficient_cache);
+                                                             cos_sin_cache);
                 });
             });
         });
@@ -3942,34 +3943,34 @@ INSTANTIATEDECODEADDFUSEDQKVBIASTRANSPOSE(__nv_bfloat16);
 #undef INSTANTIATEDECODEADDFUSEDQKVBIASTRANSPOSE
 #if USING_ROCM
 
-#define INSTANTIATEADDFUSEDQKVBIASTRANSPOSEPREFILLV1(T)                                                                  \
-    template void invokeAddFusedQKVBiasTransposePrefillV1(T*                             q_buf,                          \
-                                                        T*                             k_buf,                          \
-                                                        T*                             v_buf,                          \
-                                                        PrefixPromptBatchWeightsParam* param,                          \
-                                                        T*                             QKV,                            \
-                                                        void*                          QuantizedQKV,                   \
-                                                        const int*                     position_ids,                   \
-                                                        const T*                       qkv_bias,                       \
-                                                        const int*                     padding_offset,                 \
-                                                        const int*                     cu_seqlens,                     \
-                                                        const int                      batch_size,                     \
-                                                        const int                      seq_len,                        \
-                                                        const int                      token_num,                      \
-                                                        const int                      head_num,                       \
-                                                        const int                      head_num_kv,                    \
-                                                        const int                      size_per_head,                  \
-                                                        const RopeConfig               rope_config,                    \
-                                                        const bool                     use_logn_attn,                  \
-                                                        const float*                   scale,                          \
-                                                        const int                      int8_mode,                      \
-                                                        const bool                     use_paged_fmha,                 \
-                                                        const bool                     store_qkv,                      \
-                                                        const bool                     store_q,                        \
-                                                        const bool                     store_kv,                       \
-                                                        const bool                     store_cache,                    \
-                                                        const float2 *                 rotary_embedding_coefficient_cache,\
-                                                        cudaStream_t                   stream)
+#define INSTANTIATEADDFUSEDQKVBIASTRANSPOSEPREFILLV1(T)                                                                     \
+    template void invokeAddFusedQKVBiasTransposePrefillV1(T*                             q_buf,                             \
+                                                          T*                             k_buf,                             \
+                                                          T*                             v_buf,                             \
+                                                          PrefixPromptBatchWeightsParam* param,                             \
+                                                          T*                             QKV,                               \
+                                                          void*                          QuantizedQKV,                      \
+                                                          const int*                     position_ids,                      \
+                                                          const T*                       qkv_bias,                          \
+                                                          const int*                     padding_offset,                    \
+                                                          const int*                     cu_seqlens,                        \
+                                                          const int                      batch_size,                        \
+                                                          const int                      seq_len,                           \
+                                                          const int                      token_num,                         \
+                                                          const int                      head_num,                          \
+                                                          const int                      head_num_kv,                       \
+                                                          const int                      size_per_head,                     \
+                                                          const RopeConfig               rope_config,                       \
+                                                          const bool                     use_logn_attn,                     \
+                                                          const float*                   scale,                             \
+                                                          const int                      int8_mode,                         \
+                                                          const bool                     use_paged_fmha,                    \
+                                                          const bool                     store_qkv,                         \
+                                                          const bool                     store_q,                           \
+                                                          const bool                     store_kv,                          \
+                                                          const bool                     store_cache,                       \
+                                                          const float2 *                 cos_sin_cache,                     \
+                                                          cudaStream_t                   stream)
 INSTANTIATEADDFUSEDQKVBIASTRANSPOSEPREFILLV1(float);
 INSTANTIATEADDFUSEDQKVBIASTRANSPOSEPREFILLV1(half);
 #ifdef ENABLE_BF16
@@ -4003,8 +4004,8 @@ INSTANTIATEADDFUSEDQKVBIASTRANSPOSEPREFILLV1(__nv_bfloat16);
                                                         const bool                     store_q,                        \
                                                         const bool                     store_kv,                       \
                                                         const bool                     store_cache,                    \
-                                                        const float2* rotary_embedding_coefficient_cache,              \
-                                                        cudaStream_t  stream)
+                                                        const float2*                  cos_sin_cache,                  \
+                                                        cudaStream_t                   stream)
 INSTANTIATEADDFUSEDQKVBIASTRANSPOSEPREFILL(float);
 INSTANTIATEADDFUSEDQKVBIASTRANSPOSEPREFILL(half);
 #ifdef ENABLE_BF16
@@ -4014,33 +4015,34 @@ INSTANTIATEADDFUSEDQKVBIASTRANSPOSEPREFILL(__nv_bfloat16);
 
 #define INSTANTIATEADDFUSEDQKVBIASTRANSPOSEDECODEV1(T)                                                                   \
     template void invokeAddFusedQKVBiasTransposeDecodeV1(T*                             q_buf,                           \
-                                                       T*                             k_buf,                           \
-                                                       T*                             v_buf,                           \
-                                                       PrefixPromptBatchWeightsParam* param,                           \
-                                                       const int*                     input_lengths,                   \
-                                                       T*                             QKV,                             \
-                                                       void*                          QuantizedQKV,                    \
-                                                       const int*                     position_ids,                    \
-                                                       const T*                       qkv_bias,                        \
-                                                       const int*                     padding_offset,                  \
-                                                       const int*                     cu_seqlens,                      \
-                                                       const int*                     sequence_lengths,                \
-                                                       const int                      batch_size,                      \
-                                                       const int                      seq_len,                         \
-                                                       const int                      token_num,                       \
-                                                       const int                      head_num,                        \
-                                                       const int                      head_num_kv,                     \
-                                                       const int                      size_per_head,                   \
-                                                       const RopeConfig               rope_config,                     \
-                                                       const bool                     use_logn_attn,                   \
-                                                       const float*                   scale,                           \
-                                                       const int                      int8_mode,                       \
-                                                       const bool                     use_paged_fmha,                  \
-                                                       const bool                     store_qkv,                       \
-                                                       const bool                     store_q,                         \
-                                                       const bool                     store_kv,                        \
-                                                       const bool                     store_cache,                     \
-                                                       cudaStream_t                   stream)
+                                                         T*                             k_buf,                           \
+                                                         T*                             v_buf,                           \
+                                                         PrefixPromptBatchWeightsParam* param,                           \
+                                                         const int*                     input_lengths,                   \
+                                                         T*                             QKV,                             \
+                                                         void*                          QuantizedQKV,                    \
+                                                         const int*                     position_ids,                    \
+                                                         const T*                       qkv_bias,                        \
+                                                         const int*                     padding_offset,                  \
+                                                         const int*                     cu_seqlens,                      \
+                                                         const int*                     sequence_lengths,                \
+                                                         const int                      batch_size,                      \
+                                                         const int                      seq_len,                         \
+                                                         const int                      token_num,                       \
+                                                         const int                      head_num,                        \
+                                                         const int                      head_num_kv,                     \
+                                                         const int                      size_per_head,                   \
+                                                         const RopeConfig               rope_config,                     \
+                                                         const bool                     use_logn_attn,                   \
+                                                         const float*                   scale,                           \
+                                                         const int                      int8_mode,                       \
+                                                         const bool                     use_paged_fmha,                  \
+                                                         const bool                     store_qkv,                       \
+                                                         const bool                     store_q,                         \
+                                                         const bool                     store_kv,                        \
+                                                         const bool                     store_cache,                     \
+                                                         const float2*                  cos_sin_cache,                   \
+                                                         cudaStream_t                   stream)
 INSTANTIATEADDFUSEDQKVBIASTRANSPOSEDECODEV1(float);
 INSTANTIATEADDFUSEDQKVBIASTRANSPOSEDECODEV1(half);
 #ifdef ENABLE_BF16
@@ -4076,8 +4078,8 @@ INSTANTIATEADDFUSEDQKVBIASTRANSPOSEDECODEV1(__nv_bfloat16);
                                                        const bool                     store_q,                         \
                                                        const bool                     store_kv,                        \
                                                        const bool                     store_cache,                     \
-                                                       const float2* rotary_embedding_coefficient_cache,               \
-                                                       cudaStream_t  stream)
+                                                       const float2*                  cos_sin_cache,                   \
+                                                       cudaStream_t                   stream)
 INSTANTIATEADDFUSEDQKVBIASTRANSPOSEDECODE(float);
 INSTANTIATEADDFUSEDQKVBIASTRANSPOSEDECODE(half);
 #ifdef ENABLE_BF16
@@ -4161,31 +4163,5 @@ INSTANTIATEINVOKELOADPREFIXKVCACHE(half);
 INSTANTIATEINVOKELOADPREFIXKVCACHE(__nv_bfloat16);
 #endif
 #undef INSTANTIATEINVOKELOADPREFIXKVCACHE
-
-
-
-
-
-
-
-
-
-
-__global__ void
-cache_rotary_embedding_coefficient(float2* rotary_embedding_coefficient_cache, int stride, RopeConfig rope_config) {
-    int tid    = threadIdx.x;
-    int t_step = blockIdx.x;
-    // only support RopeStyle::Base for now.
-    rotary_embedding_coefficient_cache[t_step * stride + tid] = rotary_embedding_coefficient(
-        2 * tid, rope_config.dim, t_step, rope_config.base, LinearScaleRope{rope_config.scale});
-}
-
-void invokeRotaryEmbeddingCoefficientCache(float2*      rotary_embedding_coefficient_cache,
-                                           int          max_seq_len,
-                                           RopeConfig   rope_config,
-                                           cudaStream_t stream) {
-    cache_rotary_embedding_coefficient<<<max_seq_len, rope_config.dim / 2, 0, stream>>>(
-        rotary_embedding_coefficient_cache, rope_config.dim / 2, rope_config);
-}
 
 }  // namespace rtp_llm
