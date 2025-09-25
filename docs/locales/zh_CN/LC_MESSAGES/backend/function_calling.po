@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-24 14:39+0800\n"
+"POT-Creation-Date: 2025-09-19 11:21+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -52,7 +52,7 @@ msgstr ""
 
 #: ../../backend/function_calling.ipynb:37
 #, fuzzy
-msgid "Kimi\\_k2"
+msgid "Kimi_k2"
 msgstr "Kimi_k2"
 
 #: ../../backend/function_calling.ipynb:38
