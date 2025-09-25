@@ -1,0 +1,117 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: RTP-LLM 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-19 12:09+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: ../../references/tbstars/deploy.md:1
+msgid "tbstars-moe-42 42B-A3.5B-MoE"
+msgstr ""
+
+#: ../../references/tbstars/deploy.md:3
+msgid "Recommended Deployment"
+msgstr ""
+
+#: ../../references/tbstars/deploy.md:5
+msgid "It is recommended to use a combination of PD (Prefill-Decode) separation and DP (Data Parallelism) for optimal performance. PD separation is employed because of the MHA (Multi-Head Attention) structure, which results in substantial GPU memory consumption from KV cache. Without PD separation, the system would face KV cache insufficiency when handling large max sequence lengths. DP is implemented for similar reasons, aiming to reduce the GPU memory footprint of model weights on each GPU card."
+msgstr ""
+
+#: ../../references/tbstars/deploy.md:7
+msgid "For deployment, it is recommended to enable DeepEP, FP8 quantization, and FP8 KV cache."
+msgstr ""
+
+#: ../../references/tbstars/deploy.md:9
+msgid "Framework version: v0.2.0"
+msgstr ""
+
+#: ../../references/tbstars/deploy.md:11
+msgid "Advanced Configuration for Cluster Deployment"
+msgstr ""
+
+#: ../../references/tbstars/deploy.md:13
+msgid "H20 96G"
+msgstr ""
+
+#: ../../references/tbstars/deploy.md:15
+msgid "Prefill Node Specifications"
+msgstr ""
+
+#: ../../references/tbstars/deploy.md:17
+msgid "Single-node resource requirements: 2 GPUs per node"
+msgstr ""
+
+#: ../../references/tbstars/deploy.md:0
+msgid "CPU Cores"
+msgstr ""
+
+#: ../../references/tbstars/deploy.md:0
+msgid "Memory"
+msgstr ""
+
+#: ../../references/tbstars/deploy.md:0
+msgid "GPU Card"
+msgstr ""
+
+#: ../../references/tbstars/deploy.md:0
+msgid "GPU Count"
+msgstr ""
+
+#: ../../references/tbstars/deploy.md:0
+msgid "Disk Space"
+msgstr ""
+
+#: ../../references/tbstars/deploy.md:0
+msgid "RDMA NICs"
+msgstr ""
+
+#: ../../references/tbstars/deploy.md:0
+msgid "96"
+msgstr ""
+
+#: ../../references/tbstars/deploy.md:0
+msgid "250GB"
+msgstr ""
+
+#: ../../references/tbstars/deploy.md:0
+msgid "H20"
+msgstr ""
+
+#: ../../references/tbstars/deploy.md:0
+msgid "2"
+msgstr ""
+
+#: ../../references/tbstars/deploy.md:0
+msgid "180GB"
+msgstr ""
+
+#: ../../references/tbstars/deploy.md:22
+msgid "Prefill Advanced Arguments"
+msgstr ""
+
+#: ../../references/tbstars/deploy.md:86
+msgid "Decode Node Specifications"
+msgstr ""
+
+#: ../../references/tbstars/deploy.md:88
+msgid "Single-node resource requirements: 4 GPUs per node"
+msgstr ""
+
+#: ../../references/tbstars/deploy.md:0
+msgid "4"
+msgstr ""
+
+#: ../../references/tbstars/deploy.md:93
+msgid "Decode Advanced Arguments"
+msgstr ""

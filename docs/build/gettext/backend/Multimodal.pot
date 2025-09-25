@@ -1,0 +1,69 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: RTP-LLM 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-25 09:43+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: ../../backend/Multimodal.md:1
+msgid "Multimodal Part Debug and Separate Deployment"
+msgstr ""
+
+#: ../../backend/Multimodal.md:3
+msgid "Multimodal Development"
+msgstr ""
+
+#: ../../backend/Multimodal.md:5
+msgid "A multimodal model refers to an LLM that incorporates multimodal inputs. Currently, the primary input format is URLs, which are distinguished by specific placeholders using OpenAI formatting. Each multimodal model has its unique preprocessing pipeline but must implement the following interfaces:"
+msgstr ""
+
+#: ../../backend/Multimodal.md:7
+msgid "The multimodal model must inherit from `MultimodalMixin` in `rtp_llm/models/multimodal/multimodal_mixin.py` and instantiate `mm_part` as the processing class for multimodal inputs."
+msgstr ""
+
+#: ../../backend/Multimodal.md:9
+msgid "`mm_part` has various interface implementations based on input types, such as images, videos, or audio. The logic must be self-consistent, with the most critical interfaces being `mm_embedding`, `_mm_preprocess`, and `mm_process`:"
+msgstr ""
+
+#: ../../backend/Multimodal.md:11
+msgid "`mm_embedding` has a default implementation that calls `_mm_preprocess` and `mm_process`, converting the multimodal input URL into an embedding tensor and other information (e.g., position IDs)."
+msgstr ""
+
+#: ../../backend/Multimodal.md:13
+msgid "`_mm_preprocess` also has default implementations for specific modalities, preprocessing byte data from input url and preparing inputs for mm_process. This separation is necessary because preprocessing is CPU-bound, while subsequent processing is GPU-bound."
+msgstr ""
+
+#: ../../backend/Multimodal.md:15
+msgid "`mm_process` handles GPU-based transformation of preprocessed inputs into outputs."
+msgstr ""
+
+#: ../../backend/Multimodal.md:17
+msgid "For model weights, the required weights must be registered in `GptInitModelParameters` under `mm_related_params.vit_weights`. Refer to `BaseVitWeights` for specific implementation logic."
+msgstr ""
+
+#: ../../backend/Multimodal.md:19
+msgid "Debug"
+msgstr ""
+
+#: ../../backend/Multimodal.md:21
+msgid "Start multimodal part."
+msgstr ""
+
+#: ../../backend/Multimodal.md:32
+msgid "Start a grpc client."
+msgstr ""
+
+#: ../../backend/Multimodal.md:80
+msgid "hints: Grpc port is START_PORT + 1."
+msgstr ""

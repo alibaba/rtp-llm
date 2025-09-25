@@ -1,0 +1,233 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: RTP-LLM 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-25 09:43+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: ../../index/README.md:1
+msgid "RTP-LLM Website - React + Vite Version"
+msgstr ""
+
+#: ../../index/README.md:3
+msgid "这是 RTP-LLM 官网的 React + Vite 版本，从原始的 HTML/CSS/JS 项目迁移而来，使用 Vite 作为构建工具提供更快的开发体验。"
+msgstr ""
+
+#: ../../index/README.md:5
+msgid "功能特性"
+msgstr ""
+
+#: ../../index/README.md:7
+msgid "✅ 完全响应式设计"
+msgstr ""
+
+#: ../../index/README.md:8
+msgid "✅ 中英文语言切换"
+msgstr ""
+
+#: ../../index/README.md:9
+msgid "✅ 现代化 React 组件架构"
+msgstr ""
+
+#: ../../index/README.md:10
+msgid "✅ 模块化 CSS 样式"
+msgstr ""
+
+#: ../../index/README.md:11
+msgid "✅ 交互式动画效果"
+msgstr ""
+
+#: ../../index/README.md:12
+msgid "✅ GitHub 链接跳转"
+msgstr ""
+
+#: ../../index/README.md:14
+msgid "项目结构"
+msgstr ""
+
+#: ../../index/README.md:41
+msgid "安装和运行"
+msgstr ""
+
+#: ../../index/README.md:43
+msgid "进入项目目录："
+msgstr ""
+
+#: ../../index/README.md:48
+msgid "安装依赖："
+msgstr ""
+
+#: ../../index/README.md:53
+msgid "启动开发服务器："
+msgstr ""
+
+#: ../../index/README.md:60
+msgid "在浏览器中访问 `http://localhost:3000`"
+msgstr ""
+
+#: ../../index/README.md:62
+msgid "构建生产版本"
+msgstr ""
+
+#: ../../index/README.md:68
+msgid "构建后的文件将在 `dist/` 目录中。"
+msgstr ""
+
+#: ../../index/README.md:70
+msgid "预览生产版本"
+msgstr ""
+
+#: ../../index/README.md:76
+msgid "主要组件说明"
+msgstr ""
+
+#: ../../index/README.md:78
+msgid "Header 组件"
+msgstr ""
+
+#: ../../index/README.md:79
+msgid "包含 Logo 和导航按钮"
+msgstr ""
+
+#: ../../index/README.md:80
+msgid "GitHub 链接跳转"
+msgstr ""
+
+#: ../../index/README.md:81
+msgid "语言切换功能"
+msgstr ""
+
+#: ../../index/README.md:83
+msgid "Hero 组件"
+msgstr ""
+
+#: ../../index/README.md:84
+msgid "主标题和副标题展示"
+msgstr ""
+
+#: ../../index/README.md:85
+msgid "特性标签（Fast、Flexible、Scalable）"
+msgstr ""
+
+#: ../../index/README.md:86
+msgid "GitHub 查看按钮和播放按钮"
+msgstr ""
+
+#: ../../index/README.md:88
+msgid "Features 组件"
+msgstr ""
+
+#: ../../index/README.md:89
+msgid "特性网格布局"
+msgstr ""
+
+#: ../../index/README.md:90
+msgid "响应式设计"
+msgstr ""
+
+#: ../../index/README.md:92
+msgid "FeatureCard 组件"
+msgstr ""
+
+#: ../../index/README.md:93
+msgid "可复用的特性卡片"
+msgstr ""
+
+#: ../../index/README.md:94
+msgid "支持普通图片和复杂图标网格两种模式"
+msgstr ""
+
+#: ../../index/README.md:95
+msgid "悬停动画效果"
+msgstr ""
+
+#: ../../index/README.md:97
+msgid "useLanguage Hook"
+msgstr ""
+
+#: ../../index/README.md:98
+msgid "管理中英文切换状态"
+msgstr ""
+
+#: ../../index/README.md:99
+msgid "提供翻译函数"
+msgstr ""
+
+#: ../../index/README.md:100
+msgid "Context API 实现全局状态管理"
+msgstr ""
+
+#: ../../index/README.md:102
+msgid "技术栈"
+msgstr ""
+
+#: ../../index/README.md:104
+msgid "React 18.2.0"
+msgstr ""
+
+#: ../../index/README.md:105
+msgid "Vite 4.4.5 (构建工具)"
+msgstr ""
+
+#: ../../index/README.md:106
+msgid "CSS3 (模块化)"
+msgstr ""
+
+#: ../../index/README.md:107
+msgid "Context API (状态管理)"
+msgstr ""
+
+#: ../../index/README.md:108
+msgid "React Hooks"
+msgstr ""
+
+#: ../../index/README.md:110
+msgid "Vite 优势"
+msgstr ""
+
+#: ../../index/README.md:112
+msgid "⚡ **极速启动**: 开发服务器秒级启动"
+msgstr ""
+
+#: ../../index/README.md:113
+msgid "🔥 **热更新**: 快速的模块热替换 (HMR)"
+msgstr ""
+
+#: ../../index/README.md:114
+msgid "📦 **优化构建**: 基于 Rollup 的生产构建"
+msgstr ""
+
+#: ../../index/README.md:115
+msgid "🛠️ **开箱即用**: 内置 TypeScript、JSX 支持"
+msgstr ""
+
+#: ../../index/README.md:117
+msgid "浏览器支持"
+msgstr ""
+
+#: ../../index/README.md:119
+msgid "Chrome (最新版本)"
+msgstr ""
+
+#: ../../index/README.md:120
+msgid "Firefox (最新版本)"
+msgstr ""
+
+#: ../../index/README.md:121
+msgid "Safari (最新版本)"
+msgstr ""
+
+#: ../../index/README.md:122
+msgid "Edge (最新版本)"
+msgstr ""
