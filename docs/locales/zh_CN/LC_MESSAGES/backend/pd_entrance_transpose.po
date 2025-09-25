@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../backend/pd_entrance_transpose.md:1
 msgid "PD Disaggregation Transpose"
-msgstr "PD分离转置"
+msgstr "PD分离反转"
 
 #: ../../backend/pd_entrance_transpose.md:3
 msgid "Background"
