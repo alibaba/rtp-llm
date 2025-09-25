@@ -234,7 +234,6 @@ protected:
     rtp_llm::BufferPtr              v_scale_buffer_;
     rtp_llm::BufferPtr              residual_scale_fp32_;
     rtp_llm::BufferPtr              residual_scale_;
-    rtp_llm::BufferPtr              rotary_embedding_coefficient_cache_ = nullptr;
 
 public:
     rtp_llm::Weights            weights_;

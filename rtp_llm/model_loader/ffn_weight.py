@@ -267,6 +267,36 @@ class FfnWeight(CompositeWeight):
                 return tensor
         return super()._split(tensor, load_config)
 
+    def _swizzle_gemm_weight(
+        self,
+        name: str,
+        tensor: Union[torch.Tensor, Dict[str, torch.Tensor]],
+        load_config: LoadConfig,
+    ):
+        w = tensor.get(name)
+        if isinstance(w, torch.Tensor):
+            w = load_config.exported_device.swizzle_gemm_weight(w, w.dtype != torch.float8_e4m3fn)
+            tensor[name] = w
+        elif isinstance(w, dict):
+            self._swizzle_gemm_weight(name, w, load_config)
+        else:
+            raise ValueError("unsupported type")
+
+    def _postprocess(
+        self, tensor: Dict[str, torch.Tensor], device: str, load_config: LoadConfig
+    ):
+        if load_config.use_swizzleA:
+            ffn_w13 = tensor.get(W.ffn_w13)
+            ffn_w2 = tensor.get(W.ffn_w2)
+            for weight, keys in [(ffn_w13, [W.ffn_w13]), (ffn_w2, [W.ffn_w2]),]:
+                if isinstance(weight, dict):
+                    for key in keys:
+                        if key in weight:
+                            self._swizzle_gemm_weight(key, weight, load_config)
+                else:
+                    self._swizzle_gemm_weight(keys[0], tensor, load_config)
+        return super()._postprocess(tensor, device, load_config)
+
 
 class MoeConfig(BaseModel):
     is_moe: bool = True
@@ -374,6 +404,21 @@ class MoeWeight(CompositeWeight):
     ) -> bool:
         return False
 
+    def _swizzle_gemm_weight(
+        self,
+        name: str,
+        tensor: Union[torch.Tensor, Dict[str, torch.Tensor]],
+        load_config: LoadConfig,
+    ):
+        w = tensor.get(name)
+        if isinstance(w, torch.Tensor):
+            w = load_config.exported_device.swizzle_gemm_weight(w, w.dtype != torch.float8_e4m3fn)
+            tensor[name] = w
+        elif isinstance(w, dict):
+            self._swizzle_gemm_weight(name, w, load_config)
+        else:
+            raise ValueError("unsupported type")
+
     def _shuff_moe_weight(
         self,
         name: str,
@@ -396,6 +441,7 @@ class MoeWeight(CompositeWeight):
     ):
         moe_w1 = tensor.get(W.moe_w1)
         moe_w2 = tensor.get(W.moe_w2)
+        moe_gate = tensor.get(W.moe_gate)
         for weight, keys in [
             (moe_w1, [W.moe_w1, W.moe_s1]),
             (moe_w2, [W.moe_w2, W.moe_s2]),
@@ -406,6 +452,13 @@ class MoeWeight(CompositeWeight):
                         self._shuff_moe_weight(key, weight, load_config)
             else:
                 self._shuff_moe_weight(keys[0], tensor, load_config)
+        if load_config.use_swizzleA:
+            if moe_gate is not None:
+                if isinstance(moe_gate, dict):
+                    if W.moe_gate in moe_gate:
+                        self._swizzle_gemm_weight(W.moe_gate, moe_gate, load_config)
+                else:
+                    self._swizzle_gemm_weight(W.moe_gate, tensor, load_config)
         return super()._postprocess(tensor, device, load_config)
 
 
@@ -463,6 +516,21 @@ class MoeWithSharedWeight(CompositeWeight):
     ) -> bool:
         return False
 
+    def _swizzle_gemm_weight(
+        self,
+        name: str,
+        tensor: Union[torch.Tensor, Dict[str, torch.Tensor]],
+        load_config: LoadConfig,
+    ):
+        w = tensor.get(name)
+        if isinstance(w, torch.Tensor):
+            w = load_config.exported_device.swizzle_gemm_weight(w, w.dtype != torch.float8_e4m3fn)
+            tensor[name] = w
+        elif isinstance(w, dict):
+            self._swizzle_gemm_weight(name, w, load_config)
+        else:
+            raise ValueError("unsupported type")
+
     def _shuff_moe_weight(
         self,
         name: str,
@@ -494,6 +562,7 @@ class MoeWithSharedWeight(CompositeWeight):
     ):
         moe_w1 = tensor.get(W.moe_w1)
         moe_w2 = tensor.get(W.moe_w2)
+        moe_gate = tensor.get(W.moe_gate)
         for weight, keys in [
             (moe_w1, [W.moe_w1, W.moe_s1]),
             (moe_w2, [W.moe_w2, W.moe_s2]),
@@ -504,4 +573,11 @@ class MoeWithSharedWeight(CompositeWeight):
                         self._shuff_moe_weight(key, weight, load_config)
             else:
                 self._shuff_moe_weight(keys[0], tensor, load_config)
+        if load_config.use_swizzleA:
+            if moe_gate is not None:
+                if isinstance(moe_gate, dict):
+                    if W.moe_gate in moe_gate:
+                        self._swizzle_gemm_weight(W.moe_gate, moe_gate, load_config)
+                else:
+                    self._swizzle_gemm_weight(W.moe_gate, tensor, load_config)
         return super()._postprocess(tensor, device, load_config)

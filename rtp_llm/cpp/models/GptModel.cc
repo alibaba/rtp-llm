@@ -45,12 +45,6 @@ GptModel::GptModel(const GptModelInitParams& params):
         overall_expert_stats_ = device_->createMoeExpertStates(
             {layer_num_, moe_conf.ep_size, moe_conf.expert_num, moe_conf.expert_num + moe_conf.extra_expert_num});
     }
-#if USING_ROCM
-    auto & rope_config = params.description.attention_conf.rope_config;
-    if (rope_config.style == RopeStyle::Base) {
-        rotary_embedding_coefficient_cache_ = device_->getRotaryEmbeddingCoefficientCache(rope_config);
-    }
-#endif
 }
 
 void getPaddingOffsetAndCuSeqLens(int32_t*       padding_offset,
@@ -1310,8 +1304,7 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(const GptLayerInputs&     
                               description_.act_qscheme,
                               description_.compute_type,
                               enable_sp,
-                              inputs.pad_token_num,
-                              rotary_embedding_coefficient_cache_});
+                              inputs.pad_token_num});
     if (description_.attention_conf.use_mla && device_->mla_ops_type != rtp_llm::MlaOpsType::MHA) {
         attn_output = device_->mlaAttentionLayer(attn_params);
     } else {
