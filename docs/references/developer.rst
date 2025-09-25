@@ -6,3 +6,5 @@ Developer Reference
    Contributing.md
    Update-whl-Deps.md
    Environment.md
+   ../backend/Frontend.md
+   ../backend/Multimodal.md
