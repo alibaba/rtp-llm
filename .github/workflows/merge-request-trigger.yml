@@ -28,6 +28,7 @@ jobs:
           else
             echo "Pull request was closed without merge."
             exit 0
+          fi
         env:
           AONE_PROJECT_ID: "3512232" 
           GITHUB_REPOSITORY: ${{ github.repository }}
