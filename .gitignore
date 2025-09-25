@@ -1,9 +1,6 @@
 *~
 *.o
-*.mo
-*build*/
 __pycache__/
-.doctrees/
 .vscode
 .idea
 ./translation
@@ -71,3 +68,9 @@ rtp_llm/model_loader/test/
 # Additional debug files
 git
 git.diff
+
+*.mo
+*build*/
+.doctrees/
+node_modules/
+docs/index/dist/

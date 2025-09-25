@@ -9,6 +9,7 @@
   align-items: center;
   padding: 224px 60px 96px 60px;
   box-sizing: border-box;
+  pointer-events: none; /* 使背景能够捕捉鼠标事件 */
 }
 
 .hero-content {
@@ -73,6 +74,8 @@
   align-items: center;
   justify-content: center;
   padding: 4px 16px;
+  pointer-events: auto; /* 保持按钮的交互性 */
+  cursor: pointer;
 }
 
 .fast-tag svg, .flexible-tag svg, .scalable-tag svg, .framework-tag svg {
@@ -161,6 +164,7 @@
   align-items: center;
   cursor: pointer;
   transition: transform 0.3s ease;
+  pointer-events: auto; /* 保持按钮的交互性 */
 }
 
 .view-github-button:hover {
@@ -193,6 +197,7 @@
   background-size: 28px 28px;
   background-repeat: no-repeat;
   background-position: center;
+  pointer-events: auto; /* 保持按钮的交互性 */
 }
 
 .docs-button:hover {
