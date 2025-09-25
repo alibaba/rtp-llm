@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-12 17:38+0800\n"
+"POT-Creation-Date: 2025-09-25 11:18+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -44,19 +44,49 @@ msgid "**tag**"
 msgstr "**标签**"
 
 #: ../../release/v0.2.0/package.md
-msgid "**CUDA**"
+#, fuzzy
+msgid "**CUDA-SM9x**"
 msgstr "**CUDA**"
 
 #: ../../release/v0.2.0/package.md
-msgid "hub.docker.alibaba-inc.com/isearch/rtp_llm_gpu_cuda12"
+#, fuzzy
+msgid ""
+"hub.docker.alibaba-"
+"inc.com/isearch/rtp_llm_sm9x:0.2.0_2025_09_24_21_00_615e568 _accelerated"
 msgstr "hub.docker.alibaba-inc.com/isearch/rtp_llm_gpu_cuda12"
 
+#: ../../release/v0.2.0/package.md
+#, fuzzy
+msgid "**CUDA-SM8x**"
+msgstr "**CUDA**"
+
+#: ../../release/v0.2.0/package.md
+#, fuzzy
+msgid ""
+"hub.docker.alibaba-"
+"inc.com/isearch/rtp_llm_sm8x:0.2.0_2025_09_24_21_00_615e568 _accelerated"
+msgstr "hub.docker.alibaba-inc.com/isearch/rtp_llm_gpu_cuda12"
+
+#: ../../release/v0.2.0/package.md
+#, fuzzy
+msgid "**CUDA-SM7x**"
+msgstr "**CUDA**"
+
+#: ../../release/v0.2.0/package.md
+#, fuzzy
+msgid ""
+"hub.docker.alibaba-"
+"inc.com/isearch/rtp_llm_sm7x:0.2.0_2025_09_24_21_00_615e568 _accelerated"
+msgstr "hub.docker.alibaba-inc.com/isearch/rtp_llm_gpu_cuda12"
 
 #: ../../release/v0.2.0/package.md
 msgid "**AMD**"
 msgstr "**AMD**"
 
 #: ../../release/v0.2.0/package.md
-msgid "hub.docker.alibaba-inc.com/isearch/rtp_llm_rocm"
+#, fuzzy
+msgid ""
+"hub.docker.alibaba-"
+"inc.com/isearch/rtp_llm_rocm:0.2.0_2025_09_24_21_00_615e568 _accelerated"
 msgstr "hub.docker.alibaba-inc.com/isearch/rtp_llm_rocm"
 
