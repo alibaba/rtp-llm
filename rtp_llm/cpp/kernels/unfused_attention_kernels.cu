@@ -35,7 +35,6 @@ __inline__ __device__ int target_index(int id1, int id2, int id3, int id4, int d
     return id1 * (dim_2 * dim_3 * dim_4) + id3 * (dim_2 * dim_4) + id2 * dim_4 + id4;
 }
 
-
 __global__ void getSkipLength(int* skip_length, int* prefix_lengths, int batch_size) {
     int min_skip_length = prefix_lengths[0];
     for (int i = 1; i < batch_size; i++) {
@@ -82,8 +81,6 @@ void half_to_float(const void* input, void* output, const int num_elements) {
     half_to_float_kernel<<<gridSize, blockSize>>>(half_input, float_output, num_elements);
     cudaDeviceSynchronize();
 }
-
-
 
 template<typename T, typename T_IN, int ITEMS_PER_THREAD>
 __global__ void softmax_kernel(T*           attn_score,
@@ -699,9 +696,6 @@ INSTANTIATETRANSPOSEQKV(__nv_bfloat16);
 #endif
 #undef INSTANTIATETRANSPOSEQKV
 
-
-
-
 template<typename T>
 __global__ void transpose_remove_padding(const T*     src,
                                          T*           dst,
@@ -867,7 +861,6 @@ __device__ float convert_to_float(float val) {
 __device__ float convert_to_float(int val) {
     return float(val);
 }
-
 
 // Bandwidth-bound kernel by reading cos/sin coefficients from global memory (pre-computed and saved as weights).
 
@@ -2240,7 +2233,7 @@ void invokeDecodeAddFusedQKVBiasTranspose(T*               q_buf,
                                           const bool       store_kv,
                                           const bool       store_cache,
                                           cudaStream_t     stream) {
-    if (rope_config.style == RopeStyle::Base && cos_sin_cache) {
+    if (cos_sin_cache) {
         if (batch_size <= 16 || head_num % 4 != 0 || head_num_kv % 4 != 0
             || kv_block_array.cache_type == KvCacheDataType::INT8) {
             dim3   block((size_per_head / Vec_t<T>::size + 31) / 32 * 32);
@@ -3439,14 +3432,5 @@ INSTANTIATEINVOKELOADPREFIXKVCACHE(half);
 INSTANTIATEINVOKELOADPREFIXKVCACHE(__nv_bfloat16);
 #endif
 #undef INSTANTIATEINVOKELOADPREFIXKVCACHE
-
-
-
-
-
-
-
-
-
 
 }  // namespace rtp_llm
