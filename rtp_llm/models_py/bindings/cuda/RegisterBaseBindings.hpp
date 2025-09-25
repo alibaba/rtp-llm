@@ -118,6 +118,17 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
 
     rtp_ops_m.def(
         "embedding", &embedding, "Embedding lookup kernel", py::arg("output"), py::arg("input"), py::arg("weight"));
+    rtp_ops_m.def("embedding_bert",
+                  &embeddingBert,
+                  "EmbeddingBert lookup kernel",
+                  py::arg("output"),
+                  py::arg("input"),
+                  py::arg("weight"),
+                  py::arg("combo_position_ids"),
+                  py::arg("position_encoding"),
+                  py::arg("combo_tokens_type_ids"),
+                  py::arg("token_type_embedding"),
+                  py::arg("input_embedding_scalar") = 1.0f);
 }
 
 void registerBaseCudaBindings(py::module& rtp_ops_m) {

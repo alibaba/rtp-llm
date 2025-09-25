@@ -17,6 +17,13 @@ void printTorchBufferSample(const std::string& hint, torch::Tensor& tensor, uint
         }                                                                                                              \
     } while (0)
 
+#define printBufferDataDebug(buffer, hint)                                                                             \
+    do {                                                                                                               \
+        if (rtp_llm::Logger::getEngineLogger().isDebugMode()) {                                                        \
+            printBufferData_(buffer, hint);                                                                            \
+        }                                                                                                              \
+    } while (0)
+
 #define forcePrintBufferData(buffer, hint)                                                                             \
     do {                                                                                                               \
         printBufferData_(buffer, hint);                                                                                \

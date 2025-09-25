@@ -19,6 +19,8 @@ from rtp_llm.models.downstream_modules.classifier.roberta_classifier import (
     RobertaClassifierModule,
 )
 from rtp_llm.models.downstream_modules.custom_module import CustomModule
+from rtp_llm.models_py.model_desc.bert import BertModel
+from rtp_llm.models_py.model_desc.module_base import GptModelBase
 
 
 class Bert(BaseModel):
@@ -53,6 +55,12 @@ class Bert(BaseModel):
             config_json = json.loads(content)
             cls.from_huggingface(config, config_json)
         return config
+
+    def support_cuda_graph(self) -> bool:
+        return True
+
+    def _create_python_model(self) -> Optional[GptModelBase]:
+        self.py_model = BertModel(self.config, self.weight)
 
     def _init_custom_module(self) -> Optional[CustomModule]:
         if self.task_type == TaskType.SEQ_CLASSIFICATION:
@@ -98,6 +106,9 @@ class Roberta(Bert):
             logging.info("using RobertaRerankerModule as custom module")
             return RobertaRerankerModule(self.config, self.tokenizer)
         return super()._init_custom_module()
+
+    def support_cuda_graph(self) -> bool:
+        return False
 
     @classmethod
     def from_huggingface(
