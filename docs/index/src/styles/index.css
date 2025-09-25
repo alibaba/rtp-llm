@@ -1,0 +1,33 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+  font-family: Inter, 'PingFang SC', Roboto, 'Heiti SC', Arial;
+}
+
+@font-face {
+  font-family: 'AlibabaSans102-Regular';
+  src: local('AlibabaSans102-Regular'), url('https://g.alicdn.com/taobaodesign/alibaba-sans-102-taobao-font/0.0.1/AlibabaSans102_v1_TaoBao-Rg.ttf') format('truetype');
+}
+
+@font-face {
+  font-family: 'AlibabaSans102-Medium';
+  src: local('AlibabaSans102-Medium'), url('https://g.alicdn.com/taobaodesign/alibaba-sans-102-taobao-font/0.0.1/AlibabaSans102_v1_TaoBao-Md.ttf') format('truetype');
+}
+
+@font-face {
+  font-family: 'AlibabaSans102-Bold';
+  src: local('AlibabaSans102-Bold'), url('https://g.alicdn.com/taobaodesign/alibaba-sans-102-taobao-font/0.0.1/AlibabaSans102_v1_TaoBao-Bd.ttf') format('truetype');
+}
+
+body {
+  margin: 0;
+  font-family: 'PingFang SC', Roboto, 'Heiti SC', Arial;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background: #14161A;
+}
+
+code {
+  font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New', monospace;
+}

@@ -1,0 +1,118 @@
+.ai-features-section {
+  position: relative;
+  width: 100%;
+  padding: 170px 60px 117px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  z-index: 2;
+}
+
+.ai-features-title-text {
+  font-size: 48px;
+  font-weight: 600;
+  line-height: 56px;
+  color: #FFFFFF;
+  text-align: center;
+  margin-bottom: 60px;
+  background: linear-gradient(180deg, #FFFFFF 10%, rgba(152, 152, 152, 0.8) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  text-fill-color: transparent;
+}
+
+.ai-features-grid {
+  width: 100%;
+  max-width: 1320px;
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.ai-feature-card {
+  flex: 1;
+  max-width: 400px;
+  min-height: 440px;
+  padding: 24px 20px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+.ai-feature-icon {
+  width: 100px;
+  height: 100px;
+  margin-bottom: 16px;
+}
+
+.ai-feature-title {
+  font-size: 24px;
+  font-weight: 600;
+  line-height: 30px;
+  color: #FFFFFF;
+  margin: 0 0 16px 0;
+}
+
+.ai-feature-divider {
+  opacity: 0.4;
+  background: linear-gradient(90deg, #FFFFFF00, #FFFFFF80 12%, #FFFFFF00);
+  width: 100%;
+  height: 1px;
+  margin-bottom: 18px;
+}
+
+.ai-feature-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+}
+
+.ai-feature-item {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+.ai-check-icon {
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+}
+
+.ai-feature-text {
+  opacity: 0.64;
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 24px;
+  color: #FFFFFF;
+  flex: 1;
+}
+
+@media (max-width: 768px) {
+  .ai-features-section {
+    padding: 60px 20px;
+  }
+  
+  .ai-features-title-text {
+    font-size: 36px;
+    line-height: 44px;
+    margin-bottom: 40px;
+  }
+  
+  .ai-features-grid {
+    flex-direction: column;
+    gap: 30px;
+  }
+  
+  .ai-feature-card {
+    max-width: 100%;
+    min-height: auto;
+  }
+}

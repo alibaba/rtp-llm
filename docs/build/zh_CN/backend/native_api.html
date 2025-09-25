@@ -55,13 +55,14 @@
     <script defer="defer" src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
     <script>DOCUMENTATION_OPTIONS.pagename = 'backend/native_api';</script>
     <script src="../_static/js/language-switcher.js?v=d38991ab"></script>
+    <link rel="icon" href="../_static/logo.ico"/>
     <link rel="index" title="索引" href="../genindex.html" />
     <link rel="search" title="搜索" href="../search.html" />
     <link rel="next" title="deepseek" href="../references/deepseek/index.html" />
     <link rel="prev" title="OpenAI API - Embedding" href="openai_api_embeddings.html" /> 
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="zh-CN"/>
-    <meta name="docbuild:last-update" content="2025 年 09 月 17 日"/>
+    <meta name="docbuild:last-update" content="2025 年 09 月 25 日"/>
 <link
   rel="stylesheet"
   href="../_static/css/language-switcher.css"
@@ -217,8 +218,16 @@
 
 <li class="toctree-l1"><a class="reference internal" href="function_calling.html">工具和函数调用</a></li>
 <li class="toctree-l1"><a class="reference internal" href="quantization.html">量化</a></li>
-<li class="toctree-l1"><a class="reference internal" href="lora.html">LoRA Serving</a></li>
-<li class="toctree-l1"><a class="reference internal" href="pd_disaggregation.html">PD解聚</a></li>
+<li class="toctree-l1"><a class="reference internal" href="lora.html">LoRA 服务</a></li>
+<li class="toctree-l1"><a class="reference internal" href="pd_disaggregation.html">PD分离</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">RTP-LLM 路由器</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="flexlb.html">FlexLB（弹性负载均衡器）- 主节点</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Benchmark</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../benchmark/benchmark.html">RTP-LLM Performance Benchmark Tool</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">参考文献</span></p>
 <ul class="nav bd-sidenav">
@@ -485,11 +494,11 @@ document.write(`
 <p>除了OpenAI兼容的API之外，RTP-LLM运行时还提供其Native服务器API。我们介绍以下API：</p>
 <div class="pst-scrollable-table-container"><table class="table">
 <thead>
-<tr class="row-odd"><th class="head"><p>方法名</p></th>
-<th class="head"><p>请求示例</p></th>
-<th class="head"><p>是否POST</p></th>
-<th class="head"><p>是否GET</p></th>
-<th class="head"><p>描述</p></th>
+<tr class="row-odd"><th class="head"><p>method_name</p></th>
+<th class="head"><p>example_request</p></th>
+<th class="head"><p>is_post</p></th>
+<th class="head"><p>is_get</p></th>
+<th class="head"><p>desc</p></th>
 </tr>
 </thead>
 <tbody>
@@ -497,127 +506,163 @@ document.write(`
 <td><p><code class="docutils literal notranslate"><span class="pre">{&quot;prompt&quot;:</span> <span class="pre">&quot;Hello&quot;,</span> <span class="pre">&quot;generate_config&quot;:</span> <span class="pre">{&quot;max_new_tokens&quot;:</span> <span class="pre">10,</span> <span class="pre">&quot;top_k&quot;:</span> <span class="pre">1,</span> <span class="pre">&quot;top_p&quot;:</span> <span class="pre">0}}</span></code></p></td>
 <td><p>✅</p></td>
 <td><p>❌</p></td>
-<td><p>基本文本生成端点（向后兼容早期版本）。</p></td>
+<td><p>Basic text-generation endpoint
+(backward-compatible with
+early versions).</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">/chat/render</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">{&quot;messages&quot;:</span> <span class="pre">[{&quot;role&quot;:</span> <span class="pre">&quot;user&quot;,&quot;content&quot;:</span> <span class="pre">&quot;hello？&quot;}]}</span></code></p></td>
 <td><p>✅</p></td>
 <td><p>✅</p></td>
-<td><p>将聊天模板渲染成将发送给模型的最终提示。</p></td>
+<td><p>Render the chat template into
+the final prompt that will be
+sent to the model.</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">/v1/chat/render</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">{&quot;messages&quot;:</span> <span class="pre">[{&quot;role&quot;:</span> <span class="pre">&quot;user&quot;,&quot;content&quot;:</span> <span class="pre">&quot;hello？&quot;}]}</span></code></p></td>
 <td><p>✅</p></td>
 <td><p>❌</p></td>
-<td><p><a href="#id1"><span class="problematic" id="id2">``</span></a>/chat/render``的v1路径（仅POST）。</p></td>
+<td><p>v1 path for <code class="docutils literal notranslate"><span class="pre">/chat/render</span></code>
+(POST only).</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">/tokenizer/encode</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">{&quot;prompt&quot;:</span> <span class="pre">&quot;hello&quot;}</span></code></p></td>
 <td><p>✅</p></td>
 <td><p>❌</p></td>
-<td><p>使用内部tokenizer将文本编码成token ID列表。</p></td>
+<td><p>Encode text into a list of
+token IDs using the internal
+tokenizer.</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">/tokenize</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">{&quot;prompt&quot;:</span> <span class="pre">&quot;hello&quot;}</span></code></p></td>
 <td><p>✅</p></td>
 <td><p>❌</p></td>
-<td><p>轻量级tokenization端点，返回token数组。</p></td>
+<td><p>Lightweight tokenization
+endpoint that returns an array
+of tokens.</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">/rtp_llm/worker_status</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">{</span> <span class="pre">&quot;latest_cache_version&quot;:</span> <span class="pre">-1}</span></code></p></td>
 <td><p>✅</p></td>
 <td><p>✅</p></td>
-<td><p>RTP-LLM框架中worker的详细状态。</p></td>
+<td><p>Detailed status of a worker in
+the RTP-LLM framework.</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">/worker_status</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">{</span> <span class="pre">&quot;latest_cache_version&quot;:</span> <span class="pre">-1}</span></code></p></td>
 <td><p>✅</p></td>
 <td><p>✅</p></td>
-<td><p>查询推理worker的运行时状态。</p></td>
+<td><p>Query runtime status of the
+inference worker.</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">/health</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">{}</span></code></p></td>
 <td><p>✅</p></td>
 <td><p>✅</p></td>
-<td><p>通用健康检查；返回服务是否存活。</p></td>
+<td><p>Generic health check; returns
+whether the service is alive.</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">/status</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">{}</span></code></p></td>
 <td><p>✅</p></td>
 <td><p>✅</p></td>
-<td><p>获取当前服务实例的全面状态信息。</p></td>
+<td><p>Retrieve comprehensive status
+information for the current
+service instance.</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">/health_check</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">{&quot;latest_cache_version&quot;:</span> <span class="pre">-1}</span></code></p></td>
 <td><p>✅</p></td>
 <td><p>✅</p></td>
-<td><p>深度健康检查，包含缓存版本号。</p></td>
+<td><p>Deep health check that
+includes a cache version
+number.</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">/update</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">{&quot;peft_info&quot;:</span> <span class="pre">{&quot;lora_info&quot;:</span> <span class="pre">{&quot;lora_0&quot;:</span> <span class="pre">&quot;/lora/llama-lora-test/&quot;}}}</span></code></p></td>
 <td><p>✅</p></td>
 <td><p>❌</p></td>
-<td><p>热加载LoRA信息到运行中的服务。</p></td>
+<td><p>Hot-reload LoRA info into the
+running service.</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">/v1/models</span></code></p></td>
 <td></td>
 <td><p>❌</p></td>
 <td><p>✅</p></td>
-<td><p>列出当前部署的模型（OpenAI兼容）。</p></td>
+<td><p>List currently deployed models
+(OpenAI-compatible).</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">/set_log_level</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">{</span> <span class="pre">&quot;log_level&quot;:</span> <span class="pre">&quot;INFO&quot;}</span></code></p></td>
 <td><p>✅</p></td>
 <td><p>❌</p></td>
-<td><p>动态调整服务日志级别。</p></td>
+<td><p>Dynamically adjust the service
+log level.</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">/update_eplb_config</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">{&quot;model&quot;:</span> <span class="pre">&quot;EPLB&quot;,</span> <span class="pre">&quot;update_time&quot;:1000}</span></code></p></td>
 <td><p>✅</p></td>
 <td><p>❌</p></td>
-<td><p>更新EPLB（弹性负载均衡器）配置。</p></td>
+<td><p>Update the EPLB (Elastic Load
+Balancer) configuration.</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">/v1/embeddings</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">{&quot;input&quot;:</span> <span class="pre">&quot;who</span> <span class="pre">are</span> <span class="pre">u&quot;,</span> <span class="pre">&quot;model&quot;:</span> <span class="pre">&quot;text-embedding-ada-002&quot;}</span></code></p></td>
 <td><p>✅</p></td>
 <td><p>❌</p></td>
-<td><p>OpenAI兼容的稠密向量嵌入端点。</p></td>
+<td><p>OpenAI-compatible dense-vector
+embedding endpoint.</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">/v1/embeddings/dense</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">{&quot;input&quot;:</span> <span class="pre">&quot;who</span> <span class="pre">are</span> <span class="pre">u&quot;}</span></code></p></td>
 <td><p>✅</p></td>
 <td><p>❌</p></td>
-<td><p>仅返回**稠密**嵌入。</p></td>
+<td><p>Return <strong>dense</strong> embeddings
+only.</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">/v1/embeddings/sparse</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">{&quot;input&quot;:</span> <span class="pre">&quot;who</span> <span class="pre">are</span> <span class="pre">u&quot;}</span></code></p></td>
 <td><p>✅</p></td>
 <td><p>❌</p></td>
-<td><p>仅返回**稀疏**嵌入（例如，BM25/TF-IDF）。</p></td>
+<td><p>Return <strong>sparse</strong> embeddings
+only (e.g., BM25/TF-IDF).</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">/v1/embeddings/colbert</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">{&quot;input&quot;:[&quot;hello,</span> <span class="pre">what</span> <span class="pre">is</span> <span class="pre">your</span> <span class="pre">name?&quot;,&quot;hello&quot;],&quot;model&quot;:&quot;xx&quot;}</span></code></p></td>
 <td><p>✅</p></td>
 <td><p>❌</p></td>
-<td><p>返回用于高精度语义检索的**ColBERT**后期交互多向量表示。</p></td>
+<td><p>Return <strong>ColBERT</strong>
+late-interaction multi-vector
+representations for
+high-accuracy semantic
+retrieval.</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">/v1/embeddings/similarity</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">{&quot;left&quot;:[&quot;hello,</span> <span class="pre">what</span> <span class="pre">is</span> <span class="pre">your</span> <span class="pre">name?&quot;],&quot;right&quot;:[&quot;hello&quot;,&quot;what</span> <span class="pre">is</span> <span class="pre">your</span> <span class="pre">name&quot;],&quot;embedding_config&quot;:{&quot;type&quot;:&quot;sparse&quot;},&quot;model&quot;:&quot;xx&quot;}</span></code></p></td>
 <td><p>✅</p></td>
 <td><p>❌</p></td>
-<td><p>接受查询-文档对，直接返回成对相似度（余弦/点积），跳过单独的嵌入步骤。</p></td>
+<td><p>Accept query–doc pairs and
+return pairwise similarities
+(cosine/dot) directly,
+skipping the separate
+embedding step.</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">/v1/classifier</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">{&quot;input&quot;:[[&quot;what</span> <span class="pre">is</span> <span class="pre">panda?&quot;,&quot;hi&quot;],[&quot;what</span> <span class="pre">is</span> <span class="pre">panda?&quot;,&quot;The</span> <span class="pre">giant</span> <span class="pre">panda</span> <span class="pre">(Ailuropoda</span> <span class="pre">melanoleuca),</span> <span class="pre">sometimes</span> <span class="pre">called</span> <span class="pre">a</span> <span class="pre">panda</span> <span class="pre">bear</span> <span class="pre">or</span> <span class="pre">simply</span> <span class="pre">panda,</span> <span class="pre">is</span> <span class="pre">a</span> <span class="pre">bear</span> <span class="pre">species</span> <span class="pre">endemic</span> <span class="pre">to</span> <span class="pre">China.&quot;]],&quot;model&quot;:&quot;xx&quot;}</span></code></p></td>
 <td><p>✅</p></td>
 <td><p>❌</p></td>
-<td><p>通用文本分类端点，支持情感分类或主题分类等任务。</p></td>
+<td><p>Generic text-classification
+endpoint supporting tasks such
+as sentiment or topic
+classification.</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">/v1/reranker</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">{&quot;query&quot;:&quot;what</span> <span class="pre">is</span> <span class="pre">panda?</span> <span class="pre">&quot;,&quot;documents&quot;:[&quot;hi&quot;,&quot;The</span> <span class="pre">giant</span> <span class="pre">panda</span> <span class="pre">(Ailuropoda</span> <span class="pre">melanoleuca),</span> <span class="pre">sometimes</span> <span class="pre">called</span> <span class="pre">a</span> <span class="pre">panda</span> <span class="pre">bear</span> <span class="pre">or</span> <span class="pre">simply</span> <span class="pre">panda,</span> <span class="pre">is</span> <span class="pre">a</span> <span class="pre">bear</span> <span class="pre">species</span> <span class="pre">endemic</span> <span class="pre">to</span> <span class="pre">China.&quot;,&quot;gg&quot;]}</span></code></p></td>
 <td><p>✅</p></td>
 <td><p>❌</p></td>
-<td><p>根据相关性重新排序检索到的文档列表并返回重新排序的结果。</p></td>
+<td><p>Rerank a list of retrieved
+documents by relevance and
+return the reordered results.</p></td>
 </tr>
 </tbody>
 </table>
@@ -1116,7 +1161,7 @@ document.write(`
   
   <div class="footer-item">
     <p class="last-updated">
-  最后更新于 2025 年 09 月 17 日.
+  最后更新于 2025 年 09 月 25 日.
   <br/>
 </p>
   </div>

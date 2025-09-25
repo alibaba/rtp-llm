@@ -1,0 +1,39 @@
+.app {
+  font-family: Inter, sans-serif;
+  width: 100%;
+  min-height: 100vh;
+}
+
+.container {
+  width: 100%;
+  min-width: 100%;
+  height: auto;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background: #14161A;
+}
+
+.main-content {
+  width: 100%;
+  height: auto;
+  position: relative;
+  z-index: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.background-image {
+  width: 100%;
+  height: 1200px;
+  position: absolute;
+  z-index: 1;
+  top: 0;
+  left: 0;
+}
+
+.hero-with-header {
+  width: 100%;
+  height: 100vh;
+}
