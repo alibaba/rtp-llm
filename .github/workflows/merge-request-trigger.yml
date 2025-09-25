@@ -27,7 +27,7 @@ jobs:
             ./trigger-merge.sh "${{ github.event.pull_request.head.sha }}" "${{ secrets.CI_SECRET }}" "${{ github.actor_id }}${{ github.actor }}@users.github.com" "${{ github.actor }}" "auto-merge: github commit${{ github.event.head_commit.message }}" 
           else
             echo "Pull request was closed without merge."
-            exit 0
+            exit 1
           fi
         env:
           AONE_PROJECT_ID: "3512232" 
@@ -36,4 +36,9 @@ jobs:
       - name: Get Merge Result
         run: |
           echo "Polling for merge result of commit ${{ github.event.pull_request.head.sha }}"
-          ./get-merge-result.sh "${{ github.event.pull_request.head.sha }}" "${{ secrets.CI_SECRET }}"
+          if [ "${{ github.event.pull_request.merged }}" = "true" ]; then
+            ./get-merge-result.sh "${{ github.event.pull_request.head.sha }}" "${{ secrets.CI_SECRET }}"
+          else
+            echo "Pull request was closed without merge."
+            exit 1
+          fi
