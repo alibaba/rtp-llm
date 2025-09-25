@@ -230,7 +230,6 @@ public:
                                  int                          batch_size,
                                  bool                         use_fp8_fmha,
                                  bool                         use_offset_array = false);
-    BufferPtr getRotaryEmbeddingCoefficientCache(const RopeConfig & rope_config) override;
 
     std::shared_ptr<NativeGraphRunner> getNativeGraphRunner() override {
         return std::make_shared<NativeHipGraphRunner<GptModelInputs, GptModelOutputs>>(this);
