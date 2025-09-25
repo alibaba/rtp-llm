@@ -379,6 +379,4 @@ protected:
     std::shared_ptr<c10::cuda::CUDAStreamGuard> guard_;
 };
 
-torch::Tensor getRopeCache(const RopeConfig& rope_config, int max_position_embeddings);
-
 }  // namespace rtp_llm

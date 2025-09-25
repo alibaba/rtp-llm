@@ -4,7 +4,9 @@
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/devices/cuda_impl/CudaFlashInfer.h"
+#include "rtp_llm/cpp/devices/utils/RopeCache.h"
 #include "rtp_llm/cpp/core/BufferHelper.h"
+
 namespace rtp_llm {
 
 FusedRopeKVCachePrefillOp::FusedRopeKVCachePrefillOp(const GptInitParameter& gpt_init_parameter):
