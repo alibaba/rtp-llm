@@ -27,10 +27,11 @@ private:
 
 private:
     // Helper functions to reduce code duplication
-    torch_ext::PyAttentionInputs buildPyAttentionInputs(const GptModelInputs& inputs);
-    void                         setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs,
-                                                                const GptModelInputs&         inputs,
-                                                                BufferPtr&                    kv_cache_block_id_device);
+    torch_ext::PyAttentionInputs   buildPyAttentionInputs(const GptModelInputs& inputs);
+    torch_ext::BertEmbeddingInputs buildBertEmbeddingInputs(const GptModelInputs& inputs);
+    void                           setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs,
+                                                                  const GptModelInputs&         inputs,
+                                                                  BufferPtr&                    kv_cache_block_id_device);
     GptModelOutputs
                   callForwardPostLayers(BufferPtr hidden_states, const GptModelInputs& inputs, bool is_forward_method);
     GraphBase*    graph_runner_{nullptr};

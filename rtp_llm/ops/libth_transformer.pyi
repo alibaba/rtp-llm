@@ -1032,9 +1032,18 @@ class PyAttentionInputs:
     def get_decode_flash_infer_attn(self) -> typing.Any:
         pass
 
+class BertEmbeddingInputs:
+    combo_position_ids: torch.Tensor
+    position_encoding: torch.Tensor
+    combo_tokens_type_ids: torch.Tensor
+    token_type_embedding: torch.Tensor
+    input_embedding_scalar: float
+    def __init__(self) -> None: ...
+
 class PyModelInputs:
     input_ids: torch.Tensor
     attention_inputs: PyAttentionInputs
+    bert_embedding_inputs: BertEmbeddingInputs
 
 class ParamsBase:
     def fill_params(
