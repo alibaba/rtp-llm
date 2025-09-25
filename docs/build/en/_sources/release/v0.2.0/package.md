@@ -8,5 +8,7 @@
 
 | **CardType**              | **image** | **tag** |
 |--------------------------|-------------------|-------------------|
-| **CUDA**           | hub.docker.alibaba-inc.com/isearch/rtp_llm_gpu_cuda12 |2025_08_10_21_00_0b10e6b_accelerated                |
-| **AMD**            | hub.docker.alibaba-inc.com/isearch/rtp_llm_rocm    | 2025_07_07_11_26_b8c2167_accelerated                 |
+| **CUDA-SM9x**           | hub.docker.alibaba-inc.com/isearch/rtp_llm_sm9x:0.2.0_2025_09_24_21_00_615e568 _accelerated   
+| **CUDA-SM8x**           | hub.docker.alibaba-inc.com/isearch/rtp_llm_sm8x:0.2.0_2025_09_24_21_00_615e568 _accelerated   
+| **CUDA-SM7x**           | hub.docker.alibaba-inc.com/isearch/rtp_llm_sm7x:0.2.0_2025_09_24_21_00_615e568 _accelerated                |
+| **AMD**            | hub.docker.alibaba-inc.com/isearch/rtp_llm_rocm:0.2.0_2025_09_24_21_00_615e568 _accelerated                 |
