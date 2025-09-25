@@ -212,7 +212,7 @@ void AttentionOpTest::contextAttentionOpTest(size_t        batch_size,
     auto attention_mask_device = createDeviceBuffer<half>(attention_mask_host);
     auto scale_device          = createDeviceBuffer<float>(scale_host);
 #ifdef USING_ROCM
-    auto rope_config           = RopeConfig({rtp_llm::RopeStyle::Base, 128, 1000000});
+    auto rope_config = RopeConfig({RopeStyle::Base, (int)head_dim, 10000, 1, 2048, 1, 1});
 
     size_t tokensPerBlock = 16;
     int block_num = batch_size * ((seq_len + tokensPerBlock - 1) / tokensPerBlock + 1);
@@ -258,8 +258,10 @@ void AttentionOpTest::contextAttentionOpTest(size_t        batch_size,
     auto output_data_type = qscheme == QScheme::Qfp8PerTensor ? DataType::TYPE_FP8_E4M3 : qkv_input_device->type();
     auto qkv_output       = device_->allocateBuffer({output_data_type, {batch_size, seq_len, num_heads, head_dim}});
 #ifdef USING_ROCM
+    device_->initParamsRef().use_asm_pa = true;
+    device_->initParamsRef().max_seq_len = 150000;
     device_->contextAttention(
-        {0, *qkv_input_device, *qkv_output, common_inputs, attention_weight, attention_config, qscheme, DataType::TYPE_INVALID, ((ROCmDevice*)device_)->getRotaryEmbeddingCoefficientCache(rope_config)});
+        {0, *qkv_input_device, *qkv_output, common_inputs, attention_weight, attention_config, qscheme, DataType::TYPE_INVALID});
     auto result_ref = attention->forward(query_states_host, key_states_host, value_states_host, attention_mask_host, std::nullopt, std::nullopt, true, rope_config.base, rope_config.dim);
 #else
     device_->contextAttention(
@@ -359,7 +361,7 @@ void AttentionOpTest::selfAttentionOpTest(size_t batch_size,
     auto sequence_lengths_device = createDeviceBuffer<int>(sequence_lengths_host);
     auto input_lengths_device    = createDeviceBuffer<int>(input_lengths_host);
 #ifdef USING_ROCM
-    auto rope_config            = RopeConfig({rtp_llm::RopeStyle::Base, 128, 1000000});
+    auto rope_config = RopeConfig({RopeStyle::Base, (int)head_dim, 10000, 1, 2048, 1, 1});
 #else
     auto rope_config = RopeConfig({RopeStyle::No, (int)head_dim, 10000, 1, 2048, 1, 1});
 #endif
@@ -411,8 +413,10 @@ void AttentionOpTest::selfAttentionOpTest(size_t batch_size,
 
     auto qkv_output = device_->allocateBuffer({qkv_states_device->type(), {token_num, num_heads, head_dim}});
 #ifdef USING_ROCM
+    device_->initParamsRef().use_asm_pa = true;
+    device_->initParamsRef().max_seq_len = 150000;
     device_->decoderSelfAttention(
-        {0, *qkv_states_device, *qkv_output, common_inputs, attention_weight, attention_config, QScheme::NoQuantize, DataType::TYPE_INVALID, ((ROCmDevice*)device_)->getRotaryEmbeddingCoefficientCache(rope_config)});
+        {0, *qkv_states_device, *qkv_output, common_inputs, attention_weight, attention_config, QScheme::NoQuantize, DataType::TYPE_INVALID});
     auto result_ref = attention->forward(
         query_states_host, key_states_host, value_states_host, attention_mask_host, k_cache_host, v_cache_host, true, rope_config.base, rope_config.dim);
 #else
@@ -500,7 +504,8 @@ void AttentionOpTest::aiterPageAttentionOpTest(size_t batch_size,
     auto qkv_states_device       = createDeviceBuffer<__nv_bfloat16>(qkv_states_host);
     auto sequence_lengths_device = createDeviceBuffer<int>(sequence_lengths_host);
     auto input_lengths_device    = createDeviceBuffer<int>(input_lengths_host);
-    auto rope_config             = RopeConfig({RopeStyle::Base, (int)head_dim, 1000000, 1., 0., 0., 40960});
+    // auto rope_config             = RopeConfig({RopeStyle::Base, (int)head_dim, 1000000, 1., 0., 0., 40960});
+    auto rope_config = RopeConfig({RopeStyle::Base, (int)head_dim, 10000, 1, 2048, 1, 1});
     // cache manager need one block for preserve and every seq need one block for preserve.
     auto                 block_num = 2 * batch_size * ((kv_seq_len + tokens_per_block - 1) / tokens_per_block + 1) + 1;
     rtp_llm::CacheConfig cache_conf(rtp_llm::KVCacheParam(
