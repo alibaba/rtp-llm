@@ -1,0 +1,143 @@
+.ai-stats-section {
+  position: relative;
+  width: 100%;
+  padding: 80px 60px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  z-index: 2;
+  min-height: 600px;
+}
+
+.ai-stats-background {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 1;
+  overflow: hidden;
+}
+
+.ai-stats-background::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(0deg, #14161A 0%, rgba(21, 22, 24, 0.38) 50%, rgba(33, 36, 41, 0.43) 57%, rgba(0, 0, 0, 0.45) 64%, #14161A 100%);
+  z-index: 2;
+  pointer-events: none;
+}
+
+.ai-stats-bg-image {
+  width: 100%;
+  height: 600px;
+  object-fit: cover;
+}
+
+.ai-stats-content {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 2;
+  width: 100%;
+  max-width: 1320px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 60px 20px;
+  box-sizing: border-box;
+}
+
+.ai-stats-title-text {
+  font-size: 48px;
+  font-weight: 600;
+  line-height: 56px;
+  color: #FFFFFF;
+  text-align: center;
+  margin-bottom: 60px;
+  background: linear-gradient(180deg, #FFFFFF 10%, rgba(152, 152, 152, 0.8) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  text-fill-color: transparent;
+}
+
+.ai-stats-grid {
+  width: 100%;
+  max-width: 1200px;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.ai-stat-item {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 40px 0;
+  box-sizing: border-box;
+  min-width: 200px;
+}
+
+.ai-stat-number {
+  font-size: 42px;
+  font-weight: 600;
+  line-height: 54px;
+  color: #FFFFFF;
+  text-align: center;
+  margin-bottom: 20px;
+}
+
+.ai-stat-label {
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 24px;
+  color: #FFFFFF;
+  text-align: center;
+  opacity: 0.8;
+}
+
+@media (max-width: 768px) {
+  .ai-stats-section {
+    padding: 60px 20px;
+    min-height: 500px;
+  }
+  
+  .ai-stats-content {
+    padding: 40px 20px;
+    position: relative;
+    top: auto;
+    left: auto;
+    transform: none;
+  }
+  
+  .ai-stats-title-text {
+    font-size: 36px;
+    line-height: 44px;
+    margin-bottom: 40px;
+  }
+  
+  .ai-stats-grid {
+    flex-direction: column;
+    gap: 30px;
+  }
+  
+  .ai-stat-item {
+    min-width: auto;
+    width: 100%;
+    padding: 20px;
+  }
+  
+  .ai-stat-number {
+    font-size: 36px;
+    line-height: 44px;
+  }
+}

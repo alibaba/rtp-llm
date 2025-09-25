@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-17 22:33+0800\n"
+"POT-Creation-Date: 2025-09-25 09:43+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -33,7 +33,7 @@ msgid "Framkework  Advanced Feature"
 msgstr ""
 
 #: ../../release/v0.2.0/feature.md:6
-msgid "[PD Disaggregation](../../backend/pd_disaggregation.md) && [PD Entrance Transpose](../../backend/pd_entrace_transpose.md)"
+msgid "[PD Disaggregation](../../backend/pd_disaggregation.ipynb) && [PD Entrance Transpose](../../backend/pd_entrance_transpose.md)"
 msgstr ""
 
 #: ../../release/v0.2.0/feature.md:7

@@ -1,0 +1,15 @@
+.background-animation {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  z-index: -1;
+  overflow: hidden;
+}
+
+.background-animation canvas {
+  width: 100% !important;
+  height: 100% !important;
+  object-fit: cover;
+}

@@ -1,0 +1,801 @@
+
+<!DOCTYPE html>
+
+
+<html lang="en" data-content_root="../../" >
+
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>tbstars-moe-42 42B-A3.5B-MoE &#8212; RTP-LLM</title>
+  
+  
+  
+  <script data-cfasync="false">
+    document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
+    document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
+  </script>
+  
+  <!-- Loaded before other Sphinx assets -->
+  <link href="../../_static/styles/theme.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+<link href="../../_static/styles/bootstrap.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+<link href="../../_static/styles/pydata-sphinx-theme.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+
+  
+  <link href="../../_static/vendor/fontawesome/6.5.2/css/all.min.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+  <link rel="preload" as="font" type="font/woff2" crossorigin href="../../_static/vendor/fontawesome/6.5.2/webfonts/fa-solid-900.woff2" />
+<link rel="preload" as="font" type="font/woff2" crossorigin href="../../_static/vendor/fontawesome/6.5.2/webfonts/fa-brands-400.woff2" />
+<link rel="preload" as="font" type="font/woff2" crossorigin href="../../_static/vendor/fontawesome/6.5.2/webfonts/fa-regular-400.woff2" />
+
+    <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=03e43079" />
+    <link rel="stylesheet" type="text/css" href="../../_static/styles/sphinx-book-theme.css?v=eba8b062" />
+    <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../../_static/css/custom_log.css" />
+    <link rel="stylesheet" type="text/css" href="../../_static/css/language-switcher.css?v=943557c0" />
+    <link rel="stylesheet" type="text/css" href="../../_static/css/custom_log.css" />
+    <link rel="stylesheet" type="text/css" href="../../_static/css/language-switcher.css?v=943557c0" />
+  
+  <!-- Pre-loaded scripts that we'll load fully later -->
+  <link rel="preload" as="script" href="../../_static/scripts/bootstrap.js?digest=dfe6caa3a7d634c4db9b" />
+<link rel="preload" as="script" href="../../_static/scripts/pydata-sphinx-theme.js?digest=dfe6caa3a7d634c4db9b" />
+  <script src="../../_static/vendor/fontawesome/6.5.2/js/all.min.js?digest=dfe6caa3a7d634c4db9b"></script>
+
+    <script src="../../_static/documentation_options.js?v=7f7c277e"></script>
+    <script src="../../_static/doctools.js?v=9bcbadda"></script>
+    <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../../_static/copybutton.js?v=ccdb6887"></script>
+    <script src="../../_static/js/language-switcher.js?v=d38991ab"></script>
+    <script src="../../_static/scripts/sphinx-book-theme.js?v=887ef09a"></script>
+    <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
+    <script>DOCUMENTATION_OPTIONS.pagename = 'references/tbstars/deploy';</script>
+    <script src="../../_static/js/language-switcher.js?v=d38991ab"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+    <link rel="next" title="ServerArgs" href="../../backend/server_arguments.html" />
+    <link rel="prev" title="TBstars 2.0" href="reporter.html" /> 
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="docsearch:language" content="en"/>
+    <meta name="docbuild:last-update" content="Sep 19, 2025"/>
+<link
+  rel="stylesheet"
+  href="../../_static/css/language-switcher.css"
+/>
+<script src="../../_static/js/language-switcher.js"></script>
+
+  </head>
+  
+  
+  <body data-bs-spy="scroll" data-bs-target=".bd-toc-nav" data-offset="180" data-bs-root-margin="0px 0px -60%" data-default-mode="">
+
+  
+  
+  <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
+  
+  <div id="pst-scroll-pixel-helper"></div>
+  
+  <button type="button" class="btn rounded-pill" id="pst-back-to-top">
+    <i class="fa-solid fa-arrow-up"></i>Back to top</button>
+
+  
+  <input type="checkbox"
+          class="sidebar-toggle"
+          id="pst-primary-sidebar-checkbox"/>
+  <label class="overlay overlay-primary" for="pst-primary-sidebar-checkbox"></label>
+  
+  <input type="checkbox"
+          class="sidebar-toggle"
+          id="pst-secondary-sidebar-checkbox"/>
+  <label class="overlay overlay-secondary" for="pst-secondary-sidebar-checkbox"></label>
+  
+  <div class="search-button__wrapper">
+    <div class="search-button__overlay"></div>
+    <div class="search-button__search-container">
+<form class="bd-search d-flex align-items-center"
+      action="../../search.html"
+      method="get">
+  <i class="fa-solid fa-magnifying-glass"></i>
+  <input type="search"
+         class="form-control"
+         name="q"
+         id="search-input"
+         placeholder="Search..."
+         aria-label="Search..."
+         autocomplete="off"
+         autocorrect="off"
+         autocapitalize="off"
+         spellcheck="false"/>
+  <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd>K</kbd></span>
+</form></div>
+  </div>
+
+  <div class="pst-async-banner-revealer d-none">
+  <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="Version warning"></aside>
+</div>
+
+  
+    <header class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
+    </header>
+  
+
+  <div class="bd-container">
+    <div class="bd-container__inner bd-page-width">
+      
+      
+      
+      <div class="bd-sidebar-primary bd-sidebar">
+        
+
+  
+  <div class="sidebar-header-items sidebar-primary__section">
+    
+    
+    
+    
+  </div>
+  
+    <div class="sidebar-primary-items__start sidebar-primary__section">
+        <div class="sidebar-primary-item">
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="../../index.html">
+  
+  
+  
+  
+  
+    
+    
+      
+    
+    
+    <img src="../../_static/logo.png" class="logo__image only-light" alt="RTP-LLM - Home"/>
+    <script>document.write(`<img src="../../_static/logo.png" class="logo__image only-dark" alt="RTP-LLM - Home"/>`);</script>
+  
+  
+</a></div>
+        <div class="sidebar-primary-item">
+
+ <script>
+ document.write(`
+   <button class="btn search-button-field search-button__button" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="fa-solid fa-magnifying-glass"></i>
+    <span class="search-button__default-text">Search</span>
+    <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+   </button>
+ `);
+ </script></div>
+        <div class="sidebar-primary-item"><nav class="bd-links bd-docs-nav" aria-label="Main">
+    <div class="bd-toc-item navbar-nav active">
+        <p aria-level="2" class="caption" role="heading"><span class="caption-text">Installation</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../../start/install.html">Install RTP-LLM</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Release Version</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../../release/v0.2.0/release.html">RTP-LLM 0.2.0</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Basic Usage</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../../backend/send_request.html">Sending Requests</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../backend/openai_api_completions.html">OpenAI APIs - Completions</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../backend/openai_api_vision.html">OpenAI APIs - Vision</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../backend/openai_api_embeddings.html">OpenAI APIs - Embedding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../backend/native_api.html">RTP-LLM Native APIs</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../backend/cluster_envs.html">Cluster Environments</a></li>
+
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Backend Tutorial</span></p>
+<ul class="current nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../deepseek/index.html">deepseek</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../qwen/index.html">qwen-moe</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../kimi/index.html">kimi</a></li>
+<li class="toctree-l1 current active has-children"><a class="reference internal" href="index.html">tbstars</a><details open="open"><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="reporter.html">TBstars 2.0</a></li>
+
+<li class="toctree-l2 current active"><a class="current reference internal" href="#">tbstars-moe-42 42B-A3.5B-MoE</a></li>
+
+
+</ul>
+</details></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Advanced Backend Configurations</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../../backend/server_arguments.html">ServerArgs</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../backend/sampling_params.html">Sampling Config</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../backend/attention_backend.html">Attention Backend</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Supported Models</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../../supported_models/generative_models.html">Large Language Models</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../supported_models/multimodal_language_models.html">Multimodal Language Models</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../supported_models/embedding_models.html">Embedding Models</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../supported_models/support_new_models.html">How to Support New Models</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Advanced Features</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../../backend/speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../backend/reuse_kv_cache.html">ReuseCache</a></li>
+
+<li class="toctree-l1"><a class="reference internal" href="../../backend/function_calling.html">Tool and Function Calling</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../backend/quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../backend/lora.html">LoRA Serving</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../backend/pd_disaggregation.html">PD Disaggregation</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">RTP-LLM Router</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../../backend/flexlb.html">FlexLB (Flexible Load Balancer) - Master Role</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">References</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../general.html">General Guidance</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer.html">Developer Reference</a></li>
+</ul>
+
+    </div>
+</nav></div>
+    </div>
+  
+  
+  <div class="sidebar-primary-items__end sidebar-primary__section">
+  </div>
+  
+  <div id="rtd-footer-container"></div>
+
+
+      </div>
+      
+      <main id="main-content" class="bd-main" role="main">
+        
+        
+
+<div class="sbt-scroll-pixel-helper"></div>
+
+          <div class="bd-content">
+            <div class="bd-article-container">
+              
+              <div class="bd-header-article d-print-none">
+<div class="header-article-items header-article__inner">
+  
+    <div class="header-article-items__start">
+      
+        <div class="header-article-item"><button class="sidebar-toggle primary-toggle btn btn-sm" title="Toggle primary sidebar" data-bs-placement="bottom" data-bs-toggle="tooltip">
+  <span class="fa-solid fa-bars"></span>
+</button></div>
+      
+    </div>
+  
+  
+    <div class="header-article-items__end">
+      
+        <div class="header-article-item">
+
+<div class="article-header-buttons">
+
+
+
+
+
+<div class="dropdown dropdown-source-buttons">
+  <button class="btn dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" aria-label="Source repositories">
+    <i class="fab fa-github"></i>
+  </button>
+  <ul class="dropdown-menu">
+      
+      
+      
+      <li><a href="https://github.com/alibaba/rtp-llm" target="_blank"
+   class="btn btn-sm btn-source-repository-button dropdown-item"
+   title="Source repository"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fab fa-github"></i>
+  </span>
+<span class="btn__text-container">Repository</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li><a href="https://github.com/alibaba/rtp-llm/blob/main/references/tbstars/deploy.md?plain=1" target="_blank"
+   class="btn btn-sm btn-source-file-button dropdown-item"
+   title="Show source"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-code"></i>
+  </span>
+<span class="btn__text-container">Show source</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li><a href="https://github.com/alibaba/rtp-llm/edit/main/references/tbstars/deploy.md" target="_blank"
+   class="btn btn-sm btn-source-edit-button dropdown-item"
+   title="Suggest edit"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-pencil-alt"></i>
+  </span>
+<span class="btn__text-container">Suggest edit</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li><a href="https://github.com/alibaba/rtp-llm/issues/new?title=Issue%20on%20page%20%2Freferences/tbstars/deploy.html&body=Your%20issue%20content%20here." target="_blank"
+   class="btn btn-sm btn-source-issues-button dropdown-item"
+   title="Open an issue"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-lightbulb"></i>
+  </span>
+<span class="btn__text-container">Open issue</span>
+</a>
+</li>
+      
+  </ul>
+</div>
+
+
+
+
+
+
+<div class="dropdown dropdown-download-buttons">
+  <button class="btn dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" aria-label="Download this page">
+    <i class="fas fa-download"></i>
+  </button>
+  <ul class="dropdown-menu">
+      
+      
+      
+      <li><a href="../../_sources/references/tbstars/deploy.md" target="_blank"
+   class="btn btn-sm btn-download-source-button dropdown-item"
+   title="Download source file"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-file"></i>
+  </span>
+<span class="btn__text-container">.md</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li>
+<button onclick="window.print()"
+  class="btn btn-sm btn-download-pdf-button dropdown-item"
+  title="Print to PDF"
+  data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-file-pdf"></i>
+  </span>
+<span class="btn__text-container">.pdf</span>
+</button>
+</li>
+      
+  </ul>
+</div>
+
+
+
+
+<button onclick="toggleFullScreen()"
+  class="btn btn-sm btn-fullscreen-button"
+  title="Fullscreen mode"
+  data-bs-placement="bottom" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-expand"></i>
+  </span>
+
+</button>
+
+
+
+<script>
+document.write(`
+  <button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button" title="light/dark" aria-label="light/dark" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="theme-switch fa-solid fa-sun fa-lg" data-mode="light"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg" data-mode="dark"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"></i>
+  </button>
+`);
+</script>
+
+
+<script>
+document.write(`
+  <button class="btn btn-sm pst-navbar-icon search-button search-button__button" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="fa-solid fa-magnifying-glass fa-lg"></i>
+  </button>
+`);
+</script>
+<button class="sidebar-toggle secondary-toggle btn btn-sm" title="Toggle secondary sidebar" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <span class="fa-solid fa-list"></span>
+</button>
+</div></div>
+      
+    </div>
+  
+</div>
+</div>
+              
+              
+
+<div id="jb-print-docs-body" class="onlyprint">
+    <h1>tbstars-moe-42 42B-A3.5B-MoE</h1>
+    <!-- Table of contents -->
+    <div id="print-main-content">
+        <div id="jb-print-toc">
+            
+            <div>
+                <h2> Contents </h2>
+            </div>
+            <nav aria-label="Page">
+                <ul class="visible nav section-nav flex-column">
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#">tbstars-moe-42 42B-A3.5B-MoE</a></li>
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#recommended-deployment">Recommended Deployment</a></li>
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#advanced-configuration-for-cluster-deployment">Advanced Configuration for Cluster Deployment</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#h20-96g">H20 96G</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#prefill-node-specifications">Prefill Node Specifications</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#prefill-advanced-arguments">Prefill Advanced Arguments</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#decode-node-specifications">Decode Node Specifications</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#decode-advanced-arguments">Decode Advanced Arguments</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+
+            </nav>
+        </div>
+    </div>
+</div>
+
+              
+                
+<div id="searchbox"></div>
+                <article class="bd-article">
+                  
+  <section class="tex2jax_ignore mathjax_ignore" id="tbstars-moe-42-42b-a3-5b-moe">
+<h1>tbstars-moe-42 42B-A3.5B-MoE<a class="headerlink" href="#tbstars-moe-42-42b-a3-5b-moe" title="Link to this heading">#</a></h1>
+</section>
+<section class="tex2jax_ignore mathjax_ignore" id="recommended-deployment">
+<h1>Recommended Deployment<a class="headerlink" href="#recommended-deployment" title="Link to this heading">#</a></h1>
+<p>It is recommended to use a combination of PD (Prefill-Decode) separation and DP (Data Parallelism) for optimal performance. PD separation is employed because of the MHA (Multi-Head Attention) structure, which results in substantial GPU memory consumption from KV cache. Without PD separation, the system would face KV cache insufficiency when handling large max sequence lengths. DP is implemented for similar reasons, aiming to reduce the GPU memory footprint of model weights on each GPU card.</p>
+<p>For deployment, it is recommended to enable DeepEP, FP8 quantization, and FP8 KV cache.</p>
+<ul class="simple">
+<li><p>Framework version: v0.2.0</p></li>
+</ul>
+</section>
+<section class="tex2jax_ignore mathjax_ignore" id="advanced-configuration-for-cluster-deployment">
+<h1>Advanced Configuration for Cluster Deployment<a class="headerlink" href="#advanced-configuration-for-cluster-deployment" title="Link to this heading">#</a></h1>
+<section id="h20-96g">
+<h2>H20 96G<a class="headerlink" href="#h20-96g" title="Link to this heading">#</a></h2>
+<section id="prefill-node-specifications">
+<h3>Prefill Node Specifications<a class="headerlink" href="#prefill-node-specifications" title="Link to this heading">#</a></h3>
+<p>Single-node resource requirements: 2 GPUs per node</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>CPU Cores</p></th>
+<th class="head"><p>Memory</p></th>
+<th class="head"><p>GPU Card</p></th>
+<th class="head"><p>GPU Count</p></th>
+<th class="head"><p>Disk Space</p></th>
+<th class="head"><p>RDMA NICs</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>96</p></td>
+<td><p>250GB</p></td>
+<td><p>H20</p></td>
+<td><p>2</p></td>
+<td><p>180GB</p></td>
+<td><p>2</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section id="prefill-advanced-arguments">
+<h3>Prefill Advanced Arguments<a class="headerlink" href="#prefill-advanced-arguments" title="Link to this heading">#</a></h3>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">LD_PRELOAD</span><span class="o">=/</span><span class="n">usr</span><span class="o">/</span><span class="n">lib64</span><span class="o">/</span><span class="n">libjemalloc</span><span class="o">.</span><span class="n">so</span>
+<span class="n">ali_extend_devs</span><span class="o">=/</span><span class="n">dev</span><span class="o">/</span><span class="n">gdrdrv</span><span class="p">:</span><span class="o">/</span><span class="n">dev</span><span class="o">/</span><span class="n">gdrdrv</span><span class="p">:</span><span class="n">rwm</span> \
+<span class="n">NVSHMEM_IBGDA_NUM_RC_PER_PE</span><span class="o">=</span><span class="mi">12</span> \
+<span class="n">NVSHMEM_DISABLE_P2P</span><span class="o">=</span><span class="mi">1</span> \
+<span class="n">NVSHMEM_IB_ENABLE_IBGDA</span><span class="o">=</span><span class="mi">1</span> \
+<span class="n">NVSHMEM_IBGDA_NIC_HANDLER</span><span class="o">=</span><span class="n">gpu</span> \
+<span class="n">NVSHMEM_QP_DEPTH</span><span class="o">=</span><span class="mi">1024</span> \
+<span class="n">NVSHMEM_CUMEM_GRANULARITY</span><span class="o">=</span><span class="mi">536870912</span>  \
+<span class="n">NVSHMEM_BOOTSTRAP_UID_SOCK_IFNAME</span><span class="o">=</span><span class="n">bond0</span> \
+<span class="n">NVSHMEM_IB_TRAFFIC_CLASS</span><span class="o">=</span><span class="mi">160</span> \
+<span class="n">NCCL_SOCKET_IFNAME</span><span class="o">=</span><span class="n">eth0</span> \
+<span class="n">NCCL_DISABLE_ABORT</span><span class="o">=</span><span class="mi">1</span> \
+<span class="n">NCCL_IB_GID_INDEX</span><span class="o">=</span><span class="mi">3</span> \
+<span class="n">NCCL_IB_SL</span><span class="o">=</span><span class="mi">5</span> \
+<span class="n">NCCL_IB_TC</span><span class="o">=</span><span class="mi">160</span> \
+<span class="n">NCCL_IB_HCA</span><span class="o">=</span><span class="n">mlx5</span> \
+<span class="n">ACCL_RX_DEPTH</span><span class="o">=</span><span class="mi">32</span> \
+<span class="n">ACCL_TX_DEPTH</span><span class="o">=</span><span class="mi">512</span> \
+<span class="n">RDMA_CONNECT_RETRY_TIMES</span><span class="o">=</span><span class="mi">2</span> \
+<span class="n">LOAD_BALANCE_POLICY_NAME</span><span class="o">=</span><span class="n">WRR</span> \
+<span class="n">MAX_RPC_TIMEOUT_MS</span><span class="o">=</span><span class="mi">1800000</span> \
+<span class="n">PD_SEPARATION</span><span class="o">=</span><span class="mi">1</span> \
+<span class="n">ROLE_TYPE</span><span class="o">=</span><span class="n">PREFILL</span> \
+<span class="n">PREFILL_MAX_WAIT_TIMEOUT_US</span><span class="o">=</span><span class="mi">180000000</span> \
+<span class="n">PREFILL_RETRY_TIMEOUT_MS</span><span class="o">=</span><span class="mi">20</span> \
+<span class="n">PREFILL_RETRY_TIME</span><span class="o">=</span><span class="mi">1</span> \
+<span class="n">USE_CACHE_STORE</span><span class="o">=</span><span class="mi">1</span> \
+<span class="n">LOAD_CACHE_TIMEOUT_MS</span><span class="o">=</span><span class="mi">180000</span> \
+<span class="n">SYNC_STATUS_INTERVAL_MS</span><span class="o">=</span><span class="mi">200</span> \
+<span class="n">ENABLE_MERGE_W13</span><span class="o">=</span><span class="mi">1</span> \
+<span class="o">/</span><span class="n">opt</span><span class="o">/</span><span class="n">conda310</span><span class="o">/</span><span class="nb">bin</span><span class="o">/</span><span class="n">python3</span> <span class="o">-</span><span class="n">m</span> <span class="n">rtp_llm</span><span class="o">.</span><span class="n">start_server</span> \
+<span class="o">--</span><span class="n">checkpoint_path</span> <span class="n">XXXX</span> \
+<span class="o">--</span><span class="n">model_type</span> <span class="n">mixtbstars</span> \
+<span class="o">--</span><span class="n">act_type</span> <span class="n">bf16</span> \
+<span class="o">--</span><span class="n">max_seq_len</span> <span class="mi">131072</span> \
+<span class="o">--</span><span class="n">max_batch_size</span> <span class="mi">512</span> \
+<span class="o">--</span><span class="n">concurrency_limit</span> <span class="mi">512</span> \
+<span class="o">--</span><span class="n">think_mode</span> <span class="mi">0</span> \
+<span class="o">--</span><span class="n">tp_size</span> <span class="mi">1</span> \
+<span class="o">--</span><span class="n">dp_size</span> <span class="mi">2</span> \
+<span class="o">--</span><span class="n">world_rank</span> <span class="mi">0</span> \
+<span class="o">--</span><span class="n">local_world_size</span> <span class="mi">2</span> \
+<span class="o">--</span><span class="n">reuse_cache</span> <span class="mi">0</span> \
+<span class="o">--</span><span class="n">cache_store_rdma_mode</span> <span class="mi">1</span> \
+<span class="o">--</span><span class="n">cache_store_rdma_connect_timeout_ms</span> <span class="mi">800</span> \
+<span class="o">--</span><span class="n">balance_method</span> <span class="n">mix</span> \
+<span class="o">--</span><span class="n">load_balance</span> <span class="mi">1</span> \
+<span class="o">--</span><span class="n">use_deepep_internode</span> <span class="mi">0</span> \
+<span class="o">--</span><span class="n">use_deepep_low_latency</span> <span class="mi">0</span> \
+<span class="o">--</span><span class="n">use_deepep_moe</span> <span class="mi">1</span> \
+<span class="o">--</span><span class="n">enable_layer_micro_batch</span> <span class="mi">0</span> \
+<span class="o">--</span><span class="n">seq_size_per_block</span> <span class="mi">64</span> \
+<span class="o">--</span><span class="n">log_level</span> <span class="n">INFO</span> \
+<span class="o">--</span><span class="n">reserver_runtime_mem_mb</span> <span class="mi">42000</span> \
+<span class="o">--</span><span class="n">device_reserve_memory_bytes</span> <span class="o">-</span><span class="mi">4096000000</span> \
+<span class="o">--</span><span class="n">start_port</span> <span class="mi">8090</span> \
+<span class="o">--</span><span class="n">warm_up</span> <span class="mi">0</span> \
+<span class="o">--</span><span class="n">quantization</span> <span class="n">FP8_PER_BLOCK</span> \
+<span class="o">--</span><span class="n">fp8_kv_cache</span> <span class="mi">1</span>
+</pre></div>
+</div>
+</section>
+<section id="decode-node-specifications">
+<h3>Decode Node Specifications<a class="headerlink" href="#decode-node-specifications" title="Link to this heading">#</a></h3>
+<p>Single-node resource requirements: 4 GPUs per node</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>CPU Cores</p></th>
+<th class="head"><p>Memory</p></th>
+<th class="head"><p>GPU Card</p></th>
+<th class="head"><p>GPU Count</p></th>
+<th class="head"><p>Disk Space</p></th>
+<th class="head"><p>RDMA NICs</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>96</p></td>
+<td><p>250GB</p></td>
+<td><p>H20</p></td>
+<td><p>4</p></td>
+<td><p>180GB</p></td>
+<td><p>4</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section id="decode-advanced-arguments">
+<h3>Decode Advanced Arguments<a class="headerlink" href="#decode-advanced-arguments" title="Link to this heading">#</a></h3>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">LD_PRELOAD</span><span class="o">=/</span><span class="n">usr</span><span class="o">/</span><span class="n">lib64</span><span class="o">/</span><span class="n">libjemalloc</span><span class="o">.</span><span class="n">so</span>
+<span class="n">ali_extend_devs</span><span class="o">=/</span><span class="n">dev</span><span class="o">/</span><span class="n">gdrdrv</span><span class="p">:</span><span class="o">/</span><span class="n">dev</span><span class="o">/</span><span class="n">gdrdrv</span><span class="p">:</span><span class="n">rwm</span> \
+<span class="n">NVSHMEM_IBGDA_NUM_RC_PER_PE</span><span class="o">=</span><span class="mi">12</span> \
+<span class="n">NVSHMEM_DISABLE_P2P</span><span class="o">=</span><span class="mi">1</span> \
+<span class="n">NVSHMEM_IB_ENABLE_IBGDA</span><span class="o">=</span><span class="mi">1</span> \
+<span class="n">NVSHMEM_IBGDA_NIC_HANDLER</span><span class="o">=</span><span class="n">gpu</span> \
+<span class="n">NVSHMEM_QP_DEPTH</span><span class="o">=</span><span class="mi">1024</span> \
+<span class="n">NVSHMEM_CUMEM_GRANULARITY</span><span class="o">=</span><span class="mi">536870912</span>  \
+<span class="n">NVSHMEM_BOOTSTRAP_UID_SOCK_IFNAME</span><span class="o">=</span><span class="n">bond0</span> \
+<span class="n">NVSHMEM_IB_TRAFFIC_CLASS</span><span class="o">=</span><span class="mi">160</span> \
+<span class="n">NCCL_SOCKET_IFNAME</span><span class="o">=</span><span class="n">eth0</span> \
+<span class="n">NCCL_DISABLE_ABORT</span><span class="o">=</span><span class="mi">1</span> \
+<span class="n">NCCL_IB_GID_INDEX</span><span class="o">=</span><span class="mi">3</span> \
+<span class="n">NCCL_IB_SL</span><span class="o">=</span><span class="mi">5</span> \
+<span class="n">NCCL_IB_TC</span><span class="o">=</span><span class="mi">160</span> \
+<span class="n">NCCL_IB_HCA</span><span class="o">=</span><span class="n">mlx5</span> \
+<span class="n">ACCL_RX_DEPTH</span><span class="o">=</span><span class="mi">32</span> \
+<span class="n">ACCL_TX_DEPTH</span><span class="o">=</span><span class="mi">512</span> \
+<span class="n">RDMA_CONNECT_RETRY_TIMES</span><span class="o">=</span><span class="mi">2</span> \
+<span class="n">MAX_RPC_TIMEOUT_MS</span><span class="o">=</span><span class="mi">1800000</span> \
+<span class="n">PD_SEPARATION</span><span class="o">=</span><span class="mi">0</span> \
+<span class="n">ROLE_TYPE</span><span class="o">=</span><span class="n">DECODE</span> \
+<span class="n">PREFILL_MAX_WAIT_TIMEOUT_US</span><span class="o">=</span><span class="mi">180000000</span> \
+<span class="n">PREFILL_RETRY_TIMEOUT_MS</span><span class="o">=</span><span class="mi">20</span> \
+<span class="n">PREFILL_RETRY_TIME</span><span class="o">=</span><span class="mi">1</span> \
+<span class="n">USE_CACHE_STORE</span><span class="o">=</span><span class="mi">1</span> \
+<span class="n">LOAD_CACHE_TIMEOUT_MS</span><span class="o">=</span><span class="mi">180000</span> \
+<span class="n">SYNC_STATUS_INTERVAL_MS</span><span class="o">=</span><span class="mi">200</span> \
+<span class="n">ENABLE_MERGE_W13</span><span class="o">=</span><span class="mi">1</span> \
+<span class="o">/</span><span class="n">opt</span><span class="o">/</span><span class="n">conda310</span><span class="o">/</span><span class="nb">bin</span><span class="o">/</span><span class="n">python3</span> <span class="o">-</span><span class="n">m</span> <span class="n">rtp_llm</span><span class="o">.</span><span class="n">start_server</span> \
+<span class="o">--</span><span class="n">checkpoint_path</span> <span class="n">XXXX</span> \
+<span class="o">--</span><span class="n">model_type</span> <span class="n">mixtbstars</span> \
+<span class="o">--</span><span class="n">act_type</span> <span class="n">bf16</span> \
+<span class="o">--</span><span class="n">max_seq_len</span> <span class="mi">131072</span> \
+<span class="o">--</span><span class="n">max_batch_size</span> <span class="mi">128</span> \
+<span class="o">--</span><span class="n">concurrency_limit</span> <span class="mi">128</span> \
+<span class="o">--</span><span class="n">think_mode</span> <span class="mi">0</span> \
+<span class="o">--</span><span class="n">tp_size</span> <span class="mi">1</span> \
+<span class="o">--</span><span class="n">dp_size</span> <span class="mi">4</span> \
+<span class="o">--</span><span class="n">world_rank</span> <span class="mi">0</span> \
+<span class="o">--</span><span class="n">local_world_size</span> <span class="mi">4</span> \
+<span class="o">--</span><span class="n">reuse_cache</span> <span class="mi">0</span> \
+<span class="o">--</span><span class="n">cache_store_rdma_mode</span> <span class="mi">1</span> \ <span class="c1"># delete</span>
+<span class="o">--</span><span class="n">cache_store_rdma_connect_timeout_ms</span> <span class="mi">800</span> \
+<span class="o">--</span><span class="n">balance_method</span> <span class="n">mix</span> \
+<span class="o">--</span><span class="n">load_balance</span> <span class="mi">1</span> \
+<span class="o">--</span><span class="n">use_deepep_internode</span> <span class="mi">0</span> \
+<span class="o">--</span><span class="n">use_deepep_low_latency</span> <span class="mi">1</span> \
+<span class="o">--</span><span class="n">use_deepep_moe</span> <span class="mi">1</span> \
+<span class="o">--</span><span class="n">original_checkpoint_path</span> <span class="n">XXXX</span> \
+<span class="o">--</span><span class="n">enable_layer_micro_batch</span> <span class="mi">0</span> \
+<span class="o">--</span><span class="n">seq_size_per_block</span> <span class="mi">64</span> \
+<span class="o">--</span><span class="n">log_level</span> <span class="n">INFO</span> \
+<span class="o">--</span><span class="n">reserver_runtime_mem_mb</span> <span class="mi">2048</span> \
+<span class="o">--</span><span class="n">device_reserve_memory_bytes</span> <span class="o">-</span><span class="mi">3072000000</span> \
+<span class="o">--</span><span class="n">start_port</span> <span class="mi">8090</span> \
+<span class="o">--</span><span class="n">warm_up</span> <span class="mi">0</span> \
+<span class="o">--</span><span class="n">quantization</span> <span class="n">FP8_PER_BLOCK</span> \
+<span class="o">--</span><span class="n">fp8_kv_cache</span> <span class="mi">1</span>
+</pre></div>
+</div>
+</section>
+</section>
+</section>
+
+
+                </article>
+              
+
+              
+              
+              
+              
+                <footer class="prev-next-footer d-print-none">
+                  
+<div class="prev-next-area">
+    <a class="left-prev"
+       href="reporter.html"
+       title="previous page">
+      <i class="fa-solid fa-angle-left"></i>
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">previous</p>
+        <p class="prev-next-title">TBstars 2.0</p>
+      </div>
+    </a>
+    <a class="right-next"
+       href="../../backend/server_arguments.html"
+       title="next page">
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">next</p>
+        <p class="prev-next-title">ServerArgs</p>
+      </div>
+      <i class="fa-solid fa-angle-right"></i>
+    </a>
+</div>
+                </footer>
+              
+            </div>
+            
+            
+              
+                <div class="bd-sidebar-secondary bd-toc"><div class="sidebar-secondary-items sidebar-secondary__inner">
+
+
+  <div class="sidebar-secondary-item">
+  <div class="page-toc tocsection onthispage">
+    <i class="fa-solid fa-list"></i> Contents
+  </div>
+  <nav class="bd-toc-nav page-toc">
+    <ul class="visible nav section-nav flex-column">
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#">tbstars-moe-42 42B-A3.5B-MoE</a></li>
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#recommended-deployment">Recommended Deployment</a></li>
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#advanced-configuration-for-cluster-deployment">Advanced Configuration for Cluster Deployment</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#h20-96g">H20 96G</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#prefill-node-specifications">Prefill Node Specifications</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#prefill-advanced-arguments">Prefill Advanced Arguments</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#decode-node-specifications">Decode Node Specifications</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#decode-advanced-arguments">Decode Advanced Arguments</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+
+  </nav></div>
+
+</div></div>
+              
+            
+          </div>
+          <footer class="bd-footer-content">
+            
+<div class="bd-footer-content__inner container">
+  
+  <div class="footer-item">
+    
+<p class="component-author">
+By RTP-LLM Team
+</p>
+
+  </div>
+  
+  <div class="footer-item">
+    
+
+  <p class="copyright">
+    
+      © Copyright 2023-2025, RTP-LLM.
+      <br/>
+    
+  </p>
+
+  </div>
+  
+  <div class="footer-item">
+    <p class="last-updated">
+  Last updated on Sep 19, 2025.
+  <br/>
+</p>
+  </div>
+  
+  <div class="footer-item">
+    
+  </div>
+  
+</div>
+          </footer>
+        
+
+      </main>
+    </div>
+  </div>
+  
+  <!-- Scripts loaded after <body> so the DOM is not blocked -->
+  <script src="../../_static/scripts/bootstrap.js?digest=dfe6caa3a7d634c4db9b"></script>
+<script src="../../_static/scripts/pydata-sphinx-theme.js?digest=dfe6caa3a7d634c4db9b"></script>
+
+  <footer class="bd-footer">
+  </footer>
+  </body>
+</html>

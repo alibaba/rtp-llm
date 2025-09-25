@@ -1,0 +1,230 @@
+.ai-models-section {
+  position: relative;
+  width: 100%;
+  padding: 80px 0;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  z-index: 2;
+  overflow: hidden;
+}
+
+.ai-models-header {
+  width: 560px;
+  max-width: 90%;
+  height: 100px;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  margin-bottom: 60px;
+}
+
+.ai-models-icon {
+  width: 100px;
+  height: 100px;
+  flex-shrink: 0;
+}
+
+.ai-models-header-text {
+  width: 436px;
+  height: 57px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin-left: 24px;
+  margin-top: 27px;
+}
+
+.ai-models-title {
+  font-size: 24px;
+  font-weight: 600;
+  line-height: 30px;
+  color: #FFFFFF;
+  white-space: nowrap;
+  text-align: center;
+}
+
+.ai-models-divider {
+  opacity: 0.4;
+  background: linear-gradient(90deg, #FFFFFF00, #FFFFFF80 50%, #FFFFFF00);
+  width: 436px;
+  height: 1px;
+  margin-top: 26px;
+}
+
+.ai-models-rows-container {
+  width: 100vw;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* 添加渐变遮罩效果到 ai-models-rows-container */
+.ai-models-rows-container::before,
+.ai-models-rows-container::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  width: 100px;
+  height: 100%;
+  z-index: 10;
+  pointer-events: none;
+}
+
+.ai-models-rows-container::before {
+  left: 0;
+  background: linear-gradient(90deg, #14161A 0%, transparent 100%);
+}
+
+.ai-models-rows-container::after {
+  right: 0;
+  background: linear-gradient(270deg, #14161A 0%, transparent 100%);
+}
+
+.ai-models-scroll-container {
+  width: 100%;
+  overflow: hidden;
+  position: relative;
+}
+
+.ai-models-scroll-container.top-row {
+  /* 上行正常排列 */
+}
+
+.ai-models-scroll-container.bottom-row {
+  /* 下行错位排列 */
+}
+
+.ai-models-scroll-content {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 20px;
+  padding: 0 20px;
+  width: max-content;
+}
+
+.ai-models-scroll-content.offset {
+  /* 下行向左偏移半个卡片宽度实现错位效果 */
+  margin-left: -195px;
+}
+
+.ai-model-card {
+  border-radius: 20px;
+  background: linear-gradient(90deg, rgba(0, 0, 0, 0.5) 0%, rgba(0, 0, 0, 0) 100%);
+  border: 5px solid;
+  border-image: linear-gradient(90deg, rgba(0, 0, 0, 0.2) -1%, rgba(0, 0, 0, 0.08) 100%) 5;
+  overflow: hidden;
+  width: 370px;
+  height: 124px;
+  display: flex;
+  flex-direction: column;
+  padding: 20px;
+  box-sizing: border-box;
+  justify-content: center;
+  flex-shrink: 0;
+  backdrop-filter: blur(10px);
+  transition: transform 0.3s ease, box-shadow 0.3s ease;
+}
+
+.ai-model-card:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 10px 30px rgba(255, 255, 255, 0.05);
+}
+
+.ai-model-header {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.ai-model-logo {
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+}
+
+.ai-model-name {
+  font-family: 阿里巴巴普惠体, AlibabaPuHuiTi, sans-serif;
+  font-size: 18px;
+  font-weight: 500;
+  line-height: 24px;
+  letter-spacing: normal;
+  background: linear-gradient(180deg, #FFFFFF 0%, rgba(255, 255, 255, 0.5) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  text-fill-color: transparent;
+  margin-left: 8px;
+}
+
+.ai-model-description {
+  font-family: AlibabaPuHuiTi, sans-serif;
+  font-size: 12px;
+  font-weight: normal;
+  line-height: 18px;
+  letter-spacing: normal;
+  background: linear-gradient(180deg, #FFFFFF 0%, rgba(255, 255, 255, 0.5) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  width: 330px;
+  height: 36px;
+  max-width: 100%;
+}
+
+@media (max-width: 768px) {
+  .ai-models-section {
+    padding: 60px 0;
+  }
+  
+  .ai-models-header {
+    flex-direction: column;
+    height: auto;
+    text-align: center;
+    margin-bottom: 40px;
+  }
+  
+  .ai-models-header-text {
+    margin-left: 0;
+    margin-top: 20px;
+  }
+  
+  .ai-models-title {
+    white-space: normal;
+  }
+  
+  .ai-models-divider {
+    width: 100%;
+  }
+  
+  .ai-models-rows-container {
+    gap: 15px;
+  }
+  
+  .ai-models-scroll-content.offset {
+    margin-left: -150px;
+  }
+  
+  .ai-model-card {
+    width: 300px;
+    height: 100px;
+    padding: 15px;
+  }
+  
+  .ai-model-header {
+    width: auto;
+    margin-bottom: 8px;
+  }
+  
+  .ai-model-name {
+    width: auto;
+    max-width: 200px;
+  }
+  
+  .ai-model-description {
+    width: 100%;
+    height: auto;
+  }
+}

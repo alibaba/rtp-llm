@@ -80,6 +80,12 @@ The core features include:
    backend/flexlb.md
 
 .. toctree::
+   :maxdepth: 1
+   :caption: Benchmark
+
+   benchmark/benchmark.md
+
+.. toctree::
       :maxdepth: 1
       :caption: References
 
