@@ -56,13 +56,33 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readonly("padding_offset", &PyAttentionInputs::padding_offset)
         .def_readonly("cache_store_inputs", &PyAttentionInputs::cache_store_inputs);
 
+    pybind11::class_<BertEmbeddingInputs>(m, "BertEmbeddingInputs")
+        .def(pybind11::init<>())
+        .def(pybind11::init<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, float>(),
+             pybind11::arg("combo_position_ids")     = torch::empty(0),
+             pybind11::arg("position_encoding")      = torch::empty(0),
+             pybind11::arg("combo_tokens_type_ids")  = torch::empty(0),
+             pybind11::arg("token_type_embedding")   = torch::empty(0),
+             pybind11::arg("input_embedding_scalar") = 1.0f)
+        .def_readwrite("combo_position_ids", &BertEmbeddingInputs::combo_position_ids, "Combined position IDs tensor")
+        .def_readwrite("position_encoding", &BertEmbeddingInputs::position_encoding, "Position encoding tensor")
+        .def_readwrite(
+            "combo_tokens_type_ids", &BertEmbeddingInputs::combo_tokens_type_ids, "Combined token type IDs tensor")
+        .def_readwrite(
+            "token_type_embedding", &BertEmbeddingInputs::token_type_embedding, "Token type embedding tensor")
+        .def_readwrite(
+            "input_embedding_scalar", &BertEmbeddingInputs::input_embedding_scalar, "Input embedding scalar value");
+
     pybind11::class_<PyModelInputs>(m, "PyModelInputs")
         .def(pybind11::init<>())
-        .def(pybind11::init<torch::Tensor, PyAttentionInputs>(),
-             pybind11::arg("input_ids")        = torch::empty(0),
-             pybind11::arg("attention_inputs") = PyAttentionInputs())
+        .def(pybind11::init<torch::Tensor, PyAttentionInputs, BertEmbeddingInputs>(),
+             pybind11::arg("input_ids")             = torch::empty(0),
+             pybind11::arg("attention_inputs")      = PyAttentionInputs(),
+             pybind11::arg("bert_embedding_inputs") = BertEmbeddingInputs())
         .def_readwrite("input_ids", &PyModelInputs::input_ids, "Input token IDs tensor")
-        .def_readwrite("attention_inputs", &PyModelInputs::attention_inputs, "Attention inputs structure");
+        .def_readwrite("attention_inputs", &PyModelInputs::attention_inputs, "Attention inputs structure")
+        .def_readwrite(
+            "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure");
 
     pybind11::class_<PyModelOutputs>(m, "PyModelOutputs")
         .def(pybind11::init<>(), "Default constructor")

@@ -5,8 +5,9 @@ from torch import nn
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.models_py.modules.linear_factory import LinearFactory
-from rtp_llm.utils.model_weight import W
 from rtp_llm.ops import rtp_llm_ops
+from rtp_llm.utils.model_weight import W
+
 
 class DenseMLP(nn.Module):
     def __init__(
@@ -44,6 +45,7 @@ class FusedSiluActDenseMLP(nn.Module):
         self, config: GptInitModelParameters, weights: Dict[str, torch.Tensor]
     ):
         super().__init__()
+
         assert (
             config.activation_type == "SiGLU"
         ), "FusedSiluActDenseMLP only supports SiGLU activation"
@@ -81,3 +83,29 @@ class FusedSiluActDenseMLP(nn.Module):
         rtp_llm_ops.silu_and_mul(output, gate_up, stream_id)
         down_proj = self.down_proj(output)
         return down_proj
+
+
+class BertGeluActDenseMLP(nn.Module):
+    def __init__(
+        self, config: GptInitModelParameters, weights: Dict[str, torch.Tensor]
+    ):
+        super().__init__()
+
+        # For BERT model, use traditional FFN structure with GeLU activation
+        # BERT uses: intermediate_weight3 -> GeLU -> intermediate_weight2
+        self.intermediate_proj = LinearFactory.create_linear_from_weights(
+            weights, W.ffn_w3, W.ffn_s3, W.ffn_b3, config
+        )
+        self.output_proj = LinearFactory.create_linear_from_weights(
+            weights, W.ffn_w2, W.ffn_s2, W.ffn_b2, config
+        )
+
+        # Use GeLU activation
+        self.act_fn = nn.GELU()
+
+    def forward(self, x: torch.Tensor):
+        # Traditional BERT FFN: intermediate -> GeLU -> output
+        intermediate = self.intermediate_proj(x)
+        activated = self.act_fn(intermediate)
+        output = self.output_proj(activated)
+        return output
