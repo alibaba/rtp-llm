@@ -8,7 +8,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
-    <title>RTP-LLM Performance Benchmark Tool &#8212; RTP-LLM</title>
+    <title>RTP-LLM 性能基准测试工具 &#8212; RTP-LLM</title>
   
   
   
@@ -224,7 +224,7 @@
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Benchmark</span></p>
 <ul class="current nav bd-sidenav">
-<li class="toctree-l1 current active"><a class="current reference internal" href="#">RTP-LLM Performance Benchmark Tool</a></li>
+<li class="toctree-l1 current active"><a class="current reference internal" href="#">RTP-LLM 性能基准测试工具</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">参考文献</span></p>
 <ul class="nav bd-sidenav">
@@ -449,7 +449,7 @@ document.write(`
               
 
 <div id="jb-print-docs-body" class="onlyprint">
-    <h1>RTP-LLM Performance Benchmark Tool</h1>
+    <h1>RTP-LLM 性能基准测试工具</h1>
     <!-- Table of contents -->
     <div id="print-main-content">
         <div id="jb-print-toc">
@@ -459,14 +459,14 @@ document.write(`
             </div>
             <nav aria-label="Page">
                 <ul class="visible nav section-nav flex-column">
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#design-principle">Design Principle</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#single-node-benchmark">Single-Node Benchmark</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#multi-node-benchmark">Multi Node Benchmark</a><ul class="visible nav section-nav flex-column">
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#benchmark-yaml">Benchmark Yaml</a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#run-step">Run step</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#design-principle">设计原理</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#single-node-benchmark">单节点基准测试</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#multi-node-benchmark">多节点基准测试</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#benchmark-yaml">基准测试Yaml配置</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#run-step">运行步骤</a></li>
 </ul>
 </li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#result-format">Result Format</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#result-format">结果格式</a></li>
 </ul>
             </nav>
         </div>
@@ -479,23 +479,22 @@ document.write(`
                 <article class="bd-article">
                   
   <section class="tex2jax_ignore mathjax_ignore" id="rtp-llm-performance-benchmark-tool">
-<h1>RTP-LLM Performance Benchmark Tool<a class="headerlink" href="#rtp-llm-performance-benchmark-tool" title="Link to this heading">#</a></h1>
-<p>In this chapter, I will present the performance testing tools developed in RTP-LLM, including standalone measurement of model prefill and decode performance under various batch sizes with single-node and multi-node parallelism, timeline recording, and their usage methods.</p>
+<h1>RTP-LLM 性能基准测试工具<a class="headerlink" href="#rtp-llm-performance-benchmark-tool" title="Link to this heading">#</a></h1>
+<p>在本章节中，我将介绍RTP-LLM中开发的性能测试工具，包括在各种批次大小下对模型预填充和解码性能的独立测量，支持单节点和多节点并行，时间线记录，以及它们的使用方法。</p>
 <section id="design-principle">
-<h2>Design Principle<a class="headerlink" href="#design-principle" title="Link to this heading">#</a></h2>
-<p>RTP-LLM employs a special batch scheduler that accumulates requests until the specified batch size is reached, then all requests enter the engine simultaneously. The scheduler supports both prefill and decode modes; in decode mode, requests are only allocated KV cache without prefill, enabling accurate and efficient measurement of engine performance.
-In detail, the batch-scheduler profiler is executed three times for a single input:</p>
+<h2>设计原理<a class="headerlink" href="#design-principle" title="Link to this heading">#</a></h2>
+<p>RTP-LLM采用特殊的批次调度器，它会累积请求直到达到指定的批次大小，然后所有请求同时进入引擎。调度器支持预填充和解码两种模式；在解码模式下，请求只分配KV缓存而不进行预填充，从而实现准确高效的引擎性能测量。具体来说，批次调度器分析器对单个输入执行三次：</p>
 <ul class="simple">
-<li><p>Warm-up run, to account for one-time setup such as JIT compilation.</p></li>
-<li><p>Timing run, to measure engine performance.</p></li>
-<li><p>Profiling run, to capture a timeline for subsequent analysis; this step may degrade end-to-end performance.</p></li>
+<li><p>预热运行，用于处理一次性设置，如JIT编译。</p></li>
+<li><p>计时运行，用于测量引擎性能。</p></li>
+<li><p>性能分析运行，用于捕获时间线以供后续分析；此步骤可能会降低端到端性能。</p></li>
 </ul>
-<p>For every run we use min_new_tokens and max_new_tokens to ensure that all requests perform the same number of decode steps.</p>
-<p>Since in decode mode, we not prefill the KVCache, so hidden_states after every forward step is not real. So we also hack moe gate select for moe model and speculative accept func for mtp. In that way, we get stable result for analyse result.</p>
+<p>对于每次运行，我们使用min_new_tokens和max_new_tokens来确保所有请求执行相同数量的解码步骤。</p>
+<p>由于在解码模式下，我们不预填充KVCache，所以每个前向步骤后的hidden_states不是真实的。因此我们还对MoE模型的gate选择函数和MTP的speculative accept函数进行了修改。通过这种方式，我们获得了稳定的分析结果。</p>
 </section>
 <section id="single-node-benchmark">
-<h2>Single-Node Benchmark<a class="headerlink" href="#single-node-benchmark" title="Link to this heading">#</a></h2>
-<p>using commands below can start a performance benchmark, mixed prefill and decode</p>
+<h2>单节点基准测试<a class="headerlink" href="#single-node-benchmark" title="Link to this heading">#</a></h2>
+<p>使用以下命令可以启动性能基准测试，混合预填充和解码</p>
 <div class="highlight-shell notranslate"><div class="highlight"><pre><span></span>bazelisk<span class="w"> </span><span class="nb">test</span><span class="w"> </span>//rtp_llm/test/perf_test:perf_test<span class="w"> </span><span class="se">\</span>
 <span class="w">    </span>--config<span class="o">=</span>cuda12_6<span class="w"> </span><span class="se">\</span>
 <span class="w">    </span>--test_arg<span class="o">=</span>--ckpt_path<span class="o">=</span><span class="si">${</span><span class="p">/PATH/TO/CKPT</span><span class="si">}</span><span class="w"> </span><span class="se">\</span>
@@ -508,20 +507,20 @@ In detail, the batch-scheduler profiler is executed three times for a single inp
 <span class="w">    </span>--test_env<span class="o">=</span><span class="nv">INT8_MODE</span><span class="o">=</span><span class="m">1</span><span class="w"> </span><span class="c1"># optionally using --test_env to using custom env for RTP-LLM setup</span>
 </pre></div>
 </div>
-<p>specially <code class="docutils literal notranslate"><span class="pre">batch_size</span></code> states for the batch in single DP node, when <code class="docutils literal notranslate"><span class="pre">DP_SIZE</span></code> param is setted.</p>
-<p>also we support test prefill or decode only when prefill and decode not share the same config(such as prefill use deepep normal, and decode use deepep masked), in that case user should also set <code class="docutils literal notranslate"><span class="pre">--partial={0:all(default),</span> <span class="pre">1:decode,</span> <span class="pre">2:prefill}</span></code>, below is an example of testing decode only:</p>
+<p>特别地，当设置了<code class="docutils literal notranslate"><span class="pre">DP_SIZE</span></code>参数时，<code class="docutils literal notranslate"><span class="pre">batch_size</span></code>表示单个DP节点中的批次大小。</p>
+<p>当预填充和解码不共享相同配置时（例如预填充使用deepep normal，解码使用deepep masked），我们也支持仅测试预填充或解码，在这种情况下，用户还应设置<code class="docutils literal notranslate"><span class="pre">--partial={0:all(default),</span> <span class="pre">1:decode,</span> <span class="pre">2:prefill}</span></code>，以下是仅测试解码的示例：</p>
 <div class="highlight-shell notranslate"><div class="highlight"><pre><span></span><span class="w">    </span>--test_arg<span class="o">=</span><span class="nv">partial</span><span class="o">=</span><span class="m">1</span>
 </pre></div>
 </div>
 </section>
 <section id="multi-node-benchmark">
-<h2>Multi Node Benchmark<a class="headerlink" href="#multi-node-benchmark" title="Link to this heading">#</a></h2>
-<p>We also provide a Python script to enable multi-node benchmark, but since it requires setting up the environment and starting the script on multiple machines, it still involves more steps than single-node testing.</p>
+<h2>多节点基准测试<a class="headerlink" href="#multi-node-benchmark" title="Link to this heading">#</a></h2>
+<p>我们还提供了一个Python脚本来启用多节点基准测试，但由于需要在多台机器上设置环境并启动脚本，它仍然比单节点测试涉及更多步骤。</p>
 <p>For each machine to be tested, you need to create an environment in which RTP-LLM can run and support passwordless SSH access from the current machine’s port.</p>
 <section id="benchmark-yaml">
-<h3>Benchmark Yaml<a class="headerlink" href="#benchmark-yaml" title="Link to this heading">#</a></h3>
-<p>Configure the parameters with reference to <code class="docutils literal notranslate"><span class="pre">rtp_llm/test/perf_test/multi_node/multi_benchmark_config.yaml</span></code>. Below is the detail explaination of yaml structure.</p>
-<p>First part is for cloning code to local in ssh machine, and checkout to the branch you need to test</p>
+<h3>基准测试Yaml配置<a class="headerlink" href="#benchmark-yaml" title="Link to this heading">#</a></h3>
+<p>参考<code class="docutils literal notranslate"><span class="pre">rtp_llm/test/perf_test/multi_node/multi_benchmark_config.yaml</span></code>配置参数。以下是yaml结构的详细说明。</p>
+<p>第一部分用于在SSH机器上将代码克隆到本地，并检出到您需要测试的分支</p>
 <div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span class="nt">benchmarks</span><span class="p">:</span>
 <span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;H20_Deepseek-R1_Decode_EP32_4K&quot;</span>
 <span class="w">    </span><span class="c1"># git config</span>
@@ -529,7 +528,7 @@ In detail, the batch-scheduler profiler is executed three times for a single inp
 <span class="w">    </span><span class="nt">git_checkout_ref</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;origin/main&quot;</span>
 </pre></div>
 </div>
-<p>Second part describe the machine list, user name and port to ssh</p>
+<p>第二部分描述机器列表、用户名和SSH端口</p>
 <div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span class="w">    </span><span class="c1"># machine config</span>
 <span class="w">    </span><span class="nt">ip_lists</span><span class="p">:</span>
 <span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;33.126.67.231&quot;</span>
@@ -541,13 +540,13 @@ In detail, the batch-scheduler profiler is executed three times for a single inp
 <span class="w">    </span><span class="c1"># model config</span>
 </pre></div>
 </div>
-<p>Third part describe the model info which should be pre-download to local machine</p>
+<p>第三部分描述应预下载到本地机器的模型信息</p>
 <div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span class="w">    </span><span class="nt">tokenizer_path</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;/mnt/nas1/hf/deepseek_r1_4layers/&quot;</span>
 <span class="w">    </span><span class="nt">checkpoint_path</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;/mnt/nas1/hf/deepseek_r1_4layers/&quot;</span>
 <span class="w">    </span><span class="nt">model_type</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;deepseek3&quot;</span>
 </pre></div>
 </div>
-<p>Fourth part describe the test cases, including prefill/decode, batch_size and input_len(they will be used as Cartesian product).Specially, tp_size and dp_size len should be equal as each tuple of them will be started as a parallel config. For example, in below config, script will start three server with <code class="docutils literal notranslate"><span class="pre">TP=1</span> <span class="pre">DP=32</span></code>, <code class="docutils literal notranslate"><span class="pre">TP=2</span> <span class="pre">DP=16</span></code>, <code class="docutils literal notranslate"><span class="pre">TP=4</span> <span class="pre">DP=8</span></code> and benchmark</p>
+<p>第四部分描述测试用例，包括预填充/解码、batch_size和input_len（它们将用作笛卡尔积）。特别地，tp_size和dp_size的长度应该相等，因为它们的每个元组将作为并行配置启动。例如，在下面的配置中，脚本将启动三个服务器，配置为<code class="docutils literal notranslate"><span class="pre">TP=1</span> <span class="pre">DP=32</span></code>、<code class="docutils literal notranslate"><span class="pre">TP=2</span> <span class="pre">DP=16</span></code>、<code class="docutils literal notranslate"><span class="pre">TP=4</span> <span class="pre">DP=8</span></code>并进行基准测试</p>
 <div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span class="w">    </span><span class="c1"># test config</span>
 <span class="w">    </span><span class="nt">is_decode</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
 <span class="w">    </span><span class="nt">batch_size_list</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;[1,2,4,8,16,32,48,64,80]&quot;</span>
@@ -556,14 +555,14 @@ In detail, the batch-scheduler profiler is executed three times for a single inp
 <span class="w">    </span><span class="nt">dp_size</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">32</span><span class="p p-Indicator">,</span><span class="nv">16</span><span class="p p-Indicator">,</span><span class="nv">8</span><span class="p p-Indicator">]</span>
 </pre></div>
 </div>
-<p>bazel_build_args is the flag for bazelisk build, if you want to test in AMD card, change <code class="docutils literal notranslate"><span class="pre">--config=rocm</span></code></p>
+<p>bazel_build_args是bazelisk构建的标志，如果您想在AMD卡上测试，请将<code class="docutils literal notranslate"><span class="pre">--config=rocm</span></code></p>
 <div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span class="w">    </span><span class="c1"># build config</span>
 <span class="w">    </span><span class="nt">bazel_build_args</span><span class="p">:</span><span class="w"> </span><span class="s">&#39;&quot;</span><span class="nv"> </span><span class="s">--jobs</span><span class="nv"> </span><span class="s">100</span><span class="nv"> </span><span class="s">--verbose_failures</span><span class="nv"> </span><span class="s">--config=cuda12_6</span><span class="nv"> </span><span class="s">&quot;&#39;</span>
 <span class="w">    </span><span class="c1"># file dir config</span>
 <span class="w">    </span><span class="nt">ft_sub_dir</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;rtp_llm_perf_test&quot;</span>
 </pre></div>
 </div>
-<p>last part is the model env config, be careful that all env configs type should in <code class="docutils literal notranslate"><span class="pre">[int,</span> <span class="pre">float,</span> <span class="pre">string,</span> <span class="pre">bool]</span></code>, or there maybe unexpected error</p>
+<p>最后一部分是模型环境配置，请注意所有环境配置类型应在<code class="docutils literal notranslate"><span class="pre">[int,</span> <span class="pre">float,</span> <span class="pre">string,</span> <span class="pre">bool]</span></code>中，否则可能会出现意外错误</p>
 <div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span class="w">    </span><span class="c1"># model config</span>
 <span class="w">    </span><span class="nt">start_port</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">12333</span>
 <span class="w">    </span><span class="nt">concurrency_limit</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">80</span>
@@ -587,7 +586,7 @@ In detail, the batch-scheduler profiler is executed three times for a single inp
 </div>
 </section>
 <section id="run-step">
-<h3>Run step<a class="headerlink" href="#run-step" title="Link to this heading">#</a></h3>
+<h3>运行步骤<a class="headerlink" href="#run-step" title="Link to this heading">#</a></h3>
 <div class="highlight-shell notranslate"><div class="highlight"><pre><span></span><span class="c1"># in root of RTP-LLM</span>
 <span class="nb">cd</span><span class="w"> </span>rtp_llm/test/perf_test/multi_node
 <span class="c1"># Configure multi_benchmark_config.yaml</span>
@@ -599,12 +598,12 @@ In detail, the batch-scheduler profiler is executed three times for a single inp
 /opt/conda310/bin/python3<span class="w"> </span>multi_benchmark.py<span class="w"> </span>-m<span class="w"> </span>clean
 </pre></div>
 </div>
-<p>Also, multi-node benchmark dumps profile json in rank0, but currently we don't scp dir to local yet. So please go to rank0 and get profile data manually before clean step</p>
+<p>另外，多节点基准测试在rank0中转储profile json，但目前我们还没有将目录scp到本地。所以在清理步骤之前，请手动到rank0获取profile数据</p>
 </section>
 </section>
 <section id="result-format">
-<h2>Result Format<a class="headerlink" href="#result-format" title="Link to this heading">#</a></h2>
-<p>Decode result, where batch size stands for per DP Rank</p>
+<h2>结果格式<a class="headerlink" href="#result-format" title="Link to this heading">#</a></h2>
+<p>解码结果，其中批次大小表示每个DP Rank的批次</p>
 <div class="highlight-shell notranslate"><div class="highlight"><pre><span></span>+---------------------------------------------------------------------------------------------+
 <span class="p">|</span><span class="w">                                        </span>Decode<span class="w"> </span>Result<span class="w">                                        </span><span class="p">|</span>
 +---------+------------+------------------+--------------+------------------+-----------------+
@@ -670,14 +669,14 @@ In detail, the batch-scheduler profiler is executed three times for a single inp
   </div>
   <nav class="bd-toc-nav page-toc">
     <ul class="visible nav section-nav flex-column">
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#design-principle">Design Principle</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#single-node-benchmark">Single-Node Benchmark</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#multi-node-benchmark">Multi Node Benchmark</a><ul class="visible nav section-nav flex-column">
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#benchmark-yaml">Benchmark Yaml</a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#run-step">Run step</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#design-principle">设计原理</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#single-node-benchmark">单节点基准测试</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#multi-node-benchmark">多节点基准测试</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#benchmark-yaml">基准测试Yaml配置</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#run-step">运行步骤</a></li>
 </ul>
 </li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#result-format">Result Format</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#result-format">结果格式</a></li>
 </ul>
   </nav></div>
 

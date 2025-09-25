@@ -8,7 +8,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
-    <title>Multimodal Part Debug and Separate Deployment &#8212; RTP-LLM</title>
+    <title>多模态部分调试与独立部署 &#8212; RTP-LLM</title>
   
   
   
@@ -223,7 +223,7 @@
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Benchmark</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../benchmark/benchmark.html">RTP-LLM Performance Benchmark Tool</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../benchmark/benchmark.html">RTP-LLM 性能基准测试工具</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">参考文献</span></p>
 <ul class="current nav bd-sidenav">
@@ -233,7 +233,7 @@
 <li class="toctree-l2"><a class="reference internal" href="../references/Update-whl-Deps.html">更新 whl 依赖</a></li>
 <li class="toctree-l2"><a class="reference internal" href="../references/Environment.html">环境变量开发教程</a></li>
 <li class="toctree-l2"><a class="reference internal" href="Frontend.html">前端</a></li>
-<li class="toctree-l2 current active"><a class="current reference internal" href="#">Multimodal Part Debug and Separate Deployment</a></li>
+<li class="toctree-l2 current active"><a class="current reference internal" href="#">多模态部分调试与独立部署</a></li>
 </ul>
 </details></li>
 </ul>
@@ -455,7 +455,7 @@ document.write(`
               
 
 <div id="jb-print-docs-body" class="onlyprint">
-    <h1>Multimodal Part Debug and Separate Deployment</h1>
+    <h1>多模态部分调试与独立部署</h1>
     <!-- Table of contents -->
     <div id="print-main-content">
         <div id="jb-print-toc">
@@ -465,8 +465,8 @@ document.write(`
             </div>
             <nav aria-label="Page">
                 <ul class="visible nav section-nav flex-column">
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#multimodal-development">Multimodal Development</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#debug">Debug</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#multimodal-development">多模态开发</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#debug">调试</a></li>
 </ul>
             </nav>
         </div>
@@ -479,25 +479,25 @@ document.write(`
                 <article class="bd-article">
                   
   <section id="multimodal-part-debug-and-separate-deployment">
-<h1>Multimodal Part Debug and Separate Deployment<a class="headerlink" href="#multimodal-part-debug-and-separate-deployment" title="Link to this heading">#</a></h1>
+<h1>多模态部分调试与独立部署<a class="headerlink" href="#multimodal-part-debug-and-separate-deployment" title="Link to this heading">#</a></h1>
 <section id="multimodal-development">
-<h2>Multimodal Development<a class="headerlink" href="#multimodal-development" title="Link to this heading">#</a></h2>
-<p>A multimodal model refers to an LLM that incorporates multimodal inputs. Currently, the primary input format is URLs, which are distinguished by specific placeholders using OpenAI formatting. Each multimodal model has its unique preprocessing pipeline but must implement the following interfaces:</p>
+<h2>多模态开发<a class="headerlink" href="#multimodal-development" title="Link to this heading">#</a></h2>
+<p>多模态模型是指包含多模态输入的LLM。目前，主要的输入格式是URL，通过使用OpenAI格式的特定占位符进行区分。每个多模态模型都有其独特的预处理管道，但必须实现以下接口：</p>
 <ul class="simple">
-<li><p>The multimodal model must inherit from <code class="docutils literal notranslate"><span class="pre">MultimodalMixin</span></code> in <code class="docutils literal notranslate"><span class="pre">rtp_llm/models/multimodal/multimodal_mixin.py</span></code> and instantiate <code class="docutils literal notranslate"><span class="pre">mm_part</span></code> as the processing class for multimodal inputs.</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">mm_part</span></code> has various interface implementations based on input types, such as images, videos, or audio. The logic must be self-consistent, with the most critical interfaces being <code class="docutils literal notranslate"><span class="pre">mm_embedding</span></code>, <code class="docutils literal notranslate"><span class="pre">_mm_preprocess</span></code>, and <code class="docutils literal notranslate"><span class="pre">mm_process</span></code>:</p>
+<li><p>多模态模型必须继承自 <code class="docutils literal notranslate"><span class="pre">rtp_llm/models/multimodal/multimodal_mixin.py</span></code> 中的 <code class="docutils literal notranslate"><span class="pre">MultimodalMixin</span></code>，并实例化 <code class="docutils literal notranslate"><span class="pre">mm_part</span></code> 作为多模态输入的处理类。</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">mm_part</span></code> 根据输入类型有不同的接口实现，例如图像、视频或音频。逻辑必须保持一致，最关键接口是 <code class="docutils literal notranslate"><span class="pre">mm_embedding</span></code>、<code class="docutils literal notranslate"><span class="pre">_mm_preprocess</span></code> 和 <code class="docutils literal notranslate"><span class="pre">mm_process</span></code>：</p>
 <ul>
-<li><p><code class="docutils literal notranslate"><span class="pre">mm_embedding</span></code> has a default implementation that calls <code class="docutils literal notranslate"><span class="pre">_mm_preprocess</span></code> and <code class="docutils literal notranslate"><span class="pre">mm_process</span></code>, converting the multimodal input URL into an embedding tensor and other information (e.g., position IDs).</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">_mm_preprocess</span></code> also has default implementations for specific modalities, preprocessing byte data from input url and preparing inputs for mm_process. This separation is necessary because preprocessing is CPU-bound, while subsequent processing is GPU-bound.</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">mm_process</span></code> handles GPU-based transformation of preprocessed inputs into outputs.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">mm_embedding</span></code> 有默认实现，它调用 <code class="docutils literal notranslate"><span class="pre">_mm_preprocess</span></code> 和 <code class="docutils literal notranslate"><span class="pre">mm_process</span></code>，将多模态输入URL转换为嵌入张量和其他信息（例如，位置ID）。</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">_mm_preprocess</span></code> 对于特定模态也有默认实现，对输入URL中的字节数据进行预处理并为mm_process准备输入。这种分离是必要的，因为预处理是CPU密集型的，而后续处理是GPU密集型的。</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">mm_process</span></code> 处理预处理输入到输出的基于GPU的转换。</p></li>
 </ul>
 </li>
-<li><p>For model weights, the required weights must be registered in <code class="docutils literal notranslate"><span class="pre">GptInitModelParameters</span></code> under <code class="docutils literal notranslate"><span class="pre">mm_related_params.vit_weights</span></code>. Refer to <code class="docutils literal notranslate"><span class="pre">BaseVitWeights</span></code> for specific implementation logic.</p></li>
+<li><p>对于模型权重，所需的权重必须在 <code class="docutils literal notranslate"><span class="pre">GptInitModelParameters</span></code> 下的 <code class="docutils literal notranslate"><span class="pre">mm_related_params.vit_weights</span></code> 中注册。具体实现逻辑请参考 <code class="docutils literal notranslate"><span class="pre">BaseVitWeights</span></code>。</p></li>
 </ul>
 </section>
 <section id="debug">
-<h2>Debug<a class="headerlink" href="#debug" title="Link to this heading">#</a></h2>
-<p>Start multimodal part.</p>
+<h2>调试<a class="headerlink" href="#debug" title="Link to this heading">#</a></h2>
+<p>启动多模态部分。</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nv">START_PORT</span><span class="o">=</span><span class="m">12345</span><span class="w"> </span><span class="se">\</span>
 <span class="nv">VIT_SEPARATION</span><span class="o">=</span><span class="m">1</span><span class="w"> </span><span class="se">\</span>
 <span class="nv">ACT_TYPE</span><span class="o">=</span>bf16<span class="w"> </span><span class="se">\</span>
@@ -506,7 +506,7 @@ document.write(`
 /opt/conda310/bin/python<span class="w"> </span>-m<span class="w"> </span>rtp_llm.start_server
 </pre></div>
 </div>
-<p>Start a grpc client.</p>
+<p>启动grpc客户端。</p>
 <div class="highlight-Python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">rtp_llm.cpp.proto.model_rpc_service_pb2_grpc</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
     <span class="n">MultimodalRpcServiceStub</span><span class="p">,</span>
 <span class="p">)</span>
@@ -552,7 +552,7 @@ document.write(`
     <span class="n">main</span><span class="p">()</span>
 </pre></div>
 </div>
-<p>hints: Grpc port is START_PORT + 1.</p>
+<p>提示：Grpc端口是 START_PORT + 1。</p>
 </section>
 </section>
 
@@ -592,8 +592,8 @@ document.write(`
   </div>
   <nav class="bd-toc-nav page-toc">
     <ul class="visible nav section-nav flex-column">
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#multimodal-development">Multimodal Development</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#debug">Debug</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#multimodal-development">多模态开发</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#debug">调试</a></li>
 </ul>
   </nav></div>
 
