@@ -10,7 +10,7 @@
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/devices/rocm_impl/aiterPA.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
-
+#include "rtp_llm/cpp/utils/RopeCosSin.h"
 #include <filesystem>
 
 using namespace std;
@@ -669,6 +669,11 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                                     && !params.configs.fuse_qkv_add_bias);
     RTP_LLM_LOG_DEBUG("skip_add_bias_transpose: %d", skip_add_bias_transpose);
     if (!skip_add_bias_transpose) {
+        static torch::Tensor cos_sin_cache = getRopeCosSin(params.configs.rope_config.style,
+                                                           params.configs.rope_config.dim,
+                                                           params.configs.rope_config.base,
+                                                           params.configs.rope_config.scale,
+                                                           init_params_.max_seq_len);
         if (init_params_.use_aiter_pa) {
             if (init_params_.use_asm_pa) {
                 DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
@@ -703,7 +708,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                                              store_q,
                                              store_kv,
                                              store_cache,
-                                             params.rotary_embedding_coefficient_cache ? params.rotary_embedding_coefficient_cache->data() : nullptr,
+                                             cos_sin_cache.defined() ? static_cast<float2*>(cos_sin_cache.data_ptr()) : nullptr,
                                              stream_);
             } else {
                 RUNTIME_ASSERT_OP_ARG(init_params_.use_asm_pa, "Should use asm_pa");
@@ -1071,6 +1076,11 @@ AttentionModuleOutput ROCmDevice::decoderSelfAttention(const AttentionModulePara
                                         && !params.configs.fuse_qkv_add_bias);
         printBufferData(*params.common.input_lengths, "input_lengths");
         if (!skip_add_bias_transpose) {
+            static torch::Tensor cos_sin_cache = getRopeCosSin(params.configs.rope_config.style,
+                                                               params.configs.rope_config.dim,
+                                                               params.configs.rope_config.base,
+                                                               params.configs.rope_config.scale,
+                                                               init_params_.max_seq_len);
             if (init_params_.use_asm_pa) {
                 DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
                                              invokeAddFusedQKVBiasTransposeDecode,
@@ -1104,7 +1114,7 @@ AttentionModuleOutput ROCmDevice::decoderSelfAttention(const AttentionModulePara
                                              store_q,
                                              store_kv,
                                              store_cache,
-                                             params.rotary_embedding_coefficient_cache ? params.rotary_embedding_coefficient_cache->data() : nullptr,
+                                             cos_sin_cache.defined() ? static_cast<float2*>(cos_sin_cache.data_ptr()) : nullptr,
                                              stream_);
             } else {
                 RUNTIME_ASSERT_OP_ARG(init_params_.use_asm_pa, "Should use asm_pa");
@@ -1136,14 +1146,6 @@ AttentionModuleOutput ROCmDevice::decoderSelfAttention(const AttentionModulePara
         check_cuda_error();
         DEBUG_PRINT_PARAMS(params, this, "decode_attn");
     }
-}
-
-BufferPtr ROCmDevice::getRotaryEmbeddingCoefficientCache(const RopeConfig & rope_config) {
-    size_t max_seq_len = 1048576;
-    auto rotary_embedding_coefficient_cache = allocateBuffer({rtp_llm::DataType::TYPE_FP32, {max_seq_len, (size_t)rope_config.dim / 2, 2}, rtp_llm::AllocationType::DEVICE});
-    invokeRotaryEmbeddingCoefficientCache((float2 *)rotary_embedding_coefficient_cache->data(), max_seq_len, rope_config, stream_);
-    syncAndCheck();
-    return rotary_embedding_coefficient_cache;
 }
 
 }  // namespace rtp_llm
