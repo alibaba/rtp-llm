@@ -47,12 +47,10 @@ void runAiterAsmPA(const AttentionModuleParams& params,
     }
 }
 
-void runAiterPA(const AttentionModuleParams& params,
-		rtp_llm::DeviceBase*         device,
-		Buffer&                      q_tmp) {
-    auto out   = Buffer2torchTensor(params.output,false);
-    auto query = Buffer2torchTensor(q_tmp,false);
-    
+void runAiterPA(const AttentionModuleParams& params, rtp_llm::DeviceBase* device, Buffer& q_tmp) {
+    auto out   = Buffer2torchTensor(params.output, false);
+    auto query = Buffer2torchTensor(q_tmp, false);
+
     if (q_tmp.shape().size() < 3) {
         throw std::runtime_error("aiter_paged_attention only support 3-dim input");
     } else if (q_tmp.shape().size() > 3) {
