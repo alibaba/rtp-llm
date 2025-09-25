@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-25 09:43+0800\n"
+"POT-Creation-Date: 2025-09-25 11:18+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -41,15 +41,27 @@ msgid "**tag**"
 msgstr ""
 
 #: ../../release/v0.2.0/package.md:0
-msgid "**CUDA**"
+msgid "**CUDA-SM9x**"
 msgstr ""
 
 #: ../../release/v0.2.0/package.md:0
-msgid "hub.docker.alibaba-inc.com/isearch/rtp_llm_gpu_cuda12"
+msgid "hub.docker.alibaba-inc.com/isearch/rtp_llm_sm9x:0.2.0_2025_09_24_21_00_615e568 _accelerated"
 msgstr ""
 
 #: ../../release/v0.2.0/package.md:0
-msgid "2025_08_10_21_00_0b10e6b_accelerated"
+msgid "**CUDA-SM8x**"
+msgstr ""
+
+#: ../../release/v0.2.0/package.md:0
+msgid "hub.docker.alibaba-inc.com/isearch/rtp_llm_sm8x:0.2.0_2025_09_24_21_00_615e568 _accelerated"
+msgstr ""
+
+#: ../../release/v0.2.0/package.md:0
+msgid "**CUDA-SM7x**"
+msgstr ""
+
+#: ../../release/v0.2.0/package.md:0
+msgid "hub.docker.alibaba-inc.com/isearch/rtp_llm_sm7x:0.2.0_2025_09_24_21_00_615e568 _accelerated"
 msgstr ""
 
 #: ../../release/v0.2.0/package.md:0
@@ -57,9 +69,5 @@ msgid "**AMD**"
 msgstr ""
 
 #: ../../release/v0.2.0/package.md:0
-msgid "hub.docker.alibaba-inc.com/isearch/rtp_llm_rocm"
-msgstr ""
-
-#: ../../release/v0.2.0/package.md:0
-msgid "2025_07_07_11_26_b8c2167_accelerated"
+msgid "hub.docker.alibaba-inc.com/isearch/rtp_llm_rocm:0.2.0_2025_09_24_21_00_615e568 _accelerated"
 msgstr ""
