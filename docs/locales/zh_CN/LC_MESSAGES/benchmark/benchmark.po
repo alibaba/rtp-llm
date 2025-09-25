@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-24 14:39+0800\n"
+"POT-Creation-Date: 2025-09-25 09:43+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -29,7 +29,9 @@ msgid ""
 "in RTP-LLM, including standalone measurement of model prefill and decode "
 "performance under various batch sizes with single-node and multi-node "
 "parallelism, timeline recording, and their usage methods."
-msgstr "在本章节中，我将介绍RTP-LLM中开发的性能测试工具，包括在各种批次大小下对模型预填充和解码性能的独立测量，支持单节点和多节点并行，时间线记录，以及它们的使用方法。"
+msgstr ""
+"在本章节中，我将介绍RTP-"
+"LLM中开发的性能测试工具，包括在各种批次大小下对模型预填充和解码性能的独立测量，支持单节点和多节点并行，时间线记录，以及它们的使用方法。"
 
 #: ../../benchmark/benchmark.md:3
 msgid "Design Principle"
@@ -44,7 +46,9 @@ msgid ""
 "enabling accurate and efficient measurement of engine performance. In "
 "detail, the batch-scheduler profiler is executed three times for a single"
 " input:"
-msgstr "RTP-LLM采用特殊的批次调度器，它会累积请求直到达到指定的批次大小，然后所有请求同时进入引擎。调度器支持预填充和解码两种模式；在解码模式下，请求只分配KV缓存而不进行预填充，从而实现准确高效的引擎性能测量。具体来说，批次调度器分析器对单个输入执行三次："
+msgstr ""
+"RTP-"
+"LLM采用特殊的批次调度器，它会累积请求直到达到指定的批次大小，然后所有请求同时进入引擎。调度器支持预填充和解码两种模式；在解码模式下，请求只分配KV缓存而不进行预填充，从而实现准确高效的引擎性能测量。具体来说，批次调度器分析器对单个输入执行三次："
 
 #: ../../benchmark/benchmark.md:6
 msgid "Warm-up run, to account for one-time setup such as JIT compilation."
@@ -72,7 +76,9 @@ msgid ""
 "every forward step is not real. So we also hack moe gate select for moe "
 "model and speculative accept func for mtp. In that way, we get stable "
 "result for analyse result."
-msgstr "由于在解码模式下，我们不预填充KVCache，所以每个前向步骤后的hidden_states不是真实的。因此我们还对MoE模型的gate选择函数和MTP的speculative accept函数进行了修改。通过这种方式，我们获得了稳定的分析结果。"
+msgstr ""
+"由于在解码模式下，我们不预填充KVCache，所以每个前向步骤后的hidden_states不是真实的。因此我们还对MoE模型的gate选择函数和MTP的speculative"
+" accept函数进行了修改。通过这种方式，我们获得了稳定的分析结果。"
 
 #: ../../benchmark/benchmark.md:13
 msgid "Single-Node Benchmark"
@@ -98,7 +104,10 @@ msgid ""
 "deepep masked), in that case user should also set "
 "`--partial={0:all(default), 1:decode, 2:prefill}`, below is an example of"
 " testing decode only:"
-msgstr "当预填充和解码不共享相同配置时（例如预填充使用deepep normal，解码使用deepep masked），我们也支持仅测试预填充或解码，在这种情况下，用户还应设置`--partial={0:all(default), 1:decode, 2:prefill}`，以下是仅测试解码的示例："
+msgstr ""
+"当预填充和解码不共享相同配置时（例如预填充使用deepep normal，解码使用deepep "
+"masked），我们也支持仅测试预填充或解码，在这种情况下，用户还应设置`--partial={0:all(default), 1:decode,"
+" 2:prefill}`，以下是仅测试解码的示例："
 
 #: ../../benchmark/benchmark.md:33
 msgid "Multi Node Benchmark"
@@ -112,10 +121,11 @@ msgid ""
 msgstr "我们还提供了一个Python脚本来启用多节点基准测试，但由于需要在多台机器上设置环境并启动脚本，它仍然比单节点测试涉及更多步骤。"
 
 #: ../../benchmark/benchmark.md:36
+#, fuzzy
 msgid ""
 "For each machine to be tested, you need to create an environment in which"
 " RTP-LLM can run and support passwordless SSH access from the current "
-"machine's port."
+"machine’s port."
 msgstr "对于每台要测试的机器，您需要创建一个RTP-LLM可以运行并支持从当前机器端口进行无密码SSH访问的环境。"
 
 #: ../../benchmark/benchmark.md:37
@@ -152,7 +162,9 @@ msgid ""
 " and dp_size len should be equal as each tuple of them will be started as"
 " a parallel config. For example, in below config, script will start three"
 " server with `TP=1 DP=32`, `TP=2 DP=16`, `TP=4 DP=8` and benchmark"
-msgstr "第四部分描述测试用例，包括预填充/解码、batch_size和input_len（它们将用作笛卡尔积）。特别地，tp_size和dp_size的长度应该相等，因为它们的每个元组将作为并行配置启动。例如，在下面的配置中，脚本将启动三个服务器，配置为`TP=1 DP=32`、`TP=2 DP=16`、`TP=4 DP=8`并进行基准测试"
+msgstr ""
+"第四部分描述测试用例，包括预填充/解码、batch_size和input_len（它们将用作笛卡尔积）。特别地，tp_size和dp_size的长度应该相等，因为它们的每个元组将作为并行配置启动。例如，在下面的配置中，脚本将启动三个服务器，配置为`TP=1"
+" DP=32`、`TP=2 DP=16`、`TP=4 DP=8`并进行基准测试"
 
 #: ../../benchmark/benchmark.md:75
 msgid ""
@@ -175,7 +187,9 @@ msgid ""
 "Also, multi-node benchmark dumps profile json in rank0, but currently we "
 "don't scp dir to local yet. So please go to rank0 and get profile data "
 "manually before clean step"
-msgstr "另外，多节点基准测试在rank0中转储profile json，但目前我们还没有将目录scp到本地。所以在清理步骤之前，请手动到rank0获取profile数据"
+msgstr ""
+"另外，多节点基准测试在rank0中转储profile "
+"json，但目前我们还没有将目录scp到本地。所以在清理步骤之前，请手动到rank0获取profile数据"
 
 #: ../../benchmark/benchmark.md:118
 msgid "Result Format"
