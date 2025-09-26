@@ -265,13 +265,11 @@ cc_library(
     name = "kernels_layernorm",
     srcs = [
         "layernorm_kernels.cu",
-        "alpha_layernorm_kernels.cu",
         "rmsnormKernels.cu",
         "fused_qk_rmsnorm.cu",
     ],
     hdrs = [
         "layernorm_kernels.h",
-        "alpha_layernorm_kernels.h",
         "rmsnormKernels.h",
         "fused_qk_rmsnorm.h",
     ],
