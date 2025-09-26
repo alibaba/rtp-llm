@@ -14,6 +14,7 @@ if utils.is_cuda():
         per_tensor_quant_fp8,
         per_token_group_quant_fp8,
         per_token_group_quant_int8,
+        per_token_quant_fp8,
     )
 else:
     logging.warning("can't import from rtp_llm_ops, only support cuda!")
@@ -106,10 +107,10 @@ def scaled_fp8_per_tensor_quant(
     input: torch.Tensor,
     scale: Optional[torch.Tensor] = None,
     output: Optional[torch.Tensor] = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor]:
     assert input.ndim == 2
 
-    shape: Union[tuple[int, int], torch.Size] = input.shape
+    shape: Union[Tuple[int, int], torch.Size] = input.shape
     out_dtype: torch.dtype = torch.float8_e4m3fn
 
     if output is None:
@@ -126,4 +127,21 @@ def scaled_fp8_per_tensor_quant(
         assert scale.numel() == 1, f"{scale.shape}"
         per_tensor_quant_fp8(input, output, scale, True)
 
+    return output, scale
+
+
+def scaled_fp8_per_token_quant(
+    input: torch.Tensor,
+    output: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    scale = torch.zeros(input.size(0), device=input.device, dtype=torch.float32)
+    if output is not None:
+        assert output.dtype == torch.float8_e4m3fn
+    else:
+        output = torch.empty(
+            input.shape, device=input.device, dtype=torch.float8_e4m3fn
+        )
+
+    per_token_quant_fp8(input, output, scale)
+    scale = scale.reshape(-1, 1)
     return output, scale
