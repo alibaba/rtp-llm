@@ -133,6 +133,7 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.inter_request_id = input_py.generate_config.inter_request_id
     generate_config_pb.ignore_eos = input_py.generate_config.ignore_eos
     generate_config_pb.reuse_cache = input_py.generate_config.reuse_cache
+    generate_config_pb.reuse_query_cache = input_py.generate_config.reuse_query_cache
     generate_config_pb.enable_3fs = input_py.generate_config.enable_3fs
 
     trans_option_cast(

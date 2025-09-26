@@ -518,6 +518,7 @@ class GptInitParameter:
     reserve_runtime_mem_mb: int
     residual_scalar: float
     reuse_cache: bool
+    reuse_query_cache: bool
     reverse_e_h_norm: bool
     role_type: RoleType
     rope_head_dim: int
@@ -627,6 +628,7 @@ class KVCacheConfig:
     multi_task_prompt: str
     multi_task_prompt_str: str
     reuse_cache: bool
+    reuse_query_cache: bool
     enable_3fs: bool
     match_timeout_ms: int
     rpc_get_cache_timeout_ms: int
@@ -640,6 +642,7 @@ class KVCacheConfig:
     def __init__(
         self,
         reuse_cache: bool = False,
+        reuse_query_cache: bool = False,
         multi_task_prompt: str = "",
         multi_task_prompt_str: str = "",
         enable_3fs: bool = False,

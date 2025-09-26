@@ -1,9 +1,8 @@
 from typing import Any, List, Optional, Union
 
-import torch
 import numpy as np
 import numpy.typing as npt
-
+import torch
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 from rtp_llm.frontend.tokenizer_factory.tokenizer_utils import (
@@ -11,11 +10,11 @@ from rtp_llm.frontend.tokenizer_factory.tokenizer_utils import (
     IncrementDecodingUtils,
 )
 from rtp_llm.utils.word_util import (
-    remove_padding_eos_with_numpy,
     get_stop_word_slices,
+    match_stop_words,
+    remove_padding_eos_with_numpy,
     truncate_response_with_stop_words,
     truncate_token_with_stop_word_id,
-    match_stop_words,
 )
 
 
@@ -71,9 +70,13 @@ class TokenProcessorPerStream:
         return_incremental: bool = False,
     ):
         if not self.has_num_beams:
-            self.ouput_tokens_list[i] = np.concatenate(
-                (self.ouput_tokens_list[i], tokens), axis=1
-            )
+            # Handle case when self.ouput_tokens_list[i] is empty
+            if self.ouput_tokens_list[i].size == 0:
+                self.ouput_tokens_list[i] = tokens
+            else:
+                self.ouput_tokens_list[i] = np.concatenate(
+                    (self.ouput_tokens_list[i], tokens), axis=1
+                )
             tokens = self.ouput_tokens_list[i]
         tokens = remove_padding_eos_with_numpy(
             tokens, self.special_tokens.eos_token_id
