@@ -184,11 +184,7 @@ torch::Tensor FusedRopeKVCacheDecodeOp::forward(const torch::Tensor&            
     torch::Tensor q_output          = torch::empty({token_num, local_head_num, size_per_head},
                                           torch::TensorOptions(qkv.dtype()).device(qkv.device()));
 
-    static torch::Tensor cos_sin_cache = getRopeCosSin(attn_configs_.rope_config.style,
-                                                       attn_configs_.rope_config.dim,
-                                                       attn_configs_.rope_config.base,
-                                                       attn_configs_.rope_config.scale,
-                                                       device_->initParams().max_seq_len);
+    static torch::Tensor cos_sin_cache = getRopeCosSin(attn_configs_.rope_config, device_->initParams().max_seq_len);
 
     RTP_LLM_CHECK_WITH_INFO(params->sequence_lengths.is_pinned(), "sequence_lengths is not pinned memory");
     DISPATCH_CUDA_FUNCTION_DATA_TYPE(torchDTypeToDataType(qkv.dtype()),
