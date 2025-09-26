@@ -12,6 +12,7 @@ from rtp_llm.models_py.modules.moe.naive_data_router import (
     BatchedDataRouter,
     DataRouterNoEPStandard,
 )
+
 from rtp_llm.models_py.modules.moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous,
     TopKWeightAndReduceDelegate,

@@ -877,7 +877,7 @@ def ep_gather(
     input_index: torch.Tensor,
     output_tensor: torch.Tensor,
 ):
-    BLOCK_D = 1024  # block size of quantization
+    BLOCK_D = 512  # block size of quantization
     num_warps = 2
     num_tokens = output_tensor.shape[0]
     hidden_size = input_tensor.shape[1]
@@ -992,22 +992,21 @@ def recompute_topk_ids_triton_kernel(
     pid = tl.program_id(0)
     token_start = pid * BLOCK_SIZE
     token_end = min(token_start + BLOCK_SIZE, num_tokens)
-
+    
     for token_idx in range(token_start, token_end):
         offset = token_idx * topk
-        # 向量加载
-        expert_ids = tl.load(topk_ids_ptr + offset + tl.arange(0, topk))
-
-        # 计算局部编号与合法性掩码
-        adjusted = expert_ids - current_expert_start_id
-        valid = (adjusted >= 0) & (adjusted < num_local_experts)
-
-        # 写回局部编号：合法位置写 adjusted，非法写 -1
-        out_ids = tl.where(valid, adjusted, -1)
-        tl.store(adjusted_topk_ids_ptr + offset + tl.arange(0, topk), out_ids)
-
-        # 按掩码原子加计数器
-        tl.atomic_add(expert_count_ptr + adjusted, 1, mask=valid)
+        # Load each expert ID individually instead of vectorized load
+        for i in range(topk):
+            expert_id = tl.load(topk_ids_ptr + offset + i)
+            adjusted = expert_id - current_expert_start_id
+            valid = (adjusted >= 0) & (adjusted < num_local_experts)
+            
+            # Write back adjusted ID
+            out_id = tl.where(valid, adjusted, -1)
+            tl.store(adjusted_topk_ids_ptr + offset + i, out_id)
+            
+            # Atomic add to expert count if valid
+            tl.atomic_add(expert_count_ptr + adjusted, 1, mask=valid)
 
 
 def recompute_topk_ids_sum_expert_count(
