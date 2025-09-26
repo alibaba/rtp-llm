@@ -149,7 +149,7 @@ bool CustomAllReduceComm::shouldCustomAR(const std::vector<size_t>& tp_ranks, si
     size_t local_world_size = rocm::getDeviceCount();
 
     // 1. check whether all ranks are on same nodes
-    if (world_size != local_world_size) {
+    if (world_size > local_world_size) {
         RTP_LLM_LOG_INFO(
             "Disable custom ar since TP is performanced on multi nodes, world_size=%d, local_world_size=%d",
             world_size,
