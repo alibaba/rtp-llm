@@ -35,7 +35,6 @@ __inline__ __device__ int target_index(int id1, int id2, int id3, int id4, int d
     return id1 * (dim_2 * dim_3 * dim_4) + id3 * (dim_2 * dim_4) + id2 * dim_4 + id4;
 }
 
-
 __global__ void getSkipLength(int* skip_length, int* prefix_lengths, int batch_size) {
     int min_skip_length = prefix_lengths[0];
     for (int i = 1; i < batch_size; i++) {
@@ -82,8 +81,6 @@ void half_to_float(const void* input, void* output, const int num_elements) {
     half_to_float_kernel<<<gridSize, blockSize>>>(half_input, float_output, num_elements);
     cudaDeviceSynchronize();
 }
-
-
 
 template<typename T, typename T_IN, int ITEMS_PER_THREAD>
 __global__ void softmax_kernel(T*           attn_score,
@@ -699,9 +696,6 @@ INSTANTIATETRANSPOSEQKV(__nv_bfloat16);
 #endif
 #undef INSTANTIATETRANSPOSEQKV
 
-
-
-
 template<typename T>
 __global__ void transpose_remove_padding(const T*     src,
                                          T*           dst,
@@ -868,6 +862,37 @@ __device__ float convert_to_float(int val) {
     return float(val);
 }
 
+template<typename T>
+__global__ void debug_kernel2(T* data, int start_col, int m, int n, int row_len, int info_id) {
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
+        printf("debug_kernel2 start: %d\n", info_id);
+        for (int i = 0; i < m; i++) {
+            for (int j = start_col; j < start_col + n; j++) {
+                int   index = i * row_len + j;
+                float value = convert_to_float(data[index]);
+                printf("%f ", value);
+            }
+            printf("\n");
+        }
+        printf("debug_kernel2 end: %d\n", info_id);
+    }
+}
+
+template<typename T>
+void invoke_debug_kernel2(T* data, int start_col, int m, int n, int row_len, int info_id, cudaStream_t stream) {
+    debug_kernel2<<<1, 1, 0, stream>>>(data, start_col, m, n, row_len, info_id);
+}
+
+#define INSTANTIATEDEBUGKERNEL2(T)                                                                                     \
+    template void invoke_debug_kernel2(                                                                                \
+        T* data, int start_col, int m, int n, int row_len, int info_id, cudaStream_t stream)
+INSTANTIATEDEBUGKERNEL2(float);
+INSTANTIATEDEBUGKERNEL2(half);
+INSTANTIATEDEBUGKERNEL2(int);
+#ifdef ENABLE_BF16
+INSTANTIATEDEBUGKERNEL2(__nv_bfloat16);
+#endif
+#undef INSTANTIATEDEBUGKERNEL2
 
 // Bandwidth-bound kernel by reading cos/sin coefficients from global memory (pre-computed and saved as weights).
 
@@ -3439,14 +3464,5 @@ INSTANTIATEINVOKELOADPREFIXKVCACHE(half);
 INSTANTIATEINVOKELOADPREFIXKVCACHE(__nv_bfloat16);
 #endif
 #undef INSTANTIATEINVOKELOADPREFIXKVCACHE
-
-
-
-
-
-
-
-
-
 
 }  // namespace rtp_llm

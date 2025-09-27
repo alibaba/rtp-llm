@@ -1,6 +1,5 @@
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/core/BufferHelper.h"
-#include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/utils/utils.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
@@ -45,7 +44,8 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
             k_cache_buffer_ ? k_cache_buffer_->shape()[0] * k_cache_buffer_->shape()[1] : 0;
     }
 
-    py_attn_inputs.dtype      = dataTypeToTorchType(description_.data_type);
+    py_attn_inputs.dtype = dataTypeToTorchType(description_.data_type);
+    std::cout << "py_attn_inputs.dtype: " << py_attn_inputs.dtype << std::endl;
     py_attn_inputs.is_prefill = !py_attn_inputs.sequence_lengths.size(0);
 
     // Calculate cu_seqlens
@@ -77,38 +77,22 @@ torch_ext::BertEmbeddingInputs PyWrappedModel::buildBertEmbeddingInputs(const Gp
     // Convert combo_position_ids from Buffer to torch::Tensor
     if (inputs.combo_position_ids) {
         bert_embedding_inputs.combo_position_ids = Buffer2torchTensor(inputs.combo_position_ids, false).cuda();
-    } else {
-        // Create empty tensor if not provided
-        bert_embedding_inputs.combo_position_ids =
-            torch::empty({0}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
     }
 
     // Convert combo_tokens_type_ids from Buffer to torch::Tensor
     if (inputs.combo_tokens_type_ids) {
         bert_embedding_inputs.combo_tokens_type_ids = Buffer2torchTensor(inputs.combo_tokens_type_ids, false).cuda();
-    } else {
-        // Create empty tensor if not provided
-        bert_embedding_inputs.combo_tokens_type_ids =
-            torch::empty({0}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
     }
 
     // Get position_encoding from model weights (no clone needed for weights)
     if (weights_.position_encoding) {
         bert_embedding_inputs.position_encoding = Buffer2torchTensor(weights_.position_encoding->kernel, false).cuda();
-    } else {
-        // Create empty tensor if not available
-        bert_embedding_inputs.position_encoding =
-            torch::empty({0, 0}, torch::TensorOptions(torch::kFloat32).device(torch::kCUDA));
     }
 
     // Get token_type_embedding from model weights (no clone needed for weights)
     if (weights_.token_type_embedding) {
         bert_embedding_inputs.token_type_embedding =
             Buffer2torchTensor(weights_.token_type_embedding->kernel, false).cuda();
-    } else {
-        // Create empty tensor if not available
-        bert_embedding_inputs.token_type_embedding =
-            torch::empty({0, 0}, torch::TensorOptions(torch::kFloat32).device(torch::kCUDA));
     }
 
     // Set input_embedding_scalar
@@ -229,7 +213,7 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
 GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
 
     py::gil_scoped_acquire gil;
-
+    printBufferDataDebug(*inputs.combo_position_ids, "forward inputs.combo_position_ids");
     try {
         RTP_LLM_LOG_DEBUG("Calling forward method on Python object instance.");
 

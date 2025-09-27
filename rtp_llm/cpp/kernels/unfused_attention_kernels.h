@@ -20,7 +20,6 @@
 
 namespace rtp_llm {
 
-
 template<typename T, typename T_IN>
 struct MaskedSoftmaxParam {
     // Common parameters.
@@ -51,7 +50,6 @@ void invokeTransposeQKV(T*           dst,
                         const float* scale,
                         const int    int8_mode,
                         cudaStream_t stream);
-
 
 template<typename T>
 void invokeTransposeAttentionOutRemovePadding(T*           src,
@@ -90,7 +88,6 @@ void invokeSplitQKV(T*           q_buf,
                     const int    size_per_head,
                     cudaStream_t stream);
 
-
 template<typename T>
 void invokeAddFusedQKVBiasTranspose(T*                             q_no_transpose_buf,
                                     T*                             q_buf,
@@ -120,6 +117,9 @@ void invokeAddFusedQKVBiasTranspose(T*                             q_no_transpos
                                     const bool                     store_kv,
                                     const bool                     store_cache,
                                     cudaStream_t                   stream);
+
+template<typename T>
+void invoke_debug_kernel2(T* data, int start_col, int m, int n, int row_len, int info_id, cudaStream_t stream);
 
 #if USING_ROCM
 template<typename T>
@@ -246,9 +246,5 @@ void invokeLoadPrefixKVCacheAiter(T*                             q_buf,
                                   const int                      int8_mode,
                                   cudaStream_t                   stream);
 #endif
-
-
-
-
 
 }  // namespace rtp_llm
