@@ -95,4 +95,4 @@ class BertModel(GptModelBase):
                 fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
             )
-        return PyModelOutputs(hidden_states)
+        return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
