@@ -266,7 +266,6 @@ int CudaGraphRunner::getCurrentRealGraphBs() {
 std::vector<int> CudaGraphRunner::getBatchSizesToCapture(int concurrency_limit) {
     std::vector<int> capture_bs;
     int              max_generate_batch_size = concurrency_limit;
-    max_generate_batch_size                  = 2;
     RTP_LLM_LOG_INFO("max_generate_batch_size for cuda graph: %d", max_generate_batch_size);
     // Add range 1 to 32 (inclusive)
     for (int i = 1; i <= std::min(32, max_generate_batch_size); i += 1) {
