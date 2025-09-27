@@ -70,9 +70,18 @@ struct PyAttentionInputs {
     std::optional<PyCacheStoreInputs> cache_store_inputs;
 };
 
+struct BertEmbeddingInputs {
+    torch::Tensor combo_position_ids;
+    torch::Tensor position_encoding;
+    torch::Tensor combo_tokens_type_ids;
+    torch::Tensor token_type_embedding;
+    float         input_embedding_scalar{1.0};
+};
+
 struct PyModelInputs {
-    torch::Tensor     input_ids;
-    PyAttentionInputs attention_inputs;
+    torch::Tensor       input_ids;
+    PyAttentionInputs   attention_inputs;
+    BertEmbeddingInputs bert_embedding_inputs;
 };
 
 struct PyModelOutputs {

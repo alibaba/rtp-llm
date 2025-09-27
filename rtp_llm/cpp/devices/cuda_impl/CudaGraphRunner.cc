@@ -1,9 +1,11 @@
 #include <cuda_runtime_api.h>
 #include <torch/torch.h>
+#include "ATen/core/TensorBody.h"
 #include "rtp_llm/cpp/devices/cuda_impl/CudaGraphRunner.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/devices/cuda_impl/CudaFlashInfer.h"
 #include "rtp_llm/cpp/cuda/cuda_host_utils.h"
+#include "rtp_llm/models_py/bindings/OpDefsUtils.h"
 
 using namespace torch_ext;
 namespace rtp_llm {
@@ -26,10 +28,11 @@ py::object CudaGraphRunner::normalForward(PyModelInputs& inputs) {
 void CudaGraphRunner::captureOneBatchSize(int bs) {
     auto inputs = graph_instances_[bs].mem_hold_.py_model_inputs_;
     // WarmUp twice
+    RTP_LLM_LOG_INFO("WarmUp for batch size %d start.", bs);
     py_forward_method_(inputs);
 
     py_forward_method_(inputs);
-
+    RTP_LLM_LOG_INFO("WarmUp for batch size %d successfully.", bs);
     {
         CudaGraphStreamLife  stream_life(capture_stream_, device_);
         at::cuda::CUDAGraph& graph               = graph_instances_[bs].graph_;
@@ -38,12 +41,14 @@ void CudaGraphRunner::captureOneBatchSize(int bs) {
             graph.enable_debug_mode();
             output_dot_filename = "cuda_graph_visualization.dot";
         }
+        RTP_LLM_LOG_INFO("Capture for batch size %d begin.", bs);
         graph.capture_begin();
         CaptureCheck::in_cuda_graph_capture = true;
         auto py_outputs_obj                 = py_forward_method_(inputs);
         auto outputs                        = py_outputs_obj.cast<PyModelOutputs>();
         graph_instances_[bs].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
         graph.capture_end();
+        RTP_LLM_LOG_INFO("Capture for batch size %d end.", bs);
         CaptureCheck::in_cuda_graph_capture = false;
         if (outputs.params_ptr->check_recycle()) {
             graph_instances_[bs].mem_hold_.params_ptr =
@@ -78,7 +83,12 @@ void CudaGraphRunner::capture() {
         inputs.attention_inputs.cu_seqlens =
             capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens.slice(0, 0, bs + 1);
         inputs.attention_inputs.prefix_lengths = capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths;
-        inputs.attention_inputs.dtype          = torch::kBFloat16;
+        inputs.attention_inputs.dtype          = capture_mem_hold_.py_model_inputs_.attention_inputs.dtype;
+        inputs.attention_inputs.padding_offset =
+            capture_mem_hold_.py_model_inputs_.attention_inputs.padding_offset.slice(0, 0, bs * num_tokens_per_bs_);
+        // Copy BertEmbeddingInputs from capture_mem_hold_
+        inputs.bert_embedding_inputs = capture_mem_hold_.py_model_inputs_.bert_embedding_inputs;
+
         graph_instances_[bs].mem_hold_ =
             CaptureMemoryHold(capture_mem_hold_.decoder_layer_hidden_states_.slice(0, 0, bs * num_tokens_per_bs_),
                               inputs,
@@ -125,10 +135,6 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
     // pinned memory
     py_model_inputs_.attention_inputs.cu_seqlens.slice(0, 0, current_batch_size_ + 1) =
         inputs.attention_inputs.cu_seqlens.slice(0, 0, current_batch_size_ + 1);
-    // for now cuda graph use padded mode, so we don't need the `padding_offset` for now.
-    // int total_tokens = inputs.attention_inputs.padding_offset.size(0);
-    // py_model_inputs_.attention_inputs.padding_offset.slice(0, 0, total_tokens) =
-    //     inputs.attention_inputs.padding_offset.slice(0, 0, total_tokens);
     if (!is_prefill_cuda_graph_mode_) {
         py_model_inputs_.input_ids.fill_(0);
         py_model_inputs_.input_ids.slice(0, 0, inputs.input_ids.size(0)) = inputs.input_ids;
@@ -143,12 +149,41 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
             current_batch_size_,
             seq_size_per_block_);
     } else {
+
+        auto input_lengths_ptr  = inputs.attention_inputs.input_lengths.data_ptr<int32_t>();
+        auto padding_offset_ptr = py_model_inputs_.attention_inputs.padding_offset.data_ptr<int32_t>();
+
+        int32_t cum_offset = 0;
+        int32_t index      = 0;
+        for (int32_t i = 0; i < current_batch_size_; i++) {
+            index           = i * num_tokens_per_bs_;
+            int32_t seq_len = input_lengths_ptr[i];
+            for (int32_t j = 0; j < seq_len; j++) {
+                padding_offset_ptr[index] = cum_offset;
+                index++;
+            }
+            cum_offset += num_tokens_per_bs_ - seq_len;
+        }
+
         py_model_inputs_.input_ids.fill_(0);
         auto lengths   = inputs.attention_inputs.input_lengths.data_ptr<int>();
         int  start_idx = 0;
         for (int i = 0; i < current_batch_size_; i++) {
-            py_model_inputs_.input_ids.slice(0, i * num_tokens_per_bs_, i * num_tokens_per_bs_ + lengths[i]) =
-                inputs.input_ids.slice(0, start_idx, start_idx + lengths[i]);
+            int dst_start = i * num_tokens_per_bs_;
+            int dst_end   = dst_start + lengths[i];
+            int src_start = start_idx;
+            int src_end   = src_start + lengths[i];
+
+            // Copy input_ids
+            py_model_inputs_.input_ids.slice(0, dst_start, dst_end) = inputs.input_ids.slice(0, src_start, src_end);
+
+            // Copy bert embedding data if available
+            if (inputs.bert_embedding_inputs.position_encoding.numel() > 0) {
+                py_model_inputs_.bert_embedding_inputs.combo_position_ids.slice(0, dst_start, dst_end) =
+                    inputs.bert_embedding_inputs.combo_position_ids.slice(0, src_start, src_end);
+                py_model_inputs_.bert_embedding_inputs.combo_tokens_type_ids.slice(0, dst_start, dst_end) =
+                    inputs.bert_embedding_inputs.combo_tokens_type_ids.slice(0, src_start, src_end);
+            }
             start_idx += lengths[i];
         }
     }
@@ -246,6 +281,66 @@ std::vector<int> CudaGraphRunner::getBatchSizesToCapture(int concurrency_limit) 
     return capture_bs;
 }
 
+void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs) {
+    auto options_cpu_int32  = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
+    auto options_cuda_int32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
+    inputs.attention_inputs.is_prefill = is_prefill_cuda_graph_mode_;
+    // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
+    inputs.input_ids = torch::zeros({max_num_token_}, options_cuda_int32);
+    // prefix_lengths [batch_size, int32] (for attention `prepare`)
+    inputs.attention_inputs.prefix_lengths = torch::full({int(max_bs_)}, num_tokens_per_bs_, options_cpu_int32);
+    // input_lengths [batch_size, int32] (decode only)
+    inputs.attention_inputs.input_lengths = torch::full({int(max_bs_)}, num_tokens_per_bs_, options_cpu_int32);
+    // sequence_lengths [batch_size, int32] (decode only)
+    // sequence_length should in pinned memory
+    inputs.attention_inputs.sequence_lengths = torch::ones({int(max_bs_)}, options_cpu_int32);
+    inputs.attention_inputs.sequence_lengths = inputs.attention_inputs.sequence_lengths.pin_memory();
+    // kv_cache_block_id_device [batch_size, block_num]
+    inputs.attention_inputs.kv_cache_block_id_device = torch::zeros(
+        {int(max_bs_), ((max_seq_len_ + seq_size_per_block_ - 1) / seq_size_per_block_)}, options_cuda_int32);
+    inputs.attention_inputs.kv_cache_block_id_host = torch::zeros(
+        {int(max_bs_), ((max_seq_len_ + seq_size_per_block_ - 1) / seq_size_per_block_)}, options_cpu_int32);
+    // padding_offset [max_num_token_, int32] (for attention padding)
+    inputs.attention_inputs.padding_offset = torch::zeros({int(max_seq_len_ * max_bs_)}, options_cpu_int32);
+    inputs.attention_inputs.padding_offset = inputs.attention_inputs.padding_offset.pin_memory();
+    inputs.attention_inputs.dtype          = model_data_type_;
+}
+
+void CudaGraphRunner::setPositionEncoding(torch::Tensor position_encoding) {
+    position_encoding_ = position_encoding;
+}
+
+void CudaGraphRunner::setTokenTypeEmbedding(torch::Tensor token_type_embedding) {
+    token_type_embedding_ = token_type_embedding;
+}
+
+void CudaGraphRunner::setInputEmbeddingScalar(float input_embedding_scalar) {
+    input_embedding_scalar_ = input_embedding_scalar;
+}
+
+void CudaGraphRunner::setModelDataType(caffe2::TypeMeta data_type) {
+    model_data_type_ = data_type;
+}
+
+void CudaGraphRunner::initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token) {
+    auto options_cuda_int32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
+    // Initialize BertEmbeddingInputs for capture
+    // combo_position_ids: empty tensor for capture (will be filled during actual forward)
+    inputs.bert_embedding_inputs.combo_position_ids = torch::zeros({max_seq_len_ * max_bs}, options_cuda_int32);
+
+    // position_encoding: from weights
+    inputs.bert_embedding_inputs.position_encoding = position_encoding_;
+
+    // combo_tokens_type_ids: empty tensor for capture (will be filled during actual forward)
+    inputs.bert_embedding_inputs.combo_tokens_type_ids = torch::zeros({max_seq_len_ * max_bs}, options_cuda_int32);
+
+    // token_type_embedding: from weights
+    inputs.bert_embedding_inputs.token_type_embedding = token_type_embedding_;
+
+    // input_embedding_scalar: fixed value
+    inputs.bert_embedding_inputs.input_embedding_scalar = input_embedding_scalar_;
+}
+
 void CudaGraphRunner::initCapture() {
     if (enable_cuda_graph_) {
         RTP_LLM_LOG_INFO("CUDA graph capture is enabled");
@@ -260,28 +355,17 @@ void CudaGraphRunner::initCapture() {
         capture_range_          = CudaGraphRunner::getBatchSizesToCapture(concurrency_limit_);
         max_bs_                 = *(std::max_element(capture_range_.begin(), capture_range_.end()));
         max_num_token_          = max_bs_ * num_tokens_per_bs_;
-        auto options_cpu_int32  = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
         auto options_cuda_int32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
         PyModelInputs inputs;
-        inputs.attention_inputs.is_prefill = is_prefill_cuda_graph_mode_;
         // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
         inputs.input_ids = torch::zeros({max_num_token_}, options_cuda_int32);
-        // prefix_lengths [batch_size, int32] (for attention `prepare`)
-        inputs.attention_inputs.prefix_lengths = torch::full({int(max_bs_)}, num_tokens_per_bs_, options_cpu_int32);
         // input_lengths [batch_size, int32] (decode only)
-        inputs.attention_inputs.input_lengths = torch::full({int(max_bs_)}, num_tokens_per_bs_, options_cpu_int32);
-        // sequence_lengths [batch_size, int32] (decode only)
-        // sequence_length should in pinned memory
-        inputs.attention_inputs.sequence_lengths = torch::ones({int(max_bs_)}, options_cpu_int32);
-        inputs.attention_inputs.sequence_lengths = inputs.attention_inputs.sequence_lengths.pin_memory();
-        // kv_cache_block_id_device [batch_size, block_num]
-        inputs.attention_inputs.kv_cache_block_id_device = torch::zeros(
-            {int(max_bs_), ((max_seq_len_ + seq_size_per_block_ - 1) / seq_size_per_block_)}, options_cuda_int32);
-        inputs.attention_inputs.kv_cache_block_id_host = torch::zeros(
-            {int(max_bs_), ((max_seq_len_ + seq_size_per_block_ - 1) / seq_size_per_block_)}, options_cpu_int32);
-        // padding_offset [max_num_token_, int32] (for attention padding)
-        inputs.attention_inputs.padding_offset = torch::zeros({int(max_seq_len_ * max_bs_)}, options_cuda_int32);
-        inputs.attention_inputs.dtype          = torch::kBFloat16;  // py_model support `kBFloat16` as input type.
+        // Setup attention inputs using the extracted function
+        initCaptureAttentionInputs(inputs, max_bs_, num_tokens_per_bs_);
+
+        // Setup BertEmbedding inputs using the extracted function
+        initCaptureBertEmbeddingInputs(inputs, max_bs_, max_num_token_);
+
         torch::Tensor output;
         capture_mem_hold_ = CaptureMemoryHold(output, inputs, kv_cache_block_offset_, is_prefill_cuda_graph_mode_);
         initKernelInternalMemory();

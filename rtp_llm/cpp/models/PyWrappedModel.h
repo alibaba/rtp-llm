@@ -3,7 +3,7 @@
 #include <optional>
 #include <string>
 #include <mutex>
-
+#include "rtp_llm/cpp/core/Types.h"
 #include <pybind11/pybind11.h>
 #include <pybind11/embed.h>
 #include "rtp_llm/models_py/bindings/OpDefsUtils.h"
@@ -27,10 +27,11 @@ private:
 
 private:
     // Helper functions to reduce code duplication
-    torch_ext::PyAttentionInputs buildPyAttentionInputs(const GptModelInputs& inputs);
-    void                         setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs,
-                                                                const GptModelInputs&         inputs,
-                                                                BufferPtr&                    kv_cache_block_id_device);
+    torch_ext::PyAttentionInputs   buildPyAttentionInputs(const GptModelInputs& inputs);
+    torch_ext::BertEmbeddingInputs buildBertEmbeddingInputs(const GptModelInputs& inputs);
+    void                           setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs,
+                                                                  const GptModelInputs&         inputs,
+                                                                  BufferPtr&                    kv_cache_block_id_device);
     GptModelOutputs
                   callForwardPostLayers(BufferPtr hidden_states, const GptModelInputs& inputs, bool is_forward_method);
     GraphBase*    graph_runner_{nullptr};
@@ -79,6 +80,16 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             is_prefill_cuda_graph_mode ? 0 : k_cache_buffer_->shape()[0] * k_cache_buffer_->shape()[1];
         graph_runner_ = device_->getDeviceGraphRunner(
             params.device->initParams(), py_instance, kv_cache_offset, is_prefill_cuda_graph_mode);
+        if (weights_.position_encoding) {
+            graph_runner_->setPositionEncoding(Buffer2torchTensor(weights_.position_encoding->kernel, false).cuda());
+        }
+        if (weights_.token_type_embedding) {
+            graph_runner_->setTokenTypeEmbedding(
+                Buffer2torchTensor(weights_.token_type_embedding->kernel, false).cuda());
+        }
+        graph_runner_->setInputEmbeddingScalar(description_.input_embedding_scalar);
+        caffe2::TypeMeta dtype = torch::scalarTypeToTypeMeta(dataTypeToTorchType(description_.data_type));
+        graph_runner_->setModelDataType(dtype);
         RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be null");
         auto py_initialize_method = py_instance.attr("initialize");
         py_init_result            = py_initialize_method(init_resources);
