@@ -90,8 +90,8 @@ EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, rtp_llm::De
 
 void EmbeddingExecutor::init_position_ids(int max_seq_len) {
     max_position_ids_buf_ = device_->allocateBuffer(
-        {rtp_llm::DataType::TYPE_INT32, {(size_t)max_seq_len}, rtp_llm::AllocationType::HOST}, {});
-    int* position_ids = (int*)max_position_ids_buf_->data();
+        {rtp_llm::DataType::TYPE_INT32, {(size_t)max_seq_len}, rtp_llm::AllocationType::HOST, true}, {});
+    int32_t* position_ids = max_position_ids_buf_->data<int32_t>();
     for (int i = 0; i < max_seq_len; i++) {
         position_ids[i] = i;
     }
@@ -107,7 +107,7 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
     model_input.combo_tokens_type_ids = device_->allocateBuffer(
         {rtp_llm::DataType::TYPE_INT32, {(size_t)token_num}, rtp_llm::AllocationType::HOST}, {});
     model_input.combo_position_ids = device_->allocateBuffer(
-        {rtp_llm::DataType::TYPE_INT32, {(size_t)token_num}, rtp_llm::AllocationType::HOST}, {});
+        {rtp_llm::DataType::TYPE_INT32, {(size_t)token_num}, rtp_llm::AllocationType::HOST, true}, {});
     model_input.input_lengths = device_->allocateBuffer(
         {rtp_llm::DataType::TYPE_INT32, {(size_t)batch_size}, rtp_llm::AllocationType::HOST}, {});
     model_input.sequence_lengths =
@@ -125,6 +125,7 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
     if (params_.position_ids_style_ == 1) {
         position_bias = params_.special_tokens_.pad_token_id_ + 1;
     }
+
     std::vector<rtp_llm::BufferPtr> gathered_mm_features;
     std::vector<int>                new_locs;
     std::vector<int>                merged_text_mask;
@@ -170,6 +171,7 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
                    seqLen * sizeof(int32_t));
             length_idx += seqLen;
         }
+
         if (length_idx != length) {
             return absl::InternalError("stream total_length not equal to sum of lengths");
         }

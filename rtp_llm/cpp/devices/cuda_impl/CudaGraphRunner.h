@@ -34,6 +34,7 @@ public:
 
         py_forward_method_     = py_instance_.attr("forward");
         py_fill_params_method_ = py_instance_.attr("fill_params");
+
         RTP_LLM_LOG_INFO("Initialize CudaGraphRunner with parameters below: \n \
             enable_cuda_graph_: %d, concurrency_limit_: %d, enable_cuda_graph_debug_mode_: %d, hidden_size_: %d, max_seq_len_: %d, seq_size_per_block_: %d, kv_cache_block_offset_: %d, is_prefill_cuda_graph_mode_: %d",
                          enable_cuda_graph_,
@@ -61,12 +62,18 @@ public:
     int            getCurrentRealGraphBs();
     PyModelOutputs forward(PyModelInputs& inputs) override;
     py::object     normalForward(PyModelInputs& inputs);
+    void           setPositionEncoding(torch::Tensor position_encoding) override;
+    void           setTokenTypeEmbedding(torch::Tensor token_type_embedding) override;
+    void           setInputEmbeddingScalar(float input_embedding_scalar) override;
+    void           setModelDataType(caffe2::TypeMeta data_type) override;
 
 private:
     void             copySmallerIntoLarger(const torch::Tensor& source_tensor, torch::Tensor& target_tensor);
     std::vector<int> getBatchSizesToCapture(int concurrency_limit);
     bool             tryGetRealGraphBatchSize(PyModelInputs& inputs);
     void extractValidHiddenStates(PyModelOutputs& outputs, const PyModelInputs& inputs, int32_t total_valid_tokens);
+    void initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs);
+    void initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token);
     py::object                             py_forward_method_;
     py::object                             py_fill_params_method_;
     bool                                   enable_cuda_graph_{false};
@@ -87,6 +94,10 @@ private:
     std::vector<int>                       capture_range_;
     std::unordered_map<int, GraphInstance> graph_instances_;
     CaptureMemoryHold                      capture_mem_hold_;
+    torch::Tensor                          position_encoding_;
+    torch::Tensor                          token_type_embedding_;
+    float                                  input_embedding_scalar_;
+    caffe2::TypeMeta                       model_data_type_;
 
 public:
     DeviceBase* device_{nullptr};
