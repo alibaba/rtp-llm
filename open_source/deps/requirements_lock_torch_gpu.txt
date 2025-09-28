@@ -2929,7 +2929,7 @@ tokenizers==0.20.3 \
     # via
     #   autoawq
     #   transformers
-torch @ https://download.pytorch.org/whl/cu118/torch-2.1.2%2Bcu118-cp310-cp310-linux_x86_64.whl#sha256=60396358193f238888540f4a38d78485f161e28ec17fa445f0373b5350ef21f0 \
+torch @ https://mirrors.aliyun.com/pytorch-wheels/cu118/torch-2.1.2%2Bcu118-cp310-cp310-linux_x86_64.whl#sha256=60396358193f238888540f4a38d78485f161e28ec17fa445f0373b5350ef21f0 \
     --hash=sha256:60396358193f238888540f4a38d78485f161e28ec17fa445f0373b5350ef21f0
     # via
     #   -r open_source/deps/requirements_torch_gpu.txt
