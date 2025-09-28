@@ -247,6 +247,7 @@ class ServerArgsDefaultTest(TestCase):
         self.assertIsNone(env.get("DASHSCOPE_HTTP_URL"))
         self.assertIsNone(env.get("DASHSCOPE_WEBSOCKET_URL"))
         self.assertEqual(env.get("OPENAI_API_KEY"), "EMPTY")
+        self.assertEqual(env.get("JSON_MODEL_OVERRIDE_ARGS"), "{}")
 
         # 27. Lora Configuration
         self.assertEqual(env.get("LORA_INFO"), "{}")
@@ -664,6 +665,8 @@ class ServerArgsSetTest(TestCase):
             "ws://test.url",
             "--openai_api_key",
             "test_openai_key",
+            "--json_model_override_args",
+            '{"rope_scaling":{"type":"yarn","factor":2.0,"original_max_position_embeddings":32768,"beta_slow":1.0,"beta_fast":1.0,"mscale":1.0,"extrapolation_factor":1.0}}',
             # 27. Lora Configuration
             "--lora_info",
             '{"lora1": "/path/to/lora1"}',
@@ -942,6 +945,8 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env["DASHSCOPE_HTTP_URL"], "http://test.url")
         self.assertEqual(env["DASHSCOPE_WEBSOCKET_URL"], "ws://test.url")
         self.assertEqual(env["OPENAI_API_KEY"], "test_openai_key")
+        self.assertEqual(env["JSON_MODEL_OVERRIDE_ARGS"],
+                         '{"rope_scaling":{"type":"yarn","factor":2.0,"original_max_position_embeddings":32768,"beta_slow":1.0,"beta_fast":1.0,"mscale":1.0,"extrapolation_factor":1.0}}')
 
         # 27. Lora Configuration
         self.assertEqual(env["LORA_INFO"], '{"lora1": "/path/to/lora1"}')
