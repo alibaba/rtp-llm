@@ -15,7 +15,7 @@ cc_library(
 cc_library(
     name = "ck_headers_real",
     hdrs = glob([
-        "inlcude/**/*.h",
+        "include/**/*.h",
         "include/**/*.inc",
         "include/**/*.hpp",
     ]) + [":config_h"],
@@ -31,7 +31,7 @@ cc_library(
     name = "ck_library_headers",
     srcs = glob(["library/src/utility/**/*.cpp"]),
     hdrs = glob([
-        "library/inlcude/**/*.h",
+        "library/include/**/*.h",
         "library/include/**/*.inc",
         "library/include/**/*.hpp",
     ]),
