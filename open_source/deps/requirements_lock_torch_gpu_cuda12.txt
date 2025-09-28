@@ -584,7 +584,7 @@ filelock==3.13.1 \
     #   huggingface-hub
     #   torch
     #   transformers
-flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiTRUE-cp310-cp310-linux_x86_64.whl \
+flash-attn @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/flash_attn-2.7.4.post1%2Bcu12torch2.6cxx11abiTRUE-cp310-cp310-linux_x86_64.whl \
     --hash=sha256:bfdb0f290cc3d21d0810ba49a360ef91090f62cdc1345ec6900447e0d12d99af
     # via -r open_source/deps/requirements_torch_gpu_cuda12.txt
 fonttools==4.53.1 \
@@ -3162,7 +3162,7 @@ tokenizers==0.20.3 \
     # via
     #   autoawq
     #   transformers
-torch @ https://download.pytorch.org/whl/cu126/torch-2.6.0%2Bcu126-cp310-cp310-manylinux_2_28_x86_64.whl#sha256=c55280b4da58e565d8a25e0e844dc27d0c96aaada7b90b4de70a45397faf604e \
+torch @ https://mirrors.aliyun.com/pytorch-wheels/cu126/torch-2.6.0%2Bcu126-cp310-cp310-manylinux_2_28_x86_64.whl#sha256=c55280b4da58e565d8a25e0e844dc27d0c96aaada7b90b4de70a45397faf604e \
     --hash=sha256:c55280b4da58e565d8a25e0e844dc27d0c96aaada7b90b4de70a45397faf604e
     # via
     #   -r open_source/deps/requirements_torch_gpu_cuda12.txt
@@ -3176,7 +3176,7 @@ torch @ https://download.pytorch.org/whl/cu126/torch-2.6.0%2Bcu126-cp310-cp310-m
     #   sentence-transformers
     #   timm
     #   torchvision
-torchvision @ https://download.pytorch.org/whl/cu126/torchvision-0.21.0%2Bcu126-cp310-cp310-linux_x86_64.whl#sha256=db4369a89b866b319c8dd73931c3e5f314aa535f7035ae2336ce9a26d7ace15a \
+torchvision @ https://mirrors.aliyun.com/pytorch-wheels/cu126/torchvision-0.21.0%2Bcu126-cp310-cp310-linux_x86_64.whl#sha256=db4369a89b866b319c8dd73931c3e5f314aa535f7035ae2336ce9a26d7ace15a \
     --hash=sha256:db4369a89b866b319c8dd73931c3e5f314aa535f7035ae2336ce9a26d7ace15a
     # via
     #   -r open_source/deps/requirements_torch_gpu_cuda12.txt
