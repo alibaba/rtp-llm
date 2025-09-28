@@ -584,7 +584,7 @@ filelock==3.13.1 \
     #   huggingface-hub
     #   torch
     #   transformers
-flash-attn @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiTRUE-cp310-cp310-linux_x86_64.whl \
+flash-attn @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/flash_attn-2.7.4.post1%2Bcu12torch2.6cxx11abiTRUE-cp310-cp310-linux_x86_64.whl \
     --hash=sha256:bfdb0f290cc3d21d0810ba49a360ef91090f62cdc1345ec6900447e0d12d99af
     # via -r open_source/deps/requirements_torch_gpu_cuda12.txt
 fonttools==4.53.1 \
