@@ -44,8 +44,7 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
             k_cache_buffer_ ? k_cache_buffer_->shape()[0] * k_cache_buffer_->shape()[1] : 0;
     }
 
-    py_attn_inputs.dtype = dataTypeToTorchType(description_.data_type);
-    std::cout << "py_attn_inputs.dtype: " << py_attn_inputs.dtype << std::endl;
+    py_attn_inputs.dtype      = dataTypeToTorchType(description_.data_type);
     py_attn_inputs.is_prefill = !py_attn_inputs.sequence_lengths.size(0);
 
     // Calculate cu_seqlens
