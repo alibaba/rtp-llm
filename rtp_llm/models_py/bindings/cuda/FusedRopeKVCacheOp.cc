@@ -84,6 +84,10 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
     // bool use_qkv_fp8 =
     //     fmha_type == FMHAType::TRT_V2 && prefix_prompt_param.kv_block_array.cache_type == KvCacheDataType::FP8;
 
+    int* padding_offset = nullptr;
+    if (params->padding_offset.defined()) {
+        padding_offset = params->padding_offset.data_ptr<int>();
+    }
     // tmp not use qkv fp8 buffer
     bool use_qkv_fp8 = false;
     DISPATCH_CUDA_FUNCTION_DATA_TYPE(
@@ -100,7 +104,7 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
                   // params.configs.rope_config.index_factor): nullptr,
         nullptr,  // params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias ?
                   // params.weights.qkv_weight->bias->data() : nullptr,
-        params->padding_offset.data_ptr<int>(),
+        padding_offset,
         params->cu_seqlens.data_ptr<int>(),
         batch_size,
         params->max_seq_len,  // seq_len
