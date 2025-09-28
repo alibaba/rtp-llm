@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 import os
 import typing
 
@@ -346,6 +347,7 @@ class GptInitModelParameters:
     rotary_factor1: float
     rotary_factor2: float
     partial_rotary_factor: float
+    rotary_embedding_extrapolation_factor: float
     scheduler_reserve_resource_ratio: int
     scoring_func: int
     seq_size_per_block: int
@@ -1170,6 +1172,34 @@ class GptInitModelParameters:
             f"use stop_words_str_list [{self.special_tokens.stop_words_str_list }],"
             f" stop_words_id_list [{self.special_tokens.stop_words_id_list}]"
         )
+
+        model_override_args = json.loads(StaticConfig.model_config.json_model_override_args)
+        if model_override_args:
+            if "rope_scaling" in model_override_args:
+                # be consistent with RopeStyle
+                rope_type = {"no": 0, "base": 1, "glm2": 2, "dynamicntk": 3,
+                             "qwendynamicntk": 4, "yarn": 5, "llama3": 6, "mrope": 7}
+                rope_override_args = model_override_args["rope_scaling"]
+                assert "type" in rope_override_args and rope_override_args["type"] in rope_type
+                self.rotary_embedding_style = rope_type[rope_override_args["type"]]
+                if rope_override_args["type"] == "yarn":
+                    assert "factor" in rope_override_args and "original_max_position_embeddings" in rope_override_args
+                    self.rotary_embedding_scale = rope_override_args["factor"]
+                    self.org_embedding_max_pos = rope_override_args["original_max_position_embeddings"]
+                    self.rotary_factor1 = rope_override_args.get("beta_slow", 1.0)
+                    self.rotary_factor2 = rope_override_args.get("beta_fast", 1.0)
+                    mscale = rope_override_args.get("mscale", 1.0)
+                    self.rotary_embedding_mscale = float(
+                        (1.0 if self.rotary_embedding_scale <= 1 else 0.1 * math.log(self.rotary_embedding_scale) + 1.0) * mscale)
+                    self.rotary_embedding_extrapolation_factor = rope_override_args.get("extrapolation_factor", 1.0)
+
+                logging.info(f"rotary_embedding_style: {self.rotary_embedding_style}, "
+                             f"rotary_embedding_scale: {self.rotary_embedding_scale}, "
+                             f"org_embedding_max_pos: {self.org_embedding_max_pos}, "
+                             f"rotary_factor1: {self.rotary_factor1}, "
+                             f"rotary_factor2: {self.rotary_factor2}, "
+                             f"rotary_embedding_mscale: {self.rotary_embedding_mscale}, "
+                             f"rotary_embedding_extrapolation_factor: {self.rotary_embedding_extrapolation_factor}")
 
     def _init_precision_config(
         self,

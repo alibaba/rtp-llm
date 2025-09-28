@@ -679,6 +679,7 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(local_rank, local_rank_)                                                                              \
     DEF_PROPERTY(rotary_embedding_mscale, rotary_embedding_mscale_)                                                    \
     DEF_PROPERTY(rotary_embedding_offset, rotary_embedding_offset_)                                                    \
+    DEF_PROPERTY(rotary_embedding_extrapolation_factor, rotary_embedding_extrapolation_factor_)                        \
     DEF_PROPERTY(use_mla, use_mla_)                                                                                    \
     DEF_PROPERTY(mla_ops_type, mla_ops_type_)                                                                          \
     DEF_PROPERTY(q_lora_rank, q_lora_rank_)                                                                            \
