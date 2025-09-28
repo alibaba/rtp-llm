@@ -26,9 +26,9 @@ struct RopeConfig {
     int       base  = 10000;
 
     float scale                = 1.0;
-    float factor1              = 0;
-    float factor2              = 0;
-    int   max_pos              = 0;
+    float factor1              = 1.0;  // beta_slow
+    float factor2              = 1.0;  // beta_fast
+    int   max_pos              = 0;    // original_max_position_embeddings
     float extrapolation_factor = 1.0;
     float mscale               = 1.0;
     int   offset               = 0;

@@ -131,3 +131,10 @@ def init_model_group_args(parser):
         default="EMPTY",
         help="OpenAI API Key",
     )
+    model_group.add_argument(
+        "--json_model_override_args",
+        env_name="JSON_MODEL_OVERRIDE_ARGS",
+        type=str,
+        default="{}",
+        help="A dictionary in JSON string format used to override default model configurations.",
+    )

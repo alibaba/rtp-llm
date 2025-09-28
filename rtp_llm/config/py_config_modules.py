@@ -32,7 +32,7 @@ def get_env_str(name: str, default: str = ""):
 
 
 def get_env_bool(name: str, default: bool = False):
-    ## in fact, we can always get value from env, if that's not specified, we return default value
+    # in fact, we can always get value from env, if that's not specified, we return default value
     v = os.environ.get(name, None)
     if v is None or v == "":
         return default
@@ -93,6 +93,7 @@ class ModelConfig:
         self.dashscope_api_key: str = "EMPTY"
         self.dashscope_http_url: Optional[str] = None
         self.dashscope_websocket_url: Optional[str] = None
+        self.json_model_override_args: str = "{}"
 
     def update_from_env(self):
         self.extra_data_path = os.environ.get("EXTRA_DATA_PATH", self.extra_data_path)
@@ -129,6 +130,9 @@ class ModelConfig:
         self.dashscope_websocket_url = os.environ.get(
             "DASHSCOPE_WEBSOCKET_URL", self.dashscope_websocket_url
         )
+        self.json_model_override_args = os.environ.get(
+            "JSON_MODEL_OVERRIDE_ARGS", self.json_model_override_args
+        )
 
     def to_string(self):
         return (
@@ -150,7 +154,8 @@ class ModelConfig:
             f"openai_api_key: {self.openai_api_key}\n"
             f"dashscope_api_key: {self.dashscope_api_key}\n"
             f"dashscope_http_url: {self.dashscope_http_url}\n"
-            f"dashscope_websocket_url: {self.dashscope_websocket_url}"
+            f"dashscope_websocket_url: {self.dashscope_websocket_url}\n"
+            f"json_model_override_args: {self.json_model_override_args}"
         )
 
 
@@ -210,7 +215,7 @@ class LoadConfig:
         self.phy2log_path: str = ""
         self.converter_num_per_gpu: int = 4
         self.tokenizers_parallelism: bool = False
-        ## seem like it's a third-party pkg environment, but we reserve it temporar
+        # seem like it's a third-party pkg environment, but we reserve it temporar
         self.load_ckpt_num_process: int = 0
 
     def update_from_env(self):
@@ -865,7 +870,7 @@ class PyEnvConfigs:
         self.worker_config.update_from_env()
         self.role_config.update_from_env()
         self.pd_separation_config.update_from_env()
-        ## in gpt model parameters, we should update it from g_parallel_info
+        # in gpt model parameters, we should update it from g_parallel_info
         self.parallelism_distributed_config.update_from_env()
         self.model_specific_config.update_from_env()
         self.fmha_config.update_from_env()
@@ -918,13 +923,13 @@ class PyEnvConfigs:
         )
 
 
-## some configs are from static method or global method, etc, we collect them in `StaticConfig`, but in-none-static methods,
-## we should use configs alone. This design can make the codes of this project more clear. All configs
-## should be retrived from `StaticConfig` or a top-down `PyEnvConfigs`. Notably, we don't modify smoke
-## test envs and that's necessary.
+# some configs are from static method or global method, etc, we collect them in `StaticConfig`, but in-none-static methods,
+# we should use configs alone. This design can make the codes of this project more clear. All configs
+# should be retrived from `StaticConfig` or a top-down `PyEnvConfigs`. Notably, we don't modify smoke
+# test envs and that's necessary.
 StaticConfig = PyEnvConfigs()
 StaticConfig.update_from_env()
 
-#### The envs we reserve below:
-#### 1. weights convert: because we don't use it in our project.
-#### 2. smoke test.
+# The envs we reserve below:
+# 1. weights convert: because we don't use it in our project.
+# 2. smoke test.
