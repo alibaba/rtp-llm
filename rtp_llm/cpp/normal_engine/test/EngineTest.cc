@@ -196,11 +196,19 @@ TEST_F(NormalEngineTest, testReuseCacheOption) {
     auto gpt_init_params = rtp_llm::GptInitParameter();
     auto engine          = createMockEngine(device_, config, gpt_init_params);
     ASSERT_TRUE(engine->resourceContext().reuse_cache);
+    ASSERT_TRUE(engine->resourceContext().reuse_query_cache);
+
+    config.reuse_query_cache = false;
+    auto gpt_init_params2    = rtp_llm::GptInitParameter();
+    auto engine2             = createMockEngine(device_, config, gpt_init_params2);
+    ASSERT_TRUE(engine2->resourceContext().reuse_cache);
+    ASSERT_FALSE(engine2->resourceContext().reuse_query_cache);
 
     config.reuse_cache    = false;
-    auto gpt_init_params2 = rtp_llm::GptInitParameter();
-    auto engine2          = createMockEngine(device_, config, gpt_init_params2);
-    ASSERT_FALSE(engine2->resourceContext().reuse_cache);
+    auto gpt_init_params3 = rtp_llm::GptInitParameter();
+    auto engine3          = createMockEngine(device_, config, gpt_init_params3);
+    ASSERT_FALSE(engine3->resourceContext().reuse_cache);
+    ASSERT_FALSE(engine3->resourceContext().reuse_query_cache);
 }
 
 TEST_F(NormalEngineTest, testReuseCache) {

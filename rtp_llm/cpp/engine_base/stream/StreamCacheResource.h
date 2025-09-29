@@ -8,7 +8,6 @@
 #include <memory>
 
 namespace rtp_llm {
-
 class GenerateStream;
 
 struct ResourceContext {
@@ -16,6 +15,7 @@ struct ResourceContext {
     std::shared_ptr<CacheManager>              propose_cache_manager = nullptr;
     std::shared_ptr<SystemPrompt>              system_prompt         = nullptr;
     bool                                       reuse_cache{false};
+    bool                                       reuse_query_cache{true};
     bool                                       enable_3fs{false};
     bool                                       use_cache_store{false};
     std::vector<std::shared_ptr<CacheManager>> mtp_cache_managers;
@@ -42,6 +42,7 @@ public:
     const std::vector<int64_t>& cacheKeys(int32_t batch_id) const;
     absl::StatusOr<int>         initKVBlock(int token_capacity, size_t reserve_step = 0);
     absl::StatusOr<int>         incrKVBlock(int token_capacity, size_t reserve_step = 0);
+    void                        insertIntoCache();
     void                        fakeInitKVBlock();
     int                         tryReleaseKVBlock(size_t nums);
     absl::Status                releaseSequenceKVCache(size_t total_seq_len, size_t release_seq_len);
@@ -103,25 +104,10 @@ public:
         stream_ = stream;
     }
 
-    bool reuseCache() const;
-    bool enable3FS() const;
-
-    std::string debugString() const {
-        std::stringstream debug_string;
-        debug_string << "StreamCacheResource {"
-                     << "need_release_resource: " << need_release_resource_ << ", batch_resource: [";
-
-        for (size_t i = 0; i < batch_resource_.batchSize(); i++) {
-            debug_string << " [";
-            for (size_t j = 0; j < batch_resource_.batch_block_id[i].size(); j++) {
-                debug_string << batch_resource_.batch_block_id[i][j] << " ";
-            }
-            debug_string << "],";
-        }
-
-        debug_string << "}";
-        return debug_string.str();
-    }
+    bool        reuseCache() const;
+    bool        reuseQueryCache() const;  // 同一批推理的stream内部是否开启kvcache 复用
+    bool        enable3FS() const;
+    std::string debugString() const;
 
 private:
     GenerateStream*          stream_;

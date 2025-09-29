@@ -255,6 +255,10 @@ void CacheManager::incrBlockRefCounter(const std::vector<int>& indices) {
     allocator_->incrBlockRefCounter(indices);
 }
 
+void CacheManager::decrBlockRefCounter(const std::vector<int>& indices) {
+    allocator_->decrBlockRefCounter(indices);
+}
+
 void CacheManager::incrQueryRefCounter(const std::vector<int>& blocks) {
     std::set<int> unique_blocks(blocks.begin(), blocks.end());
     for (auto block : unique_blocks) {
@@ -263,13 +267,11 @@ void CacheManager::incrQueryRefCounter(const std::vector<int>& blocks) {
             available_blocks_--;
         }
     }
-
     query_ref_counter_.incrementRefCounter(blocks);
 }
 
 void CacheManager::decrQueryRefCounter(const std::vector<int>& blocks) {
     query_ref_counter_.decrementRefCounter(blocks);
-
     std::set<int> unique_blocks(blocks.begin(), blocks.end());
     for (auto block : unique_blocks) {
         if (query_ref_counter_.getRefCounter(block) == 0) {
@@ -347,15 +349,34 @@ void CacheManager::freeWithCache(FreeInfo& free_info) {
     std::lock_guard<std::mutex> guard(mutex_);
     decrQueryRefCounter(free_info.block_indices);
     free_info.is_resident = false;
-    insertIntoCache(free_info);
+    insertCacheThenFree(free_info);
+}
+
+void CacheManager::insertIntoCache(FreeInfo& free_info) {
+    if (free_info.token_ids.size() > 1) {
+        size_t token_len = free_info.token_ids.size() - 1;
+        size_t block_len = std::min(std::min(free_info.block_indices.size(), free_info.cache_keys.size()),
+                                    token_len / seq_size_per_block_);
+        token_len        = block_len * seq_size_per_block_;
+        CacheItem item{{free_info.token_ids.begin(), free_info.token_ids.begin() + token_len},
+                       {free_info.block_indices.begin(), free_info.block_indices.begin() + block_len},
+                       {free_info.cache_keys.begin(), free_info.cache_keys.begin() + block_len},
+                       free_info.loss.empty() ?
+                           free_info.loss :
+                           std::vector<float>{free_info.loss.begin(), free_info.loss.begin() + token_len},
+                       free_info.is_resident};
+        incrBlockRefCounter(item.block_indices);
+        std::vector<int> indices = block_cache_.put(item);
+        allocator_->free(indices);
+    }
 }
 
 void CacheManager::insertResidentCache(FreeInfo& free_info) {
     free_info.is_resident = true;
-    insertIntoCache(free_info);
+    insertCacheThenFree(free_info);
 }
 
-void CacheManager::insertIntoCache(FreeInfo& free_info) {
+void CacheManager::insertCacheThenFree(FreeInfo& free_info) {
     if (free_info.token_ids.size() > 1) {
         size_t token_len = free_info.token_ids.size() - 1;
         size_t block_len = std::min(std::min(free_info.block_indices.size(), free_info.cache_keys.size()),
