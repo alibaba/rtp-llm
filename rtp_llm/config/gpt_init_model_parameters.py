@@ -1128,9 +1128,6 @@ class GptInitModelParameters:
         logging.info(f"pre_allocate_op_mem: {self.pre_allocate_op_mem}")
         logging.info(f"tp_split_emb_and_lm_head: {self.tp_split_emb_and_lm_head}")
 
-        if os.environ.get("ROCM_KV_CACHE_DATATYPE", "") == "fp8":
-            self.kv_cache_data_type = WEIGHT_TYPE.FP8.to_str()
-
         # use environment variables to update stop_words_str and stop_words_id
         env_stop_words_str = self.py_env_configs.generate_env_config.stop_words_str
         env_stop_words_id = self.py_env_configs.generate_env_config.stop_words_list
