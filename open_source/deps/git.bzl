@@ -90,6 +90,7 @@ def git_deps():
         patches = [
             "//patches/rules_python:0001-add-extra-data.patch",
             "//patches/rules_python:0002-remove-import-from-rules_cc.patch",
+            "//patches/rules_python:0001-xx.patch",
         ],
     )
 
