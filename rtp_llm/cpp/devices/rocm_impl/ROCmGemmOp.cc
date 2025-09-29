@@ -141,6 +141,8 @@ struct ROCmGemmArguments {
         compute_type = (params.compute_type == DataType::TYPE_INVALID) ? DataType::TYPE_FP32 : params.compute_type;
         if (params.D) {
             DDtype = params.D->type();
+        } else if (params.A.type() == DataType::TYPE_INT8 || params.A.type() == DataType::TYPE_QINT8){
+            DDtype = DataType::TYPE_FP16;
         } else {
             DDtype = params.compute_type == DataType::TYPE_INVALID ? ADtype : compute_type;
         }
