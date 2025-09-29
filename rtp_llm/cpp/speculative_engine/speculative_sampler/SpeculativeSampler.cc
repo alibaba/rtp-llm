@@ -174,10 +174,6 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
         if (propose_stream_output->propose_step == 0) {
             size_t accept_len = 1;
 
-            if (!stream->isDummyStream()) {
-                sample_output.accept_token_num += accept_len;
-            }
-
             rtp_llm::BufferPtr accept_tokens = device_->allocateBuffer(
                 {rtp_llm::DataType::TYPE_INT32, {1, accept_len}, rtp_llm::AllocationType::HOST}, {"accept_tokens"});
 
