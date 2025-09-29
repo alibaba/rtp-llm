@@ -27,9 +27,6 @@ combined="${COMMIT_ID}${SECURITY}${timestamp}"
 # Calculate the MD5 hash
 base64_hash=$(echo -n "${combined}" | base64)
 
-# Output the MD5 hash
-echo "MD5 hash of '${COMMIT_ID}' and '${SECURITY}' combined with timestamp is: ${md5_hash}"
-
 # Return the MD5 hash as the script's exit code
 echo "${SECURITY}"
 
