@@ -345,6 +345,7 @@ cc_library(
         "unfused_attention_kernels.h",
     ],
     deps = any_cuda_deps + [
+        "//rtp_llm/cpp/core:device_types_hdr",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/model_utils:model_utils",
         "//rtp_llm/cpp/cuda:cuda_utils_cu",

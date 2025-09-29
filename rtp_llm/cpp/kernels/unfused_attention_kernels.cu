@@ -21,11 +21,11 @@
 #include "rtp_llm/cpp/kernels/rotary_position_embedding.h"
 #include "rtp_llm/cpp/kernels/unfused_attention_kernels.h"
 #include "rtp_llm/cpp/cuda/cuda_type_utils.cuh"
+#include "rtp_llm/cpp/core/DeviceTypes.h"
 #if USING_CUDA
 #include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 #endif
 #if USING_ROCM
-typedef __hip_fp8_e4m3_fnuz __nv_fp8_e4m3;
 #include "rtp_llm/cpp/rocm/cuda_shims.h"
 #endif
 #include <cstdlib>

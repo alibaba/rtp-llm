@@ -34,6 +34,7 @@ cc_library(
         "BlockLRUCache.cc",
     ],
     deps = torch_deps() + [
+        "//rtp_llm/cpp/core:device_types_hdr",
         "//rtp_llm/cpp/metrics:metrics",
         "//rtp_llm/cpp/dataclass:dataclass",
         "//rtp_llm/cpp/model_rpc:model_rpc_pool",
