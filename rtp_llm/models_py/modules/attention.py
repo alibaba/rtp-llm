@@ -23,6 +23,7 @@ class CausalAttention(nn.Module):
         self.head_num = config.head_num
         self.num_key_value_groups = config.head_num // config.head_num_kv
         self.q_size = config.head_num * self.head_dim
+
         # Create linear layers using LinearFactory
         self.qkv_proj = LinearFactory.create_linear_from_weights(
             weights, W.attn_qkv_w, W.attn_qkv_s, W.attn_qkv_b, config
@@ -53,6 +54,7 @@ class CausalAttention(nn.Module):
             qkv = self.qk_fuse_norm(qkv)
         attn_output = fmha_impl.forward(qkv, kv_cache)
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+
         output = self.o_proj(attn_output)
         if self.config.tp_size > 1:
             output = all_reduce(output, group=Group.TP)

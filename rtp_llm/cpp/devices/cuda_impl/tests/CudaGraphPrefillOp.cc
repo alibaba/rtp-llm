@@ -37,6 +37,7 @@ CudaGraphRunnerPtr CudaGraphPrefillOp::createCudaGraphRunner(py::object py_insta
     // int  block_num                              = 26037;
     auto               runner_ptr            = device->getDeviceGraphRunner(params, std::move(py_instance), 0, true);
     CudaGraphRunnerPtr cuda_graph_runner_ptr = dynamic_cast<CudaGraphRunner*>(runner_ptr);
+    cuda_graph_runner_ptr->setModelDataType(torch::scalarTypeToTypeMeta(torch::kBFloat16));
     return cuda_graph_runner_ptr;
 }
 

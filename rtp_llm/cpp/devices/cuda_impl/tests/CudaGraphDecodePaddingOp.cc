@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/devices/cuda_impl/tests/CudaGraphDecodePaddingOp.h"
+#include "c10/core/ScalarType.h"
 namespace cuda_graph {
 using namespace rtp_llm;
 
@@ -25,6 +26,7 @@ CudaGraphRunnerPtr CudaGraphDecodePaddingOp::createCudaGraphRunner(py::object py
     // int  block_num                              = 26037;
     auto               runner_ptr            = device->getDeviceGraphRunner(params, std::move(py_instance), 663676);
     CudaGraphRunnerPtr cuda_graph_runner_ptr = dynamic_cast<CudaGraphRunner*>(runner_ptr);
+    cuda_graph_runner_ptr->setModelDataType(torch::scalarTypeToTypeMeta(torch::kBFloat16));
     return cuda_graph_runner_ptr;
 }
 

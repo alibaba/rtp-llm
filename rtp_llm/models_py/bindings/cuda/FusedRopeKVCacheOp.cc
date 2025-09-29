@@ -84,14 +84,12 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
     // bool use_qkv_fp8 =
     //     fmha_type == FMHAType::TRT_V2 && prefix_prompt_param.kv_block_array.cache_type == KvCacheDataType::FP8;
 
-    // tmp not use qkv fp8 buffer
-    bool use_qkv_fp8 = false;
-    // embedding cuda graph, we use padded mode, so the padding offset is always zero and in this case the
-    // `padding_offset` should be nullptr.
     int* padding_offset = nullptr;
     if (params->padding_offset.defined()) {
         padding_offset = params->padding_offset.data_ptr<int>();
     }
+    // tmp not use qkv fp8 buffer
+    bool use_qkv_fp8 = false;
     DISPATCH_CUDA_FUNCTION_DATA_TYPE(
         torchDTypeToDataType(qkv.dtype()),
         invokeAddFusedQKVBiasTranspose,
