@@ -46,10 +46,10 @@ struct CacheConfig {
     size_t v_total_size          = 0;
     size_t scale_size            = 0;
 
-    bool     use_mla       = false;
-    uint32_t kv_lora_rank  = 0;
-    uint32_t rope_head_dim = 0;
-    std::string mtp_model_type    = "";
+    bool        use_mla        = false;
+    uint32_t    kv_lora_rank   = 0;
+    uint32_t    rope_head_dim  = 0;
+    std::string mtp_model_type = "default_model";
 
     CacheConfig() {}
 

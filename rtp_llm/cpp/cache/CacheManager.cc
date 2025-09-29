@@ -48,7 +48,9 @@ CacheManager::CacheManager(const CacheConfig&                 config,
         RTP_LLM_FAIL("kvcache allocator init failed");
     }
     available_blocks_ = allocator_->totalBlocks();
-
+    if (metrics_reporter_) {
+        metrics_reporter_thread_ = std::thread(&CacheManager::reportMetricsLoop, this);
+    }
     if (params_.kv_cache_config.enable_3fs) {
         enable_dist_kvcache_ = initDistKvCache();
         if (!enable_dist_kvcache_) {
@@ -83,7 +85,7 @@ uint32_t CacheManager::maxSeqLen() const {
 void CacheManager::reportMetricsLoop() {
     kmonitor::MetricsTags tags;
     tags.AddTag("mtp_model_type", config_.mtp_model_type);
-    
+
     while (!stop_) {
         if (metrics_reporter_) {
             RtpLLMCacheMetricsCollector collector;
