@@ -439,7 +439,6 @@ void register_misc_config(pybind11::module& m) {
         .def_readwrite("disable_pdl", &MiscellaneousConfig::disable_pdl);
 }
 
-
 void registerGptInitParameter(py::module m) {
     py::enum_<MlaOpsType>(m, "MlaOpsType")
         .value("AUTO", MlaOpsType::AUTO)
@@ -678,6 +677,7 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(local_rank, local_rank_)                                                                              \
     DEF_PROPERTY(rotary_embedding_mscale, rotary_embedding_mscale_)                                                    \
     DEF_PROPERTY(rotary_embedding_offset, rotary_embedding_offset_)                                                    \
+    DEF_PROPERTY(rotary_embedding_extrapolation_factor, rotary_embedding_extrapolation_factor_)                        \
     DEF_PROPERTY(use_mla, use_mla_)                                                                                    \
     DEF_PROPERTY(mla_ops_type, mla_ops_type_)                                                                          \
     DEF_PROPERTY(q_lora_rank, q_lora_rank_)                                                                            \
@@ -776,4 +776,4 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     registerCommon(m);
 }
 
-}  // namespace torch_ext
+}  // namespace rtp_llm
