@@ -105,6 +105,10 @@ bool FlashInferDecodeOp::support(torch_ext::PyAttentionInputs attn_inputs) {
     if (fmha_config_.disable_flash_infer || attn_configs_.kv_cache_dtype != KvCacheDataType::BASE) {
         return false;
     }
+    // FIXME: FlashInferDecodeOp causes crash in this case, temporarily bypassing it here
+    if (attn_configs_.head_num / attn_configs_.kv_head_num == 12) {
+        return false;
+    }
     return FlashInferAttnParams::checkDecode(device_, attn_configs_, torchDTypeToDataType(attn_inputs.dtype));
 }
 
