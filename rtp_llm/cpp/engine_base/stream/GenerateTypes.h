@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 #include <torch/python.h>
-#include "rtp_llm/cpp/dataclass/GenerateConfig.h"
+#include "rtp_llm/cpp/engine_base/stream/GenerateConfig.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/models/position_ids/PositionIdsGenerator.h"
 #include "rtp_llm/cpp/core/Buffer.h"

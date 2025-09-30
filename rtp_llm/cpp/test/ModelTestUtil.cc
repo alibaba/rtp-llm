@@ -1,6 +1,6 @@
 #include <torch/script.h>
 #include "rtp_llm/cpp/test/ModelTestUtil.h"
-#include "rtp_llm/cpp/dataclass/EngineInitParameter.h"
+#include "rtp_llm/cpp/engine_base/WeightsConverter.h"
 #include "rtp_llm/cpp/models/models_weight/W.h"
 
 #include <filesystem>

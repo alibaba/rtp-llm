@@ -3,6 +3,8 @@
 
 namespace rtp_llm {
 
+using namespace std;
+
 std::optional<int> Tokenizer::getEosTokenId() {
     py::gil_scoped_acquire acquire;
     auto                   res = tokenizer_.attr("eos_token_id");
@@ -48,6 +50,26 @@ std::string Tokenizer::toString() {
     py::str                py_str  = py::str(tokenizer_);
     std::string            cpp_str = py_str;
     return cpp_str;
+}
+
+vector<int> Tokenizer::convertSelectTokens(const std::vector<std::string>& select_tokens_str, int vocab_size) {
+    std::vector<int> select_tokens_id;
+
+    for (const auto& token_str : select_tokens_str) {
+        auto vec = encode(token_str);
+        select_tokens_id.insert(select_tokens_id.begin(), vec.begin(), vec.end());
+    }
+
+    auto areTokensValid = [](const std::vector<int>& select_tokens_id, int vocab_size) {
+        return std::all_of(select_tokens_id.begin(), select_tokens_id.end(), [vocab_size](int token_id) {
+            return token_id < vocab_size && token_id >= 0;
+        });
+    };
+    if (!areTokensValid(select_tokens_id, vocab_size)) {
+        throw std::runtime_error("token_id should be less than vocab_size");
+    }
+
+    return select_tokens_id;
 }
 
 }  // namespace rtp_llm

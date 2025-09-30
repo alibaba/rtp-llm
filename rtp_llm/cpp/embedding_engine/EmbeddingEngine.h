@@ -8,7 +8,8 @@
 #include <thread>
 #include "absl/status/status.h"
 #include "rtp_llm/cpp/embedding_engine/EmbeddingExecutor.h"
-#include "rtp_llm/cpp/dataclass/EngineInitParameter.h"
+#include "rtp_llm/cpp/engine_base/EngineInitParams.h"
+#include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/embedding_engine/EmbeddingStream.h"
 #include "rtp_llm/cpp/embedding_engine/EmbeddingScheduler.h"
