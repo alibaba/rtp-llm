@@ -1,6 +1,8 @@
 
 #include "rtp_llm/cpp/api_server/WeightsLoader.h"
-#include "rtp_llm/cpp/dataclass/EngineInitParameter.h"
+#include "rtp_llm/cpp/engine_base/EngineInitParams.h"
+#include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
+#include "rtp_llm/cpp/engine_base/WeightsConverter.h"
 
 namespace rtp_llm {
 

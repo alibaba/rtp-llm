@@ -2,7 +2,7 @@
 
 #include "autil/legacy/jsonizable.h"
 
-#include "rtp_llm/cpp/dataclass/GenerateConfig.h"
+#include "rtp_llm/cpp/engine_base/stream/GenerateConfig.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 
 using namespace autil::legacy;

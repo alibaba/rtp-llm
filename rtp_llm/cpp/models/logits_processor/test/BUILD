@@ -8,7 +8,6 @@ test_copts = [
 test_deps = [
     "//rtp_llm/cpp/devices/testing:device_test_utils",
     "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
-    "//rtp_llm/cpp/dataclass:dataclass",
     "//rtp_llm/cpp/models:logits_processor",
     "//rtp_llm/cpp/config:gpt_init_params",
     "@com_google_googletest//:gtest",
