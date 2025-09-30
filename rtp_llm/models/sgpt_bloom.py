@@ -71,6 +71,7 @@ class SGPTBloom(Bloom):
         hidden_states = self.post_decoder_layernorm(hidden_states)  # type: ignore
         yield GenerateOutput(
             hidden_states,
+            None,
             input_token_ids,
             torch.ones_like(input_lengths).bool(),
             [{}] * input_lengths.shape[0],

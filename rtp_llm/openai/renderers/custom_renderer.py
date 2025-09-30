@@ -522,6 +522,11 @@ class CustomChatRenderer:
 
         if generate_config.return_hidden_states and output.hidden_states is not None:
             result().hidden_states = output.hidden_states.tolist()
+        if (
+            generate_config.return_all_hidden_states
+            and output.all_hidden_states is not None
+        ):
+            result().all_hidden_states = output.all_hidden_states.tolist()
         if generate_config.calculate_loss != 0 and output.loss is not None:
             result().loss = output.loss.tolist()
         if generate_config.return_logits and output.logits is not None:

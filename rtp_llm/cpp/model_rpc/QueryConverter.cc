@@ -24,6 +24,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->return_logits            = config_proto->return_logits();
     generate_config->return_incremental       = config_proto->return_incremental();
     generate_config->return_hidden_states     = config_proto->return_hidden_states();
+    generate_config->return_all_hidden_states = config_proto->return_all_hidden_states();
     generate_config->hidden_states_cut_dim    = config_proto->hidden_states_cut_dim();
     generate_config->normalized_hidden_states = config_proto->normalized_hidden_states();
     generate_config->calculate_loss           = config_proto->calculate_loss();
@@ -285,6 +286,9 @@ void QueryConverter::transResponse(GenerateOutputsPB* outputs, const GenerateOut
         }
         if (response.logits.has_value()) {
             transTensorPB(output->mutable_logits(), response.logits.value().get());
+        }
+        if (response.all_hidden_states.has_value()) {
+            transTensorPB(output->mutable_all_hidden_states(), response.all_hidden_states.value().get());
         }
     }
     RTP_LLM_LOG_DEBUG("transResponse done");

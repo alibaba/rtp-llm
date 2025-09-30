@@ -85,6 +85,7 @@ class AuxInfo(PyBaseModel):
 
 class GenerateOutput(PyBaseModel):
     hidden_states: Optional[torch.Tensor] = None
+    all_hidden_states: Optional[torch.Tensor] = None
     output_ids: Optional[torch.Tensor] = None
     input_ids: Optional[torch.Tensor] = None
     finished: bool = False
