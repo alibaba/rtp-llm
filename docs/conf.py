@@ -4,17 +4,10 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.abspath("../.."))
 
-version_file = "../release_version"
+version_file = "../rtp_llm/release_version.py"
 with open(version_file, "r") as f:
-    version_content = f.read().strip()
-    # Handle both simple version format and Python format
-    if version_content.startswith('__version__ = "'):
-        # Python format
-        exec(compile(version_content, version_file, "exec"))
-        __version__ = locals()["__version__"]
-    else:
-        # Simple version format
-        __version__ = version_content
+    exec(compile(f.read(), version_file, "exec"))
+__version__ = locals()["RELEASE_VERSION"]
 
 project = "RTP-LLM"
 copyright = f"2023-{datetime.now().year}, RTP-LLM"
@@ -39,8 +32,8 @@ extensions = [
 ]
 
 # 国际化配置
-locale_dirs = ['locales/']   # 翻译文件存放目录
-gettext_compact = False      # 为每个文档生成单独的 .pot 文件
+locale_dirs = ["locales/"]  # 翻译文件存放目录
+gettext_compact = False  # 为每个文档生成单独的 .pot 文件
 
 nbsphinx_allow_errors = True
 nbsphinx_execute = "never"
@@ -139,18 +132,15 @@ html_context = {
 }
 
 html_static_path = ["_static"]
-html_css_files = [
-    "css/custom_log.css",
-    "css/language-switcher.css"
-]
-html_js_files = [
-    "js/language-switcher.js"
-]
+html_css_files = ["css/custom_log.css", "css/language-switcher.css"]
+html_js_files = ["js/language-switcher.js"]
+
 
 def setup(app):
     app.add_css_file("css/custom_log.css")
     app.add_css_file("css/language-switcher.css")
     app.add_js_file("js/language-switcher.js")
+
 
 myst_enable_extensions = [
     "dollarmath",
