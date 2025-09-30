@@ -92,6 +92,7 @@ message GenerateConfigPB {
     bool enable_3fs = 48;
     repeated int32 variable_num_beams = 49;
     google.protobuf.StringValue trace_id = 50;
+    bool return_all_hidden_states = 51;
 }
 
 message MMPreprocessConfigPB {
@@ -167,6 +168,7 @@ message GenerateOutputPB {
     TensorPB loss = 5;
     TensorPB logits = 6;
     TensorPB all_probs = 7;
+    TensorPB all_hidden_states = 8;
 }
 
 message GenerateOutputsPB {
