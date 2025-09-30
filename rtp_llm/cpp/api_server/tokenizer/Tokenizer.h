@@ -22,6 +22,7 @@ public:
     virtual std::string        decode(const std::vector<int>& ids);
     virtual std::vector<int>   encode(const std::string& tokens);
 
+    virtual std::vector<int> convertSelectTokens(const std::vector<std::string>& select_tokens_str, int vocab_size);
 private:
     py::object tokenizer_;
 };

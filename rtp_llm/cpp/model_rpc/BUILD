@@ -39,7 +39,6 @@ cc_library(
         ":model_rpc_pool",
         "//rtp_llm/cpp/devices:devices_base",
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
-        "//rtp_llm/cpp/dataclass:dataclass",
         "//rtp_llm/cpp/engine_base/stream:generate_types",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/normal_engine:normal_engine",
