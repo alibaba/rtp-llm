@@ -19,6 +19,7 @@ test_deps = [
     "//rtp_llm/cpp/devices/testing:device_test_utils",
     "//rtp_llm/cpp/models:models",
     "//rtp_llm/cpp/config:gpt_init_params",
+    "//rtp_llm/cpp/engine_base:weights_converter",
     ":test_headers",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",

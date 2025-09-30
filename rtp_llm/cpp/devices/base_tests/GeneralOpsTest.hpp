@@ -1,6 +1,8 @@
 #pragma once
 
 #include <torch/torch.h>
+#include <cuda_fp16.h>
+#include <cuda_bf16.h>
 #include "rtp_llm/cpp/devices/testing/TestBase.h"
 
 using namespace std;

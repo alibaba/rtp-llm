@@ -7,7 +7,7 @@
 #include <algorithm>
 #include <random>
 #include <chrono>
-#include "rtp_llm/cpp/dataclass/EngineScheduleInfo.h"
+#include "rtp_llm/cpp/engine_base/schedulers/EngineScheduleInfo.h"
 
 namespace rtp_llm {
 
@@ -21,7 +21,5 @@ struct WorkerStatusInfo {
     int32_t            dp_rank;
     std::string        precision;
 };
-
-void registerWorkerStatusInfo(const pybind11::module& m);
 
 }  // namespace rtp_llm

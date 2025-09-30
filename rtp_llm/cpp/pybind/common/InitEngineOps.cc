@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/pybind/common/InitEngineOps.h"
 #include <cstdio>
 #include <string>
+#include "absl/debugging/symbolize.h"
 
 namespace torch_ext {
 

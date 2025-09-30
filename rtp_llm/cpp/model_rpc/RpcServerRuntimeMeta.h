@@ -1,6 +1,6 @@
 #pragma once
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
-#include "rtp_llm/cpp/dataclass/EngineScheduleInfo.h"
+#include "rtp_llm/cpp/engine_base/schedulers/EngineScheduleInfo.h"
 
 namespace rtp_llm {
 class RpcServerRuntimeMeta {

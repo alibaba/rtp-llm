@@ -10,6 +10,7 @@
 
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
+#include "rtp_llm/cpp/engine_base/WeightsConverter.h"
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/devices/testing/TestBase.h"
