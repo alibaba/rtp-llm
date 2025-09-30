@@ -1,5 +1,4 @@
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
-#include "rtp_llm/cpp/utils/SignalUtils.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "autil/EnvUtil.h"
 #include <stdexcept>

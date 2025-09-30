@@ -92,7 +92,6 @@ cc_library(
         "//rtp_llm/cpp/core:torch_event",
         "//rtp_llm/cpp/kernels:kernels_cu",
         "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/utils:signal_utils",
         "//rtp_llm/cpp/cuda/deep_gemm:deep_gemm_plugins_impl",
         "//rtp_llm/cpp/pybind:th_utils",
         "//rtp_llm/cpp/cuda:trt_plugins",

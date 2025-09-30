@@ -1,5 +1,5 @@
 #pragma once
-#include "rtp_llm/cpp/dataclass/GenerateConfig.h"
+#include "rtp_llm/cpp/engine_base/stream/GenerateConfig.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalTypes.h"
 #include "rtp_llm/cpp/core/Buffer.h"

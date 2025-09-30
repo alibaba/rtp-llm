@@ -13,6 +13,7 @@ cc_library(
     srcs = [],
     deps = [
         "@com_google_googletest//:gtest",
+        "@local_config_cuda//cuda:cuda_headers",
     ],
     visibility = ["//visibility:public"],
     copts = copts(),

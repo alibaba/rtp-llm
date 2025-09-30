@@ -72,8 +72,6 @@ cc_library(
         ":dfa_utils",
         "//rtp_llm/cpp/engine_base/stream:generate_types",
         "//rtp_llm/cpp/multimodal_processor:multimodal_types",
-        "//rtp_llm/cpp/cache",
-        "//rtp_llm/cpp/dataclass:dataclass",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:error_code",
         "//rtp_llm/cpp/pybind:py_utils",
@@ -113,12 +111,12 @@ cc_library(
     deps = torch_deps() + [
         ":sample_infos",
         ":logits_processor",
-        "//rtp_llm/cpp/dataclass:dataclass",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:error_code",
         ":dfa_utils",
         "@havenask//aios/autil:scope",
         "//rtp_llm/cpp/devices:devices_base",
+        "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/models_py/bindings:op_defs"
     ] + select({
         "@//:using_cuda": [
