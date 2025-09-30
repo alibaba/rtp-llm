@@ -706,6 +706,9 @@ class ServerArgsSetTest(TestCase):
             # 32 jit
             "--remote_jit_dir",
             "/home/admin/jit_dir",
+            # 33 deployment config
+            "--aux_string",
+            '{"DEPLOYMENT_NAME":"DEFAULT_DEPLOYMENT_NAME", "GPU_MODEL_DETAIL":"H20"}',
         ]
 
         # 重新加载 server_args 并执行 setup_args
@@ -972,6 +975,12 @@ class ServerArgsSetTest(TestCase):
 
         # 32. jit
         self.assertEqual(env["REMOTE_JIT_DIR"], "/home/admin/jit_dir")
+
+        # 33. aux_string
+        self.assertEqual(
+            env["AUX_STRING"],
+            '{"DEPLOYMENT_NAME":"DEFAULT_DEPLOYMENT_NAME", "GPU_MODEL_DETAIL":"H20"}',
+        )
 
 
 if __name__ == "__main__":

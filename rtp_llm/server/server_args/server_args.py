@@ -5,6 +5,7 @@ import os
 from typing import Any, Dict, Optional, Sequence, TypeVar
 
 from rtp_llm.config.py_config_modules import StaticConfig
+from rtp_llm.server.server_args.aux_string_args import init_aux_string_group_args
 from rtp_llm.server.server_args.batch_decode_scheduler_group_args import (
     init_batch_decode_scheduler_group_args,
 )
@@ -250,6 +251,7 @@ def init_all_group_args(parser: EnvArgumentParser) -> None:
     init_worker_group_args(parser)
     init_jit_group_args(parser)
     init_pd_separation_group_args(parser)
+    init_aux_string_group_args(parser)
 
 
 def setup_args():

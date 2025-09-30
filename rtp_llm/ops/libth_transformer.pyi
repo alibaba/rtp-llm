@@ -11,6 +11,7 @@ __all__ = [
     "CacheStoreConfig",
     "Cm2ServiceClient",
     "ConcurrencyConfig",
+    "AuxString",
     "DeviceExporter",
     "DeviceResourceConfig",
     "DeviceType",
@@ -277,6 +278,12 @@ class FIFOSchedulerConfig:
     def to_string(self) -> str: ...
     def update_from_env(self) -> None: ...
 
+class AuxString:
+    infra_spec: str
+    def __init__(self, infra_spec: str = "") -> None: ...
+    def to_string(self) -> str: ...
+    def update_from_env(self) -> None: ...
+
 class FMHAConfig:
     disable_flash_infer: bool
     enable_fmha: bool
@@ -435,6 +442,7 @@ class GptInitParameter:
     ffn_tp_rank: int
     ffn_tp_size: int
     fifo_scheduler_config: FIFOSchedulerConfig
+    aux_string: AuxString
     fmha_config: FMHAConfig
     gen_num_per_circle: int
     has_lm_head: bool

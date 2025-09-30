@@ -15,7 +15,8 @@ class QueryConverter {
 public:
     static std::shared_ptr<GenerateInput> transQuery(const GenerateInputPB* input);
 
-    static void transResponse(GenerateOutputsPB* outputs, const GenerateOutputs* response);
+    static void
+    transResponse(GenerateOutputsPB* outputs, const GenerateOutputs* response, const std::string& aux_string);
 
     static std::vector<MultimodalInput> transMMInput(const MultimodalInputsPB* mm_inputs);
 

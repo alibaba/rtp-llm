@@ -107,6 +107,7 @@ cdll.LoadLibrary(sysconfig.get_config_var("LIBDIR") + "/libpython3.10.so")
 try:
     from libth_transformer_config import (
         ArpcConfig,
+        AuxString,
         BatchDecodeSchedulerConfig,
         CacheStoreConfig,
         ConcurrencyConfig,

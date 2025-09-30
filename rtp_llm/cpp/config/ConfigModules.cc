@@ -61,6 +61,16 @@ std::string ConcurrencyConfig::to_string() const {
     return oss.str();
 }
 
+// AuxString
+void AuxString::update_from_env_for_test() {
+    infra_spec = autil::EnvUtil::getEnv("AUX_STRING", "");
+}
+std::string AuxString::to_string() const {
+    std::ostringstream oss;
+    oss << "infra_spec: " << infra_spec << "\n";
+    return oss.str();
+}
+
 // FMHAConfig
 void FMHAConfig::update_from_env_for_test() {
     enable_fmha                   = bool_from_env_for_test("ENABLE_FMHA", true);

@@ -24,6 +24,12 @@ struct ConcurrencyConfig {
     void        update_from_env_for_test();
 };
 
+struct AuxString {
+    std::string infra_spec = "";
+    void        update_from_env_for_test();
+    std::string to_string() const;
+};
+
 struct FMHAConfig {
     bool        enable_fmha                   = true;
     bool        enable_trt_fmha               = true;
