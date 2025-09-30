@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/dataclass/EngineInitParameter.h"
+#include "rtp_llm/cpp/engine_base/WeightsConverter.h"
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/core/BufferHelper.h"
@@ -318,71 +318,5 @@ std::unique_ptr<ConstBufferPtrMaps> WeightsConverter::convertLayerWeights_(py::o
 std::unique_ptr<ConstBufferPtrMap> WeightsConverter::convertGlobalWeight_(py::object py_global_weight) {
     return convertGlobalWeight(std::move(convertGlobalWeight(py_global_weight)));
 }
-
-std::tuple<rtp_llm::GptInitParameter, std::unique_ptr<rtp_llm::Weights>> prepareEngineInitParams(py::object model,
-                                                                                                 bool       sp_model) {
-    if (sp_model) {
-        model = model.attr("model");
-    }
-    const rtp_llm::GptInitParameter& gpt_init_params =
-        model.attr("config").attr("gpt_init_params").cast<rtp_llm::GptInitParameter>();
-    py::object py_layers_weights = model.attr("weight").attr("weights");
-    py::object py_global_weights = model.attr("weight").attr("global_weights");
-
-    auto convert    = rtp_llm::WeightsConverter(false, gpt_init_params.quant_algo_);
-    auto gpt_weight = convert.createGptWeights(py_layers_weights, py_global_weights);
-
-    return {gpt_init_params, std::move(gpt_weight)};
-}
-
-std::unique_ptr<ProposeModelEngineInitParams> prepareMTPEngineInitParams(size_t model_id, py::object model) {
-    auto        sp_model           = model.attr("model");
-    std::string sp_type            = model.attr("sp_type").cast<std::string>();
-    size_t      gen_num_per_circle = model.attr("gen_num_per_circle").cast<size_t>();
-    RTP_LLM_CHECK(sp_type == "mtp" || sp_type == "eagle3" || sp_type == "eagle");
-
-    std::unique_ptr<std::vector<std::unique_ptr<EngineInitParams>>> mtp_params =
-        std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
-    const rtp_llm::GptInitParameter& gpt_init_params =
-        sp_model.attr("config").attr("gpt_init_params").cast<rtp_llm::GptInitParameter>();
-    py::object py_layers_weights     = sp_model.attr("weight").attr("weights");
-    py::object py_global_weights     = sp_model.attr("weight").attr("global_weights");
-    auto       convert               = rtp_llm::WeightsConverter(false, gpt_init_params.quant_algo_);
-    auto       py_layers_weights_vec = convertPyObjectToVec(py_layers_weights);
-    size_t     model_num             = py_layers_weights_vec.size();
-    if (gpt_init_params.gen_num_per_circle_ > 1 && py_layers_weights_vec.size() == 1) {
-        RTP_LLM_LOG_WARNING("duplicate py_layers_weights_vec from 1 to gpt_init_params.gen_num_per_circle_: %d",
-                            gpt_init_params.gen_num_per_circle_);
-        for (size_t i = 1; i < gpt_init_params.gen_num_per_circle_; i++) {
-            py_layers_weights_vec.push_back(py_layers_weights_vec[0]);
-        }
-        model_num = gpt_init_params.gen_num_per_circle_;
-    }
-    if (gpt_init_params.gen_num_per_circle_ != py_layers_weights_vec.size()) {
-        RTP_LLM_LOG_WARNING("gpt_init_params.gen_num_per_circle_: %d  != py_layers_weights_vec.size(): %d",
-                            gpt_init_params.gen_num_per_circle_,
-                            py_layers_weights_vec.size());
-        model_num = std::min(model_num, size_t(gpt_init_params.gen_num_per_circle_));
-    }
-    if (sp_type == "eagle" || sp_type == "eagle3") {
-        model_num = 1;
-    }
-
-    auto no_cast_gpt_init_params        = const_cast<rtp_llm::GptInitParameter&>(gpt_init_params);
-    no_cast_gpt_init_params.num_layers_ = 1;
-
-    for (int i = 0; i < model_num; i++) {
-        auto     layer_weigths = py_layers_weights_vec[i];
-        py::list tmp;
-        tmp.append(layer_weigths);
-        auto gpt_weight = convert.createGptWeights(tmp, py_global_weights);
-        mtp_params->push_back(
-            std::move(std::make_unique<EngineInitParams>(model_id, gpt_init_params, std::move(*gpt_weight))));
-        model_id++;
-    }
-
-    return std::move(
-        std::make_unique<rtp_llm::ProposeModelEngineInitParams>(sp_type, gen_num_per_circle, std::move(mtp_params)));
-};
 
 }  // namespace rtp_llm

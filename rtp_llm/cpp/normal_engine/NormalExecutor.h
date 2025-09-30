@@ -3,7 +3,8 @@
 #include <memory>
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/engine_base/Executor.h"
-#include "rtp_llm/cpp/dataclass/EngineInitParameter.h"
+#include "rtp_llm/cpp/engine_base/EngineInitParams.h"
+#include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"

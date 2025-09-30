@@ -14,7 +14,7 @@
 
 namespace th = torch;
 
-namespace torch_ext {
+namespace rtp_llm {
 
 class EmbeddingOpOutput: public th::jit::CustomClassHolder {
 public:
@@ -31,26 +31,26 @@ public:
                       th::Tensor                            token_type_ids,
                       th::Tensor                            input_lengths,
                       int64_t                               request_id,
-                      std::vector<rtp_llm::MultimodalInput> multimodal_inputs = {});
+                      std::vector<MultimodalInput> multimodal_inputs = {});
 
 private:
-    void startRpcServer(const rtp_llm::GptInitParameter&              gpt_init_params,
+    void startRpcServer(const GptInitParameter&              gpt_init_params,
                         py::object                                    py_render,
                         py::object                                    py_tokenizer,
                         kmonitor::MetricsReporterPtr                  reporter,
-                        std::shared_ptr<rtp_llm::MultimodalProcessor> mm_processor);
+                        std::shared_ptr<MultimodalProcessor> mm_processor);
 
-    void startHttpServer(std::shared_ptr<rtp_llm::EmbeddingEngine>     embedding_engine,
-                         std::shared_ptr<rtp_llm::MultimodalProcessor> mm_processor,
-                         const rtp_llm::EngineInitParams&              params,
+    void startHttpServer(std::shared_ptr<EmbeddingEngine>     embedding_engine,
+                         std::shared_ptr<MultimodalProcessor> mm_processor,
+                         const EngineInitParams&              params,
                          py::object                                    py_render);
 
 private:
     // need to be shared to pass into rpc service
-    std::shared_ptr<rtp_llm::EmbeddingEngine>     embedding_engine_;
-    std::shared_ptr<rtp_llm::MultimodalProcessor> mm_processor_ = nullptr;
-    std::unique_ptr<rtp_llm::ArpcServerWrapper>   embedding_rpc_service_;
-    std::shared_ptr<rtp_llm::HttpApiServer>       http_server_;
+    std::shared_ptr<EmbeddingEngine>     embedding_engine_;
+    std::shared_ptr<MultimodalProcessor> mm_processor_ = nullptr;
+    std::unique_ptr<ArpcServerWrapper>   embedding_rpc_service_;
+    std::shared_ptr<HttpApiServer>       http_server_;
 
     std::atomic<bool>            is_server_shutdown_{false};
     kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;

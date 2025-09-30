@@ -14,7 +14,7 @@
 #include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "kmonitor/client/MetricsReporter.h"
-#include "rtp_llm/cpp/dataclass/KvCacheInfo.h"
+#include "rtp_llm/cpp/cache/KvCacheInfo.h"
 
 namespace rtp_llm {
 

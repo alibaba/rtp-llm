@@ -8,7 +8,7 @@
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
-#include "rtp_llm/cpp/dataclass/EngineScheduleInfo.h"
+#include "rtp_llm/cpp/engine_base/schedulers/EngineScheduleInfo.h"
 
 namespace rtp_llm {
 

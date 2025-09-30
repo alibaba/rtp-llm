@@ -26,8 +26,8 @@ cc_library(
     ],
     deps = torch_deps() + [
         "//rtp_llm/cpp/engine_base:engine_base",
-        "//rtp_llm/cpp/cache",
-        "//rtp_llm/cpp/dataclass:dataclass",
+        "//rtp_llm/cpp/engine_base/stream:generate_config",
+        "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/config:gpt_init_params",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:error_code",

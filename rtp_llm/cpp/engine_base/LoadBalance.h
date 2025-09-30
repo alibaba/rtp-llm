@@ -7,9 +7,9 @@
 #include <algorithm>
 #include <random>
 #include <chrono>
-#include "autil/EnvUtil.h"
-#include "rtp_llm/cpp/pybind/PyUtils.h"
-#include "rtp_llm/cpp/dataclass/KvCacheInfo.h"
+#include <memory>
+#include <atomic>
+#include <string>
 
 namespace rtp_llm {
 

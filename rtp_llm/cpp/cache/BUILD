@@ -11,6 +11,7 @@ cc_library(
         "CacheConfig.h",
         "CacheManager.h",
         "KVCacheResource.h",
+        "KvCacheInfo.h",
         "DistStorage.h",
         "DistStorageLocalMem.h",
         "DistStorageManager.h",
@@ -19,6 +20,7 @@ cc_library(
         "DistKvCacheMetrics.h",
         "KVCacheAllocator.h",
         "BlockLRUCache.h",
+        "WarmUpResult.h",
     ],
     srcs = [
         "BatchKVCacheResource.cc",
@@ -35,7 +37,6 @@ cc_library(
     ],
     deps = torch_deps() + [
         "//rtp_llm/cpp/metrics:metrics",
-        "//rtp_llm/cpp/dataclass:dataclass",
         "//rtp_llm/cpp/model_rpc:model_rpc_pool",
         "//rtp_llm/cpp/config:gpt_init_params",
         "//rtp_llm/cpp/utils:core_utils",

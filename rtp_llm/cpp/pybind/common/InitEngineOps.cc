@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/pybind/common/InitEngineOps.h"
 #include <cstdio>
 #include <string>
+#include "absl/debugging/symbolize.h"
 
 namespace torch_ext {
 
@@ -13,6 +14,8 @@ void initEngine(std::string py_ft_alog_file_path) {
     if (!init_log_success) {
         std::runtime_error("init logger failed");
     }
+
+    absl::InitializeSymbolizer(nullptr);
 
     RTP_LLM_LOG_INFO("install sighandler begin");
     if (!rtp_llm::installSighandler()) {

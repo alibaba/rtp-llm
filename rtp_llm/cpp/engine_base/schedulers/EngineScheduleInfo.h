@@ -2,7 +2,6 @@
 
 #include <vector>
 #include <string>
-#include "rtp_llm/cpp/pybind/PyUtils.h"
 
 namespace rtp_llm {
 
@@ -21,7 +20,5 @@ struct EngineScheduleInfo {
     std::vector<TaskInfo> finished_task_info_list;
     int64_t               last_schedule_delta;
 };
-
-void registerEngineScheduleInfo(const pybind11::module& m);
 
 }  // namespace rtp_llm

@@ -87,7 +87,9 @@ std::shared_ptr<GenerateConfig> OpenaiEndpoint::extract_generation_config(const 
         config.return_all_probs = req.logprobs.value();
     }
     config.addSpecialTokens(model_config_.special_tokens_);
-    config.convertSelectTokens(model_config_.vocab_size_, tokenizer_);
+
+    auto select_tokens_id = tokenizer_->convertSelectTokens(config.select_tokens_str, model_config_.vocab_size_);
+    config.select_tokens_id.insert(config.select_tokens_id.begin(), select_tokens_id.begin(), select_tokens_id.end());
     if (config.sp_advice_prompt.empty() == false) {
         config.sp_advice_prompt_token_ids = tokenizer_->encode(config.sp_advice_prompt);
     }

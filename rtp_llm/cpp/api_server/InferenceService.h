@@ -4,7 +4,8 @@
 
 #include "rtp_llm/cpp/multimodal_processor/MultimodalProcessor.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
-#include "rtp_llm/cpp/dataclass/EngineInitParameter.h"
+#include "rtp_llm/cpp/engine_base/EngineInitParams.h"
+#include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 
 #include "rtp_llm/cpp/api_server/http_server/http_server/HttpResponseWriter.h"
 #include "rtp_llm/cpp/api_server/http_server/http_server/HttpRequest.h"

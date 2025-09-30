@@ -56,7 +56,6 @@ cc_test(
         "//rtp_llm/cpp/model_rpc:model_rpc_server",
         "//rtp_llm/cpp/config:gpt_init_params",
         "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/dataclass:dataclass",
         "//rtp_llm/cpp/devices:devices_base",
         "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
         "//rtp_llm/cpp/devices/testing:device_test_utils",

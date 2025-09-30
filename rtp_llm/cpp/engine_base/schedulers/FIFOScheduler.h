@@ -9,7 +9,7 @@
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/config/GptInitParameter.h"
-#include "rtp_llm/cpp/dataclass/EngineScheduleInfo.h"
+#include "rtp_llm/cpp/engine_base/schedulers/EngineScheduleInfo.h"
 namespace rtp_llm {
 
 class FIFOScheduler: public SchedulerBase {

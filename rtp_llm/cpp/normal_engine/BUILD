@@ -10,10 +10,11 @@ cc_library(
         "*.cc",
     ]),
     deps = torch_deps() + [
-        "//rtp_llm/cpp/dataclass:dataclass",
+        "//rtp_llm/cpp/engine_base:engine_base",
+        "//rtp_llm/cpp/engine_base/stream:generate_config",
+        "//rtp_llm/cpp/engine_base:data_structures",
         "//rtp_llm/cpp/metrics:metrics",
         "//rtp_llm/cpp/models:models",
-        "//rtp_llm/cpp/engine_base:engine_base",
         "//rtp_llm/cpp/engine_base/schedulers:schedulers",
         "//rtp_llm/cpp/engine_base/stream:stream",
         "//rtp_llm/cpp/engine_base/system_prompt:system_prompt",

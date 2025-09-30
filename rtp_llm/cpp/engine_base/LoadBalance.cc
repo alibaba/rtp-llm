@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/dataclass/LoadBalance.h"
+#include "rtp_llm/cpp/engine_base/LoadBalance.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 
