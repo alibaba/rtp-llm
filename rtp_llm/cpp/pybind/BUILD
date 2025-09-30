@@ -69,6 +69,7 @@ cc_library(
         "//rtp_llm/cpp/engine_base:engine_base",
         "//rtp_llm/cpp/engine_base/schedulers:schedulers",
         "//rtp_llm/cpp/cache:cache",
+        "@com_google_absl//absl/debugging:symbolize",
     ] + torch_deps() + select_py_bindings(),
     copts = copts(),
     alwayslink = True,
