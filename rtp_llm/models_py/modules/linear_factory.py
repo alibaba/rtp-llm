@@ -13,6 +13,7 @@ from rtp_llm.models_py.modules.linear import Linear
 
 if utils.is_cuda():
     from rtp_llm.models_py.modules.fp8_linear import Fp8PerTensorLinear
+
     try:
         from rtp_llm.models_py.modules.fp8_linear import Fp8DeepGEMMLinear
 
@@ -79,7 +80,10 @@ class LinearFactory:
                 raise ValueError("FP8 linear layer requires config")
             else:
                 quant_config = config.quant_config
-                if quant_config.get_method() == "FP8_PER_TENSOR_COMPRESSED":
+                if quant_config.get_method() in [
+                    "FP8_PER_TENSOR_COMPRESSED",
+                    "FP8_DYNAMIC_PER_TENSOR",
+                ]:
                     return Fp8PerTensorLinear(
                         config.quant_config, weight, weight_scales, input_scales, bias
                     )

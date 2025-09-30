@@ -201,7 +201,10 @@ class FusedMoeFactory(object):
                 return FusedMoe(router, experts, expert_num=config.expert_num)
         elif config.quant_config.get_method() == "FP8_PER_BLOCK":
             return FusedMoeFactory._create_fp8_per_block_fused_moe(config, weights)
-        elif isinstance(config.quant_config, Fp8PerTensorCompressedQuantConfig):
+        elif config.quant_config.get_method() in [
+            "FP8_PER_TENSOR_COMPRESSED",
+            "FP8_DYNAMIC_PER_TENSOR",
+        ]:
             return FusedMoeFactory._create_fp8_per_tensor_fused_moe(config, weights)
         else:
             raise ValueError(
