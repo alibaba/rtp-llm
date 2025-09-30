@@ -110,7 +110,6 @@ public:
 };
 
 TEST_F(MoeTest, Test1) {
-    installSighandler();
 
     // for (auto ep: {1, 32, 64}) {
     //     for (auto bs: {1, 32, 256, 512, 1024, 2048, 4096}) {

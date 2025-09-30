@@ -15,6 +15,8 @@ void initEngine(std::string py_ft_alog_file_path) {
         std::runtime_error("init logger failed");
     }
 
+    absl::InitializeSymbolizer(nullptr);
+
     RTP_LLM_LOG_INFO("install sighandler begin");
     if (!rtp_llm::installSighandler()) {
         std::cerr << "install sighandler failed" << std::endl;
