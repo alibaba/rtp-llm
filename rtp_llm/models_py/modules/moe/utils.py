@@ -4,7 +4,10 @@ from typing import Optional, Union
 
 import torch
 
-from rtp_llm.models_py.modules.fp8_kernel import scaled_fp8_per_tensor_quant
+from rtp_llm.models_py.modules.fp8_kernel import (
+    scaled_fp8_per_tensor_quant,
+    scaled_fp8_per_token_quant,
+)
 
 # Type alias for quantization dtype
 QuantDtype = Union[None, torch.dtype, str]
@@ -112,8 +115,10 @@ def _fp8_quantize(
     is provided, the output will be blocked.
     """
     if block_shape is None:
-        assert not per_act_token
-        A_q, A_scale = scaled_fp8_per_tensor_quant(A, A_scale)
+        if not per_act_token:
+            A_q, A_scale = scaled_fp8_per_tensor_quant(A, A_scale)
+        else:
+            A_q, A_scale = scaled_fp8_per_token_quant(A, A_scale)
     else:
         raise NotImplementedError("per token group fp8 quant not supported yet")
 

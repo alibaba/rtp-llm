@@ -157,6 +157,43 @@ class Fp8PerTensorQuantConfig(QuantizationConfig):
 DEFAULT_FP8_PER_TENSOR_QUANT_CONFIG = Fp8PerTensorQuantConfig(is_quanted=False)
 
 
+class Fp8DynamicPerTensorQuantConfig(QuantizationConfig):
+    def __init__(
+        self,
+        bits: int = 8,
+        group_size: int = 0,
+        is_quanted: bool = False,
+        **kwargs: Any,
+    ):
+        assert (
+            bits == 8 and group_size == 0
+        ), f"invalid params {bits} != 8 or {group_size} != 0"
+        super().__init__(bits=8, group_size=0, is_quanted=is_quanted)
+
+    @classmethod
+    def get_method(cls) -> str:
+        return "FP8_DYNAMIC_PER_TENSOR"
+
+    @classmethod
+    def get_algo(cls) -> str:
+        return "fp8_dynamic_per_tensor"
+
+    def get_supported_compute_dtypes(self) -> List[torch.dtype]:
+        return [torch.float16, torch.bfloat16]
+
+    def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
+        return [torch.float8_e4m3fn, torch.float16, torch.bfloat16]
+
+    @classmethod
+    def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
+        return Fp8DynamicPerTensorQuantConfig(**config)
+
+
+DEFAULT_FP8_DYNAMIC_PER_TENSOR_QUANT_CONFIG = Fp8DynamicPerTensorQuantConfig(
+    is_quanted=False
+)
+
+
 class Fp8BlockWiseQuantConfig(QuantizationConfig):
     DEFAULT_FP8_QUANT_BLOCK_SIZE = 128
 
@@ -396,6 +433,7 @@ DEFAULT_FP8_PER_CHANNEL_COMPRESSED_QUANT_CONFIG = Fp8PerChannelCompressedQuantCo
 preset_quant_config = {
     "INT8": DEFAULT_WEIGHT_ONLY_INT8_PER_CHANNEL_QUANT_CONFIG,
     "FP8": DEFAULT_FP8_PER_TENSOR_QUANT_CONFIG,
+    "FP8_DYNAMIC_PER_TENSOR": DEFAULT_FP8_DYNAMIC_PER_TENSOR_QUANT_CONFIG,
     "FP8_PER_BLOCK": DEFAULT_FP8_BLOCK_WISE_QUANT_CONFIG,
     "FP8_PER_CHANNEL_COMPRESSED": DEFAULT_FP8_PER_CHANNEL_COMPRESSED_QUANT_CONFIG,
 }

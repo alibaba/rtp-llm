@@ -112,7 +112,7 @@ class FusedMoeFactory(object):
                 max_num_tokens = (
                     config.max_generate_batch_size + config.tp_size - 1
                 ) // config.tp_size
-                router = DeepEpLowLatencyRouter(config, use_fp8_dispatch=False)
+                router = DeepEpLowLatencyRouter(config, use_fp8_dispatch=True)
                 executor = CutlassBatchedExpertsFp8(
                     max_num_tokens=max_num_tokens,
                     num_dispatchers=config.world_size // config.tp_size,
@@ -122,9 +122,10 @@ class FusedMoeFactory(object):
                     w2_scale=weights.get(W.moe_s2, None),
                     a1q_scale=weights.get(W.moe_w1_input_sr, None),
                     a2_scale=weights.get(W.moe_w2_input_sr, None),
+                    per_act_token_quant=True,
                 )
             else:
-                router = DeepepNormalRouter(config, use_fp8=False, expert_alignment=1)
+                router = DeepepNormalRouter(config, use_fp8=True, expert_alignment=1)
                 executor = CutlassExpertsFp8(
                     w1=weights.get(W.moe_w1, None),
                     w2=weights.get(W.moe_w2, None),
@@ -132,6 +133,7 @@ class FusedMoeFactory(object):
                     w2_scale=weights.get(W.moe_s2, None),
                     a1q_scale=weights.get(W.moe_w1_input_sr, None),
                     a2_scale=weights.get(W.moe_w2_input_sr, None),
+                    per_act_token_quant=True,
                 )
 
         else:
@@ -143,6 +145,7 @@ class FusedMoeFactory(object):
                 w2_scale=weights.get(W.moe_s2, None),
                 a1q_scale=weights.get(W.moe_w1_input_sr, None),
                 a2_scale=weights.get(W.moe_w2_input_sr, None),
+                per_act_token_quant=True,
             )
 
         return FusedMoe(router, executor, config.expert_num)
@@ -198,7 +201,10 @@ class FusedMoeFactory(object):
                 return FusedMoe(router, experts, expert_num=config.expert_num)
         elif config.quant_config.get_method() == "FP8_PER_BLOCK":
             return FusedMoeFactory._create_fp8_per_block_fused_moe(config, weights)
-        elif isinstance(config.quant_config, Fp8PerTensorCompressedQuantConfig):
+        elif config.quant_config.get_method() in [
+            "FP8_PER_TENSOR_COMPRESSED",
+            "FP8_DYNAMIC_PER_TENSOR",
+        ]:
             return FusedMoeFactory._create_fp8_per_tensor_fused_moe(config, weights)
         else:
             raise ValueError(
