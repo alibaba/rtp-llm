@@ -241,6 +241,12 @@ filegroup(
 )
 
 py_library(
+    name = "release_version",
+    srcs = ["release_version.py"],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "config",
     srcs = glob([
         "config/*.py",
