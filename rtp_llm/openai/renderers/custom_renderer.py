@@ -62,6 +62,7 @@ class StreamStatus:
     output: Optional[GenerateOutput] = None
     origin_output_ids: torch.Tensor = torch.empty(0, dtype=torch.int32)
     output_ids: torch.Tensor = torch.empty(0, dtype=torch.int32)
+    output_ids_list: List[int] = []
     last_output_ids: List[int] = []
     last_token_length: int = 0
     finish_reason = None
@@ -81,12 +82,13 @@ class StreamStatus:
     ):
         self.index += 1
         self.output = output
-        self.origin_output_ids = torch.cat(
-            (self.origin_output_ids, output.output_ids), dim=1
+        self.output_ids_list = copy.deepcopy(self.output_ids_list) + copy.deepcopy(
+            clean_output_func(output.output_ids)
         )
-        self.output_ids = clean_output_func(self.origin_output_ids)
-        self.finish_reason = check_finish_func(self.output_ids, self.input_token_length)
-        self.output_ids = remove_stop_word_ids_func(self.output_ids)
+        self.finish_reason = check_finish_func(
+            self.output_ids_list, self.input_token_length
+        )
+        self.output_ids = remove_stop_word_ids_func(self.output_ids_list)
 
     def update_result(self):
         self.last_token_length = len(self.output_ids) - len(self.last_output_ids)
