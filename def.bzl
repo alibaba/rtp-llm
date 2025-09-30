@@ -210,7 +210,23 @@ def gen_cpp_code(name, elements_list, template_header, template, template_tail,
 
 
 def _read_release_version_impl(repository_ctx):
-    release_version = repository_ctx.read(repository_ctx.path(Label("//:release_version"))).strip()
+    # Read the release_version.py file
+    release_version_content = repository_ctx.read(repository_ctx.path(Label("//rtp_llm:release_version.py")))
+    # Extract the RELEASE_VERSION value from the Python file
+    # We assume the format is RELEASE_VERSION = "x.x.x"
+    release_version = "0.0.1"  # fallback version
+
+    # Look for the pattern RELEASE_VERSION = "x.x.x"
+    pattern = 'RELEASE_VERSION = "'
+    start_index = release_version_content.find(pattern)
+    if start_index != -1:
+        # Find the start of the version string
+        start_index += len(pattern)
+        # Find the end of the version string
+        end_index = release_version_content.find('"', start_index)
+        if end_index != -1:
+            release_version = release_version_content[start_index:end_index]
+
     repository_ctx.file("BUILD", "")
     repository_ctx.file("defs.bzl", "RELEASE_VERSION = '{}'".format(release_version))
 

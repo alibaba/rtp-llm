@@ -33,7 +33,7 @@ RUN yum update -y && \
 COPY docs/ /app/docs/
 
 # Copy release version file
-COPY release_version /app/
+COPY rtp_llm/release_version.py /app/
 
 # Install documentation requirements
 RUN /opt/conda310/bin/uv pip install -r /app/docs/requirements.txt \
