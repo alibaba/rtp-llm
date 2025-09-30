@@ -1,4 +1,5 @@
 from .attn_weight import AttnAtomicWeight, AttnConfig, MlaAttnAtomicWeight, MlaConfig
+from .dynamic_fp8_quant_weight import LoadQuantDynamicPerTensorFp8Weight
 from .ffn_weight import (
     FfnAtomicWeight,
     FfnConfig,

@@ -106,7 +106,7 @@ void QuantAlgo::setQuantAlgo(const std::string& quant_method, int64_t bits, int6
     } else if (quant_method == "pertensor_quant") {
         quant_method_ = PerTensorQuant;
         weight_bits_  = 8;
-    } else if (quant_method == "fp8") {
+    } else if (quant_method == "fp8" || quant_method == "fp8_dynamic_per_tensor") {
         quant_method_ = FP8Quant;
         weight_bits_  = 8;
         group_size_   = group_size;
