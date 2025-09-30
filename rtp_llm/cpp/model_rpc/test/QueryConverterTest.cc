@@ -94,7 +94,7 @@ TEST_F(QueryConverterTest, testTransOutput) {
     outputs.generate_outputs.push_back(res);
 
     GenerateOutputsPB outputs_pb;
-    QueryConverter::transResponse(&outputs_pb, &outputs);
+    QueryConverter::transResponse(&outputs_pb, &outputs, "");
 
     auto& output_pb   = outputs_pb.generate_outputs(0);
     auto  aux_info_pb = output_pb.aux_info();

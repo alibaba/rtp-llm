@@ -82,6 +82,8 @@ class AuxInfo(PyBaseModel):
 
     role_addrs: List[RoleAddr] = []
 
+    aux_string: str = ""
+
 
 class GenerateOutput(PyBaseModel):
     hidden_states: Optional[torch.Tensor] = None
