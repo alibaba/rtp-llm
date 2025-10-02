@@ -9,4 +9,4 @@ RUN /opt/conda310/bin/pip install /tmp/$WHL_FILE \
     && rm /tmp/$WHL_FILE
 
 ARG START_FILE
-ADD $START_FILE /usr/bin/$START_FILE
+ADD $START_FILE /usr/bin/maga_start.sh

@@ -61,7 +61,7 @@ def subscribe_deps():
 
 def whl_deps():
     return select({
-        "@//:using_cuda12": ["torch==2.1.2+cu121"],
+        "@//:using_cuda12": ["torch==2.6.0+cu126"],
         "@//:using_rocm": ["torch==2.1.2", "pyyaml"],
         "//conditions:default": ["torch==2.1.2"],
     })

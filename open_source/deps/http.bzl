@@ -33,7 +33,7 @@ def http_deps():
         name = "torch_2.1_py310_cpu",
         sha256 = "bf3ca897f8c7c218dd6c4b1cc5eec57b4f4e71106b0b8120e92f5fdaf4acf6cd",
         urls = [
-            "https://download.pytorch.org/whl/cpu/torch-2.6.0%2Bcpu-cp310-cp310-linux_x86_64.whl",
+            "https://mirrors.aliyun.com/pytorch-wheels/cpu/torch-2.6.0%2Bcpu-cp310-cp310-linux_x86_64.whl",
         ],
         type = "zip",
         build_file = clean_dep("//:BUILD.pytorch"),
@@ -43,7 +43,7 @@ def http_deps():
         name = "torch_2.6_py310_cuda",
         sha256 = "c55280b4da58e565d8a25e0e844dc27d0c96aaada7b90b4de70a45397faf604e",
         urls = [
-            "https://download.pytorch.org/whl/cu126/torch-2.6.0%2Bcu126-cp310-cp310-manylinux_2_28_x86_64.whl",
+            "https://mirrors.aliyun.com/pytorch-wheels/cu126/torch-2.6.0%2Bcu126-cp310-cp310-manylinux_2_28_x86_64.whl",
         ],
         type = "zip",
         build_file = clean_dep("//:BUILD.pytorch"),
@@ -105,7 +105,7 @@ def http_deps():
         name = "torch_2.3_py310_cpu_aarch64",
         sha256 = "bef6996c27d8f6e92ea4e13a772d89611da0e103b48790de78131e308cf73076",
         urls = [
-            "https://download.pytorch.org/whl/cpu/torch-2.1.2-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl#sha256=bef6996c27d8f6e92ea4e13a772d89611da0e103b48790de78131e308cf73076"
+            "https://mirrors.aliyun.com/pytorch-wheels/cpu/torch-2.1.2-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl#sha256=bef6996c27d8f6e92ea4e13a772d89611da0e103b48790de78131e308cf73076"
         ],
         type = "zip",
         build_file = clean_dep("//:BUILD.pytorch"),
