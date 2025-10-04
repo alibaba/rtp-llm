@@ -77,6 +77,7 @@ class GenerateConfig(BaseModel):
     # calculate_loss style: 0 for not calculate; 1 for sum; 2 for each token
     calculate_loss: int = 0
     return_logits: bool = False
+    logits_top_k: int = 0
     logits_index: Optional[int] = None
     return_incremental: bool = False
     return_hidden_states: bool = False
@@ -338,6 +339,10 @@ class GenerateConfig(BaseModel):
                 self.calculate_loss in calculate_loss_list,
                 f"calculate_loss {self.top_k} in generate_config can only be in {calculate_loss_list},"
                 " but it's {self.calculate_loss}",
+            )
+            check_with_info(
+                is_positive_integer(self.logits_top_k),
+                f"logits_top_k {self.logits_top_k} is wrong data type",
             )
         except Exception as e:
             raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, str(e))
