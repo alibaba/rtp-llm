@@ -61,10 +61,34 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             } else {
                 logits_result = update_info.logits;
             }
-            if (logits_result->shape()[0] <= 1) {
-                generate_output.logits = device_->clone({*logits_result, rtp_llm::AllocationType::HOST});
-            } else {
-                generate_output.logits = device_->clone({logits_result->view(i, 1), rtp_llm::AllocationType::HOST});
+
+            // Apply logits top-k selection if requested
+            if (generate_input_->generate_config->logits_top_k > 0
+                && generate_input_->generate_config->select_tokens_id.empty()) {
+                auto logits_tensor = rtp_llm::Buffer2torchTensor(*logits_result, false);
+
+                // Apply top-k to all tokens when logits_top_k is specified
+                std::vector<torch::Tensor> truncated_tensors;
+                for (int token_idx = 0; token_idx < logits_tensor.size(0); token_idx++) {
+                    auto token_logits = logits_tensor[token_idx];
+                    // Get top-k values and indices (PyTorch handles cases where k > vocab size)
+                    auto [topk_values, topk_indices] =
+                        token_logits.topk(generate_input_->generate_config->logits_top_k, -1, true, true);
+                    // Stack indices and values together in the last dimension as [indices, values]
+                    auto stacked_tensor = torch::stack({topk_indices, topk_values}, 1);
+                    truncated_tensors.push_back(stacked_tensor);
+                }
+                // Stack the truncated tensors to form the result
+                auto result_tensor = torch::stack(truncated_tensors, 0);
+                logits_result      = rtp_llm::torchTensor2Buffer(result_tensor);
+            }
+
+            if (logits_result != nullptr) {
+                if (logits_result->shape()[0] == 1 || logits_result->shape().size() >= 2) {
+                    generate_output.logits = device_->clone({*logits_result, rtp_llm::AllocationType::HOST});
+                } else {
+                    generate_output.logits = device_->clone({logits_result->view(i, 1), rtp_llm::AllocationType::HOST});
+                }
             }
         }
 

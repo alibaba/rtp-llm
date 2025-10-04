@@ -9,6 +9,8 @@
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/core/BufferHelper.h"
 #include "rtp_llm/cpp/devices/testing/TestBase.h"
+#include "rtp_llm/cpp/cache/CacheManager.h"
+#include "rtp_llm/cpp/devices/DeviceFactory.h"
 
 using namespace std;
 
@@ -274,4 +276,273 @@ TEST_F(NormalBatchStreamProcessorTest, testMultimodalGatherBatch) {
     }
 }
 
+TEST_F(NormalBatchStreamProcessorTest, testLogitsTopK) {
+    // Initialize cache manager to avoid null pointer dereference
+    CacheConfig     cache_config(KVCacheParam{3, 9, 1, 1, 2, DataType::TYPE_INT8});
+    auto            cache_manager = std::make_shared<CacheManager>(cache_config, DeviceFactory::getDefaultDevice());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+    GptInitParameter param;
+    param.max_seq_len_                     = 2048;
+    param.vocab_size_                      = 2048;
+    param.num_layers_                      = 2;
+    std::shared_ptr<GenerateInput> query1  = make_shared<GenerateInput>();
+    query1->input_ids                      = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+    query1->generate_config                = make_shared<GenerateConfig>();
+    query1->generate_config->logits_top_k  = 4;
+    query1->generate_config->return_logits = true;  // Enable logits return
+    GenerateStreamPtr stream1 = make_shared<NormalGenerateStream>(query1, param, resource_context, nullptr);
+    stream1->setNeedReleaseResource(false);  // Disable resource release to avoid double-free in tests
+    BatchKVCacheResource addr1;
+    addr1.batch_block_id = {{1}};
+    stream1->setKVCache(addr1);
+
+    std::shared_ptr<GenerateInput> query3  = make_shared<GenerateInput>();
+    query3->input_ids                      = createBuffer<int32_t>({2}, {0, 1}, AllocationType::HOST);
+    query3->generate_config                = make_shared<GenerateConfig>();
+    query3->generate_config->logits_top_k  = 2;
+    query3->generate_config->return_logits = true;  // Enable logits return
+    GenerateStreamPtr stream3 = make_shared<NormalGenerateStream>(query3, param, resource_context, nullptr);
+    stream3->setNeedReleaseResource(false);  // Disable resource release to avoid double-free in tests
+    BatchKVCacheResource addr3;
+    addr3.batch_block_id = {{9}};
+    stream3->setKVCache(addr3);
+
+    std::shared_ptr<GenerateInput> query4  = make_shared<GenerateInput>();
+    query4->input_ids                      = createBuffer<int32_t>({3}, {0, 1, 0}, AllocationType::HOST);
+    query4->generate_config                = make_shared<GenerateConfig>();
+    query4->generate_config->logits_top_k  = 1;
+    query4->generate_config->return_logits = true;  // Enable logits return
+    GenerateStreamPtr stream4 = make_shared<NormalGenerateStream>(query4, param, resource_context, nullptr);
+    stream4->setNeedReleaseResource(false);  // Disable resource release to avoid double-free in tests
+    BatchKVCacheResource addr4;
+    addr4.batch_block_id = {{11, 12}};
+    stream4->setKVCache(addr4);
+
+    // Set streams to running state
+    stream1->setRunning();
+    stream3->setRunning();
+    stream4->setRunning();
+
+    // Cast to NormalGenerateStream to access private prepareGenerateOutput method
+    NormalGenerateStream* normal_stream1 = static_cast<NormalGenerateStream*>(stream1.get());
+    NormalGenerateStream* normal_stream3 = static_cast<NormalGenerateStream*>(stream3.get());
+    NormalGenerateStream* normal_stream4 = static_cast<NormalGenerateStream*>(stream4.get());
+
+    // Test prepareGenerateOutput directly to avoid hanging in nextOutput()
+    // Create StreamUpdateInfo with mock logits data
+    // For testing purposes, we'll create logits that match our test expectations
+    // Using simpler test data to make it easier to verify
+    {
+        auto logits_buffer =
+            createBuffer<float>({1, 8}, {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f}, AllocationType::DEVICE);
+        StreamUpdateInfo update_info{
+            nullptr, 0, nullptr, logits_buffer, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, false, false};
+
+        // Test stream1 with logits_top_k = 4
+        GenerateOutputs outputs1 = normal_stream1->prepareGenerateOutput(update_info);
+        DeviceFactory::getDefaultDevice()->syncAndCheck();
+        EXPECT_EQ(outputs1.generate_outputs.size(), 1);
+        EXPECT_TRUE(outputs1.generate_outputs[0].logits.has_value());
+
+        auto logits1_tensor = rtp_llm::Buffer2torchTensor(outputs1.generate_outputs[0].logits.value());
+        EXPECT_EQ(logits1_tensor.sizes().size(), 3);
+        EXPECT_EQ(logits1_tensor.sizes()[0], 1);
+        EXPECT_EQ(logits1_tensor.sizes()[1], 4);  // Should preserve original vocab size
+
+        EXPECT_FLOAT_EQ(logits1_tensor[0][0][1].item().toFloat(), 8.0f);  // Top-1 value
+        EXPECT_FLOAT_EQ(logits1_tensor[0][1][1].item().toFloat(), 7.0f);  // Top-2 value
+        EXPECT_FLOAT_EQ(logits1_tensor[0][2][1].item().toFloat(), 6.0f);  // Top-3 value
+        EXPECT_FLOAT_EQ(logits1_tensor[0][3][1].item().toFloat(), 5.0f);  // Top-4 value
+        EXPECT_FLOAT_EQ(logits1_tensor[0][0][0].item().toFloat(), 7.0f);  // Top-1 value
+        EXPECT_FLOAT_EQ(logits1_tensor[0][1][0].item().toFloat(), 6.0f);  // Top-2 value
+        EXPECT_FLOAT_EQ(logits1_tensor[0][2][0].item().toFloat(), 5.0f);  // Top-3 value
+        EXPECT_FLOAT_EQ(logits1_tensor[0][3][0].item().toFloat(), 4.0f);  // Top-4 value
+    }
+
+    {
+        auto logits_buffer = createBuffer<float>(
+            {2, 8},
+            {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f, 10.0f, 11.0f, 12.0f, 13.0f, 14.0f, 15.0f, 16.0f},
+            AllocationType::DEVICE);
+        StreamUpdateInfo update_info{
+            nullptr, 0, nullptr, logits_buffer, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, false, false};
+
+        // Test stream3 with logits_top_k = 2
+        GenerateOutputs outputs3 = normal_stream3->prepareGenerateOutput(update_info);
+        DeviceFactory::getDefaultDevice()->syncAndCheck();
+        EXPECT_EQ(outputs3.generate_outputs.size(), 1);
+        EXPECT_TRUE(outputs3.generate_outputs[0].logits.has_value());
+
+        auto logits3_tensor = rtp_llm::Buffer2torchTensor(*outputs3.generate_outputs[0].logits.value());
+        EXPECT_EQ(logits3_tensor.sizes().size(), 3);
+        EXPECT_EQ(logits3_tensor.sizes()[0], 2);
+        EXPECT_EQ(logits3_tensor.sizes()[1], 2);  // Should preserve original vocab size
+
+        EXPECT_FLOAT_EQ(logits3_tensor[0][0][1].item().toFloat(), 8.0f);   // Top-1 value for batch 0
+        EXPECT_FLOAT_EQ(logits3_tensor[0][1][1].item().toFloat(), 7.0f);   // Top-2 value for batch 0
+        EXPECT_FLOAT_EQ(logits3_tensor[1][0][1].item().toFloat(), 16.0f);  // Top-1 value for batch 1
+        EXPECT_FLOAT_EQ(logits3_tensor[1][1][1].item().toFloat(), 15.0f);  // Top-2 value for batch 1
+        EXPECT_FLOAT_EQ(logits3_tensor[0][0][0].item().toFloat(), 7.0f);   // Top-1 value for batch 0
+        EXPECT_FLOAT_EQ(logits3_tensor[0][1][0].item().toFloat(), 6.0f);   // Top-2 value for batch 0
+        EXPECT_FLOAT_EQ(logits3_tensor[1][0][0].item().toFloat(), 7.0f);   // Top-1 value for batch 1
+        EXPECT_FLOAT_EQ(logits3_tensor[1][1][0].item().toFloat(), 6.0f);   // Top-2 value for batch 1
+    }
+    {
+        auto logits_buffer =
+            createBuffer<float>({3, 8},
+                                {1.0f,  2.0f,  3.0f,  4.0f,  5.0f,  6.0f,  7.0f,  8.0f,  9.0f,  10.0f, 11.0f, 12.0f,
+                                 13.0f, 14.0f, 15.0f, 16.0f, 17.0f, 18.0f, 19.0f, 20.0f, 21.0f, 22.0f, 23.0f, 24.0f},
+                                AllocationType::DEVICE);
+        StreamUpdateInfo update_info{
+            nullptr, 0, nullptr, logits_buffer, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, false, false};
+
+        // Test stream4 with logits_top_k = 1
+        GenerateOutputs outputs4 = normal_stream4->prepareGenerateOutput(update_info);
+        DeviceFactory::getDefaultDevice()->syncAndCheck();
+        EXPECT_EQ(outputs4.generate_outputs.size(), 1);
+        EXPECT_TRUE(outputs4.generate_outputs[0].logits.has_value());
+
+        auto logits4_tensor = rtp_llm::Buffer2torchTensor(outputs4.generate_outputs[0].logits.value());
+        EXPECT_EQ(logits4_tensor.sizes().size(), 3);
+        EXPECT_EQ(logits4_tensor.sizes()[0], 3);  // Should preserve original vocab size
+
+        EXPECT_FLOAT_EQ(logits4_tensor[0][0][1].item().toFloat(), 8.0f);   // Top-1 value for batch 0
+        EXPECT_FLOAT_EQ(logits4_tensor[1][0][1].item().toFloat(), 16.0f);  // Top-1 value for batch 1
+        EXPECT_FLOAT_EQ(logits4_tensor[2][0][1].item().toFloat(), 24.0f);  // Top-1 value for batch 2
+        EXPECT_FLOAT_EQ(logits4_tensor[0][0][0].item().toFloat(), 7.0f);   // Top-1 value for batch 0
+        EXPECT_FLOAT_EQ(logits4_tensor[1][0][0].item().toFloat(), 7.0f);   // Top-1 value for batch 1
+        EXPECT_FLOAT_EQ(logits4_tensor[2][0][0].item().toFloat(), 7.0f);   // Top-1 value for batch 2
+    }
+
+    // Manually release resources to avoid double-free issues during destruction
+    stream1->releaseResource();
+    stream3->releaseResource();
+    stream4->releaseResource();
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testLogitsWithLogitsIndex) {
+    // Initialize cache manager to avoid null pointer dereference
+    CacheConfig     cache_config(KVCacheParam{3, 9, 1, 1, 2, DataType::TYPE_INT8});
+    auto            cache_manager = std::make_shared<CacheManager>(cache_config, DeviceFactory::getDefaultDevice());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+    GptInitParameter param;
+    param.max_seq_len_                        = 2048;
+    param.vocab_size_                         = 2048;
+    param.num_layers_                         = 2;
+    std::shared_ptr<GenerateInput> query1     = make_shared<GenerateInput>();
+    query1->input_ids                         = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
+    query1->generate_config                   = make_shared<GenerateConfig>();
+    query1->generate_config->select_tokens_id = {2, 3};
+    query1->generate_config->return_logits    = true;  // Enable logits return
+    GenerateStreamPtr stream1 = make_shared<NormalGenerateStream>(query1, param, resource_context, nullptr);
+    stream1->setNeedReleaseResource(false);  // Disable resource release to avoid double-free in tests
+    BatchKVCacheResource addr1;
+    addr1.batch_block_id = {{1}};
+    stream1->setKVCache(addr1);
+
+    std::shared_ptr<GenerateInput> query3     = make_shared<GenerateInput>();
+    query3->input_ids                         = createBuffer<int32_t>({2}, {0, 1}, AllocationType::HOST);
+    query3->generate_config                   = make_shared<GenerateConfig>();
+    query3->generate_config->select_tokens_id = std::vector<int>{};
+    query3->generate_config->return_logits    = true;  // Enable logits return
+    GenerateStreamPtr stream3 = make_shared<NormalGenerateStream>(query3, param, resource_context, nullptr);
+    stream3->setNeedReleaseResource(false);  // Disable resource release to avoid double-free in tests
+    BatchKVCacheResource addr3;
+    addr3.batch_block_id = {{9}};
+    stream3->setKVCache(addr3);
+
+    std::shared_ptr<GenerateInput> query4     = make_shared<GenerateInput>();
+    query4->input_ids                         = createBuffer<int32_t>({3}, {0, 1, 0}, AllocationType::HOST);
+    query4->generate_config                   = make_shared<GenerateConfig>();
+    query4->generate_config->select_tokens_id = std::vector<int>{1};
+    query4->generate_config->return_logits    = true;  // Enable logits return
+    GenerateStreamPtr stream4 = make_shared<NormalGenerateStream>(query4, param, resource_context, nullptr);
+    stream4->setNeedReleaseResource(false);  // Disable resource release to avoid double-free in tests
+    BatchKVCacheResource addr4;
+    addr4.batch_block_id = {{11, 12}};
+    stream4->setKVCache(addr4);
+
+    // Set streams to running state
+    stream1->setRunning();
+    stream3->setRunning();
+    stream4->setRunning();
+
+    // Cast to NormalGenerateStream to access private prepareGenerateOutput method
+    NormalGenerateStream* normal_stream1 = static_cast<NormalGenerateStream*>(stream1.get());
+    NormalGenerateStream* normal_stream3 = static_cast<NormalGenerateStream*>(stream3.get());
+    NormalGenerateStream* normal_stream4 = static_cast<NormalGenerateStream*>(stream4.get());
+
+    // Test prepareGenerateOutput directly to avoid hanging in nextOutput()
+    // Create StreamUpdateInfo with mock logits data
+    // For testing purposes, we'll create logits that match our test expectations
+    // Using simpler test data to make it easier to verify
+    {
+        auto logits_buffer =
+            createBuffer<float>({1, 8}, {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f}, AllocationType::DEVICE);
+        StreamUpdateInfo update_info{
+            nullptr, 0, nullptr, logits_buffer, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, false, false};
+
+        // Test stream1 with logits_top_k = 4
+        GenerateOutputs outputs1 = normal_stream1->prepareGenerateOutput(update_info);
+        DeviceFactory::getDefaultDevice()->syncAndCheck();
+        EXPECT_EQ(outputs1.generate_outputs.size(), 1);
+        EXPECT_TRUE(outputs1.generate_outputs[0].logits.has_value());
+
+        auto logits1_tensor = rtp_llm::Buffer2torchTensor(outputs1.generate_outputs[0].logits.value());
+        EXPECT_EQ(logits1_tensor.sizes().size(), 2);
+        EXPECT_EQ(logits1_tensor.sizes()[0], 1);
+        EXPECT_EQ(logits1_tensor.sizes()[1], 2);
+    }
+
+    {
+        auto logits_buffer = createBuffer<float>(
+            {2, 8},
+            {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f, 10.0f, 11.0f, 12.0f, 13.0f, 14.0f, 15.0f, 16.0f},
+            AllocationType::DEVICE);
+        StreamUpdateInfo update_info{
+            nullptr, 0, nullptr, logits_buffer, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, false, false};
+
+        // Test stream3 with logits_top_k = 2
+        GenerateOutputs outputs3 = normal_stream3->prepareGenerateOutput(update_info);
+        DeviceFactory::getDefaultDevice()->syncAndCheck();
+        EXPECT_EQ(outputs3.generate_outputs.size(), 1);
+        EXPECT_TRUE(outputs3.generate_outputs[0].logits.has_value());
+
+        auto logits3_tensor = rtp_llm::Buffer2torchTensor(*outputs3.generate_outputs[0].logits.value());
+        EXPECT_EQ(logits3_tensor.sizes().size(), 2);
+        EXPECT_EQ(logits3_tensor.sizes()[0], 2);
+        EXPECT_EQ(logits3_tensor.sizes()[1], 8);
+    }
+    {
+        auto logits_buffer =
+            createBuffer<float>({3, 8},
+                                {1.0f,  2.0f,  3.0f,  4.0f,  5.0f,  6.0f,  7.0f,  8.0f,  9.0f,  10.0f, 11.0f, 12.0f,
+                                 13.0f, 14.0f, 15.0f, 16.0f, 17.0f, 18.0f, 19.0f, 20.0f, 21.0f, 22.0f, 23.0f, 24.0f},
+                                AllocationType::DEVICE);
+        StreamUpdateInfo update_info{
+            nullptr, 0, nullptr, logits_buffer, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, false, false};
+
+        // Test stream4 with logits_top_k = 1
+        GenerateOutputs outputs4 = normal_stream4->prepareGenerateOutput(update_info);
+        DeviceFactory::getDefaultDevice()->syncAndCheck();
+        EXPECT_EQ(outputs4.generate_outputs.size(), 1);
+        EXPECT_TRUE(outputs4.generate_outputs[0].logits.has_value());
+
+        auto logits4_tensor = rtp_llm::Buffer2torchTensor(outputs4.generate_outputs[0].logits.value());
+        EXPECT_EQ(logits4_tensor.sizes().size(), 2);
+        EXPECT_EQ(logits4_tensor.sizes()[0], 3);  // Should preserve original vocab size
+        EXPECT_EQ(logits4_tensor.sizes()[1], 1);
+
+        EXPECT_FLOAT_EQ(logits4_tensor[0][0].item().toFloat(), 2.0f);
+        EXPECT_FLOAT_EQ(logits4_tensor[1][0].item().toFloat(), 10.0f);
+        EXPECT_FLOAT_EQ(logits4_tensor[2][0].item().toFloat(), 18.0f);
+    }
+
+    // Manually release resources to avoid double-free issues during destruction
+    stream1->releaseResource();
+    stream3->releaseResource();
+    stream4->releaseResource();
+}
 }  // namespace rtp_llm

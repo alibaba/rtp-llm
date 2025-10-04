@@ -27,6 +27,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->hidden_states_cut_dim    = config_proto->hidden_states_cut_dim();
     generate_config->normalized_hidden_states = config_proto->normalized_hidden_states();
     generate_config->calculate_loss           = config_proto->calculate_loss();
+    generate_config->logits_top_k             = config_proto->logits_top_k();
     generate_config->is_streaming             = config_proto->is_streaming();
     generate_config->timeout_ms               = config_proto->timeout_ms();
     generate_config->sp_edit                  = config_proto->sp_edit();
