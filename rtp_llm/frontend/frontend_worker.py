@@ -32,7 +32,11 @@ class PipelineResponse(BaseModel):
     aux_info: Dict[str, Any] = {}
     hidden_states: Optional[Union[List[float], List[List[float]]]] = None
     loss: Optional[Union[float, List[float]]] = None
-    logits: Optional[Union[List[float], List[List[float]]]] = None
+    logits: Optional[
+        Union[
+            List[float], List[List[float]], List[List[float]], List[List[List[float]]]
+        ]
+    ] = None
     output_ids: Optional[List[List[int]]] = None
     input_ids: Optional[List[List[int]]] = None
 

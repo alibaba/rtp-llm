@@ -312,7 +312,10 @@ public:
     }
 
     bool waitForRemoteGenerate();
-
+    bool needReturnAllLogits() {
+        return generate_input_->generate_config->logits_top_k > 0 && generate_input_->generate_config->return_logits;
+    }
+    
     void setNeedRemoteGenerate(bool need_remote_generate) {
         std::lock_guard<std::mutex> lock(*output_mutex_);
         need_remote_generate_ = need_remote_generate;

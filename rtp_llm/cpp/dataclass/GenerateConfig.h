@@ -48,6 +48,7 @@ public:
     std::vector<int>              select_tokens_id;
     std::vector<std::string>      select_tokens_str;
     int                           calculate_loss           = 0;
+    int                           logits_top_k             = 0;
     int                           hidden_states_cut_dim    = 0;
     bool                          return_logits            = false;
     bool                          return_cum_log_probs     = false;
@@ -136,7 +137,8 @@ public:
                      << "max_new_tokens:" << max_new_tokens << ", min_new_tokens:" << min_new_tokens
                      << ", num_beams:" << num_beams << ", variable_num_beams:" << vectorToString(variable_num_beams)
                      << ", num_return_sequences:" << num_return_sequences << ", calculate_loss:" << calculate_loss
-                     << ", return_logits:" << return_logits << ", return_incremental: " << return_incremental
+                     << ", logits_top_k:" << logits_top_k << ", return_logits:" << return_logits
+                     << ", return_incremental: " << return_incremental
                      << ", return_hidden_states:" << return_hidden_states
                      << ", hidden_states_cut_dim:" << hidden_states_cut_dim
                      << ", normalized_hidden_states:" << normalized_hidden_states
@@ -199,6 +201,7 @@ public:
         JSONIZE(select_tokens_id);
         JSONIZE(select_tokens_str);
         JSONIZE(calculate_loss);
+        JSONIZE(logits_top_k);
         JSONIZE(return_logits);
         JSONIZE(return_incremental);
         JSONIZE(return_hidden_states);

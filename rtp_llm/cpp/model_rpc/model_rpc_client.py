@@ -100,6 +100,7 @@ def trans_input(input_py: GenerateInput):
         input_py.generate_config.select_tokens_id
     )
     generate_config_pb.calculate_loss = input_py.generate_config.calculate_loss
+    generate_config_pb.logits_top_k = input_py.generate_config.logits_top_k
     generate_config_pb.return_logits = input_py.generate_config.return_logits
     generate_config_pb.return_incremental = input_py.generate_config.return_incremental
     generate_config_pb.return_hidden_states = (

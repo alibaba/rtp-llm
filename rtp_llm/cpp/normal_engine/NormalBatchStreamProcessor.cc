@@ -95,8 +95,9 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     }
 
     for (const auto& stream : decode_streams) {
-        model_input.need_all_logits = model_input.need_all_logits || stream->calculateLoss();
-        auto current_batch_size     = stream->currentBatchSize();
+        model_input.need_all_logits =
+            model_input.need_all_logits || stream->calculateLoss() || stream->needReturnAllLogits();
+        auto current_batch_size = stream->currentBatchSize();
 
         const auto& kv_cache = stream->kvCache();
         RTP_LLM_LOG_DEBUG("decode kv_cache: %s", kv_cache.debugString().c_str());
@@ -144,8 +145,9 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
 
     for (const auto& stream : context_streams) {
         // context stream也需要batch运行是为了fallback的场景和perf test的场景
-        model_input.need_all_logits = model_input.need_all_logits || stream->calculateLoss();
-        auto current_batch_size     = stream->currentBatchSize();
+        model_input.need_all_logits =
+            model_input.need_all_logits || stream->calculateLoss() || stream->needReturnAllLogits();
+        auto current_batch_size = stream->currentBatchSize();
 
         const auto& kv_cache = stream->kvCache();
         RTP_LLM_LOG_DEBUG("context kv_cache: %s", kv_cache.debugString().c_str());
@@ -496,7 +498,9 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_gro
         }
 
         BufferPtr batch_logits = nullptr;
-        if (stream->returnLogits() || stream->calculateSoftmaxProbs() || has_beam_search) {
+        if (stream->needReturnAllLogits()) {
+            batch_logits = model_output.all_logits->slice(token_offset, token_size - 1);
+        } else if (stream->returnLogits() || stream->calculateSoftmaxProbs() || has_beam_search) {
             batch_logits = model_output.logits->slice(batch_idx_in, cur_batch_size);
         }
 
