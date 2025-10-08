@@ -31,7 +31,6 @@ test_linkopts = [
     "-lrocprofiler64v2",
     "-lrocprofiler-sdk",
     "-lhsa-runtime64",
-    "-lrocprofiler-register",
     "-lrocprofiler64",
     "-lrocprofiler-sdk-roctx",
     "-lhipsparse",
