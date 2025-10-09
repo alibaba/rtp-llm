@@ -706,6 +706,59 @@ class LoadQuantStaticPerTensorFp8Weight(StaticPerTensorFp8Weight):
             )
             res.update(act_scale_inv)
         return res
+    
+    def get_tensor_names(
+        self, layer_id: Optional[int], load_config: LoadConfig
+    ) -> set[str]:
+        names = self.kernel.get_tensor_names(layer_id, load_config)
+        if self.act_scale:
+            names = names.union(self.act_scale.get_tensor_names(layer_id, load_config))
+        if self.act_scale_inv:
+            names = names.union(
+                self.act_scale_inv.get_tensor_names(layer_id, load_config)
+            )
+        return names
+
+    def _process_raw_tensors(
+        self,
+        raw_tensors: Dict[str, torch.Tensor],
+        layer_id: Optional[int],
+        device: str,
+        load_config: LoadConfig,
+    ):
+        kernel_raw_tensors: Dict[str, torch.Tensor] = {
+            key: raw_tensors[key]
+            for key in self.kernel.get_tensor_names(layer_id, load_config)
+        }
+        kernel = self.kernel._process_raw_tensors(
+            kernel_raw_tensors, layer_id, device, load_config
+        )
+        res = {}
+        quant_kernel, scale = quantize_weight_to_fp8(kernel.get(self.kernel.name))
+        quant_kernel = quant_kernel.T
+        res = {
+            self.kernel.name: quant_kernel.contiguous().to(device),
+            self.scale.name: scale.contiguous().to(device),
+        }
+        if self.act_scale:
+            act_scale_raw_tensors: Dict[str, torch.Tensor] = {
+                key: raw_tensors[key]
+                for key in self.act_scale.get_tensor_names(layer_id, load_config)
+            }
+            act_scale = self.act_scale._process_raw_tensors(
+                act_scale_raw_tensors, layer_id, device, load_config
+            )
+            res.update(act_scale)
+        if self.act_scale_inv:
+            act_scale_inv_raw_tensors: Dict[str, torch.Tensor] = {
+                key: raw_tensors[key]
+                for key in self.act_scale_inv.get_tensor_names(layer_id, load_config)
+            }
+            act_scale_inv = self.act_scale_inv._process_raw_tensors(
+                act_scale_inv_raw_tensors, layer_id, device, load_config
+            )
+            res.update(act_scale_inv)
+        return res
 
 
 class Fp8PerTensorCompressedWeight(CompositeWeight, QuantWeight):

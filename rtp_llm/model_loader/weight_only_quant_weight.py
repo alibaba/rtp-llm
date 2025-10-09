@@ -102,3 +102,23 @@ class WeightOnlyPerColWeight(CompositeWeight, QuantWeight):
         else:
             weight, scale = load_config.exported_device.apply_int8(kernel, device)
         return {self.kernel.name: weight, self.scale.name: scale}
+    
+    def get_tensor_names(
+        self, layer_id: Optional[int], load_config: LoadConfig
+    ) -> set[str]:
+        return self.kernel.get_tensor_names(layer_id, load_config)
+
+    def _process_raw_tensors(
+        self,
+        raw_tensors: Dict[str, torch.Tensor],
+        layer_id: Optional[int],
+        device: str,
+        load_config: LoadConfig,
+    ):
+        kernel_raw_tensors: Dict[str, torch.Tensor] = {
+            key: raw_tensors[key]
+            for key in self.kernel.get_tensor_names(layer_id, load_config)
+        }
+        return self.kernel._process_raw_tensors(
+            kernel_raw_tensors, layer_id, device, load_config
+        )

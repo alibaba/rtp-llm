@@ -1,8 +1,9 @@
 import gc
 import logging
 import os
+import time
 from collections import OrderedDict
-from typing import Optional
+from typing import Dict, Optional
 
 import safetensors
 import torch
@@ -66,7 +67,8 @@ class ModelLoader:
         if self._load_config.is_ft_style_weight:
             weights = self._load_from_ft_style(device)
         else:
-            weights = self._load_from_scratch(device)
+            weights = self._load_weight(device)
+            self.force_clean_cuda_memory()
 
         # load dynamic weight
         self._load_dynamic_weights(weights, device)
@@ -203,6 +205,71 @@ class ModelLoader:
         model_weights.global_weights = global_weights
         return model_weights
 
+    def _load_weight(self, device: str):
+        is_safetensor = self._load_config.database.is_safetensor
+        convert_device = self._choose_weight_convert_device(device)
+        if not is_safetensor or convert_device == "cpu":
+            logging.info(
+                f"database is safetensor: {is_safetensor}, device: {device}, choose devie: {convert_device}"
+            )
+            return self._load_from_scratch(device)
+        try:
+            all_tensors = self._load_config.database.fastsafetensors_weights_iterator(
+                device, True
+            )
+        except (ModuleNotFoundError, ImportError) as e:
+            logging.warning(f"Failed to import fastsafetensors: {e}")
+            return self._load_from_scratch(device)
+
+        logging.info(f"load weight by device: {device}")
+        model_weights = self._create_model_weights(device)
+        tensor_to_weight_map = self._get_tensor_to_weight_map()
+        direct_io = self._load_config.exported_device.support_dio_load
+        for key, loaded_tensor in all_tensors:
+            if key not in tensor_to_weight_map:
+                continue
+            layer_id, weight = tensor_to_weight_map[key]
+            start = time.time()
+            res, complete = weight.add_tensor(
+                key, layer_id, loaded_tensor, device, self._load_config
+            )
+            logging.debug(
+                f"weight: {type(weight).__name__} add tensor, complete: {complete}, cost {time.time() - start}"
+            )
+            if complete and res is not None:
+                for name, tensor in res.items():
+                    if layer_id is not None and self._load_config.vit_separation != 1:
+                        model_weights.set_layer_weight(layer_id, name, tensor)
+                    else:
+                        model_weights.set_global_weight(name, tensor)
+        for layer_id, name, tensor in self._load_uncomplete_weight_modules(device):
+            if layer_id is not None and self._load_config.vit_separation != 1:
+                model_weights.set_layer_weight(layer_id, name, tensor)
+            else:
+                model_weights.set_global_weight(name, tensor)
+        return model_weights
+    
+    def _load_uncomplete_weight_modules(self, device: str):
+        if self._load_config.vit_separation != 1 and not self._is_attn_model:
+            for layer_id in range(self._load_config.num_layers):
+                layer_weights = self._model_weights_info.layer_weights[layer_id]
+                for weight in layer_weights:
+                    if weight.loaded:
+                        continue
+                    results = weight.load(
+                        self._load_config.database, layer_id, device, self._load_config
+                    )
+                    for name, tensor in results.items():
+                        yield (layer_id, name, tensor)
+        for weight in self._model_weights_info.weights:
+            if self._maybe_skip_weight(weight) or weight.loaded:
+                continue
+            results = weight.load(
+                self._load_config.database, None, device, self._load_config
+            )
+            for name, tensor in results.items():
+                yield (None, name, tensor)
+
     def prepare_weights(self, device: str):
         if self._load_config.vit_separation != 1 and not self._is_attn_model:
             for id in range(self._load_config.num_layers):
@@ -225,6 +292,34 @@ class ModelLoader:
             )
             for name, tensor in weights.items():
                 yield (None, name, tensor)
+    
+    def _get_tensor_to_weight_map(
+        self,
+    ) -> Dict[str, tuple[Optional[int], WeightModule]]:
+        tensor_to_weight_map: Dict[str, tuple[Optional[int], WeightModule]] = {}
+        if self._load_config.vit_separation != 1 and not self._is_attn_model:
+            for layer_id in range(self._load_config.num_layers):
+                layer_weights = self._model_weights_info.layer_weights[layer_id]
+                if isinstance(layer_weights, WeightModule):
+                    names = layer_weights.get_tensor_names(layer_id, self._load_config)
+                    tensor_to_weight_map.update(
+                        {k: (layer_id, layer_weights) for k in names}
+                    )
+                else:
+                    for weight in layer_weights:
+                        names = weight.get_tensor_names(layer_id, self._load_config)
+                        tensor_to_weight_map.update(
+                            {k: (layer_id, weight) for k in names}
+                        )
+        for weight in self._model_weights_info.weights:
+            if self._maybe_skip_weight(weight):
+                continue
+            names = weight.get_tensor_names(None, self._load_config)
+            tensor_to_weight_map.update({k: (None, weight) for k in names})
+        for weight in self._misc_weights_info:
+            names = weight.get_tensor_names(None, self._load_config)
+            tensor_to_weight_map.update({k: (None, weight) for k in names})
+        return tensor_to_weight_map
 
     def _maybe_skip_weight(self, weight: WeightModule):
         if self._task_type == TaskType.LANGUAGE_MODEL:
@@ -270,6 +365,7 @@ class ModelLoader:
                 weights.set_layer_weight(layer_id, name, tensor)
             else:
                 weights.set_global_weight(name, tensor)
+            gc.collect()
         return weights
 
     def _load_layer_weights(self, layer_id: int, device: str):

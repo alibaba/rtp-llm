@@ -331,6 +331,58 @@ class MoeAtomicWeight(AtomicWeight):
         after_merge_tensor = self.process_fun(before_merge_tensors).to(convert_type)
         logging.debug("load weight :%s, %s ", self.name, after_merge_tensor.shape)
         return {self.name: after_merge_tensor}
+    
+    def get_tensor_names(
+        self, layer_id: Optional[int], load_config: LoadConfig
+    ) -> set[str]:
+        if self.config.weight_stack:
+            return super().get_tensor_names(layer_id, load_config)
+        names = set[str]()
+        for ckpt_weight in self.weights:
+            selected_experts = load_config.get_selected_experts(
+                layer_id, self.config.expert_num
+            )
+            for expert_id in selected_experts:
+                name = ckpt_weight.name.format(
+                    i=str(layer_id), i_1=str(layer_id + 1), expert_id=str(expert_id)
+                )
+                names.add(name)
+        return names
+
+    def _process_raw_tensors(
+        self,
+        raw_tensors: Dict[str, torch.Tensor],
+        layer_id: Optional[int],
+        device: str,
+        load_config: LoadConfig,
+    ):
+        if self.config.weight_stack:
+            return super()._process_raw_tensors(
+                raw_tensors, layer_id, device, load_config
+            )
+        before_merge_tensors: List[torch.Tensor] = []
+        convert_type = (
+            self.data_type if self.data_type is not None else load_config.compute_dtype
+        )
+        for ckpt_weight in self.weights:
+            selected_experts = load_config.get_selected_experts(
+                layer_id, self.config.expert_num
+            )
+            for expert_id in selected_experts:
+                name = ckpt_weight.name.format(
+                    i=str(layer_id), i_1=str(layer_id + 1), expert_id=str(expert_id)
+                )
+                try:
+                    before_merge_tensors.append(
+                        ckpt_weight.merge_fun([raw_tensors[name]])
+                    )
+                except Exception as e:
+                    logging.error(
+                        f"加载 {self.name}: {name} 失败，完整堆栈:\n{traceback.format_exc()}"
+                    )
+                    raise e
+        after_merge_tensor = self.process_fun(before_merge_tensors).to(convert_type)
+        return {self.name: after_merge_tensor}
 
 
 class MoeWeight(CompositeWeight):
