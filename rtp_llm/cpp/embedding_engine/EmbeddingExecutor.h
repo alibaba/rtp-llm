@@ -11,26 +11,9 @@
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/cpp/embedding_engine/ModelRequest.h"
 #include "rtp_llm/cpp/engine_base/Executor.h"
+#include "rtp_llm/cpp/engine_base/ExecutorBase/HandlerArgs.h" 
 
 namespace rtp_llm {
-
-namespace HandlerArgs {
-
-enum class Arg : uint32_t {
-    INPUT_LENGTHS,
-    HIDDEN_STATES,
-    INPUT_IDS,
-    ATTENTION_MASK,
-    MOE_GATING,
-    // reserve as number marker
-    NUM_INPUT_TYPES
-};
-
-constexpr size_t NUM_INPUT_TYPES = static_cast<size_t>(Arg::NUM_INPUT_TYPES);
-
-using Flag = std::bitset<NUM_INPUT_TYPES>;
-
-}  // namespace HandlerArgs
 
 class EmbeddingExecutor {
 public:

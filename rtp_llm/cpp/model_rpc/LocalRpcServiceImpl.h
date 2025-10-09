@@ -16,10 +16,13 @@ public:
     LocalRpcServiceImpl() {}
     virtual ~LocalRpcServiceImpl() {}
     virtual grpc::Status init(const EngineInitParams&                                maga_init_params,
+                              py::object                                             py_handler,
                               py::object                                             mm_process_engine,
                               std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params) {
         local_server_ = std::make_shared<LocalRpcServer>();
-        return local_server_->init(maga_init_params, mm_process_engine, std::move(propose_params));
+
+        RTP_LLM_LOG_INFO("LocalRpcServiceImpl py_handler = %p", py_handler.ptr());
+        return local_server_->init(maga_init_params, py_handler, mm_process_engine, std::move(propose_params));
     }
 
     grpc::Status GenerateStreamCall(grpc::ServerContext*                   context,

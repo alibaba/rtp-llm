@@ -45,6 +45,7 @@ private:
     rtp_llm::EngineInitParams                              initModel(py::object model);
     std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> initProposeModel(py::object propose_model);
     void initRPCServer(const rtp_llm::EngineInitParams                        maga_init_params,
+                       py::object                                             py_handler,
                        py::object                                             mm_process_engine,
                        std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
                        py::object                                             token_processor);

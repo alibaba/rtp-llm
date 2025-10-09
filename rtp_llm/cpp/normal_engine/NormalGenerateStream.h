@@ -1,6 +1,9 @@
 #pragma once
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include <cstdint>
+#include <functional>
+#include <optional>
+#include <torch/torch.h>
 
 namespace rtp_llm {
 
@@ -28,7 +31,7 @@ public:
 
     bool                         hasOutput() override;
     ErrorResult<GenerateOutputs> nextOutput() override;
-    void                         updateOutput(const StreamUpdateInfo& update_info) override;
+    void updateOutput(const StreamUpdateInfo& update_info) override;
 
 private:
     GenerateOutputs prepareGenerateOutput(const StreamUpdateInfo& update_info);
@@ -37,5 +40,6 @@ private:
     int64_t                                   request_id_{0};
     bool                                      finished_{false};
     autil::SynchronizedQueue<GenerateOutputs> generate_outputs_queue_;
+    std::optional<torch::Tensor> final_embedding_;
 };
 }  // namespace rtp_llm

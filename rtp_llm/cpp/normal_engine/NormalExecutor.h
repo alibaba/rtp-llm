@@ -1,14 +1,17 @@
 #pragma once
 
 #include <memory>
+#include <bitset>
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/engine_base/Executor.h"
 #include "rtp_llm/cpp/dataclass/EngineInitParameter.h"
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "rtp_llm/cpp/core/Types.h"
+#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/models/lora/LoraManager.h"
 #include "rtp_llm/cpp/models/eplb/ExpertBalancer.h"
+#include "rtp_llm/cpp/engine_base/ExecutorBase/HandlerArgs.h" 
 
 namespace rtp_llm {
 
@@ -16,9 +19,10 @@ class NormalExecutor: public Executor {
 public:
     explicit NormalExecutor(const EngineInitParams&                   params,
                             const std::shared_ptr<CacheManager>&      cache_manager,
-                            rtp_llm::DeviceBase*                      device,
+                            rtp_llm::DeviceBase*                      device,      
                             const std::shared_ptr<lora::LoraManager>& lora_manager = nullptr,
-                            bool                                      warm_up      = false);
+                            bool                                      warm_up      = false,
+                            py::object                                handler      = py::object());
     ~NormalExecutor() {
         device_->profileStop();
     }
@@ -36,7 +40,6 @@ public:
     }
 
     bool updateEplbConfig(const EplbConfig& config) override;
-
 private:
     std::unique_ptr<GptModel>                                                model_;
     std::unique_ptr<Sampler>                                                 sampler_;
@@ -46,6 +49,8 @@ private:
     std::shared_ptr<ExpertBalancer>                                          expert_balancer_;
     bool                                                                     warm_up_;
     bool                                                                     use_all_gather_;
+    py::object                                                               handler_;
+    HandlerArgs::Flag                                                        handler_args_;
     kmonitor::MetricsReporterPtr                                             metrics_reporter_ = nullptr;
     MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector> tps_reporter_;
     bool                                                                     enable_ffn_disaggregate_ = false;

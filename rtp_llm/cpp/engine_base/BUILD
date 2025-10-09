@@ -6,9 +6,11 @@ cc_library(
     name = "engine_base",
     hdrs = glob([
         "*.h",
+        "ExecutorBase/*.h",  
     ]),
     srcs = glob([
         "*.cc",
+        "ExecutorBase/*.cc",  
     ]),
     deps = torch_deps() + [
         "//rtp_llm/cpp/engine_base/schedulers:schedulers",

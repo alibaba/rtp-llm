@@ -1,5 +1,7 @@
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
+#include <optional>
+#include <string>
 
 namespace rtp_llm {
 
@@ -30,6 +32,8 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
     size_t          output_len = seqLength() - last_output_pos_;
     GenerateOutputs generate_results;
     generate_results.request_id = request_id_;
+
+    const bool has_final_embedding = final_embedding_.has_value();
 
     for (int i = 0; i < nextBatchSize(); i++) {
         GenerateOutput generate_output;
@@ -68,11 +72,13 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             }
         }
 
-        if (generate_input_->generate_config->return_hidden_states && update_info.hidden_states) {
-            if (update_info.hidden_states->shape()[0] == 1) {
+        if (generate_input_->generate_config->return_hidden_states) {
+            if (has_final_embedding && final_embedding_->size(0) > i) {
+                auto row_tensor = final_embedding_->index({i}).unsqueeze(0).contiguous();
+                auto row_buffer = rtp_llm::torchTensor2Buffer(row_tensor);
                 generate_output.hidden_states =
-                    device_->clone({*update_info.hidden_states, rtp_llm::AllocationType::HOST});
-            } else {
+                    device_->clone({*row_buffer, rtp_llm::AllocationType::HOST});
+            } else if (update_info.hidden_states) {
                 generate_output.hidden_states =
                     device_->clone({update_info.hidden_states->view(i, 1), rtp_llm::AllocationType::HOST});
             }
@@ -146,6 +152,9 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
 
         generate_results.generate_outputs.emplace_back(std::move(generate_output));
     }
+    if (has_final_embedding) {
+        final_embedding_.reset();
+    }
     return generate_results;
 }
 
@@ -182,6 +191,15 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     finished_ = needFinish();
     if (finished_) {
         setFinishedWithoutLock();
+        if (update_info.postprocess_cb_) {
+            try {
+                final_embedding_ = update_info.runPostprocessCallback(update_info);
+            } catch (const std::exception& e) {
+                auto error_msg = std::string("post process error: ") + e.what();
+                RTP_LLM_LOG_WARNING("stream [%ld] %s", streamId(), error_msg.c_str());
+                setStopWithoutLock(ErrorCode::EXECUTION_EXCEPTION, error_msg);
+            }
+        }
     }
     if (update_info.cum_log_probs) {
         cum_log_probs_ = device_->clone({*update_info.cum_log_probs, rtp_llm::AllocationType::HOST});
@@ -213,7 +231,11 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     }
 
     RTP_LLM_LOG_DEBUG("stream [%ld] enqueue generate output", streamId());
-    enqueueGenerateOutput(prepareGenerateOutput(update_info));
+    auto generate_outputs = prepareGenerateOutput(update_info);
+    if (stoppedWithoutLock()) {
+        return;
+    }
+    enqueueGenerateOutput(std::move(generate_outputs));
 
     if (stoppedWithoutLock()) {
         return;
@@ -221,4 +243,5 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
 
     last_output_pos_ = seqLength();
 }
-};  // namespace rtp_llm
+
+}  // namespace rtp_llm

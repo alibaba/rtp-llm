@@ -11,6 +11,7 @@ public:
     RemoteRpcServer() {}
     virtual ~RemoteRpcServer() {}
     grpc::Status init(const EngineInitParams&                                maga_init_params,
+                      py::object                                             py_handler,
                       py::object                                             mm_process_engine,
                       std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params);
 

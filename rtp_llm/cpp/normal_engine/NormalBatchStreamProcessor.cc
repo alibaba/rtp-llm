@@ -19,6 +19,18 @@
 using namespace std;
 
 namespace rtp_llm {
+namespace py = pybind11;
+
+void NormalBatchStreamProcessor::setPostprocessHandler(pybind11::object handler, HandlerArgs::Flag handler_args) {
+    if (!handler || handler.is_none()) {
+        postprocess_handler_ = pybind11::object();
+        has_postprocess_handler_ = false;
+    } else {
+        postprocess_handler_      = handler;
+        postprocess_handler_args_ = handler_args;
+        has_postprocess_handler_  = true;
+    }
+}
 
 absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(const StreamGroups& stream_groups) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
@@ -557,16 +569,65 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_gro
         RTP_LLM_LOG_DEBUG(
             "stream [%ld], new_tokens = [%s]", stream->streamId(), new_tokens->debugStringWithData<int32_t>().c_str());
 
-        stream->update({has_beam_search ? batch_new_all_token_ids : new_tokens,
-                        1,
-                        batch_hidden_states,
-                        batch_logits,
-                        current_softmax_result,
-                        batch_cum_log_probs,
-                        all_probs,
-                        loss,
-                        src_batch_indices,
-                        all_hidden_states});
+        StreamUpdateInfo::PostprocessCallback postprocess_callback;
+
+        if (has_postprocess_handler_) {
+            postprocess_callback = [hidden_states = batch_hidden_states,
+                                    handler = postprocess_handler_,
+                                    handler_args = postprocess_handler_args_,
+                                    gating_buffers = merge_outputs.model_output.moe_gating,
+                                    token_offset,
+                                    token_size,
+                                    cur_batch_size,
+                                    stream_capture = stream](const StreamUpdateInfo& info) {
+                py::gil_scoped_acquire gil;
+                py::dict kwargs;
+
+                if (HandlerArgs::has_arg(handler_args, HandlerArgs::Arg::LAST_HIDDEN_STATES)) {
+                    kwargs[py::str(HandlerArgs::get_name(HandlerArgs::Arg::LAST_HIDDEN_STATES))] =
+                        Buffer2torchTensor(hidden_states, false);
+                }
+
+                if (HandlerArgs::has_arg(handler_args, HandlerArgs::Arg::LAST_MOE_GATING)) {
+                    py::list gating_list;
+                    for (const auto& gating : gating_buffers) {
+                        if (gating) {
+                            auto gating_view = gating->slice(token_offset, token_size, false);
+                            gating_list.append(Buffer2torchTensor(gating_view, false));
+                        } else {
+                            gating_list.append(py::none());
+                        }
+                    }
+                    kwargs[py::str(HandlerArgs::get_name(HandlerArgs::Arg::LAST_MOE_GATING))] = gating_list;
+                }
+
+                if (HandlerArgs::has_arg(handler_args, HandlerArgs::Arg::TOKEN_LENGTHS) && stream_capture) {
+                    py::list lengths;
+                    for (int i = 0; i < cur_batch_size; ++i) {
+                        lengths.append(static_cast<int64_t>(stream_capture->currentExecuteTokens(i).size()));
+                    }
+                    kwargs[py::str(HandlerArgs::get_name(HandlerArgs::Arg::TOKEN_LENGTHS))] = lengths;
+                }
+
+                return handler.attr("extend_forward")(**kwargs).cast<torch::Tensor>();
+            };
+        }
+
+        StreamUpdateInfo update_info{has_beam_search ? batch_new_all_token_ids : new_tokens,
+                                     1,
+                                     batch_hidden_states,
+                                     batch_logits,
+                                     current_softmax_result,
+                                     batch_cum_log_probs,
+                                     all_probs,
+                                     loss,
+                                     src_batch_indices,
+                                     all_hidden_states,
+                                     true,
+                                     false,
+                                     std::move(postprocess_callback)};
+
+        stream->update(update_info);
 
         batch_idx_in += cur_batch_size;
         batch_idx_out += next_batch_size;
