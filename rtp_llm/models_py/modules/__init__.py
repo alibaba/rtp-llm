@@ -14,14 +14,16 @@ if device_type == DeviceType.ROCm:
     from rtp_llm.models_py.modules.rocm.linear import Linear
     from rtp_llm.models_py.modules.rocm.mlp import DenseMLP, FusedSiluActDenseMLP
     from rtp_llm.models_py.modules.rocm.norm import FusedQKRMSNorm, RMSNorm
+    from rtp_llm.models_py.modules.rocm.select_topk import SelectTopk
     from rtp_llm.models_py.modules.rocm.fmha import (
         DECODE_MHA_IMPS,
         PREFILL_MHA_IMPS,
-    )
+    )  
 else:
     from rtp_llm.models_py.modules.norm import FusedQKRMSNorm, RMSNorm
     from rtp_llm.models_py.modules.linear import Linear
     from rtp_llm.models_py.modules.mlp import DenseMLP, FusedSiluActDenseMLP
+    from rtp_llm.models_py.modules.select_topk import SelectTopk
     from rtp_llm.models_py.modules.fmha import (
         DECODE_MHA_IMPS,
         PREFILL_MHA_IMPS,
