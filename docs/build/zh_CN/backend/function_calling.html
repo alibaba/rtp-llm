@@ -8,7 +8,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
-    <title>工具和函数调用 &#8212; RTP-LLM</title>
+    <title>Tool and Function Calling &#8212; RTP-LLM</title>
   
   
   
@@ -58,11 +58,11 @@
     <link rel="icon" href="../_static/logo.ico"/>
     <link rel="index" title="索引" href="../genindex.html" />
     <link rel="search" title="搜索" href="../search.html" />
-    <link rel="next" title="量化" href="quantization.html" />
-    <link rel="prev" title="重用缓存" href="reuse_kv_cache.html" /> 
+    <link rel="next" title="Quantization" href="quantization.html" />
+    <link rel="prev" title="ReuseCache" href="reuse_kv_cache.html" /> 
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="zh-CN"/>
-    <meta name="docbuild:last-update" content="2025 年 09 月 25 日"/>
+    <meta name="docbuild:last-update" content="2025 年 10 月 09 日"/>
 <link
   rel="stylesheet"
   href="../_static/css/language-switcher.css"
@@ -176,63 +176,64 @@
  </script></div>
         <div class="sidebar-primary-item"><nav class="bd-links bd-docs-nav" aria-label="Main">
     <div class="bd-toc-item navbar-nav active">
-        <p aria-level="2" class="caption" role="heading"><span class="caption-text">安装</span></p>
+        <p aria-level="2" class="caption" role="heading"><span class="caption-text">Installation</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../start/install.html">安装 RTP-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../start/install.html">Install RTP-LLM</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">发布版本</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Release Version</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../release/v0.2.0/release.html">RTP-LLM 0.2.0</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">基本用法</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Basic Usage</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="send_request.html">发送请求</a></li>
-<li class="toctree-l1"><a class="reference internal" href="openai_api_completions.html">OpenAI API - 文本生成/会话</a></li>
-<li class="toctree-l1"><a class="reference internal" href="openai_api_vision.html">OpenAI API - 多模态</a></li>
-<li class="toctree-l1"><a class="reference internal" href="openai_api_embeddings.html">OpenAI API - Embedding</a></li>
-<li class="toctree-l1"><a class="reference internal" href="native_api.html">RTP-LLM Native API</a></li>
+<li class="toctree-l1"><a class="reference internal" href="send_request.html">Sending Requests</a></li>
+<li class="toctree-l1"><a class="reference internal" href="openai_api_completions.html">OpenAI APIs - Completions</a></li>
+<li class="toctree-l1"><a class="reference internal" href="openai_api_vision.html">OpenAI APIs - Vision</a></li>
+<li class="toctree-l1"><a class="reference internal" href="openai_api_embeddings.html">OpenAI APIs - Embedding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="native_api.html">RTP-LLM Native APIs</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">后端教程</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Backend Tutorial</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../references/deepseek/index.html">deepseek</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../references/qwen/index.html">qwen-moe</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../references/kimi/index.html">kimi</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">高级后端配置</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Advanced Backend Configurations</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="server_arguments.html">服务器参数</a></li>
-<li class="toctree-l1"><a class="reference internal" href="sampling_params.html">采样配置</a></li>
-<li class="toctree-l1"><a class="reference internal" href="attention_backend.html">注意力后端</a></li>
+<li class="toctree-l1"><a class="reference internal" href="server_arguments.html">ServerArgs</a></li>
+<li class="toctree-l1"><a class="reference internal" href="sampling_params.html">Sampling Config</a></li>
+<li class="toctree-l1"><a class="reference internal" href="attention_backend.html">Attention Backend</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">支持的模型</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Supported Models</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../supported_models/generative_models.html">大语言模型</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../supported_models/multimodal_language_models.html">多模态语言模型</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../supported_models/embedding_models.html">Embedding 模型</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../supported_models/support_new_models.html">如何支持新模型</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/generative_models.html">Large Language Models</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/multimodal_language_models.html">Multimodal Language Models</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/embedding_models.html">Embedding Models</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/support_new_models.html">How to Support New Models</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">高级功能</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Advanced Features</span></p>
 <ul class="current nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="speculative_decoding.html">推测解码</a></li>
-<li class="toctree-l1"><a class="reference internal" href="reuse_kv_cache.html">重用缓存</a></li>
+<li class="toctree-l1"><a class="reference internal" href="speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="reuse_kv_cache.html">ReuseCache</a></li>
 
-<li class="toctree-l1 current active"><a class="current reference internal" href="#">工具和函数调用</a></li>
-<li class="toctree-l1"><a class="reference internal" href="quantization.html">量化</a></li>
-<li class="toctree-l1"><a class="reference internal" href="lora.html">LoRA 服务</a></li>
-<li class="toctree-l1"><a class="reference internal" href="pd_disaggregation.html">PD分离</a></li>
+<li class="toctree-l1 current active"><a class="current reference internal" href="#">Tool and Function Calling</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="lora.html">LoRA Serving</a></li>
+<li class="toctree-l1"><a class="reference internal" href="pd_disaggregation.html">PD Disaggregation</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">RTP-LLM 路由器</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">RTP-LLM Router</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="flexlb.html">FlexLB（弹性负载均衡器）- 主节点</a></li>
+<li class="toctree-l1"><a class="reference internal" href="flexlb.html">FlexLB (Flexible Load Balancer) - Master Role</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Benchmark</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../benchmark/benchmark.html">RTP-LLM 性能基准测试工具</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../benchmark/benchmark.html">RTP-LLM Performance Benchmark Tool</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">参考文献</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">References</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../references/general.html">通用指南</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../references/developer.html">开发者参考</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../references/general.html">General Guidance</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../references/developer.html">Developer Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../README.html">Documentation Manual</a></li>
 </ul>
 
     </div>
@@ -452,7 +453,7 @@ document.write(`
               
 
 <div id="jb-print-docs-body" class="onlyprint">
-    <h1>工具和函数调用</h1>
+    <h1>Tool and Function Calling</h1>
     <!-- Table of contents -->
     <div id="print-main-content">
         <div id="jb-print-toc">
@@ -462,23 +463,23 @@ document.write(`
             </div>
             <nav aria-label="Page">
                 <ul class="visible nav section-nav flex-column">
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#OpenAI兼容API">OpenAI兼容API</a><ul class="visible nav section-nav flex-column">
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#定义函数调用的工具">定义函数调用的工具</a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#定义消息">定义消息</a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#初始化客户端">初始化客户端</a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#非流式请求">非流式请求</a><ul class="nav section-nav flex-column">
-<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#处理工具">处理工具</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#OpenAI-Compatible-API">OpenAI Compatible API</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#Define-Tools-for-Function-Call">Define Tools for Function Call</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#Define-Messages">Define Messages</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#Initialize-the-Client">Initialize the Client</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#Non-Streaming-Request">Non-Streaming Request</a><ul class="nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#Handle-Tools">Handle Tools</a></li>
 </ul>
 </li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#流式请求">流式请求</a><ul class="nav section-nav flex-column">
-<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#id1">处理工具</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#Streaming-Request">Streaming Request</a><ul class="nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#id1">Handle Tools</a></li>
 </ul>
 </li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#定义工具函数">定义工具函数</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#Define-a-Tool-Function">Define a Tool Function</a></li>
 </ul>
 </li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#执行工具">执行工具</a><ul class="visible nav section-nav flex-column">
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#将结果发送回模型">将结果发送回模型</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#Execute-the-Tool">Execute the Tool</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#Send-Results-Back-to-Model">Send Results Back to Model</a></li>
 </ul>
 </li>
 </ul>
@@ -496,20 +497,20 @@ document.write(`
     .output_area.stderr, .output_area.stdout {
         color: #d3d3d3 !important; /* light gray */
     }
-</style><section id="工具和函数调用">
-<h1>工具和函数调用<a class="headerlink" href="#工具和函数调用" title="Link to this heading">#</a></h1>
-<p>本指南演示如何使用RTP-LLM的`函数调用&lt;<a class="reference external" href="https://platform.openai.com/docs/guides/function-calling">https://platform.openai.com/docs/guides/function-calling</a>&gt;`__功能。</p>
-<section id="OpenAI兼容API">
-<h2>OpenAI兼容API<a class="headerlink" href="#OpenAI兼容API" title="Link to this heading">#</a></h2>
-<p>目前，RTP-LLM支持以下模型的函数调用功能：</p>
+</style><section id="Tool-and-Function-Calling">
+<h1>Tool and Function Calling<a class="headerlink" href="#Tool-and-Function-Calling" title="Link to this heading">#</a></h1>
+<p>This guide demonstrates how to use RTP-LLM’s <a class="reference external" href="https://platform.openai.com/docs/guides/function-calling">Function calling</a> functionality.</p>
+<section id="OpenAI-Compatible-API">
+<h2>OpenAI Compatible API<a class="headerlink" href="#OpenAI-Compatible-API" title="Link to this heading">#</a></h2>
+<p>Currently, RTP-LLM supports Function Calling capabilities for the following models:</p>
 <ul class="simple">
-<li><p>qwen25/qwen3：Qwen 2.5（例如 Qwen/Qwen2.5-1.5B-Instruct、Qwen/Qwen2.5-7B-Instruct）和 QwQ（即 Qwen/QwQ-32B）、Qwen3-235B-A22B 等。</p></li>
+<li><p>qwen25/qwen3: Qwen 2.5 (e.g. Qwen/Qwen2.5-1.5B-Instruct, Qwen/Qwen2.5-7B-Instruct) and QwQ (i.e. Qwen/QwQ-32B), Qwen3-235B-A22B, etc.</p></li>
 <li><p>Kimi_k2</p></li>
 <li><p>Qwen3-Coder</p></li>
 </ul>
-<section id="定义函数调用的工具">
-<h3>定义函数调用的工具<a class="headerlink" href="#定义函数调用的工具" title="Link to this heading">#</a></h3>
-<p>下面是一个Python代码片段，展示如何将工具定义为字典。该字典包括工具名称、描述和属性定义的参数。</p>
+<section id="Define-Tools-for-Function-Call">
+<h3>Define Tools for Function Call<a class="headerlink" href="#Define-Tools-for-Function-Call" title="Link to this heading">#</a></h3>
+<p>Below is a Python snippet that shows how to define a tool as a dictionary. The dictionary includes a tool name, a description, and property defined Parameters.</p>
 <div class="nbinput nblast docutils container">
 <div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[ ]:
 </pre></div>
@@ -548,8 +549,8 @@ document.write(`
 </div>
 </div>
 </section>
-<section id="定义消息">
-<h3>定义消息<a class="headerlink" href="#定义消息" title="Link to this heading">#</a></h3>
+<section id="Define-Messages">
+<h3>Define Messages<a class="headerlink" href="#Define-Messages" title="Link to this heading">#</a></h3>
 <div class="nbinput nblast docutils container">
 <div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[ ]:
 </pre></div>
@@ -568,8 +569,8 @@ document.write(`
 </div>
 </div>
 </section>
-<section id="初始化客户端">
-<h3>初始化客户端<a class="headerlink" href="#初始化客户端" title="Link to this heading">#</a></h3>
+<section id="Initialize-the-Client">
+<h3>Initialize the Client<a class="headerlink" href="#Initialize-the-Client" title="Link to this heading">#</a></h3>
 <div class="nbinput nblast docutils container">
 <div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[ ]:
 </pre></div>
@@ -581,8 +582,8 @@ document.write(`
 </div>
 </div>
 </section>
-<section id="非流式请求">
-<h3>非流式请求<a class="headerlink" href="#非流式请求" title="Link to this heading">#</a></h3>
+<section id="Non-Streaming-Request">
+<h3>Non-Streaming Request<a class="headerlink" href="#Non-Streaming-Request" title="Link to this heading">#</a></h3>
 <div class="nbinput nblast docutils container">
 <div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[ ]:
 </pre></div>
@@ -606,9 +607,9 @@ document.write(`
 </pre></div>
 </div>
 </div>
-<section id="处理工具">
-<h4>处理工具<a class="headerlink" href="#处理工具" title="Link to this heading">#</a></h4>
-<p>当引擎确定应该调用某个特定工具时，它将通过响应返回参数或部分参数。您可以解析这些参数，然后相应地调用工具。</p>
+<section id="Handle-Tools">
+<h4>Handle Tools<a class="headerlink" href="#Handle-Tools" title="Link to this heading">#</a></h4>
+<p>When the engine determines it should call a particular tool, it will return arguments or partial arguments through the response. You can parse these arguments and later invoke the tool accordingly.</p>
 <div class="nbinput nblast docutils container">
 <div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[ ]:
 </pre></div>
@@ -625,8 +626,8 @@ document.write(`
 </div>
 </section>
 </section>
-<section id="流式请求">
-<h3>流式请求<a class="headerlink" href="#流式请求" title="Link to this heading">#</a></h3>
+<section id="Streaming-Request">
+<h3>Streaming Request<a class="headerlink" href="#Streaming-Request" title="Link to this heading">#</a></h3>
 <div class="nbinput nblast docutils container">
 <div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[ ]:
 </pre></div>
@@ -662,8 +663,8 @@ document.write(`
 </div>
 </div>
 <section id="id1">
-<h4>处理工具<a class="headerlink" href="#id1" title="Link to this heading">#</a></h4>
-<p>当引擎确定应该调用某个特定工具时，它将通过响应返回参数或部分参数。您可以解析这些参数，然后相应地调用工具。</p>
+<h4>Handle Tools<a class="headerlink" href="#id1" title="Link to this heading">#</a></h4>
+<p>When the engine determines it should call a particular tool, it will return arguments or partial arguments through the response. You can parse these arguments and later invoke the tool accordingly.</p>
 <div class="nbinput nblast docutils container">
 <div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[ ]:
 </pre></div>
@@ -685,8 +686,8 @@ document.write(`
 </div>
 </section>
 </section>
-<section id="定义工具函数">
-<h3>定义工具函数<a class="headerlink" href="#定义工具函数" title="Link to this heading">#</a></h3>
+<section id="Define-a-Tool-Function">
+<h3>Define a Tool Function<a class="headerlink" href="#Define-a-Tool-Function" title="Link to this heading">#</a></h3>
 <div class="nbinput nblast docutils container">
 <div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[ ]:
 </pre></div>
@@ -705,8 +706,8 @@ document.write(`
 </div>
 </section>
 </section>
-<section id="执行工具">
-<h2>执行工具<a class="headerlink" href="#执行工具" title="Link to this heading">#</a></h2>
+<section id="Execute-the-Tool">
+<h2>Execute the Tool<a class="headerlink" href="#Execute-the-Tool" title="Link to this heading">#</a></h2>
 <div class="nbinput nblast docutils container">
 <div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[ ]:
 </pre></div>
@@ -733,8 +734,8 @@ document.write(`
 </pre></div>
 </div>
 </div>
-<section id="将结果发送回模型">
-<h3>将结果发送回模型<a class="headerlink" href="#将结果发送回模型" title="Link to this heading">#</a></h3>
+<section id="Send-Results-Back-to-Model">
+<h3>Send Results Back to Model<a class="headerlink" href="#Send-Results-Back-to-Model" title="Link to this heading">#</a></h3>
 <div class="nbinput nblast docutils container">
 <div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[ ]:
 </pre></div>
@@ -776,7 +777,7 @@ document.write(`
       <i class="fa-solid fa-angle-left"></i>
       <div class="prev-next-info">
         <p class="prev-next-subtitle">上一页</p>
-        <p class="prev-next-title">重用缓存</p>
+        <p class="prev-next-title">ReuseCache</p>
       </div>
     </a>
     <a class="right-next"
@@ -784,7 +785,7 @@ document.write(`
        title="next page">
       <div class="prev-next-info">
         <p class="prev-next-subtitle">下一页</p>
-        <p class="prev-next-title">量化</p>
+        <p class="prev-next-title">Quantization</p>
       </div>
       <i class="fa-solid fa-angle-right"></i>
     </a>
@@ -804,23 +805,23 @@ document.write(`
   </div>
   <nav class="bd-toc-nav page-toc">
     <ul class="visible nav section-nav flex-column">
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#OpenAI兼容API">OpenAI兼容API</a><ul class="visible nav section-nav flex-column">
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#定义函数调用的工具">定义函数调用的工具</a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#定义消息">定义消息</a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#初始化客户端">初始化客户端</a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#非流式请求">非流式请求</a><ul class="nav section-nav flex-column">
-<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#处理工具">处理工具</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#OpenAI-Compatible-API">OpenAI Compatible API</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#Define-Tools-for-Function-Call">Define Tools for Function Call</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#Define-Messages">Define Messages</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#Initialize-the-Client">Initialize the Client</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#Non-Streaming-Request">Non-Streaming Request</a><ul class="nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#Handle-Tools">Handle Tools</a></li>
 </ul>
 </li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#流式请求">流式请求</a><ul class="nav section-nav flex-column">
-<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#id1">处理工具</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#Streaming-Request">Streaming Request</a><ul class="nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#id1">Handle Tools</a></li>
 </ul>
 </li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#定义工具函数">定义工具函数</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#Define-a-Tool-Function">Define a Tool Function</a></li>
 </ul>
 </li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#执行工具">执行工具</a><ul class="visible nav section-nav flex-column">
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#将结果发送回模型">将结果发送回模型</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#Execute-the-Tool">Execute the Tool</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#Send-Results-Back-to-Model">Send Results Back to Model</a></li>
 </ul>
 </li>
 </ul>
@@ -856,7 +857,7 @@ document.write(`
   
   <div class="footer-item">
     <p class="last-updated">
-  最后更新于 2025 年 09 月 25 日.
+  最后更新于 2025 年 10 月 09 日.
   <br/>
 </p>
   </div>

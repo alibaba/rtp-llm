@@ -32,8 +32,7 @@ RTP-LLM First Release Version:0.2.0(2025.09)
 ### Bug Fixs
 
 ## Question of omission
-* PD Entrance Transpose not worker with front app
-* metrics of 3fs cache hit ratio is not accurate
+* metrics of cache is not work
 * too many dynamic lora need more **reserver_runtime_mem_mb**
 * AMD not support MoE models
 * MoE model without shared_experter cannot use enable-layer-micro-batch

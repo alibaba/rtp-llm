@@ -8,7 +8,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
-    <title>LoRA 服务 &#8212; RTP-LLM</title>
+    <title>LoRA Serving &#8212; RTP-LLM</title>
   
   
   
@@ -58,11 +58,11 @@
     <link rel="icon" href="../_static/logo.ico"/>
     <link rel="index" title="索引" href="../genindex.html" />
     <link rel="search" title="搜索" href="../search.html" />
-    <link rel="next" title="PD分离" href="pd_disaggregation.html" />
-    <link rel="prev" title="量化" href="quantization.html" /> 
+    <link rel="next" title="PD Disaggregation" href="pd_disaggregation.html" />
+    <link rel="prev" title="Quantization" href="quantization.html" /> 
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="zh-CN"/>
-    <meta name="docbuild:last-update" content="2025 年 09 月 25 日"/>
+    <meta name="docbuild:last-update" content="2025 年 10 月 09 日"/>
 <link
   rel="stylesheet"
   href="../_static/css/language-switcher.css"
@@ -176,63 +176,64 @@
  </script></div>
         <div class="sidebar-primary-item"><nav class="bd-links bd-docs-nav" aria-label="Main">
     <div class="bd-toc-item navbar-nav active">
-        <p aria-level="2" class="caption" role="heading"><span class="caption-text">安装</span></p>
+        <p aria-level="2" class="caption" role="heading"><span class="caption-text">Installation</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../start/install.html">安装 RTP-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../start/install.html">Install RTP-LLM</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">发布版本</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Release Version</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../release/v0.2.0/release.html">RTP-LLM 0.2.0</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">基本用法</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Basic Usage</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="send_request.html">发送请求</a></li>
-<li class="toctree-l1"><a class="reference internal" href="openai_api_completions.html">OpenAI API - 文本生成/会话</a></li>
-<li class="toctree-l1"><a class="reference internal" href="openai_api_vision.html">OpenAI API - 多模态</a></li>
-<li class="toctree-l1"><a class="reference internal" href="openai_api_embeddings.html">OpenAI API - Embedding</a></li>
-<li class="toctree-l1"><a class="reference internal" href="native_api.html">RTP-LLM Native API</a></li>
+<li class="toctree-l1"><a class="reference internal" href="send_request.html">Sending Requests</a></li>
+<li class="toctree-l1"><a class="reference internal" href="openai_api_completions.html">OpenAI APIs - Completions</a></li>
+<li class="toctree-l1"><a class="reference internal" href="openai_api_vision.html">OpenAI APIs - Vision</a></li>
+<li class="toctree-l1"><a class="reference internal" href="openai_api_embeddings.html">OpenAI APIs - Embedding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="native_api.html">RTP-LLM Native APIs</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">后端教程</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Backend Tutorial</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../references/deepseek/index.html">deepseek</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../references/qwen/index.html">qwen-moe</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../references/kimi/index.html">kimi</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">高级后端配置</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Advanced Backend Configurations</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="server_arguments.html">服务器参数</a></li>
-<li class="toctree-l1"><a class="reference internal" href="sampling_params.html">采样配置</a></li>
-<li class="toctree-l1"><a class="reference internal" href="attention_backend.html">注意力后端</a></li>
+<li class="toctree-l1"><a class="reference internal" href="server_arguments.html">ServerArgs</a></li>
+<li class="toctree-l1"><a class="reference internal" href="sampling_params.html">Sampling Config</a></li>
+<li class="toctree-l1"><a class="reference internal" href="attention_backend.html">Attention Backend</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">支持的模型</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Supported Models</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../supported_models/generative_models.html">大语言模型</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../supported_models/multimodal_language_models.html">多模态语言模型</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../supported_models/embedding_models.html">Embedding 模型</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../supported_models/support_new_models.html">如何支持新模型</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/generative_models.html">Large Language Models</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/multimodal_language_models.html">Multimodal Language Models</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/embedding_models.html">Embedding Models</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/support_new_models.html">How to Support New Models</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">高级功能</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Advanced Features</span></p>
 <ul class="current nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="speculative_decoding.html">推测解码</a></li>
-<li class="toctree-l1"><a class="reference internal" href="reuse_kv_cache.html">重用缓存</a></li>
+<li class="toctree-l1"><a class="reference internal" href="speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="reuse_kv_cache.html">ReuseCache</a></li>
 
-<li class="toctree-l1"><a class="reference internal" href="function_calling.html">工具和函数调用</a></li>
-<li class="toctree-l1"><a class="reference internal" href="quantization.html">量化</a></li>
-<li class="toctree-l1 current active"><a class="current reference internal" href="#">LoRA 服务</a></li>
-<li class="toctree-l1"><a class="reference internal" href="pd_disaggregation.html">PD分离</a></li>
+<li class="toctree-l1"><a class="reference internal" href="function_calling.html">Tool and Function Calling</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quantization.html">Quantization</a></li>
+<li class="toctree-l1 current active"><a class="current reference internal" href="#">LoRA Serving</a></li>
+<li class="toctree-l1"><a class="reference internal" href="pd_disaggregation.html">PD Disaggregation</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">RTP-LLM 路由器</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">RTP-LLM Router</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="flexlb.html">FlexLB（弹性负载均衡器）- 主节点</a></li>
+<li class="toctree-l1"><a class="reference internal" href="flexlb.html">FlexLB (Flexible Load Balancer) - Master Role</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Benchmark</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../benchmark/benchmark.html">RTP-LLM 性能基准测试工具</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../benchmark/benchmark.html">RTP-LLM Performance Benchmark Tool</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">参考文献</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">References</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../references/general.html">通用指南</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../references/developer.html">开发者参考</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../references/general.html">General Guidance</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../references/developer.html">Developer Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../README.html">Documentation Manual</a></li>
 </ul>
 
     </div>
@@ -452,7 +453,7 @@ document.write(`
               
 
 <div id="jb-print-docs-body" class="onlyprint">
-    <h1>LoRA 服务</h1>
+    <h1>LoRA Serving</h1>
     <!-- Table of contents -->
     <div id="print-main-content">
         <div id="jb-print-toc">
@@ -462,12 +463,12 @@ document.write(`
             </div>
             <nav aria-label="Page">
                 <ul class="visible nav section-nav flex-column">
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#单适配器服务（静态-LoRA）">单适配器服务（静态 LoRA）</a><ul class="visible nav section-nav flex-column">
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#使用方式">使用方式</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#Serving-Single-Adaptor（Static-LoRA）">Serving Single Adaptor（Static LoRA）</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#Usage">Usage</a></li>
 </ul>
 </li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#多适配器服务（动态-LoRA）">多适配器服务（动态 LoRA）</a><ul class="visible nav section-nav flex-column">
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#id1">使用方式</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#Serving-Multiple-Adaptors(Dynamic-LoRA)">Serving Multiple Adaptors(Dynamic LoRA)</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#id1">Usage</a></li>
 </ul>
 </li>
 </ul>
@@ -485,15 +486,15 @@ document.write(`
     .output_area.stderr, .output_area.stdout {
         color: #d3d3d3 !important; /* light gray */
     }
-</style><section id="LoRA-服务">
-<h1>LoRA 服务<a class="headerlink" href="#LoRA-服务" title="Link to this heading">#</a></h1>
+</style><section id="LoRA-Serving">
+<h1>LoRA Serving<a class="headerlink" href="#LoRA-Serving" title="Link to this heading">#</a></h1>
 <p>RTP-LLM supports <strong>Static LoRA</strong> and <strong>Dynamic LoRA</strong> inference modes. For information on LoRA principles, refer to <a class="reference external" href="https://huggingface.co/docs/peft/conceptual_guides/lora">Hugging Face Official Documentation</a>.</p>
-<section id="单适配器服务（静态-LoRA）">
-<h2>单适配器服务（静态 LoRA）<a class="headerlink" href="#单适配器服务（静态-LoRA）" title="Link to this heading">#</a></h2>
+<section id="Serving-Single-Adaptor（Static-LoRA）">
+<h2>Serving Single Adaptor（Static LoRA）<a class="headerlink" href="#Serving-Single-Adaptor（Static-LoRA）" title="Link to this heading">#</a></h2>
 <div class="pst-scrollable-table-container"><table class="table">
 <thead>
-<tr class="row-odd"><th class="head"><p>功能特性</p></th>
-<th class="head"><p>功能描述</p></th>
+<tr class="row-odd"><th class="head"><p>Feature</p></th>
+<th class="head"><p>Description</p></th>
 </tr>
 </thead>
 <tbody>
@@ -504,13 +505,13 @@ document.write(`
 <td><p>Scenarios requiring <strong>single LoRA</strong> with pursuit of optimal performance.</p></td>
 </tr>
 <tr class="row-even"><td><p><strong>Limitations</strong></p></td>
-<td><p>融合后无法恢复基座模型，无法同时获得应用 LoRA 前的原始输出</p></td>
+<td><p>After fusion, the base model cannot be restored; the original output before applying LoRA cannot be obtained simultaneously.</p></td>
 </tr>
 </tbody>
 </table>
 </div>
-<section id="使用方式">
-<h3>使用方式<a class="headerlink" href="#使用方式" title="Link to this heading">#</a></h3>
+<section id="Usage">
+<h3>Usage<a class="headerlink" href="#Usage" title="Link to this heading">#</a></h3>
 <ul class="simple">
 <li><p>When the startup parameter <code class="docutils literal notranslate"><span class="pre">--lora_info</span></code> contains only <strong>1 element</strong>, it automatically enters static mode.</p></li>
 <li><p>Example: <code class="docutils literal notranslate"><span class="pre">--lora_info</span> <span class="pre">{&quot;test0&quot;:&quot;/mnt/nas1/lora/taoshang_qwen_lora_18000/lora&quot;}</span></code></p></li>
@@ -597,12 +598,12 @@ document.write(`
 </div>
 </section>
 </section>
-<section id="多适配器服务（动态-LoRA）">
-<h2>多适配器服务（动态 LoRA）<a class="headerlink" href="#多适配器服务（动态-LoRA）" title="Link to this heading">#</a></h2>
+<section id="Serving-Multiple-Adaptors(Dynamic-LoRA)">
+<h2>Serving Multiple Adaptors(Dynamic LoRA)<a class="headerlink" href="#Serving-Multiple-Adaptors(Dynamic-LoRA)" title="Link to this heading">#</a></h2>
 <div class="pst-scrollable-table-container"><table class="table">
 <thead>
-<tr class="row-odd"><th class="head"><p>功能特性</p></th>
-<th class="head"><p>功能描述</p></th>
+<tr class="row-odd"><th class="head"><p>Feature</p></th>
+<th class="head"><p>Description</p></th>
 </tr>
 </thead>
 <tbody>
@@ -613,16 +614,16 @@ document.write(`
 <td><p>Scenarios requiring <strong>multiple LoRA switching</strong> or <strong>dynamic selection by request</strong>.</p></td>
 </tr>
 <tr class="row-even"><td><p><strong>Limitations</strong></p></td>
-<td><p>当前仅部分模型支持 LoRA</p></td>
+<td><p>Only some models support LoRA</p></td>
 </tr>
 </tbody>
 </table>
 </div>
 <section id="id1">
-<h3>使用方式<a class="headerlink" href="#id1" title="Link to this heading">#</a></h3>
+<h3>Usage<a class="headerlink" href="#id1" title="Link to this heading">#</a></h3>
 <ul class="simple">
 <li><p>Specify the LoRA to be used for this request through <code class="docutils literal notranslate"><span class="pre">generate_config.adapter_name</span></code>.</p></li>
-<li><p>字段规则</p></li>
+<li><p>Field rules</p></li>
 <li><p>Type: <code class="docutils literal notranslate"><span class="pre">str</span></code> or <code class="docutils literal notranslate"><span class="pre">list[str]</span></code></p></li>
 <li><p>The number of elements and order must be <strong>completely aligned</strong> with <code class="docutils literal notranslate"><span class="pre">prompt</span></code></p></li>
 <li><p>Leave empty or omit to indicate <strong>not using LoRA</strong></p></li>
@@ -702,7 +703,7 @@ document.write(`
       <i class="fa-solid fa-angle-left"></i>
       <div class="prev-next-info">
         <p class="prev-next-subtitle">上一页</p>
-        <p class="prev-next-title">量化</p>
+        <p class="prev-next-title">Quantization</p>
       </div>
     </a>
     <a class="right-next"
@@ -710,7 +711,7 @@ document.write(`
        title="next page">
       <div class="prev-next-info">
         <p class="prev-next-subtitle">下一页</p>
-        <p class="prev-next-title">PD分离</p>
+        <p class="prev-next-title">PD Disaggregation</p>
       </div>
       <i class="fa-solid fa-angle-right"></i>
     </a>
@@ -730,12 +731,12 @@ document.write(`
   </div>
   <nav class="bd-toc-nav page-toc">
     <ul class="visible nav section-nav flex-column">
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#单适配器服务（静态-LoRA）">单适配器服务（静态 LoRA）</a><ul class="visible nav section-nav flex-column">
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#使用方式">使用方式</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#Serving-Single-Adaptor（Static-LoRA）">Serving Single Adaptor（Static LoRA）</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#Usage">Usage</a></li>
 </ul>
 </li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#多适配器服务（动态-LoRA）">多适配器服务（动态 LoRA）</a><ul class="visible nav section-nav flex-column">
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#id1">使用方式</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#Serving-Multiple-Adaptors(Dynamic-LoRA)">Serving Multiple Adaptors(Dynamic LoRA)</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#id1">Usage</a></li>
 </ul>
 </li>
 </ul>
@@ -771,7 +772,7 @@ document.write(`
   
   <div class="footer-item">
     <p class="last-updated">
-  最后更新于 2025 年 09 月 25 日.
+  最后更新于 2025 年 10 月 09 日.
   <br/>
 </p>
   </div>
