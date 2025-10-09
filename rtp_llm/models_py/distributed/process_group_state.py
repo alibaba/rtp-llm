@@ -152,7 +152,7 @@ def init_distributed_environment(
             device_id=torch.device(f"cuda:{local_rank}"),
             timeout=timeout,  # pyright: ignore[reportArgumentType]
         )
-        initialize_expert_parallel(params, backend)
+    initialize_expert_parallel(params, backend)
 
 
 _EP: Optional[ProcessGroupState] = None

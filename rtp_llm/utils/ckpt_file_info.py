@@ -55,6 +55,10 @@ class CkptFileInfo:
     def tensor_num(self) -> int:
         return len(self.metadata.keys())
 
+    @property
+    def file_size(self) -> int:
+        return os.path.getsize(self.file_name)
+
     def is_safetensor(self) -> bool:
         if self.ckpt_type == CkptType.safetensors:
             return True
