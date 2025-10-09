@@ -2,20 +2,81 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="./logo.ico" />
+    <link rel="icon" type="image/svg+xml" href="./assets/logo-324d0b39.ico" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#000000" />
     <meta
       name="description"
       content="RTP-LLM - Production-Ready Large Language Model Inference Engine"
     />
-    <title>RTP-LLM - Production-Ready Large Language Model Inference Engine</title>
-    <script type="module" crossorigin src="./assets/index-da5cd6c9.js"></script>
-    <link rel="stylesheet" href="./assets/index-7fb6ccb0.css">
+    <meta name="aplus-core" content="aplus.js" />
+    <title>
+      RTP-LLM - Production-Ready Large Language Model Inference Engine
+    </title>
+    <script>
+      (function (w, d, s, q) {
+        w[q] = w[q] || [];
+        var f = d.getElementsByTagName(s)[0],
+          j = d.createElement(s);
+        j.async = true;
+        j.id = "beacon-aplus";
+        j.setAttribute(
+          "exparams",
+          "userid=&aplus&sidx=aplusSidex&ckx=aplusCkx"
+        );
+        j.src = "//g.alicdn.com/alilog/mlog/aplus_v2.js";
+        j.crossorigin = "anonymous";
+        f.parentNode.insertBefore(j, f);
+      })(window, document, "script", "aplus_queue");
+    </script>
+    <script type="module" crossorigin src="./assets/index-d2159c8e.js"></script>
+    <link rel="stylesheet" href="./assets/index-cc1a23eb.css">
   </head>
   <body>
     <noscript>You need to enable JavaScript to run this app.</noscript>
     <div id="root"></div>
     
+
+    <!--监控引入SDK及插件-->
+    <script src="//g.alicdn.com/aes/??tracker/3.3.13/index.js,tracker-plugin-pv/3.0.6/index.js,tracker-plugin-event/3.0.0/index.js,tracker-plugin-jserror/3.0.3/index.js,tracker-plugin-resourceError/3.0.4/index.js,tracker-plugin-perf/3.1.3/index.js,tracker-plugin-eventTiming/3.0.0/index.js,tracker-plugin-autolog/3.0.15/index.js"></script>
+
+    <!--监控初始化SDK-->
+    <script>
+      // 生成用户ID的函数
+      function generateUserId() {
+        // 尝试从localStorage获取已存在的用户ID
+        let userId = localStorage.getItem("rtp_llm_docs_user_id");
+
+        // 如果不存在，则生成一个新的UUID并存储
+        if (!userId) {
+          userId =
+            "user_" +
+            Date.now() +
+            "_" +
+            Math.random().toString(36).substr(2, 9);
+          localStorage.setItem("rtp_llm_docs_user_id", userId);
+        }
+
+        return userId;
+      }
+
+      const aes = new AES({
+        pid: "RTP_LLM_docs", // 项目 ID
+        user_type: "101", // 当前登录用户所属的账号体系
+        uid: generateUserId(), // 当前登录用户的账号 ID
+        username: "rtp_llm_visitor", // 当前登录用户的账号名称
+      });
+
+      <!--挂载插件-->
+      const plugins = aes.use([
+        AESPluginPV,
+        AESPluginEvent,
+        AESPluginJSError,
+        AESPluginResourceError,
+        AESPluginPerf,
+        AESPluginEventTiming,
+        AESPluginAutolog,
+      ]);
+    </script>
   </body>
 </html>

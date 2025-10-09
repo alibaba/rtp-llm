@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-19 11:21+0800\n"
+"POT-Creation-Date: 2025-10-09 17:27+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -21,11 +21,11 @@ msgstr ""
 
 #: ../../start/install.md:1
 msgid "Install RTP-LLM"
-msgstr "安装 RTP-LLM"
+msgstr ""
 
 #: ../../start/install.md:3
 msgid "We provide multiple ways to install RTP-LLM."
-msgstr "我们提供了多种安装RTP-LLM的方式。"
+msgstr ""
 
 #: ../../start/install.md:4
 msgid ""
@@ -33,66 +33,60 @@ msgid ""
 "[DeepSeek V3/R1 Support](../references/deepseek/index.rst) and use Docker"
 " to run"
 msgstr ""
-"如果您需要运行 **DeepSeek V3/R1**，建议参考 [DeepSeek V3/R1 "
-"支持](../references/deepseek/index.rst) 并使用 Docker 运行"
 
 #: ../../start/install.md:5
 msgid ""
 "If you need to run **Kimi-K2**, it is recommended to refer to [Kimi-K2 "
 "Support](../references/kimi/index.rst) and use Docker to run"
 msgstr ""
-"如果您需要运行 **Kimi-K2**，建议参考 [Kimi-K2 支持](../references/kimi/index.rst) 并使用 "
-"Docker 运行"
 
 #: ../../start/install.md:6
 msgid ""
 "If you need to run **QwenMoE**, it is recommended to refer to [Qwen MoE "
 "Support](../references/qwen/index.rst) and use Docker to run"
 msgstr ""
-"如果您需要运行 **QwenMoE**，建议参考 [Qwen MoE 支持](../references/qwen/index.rst) 并使用 "
-"Docker 运行"
 
 #: ../../start/install.md:9
 msgid ""
 "To speed up installation, it is recommended to use pip to install "
 "dependencies:"
-msgstr "为了加快安装速度，建议使用pip安装依赖："
+msgstr ""
 
 #: ../../start/install.md:11
 msgid "Method 1: With pip"
-msgstr "方法1：使用pip安装"
+msgstr ""
 
 #: ../../start/install.md:19
 msgid "Method 2: From source"
-msgstr "方法2：从源码构建"
+msgstr ""
 
 #: ../../start/install.md
 msgid "os"
-msgstr "操作系统"
+msgstr ""
 
 #: ../../start/install.md
 msgid "Python"
-msgstr "Python版本"
+msgstr ""
 
 #: ../../start/install.md
 msgid "NVIDIA GPU"
-msgstr "NVIDIA GPU支持"
+msgstr ""
 
 #: ../../start/install.md
 msgid "AMD"
-msgstr "AMD GPU支持"
+msgstr ""
 
 #: ../../start/install.md
 msgid "Compile Tools"
-msgstr "编译工具"
+msgstr ""
 
 #: ../../start/install.md
 msgid "Linux"
-msgstr "Linux系统"
+msgstr ""
 
 #: ../../start/install.md
 msgid "3.10"
-msgstr "Python 3.10"
+msgstr ""
 
 #: ../../start/install.md
 msgid ""
@@ -100,31 +94,28 @@ msgid ""
 "✅RTX40xx<br>  ✅V100<br>  ✅T4<br>  ✅A10/A30/A100<br>  ✅L40/L20<br>  "
 "✅H100/H200/H20/H800.. <br>"
 msgstr ""
-"计算能力7.0或更高 <br> ✅ RTX20xx<br>  ✅RTX30xx<br>  ✅RTX40xx<br>  ✅V100<br>  "
-"✅T4<br>  ✅A10/A30/A100<br>  ✅L40/L20<br>  ✅H100/H200/H20/H800.. <br>"
 
 #: ../../start/install.md
 msgid "✅MI308X"
-msgstr "✅MI308X显卡支持"
+msgstr ""
 
 #: ../../start/install.md
 msgid "bazelisk"
-msgstr "bazelisk编译工具"
+msgstr ""
 
 #: ../../start/install.md:40
 msgid "Method 3: Using docker"
-msgstr "方法3：使用Docker"
+msgstr ""
 
 #: ../../start/install.md:41
 msgid ""
 "More Docker versions can be obtained from [RTP-LLM "
 "Release](../release/index.rst)"
-msgstr "更多Docker版本可以从[RTP-LLM发布页面](../release/index.rst)获取"
+msgstr ""
 
 #: ../../start/install.md:56
-#, fuzzy
 msgid "Method 4: Using Kubernetes"
-msgstr "方法3：使用Docker"
+msgstr ""
 
 #: ../../start/install.md:57
 msgid ""

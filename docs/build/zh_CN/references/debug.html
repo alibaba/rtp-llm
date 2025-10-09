@@ -8,7 +8,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
-    <title>RTP-LLM调试 &#8212; RTP-LLM</title>
+    <title>Debugging RTP-LLM &#8212; RTP-LLM</title>
   
   
   
@@ -55,11 +55,11 @@
     <link rel="icon" href="../_static/logo.ico"/>
     <link rel="index" title="索引" href="../genindex.html" />
     <link rel="search" title="搜索" href="../search.html" />
-    <link rel="next" title="开发者参考" href="developer.html" />
-    <link rel="prev" title="性能分析" href="profiling.html" /> 
+    <link rel="next" title="Developer Reference" href="developer.html" />
+    <link rel="prev" title="Performance Profiling" href="profiling.html" /> 
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="zh-CN"/>
-    <meta name="docbuild:last-update" content="2025 年 09 月 25 日"/>
+    <meta name="docbuild:last-update" content="2025 年 10 月 09 日"/>
 <link
   rel="stylesheet"
   href="../_static/css/language-switcher.css"
@@ -173,67 +173,68 @@
  </script></div>
         <div class="sidebar-primary-item"><nav class="bd-links bd-docs-nav" aria-label="Main">
     <div class="bd-toc-item navbar-nav active">
-        <p aria-level="2" class="caption" role="heading"><span class="caption-text">安装</span></p>
+        <p aria-level="2" class="caption" role="heading"><span class="caption-text">Installation</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../start/install.html">安装 RTP-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../start/install.html">Install RTP-LLM</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">发布版本</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Release Version</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../release/v0.2.0/release.html">RTP-LLM 0.2.0</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">基本用法</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Basic Usage</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../backend/send_request.html">发送请求</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../backend/openai_api_completions.html">OpenAI API - 文本生成/会话</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../backend/openai_api_vision.html">OpenAI API - 多模态</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../backend/openai_api_embeddings.html">OpenAI API - Embedding</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../backend/native_api.html">RTP-LLM Native API</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/send_request.html">Sending Requests</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/openai_api_completions.html">OpenAI APIs - Completions</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/openai_api_vision.html">OpenAI APIs - Vision</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/openai_api_embeddings.html">OpenAI APIs - Embedding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/native_api.html">RTP-LLM Native APIs</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">后端教程</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Backend Tutorial</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="deepseek/index.html">deepseek</a></li>
 <li class="toctree-l1"><a class="reference internal" href="qwen/index.html">qwen-moe</a></li>
 <li class="toctree-l1"><a class="reference internal" href="kimi/index.html">kimi</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">高级后端配置</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Advanced Backend Configurations</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../backend/server_arguments.html">服务器参数</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../backend/sampling_params.html">采样配置</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../backend/attention_backend.html">注意力后端</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/server_arguments.html">ServerArgs</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/sampling_params.html">Sampling Config</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/attention_backend.html">Attention Backend</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">支持的模型</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Supported Models</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../supported_models/generative_models.html">大语言模型</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../supported_models/multimodal_language_models.html">多模态语言模型</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../supported_models/embedding_models.html">Embedding 模型</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../supported_models/support_new_models.html">如何支持新模型</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/generative_models.html">Large Language Models</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/multimodal_language_models.html">Multimodal Language Models</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/embedding_models.html">Embedding Models</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/support_new_models.html">How to Support New Models</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">高级功能</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Advanced Features</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../backend/speculative_decoding.html">推测解码</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../backend/reuse_kv_cache.html">重用缓存</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/reuse_kv_cache.html">ReuseCache</a></li>
 
-<li class="toctree-l1"><a class="reference internal" href="../backend/function_calling.html">工具和函数调用</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../backend/quantization.html">量化</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../backend/lora.html">LoRA 服务</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../backend/pd_disaggregation.html">PD分离</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/function_calling.html">Tool and Function Calling</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/lora.html">LoRA Serving</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/pd_disaggregation.html">PD Disaggregation</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">RTP-LLM 路由器</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">RTP-LLM Router</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../backend/flexlb.html">FlexLB（弹性负载均衡器）- 主节点</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/flexlb.html">FlexLB (Flexible Load Balancer) - Master Role</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Benchmark</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../benchmark/benchmark.html">RTP-LLM 性能基准测试工具</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../benchmark/benchmark.html">RTP-LLM Performance Benchmark Tool</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">参考文献</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">References</span></p>
 <ul class="current nav bd-sidenav">
-<li class="toctree-l1 current active has-children"><a class="reference internal" href="general.html">通用指南</a><details open="open"><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul class="current">
-<li class="toctree-l2"><a class="reference internal" href="profiling.html">性能分析</a></li>
-<li class="toctree-l2 current active"><a class="current reference internal" href="#">RTP-LLM调试</a></li>
+<li class="toctree-l1 current active has-children"><a class="reference internal" href="general.html">General Guidance</a><details open="open"><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="profiling.html">Performance Profiling</a></li>
+<li class="toctree-l2 current active"><a class="current reference internal" href="#">Debugging RTP-LLM</a></li>
 </ul>
 </details></li>
-<li class="toctree-l1"><a class="reference internal" href="developer.html">开发者参考</a></li>
+<li class="toctree-l1"><a class="reference internal" href="developer.html">Developer Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../README.html">Documentation Manual</a></li>
 </ul>
 
     </div>
@@ -453,7 +454,7 @@ document.write(`
               
 
 <div id="jb-print-docs-body" class="onlyprint">
-    <h1>RTP-LLM调试</h1>
+    <h1>Debugging RTP-LLM</h1>
     <!-- Table of contents -->
     <div id="print-main-content">
         <div id="jb-print-toc">
@@ -463,19 +464,19 @@ document.write(`
             </div>
             <nav aria-label="Page">
                 <ul class="visible nav section-nav flex-column">
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#debug-python-part">调试Python部分</a><ul class="visible nav section-nav flex-column">
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#method-1-logging-or-print">方法一：日志或打印</a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#method-2-python-debugger">方法二：Python调试器</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#debug-python-part">Debug Python Part</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#method-1-logging-or-print">Method 1: logging or print</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#method-2-python-debugger">Method 2: python debugger</a></li>
 </ul>
 </li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#debug-c-part">调试C++部分</a><ul class="visible nav section-nav flex-column">
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#method-1-logging">方法一：日志记录</a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#method-2-gdb-debug">方法二：GDB调试</a><ul class="nav section-nav flex-column">
-<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#gdb-debug-core">GDB调试核心</a></li>
-<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#gdb-debug-process">GDB调试进程</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#debug-c-part">Debug C++ Part</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#method-1-logging">Method 1: logging</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#method-2-gdb-debug">Method 2: GDB debug</a><ul class="nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#gdb-debug-core">GDB debug core</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#gdb-debug-process">GDB debug process</a></li>
 </ul>
 </li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#method-3-unit-test">方法三：单元测试</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#method-3-unit-test">Method 3: Unit Test</a></li>
 </ul>
 </li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#debug-running-server">Debug Running Server</a></li>
@@ -491,29 +492,30 @@ document.write(`
                 <article class="bd-article">
                   
   <section class="tex2jax_ignore mathjax_ignore" id="debugging-rtp-llm">
-<h1>RTP-LLM调试<a class="headerlink" href="#debugging-rtp-llm" title="Link to this heading">#</a></h1>
-<p>RTP-LLM项目使用Bazel构建系统。在了解如何从头开始本地编译和运行RTP-LLM之后，本文将介绍如何调试代码。由于RTP-LLM主要由Python和C++代码组合而成，我们将在本指南中介绍几种常用的调试方法。</p>
+<h1>Debugging RTP-LLM<a class="headerlink" href="#debugging-rtp-llm" title="Link to this heading">#</a></h1>
+<p>The RTP-LLM project uses the Bazel build system. After learning how to compile and run RTP-LLM locally from scratch, this article will explain how to debug the code. Since RTP-LLM is primarily composed of a combination of Python and C++ code, we will introduce several commonly used debugging methods in this guide.</p>
 <section id="debug-python-part">
-<h2>调试Python部分<a class="headerlink" href="#debug-python-part" title="Link to this heading">#</a></h2>
+<h2>Debug Python Part<a class="headerlink" href="#debug-python-part" title="Link to this heading">#</a></h2>
 <section id="method-1-logging-or-print">
-<h3>方法一：日志或打印<a class="headerlink" href="#method-1-logging-or-print" title="Link to this heading">#</a></h3>
-<p>在本地运行调试模式时，将rtp_llm/config/py_config_modules.py中ServerConfig类的self.frontend_server_count = 4修改为1。这个修改确保只启动一个前端服务器，允许打印语句和日志输出直接在终端中显示。</p>
+<h3>Method 1: logging or print<a class="headerlink" href="#method-1-logging-or-print" title="Link to this heading">#</a></h3>
+<p>When running the debug mode locally, modify the self.frontend_server_count = 4 to 1 in the ServerConfig class within rtp_llm/config/py_config_modules.py. This change ensures only one frontend server is launched, allowing print statements and logging outputs to be directly displayed in the terminal.</p>
 </section>
 <section id="method-2-python-debugger">
-<h3>方法二：Python调试器<a class="headerlink" href="#method-2-python-debugger" title="Link to this heading">#</a></h3>
-<p>假设我们已经有一个现有的容器，访问它并设置SSH端口映射以启用远程连接。</p>
+<h3>Method 2: python debugger<a class="headerlink" href="#method-2-python-debugger" title="Link to this heading">#</a></h3>
+<p>Assuming we already have an existing container, access it and set up an SSH port mapping to enable remote connections.</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>sudo<span class="w"> </span>ssh-keygen<span class="w"> </span>-A
 sudo<span class="w"> </span>/usr/sbin/sshd<span class="w"> </span>-p<span class="w"> </span><span class="m">37228</span>
 </pre></div>
 </div>
-<p>通过VS Code中的SSH扩展访问容器。</p>
+<p>Access the container via the SSH extension in VS Code.</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>Host<span class="w"> </span>dev-container
 <span class="w">    </span>HostName<span class="w"> </span>ip
 <span class="w">    </span>User<span class="w"> </span>user
 <span class="w">    </span>Port<span class="w"> </span><span class="m">37228</span>
 </pre></div>
 </div>
-<p>通过VS Code访问容器后，确保Python调试器扩展已安装在容器中。<img alt="替代文本" src="../_images/debug_image-debugger.png" /></p>
+<p>After accessing the container via VS Code, ensure the Python debugger extension is installed within the container.
+<img alt="alt text" src="../_images/debug_image-debugger.png" /></p>
 <p>Write the launch.json configuration file for debugging.
 Here’s an example of a VS Code launch.json configuration file for debugging Python and C++ code in the RTP-LLM project (adjust paths as needed):</p>
 <div class="highlight-json notranslate"><div class="highlight"><pre><span></span><span class="p">{</span>
@@ -553,7 +555,7 @@ Here’s an example of a VS Code launch.json configuration file for debugging Py
 <span class="p">}</span>
 </pre></div>
 </div>
-<p>在运行或调试代码之前设置所需的环境变量。</p>
+<p>Set up the required environment variables before running or debugging the code.</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="ch">#!/bin/bash</span>
 <span class="nb">set</span><span class="w"> </span>-x<span class="p">;</span>
 <span class="c1">## set python path</span>
@@ -588,52 +590,52 @@ Here’s an example of a VS Code launch.json configuration file for debugging Py
 <span class="nb">export</span><span class="w"> </span><span class="nv">DEVICE_RESERVE_MEMORY_BYTES</span><span class="o">=</span>-20480000
 </pre></div>
 </div>
-<p>打开包含start_server.py的文件，设置断点，然后开始调试。</p>
-<p><img alt="替代文本" src="../_images/debug_image-1.png" /></p>
+<p>open the file containing start_server.py, set breakpoints, and begin debugging.</p>
+<p><img alt="alt text" src="../_images/debug_image-1.png" /></p>
 </section>
 </section>
 <section id="debug-c-part">
-<h2>调试C++部分<a class="headerlink" href="#debug-c-part" title="Link to this heading">#</a></h2>
+<h2>Debug C++ Part<a class="headerlink" href="#debug-c-part" title="Link to this heading">#</a></h2>
 <section id="method-1-logging">
-<h3>方法一：日志记录<a class="headerlink" href="#method-1-logging" title="Link to this heading">#</a></h3>
-<p>添加以下日志语句进行输出：</p>
+<h3>Method 1: logging<a class="headerlink" href="#method-1-logging" title="Link to this heading">#</a></h3>
+<p>Add the following log statements for output:</p>
 <div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="n">RTP_LLM_LOG_DEBUG</span><span class="p">(</span><span class="s">&quot;request [%ld] enqueue success&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">request_id</span><span class="p">);</span>
 </pre></div>
 </div>
-<p>其他类似函数包括：</p>
+<p>other similar functions include:</p>
 <div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="n">RTP_LLM_LOG_INFO</span>
 <span class="n">RTP_LLM_LOG_WARNING</span>
 <span class="n">RTP_LLM_LOG_ERROR</span>
 </pre></div>
 </div>
-<p>使用LOG_LEVEL=&quot;INFO&quot;环境变量设置日志级别。</p>
+<p>Set the log level using the LOG_LEVEL=&quot;INFO&quot; environment variable.</p>
 </section>
 <section id="method-2-gdb-debug">
-<h3>方法二：GDB调试<a class="headerlink" href="#method-2-gdb-debug" title="Link to this heading">#</a></h3>
+<h3>Method 2: GDB debug<a class="headerlink" href="#method-2-gdb-debug" title="Link to this heading">#</a></h3>
 <section id="gdb-debug-core">
-<h4>GDB调试核心<a class="headerlink" href="#gdb-debug-core" title="Link to this heading">#</a></h4>
-<p>当代码在容器中崩溃并产生核心转储时，会生成一个核心文件（例如，core-rtp_llm_backend-78933-1757510512）。调试方法：</p>
+<h4>GDB debug core<a class="headerlink" href="#gdb-debug-core" title="Link to this heading">#</a></h4>
+<p>When the code crashes with a core dump in the container, a core file is generated (e.g., core-rtp_llm_backend-78933-1757510512). To debug:</p>
 <div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">gdb</span> <span class="o">/</span><span class="n">opt</span><span class="o">/</span><span class="n">conda310</span><span class="o">/</span><span class="nb">bin</span><span class="o">/</span><span class="n">python3</span> <span class="n">core</span><span class="o">-</span><span class="n">rtp_llm_backend</span><span class="o">-</span><span class="mi">78933</span><span class="o">-</span><span class="mi">1757510512</span>
 </pre></div>
 </div>
-<p>将核心文件加载到GDB后，运行bt（回溯）命令显示错误堆栈跟踪。</p>
-<p><img alt="替代文本" src="../_images/debug_image-2.png" /></p>
+<p>After loading the core file into GDB, run the bt (backtrace) command to display the error stack trace.</p>
+<p><img alt="alt text" src="../_images/debug_image-2.png" /></p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>f<span class="w"> </span><span class="m">4</span><span class="w">       </span><span class="c1"># check rtp_llm::ScoreStream::ScoreStream info</span>
 info<span class="w"> </span>locals
 p<span class="w"> </span>stream
 </pre></div>
 </div>
-<p><img alt="替代文本" src="../_images/debug_image-3.png" /></p>
-<p>检查propose_stream_信息</p>
+<p><img alt="alt text" src="../_images/debug_image-3.png" /></p>
+<p>check propose_stream_ info</p>
 <div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">p</span> <span class="o">*</span><span class="p">(</span><span class="n">this</span><span class="o">-&gt;</span><span class="n">propose_stream_</span><span class="o">.</span><span class="n">_M_ptr</span><span class="o">-&gt;</span><span class="n">sp_output_buffer_</span><span class="o">.</span><span class="n">_M_ptr</span><span class="o">-&gt;</span><span class="n">tokens</span><span class="o">.</span><span class="n">_M_ptr</span><span class="p">)</span>
 </pre></div>
 </div>
-<p>检查token信息</p>
-<p><img alt="替代文本" src="../_images/debug_image-4.png" /></p>
-<p>检测到空指针（data_ = 0），导致memcpy错误。</p>
+<p>check tokens info</p>
+<p><img alt="alt text" src="../_images/debug_image-4.png" /></p>
+<p>A null pointer (data_ = 0) was detected, causing a memcpy error.</p>
 </section>
 <section id="gdb-debug-process">
-<h4>GDB调试进程<a class="headerlink" href="#gdb-debug-process" title="Link to this heading">#</a></h4>
+<h4>GDB debug process<a class="headerlink" href="#gdb-debug-process" title="Link to this heading">#</a></h4>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nv">MODEL_TYPE</span><span class="o">=</span>qwen_7b<span class="w">     </span><span class="se">\</span>
 <span class="nv">CHECKPOINT_PATH</span><span class="o">=</span>/mnt/nas1/hf/Qwen-7B-Chat/<span class="w">     </span><span class="se">\</span>
 <span class="nv">TOKENIZER_PATH</span><span class="o">=</span>/mnt/nas1/dm/qwen_sp/qwen_tokenizer<span class="w">     </span><span class="se">\</span>
@@ -650,17 +652,20 @@ p<span class="w"> </span>stream
 /opt/conda310/bin/python3<span class="w"> </span>-m<span class="w"> </span>rtp_llm.start_server
 </pre></div>
 </div>
-<p>启动服务后，您可以按如下方式查看相关进程：</p>
-<p>rtp_llm_backend_server进程将作为推理服务的主进程运行。如果设置了TP_SIZE=2，您将看到两个子进程（例如，rank-0和rank-1）用于张量并行。rtp_llm_frontend_server_0前端服务进程将处于活动状态以处理外部请求。</p>
+<p>After starting the service, you can view the relevant processes as follows:</p>
+<p>A rtp_llm_backend_server process will be running as the main process for the inference service. If TP_SIZE=2 is set, you will see two child processes (e.g., rank-0 and rank-1) for tensor parallelism.
+A rtp_llm_frontend_server_0 frontend service process will be active to handle external requests.</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>yanxi.w+<span class="w">  </span><span class="m">40954</span><span class="w">  </span><span class="m">40801</span><span class="w"> </span><span class="m">44</span><span class="w"> </span><span class="m">14</span>:03<span class="w"> </span>pts/8<span class="w">    </span><span class="m">00</span>:00:41<span class="w"> </span>rtp_llm_backend_server
 yanxi.w+<span class="w">  </span><span class="m">41356</span><span class="w">  </span><span class="m">40801</span><span class="w"> </span><span class="m">20</span><span class="w"> </span><span class="m">14</span>:04<span class="w"> </span>pts/8<span class="w">    </span><span class="m">00</span>:00:11<span class="w"> </span>rtp_llm_frontend_server_0
 </pre></div>
 </div>
-<p>开始GDB调试：将GDB附加到目标进程（例如，PID 40954）：</p>
+<p>To begin debugging with GDB:
+Attach GDB to the target process (e.g., PID 40954):</p>
 <div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">gdb</span> <span class="o">-</span><span class="n">p</span> <span class="mi">40954</span>
 </pre></div>
 </div>
-<p>在代码中设置断点，使用curl发送测试请求并触发断点：</p>
+<p>Set breakpoints in the code
+Use curl to send a test request and trigger the breakpoint:</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://127.0.0.1:26000/v1/chat/completions<span class="w">   </span>-H<span class="w"> </span><span class="s2">&quot;Content-Type: application/json&quot;</span><span class="w">   </span>-d<span class="w"> </span><span class="s1">&#39;{</span>
 <span class="s1">    &quot;messages&quot;: [</span>
 <span class="s1">      {</span>
@@ -674,17 +679,19 @@ yanxi.w+<span class="w">  </span><span class="m">41356</span><span class="w">  <
 <span class="s2">  }&#39;</span>
 </pre></div>
 </div>
-<p>断点将被触发，然后通过检查堆栈跟踪来检查代码路径。</p>
-<p><img alt="替代文本" src="../_images/debug_image-5.png" /></p>
+<p>The breakpoint will be triggered, and you can then examine the code path by inspecting the stack trace.</p>
+<p><img alt="alt text" src="../_images/debug_image-5.png" /></p>
 </section>
 </section>
 <section id="method-3-unit-test">
-<h3>方法三：单元测试<a class="headerlink" href="#method-3-unit-test" title="Link to this heading">#</a></h3>
-<p>示例：ViT模块的单元测试</p>
-<p>ViT模块的文件结构</p>
-<p><img alt="替代文本" src="../_images/debug_image-6.png" /></p>
-<p>创建单元测试的步骤 创建测试文件：</p>
-<p>在测试目录下添加一个.cc测试文件（例如，multimodal_processor_test.cc）。使用EXPECT_EQ等断言语句编写Google Test（gtest）用例来验证行为。</p>
+<h3>Method 3: Unit Test<a class="headerlink" href="#method-3-unit-test" title="Link to this heading">#</a></h3>
+<p>Example: Unit Testing for the ViT Module</p>
+<p>File Structure of the ViT Module</p>
+<p><img alt="alt text" src="../_images/debug_image-6.png" /></p>
+<p>Steps to Create Unit Tests
+Create Test Files:</p>
+<p>Add a .cc test file (e.g., multimodal_processor_test.cc) under the test directory.
+Write Google Test (gtest) cases using assertions like EXPECT_EQ to validate behavior.</p>
 <div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;gtest/gtest.h&gt;</span>
 <span class="n">TEST</span><span class="p">(</span><span class="n">MultimodalProcessorTest</span><span class="p">,</span><span class="w"> </span><span class="n">BasicFunctionality</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
 <span class="w">  </span><span class="c1">// Test logic here</span>
@@ -692,7 +699,7 @@ yanxi.w+<span class="w">  </span><span class="m">41356</span><span class="w">  <
 <span class="p">}</span>
 </pre></div>
 </div>
-<p>定义BUILD文件：</p>
+<p>Define the BUILD File:</p>
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">cc_test</span><span class="p">(</span>
     <span class="n">name</span> <span class="o">=</span> <span class="s2">&quot;multimodal_processor_test&quot;</span><span class="p">,</span>
     <span class="n">srcs</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;multimodal_processor_test.cc&quot;</span><span class="p">],</span>
@@ -713,8 +720,8 @@ Execute the following command in the project’s container:</p>
 </section>
 <section id="debug-running-server">
 <h2>Debug Running Server<a class="headerlink" href="#debug-running-server" title="Link to this heading">#</a></h2>
-<p>要通过curl请求获取调试信息，请使用以下带有详细输出的命令：</p>
-<p>在请求中启用aux_info: true和debug_info: true将返回额外的辅助信息和调试详细信息。</p>
+<p>To retrieve debugging information via a curl request, use the following command with verbose output:</p>
+<p>Enabling aux_info: true and debug_info: true in the request will return additional auxiliary information and debugging details.</p>
 <div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">curl</span> <span class="o">-</span><span class="n">X</span> <span class="n">POST</span> <span class="n">http</span><span class="p">:</span><span class="o">//</span><span class="mf">127.0.0.1</span><span class="p">:</span><span class="mi">26000</span><span class="o">/</span><span class="n">v1</span><span class="o">/</span><span class="n">chat</span><span class="o">/</span><span class="n">completions</span>   <span class="o">-</span><span class="n">H</span> <span class="s2">&quot;Content-Type: application/json&quot;</span>   <span class="o">-</span><span class="n">d</span> <span class="s1">&#39;{</span>
     <span class="s2">&quot;messages&quot;</span><span class="p">:</span> <span class="p">[</span>
       <span class="p">{</span>
@@ -729,7 +736,7 @@ Execute the following command in the project’s container:</p>
   <span class="p">}</span><span class="s1">&#39;</span>
 </pre></div>
 </div>
-<p>响应：</p>
+<p>response:</p>
 <div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="p">{</span>
   <span class="s2">&quot;id&quot;</span><span class="p">:</span> <span class="s2">&quot;chat-&quot;</span><span class="p">,</span>
   <span class="s2">&quot;object&quot;</span><span class="p">:</span> <span class="s2">&quot;chat.completion&quot;</span><span class="p">,</span>
@@ -855,7 +862,7 @@ Execute the following command in the project’s container:</p>
 
 </pre></div>
 </div>
-<p>在请求中启用return_softmax_probs: true将返回softmax概率详细信息。&quot;</p>
+<p>Enabling return_softmax_probs: true in the request will return softmax probs details.</p>
 <div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">curl</span> <span class="o">-</span><span class="n">X</span> <span class="n">POST</span> <span class="n">http</span><span class="p">:</span><span class="o">//</span><span class="mf">127.0.0.1</span><span class="p">:</span><span class="mi">26000</span><span class="o">/</span><span class="n">v1</span><span class="o">/</span><span class="n">chat</span><span class="o">/</span><span class="n">completions</span>   <span class="o">-</span><span class="n">H</span> <span class="s2">&quot;Content-Type: application/json&quot;</span>   <span class="o">-</span><span class="n">d</span> <span class="s1">&#39;{</span>
     <span class="s2">&quot;messages&quot;</span><span class="p">:</span> <span class="p">[</span>
       <span class="p">{</span>
@@ -872,7 +879,7 @@ Execute the following command in the project’s container:</p>
   <span class="p">}</span><span class="s1">&#39;</span>
 </pre></div>
 </div>
-<p>响应：</p>
+<p>response:</p>
 <div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="p">{</span>
   <span class="s2">&quot;id&quot;</span><span class="p">:</span> <span class="s2">&quot;chat-&quot;</span><span class="p">,</span>
   <span class="s2">&quot;object&quot;</span><span class="p">:</span> <span class="s2">&quot;chat.completion&quot;</span><span class="p">,</span>
@@ -928,15 +935,15 @@ Execute the following command in the project’s container:</p>
 
 </pre></div>
 </div>
-<p>还有其他配置选项可用，例如：</p>
+<p>Additional configuration options are available, such as:</p>
 <ul class="simple">
-<li><p>返回logits</p></li>
-<li><p>返回累积对数概率</p></li>
-<li><p>返回增量</p></li>
-<li><p>返回隐藏状态</p></li>
-<li><p>返回输出ID</p></li>
-<li><p>返回输入ID</p></li>
-<li><p>返回所有概率</p></li>
+<li><p>return_logits</p></li>
+<li><p>return_cum_log_probs</p></li>
+<li><p>return_incremental</p></li>
+<li><p>return_hidden_states</p></li>
+<li><p>return_output_ids</p></li>
+<li><p>return_input_ids</p></li>
+<li><p>return_all_probs</p></li>
 </ul>
 </section>
 </section>
@@ -958,7 +965,7 @@ Execute the following command in the project’s container:</p>
       <i class="fa-solid fa-angle-left"></i>
       <div class="prev-next-info">
         <p class="prev-next-subtitle">上一页</p>
-        <p class="prev-next-title">性能分析</p>
+        <p class="prev-next-title">Performance Profiling</p>
       </div>
     </a>
     <a class="right-next"
@@ -966,7 +973,7 @@ Execute the following command in the project’s container:</p>
        title="next page">
       <div class="prev-next-info">
         <p class="prev-next-subtitle">下一页</p>
-        <p class="prev-next-title">开发者参考</p>
+        <p class="prev-next-title">Developer Reference</p>
       </div>
       <i class="fa-solid fa-angle-right"></i>
     </a>
@@ -986,19 +993,19 @@ Execute the following command in the project’s container:</p>
   </div>
   <nav class="bd-toc-nav page-toc">
     <ul class="visible nav section-nav flex-column">
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#debug-python-part">调试Python部分</a><ul class="visible nav section-nav flex-column">
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#method-1-logging-or-print">方法一：日志或打印</a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#method-2-python-debugger">方法二：Python调试器</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#debug-python-part">Debug Python Part</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#method-1-logging-or-print">Method 1: logging or print</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#method-2-python-debugger">Method 2: python debugger</a></li>
 </ul>
 </li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#debug-c-part">调试C++部分</a><ul class="visible nav section-nav flex-column">
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#method-1-logging">方法一：日志记录</a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#method-2-gdb-debug">方法二：GDB调试</a><ul class="nav section-nav flex-column">
-<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#gdb-debug-core">GDB调试核心</a></li>
-<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#gdb-debug-process">GDB调试进程</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#debug-c-part">Debug C++ Part</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#method-1-logging">Method 1: logging</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#method-2-gdb-debug">Method 2: GDB debug</a><ul class="nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#gdb-debug-core">GDB debug core</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#gdb-debug-process">GDB debug process</a></li>
 </ul>
 </li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#method-3-unit-test">方法三：单元测试</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#method-3-unit-test">Method 3: Unit Test</a></li>
 </ul>
 </li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#debug-running-server">Debug Running Server</a></li>
@@ -1035,7 +1042,7 @@ Execute the following command in the project’s container:</p>
   
   <div class="footer-item">
     <p class="last-updated">
-  最后更新于 2025 年 09 月 25 日.
+  最后更新于 2025 年 10 月 09 日.
   <br/>
 </p>
   </div>
