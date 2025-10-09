@@ -7,7 +7,7 @@ BeamSearchLogitsProcessor::BeamSearchLogitsProcessor(rtp_llm::DeviceBase* device
 std::shared_ptr<BeamSearchLogitsProcessor> BeamSearchLogitsProcessor::fromGenerateInput(
     rtp_llm::DeviceBase* device, std::shared_ptr<GenerateInput> generate_input, int64_t eos_token_id) {
 
-    if (!generate_input->generate_config->hasNumBeams()) {
+    if (generate_input->generate_config->num_return_sequences <= 1 && !generate_input->generate_config->hasNumBeams()) {
         return nullptr;
     }
 
