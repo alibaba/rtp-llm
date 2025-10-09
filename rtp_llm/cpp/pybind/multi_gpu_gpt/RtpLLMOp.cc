@@ -98,6 +98,26 @@ void RtpLLMOp::init(py::object model,
                     py::object propose_model,
                     py::object token_processor) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
+    
+    py::object handler; 
+    {
+        py::gil_scoped_acquire gil;
+
+        auto custom_module = model.attr("custom_module");
+        if (!custom_module.is_none()) {
+            py::object potential_handler = custom_module.attr("handler");
+
+            if (!potential_handler.is_none()) {
+                handler = potential_handler;
+            }
+        }
+    }
+
+    if (handler) {
+        RTP_LLM_LOG_INFO("Post process mode is on");
+    }
+
+    RTP_LLM_LOG_INFO("handler = %p", handler.ptr());
 
     EngineInitParams params = initModel(model);
     RTP_LLM_LOG_INFO("init engine params success");
@@ -107,10 +127,12 @@ void RtpLLMOp::init(py::object model,
     grpc_server_thread_ = std::thread(&RtpLLMOp::initRPCServer,
                                       this,
                                       std::move(params),
+                                      std::move(handler),
                                       std::move(mm_process_engine),
                                       std::move(propose_params),
                                       std::move(token_processor));
     grpc_server_thread_.detach();
+    RTP_LLM_LOG_INFO("handler = %p", handler.ptr());
     while (!is_server_ready_) {
         sleep(1);  // wait 1s for server ready
     }
@@ -198,6 +220,7 @@ KVCacheInfo RtpLLMOp::getCacheStatusInfo(int64_t latest_cache_version) {
 }
 
 void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_init_params,
+                             py::object                                             py_handler,
                              py::object                                             mm_process_engine,
                              std::unique_ptr<ProposeModelEngineInitParams> propose_params,
                              py::object                                             token_processor) {
@@ -213,8 +236,9 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
         } else {
             model_rpc_service_.reset(new LocalRpcServiceImpl());
         }
+        RTP_LLM_LOG_INFO("initRPCServer = %p", py_handler.ptr());
         grpc::Status grpc_status =
-            model_rpc_service_->init(maga_init_params, std::move(mm_process_engine), std::move(propose_params));
+            model_rpc_service_->init(maga_init_params, std::move(py_handler), std::move(mm_process_engine), std::move(propose_params));
         if (!grpc_status.ok()) {
             RTP_LLM_FAIL("init rpc server failed, error msg: %s", grpc_status.error_message().c_str());
         }

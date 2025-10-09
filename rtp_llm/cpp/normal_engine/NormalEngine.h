@@ -23,7 +23,7 @@ namespace rtp_llm {
 
 class NormalEngine: public EngineBase {
 public:
-    NormalEngine(const EngineInitParams& params);
+    NormalEngine(const EngineInitParams& params, py::object handler);
     ~NormalEngine();
 
     std::shared_ptr<GenerateStream>   makeStream(const std::shared_ptr<GenerateInput>& input) override;

@@ -1,6 +1,7 @@
 #pragma once
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include <cstdint>
+#include <functional>
 
 namespace rtp_llm {
 
@@ -28,7 +29,7 @@ public:
 
     bool                         hasOutput() override;
     ErrorResult<GenerateOutputs> nextOutput() override;
-    void                         updateOutput(const StreamUpdateInfo& update_info) override;
+    void updateOutput(const StreamUpdateInfo& update_info) override;
 
 private:
     GenerateOutputs prepareGenerateOutput(const StreamUpdateInfo& update_info);

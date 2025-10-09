@@ -76,7 +76,7 @@ class CustomHandler(object):
 
     # specify required args for extended_forward
     def extend_forward_args(self) -> List[str]:
-        return ["input_lengths", "input_ids", "hidden_states"]
+        return ["input_lengths", "input_ids", "all_hidden_states"]
 
     # extended_forward
     # input_lengths: [batch_size]
@@ -87,7 +87,7 @@ class CustomHandler(object):
         return self.forward(
             input_lengths=kwargs["input_lengths"],
             input_ids=kwargs["input_ids"],
-            hidden_states=kwargs["hidden_states"],
+            hidden_states=kwargs["all_hidden_states"],
         )
 
     def post_process(self, request: Any, batch_output: EngineOutputs) -> EngineOutputs:

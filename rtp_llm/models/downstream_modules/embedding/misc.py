@@ -83,14 +83,14 @@ def combo_to_batch_data(
             batch_data.pop("input_ids"), input_slices
         )
 
-    if "hidden_states" in batch_data:
-        batch_data["hidden_states"] = combo_to_batch_hidden_states(
-            batch_data.pop("hidden_states"), input_slices
+    if "all_hidden_states" in batch_data:
+        batch_data["all_hidden_states"] = combo_to_batch_hidden_states(
+            batch_data.pop("all_hidden_states"), input_slices
         )
 
-    if "moe_gating" in batch_data:
-        batch_data["moe_gating"] = combo_to_batch_moe_gating(
-            batch_data.pop("moe_gating"), input_slices
+    if "all_moe_gating" in batch_data:
+        batch_data["all_moe_gating"] = combo_to_batch_moe_gating(
+            batch_data.pop("all_moe_gating"), input_slices
         )
 
     if "attention_mask" in batch_data:
@@ -133,6 +133,30 @@ def combo_to_list(
         bias += length
     return result
 
+
+def slice_last_moe_gating(
+    moe_gating: List[Optional[torch.Tensor]], 
+    token_lengths: List[int]
+) -> List[Optional[torch.Tensor]]:
+    first_tensor = next((g for g in moe_gating if g is not None), None)
+
+    if first_tensor is None:
+        return [None] * len(moe_gating)
+
+    device = first_tensor.device
+    lengths_tensor = torch.as_tensor(token_lengths, dtype=torch.long, device=device)
+    last_token_indices = torch.cumsum(lengths_tensor, dim=0) - 1
+
+    non_none_indices = [idx for idx, gating in enumerate(moe_gating) if gating is not None]
+    stacked = torch.stack([moe_gating[idx] for idx in non_none_indices], dim=0)
+    selected = stacked.index_select(dim=1, index=last_token_indices)
+    per_layer = selected.unbind(dim=0)
+
+    layer_iter = iter(per_layer)
+    return [
+        next(layer_iter) if g is not None else None
+        for g in moe_gating
+    ]
 
 class EmbeddingRendererBase(CustomRenderer):
     embedding_type: EmbeddingResponseType

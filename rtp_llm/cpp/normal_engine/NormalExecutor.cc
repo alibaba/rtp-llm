@@ -1,12 +1,18 @@
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include <cstdlib>
 #include <memory>
+#include <sstream>
+#include <vector>
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/models/GptModel.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/models/NativeDeviceGraphModel.h"
 #include "rtp_llm/cpp/models/Sampler.h"
 #include "rtp_llm/cpp/config/GptInitParameter.h"
+#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "rtp_llm/cpp/engine_base/executor_base/HandlerArgs.h"
+#include <torch/torch.h>
+#include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 
 using namespace std;
 
@@ -16,7 +22,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
                                const std::shared_ptr<CacheManager>&      cache_manager,
                                rtp_llm::DeviceBase*                      device,
                                const std::shared_ptr<lora::LoraManager>& lora_manager,
-                               bool                                      warm_up):
+                               bool                                      warm_up,
+                               py::object                                handler):
     Executor(device),
     cache_manager_(cache_manager),
     lora_manager_(lora_manager),
@@ -80,10 +87,14 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
 
     // when warmup, cache manager maybe nullptr
     const auto& cache_config = cache_manager ? cache_manager->cacheConfig() : CacheConfig();
-    batch_stream_processor_.reset(new NormalBatchStreamProcessor(params.gpt_init_parameter, cache_config, warm_up_));
+    batch_stream_processor_ =
+        std::make_unique<NormalBatchStreamProcessor>(params.gpt_init_parameter, cache_config, warm_up_);
     PrefixToCandidateTokens::instance()->reloadPrefixDictWithPrefix(
         params.gpt_init_parameter.ckpt_path_, params.gpt_init_parameter.sp_config.tree_decode_config);
     device_->profileStart();
+
+    post_processor_ = std::make_shared<PostProcessor>();
+    setPostprocessHandler(std::move(handler));
 }
 
 absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams) {
@@ -97,7 +108,10 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         int64_t start_time_us      = autil::TimeUtility::currentTimeInMicroSeconds();
         auto    model_input_status = batch_stream_processor_->gatherModelInput(stream_groups);
         RETURN_IF_STATUS_OR_ERROR(model_input_status);
-        model_input                              = std::move(model_input_status.value());
+        model_input = std::move(model_input_status.value());
+        if (post_processor_ && post_processor_->hasArg(HandlerArgs::Arg::LAST_MOE_GATING)) {
+            model_input.need_moe_gating = true;
+        }
         executor_collector.gather_model_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
     {
@@ -148,6 +162,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         RTP_LLM_LOG_DEBUG("sampler forward done");
         executor_collector.sample_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
+
     {
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         auto    result =

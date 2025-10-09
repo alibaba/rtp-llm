@@ -1,5 +1,5 @@
+import os
 from typing import Optional
-
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.config.task_type import TaskType
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
@@ -31,8 +31,11 @@ def create_custom_module(
     except ImportError:
         pass
 
-    if task_type == TaskType.LANGUAGE_MODEL:
-        return None
+    if task_type == TaskType.LANGUAGE_MODEL: 
+        if os.path.exists(os.path.join(config.ckpt_path, "modules.json")):
+            return DenseEmbeddingModule(config, tokenizer)
+        else:
+            return None
     assert tokenizer is not None, "tokenizer should not be None"
     if task_type == TaskType.DENSE_EMBEDDING:
         return DenseEmbeddingModule(config, tokenizer)

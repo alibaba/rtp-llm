@@ -15,10 +15,20 @@
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
+#include "rtp_llm/cpp/normal_engine/PostProcessor.h"
 
 using namespace std;
 
 namespace rtp_llm {
+namespace py = pybind11;
+
+void NormalBatchStreamProcessor::setPostProcessor(std::shared_ptr<PostProcessor> post_processor) {
+    post_processor_ = std::move(post_processor);
+}
+
+bool NormalBatchStreamProcessor::needsPostprocessArg(HandlerArgs::Arg arg) const {
+    return post_processor_ && post_processor_->hasArg(arg);
+}
 
 absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(const StreamGroups& stream_groups) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
@@ -562,16 +572,27 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_gro
         RTP_LLM_LOG_DEBUG(
             "stream [%ld], new_tokens = [%s]", stream->streamId(), new_tokens->debugStringWithData<int32_t>().c_str());
 
-        stream->update({has_beam_search ? batch_new_all_token_ids : new_tokens,
-                        1,
-                        batch_hidden_states,
-                        batch_logits,
-                        current_softmax_result,
-                        batch_cum_log_probs,
-                        all_probs,
-                        loss,
-                        src_batch_indices,
-                        all_hidden_states});
+        StreamUpdateInfo::PostprocessCallback postprocess_callback;
+        if (post_processor_) {
+            postprocess_callback = post_processor_->buildCallback(
+                batch_hidden_states, merge_outputs.model_output.moe_gating, token_offset, token_size, cur_batch_size, stream);
+        }
+
+        StreamUpdateInfo update_info{has_beam_search ? batch_new_all_token_ids : new_tokens,
+                                     1,
+                                     batch_hidden_states,
+                                     batch_logits,
+                                     current_softmax_result,
+                                     batch_cum_log_probs,
+                                     all_probs,
+                                     loss,
+                                     src_batch_indices,
+                                     all_hidden_states,
+                                     true,
+                                     false,
+                                     std::move(postprocess_callback)};
+
+        stream->update(update_info);
 
         batch_idx_in += cur_batch_size;
         batch_idx_out += next_batch_size;
