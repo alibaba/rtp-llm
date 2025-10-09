@@ -18,7 +18,7 @@ from rtp_llm.openai.renderers.sglang_helpers.function_call.qwen3_coder_detector 
 
 
 class Qwen3CoderRenderer(ReasoningToolBaseRenderer):
-    """Qwen3CoderRenderer 使用 Qwen3CoderDetector 进行工具调用解析"""
+    """Qwen3CoderRenderer 使用 Q wen3CoderDetector 进行工具调用解析"""
 
     @override
     def _create_detector(
