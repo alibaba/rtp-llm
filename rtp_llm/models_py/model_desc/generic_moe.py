@@ -14,6 +14,7 @@ from rtp_llm.models_py.modules import Linear
 from rtp_llm.models_py.modules.moe import FusedMoe
 from rtp_llm.models_py.modules.moe.fused_moe_factory import FusedMoeFactory
 from rtp_llm.models_py.modules import RMSNorm
+from rtp_llm.models_py.modules import SelectTopk
 from rtp_llm.ops import KVCache, PyAttentionInputs, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
@@ -33,7 +34,7 @@ class GenericMoeLayer(nn.Module):
         self.top_k = config.moe_k
 
         self.gate = Linear(weights[W.moe_gate], None)
-        self.select_topk_op = SelectTopkOp(config)
+        self.select_topk = SelectTopk(config)
         self.fused_moe: FusedMoe = FusedMoeFactory.create_fused_moe(config, weights)
         self.w1 = weights.get(W.moe_w1, None)
         self.w2 = weights.get(W.moe_w2, None)
@@ -70,22 +71,7 @@ class GenericMoeLayer(nn.Module):
             device=hidden_states.device,
         )
         
-        from rtp_llm.ops import DeviceType, get_device
-        device_type = get_device().get_device_type()
-        if device_type == DeviceType.ROCm:
-            import aiter
-            token_expert_indicies = torch.empty(hidden_states.shape[0], self.top_k, dtype=torch.int32, device=hidden_states.device)
-            aiter.topk_softmax(
-                topk_weights,
-                topk_ids,
-                token_expert_indicies,
-                router_logits_fp32,  # TODO(woosuk): Optimize this.
-                True,
-            )
-        else:
-            from libth_transformer.rtp_llm_ops import SelectTopkOp
-            select_topk_op = SelectTopkOp(self.config)
-            select_topk_op.forward(router_logits_fp32, topk_ids, topk_weights)
+        self.select_topk(router_logits_fp32, topk_ids, topk_weights)
 
         return self.fused_moe(
             hidden_states=hidden_states,
