@@ -18,7 +18,7 @@ from rtp_llm.model_loader.weight_module import (
     QuantWeight,
     WeightModule,
 )
-from rtp_llm.utils.database import BaseDatabase
+from rtp_llm.model_loader.tensor_source import TensorSource
 from rtp_llm.utils.model_weight import W, WeightStyle
 
 if utils.is_cuda():
@@ -159,12 +159,12 @@ class LoadQuantDynamicPerTensorFp8Weight(CompositeWeight, QuantWeight):
 
     def _load_raw_tensor(
         self,
-        database: BaseDatabase,
+        tensor_source: TensorSource,
         layer_id: Optional[int],
         device: str,
         load_config: LoadConfig,
     ):
-        kernel = self.kernel._load_raw_tensor(database, layer_id, device, load_config)
+        kernel = self.kernel._load_raw_tensor(tensor_source, layer_id, device, load_config)
         if self.kernel.name in [W.moe_w1, W.moe_w2]:
             # per expert quant moe w13 and w2 to fp8
             kernel_tensor = kernel[self.kernel.name]

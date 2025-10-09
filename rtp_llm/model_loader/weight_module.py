@@ -1,6 +1,7 @@
 import functools
 import inspect
 import logging
+import time
 import traceback
 import weakref
 from abc import ABC, abstractmethod
@@ -11,6 +12,7 @@ import torch
 from rtp_llm.config.quant_config import QuantizationConfig
 from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.utils.database import BaseDatabase
+from rtp_llm.model_loader.tensor_source import TensorSource
 from rtp_llm.utils.model_weight import CkptWeightInfo, W, WeightStyle, identity, sp_id
 
 
@@ -151,16 +153,16 @@ class WeightModule(ABC):
     @torch.inference_mode()
     def load(
         self,
-        database: BaseDatabase,
+        tensor_source: TensorSource,
         layer_id: Optional[int],
         device: str,
         load_config: LoadConfig,
     ):
-        raw_tensors = self._load_raw_tensor(database, layer_id, device, load_config)
+        raw_tensors = self._load_raw_tensor(tensor_source, layer_id, device, load_config)
 
         if load_config.merge_lora:
             merged_tensors = self._merge_lora(
-                raw_tensors, database, layer_id, load_config
+                raw_tensors, tensor_source.get_database(), layer_id, load_config
             )
         else:
             merged_tensors = raw_tensors
@@ -230,11 +232,17 @@ class WeightModule(ABC):
     @abstractmethod
     def _load_raw_tensor(
         self,
-        database: BaseDatabase,
+        tensor_source: TensorSource,
         layer_id: Optional[int],
         device: str,
         load_config: LoadConfig,
     ):
+        pass
+
+    @abstractmethod
+    def get_tensor_names(
+        self, layer_id: Optional[int], load_config: LoadConfig
+    ) -> set[str]:
         pass
 
     @abstractmethod
@@ -308,7 +316,7 @@ class AtomicWeight(WeightModule):
 
     def _load_raw_tensor(
         self,
-        database: BaseDatabase,
+        tensor_source: TensorSource,
         layer_id: Optional[int],
         device: str,
         load_config: LoadConfig,
@@ -322,7 +330,7 @@ class AtomicWeight(WeightModule):
             try:
                 before_merge_tensors.append(
                     ckpt_weight.merge_fun(
-                        [x.to(device) for x in database.load_tensor(name, convert_type)]
+                        [x.to(device) for x in tensor_source.load_tensor(name, convert_type)]
                     )
                 )
             except Exception as e:
@@ -617,6 +625,14 @@ class AtomicWeight(WeightModule):
             )
         }
 
+    def get_tensor_names(
+        self, layer_id: Optional[int], load_config: LoadConfig
+    ) -> set[str]:
+        names = set[str]()
+        for ckpt_weight in self.weights:
+            names.add(ckpt_weight.tensor_name(layer_id))
+        return names
+
     def _get_split_func(self):
         return W.gpt_style_tp_strategy[self.name]
 
@@ -737,7 +753,7 @@ class CompositeWeight(WeightModule):
 
     def _load_raw_tensor(
         self,
-        database: BaseDatabase,
+        tensor_source: TensorSource,
         layer_id: Optional[int],
         device: str,
         load_config: LoadConfig,
@@ -745,7 +761,7 @@ class CompositeWeight(WeightModule):
         raw_tensors = {}
         for name, sub_weight in self.sub_weights.items():
             sub_tensors = sub_weight._load_raw_tensor(
-                database, layer_id, device, load_config
+                tensor_source, layer_id, device, load_config
             )
             if isinstance(sub_weight, AtomicWeight) and isinstance(sub_tensors, dict):
                 raw_tensors.update(sub_tensors)
@@ -836,3 +852,12 @@ class CompositeWeight(WeightModule):
             else:
                 processed_tensors.update({name: sub_tensors})
         return processed_tensors
+
+    def get_tensor_names(
+        self, layer_id: Optional[int], load_config: LoadConfig
+    ) -> set[str]:
+        names = set[str]()
+        for _, sub_weight in self.sub_weights.items():
+            sub_names = sub_weight.get_tensor_names(layer_id, load_config)
+            names = names.union(sub_names)
+        return names

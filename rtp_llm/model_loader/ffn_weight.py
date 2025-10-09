@@ -14,7 +14,7 @@ from rtp_llm.model_loader.weight_module import (
     QuantWeight,
     WeightModule,
 )
-from rtp_llm.utils.database import BaseDatabase
+from rtp_llm.model_loader.tensor_source import TensorSource
 from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity
 from rtp_llm.utils.util import check_with_info
 
@@ -291,13 +291,13 @@ class MoeAtomicWeight(AtomicWeight):
 
     def _load_raw_tensor(
         self,
-        database: BaseDatabase,
+        tensor_source: TensorSource,
         layer_id: Optional[int],
         device: str,
         load_config: LoadConfig,
     ):
         if self.config.weight_stack:
-            return super()._load_raw_tensor(database, layer_id, device, load_config)
+            return super()._load_raw_tensor(tensor_source, layer_id, device, load_config)
 
         # weight should be expand by experts
         before_merge_tensors = []
@@ -318,7 +318,7 @@ class MoeAtomicWeight(AtomicWeight):
                         ckpt_weight.merge_fun(
                             [
                                 x.to(device)
-                                for x in database.load_tensor(name, convert_type)
+                                for x in tensor_source.load_tensor(name, convert_type)
                             ]
                         )
                     )
@@ -331,6 +331,23 @@ class MoeAtomicWeight(AtomicWeight):
         after_merge_tensor = self.process_fun(before_merge_tensors).to(convert_type)
         logging.debug("load weight :%s, %s ", self.name, after_merge_tensor.shape)
         return {self.name: after_merge_tensor}
+    
+    def get_tensor_names(
+        self, layer_id: Optional[int], load_config: LoadConfig
+    ) -> set[str]:
+        if self.config.weight_stack:
+            return super().get_tensor_names(layer_id, load_config)
+        names = set[str]()
+        for ckpt_weight in self.weights:
+            selected_experts = load_config.get_selected_experts(
+                layer_id, self.config.expert_num
+            )
+            for expert_id in selected_experts:
+                name = ckpt_weight.name.format(
+                    i=str(layer_id), i_1=str(layer_id + 1), expert_id=str(expert_id)
+                )
+                names.add(name)
+        return names
 
 
 class MoeWeight(CompositeWeight):

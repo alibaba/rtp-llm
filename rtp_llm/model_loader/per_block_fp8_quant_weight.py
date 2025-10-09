@@ -14,7 +14,7 @@ from rtp_llm.model_loader.weight_module import (
     QuantWeight,
     WeightModule,
 )
-from rtp_llm.utils.database import BaseDatabase
+from rtp_llm.model_loader.tensor_source import TensorSource
 from rtp_llm.utils.model_weight import (
     FP8_E4M3_MAX,
     CkptWeightInfo,
@@ -745,12 +745,12 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
 
     def _load_raw_tensor(
         self,
-        database: BaseDatabase,
+        tensor_source: TensorSource,
         layer_id: Optional[int],
         device: str,
         load_config: LoadConfig,
     ):
-        kernel = self.kernel._load_raw_tensor(database, layer_id, device, load_config)
+        kernel = self.kernel._load_raw_tensor(tensor_source, layer_id, device, load_config)
 
         res = {}
         scale = None
@@ -774,3 +774,8 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
             res.update({self.scale.name: scale.contiguous().to(device)})
 
         return res
+    
+    def get_tensor_names(
+        self, layer_id: Optional[int], load_config: LoadConfig
+    ) -> set[str]:
+        return self.kernel.get_tensor_names(layer_id, load_config)

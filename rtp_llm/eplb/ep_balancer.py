@@ -20,6 +20,7 @@ from rtp_llm.model_loader.model_weight_info import (
     ModelWeightInfo,
 )
 from rtp_llm.utils.database import BaseDatabase
+from rtp_llm.model_loader.tensor_source import DatabaseTensorSource
 from rtp_llm.utils.model_weight import W
 
 
@@ -217,7 +218,7 @@ class ExpertBalancer:
             f"[EPLB_py][RANK {self._load_config.ep_rank}] Load MOE weight layer {layer_id} for {choose_expert_id}"
         )
         try:
-            res = moe_weight.load(self.database, layer_id, "cpu", self._load_config)
+            res = moe_weight.load(DatabaseTensorSource(self.database), layer_id, "cpu", self._load_config)
         except:
             logging.error(
                 f"[EPLB_py][RANK {self._load_config.ep_rank}] Load MOE weight layer failed: 完整堆栈:\n{traceback.format_exc()}"

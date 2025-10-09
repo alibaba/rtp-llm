@@ -97,6 +97,7 @@ requirement([
     "portalocker",
     "concurrent_log_handler",
     "aiter",
+    "fastsafetensors",
 ] + tensorrt)
 
 filegroup(

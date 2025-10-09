@@ -19,7 +19,7 @@ from rtp_llm.model_loader.weight_module import (
     QuantWeight,
     WeightModule,
 )
-from rtp_llm.utils.database import BaseDatabase
+from rtp_llm.model_loader.tensor_source import TensorSource
 from rtp_llm.utils.model_weight import (
     FP8_E4M3_MAX,
     CkptWeightInfo,
@@ -681,12 +681,12 @@ class LoadQuantStaticPerTensorFp8Weight(StaticPerTensorFp8Weight):
 
     def _load_raw_tensor(
         self,
-        database: BaseDatabase,
+        tensor_source: TensorSource,
         layer_id: Optional[int],
         device: str,
         load_config: LoadConfig,
     ):
-        kernel = self.kernel._load_raw_tensor(database, layer_id, device, load_config)
+        kernel = self.kernel._load_raw_tensor(tensor_source, layer_id, device, load_config)
         res = {}
         quant_kernel, scale = quantize_weight_to_fp8(kernel.get(self.kernel.name))
         quant_kernel = quant_kernel.T
@@ -697,15 +697,27 @@ class LoadQuantStaticPerTensorFp8Weight(StaticPerTensorFp8Weight):
 
         if self.act_scale:
             act_scale = self.act_scale._load_raw_tensor(
-                database, layer_id, device, load_config
+                tensor_source, layer_id, device, load_config
             )
             res.update(act_scale)
         if self.act_scale_inv:
             act_scale_inv = self.act_scale_inv._load_raw_tensor(
-                database, layer_id, device, load_config
+                tensor_source, layer_id, device, load_config
             )
             res.update(act_scale_inv)
         return res
+    
+    def get_tensor_names(
+        self, layer_id: Optional[int], load_config: LoadConfig
+    ) -> set[str]:
+        names = self.kernel.get_tensor_names(layer_id, load_config)
+        if self.act_scale:
+            names = names.union(self.act_scale.get_tensor_names(layer_id, load_config))
+        if self.act_scale_inv:
+            names = names.union(
+                self.act_scale_inv.get_tensor_names(layer_id, load_config)
+            )
+        return names
 
 
 class Fp8PerTensorCompressedWeight(CompositeWeight, QuantWeight):
