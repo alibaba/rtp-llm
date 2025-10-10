@@ -38,7 +38,7 @@ def register_hf_architecture(name: str, model_type: str):
         raise Exception(
             f"try register model {name} with type {_hf_architecture_2_ft[name]} and {model_type}, confict!"
         )
-    logging.debug(f"registerhf_architecture: {name} -> {model_type}")
+    logging.debug("registerhf_architecture: %s -> %s", name, model_type)
     _hf_architecture_2_ft[name] = model_type
 
 
@@ -51,7 +51,7 @@ def register_hf_repo(name: str, model_type: str):
         raise Exception(
             f"try register model {name} with type {_hf_repo_2_ft[name]} and {model_type}, confict!"
         )
-    logging.debug(f"register_hf_repo: {name} -> {model_type}")
+    logging.debug("register_hf_repo: %s -> %s", name, model_type)
     _hf_repo_2_ft[name] = model_type
 
 
@@ -60,14 +60,14 @@ class ModelDict:
     def get_ft_model_type_by_hf_repo(repo: str) -> Optional[str]:
         global _hf_repo_2_ft
         model_type = _hf_repo_2_ft.get(repo, None)
-        logging.debug(f"get hf_repo model type: {repo}, {model_type}")
+        logging.debug("get hf_repo model type: %s, %s", repo, model_type)
         return model_type
 
     @staticmethod
     def get_ft_model_type_by_hf_architectures(architecture):
         global _hf_architecture_2_ft
         model_type = _hf_architecture_2_ft.get(architecture, None)
-        logging.debug(f"get architectur model type: {architecture}, {model_type}")
+        logging.debug("get architectur model type: %s, %s", architecture, model_type)
         return model_type
 
     @staticmethod

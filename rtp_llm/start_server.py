@@ -30,7 +30,7 @@ def check_server_health(server_port):
             logging.info(f"health check is not ready")
             return False
     except BaseException as e:
-        logging.debug(f"health check is not ready, {str(e)}")
+        logging.debug("health check is not ready, %s", str(e))
         return False
 
 

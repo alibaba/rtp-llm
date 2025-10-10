@@ -118,7 +118,7 @@ class LoadConfig(BaseModel):
             f"layer_id:{layer_id} muse less than num_layers:{self.num_layers} and phy2log len(self.phy2log[layer_id]) must equal to {self.phy_exp_num}",
         )
         self.phy2log[layer_id] = experts
-        logging.debug(f"update layer {layer_id} phy2log {layer_phy2log}")
+        logging.debug("update layer %s phy2log %s", layer_id, layer_phy2log)
 
     @staticmethod
     def create_redundant_expert(
@@ -186,5 +186,5 @@ class LoadConfig(BaseModel):
                 layer_phy2log.extend(list(range(redundant_expert)))
                 phy2log.append(layer_phy2log)
 
-        logging.debug(f"phy2log: {phy2log}")
+        logging.debug("phy2log: %s", phy2log)
         return phy2log

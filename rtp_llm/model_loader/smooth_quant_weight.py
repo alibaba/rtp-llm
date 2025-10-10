@@ -64,7 +64,7 @@ class SmoothQuantWeightInfo(CompositeWeight, QuantWeight):
         ):
             return False
         name = src_weight_info.name
-        logging.debug(f"src_weight_info.weight_style : {src_weight_info.weight_style}")
+        logging.debug("src_weight_info.weight_style : %s", src_weight_info.weight_style)
         return name in cls.w8a8_weight_list and (
             src_weight_info.weight_style
             not in [WeightStyle.TRT_ENGINE, WeightStyle.RTP_SMOOTH_LLM_STYLE]

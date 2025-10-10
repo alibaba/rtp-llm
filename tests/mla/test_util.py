@@ -47,14 +47,14 @@ def compare_tensor_diff_with_ratio(
 
     # 打印误差统计信息
     logging.debug(
-        f"{name} - Absolute error > {abs_threshold} percentage: {abs_diff_percentage:.2%}"
+        "%s - Absolute error > %s percentage: %.2f%%", name, abs_threshold, abs_diff_percentage * 100
     )
     logging.debug(
-        f"{name} - Relative error > {rel_threshold} percentage: {rel_diff_percentage:.2%}"
+        "%s - Relative error > %s percentage: %.2f%%", name, rel_threshold, rel_diff_percentage * 100
     )
-    logging.debug(f"{name} - Combined error percentage: {combined_diff_percentage:.2%}")
-    logging.debug(f"{name} - Max absolute error: {abs_diff.max().item():.6f}")
-    logging.debug(f"{name} - Max relative error: {rel_diff.max().item():.6f}")
+    logging.debug("%s - Combined error percentage: %.2f%%", name, combined_diff_percentage * 100)
+    logging.debug("%s - Max absolute error: %.6f", name, abs_diff.max().item())
+    logging.debug("%s - Max relative error: %.6f", name, rel_diff.max().item())
 
     # 使用组合条件进行断言
     check_with_info(

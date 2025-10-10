@@ -312,7 +312,7 @@ class MoeAtomicWeight(AtomicWeight):
                 name = ckpt_weight.name.format(
                     i=str(layer_id), i_1=str(layer_id + 1), expert_id=str(expert_id)
                 )
-                logging.debug(f"tensor name: {name}")
+                logging.debug("tensor name: %s", name)
                 try:
                     before_merge_tensors.append(
                         ckpt_weight.merge_fun(

@@ -217,7 +217,7 @@ class QwenRenderer(CustomChatRenderer):
         query, history, system = self.parse_messages(
             request.messages, request.functions
         )
-        logging.debug(f"parsed query: {query}, history: {history}, system: {system}")
+        logging.debug("parsed query: %s, history: %s, system: %s", query, history, system)
         prompt = ""
         input_ids = []
         if query == _TEXT_COMPLETION_CMD:

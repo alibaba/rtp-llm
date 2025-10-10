@@ -194,7 +194,7 @@ class CkptFileInfo:
                     use_shm=use_shm,
                     device=device,
                 )
-                logging.debug(f"load_safetensors_to_device result: {list(res.keys())}")
+                logging.debug("load_safetensors_to_device result: %s", list(res.keys()))
                 return res
             except ModuleNotFoundError:
                 logging.info(f"use safetensors to device: {device}")
