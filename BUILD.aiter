@@ -70,7 +70,7 @@ cc_library(
         "aiter_meta/3rdparty/composable_kernel/include/**/*.h",
         "aiter_meta/3rdparty/composable_kernel/include/**/*.inc",
         "aiter_meta/3rdparty/composable_kernel/include/**/*.hpp",
-    ]) + ["aiter_meta/3rdparty/composable_kernel/include/ck/config.h"],
+    ], exclude = ["aiter_meta/3rdparty/composable_kernel/include/rapidjson/**"]) + ["aiter_meta/3rdparty/composable_kernel/include/ck/config.h"],
     copts = rocm_default_copts() + ["-std=c++20"],
     strip_include_prefix = "aiter_meta/3rdparty/composable_kernel/include/",
     visibility = ["//visibility:public"],
@@ -294,6 +294,21 @@ cc_library(
     name = "module_norm",
     srcs = ["aiter/jit/module_norm.so"],
     hdrs = ["aiter_meta/csrc/include/norm.h"],
+    deps = [
+        ":aiter_so",
+        ":aiter_headers",
+    ],
+    copts = [],
+    linkopts = [],
+    strip_include_prefix = "aiter_meta/csrc/include/",
+    visibility = ["//visibility:public"],
+    tags = ["rocm"],
+)
+
+cc_library(
+    name = "module_gemm_a8w8",
+    srcs = ["aiter/jit/libmodule_gemm_a8w8.so"],
+    hdrs = ["csrc/ck_gemm_a8w8/include/gemm_a8w8.h"],
     deps = [
         ":aiter_so",
         ":aiter_headers",
