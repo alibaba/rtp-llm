@@ -26,6 +26,8 @@ jobs:
           echo "$GITHUB_REF"
           PR_ID=$(echo "$GITHUB_REF" | sed 's@refs/pull/\([0-9]\+\)/.*@\1@')
           echo "PR ID is $PR_ID"
+          PR_ID="${{ github.event.pull_request.number }}"
+          echo "PR ID is $PR_ID"
           if [ "${{ github.event.pull_request.merged }}" = "true" ]; then
             ./trigger-merge.sh "${{ github.event.pull_request.head.sha }}" "${{ secrets.CI_SECRET }}" "${{ github.actor_id }}${{ github.actor }}@users.github.com" "${{ github.actor }}" "auto-merge: github commit ${{ github.event.pull_request.head.sha }}" "$PR_ID"
           else
