@@ -9,7 +9,6 @@
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
-#include "rtp_llm/cpp/engine_base/LoadBalance.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "autil/TimeUtility.h"
@@ -50,10 +49,6 @@ NormalEngine::NormalEngine(const EngineInitParams& params):
     RTP_LLM_LOG_INFO("create normal executor done");
     initScheduler();
     (void)startLoop();
-    if (device_->getDeviceProperties().tp_rank == 0 && !params_.ffn_disaggregate_config.is_ffn_service()
-        && scheduler_->canLoadBalance()) {
-        initLoadBalance();
-    }
 }
 
 void NormalEngine::initScheduler() {
@@ -175,17 +170,6 @@ std::shared_ptr<GenerateStream> NormalEngine::enqueueMinFakeQuery(int32_t max_ne
     return stream;
 }
 
-void NormalEngine::initLoadBalance() {
-    RTP_LLM_LOG_INFO("init load balance start");
-    auto stream = enqueueMinFakeQuery(3);
-    while (!stream->finished() && !stream->stopped()) {
-        RTP_LLM_LOG_DEBUG("wait load balance init run over for 1s");
-        this_thread::sleep_for(std::chrono::seconds(1));
-    }
-    RTP_LLM_LOG_INFO("init load balance done and (StepPerMin: %ld , StepLatencyUs: %ld)",
-                     step_recorder_.getStepPerMin(),
-                     step_recorder_.getStepLatency());
-}
 
 void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {
     auto result = CacheConfigCreator::createConfig(params_, warm_up_result);
@@ -285,10 +269,6 @@ absl::Status NormalEngine::step() {
 
     list<GenerateStreamPtr> streams;
     if (device_->getDeviceProperties().tp_rank == 0 && !params_.ffn_disaggregate_config.is_ffn_service()) {
-        if (scheduler_->empty() || step_recorder_.empty()) {
-            step_recorder_.reset();
-            step_recorder_.registerStep(autil::TimeUtility::currentTimeInMicroSeconds());
-        }
         CHECK_AND_ASSIGN(streams, scheduler_->schedule());
         if (streams.empty()) {
             if (params_.dp_size_ > 1) {
@@ -353,12 +333,6 @@ absl::Status NormalEngine::step() {
     if (device_->getDeviceProperties().tp_rank == 0) {
         auto step_latency = autil::TimeUtility::currentTimeInMicroSeconds() - step_begin_time_us;
         reportMetrics({false, false, step_latency});
-        for (auto& stream : streams) {
-            if (stream->finished()) {
-                step_recorder_.addStepCount(stream->iterCount());
-            }
-        }
-        step_recorder_.registerStep(autil::TimeUtility::currentTimeInMicroSeconds());
     }
 
     return status;

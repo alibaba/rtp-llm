@@ -139,27 +139,7 @@ absl::Status SpeculativeEngine::init() {
     speculative_sampler_ = std::make_unique<SpeculativeSampler>(device_);
     RTP_LLM_LOG_INFO("create speculative sampler");
     RETURN_IF_STATUS_ERROR(startLoop());
-    if (device_->getDeviceProperties().tp_rank == 0) {
-        initLoadBalance();
-    }
     return absl::OkStatus();
-}
-
-void SpeculativeEngine::initLoadBalance() {
-    RTP_LLM_LOG_INFO("init load balance start");
-    std::shared_ptr<GenerateStream> stream;
-    if (score_model_params_.gpt_init_parameter.role_type_ == RoleType::PREFILL) {
-        stream = enqueueMinFakeQuery(1, false);
-    } else {
-        stream = enqueueMinFakeQuery(1, true);
-    }
-    while (!stream->finished() && !stream->stopped()) {
-        RTP_LLM_LOG_INFO("wait load balance init run over for 1s");
-        this_thread::sleep_for(std::chrono::seconds(1));
-    }
-    RTP_LLM_LOG_INFO("init load balance done and (StepPerMin: %ld , StepLatencyUs: %ld)",
-                     step_recorder_.getStepPerMin(),
-                     step_recorder_.getStepLatency());
 }
 
 absl::StatusOr<GenerateStreamPtr> SpeculativeEngine::preRun(const std::shared_ptr<GenerateInput>& generate_input,
@@ -364,11 +344,6 @@ absl::Status SpeculativeEngine::step() {
     list<GenerateStreamPtr> streams;
 
     if (device_->getDeviceProperties().tp_rank == 0) {
-        if (scheduler_->empty() || step_recorder_.empty()) {
-            step_recorder_.reset();
-            step_recorder_.registerStep(autil::TimeUtility::currentTimeInMicroSeconds(),
-                                        propose_executor_->reserveStep() / 2);
-        }
         auto reserve_step = propose_executor_->reserveStep() + 1;
 
         CHECK_AND_ASSIGN(streams, scheduler_->schedule(reserve_step));
@@ -448,15 +423,6 @@ absl::Status SpeculativeEngine::step() {
 
     if (device_->getDeviceProperties().tp_rank == 0) {
         reportMetrics();
-        for (auto& stream : streams) {
-            if (stream->finished()) {
-                step_recorder_.addStepCount(stream->iterCount());
-            }
-        }
-
-        step_recorder_.registerStep(autil::TimeUtility::currentTimeInMicroSeconds(),
-                                    metrics_.accept_token_num / streams.size());
-
         metrics_.reset();
     }
 

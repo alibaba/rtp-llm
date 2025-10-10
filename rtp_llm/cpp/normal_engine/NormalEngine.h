@@ -64,7 +64,6 @@ private:
     std::atomic<bool>               running_{false};
     std::unique_ptr<Executor>       executor_;
     const rtp_llm::GptInitParameter params_;
-    StepRecorder                    step_recorder_;
     kmonitor::MetricsReporterPtr    metrics_reporter_;
     std::shared_ptr<CudaProfiler>   profiler_;
     int                             profiler_step_     = 0;

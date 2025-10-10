@@ -265,9 +265,6 @@ class ServerArgsDefaultTest(TestCase):
         self.assertEqual(env.get("LLAVA_CHAT_TEMPLATE"), "")
 
         # 30. Miscellaneous Configuration
-        self.assertEqual(env.get("LOAD_BALANCE"), "0")
-        self.assertEqual(env.get("STEP_RECORDS_TIME_RANGE"), "60000000")
-        self.assertEqual(env.get("STEP_RECORDS_MAX_SIZE"), "1000")
         self.assertEqual(env.get("DISABLE_PDL"), "1")
 
 
@@ -688,12 +685,6 @@ class ServerArgsSetTest(TestCase):
             "--llava_chat_template",
             "llava_template_string",
             # 30. Miscellaneous Configuration
-            "--load_balance",
-            "True",
-            "--step_records_time_range",
-            "240000000",
-            "--step_records_max_size",
-            "4000",
             "--disable_pdl",
             "True",
             # 31. PD-Separation Configuration
@@ -701,8 +692,6 @@ class ServerArgsSetTest(TestCase):
             "2",
             "--decode_entrance",
             "1",
-            "--sync_status_interval_ms",
-            "125",
             # 32 jit
             "--remote_jit_dir",
             "/home/admin/jit_dir",
@@ -960,9 +949,6 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env["LLAVA_CHAT_TEMPLATE"], "llava_template_string")
 
         # 30. Miscellaneous Configuration
-        self.assertEqual(env["LOAD_BALANCE"], "1")
-        self.assertEqual(env["STEP_RECORDS_TIME_RANGE"], "240000000")
-        self.assertEqual(env["STEP_RECORDS_MAX_SIZE"], "4000")
         self.assertEqual(env["DISABLE_PDL"], "1")
         self.assertEqual(
             env["AUX_STRING"], ""
@@ -971,7 +957,6 @@ class ServerArgsSetTest(TestCase):
         # 31. PD-Separation Configuration
         self.assertEqual(env["PREFILL_RETRY_TIMES"], "2")
         self.assertEqual(env["DECODE_ENTRANCE"], "1")
-        self.assertEqual(env["SYNC_STATUS_INTERVAL_MS"], "125")
 
         # 32. jit
         self.assertEqual(env["REMOTE_JIT_DIR"], "/home/admin/jit_dir")

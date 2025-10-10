@@ -202,9 +202,6 @@ struct FIFOSchedulerConfig {
 };
 
 struct MiscellaneousConfig {
-    int         load_balance            = 0;
-    int64_t     step_records_time_range = 60 * 1000 * 1000;
-    int64_t     step_records_max_size   = 1000;
     bool        disable_pdl             = true;
     std::string aux_string              = "";
     std::string to_string() const;

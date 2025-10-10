@@ -77,20 +77,3 @@ def init_pd_separation_group_args(parser):
         default=False,
         help="Decode 是否作为流量的入口点",
     )
-
-    pd_separation_group.add_argument(
-        "--load_balance_policy_name",
-        env_name="LOAD_BALANCE_POLICY_NAME",
-        type=str,
-        default="RR",
-        choices=["RR", "WRR"],
-        help="负载均衡策略：RR（轮询）或 WRR（加权轮询）",
-    )
-
-    pd_separation_group.add_argument(
-        "--sync_status_interval_ms",
-        env_name="SYNC_STATUS_INTERVAL_MS",
-        type=int,
-        default=50,
-        help="PD之间状态同步间隔时间（毫秒）",
-    )

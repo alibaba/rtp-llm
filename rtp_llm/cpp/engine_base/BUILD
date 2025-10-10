@@ -22,13 +22,10 @@ cc_library(
 
 # Load balancing and worker management
 cc_library(
-    name = "load_balance",
+    name = "worker_status_info",
     hdrs = [
-        "LoadBalance.h",
         "WorkerStatusInfo.h",
-    ],
-    srcs = [
-        "LoadBalance.cc",
+        "Host.h"
     ],
     deps = [
         "//rtp_llm/cpp/utils:core_utils",
@@ -84,7 +81,7 @@ cc_library(
     deps = torch_deps() + [
         ":executor",
         ":profiler",
-        ":load_balance",
+        ":worker_status_info",
         "//rtp_llm/cpp/devices:devices_base",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/core:buffer",

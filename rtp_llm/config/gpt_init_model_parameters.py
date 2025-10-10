@@ -288,7 +288,6 @@ class GptInitModelParameters:
     layer_num: int
     layernorm_eps: float
     layernorm_type: str
-    load_balance_policy_name: str
     load_cache_timeout_ms: int
     local_rank: int
     logit_scale: float
@@ -352,7 +351,6 @@ class GptInitModelParameters:
     size_per_head: int
     softmax_extra_scale: float
     special_tokens: SpecialTokens
-    sync_status_interval_ms: int
     tokenizer_path: str
     tp_nccl_port: int
     tp_rank: int
@@ -760,11 +758,6 @@ class GptInitModelParameters:
 
         # MiscellaneousConfig
         self.gpt_init_params.misc_config = MiscellaneousConfig(
-            load_balance=get_env_int("LOAD_BALANCE", 0),
-            step_records_time_range=get_env_int(
-                "STEP_RECORDS_TIME_RANGE", 60 * 1000 * 1000
-            ),
-            step_records_max_size=get_env_int("STEP_RECORDS_MAX_SIZE", 1000),
             disable_pdl=get_env_bool("DISABLE_PDL", True),
             aux_string=get_env_str("AUX_STRING", ""),
         )
@@ -1112,26 +1105,6 @@ class GptInitModelParameters:
                 self.py_env_configs.pd_separation_config.decode_entrance
             )
             logging.info(f"decode_entrance: {self.decode_entrance}")
-
-            if (not self.decode_entrance and self.role_type in [RoleType.PREFILL]) or (
-                self.decode_entrance and self.role_type in [RoleType.DECODE]
-            ):
-                self.load_balance_policy_name = (
-                    self.py_env_configs.pd_separation_config.load_balance_policy_name
-                )
-                logging.info(
-                    f"load_balance_policy_name: {self.load_balance_policy_name}"
-                )
-                policy_list = ["RR", "WRR"]
-                if not self.load_balance_policy_name in policy_list:
-                    raise Exception(
-                        f"load_balance_policy_name {self.load_balance_policy_name} "
-                        f"is not right, it must in {policy_list}"
-                    )
-                self.sync_status_interval_ms = (
-                    self.py_env_configs.pd_separation_config.sync_status_interval_ms
-                )
-                logging.info(f"sync_status_interval_ms: {self.sync_status_interval_ms}")
 
         self.scheduler_reserve_resource_ratio = int(
             os.environ.get("SCHEDUlER_RESERVE_RESOURCE_RATIO", 5)
