@@ -24,8 +24,6 @@ jobs:
         run: |
           echo "Triggering Aone merge for commit ${{ github.event.pull_request.head.sha }}"
           echo "$GITHUB_REF"
-          PR_ID=$(echo "$GITHUB_REF" | sed 's@refs/pull/\([0-9]\+\)/.*@\1@')
-          echo "PR ID is $PR_ID"
           PR_ID="${{ github.event.pull_request.number }}"
           echo "PR ID is $PR_ID"
           if [ "${{ github.event.pull_request.merged }}" = "true" ]; then
