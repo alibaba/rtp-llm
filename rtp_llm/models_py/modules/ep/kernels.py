@@ -988,11 +988,11 @@ def recompute_topk_ids_triton_kernel(
     num_total,
     BLOCK_SIZE: tl.constexpr,
 ):
-    pid = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = pid < num_total          # Mask out-of-bounds threads
+    token_indices = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = token_indices < num_total          # Mask out-of-bounds threads
 
     # 1. Load
-    expert_id = tl.load(topk_ids_ptr + pid, mask=mask, other=-1)
+    expert_id = tl.load(topk_ids_ptr + token_indices, mask=mask, other=-1)
 
     # 2. Adjust expert index
     adjusted = expert_id - current_expert_start_id
@@ -1000,11 +1000,11 @@ def recompute_topk_ids_triton_kernel(
 
     # 3. Store
     out = tl.where(valid, adjusted, -1)
-    tl.store(adjusted_topk_ids_ptr + pid, out, mask=mask)
+    tl.store(adjusted_topk_ids_ptr + token_indices, out, mask=mask)
 
-    # 4. Atomic add
+    # 4. Atomic add - use scalar value for efficiency
     tl.atomic_add(expert_count_ptr + adjusted,
-                  tl.full([BLOCK_SIZE], 1, tl.int32),
+                  1,  # Use scalar instead of full vector
                   mask=valid)
 
 
