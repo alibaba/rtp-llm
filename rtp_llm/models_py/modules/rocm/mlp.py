@@ -1,13 +1,15 @@
 from typing import Dict
-
 import aiter
 import torch
 from torch import nn
 
+import torch
+from torch import nn
+
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.models_py.modules import Linear
-from rtp_llm.ops import rtp_llm_ops
+from rtp_llm.models_py.modules.linear_factory import LinearFactory
 from rtp_llm.utils.model_weight import W
+from rtp_llm.ops import rtp_llm_ops
 
 
 class DenseMLP(nn.Module):
@@ -16,21 +18,16 @@ class DenseMLP(nn.Module):
     ):
         super().__init__()
 
-        # 拆分gate_proj和up_proj的权重
-        ffn13 = weights[W.ffn_w13]
-        gate_w, up_w = torch.chunk(ffn13, 2, dim=-1)
-
-        # 拆分gate_proj和up_proj的bias，如果有的话
-        ffn13_bias = weights.get(W.ffn_b13, None)
-        if ffn13_bias is not None:
-            gate_b, up_b = torch.chunk(ffn13_bias, 2, dim=-1)
-        else:
-            gate_b = None
-            up_b = None
-
-        self.gate_proj = Linear(gate_w, gate_b)
-        self.up_proj = Linear(up_w, up_b)
-        self.down_proj = Linear(weights[W.ffn_w2], weights.get(W.ffn_b2, None))
+        # Create linear layers using LinearFactory
+        self.gate_proj = LinearFactory.create_linear_from_weights(
+            weights, W.ffn_w1, W.ffn_s1, W.ffn_b1, config
+        )
+        self.up_proj = LinearFactory.create_linear_from_weights(
+            weights, W.ffn_w3, W.ffn_s3, W.ffn_b3, config
+        )
+        self.down_proj = LinearFactory.create_linear_from_weights(
+            weights, W.ffn_w2, W.ffn_s2, W.ffn_b2, config
+        )
 
         if config.activation_type == "SiGLU":
             self.act_fn = nn.SiLU()
@@ -38,8 +35,12 @@ class DenseMLP(nn.Module):
             raise ValueError(f"Unsupported activation type: {config.activation_type}")
 
     def forward(self, x: torch.Tensor):
-        down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
-        return down_proj
+        gate_output = self.gate_proj(x)
+        up_output = self.up_proj(x)
+        activated = self.act_fn(gate_output)
+        product = activated * up_output
+        down_output = self.down_proj(product)
+        return down_output
 
 
 class FusedSiluActDenseMLP(nn.Module):
@@ -50,8 +51,29 @@ class FusedSiluActDenseMLP(nn.Module):
         assert (
             config.activation_type == "SiGLU"
         ), "FusedSiluActDenseMLP only supports SiGLU activation"
-        self.gate_up_proj = Linear(weights[W.ffn_w13], weights.get(W.ffn_b13, None))
-        self.down_proj = Linear(weights[W.ffn_w2], weights.get(W.ffn_b2, None))
+
+        # Handle merged or separate weights
+        if W.ffn_w13 in weights:
+            # Pre-merged weights
+            self.gate_up_proj = LinearFactory.create_linear_from_weights(
+                weights, W.ffn_w13, W.ffn_s13, W.ffn_b13, config
+            )
+            self.down_proj = LinearFactory.create_linear_from_weights(
+                weights, W.ffn_w2, W.ffn_s2, W.ffn_b2, config
+            )
+        else:
+            # Separate weights: concatenate w1 and w3
+            self.gate_up_proj = LinearFactory.create_merged_linear(
+                weights,
+                weight_keys=[W.ffn_w1, W.ffn_w3],
+                scale_keys=[W.ffn_s1, W.ffn_s3],
+                bias_keys=[W.ffn_b1, W.ffn_b3],
+                config=config,
+                dim=-1,
+            )
+            self.down_proj = LinearFactory.create_linear_from_weights(
+                weights, W.ffn_w2, W.ffn_s2, W.ffn_b2, config
+            )
 
     def forward(self, x: torch.Tensor):
         gate_up = self.gate_up_proj(x)
