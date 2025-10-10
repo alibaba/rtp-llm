@@ -1,0 +1,61 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: RTP-LLM 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-12 17:38+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../DeployDocker.md:1
+msgid "Requirements:"
+msgstr "环境要求："
+
+#: ../../DeployDocker.md:2
+msgid "Operating System: Linux"
+msgstr "操作系统：Linux"
+
+#: ../../DeployDocker.md:3
+msgid "Python: 3.10"
+msgstr "Python：3.10"
+
+#: ../../DeployDocker.md:4
+msgid ""
+"NVIDIA GPU: Compute Capability 7.0 or higher (e.g., V100, T4, RTX20xx, "
+"A100, L4, H100, etc.)"
+msgstr "NVIDIA GPU：计算能力7.0或更高（例如，V100、T4、RTX20xx、A100、L4、H100等）"
+
+#: ../../DeployDocker.md:6
+msgid "Enter deploy docker"
+msgstr "进入部署docker"
+
+#: ../../DeployDocker.md:7
+msgid ""
+"The deploy docker contains dependencies and our program's whl package. "
+"After entering the docker environment, you can directly execute tests."
+msgstr "部署docker包含依赖项和我们程序的whl包。进入docker环境后，您可以直接执行测试。"
+
+#: ../../DeployDocker.md:9
+msgid "Image address see: [Image Release History](./DockerHistory.md)"
+msgstr "镜像地址请参见：[镜像发布历史](./DockerHistory.md)"
+
+#: ../../DeployDocker.md:22
+msgid "Testing"
+msgstr "测试"
+
+#: ../../DeployDocker.md:33
+msgid "Where your_model_type can be found in rtp_llm/models/__init__.py"
+msgstr "其中your_model_type可以在rtp_llm/models/__init__.py中找到"
+

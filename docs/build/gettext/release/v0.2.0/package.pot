@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-10-09 17:27+0800\n"
+"POT-Creation-Date: 2025-09-25 11:18+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -28,10 +28,6 @@ msgstr ""
 msgid "docker"
 msgstr ""
 
-#: ../../release/v0.2.0/package.md:8
-msgid "Inference"
-msgstr ""
-
 #: ../../release/v0.2.0/package.md:0
 msgid "**CardType**"
 msgstr ""
@@ -49,11 +45,7 @@ msgid "**CUDA-SM9x**"
 msgstr ""
 
 #: ../../release/v0.2.0/package.md:0
-msgid "hub.docker.alibaba-inc.com/isearch/rtp_llm_sm9x"
-msgstr ""
-
-#: ../../release/v0.2.0/package.md:0
-msgid "0.2.0_2025_09_24_21_00_615e568_accelerated"
+msgid "hub.docker.alibaba-inc.com/isearch/rtp_llm_sm9x:0.2.0_2025_09_24_21_00_615e568 _accelerated"
 msgstr ""
 
 #: ../../release/v0.2.0/package.md:0
@@ -61,7 +53,7 @@ msgid "**CUDA-SM8x**"
 msgstr ""
 
 #: ../../release/v0.2.0/package.md:0
-msgid "hub.docker.alibaba-inc.com/isearch/rtp_llm_sm8x"
+msgid "hub.docker.alibaba-inc.com/isearch/rtp_llm_sm8x:0.2.0_2025_09_24_21_00_615e568 _accelerated"
 msgstr ""
 
 #: ../../release/v0.2.0/package.md:0
@@ -69,7 +61,7 @@ msgid "**CUDA-SM7x**"
 msgstr ""
 
 #: ../../release/v0.2.0/package.md:0
-msgid "hub.docker.alibaba-inc.com/isearch/rtp_llm_sm7x"
+msgid "hub.docker.alibaba-inc.com/isearch/rtp_llm_sm7x:0.2.0_2025_09_24_21_00_615e568 _accelerated"
 msgstr ""
 
 #: ../../release/v0.2.0/package.md:0
@@ -77,33 +69,5 @@ msgid "**AMD**"
 msgstr ""
 
 #: ../../release/v0.2.0/package.md:0
-msgid "hub.docker.alibaba-inc.com/isearch/rtp_llm_rocm"
-msgstr ""
-
-#: ../../release/v0.2.0/package.md:17
-msgid "Others"
-msgstr ""
-
-#: ../../release/v0.2.0/package.md:0
-msgid "**Role**"
-msgstr ""
-
-#: ../../release/v0.2.0/package.md:0
-msgid "**Frontend**"
-msgstr ""
-
-#: ../../release/v0.2.0/package.md:0
-msgid "hub.docker.alibaba-inc.com/isearch/rtp_llm_frontend"
-msgstr ""
-
-#: ../../release/v0.2.0/package.md:0
-msgid "**Master**"
-msgstr ""
-
-#: ../../release/v0.2.0/package.md:0
-msgid "hub.docker.alibaba-inc.com/aone/flexlb"
-msgstr ""
-
-#: ../../release/v0.2.0/package.md:0
-msgid "0.2.0_2025_09_19_11_16_3b779f1_accelerated"
+msgid "hub.docker.alibaba-inc.com/isearch/rtp_llm_rocm:0.2.0_2025_09_24_21_00_615e568 _accelerated"
 msgstr ""

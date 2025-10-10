@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-10-09 17:27+0800\n"
+"POT-Creation-Date: 2025-09-12 17:38+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../backend/server_arguments.md:1
 msgid "ServerArgs"
-msgstr ""
+msgstr "服务器参数"
 
 #: ../../backend/server_arguments.md:3
 msgid ""
@@ -30,921 +30,921 @@ msgid ""
 "parameters allow users to customize key server functionalities, including"
 " model selection, parallel strategies, memory management, and "
 "optimization techniques."
-msgstr ""
+msgstr "本页面列出了通过命令行配置语言模型服务器行为和性能的服务器参数。这些参数允许用户自定义关键服务器功能，包括模型选择、并行策略、内存管理和优化技术。"
 
 #: ../../backend/server_arguments.md:5
 msgid "Parallelism and Distributed Setup Configuration"
-msgstr ""
+msgstr "并行和分布式设置配置"
 
 #: ../../backend/server_arguments.md
 msgid "Arguments"
-msgstr ""
+msgstr "参数"
 
 #: ../../backend/server_arguments.md
 msgid "Description"
-msgstr ""
+msgstr "描述"
 
 #: ../../backend/server_arguments.md
 msgid "Defaults"
-msgstr ""
+msgstr "默认值"
 
 #: ../../backend/server_arguments.md
 msgid "`--tp-size`"
-msgstr ""
+msgstr "`--tp-size`"
 
 #: ../../backend/server_arguments.md
 msgid "Specifies the tensor parallelism degree."
-msgstr ""
+msgstr "指定张量并行度。"
 
 #: ../../backend/server_arguments.md
 msgid "None"
-msgstr ""
+msgstr "无"
 
 #: ../../backend/server_arguments.md
 msgid "`--ep-size`"
-msgstr ""
+msgstr "`--ep-size`"
 
 #: ../../backend/server_arguments.md
 msgid "Defines the number of model instances for expert parallelism."
-msgstr ""
+msgstr "定义专家并行的模型实例数量。"
 
 #: ../../backend/server_arguments.md
 msgid "`--dp-size`"
-msgstr ""
+msgstr "`--dp-size`"
 
 #: ../../backend/server_arguments.md
 msgid "Sets the number of replicas or group size for data parallelism."
-msgstr ""
+msgstr "设置数据并行的副本数或组大小。"
 
 #: ../../backend/server_arguments.md
 msgid "`--world-size`"
-msgstr ""
+msgstr "`--world-size`"
 
 #: ../../backend/server_arguments.md
 msgid ""
 "Total number of GPUs used in distributed setup (WORLD_SIZE = TP_SIZE * "
 "DP_SIZE)."
-msgstr ""
+msgstr "分布式设置中使用的GPU总数（WORLD_SIZE = TP_SIZE * DP_SIZE）。"
 
 #: ../../backend/server_arguments.md
 msgid "`--world-rank`"
-msgstr ""
+msgstr "`--world-rank`"
 
 #: ../../backend/server_arguments.md
 msgid "Global unique ID of the current process/GPU in the distributed system."
-msgstr ""
+msgstr "分布式系统中当前进程/GPU的全局唯一ID。"
 
 #: ../../backend/server_arguments.md
 msgid "`--local-world-size`"
-msgstr ""
+msgstr "`--local-world-size`"
 
 #: ../../backend/server_arguments.md
 msgid "Number of GPU devices used on the current node."
-msgstr ""
+msgstr "当前节点上使用的GPU设备数量。"
 
 #: ../../backend/server_arguments.md
 msgid "`--enable_ffn_disaggregate`"
-msgstr ""
+msgstr "`--enable_ffn_disaggregate`"
 
 #: ../../backend/server_arguments.md
 msgid ""
 "Enables FFN disaggregation feature to separate attention and feed-forward"
 " network computations for performance optimization."
-msgstr ""
+msgstr "启用FFN解聚功能，将注意力和前馈网络计算分离以优化性能。"
 
 #: ../../backend/server_arguments.md:17
 msgid "Concurrency Control"
-msgstr ""
+msgstr "并发控制"
 
 #: ../../backend/server_arguments.md
 msgid "`--concurrency-with-block`"
-msgstr ""
+msgstr "`--concurrency-with-block`"
 
 #: ../../backend/server_arguments.md
 msgid "Controls blocking behavior for concurrent requests."
-msgstr ""
+msgstr "控制并发请求的阻塞行为。"
 
 #: ../../backend/server_arguments.md
 msgid "False"
-msgstr ""
+msgstr "否"
 
 #: ../../backend/server_arguments.md
 msgid "`--concurrency-limit`"
-msgstr ""
+msgstr "`--concurrency-limit`"
 
 #: ../../backend/server_arguments.md
 msgid "Maximum number of concurrent requests allowed by the system."
-msgstr ""
+msgstr "系统允许的最大并发请求数。"
 
 #: ../../backend/server_arguments.md
 msgid "32"
-msgstr ""
+msgstr "32"
 
 #: ../../backend/server_arguments.md:24
 msgid "[Attention Optimization](./attention_backend.md)"
-msgstr ""
+msgstr "[注意力优化](./attention_backend.md)"
 
 #: ../../backend/server_arguments.md
 msgid "`--enable-fmha`"
-msgstr ""
+msgstr "`--enable-fmha`"
 
 #: ../../backend/server_arguments.md
 msgid "Enables Fused Multi-Head Attention (FMHA) feature."
-msgstr ""
+msgstr "启用融合多头注意力（FMHA）功能。"
 
 #: ../../backend/server_arguments.md
 msgid "True"
-msgstr ""
+msgstr "是"
 
 #: ../../backend/server_arguments.md
 msgid "`--enable-trt-fmha`"
-msgstr ""
+msgstr "`--enable-trt-fmha`"
 
 #: ../../backend/server_arguments.md
 msgid "Enables TensorRT optimized FMHA feature."
-msgstr ""
+msgstr "启用TensorRT优化的FMHA功能。"
 
 #: ../../backend/server_arguments.md
 msgid "`--enable-paged-trt-fmha`"
-msgstr ""
+msgstr "`--enable-paged-trt-fmha`"
 
 #: ../../backend/server_arguments.md
 msgid "Enables Paged TensorRT FMHA."
-msgstr ""
+msgstr "启用分页TensorRT FMHA。"
 
 #: ../../backend/server_arguments.md
 msgid "`--enable-open-source-fmha`"
-msgstr ""
+msgstr "`--enable-open-source-fmha`"
 
 #: ../../backend/server_arguments.md
 msgid "Enables open-source FMHA implementation."
-msgstr ""
+msgstr "启用开源FMHA实现。"
 
 #: ../../backend/server_arguments.md
 msgid "`--enable-paged-open-source-fmha`"
-msgstr ""
+msgstr "`--enable-paged-open-source-fmha`"
 
 #: ../../backend/server_arguments.md
 msgid "Enables Paged open-source FMHA implementation."
-msgstr ""
+msgstr "启用分页开源FMHA实现。"
 
 #: ../../backend/server_arguments.md
 msgid "`--enable-trtv1-fmha`"
-msgstr ""
+msgstr "`--enable-trtv1-fmha`"
 
 #: ../../backend/server_arguments.md
 msgid "Enables TRTv1-style FMHA."
-msgstr ""
+msgstr "启用TRTv1风格的FMHA。"
 
 #: ../../backend/server_arguments.md
 msgid "`--fmha-perf-instrument`"
-msgstr ""
+msgstr "`--fmha-perf-instrument`"
 
 #: ../../backend/server_arguments.md
 msgid "Enables NVTX performance profiling for FMHA."
-msgstr ""
+msgstr "启用FMHA的NVTX性能分析。"
 
 #: ../../backend/server_arguments.md
 msgid "`--fmha-show-params`"
-msgstr ""
+msgstr "`--fmha-show-params`"
 
 #: ../../backend/server_arguments.md
 msgid "Displays FMHA parameter information."
-msgstr ""
+msgstr "显示FMHA参数信息。"
 
 #: ../../backend/server_arguments.md
 msgid "`--disable-flash-infer`"
-msgstr ""
+msgstr "`--disable-flash-infer`"
 
 #: ../../backend/server_arguments.md
 msgid "Disables FlashInfer Attention mechanism."
-msgstr ""
+msgstr "禁用FlashInfer注意力机制。"
 
 #: ../../backend/server_arguments.md
 msgid "`--enable-xqa`"
-msgstr ""
+msgstr "`--enable-xqa`"
 
 #: ../../backend/server_arguments.md
 msgid "Enables XQA feature (requires SM90+ GPU)."
-msgstr ""
+msgstr "启用XQA功能（需要SM90+ GPU）。"
 
 #: ../../backend/server_arguments.md:39
 msgid "KV Cache Configuration"
-msgstr ""
+msgstr "KV缓存配置"
 
 #: ../../backend/server_arguments.md
 msgid "`--reuse-cache`"
-msgstr ""
+msgstr "`--reuse-cache`"
 
 #: ../../backend/server_arguments.md
 msgid "Activates KV Cache reuse mechanism."
-msgstr ""
+msgstr "激活KV缓存重用机制。"
 
 #: ../../backend/server_arguments.md
 msgid "`--multi-task-prompt`"
-msgstr ""
+msgstr "`--multi-task-prompt`"
 
 #: ../../backend/server_arguments.md
 msgid "Multi-task prompt file path."
-msgstr ""
+msgstr "多任务提示文件路径。"
 
 #: ../../backend/server_arguments.md
 msgid "`--multi-task-prompt-str`"
-msgstr ""
+msgstr "`--multi-task-prompt-str`"
 
 #: ../../backend/server_arguments.md
 msgid "Multi-task prompt JSON string."
-msgstr ""
+msgstr "多任务提示JSON字符串。"
 
 #: ../../backend/server_arguments.md:47
 msgid "Hardware/Kernel Optimization"
-msgstr ""
+msgstr "硬件/内核优化"
 
 #: ../../backend/server_arguments.md
 msgid "`--deep-gemm-num-sm`"
-msgstr ""
+msgstr "`--deep-gemm-num-sm`"
 
 #: ../../backend/server_arguments.md
 msgid "Number of SMs used for DeepGEMM."
-msgstr ""
+msgstr "用于DeepGEMM的SM数量。"
 
 #: ../../backend/server_arguments.md
 msgid "`--arm-gemm-use-kai`"
-msgstr ""
+msgstr "`--arm-gemm-use-kai`"
 
 #: ../../backend/server_arguments.md
 msgid "Enables KleidiAI support for ARM GEMM."
-msgstr ""
+msgstr "启用ARM GEMM的KleidiAI支持。"
 
 #: ../../backend/server_arguments.md
 msgid "`--enable-stable-scatter-add`"
-msgstr ""
+msgstr "`--enable-stable-scatter-add`"
 
 #: ../../backend/server_arguments.md
 msgid "Enables stable scatter add operation."
-msgstr ""
+msgstr "启用稳定的scatter add操作。"
 
 #: ../../backend/server_arguments.md
 msgid "`--enable-multi-block-mode`"
-msgstr ""
+msgstr "`--enable-multi-block-mode`"
 
 #: ../../backend/server_arguments.md
 msgid "Enables multi-block mode for MMHA."
-msgstr ""
+msgstr "启用MMHA的多块模式。"
 
 #: ../../backend/server_arguments.md
 msgid "`--rocm-hipblaslt-config`"
-msgstr ""
+msgstr "`--rocm-hipblaslt-config`"
 
 #: ../../backend/server_arguments.md
 msgid "hipBLASLt GEMM configuration file path."
-msgstr ""
+msgstr "hipBLASLt GEMM配置文件路径。"
 
 #: ../../backend/server_arguments.md
 msgid "gemm_config.csv"
-msgstr ""
+msgstr "gemm_config.csv"
 
 #: ../../backend/server_arguments.md
 msgid "`--ft-disable-custom-ar`"
-msgstr ""
+msgstr "`--ft-disable-custom-ar`"
 
 #: ../../backend/server_arguments.md
 msgid "Disables custom AllReduce implementation."
-msgstr ""
+msgstr "禁用自定义AllReduce实现。"
 
 #: ../../backend/server_arguments.md:58
 msgid "Device Resource Management"
-msgstr ""
+msgstr "设备资源管理"
 
 #: ../../backend/server_arguments.md
 msgid "`--device-reserve-memory-bytes`"
-msgstr ""
+msgstr "`--device-reserve-memory-bytes`"
 
 #: ../../backend/server_arguments.md
 msgid "Amount of GPU memory to reserve (bytes)."
-msgstr ""
+msgstr "要预留的GPU内存量（字节）。"
 
 #: ../../backend/server_arguments.md
 msgid "0"
-msgstr ""
+msgstr "0"
 
 #: ../../backend/server_arguments.md
 msgid "`--host-reserve-memory-bytes`"
-msgstr ""
+msgstr "`--host-reserve-memory-bytes`"
 
 #: ../../backend/server_arguments.md
 msgid "Amount of CPU memory to reserve (bytes)."
-msgstr ""
+msgstr "要预留的CPU内存量（字节）。"
 
 #: ../../backend/server_arguments.md
 msgid "4GB"
-msgstr ""
+msgstr "4GB"
 
 #: ../../backend/server_arguments.md
 msgid "`--overlap-math-sm-count`"
-msgstr ""
+msgstr "`--overlap-math-sm-count`"
 
 #: ../../backend/server_arguments.md
 msgid "Number of SMs for compute-communication overlap optimization."
-msgstr ""
+msgstr "用于计算-通信重叠优化的SM数量。"
 
 #: ../../backend/server_arguments.md
 msgid "`--overlap-comm-type`"
-msgstr ""
+msgstr "`--overlap-comm-type`"
 
 #: ../../backend/server_arguments.md
 msgid "Compute-communication overlap strategy type."
-msgstr ""
+msgstr "计算-通信重叠策略类型。"
 
 #: ../../backend/server_arguments.md
 msgid "`--m-split`"
-msgstr ""
+msgstr "`--m-split`"
 
 #: ../../backend/server_arguments.md
 msgid "M_SPLIT parameter for device operations."
-msgstr ""
+msgstr "设备操作的M_SPLIT参数。"
 
 #: ../../backend/server_arguments.md
 msgid "`--enable-comm-overlap`"
-msgstr ""
+msgstr "`--enable-comm-overlap`"
 
 #: ../../backend/server_arguments.md
 msgid "Enables compute-communication overlapping execution."
-msgstr ""
+msgstr "启用计算-通信重叠执行。"
 
 #: ../../backend/server_arguments.md
 msgid "`--enable-layer-micro-batch`"
-msgstr ""
+msgstr "`--enable-layer-micro-batch`"
 
 #: ../../backend/server_arguments.md
 msgid "Enables layer-level micro-batching."
-msgstr ""
+msgstr "启用层级别微批处理。"
 
 #: ../../backend/server_arguments.md
 msgid "`--not-use-default-stream`"
-msgstr ""
+msgstr "`--not-use-default-stream`"
 
 #: ../../backend/server_arguments.md
 msgid "Do not use default CUDA stream."
-msgstr ""
+msgstr "不使用默认CUDA流。"
 
 #: ../../backend/server_arguments.md:71
 msgid "DeepEP Configuration"
-msgstr ""
+msgstr "DeepEP配置"
 
 #: ../../backend/server_arguments.md
 msgid "`--use-deepep-moe`"
-msgstr ""
+msgstr "`--use-deepep-moe`"
 
 #: ../../backend/server_arguments.md
 msgid "Enables DeepEP for MoE processing. Single EP shoude set be false"
-msgstr ""
+msgstr "启用DeepEP进行MoE处理。单个EP应设置为false"
 
 #: ../../backend/server_arguments.md
 msgid "`--use-deepep-internode`"
-msgstr ""
+msgstr "`--use-deepep-internode`"
 
 #: ../../backend/server_arguments.md
 msgid "Enables inter-node communication optimization."
-msgstr ""
+msgstr "启用节点间通信优化。"
 
 #: ../../backend/server_arguments.md
 msgid "`--use-deepep-low-latency`"
-msgstr ""
+msgstr "`--use-deepep-low-latency`"
 
 #: ../../backend/server_arguments.md
 msgid "Enables DeepEP low-latency mode."
-msgstr ""
+msgstr "启用DeepEP低延迟模式。"
 
 #: ../../backend/server_arguments.md
 msgid "`--use-deepep-p2p-low-latency`"
-msgstr ""
+msgstr "`--use-deepep-p2p-low-latency`"
 
 #: ../../backend/server_arguments.md
 msgid "Enables P2P low-latency mode."
-msgstr ""
+msgstr "启用P2P低延迟模式。"
 
 #: ../../backend/server_arguments.md
 msgid "`--deep-ep-num-sm`"
-msgstr ""
+msgstr "`--deep-ep-num-sm`"
 
 #: ../../backend/server_arguments.md
 msgid "Number of SMs for DeepEPBuffer."
-msgstr ""
+msgstr "DeepEPBuffer的SM数量。"
 
 #: ../../backend/server_arguments.md:81
 msgid "EPLB Configuration"
-msgstr ""
+msgstr "EPLB配置"
 
 #: ../../backend/server_arguments.md
 msgid "`--eplb_mode`"
-msgstr ""
+msgstr "`--eplb_mode`"
 
 #: ../../backend/server_arguments.md
 msgid "EPLB mode"
-msgstr ""
+msgstr "EPLB模式"
 
 #: ../../backend/server_arguments.md
 msgid "\"NONE\""
-msgstr ""
+msgstr "\"NONE\""
 
 #: ../../backend/server_arguments.md
 msgid "`--balance_method`"
-msgstr ""
+msgstr "`--balance_method`"
 
 #: ../../backend/server_arguments.md
 msgid "EPLB load balancing method."
-msgstr ""
+msgstr "EPLB负载均衡方法。"
 
 #: ../../backend/server_arguments.md
 msgid "\"mix\""
-msgstr ""
+msgstr "\"mix\""
 
 #: ../../backend/server_arguments.md
 msgid "`--redundant_expert`"
-msgstr ""
+msgstr "`--redundant_expert`"
 
 #: ../../backend/server_arguments.md
 msgid "Number of redundant experts."
-msgstr ""
+msgstr "冗余专家数量。"
 
 #: ../../backend/server_arguments.md
 msgid "`--eplb_update_time`"
-msgstr ""
+msgstr "`--eplb_update_time`"
 
 #: ../../backend/server_arguments.md
 msgid "EPLB execution cycle."
-msgstr ""
+msgstr "EPLB执行周期。"
 
 #: ../../backend/server_arguments.md
 msgid "5000"
-msgstr ""
+msgstr "5000"
 
 #: ../../backend/server_arguments.md
 msgid "`--eplb_balance_layer_per_step`"
-msgstr ""
+msgstr "`--eplb_balance_layer_per_step`"
 
 #: ../../backend/server_arguments.md
 msgid "Number of layers updated per EPLB update."
-msgstr ""
+msgstr "每次EPLB更新的层数。"
 
 #: ../../backend/server_arguments.md
 msgid "1"
-msgstr ""
+msgstr "1"
 
 #: ../../backend/server_arguments.md
 msgid "`--eplb_force_repack`"
-msgstr ""
+msgstr "`--eplb_force_repack`"
 
 #: ../../backend/server_arguments.md
 msgid "Globally repack EPLB experts."
-msgstr ""
+msgstr "全局重新打包EPLB专家。"
 
 #: ../../backend/server_arguments.md
 msgid "`--eplb_stats_window_size`"
-msgstr ""
+msgstr "`--eplb_stats_window_size`"
 
 #: ../../backend/server_arguments.md
 msgid "EPLB statistics window size."
-msgstr ""
+msgstr "EPLB统计窗口大小。"
 
 #: ../../backend/server_arguments.md
 msgid "10"
-msgstr ""
+msgstr "10"
 
 #: ../../backend/server_arguments.md
 msgid "`--eplb_control_step`"
-msgstr ""
+msgstr "`--eplb_control_step`"
 
 #: ../../backend/server_arguments.md
 msgid "(DEBUG) EPLB synchronization control parameter cycle."
-msgstr ""
+msgstr "(调试) EPLB同步控制参数周期。"
 
 #: ../../backend/server_arguments.md
 msgid "100"
-msgstr ""
+msgstr "100"
 
 #: ../../backend/server_arguments.md
 msgid "`--eplb_test_mode`"
-msgstr ""
+msgstr "`--eplb_test_mode`"
 
 #: ../../backend/server_arguments.md
 msgid "(DEBUG) Enables ExpertBalancer test mode"
-msgstr ""
+msgstr "(调试) 启用ExpertBalancer测试模式"
 
 #: ../../backend/server_arguments.md
 msgid "`--fake_balance_expert`"
-msgstr ""
+msgstr "`--fake_balance_expert`"
 
 #: ../../backend/server_arguments.md
 msgid "(DEBUG) Enables expert pseudo-balancing mechanism."
-msgstr ""
+msgstr "(调试) 启用专家伪平衡机制。"
 
 #: ../../backend/server_arguments.md:96
 msgid "Sampling Configuration"
-msgstr ""
+msgstr "采样配置"
 
 #: ../../backend/server_arguments.md
 msgid "`--max-batch-size`"
-msgstr ""
+msgstr "`--max-batch-size`"
 
 #: ../../backend/server_arguments.md
 msgid "Override system maximum batch size."
-msgstr ""
+msgstr "覆盖系统最大批处理大小。"
 
 #: ../../backend/server_arguments.md
 msgid "`--enable-flashinfer-sample-kernel`"
-msgstr ""
+msgstr "`--enable-flashinfer-sample-kernel`"
 
 #: ../../backend/server_arguments.md
 msgid "Enables FlashInfer sampling kernel."
-msgstr ""
+msgstr "启用FlashInfer采样内核。"
 
 #: ../../backend/server_arguments.md:103
 msgid "Logging & Profiling"
-msgstr ""
+msgstr "日志记录与性能分析"
 
 #: ../../backend/server_arguments.md
 msgid "`--ft-nvtx`"
-msgstr ""
+msgstr "`--ft-nvtx`"
 
 #: ../../backend/server_arguments.md
 msgid "Enables NVTX performance profiling."
-msgstr ""
+msgstr "启用NVTX性能分析。"
 
 #: ../../backend/server_arguments.md
 msgid "`--py-inference-log-response`"
-msgstr ""
+msgstr "`--py-inference-log-response`"
 
 #: ../../backend/server_arguments.md
 msgid "Logs inference response content."
-msgstr ""
+msgstr "记录推理响应内容。"
 
 #: ../../backend/server_arguments.md
 msgid "`--trace-memory`"
-msgstr ""
+msgstr "`--trace-memory`"
 
 #: ../../backend/server_arguments.md
 msgid "Enables memory tracing."
-msgstr ""
+msgstr "启用内存追踪。"
 
 #: ../../backend/server_arguments.md
 msgid "`--trace-malloc-stack`"
-msgstr ""
+msgstr "`--trace-malloc-stack`"
 
 #: ../../backend/server_arguments.md
 msgid "Enables malloc stack tracing."
-msgstr ""
+msgstr "启用malloc堆栈追踪。"
 
 #: ../../backend/server_arguments.md
 msgid "`--enable-device-perf`"
-msgstr ""
+msgstr "`--enable-device-perf`"
 
 #: ../../backend/server_arguments.md
 msgid "Collects device performance metrics."
-msgstr ""
+msgstr "收集设备性能指标。"
 
 #: ../../backend/server_arguments.md
 msgid "`--ft-core-dump-on-exception`"
-msgstr ""
+msgstr "`--ft-core-dump-on-exception`"
 
 #: ../../backend/server_arguments.md
 msgid "Generates core dump on exception."
-msgstr ""
+msgstr "在异常时生成核心转储。"
 
 #: ../../backend/server_arguments.md
 msgid "`--ft-alog-conf-path`"
-msgstr ""
+msgstr "`--ft-alog-conf-path`"
 
 #: ../../backend/server_arguments.md
 msgid "Log configuration file path."
-msgstr ""
+msgstr "日志配置文件路径。"
 
 #: ../../backend/server_arguments.md
 msgid "`--log-level`"
-msgstr ""
+msgstr "`--log-level`"
 
 #: ../../backend/server_arguments.md
 msgid "Log level (ERROR/WARN/INFO/DEBUG)."
-msgstr ""
+msgstr "日志级别（ERROR/WARN/INFO/DEBUG）。"
 
 #: ../../backend/server_arguments.md
 msgid "INFO"
-msgstr ""
+msgstr "INFO"
 
 #: ../../backend/server_arguments.md
 msgid "`--gen-timeline-sync`"
-msgstr ""
+msgstr "`--gen-timeline-sync`"
 
 #: ../../backend/server_arguments.md
 msgid "Collects Timeline analysis data."
-msgstr ""
+msgstr "收集时间线分析数据。"
 
 #: ../../backend/server_arguments.md
 msgid "`--torch-cuda-profiler-dir`"
-msgstr ""
+msgstr "`--torch-cuda-profiler-dir`"
 
 #: ../../backend/server_arguments.md
 msgid "Torch Profiler output directory."
-msgstr ""
+msgstr "Torch Profiler输出目录。"
 
 #: ../../backend/server_arguments.md
 msgid "\"\""
-msgstr ""
+msgstr "\"\""
 
 #: ../../backend/server_arguments.md:118
 msgid "Speculative Decoding"
-msgstr ""
+msgstr "推测解码"
 
 #: ../../backend/server_arguments.md
 msgid "`--sp-model-type`"
-msgstr ""
+msgstr "`--sp-model-type`"
 
 #: ../../backend/server_arguments.md
 msgid "Specifies draft model type (e.g.  \"deepseek-v3-mtp\")"
-msgstr ""
+msgstr "指定草稿模型类型（例如 \"deepseek-v3-mtp\"）"
 
 #: ../../backend/server_arguments.md
 msgid "`--sp-type`"
-msgstr ""
+msgstr "`--sp-type`"
 
 #: ../../backend/server_arguments.md
 msgid "Controls speculative sampling type (\"vanilla\" disables, \"mtp\" enables)"
-msgstr ""
+msgstr "控制推测采样类型（\"vanilla\" 禁用，\"mtp\" 启用）"
 
 #: ../../backend/server_arguments.md
 msgid "`--sp-min-token-match`"
-msgstr ""
+msgstr "`--sp-min-token-match`"
 
 #: ../../backend/server_arguments.md
 msgid "Minimum token match length"
-msgstr ""
+msgstr "最小token匹配长度"
 
 #: ../../backend/server_arguments.md
 msgid "2"
-msgstr ""
+msgstr "2"
 
 #: ../../backend/server_arguments.md
 msgid "`--sp-max-token-match`"
-msgstr ""
+msgstr "`--sp-max-token-match`"
 
 #: ../../backend/server_arguments.md
 msgid "Maximum token match length"
-msgstr ""
+msgstr "最大token匹配长度"
 
 #: ../../backend/server_arguments.md
 msgid "`--tree-decode-config`"
-msgstr ""
+msgstr "`--tree-decode-config`"
 
 #: ../../backend/server_arguments.md
 msgid "Tree decode mapping configuration file"
-msgstr ""
+msgstr "树解码映射配置文件"
 
 #: ../../backend/server_arguments.md
 msgid "`--gen-num-per-cycle`"
-msgstr ""
+msgstr "`--gen-num-per-cycle`"
 
 #: ../../backend/server_arguments.md
 msgid "Maximum number of tokens generated per cycle"
-msgstr ""
+msgstr "每个周期生成的最大token数量"
 
 #: ../../backend/server_arguments.md
 msgid "`--force-stream-sample`"
-msgstr ""
+msgstr "`--force-stream-sample`"
 
 #: ../../backend/server_arguments.md
 msgid "Forces streaming sampling"
-msgstr ""
+msgstr "强制流式采样"
 
 #: ../../backend/server_arguments.md
 msgid "`--force-score-context-attention`"
-msgstr ""
+msgstr "`--force-score-context-attention`"
 
 #: ../../backend/server_arguments.md
 msgid "Forces context attention scoring"
-msgstr ""
+msgstr "强制上下文注意力评分"
 
 #: ../../backend/server_arguments.md:131
 msgid "RPC and Service Discovery"
-msgstr ""
+msgstr "RPC和服务发现"
 
 #: ../../backend/server_arguments.md
 msgid "`--use-local`"
-msgstr ""
+msgstr "`--use-local`"
 
 #: ../../backend/server_arguments.md
 msgid "Uses local service discovery"
-msgstr ""
+msgstr "使用本地服务发现"
 
 #: ../../backend/server_arguments.md
 msgid "`--remote-rpc-server-ip`"
-msgstr ""
+msgstr "`--remote-rpc-server-ip`"
 
 #: ../../backend/server_arguments.md
 msgid "Remote RPC server address"
-msgstr ""
+msgstr "远程RPC服务器地址"
 
 #: ../../backend/server_arguments.md
 msgid "`--decode-cm2-config`"
-msgstr ""
+msgstr "`--decode-cm2-config`"
 
 #: ../../backend/server_arguments.md
 msgid "Decode service discovery configuration"
-msgstr ""
+msgstr "解码服务发现配置"
 
 #: ../../backend/server_arguments.md
 msgid "`--remote-vit-server-ip`"
-msgstr ""
+msgstr "`--remote-vit-server-ip`"
 
 #: ../../backend/server_arguments.md
 msgid "Remote ViT server address"
-msgstr ""
+msgstr "远程ViT服务器地址"
 
 #: ../../backend/server_arguments.md
 msgid "`--multimodal-part-cm2-config`"
-msgstr ""
+msgstr "`--multimodal-part-cm2-config`"
 
 #: ../../backend/server_arguments.md
 msgid "Multimodal service discovery configuration"
-msgstr ""
+msgstr "多模态服务发现配置"
 
 #: ../../backend/server_arguments.md:141
 msgid "Cache Store"
-msgstr ""
+msgstr "缓存存储"
 
 #: ../../backend/server_arguments.md
 msgid "`--cache-store-rdma-mode`"
-msgstr ""
+msgstr "`--cache-store-rdma-mode`"
 
 #: ../../backend/server_arguments.md
 msgid "Enables RDMA mode"
-msgstr ""
+msgstr "启用RDMA模式"
 
 #: ../../backend/server_arguments.md
 msgid "`--wrr-available-ratio`"
-msgstr ""
+msgstr "`--wrr-available-ratio`"
 
 #: ../../backend/server_arguments.md
 msgid "WRR load balancing availability threshold"
-msgstr ""
+msgstr "WRR负载均衡可用性阈值"
 
 #: ../../backend/server_arguments.md
 msgid "80"
-msgstr ""
+msgstr "80"
 
 #: ../../backend/server_arguments.md
 msgid "`--rank-factor`"
-msgstr ""
+msgstr "`--rank-factor`"
 
 #: ../../backend/server_arguments.md
 msgid "WRR ranking factor (0=KV_CACHE usage, 1=in-flight requests)"
-msgstr ""
+msgstr "WRR排序因子（0=KV缓存使用率，1=飞行中请求）"
 
 #: ../../backend/server_arguments.md:149
 msgid "Scheduler Configuration"
-msgstr ""
+msgstr "调度器配置"
 
 #: ../../backend/server_arguments.md
 msgid "`--use-batch-decode-scheduler`"
-msgstr ""
+msgstr "`--use-batch-decode-scheduler`"
 
 #: ../../backend/server_arguments.md
 msgid "Enables batch decode scheduler"
-msgstr ""
+msgstr "启用批处理解码调度器"
 
 #: ../../backend/server_arguments.md
 msgid "`--max-context-batch-size`"
-msgstr ""
+msgstr "`--max-context-batch-size`"
 
 #: ../../backend/server_arguments.md
 msgid "Maximum context batch size"
-msgstr ""
+msgstr "最大上下文批处理大小"
 
 #: ../../backend/server_arguments.md
 msgid "`--scheduler-reserve-resource-ratio`"
-msgstr ""
+msgstr "`--scheduler-reserve-resource-ratio`"
 
 #: ../../backend/server_arguments.md
 msgid "Reserved resource percentage"
-msgstr ""
+msgstr "预留资源百分比"
 
 #: ../../backend/server_arguments.md
 msgid "5"
-msgstr ""
+msgstr "5"
 
 #: ../../backend/server_arguments.md
 msgid "`--enable-fast-gen`"
-msgstr ""
+msgstr "`--enable-fast-gen`"
 
 #: ../../backend/server_arguments.md
 msgid "Enables long request chunking processing"
-msgstr ""
+msgstr "启用长请求分块处理"
 
 #: ../../backend/server_arguments.md
 msgid "`--fast-gen-context-budget`"
-msgstr ""
+msgstr "`--fast-gen-context-budget`"
 
 #: ../../backend/server_arguments.md
 msgid "Chunk processing size"
-msgstr ""
+msgstr "分块处理大小"
 
 #: ../../backend/server_arguments.md
 msgid "`--enable-partial-fallback`"
-msgstr ""
+msgstr "`--enable-partial-fallback`"
 
 #: ../../backend/server_arguments.md
 msgid "Allows partial resource reclamation"
-msgstr ""
+msgstr "允许部分资源回收"
 
 #: ../../backend/server_arguments.md
 msgid "`--batch-decode-scheduler-batch-size`"
-msgstr ""
+msgstr "`--batch-decode-scheduler-batch-size`"
 
 #: ../../backend/server_arguments.md
 msgid "Decode batch size"
-msgstr ""
+msgstr "解码批处理大小"
 
 #: ../../backend/server_arguments.md:161
 msgid "Load Balancing and Performance Optimization Configuration"
-msgstr ""
+msgstr "负载均衡和性能优化配置"
 
 #: ../../backend/server_arguments.md
 msgid "`--load-balance`"
-msgstr ""
+msgstr "`--load-balance`"
 
 #: ../../backend/server_arguments.md
 msgid "Enables dynamic load balancing"
-msgstr ""
+msgstr "启用动态负载均衡"
 
 #: ../../backend/server_arguments.md
 msgid "`--step-records-time-range`"
-msgstr ""
+msgstr "`--step-records-time-range`"
 
 #: ../../backend/server_arguments.md
 msgid "Performance record retention time window (microseconds)"
-msgstr ""
+msgstr "性能记录保留时间窗口（微秒）"
 
 #: ../../backend/server_arguments.md
 msgid "60000000"
-msgstr ""
+msgstr "60000000"
 
 #: ../../backend/server_arguments.md
 msgid "`--step-records-max-size`"
-msgstr ""
+msgstr "`--step-records-max-size`"
 
 #: ../../backend/server_arguments.md
 msgid "Maximum performance record count"
-msgstr ""
+msgstr "最大性能记录数量"
 
 #: ../../backend/server_arguments.md
 msgid "1000"
-msgstr ""
+msgstr "1000"
 
 #: ../../backend/server_arguments.md
 msgid "`--disable-pdl`"
-msgstr ""
+msgstr "`--disable-pdl`"
 
 #: ../../backend/server_arguments.md
 msgid "Disables PDL feature"
-msgstr ""
+msgstr "禁用PDL功能"
 
 #: ../../backend/server_arguments.md:170
 msgid "3FS Configuration"
-msgstr ""
+msgstr "3FS配置"
 
 #: ../../backend/server_arguments.md
 msgid "`--enable-3fs`"
-msgstr ""
+msgstr "`--enable-3fs`"
 
 #: ../../backend/server_arguments.md
 msgid "Enables 3FS for managing KVCache"
-msgstr ""
+msgstr "启用3FS管理KVCache"
 
 #: ../../backend/server_arguments.md:176
 msgid "Model Adaptation"
-msgstr ""
+msgstr "模型适配"
 
 #: ../../backend/server_arguments.md
 msgid "`--max-lora-model-size`"
-msgstr ""
+msgstr "`--max-lora-model-size`"
 
 #: ../../backend/server_arguments.md
 msgid "Maximum size limit for LoRA models"
-msgstr ""
+msgstr "LoRA模型的最大大小限制"
 
 #: ../../backend/server_arguments.md
 msgid "-1"
-msgstr ""
+msgstr "-1"
 
 #: ../../backend/server_arguments.md:182
 msgid "System Debugging"
-msgstr ""
+msgstr "系统调试"
 
 #: ../../backend/server_arguments.md
 msgid "Collects Timeline analysis data"
-msgstr ""
+msgstr "收集时间线分析数据"
 
 #: ../../backend/server_arguments.md
 msgid "Torch Profiler output directory"
-msgstr ""
+msgstr "Torch Profiler输出目录"
 

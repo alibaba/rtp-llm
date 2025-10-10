@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-10-09 17:27+0800\n"
+"POT-Creation-Date: 2025-09-12 17:38+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -21,41 +21,41 @@ msgstr ""
 
 #: ../../references/qwen/deploy.md:1
 msgid "Recommended Deployment"
-msgstr ""
+msgstr "推荐部署"
 
 #: ../../references/qwen/deploy.md:3
 msgid ""
 "It is recommended to use PD (Prefill-Decode) separation for optimal "
 "performance."
-msgstr ""
+msgstr "建议使用PD（预填充-解码）分离以获得最佳性能。"
 
 #: ../../references/qwen/deploy.md:5
 msgid "Framework version: v0.2.0"
-msgstr ""
+msgstr "框架版本：v0.2.0"
 
 #: ../../references/qwen/deploy.md:7
 msgid "Advanced Configuration"
-msgstr ""
+msgstr "高级配置"
 
 #: ../../references/qwen/deploy.md:9
 msgid ""
 "The resource requirements and startup parameters for prefill and decode "
 "are described separately below."
-msgstr ""
+msgstr "预填充和解码的资源需求及启动参数分别在下面描述。"
 
 #: ../../references/qwen/deploy.md:11
 msgid "Prefill"
-msgstr ""
+msgstr "预填充"
 
 #: ../../references/qwen/deploy.md:13 ../../references/qwen/deploy.md:74
 msgid "Resource Requirements"
-msgstr ""
+msgstr "资源需求"
 
 #: ../../references/qwen/deploy.md:15
 msgid ""
 "Single-node resource specifications requiring 4 nodes for multi-node "
 "deployment:"
-msgstr ""
+msgstr "单节点资源规格，多节点部署需要4个节点："
 
 #: ../../references/qwen/deploy.md
 msgid "CPU Cores"
@@ -103,19 +103,23 @@ msgstr ""
 
 #: ../../references/qwen/deploy.md:20 ../../references/qwen/deploy.md:81
 msgid "Advanced Arguments"
-msgstr ""
+msgstr "高级参数"
 
 #: ../../references/qwen/deploy.md:72
 msgid "Decode"
-msgstr ""
+msgstr "解码"
 
 #: ../../references/qwen/deploy.md:76
 msgid ""
 "Single-node resource specifications requiring 18 nodes for multi-node "
 "deployment:"
-msgstr ""
+msgstr "单节点资源规格，多节点部署需要18个节点："
 
 #: ../../references/qwen/deploy.md
 msgid "250GB"
+msgstr ""
+
+#: ../../references/qwen/deploy.md
+msgid "H20"
 msgstr ""
 

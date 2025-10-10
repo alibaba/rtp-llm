@@ -8,7 +8,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
-    <title>ServerArgs &#8212; RTP-LLM</title>
+    <title>服务器参数 &#8212; RTP-LLM</title>
   
   
   
@@ -55,11 +55,11 @@
     <link rel="icon" href="../_static/logo.ico"/>
     <link rel="index" title="索引" href="../genindex.html" />
     <link rel="search" title="搜索" href="../search.html" />
-    <link rel="next" title="Sampling Config" href="sampling_params.html" />
-    <link rel="prev" title="KiMi-K2 Recommended Deployment" href="../references/kimi/deploy.html" /> 
+    <link rel="next" title="采样配置" href="sampling_params.html" />
+    <link rel="prev" title="KiMi-K2推荐部署" href="../references/kimi/deploy.html" /> 
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="zh-CN"/>
-    <meta name="docbuild:last-update" content="2025 年 10 月 09 日"/>
+    <meta name="docbuild:last-update" content="2025 年 09 月 25 日"/>
 <link
   rel="stylesheet"
   href="../_static/css/language-switcher.css"
@@ -173,64 +173,63 @@
  </script></div>
         <div class="sidebar-primary-item"><nav class="bd-links bd-docs-nav" aria-label="Main">
     <div class="bd-toc-item navbar-nav active">
-        <p aria-level="2" class="caption" role="heading"><span class="caption-text">Installation</span></p>
+        <p aria-level="2" class="caption" role="heading"><span class="caption-text">安装</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../start/install.html">Install RTP-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../start/install.html">安装 RTP-LLM</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">Release Version</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">发布版本</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../release/v0.2.0/release.html">RTP-LLM 0.2.0</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">Basic Usage</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">基本用法</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="send_request.html">Sending Requests</a></li>
-<li class="toctree-l1"><a class="reference internal" href="openai_api_completions.html">OpenAI APIs - Completions</a></li>
-<li class="toctree-l1"><a class="reference internal" href="openai_api_vision.html">OpenAI APIs - Vision</a></li>
-<li class="toctree-l1"><a class="reference internal" href="openai_api_embeddings.html">OpenAI APIs - Embedding</a></li>
-<li class="toctree-l1"><a class="reference internal" href="native_api.html">RTP-LLM Native APIs</a></li>
+<li class="toctree-l1"><a class="reference internal" href="send_request.html">发送请求</a></li>
+<li class="toctree-l1"><a class="reference internal" href="openai_api_completions.html">OpenAI API - 文本生成/会话</a></li>
+<li class="toctree-l1"><a class="reference internal" href="openai_api_vision.html">OpenAI API - 多模态</a></li>
+<li class="toctree-l1"><a class="reference internal" href="openai_api_embeddings.html">OpenAI API - Embedding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="native_api.html">RTP-LLM Native API</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">Backend Tutorial</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">后端教程</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../references/deepseek/index.html">deepseek</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../references/qwen/index.html">qwen-moe</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../references/kimi/index.html">kimi</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">Advanced Backend Configurations</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">高级后端配置</span></p>
 <ul class="current nav bd-sidenav">
-<li class="toctree-l1 current active"><a class="current reference internal" href="#">ServerArgs</a></li>
-<li class="toctree-l1"><a class="reference internal" href="sampling_params.html">Sampling Config</a></li>
-<li class="toctree-l1"><a class="reference internal" href="attention_backend.html">Attention Backend</a></li>
+<li class="toctree-l1 current active"><a class="current reference internal" href="#">服务器参数</a></li>
+<li class="toctree-l1"><a class="reference internal" href="sampling_params.html">采样配置</a></li>
+<li class="toctree-l1"><a class="reference internal" href="attention_backend.html">注意力后端</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">Supported Models</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">支持的模型</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../supported_models/generative_models.html">Large Language Models</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../supported_models/multimodal_language_models.html">Multimodal Language Models</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../supported_models/embedding_models.html">Embedding Models</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../supported_models/support_new_models.html">How to Support New Models</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/generative_models.html">大语言模型</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/multimodal_language_models.html">多模态语言模型</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/embedding_models.html">Embedding 模型</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/support_new_models.html">如何支持新模型</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">Advanced Features</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">高级功能</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="speculative_decoding.html">Speculative Decoding</a></li>
-<li class="toctree-l1"><a class="reference internal" href="reuse_kv_cache.html">ReuseCache</a></li>
+<li class="toctree-l1"><a class="reference internal" href="speculative_decoding.html">推测解码</a></li>
+<li class="toctree-l1"><a class="reference internal" href="reuse_kv_cache.html">重用缓存</a></li>
 
-<li class="toctree-l1"><a class="reference internal" href="function_calling.html">Tool and Function Calling</a></li>
-<li class="toctree-l1"><a class="reference internal" href="quantization.html">Quantization</a></li>
-<li class="toctree-l1"><a class="reference internal" href="lora.html">LoRA Serving</a></li>
-<li class="toctree-l1"><a class="reference internal" href="pd_disaggregation.html">PD Disaggregation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="function_calling.html">工具和函数调用</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quantization.html">量化</a></li>
+<li class="toctree-l1"><a class="reference internal" href="lora.html">LoRA 服务</a></li>
+<li class="toctree-l1"><a class="reference internal" href="pd_disaggregation.html">PD分离</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">RTP-LLM Router</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">RTP-LLM 路由器</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="flexlb.html">FlexLB (Flexible Load Balancer) - Master Role</a></li>
+<li class="toctree-l1"><a class="reference internal" href="flexlb.html">FlexLB（弹性负载均衡器）- 主节点</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Benchmark</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../benchmark/benchmark.html">RTP-LLM Performance Benchmark Tool</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../benchmark/benchmark.html">RTP-LLM 性能基准测试工具</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">References</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">参考文献</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../references/general.html">General Guidance</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../references/developer.html">Developer Reference</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../README.html">Documentation Manual</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../references/general.html">通用指南</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../references/developer.html">开发者参考</a></li>
 </ul>
 
     </div>
@@ -450,7 +449,7 @@ document.write(`
               
 
 <div id="jb-print-docs-body" class="onlyprint">
-    <h1>ServerArgs</h1>
+    <h1>服务器参数</h1>
     <!-- Table of contents -->
     <div id="print-main-content">
         <div id="jb-print-toc">
@@ -460,24 +459,24 @@ document.write(`
             </div>
             <nav aria-label="Page">
                 <ul class="visible nav section-nav flex-column">
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#parallelism-and-distributed-setup-configuration">Parallelism and Distributed Setup Configuration</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#concurrency-control">Concurrency Control</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#attention-optimization"><span class="xref myst">Attention Optimization</span></a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#kv-cache-configuration">KV Cache Configuration</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#hardware-kernel-optimization">Hardware/Kernel Optimization</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#device-resource-management">Device Resource Management</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#deepep-configuration">DeepEP Configuration</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#eplb-configuration">EPLB Configuration</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#sampling-configuration">Sampling Configuration</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#logging-profiling">Logging &amp; Profiling</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#speculative-decoding">Speculative Decoding</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#rpc-and-service-discovery">RPC and Service Discovery</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#cache-store">Cache Store</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#scheduler-configuration">Scheduler Configuration</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#load-balancing-and-performance-optimization-configuration">Load Balancing and Performance Optimization Configuration</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#fs-configuration">3FS Configuration</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#model-adaptation">Model Adaptation</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#system-debugging">System Debugging</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#parallelism-and-distributed-setup-configuration">并行和分布式设置配置</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#concurrency-control">并发控制</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#attention-optimization"><span class="xref myst">注意力优化</span></a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#kv-cache-configuration">KV缓存配置</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#hardware-kernel-optimization">硬件/内核优化</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#device-resource-management">设备资源管理</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#deepep-configuration">DeepEP配置</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#eplb-configuration">EPLB配置</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#sampling-configuration">采样配置</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#logging-profiling">日志记录与性能分析</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#speculative-decoding">推测解码</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#rpc-and-service-discovery">RPC和服务发现</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#cache-store">缓存存储</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#scheduler-configuration">调度器配置</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#load-balancing-and-performance-optimization-configuration">负载均衡和性能优化配置</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#fs-configuration">3FS配置</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#model-adaptation">模型适配</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#system-debugging">系统调试</a></li>
 </ul>
             </nav>
         </div>
@@ -490,66 +489,66 @@ document.write(`
                 <article class="bd-article">
                   
   <section class="tex2jax_ignore mathjax_ignore" id="serverargs">
-<h1>ServerArgs<a class="headerlink" href="#serverargs" title="Link to this heading">#</a></h1>
-<p>This page lists server arguments used to configure the behavior and performance of the language model server via command line. These parameters allow users to customize key server functionalities, including model selection, parallel strategies, memory management, and optimization techniques.</p>
+<h1>服务器参数<a class="headerlink" href="#serverargs" title="Link to this heading">#</a></h1>
+<p>本页面列出了通过命令行配置语言模型服务器行为和性能的服务器参数。这些参数允许用户自定义关键服务器功能，包括模型选择、并行策略、内存管理和优化技术。</p>
 <section id="parallelism-and-distributed-setup-configuration">
-<h2>Parallelism and Distributed Setup Configuration<a class="headerlink" href="#parallelism-and-distributed-setup-configuration" title="Link to this heading">#</a></h2>
+<h2>并行和分布式设置配置<a class="headerlink" href="#parallelism-and-distributed-setup-configuration" title="Link to this heading">#</a></h2>
 <div class="pst-scrollable-table-container"><table class="table">
 <thead>
-<tr class="row-odd"><th class="head"><p>Arguments</p></th>
-<th class="head"><p>Description</p></th>
-<th class="head"><p>Defaults</p></th>
+<tr class="row-odd"><th class="head"><p>参数</p></th>
+<th class="head"><p>描述</p></th>
+<th class="head"><p>默认值</p></th>
 </tr>
 </thead>
 <tbody>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--tp-size</span></code></p></td>
-<td><p>Specifies the tensor parallelism degree.</p></td>
-<td><p>None</p></td>
+<td><p>指定张量并行度。</p></td>
+<td><p>无</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--ep-size</span></code></p></td>
-<td><p>Defines the number of model instances for expert parallelism.</p></td>
-<td><p>None</p></td>
+<td><p>定义专家并行的模型实例数量。</p></td>
+<td><p>无</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--dp-size</span></code></p></td>
-<td><p>Sets the number of replicas or group size for data parallelism.</p></td>
-<td><p>None</p></td>
+<td><p>设置数据并行的副本数或组大小。</p></td>
+<td><p>无</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--world-size</span></code></p></td>
-<td><p>Total number of GPUs used in distributed setup (WORLD_SIZE = TP_SIZE * DP_SIZE).</p></td>
-<td><p>None</p></td>
+<td><p>分布式设置中使用的GPU总数（WORLD_SIZE = TP_SIZE * DP_SIZE）。</p></td>
+<td><p>无</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--world-rank</span></code></p></td>
-<td><p>Global unique ID of the current process/GPU in the distributed system.</p></td>
-<td><p>None</p></td>
+<td><p>分布式系统中当前进程/GPU的全局唯一ID。</p></td>
+<td><p>无</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--local-world-size</span></code></p></td>
-<td><p>Number of GPU devices used on the current node.</p></td>
-<td><p>None</p></td>
+<td><p>当前节点上使用的GPU设备数量。</p></td>
+<td><p>无</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--enable_ffn_disaggregate</span></code></p></td>
-<td><p>Enables FFN disaggregation feature to separate attention and feed-forward network computations for performance optimization.</p></td>
-<td><p>None</p></td>
+<td><p>启用FFN解聚功能，将注意力和前馈网络计算分离以优化性能。</p></td>
+<td><p>无</p></td>
 </tr>
 </tbody>
 </table>
 </div>
 </section>
 <section id="concurrency-control">
-<h2>Concurrency Control<a class="headerlink" href="#concurrency-control" title="Link to this heading">#</a></h2>
+<h2>并发控制<a class="headerlink" href="#concurrency-control" title="Link to this heading">#</a></h2>
 <div class="pst-scrollable-table-container"><table class="table">
 <thead>
-<tr class="row-odd"><th class="head"><p>Arguments</p></th>
-<th class="head"><p>Description</p></th>
-<th class="head"><p>Defaults</p></th>
+<tr class="row-odd"><th class="head"><p>参数</p></th>
+<th class="head"><p>描述</p></th>
+<th class="head"><p>默认值</p></th>
 </tr>
 </thead>
 <tbody>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--concurrency-with-block</span></code></p></td>
-<td><p>Controls blocking behavior for concurrent requests.</p></td>
-<td><p>False</p></td>
+<td><p>控制并发请求的阻塞行为。</p></td>
+<td><p>否</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--concurrency-limit</span></code></p></td>
-<td><p>Maximum number of concurrent requests allowed by the system.</p></td>
+<td><p>系统允许的最大并发请求数。</p></td>
 <td><p>32</p></td>
 </tr>
 </tbody>
@@ -557,197 +556,197 @@ document.write(`
 </div>
 </section>
 <section id="attention-optimization">
-<h2><a class="reference internal" href="attention_backend.html"><span class="std std-doc">Attention Optimization</span></a><a class="headerlink" href="#attention-optimization" title="Link to this heading">#</a></h2>
+<h2><a class="reference internal" href="attention_backend.html"><span class="std std-doc">注意力优化</span></a><a class="headerlink" href="#attention-optimization" title="Link to this heading">#</a></h2>
 <div class="pst-scrollable-table-container"><table class="table">
 <thead>
-<tr class="row-odd"><th class="head"><p>Arguments</p></th>
-<th class="head"><p>Description</p></th>
-<th class="head"><p>Defaults</p></th>
+<tr class="row-odd"><th class="head"><p>参数</p></th>
+<th class="head"><p>描述</p></th>
+<th class="head"><p>默认值</p></th>
 </tr>
 </thead>
 <tbody>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--enable-fmha</span></code></p></td>
-<td><p>Enables Fused Multi-Head Attention (FMHA) feature.</p></td>
-<td><p>True</p></td>
+<td><p>启用融合多头注意力（FMHA）功能。</p></td>
+<td><p>是</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--enable-trt-fmha</span></code></p></td>
-<td><p>Enables TensorRT optimized FMHA feature.</p></td>
-<td><p>True</p></td>
+<td><p>启用TensorRT优化的FMHA功能。</p></td>
+<td><p>是</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--enable-paged-trt-fmha</span></code></p></td>
-<td><p>Enables Paged TensorRT FMHA.</p></td>
-<td><p>True</p></td>
+<td><p>启用分页TensorRT FMHA。</p></td>
+<td><p>是</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--enable-open-source-fmha</span></code></p></td>
-<td><p>Enables open-source FMHA implementation.</p></td>
-<td><p>True</p></td>
+<td><p>启用开源FMHA实现。</p></td>
+<td><p>是</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--enable-paged-open-source-fmha</span></code></p></td>
-<td><p>Enables Paged open-source FMHA implementation.</p></td>
-<td><p>True</p></td>
+<td><p>启用分页开源FMHA实现。</p></td>
+<td><p>是</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--enable-trtv1-fmha</span></code></p></td>
-<td><p>Enables TRTv1-style FMHA.</p></td>
-<td><p>True</p></td>
+<td><p>启用TRTv1风格的FMHA。</p></td>
+<td><p>是</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--fmha-perf-instrument</span></code></p></td>
-<td><p>Enables NVTX performance profiling for FMHA.</p></td>
-<td><p>False</p></td>
+<td><p>启用FMHA的NVTX性能分析。</p></td>
+<td><p>否</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--fmha-show-params</span></code></p></td>
-<td><p>Displays FMHA parameter information.</p></td>
-<td><p>False</p></td>
+<td><p>显示FMHA参数信息。</p></td>
+<td><p>否</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--disable-flash-infer</span></code></p></td>
-<td><p>Disables FlashInfer Attention mechanism.</p></td>
-<td><p>False</p></td>
+<td><p>禁用FlashInfer注意力机制。</p></td>
+<td><p>否</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--enable-xqa</span></code></p></td>
-<td><p>Enables XQA feature (requires SM90+ GPU).</p></td>
-<td><p>True</p></td>
+<td><p>启用XQA功能（需要SM90+ GPU）。</p></td>
+<td><p>是</p></td>
 </tr>
 </tbody>
 </table>
 </div>
 </section>
 <section id="kv-cache-configuration">
-<h2>KV Cache Configuration<a class="headerlink" href="#kv-cache-configuration" title="Link to this heading">#</a></h2>
+<h2>KV缓存配置<a class="headerlink" href="#kv-cache-configuration" title="Link to this heading">#</a></h2>
 <div class="pst-scrollable-table-container"><table class="table">
 <thead>
-<tr class="row-odd"><th class="head"><p>Arguments</p></th>
-<th class="head"><p>Description</p></th>
-<th class="head"><p>Defaults</p></th>
+<tr class="row-odd"><th class="head"><p>参数</p></th>
+<th class="head"><p>描述</p></th>
+<th class="head"><p>默认值</p></th>
 </tr>
 </thead>
 <tbody>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--reuse-cache</span></code></p></td>
-<td><p>Activates KV Cache reuse mechanism.</p></td>
-<td><p>False</p></td>
+<td><p>激活KV缓存重用机制。</p></td>
+<td><p>否</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--multi-task-prompt</span></code></p></td>
-<td><p>Multi-task prompt file path.</p></td>
-<td><p>None</p></td>
+<td><p>多任务提示文件路径。</p></td>
+<td><p>无</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--multi-task-prompt-str</span></code></p></td>
-<td><p>Multi-task prompt JSON string.</p></td>
-<td><p>None</p></td>
+<td><p>多任务提示JSON字符串。</p></td>
+<td><p>无</p></td>
 </tr>
 </tbody>
 </table>
 </div>
 </section>
 <section id="hardware-kernel-optimization">
-<h2>Hardware/Kernel Optimization<a class="headerlink" href="#hardware-kernel-optimization" title="Link to this heading">#</a></h2>
+<h2>硬件/内核优化<a class="headerlink" href="#hardware-kernel-optimization" title="Link to this heading">#</a></h2>
 <div class="pst-scrollable-table-container"><table class="table">
 <thead>
-<tr class="row-odd"><th class="head"><p>Arguments</p></th>
-<th class="head"><p>Description</p></th>
-<th class="head"><p>Defaults</p></th>
+<tr class="row-odd"><th class="head"><p>参数</p></th>
+<th class="head"><p>描述</p></th>
+<th class="head"><p>默认值</p></th>
 </tr>
 </thead>
 <tbody>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--deep-gemm-num-sm</span></code></p></td>
-<td><p>Number of SMs used for DeepGEMM.</p></td>
-<td><p>None</p></td>
+<td><p>用于DeepGEMM的SM数量。</p></td>
+<td><p>无</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--arm-gemm-use-kai</span></code></p></td>
-<td><p>Enables KleidiAI support for ARM GEMM.</p></td>
-<td><p>False</p></td>
+<td><p>启用ARM GEMM的KleidiAI支持。</p></td>
+<td><p>否</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--enable-stable-scatter-add</span></code></p></td>
-<td><p>Enables stable scatter add operation.</p></td>
-<td><p>False</p></td>
+<td><p>启用稳定的scatter add操作。</p></td>
+<td><p>否</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--enable-multi-block-mode</span></code></p></td>
-<td><p>Enables multi-block mode for MMHA.</p></td>
-<td><p>True</p></td>
+<td><p>启用MMHA的多块模式。</p></td>
+<td><p>是</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--rocm-hipblaslt-config</span></code></p></td>
-<td><p>hipBLASLt GEMM configuration file path.</p></td>
+<td><p>hipBLASLt GEMM配置文件路径。</p></td>
 <td><p>gemm_config.csv</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--ft-disable-custom-ar</span></code></p></td>
-<td><p>Disables custom AllReduce implementation.</p></td>
-<td><p>True</p></td>
+<td><p>禁用自定义AllReduce实现。</p></td>
+<td><p>是</p></td>
 </tr>
 </tbody>
 </table>
 </div>
 </section>
 <section id="device-resource-management">
-<h2>Device Resource Management<a class="headerlink" href="#device-resource-management" title="Link to this heading">#</a></h2>
+<h2>设备资源管理<a class="headerlink" href="#device-resource-management" title="Link to this heading">#</a></h2>
 <div class="pst-scrollable-table-container"><table class="table">
 <thead>
-<tr class="row-odd"><th class="head"><p>Arguments</p></th>
-<th class="head"><p>Description</p></th>
-<th class="head"><p>Defaults</p></th>
+<tr class="row-odd"><th class="head"><p>参数</p></th>
+<th class="head"><p>描述</p></th>
+<th class="head"><p>默认值</p></th>
 </tr>
 </thead>
 <tbody>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--device-reserve-memory-bytes</span></code></p></td>
-<td><p>Amount of GPU memory to reserve (bytes).</p></td>
+<td><p>要预留的GPU内存量（字节）。</p></td>
 <td><p>0</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--host-reserve-memory-bytes</span></code></p></td>
-<td><p>Amount of CPU memory to reserve (bytes).</p></td>
+<td><p>要预留的CPU内存量（字节）。</p></td>
 <td><p>4GB</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--overlap-math-sm-count</span></code></p></td>
-<td><p>Number of SMs for compute-communication overlap optimization.</p></td>
+<td><p>用于计算-通信重叠优化的SM数量。</p></td>
 <td><p>0</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--overlap-comm-type</span></code></p></td>
-<td><p>Compute-communication overlap strategy type.</p></td>
+<td><p>计算-通信重叠策略类型。</p></td>
 <td><p>0</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--m-split</span></code></p></td>
-<td><p>M_SPLIT parameter for device operations.</p></td>
+<td><p>设备操作的M_SPLIT参数。</p></td>
 <td><p>0</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--enable-comm-overlap</span></code></p></td>
-<td><p>Enables compute-communication overlapping execution.</p></td>
-<td><p>True</p></td>
+<td><p>启用计算-通信重叠执行。</p></td>
+<td><p>是</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--enable-layer-micro-batch</span></code></p></td>
-<td><p>Enables layer-level micro-batching.</p></td>
+<td><p>启用层级别微批处理。</p></td>
 <td><p>0</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--not-use-default-stream</span></code></p></td>
-<td><p>Do not use default CUDA stream.</p></td>
-<td><p>False</p></td>
+<td><p>不使用默认CUDA流。</p></td>
+<td><p>否</p></td>
 </tr>
 </tbody>
 </table>
 </div>
 </section>
 <section id="deepep-configuration">
-<h2>DeepEP Configuration<a class="headerlink" href="#deepep-configuration" title="Link to this heading">#</a></h2>
+<h2>DeepEP配置<a class="headerlink" href="#deepep-configuration" title="Link to this heading">#</a></h2>
 <div class="pst-scrollable-table-container"><table class="table">
 <thead>
-<tr class="row-odd"><th class="head"><p>Arguments</p></th>
-<th class="head"><p>Description</p></th>
-<th class="head"><p>Defaults</p></th>
+<tr class="row-odd"><th class="head"><p>参数</p></th>
+<th class="head"><p>描述</p></th>
+<th class="head"><p>默认值</p></th>
 </tr>
 </thead>
 <tbody>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--use-deepep-moe</span></code></p></td>
-<td><p>Enables DeepEP for MoE processing. Single EP shoude set be false</p></td>
-<td><p>False</p></td>
+<td><p>启用DeepEP进行MoE处理。单个EP应设置为false</p></td>
+<td><p>否</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--use-deepep-internode</span></code></p></td>
-<td><p>Enables inter-node communication optimization.</p></td>
-<td><p>False</p></td>
+<td><p>启用节点间通信优化。</p></td>
+<td><p>否</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--use-deepep-low-latency</span></code></p></td>
-<td><p>Enables DeepEP low-latency mode.</p></td>
-<td><p>True</p></td>
+<td><p>启用DeepEP低延迟模式。</p></td>
+<td><p>是</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--use-deepep-p2p-low-latency</span></code></p></td>
-<td><p>Enables P2P low-latency mode.</p></td>
-<td><p>False</p></td>
+<td><p>启用P2P低延迟模式。</p></td>
+<td><p>否</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--deep-ep-num-sm</span></code></p></td>
-<td><p>Number of SMs for DeepEPBuffer.</p></td>
+<td><p>DeepEPBuffer的SM数量。</p></td>
 <td><p>0</p></td>
 </tr>
 </tbody>
@@ -755,129 +754,129 @@ document.write(`
 </div>
 </section>
 <section id="eplb-configuration">
-<h2>EPLB Configuration<a class="headerlink" href="#eplb-configuration" title="Link to this heading">#</a></h2>
+<h2>EPLB配置<a class="headerlink" href="#eplb-configuration" title="Link to this heading">#</a></h2>
 <div class="pst-scrollable-table-container"><table class="table">
 <thead>
-<tr class="row-odd"><th class="head"><p>Arguments</p></th>
-<th class="head"><p>Description</p></th>
-<th class="head"><p>Defaults</p></th>
+<tr class="row-odd"><th class="head"><p>参数</p></th>
+<th class="head"><p>描述</p></th>
+<th class="head"><p>默认值</p></th>
 </tr>
 </thead>
 <tbody>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--eplb_mode</span></code></p></td>
-<td><p>EPLB mode</p></td>
+<td><p>EPLB模式</p></td>
 <td><p>&quot;NONE&quot;</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--balance_method</span></code></p></td>
-<td><p>EPLB load balancing method.</p></td>
+<td><p>EPLB负载均衡方法。</p></td>
 <td><p>&quot;mix&quot;</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--redundant_expert</span></code></p></td>
-<td><p>Number of redundant experts.</p></td>
+<td><p>冗余专家数量。</p></td>
 <td><p>0</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--eplb_update_time</span></code></p></td>
-<td><p>EPLB execution cycle.</p></td>
+<td><p>EPLB执行周期。</p></td>
 <td><p>5000</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--eplb_balance_layer_per_step</span></code></p></td>
-<td><p>Number of layers updated per EPLB update.</p></td>
+<td><p>每次EPLB更新的层数。</p></td>
 <td><p>1</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--eplb_force_repack</span></code></p></td>
-<td><p>Globally repack EPLB experts.</p></td>
-<td><p>False</p></td>
+<td><p>全局重新打包EPLB专家。</p></td>
+<td><p>否</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--eplb_stats_window_size</span></code></p></td>
-<td><p>EPLB statistics window size.</p></td>
+<td><p>EPLB统计窗口大小。</p></td>
 <td><p>10</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--eplb_control_step</span></code></p></td>
-<td><p>(DEBUG) EPLB synchronization control parameter cycle.</p></td>
+<td><p>(调试) EPLB同步控制参数周期。</p></td>
 <td><p>100</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--eplb_test_mode</span></code></p></td>
-<td><p>(DEBUG) Enables ExpertBalancer test mode</p></td>
-<td><p>False</p></td>
+<td><p>(调试) 启用ExpertBalancer测试模式</p></td>
+<td><p>否</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--fake_balance_expert</span></code></p></td>
-<td><p>(DEBUG) Enables expert pseudo-balancing mechanism.</p></td>
-<td><p>False</p></td>
+<td><p>(调试) 启用专家伪平衡机制。</p></td>
+<td><p>否</p></td>
 </tr>
 </tbody>
 </table>
 </div>
 </section>
 <section id="sampling-configuration">
-<h2>Sampling Configuration<a class="headerlink" href="#sampling-configuration" title="Link to this heading">#</a></h2>
+<h2>采样配置<a class="headerlink" href="#sampling-configuration" title="Link to this heading">#</a></h2>
 <div class="pst-scrollable-table-container"><table class="table">
 <thead>
-<tr class="row-odd"><th class="head"><p>Arguments</p></th>
-<th class="head"><p>Description</p></th>
-<th class="head"><p>Defaults</p></th>
+<tr class="row-odd"><th class="head"><p>参数</p></th>
+<th class="head"><p>描述</p></th>
+<th class="head"><p>默认值</p></th>
 </tr>
 </thead>
 <tbody>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--max-batch-size</span></code></p></td>
-<td><p>Override system maximum batch size.</p></td>
+<td><p>覆盖系统最大批处理大小。</p></td>
 <td><p>0</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--enable-flashinfer-sample-kernel</span></code></p></td>
-<td><p>Enables FlashInfer sampling kernel.</p></td>
-<td><p>True</p></td>
+<td><p>启用FlashInfer采样内核。</p></td>
+<td><p>是</p></td>
 </tr>
 </tbody>
 </table>
 </div>
 </section>
 <section id="logging-profiling">
-<h2>Logging &amp; Profiling<a class="headerlink" href="#logging-profiling" title="Link to this heading">#</a></h2>
+<h2>日志记录与性能分析<a class="headerlink" href="#logging-profiling" title="Link to this heading">#</a></h2>
 <div class="pst-scrollable-table-container"><table class="table">
 <thead>
-<tr class="row-odd"><th class="head"><p>Arguments</p></th>
-<th class="head"><p>Description</p></th>
-<th class="head"><p>Defaults</p></th>
+<tr class="row-odd"><th class="head"><p>参数</p></th>
+<th class="head"><p>描述</p></th>
+<th class="head"><p>默认值</p></th>
 </tr>
 </thead>
 <tbody>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--ft-nvtx</span></code></p></td>
-<td><p>Enables NVTX performance profiling.</p></td>
-<td><p>False</p></td>
+<td><p>启用NVTX性能分析。</p></td>
+<td><p>否</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--py-inference-log-response</span></code></p></td>
-<td><p>Logs inference response content.</p></td>
-<td><p>False</p></td>
+<td><p>记录推理响应内容。</p></td>
+<td><p>否</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--trace-memory</span></code></p></td>
-<td><p>Enables memory tracing.</p></td>
-<td><p>False</p></td>
+<td><p>启用内存追踪。</p></td>
+<td><p>否</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--trace-malloc-stack</span></code></p></td>
-<td><p>Enables malloc stack tracing.</p></td>
-<td><p>False</p></td>
+<td><p>启用malloc堆栈追踪。</p></td>
+<td><p>否</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--enable-device-perf</span></code></p></td>
-<td><p>Collects device performance metrics.</p></td>
-<td><p>False</p></td>
+<td><p>收集设备性能指标。</p></td>
+<td><p>否</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--ft-core-dump-on-exception</span></code></p></td>
-<td><p>Generates core dump on exception.</p></td>
-<td><p>False</p></td>
+<td><p>在异常时生成核心转储。</p></td>
+<td><p>否</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--ft-alog-conf-path</span></code></p></td>
-<td><p>Log configuration file path.</p></td>
-<td><p>None</p></td>
+<td><p>日志配置文件路径。</p></td>
+<td><p>无</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--log-level</span></code></p></td>
-<td><p>Log level (ERROR/WARN/INFO/DEBUG).</p></td>
+<td><p>日志级别（ERROR/WARN/INFO/DEBUG）。</p></td>
 <td><p>INFO</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--gen-timeline-sync</span></code></p></td>
-<td><p>Collects Timeline analysis data.</p></td>
-<td><p>False</p></td>
+<td><p>收集时间线分析数据。</p></td>
+<td><p>否</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--torch-cuda-profiler-dir</span></code></p></td>
-<td><p>Torch Profiler output directory.</p></td>
+<td><p>Torch Profiler输出目录。</p></td>
 <td><p>&quot;&quot;</p></td>
 </tr>
 </tbody>
@@ -885,105 +884,105 @@ document.write(`
 </div>
 </section>
 <section id="speculative-decoding">
-<h2>Speculative Decoding<a class="headerlink" href="#speculative-decoding" title="Link to this heading">#</a></h2>
+<h2>推测解码<a class="headerlink" href="#speculative-decoding" title="Link to this heading">#</a></h2>
 <div class="pst-scrollable-table-container"><table class="table">
 <thead>
-<tr class="row-odd"><th class="head"><p>Arguments</p></th>
-<th class="head"><p>Description</p></th>
-<th class="head"><p>Defaults</p></th>
+<tr class="row-odd"><th class="head"><p>参数</p></th>
+<th class="head"><p>描述</p></th>
+<th class="head"><p>默认值</p></th>
 </tr>
 </thead>
 <tbody>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--sp-model-type</span></code></p></td>
-<td><p>Specifies draft model type (e.g.  &quot;deepseek-v3-mtp&quot;)</p></td>
+<td><p>指定草稿模型类型（例如 &quot;deepseek-v3-mtp&quot;）</p></td>
 <td><p>&quot;&quot;</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--sp-type</span></code></p></td>
-<td><p>Controls speculative sampling type (&quot;vanilla&quot; disables, &quot;mtp&quot; enables)</p></td>
+<td><p>控制推测采样类型（&quot;vanilla&quot; 禁用，&quot;mtp&quot; 启用）</p></td>
 <td><p>&quot;&quot;</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--sp-min-token-match</span></code></p></td>
-<td><p>Minimum token match length</p></td>
+<td><p>最小token匹配长度</p></td>
 <td><p>2</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--sp-max-token-match</span></code></p></td>
-<td><p>Maximum token match length</p></td>
+<td><p>最大token匹配长度</p></td>
 <td><p>2</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--tree-decode-config</span></code></p></td>
-<td><p>Tree decode mapping configuration file</p></td>
+<td><p>树解码映射配置文件</p></td>
 <td><p>&quot;&quot;</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--gen-num-per-cycle</span></code></p></td>
-<td><p>Maximum number of tokens generated per cycle</p></td>
+<td><p>每个周期生成的最大token数量</p></td>
 <td><p>1</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--force-stream-sample</span></code></p></td>
-<td><p>Forces streaming sampling</p></td>
-<td><p>False</p></td>
+<td><p>强制流式采样</p></td>
+<td><p>否</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--force-score-context-attention</span></code></p></td>
-<td><p>Forces context attention scoring</p></td>
-<td><p>True</p></td>
+<td><p>强制上下文注意力评分</p></td>
+<td><p>是</p></td>
 </tr>
 </tbody>
 </table>
 </div>
 </section>
 <section id="rpc-and-service-discovery">
-<h2>RPC and Service Discovery<a class="headerlink" href="#rpc-and-service-discovery" title="Link to this heading">#</a></h2>
+<h2>RPC和服务发现<a class="headerlink" href="#rpc-and-service-discovery" title="Link to this heading">#</a></h2>
 <div class="pst-scrollable-table-container"><table class="table">
 <thead>
-<tr class="row-odd"><th class="head"><p>Arguments</p></th>
-<th class="head"><p>Description</p></th>
-<th class="head"><p>Defaults</p></th>
+<tr class="row-odd"><th class="head"><p>参数</p></th>
+<th class="head"><p>描述</p></th>
+<th class="head"><p>默认值</p></th>
 </tr>
 </thead>
 <tbody>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--use-local</span></code></p></td>
-<td><p>Uses local service discovery</p></td>
-<td><p>False</p></td>
+<td><p>使用本地服务发现</p></td>
+<td><p>否</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--remote-rpc-server-ip</span></code></p></td>
-<td><p>Remote RPC server address</p></td>
-<td><p>None</p></td>
+<td><p>远程RPC服务器地址</p></td>
+<td><p>无</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--decode-cm2-config</span></code></p></td>
-<td><p>Decode service discovery configuration</p></td>
-<td><p>None</p></td>
+<td><p>解码服务发现配置</p></td>
+<td><p>无</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--remote-vit-server-ip</span></code></p></td>
-<td><p>Remote ViT server address</p></td>
-<td><p>None</p></td>
+<td><p>远程ViT服务器地址</p></td>
+<td><p>无</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--multimodal-part-cm2-config</span></code></p></td>
-<td><p>Multimodal service discovery configuration</p></td>
-<td><p>None</p></td>
+<td><p>多模态服务发现配置</p></td>
+<td><p>无</p></td>
 </tr>
 </tbody>
 </table>
 </div>
 </section>
 <section id="cache-store">
-<h2>Cache Store<a class="headerlink" href="#cache-store" title="Link to this heading">#</a></h2>
+<h2>缓存存储<a class="headerlink" href="#cache-store" title="Link to this heading">#</a></h2>
 <div class="pst-scrollable-table-container"><table class="table">
 <thead>
-<tr class="row-odd"><th class="head"><p>Arguments</p></th>
-<th class="head"><p>Description</p></th>
-<th class="head"><p>Defaults</p></th>
+<tr class="row-odd"><th class="head"><p>参数</p></th>
+<th class="head"><p>描述</p></th>
+<th class="head"><p>默认值</p></th>
 </tr>
 </thead>
 <tbody>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--cache-store-rdma-mode</span></code></p></td>
-<td><p>Enables RDMA mode</p></td>
-<td><p>False</p></td>
+<td><p>启用RDMA模式</p></td>
+<td><p>否</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--wrr-available-ratio</span></code></p></td>
-<td><p>WRR load balancing availability threshold</p></td>
+<td><p>WRR负载均衡可用性阈值</p></td>
 <td><p>80</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--rank-factor</span></code></p></td>
-<td><p>WRR ranking factor (0=KV_CACHE usage, 1=in-flight requests)</p></td>
+<td><p>WRR排序因子（0=KV缓存使用率，1=飞行中请求）</p></td>
 <td><p>0</p></td>
 </tr>
 </tbody>
@@ -991,41 +990,41 @@ document.write(`
 </div>
 </section>
 <section id="scheduler-configuration">
-<h2>Scheduler Configuration<a class="headerlink" href="#scheduler-configuration" title="Link to this heading">#</a></h2>
+<h2>调度器配置<a class="headerlink" href="#scheduler-configuration" title="Link to this heading">#</a></h2>
 <div class="pst-scrollable-table-container"><table class="table">
 <thead>
-<tr class="row-odd"><th class="head"><p>Arguments</p></th>
-<th class="head"><p>Description</p></th>
-<th class="head"><p>Defaults</p></th>
+<tr class="row-odd"><th class="head"><p>参数</p></th>
+<th class="head"><p>描述</p></th>
+<th class="head"><p>默认值</p></th>
 </tr>
 </thead>
 <tbody>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--use-batch-decode-scheduler</span></code></p></td>
-<td><p>Enables batch decode scheduler</p></td>
-<td><p>False</p></td>
+<td><p>启用批处理解码调度器</p></td>
+<td><p>否</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--max-context-batch-size</span></code></p></td>
-<td><p>Maximum context batch size</p></td>
+<td><p>最大上下文批处理大小</p></td>
 <td><p>1</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--scheduler-reserve-resource-ratio</span></code></p></td>
-<td><p>Reserved resource percentage</p></td>
+<td><p>预留资源百分比</p></td>
 <td><p>5</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--enable-fast-gen</span></code></p></td>
-<td><p>Enables long request chunking processing</p></td>
-<td><p>False</p></td>
+<td><p>启用长请求分块处理</p></td>
+<td><p>否</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--fast-gen-context-budget</span></code></p></td>
-<td><p>Chunk processing size</p></td>
-<td><p>None</p></td>
+<td><p>分块处理大小</p></td>
+<td><p>无</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--enable-partial-fallback</span></code></p></td>
-<td><p>Allows partial resource reclamation</p></td>
-<td><p>False</p></td>
+<td><p>允许部分资源回收</p></td>
+<td><p>否</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--batch-decode-scheduler-batch-size</span></code></p></td>
-<td><p>Decode batch size</p></td>
+<td><p>解码批处理大小</p></td>
 <td><p>1</p></td>
 </tr>
 </tbody>
@@ -1033,65 +1032,65 @@ document.write(`
 </div>
 </section>
 <section id="load-balancing-and-performance-optimization-configuration">
-<h2>Load Balancing and Performance Optimization Configuration<a class="headerlink" href="#load-balancing-and-performance-optimization-configuration" title="Link to this heading">#</a></h2>
+<h2>负载均衡和性能优化配置<a class="headerlink" href="#load-balancing-and-performance-optimization-configuration" title="Link to this heading">#</a></h2>
 <div class="pst-scrollable-table-container"><table class="table">
 <thead>
-<tr class="row-odd"><th class="head"><p>Arguments</p></th>
-<th class="head"><p>Description</p></th>
-<th class="head"><p>Defaults</p></th>
+<tr class="row-odd"><th class="head"><p>参数</p></th>
+<th class="head"><p>描述</p></th>
+<th class="head"><p>默认值</p></th>
 </tr>
 </thead>
 <tbody>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--load-balance</span></code></p></td>
-<td><p>Enables dynamic load balancing</p></td>
-<td><p>False</p></td>
+<td><p>启用动态负载均衡</p></td>
+<td><p>否</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--step-records-time-range</span></code></p></td>
-<td><p>Performance record retention time window (microseconds)</p></td>
+<td><p>性能记录保留时间窗口（微秒）</p></td>
 <td><p>60000000</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--step-records-max-size</span></code></p></td>
-<td><p>Maximum performance record count</p></td>
+<td><p>最大性能记录数量</p></td>
 <td><p>1000</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--disable-pdl</span></code></p></td>
-<td><p>Disables PDL feature</p></td>
-<td><p>False</p></td>
+<td><p>禁用PDL功能</p></td>
+<td><p>否</p></td>
 </tr>
 </tbody>
 </table>
 </div>
 </section>
 <section id="fs-configuration">
-<h2>3FS Configuration<a class="headerlink" href="#fs-configuration" title="Link to this heading">#</a></h2>
+<h2>3FS配置<a class="headerlink" href="#fs-configuration" title="Link to this heading">#</a></h2>
 <div class="pst-scrollable-table-container"><table class="table">
 <thead>
-<tr class="row-odd"><th class="head"><p>Arguments</p></th>
-<th class="head"><p>Description</p></th>
-<th class="head"><p>Defaults</p></th>
+<tr class="row-odd"><th class="head"><p>参数</p></th>
+<th class="head"><p>描述</p></th>
+<th class="head"><p>默认值</p></th>
 </tr>
 </thead>
 <tbody>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--enable-3fs</span></code></p></td>
-<td><p>Enables 3FS for managing KVCache</p></td>
-<td><p>False</p></td>
+<td><p>启用3FS管理KVCache</p></td>
+<td><p>否</p></td>
 </tr>
 </tbody>
 </table>
 </div>
 </section>
 <section id="model-adaptation">
-<h2>Model Adaptation<a class="headerlink" href="#model-adaptation" title="Link to this heading">#</a></h2>
+<h2>模型适配<a class="headerlink" href="#model-adaptation" title="Link to this heading">#</a></h2>
 <div class="pst-scrollable-table-container"><table class="table">
 <thead>
-<tr class="row-odd"><th class="head"><p>Arguments</p></th>
-<th class="head"><p>Description</p></th>
-<th class="head"><p>Defaults</p></th>
+<tr class="row-odd"><th class="head"><p>参数</p></th>
+<th class="head"><p>描述</p></th>
+<th class="head"><p>默认值</p></th>
 </tr>
 </thead>
 <tbody>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--max-lora-model-size</span></code></p></td>
-<td><p>Maximum size limit for LoRA models</p></td>
+<td><p>LoRA模型的最大大小限制</p></td>
 <td><p>-1</p></td>
 </tr>
 </tbody>
@@ -1099,21 +1098,21 @@ document.write(`
 </div>
 </section>
 <section id="system-debugging">
-<h2>System Debugging<a class="headerlink" href="#system-debugging" title="Link to this heading">#</a></h2>
+<h2>系统调试<a class="headerlink" href="#system-debugging" title="Link to this heading">#</a></h2>
 <div class="pst-scrollable-table-container"><table class="table">
 <thead>
-<tr class="row-odd"><th class="head"><p>Arguments</p></th>
-<th class="head"><p>Description</p></th>
-<th class="head"><p>Defaults</p></th>
+<tr class="row-odd"><th class="head"><p>参数</p></th>
+<th class="head"><p>描述</p></th>
+<th class="head"><p>默认值</p></th>
 </tr>
 </thead>
 <tbody>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--gen-timeline-sync</span></code></p></td>
-<td><p>Collects Timeline analysis data</p></td>
-<td><p>False</p></td>
+<td><p>收集时间线分析数据</p></td>
+<td><p>否</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--torch-cuda-profiler-dir</span></code></p></td>
-<td><p>Torch Profiler output directory</p></td>
+<td><p>Torch Profiler输出目录</p></td>
 <td><p>&quot;&quot;</p></td>
 </tr>
 </tbody>
@@ -1139,7 +1138,7 @@ document.write(`
       <i class="fa-solid fa-angle-left"></i>
       <div class="prev-next-info">
         <p class="prev-next-subtitle">上一页</p>
-        <p class="prev-next-title">KiMi-K2 Recommended Deployment</p>
+        <p class="prev-next-title">KiMi-K2推荐部署</p>
       </div>
     </a>
     <a class="right-next"
@@ -1147,7 +1146,7 @@ document.write(`
        title="next page">
       <div class="prev-next-info">
         <p class="prev-next-subtitle">下一页</p>
-        <p class="prev-next-title">Sampling Config</p>
+        <p class="prev-next-title">采样配置</p>
       </div>
       <i class="fa-solid fa-angle-right"></i>
     </a>
@@ -1167,24 +1166,24 @@ document.write(`
   </div>
   <nav class="bd-toc-nav page-toc">
     <ul class="visible nav section-nav flex-column">
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#parallelism-and-distributed-setup-configuration">Parallelism and Distributed Setup Configuration</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#concurrency-control">Concurrency Control</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#attention-optimization"><span class="xref myst">Attention Optimization</span></a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#kv-cache-configuration">KV Cache Configuration</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#hardware-kernel-optimization">Hardware/Kernel Optimization</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#device-resource-management">Device Resource Management</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#deepep-configuration">DeepEP Configuration</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#eplb-configuration">EPLB Configuration</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#sampling-configuration">Sampling Configuration</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#logging-profiling">Logging &amp; Profiling</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#speculative-decoding">Speculative Decoding</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#rpc-and-service-discovery">RPC and Service Discovery</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#cache-store">Cache Store</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#scheduler-configuration">Scheduler Configuration</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#load-balancing-and-performance-optimization-configuration">Load Balancing and Performance Optimization Configuration</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#fs-configuration">3FS Configuration</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#model-adaptation">Model Adaptation</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#system-debugging">System Debugging</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#parallelism-and-distributed-setup-configuration">并行和分布式设置配置</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#concurrency-control">并发控制</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#attention-optimization"><span class="xref myst">注意力优化</span></a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#kv-cache-configuration">KV缓存配置</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#hardware-kernel-optimization">硬件/内核优化</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#device-resource-management">设备资源管理</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#deepep-configuration">DeepEP配置</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#eplb-configuration">EPLB配置</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#sampling-configuration">采样配置</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#logging-profiling">日志记录与性能分析</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#speculative-decoding">推测解码</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#rpc-and-service-discovery">RPC和服务发现</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#cache-store">缓存存储</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#scheduler-configuration">调度器配置</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#load-balancing-and-performance-optimization-configuration">负载均衡和性能优化配置</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#fs-configuration">3FS配置</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#model-adaptation">模型适配</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#system-debugging">系统调试</a></li>
 </ul>
   </nav></div>
 
@@ -1218,7 +1217,7 @@ document.write(`
   
   <div class="footer-item">
     <p class="last-updated">
-  最后更新于 2025 年 10 月 09 日.
+  最后更新于 2025 年 09 月 25 日.
   <br/>
 </p>
   </div>

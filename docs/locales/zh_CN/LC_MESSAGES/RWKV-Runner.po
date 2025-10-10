@@ -1,0 +1,47 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: RTP-LLM 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-12 17:38+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../RWKV-Runner.md:2
+msgid "RWKV-Runner"
+msgstr "RWKV-Runner"
+
+#: ../../RWKV-Runner.md:13
+#, python-brace-format
+msgid "在客户端对应位置填写API URL：`{server_ip}:{port}`即可"
+msgstr "在客户端对应位置填写API URL：`{server_ip}:{port}`即可"
+
+#: ../../RWKV-Runner.md:16
+msgid ""
+"在API URL填写服务ip和端口(默认8088) <img src=\"pics/rwkv_runner_main_image.jpg\" "
+"width = \"1000\" height = \"500\"/>"
+msgstr "在API URL填写服务ip和端口(默认8088) <img src=\"pics/rwkv_runner_main_image.jpg\" width = \"1000\" height = \"500\"/>"
+
+#: ../../RWKV-Runner.md:19
+msgid ""
+"之后可以直接使用chat功能，其本质上是调用`/v1/chat/completion`接口 <img "
+"src=\"pics/rwkv_runner_chat_image.jpg\" width = \"1000\" height = "
+"\"500\"/>"
+msgstr "之后可以直接使用chat功能，其本质上是调用`/v1/chat/completion`接口 <img src=\"pics/rwkv_runner_chat_image.jpg\" width = \"1000\" height = \"500\"/>"
+
+#: ../../RWKV-Runner.md:22
+msgid "其余接口(续写、作曲等)尚未适配，无法使用"
+msgstr "其余接口(续写、作曲等)尚未适配，无法使用"
+

@@ -8,7 +8,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
-    <title>Contributing Guide &#8212; RTP-LLM</title>
+    <title>贡献指南 &#8212; RTP-LLM</title>
   
   
   
@@ -55,11 +55,11 @@
     <link rel="icon" href="../_static/logo.ico"/>
     <link rel="index" title="索引" href="../genindex.html" />
     <link rel="search" title="搜索" href="../search.html" />
-    <link rel="next" title="Update whl Deps" href="Update-whl-Deps.html" />
-    <link rel="prev" title="Developer Reference" href="developer.html" /> 
+    <link rel="next" title="更新 whl 依赖" href="Update-whl-Deps.html" />
+    <link rel="prev" title="开发者参考" href="developer.html" /> 
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="zh-CN"/>
-    <meta name="docbuild:last-update" content="2025 年 10 月 09 日"/>
+    <meta name="docbuild:last-update" content="2025 年 09 月 25 日"/>
 <link
   rel="stylesheet"
   href="../_static/css/language-switcher.css"
@@ -173,71 +173,70 @@
  </script></div>
         <div class="sidebar-primary-item"><nav class="bd-links bd-docs-nav" aria-label="Main">
     <div class="bd-toc-item navbar-nav active">
-        <p aria-level="2" class="caption" role="heading"><span class="caption-text">Installation</span></p>
+        <p aria-level="2" class="caption" role="heading"><span class="caption-text">安装</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../start/install.html">Install RTP-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../start/install.html">安装 RTP-LLM</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">Release Version</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">发布版本</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../release/v0.2.0/release.html">RTP-LLM 0.2.0</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">Basic Usage</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">基本用法</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../backend/send_request.html">Sending Requests</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../backend/openai_api_completions.html">OpenAI APIs - Completions</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../backend/openai_api_vision.html">OpenAI APIs - Vision</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../backend/openai_api_embeddings.html">OpenAI APIs - Embedding</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../backend/native_api.html">RTP-LLM Native APIs</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/send_request.html">发送请求</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/openai_api_completions.html">OpenAI API - 文本生成/会话</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/openai_api_vision.html">OpenAI API - 多模态</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/openai_api_embeddings.html">OpenAI API - Embedding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/native_api.html">RTP-LLM Native API</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">Backend Tutorial</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">后端教程</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="deepseek/index.html">deepseek</a></li>
 <li class="toctree-l1"><a class="reference internal" href="qwen/index.html">qwen-moe</a></li>
 <li class="toctree-l1"><a class="reference internal" href="kimi/index.html">kimi</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">Advanced Backend Configurations</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">高级后端配置</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../backend/server_arguments.html">ServerArgs</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../backend/sampling_params.html">Sampling Config</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../backend/attention_backend.html">Attention Backend</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/server_arguments.html">服务器参数</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/sampling_params.html">采样配置</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/attention_backend.html">注意力后端</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">Supported Models</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">支持的模型</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../supported_models/generative_models.html">Large Language Models</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../supported_models/multimodal_language_models.html">Multimodal Language Models</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../supported_models/embedding_models.html">Embedding Models</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../supported_models/support_new_models.html">How to Support New Models</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/generative_models.html">大语言模型</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/multimodal_language_models.html">多模态语言模型</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/embedding_models.html">Embedding 模型</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/support_new_models.html">如何支持新模型</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">Advanced Features</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">高级功能</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../backend/speculative_decoding.html">Speculative Decoding</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../backend/reuse_kv_cache.html">ReuseCache</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/speculative_decoding.html">推测解码</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/reuse_kv_cache.html">重用缓存</a></li>
 
-<li class="toctree-l1"><a class="reference internal" href="../backend/function_calling.html">Tool and Function Calling</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../backend/quantization.html">Quantization</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../backend/lora.html">LoRA Serving</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../backend/pd_disaggregation.html">PD Disaggregation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/function_calling.html">工具和函数调用</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/quantization.html">量化</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/lora.html">LoRA 服务</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/pd_disaggregation.html">PD分离</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">RTP-LLM Router</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">RTP-LLM 路由器</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../backend/flexlb.html">FlexLB (Flexible Load Balancer) - Master Role</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/flexlb.html">FlexLB（弹性负载均衡器）- 主节点</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Benchmark</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../benchmark/benchmark.html">RTP-LLM Performance Benchmark Tool</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../benchmark/benchmark.html">RTP-LLM 性能基准测试工具</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">References</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">参考文献</span></p>
 <ul class="current nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="general.html">General Guidance</a></li>
-<li class="toctree-l1 current active has-children"><a class="reference internal" href="developer.html">Developer Reference</a><details open="open"><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul class="current">
-<li class="toctree-l2 current active"><a class="current reference internal" href="#">Contributing Guide</a></li>
-<li class="toctree-l2"><a class="reference internal" href="Update-whl-Deps.html">Update whl Deps</a></li>
-<li class="toctree-l2"><a class="reference internal" href="Environment.html">Environment Variable Development Tutorial</a></li>
-<li class="toctree-l2"><a class="reference internal" href="../backend/Frontend.html">Frontend</a></li>
-<li class="toctree-l2"><a class="reference internal" href="../backend/Multimodal.html">Multimodal Part Debug and Separate Deployment</a></li>
+<li class="toctree-l1"><a class="reference internal" href="general.html">通用指南</a></li>
+<li class="toctree-l1 current active has-children"><a class="reference internal" href="developer.html">开发者参考</a><details open="open"><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul class="current">
+<li class="toctree-l2 current active"><a class="current reference internal" href="#">贡献指南</a></li>
+<li class="toctree-l2"><a class="reference internal" href="Update-whl-Deps.html">更新 whl 依赖</a></li>
+<li class="toctree-l2"><a class="reference internal" href="Environment.html">环境变量开发教程</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../backend/Frontend.html">前端</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../backend/Multimodal.html">多模态部分调试与独立部署</a></li>
 </ul>
 </details></li>
-<li class="toctree-l1"><a class="reference internal" href="../README.html">Documentation Manual</a></li>
 </ul>
 
     </div>
@@ -457,7 +456,7 @@ document.write(`
               
 
 <div id="jb-print-docs-body" class="onlyprint">
-    <h1>Contributing Guide</h1>
+    <h1>贡献指南</h1>
     <!-- Table of contents -->
     <div id="print-main-content">
         <div id="jb-print-toc">
@@ -467,8 +466,8 @@ document.write(`
             </div>
             <nav aria-label="Page">
                 <ul class="visible nav section-nav flex-column">
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#contribution-process">Contribution Process</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#notes">Notes</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#contribution-process">贡献流程</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#notes">注意事项</a></li>
 </ul>
             </nav>
         </div>
@@ -481,32 +480,32 @@ document.write(`
                 <article class="bd-article">
                   
   <section class="tex2jax_ignore mathjax_ignore" id="contributing-guide">
-<h1>Contributing Guide<a class="headerlink" href="#contributing-guide" title="Link to this heading">#</a></h1>
-<p>We encourage every member to contribute to the project. Whether through reporting issues, discussing the current state of code, submitting fixes, proposing new features, or becoming a maintainer, we warmly welcome your participation!</p>
-<p>Here are several ways you can contribute:</p>
+<h1>贡献指南<a class="headerlink" href="#contributing-guide" title="Link to this heading">#</a></h1>
+<p>我们鼓励每位成员为项目做出贡献。无论是通过报告问题、讨论代码现状、提交修复、提出新功能，还是成为维护者，我们都热烈欢迎您的参与！</p>
+<p>以下是您可以贡献的几种方式：</p>
 <ul class="simple">
-<li><p><strong>Report bugs</strong>: If you find an error, please let us know.</p></li>
-<li><p><strong>Discuss code status</strong>: Participate in discussions and reviews of existing code.</p></li>
-<li><p><strong>Submit fixes</strong>: If you can fix a problem, please submit your code.</p></li>
-<li><p><strong>Propose new features</strong>: We welcome any innovative ideas and suggestions.</p></li>
-<li><p><strong>Become a maintainer</strong>: If you're willing to commit long-term to the project, you can become a project maintainer.</p></li>
-<li><p><strong>Discussion</strong>: If you want to discuss anything, feel free to express your views, opinions, or other relevant comments in the discussion area.</p></li>
+<li><p><strong>报告错误</strong>：如果您发现错误，请告知我们。</p></li>
+<li><p><strong>讨论代码状态</strong>：参与现有代码的讨论和审查。</p></li>
+<li><p><strong>提交修复</strong>：如果您能修复问题，请提交您的代码。</p></li>
+<li><p><strong>提出新功能</strong>：我们欢迎任何创新的想法和建议。</p></li>
+<li><p><strong>成为维护者</strong>：如果您愿意长期致力于该项目，您可以成为项目维护者。</p></li>
+<li><p><strong>讨论</strong>：如果您想讨论任何事情，请随时在讨论区表达您的观点、意见或其他相关评论。</p></li>
 </ul>
 <section id="contribution-process">
-<h2>Contribution Process<a class="headerlink" href="#contribution-process" title="Link to this heading">#</a></h2>
+<h2>贡献流程<a class="headerlink" href="#contribution-process" title="Link to this heading">#</a></h2>
 <ol class="arabic simple">
-<li><p><strong>Propose changes</strong>: Open a new issue (issue) for any changes you suggest.</p></li>
-<li><p><strong>Get approval</strong>: Once your proposal is approved, you can fork this repository and make changes.</p></li>
-<li><p><strong>Submit PR</strong>: Open a pull request (PR) for the latest development branch. Please describe your changes in detail in the PR.</p></li>
-<li><p><strong>Complete</strong>.</p></li>
+<li><p><strong>提出更改</strong>：为您建议的任何更改开启新的问题（issue）。</p></li>
+<li><p><strong>获得批准</strong>：一旦您的提案获得批准，您可以 fork 此仓库并进行更改。</p></li>
+<li><p><strong>提交 PR</strong>：为最新的开发分支开启拉取请求（PR）。请在 PR 中详细描述您的更改。</p></li>
+<li><p><strong>完成</strong>。</p></li>
 </ol>
 </section>
 <section id="notes">
-<h2>Notes<a class="headerlink" href="#notes" title="Link to this heading">#</a></h2>
+<h2>注意事项<a class="headerlink" href="#notes" title="Link to this heading">#</a></h2>
 <ul class="simple">
-<li><p>New or removed code should not break the existing flow of the system.</p></li>
-<li><p>Ensure to remove any installation or build dependencies at the end of building.</p></li>
-<li><p>If changes are needed, update README.md and related documentation, and provide detailed explanations of API changes.</p></li>
+<li><p>新增或删除的代码不应破坏系统的现有流程。</p></li>
+<li><p>确保在构建结束时删除任何安装或构建依赖项。</p></li>
+<li><p>如果需要更改，请更新 README.md 和相关文档，并提供 API 更改的详细说明。</p></li>
 </ul>
 </section>
 </section>
@@ -528,7 +527,7 @@ document.write(`
       <i class="fa-solid fa-angle-left"></i>
       <div class="prev-next-info">
         <p class="prev-next-subtitle">上一页</p>
-        <p class="prev-next-title">Developer Reference</p>
+        <p class="prev-next-title">开发者参考</p>
       </div>
     </a>
     <a class="right-next"
@@ -536,7 +535,7 @@ document.write(`
        title="next page">
       <div class="prev-next-info">
         <p class="prev-next-subtitle">下一页</p>
-        <p class="prev-next-title">Update whl Deps</p>
+        <p class="prev-next-title">更新 whl 依赖</p>
       </div>
       <i class="fa-solid fa-angle-right"></i>
     </a>
@@ -556,8 +555,8 @@ document.write(`
   </div>
   <nav class="bd-toc-nav page-toc">
     <ul class="visible nav section-nav flex-column">
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#contribution-process">Contribution Process</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#notes">Notes</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#contribution-process">贡献流程</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#notes">注意事项</a></li>
 </ul>
   </nav></div>
 
@@ -591,7 +590,7 @@ document.write(`
   
   <div class="footer-item">
     <p class="last-updated">
-  最后更新于 2025 年 10 月 09 日.
+  最后更新于 2025 年 09 月 25 日.
   <br/>
 </p>
   </div>

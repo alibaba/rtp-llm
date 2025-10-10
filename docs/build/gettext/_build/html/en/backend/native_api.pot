@@ -1,0 +1,411 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: RTP-LLM 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-17 18:04+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: ../../_build/html/en/backend/native_api.ipynb:9
+msgid "RTP-LLM Native APIs"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:11
+msgid "Apart from the OpenAI compatible APIs, the RTP-LLM Runtime also provides its native server APIs. We introduce these following APIs:"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:14
+msgid "method_name"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:14
+msgid "example_request"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:14
+msgid "is_post"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:14
+msgid "is_get"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:14
+msgid "desc"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:16
+msgid "``/``"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:16
+msgid "``{\"prompt\": \"Hello\", \"generate_config\": {\"max_new_tokens\": 10, \"top_k\": 1, \"top_p\": 0}}``"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:16
+#: ../../_build/html/en/backend/native_api.ipynb:20
+#: ../../_build/html/en/backend/native_api.ipynb:24
+#: ../../_build/html/en/backend/native_api.ipynb:27
+#: ../../_build/html/en/backend/native_api.ipynb:31
+#: ../../_build/html/en/backend/native_api.ipynb:35
+#: ../../_build/html/en/backend/native_api.ipynb:38
+#: ../../_build/html/en/backend/native_api.ipynb:41
+#: ../../_build/html/en/backend/native_api.ipynb:44
+#: ../../_build/html/en/backend/native_api.ipynb:48
+#: ../../_build/html/en/backend/native_api.ipynb:52
+#: ../../_build/html/en/backend/native_api.ipynb:55
+#: ../../_build/html/en/backend/native_api.ipynb:58
+#: ../../_build/html/en/backend/native_api.ipynb:61
+#: ../../_build/html/en/backend/native_api.ipynb:64
+#: ../../_build/html/en/backend/native_api.ipynb:67
+#: ../../_build/html/en/backend/native_api.ipynb:70
+#: ../../_build/html/en/backend/native_api.ipynb:73
+#: ../../_build/html/en/backend/native_api.ipynb:79
+#: ../../_build/html/en/backend/native_api.ipynb:85
+#: ../../_build/html/en/backend/native_api.ipynb:90
+msgid "✅"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:16
+#: ../../_build/html/en/backend/native_api.ipynb:24
+#: ../../_build/html/en/backend/native_api.ipynb:27
+#: ../../_build/html/en/backend/native_api.ipynb:31
+#: ../../_build/html/en/backend/native_api.ipynb:52
+#: ../../_build/html/en/backend/native_api.ipynb:55
+#: ../../_build/html/en/backend/native_api.ipynb:58
+#: ../../_build/html/en/backend/native_api.ipynb:61
+#: ../../_build/html/en/backend/native_api.ipynb:64
+#: ../../_build/html/en/backend/native_api.ipynb:67
+#: ../../_build/html/en/backend/native_api.ipynb:70
+#: ../../_build/html/en/backend/native_api.ipynb:73
+#: ../../_build/html/en/backend/native_api.ipynb:79
+#: ../../_build/html/en/backend/native_api.ipynb:85
+#: ../../_build/html/en/backend/native_api.ipynb:90
+msgid "❌"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:16
+msgid "Basic text-generation endpoint (backward-compatible with early versions)."
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:20
+msgid "``/chat/render``"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:20
+#: ../../_build/html/en/backend/native_api.ipynb:24
+msgid "``{\"messages\": [{\"role\": \"user\",\"content\": \"hello？\"}]}``"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:20
+msgid "Render the chat template into the final prompt that will be sent to the model."
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:24
+msgid "``/v1/chat/render``"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:24
+msgid "v1 path for ``/chat/render`` (POST only)."
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:27
+msgid "``/tokenizer/encode``"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:27
+#: ../../_build/html/en/backend/native_api.ipynb:31
+msgid "``{\"prompt\": \"hello\"}``"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:27
+msgid "Encode text into a list of token IDs using the internal tokenizer."
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:31
+msgid "``/tokenize``"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:31
+msgid "Lightweight tokenization endpoint that returns an array of tokens."
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:35
+msgid "``/rtp_llm/worker_status``"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:35
+#: ../../_build/html/en/backend/native_api.ipynb:38
+msgid "``{ \"latest_cache_version\": -1}``"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:35
+msgid "Detailed status of a worker in the RTP-LLM framework."
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:38
+msgid "``/worker_status``"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:38
+msgid "Query runtime status of the inference worker."
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:41
+msgid "``/health``"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:41
+#: ../../_build/html/en/backend/native_api.ipynb:44
+msgid "``{}``"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:41
+msgid "Generic health check; returns whether the service is alive."
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:44
+msgid "``/status``"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:44
+msgid "Retrieve comprehensive status information for the current service instance."
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:48
+msgid "``/health_check``"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:48
+msgid "``{\"latest_cache_version\": -1}``"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:48
+msgid "Deep health check that includes a cache version number."
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:52
+msgid "``/update``"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:52
+msgid "``{\"peft_info\": {\"lora_info\": {\"lora_0\": \"/lora/llama-lora-test/\"}}}``"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:52
+msgid "Hot-reload LoRA info into the running service."
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:55
+#: ../../_build/html/en/backend/native_api.ipynb:301
+msgid "``/v1/models``"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:55
+msgid "List currently deployed models (OpenAI-compatible)."
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:58
+#: ../../_build/html/en/backend/native_api.ipynb:327
+msgid "``/set_log_level``"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:58
+msgid "``{ \"log_level\": \"INFO\"}``"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:58
+msgid "Dynamically adjust the service log level."
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:61
+#: ../../_build/html/en/backend/native_api.ipynb:355
+msgid "``/update_eplb_config``"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:61
+msgid "``{\"model\": \"EPLB\", \"update_time\":1000}``"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:61
+msgid "Update the EPLB (Elastic Load Balancer) configuration."
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:64
+msgid "``/v1/embeddings``"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:64
+msgid "``{\"input\": \"who are u\", \"model\": \"text-embedding-ada-002\"}``"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:64
+msgid "OpenAI-compatible dense-vector embedding endpoint."
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:67
+msgid "``/v1/embeddings/dense``"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:67
+#: ../../_build/html/en/backend/native_api.ipynb:70
+msgid "``{\"input\": \"who are u\"}``"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:67
+msgid "Return **dense** embeddings only."
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:70
+msgid "``/v1/embeddings/sparse``"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:70
+msgid "Return **sparse** embeddings only (e.g., BM25/TF-IDF)."
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:73
+msgid "``/v1/embeddings/colbert``"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:73
+msgid "``{\"input\":[\"hello, what is your name?\",\"hello\"],\"model\":\"xx\"}``"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:73
+msgid "Return **ColBERT** late-interaction multi-vector representations for high-accuracy semantic retrieval."
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:79
+msgid "``/v1/embeddings/similarity``"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:79
+msgid "``{\"left\":[\"hello, what is your name?\"],\"right\":[\"hello\",\"what is your name\"],\"embedding_config\":{\"type\":\"sparse\"},\"model\":\"xx\"}``"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:79
+msgid "Accept query–doc pairs and return pairwise similarities (cosine/dot) directly, skipping the separate embedding step."
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:85
+msgid "``/v1/classifier``"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:85
+msgid "``{\"input\":[[\"what is panda?\",\"hi\"],[\"what is panda?\",\"The giant panda (Ailuropoda melanoleuca), sometimes called a panda bear or simply panda, is a bear species endemic to China.\"]],\"model\":\"xx\"}``"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:85
+msgid "Generic text-classification endpoint supporting tasks such as sentiment or topic classification."
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:90
+msgid "``/v1/reranker``"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:90
+msgid "``{\"query\":\"what is panda? \",\"documents\":[\"hi\",\"The giant panda (Ailuropoda melanoleuca), sometimes called a panda bear or simply panda, is a bear species endemic to China.\",\"gg\"]}``"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:90
+msgid "Rerank a list of retrieved documents by relevance and return the reordered results."
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:95
+msgid "We mainly use **requests** to test these APIs in the following examples. You can also use **curl**."
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:107
+msgid "Launch A Server"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:144
+msgid "Generate (text generation model)"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:146
+msgid "Generate completions. This is similar to the ``/v1/completions`` in OpenAI API. Detailed parameters can be found in the `sampling parameters <./sampling_params.md>`__."
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:174
+msgid "Chat Render / Tokenizer"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:176
+msgid "``/chat/render``\\ 、\\ ``/v1/chat/render``: Chat Template Render"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:177
+msgid "``/tokenizer/encode``, ``/tokenize``: Raw prompt tokenize"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:217
+msgid "Worker Status"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:219
+msgid "``/rtp_llm/worker_status``\\ 、\\ ``/worker_status``: Server for processing snapshot, includes RunningTask, FinishedTask, CacheStatus."
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:245
+msgid "Health Check"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:247
+msgid "``/health``\\ 、\\ ``/status``: Check the health of the server."
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:271
+msgid "Update Lora Info"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:273
+msgid "``/update``: Update full LoRA Info"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:299
+msgid "Get Model Info"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:325
+msgid "Update Log Level"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:353
+msgid "Update EPLB Config for MoE"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:381
+msgid "Encode (embedding model)"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:383
+msgid "Encode text into embeddings. Note that this API is only available for `embedding models <openai_api_embeddings.html#openai-apis-embedding>`__ and will raise an error for generation models. Therefore, we launch a new server to server an embedding model."
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:483
+msgid "v1/rerank (cross encoder rerank model)"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:485
+msgid "Rerank a list of documents given a query using a cross-encoder model. Note that this API is only available for cross encoder model like `BAAI/bge-reranker-v2-m3 <https://huggingface.co/BAAI/bge-reranker-v2-m3>`__ with ``attention-backend`` ``triton`` and ``torch_native``."
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:556
+msgid "Classify"
+msgstr ""
+
+#: ../../_build/html/en/backend/native_api.ipynb:558
+msgid "RTP-LL Runtime also supports classify models. Here we use a classify model to classify the quality of pairwise generations."
+msgstr ""

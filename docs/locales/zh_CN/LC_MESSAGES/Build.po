@@ -1,0 +1,135 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: RTP-LLM 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-12 17:38+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../Build.md:1
+msgid "Building and Running RTP-LLM from Scratch"
+msgstr "从零开始构建和运行RTP-LLM"
+
+#: ../../Build.md:2
+msgid "Operating System: Linux"
+msgstr "操作系统：Linux"
+
+#: ../../Build.md:3
+msgid "Python: 3.10"
+msgstr "Python：3.10"
+
+#: ../../Build.md:4
+msgid ""
+"NVIDIA GPU: Compute Capability 7.0 or higher (e.g., V100, T4, RTX20xx, "
+"A100, L4, H100, etc.)"
+msgstr "NVIDIA GPU：计算能力7.0或更高（例如，V100、T4、RTX20xx、A100、L4、H100等）"
+
+#: ../../Build.md:6
+msgid "1. Environment Setup"
+msgstr "1. 环境设置"
+
+#: ../../Build.md:7
+msgid ""
+"In this article, we will introduce the complete deployment and usage path"
+" of the RTP-LLM inference engine system. This article uses a single "
+"machine with 4 A10 cards as an example. First, let's look at our machine "
+"configuration, with the GPU configuration as follows:"
+msgstr "在本文中，我们将介绍RTP-LLM推理引擎系统的完整部署和使用路径。本文以一台配备4张A10卡的机器为例。首先，让我们查看我们的机器配置，GPU配置如下："
+
+#: ../../Build.md:43
+msgid ""
+"Next, we need to pull the container environment for configuring and "
+"installing RTP-LLM. The container we prepared is as follows: registry.cn-"
+"hangzhou.aliyuncs.com/havenask/rtp_llm:2025_06_03_10_12_c02cc34"
+msgstr "接下来，我们需要拉取用于配置和安装RTP-LLM的容器环境。我们准备的容器如下：registry.cn-hangzhou.aliyuncs.com/havenask/rtp_llm:2025_06_03_10_12_c02cc34"
+
+#: ../../Build.md:46
+msgid ""
+"Image name: registry.cn-hangzhou.aliyuncs.com/havenask/rtp_llm Version: "
+"2025_06_03_10_12_c02cc34"
+msgstr "镜像名称：registry.cn-hangzhou.aliyuncs.com/havenask/rtp_llm 版本：2025_06_03_10_12_c02cc34"
+
+#: ../../Build.md:49
+msgid "1.1 Pull Container"
+msgstr "1.1 拉取容器"
+
+#: ../../Build.md:54
+msgid ""
+"1.2 Create Docker Container, Mount Disks According to Local Machine "
+"Storage"
+msgstr "1.2 创建Docker容器，根据本地机器存储挂载磁盘"
+
+#: ../../Build.md:81
+msgid ""
+"1.3 Create User in Container (Optional, Default is root. Advanced "
+"developers can choose to create their own user. It is not recommended to "
+"use root user for source code development)"
+msgstr "1.3 在容器中创建用户（可选，默认为root。高级开发人员可以选择创建自己的用户。不建议在源代码开发中使用root用户）"
+
+#: ../../Build.md:89
+msgid "1.4 Enter Container"
+msgstr "1.4 进入容器"
+
+#: ../../Build.md:99
+msgid "2. Compilation and Execution"
+msgstr "2. 编译和执行"
+
+#: ../../Build.md:100
+msgid ""
+"In the previous step, we have completed the environment setup. Now we "
+"start the formal compilation and execution of RTP-LLM."
+msgstr "在上一步中，我们已经完成了环境设置。现在开始正式编译和执行RTP-LLM。"
+
+#: ../../Build.md:101
+msgid "2.1 Code Pull"
+msgstr "2.1 代码拉取"
+
+#: ../../Build.md:105
+msgid "2.2 Dependency Installation Related Issues"
+msgstr "2.2 依赖安装相关问题"
+
+#: ../../Build.md:110
+msgid ""
+"In addition, if network issues are encountered during compilation, it is "
+"recommended to change the source:"
+msgstr "此外，如果在编译过程中遇到网络问题，建议更换源："
+
+#: ../../Build.md:116
+msgid "2.3 Compile and Start Service"
+msgstr "2.3 编译和启动服务"
+
+#: ../../Build.md:117
+msgid "For demonstration convenience, we are using the Qwen2-0.5B small model:"
+msgstr "为了演示方便，我们使用Qwen2-0.5B小模型："
+
+#: ../../Build.md:134
+msgid "Next, prepare the service startup script:"
+msgstr "接下来，准备服务启动脚本："
+
+#: ../../Build.md:238
+msgid "Then start compilation and execution:"
+msgstr "然后开始编译和执行："
+
+#: ../../Build.md:331
+msgid "2.4 Running Results"
+msgstr "2.4 运行结果"
+
+#: ../../Build.md:332
+msgid ""
+"You can consider it successful when you see similar responses returned as"
+" below: ![](pics/response_success_example.png)"
+msgstr "当您看到如下类似的响应返回时，可以认为是成功的：![](pics/response_success_example.png)"
+

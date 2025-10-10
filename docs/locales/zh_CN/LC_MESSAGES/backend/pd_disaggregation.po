@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-10-09 17:27+0800\n"
+"POT-Creation-Date: 2025-09-19 11:21+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -21,17 +21,17 @@ msgstr ""
 
 #: ../../backend/pd_disaggregation.ipynb:9
 msgid "PD Disaggregation"
-msgstr ""
+msgstr "PD分离"
 
 #: ../../backend/pd_disaggregation.ipynb:12
 msgid "Why and What is PD Disaggregation?"
-msgstr ""
+msgstr "为什么以及什么是PD分离？"
 
 #: ../../backend/pd_disaggregation.ipynb:14
 msgid ""
 "Large Language Models (LLMs) separate Prefill (context preparation) and "
 "Decode (token generation) phases to:"
-msgstr ""
+msgstr "大语言模型（LLM）将预填充（上下文准备）和解码（token生成）阶段分离以："
 
 #: ../../backend/pd_disaggregation.ipynb:16
 msgid ""
@@ -46,164 +46,175 @@ msgid ""
 "resource allocation (e.g., high-throughput Prefill for prompts + low-"
 "latency Decode for streaming outputs), vital for real-time use cases like"
 " chatbots."
-msgstr ""
+msgstr "提升效率：预填充为输入序列预计算注意力键/值（KV缓存），通过重用缓存数据实现快速自回归解码——将每个token的计算从O(n²)减少到O(n)。优化内存：在预填充期间缓存KV矩阵避免了冗余的重新计算，减少了长序列生成期间的内存开销。利用硬件：预填充利用并行处理已知输入（全序列批处理计算），而解码则优化延迟关键的逐步生成。扩展应用：分离允许动态资源分配（例如，高吞吐量的提示预填充+低延迟的流式输出解码），对于聊天机器人等实时用例至关重要。"
 
 #: ../../backend/pd_disaggregation.ipynb:20
 msgid "start"
-msgstr ""
+msgstr "开始"
 
 #: ../../backend/pd_disaggregation.ipynb:23
 msgid "start prefill"
-msgstr ""
+msgstr "开始预填充"
 
 #: ../../backend/pd_disaggregation.ipynb:61
 msgid "start decode"
-msgstr ""
+msgstr "开始解码"
 
 #: ../../backend/pd_disaggregation.ipynb:121
 msgid "Advanced Configuration"
-msgstr ""
+msgstr "高级配置"
 
 #: ../../backend/pd_disaggregation.ipynb:123
 msgid "PD Disaggregation supports the following environment variables."
-msgstr ""
+msgstr "PD分离支持以下环境变量。"
 
 #: ../../backend/pd_disaggregation.ipynb:126
 msgid "Prefill Server Configuration"
-msgstr ""
+msgstr "预填充服务器配置"
 
 #: ../../backend/pd_disaggregation.ipynb:129
 msgid "Variable"
-msgstr ""
+msgstr "变量"
 
 #: ../../backend/pd_disaggregation.ipynb:129
 msgid "Description"
-msgstr ""
+msgstr "描述"
 
 #: ../../backend/pd_disaggregation.ipynb:129
 msgid "Default"
-msgstr ""
+msgstr "默认值"
 
 #: ../../backend/pd_disaggregation.ipynb:131
+#, fuzzy
 msgid "**PREFILL_RETRY_TIMES**"
-msgstr ""
+msgstr "**PREFILL_RETRY_TIMES**"
 
 #: ../../backend/pd_disaggregation.ipynb:131
 msgid "Number of retries for prefill process, 0 means retry disabled"
-msgstr ""
+msgstr "预填充过程的重试次数，0表示禁用重试"
 
 #: ../../backend/pd_disaggregation.ipynb:131
 #: ../../backend/pd_disaggregation.ipynb:133
 msgid "``0``"
-msgstr ""
+msgstr "``0``"
 
 #: ../../backend/pd_disaggregation.ipynb:133
+#, fuzzy
 msgid "**PREFILL_RETRY_TIMEOUT_MS**"
-msgstr ""
+msgstr "**PREFILL_RETRY_TIMEOUT_MS**"
 
 #: ../../backend/pd_disaggregation.ipynb:133
 msgid "Total timeout for prefill retries (milliseconds)"
-msgstr ""
+msgstr "预填充重试的总超时时间（毫秒）"
 
 #: ../../backend/pd_disaggregation.ipynb:135
+#, fuzzy
 msgid "**PREFILL_MAX_WAIT_TIMEOUT_MS**"
-msgstr ""
+msgstr "**PREFILL_MAX_WAIT_TIMEOUT_MS**"
 
 #: ../../backend/pd_disaggregation.ipynb:135
 msgid "Maximum wait timeout for prefill execution (milliseconds)"
-msgstr ""
+msgstr "预填充执行的最大等待超时时间（毫秒）"
 
 #: ../../backend/pd_disaggregation.ipynb:135
 msgid "``600000``"
-msgstr ""
+msgstr "``600000``"
 
 #: ../../backend/pd_disaggregation.ipynb:137
+#, fuzzy
 msgid "**LOAD_CACHE_TIMEOUT_MS**"
-msgstr ""
+msgstr "**LOAD_CACHE_TIMEOUT_MS**"
 
 #: ../../backend/pd_disaggregation.ipynb:137
 msgid "Timeout for remote KVCache loading (milliseconds)"
-msgstr ""
+msgstr "远程KVCache加载的超时时间（毫秒）"
 
 #: ../../backend/pd_disaggregation.ipynb:137
 #: ../../backend/pd_disaggregation.ipynb:143
 msgid "``5000``"
-msgstr ""
+msgstr "``5000``"
 
 #: ../../backend/pd_disaggregation.ipynb:139
+#, fuzzy
 msgid "**DECODE_RETRY_TIMES**"
-msgstr ""
+msgstr "**DECODE_RETRY_TIMES**"
 
 #: ../../backend/pd_disaggregation.ipynb:139
 msgid "Number of retries for decode process, 0 means retry disabled"
-msgstr ""
+msgstr "解码过程的重试次数，0表示禁用重试"
 
 #: ../../backend/pd_disaggregation.ipynb:139
 #: ../../backend/pd_disaggregation.ipynb:141
 msgid "``100``"
-msgstr ""
+msgstr "``100``"
 
 #: ../../backend/pd_disaggregation.ipynb:141
+#, fuzzy
 msgid "**DECODE_RETRY_TIMEOUT_MS**"
-msgstr ""
+msgstr "**DECODE_RETRY_TIMEOUT_MS**"
 
 #: ../../backend/pd_disaggregation.ipynb:141
 msgid "Total timeout for decode process retries (milliseconds)"
-msgstr ""
+msgstr "解码过程重试的总超时时间（毫秒）"
 
 #: ../../backend/pd_disaggregation.ipynb:143
+#, fuzzy
 msgid "**RDMA_CONNECT_RETRY_TIMES**"
-msgstr ""
+msgstr "**RDMA_CONNECT_RETRY_TIMES**"
 
 #: ../../backend/pd_disaggregation.ipynb:143
 msgid "Number of retries for RDMA connection establishment"
-msgstr ""
+msgstr "RDMA连接建立的重试次数"
 
 #: ../../backend/pd_disaggregation.ipynb:145
+#, fuzzy
 msgid "**DECODE_POLLING_KV_CACHE_STEP_MS**"
-msgstr ""
+msgstr "**DECODE_POLLING_KV_CACHE_STEP_MS**"
 
 #: ../../backend/pd_disaggregation.ipynb:145
 msgid "Interval time for polling KV loading status (milliseconds)"
-msgstr ""
+msgstr "轮询KV加载状态的时间间隔（毫秒）"
 
 #: ../../backend/pd_disaggregation.ipynb:145
 msgid "``30``"
-msgstr ""
+msgstr "``30``"
 
 #: ../../backend/pd_disaggregation.ipynb:147
+#, fuzzy
 msgid "**DECODE_ENTRANCE**"
-msgstr ""
+msgstr "**DECODE_ENTRANCE**"
 
 #: ../../backend/pd_disaggregation.ipynb:147
 msgid "Whether Decode serves as traffic entry point"
-msgstr ""
+msgstr "解码是否作为流量入口点"
 
 #: ../../backend/pd_disaggregation.ipynb:147
 msgid "``false``"
-msgstr ""
+msgstr "``false``"
 
 #: ../../backend/pd_disaggregation.ipynb:149
+#, fuzzy
 msgid "**LOAD_BALANCE_POLICY_NAME**"
-msgstr ""
+msgstr "**LOAD_BALANCE_POLICY_NAME**"
 
 #: ../../backend/pd_disaggregation.ipynb:149
 msgid "Load balancing policy: RR (round-robin) or WRR (weighted round-robin)"
-msgstr ""
+msgstr "负载均衡策略：RR（轮询）或WRR（加权轮询）"
 
 #: ../../backend/pd_disaggregation.ipynb:149
 msgid "``RR``"
-msgstr ""
+msgstr "``RR``"
 
 #: ../../backend/pd_disaggregation.ipynb:151
+#, fuzzy
 msgid "**SYNC_STATUS_INTERVAL_MS**"
-msgstr ""
+msgstr "**SYNC_STATUS_INTERVAL_MS**"
 
 #: ../../backend/pd_disaggregation.ipynb:151
 msgid "Status synchronization interval between PDs (milliseconds)"
-msgstr ""
+msgstr "PD之间状态同步的时间间隔（毫秒）"
 
 #: ../../backend/pd_disaggregation.ipynb:151
 msgid "``50``"
-msgstr ""
+msgstr "``50``"
 

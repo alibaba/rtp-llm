@@ -1,0 +1,91 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: RTP-LLM 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-17 18:04+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: ../../_build/html/zh_CN/backend/function_calling.ipynb:9
+msgid "Tool and Function Calling"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/function_calling.ipynb:11
+msgid "This guide demonstrates how to use RTP-LLM’s `Function calling <https://platform.openai.com/docs/guides/function-calling>`__ functionality."
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/function_calling.ipynb:23
+msgid "OpenAI Compatible API"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/function_calling.ipynb:34
+msgid "Currently, RTP-LLM supports Function Calling capabilities for the following models:"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/function_calling.ipynb:36
+msgid "qwen25/qwen3: Qwen 2.5 (e.g. Qwen/Qwen2.5-1.5B-Instruct, Qwen/Qwen2.5-7B-Instruct) and QwQ (i.e. Qwen/QwQ-32B), Qwen3-235B-A22B, etc."
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/function_calling.ipynb:37
+msgid "Kimi_k2"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/function_calling.ipynb:38
+msgid "Qwen3-Coder"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/function_calling.ipynb:50
+msgid "Define Tools for Function Call"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/function_calling.ipynb:52
+msgid "Below is a Python snippet that shows how to define a tool as a dictionary. The dictionary includes a tool name, a description, and property defined Parameters."
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/function_calling.ipynb:102
+msgid "Define Messages"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/function_calling.ipynb:132
+msgid "Initialize the Client"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/function_calling.ipynb:155
+msgid "Non-Streaming Request"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/function_calling.ipynb:191
+#: ../../_build/html/zh_CN/backend/function_calling.ipynb:267
+msgid "Handle Tools"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/function_calling.ipynb:193
+#: ../../_build/html/zh_CN/backend/function_calling.ipynb:269
+msgid "When the engine determines it should call a particular tool, it will return arguments or partial arguments through the response. You can parse these arguments and later invoke the tool accordingly."
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/function_calling.ipynb:220
+msgid "Streaming Request"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/function_calling.ipynb:301
+msgid "Define a Tool Function"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/function_calling.ipynb:330
+msgid "Execute the Tool"
+msgstr ""
+
+#: ../../_build/html/zh_CN/backend/function_calling.ipynb:369
+msgid "Send Results Back to Model"
+msgstr ""
