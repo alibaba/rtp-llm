@@ -1,1 +1,1 @@
-../open_source/bazel/arch_select.bzl
+../stub_source/bazel/arch_select.bzl
