@@ -119,11 +119,7 @@ class AiterPrefillAttnOp:
             1, 2
         )  # {batch_size, seq_len_with_prefix, head_num_kv, head_dim}
         v = v_tensor.transpose(1, 2)  # {batch_size, seq_len_with_prefix, head_dim}
-
-        res = aiter.flash_attn_func(
-            q, k, v, dropout_p=0.0, softmax_scale=None, causal=True
-        )
-
+        res = aiter.flash_attn_func(q, k, v, dropout_p=0., softmax_scale=None, causal=True)
         input_lengths = fmha_params.input_lengths  # 每个 batch 的真实长度
         hidden_size = head_num_actual * head_dim
 
@@ -139,7 +135,6 @@ class AiterPrefillAttnOp:
             valid_results.append(batch_result)
 
         final_result = torch.cat(valid_results, dim=0)  # {total_token_num, hidden_size}
-
         return final_result
 
 
@@ -195,7 +190,6 @@ class AiterDecodeAttnOp:
         max_seq_len = fmha_params.max_seq_len + 1
         key_cache = kv_cache.k_cache_base
         value_cache = kv_cache.v_cache_base
-        block_tables_id_host = fmha_params.kv_cache_block_id_host
         block_tables_id_device = fmha_params.kv_cache_block_id_device
         num_kv_heads = self.head_num_kv
         scale = 1.0 / (self.head_dim**0.5)
@@ -212,14 +206,8 @@ class AiterDecodeAttnOp:
             else torch.tensor(1.0, device=query.device, dtype=query.dtype)
         )
         max_num_blocks = block_tables_id_device.shape[1]
-
         # for now not support fp8 
         if self.use_asm_pa:
-            x = 16 // value_cache.element_size()
-            num_blocks, num_kv_heads, block_size, head_size = value_cache.shape
-            value_cache = value_cache.view(num_blocks, num_kv_heads, head_size, block_size // x, x)
-            value_cache = value_cache.permute(0, 1, 3, 2, 4).contiguous()
-
             output = aiter.pa_fwd_asm(
                 query,  # [num_seqs, num_heads, head_size]
                 key_cache,  # [num_blocks, num_kv_heads, block_size, head_size/x, x]
