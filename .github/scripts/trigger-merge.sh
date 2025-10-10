@@ -1,7 +1,7 @@
 #!/bin/bash
 
-if [ $# -ne 5 ]; then
-    echo "Usage: $0 <COMMIT_ID> <SECURITY> <AUTHOR_EMAIL> <AUTHOR_NAME> <MERGE_MESSAGE>"
+if [ $# -ne 6 ]; then
+    echo "Usage: $0 <COMMIT_ID> <SECURITY> <AUTHOR_EMAIL> <AUTHOR_NAME> <MERGE_MESSAGE> <GITHUB_PR_ID>"
     exit 1
 fi
 
@@ -12,8 +12,9 @@ AONE_PROJECT_ID="2654816"
 AUTHOR_EMAIL=$3
 AUTHOR_NAME=$4
 MERGE_MESSAGE=$5
+GITHUB_PR_ID=$6
 MERGE_TYPE="SQUASH"
-SOURCE_BRANCH="open_merge/${COMMIT_ID}"
+SOURCE_BRANCH="open_merge/${GITHUB_PR_ID}"
 TARGET_BRANCH="main-internal"
 
 # Get current timestamp
@@ -50,7 +51,7 @@ JSON_BODY=$(cat <<EOF
 EOF
 )
 
-echo "Sending MERGE-TASK for commitId: ${COMMIT_ID}"
+echo "Sending MERGE-TASK for commitId: ${COMMIT_ID} ${JSON_BODY} "
 
 # 调用 HTTP 函数发送消息
 curl -v -H "Content-Type: application/json" \

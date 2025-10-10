@@ -23,8 +23,11 @@ jobs:
         id: trigger
         run: |
           echo "Triggering Aone merge for commit ${{ github.event.pull_request.head.sha }}"
+          echo "$GITHUB_REF"
+          PR_ID=$(echo "$GITHUB_REF" | sed 's@refs/pull/\([0-9]\+\)/.*@\1@')
+          echo "PR ID is $PR_ID"
           if [ "${{ github.event.pull_request.merged }}" = "true" ]; then
-            ./trigger-merge.sh "${{ github.event.pull_request.head.sha }}" "${{ secrets.CI_SECRET }}" "${{ github.actor_id }}${{ github.actor }}@users.github.com" "${{ github.actor }}" "auto-merge: github commit${{ github.event.head_commit.message }}" 
+            ./trigger-merge.sh "${{ github.event.pull_request.head.sha }}" "${{ secrets.CI_SECRET }}" "${{ github.actor_id }}${{ github.actor }}@users.github.com" "${{ github.actor }}" "auto-merge: github commit ${{ github.event.pull_request.head.sha }}" "$PR_ID"
           else
             echo "Pull request was closed without merge."
             exit 0

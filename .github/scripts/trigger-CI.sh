@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # Check if two arguments are provided
-if [ $# -ne 3 ]; then
-    echo "Usage: $0 <COMMIT_ID> <SECURITY> <GITHUB_SOURCE_REPO>"
+if [ $# -ne 4 ]; then
+    echo "Usage: $0 <COMMIT_ID> <SECURITY> <GITHUB_SOURCE_REPO> <GITHUB_PR_ID>"
     exit 1
 fi
 
@@ -12,11 +12,12 @@ SECURITY=$2
 REPO_URL="https://github.com/${GITHUB_REPOSITORY}.git"
 PROJECT_ID="2654816"
 BRANCH_REF="main-internal"
-BRANCH_NAME="open_merge/${COMMIT_ID}"
 CANCEL_IN_PROGRESS="true"
 PIPELINE_ID="1346"
 GITHUB_COMMIT_ID="${COMMIT_ID}"
 GITHUB_SOURCE_REPO=$3
+GITHUB_PR_ID=$4
+BRANCH_NAME="open_merge/${GITHUB_PR_ID}"
 
 # Get current timestamp
 timestamp=$(date +%s)
