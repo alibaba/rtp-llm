@@ -42,7 +42,7 @@ cc_library(
         "3rdparty/composable_kernel/include/**/*.h",
         "3rdparty/composable_kernel/include/**/*.inc",
         "3rdparty/composable_kernel/include/**/*.hpp",
-    ]),
+    ], exclude = ["3rdparty/composable_kernel/include/rapidjson/**"]),
     copts = rocm_default_copts() + ["-std=c++20"],
     strip_include_prefix = "3rdparty/composable_kernel/include",
     visibility = ["//visibility:public"],
@@ -101,6 +101,7 @@ genrule(
         "aiter/jit/libmodule_activation.so",
         "aiter/jit/libmodule_rmsnorm.so",
         "aiter/jit/libmodule_smoothquant.so",
+        "aiter/jit/libmodule_gemm_a8w8.so",
         "aiter/jit/libmodule_moe_ck2stages.so"
     ],
     cmd = """
@@ -127,6 +128,7 @@ genrule(
         cp external/aiter_src/aiter/jit/module_norm.so $(location aiter/jit/libmodule_norm.so);
         cp external/aiter_src/aiter/jit/module_rmsnorm.so $(location aiter/jit/libmodule_rmsnorm.so);
         cp external/aiter_src/aiter/jit/module_mha_fwd.so $(location aiter/jit/libmodule_mha_fwd.so);
+        cp external/aiter_src/aiter/jit/module_gemm_a8w8.so $(location aiter/jit/libmodule_gemm_a8w8.so);
         cp external/aiter_src/aiter/jit/module_moe_ck2stages.so $(location aiter/jit/libmodule_moe_ck2stages.so);
     """,
     visibility = ["//visibility:public"],
@@ -282,6 +284,18 @@ cc_library(
     copts = [],
     linkopts = [],
     strip_include_prefix = "csrc/include/",
+    visibility = ["//visibility:public"],
+    tags = ["rocm","local"],
+)
+
+cc_library(
+    name = "module_gemm_a8w8",
+    srcs = ["aiter/jit/libmodule_gemm_a8w8.so"],
+    hdrs = ["csrc/ck_gemm_a8w8/include/gemm_a8w8.h"],
+    deps = [":cpp_libraries"],
+    copts = [],
+    linkopts = [],
+    strip_include_prefix = "csrc/ck_gemm_a8w8/include/",
     visibility = ["//visibility:public"],
     tags = ["rocm","local"],
 )
