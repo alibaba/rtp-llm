@@ -82,13 +82,10 @@ def build_all():
             print(f"构建 {lang} 版本失败")
             return False
     
-    # 3. 复制 index.html 到 build/ 目录
-    copy_index_html()
     
     print("多语言文档构建完成!")
     print("输出结构:")
     print("  build/")
-    print("  ├── index.html")
     print("  ├── en/")
     print("  ├── zh_CN/")
     print("  └── gettext/")
@@ -103,15 +100,6 @@ def clean():
             shutil.rmtree(dir_name)
             print(f"已删除 {dir_name}")
 
-def copy_index_html():
-    """将 index.html 复制到 build/ 目录"""
-    # 使用 cp 命令复制 index.html
-    if run_command("cp index.html build/"):
-        print("已将 index.html 复制到 build/ 目录")
-        return True
-    else:
-        print("警告: 复制 index.html 失败")
-        return False
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:
@@ -120,9 +108,7 @@ if __name__ == "__main__":
         elif sys.argv[1] == "update":
             update_translations()
         elif sys.argv[1] in LANGUAGES:
-            # 构建单个语言时也复制 index.html
-            if build_language(sys.argv[1]):
-                copy_index_html()
+            build_language(sys.argv[1])
         else:
             print(f"未知命令: {sys.argv[1]}")
             print("可用命令: clean, update, en, zh_CN")

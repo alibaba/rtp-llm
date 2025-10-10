@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-19 11:21+0800\n"
+"POT-Creation-Date: 2025-10-10 11:12+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -37,8 +37,8 @@ msgstr ""
 
 #: ../../release/v0.2.0/feature.md:6
 msgid ""
-"[PD Disaggregation](../../backend/pd_disaggregation.ipynb) && [PD Entrance "
-"Transpose](../../backend/pd_entrance_transpose.md)"
+"[PD Disaggregation](../../backend/pd_disaggregation.ipynb) && [PD "
+"Entrance Transpose](../../backend/pd_entrance_transpose.md)"
 msgstr ""
 "[PD 分离](../../backend/pd_disaggregation.ipynb) && [PD "
 "入口转置](../../backend/pd_entrance_transpose.md)"
@@ -218,30 +218,27 @@ msgid "Question of omission"
 msgstr "遗漏问题"
 
 #: ../../release/v0.2.0/feature.md:35
-msgid "PD Entrance Transpose not worker with front app"
-msgstr "PD入口转置无法与前端应用配合工作"
-
-#: ../../release/v0.2.0/feature.md:36
-msgid "metrics of 3fs cache hit ratio is not accurate"
+#, fuzzy
+msgid "metrics of cache is not work"
 msgstr "3fs缓存命中率指标不准确"
 
-#: ../../release/v0.2.0/feature.md:37
+#: ../../release/v0.2.0/feature.md:36
 msgid "too many dynamic lora need more **reserver_runtime_mem_mb**"
 msgstr "过多动态lora需要更多 **reserver_runtime_mem_mb**"
 
-#: ../../release/v0.2.0/feature.md:38
+#: ../../release/v0.2.0/feature.md:37
 msgid "AMD not support MoE models"
 msgstr "AMD不支持MoE模型"
 
-#: ../../release/v0.2.0/feature.md:39
+#: ../../release/v0.2.0/feature.md:38
 msgid "MoE model without shared_experter cannot use enable-layer-micro-batch"
 msgstr "没有shared_experter的MoE模型无法使用enable-layer-micro-batch"
 
-#: ../../release/v0.2.0/feature.md:42
+#: ../../release/v0.2.0/feature.md:41
 msgid "Performance"
 msgstr "性能"
 
-#: ../../release/v0.2.0/feature.md:44
+#: ../../release/v0.2.0/feature.md:43
 msgid "Compatibility"
 msgstr "兼容性"
 
@@ -259,3 +256,7 @@ msgstr "兼容性"
 
 #~ msgid "**MixTBstars**"
 #~ msgstr ""
+
+#~ msgid "PD Entrance Transpose not worker with front app"
+#~ msgstr "PD入口转置无法与前端应用配合工作"
+
