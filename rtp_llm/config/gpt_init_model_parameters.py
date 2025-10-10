@@ -649,6 +649,7 @@ class GptInitModelParameters:
             ),
             use_swizzleA = (
                 get_env_bool("USE_SWIZZLEA", False)
+                and get_env_str("MODEL_TYPE", "") in ("qwen_2", "qwen_3", "qwen2_5_vl")
             ),
             ft_disable_custom_ar=get_env_bool("FT_DISABLE_CUSTOM_AR", True),
             enable_cuda_graph=get_env_bool("ENABLE_CUDA_GRAPH", False),

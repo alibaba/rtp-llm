@@ -34,6 +34,8 @@ from rtp_llm.models.qwen2_vl.qwen2_vl_vit import (
     smart_resize,
 )
 
+from rtp_llm.utils.swizzle_utils import do_swizzle
+
 if not hasattr(tl, "wrap_triton"):
 
     def wrap_triton(fn):
@@ -129,6 +131,10 @@ class QWen2_5_VL(QWen2_VL):
         config.mm_related_params.vit_weights = QwenVL2VitWeight(
             {"vit": self.mm_part.visual}
         )
+    def postprocess_weights(self):
+        if self.config.hw_kernel_config.use_swizzleA and self.weight.weights[0]["self_attention_weights.query_weight.kernel"].dtype != torch.float8_e4m3fnuz:
+            do_swizzle(self.weight.weights)
+
 
 
 register_model("qwen2_5_vl", QWen2_5_VL, ["Qwen2_5_VLForConditionalGeneration"])
