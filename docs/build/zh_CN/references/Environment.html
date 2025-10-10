@@ -8,7 +8,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
-    <title>Environment Variable Development Tutorial &#8212; RTP-LLM</title>
+    <title>环境变量开发教程 &#8212; RTP-LLM</title>
   
   
   
@@ -55,11 +55,11 @@
     <link rel="icon" href="../_static/logo.ico"/>
     <link rel="index" title="索引" href="../genindex.html" />
     <link rel="search" title="搜索" href="../search.html" />
-    <link rel="next" title="Frontend" href="../backend/Frontend.html" />
-    <link rel="prev" title="Update whl Deps" href="Update-whl-Deps.html" /> 
+    <link rel="next" title="前端" href="../backend/Frontend.html" />
+    <link rel="prev" title="更新 whl 依赖" href="Update-whl-Deps.html" /> 
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="zh-CN"/>
-    <meta name="docbuild:last-update" content="2025 年 10 月 09 日"/>
+    <meta name="docbuild:last-update" content="2025 年 09 月 25 日"/>
 <link
   rel="stylesheet"
   href="../_static/css/language-switcher.css"
@@ -173,71 +173,70 @@
  </script></div>
         <div class="sidebar-primary-item"><nav class="bd-links bd-docs-nav" aria-label="Main">
     <div class="bd-toc-item navbar-nav active">
-        <p aria-level="2" class="caption" role="heading"><span class="caption-text">Installation</span></p>
+        <p aria-level="2" class="caption" role="heading"><span class="caption-text">安装</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../start/install.html">Install RTP-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../start/install.html">安装 RTP-LLM</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">Release Version</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">发布版本</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../release/v0.2.0/release.html">RTP-LLM 0.2.0</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">Basic Usage</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">基本用法</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../backend/send_request.html">Sending Requests</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../backend/openai_api_completions.html">OpenAI APIs - Completions</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../backend/openai_api_vision.html">OpenAI APIs - Vision</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../backend/openai_api_embeddings.html">OpenAI APIs - Embedding</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../backend/native_api.html">RTP-LLM Native APIs</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/send_request.html">发送请求</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/openai_api_completions.html">OpenAI API - 文本生成/会话</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/openai_api_vision.html">OpenAI API - 多模态</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/openai_api_embeddings.html">OpenAI API - Embedding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/native_api.html">RTP-LLM Native API</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">Backend Tutorial</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">后端教程</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="deepseek/index.html">deepseek</a></li>
 <li class="toctree-l1"><a class="reference internal" href="qwen/index.html">qwen-moe</a></li>
 <li class="toctree-l1"><a class="reference internal" href="kimi/index.html">kimi</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">Advanced Backend Configurations</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">高级后端配置</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../backend/server_arguments.html">ServerArgs</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../backend/sampling_params.html">Sampling Config</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../backend/attention_backend.html">Attention Backend</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/server_arguments.html">服务器参数</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/sampling_params.html">采样配置</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/attention_backend.html">注意力后端</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">Supported Models</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">支持的模型</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../supported_models/generative_models.html">Large Language Models</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../supported_models/multimodal_language_models.html">Multimodal Language Models</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../supported_models/embedding_models.html">Embedding Models</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../supported_models/support_new_models.html">How to Support New Models</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/generative_models.html">大语言模型</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/multimodal_language_models.html">多模态语言模型</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/embedding_models.html">Embedding 模型</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/support_new_models.html">如何支持新模型</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">Advanced Features</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">高级功能</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../backend/speculative_decoding.html">Speculative Decoding</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../backend/reuse_kv_cache.html">ReuseCache</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/speculative_decoding.html">推测解码</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/reuse_kv_cache.html">重用缓存</a></li>
 
-<li class="toctree-l1"><a class="reference internal" href="../backend/function_calling.html">Tool and Function Calling</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../backend/quantization.html">Quantization</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../backend/lora.html">LoRA Serving</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../backend/pd_disaggregation.html">PD Disaggregation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/function_calling.html">工具和函数调用</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/quantization.html">量化</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/lora.html">LoRA 服务</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/pd_disaggregation.html">PD分离</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">RTP-LLM Router</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">RTP-LLM 路由器</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../backend/flexlb.html">FlexLB (Flexible Load Balancer) - Master Role</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/flexlb.html">FlexLB（弹性负载均衡器）- 主节点</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Benchmark</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../benchmark/benchmark.html">RTP-LLM Performance Benchmark Tool</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../benchmark/benchmark.html">RTP-LLM 性能基准测试工具</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">References</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">参考文献</span></p>
 <ul class="current nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="general.html">General Guidance</a></li>
-<li class="toctree-l1 current active has-children"><a class="reference internal" href="developer.html">Developer Reference</a><details open="open"><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul class="current">
-<li class="toctree-l2"><a class="reference internal" href="Contributing.html">Contributing Guide</a></li>
-<li class="toctree-l2"><a class="reference internal" href="Update-whl-Deps.html">Update whl Deps</a></li>
-<li class="toctree-l2 current active"><a class="current reference internal" href="#">Environment Variable Development Tutorial</a></li>
-<li class="toctree-l2"><a class="reference internal" href="../backend/Frontend.html">Frontend</a></li>
-<li class="toctree-l2"><a class="reference internal" href="../backend/Multimodal.html">Multimodal Part Debug and Separate Deployment</a></li>
+<li class="toctree-l1"><a class="reference internal" href="general.html">通用指南</a></li>
+<li class="toctree-l1 current active has-children"><a class="reference internal" href="developer.html">开发者参考</a><details open="open"><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="Contributing.html">贡献指南</a></li>
+<li class="toctree-l2"><a class="reference internal" href="Update-whl-Deps.html">更新 whl 依赖</a></li>
+<li class="toctree-l2 current active"><a class="current reference internal" href="#">环境变量开发教程</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../backend/Frontend.html">前端</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../backend/Multimodal.html">多模态部分调试与独立部署</a></li>
 </ul>
 </details></li>
-<li class="toctree-l1"><a class="reference internal" href="../README.html">Documentation Manual</a></li>
 </ul>
 
     </div>
@@ -457,7 +456,7 @@ document.write(`
               
 
 <div id="jb-print-docs-body" class="onlyprint">
-    <h1>Environment Variable Development Tutorial</h1>
+    <h1>环境变量开发教程</h1>
     <!-- Table of contents -->
     <div id="print-main-content">
         <div id="jb-print-toc">
@@ -467,10 +466,10 @@ document.write(`
             </div>
             <nav aria-label="Page">
                 <ul class="visible nav section-nav flex-column">
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#python-parameter-parsing">Python Parameter Parsing</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#parameter-propagation">Parameter Propagation</a><ul class="visible nav section-nav flex-column">
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#c-side-parameter-propagation">2.1 C++ Side Parameter Propagation</a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#python-side-parameter-propagation">2.2 Python Side Parameter Propagation</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#python-parameter-parsing">Python参数解析</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#parameter-propagation">参数传播</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#c-side-parameter-propagation">2.1 C++端参数传播</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#python-side-parameter-propagation">2.2 Python端参数传播</a></li>
 </ul>
 </li>
 </ul>
@@ -485,20 +484,20 @@ document.write(`
                 <article class="bd-article">
                   
   <section class="tex2jax_ignore mathjax_ignore" id="environment-variable-development-tutorial">
-<h1>Environment Variable Development Tutorial<a class="headerlink" href="#environment-variable-development-tutorial" title="Link to this heading">#</a></h1>
-<p>We have already processed all environment variable-related code in RTP_LLM, with only some environment variables related to Test, Monitor, RDMA, etc. remaining unprocessed. For future development, any new environment variables should be handled uniformly according to this document.</p>
+<h1>环境变量开发教程<a class="headerlink" href="#environment-variable-development-tutorial" title="Link to this heading">#</a></h1>
+<p>我们已经处理了RTP_LLM中所有与环境变量相关的代码，仅剩下一些与测试、监控、RDMA等相关的环境变量未处理。对于未来的开发，任何新的环境变量都应按照本文档统一处理。</p>
 <section id="python-parameter-parsing">
-<h2>Python Parameter Parsing<a class="headerlink" href="#python-parameter-parsing" title="Link to this heading">#</a></h2>
-<p>In <code class="docutils literal notranslate"><span class="pre">rtp_llm/server/server_args.py</span></code>, all user-configurable environment variables are converted to command-line parameters when starting the Python service. If you find any comments for the related parameters below unreasonable, please feel free to modify them directly.</p>
-<p><img alt="image" src="../_images/env-1.png" /></p>
-<p>When adding new parameter information, you need to specify the parameter type, variable name, default value, and its corresponding specific meaning. The processing logic here is actually to use the parsed parameters to update environment variables. The current priority is: <code class="docutils literal notranslate"><span class="pre">args</span> <span class="pre">&gt;</span> <span class="pre">env</span> <span class="pre">&gt;</span> <span class="pre">default</span></code>.</p>
+<h2>Python参数解析<a class="headerlink" href="#python-parameter-parsing" title="Link to this heading">#</a></h2>
+<p>在<code class="docutils literal notranslate"><span class="pre">rtp_llm/server/server_args.py</span></code>中，所有用户可配置的环境变量在启动Python服务时都会转换为命令行参数。如果您发现下面相关参数的注释不合理，请直接修改。</p>
+<p><img alt="图像" src="../_images/env-1.png" /></p>
+<p>添加新的参数信息时，需要指定参数类型、变量名、默认值及其对应的具体含义。这里的处理逻辑实际上是使用解析的参数来更新环境变量。当前的优先级是：<code class="docutils literal notranslate"><span class="pre">args</span> <span class="pre">&gt;</span> <span class="pre">env</span> <span class="pre">&gt;</span> <span class="pre">default</span></code>。</p>
 </section>
 <section id="parameter-propagation">
-<h2>Parameter Propagation<a class="headerlink" href="#parameter-propagation" title="Link to this heading">#</a></h2>
-<p><strong>We have collected and organized all config-related information and classified it for processing on both the C++ and Python sides. At the top level of the C++ side is <code class="docutils literal notranslate"><span class="pre">GptInitParameter</span></code>, which categorizes various environment variables in C++ into different configuration types. On the Python side, everything is summarized in <code class="docutils literal notranslate"><span class="pre">EnvArgs</span></code> under <code class="docutils literal notranslate"><span class="pre">rtp_llm/config/py_config_modules.py</span></code>. <code class="docutils literal notranslate"><span class="pre">EnvArgs</span></code> also categorizes various configurations, and throughout the system, various configurations are gradually propagated down to specified locations for use.</strong></p>
+<h2>参数传播<a class="headerlink" href="#parameter-propagation" title="Link to this heading">#</a></h2>
+<p><strong>我们已经收集和整理了所有与配置相关的信息，并在C++端和Python端都进行了分类处理。在C++端的顶层是<code class="docutils literal notranslate"><span class="pre">GptInitParameter</span></code>，它将C++中的各种环境变量分类到不同的配置类型中。在Python端，所有内容都在<code class="docutils literal notranslate"><span class="pre">rtp_llm/config/py_config_modules.py</span></code>下的<code class="docutils literal notranslate"><span class="pre">EnvArgs</span></code>中进行汇总。<code class="docutils literal notranslate"><span class="pre">EnvArgs</span></code>也对各种配置进行分类，整个系统中，各种配置会逐渐传播到指定位置供使用。</strong></p>
 <section id="c-side-parameter-propagation">
-<h3>2.1 C++ Side Parameter Propagation<a class="headerlink" href="#c-side-parameter-propagation" title="Link to this heading">#</a></h3>
-<p>In <code class="docutils literal notranslate"><span class="pre">rtp_llm/cpp/th_op/ConfigModules.h</span></code>, all related parameter information classifications are placed here. Let's illustrate with the following example:</p>
+<h3>2.1 C++端参数传播<a class="headerlink" href="#c-side-parameter-propagation" title="Link to this heading">#</a></h3>
+<p>在<code class="docutils literal notranslate"><span class="pre">rtp_llm/cpp/th_op/ConfigModules.h</span></code>中，所有相关的参数信息分类都放在这里。让我们通过以下示例来说明：</p>
 <div class="highlight-c++ notranslate"><div class="highlight"><pre><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">ParallelismDistributedConfig</span><span class="w"> </span><span class="p">{</span>
 <span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">tp_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
 <span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">ep_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
@@ -512,34 +511,34 @@ document.write(`
 <span class="p">};</span>
 </pre></div>
 </div>
-<p>For example, after adding a new parameter, you need to specify the default value and modify the content of both the <code class="docutils literal notranslate"><span class="pre">to_string</span></code> and <code class="docutils literal notranslate"><span class="pre">update_from_env_for_test</span></code> functions. Additionally, these configurations are bound and passed to the Python side for interaction through <code class="docutils literal notranslate"><span class="pre">Pybind11</span></code>.</p>
-<p><img alt="image" src="../_images/env-2.png" /></p>
-<p>It's important to note that <strong>the parameter order here must be consistent with the order defined in the struct</strong>. This is a requirement of <code class="docutils literal notranslate"><span class="pre">Pybind11</span></code> because we need to pass these parameters from the Python side later. Specifically, in <code class="docutils literal notranslate"><span class="pre">rtp_llm/config/gpt_init_model_parameters.py</span></code>, when generating <code class="docutils literal notranslate"><span class="pre">GptInitModelParameters</span></code>, it calls <code class="docutils literal notranslate"><span class="pre">update_gpt_init_params_from_env</span></code> for update processing. The <code class="docutils literal notranslate"><span class="pre">GptInitParameter</span></code> updated here is actually defined in C++. In <code class="docutils literal notranslate"><span class="pre">rtp_llm/cpp/dataclass/EngineInitParameter.h</span></code>, parameters are constructed and updated during initialization. Later, these parameters are propagated down layer by layer to the corresponding function call locations as needed (all parameters are propagated down).</p>
-<p>Another task that needs to be done is, after updating new parameters, <strong>after the project compilation is complete</strong>, you need to execute the following operations:</p>
+<p>例如，在添加新参数后，您需要指定默认值并修改<code class="docutils literal notranslate"><span class="pre">to_string</span></code>和<code class="docutils literal notranslate"><span class="pre">update_from_env_for_test</span></code>函数的内容。此外，这些配置通过<code class="docutils literal notranslate"><span class="pre">Pybind11</span></code>绑定并传递到Python端进行交互。</p>
+<p><img alt="图像" src="../_images/env-2.png" /></p>
+<p>需要注意的是，<strong>这里的参数顺序必须与结构体中定义的顺序一致</strong>。这是<code class="docutils literal notranslate"><span class="pre">Pybind11</span></code>的要求，因为我们需要稍后从Python端传递这些参数。具体来说，在<code class="docutils literal notranslate"><span class="pre">rtp_llm/config/gpt_init_model_parameters.py</span></code>中生成<code class="docutils literal notranslate"><span class="pre">GptInitModelParameters</span></code>时，会调用<code class="docutils literal notranslate"><span class="pre">update_gpt_init_params_from_env</span></code>进行更新处理。这里更新的<code class="docutils literal notranslate"><span class="pre">GptInitParameter</span></code>实际上是在C++中定义的。在<code class="docutils literal notranslate"><span class="pre">rtp_llm/cpp/dataclass/EngineInitParameter.h</span></code>中，参数在初始化期间被构造和更新。随后，这些参数根据需要逐层传播到相应的函数调用位置（所有参数都会向下传播）。</p>
+<p>另一项需要完成的任务是，在更新新参数后，<strong>项目编译完成后</strong>，您需要执行以下操作：</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>$<span class="w"> </span><span class="nb">cd</span><span class="w"> </span>rtp_llm/ops
 $<span class="w"> </span>bash<span class="w"> </span>rtp_llm/ops/gen_pyi.sh
 </pre></div>
 </div>
-<p>This will generate the corresponding files under <code class="docutils literal notranslate"><span class="pre">bazel-bin/stubs</span></code>. <strong>Find the modified parts in the generated files and place them in <code class="docutils literal notranslate"><span class="pre">rtp_llm/ops</span></code></strong>.</p>
-<p><strong>Summary:</strong></p>
+<p>这将在<code class="docutils literal notranslate"><span class="pre">bazel-bin/stubs</span></code>下生成相应的文件。<strong>在生成的文件中找到修改的部分并将其放入<code class="docutils literal notranslate"><span class="pre">rtp_llm/ops</span></code>中</strong>。</p>
+<p><strong>总结：</strong></p>
 <ol class="arabic simple">
-<li><p>Modify <code class="docutils literal notranslate"><span class="pre">rtp_llm/cpp/th_op/ConfigModules.h</span></code> and <code class="docutils literal notranslate"><span class="pre">rtp_llm/cpp/th_op/ConfigModules.cc</span></code></p></li>
-<li><p>Modify <code class="docutils literal notranslate"><span class="pre">rtp_llm/config/gpt_init_model_parameters.py</span></code></p></li>
-<li><p>Modify <code class="docutils literal notranslate"><span class="pre">rtp_llm/server/server_args.py</span></code></p></li>
-<li><p>Modify <code class="docutils literal notranslate"><span class="pre">rtp_llm/server/test/server_args_test.py</span></code></p></li>
-<li><p>Modify <code class="docutils literal notranslate"><span class="pre">rtp_llm/ops/libth_transformer.pyi</span></code></p></li>
+<li><p>修改<code class="docutils literal notranslate"><span class="pre">rtp_llm/cpp/th_op/ConfigModules.h</span></code>和<code class="docutils literal notranslate"><span class="pre">rtp_llm/cpp/th_op/ConfigModules.cc</span></code></p></li>
+<li><p>修改<code class="docutils literal notranslate"><span class="pre">rtp_llm/config/gpt_init_model_parameters.py</span></code></p></li>
+<li><p>修改<code class="docutils literal notranslate"><span class="pre">rtp_llm/server/server_args.py</span></code></p></li>
+<li><p>修改<code class="docutils literal notranslate"><span class="pre">rtp_llm/server/test/server_args_test.py</span></code></p></li>
+<li><p>修改<code class="docutils literal notranslate"><span class="pre">rtp_llm/ops/libth_transformer.pyi</span></code></p></li>
 </ol>
-<p><strong>A total of 6 files need to be modified.</strong></p>
+<p><strong>总共需要修改6个文件。</strong></p>
 </section>
 <section id="python-side-parameter-propagation">
-<h3>2.2 Python Side Parameter Propagation<a class="headerlink" href="#python-side-parameter-propagation" title="Link to this heading">#</a></h3>
-<p>The Python side has significantly more environment variables than the C++ side, and there is some overlap between the two. We have merged some Python-specific environment variables into the C++ side's config classification, while the rest have their own independent configuration classification sets on the Python side.</p>
-<p>Currently, our design considers the current code architecture. Config retrieval exists in two scenarios: one is in some global methods or static methods where we directly obtain corresponding configuration parameters from <code class="docutils literal notranslate"><span class="pre">StaticConfig</span></code> in <code class="docutils literal notranslate"><span class="pre">rtp_llm/config/py_config_modules.py</span></code>, and for other cases, we obtain them by passing in <code class="docutils literal notranslate"><span class="pre">py_env_configs</span></code> configuration. Additionally, regarding Python-side environment variable modifications, we adhere to the following principles:</p>
+<h3>2.2 Python端参数传播<a class="headerlink" href="#python-side-parameter-propagation" title="Link to this heading">#</a></h3>
+<p>Python端的环境变量比C++端多得多，两者之间存在一些重叠。我们将一些Python特有的环境变量合并到了C++端的配置分类中，其余的在Python端有自己独立的配置分类集合。</p>
+<p>目前，我们的设计考虑了当前的代码架构。配置获取存在两种场景：一种是在某些全局方法或静态方法中，我们直接从<code class="docutils literal notranslate"><span class="pre">rtp_llm/config/py_config_modules.py</span></code>中的<code class="docutils literal notranslate"><span class="pre">StaticConfig</span></code>获取相应的配置参数，对于其他情况，我们通过传入<code class="docutils literal notranslate"><span class="pre">py_env_configs</span></code>配置来获取。此外，关于Python端环境变量的修改，我们遵循以下原则：</p>
 <p><strong>Principle: Environment variable settings in tests/Test environment variables/smoke test environment variables are all preserved. Global initialization environment variable settings and retrieval are also preserved (such as internal_source/rtp_llm/models/internal_init.py). env_param, etc., which exist for rpc_api transmission specification, are also preserved (such as rtp_llm/tools/api/model_size_evaluator_api.py).</strong></p>
-<p>In future development of new environment variables, the above principles must be followed. Python environment variable modifications are similar to the C++ side. Here are the specific code locations that need to be modified:</p>
+<p>在未来开发新环境变量时，必须遵循上述原则。Python环境变量的修改与C++端类似。以下是需要修改的具体代码位置：</p>
 <ol class="arabic simple">
 <li><p><code class="docutils literal notranslate"><span class="pre">rtp_llm/config/py_config_modules.py</span></code></p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">rtp_llm/server/server_args.py</span></code>(<em>There are many corresponding classified configuration files in the same directory that can be modified accordingly.</em>)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">rtp_llm/server/server_args.py</span></code>（<em>在同一目录下有许多相应的分类配置文件可以相应修改。</em>）</p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">rtp_llm/server/test/server_args_test.py</span></code></p></li>
 </ol>
 </section>
@@ -563,7 +562,7 @@ $<span class="w"> </span>bash<span class="w"> </span>rtp_llm/ops/gen_pyi.sh
       <i class="fa-solid fa-angle-left"></i>
       <div class="prev-next-info">
         <p class="prev-next-subtitle">上一页</p>
-        <p class="prev-next-title">Update whl Deps</p>
+        <p class="prev-next-title">更新 whl 依赖</p>
       </div>
     </a>
     <a class="right-next"
@@ -571,7 +570,7 @@ $<span class="w"> </span>bash<span class="w"> </span>rtp_llm/ops/gen_pyi.sh
        title="next page">
       <div class="prev-next-info">
         <p class="prev-next-subtitle">下一页</p>
-        <p class="prev-next-title">Frontend</p>
+        <p class="prev-next-title">前端</p>
       </div>
       <i class="fa-solid fa-angle-right"></i>
     </a>
@@ -591,10 +590,10 @@ $<span class="w"> </span>bash<span class="w"> </span>rtp_llm/ops/gen_pyi.sh
   </div>
   <nav class="bd-toc-nav page-toc">
     <ul class="visible nav section-nav flex-column">
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#python-parameter-parsing">Python Parameter Parsing</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#parameter-propagation">Parameter Propagation</a><ul class="visible nav section-nav flex-column">
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#c-side-parameter-propagation">2.1 C++ Side Parameter Propagation</a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#python-side-parameter-propagation">2.2 Python Side Parameter Propagation</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#python-parameter-parsing">Python参数解析</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#parameter-propagation">参数传播</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#c-side-parameter-propagation">2.1 C++端参数传播</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#python-side-parameter-propagation">2.2 Python端参数传播</a></li>
 </ul>
 </li>
 </ul>
@@ -630,7 +629,7 @@ $<span class="w"> </span>bash<span class="w"> </span>rtp_llm/ops/gen_pyi.sh
   
   <div class="footer-item">
     <p class="last-updated">
-  最后更新于 2025 年 10 月 09 日.
+  最后更新于 2025 年 09 月 25 日.
   <br/>
 </p>
   </div>

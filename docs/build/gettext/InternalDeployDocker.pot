@@ -1,0 +1,49 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: RTP-LLM 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-19 12:09+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: ../../InternalDeployDocker.md:2
+msgid "需求："
+msgstr ""
+
+#: ../../InternalDeployDocker.md:3
+msgid "操作系统: Linux"
+msgstr ""
+
+#: ../../InternalDeployDocker.md:4
+msgid "Python: 3.10"
+msgstr ""
+
+#: ../../InternalDeployDocker.md:5
+msgid "NVIDIA GPU: Compute Capability 7.0 或者更高 (例如V100, T4, RTX20xx, A100, L4, H100等)"
+msgstr ""
+
+#: ../../InternalDeployDocker.md:7
+msgid "进入deploy docker"
+msgstr ""
+
+#: ../../InternalDeployDocker.md:8
+msgid "internal deploy docker安装了依赖和我们的程序的whl包，进入docker环境，可以直接执行测试。"
+msgstr ""
+
+#: ../../InternalDeployDocker.md:19
+msgid "测试"
+msgstr ""
+
+#: ../../InternalDeployDocker.md:30
+msgid "其中 your_model_type 可以在 rtp_llm/models/__init__.py 中查找到"
+msgstr ""

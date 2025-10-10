@@ -1,0 +1,319 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: RTP-LLM 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-12 17:38+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../Config.md:1
+msgid "Environment Variable Configuration"
+msgstr "环境变量配置"
+
+#: ../../Config.md:3
+msgid "Common Options"
+msgstr "通用选项"
+
+#: ../../Config.md
+msgid "Environment Variable Name"
+msgstr "环境变量名称"
+
+#: ../../Config.md
+msgid "Type"
+msgstr "类型"
+
+#: ../../Config.md
+msgid "Description"
+msgstr "描述"
+
+#: ../../Config.md
+msgid "`TOKENIZER_PATH`"
+msgstr "`TOKENIZER_PATH`"
+
+#: ../../Config.md
+msgid "`str`, required"
+msgstr "`str`，必需"
+
+#: ../../Config.md
+msgid "Tokenizer path"
+msgstr "分词器路径"
+
+#: ../../Config.md
+msgid "`CHECKPOINT_PATH`"
+msgstr "`CHECKPOINT_PATH`"
+
+#: ../../Config.md
+msgid "Checkpoint path"
+msgstr "检查点路径"
+
+#: ../../Config.md
+msgid "`MODEL_TYPE`"
+msgstr "`MODEL_TYPE`"
+
+#: ../../Config.md
+msgid "Model type"
+msgstr "模型类型"
+
+#: ../../Config.md
+msgid "`MAX_SEQ_LEN`"
+msgstr "`MAX_SEQ_LEN`"
+
+#: ../../Config.md
+msgid "`str`, optional"
+msgstr "`str`，可选"
+
+#: ../../Config.md
+msgid "Maximum input+output length"
+msgstr "最大输入+输出长度"
+
+#: ../../Config.md
+msgid "`WEIGHT_TYPE`"
+msgstr "`WEIGHT_TYPE`"
+
+#: ../../Config.md
+msgid "Weight type used for model loading: FP16/INT8"
+msgstr "用于模型加载的权重类型：FP16/INT8"
+
+#: ../../Config.md
+msgid "`CONCURRENCY_LIMIT`"
+msgstr "`CONCURRENCY_LIMIT`"
+
+#: ../../Config.md
+msgid "Maximum concurrency for the model"
+msgstr "模型的最大并发数"
+
+#: ../../Config.md:13
+msgid "`TOKENIZER_PATH` and `CHECKPOINT_PATH` must be local paths."
+msgstr "`TOKENIZER_PATH`和`CHECKPOINT_PATH`必须是本地路径。"
+
+#: ../../Config.md:14
+msgid ""
+"`MODEL_TYPE` currently supports "
+"`chatglm``chat_glm``chatglm2``chat_glm_2``chatglm3``chat_glm_3``glm_130b``gpt_bigcode``starcoder2``wizardcoder``sgpt_bloom``sgpt_bloom_vector``bloom``llama``gemma``xverse``llava``baichuan``gpt_neox``qwen_7b``qwen_13b``qwen_1b8``qwen_2``qwen_vl``falcon``mpt``internlm``phi``aquila``chatglm4v`"
+msgstr "`MODEL_TYPE`当前支持`chatglm``chat_glm``chatglm2``chat_glm_2``chatglm3``chat_glm_3``glm_130b``gpt_bigcode``starcoder2``wizardcoder``sgpt_bloom``sgpt_bloom_vector``bloom``llama``gemma``xverse``llava``baichuan``gpt_neox``qwen_7b``qwen_13b``qwen_1b8``qwen_2``qwen_vl``falcon``mpt``internlm``phi``aquila``chatglm4v`"
+
+#: ../../Config.md:16
+msgid "Advanced Options"
+msgstr "高级选项"
+
+#: ../../Config.md
+msgid "`INT8_KV_CACHE`"
+msgstr "`INT8_KV_CACHE`"
+
+#: ../../Config.md
+msgid "Advanced option: Use int8 type for kv cache to save GPU memory"
+msgstr "高级选项：使用int8类型作为kv缓存以节省GPU内存"
+
+#: ../../Config.md
+msgid "`KV_CACHE_MEM_MB`"
+msgstr "`KV_CACHE_MEM_MB`"
+
+#: ../../Config.md
+msgid "Reserved GPU memory size for kv cache, unit (MB)"
+msgstr "为kv缓存保留的GPU内存大小，单位(MB)"
+
+#: ../../Config.md
+msgid "`PRE_ALLOCATE_OP_MEM`"
+msgstr "`PRE_ALLOCATE_OP_MEM`"
+
+#: ../../Config.md
+msgid ""
+"Whether to pre-allocate GPU memory, used in conjunction with "
+"KV_CACHE_MEM_MB"
+msgstr "是否预分配GPU内存，与KV_CACHE_MEM_MB结合使用"
+
+#: ../../Config.md
+msgid "`TP_SPLIT_EMB_AND_LMHEAD`"
+msgstr "`TP_SPLIT_EMB_AND_LMHEAD`"
+
+#: ../../Config.md
+msgid ""
+"Whether to split Emb and LmHead computation during TensorParallel (1: "
+"enable, 0: disable)"
+msgstr "在TensorParallel期间是否拆分Emb和LmHead计算（1：启用，0：禁用）"
+
+#: ../../Config.md
+msgid "`REUSE_CACHE`"
+msgstr "`REUSE_CACHE`"
+
+#: ../../Config.md
+msgid "Reuse kvcache between queries"
+msgstr "在查询之间重用kvcache"
+
+#: ../../Config.md
+msgid "`EXTRA_DATA_PATH`"
+msgstr "`EXTRA_DATA_PATH`"
+
+#: ../../Config.md
+msgid "Additional data needed besides ckpt/tokenizer, such as LLAVA's VIT data"
+msgstr "除了ckpt/tokenizer之外需要的额外数据，例如LLAVA的VIT数据"
+
+#: ../../Config.md
+msgid "`VIT_TRT`"
+msgstr "`VIT_TRT`"
+
+#: ../../Config.md
+msgid "`int`, optional"
+msgstr "`int`，可选"
+
+#: ../../Config.md
+msgid "Whether to use TRT to accelerate VIT model (1: enable, 0: disable)"
+msgstr "是否使用TRT加速VIT模型（1：启用，0：禁用）"
+
+#: ../../Config.md
+msgid "`FT_DISABLE_CUSTOM_AR`"
+msgstr "`FT_DISABLE_CUSTOM_AR`"
+
+#: ../../Config.md
+msgid "Whether to disable Custom All Reduce (1: disable, others: enable)"
+msgstr "是否禁用自定义全归约（1：禁用，其他：启用）"
+
+#: ../../Config.md:28
+msgid "Notes"
+msgstr "注意事项"
+
+#: ../../Config.md:29
+msgid ""
+"The default log_level for model runtime is WARNING. You can add the "
+"environment variable `LOG_LEVEL=INFO` to display more logs."
+msgstr "模型运行时的默认日志级别是WARNING。您可以添加环境变量`LOG_LEVEL=INFO`来显示更多日志。"
+
+#: ../../Config.md:30
+msgid ""
+"You can configure the environment variable `LOAD_CKPT_NUM_PROCESS=x` to "
+"load the model with multiple processes. When loading with multiple "
+"processes, you need to use `if __name__ == '__main__':` as the entry "
+"point, because the default program will use spawn to start multiple "
+"processes; at the same time, too many processes may cause cuda out of "
+"memory."
+msgstr "您可以配置环境变量`LOAD_CKPT_NUM_PROCESS=x`来使用多进程加载模型。当使用多进程加载时，您需要使用`if __name__ == '__main__':`作为入口点，因为默认程序将使用spawn启动多个进程；同时，过多的进程可能导致cuda内存不足。"
+
+#: ../../Config.md:32
+msgid "ModelConfig"
+msgstr "模型配置"
+
+#: ../../Config.md
+msgid "Parameter Name"
+msgstr "参数名称"
+
+#: ../../Config.md
+msgid "`model_type`"
+msgstr "`model_type`"
+
+#: ../../Config.md
+msgid "`str, default=''`"
+msgstr "`str，默认值=''`"
+
+#: ../../Config.md
+msgid "`ckpt_path`"
+msgstr "`ckpt_path`"
+
+#: ../../Config.md
+msgid "Model path"
+msgstr "模型路径"
+
+#: ../../Config.md
+msgid "`tokenizer_path`"
+msgstr "`tokenizer_path`"
+
+#: ../../Config.md
+msgid "`weight_type`"
+msgstr "`weight_type`"
+
+#: ../../Config.md
+msgid "`WEIGHT_TYPE, default=WEIGHT_TYPE.FP16`"
+msgstr "`WEIGHT_TYPE，默认值=WEIGHT_TYPE.FP16`"
+
+#: ../../Config.md
+msgid "Model weights quantization type"
+msgstr "模型权重量化类型"
+
+#: ../../Config.md
+msgid "`act_type`"
+msgstr "`act_type`"
+
+#: ../../Config.md
+msgid "Model weights storage type"
+msgstr "模型权重存储类型"
+
+#: ../../Config.md
+msgid "`max_seq_len`"
+msgstr "`max_seq_len`"
+
+#: ../../Config.md
+msgid "`bool, default=0`"
+msgstr "`bool，默认值=0`"
+
+#: ../../Config.md
+msgid "Number of beam search"
+msgstr "束搜索数量"
+
+#: ../../Config.md
+msgid "`seq_size_per_block`"
+msgstr "`seq_size_per_block`"
+
+#: ../../Config.md
+msgid "`int, default=8`"
+msgstr "`int，默认值=8`"
+
+#: ../../Config.md
+msgid "Sequence length per block in async mode"
+msgstr "异步模式下每个块的序列长度"
+
+#: ../../Config.md
+msgid "`gen_num_per_circle`"
+msgstr "`gen_num_per_circle`"
+
+#: ../../Config.md
+msgid "`int, default=1`"
+msgstr "`int，默认值=1`"
+
+#: ../../Config.md
+msgid ""
+"Number of tokens that may be added per round, only >1 in speculative "
+"sampling cases"
+msgstr "每轮可能添加的token数，仅在推测性采样情况下>1"
+
+#: ../../Config.md
+msgid "`ptuning_path`"
+msgstr "`ptuning_path`"
+
+#: ../../Config.md
+msgid "`Optional[str], default=None`"
+msgstr "`Optional[str]，默认值=None`"
+
+#: ../../Config.md
+msgid "Storage path for ptuning ckpt"
+msgstr "ptuning检查点的存储路径"
+
+#: ../../Config.md
+msgid "`lora_infos`"
+msgstr "`lora_infos`"
+
+#: ../../Config.md
+msgid "`Optional[Dict[str, str]]`"
+msgstr "`Optional[Dict[str, str]]`"
+
+#: ../../Config.md
+msgid "Storage path for lora ckpt"
+msgstr "lora检查点的存储路径"
+
+#: ../../Config.md:47
+msgid ""
+"The list of all models we currently support can be viewed in "
+"`rtp_llm/models/__init__.py`. The corresponding `model_type` for specific"
+" models can be viewed in the model file's `register_model`."
+msgstr "我们目前支持的所有模型列表可以在`rtp_llm/models/__init__.py`中查看。特定模型对应的`model_type`可以在模型文件的`register_model`中查看。"

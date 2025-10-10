@@ -1,0 +1,61 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: RTP-LLM 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-12 17:38+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../Sparse-Tutorial.md:1
+msgid "Background"
+msgstr "背景"
+
+#: ../../Sparse-Tutorial.md:2
+msgid ""
+"Supports structured pruning [LLM-Pruner: On the Structural Pruning of "
+"Large Language Models](https://arxiv.org/abs/2305.11627). Specifically, "
+"for the Attention Layer, the head_num varies layer by layer (where head "
+"num can be reduced to 0); for the FFN Layer, the inter_size varies layer "
+"by layer. Applied to [Large Language Model based Long-tail Query "
+"Rewriting in Taobao Search](https://arxiv.org/abs/2311.03758)."
+msgstr ""
+"支持结构化剪枝 [LLM-Pruner：大语言模型的结构化剪枝方法](https://arxiv.org/abs/2305.11627)。"
+"具体而言，在注意力层中，每层的 head_num 可以不同（甚至减少到 0）；在 FFN 层中，每层的 inter_size 也可以不同。"
+"该技术已应用于 [基于大语言模型的淘宝搜索长尾查询改写](https://arxiv.org/abs/2311.03758)。"
+
+#: ../../Sparse-Tutorial.md:5
+msgid "Usage"
+msgstr "使用方法"
+
+#: ../../Sparse-Tutorial.md:7
+msgid ""
+"Add two lists in the model's config.json to specify the head_num and "
+"inter_size for each layer, and the number of elements in the list needs "
+"to be consistent with layer_num. The config needs to be consistent with "
+"the trained ckpt. For example:"
+msgstr ""
+"在模型的 config.json 文件中添加两个列表，用于指定每一层的 head_num 和 inter_size，"
+"列表中的元素数量需与 layer_num 保持一致。配置文件必须与训练好的 ckpt 保持一致。例如："
+
+#: ../../Sparse-Tutorial.md:18
+msgid "Then you can call it directly."
+msgstr "然后你可以直接调用该模型。"
+
+#: ../../Sparse-Tutorial.md:20
+msgid ""
+"Currently, sparse only supports limited models such as Qwen, but it can "
+"be easily extended to other models with reference to Qwen."
+msgstr "目前，稀疏化功能仅支持 Qwen 等有限模型，但可参考 Qwen 的实现轻松扩展至其他模型。"

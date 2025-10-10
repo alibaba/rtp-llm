@@ -91,6 +91,5 @@ The core features include:
 
       references/general
       references/developer
-      README.md
 
 

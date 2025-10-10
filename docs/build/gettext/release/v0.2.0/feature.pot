@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-10-09 17:27+0800\n"
+"POT-Creation-Date: 2025-09-25 09:43+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -189,25 +189,29 @@ msgid "Question of omission"
 msgstr ""
 
 #: ../../release/v0.2.0/feature.md:35
-msgid "metrics of cache is not work"
+msgid "PD Entrance Transpose not worker with front app"
 msgstr ""
 
 #: ../../release/v0.2.0/feature.md:36
-msgid "too many dynamic lora need more **reserver_runtime_mem_mb**"
+msgid "metrics of 3fs cache hit ratio is not accurate"
 msgstr ""
 
 #: ../../release/v0.2.0/feature.md:37
-msgid "AMD not support MoE models"
+msgid "too many dynamic lora need more **reserver_runtime_mem_mb**"
 msgstr ""
 
 #: ../../release/v0.2.0/feature.md:38
+msgid "AMD not support MoE models"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:39
 msgid "MoE model without shared_experter cannot use enable-layer-micro-batch"
 msgstr ""
 
-#: ../../release/v0.2.0/feature.md:41
+#: ../../release/v0.2.0/feature.md:42
 msgid "Performance"
 msgstr ""
 
-#: ../../release/v0.2.0/feature.md:43
+#: ../../release/v0.2.0/feature.md:44
 msgid "Compatibility"
 msgstr ""
