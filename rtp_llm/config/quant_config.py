@@ -302,6 +302,51 @@ class Fp8PerChannelCompressedQuantConfig(CompressedTensorsQuantConfig):
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
         return Fp8PerChannelCompressedQuantConfig(**config)
 
+class QuarkQuantConfig(QuantizationConfig):
+    def __init__(self, bits: int = 0, is_quanted: bool = False):
+        super().__init__(bits=bits, group_size=0, is_quanted=is_quanted)
+
+    @classmethod
+    def get_method(cls) -> str:
+        return "quark"
+
+    @classmethod
+    def get_algo(cls) -> str:
+        return "quark"
+
+    def get_supported_act_dtypes(self) -> List[torch.dtype]:
+        return [torch.float16, torch.bfloat16]
+
+    @classmethod
+    def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
+        return QuarkQuantConfig()
+
+
+class Fp8PerChannelQuarkQuantConfig(QuarkQuantConfig):
+    def __init__(self, bits: int = 8, is_quanted: bool = False, **kwargs: Any):
+        super().__init__(bits=bits, is_quanted=is_quanted)
+
+    @classmethod
+    def get_method(cls) -> str:
+        return "FP8_PER_CHANNEL_QUARK"
+
+    @classmethod
+    def get_algo(cls) -> str:
+        return "fp8-perchannel-quark"
+
+    def get_supported_act_dtypes(self) -> List[torch.dtype]:
+        return [torch.float16, torch.bfloat16]
+
+    def get_supported_compute_dtypes(self) -> List[torch.dtype]:
+        return [torch.float16, torch.bfloat16]
+
+    def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
+        return [torch.float16, torch.bfloat16, torch.float8_e4m3fn]
+
+    @classmethod
+    def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
+        return Fp8PerChannelQuarkQuantConfig(**config)
+
 
 class SmoothQuantConfig(QuantizationConfig):
     def __init__(self):
@@ -429,13 +474,16 @@ DEFAULT_FP8_BLOCK_WISE_QUANT_CONFIG = Fp8BlockWiseQuantConfig(
 DEFAULT_FP8_PER_CHANNEL_COMPRESSED_QUANT_CONFIG = Fp8PerChannelCompressedQuantConfig(
     bits=8, is_quanted=False
 )
-
+DEFAULT_FP8_PER_CHANNEL_QUARK_QUANT_CONFIG = Fp8PerChannelQuarkQuantConfig(
+    bits=8, is_quanted=False
+)
 preset_quant_config = {
     "INT8": DEFAULT_WEIGHT_ONLY_INT8_PER_CHANNEL_QUANT_CONFIG,
     "FP8": DEFAULT_FP8_PER_TENSOR_QUANT_CONFIG,
     "FP8_DYNAMIC_PER_TENSOR": DEFAULT_FP8_DYNAMIC_PER_TENSOR_QUANT_CONFIG,
     "FP8_PER_BLOCK": DEFAULT_FP8_BLOCK_WISE_QUANT_CONFIG,
     "FP8_PER_CHANNEL_COMPRESSED": DEFAULT_FP8_PER_CHANNEL_COMPRESSED_QUANT_CONFIG,
+    "FP8_PER_CHANNEL_QUARK": DEFAULT_FP8_PER_CHANNEL_QUARK_QUANT_CONFIG,
 }
 
 

@@ -6,6 +6,7 @@ import torch
 
 from rtp_llm.config.quant_config import (
     Fp8PerChannelCompressedQuantConfig,
+    Fp8PerChannelQuarkQuantConfig,
     QuantizationConfig,
 )
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight
@@ -119,7 +120,7 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
         cls, quant_config: QuantizationConfig, src_weight_info: WeightModule
     ) -> bool:
         if not quant_config.is_quanted() or not isinstance(
-            quant_config, Fp8PerChannelCompressedQuantConfig
+            quant_config, (Fp8PerChannelCompressedQuantConfig, Fp8PerChannelQuarkQuantConfig)
         ):
             return False
         name = src_weight_info.name

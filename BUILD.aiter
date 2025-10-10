@@ -3,6 +3,15 @@ load(
     "rocm_default_copts",
 )
 
+py_library(
+    name = "aiter_py",
+    srcs = glob([
+        "aiter/aiter/*.py",
+    ]),
+    visibility = ["//visibility:public"],
+    tags = ["rocm"],
+)
+
 cc_library(
     name = "aiter_so",
     srcs = glob([
