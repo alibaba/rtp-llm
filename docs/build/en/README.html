@@ -8,7 +8,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
-    <title>添加文档手册 &#8212; RTP-LLM</title>
+    <title>Documentation Manual &#8212; RTP-LLM</title>
   
   
   
@@ -53,10 +53,11 @@
     <script src="_static/js/language-switcher.js?v=d38991ab"></script>
     <link rel="icon" href="_static/logo.ico"/>
     <link rel="index" title="Index" href="genindex.html" />
-    <link rel="search" title="Search" href="search.html" /> 
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="prev" title="Multimodal Part Debug and Separate Deployment" href="backend/Multimodal.html" /> 
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
-    <meta name="docbuild:last-update" content="Sep 25, 2025"/>
+    <meta name="docbuild:last-update" content="Oct 10, 2025"/>
 <link
   rel="stylesheet"
   href="_static/css/language-switcher.css"
@@ -122,8 +123,6 @@
     <div class="bd-container__inner bd-page-width">
       
       
-      
-        
       
       <div class="bd-sidebar-primary bd-sidebar">
         
@@ -226,9 +225,10 @@
 <li class="toctree-l1"><a class="reference internal" href="benchmark/benchmark.html">RTP-LLM Performance Benchmark Tool</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">References</span></p>
-<ul class="nav bd-sidenav">
+<ul class="current nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="references/general.html">General Guidance</a></li>
 <li class="toctree-l1"><a class="reference internal" href="references/developer.html">Developer Reference</a></li>
+<li class="toctree-l1 current active"><a class="current reference internal" href="#">Documentation Manual</a></li>
 </ul>
 
     </div>
@@ -448,7 +448,7 @@ document.write(`
               
 
 <div id="jb-print-docs-body" class="onlyprint">
-    <h1>添加文档手册</h1>
+    <h1>Documentation Manual</h1>
     <!-- Table of contents -->
     <div id="print-main-content">
         <div id="jb-print-toc">
@@ -458,9 +458,14 @@ document.write(`
             </div>
             <nav aria-label="Page">
                 <ul class="visible nav section-nav flex-column">
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#id2">1. 添加文档</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#id3">2. 添加索引</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#id4">3. 增加中文</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#prepare-docs-requirements">Prepare Docs Requirements</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#add-documentation">Add Documentation</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#add-documentation-file">1. Add Documentation File</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#add-index">2. Add Index</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#add-chinese-support">3. Add Chinese Support</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#modify-documentation">Modify Documentation</a></li>
+</ul>
+</li>
 </ul>
             </nav>
         </div>
@@ -472,28 +477,52 @@ document.write(`
 <div id="searchbox"></div>
                 <article class="bd-article">
                   
-  <section class="tex2jax_ignore mathjax_ignore" id="id1">
-<h1>添加文档手册<a class="headerlink" href="#id1" title="Link to this heading">#</a></h1>
-<section id="id2">
-<h2>1. 添加文档<a class="headerlink" href="#id2" title="Link to this heading">#</a></h2>
+  <section class="tex2jax_ignore mathjax_ignore" id="documentation-manual">
+<h1>Documentation Manual<a class="headerlink" href="#documentation-manual" title="Link to this heading">#</a></h1>
+<section id="prepare-docs-requirements">
+<h2>Prepare Docs Requirements<a class="headerlink" href="#prepare-docs-requirements" title="Link to this heading">#</a></h2>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">wget</span> <span class="o">--</span><span class="n">no</span><span class="o">-</span><span class="n">check</span><span class="o">-</span><span class="n">certificate</span> <span class="n">https</span><span class="p">:</span><span class="o">//</span><span class="n">github</span><span class="o">.</span><span class="n">com</span><span class="o">/</span><span class="n">jgm</span><span class="o">/</span><span class="n">pandoc</span><span class="o">/</span><span class="n">releases</span><span class="o">/</span><span class="n">download</span><span class="o">/</span><span class="mf">3.7.0.2</span><span class="o">/</span><span class="n">pandoc</span><span class="o">-</span><span class="mf">3.7.0.2</span><span class="o">-</span><span class="n">linux</span><span class="o">-</span><span class="n">amd64</span><span class="o">.</span><span class="n">tar</span><span class="o">.</span><span class="n">gz</span> <span class="o">-</span><span class="n">O</span> <span class="n">pandoc</span><span class="o">-</span><span class="mf">3.7.0.2</span><span class="o">-</span><span class="n">linux</span><span class="o">-</span><span class="n">amd64</span><span class="o">.</span><span class="n">tar</span><span class="o">.</span><span class="n">gz</span> <span class="o">&amp;&amp;</span>     <span class="n">tar</span> <span class="n">xzf</span> <span class="n">pandoc</span><span class="o">-</span><span class="mf">3.7.0.2</span><span class="o">-</span><span class="n">linux</span><span class="o">-</span><span class="n">amd64</span><span class="o">.</span><span class="n">tar</span><span class="o">.</span><span class="n">gz</span> <span class="o">&amp;&amp;</span>     <span class="n">cp</span> <span class="n">pandoc</span><span class="o">-</span><span class="mf">3.7.0.2</span><span class="o">/</span><span class="nb">bin</span><span class="o">/</span><span class="n">pandoc</span> <span class="o">/</span><span class="n">usr</span><span class="o">/</span><span class="n">local</span><span class="o">/</span><span class="nb">bin</span><span class="o">/</span> <span class="o">&amp;&amp;</span>     <span class="n">rm</span> <span class="o">-</span><span class="n">rf</span> <span class="n">pandoc</span><span class="o">-</span><span class="mf">3.7.0.2</span><span class="o">*/</span><span class="n">opt</span><span class="o">/</span><span class="n">conda310</span><span class="o">/</span><span class="nb">bin</span><span class="o">/</span><span class="n">pip</span> <span class="n">install</span> <span class="n">uv</span> 
+
+<span class="o">/</span><span class="n">opt</span><span class="o">/</span><span class="n">conda310</span><span class="o">/</span><span class="nb">bin</span><span class="o">/</span><span class="n">uv</span> <span class="n">pip</span> <span class="n">install</span> <span class="n">sphinx</span> <span class="n">myst</span><span class="o">-</span><span class="n">nb</span> <span class="n">jupyter</span> <span class="n">nbconvert</span> <span class="n">sphinx</span><span class="o">-</span><span class="n">autobuild</span> <span class="o">--</span><span class="n">cache</span><span class="o">-</span><span class="nb">dir</span><span class="o">=/</span><span class="n">root</span><span class="o">/.</span><span class="n">cache</span><span class="o">/</span><span class="n">uv</span><span class="o">/</span>      <span class="o">--</span><span class="n">python</span><span class="o">=/</span><span class="n">opt</span><span class="o">/</span><span class="n">conda310</span><span class="o">/</span><span class="nb">bin</span><span class="o">/</span><span class="n">python</span>      <span class="o">--</span><span class="n">verbose</span>
+
+<span class="n">yum</span> <span class="n">update</span> <span class="o">-</span><span class="n">y</span> <span class="o">&amp;&amp;</span>     <span class="n">yum</span> <span class="n">install</span> <span class="o">-</span><span class="n">y</span> <span class="n">moreutils</span> <span class="o">--</span><span class="n">skip</span><span class="o">-</span><span class="n">broken</span> <span class="o">||</span> <span class="n">true</span> <span class="o">&amp;&amp;</span>     <span class="n">yum</span> <span class="n">install</span> <span class="o">-</span><span class="n">y</span> <span class="n">parallel</span> <span class="o">--</span><span class="n">skip</span><span class="o">-</span><span class="n">broken</span> <span class="o">||</span> <span class="n">true</span> <span class="o">&amp;&amp;</span>     <span class="n">rm</span> <span class="o">-</span><span class="n">rf</span> <span class="o">/</span><span class="n">var</span><span class="o">/</span><span class="n">cache</span><span class="o">/</span><span class="n">yum</span><span class="o">/*</span>
+
+<span class="o">/</span><span class="n">opt</span><span class="o">/</span><span class="n">conda310</span><span class="o">/</span><span class="nb">bin</span><span class="o">/</span><span class="n">uv</span> <span class="n">pip</span> <span class="n">install</span> <span class="o">-</span><span class="n">r</span>  <span class="n">docs</span><span class="o">/</span><span class="n">requirements</span><span class="o">.</span><span class="n">txt</span>       <span class="o">--</span><span class="n">cache</span><span class="o">-</span><span class="nb">dir</span><span class="o">=/</span><span class="n">root</span><span class="o">/.</span><span class="n">cache</span><span class="o">/</span><span class="n">uv</span><span class="o">/</span>      <span class="o">--</span><span class="n">python</span><span class="o">=/</span><span class="n">opt</span><span class="o">/</span><span class="n">conda310</span><span class="o">/</span><span class="nb">bin</span><span class="o">/</span><span class="n">python</span>      <span class="o">--</span><span class="n">verbose</span>
+</pre></div>
+</div>
+</section>
+<section id="add-documentation">
+<h2>Add Documentation<a class="headerlink" href="#add-documentation" title="Link to this heading">#</a></h2>
+<section id="add-documentation-file">
+<h3>1. Add Documentation File<a class="headerlink" href="#add-documentation-file" title="Link to this heading">#</a></h3>
 <ul class="simple">
-<li><p>如果是设计可以添加MD文档，如果是使用文档可以在Jupyter Notebook 上运行则建议添加ipynb文档</p></li>
+<li><p>For design-related content, add MD (Markdown) files. For usage documentation that can be executed, consider adding Jupyter Notebook (<code class="docutils literal notranslate"><span class="pre">.ipynb</span></code>) files.</p></li>
+<li><p>If images are included, it is recommended to place them in the <code class="docutils literal notranslate"><span class="pre">docs/pics/</span></code> directory.</p></li>
 </ul>
 </section>
-<section id="id3">
-<h2>2. 添加索引<a class="headerlink" href="#id3" title="Link to this heading">#</a></h2>
+<section id="add-index">
+<h3>2. Add Index<a class="headerlink" href="#add-index" title="Link to this heading">#</a></h3>
 <ul class="simple">
-<li><p>docs 的索引由.rst 文件构建，添加好文档之后根据文档的用途将文档放到对应的目录结构</p></li>
+<li><p>The documentation index is built from <code class="docutils literal notranslate"><span class="pre">.rst</span></code> files. After adding documentation, organize files into the appropriate directory structure based on their purpose.</p></li>
 </ul>
 </section>
-<section id="id4">
-<h2>3. 增加中文<a class="headerlink" href="#id4" title="Link to this heading">#</a></h2>
+<section id="add-chinese-support">
+<h3>3. Add Chinese Support<a class="headerlink" href="#add-chinese-support" title="Link to this heading">#</a></h3>
 <ol class="arabic simple">
-<li><p>进入 docs 目录。</p></li>
-<li><p>运行命令 <code class="docutils literal notranslate"><span class="pre">make</span> <span class="pre">update</span></code>。此命令会提取所有可翻译的消息并更新 PO 翻译文件。</p></li>
-<li><p>手动修改新增的翻译文件，文件位于 docs/locales/zh_CN/LC_MESSAGES 下，补全对应语言的 msgstr 字段。</p></li>
-<li><p>运行命令 <code class="docutils literal notranslate"><span class="pre">make</span> <span class="pre">html</span></code>，此命令会同时生成中英两语的 HTML 版本。您也可以分别运行 <code class="docutils literal notranslate"><span class="pre">make</span> <span class="pre">html-zh</span></code> 和 <code class="docutils literal notranslate"><span class="pre">make</span> <span class="pre">html-en</span></code> 命令生成中英文两个版本。</p></li>
+<li><p>Navigate to the <code class="docutils literal notranslate"><span class="pre">docs</span></code> directory.</p></li>
+<li><p>Run the command <code class="docutils literal notranslate"><span class="pre">make</span> <span class="pre">update</span></code>. This command extracts all translatable messages and updates the PO translation files.</p></li>
+<li><p>Manually update the newly generated translation files under <code class="docutils literal notranslate"><span class="pre">docs/locales/zh_CN/LC_MESSAGES</span></code>, filling in the <code class="docutils literal notranslate"><span class="pre">msgstr</span></code> fields for the target language.</p></li>
+<li><p>Run <code class="docutils literal notranslate"><span class="pre">make</span> <span class="pre">html</span></code> to generate both Chinese and English HTML versions. Alternatively, run <code class="docutils literal notranslate"><span class="pre">make</span> <span class="pre">html-zh</span></code> or <code class="docutils literal notranslate"><span class="pre">make</span> <span class="pre">html-en</span></code> separately to build specific language versions.</p></li>
 </ol>
+</section>
+<section id="modify-documentation">
+<h3>Modify Documentation<a class="headerlink" href="#modify-documentation" title="Link to this heading">#</a></h3>
+<p>Similar to adding documentation, if you modify existing documentation, ensure to update the corresponding Chinese PO files and regenerate HTML output by running <code class="docutils literal notranslate"><span class="pre">make</span> <span class="pre">html</span></code>.</p>
+<ol class="arabic simple">
+<li><p>Run <code class="docutils literal notranslate"><span class="pre">make</span> <span class="pre">update</span></code>, Manually update the newly generated translation files under <code class="docutils literal notranslate"><span class="pre">docs/locales/zh_CN/LC_MESSAGES</span></code>, filling in the <code class="docutils literal notranslate"><span class="pre">msgstr</span></code> fields for the target language.</p></li>
+<li><p>Run <code class="docutils literal notranslate"><span class="pre">make</span> <span class="pre">html</span></code> to generate both Chinese and English HTML versions. Alternatively, run <code class="docutils literal notranslate"><span class="pre">make</span> <span class="pre">html-zh</span></code> or <code class="docutils literal notranslate"><span class="pre">make</span> <span class="pre">html-en</span></code> separately to build specific language versions.</p></li>
+</ol>
+</section>
 </section>
 </section>
 
@@ -508,6 +537,15 @@ document.write(`
                 <footer class="prev-next-footer d-print-none">
                   
 <div class="prev-next-area">
+    <a class="left-prev"
+       href="backend/Multimodal.html"
+       title="previous page">
+      <i class="fa-solid fa-angle-left"></i>
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">previous</p>
+        <p class="prev-next-title">Multimodal Part Debug and Separate Deployment</p>
+      </div>
+    </a>
 </div>
                 </footer>
               
@@ -524,9 +562,14 @@ document.write(`
   </div>
   <nav class="bd-toc-nav page-toc">
     <ul class="visible nav section-nav flex-column">
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#id2">1. 添加文档</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#id3">2. 添加索引</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#id4">3. 增加中文</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#prepare-docs-requirements">Prepare Docs Requirements</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#add-documentation">Add Documentation</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#add-documentation-file">1. Add Documentation File</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#add-index">2. Add Index</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#add-chinese-support">3. Add Chinese Support</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#modify-documentation">Modify Documentation</a></li>
+</ul>
+</li>
 </ul>
   </nav></div>
 
@@ -560,7 +603,7 @@ By RTP-LLM Team
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Sep 25, 2025.
+  Last updated on Oct 10, 2025.
   <br/>
 </p>
   </div>
