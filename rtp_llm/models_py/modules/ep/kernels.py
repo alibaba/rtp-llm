@@ -985,28 +985,27 @@ def recompute_topk_ids_triton_kernel(
     expert_count_ptr,
     current_expert_start_id,
     num_local_experts,
-    num_tokens,
-    topk: tl.constexpr,
+    num_total,
     BLOCK_SIZE: tl.constexpr,
 ):
-    pid = tl.program_id(0)
-    token_start = pid * BLOCK_SIZE
-    token_end = min(token_start + BLOCK_SIZE, num_tokens)
-    
-    for token_idx in range(token_start, token_end):
-        offset = token_idx * topk
-        # Load each expert ID individually instead of vectorized load
-        for i in range(topk):
-            expert_id = tl.load(topk_ids_ptr + offset + i)
-            adjusted = expert_id - current_expert_start_id
-            valid = (adjusted >= 0) & (adjusted < num_local_experts)
-            
-            # Write back adjusted ID
-            out_id = tl.where(valid, adjusted, -1)
-            tl.store(adjusted_topk_ids_ptr + offset + i, out_id)
-            
-            # Atomic add to expert count if valid
-            tl.atomic_add(expert_count_ptr + adjusted, 1, mask=valid)
+    pid = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = pid < num_total          # Mask out-of-bounds threads
+
+    # 1. Load
+    expert_id = tl.load(topk_ids_ptr + pid, mask=mask, other=-1)
+
+    # 2. Adjust expert index
+    adjusted = expert_id - current_expert_start_id
+    valid = mask & (adjusted >= 0) & (adjusted < num_local_experts)
+
+    # 3. Store
+    out = tl.where(valid, adjusted, -1)
+    tl.store(adjusted_topk_ids_ptr + pid, out, mask=mask)
+
+    # 4. Atomic add
+    tl.atomic_add(expert_count_ptr + adjusted,
+                  tl.full([BLOCK_SIZE], 1, tl.int32),
+                  mask=valid)
 
 
 def recompute_topk_ids_sum_expert_count(
@@ -1025,6 +1024,7 @@ def recompute_topk_ids_sum_expert_count(
     """
     device = topk_ids.device
     num_tokens, topk = topk_ids.shape
+    num_total = num_tokens * topk
 
     # Create output tensors
     adjusted_topk_ids = torch.empty_like(topk_ids)
@@ -1032,18 +1032,19 @@ def recompute_topk_ids_sum_expert_count(
 
     # Configure triton kernel parameters
     # Use smaller block size for better vectorization when topk is large
-    BLOCK_SIZE = min(256, 1024 // max(topk, 1))
+    # Ensure BLOCK_SIZE is a power of 2 for triton compatibility
+    base_block_size = min(256, 1024 // max(topk, 1))
+    BLOCK_SIZE = triton.next_power_of_2(base_block_size)
 
     # Launch recompute kernel
-    grid_recompute = (triton.cdiv(num_tokens, BLOCK_SIZE),)
+    grid_recompute = (triton.cdiv(num_total, BLOCK_SIZE),)
     recompute_topk_ids_triton_kernel[grid_recompute](
         topk_ids,
         adjusted_topk_ids,
         expert_count,
         current_expert_start_id,
         num_local_experts,
-        num_tokens,
-        topk=topk,
+        num_total,
         BLOCK_SIZE=BLOCK_SIZE,
     )
 
