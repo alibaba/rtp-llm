@@ -38,7 +38,7 @@ def concat_1(ts: List[torch.Tensor]) -> torch.Tensor:
 
 
 def pad(ts: List[torch.Tensor], inter_padding_size: int, dim: int):
-    logging.debug(f"inter_padding_size: {inter_padding_size}, dim: {dim}")
+    logging.debug("inter_padding_size: %s, dim: %s", inter_padding_size, dim)
     if dim == 0:
         pad_shape = [inter_padding_size - ts[0].shape[0], ts[0].shape[1]]
     elif dim == 1:

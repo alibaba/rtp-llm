@@ -97,7 +97,7 @@ class GangServer:
             name = req["name"]
             ip = req["ip"]
             if not self._initialized:
-                logging.debug(f"server member recv: {name} {ip}")
+                logging.debug("server member recv: %s %s", name, ip)
                 self._gang_status[name] = ip
                 last_underscore_index = name.rfind("_")
                 if last_underscore_index != -1:
@@ -109,7 +109,7 @@ class GangServer:
 
         @app.post("/broadcast_parts")
         def broadcast_parts(req: Dict[str, Any]):
-            logging.debug(f"broadcast parts recv: {json.dumps(req)}")
+            logging.debug("broadcast parts recv: %s", json.dumps(req))
             StaticConfig.gang_config.json_gang_parts = json.dumps(req)
 
         @app.post("/report_failure")
@@ -182,12 +182,12 @@ class GangServer:
                     timeout=1,
                 )
             except Exception as e:
-                logging.debug(f"request {url} failed, {str(e)}")
+                logging.debug("request %s failed, %s", url, str(e))
                 continue
             if result.status_code == 200:
                 response = result.json()
                 if response["initializing"] == True:
-                    logging.debug(f"client member recv: {member.name} {member.ip}")
+                    logging.debug("client member recv: %s %s", member.name, member.ip)
                     self._gang_status[member.name] = member.ip
             self._broadcast_parts(gang_info)
 
@@ -297,7 +297,7 @@ class GangServer:
                     try:
                         result = requests.post(broadcast_url, json=parts, timeout=1)
                     except:
-                        logging.debug(f"request {broadcast_url} failed")
+                        logging.debug("request %s failed", broadcast_url)
 
     def _health_check_impl(self):
         failed_member = None

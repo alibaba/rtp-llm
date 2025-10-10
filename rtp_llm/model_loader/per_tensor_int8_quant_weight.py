@@ -104,7 +104,7 @@ class PerTensorInt8QuantWeight(CompositeWeight, QuantWeight):
         scale: Optional[AtomicWeight] = None
         act_scale: Optional[AtomicWeight] = None
         act_scale_inv: Optional[AtomicWeight] = None
-        logging.debug(f"PerTensorInt8QuantWeight : {self.qs_suffix}, {self.qw_suffix}")
+        logging.debug("PerTensorInt8QuantWeight : %s, %s", self.qs_suffix, self.qw_suffix)
 
         if src_weight_info.name == W.attn_qkv_w:
             (kernel, scale, act_scale, act_scale_inv) = self._get_qkv_quant_weight_info(
