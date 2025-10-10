@@ -180,7 +180,6 @@ class ConcurrencyLimitTest(TestCase):
         time.sleep(10)
         self.assertEqual(self.get_available_concurrency(), 16)
 
-        os.environ["LOAD_BALANCE"] = "1"
         self.assertEqual(self.get_backend_available_concurrency(), 60)
         excepted = {
             "available_kv_cache": 0,

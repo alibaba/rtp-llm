@@ -240,27 +240,25 @@ public:
     int64_t world_size_ = 1;
 
     // pd speration
-    RoleType    role_type_                       = RoleType::PDFUSION;
-    bool        cache_store_rdma_mode_           = true;
-    int64_t     cache_store_listen_port_         = 0;
-    int64_t     cache_store_connect_port_        = 0;
-    int64_t     cache_store_rdma_listen_port_    = 0;
-    int64_t     cache_store_rdma_connect_port_   = 0;
-    int64_t     remote_rpc_server_port_          = 0;
-    int64_t     prefill_retry_times_             = 0;
-    int64_t     prefill_retry_timeout_ms_        = 0;
-    int64_t     prefill_max_wait_timeout_ms_     = 0;
-    int64_t     decode_retry_times_              = 0;
-    int64_t     decode_retry_timeout_ms_         = 0;
-    int64_t     decode_polling_kv_cache_step_ms_ = 0;
-    int64_t     decode_polling_call_prefill_ms_  = 0;
-    int64_t     rdma_connect_retry_times_        = 0;
-    std::string load_balance_policy_name_        = "";
-    int64_t     sync_status_interval_ms_         = 0;
-    int64_t     load_cache_timeout_ms_           = 0;
-    int64_t     max_rpc_timeout_ms_              = 0;
-    int64_t     worker_port_offset_              = 0;
-    bool        decode_entrance_                 = false;
+    RoleType role_type_                       = RoleType::PDFUSION;
+    bool     cache_store_rdma_mode_           = true;
+    int64_t  cache_store_listen_port_         = 0;
+    int64_t  cache_store_connect_port_        = 0;
+    int64_t  cache_store_rdma_listen_port_    = 0;
+    int64_t  cache_store_rdma_connect_port_   = 0;
+    int64_t  remote_rpc_server_port_          = 0;
+    int64_t  prefill_retry_times_             = 0;
+    int64_t  prefill_retry_timeout_ms_        = 0;
+    int64_t  prefill_max_wait_timeout_ms_     = 0;
+    int64_t  decode_retry_times_              = 0;
+    int64_t  decode_retry_timeout_ms_         = 0;
+    int64_t  decode_polling_kv_cache_step_ms_ = 0;
+    int64_t  decode_polling_call_prefill_ms_  = 0;
+    int64_t  rdma_connect_retry_times_        = 0;
+    int64_t  load_cache_timeout_ms_           = 0;
+    int64_t  max_rpc_timeout_ms_              = 0;
+    int64_t  worker_port_offset_              = 0;
+    bool     decode_entrance_                 = false;
 
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens_;
 

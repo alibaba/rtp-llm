@@ -395,19 +395,13 @@ std::string FIFOSchedulerConfig::to_string() const {
 
 // MiscellaneousConfig
 void MiscellaneousConfig::update_from_env_for_test() {
-    load_balance            = autil::EnvUtil::getEnv("LOAD_BALANCE", 0);
-    step_records_time_range = autil::EnvUtil::getEnv("STEP_RECORDS_TIME_RANGE", 60 * 1000 * 1000);
-    step_records_max_size   = autil::EnvUtil::getEnv("STEP_RECORDS_MAX_SIZE", 1000);
     disable_pdl             = bool_from_env_for_test("DISABLE_PDL", true);
     aux_string              = autil::EnvUtil::getEnv("AUX_STRING", "");
 }
 
 std::string MiscellaneousConfig::to_string() const {
     std::ostringstream oss;
-    oss << "load_balance: " << load_balance << "\n"
-        << "step_records_time_range: " << step_records_time_range << "\n"
-        << "step_records_max_size: " << step_records_max_size << "\n"
-        << "disable_pdl" << disable_pdl << "\n"
+    oss << "disable_pdl" << disable_pdl << "\n"
         << "aux_string: " << aux_string << "\n";
     return oss.str();
 }

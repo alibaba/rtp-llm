@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/engine_base/Host.h"
 #include <cstring>
 #include <memory>
 #include <unistd.h>

@@ -9,7 +9,6 @@
 #include "rtp_llm/cpp/devices/Weights.h"
 #include "rtp_llm/cpp/config/GptInitParameter.h"
 #include "kmonitor/client/MetricsReporter.h"
-#include "rtp_llm/cpp/engine_base/LoadBalance.h"
 
 namespace th = torch;
 
@@ -35,8 +34,6 @@ struct EngineInitParams {
             gpt_init_parameter.profiling_debug_logging_config.ft_core_dump_on_exception;
         StaticConfig::user_disable_pdl = gpt_init_parameter.misc_config.disable_pdl;
         // default 1 minute and 1000
-        StepRecorder::STEP_RECORDS_TIME_RANGE = gpt_init_parameter.misc_config.step_records_time_range;
-        StepRecorder::STEP_RECORDS_MAX_SIZE   = gpt_init_parameter.misc_config.step_records_max_size;
         ParallelInfo& global_parallel_info    = ParallelInfo::globalParallelInfo();
         global_parallel_info.setTpSize(gpt_init_parameter.parallelism_distributed_config.tp_size);
         global_parallel_info.setPpSize(gpt_init_parameter.parallelism_distributed_config.pp_size);

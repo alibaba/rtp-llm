@@ -658,10 +658,6 @@ class PdSeparationConfig:
         self.rdma_connect_retry_times: int = 0
         self.load_cache_timeout_ms: int = 5000
 
-        # Load balance configuration
-        self.load_balance_policy_name: str = "RR"
-        self.sync_status_interval_ms: int = 50
-
     def update_from_env(self):
         # Prefill related configuration
         self.prefill_retry_times = int(
@@ -700,14 +696,6 @@ class PdSeparationConfig:
             os.environ.get("LOAD_CACHE_TIMEOUT_MS", self.load_cache_timeout_ms)
         )
 
-        # Load balance configuration
-        self.load_balance_policy_name = os.environ.get(
-            "LOAD_BALANCE_POLICY_NAME", self.load_balance_policy_name
-        )
-        self.sync_status_interval_ms = int(
-            os.environ.get("SYNC_STATUS_INTERVAL_MS", self.sync_status_interval_ms)
-        )
-
     def to_string(self):
         return (
             f"prefill_retry_times: {self.prefill_retry_times}\n"
@@ -718,9 +706,7 @@ class PdSeparationConfig:
             f"decode_polling_kv_cache_step_ms: {self.decode_polling_kv_cache_step_ms}\n"
             f"decode_entrance: {self.decode_entrance}\n"
             f"rdma_connect_retry_times: {self.rdma_connect_retry_times}\n"
-            f"load_cache_timeout_ms: {self.load_cache_timeout_ms}\n"
-            f"load_balance_policy_name: {self.load_balance_policy_name}\n"
-            f"sync_status_interval_ms: {self.sync_status_interval_ms}"
+            f"load_cache_timeout_ms: {self.load_cache_timeout_ms}"
         )
 
 

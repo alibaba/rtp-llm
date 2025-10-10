@@ -31,12 +31,8 @@ public:
 class WorkerStatusService {
 public:
     WorkerStatusService(const std::shared_ptr<EngineBase>&            engine,
-                        const std::shared_ptr<ConcurrencyController>& controller,
-                        const int                                     load_balance = 0);
+                        const std::shared_ptr<ConcurrencyController>& controller);
     ~WorkerStatusService() = default;
-    int getLoadBalanceEnv() {
-        return load_balance_env_;
-    }
 
 public:
     void workerStatus(const std::unique_ptr<http_server::HttpResponseWriter>& writer,
@@ -47,7 +43,6 @@ private:
     std::atomic_bool                       is_stopped_{false};
     std::shared_ptr<EngineBase>            engine_;
     std::shared_ptr<ConcurrencyController> controller_;
-    int                                    load_balance_env_{0};
 };
 
 }  // namespace rtp_llm

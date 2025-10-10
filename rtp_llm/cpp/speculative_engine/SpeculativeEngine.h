@@ -160,7 +160,6 @@ private:
     std::thread                     loop_thread_;
     std::atomic<bool>               running_{false};
     ResourceContext                 resource_context_;
-    StepRecorder                    step_recorder_;
     std::shared_ptr<CudaProfiler_E> profiler_;
     int                             profiler_step_ = 0;
 };

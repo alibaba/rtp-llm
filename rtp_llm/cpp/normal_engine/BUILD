@@ -12,7 +12,7 @@ cc_library(
     deps = torch_deps() + [
         "//rtp_llm/cpp/engine_base:engine_base",
         "//rtp_llm/cpp/engine_base/stream:generate_config",
-        "//rtp_llm/cpp/engine_base:load_balance",
+        "//rtp_llm/cpp/engine_base:worker_status_info",
         "//rtp_llm/cpp/engine_base:profiler",
         "//rtp_llm/cpp/metrics:metrics",
         "//rtp_llm/cpp/models:models",

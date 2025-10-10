@@ -35,10 +35,9 @@ protected:
 };
 
 TEST_F(WorkerStatusServiceTest, Constructor) {
-    WorkerStatusService worker_status_service(nullptr, nullptr, 1);
+    WorkerStatusService worker_status_service(nullptr, nullptr);
     EXPECT_EQ(worker_status_service.engine_, nullptr);
     EXPECT_EQ(worker_status_service.controller_, nullptr);
-    EXPECT_EQ(worker_status_service.load_balance_env_, 1);
 }
 
 TEST_F(WorkerStatusServiceTest, WorkerStatus_AlreadyStopped) {
