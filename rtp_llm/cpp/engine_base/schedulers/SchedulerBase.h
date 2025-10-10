@@ -29,9 +29,6 @@ public:
     virtual std::vector<EngineScheduleInfo::TaskInfo> runningTaskList() {
         return {};
     }
-    virtual bool canLoadBalance() {
-        return true;
-    }
     virtual void updateSchedulerInfo(const std::string& scheduler_info) {}
 };
 

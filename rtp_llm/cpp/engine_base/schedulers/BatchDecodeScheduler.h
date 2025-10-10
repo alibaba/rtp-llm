@@ -134,11 +134,7 @@ public:
         evictAllDoneStreams();
         return running_streams_;
     }
-
-    bool canLoadBalance() override {
-        return false;
-    }
-
+    
     absl::Status stop() override {
         // Not implemented
         return absl::UnimplementedError("BatchDecodeScheduler::stop not implemented");
