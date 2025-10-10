@@ -322,7 +322,7 @@ class AtomicWeight(WeightModule):
             try:
                 before_merge_tensors.append(
                     ckpt_weight.merge_fun(
-                        [x.to(device) for x in database.load_tensor(name, convert_type)]
+                        [x.unsqueeze(-1).to(device) if "scale" in name and x.dim() == 1 else x.to(device) for x in database.load_tensor(name, convert_type)]
                     )
                 )
             except Exception as e:

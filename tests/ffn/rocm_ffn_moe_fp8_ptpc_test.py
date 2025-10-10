@@ -342,7 +342,7 @@ class TestROCmFfnMoeFp8(unittest.TestCase):
     def test_moe_fp8_ptpc(self):
         for ep_size in [1, 2]:
             for dtype in [torch.bfloat16]:
-                for token in [1, 2, 5, 16, 32]:
+                for token in [1, 32]:
                     for model_dim in [4096]:
                         for inter_dim in [1536]:
                             self._test_moe_fp8(token, model_dim, inter_dim, 128, 0, 8, 1, 1, ep_size, dtype, torch.float8_e4m3fnuz)

@@ -326,71 +326,71 @@ py_test(
     ],
 )
 
-#ToDo: fix aiter import issue
-#py_test(
-#    name = "rocm_ffn_moe_fp8_test",
-#    srcs = [
-#        "ffn/rocm_ffn_moe_fp8_test.py"
-#    ],
-#    data = [
-#        "//:th_transformer",
-#        ":rocm_test_ops",
-#    ],
-#    deps = [
-#        "//rtp_llm:torch",
-#        "//rtp_llm:rtp_llm_lib",
-#        "@aiter//:aiter_py",
-#    ],
-#    env = {
-#        "DEVICE_RESERVE_MEMORY_BYTES": "1024000",
-#    },
-#    tags = [
-#        "rocm",
-#    ],
-#)
+py_test(
+   name = "rocm_ffn_moe_fp8_test",
+   srcs = [
+       "ffn/rocm_ffn_moe_fp8_test.py"
+   ],
+   data = [
+       "//:th_transformer",
+       ":rocm_test_ops",
+   ],
+   deps = [
+       "//rtp_llm:torch",
+       "//rtp_llm:rtp_llm_lib",
+       "@aiter//:aiter_py",
+   ],
+   env = {
+       "DEVICE_RESERVE_MEMORY_BYTES": "1024000",
+   },
+   timeout = "long",
+   tags = [
+       "rocm",
+   ],
+)
 
-#ToDo: fix aiter import issue
-# py_test(
-#     name = "rocm_ffn_moe_fp8_ptpc_test",
-#     srcs = [
-#         "ffn/rocm_ffn_moe_fp8_ptpc_test.py"
-#     ],
-#     data = [
-#         "//:th_transformer",
-#         ":rocm_test_ops",
-#     ],
-#     deps = [
-#         "//rtp_llm:torch",
-#         "//rtp_llm:rtp_llm_lib",
-#     ],
-#     env = {
-#         "DEVICE_RESERVE_MEMORY_BYTES": "1024000",
-#     },
-#     tags = [
-#         "rocm",
-#     ],
-# )
+py_test(
+    name = "rocm_ffn_moe_fp8_ptpc_test",
+    srcs = [
+        "ffn/rocm_ffn_moe_fp8_ptpc_test.py"
+    ],
+    data = [
+        "//:th_transformer",
+        ":rocm_test_ops",
+    ],
+    deps = [
+        "//rtp_llm:torch",
+        "//rtp_llm:rtp_llm_lib",
+    ],
+    env = {
+        "DEVICE_RESERVE_MEMORY_BYTES": "1024000",
+    },
+    timeout = "long",
+    tags = [
+        "rocm",
+    ],
+)
 
-#ToDo: fix aiter import issue
-#py_test(
-#    name = "rocm_ffn_moe_bf16_test",
-#    srcs = [
-#        "ffn/rocm_ffn_moe_bf16_test.py"
-#    ],
-#    data = [
-#        "//:th_transformer",
-#        ":rocm_test_ops",
-#    ],
-#    deps = [
-#        "//rtp_llm:torch",
-#        "//rtp_llm:rtp_llm_lib",
-#        "@aiter//:aiter_py",
-#    ],
-#    env = {
-#        "DEVICE_RESERVE_MEMORY_BYTES": "1024000",
-#    },
-#    tags = ["rocm"],
-#)
+py_test(
+   name = "rocm_ffn_moe_bf16_test",
+   srcs = [
+       "ffn/rocm_ffn_moe_bf16_test.py"
+   ],
+   data = [
+       "//:th_transformer",
+       ":rocm_test_ops",
+   ],
+   deps = [
+       "//rtp_llm:torch",
+       "//rtp_llm:rtp_llm_lib",
+       "@aiter//:aiter_py",
+   ],
+   env = {
+       "DEVICE_RESERVE_MEMORY_BYTES": "1024000",
+   },
+   timeout = "long",
+   tags = ["rocm"],
+)
 
 py_test(
     name = "mla_rotary_kvcache_test",

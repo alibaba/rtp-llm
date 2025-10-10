@@ -21,6 +21,7 @@ from rtp_llm.config.quant_config import (
     Fp8BlockWiseQuantConfig,
     Fp8PerChannelCompressedQuantConfig,
     Fp8PerTensorCompressedQuantConfig,
+    Fp8PerChannelQuarkQuantConfig,
     QuantizationConfig,
     init_quant_config,
 )
@@ -1286,7 +1287,15 @@ class GptInitModelParameters:
                         "weight_scale_suffix": ".weight_scale",
                     }
                 )
-
+        if quant_method == "quark":
+            quark_weights_config = quant_config["global_quant_config"]["weight"]
+            if quark_weights_config["dtype"] == "fp8_e4m3":
+                bits = 8
+            if (
+                quark_weights_config["dtype"] == "fp8_e4m3"
+                and quark_weights_config["qscheme"] == "per_channel"
+            ):
+                quant_method = Fp8PerChannelQuarkQuantConfig.get_method()
         return QuantizationConfig.from_config(
             {
                 "bits": bits,
