@@ -79,19 +79,6 @@
      "CK_DIR", f"{AITER_META_DIR}/3rdparty/composable_kernel"
  )
 
-
---- aiter/ops/mha.py
-+++ aiter/ops/mha.py
-@@ -1014,7 +1014,7 @@ def _flash_attn_forward(
-         ret = ret and (not swa)
-         ret = ret and (q.dtype == dtypes.bf16)
-         ret = ret and ((return_lse and gfx == "gfx950") or (gfx == "gfx942"))
--        return ret
-+        return
- 
-     q, k, v = [maybe_contiguous(x) for x in (q, k, v)]
-     if can_impl_fmha_v3_fwd():
-
 --- csrc/kernels/activation_kernels.cu
 +++ csrc/kernels/activation_kernels.cu
 @@ -18,6 +18,7 @@
