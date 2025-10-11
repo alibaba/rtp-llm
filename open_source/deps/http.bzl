@@ -65,7 +65,7 @@ def http_deps():
 	        "https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/RTP/aiter-0.1.0%2Bgit.94934e7d.date.202508252339-py3-none-any.whl",
 	    ],
         type = "zip",
-        patches = ["//3rdparty/aiter:refine-aiter-asm-dir.patch", "//3rdparty/aiter:aiter-flash_attn.patch"],
+        patches = ["//3rdparty/aiter:aiter-flash_attn.patch"],
         patch_args = ["-p1"],
         build_file = clean_dep("//:BUILD.aiter"),
     )
