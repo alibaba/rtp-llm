@@ -51,8 +51,7 @@ absl::Status FIFOScheduler::stop() {
 
 void FIFOScheduler::evaluateRunningRemote() {
     for (auto it = running_streams_.begin(); it != running_streams_.end();) {
-        if ((*it)->needRemoteGenerate()) {
-            (*it)->setRemoteGenerate();
+        if ((*it)->needRemoteGenerate() && (*it)->setRemoteGenerate()) {
             remote_running_streams_.emplace_back(*it);
             RTP_LLM_LOG_DEBUG("stream [%ld] move to remote running streams", (*it)->streamId());
             it = running_streams_.erase(it);
@@ -244,13 +243,16 @@ bool FIFOScheduler::evaluateNewStream(const list<GenerateStreamPtr>& streams,
 
 list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
     list<GenerateStreamPtr> new_streams;
+    bool has_dummy_stream = false;
     for (auto it = waiting_streams_.begin(); it != waiting_streams_.end();) {
         auto& stream = *it;
-        if (stream->isDummyStream() && (waiting_streams_.size() > 1 || new_streams.size() > 0)) {
-            stream->stopAndRelease(ErrorCode::UNKNOWN_ERROR, "multi fake query");
-            RTP_LLM_LOG_WARNING("waiting streams should has just one fake query");
-            it = waiting_streams_.erase(it);
-            continue;
+        if (stream->isDummyStream()) {
+            if (has_dummy_stream) {
+                stream->stopAndRelease(ErrorCode::UNKNOWN_ERROR, "multi fake query");
+                it = waiting_streams_.erase(it);
+                continue;
+            }
+            has_dummy_stream = true;
         }
         if (evaluateNewStream(new_streams, *it, reserve_step)) {
             RTP_LLM_LOG_DEBUG("stream [%ld] add to new queue", stream->streamId());
@@ -286,9 +288,20 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
             // for dp run must out one fake query
             if (need_fill_fake_stream_ && !waiting_streams_.empty() && waiting_streams_.back()->isDummyStream()) {
                 auto& fake_stream = waiting_streams_.back();
-                if (evaluateNewStream(new_streams, fake_stream, 0)) {
+                if (fake_stream->initKVBlock(token_capacity_, 0).ok() && fake_stream->setRunning()) {
                     new_streams.emplace_back(fake_stream);
                     waiting_streams_.pop_back();
+                } else {
+                    auto first_stream = *(waiting_streams_.begin());
+                    RTP_LLM_CHECK_WITH_INFO(first_stream->maxBlockSize(), "waitting stream should have block size");
+                    RTP_LLM_LOG_INFO("lack fake mem, stream [%ld] in watting queue try release blocks, "
+                                     "it's input_length:%d seq_length:%d, hold block size:%d, release block size:%d",
+                                     first_stream->streamId(),
+                                     first_stream->inputLength(),
+                                     first_stream->seqLength(),
+                                     first_stream->maxBlockSize(),
+                                     first_stream->maxBlockSize());
+                    first_stream->tryReleaseKVBlock(first_stream->maxBlockSize());
                 }
             }
             // try to join new streams in the next schedule cycle
