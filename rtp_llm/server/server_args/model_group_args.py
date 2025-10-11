@@ -56,13 +56,6 @@ def init_model_group_args(parser):
         help="Multi Latent Attention的操作类型",
     )
     model_group.add_argument(
-        "--parallel_batch",
-        env_name="PARALLEL_BATCH",
-        type=int,
-        default=0,
-        help="Batch推理时采用串行还是并行",
-    )
-    model_group.add_argument(
         "--ft_plugin_path",
         env_name="FT_PLUGIN_PATH",
         type=str,

@@ -235,7 +235,6 @@ class ServerArgsDefaultTest(TestCase):
         self.assertEqual(env.get("USE_FLOAT32"), "0")
         self.assertIsNone(env.get("ORIGINAL_CHECKPOINT_PATH"))
         self.assertEqual(env.get("MLA_OPS_TYPE"), "AUTO")
-        self.assertEqual(env.get("PARALLEL_BATCH"), "0")
         self.assertIsNone(env.get("FT_PLUGIN_PATH"))
         self.assertIsNone(env.get("WEIGHT_TYPE"))
         self.assertIsNone(env.get("TASK_TYPE"))
@@ -640,8 +639,6 @@ class ServerArgsSetTest(TestCase):
             "/path/to/original/ckpt",
             "--mla_ops_type",
             "CUSTOM",
-            "--parallel_batch",
-            "1",
             "--ft_plugin_path",
             "/path/to/plugin",
             "--weight_type",
@@ -930,7 +927,6 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env["USE_FLOAT32"], "1")
         self.assertEqual(env["ORIGINAL_CHECKPOINT_PATH"], "/path/to/original/ckpt")
         self.assertEqual(env["MLA_OPS_TYPE"], "CUSTOM")
-        self.assertEqual(env["PARALLEL_BATCH"], "1")
         self.assertEqual(env["FT_PLUGIN_PATH"], "/path/to/plugin")
         self.assertEqual(env["WEIGHT_TYPE"], "FP16")
         self.assertEqual(env["TASK_TYPE"], "generation")
