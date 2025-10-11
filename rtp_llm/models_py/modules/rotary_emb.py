@@ -8,7 +8,7 @@ from flashinfer.rope import (
 
 from rtp_llm.models_py.modules.flashinfer_mla import fill_flash_params
 from rtp_llm.ops import KVCache, PyAttentionInputs
-
+from rtp_llm.ops import rtp_llm_ops
 
 class MlaRotaryEmbeddingOp(object):
     """Original rotary positional embedding."""
@@ -33,7 +33,7 @@ class MlaRotaryEmbeddingOp(object):
         self.token_per_block = token_per_block
 
     def prepare(self, attention_inputs: PyAttentionInputs):
-        return fill_flash_params(
+        return rtp_llm_ops.fill_flash_params(
             self.token_per_block, attention_inputs, self.cos_sin_cache.device
         )
 

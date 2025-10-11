@@ -3,6 +3,16 @@
 namespace torch_ext {
 
 void registerPyOpDefs(pybind11::module& m) {
+    pybind11::class_<FlashInferMlaParams>(m, "FlashInferMlaParams")
+        .def(pybind11::init<>())
+        .def_readonly("batch_indice", &FlashInferMlaParams::batch_indice)
+        .def_readonly("positions", &FlashInferMlaParams::positions)
+        .def_readonly("paged_kv_last_page_len", &FlashInferMlaParams::paged_kv_last_page_len)
+        .def_readonly("kvlen", &FlashInferMlaParams::kvlen)
+        .def_readonly("page_indice", &FlashInferMlaParams::page_indice)
+        .def_readonly("page_indptr", &FlashInferMlaParams::page_indptr)
+        .def_readonly("qo_indptr", &FlashInferMlaParams::qo_indptr);
+
     pybind11::class_<KVCache>(m, "KVCache")
         .def(pybind11::init<>())
         .def_readonly("k_cache_base", &KVCache::k_cache_base, "Key cache base tensor")

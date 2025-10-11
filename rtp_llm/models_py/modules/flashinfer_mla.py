@@ -8,6 +8,7 @@ import torch.nn.functional as F
 # from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.ops import KVCache, PyAttentionInputs
 from rtp_llm.utils.model_weight import W
+from rtp_llm.ops import rtp_llm_ops
 
 
 def fill_flash_params(page_size: int, attention_inputs: PyAttentionInputs, device):
@@ -131,7 +132,7 @@ class MlaFlashInferPrefillOp(object):
         return self.use_mla and attention_inputs.is_prefill
 
     def prepare(self, attention_inputs: PyAttentionInputs):
-        return fill_flash_params(
+        return rtp_llm_ops.fill_flash_params(
             self.token_per_block,
             attention_inputs,
             self.weights[0].get(W.mla_k_nope_w).device,
@@ -230,7 +231,7 @@ class MlaFlashInferDecodeOp(object):
         return self.use_mla and not attention_inputs.is_prefill
 
     def prepare(self, attention_inputs: PyAttentionInputs):
-        return fill_flash_params(
+        return rtp_llm_ops.fill_flash_params(
             self.token_per_block, attention_inputs, self.weights[0].get(W.mla_vc).device
         )
 

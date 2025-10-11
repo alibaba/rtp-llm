@@ -8,6 +8,16 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 namespace torch_ext {
 
+struct FlashInferMlaParams {
+    torch::Tensor batch_indice;
+    torch::Tensor positions;
+    torch::Tensor paged_kv_last_page_len;
+    torch::Tensor kvlen;
+    torch::Tensor page_indice;
+    torch::Tensor page_indptr;
+    torch::Tensor qo_indptr;
+};
+
 struct KVCache {
     torch::Tensor k_cache_base;
     torch::Tensor v_cache_base;
