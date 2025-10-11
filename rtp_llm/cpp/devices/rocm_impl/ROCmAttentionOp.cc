@@ -673,7 +673,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
     if (!skip_add_bias_transpose) {
 
         bool use_rope_cache =
-            params.configs.rope_config.style == RopeStyle::Base || params.configs.rope_config.style == RopeStyle::Yarn;
+            params.configs.rope_config.style == RopeStyle::Base;
         static torch::Tensor rope_cache;
         std::call_once(rope_cache_flag, [&]() {
             if (use_rope_cache) {
@@ -1086,7 +1086,7 @@ AttentionModuleOutput ROCmDevice::decoderSelfAttention(const AttentionModulePara
         if (!skip_add_bias_transpose) {
 
             bool use_rope_cache =
-                params.configs.rope_config.style == RopeStyle::Base || params.configs.rope_config.style == RopeStyle::Yarn;
+                params.configs.rope_config.style == RopeStyle::Base;
             static torch::Tensor rope_cache;
             std::call_once(rope_cache_flag, [&]() {
                 if (use_rope_cache) {
