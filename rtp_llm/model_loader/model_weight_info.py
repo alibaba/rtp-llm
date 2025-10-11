@@ -601,7 +601,6 @@ class ModelWeights:
 
     def set_layer_weight(self, layer_id: int, name: str, tensor: torch.Tensor):
         self.weights[layer_id][name] = tensor
-        gc.collect()
 
     def set_global_weight(self, name: str, tensor: torch.Tensor):
         self.global_weights[name] = tensor

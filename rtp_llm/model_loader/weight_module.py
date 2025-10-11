@@ -1,6 +1,7 @@
 import functools
 import inspect
 import logging
+import time
 import traceback
 import weakref
 from abc import ABC, abstractmethod
@@ -20,6 +21,8 @@ class WeightModule(ABC):
     lora_base_name = "base_model.model.{}.{}.weight"
     lora_A_suffix = "lora_A"
     lora_B_suffix = "lora_B"
+    raw_tensors: Dict[str, Optional[torch.Tensor]] = {}
+    loaded = False
 
     def __init__(
         self,
@@ -148,6 +151,59 @@ class WeightModule(ABC):
     ) -> bool:
         pass
 
+    def add_tensor(
+        self,
+        name: str,
+        layer_id: Optional[int],
+        raw_tensor: torch.Tensor,
+        device: str,
+        load_config: LoadConfig,
+    ):
+        if len(self.raw_tensors) == 0:
+            self.raw_tensors = {
+                key: None for key in self.get_tensor_names(layer_id, load_config)
+            }
+        if name not in self.raw_tensors or self.raw_tensors[name] is not None:
+            raise ValueError(f"the weight has not tensor {name}")
+        else:
+            self.raw_tensors[name] = raw_tensor
+        if all(t is not None for t in self.raw_tensors.values()):
+            self.loaded = True
+            return self._load_from_raw_tensors(layer_id, device, load_config), True
+        return None, False
+
+    @torch.inference_mode()
+    def _load_from_raw_tensors(
+        self,
+        layer_id: Optional[int],
+        device: str,
+        load_config: LoadConfig,
+    ) -> Dict[str, torch.Tensor]:
+        if not all(t is not None for t in self.raw_tensors.values()):
+            raise ValueError(f"some of raw tensors is None")
+        raw_tensors = self._process_raw_tensors(
+            self.raw_tensors, layer_id, device, load_config
+        )
+
+        if load_config.merge_lora:
+            merged_tensors = self._merge_lora(
+                raw_tensors, database, layer_id, load_config
+            )
+        else:
+            merged_tensors = raw_tensors
+        split_tensors = self._split(merged_tensors, load_config)
+        processed_tensors = self._postprocess(split_tensors, device, load_config)
+        flat_res: Dict[str, torch.Tensor] = {}
+        def __extract_tensor(tensors):
+            for k, v in tensors.items():
+                if isinstance(v, dict):
+                    __extract_tensor(v)
+                else:
+                    flat_res.update({k: v.to(device)})
+        __extract_tensor(processed_tensors)
+        self.raw_tensors.clear()
+        return flat_res
+
     @torch.inference_mode()
     def load(
         self,
@@ -156,6 +212,7 @@ class WeightModule(ABC):
         device: str,
         load_config: LoadConfig,
     ):
+        self.raw_tensors.clear()
         raw_tensors = self._load_raw_tensor(database, layer_id, device, load_config)
 
         if load_config.merge_lora:
@@ -231,6 +288,22 @@ class WeightModule(ABC):
     def _load_raw_tensor(
         self,
         database: BaseDatabase,
+        layer_id: Optional[int],
+        device: str,
+        load_config: LoadConfig,
+    ):
+        pass
+
+    @abstractmethod
+    def get_tensor_names(
+        self, layer_id: Optional[int], load_config: LoadConfig
+    ) -> set[str]:
+        pass
+
+    @abstractmethod
+    def _process_raw_tensors(
+        self,
+        raw_tensors: Dict[str, torch.Tensor],
         layer_id: Optional[int],
         device: str,
         load_config: LoadConfig,
@@ -617,6 +690,43 @@ class AtomicWeight(WeightModule):
             )
         }
 
+    def _process_raw_tensors(
+        self,
+        raw_tensors: Dict[str, torch.Tensor],
+        layer_id: Optional[int],
+        device: str,
+        load_config: LoadConfig,
+    ):
+        before_merge_tensors: List[torch.Tensor] = []
+        convert_type = (
+            self.data_type if self.data_type is not None else load_config.compute_dtype
+        )
+        for ckpt_weight in self.weights:
+            name = ckpt_weight.tensor_name(layer_id)
+            try:
+                before_merge_tensors.append(ckpt_weight.merge_fun([raw_tensors[name]]))
+            except Exception as e:
+                logging.error(
+                    f"加载 {self.name}: {name} 失败，完整堆栈:\n{traceback.format_exc()}"
+                )
+                raise e
+        try:
+            after_merge_tensor = (
+                self.process_fun(before_merge_tensors).to(device).to(convert_type)
+            )
+        except Exception as e:
+            logging.error(f"加载 {self.name} 失败，完整堆栈:\n{traceback.format_exc()}")
+            raise e
+        return {self.name: after_merge_tensor}
+
+    def get_tensor_names(
+        self, layer_id: Optional[int], load_config: LoadConfig
+    ) -> set[str]:
+        names = set[str]()
+        for ckpt_weight in self.weights:
+            names.add(ckpt_weight.tensor_name(layer_id))
+        return names
+
     def _get_split_func(self):
         return W.gpt_style_tp_strategy[self.name]
 
@@ -836,3 +946,36 @@ class CompositeWeight(WeightModule):
             else:
                 processed_tensors.update({name: sub_tensors})
         return processed_tensors
+    
+    def _process_raw_tensors(
+        self,
+        raw_tensors: Dict[str, torch.Tensor],
+        layer_id: Optional[int],
+        device: str,
+        load_config: LoadConfig,
+    ):
+        process_tensors = {}
+        for name, sub_weight in self.sub_weights.items():
+            sub_raw_tensors: Dict[str, torch.Tensor] = {
+                key: raw_tensors[key]
+                for key in sub_weight.get_tensor_names(layer_id, load_config)
+            }
+            sub_process_tensors = sub_weight._process_raw_tensors(
+                sub_raw_tensors, layer_id, device, load_config
+            )
+            if isinstance(sub_weight, AtomicWeight) and isinstance(
+                sub_process_tensors, dict
+            ):
+                process_tensors.update(sub_process_tensors)
+            else:
+                process_tensors.update({name: sub_process_tensors})
+        return process_tensors
+
+    def get_tensor_names(
+        self, layer_id: Optional[int], load_config: LoadConfig
+    ) -> set[str]:
+        names = set[str]()
+        for _, sub_weight in self.sub_weights.items():
+            sub_names = sub_weight.get_tensor_names(layer_id, load_config)
+            names = names.union(sub_names)
+        return names

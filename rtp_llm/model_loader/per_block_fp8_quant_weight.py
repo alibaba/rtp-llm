@@ -774,3 +774,42 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
             res.update({self.scale.name: scale.contiguous().to(device)})
 
         return res
+    
+    def get_tensor_names(
+        self, layer_id: Optional[int], load_config: LoadConfig
+    ) -> set[str]:
+        return self.kernel.get_tensor_names(layer_id, load_config)
+
+    def _process_raw_tensors(
+        self,
+        raw_tensors: Dict[str, torch.Tensor],
+        layer_id: Optional[int],
+        device: str,
+        load_config: LoadConfig,
+    ):
+        kernel_raw_tensors: Dict[str, torch.Tensor] = {
+            key: raw_tensors[key]
+            for key in self.kernel.get_tensor_names(layer_id, load_config)
+        }
+        kernel = self.kernel._process_raw_tensors(
+            kernel_raw_tensors, layer_id, device, load_config
+        )
+        res = {}
+        scale = None
+        if self.scale:
+            quant_kernel, scale = per_block_cast_to_fp8(
+                kernel.get(self.kernel.name), self.group_size
+            )
+            if quant_kernel.dim() == 2:
+                scale = scale.reshape([scale.shape[0], -1])
+        else:
+            quant_kernel = cast_to_fp8(kernel.get(self.kernel.name))
+        if self.kernel.name == W.moe_w1 or self.kernel.name == W.moe_w2:
+            pass
+        elif quant_kernel.dim() == 2:
+            quant_kernel = quant_kernel.T
+        res = {self.kernel.name: quant_kernel.contiguous().to(device)}
+        if self.scale:
+            scale = scale.T if scale.dim() == 2 else scale
+            res.update({self.scale.name: scale.contiguous().to(device)})
+        return res
