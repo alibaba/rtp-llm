@@ -43,9 +43,3 @@ pip_gpu_rocm_torch_install_deps()
 
 load("//:def.bzl", "read_release_version")
 read_release_version(name = "release_version")
-load("//:patched_repo.bzl", "patched_pip_repository")
-
-# 创建打过patch的版本
-patched_pip_repository(
-    name = "patched_aiter"
-)
