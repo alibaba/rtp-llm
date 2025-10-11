@@ -1026,6 +1026,13 @@ class PyCacheStoreInputs:
     def __init__(self) -> None: ...
 
 class PyAttentionInputs:
+    is_prefill: bool
+    prefix_lengths: torch.Tensor
+    sequence_lengths: torch.Tensor
+    input_lengths: torch.Tensor
+    kv_cache_block_id_host: torch.Tensor
+    kv_cache_block_id_device: torch.Tensor
+    cu_seqlens: torch.Tensor
     def get_prefill_flash_infer_attn(self) -> typing.Any:
         pass
 
