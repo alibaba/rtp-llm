@@ -35,6 +35,7 @@ from rtp_llm.distribute.worker_info import (
 )
 from rtp_llm.ops import (
     ArpcConfig,
+    AuxString,
     BatchDecodeSchedulerConfig,
     CacheStoreConfig,
     ConcurrencyConfig,
@@ -386,6 +387,7 @@ class GptInitModelParameters:
     concurrency_config: ConcurrencyConfig
     device_resource_config: DeviceResourceConfig
     fifo_scheduler_config: FIFOSchedulerConfig
+    aux_string: AuxString
     fmha_config: FMHAConfig
     hw_kernel_config: HWKernelConfig
     kv_cache_config: KVCacheConfig
@@ -570,6 +572,11 @@ class GptInitModelParameters:
         self.gpt_init_params.concurrency_config = ConcurrencyConfig(
             concurrency_with_block=get_env_bool("CONCURRENCY_WITH_BLOCK", False),
             concurrency_limit=get_env_int("CONCURRENCY_LIMIT", 32),
+        )
+
+        # Aux_string
+        self.gpt_init_params.aux_string = AuxString(
+            infra_spec=get_env_str("AUX_STRING", "")
         )
 
         # FMHAConfig

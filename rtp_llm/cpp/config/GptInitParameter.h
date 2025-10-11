@@ -276,6 +276,7 @@ public:
 
     ParallelismDistributedConfig parallelism_distributed_config;
     ConcurrencyConfig            concurrency_config;
+    AuxString                    aux_string;
     FMHAConfig                   fmha_config;
     KVCacheConfig                kv_cache_config;
     ProfilingDebugLoggingConfig  profiling_debug_logging_config;
@@ -306,6 +307,7 @@ public:
     void update_from_env_for_test() {
         parallelism_distributed_config.update_from_env_for_test();
         concurrency_config.update_from_env_for_test();
+        aux_string.update_from_env_for_test();
         fmha_config.update_from_env_for_test();
         kv_cache_config.update_from_env_for_test();
         profiling_debug_logging_config.update_from_env_for_test();

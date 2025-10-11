@@ -3,6 +3,7 @@ import os
 from typing import Optional
 
 from rtp_llm.ops import (
+    AuxString,
     ConcurrencyConfig,
     FfnDisAggregateConfig,
     FMHAConfig,
@@ -838,6 +839,7 @@ class PyEnvConfigs:
         )
         self.ffn_disaggregate_config: FfnDisAggregateConfig = FfnDisAggregateConfig()
         self.model_specific_config = ModelSpecificConfig()
+        self.aux_string = AuxString()
         self.fmha_config = FMHAConfig()
         self.misc_config = MiscellaneousConfig()
         self.concurrency_config = ConcurrencyConfig()
@@ -868,6 +870,7 @@ class PyEnvConfigs:
         ## in gpt model parameters, we should update it from g_parallel_info
         self.parallelism_distributed_config.update_from_env()
         self.model_specific_config.update_from_env()
+        self.aux_string.update_from_env()
         self.fmha_config.update_from_env()
         self.misc_config.update_from_env()
         self.concurrency_config.update_from_env()

@@ -130,6 +130,8 @@ void GptInitParameter::showDebugInfo() const {
         << parallelism_distributed_config.to_string() << "\n"
         << "========== ConcurrencyConfig ==========\n"
         << concurrency_config.to_string() << "\n"
+        << "========== AuxString ==========\n"
+        << aux_string.to_string() << "\n"
         << "========== FMHAConfig ==========\n"
         << fmha_config.to_string() << "\n"
         << "========== KVCacheConfig ==========\n"

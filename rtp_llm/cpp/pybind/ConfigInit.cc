@@ -91,6 +91,15 @@ void register_concurrency_config(pybind11::module& m) {
         .def_readwrite("concurrency_limit", &ConcurrencyConfig::concurrency_limit);
 }
 
+// AuxString
+void register_aux_string(pybind11::module& m) {
+    pybind11::class_<AuxString>(m, "AuxString")
+        .def(pybind11::init<std::string>(), pybind11::arg("infra_spec") = "")
+        .def("to_string", &AuxString::to_string)
+        .def("update_from_env", &AuxString::update_from_env_for_test)
+        .def_readwrite("infra_spec", &AuxString::infra_spec);
+}
+
 // FMHAConfig
 void register_fmha_config(pybind11::module& m) {
     pybind11::class_<FMHAConfig>(m, "FMHAConfig")
@@ -439,7 +448,6 @@ void register_misc_config(pybind11::module& m) {
         .def_readwrite("disable_pdl", &MiscellaneousConfig::disable_pdl);
 }
 
-
 void registerGptInitParameter(py::module m) {
     py::enum_<MlaOpsType>(m, "MlaOpsType")
         .value("AUTO", MlaOpsType::AUTO)
@@ -731,6 +739,7 @@ void registerGptInitParameter(py::module m) {
         // 新增配置结构体成员暴露
         .def_readwrite("parallelism_distributed_config", &GptInitParameter::parallelism_distributed_config)
         .def_readwrite("concurrency_config", &GptInitParameter::concurrency_config)
+        .def_readwrite("aux_string", &GptInitParameter::aux_string)
         .def_readwrite("fmha_config", &GptInitParameter::fmha_config)
         .def_readwrite("kv_cache_config", &GptInitParameter::kv_cache_config)
         .def_readwrite("profiling_debug_logging_config", &GptInitParameter::profiling_debug_logging_config)
@@ -753,6 +762,7 @@ void registerGptInitParameter(py::module m) {
 PYBIND11_MODULE(libth_transformer_config, m) {
     register_parallelism_distributed_config(m);
     register_concurrency_config(m);
+    register_aux_string(m);
     register_fmha_config(m);
     register_kvcache_config(m);
     register_profiling_debug_logging_config(m);
@@ -776,4 +786,4 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     registerCommon(m);
 }
 
-}  // namespace torch_ext
+}  // namespace rtp_llm
