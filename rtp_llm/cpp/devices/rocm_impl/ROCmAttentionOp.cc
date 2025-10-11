@@ -10,7 +10,7 @@
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/devices/rocm_impl/aiterPA.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
-
+#include "rtp_llm/cpp/utils/RopeCosSin.h"
 #include <filesystem>
 
 using namespace std;
@@ -504,12 +504,12 @@ KVBlockArray ROCmDevice::getKVBlockArray(const AttentionModuleParams& params,
         kv_cache_buffer.mScaleBytesPerBlock = k_scale[0].sizeBytes();
     }
     KvCacheDataType cache_type = KvCacheDataType::BASE;
-#ifdef ENABLE_FP8
+#if defined(ENABLE_FP8)
     if (use_fp8_fmha_) {
         cache_type = KvCacheDataType::FP8;
     } else
 #endif
-        if (use_fp8_fmha) {
+    if (use_fp8_fmha) {
         cache_type = KvCacheDataType::FP8;
     } else if (kv_cache->k_scale_buffer && params.configs.kv_cache_dtype == KvCacheDataType::INT8) {
         RTP_LLM_LOG_DEBUG("now use kv_cache int8");
@@ -602,9 +602,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
         kv_cache_block_id =
             allocateBuffer({DataType::TYPE_INT32, {batch_size, 1, 2, max_blocks_per_batch}, AllocationType::DEVICE},
                            {"kv_cache_block_id"});
-
-        kv_block_array = getKVBlockArray(params, *kv_cache_block_id, batch_size, false);
-
+        kv_block_array = getKVBlockArray(params, *kv_cache_block_id, batch_size, params.common.kv_cache->k_cache_buffer->type() == DataType::TYPE_FP8_E4M3);
         prefix_prompt_param.kv_block_array = kv_block_array;
 
         if (params.common.prefix_prompt_lengths) {
@@ -625,7 +623,8 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
 
     if (prefix_prompt_param.max_prefix_prompt_length > 0) {
         if (init_params_.use_aiter_pa) {
-            DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
+            if (init_params_.use_asm_pa) {
+                DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
                                              invokeLoadPrefixKVCacheAiter,
                                              q_output->data(),
                                              k_output->data(),
@@ -639,6 +638,9 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                                              scale_out_ptr,
                                              int8_mode,
                                              stream_);
+            } else {
+                RUNTIME_ASSERT_OP_ARG(init_params_.use_asm_pa, "Should use asm_pa");
+            }
         } else {
             DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
                                              invokeLoadPrefixKVCache,
@@ -667,8 +669,14 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                                     && !params.configs.fuse_qkv_add_bias);
     RTP_LLM_LOG_DEBUG("skip_add_bias_transpose: %d", skip_add_bias_transpose);
     if (!skip_add_bias_transpose) {
+        static torch::Tensor cos_sin_cache = getRopeCosSin(params.configs.rope_config.style,
+                                                           params.configs.rope_config.dim,
+                                                           params.configs.rope_config.base,
+                                                           params.configs.rope_config.scale,
+                                                           init_params_.max_seq_len);
         if (init_params_.use_aiter_pa) {
-            DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
+            if (init_params_.use_asm_pa) {
+                DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
                                              invokeAddFusedQKVBiasTransposePrefill,
                                              q_output->data(),
                                              k_output->data(),
@@ -700,7 +708,11 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                                              store_q,
                                              store_kv,
                                              store_cache,
+                                             cos_sin_cache.defined() ? static_cast<float2*>(cos_sin_cache.data_ptr()) : nullptr,
                                              stream_);
+            } else {
+                RUNTIME_ASSERT_OP_ARG(init_params_.use_asm_pa, "Should use asm_pa");
+            }
             check_cuda_error();
         } else {
             DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
@@ -1029,13 +1041,20 @@ AttentionModuleOutput ROCmDevice::decoderSelfAttention(const AttentionModulePara
         {DataType::TYPE_INT32, {batch_size, 1, 2, max_blocks_per_batch}, AllocationType::DEVICE}, {"kv_cache_offset"});
 
     if (init_params_.use_aiter_pa) {
-        KVBlockArray kv_block_array = getKVBlockArray(params, *kv_cache_offset, batch_size, false, true);
         PrefixPromptBatchWeightsParam prefix_prompt_param;
-        auto                          offset_kv_block_array = OffsetIndexedKVBlockArray(
-            kv_block_array,
-            (rtp_llm::KVBlockArrayForContextFMHA::DataType*)params.common.kv_cache->kv_cache_block_id->data(),
-            params.common.kv_cache->k_cache_buffer->shape()[0] * params.common.kv_cache->layer_num);
-        prefix_prompt_param.offset_kv_block_array = offset_kv_block_array;
+        if (init_params_.use_asm_pa) {
+            KVBlockArray kv_block_array = getKVBlockArray(params, *kv_cache_offset, batch_size, params.common.kv_cache->k_cache_buffer->type() == DataType::TYPE_FP8_E4M3, false);
+            prefix_prompt_param.kv_block_array = kv_block_array;
+        }
+        else {
+            KVBlockArray kv_block_array = getKVBlockArray(params, *kv_cache_offset, batch_size, params.common.kv_cache->k_cache_buffer->type() == DataType::TYPE_FP8_E4M3, true);
+            auto offset_kv_block_array = OffsetIndexedKVBlockArray(
+                                            kv_block_array,
+                                            (rtp_llm::KVBlockArrayForContextFMHA::DataType*)params.common.kv_cache->kv_cache_block_id->data(),
+                                            params.common.kv_cache->k_cache_buffer->shape()[0] * params.common.kv_cache->layer_num);
+            prefix_prompt_param.kv_block_array = kv_block_array;
+            prefix_prompt_param.offset_kv_block_array = offset_kv_block_array;
+        }
 
         auto   token_num          = params.input.shape()[0];
         auto   decoder_batch_size = params.common.decoder_batch_size;
@@ -1057,7 +1076,13 @@ AttentionModuleOutput ROCmDevice::decoderSelfAttention(const AttentionModulePara
                                         && !params.configs.fuse_qkv_add_bias);
         printBufferData(*params.common.input_lengths, "input_lengths");
         if (!skip_add_bias_transpose) {
-            DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
+            static torch::Tensor cos_sin_cache = getRopeCosSin(params.configs.rope_config.style,
+                                                               params.configs.rope_config.dim,
+                                                               params.configs.rope_config.base,
+                                                               params.configs.rope_config.scale,
+                                                               init_params_.max_seq_len);
+            if (init_params_.use_asm_pa) {
+                DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
                                              invokeAddFusedQKVBiasTransposeDecode,
                                              q_output->data(),
                                              nullptr,
@@ -1089,14 +1114,23 @@ AttentionModuleOutput ROCmDevice::decoderSelfAttention(const AttentionModulePara
                                              store_q,
                                              store_kv,
                                              store_cache,
+                                             cos_sin_cache.defined() ? static_cast<float2*>(cos_sin_cache.data_ptr()) : nullptr,
                                              stream_);
+            } else {
+                RUNTIME_ASSERT_OP_ARG(init_params_.use_asm_pa, "Should use asm_pa");
+            }
             check_cuda_error();
             DEBUG_PRINT_PARAMS(params, this, "decode_writeKVCache", q_output);
-            runAiterPA(params, this, *q_output);
+            if (init_params_.use_asm_pa) {
+                runAiterAsmPA(params, this, *q_output);
+            }
+            else {
+                runAiterPA(params, this, *q_output);
+            }
             check_cuda_error();
         }
     } else {
-        KVBlockArray kv_block_array = getKVBlockArray(params, *kv_cache_offset, batch_size, false);
+        KVBlockArray kv_block_array = getKVBlockArray(params, *kv_cache_offset, batch_size, params.common.kv_cache->k_cache_buffer->type() == DataType::TYPE_FP8_E4M3);
 
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
                                          selfAttentionwrapper,

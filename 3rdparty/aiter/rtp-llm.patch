@@ -1,15 +1,11 @@
---- aiter/jit/core.py
-+++ aiter/jit/core.py
-@@ -114,10 +114,12 @@ def get_user_jit_dir():
-         shutil.copytree(this_dir, home_jit_dir)
-     return home_jit_dir
- 
-+CK_DIR = os.environ.get("CK_DIR", f"{AITER_ROOT_DIR}/3rdparty/composable_kernel")
- 
- bd_dir = f"{get_user_jit_dir()}/build"
- # copy ck to build, thus hippify under bd_dir
- if multiprocessing.current_process().name == "MainProcess":
-+    shutil.copytree(CK_DIR, f'{bd_dir}/ck', dirs_exist_ok=True)
-     os.makedirs(bd_dir, exist_ok=True)
-     # if os.path.exists(f"{bd_dir}/ck/library"):
-     #     shutil.rmtree(f"{bd_dir}/ck/library")
+--- csrc/py_itfs_cu/asm_pa.cu
++++ csrc/py_itfs_cu/asm_pa.cu
+@@ -97,7 +97,7 @@ torch::Tensor pa_fwd(torch::Tensor& Q, //   [num_seqs, num_heads, head_size]
+     int num_heads       = Q.size(1);
+     int head_size       = Q.size(2);
+     int num_kv_heads    = K.size(1);
+-    int block_size      = K.size(3);
++    int block_size      = K.size(2);
+     const int gqa_ratio = num_heads / num_kv_heads;
+     TORCH_CHECK(block_size == 16, __func__, " for now only support block_size == 16");
+

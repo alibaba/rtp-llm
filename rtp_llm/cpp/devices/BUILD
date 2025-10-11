@@ -31,6 +31,7 @@ cc_library(
         "//rtp_llm/cpp/core:event",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:kv_cache_utils",
+        "//rtp_llm/cpp/utils:calc_utils",
         "//rtp_llm/cpp/config:static_config",
         "//rtp_llm/cpp/model_utils:model_utils",
         "//rtp_llm/cpp/config:gpt_init_params",

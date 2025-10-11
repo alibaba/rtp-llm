@@ -136,6 +136,7 @@ class AiterDecodeAttnOp():
         self.head_dim = config.hidden_size // config.head_num
         self.head_num_kv = config.head_num_kv
         self.kv_cache_data_type = config.kv_cache_data_type
+        self.use_asm_pa = config.hw_kernel_config.use_asm_pa
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
         return True
@@ -168,21 +169,24 @@ class AiterDecodeAttnOp():
         num_kv_heads = self.head_num_kv
         scale = 1.0 / (self.head_dim ** 0.5)
         alibi_slopes = None
-
-        k_scale = kv_cache.k_scale_base if kv_cache and kv_cache.k_scale_base is not None else 1.0
-        v_scale = kv_cache.v_scale_base if kv_cache and kv_cache.v_scale_base is not None else 1.0
+        k_scale = kv_cache.k_scale_base if kv_cache and kv_cache.k_scale_base is not None else torch.tensor(1.0, device=query.device, dtype=query.dtype)
+        v_scale = kv_cache.v_scale_base if kv_cache and kv_cache.v_scale_base is not None else torch.tensor(1.0, device=query.device, dtype=query.dtype)
         max_num_blocks = block_tables_id_device.shape[1]
 
-        if os.environ.get('USE_ASM_PA'):
-            output = torch.ops.aiter.pa_fwd_asm(
-                query,
-                key_cache,
-                value_cache,
+        # for now not support fp8 
+        if self.use_asm_pa:
+            x = 16 // value_cache.element_size()
+            num_blocks, num_kv_heads, block_size, head_size = value_cache.shape
+            value_cache = value_cache.view(num_blocks, num_kv_heads, head_size, block_size // x, x)
+            value_cache = value_cache.permute(0, 1, 3, 2, 4).contiguous()
+
+            output = aiter.pa_fwd_asm(
+                query,  # [num_seqs, num_heads, head_size]
+                key_cache,  # [num_blocks, num_kv_heads, block_size, head_size/x, x]
+                value_cache,  # [num_blocks, num_kv_heads, block_size, head_size/x, x]
                 block_tables_id_device,
                 seq_lens,
                 max_num_blocks,
-                k_scale,
-                v_scale,
             )
         else :
             num_seqs, num_heads, head_size = query.shape
@@ -213,8 +217,8 @@ class AiterDecodeAttnOp():
             max_logits = torch.ones_like(exp_sums)
             
             kv_cache_dtype ="auto"
-            key_cache_reshaped = key_cache.permute(0,1,3,2)
-            value_cache_reshaped = value_cache.permute(0,1,3,2)
+            # key_cache_reshaped = key_cache.permute(0,1,3,2)
+            # value_cache_reshaped = value_cache.permute(0,1,3,2)
 
             aiter.paged_attention_rocm(
                 output,
@@ -222,8 +226,8 @@ class AiterDecodeAttnOp():
                 max_logits,
                 tmp_output,
                 query,
-                key_cache_reshaped,
-                value_cache_reshaped,
+                key_cache,
+                value_cache,
                 num_kv_heads,
                 float(scale),
                 block_tables_id_device,

@@ -1,10 +1,10 @@
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, List, Optional, Union, Dict
 
 import torch
 from pydantic import BaseModel
-
+from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.weight_module import AtomicWeight
-from rtp_llm.utils.model_weight import CkptWeightInfo, identity
+from rtp_llm.utils.model_weight import CkptWeightInfo, identity, W
 
 
 class AttnConfig(BaseModel):

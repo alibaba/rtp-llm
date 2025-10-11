@@ -446,23 +446,6 @@ class MoeWithSharedWeight(CompositeWeight):
     ) -> bool:
         return False
 
-    def _shuff_moe_weight(
-        self,
-        name: str,
-        tensor: Union[torch.Tensor, Dict[str, torch.Tensor]],
-        load_config: LoadConfig,
-    ):
-        w = tensor.get(name)
-        if isinstance(w, torch.Tensor):
-            w = load_config.exported_device.shuffle_moe_weight(
-                w, load_config.compute_dtype, name
-            )
-            tensor[name] = w
-        elif isinstance(w, dict):
-            self._shuff_moe_weight(name, w, load_config)
-        else:
-            raise ValueError("unsupported type")
-
     def _split(
         self,
         tensor: Union[torch.Tensor, Dict[str, torch.Tensor]],

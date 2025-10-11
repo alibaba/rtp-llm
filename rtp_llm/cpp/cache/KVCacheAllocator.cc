@@ -5,9 +5,7 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/NormalCacheStore.h"
 #include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/core/Types.h"
-#ifdef ENABLE_FP8
-#include <cuda_fp8.h>
-#endif
+#include "rtp_llm/cpp/core/DeviceTypes.h"
 
 using namespace std;
 
@@ -87,7 +85,7 @@ void KVCacheAllocator::initKVCacheScale() {
             (int8_t*)cache_base_ptr_ + kv_cache_.k_blocks->sizeBytes() * 2 + kv_cache_.k_scale->sizeBytes());
     }
 
-#ifdef ENABLE_FP8
+#if defined(ENABLE_FP8) || defined(USING_ROCM)
     else if (config_.dtype == rtp_llm::DataType::TYPE_FP8_E4M3) {
         kv_cache_.k_scale =
             std::make_unique<rtp_llm::Buffer>(rtp_llm::MemoryType::MEMORY_GPU,
@@ -105,6 +103,8 @@ void KVCacheAllocator::initKVCacheScale() {
                                 (size_t)config_.local_head_num_kv,
                                 (size_t)config_.seq_size_per_block},
             (__nv_fp8_e4m3*)cache_base_ptr_ + kv_cache_.k_blocks->sizeBytes() * 2 + kv_cache_.k_scale->sizeBytes());
+        Buffer2torchTensor(kv_cache_.k_scale, false).fill_(1.0);
+        Buffer2torchTensor(kv_cache_.v_scale, false).fill_(1.0);
     }
 #endif
 }

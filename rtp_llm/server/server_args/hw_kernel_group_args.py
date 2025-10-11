@@ -94,3 +94,19 @@ def init_hw_kernel_group_args(parser):
         default=True,
         help="Rocm是否使用AITER Attention",
     )
+
+    hw_kernel_group.add_argument(
+        "--use_asm_pa",
+        env_name="USE_ASM_PA",
+        type=str2bool,
+        default=True,
+        help="Rocm是否使用AITER ASM Attention",
+    )
+
+    hw_kernel_group.add_argument(
+        "--use_swizzleA",
+        env_name="USE_SWIZZLEA",
+        type=str2bool,
+        default=False,
+        help="hipBLASLt GEMM 是否使用 swizzle",
+    )

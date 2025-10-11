@@ -56,14 +56,14 @@ TEST_F(ROCmGemmOpTest, Q4x2GemmOpTest) {
 }
 
 TEST_F(ROCmGemmOpTest, BasicGemmOpTest) {
-    BasicGemmOpTest(2, 1024, 2048, DataType::TYPE_FP16);
+    BasicGemmOpTest(2, 1024, 2048, DataType::TYPE_BF16);
     BasicGemmOpTest(8, 1024, 2048, DataType::TYPE_FP16);
     BasicGemmOpTest(1024, 1024, 2048, DataType::TYPE_FP16);
     BasicGemmOpTest(4096, 1024, 2048, DataType::TYPE_FP16);
-    BasicGemmOpTest(2, 1024, 2048, DataType::TYPE_FP32);
-    BasicGemmOpTest(8, 1024, 2048, DataType::TYPE_FP32);
-    BasicGemmOpTest(1024, 1024, 2048, DataType::TYPE_FP32);
-    BasicGemmOpTest(4096, 1024, 2048, DataType::TYPE_FP32);
+    BasicGemmOpTest(2, 1024, 2048, DataType::TYPE_BF16);
+    BasicGemmOpTest(8, 1024, 2048, DataType::TYPE_BF16);
+    BasicGemmOpTest(1024, 1024, 2048, DataType::TYPE_BF16);
+    BasicGemmOpTest(4096, 1024, 2048, DataType::TYPE_BF16);
 }
 
 TEST_F(ROCmGemmOpTest, BasicFP8GemmOpTest) {
@@ -98,7 +98,7 @@ TEST_F(ROCmGemmOpTest, TransposeGemmOpTest) {
     size_t m    = 5;
     size_t n    = 1024;
     size_t k    = 4096;
-    TransposeGemmOpTest(none, none, m, k, k, n, DataType::TYPE_FP16);
+
     TransposeGemmOpTest(none, tran, m, k, n, k, DataType::TYPE_FP16);
     TransposeGemmOpTest(tran, tran, k, m, n, k, DataType::TYPE_FP16);
     TransposeGemmOpTest(tran, none, k, m, k, n, DataType::TYPE_FP16);

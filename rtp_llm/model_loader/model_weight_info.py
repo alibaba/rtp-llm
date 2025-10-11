@@ -146,6 +146,7 @@ class ModelDeployWeightInfo:
 
     def __init__(self, config: GptInitModelParameters, tp_size: int, tp_rank: int):
         self.config = config
+        self._use_swizzleA = config.hw_kernel_config.use_swizzleA
         self._use_qk_norm = config.qk_norm
         self._hidden_size = config.hidden_size
         self._inter_size = config.inter_size
@@ -585,6 +586,7 @@ class ModelDeployWeightInfo:
             is_ft_style_weight=database.is_ft_style,
             phy2log=self.config.phy2log,  # Notice use config, because phy2log init after ModelDeployWeightInfo.__init__
             exported_device=exported_device,
+            use_swizzleA=self._use_swizzleA
         )
         return load_config
 

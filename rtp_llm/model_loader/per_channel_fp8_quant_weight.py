@@ -365,10 +365,6 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
         # need reshape for kernel weight
         processed_res = super()._postprocess(tensor, device, load_config)
         kernel_weight = processed_res[self.kernel.name]
-        if self.kernel.name not in [W.moe_w1, W.moe_w2]:
-            kernel_weight = load_config.exported_device.shuffle_gemm_weight(
-                kernel_weight
-            )
         kernel_weight = (
             kernel_weight.reshape(kernel_weight.shape[-1], -1)
             if kernel_weight.dim() == 2

@@ -379,7 +379,4 @@ protected:
     std::shared_ptr<c10::cuda::CUDAStreamGuard> guard_;
 };
 
-torch::Tensor
-getRopeCosSin(RopeStyle rope_style, int rope_dim, int rope_theta, float rope_scale, int max_position_embeddings);
-
 }  // namespace rtp_llm

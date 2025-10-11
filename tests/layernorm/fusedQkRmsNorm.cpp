@@ -1,15 +1,12 @@
-#include "rtp_llm/cpp/kernels/layernorm_kernels.h"
-#include "rtp_llm/cpp/kernels/fused_qk_rmsnorm.h"
-#include "rtp_llm/cpp/devices/DeviceBase.h"
-#include "rtp_llm/cpp/cuda/cuda_fp8_utils.h"
-#include "rtp_llm/cpp/cuda/cuda_type_utils.cuh"
-#include "torch/csrc/cuda/Stream.h"
+#ifdef USING_ROCM
+#include "rtp_llm/cpp/devices/rocm_impl/ROCmDevice.h"
+#else
+#include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
+#endif
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/devices/OpData.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/core/BufferHelper.h"
-#include <ATen/cuda/CUDAContext.h>
-#include <cuda_fp8.h>
 
 using namespace rtp_llm;
 
@@ -41,7 +38,6 @@ void FusedQkRmsNormOp::forward(torch::Tensor                  input,
                                int64_t                        q_group_num,
                                int64_t                        k_group_num,
                                int64_t                        norm_size) {
-    auto stream     = at::cuda::getCurrentCUDAStream().stream();
     auto gpt_params = GptInitParameter();
     rtp_llm::DeviceFactory::initDevices(gpt_params);
     device_ = rtp_llm::DeviceFactory::getDefaultDevice();

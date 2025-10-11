@@ -254,6 +254,33 @@ void ROCmDevice::InvokeROCmPTPCGemm(const GemmParams& params, BufferPtr output) 
     gemm_a8w8_bpreshuffle(A_quant_tensor, W_kernel_tensor, A_quant_scale_tensor, W_scale_tensor, output_tensor);
 }
 
+void ROCmDevice::HipblasltPTPCGemm(const GemmParams& params, BufferPtr output) {
+    RTP_LLM_LOG_DEBUG("use hipBLASLt ptpc gemm.");
+    ROCmGemmArguments arguments(params);
+
+    QBufferPtr q_hidden = std::dynamic_pointer_cast<QBuffer>(
+        quantize(QuantizeParams(params.A, DataType::TYPE_QFP8_E4M3, 1, QScheme::Qfp8PerToken, 0, 0)));
+    
+    BufferPtr A_quant_buffer = q_hidden->kernelPtr();
+    BufferPtr A_scales = q_hidden->scalesPtr();
+    BufferPtr W_kernel = reinterpret_cast<const QBuffer&>(params.B).kernelPtr();
+    BufferPtr W_scales = reinterpret_cast<const QBuffer&>(params.B).scalesPtr();
+
+    auto A    = A_quant_buffer->data();
+    auto B    = W_kernel->data();
+    auto D    = output->data();
+    auto a_op = opConvert(params.transA);
+    auto b_op = opConvert(params.transB);
+    
+    hipblas_mm_wrapper_->setStream(current_stream_);
+    hipblas_mm_wrapper_->setGemmConfig(dtypeConvert(A_quant_buffer->type()), dtypeConvert(W_kernel->type()), 
+                                       dtypeConvert(output->type()), dtypeConvert(arguments.compute_type));
+
+    hipblas_mm_wrapper_->FP8_Gemm(b_op, a_op, arguments.n, arguments.m, arguments.k, B, arguments.ldb, 
+                            A, arguments.lda, D, arguments.ldc, reinterpret_cast<const float*>(W_scales->data()),
+                            reinterpret_cast<const float*>(A_scales->data()), arguments.alpha, arguments.beta);
+}
+
 /// @brief   basic gemm ops
 /// @details D = alpha * op(A) * op(B) + beta * C
 ///          A [b, ..., m, k]
@@ -371,7 +398,12 @@ BufferPtr ROCmDevice::gemm(const GemmParams& params) {
             if (kernel_K == scale_K * 128) {
                 InvokeROCmDeepGemm(params, output);
             } else if (1 == scale_K && scale_N == kernel_N) {
-                InvokeROCmPTPCGemm(params, output);
+                if (hipblas_mm_wrapper_->use_swizzleA() || hipblas_mm_wrapper_->test_swizzleA()){
+                    HipblasltPTPCGemm(params, output);
+                }
+                else {
+                    InvokeROCmPTPCGemm(params, output);
+                }
             } else {
                 ROCM_FAIL(
                     "[GEMM]: Other FP8 weight quantization not implemented, with weight kernel [%d, %d], weight scales [%d, %d]",

@@ -52,6 +52,7 @@ class LoadConfig(BaseModel):
     exported_device: Optional[Any] = None
 
     phy2log: Optional[List[List[int]]] = None
+    use_swizzleA: bool = False
 
     @field_validator("database", "compute_dtype", "quant_algo", "exported_device")
     @classmethod

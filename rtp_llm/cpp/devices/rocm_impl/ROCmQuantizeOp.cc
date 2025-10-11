@@ -10,7 +10,7 @@ namespace rtp_llm {
 using namespace rocm;
 
 BufferPtr ROCmDevice::quantize(const QuantizeParams& params) {
-    ROCM_CHECK_VALUE((params.input.dim() == 2), "quantize only support 2D.");
+    ROCM_CHECK_VALUE((params.input.dim() == 2 || params.input.dim() == 3), "quantize only support 2D or 3D.");
     ROCM_CHECK_VALUE((params.input.type() == DataType::TYPE_FP16 || params.input.type() == DataType::TYPE_FP32
                       || params.input.type() == DataType::TYPE_BF16),
                      "quantize only support half or float quantize. but get %d.",
@@ -50,9 +50,10 @@ BufferPtr ROCmDevice::quantize(const QuantizeParams& params) {
                              "Qfp8PerToken only support qtype = TYPE_QFP8_E4M3");
             ROCM_CHECK_VALUE((params.axis == 1), "Qfp8PerToken only support axis = 1");
             size_t num_token = params.input.shape()[0];
-            size_t model_dim = params.input.shape()[1];
+            auto scale_shape = params.input.shape();
+            scale_shape.back() = 1;
             kernel           = allocateBuffer({DataType::TYPE_FP8_E4M3, params.input.shape()}, {"quant_kernel"});
-            scales           = allocateBuffer({DataType::TYPE_FP32, {num_token, 1}}, {"quant_scale"});
+            scales           = allocateBuffer({DataType::TYPE_FP32, scale_shape}, {"quant_scale"});
             zeros            = BufferPtr(new Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_INVALID, {0}, nullptr));
             if (num_token > 0) {
                 torch::Tensor input_tensor  = Buffer2torchTensor(params.input, false);
@@ -91,7 +92,10 @@ BufferPtr ROCmDevice::quantize(const QuantizeParams& params) {
                     /*out=*/kernel_tensor,
                     /*input=*/input_tensor,
                     /*scales=*/scales_tensor,
-                    /*scale_ub=*/std::nullopt);
+                    /*scale_ub=*/std::nullopt,
+                    /*shuffle_case=*/false,
+                    /*num_rows=*/std::nullopt,
+                    /*num_rows_factor*/1);
             }
         } else {
             ROCM_FAIL("other quantize not implemented");

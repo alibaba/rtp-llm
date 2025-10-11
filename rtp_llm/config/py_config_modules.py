@@ -754,9 +754,11 @@ class PyHwKernelConfig:
         self.enable_multi_block_mode: bool = True
         self.ft_disable_custom_ar: bool = True
         self.rocm_hipblaslt_config: str = "gemm_config.csv"
+        self.use_swizzleA = False
         self.enable_cuda_graph: bool = False
         self.enable_cuda_graph_debug_mode: bool = False
         self.use_aiter_pa: bool = True
+        self.use_asm_pa: bool = True
         self.enable_native_cuda_graph: bool = False
         self.num_native_cuda_graph: int = 200
 
@@ -775,6 +777,9 @@ class PyHwKernelConfig:
         self.rocm_hipblaslt_config = get_env_str(
             "ROCM_HIPBLASLT_CONFIG", self.rocm_hipblaslt_config
         )
+        self.use_swizzleA = get_env_bool(
+            "USE_SWIZZLEA", self.use_swizzleA
+        )
         self.enable_cuda_graph = get_env_bool(
             "ENABLE_CUDA_GRAPH", self.enable_cuda_graph
         )
@@ -782,6 +787,7 @@ class PyHwKernelConfig:
             "ENABLE_CUDA_GRAPH_DEBUG_MODE", self.enable_cuda_graph_debug_mode
         )
         self.use_aiter_pa = get_env_bool("USE_AITER_PA", self.use_aiter_pa)
+        self.use_asm_pa = get_env_bool("USE_ASM_PA", self.use_asm_pa)
         self.enable_native_cuda_graph = get_env_bool(
             "ENABLE_NATIVE_CUDA_GRAPH", self.enable_native_cuda_graph
         )
@@ -797,9 +803,11 @@ class PyHwKernelConfig:
             f"enable_multi_block_mode: {self.enable_multi_block_mode}\n"
             f"ft_disable_custom_ar: {self.ft_disable_custom_ar}\n"
             f"rocm_hipblaslt_config: {self.rocm_hipblaslt_config}\n"
+            f"use_swizzleA: {self.use_swizzleA}\n"
             f"enable_cuda_graph: {self.enable_cuda_graph}\n"
             f"enable_cuda_graph_debug_mode: {self.enable_cuda_graph_debug_mode}\n"
             f"use_aiter_pa: {self.use_aiter_pa}\n"
+            f"use_asm_pa: {self.use_asm_pa}\n"
             f"enable_native_cuda_graph: {self.enable_native_cuda_graph}\n"
             f"num_native_cuda_graph: {self.num_native_cuda_graph}"
         )
