@@ -791,6 +791,7 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env["ENABLE_STABLE_SCATTER_ADD"], "1")
         self.assertEqual(env["ENABLE_MULTI_BLOCK_MODE"], "0")
         self.assertEqual(env["ROCM_HIPBLASLT_CONFIG"], "another_gemm_config.csv")
+        self.assertEqual(env["USE_SWIZZLEA"], "0")
         self.assertEqual(env["FT_DISABLE_CUSTOM_AR"], "0")
         self.assertEqual(env.get("ENABLE_CUDA_GRAPH"), "1")
         self.assertEqual(env.get("ENABLE_CUDA_GRAPH_DEBUG_MODE"), "1")
