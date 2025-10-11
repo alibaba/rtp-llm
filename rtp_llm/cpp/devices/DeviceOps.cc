@@ -327,4 +327,8 @@ void DeviceOps::prepareCommBuffer(const PrepareCommBufferParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
+bool DeviceOps::checkNAN(const Buffer& input) {
+    return false;
+}
+
 }  // namespace rtp_llm

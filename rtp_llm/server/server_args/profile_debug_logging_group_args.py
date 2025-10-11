@@ -132,3 +132,10 @@ def init_profile_debug_logging_group_args(parser):
         default=None,
         help="控制是否打印细节日志，为了排查使用",
     )
+    profile_debug_logging_group.add_argument(
+        "--check_nan",
+        env_name="CHECK_NAN",
+        type=str2bool,
+        default=False,
+        help="控制是否check nan, 为了排查。可选值: True (启用), False (禁用)。默认为 False",
+    )

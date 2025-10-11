@@ -636,6 +636,7 @@ class GptInitModelParameters:
                 qwen_agent_debug=get_env_bool("QWEN_AGENT_DEBUG", False),
                 disable_dpc_random=get_env_bool("DISABLE_DPC_RANDOM", False),
                 enable_detail_log=get_env_bool("ENABLE_DETAIL_LOG", False),
+                check_nan=get_env_bool("CHECK_NAN", False),
             )
         )
         # HWKernelConfig
