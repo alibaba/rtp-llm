@@ -1,86 +1,26 @@
 #!/bin/sh
 mkdir -p rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/kimi_k2/tokenizer/;
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/kimi_k2/tokenizer/chat_template.jinja" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/kimi_k2/tokenizer/chat_template.jinja
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/kimi_k2/tokenizer/tiktoken.model" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/kimi_k2/tokenizer/tiktoken.model
-mkdir -p rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/llama/fake/
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/llama/fake/expect.pt" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/llama/fake/expect.pt
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/llama/fake/hf_out.pt" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/llama/fake/hf_out.pt
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/llama/fake/int8_ft_out.pt" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/llama/fake/int8_ft_out.pt
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/llama/fake/int8_hf_out.pt" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/llama/fake/int8_hf_out.pt
+curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/kimi_k2/tokenizer/chat_template.jinja" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/kimi_k2/tokenizer/chat_template.jinja &
+curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/kimi_k2/tokenizer/tiktoken.model" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/kimi_k2/tokenizer/tiktoken.model &
 mkdir -p rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/llama/fake/hf_source/
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/llama/fake/hf_source/pytorch_model.bin" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/llama/fake/hf_source/pytorch_model.bin
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/llama/fake/hf_source/tokenizer.model" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/llama/fake/hf_source/tokenizer.model
+curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/llama/fake/hf_source/pytorch_model.bin" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/llama/fake/hf_source/pytorch_model.bin &
+curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/llama/fake/hf_source/tokenizer.model" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/llama/fake/hf_source/tokenizer.model &
 mkdir -p rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_0.pt" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_0.pt
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_1.pt" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_1.pt
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_10.pt" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_10.pt
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_11.pt" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_11.pt
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_12.pt" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_12.pt
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_13.pt" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_13.pt
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_14.pt" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_14.pt
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_15.pt" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_15.pt
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_16.pt" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_16.pt
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_17.pt" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_17.pt
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_18.pt" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_18.pt
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_19.pt" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_19.pt
+curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_0.pt" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_0.pt &
+curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_1.pt" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_1.pt &
 curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_2.pt" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_2.pt
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_20.pt" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_20.pt
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_21.pt" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_21.pt
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_22.pt" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_22.pt
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_23.pt" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_23.pt
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_3.pt" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_3.pt
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_4.pt" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_4.pt
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_5.pt" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_5.pt
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_6.pt" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_6.pt
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_7.pt" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_7.pt
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_8.pt" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_8.pt
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_9.pt" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_9.pt
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/pytorch_tensors.pt" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/pytorch_tensors.pt
-mkdir -p rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/qwen_7b/fake
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/qwen_7b/fake/expect.pt" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/qwen_7b/fake/expect.pt
+curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_3.pt" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_3.pt &
+curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_4.pt" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_4.pt &
 mkdir -p rtp_llm/test-data/rtp_llm/test/tokenizer_test/testdata/chatglm3_tokenizer
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/tokenizer_test/testdata/chatglm3_tokenizer/tokenizer.model" -o rtp_llm/test-data/rtp_llm/test/tokenizer_test/testdata/chatglm3_tokenizer/tokenizer.model
+curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/tokenizer_test/testdata/chatglm3_tokenizer/tokenizer.model" -o rtp_llm/test-data/rtp_llm/test/tokenizer_test/testdata/chatglm3_tokenizer/tokenizer.model &
 mkdir -p rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/bin_testdata
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/ckpt_database_testdata/bin_testdata/pytorch_model.bin" -o rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/bin_testdata/pytorch_model.bin
+curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/ckpt_database_testdata/bin_testdata/pytorch_model.bin" -o rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/bin_testdata/pytorch_model.bin &
 mkdir -p rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/lora_testdata
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/ckpt_database_testdata/lora_testdata/adapter_model.bin" -o rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/lora_testdata/adapter_model.bin
+curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/ckpt_database_testdata/lora_testdata/adapter_model.bin" -o rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/lora_testdata/adapter_model.bin &
 mkdir -p rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/lora_testdata_safetensor
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/ckpt_database_testdata/lora_testdata_safetensor/adapter_model.safetensors" -o rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/lora_testdata_safetensor/adapter_model.safetensors
-mkdir -p rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/mixture_testdata
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/ckpt_database_testdata/mixture_testdata/pytorch_model.bin" -o rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/mixture_testdata/pytorch_model.bin
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/ckpt_database_testdata/mixture_testdata/test.pt" -o rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/mixture_testdata/test.pt
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/ckpt_database_testdata/mixture_testdata/test.safetensors" -o rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/mixture_testdata/test.safetensors
+curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/ckpt_database_testdata/lora_testdata_safetensor/adapter_model.safetensors" -o rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/lora_testdata_safetensor/adapter_model.safetensors &
 mkdir -p rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/pt_testdata
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/ckpt_database_testdata/pt_testdata/test.pt" -o rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/pt_testdata/test.pt
+curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/ckpt_database_testdata/pt_testdata/test.pt" -o rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/pt_testdata/test.pt &
 mkdir -p rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/safetensor_testdata
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/ckpt_database_testdata/safetensor_testdata/test.safetensors" -o rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/safetensor_testdata/test.safetensors
-mkdir -p rtp_llm/test-data/rtp_llm/utils/test/testdata/megatron_checkpointing_test/dm_rank_xx/iter_0008000/mp_rank_00
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/megatron_checkpointing_test/dm_rank_xx/iter_0008000/mp_rank_00/model_rng.pt" -o rtp_llm/test-data/rtp_llm/utils/test/testdata/megatron_checkpointing_test/dm_rank_xx/iter_0008000/mp_rank_00/model_rng.pt
-mkdir -p rtp_llm/test-data/rtp_llm/utils/test/testdata/megatron_checkpointing_test/dm_rank_xx/iter_0008000/mp_rank_01
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/megatron_checkpointing_test/dm_rank_xx/iter_0008000/mp_rank_01/model_rng.pt" -o rtp_llm/test-data/rtp_llm/utils/test/testdata/megatron_checkpointing_test/dm_rank_xx/iter_0008000/mp_rank_01/model_rng.pt
-mkdir -p rtp_llm/test-data/rtp_llm/utils/test/testdata/megatron_checkpointing_test/dm_rank_xx_xx/iter_0008000/mp_rank_00_000
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/megatron_checkpointing_test/dm_rank_xx_xx/iter_0008000/mp_rank_00_000/model_rng.pt" -o rtp_llm/test-data/rtp_llm/utils/test/testdata/megatron_checkpointing_test/dm_rank_xx_xx/iter_0008000/mp_rank_00_000/model_rng.pt
-mkdir -p rtp_llm/test-data/rtp_llm/utils/test/testdata/megatron_checkpointing_test/dm_rank_xx_xx/iter_0008000/mp_rank_00_001
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/megatron_checkpointing_test/dm_rank_xx_xx/iter_0008000/mp_rank_00_001/model_rng.pt" -o rtp_llm/test-data/rtp_llm/utils/test/testdata/megatron_checkpointing_test/dm_rank_xx_xx/iter_0008000/mp_rank_00_001/model_rng.pt
-mkdir -p rtp_llm/test-data/rtp_llm/utils/test/testdata/megatron_checkpointing_test/dm_rank_xx_xx/iter_0008000/mp_rank_01_000
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/megatron_checkpointing_test/dm_rank_xx_xx/iter_0008000/mp_rank_01_000/model_rng.pt" -o rtp_llm/test-data/rtp_llm/utils/test/testdata/megatron_checkpointing_test/dm_rank_xx_xx/iter_0008000/mp_rank_01_000/model_rng.pt
-mkdir -p rtp_llm/test-data/rtp_llm/utils/test/testdata/megatron_checkpointing_test/dm_rank_xx_xx/iter_0008000/mp_rank_01_001
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/megatron_checkpointing_test/dm_rank_xx_xx/iter_0008000/mp_rank_01_001/model_rng.pt" -o rtp_llm/test-data/rtp_llm/utils/test/testdata/megatron_checkpointing_test/dm_rank_xx_xx/iter_0008000/mp_rank_01_001/model_rng.pt
-mkdir -p rtp_llm/test-data/rtp_llm/utils/test/testdata/megatron_checkpointing_test/m6/global_step200/global_step200/
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/megatron_checkpointing_test/m6/global_step200/global_step200/mp_rank_00_model_states.pt" -o rtp_llm/test-data/rtp_llm/utils/test/testdata/megatron_checkpointing_test/m6/global_step200/global_step200/mp_rank_00_model_states.pt
-mkdir -p rtp_llm/test-data/rtp_llm/utils/test/testdata/model_weights_loader_testdata/qwen_14b_megatron_model/iter_0002000/mp_rank_00
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/model_weights_loader_testdata/qwen_14b_megatron_model/iter_0002000/mp_rank_00/model_rng.pt" -o rtp_llm/test-data/rtp_llm/utils/test/testdata/model_weights_loader_testdata/qwen_14b_megatron_model/iter_0002000/mp_rank_00/model_rng.pt
-mkdir -p rtp_llm/test-data/rtp_llm/utils/test/testdata/model_weights_loader_testdata/qwen_14b_megatron_model/iter_0002000/mp_rank_01
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/model_weights_loader_testdata/qwen_14b_megatron_model/iter_0002000/mp_rank_01/model_rng.pt" -o rtp_llm/test-data/rtp_llm/utils/test/testdata/model_weights_loader_testdata/qwen_14b_megatron_model/iter_0002000/mp_rank_01/model_rng.pt
-mkdir -p rtp_llm/test-data/rtp_llm/utils/test/testdata/model_weights_loader_testdata/qwen_14b_megatron_model/iter_0002000/mp_rank_02
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/model_weights_loader_testdata/qwen_14b_megatron_model/iter_0002000/mp_rank_02/model_rng.pt" -o rtp_llm/test-data/rtp_llm/utils/test/testdata/model_weights_loader_testdata/qwen_14b_megatron_model/iter_0002000/mp_rank_02/model_rng.pt
-mkdir -p rtp_llm/test-data/rtp_llm/utils/test/testdata/model_weights_loader_testdata/qwen_14b_megatron_model/iter_0002000/mp_rank_03
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/model_weights_loader_testdata/qwen_14b_megatron_model/iter_0002000/mp_rank_03/model_rng.pt" -o rtp_llm/test-data/rtp_llm/utils/test/testdata/model_weights_loader_testdata/qwen_14b_megatron_model/iter_0002000/mp_rank_03/model_rng.pt
-mkdir -p rtp_llm/test-data/rtp_llm/utils/test/testdata/model_weights_loader_testdata/yanghao-qwen-13b-sft/mp_rank_00_000
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/model_weights_loader_testdata/yanghao-qwen-13b-sft/mp_rank_00_000/model_rng.pt" -o rtp_llm/test-data/rtp_llm/utils/test/testdata/model_weights_loader_testdata/yanghao-qwen-13b-sft/mp_rank_00_000/model_rng.pt
-mkdir -p rtp_llm/test-data/rtp_llm/utils/test/testdata/model_weights_loader_testdata/yanghao-qwen-13b-sft/mp_rank_00_001
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/model_weights_loader_testdata/yanghao-qwen-13b-sft/mp_rank_00_001/model_rng.pt" -o rtp_llm/test-data/rtp_llm/utils/test/testdata/model_weights_loader_testdata/yanghao-qwen-13b-sft/mp_rank_00_001/model_rng.pt
-mkdir -p rtp_llm/test-data/rtp_llm/utils/test/testdata/model_weights_loader_testdata/yanghao-qwen-13b-sft/mp_rank_00_002
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/model_weights_loader_testdata/yanghao-qwen-13b-sft/mp_rank_00_002/model_rng.pt" -o rtp_llm/test-data/rtp_llm/utils/test/testdata/model_weights_loader_testdata/yanghao-qwen-13b-sft/mp_rank_00_002/model_rng.pt
-mkdir -p rtp_llm/test-data/rtp_llm/utils/test/testdata/model_weights_loader_testdata/yanghao-qwen-13b-sft/mp_rank_00_003
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/model_weights_loader_testdata/yanghao-qwen-13b-sft/mp_rank_00_003/model_rng.pt" -o rtp_llm/test-data/rtp_llm/utils/test/testdata/model_weights_loader_testdata/yanghao-qwen-13b-sft/mp_rank_00_003/model_rng.pt
+curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/ckpt_database_testdata/safetensor_testdata/test.safetensors" -o rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/safetensor_testdata/test.safetensors &
+wait

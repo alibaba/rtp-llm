@@ -15,7 +15,7 @@ TEST_F(GptModelTest, testSimple) {
     auto       weights = loadWeightsFromDir(path);
     RTP_LLM_CHECK(weights->lm_head->kernel != nullptr);
     RTP_LLM_CHECK(weights->embedding != nullptr);
-    RTP_LLM_CHECK(weights->layers.size() == 24);
+    RTP_LLM_CHECK(weights->layers.size() == 4);
 
     GptModelDescription description;
     description.ffn_conf.activation_type = ActivationType::Swiglu;
