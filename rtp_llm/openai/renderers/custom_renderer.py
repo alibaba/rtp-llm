@@ -76,14 +76,13 @@ class StreamStatus:
     def update_output(
         self,
         output: GenerateOutput,
-        clean_output_func,
         check_finish_func,
         remove_stop_word_ids_func,
     ):
         self.index += 1
         self.output = output
-        self.output_ids_list = copy.deepcopy(self.output_ids_list) + copy.deepcopy(
-            clean_output_func(output.output_ids)
+        self.output_ids_list = copy.deepcopy(
+            self.output_ids_list + output.output_ids.cpu().flatten().tolist()
         )
         self.finish_reason = check_finish_func(
             self.output_ids_list, self.input_token_length
@@ -151,13 +150,12 @@ class StreamStatusSync:
         self,
         output_ids,
         input_len,
-        clean_output_func,
         check_finish_func,
         remove_stop_word_ids_func,
     ):
         self.index += 1
         self.origin_output_ids = torch.cat((self.origin_output_ids, output_ids), dim=1)
-        self.output_ids = clean_output_func(self.origin_output_ids)
+        self.output_ids = self.origin_output_ids.cpu().reshape([-1]).tolist()
         self.finish_reason = check_finish_func(self.output_ids, input_len)
         self.output_ids = remove_stop_word_ids_func(self.output_ids)
 
@@ -548,7 +546,6 @@ class CustomChatRenderer:
             return await self._create_empty_delta(status.output.aux_info)
         status.update_output(
             output,
-            self._clean_output_ids,
             functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens),
             self._remove_stop_word_ids,
         )
@@ -960,7 +957,6 @@ class CustomChatRenderer:
         status.update_output_sync(
             output_ids,
             input_len,
-            self._clean_output_ids,
             functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens),
             self._remove_stop_word_ids,
         )
@@ -1422,11 +1418,4 @@ class CustomChatRenderer:
                 if output_ids[-i:] == stop_word_ids[:i]:
                     output_ids = output_ids[:-i]
                     break
-        return output_ids
-
-    def _clean_output_ids(self, output_ids_tensor: torch.Tensor) -> list[int]:
-        output_ids_tensor = output_ids_tensor.cpu().reshape([-1])
-        # TODO(wangyin): This slicing shouldn't be done here.
-        # model should return output length, ids should be sliced with output length.
-        output_ids = output_ids_tensor[output_ids_tensor != self.eos_token_id].tolist()
         return output_ids
