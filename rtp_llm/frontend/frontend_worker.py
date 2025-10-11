@@ -122,25 +122,11 @@ class FrontendWorker:
                         **kwargs,
                     )
                 )
-            has_num_beams = any(
-                config.has_num_beams() for config in request.generate_configs
+            return self._parallel_batch_async_generators(
+                request.incremental,
+                generators,
+                request.batch_infer,
             )
-            in_test = bool(int(os.environ.get("FT_SERVER_TEST", 0)))
-            parallel_batch = StaticConfig.model_config.parallel_batch
-            if has_num_beams or (in_test and not parallel_batch):
-                return self._batch_async_generators(
-                    request.incremental,
-                    num_return_sequences,
-                    generators,
-                    request.batch_infer,
-                )
-            else:
-                return self._parallel_batch_async_generators(
-                    request.incremental,
-                    num_return_sequences,
-                    generators,
-                    request.batch_infer,
-                )
         else:
             return self._yield_generate(
                 request.request_id,
@@ -272,7 +258,6 @@ class FrontendWorker:
     async def _parallel_batch_async_generators(
         self,
         incremental: bool,
-        num_return_sequences: int,
         generators: List[AsyncGenerator[Dict[str, Any], None]],
         batch_infer: bool,
     ) -> AsyncGenerator[Dict[str, Any], None]:
