@@ -131,7 +131,7 @@ class TestGemmOp(unittest.TestCase):
                     custom_output = torch.zeros((m, n), device="cuda", dtype=torch.bfloat16)
 
                     self.gemm_op.forward_with_input_scale(
-                        input_quant, input_scale, weight_quant_swizzle, weight_scale, custom_output
+                        input_quant, input_scale, weight_quant_swizzle, weight_scale, custom_output, None
                     )
                 else:
                     weight_quant_shuffle = shuffle_weight(weight_quant)
@@ -141,7 +141,7 @@ class TestGemmOp(unittest.TestCase):
                     custom_output = torch.zeros((m, n), device="cuda", dtype=torch.bfloat16)
 
                     self.gemm_op.forward_with_input_scale(
-                        input_quant, input_scale, weight_quant_shuffle, weight_scale, custom_output
+                        input_quant, input_scale, weight_quant_shuffle, weight_scale, custom_output, None
                     )
                 custom_output = custom_output.to(torch.float32).to("cpu")
 
