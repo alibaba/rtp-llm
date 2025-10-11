@@ -423,7 +423,6 @@ class QwenRenderer(CustomChatRenderer):
             return await self._create_empty_delta(status.output.aux_info)
         status.update_output(
             output,
-            self._clean_output_ids,
             functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens),
             self._remove_stop_word_ids,
         )
@@ -563,7 +562,6 @@ class QwenRenderer(CustomChatRenderer):
         status.update_output_sync(
             output_ids,
             input_len,
-            self._clean_output_ids,
             functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens),
             self._remove_stop_word_ids,
         )
