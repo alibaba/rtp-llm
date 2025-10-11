@@ -40,14 +40,3 @@ def swizzle_tensor(
 
     dst = tmp.clone()
     return dst.view(src.shape)
-
-def do_swizzle(weights: List[Dict[str, torch.Tensor]]):
-    target_layer_weight_names = [
-        "self_attention_weights.query_weight.kernel",
-        "self_attention_weights.attention_output_weight.kernel",
-        "ffn_weights.intermediate_weight2.kernel",
-        "ffn_weights.intermediate_weight13.kernel"
-    ]
-    for layer_weights in weights:
-        for k in target_layer_weight_names:
-            layer_weights[k] = swizzle_tensor(layer_weights[k], True)
