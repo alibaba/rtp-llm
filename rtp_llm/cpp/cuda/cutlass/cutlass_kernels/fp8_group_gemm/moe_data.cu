@@ -174,76 +174,79 @@ void get_cutlass_moe_mm_data_caller(const torch::Tensor&                topk_ids
                                                                topk_ids.size(1));
 }
 
-template <bool SWAP_AB>
+template<bool SWAP_AB>
 __global__ void compute_pplx_data(int32_t* expert_offsets,
                                   int32_t* problem_sizes1,
                                   int32_t* problem_sizes2,
                                   const int32_t* __restrict__ expert_num_tokens,
-                                  const int padded_m, const int n,
+                                  const int padded_m,
+                                  const int n,
                                   const int k) {
-  int expert_idx = threadIdx.x;
-  expert_offsets[expert_idx] = expert_idx * padded_m;
+    int expert_idx             = threadIdx.x;
+    expert_offsets[expert_idx] = expert_idx * padded_m;
 
-  if constexpr (!SWAP_AB) {
-    problem_sizes1[expert_idx * 3] = expert_num_tokens[expert_idx];
-    problem_sizes1[expert_idx * 3 + 1] = 2 * n;
-    problem_sizes1[expert_idx * 3 + 2] = k;
-    problem_sizes2[expert_idx * 3] = expert_num_tokens[expert_idx];
-    problem_sizes2[expert_idx * 3 + 1] = k;
-    problem_sizes2[expert_idx * 3 + 2] = n;
-  } else {
-    problem_sizes1[expert_idx * 3] = 2 * n;
-    problem_sizes1[expert_idx * 3 + 1] = expert_num_tokens[expert_idx];
-    problem_sizes1[expert_idx * 3 + 2] = k;
-    problem_sizes2[expert_idx * 3] = k;
-    problem_sizes2[expert_idx * 3 + 1] = expert_num_tokens[expert_idx];
-    problem_sizes2[expert_idx * 3 + 2] = n;
-  }
+    if constexpr (!SWAP_AB) {
+        problem_sizes1[expert_idx * 3]     = expert_num_tokens[expert_idx];
+        problem_sizes1[expert_idx * 3 + 1] = 2 * n;
+        problem_sizes1[expert_idx * 3 + 2] = k;
+        problem_sizes2[expert_idx * 3]     = expert_num_tokens[expert_idx];
+        problem_sizes2[expert_idx * 3 + 1] = k;
+        problem_sizes2[expert_idx * 3 + 2] = n;
+    } else {
+        problem_sizes1[expert_idx * 3]     = 2 * n;
+        problem_sizes1[expert_idx * 3 + 1] = expert_num_tokens[expert_idx];
+        problem_sizes1[expert_idx * 3 + 2] = k;
+        problem_sizes2[expert_idx * 3]     = k;
+        problem_sizes2[expert_idx * 3 + 1] = expert_num_tokens[expert_idx];
+        problem_sizes2[expert_idx * 3 + 2] = n;
+    }
 }
 
-
-void get_cutlass_pplx_moe_mm_data_caller(torch::Tensor& expert_offsets,
-                                         torch::Tensor& problem_sizes1,
-                                         torch::Tensor& problem_sizes2,
+void get_cutlass_pplx_moe_mm_data_caller(torch::Tensor&       expert_offsets,
+                                         torch::Tensor&       problem_sizes1,
+                                         torch::Tensor&       problem_sizes2,
                                          const torch::Tensor& expert_num_tokens,
-                                         const int64_t num_local_experts,
-                                         const int64_t padded_m,
-                                         const int64_t n, const int64_t k) {
-  auto stream = at::cuda::getCurrentCUDAStream(expert_offsets.device().index());
+                                         const int64_t        num_local_experts,
+                                         const int64_t        padded_m,
+                                         const int64_t        n,
+                                         const int64_t        k) {
+    auto stream = at::cuda::getCurrentCUDAStream(expert_offsets.device().index());
 
-  if (num_local_experts * padded_m > SWAP_AB_THRESHOLD) {
-    compute_pplx_data<false><<<1, num_local_experts, 0, stream>>>(
-        static_cast<int32_t*>(expert_offsets.data_ptr()),
-        static_cast<int32_t*>(problem_sizes1.data_ptr()),
-        static_cast<int32_t*>(problem_sizes2.data_ptr()),
-        static_cast<const int32_t*>(expert_num_tokens.data_ptr()), padded_m, n,
-        k);
-  } else {
-    compute_pplx_data<true><<<1, num_local_experts, 0, stream>>>(
-        static_cast<int32_t*>(expert_offsets.data_ptr()),
-        static_cast<int32_t*>(problem_sizes1.data_ptr()),
-        static_cast<int32_t*>(problem_sizes2.data_ptr()),
-        static_cast<const int32_t*>(expert_num_tokens.data_ptr()), padded_m, n,
-        k);
-  }
+    if (num_local_experts * padded_m > SWAP_AB_THRESHOLD) {
+        compute_pplx_data<false>
+            <<<1, num_local_experts, 0, stream>>>(static_cast<int32_t*>(expert_offsets.data_ptr()),
+                                                  static_cast<int32_t*>(problem_sizes1.data_ptr()),
+                                                  static_cast<int32_t*>(problem_sizes2.data_ptr()),
+                                                  static_cast<const int32_t*>(expert_num_tokens.data_ptr()),
+                                                  padded_m,
+                                                  n,
+                                                  k);
+    } else {
+        compute_pplx_data<true>
+            <<<1, num_local_experts, 0, stream>>>(static_cast<int32_t*>(expert_offsets.data_ptr()),
+                                                  static_cast<int32_t*>(problem_sizes1.data_ptr()),
+                                                  static_cast<int32_t*>(problem_sizes2.data_ptr()),
+                                                  static_cast<const int32_t*>(expert_num_tokens.data_ptr()),
+                                                  padded_m,
+                                                  n,
+                                                  k);
+    }
 }
-
-
 
 void rtp_llm::get_cutlass_moe_mm_data(const torch::Tensor&                topk_ids,
-                             torch::Tensor&                      expert_offsets,
-                             torch::Tensor&                      problem_sizes1,
-                             torch::Tensor&                      problem_sizes2,
-                             torch::Tensor&                      input_permutation,
-                             torch::Tensor&                      output_permutation,
-                             const int64_t                       num_experts,
-                             const int64_t                       n,
-                             const int64_t                       k,
-                             const std::optional<torch::Tensor>& blockscale_offsets) {
+                                      torch::Tensor&                      expert_offsets,
+                                      torch::Tensor&                      problem_sizes1,
+                                      torch::Tensor&                      problem_sizes2,
+                                      torch::Tensor&                      input_permutation,
+                                      torch::Tensor&                      output_permutation,
+                                      const int64_t                       num_experts,
+                                      const int64_t                       n,
+                                      const int64_t                       k,
+                                      const std::optional<torch::Tensor>& blockscale_offsets) {
     // This function currently gets compiled only if we have a valid cutlass moe
     // mm to run it for.
     int32_t version_num = rtp_llm::get_sm_version_num();
-// #if (defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90)
+    // #if (defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90)
     get_cutlass_moe_mm_data_caller(topk_ids,
                                    expert_offsets,
                                    problem_sizes1,
@@ -255,35 +258,72 @@ void rtp_llm::get_cutlass_moe_mm_data(const torch::Tensor&                topk_i
                                    k,
                                    blockscale_offsets);
     return;
-// #endif
-//     TORCH_CHECK_NOT_IMPLEMENTED(false,
-//                                 "No compiled get_cutlass_moe_mm_data: no cutlass_scaled_mm kernel for "
-//                                 "CUDA device capability: ",
-//                                 version_num,
-//                                 ". Required capability: 90");
+    // #endif
+    //     TORCH_CHECK_NOT_IMPLEMENTED(false,
+    //                                 "No compiled get_cutlass_moe_mm_data: no cutlass_scaled_mm kernel for "
+    //                                 "CUDA device capability: ",
+    //                                 version_num,
+    //                                 ". Required capability: 90");
 }
 
-
-void rtp_llm::get_cutlass_batched_moe_mm_data(torch::Tensor& expert_offsets,
-                                  torch::Tensor& problem_sizes1,
-                                  torch::Tensor& problem_sizes2,
-                                  const torch::Tensor& expert_num_tokens,
-                                  const int64_t num_local_experts,
-                                  const int64_t padded_m, const int64_t n,
-                                  const int64_t k) {
-  // This function currently gets compiled only if we have a valid cutlass moe
-  // mm to run it for.
-  int32_t version_num = get_sm_version_num();
-// #if (defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90) || \
+void rtp_llm::get_cutlass_batched_moe_mm_data(torch::Tensor&       expert_offsets,
+                                              torch::Tensor&       problem_sizes1,
+                                              torch::Tensor&       problem_sizes2,
+                                              const torch::Tensor& expert_num_tokens,
+                                              const int64_t        num_local_experts,
+                                              const int64_t        padded_m,
+                                              const int64_t        n,
+                                              const int64_t        k) {
+    // This function currently gets compiled only if we have a valid cutlass moe
+    // mm to run it for.
+    int32_t version_num = get_sm_version_num();
+    // #if (defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90) || \
 //     (defined ENABLE_CUTLASS_MOE_SM100 && ENABLE_CUTLASS_MOE_SM100)
-  get_cutlass_pplx_moe_mm_data_caller(expert_offsets, problem_sizes1,
-                                      problem_sizes2, expert_num_tokens,
-                                      num_local_experts, padded_m, n, k);
-  return;
-// #endif
-//   TORCH_CHECK_NOT_IMPLEMENTED(
-//       false,
-//       "No compiled get_cutlass_pplx_moe_mm_data: no cutlass_scaled_mm kernel "
-//       "for CUDA device capability: ",
-//       version_num, ". Required capability: 90 or 100");
+    get_cutlass_pplx_moe_mm_data_caller(
+        expert_offsets, problem_sizes1, problem_sizes2, expert_num_tokens, num_local_experts, padded_m, n, k);
+    return;
+    // #endif
+    //   TORCH_CHECK_NOT_IMPLEMENTED(
+    //       false,
+    //       "No compiled get_cutlass_pplx_moe_mm_data: no cutlass_scaled_mm kernel "
+    //       "for CUDA device capability: ",
+    //       version_num, ". Required capability: 90 or 100");
+}
+
+void rtp_llm::get_cutlass_moe_mm_without_permute_info(const torch::Tensor&                topk_ids,
+                                                      torch::Tensor&                      problem_sizes1,
+                                                      torch::Tensor&                      problem_sizes2,
+                                                      const int64_t                       num_experts,
+                                                      const int64_t                       n,
+                                                      const int64_t                       k,
+                                                      const std::optional<torch::Tensor>& blockscale_offsets) {
+    auto          stream        = at::cuda::getCurrentCUDAStream(topk_ids.device().index());
+    auto          options_int32 = torch::TensorOptions().dtype(torch::kInt32).device(topk_ids.device());
+    torch::Tensor atomic_buffer = torch::zeros(num_experts, options_int32);
+    bool          may_swap_ab   = (!blockscale_offsets.has_value()) && (topk_ids.numel() <= SWAP_AB_THRESHOLD);
+
+    int num_threads = min(THREADS_PER_EXPERT, topk_ids.numel());
+
+    const int32_t* topk_ptr   = static_cast<const int32_t*>(topk_ids.data_ptr());
+    int32_t*       ps1_ptr    = static_cast<int32_t*>(problem_sizes1.data_ptr());
+    int32_t*       ps2_ptr    = static_cast<int32_t*>(problem_sizes2.data_ptr());
+    int32_t*       atomic_ptr = static_cast<int32_t*>(atomic_buffer.data_ptr());
+
+    if (may_swap_ab) {
+        compute_problem_sizes<true><<<num_experts, num_threads, 0, stream>>>(topk_ptr,
+                                                                             ps1_ptr,
+                                                                             ps2_ptr,
+                                                                             atomic_ptr,
+                                                                             static_cast<int>(topk_ids.numel()),
+                                                                             static_cast<int>(n),
+                                                                             static_cast<int>(k));
+    } else {
+        compute_problem_sizes<false><<<num_experts, num_threads, 0, stream>>>(topk_ptr,
+                                                                              ps1_ptr,
+                                                                              ps2_ptr,
+                                                                              atomic_ptr,
+                                                                              static_cast<int>(topk_ids.numel()),
+                                                                              static_cast<int>(n),
+                                                                              static_cast<int>(k));
+    }
 }

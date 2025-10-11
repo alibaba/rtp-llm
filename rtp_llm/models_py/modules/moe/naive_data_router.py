@@ -169,11 +169,12 @@ class DataRouterNoEPStandard(mm.FusedMoeDataRouter):
     ) -> torch.Tensor:
         if isinstance(weight_and_reduce_impl, TopKWeightAndReduceDelegate):
             weight_and_reduce_impl = TopKWeightAndReduceContiguous()
-
-        output = weight_and_reduce_impl.apply(
-            fused_expert_output=fused_expert_output,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            apply_router_weight_on_input=apply_router_weight_on_input,
-        )
-        return output
+        if weight_and_reduce_impl is not None:
+            return weight_and_reduce_impl.apply(
+                fused_expert_output=fused_expert_output,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+            )
+        else:
+            return fused_expert_output

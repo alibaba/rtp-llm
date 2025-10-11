@@ -95,7 +95,7 @@ class FusedMoeFactory(object):
         config: GptInitModelParameters, weights: Dict[str, torch.Tensor]
     ):
         assert utils.is_cuda(), "FP8_PER_TENSOR only supports cuda"
-        from rtp_llm.models_py.modules.moe.cutlass_moe import (
+        from rtp_llm.models_py.modules.moe.executors.cutlass_moe import (
             CutlassBatchedExpertsFp8,
             CutlassExpertsFp8,
         )
