@@ -4,7 +4,7 @@
 
 namespace rtp_llm {
 
-class SpeculativeScheduler: public FIFOScheduler {
+class SpeculativeScheduler: virtual public FIFOScheduler {
 public:
     explicit SpeculativeScheduler(const rtp_llm::GptInitParameter&     params,
                                   const std::shared_ptr<CacheManager>& cache_manager,

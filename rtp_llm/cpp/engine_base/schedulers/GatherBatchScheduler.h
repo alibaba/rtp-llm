@@ -12,7 +12,7 @@ struct GatherBatchSchedulerConfigLocal: public autil::legacy::Jsonizable {
 
 // GatherBatchScheduler is used to gather batch of streams, and sort streams by streamId.
 // Currently it is only used in CI with prompt_batch input, which may occur unstable result
-class GatherBatchScheduler: public FIFOScheduler {
+class GatherBatchScheduler: virtual public FIFOScheduler {
 public:
     explicit GatherBatchScheduler(const rtp_llm::GptInitParameter&     params,
                                   const std::shared_ptr<CacheManager>& cache_manager,
@@ -32,7 +32,7 @@ public:
 
 protected:
     std::list<GenerateStreamPtr> scheduleNew(size_t reserve_step) override {
-        if (waiting_streams_.size() < gather_batch_size_) {
+        if (waiting_streams_.size() > 0 && waiting_streams_.size() < gather_batch_size_) {
             RTP_LLM_LOG_INFO("GatherBatchScheduler scheduleNew, waiting_streams_.size() [%d] < gather_batch_size_ [%d]",
                              waiting_streams_.size(),
                              gather_batch_size_);
@@ -44,6 +44,8 @@ protected:
             gather_batch_size_);
         waiting_streams_.sort(
             [](const GenerateStreamPtr& a, const GenerateStreamPtr& b) { return a->streamId() < b->streamId(); });
+        // reset gather_batch_size_ to 1, for potential next schedule like partial fallback can pass
+        gather_batch_size_ = 1;
         return FIFOScheduler::scheduleNew(reserve_step);
     }
 
