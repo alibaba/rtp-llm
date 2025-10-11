@@ -178,5 +178,7 @@ test --test_env TZ=Asia/Shanghai
 # compat for low driver < 535
 test:compat --test_env LD_LIBRARY_PATH="/opt/rocm/lib:/opt/conda310/lib/:/usr/local/cuda/compat/:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64:/opt/amdgpu/lib64:/usr/local/cuda/extras/CUPTI/lib64:/usr/local/cuda/lib64/stubs"
 
-try-import %workspace%/internal_source/.internal_bazelrc
+# only use for internal source
+try-import %workspace%/stub_source/.internal_bazelrc
+# always use for aone ci
 try-import %workspace%/internal_source/.cicd_bazelrc
