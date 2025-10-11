@@ -143,6 +143,8 @@ struct ROCmGemmArguments {
             DDtype = params.D->type();
         } else if (params.A.type() == DataType::TYPE_INT8 || params.A.type() == DataType::TYPE_QINT8){
             DDtype = DataType::TYPE_FP16;
+        } else if (params.A.type() == DataType::TYPE_FP8_E4M3 || params.A.type() == DataType::TYPE_QFP8_E4M3){
+            DDtype = DataType::TYPE_BF16;
         } else {
             DDtype = params.compute_type == DataType::TYPE_INVALID ? ADtype : compute_type;
         }
