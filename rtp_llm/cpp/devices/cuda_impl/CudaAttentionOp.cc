@@ -24,49 +24,92 @@ using namespace rtp_llm;
 
 namespace rtp_llm {
 
-torch::Tensor genNormalCosSin(int rope_dim, int rope_theta, float rope_scale, int max_position_embeddings) {
+float yarnFindCorrectionDim(int num_rotations, int rope_dim, int rope_theta, int max_position_embeddings) {
+    return static_cast<float>(rope_dim
+                              * std::log(static_cast<float>(max_position_embeddings / (num_rotations * 2.f * M_PI))))
+           / (2.f * std::log(static_cast<float>(rope_theta)));
+}
+
+torch::Tensor genBaseCosSin(int rope_dim, int rope_theta, float rope_scale, int max_position_embeddings) {
     auto inv_freq =
-        1.0 / torch::pow(rope_theta, torch::arange(0, rope_dim, 2, torch::kInt64).to(torch::kFloat32) / rope_dim);
-    auto t = torch::arange(max_position_embeddings, torch::kInt64).to(torch::kFloat32);
+        1.f / torch::pow(rope_theta, torch::arange(0, rope_dim, 2, torch::kInt64).to(torch::kFloat32) / rope_dim);
+    auto t = torch::arange(max_position_embeddings * rope_scale, torch::kInt64).to(torch::kFloat32);
     t.div_(rope_scale);
     auto freqs   = torch::outer(t, inv_freq);
     auto cos     = freqs.cos().to(torch::kFloat32);
     auto sin     = freqs.sin().to(torch::kFloat32);
     auto cos_sin = torch::stack({cos, sin}, 0).permute({1, 2, 0}).reshape({cos.size(0), -1}).contiguous();
+
+    return cos_sin.cuda();
+}
+
+torch::Tensor genYarnCosSin(int   rope_dim,
+                            int   rope_theta,
+                            float rope_scale,
+                            int   max_position_embeddings,
+                            int   beta_slow,
+                            int   beta_fast,
+                            float extrapolation_factor,
+                            float mscale) {
+    auto pos_freqs =
+        torch::pow(rope_theta, torch::arange(0, rope_dim, 2, torch::kInt64).to(torch::kFloat32) / rope_dim);
+    auto  inv_freq_extrapolation = 1.f / pos_freqs;
+    auto  inv_freq_interpolation = 1.f / (rope_scale * pos_freqs);
+    float low                    = static_cast<float>(std::max(
+        0,
+        static_cast<int>(std::floor(yarnFindCorrectionDim(beta_slow, rope_dim, rope_theta, max_position_embeddings)))));
+    float high                   = static_cast<float>(std::min(
+        rope_dim - 1,
+        static_cast<int>(std::ceil(yarnFindCorrectionDim(beta_fast, rope_dim, rope_theta, max_position_embeddings)))));
+    if (std::fabs(low - high) < 1e-6) {
+        high += 0.001f;
+    }
+    auto linear        = (torch::arange(rope_dim / 2, torch::kInt64).to(torch::kFloat32) - low) / (high - low);
+    auto ramp          = torch::clamp(linear, 0, 1);
+    auto inv_freq_mask = (1.f - ramp) * extrapolation_factor;
+    auto inv_freq      = inv_freq_interpolation * (1.f - inv_freq_mask) + inv_freq_extrapolation * inv_freq_mask;
+    auto t             = torch::arange(max_position_embeddings * rope_scale, torch::kInt64).to(torch::kFloat32);
+    auto freqs         = torch::outer(t, inv_freq);
+    auto cos           = freqs.cos().to(torch::kFloat32) * mscale;
+    auto sin           = freqs.sin().to(torch::kFloat32) * mscale;
+    auto cos_sin       = torch::stack({cos, sin}, 0).permute({1, 2, 0}).reshape({cos.size(0), -1}).contiguous();
+
     return cos_sin.cuda();
 }
 
 /**
  * @brief Get the Rope Cos Sin object, TODO: move to python
  *
- * @param device
- * @param rope_style
- * @param rope_dim
- * @param rope_theta
- * @param rope_scale
+ * @param rope_config
  * @param max_position_embeddings
- * @return BufferPtr
+ * @return torch::Tensor
  */
-torch::Tensor
-getRopeCosSin(RopeStyle rope_style, int rope_dim, int rope_theta, float rope_scale, int max_position_embeddings) {
-    RTP_LLM_LOG_INFO("rope: style = %d, dim = %d, theta = %d, scale = %f, max_position_embeddings = %d",
-                     rope_style,
-                     rope_dim,
-                     rope_theta,
-                     rope_scale,
-                     max_position_embeddings);
+torch::Tensor getRopeCosSin(const RopeConfig& rope_config, int max_position_embeddings) {
+    RTP_LLM_LOG_INFO(
+        "%s  max_position_embeddings: %d", rope_config.DebugRopeConfigStr().c_str(), max_position_embeddings);
     torch::Tensor cos_sin;
 
-    switch (rope_style) {
+    switch (rope_config.style) {
         case RopeStyle::No:
             break;
 
         case RopeStyle::Base:
-            cos_sin = genNormalCosSin(rope_dim, rope_theta, rope_scale, max_position_embeddings);
+            cos_sin = genBaseCosSin(rope_config.dim, rope_config.base, rope_config.scale, max_position_embeddings);
+            break;
+
+        case RopeStyle::Yarn:
+            cos_sin = genYarnCosSin(rope_config.dim,
+                                    rope_config.base,
+                                    rope_config.scale,
+                                    rope_config.max_pos,
+                                    static_cast<int>(rope_config.factor1),
+                                    static_cast<int>(rope_config.factor2),
+                                    rope_config.extrapolation_factor,
+                                    rope_config.mscale);
             break;
 
         default:
-            RTP_LLM_LOG_WARNING("unsupported rope_style = %d, not use rope_cache", rope_style);
+            RTP_LLM_LOG_WARNING("unsupported rope_style = %d, not use rope_cache", rope_config.style);
             break;
     }
 
@@ -431,11 +474,7 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
         q_output = allocateBuffer(
             {params.input.type(), {batch_size, local_head_num, size_per_head}, AllocationType::DEVICE}, {"q_output"});
 
-        static torch::Tensor cos_sin_cache = getRopeCosSin(params.configs.rope_config.style,
-                                                           params.configs.rope_config.dim,
-                                                           params.configs.rope_config.base,
-                                                           params.configs.rope_config.scale,
-                                                           init_params_.max_seq_len);
+        static torch::Tensor cos_sin_cache = getRopeCosSin(params.configs.rope_config, init_params_.max_seq_len);
 
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(params.input.type(),
                                          invokeDecodeAddFusedQKVBiasTranspose,
