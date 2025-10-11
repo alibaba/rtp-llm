@@ -479,6 +479,7 @@ class PyKvCacheConfig:
         self.blockwise_use_fp8_kv_cache: int = 0
         self.kv_cache_dtype: Optional[str] = None
         self.reuse_cache: bool = False
+        self.reuse_query_cache: bool = False
 
     def update_from_env(self):
         self.int8_kv_cache = int(os.environ.get("INT8_KV_CACHE", self.int8_kv_cache))
@@ -508,6 +509,9 @@ class PyKvCacheConfig:
         if not self.kv_cache_dtype:
             self.kv_cache_dtype = WEIGHT_TYPE.AUTO.to_str()
         self.reuse_cache = get_env_bool("REUSE_CACHE", self.reuse_cache)
+        self.reuse_query_cache = self.reuse_cache and get_env_bool(
+            "REUSE_QUERY_CACHE", True
+        )
 
     def to_string(self):
         return (
@@ -519,7 +523,8 @@ class PyKvCacheConfig:
             f"test_block_num: {self.test_block_num}\n"
             f"use_block_cache: {self.use_block_cache}\n"
             f"blockwise_use_fp8_kv_cache: {self.blockwise_use_fp8_kv_cache}\n"
-            f"reuse_cache: {self.reuse_cache}"
+            f"reuse_cache: {self.reuse_cache}\n"
+            f"reuse_query_cache: {self.reuse_query_cache}\n"
         )
 
 
