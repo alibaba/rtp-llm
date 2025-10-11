@@ -78,7 +78,6 @@ class ModelConfig:
         self.use_float32: bool = False
         self.original_checkpoint_path: Optional[str] = None
         self.mla_ops_type: str = "AUTO"
-        self.parallel_batch: bool = False
         self.ft_plugin_path: Optional[str] = None
         self.weight_type: Optional[str] = None
 
@@ -110,7 +109,6 @@ class ModelConfig:
             "ORIGINAL_CHECKPOINT_PATH", self.original_checkpoint_path
         )
         self.mla_ops_type = os.environ.get("MLA_OPS_TYPE", self.mla_ops_type)
-        self.parallel_batch = get_env_bool("PARALLEL_BATCH", self.parallel_batch)
         self.ft_plugin_path = os.environ.get("FT_PLUGIN_PATH", self.ft_plugin_path)
         self.weight_type = os.environ.get("WEIGHT_TYPE", self.weight_type)
         self.task_type = os.environ.get("TASK_TYPE", self.task_type)
@@ -139,7 +137,6 @@ class ModelConfig:
             f"use_float32: {self.use_float32}\n"
             f"original_checkpoint_path: {self.original_checkpoint_path}\n"
             f"mla_ops_type: {self.mla_ops_type}\n"
-            f"parallel_batch: {self.parallel_batch}\n"
             f"ft_plugin_path: {self.ft_plugin_path}\n"
             f"weight_type: {self.weight_type}\n"
             f"task_type: {self.task_type}\n"
