@@ -19,13 +19,6 @@ void registerPyOpDefs(pybind11::module& m) {
     pybind11::class_<caffe2::TypeMeta>(m, "TypeMeta").def(pybind11::init<>());
 
     pybind11::class_<PyCacheStoreInputs>(m, "PyCacheStoreInputs").def(pybind11::init<>());
-    pybind11::class_<PyMlaInputs>(m, "PyMlaInputs")
-        .def(pybind11::init<>())
-        .def_readonly("max_prefix_length", &PyMlaInputs::max_prefix_length)
-        .def_readonly("context_batch_size", &PyMlaInputs::context_batch_size)
-        .def_readonly("decoder_batch_size", &PyMlaInputs::decoder_batch_size)
-        .def_readonly("context_token_num", &PyMlaInputs::context_token_num)
-        .def_readonly("max_context_seq_len", &PyMlaInputs::max_context_seq_len);
     pybind11::class_<PyCaptureMetaData>(m, "PyCaptureMetaData").def(pybind11::init<>());
 
     pybind11::class_<rtp_llm::ParamsBase, std::shared_ptr<rtp_llm::ParamsBase>>(m, "ParamsBase")

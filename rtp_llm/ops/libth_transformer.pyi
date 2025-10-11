@@ -1022,14 +1022,6 @@ class KVCache:
     v_scale_base: torch.Tensor
     def get_layer_cache(self, idx: int) -> KVCache: ...
 
-class PyMlaInputs:
-    max_prefix_length: int
-    context_batch_size: int
-    decoder_batch_size: int
-    context_token_num: int
-    max_context_seq_len: int
-    def __init__(self) -> None: ...
-
 class PyCacheStoreInputs:
     def __init__(self) -> None: ...
 
@@ -1041,7 +1033,6 @@ class PyAttentionInputs:
     kv_cache_block_id_host: torch.Tensor
     kv_cache_block_id_device: torch.Tensor
     cu_seqlens: torch.Tensor
-    mla_inputs: PyMlaInputs
     def get_prefill_flash_infer_attn(self) -> typing.Any:
         pass
 

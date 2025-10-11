@@ -177,7 +177,6 @@ try:
         ParamsBase,
         PyAttentionInputs,
         PyCacheStoreInputs,
-        PyMlaInputs,
         PyModelInitResources,
         PyModelInputs,
         PyModelOutputs,

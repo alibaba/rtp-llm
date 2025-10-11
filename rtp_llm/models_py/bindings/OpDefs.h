@@ -47,13 +47,6 @@ struct PyCacheStoreInputs {
     bool                     warmup          = false;
     bool                     mla_kvcache     = false;
 };
-struct PyMlaInputs {
-    size_t context_batch_size  = 0;
-    size_t decoder_batch_size  = 0;
-    size_t context_token_num   = 0;
-    size_t max_prefix_length   = 0;
-    size_t max_context_seq_len = 0;
-};
 
 // for cuda grpah capture
 struct PyCaptureMetaData {
@@ -73,7 +66,6 @@ struct PyAttentionInputs {
     torch::Tensor cu_seqlens;
     torch::Tensor padding_offset;
 
-    std::optional<PyMlaInputs> mla_inputs;
 
     // for write cache store
     std::optional<PyCacheStoreInputs> cache_store_inputs;

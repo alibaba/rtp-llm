@@ -56,37 +56,6 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     cu_seqlens.slice(0, 1, batch_size + 1) = py_attn_inputs.input_lengths.cumsum(0);
     py_attn_inputs.cu_seqlens              = cu_seqlens;
     py_attn_inputs.sequence_lengths.pin_memory();
-
-    const auto& input_lengths      = inputs.input_lengths;
-    const auto& sequence_lengths   = inputs.sequence_lengths;
-    const auto& prefix_lengths     = inputs.prefix_lengths;
-    const auto  decoder_batch_size = sequence_lengths->shape()[0];
-    const auto  context_batch_size = input_lengths->shape()[0] - decoder_batch_size;
-
-    std::optional<PyMlaInputs> mla_params;
-
-    auto max_prefix_length = context_batch_size && prefix_lengths ?
-                                 *std::max_element(prefix_lengths->data<int32_t>(),
-                                                   prefix_lengths->data<int32_t>() + prefix_lengths->size()) :
-                                 0;
-
-    auto max_context_seq_len =
-        context_batch_size ?
-            *std::max_element(input_lengths->data<int32_t>() + decoder_batch_size,
-                              input_lengths->data<int32_t>() + decoder_batch_size + context_batch_size) :
-            0;
-
-    const int32_t* sequence_length = input_lengths->dataWithOffset<int32_t>(decoder_batch_size);
-    int32_t        total_seq_len   = std::accumulate(sequence_length, sequence_length + context_batch_size, 0);
-
-    PyMlaInputs mla_inputs{(size_t)context_batch_size,
-                           (size_t)decoder_batch_size,
-                           (size_t)total_seq_len,
-                           (size_t)max_prefix_length,
-                           (size_t)max_context_seq_len};
-    mla_params = mla_inputs;
-
-    py_attn_inputs.mla_inputs = mla_params;
     return py_attn_inputs;
 }
 
