@@ -137,7 +137,7 @@ cc_library(
     name = "cuda_cu",
     deps = [
         ":cuda_no_aux_tc",
-        ":cuda_quantization", 
+        ":cuda_quantization",
         ":cuda_moe",
         ":cuda_comm",
     ],
@@ -212,7 +212,7 @@ cc_library(
     name = "rocm_basic",
     deps = [
         ":rocm_layernorm",
-        ":rocm_quantization", 
+        ":rocm_quantization",
         ":rocm_fused_qk_rmsnorm",
     ],
     visibility = ["//visibility:public"],
@@ -499,6 +499,23 @@ cc_library(
 )
 
 cc_library(
+    name = "kernels_ep_util",
+    srcs = glob([
+        "moe/*.cu",
+    ]),
+    hdrs = glob([
+        "moe/*.h",
+    ]),
+    deps = any_cuda_deps + [
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/cuda/cutlass:moe_cu",
+    ]+ torch_deps(),
+    copts = any_cuda_copts(),
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "kernels_eplb",
     srcs = glob([
         "eplb/*.cu",
@@ -539,7 +556,7 @@ cc_library(
         ":kernels_sampling",
         ":kernels_attention",
         ":kernels_embedding",
-        ":kernels_tensor_ops", 
+        ":kernels_tensor_ops",
         ":kernels_kv_cache",
         ":kernels_residual",
         ":kernels_copy",
