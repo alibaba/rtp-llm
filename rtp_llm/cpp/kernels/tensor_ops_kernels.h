@@ -51,4 +51,7 @@ void invokeLookupHiddenStateOfLastToken(T*           from_tensor,
                                         const int    idx_offset,
                                         cudaStream_t stream);
 
+template<typename T>
+void invokeCheckNAN(T* input, size_t nums, cudaStream_t stream);
+
 }  // namespace rtp_llm
