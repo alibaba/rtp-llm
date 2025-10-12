@@ -190,9 +190,10 @@ class DeepEPWrapper:
             "low_latency_mode": False,
             "num_qps_per_rank": num_qps_per_rank,
         }
-        if self._use_accl_ep:
-            init_kwargs["allow_nvlink_for_low_latency_mode"] = True
-            init_kwargs["allow_mnnvl"] = False
+        # AcclEP-R not supported
+        # if self._use_accl_ep:
+        #    init_kwargs["allow_nvlink_for_low_latency_mode"] = True
+        #    init_kwargs["allow_mnnvl"] = False
         return DeepEPBuffer(**init_kwargs)  # type: ignore
 
     def _init_low_latency_buffer(
@@ -242,9 +243,10 @@ class DeepEPWrapper:
             "low_latency_mode": True,
             "num_qps_per_rank": num_qps_per_rank,
         }
-        if self._use_accl_ep:
-            init_kwargs["allow_nvlink_for_low_latency_mode"] = True
-            init_kwargs["allow_mnnvl"] = False
+        # AcclEP-R not supported
+        # if self._use_accl_ep:
+        #    init_kwargs["allow_nvlink_for_low_latency_mode"] = True
+        #    init_kwargs["allow_mnnvl"] = False
         return DeepEPBuffer(**init_kwargs)  # type: ignore
 
     def _init_low_latency_m2n_buffer(
