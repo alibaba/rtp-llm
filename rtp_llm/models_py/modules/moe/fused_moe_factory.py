@@ -23,7 +23,11 @@ def init_deepep_env_once(config: GptInitModelParameters):
     if initialized:
         return
     initialized = True
-    from rtp_llm.models_py.distributed.deepep_wrapper import init_deepep_wrapper
+    device_type = get_device().get_device_type()
+    if device_type == DeviceType.ROCm:
+        from rtp_llm.models_py.distributed.rocm.deepep_wrapper import init_deepep_wrapper
+    else:  
+        from rtp_llm.models_py.distributed.deepep_wrapper import init_deepep_wrapper
     from rtp_llm.models_py.distributed.process_group_state import (
         get_ep_group,
         init_distributed_environment,
