@@ -608,6 +608,10 @@ class GptInitModelParameters:
             max_block_size_per_item=get_env_int("MAX_BLOCK_SIZE_PER_ITEM", 16),
             threefs_read_iov_size=get_env_int("THREEFS_READ_IOV_SIZE", 1 << 32),
             threefs_write_iov_size=get_env_int("THREEFS_WRITE_IOV_SIZE", 1 << 32),
+            memory_block_cache_size_mb=get_env_int("MEMORY_BLOCK_CACHE_SIZE_MB", 0),
+            memory_block_cache_sync_timeout_ms=get_env_int(
+                "MEMORY_BLOCK_CACHE_SYNC_TIMEOUT_MS", 10000
+            ),
         )
 
         enable_detail_log = get_env_bool("ENABLE_DETAIL_LOG", False)

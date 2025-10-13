@@ -60,6 +60,8 @@ class ServerArgsDefaultTest(TestCase):
         self.assertEqual(env.get("MAX_BLOCK_SIZE_PER_ITEM"), "16")
         self.assertEqual(env.get("THREEFS_READ_IOV_SIZE"), "4294967296")
         self.assertEqual(env.get("THREEFS_WRITE_IOV_SIZE"), "4294967296")
+        self.assertEqual(env.get("MEMORY_BLOCK_CACHE_SIZE_MB"), "0")
+        self.assertEqual(env.get("MEMORY_BLOCK_CACHE_SYNC_TIMEOUT_MS"), "10000")
 
         # 5. Profiling、Debugging、Logging
         self.assertEqual(env.get("RTP_LLM_TRACE_MEMORY"), "0")
@@ -357,6 +359,10 @@ class ServerArgsSetTest(TestCase):
             "1073741824",
             "--threefs_write_iov_size",
             "1073741824",
+            "--memory_block_cache_size_mb",
+            "10",
+            "--memory_block_cache_sync_timeout_ms",
+            "5000",
             # 5. Profiling、Debugging、Logging
             "--trace_memory",
             "True",
@@ -759,6 +765,8 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env.get("THREEFS_WRITE_TIMEOUT_MS"), "5000")
         self.assertEqual(env.get("THREEFS_READ_IOV_SIZE"), "1073741824")
         self.assertEqual(env.get("THREEFS_WRITE_IOV_SIZE"), "1073741824")
+        self.assertEqual(env.get("MEMORY_BLOCK_CACHE_SIZE_MB"), "10")
+        self.assertEqual(env.get("MEMORY_BLOCK_CACHE_SYNC_TIMEOUT_MS"), "5000")
 
         # 5. Profiling、Debugging、Logging
         self.assertEqual(env["RTP_LLM_TRACE_MEMORY"], "1")
