@@ -283,6 +283,10 @@ void DeviceOps::noBlockCopy(const CopyParams& params) {
     copy(params);
 }
 
+void DeviceOps::noBlockCopy(const MultiCopyParams& params) {
+    multiCopy(params);
+}
+
 void DeviceOps::multiMergeCopy(const MultiMergeCopyParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
