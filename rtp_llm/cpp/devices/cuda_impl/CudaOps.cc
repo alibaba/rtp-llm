@@ -178,6 +178,20 @@ void CudaDevice::noBlockCopy(const CopyParams& params) {
     check_cuda_error();
 }
 
+void CudaDevice::noBlockCopy(const MultiCopyParams& params) {
+    RUNTIME_ASSERT_OP_ARG(params.multi_src.size() == params.multi_dst.size(),
+                          "multi_src and multi_dst must have the same size");
+    for (size_t i = 0; i < params.multi_src.size(); i++) {
+        cudaMemcpyAsync(params.multi_dst[i]->data(),
+                        params.multi_src[i]->data(),
+                        params.multi_src[i]->sizeBytes(),
+                        cudaMemcpyDefault,
+                        no_block_copy_stream_);
+    }
+    cudaStreamSynchronize(no_block_copy_stream_);
+    check_cuda_error();
+}
+
 TransposeOutput CudaDevice::transpose(const TransposeParams& params) {
     const auto&  input     = params.input;
     const auto   data_type = input.type();
