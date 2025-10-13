@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-10-10 11:12+0800\n"
+"POT-Creation-Date: 2025-10-14 10:12+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -68,9 +68,14 @@ msgid "**CUDA-SM8x**"
 msgstr "**CUDA**"
 
 #: ../../release/v0.2.0/package.md
-#, fuzzy
-msgid "hub.docker.alibaba-inc.com/isearch/rtp_llm_sm8x"
-msgstr "hub.docker.alibaba-inc.com/isearch/rtp_llm_gpu_cuda12"
+msgid ""
+"ali-hangzhou-hub-registry.cn-"
+"hangzhou.cr.aliyuncs.com/isearch/rtp_llm_sm8x_opensource"
+msgstr ""
+
+#: ../../release/v0.2.0/package.md
+msgid "0.2.0_0.2.0_2025_10_09_17_35_8fa289f5"
+msgstr ""
 
 #: ../../release/v0.2.0/package.md
 #, fuzzy
@@ -121,4 +126,23 @@ msgstr ""
 #: ../../release/v0.2.0/package.md
 msgid "0.2.0_2025_09_19_11_16_3b779f1_accelerated"
 msgstr ""
+
+#: ../../release/v0.2.0/package.md:24
+#, fuzzy
+msgid "Wheel"
+msgstr "whl包"
+
+#: ../../release/v0.2.0/package.md
+#, fuzzy
+msgid "**wheel**"
+msgstr "whl包"
+
+#: ../../release/v0.2.0/package.md
+msgid ""
+"https://rtp-opensource.oss-cn-"
+"hangzhou.aliyuncs.com/package/daily/2025_10_09/rtp_llm-0.2.0-0.2.0-2025_10_09_17_35_8fa289f5-cp310-cp310-manylinux1_x86_64.whl"
+msgstr ""
+
+#~ msgid "hub.docker.alibaba-inc.com/isearch/rtp_llm_sm8x"
+#~ msgstr "hub.docker.alibaba-inc.com/isearch/rtp_llm_gpu_cuda12"
 
