@@ -122,19 +122,22 @@ void register_fmha_config(pybind11::module& m) {
 // KVCacheConfig
 void register_kvcache_config(pybind11::module& m) {
     pybind11::class_<KVCacheConfig>(m, "KVCacheConfig")
-        .def(pybind11::init<bool, std::string, std::string, bool, int, int, int, int, int, int, int64_t, int64_t>(),
-             pybind11::arg("reuse_cache")              = false,
-             pybind11::arg("multi_task_prompt")        = "",
-             pybind11::arg("multi_task_prompt_str")    = "",
-             pybind11::arg("enable_3fs")               = false,
-             pybind11::arg("match_timeout_ms")         = 1000,
-             pybind11::arg("rpc_get_cache_timeout_ms") = 2000,
-             pybind11::arg("rpc_put_cache_timeout_ms") = 2000,
-             pybind11::arg("threefs_read_timeout_ms")  = 1000,
-             pybind11::arg("threefs_write_timeout_ms") = 2000,
-             pybind11::arg("max_block_size_per_item")  = 16,
-             pybind11::arg("threefs_read_iov_size")    = 1LL << 32,
-             pybind11::arg("threefs_write_iov_size")   = 1LL << 32)
+        .def(pybind11::
+                 init<bool, std::string, std::string, bool, int, int, int, int, int, int, int64_t, int64_t, int, int>(),
+             pybind11::arg("reuse_cache")                        = false,
+             pybind11::arg("multi_task_prompt")                  = "",
+             pybind11::arg("multi_task_prompt_str")              = "",
+             pybind11::arg("enable_3fs")                         = false,
+             pybind11::arg("match_timeout_ms")                   = 1000,
+             pybind11::arg("rpc_get_cache_timeout_ms")           = 2000,
+             pybind11::arg("rpc_put_cache_timeout_ms")           = 2000,
+             pybind11::arg("threefs_read_timeout_ms")            = 1000,
+             pybind11::arg("threefs_write_timeout_ms")           = 2000,
+             pybind11::arg("max_block_size_per_item")            = 16,
+             pybind11::arg("threefs_read_iov_size")              = 1LL << 32,
+             pybind11::arg("threefs_write_iov_size")             = 1LL << 32,
+             pybind11::arg("memory_block_cache_size_mb")         = 0,
+             pybind11::arg("memory_block_cache_sync_timeout_ms") = 10000)
         .def("to_string", &KVCacheConfig::to_string)
         .def("update_from_env", &KVCacheConfig::update_from_env_for_test)
         .def_readwrite("reuse_cache", &KVCacheConfig::reuse_cache)
@@ -148,7 +151,9 @@ void register_kvcache_config(pybind11::module& m) {
         .def_readwrite("threefs_write_timeout_ms", &KVCacheConfig::threefs_write_timeout_ms)
         .def_readwrite("max_block_size_per_item", &KVCacheConfig::max_block_size_per_item)
         .def_readwrite("threefs_read_iov_size", &KVCacheConfig::threefs_read_iov_size)
-        .def_readwrite("threefs_write_iov_size", &KVCacheConfig::threefs_write_iov_size);
+        .def_readwrite("threefs_write_iov_size", &KVCacheConfig::threefs_write_iov_size)
+        .def_readwrite("memory_block_cache_size_mb", &KVCacheConfig::memory_block_cache_size_mb)
+        .def_readwrite("memory_block_cache_sync_timeout_ms", &KVCacheConfig::memory_block_cache_sync_timeout_ms);
 }
 
 // ProfilingDebugLoggingConfig

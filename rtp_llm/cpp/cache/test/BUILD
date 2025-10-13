@@ -109,3 +109,17 @@ cc_test(
     env = {},
     exec_properties = {'gpu':'A10'},
 )
+
+cc_test(
+    name = "memory_block_cache_test",
+    srcs = [
+        "MemoryBlockCacheTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'A10'},
+)

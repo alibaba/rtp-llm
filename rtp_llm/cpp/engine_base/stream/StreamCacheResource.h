@@ -17,6 +17,7 @@ struct ResourceContext {
     std::shared_ptr<SystemPrompt>              system_prompt         = nullptr;
     bool                                       reuse_cache{false};
     bool                                       enable_3fs{false};
+    bool                                       enable_memory_block_cache{false};
     bool                                       use_cache_store{false};
     std::vector<std::shared_ptr<CacheManager>> mtp_cache_managers;
 };
@@ -105,6 +106,7 @@ public:
 
     bool reuseCache() const;
     bool enable3FS() const;
+    bool enableMemoryBlockCache() const;
 
     std::string debugString() const {
         std::stringstream debug_string;

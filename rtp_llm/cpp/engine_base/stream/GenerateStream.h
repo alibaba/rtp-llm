@@ -480,6 +480,10 @@ public:
         return generate_input_->generate_config->enable_3fs;
     }
 
+    bool enableMemoryBlockCache() const {
+        return generate_input_->generate_config->enable_memory_block_cache;
+    }
+
     void fillSubGenerateStatus(StreamState state);
     void resizeSubGenerateStatus(size_t new_size);
 

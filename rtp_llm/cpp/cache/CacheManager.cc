@@ -57,6 +57,24 @@ CacheManager::CacheManager(const CacheConfig&                 config,
             RTP_LLM_FAIL("dist kv cache init failed");
         }
     }
+
+    if (params_.kv_cache_config.memory_block_cache_size_mb > 0) {
+        int64_t block_nums =
+            (int64_t)params_.kv_cache_config.memory_block_cache_size_mb * 1024 * 1024 / config_.block_size;
+        RTP_LLM_LOG_INFO("init memory block cache, size: %d MB, block nums: %ld",
+                         params_.kv_cache_config.memory_block_cache_size_mb,
+                         block_nums);
+
+        auto memory_block_cache_config       = config_;
+        memory_block_cache_config.block_nums = block_nums;
+        memory_block_cache_config.refresh();
+
+        memory_block_cache_ = std::make_shared<MemoryBlockCache>(
+            memory_block_cache_config, device_, allocator_.get(), params_, metrics_reporter_);
+        if (!memory_block_cache_->init()) {
+            RTP_LLM_FAIL("memory block cache init failed");
+        }
+    }
 }
 
 void CacheManager::regUserMr(size_t model_id) {
@@ -204,6 +222,11 @@ CacheManager::MatchInfo CacheManager::matchImpl(const AdvancedMallocInfo& malloc
     auto match_result = block_cache_.match(malloc_info.cache_keys);
     incrRefCounter(match_result.block_indices);
     auto local_match_blocks = match_result.block_indices.size();
+
+    if (memory_block_cache_ && malloc_info.enable_memory_block_cache
+        && local_match_blocks < malloc_info.cache_keys.size()) {
+        matchInMemoryBlockCache(malloc_info, match_result);
+    }
 
     // match in dist kvcache if cache keys not fully matched
     if (enable_dist_kvcache_ && malloc_info.enable_3fs && !malloc_info.need_loss
@@ -371,6 +394,12 @@ void CacheManager::insertIntoCache(FreeInfo& free_info) {
                                   std::vector<float>{free_info.loss.begin(), free_info.loss.begin() + token_len},
                        free_info.is_resident};
         std::vector<int> indices = block_cache_.put(item);
+
+        // put into memory block cache, can not put in block cache pop cause may block malloc
+        if (memory_block_cache_ && free_info.enable_memory_block_cache) {
+            putToMemoryBlockCache(item, free_info);
+        }
+
         if (enable_dist_kvcache_ && free_info.enable_3fs && free_info.loss.empty()) {
             putToDistKvCache(item.cache_key, item.block_indices, 0, free_info.request_id, free_info.adapter_name);
         }
@@ -583,4 +612,52 @@ const std::shared_ptr<KVCacheAllocator>& CacheManager::kvCacheAllocator() const 
     return allocator_;
 }
 
+void CacheManager::matchInMemoryBlockCache(const AdvancedMallocInfo& malloc_info,
+                                           BlockCache::MatchResult&  match_result) {
+    if (!malloc_info.enable_memory_block_cache || malloc_info.cache_keys.empty()
+        || malloc_info.cache_keys.size() <= match_result.block_indices.size()) {
+        return;
+    }
+
+    std::vector<int64_t> need_get_cache_keys(malloc_info.cache_keys.begin() + match_result.block_indices.size(),
+                                             malloc_info.cache_keys.end());
+
+    auto [success, block_indices] =
+        mallocIndex(KVCacheAllocator::SimpleMallocInfo(malloc_info.request_id, need_get_cache_keys.size(), true));
+    if (!success) {
+        RTP_LLM_LOG_WARNING("match in memory failed, malloc failed");
+        return;
+    }
+
+    MemoryMatchResult mem_result =
+        memory_block_cache_->match(need_get_cache_keys, block_indices, malloc_info.request_id);
+    if (mem_result.matched_len < need_get_cache_keys.size()) {
+        std::vector<int> need_free_blocks(block_indices.begin() + mem_result.matched_len, block_indices.end());
+        freeWithoutLock(need_free_blocks);
+    }
+
+    if (mem_result.matched_len <= 0) {
+        return;
+    }
+
+    match_result.block_indices.insert(
+        match_result.block_indices.end(), mem_result.block_indices.begin(), mem_result.block_indices.end());
+    match_result.loss.insert(match_result.loss.end(), mem_result.losses.begin(), mem_result.losses.end());
+}
+
+void CacheManager::putToMemoryBlockCache(const CacheItem& item, const FreeInfo& free_info) {
+    if (!memory_block_cache_ || item.cache_key.empty() || item.block_indices.empty()) {
+        return;
+    }
+
+    auto                 real_len = std::min(item.block_indices.size(), item.cache_key.size());
+    std::vector<int64_t> cache_keys(item.cache_key.begin(), item.cache_key.begin() + real_len);
+    std::vector<int>     block_indices(item.block_indices.begin(), item.block_indices.begin() + real_len);
+
+    memory_block_cache_->put(cache_keys, block_indices, item.loss, item.is_resident, free_info.request_id);
+}
+
+const std::shared_ptr<MemoryBlockCache>& CacheManager::memoryBlockCache() const {
+    return memory_block_cache_;
+}
 }  // namespace rtp_llm
