@@ -43,6 +43,6 @@ def init_misc_group_args(parser):
         "--aux_string",
         env_name="AUX_STRING",
         type=str,
-        default='{"DEPLOYMENT_NAME":"DEFAULT_DEPLOYMENT_NAME"}',
+        default="",
         help="管控环境变量字符串",
     )
