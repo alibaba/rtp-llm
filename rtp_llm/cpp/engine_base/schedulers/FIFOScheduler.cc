@@ -246,6 +246,7 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
     bool has_dummy_stream = false;
     for (auto it = waiting_streams_.begin(); it != waiting_streams_.end();) {
         auto& stream = *it;
+        // avoid multi fake query add to new streams, remove redundant fake stream
         if (stream->isDummyStream()) {
             if (has_dummy_stream) {
                 stream->stopAndRelease(ErrorCode::UNKNOWN_ERROR, "multi fake query");
@@ -293,8 +294,9 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
                     waiting_streams_.pop_back();
                 } else {
                     auto first_stream = *(waiting_streams_.begin());
+                    // fake stream只需要一个block，如果申请不出来，同时wait stream也没有占用的block可以释放，那么应该是出问题了，这里直接core好了。
                     RTP_LLM_CHECK_WITH_INFO(first_stream->maxBlockSize(), "waitting stream should have block size");
-                    RTP_LLM_LOG_INFO("lack fake mem, stream [%ld] in watting queue try release blocks, "
+                    RTP_LLM_LOG_INFO("lack fake stream mem, stream [%ld] in watting queue try release blocks, "
                                      "it's input_length:%d seq_length:%d, hold block size:%d, release block size:%d",
                                      first_stream->streamId(),
                                      first_stream->inputLength(),

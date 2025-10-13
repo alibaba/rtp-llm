@@ -581,6 +581,7 @@ absl::Status SpeculativeEngine::prefillMtpStep(std::list<GenerateStreamPtr>& str
             stream->setSpEditRun(false);
             stream->setLastHiddenStates(nullptr);
             stream->setSPOutputBuffer(nullptr);
+            // 前面stream的状态准备完了，可以先将remote generate设置为true然后让另外的线程开始发送kv cache，最后再清理一些不需要的资源
             if (stream->queryPdSep()) {
                 RTP_LLM_LOG_DEBUG("stream [%ld] set setNeedRemoteGenerate", stream->streamId());
                 stream->setNeedRemoteGenerate(true);
@@ -649,6 +650,7 @@ absl::Status SpeculativeEngine::mtpStep(std::list<GenerateStreamPtr>& streams) {
         tpSyncDisableSPRun(skip_propose);
         RTP_LLM_CHECK_WITH_INFO(!skip_propose, "skip propose not allowed now");
         RTP_LLM_LOG_DEBUG("propose step");
+        // 这里直接core吧，相比skip带来的性能提升，dp下步骤不同步带来的问题更严重
         THROW_IF_STATUS_ERROR(propose_executor_->propose(propose_streams));
 
         for (const GenerateStreamPtr& stream : prefill_streams) {
@@ -672,6 +674,7 @@ absl::Status SpeculativeEngine::mtpStep(std::list<GenerateStreamPtr>& streams) {
             sp_output_buffer_->tokens                            = device_->allocateBuffer(
                 {rtp_llm::DataType::TYPE_INT32, {1, propose_tokens.size()}, rtp_llm::AllocationType::HOST}, {});
             memcpy(sp_output_buffer_->tokens->data(), propose_tokens.data(), sizeof(int) * propose_tokens.size());
+            // set output token to zero when steam is fake query and can debug easily
             if (stream->isDummyStream()) {
                 device_->bufMemset(*(sp_output_buffer_->tokens), 0);
             }

@@ -209,15 +209,13 @@ INSTANTIATE_INVOKE_LOOKUP_HIDDEN_OF_LAST(__nv_bfloat16);
 INSTANTIATE_INVOKE_LOOKUP_HIDDEN_OF_LAST(__nv_fp8_e4m3);
 #endif
 
-template<typename T, int vec_size = 8>
+template<typename T, size_t vec_size = 8>
 __global__ void checkNANKernel(T* input, int64_t nums, int circle) {
     int64_t            index = ((int64_t)blockIdx.x * blockDim.x + threadIdx.x) * vec_size * circle;
     vec_t<T, vec_size> inputs;
     int64_t            max_index = min(index + vec_size * circle, nums - vec_size);
-    #pragma unroll
     for (int64_t i = index; i < max_index; i += vec_size) {
         inputs.load(input + i);
-        #pragma unroll
         for (int j = 0; j < vec_size; ++j)
             if (isnan(float(inputs[j]))) {
                 // 触发非法内存访问以生成core dump
@@ -240,7 +238,7 @@ void invokeCheckNAN(T* input, size_t nums, cudaStream_t stream) {
 template void invokeCheckNAN(float* input, size_t nums, cudaStream_t stream);
 template void invokeCheckNAN(half* input, size_t nums, cudaStream_t stream);
 #ifdef ENABLE_BF16
-template void invokeCheckNAN(__nv_bfloat16* input, size_t nums, cudaStream_t stream);
+template void invokeCheckNAN(nv_bfloat16* input, size_t nums, cudaStream_t stream);
 #endif
 #ifdef ENABLE_FP8
 template void invokeCheckNAN(__nv_fp8_e4m3* input, size_t nums, cudaStream_t stream);

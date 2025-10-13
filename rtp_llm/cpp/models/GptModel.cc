@@ -689,7 +689,7 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
     }
     device_->checkError();
     if (device_->initParams().profile_debug_logging_config.check_nan) {
-        device_->checkNAN(*hidden);
+        (void)device_->checkNAN(*hidden);
     }
     if (int(device_props_.enable_layer_micro_batch)) {
         auto micro_batch_plan = planMicroBatches(inputs);
@@ -798,7 +798,7 @@ vector<GptLayerInputs> GptModel::forwardPrefillMicroBatchedLayers(vector<GptLaye
 
             auto hidden_states = dispatched_output.hidden;
             if (device_->initParams().profile_debug_logging_config.check_nan) {
-                device_->checkNAN(*hidden_states);
+                (void)device_->checkNAN(*hidden_states);
             }
             auto moe_ffn_params = FfnLayerParams(
                 {*hidden_states, ffn_params.configs, ffn_params.weights, ffn_params.residual, ffn_params.qscheme});
@@ -818,7 +818,7 @@ vector<GptLayerInputs> GptModel::forwardPrefillMicroBatchedLayers(vector<GptLaye
                                 .hidden_states;
             device_->checkError();
             if (device_->initParams().profile_debug_logging_config.check_nan) {
-                device_->checkNAN(*hidden_states);
+                (void)device_->checkNAN(*hidden_states);
             }
             // shared experts to overlap combine
             if (micro_batch_idx) {
@@ -1105,7 +1105,7 @@ GptLayerOutputs GptModel::forwardGptLayer(GptLayerInputs                        
         ffn_output_buf = device_->prepareAllReduce({std::move(ffn_output_buf), ReduceOp::Sum}).buffer;
     }
     if (device_->initParams().profile_debug_logging_config.check_nan) {
-        device_->checkNAN(*hidden);
+        (void)device_->checkNAN(*hidden);
     }
     auto ffn_layer_params =
         FfnLayerParams({*hidden,
@@ -1128,7 +1128,7 @@ GptLayerOutputs GptModel::forwardGptLayer(GptLayerInputs                        
     device_->checkError();
     hidden = ffn_output.hidden_states;
     if (device_->initParams().profile_debug_logging_config.check_nan) {
-        device_->checkNAN(*hidden);
+        (void)device_->checkNAN(*hidden);
     }
     if (inputs.need_moe_gating) {
         moe_gating = std::move(ffn_output.moe_gating);
@@ -1305,7 +1305,7 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(const GptLayerInputs&     
     }
     AttentionLayerOutput attn_output;
     if (device_->initParams().profile_debug_logging_config.check_nan) {
-        device_->checkNAN(*hidden);
+        (void)device_->checkNAN(*hidden);
     }
     auto                 attn_params =
         AttentionLayerParams({layer_id,
@@ -1329,7 +1329,7 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(const GptLayerInputs&     
 
     auto attn_hidden = std::move(attn_output.hidden_states);
     if (device_->initParams().profile_debug_logging_config.check_nan) {
-        device_->checkNAN(*attn_hidden);
+        (void)device_->checkNAN(*attn_hidden);
     }
     if (device_props_.tp_size > 1 && !enable_sp) {
         // Note: for custom all reduce, allReduce will allocate a new buffer and replace the original attn_hidden with
@@ -1525,8 +1525,8 @@ GptModelOutputs GptModel::forwardPostLayers(rtp_llm::BufferPtr       input,
             logits = tpSyncEmbeddingOrLogits(logits);
         }
         if (device_->initParams().profile_debug_logging_config.check_nan) {
-            device_->checkNAN(*last_hidden);
-            device_->checkNAN(*logits);
+            (void)device_->checkNAN(*last_hidden);
+            (void)device_->checkNAN(*logits);
         }
         // TODO(xinfei.sxf) calculate softmax_result
         rtp_llm::BufferPtr softmax_result;
@@ -1580,7 +1580,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
 
     BufferPtr merged_eagle3_hidden = mergeEagle3HiddenState(layer_inputs, eagle3_selected_hidden);
     if (device_->initParams().profile_debug_logging_config.check_nan) {
-        device_->checkNAN(*layer_outputs.hidden);
+        (void)device_->checkNAN(*layer_outputs.hidden);
     }
     auto outputs = forwardPostLayers(layer_outputs.hidden,
                                      inputs.input_lengths->shape()[0] != inputs.sequence_lengths->shape()[0],
