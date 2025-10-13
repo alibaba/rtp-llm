@@ -21,6 +21,7 @@ cc_library(
         "KVCacheAllocator.h",
         "BlockLRUCache.h",
         "WarmUpResult.h",
+        "MemoryBlockCache.h",
     ],
     srcs = [
         "BatchKVCacheResource.cc",
@@ -34,6 +35,7 @@ cc_library(
         "DistKvCache.cc",
         "KVCacheAllocator.cc",
         "BlockLRUCache.cc",
+        "MemoryBlockCache.cc",
     ],
     deps = torch_deps() + [
         "//rtp_llm/cpp/metrics:metrics",
