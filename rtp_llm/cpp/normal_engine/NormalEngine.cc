@@ -183,8 +183,9 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
 }
 
 absl::Status NormalEngine::initSystemPrompt() {
-    resource_context_.reuse_cache = params_.reuse_cache_;
-    resource_context_.enable_3fs  = params_.kv_cache_config.enable_3fs;
+    resource_context_.reuse_cache               = params_.reuse_cache_;
+    resource_context_.enable_3fs                = params_.kv_cache_config.enable_3fs;
+    resource_context_.enable_memory_block_cache = params_.kv_cache_config.memory_block_cache_size_mb > 0;
 
     if (!params_.multi_task_prompt_tokens_.empty()) {
         resource_context_.reuse_cache = true;

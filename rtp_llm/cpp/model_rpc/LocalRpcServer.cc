@@ -389,4 +389,56 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
     }
 }
 
+::grpc::Status LocalRpcServer::MemoryBlockCache(::grpc::ServerContext*             context,
+                                                const ::MemoryBlockCacheRequestPB* request,
+                                                ::MemoryBlockCacheResponsePB*      response) {
+    const int64_t request_id = request->request_id();
+    const auto    op_code    = request->op();
+    if (!engine_) {
+        RTP_LLM_LOG_WARNING("memory block service failed, engine is null, request: %ld", request_id);
+        response->set_success(false);
+        return grpc::Status::OK;
+    }
+    auto cache_manager = engine_->getCacheManager();
+    if (!cache_manager) {
+        RTP_LLM_LOG_WARNING("memory block service failed, cache manager is null, request: %ld, op: %s",
+                            request_id,
+                            ::MemoryBlockCacheOp_Name(op_code).c_str());
+        response->set_success(false);
+        return grpc::Status::OK;
+    }
+    auto memory_block_cache = cache_manager->memoryBlockCache();
+    if (!memory_block_cache) {
+        response->set_success(false);
+        RTP_LLM_LOG_WARNING("memory block service failed, memory block cache is null, request: %ld", request_id);
+        return grpc::Status::OK;
+    }
+
+    std::vector<int32_t> gpu_block_ids(request->gpu_block_ids().begin(), request->gpu_block_ids().end());
+    std::vector<int32_t> memory_block_ids(request->memory_block_ids().begin(), request->memory_block_ids().end());
+    if (gpu_block_ids.empty() || memory_block_ids.empty() || gpu_block_ids.size() != memory_block_ids.size()) {
+        response->set_success(false);
+        RTP_LLM_LOG_WARNING("memory block cache failed, gpu block ids or memory block ids is empty, request: %ld",
+                            request_id);
+        return grpc::Status::OK;
+    }
+
+    bool result = false;
+    if (op_code == ::MemoryBlockCacheOp::MEMORY_CACHE_COPY_FROM_GPU) {
+        result = memory_block_cache->copyKVData(
+            memory_block_ids, gpu_block_ids, MemoryBlockCache::CopyDirection::FROM_GPU, request_id);
+    } else {
+        result = memory_block_cache->copyKVData(
+            memory_block_ids, gpu_block_ids, MemoryBlockCache::CopyDirection::TO_GPU, request_id);
+    }
+    response->set_success(result);
+
+    if (!result) {
+        RTP_LLM_LOG_WARNING("memory block cache failed, %s copy failed, request: %ld",
+                            ::MemoryBlockCacheOp_Name(op_code).c_str(),
+                            request_id);
+    }
+    return grpc::Status::OK;
+}
+
 }  // namespace rtp_llm

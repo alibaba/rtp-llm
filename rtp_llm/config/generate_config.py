@@ -131,6 +131,9 @@ class GenerateConfig(BaseModel):
     # 只有开启环境变量 ENABLE_3FS 时才生效
     enable_3fs: bool = True
 
+    # 是否启用 memory block cache
+    enable_memory_block_cache: bool = True
+
     def gen_hash_value(self):
         cp = copy.copy(self)
         cp.max_new_tokens = 0

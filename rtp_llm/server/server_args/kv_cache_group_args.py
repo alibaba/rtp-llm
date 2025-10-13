@@ -62,3 +62,17 @@ def init_kv_cache_group_args(parser):
         default=0,
         help="在测试时强制指定BLOCK的数量",
     )
+    kv_cache_group.add_argument(
+        "--memory_block_cache_size_mb",
+        env_name="MEMORY_BLOCK_CACHE_SIZE_MB",
+        type=int,
+        default=0,
+        help="单个RANK MemoryBlockCache 的大小, 单位为MB",
+    )
+    kv_cache_group.add_argument(
+        "--memory_block_cache_sync_timeout_ms",
+        env_name="MEMORY_BLOCK_CACHE_SYNC_TIMEOUT_MS",
+        type=int,
+        default=10000,
+        help="MemoryBlockCache 多TP同步的超时时间, 单位为毫秒",
+    )

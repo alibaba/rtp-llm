@@ -92,18 +92,20 @@ std::string FMHAConfig::to_string() const {
 
 // KVCacheConfig
 void KVCacheConfig::update_from_env_for_test() {
-    reuse_cache              = bool_from_env_for_test("REUSE_CACHE", false);
-    multi_task_prompt        = autil::EnvUtil::getEnv("MULTI_TASK_PROMPT", "");
-    multi_task_prompt_str    = autil::EnvUtil::getEnv("MULTI_TASK_PROMPT_STR", "");
-    enable_3fs               = bool_from_env_for_test("ENABLE_3FS", false);
-    match_timeout_ms         = autil::EnvUtil::getEnv("MATCH_TIMEOUT_MS", 1000);
-    rpc_get_cache_timeout_ms = autil::EnvUtil::getEnv("RPC_GET_CACHE_TIMEOUT_MS", 2000);
-    rpc_put_cache_timeout_ms = autil::EnvUtil::getEnv("RPC_PUT_CACHE_TIMEOUT_MS", 2000);
-    threefs_read_timeout_ms  = autil::EnvUtil::getEnv("THREEFS_READ_TIMEOUT_MS", 1000);
-    threefs_write_timeout_ms = autil::EnvUtil::getEnv("THREEFS_WRITE_TIMEOUT_MS", 2000);
-    max_block_size_per_item  = autil::EnvUtil::getEnv("MAX_BLOCK_SIZE_PER_ITEM", 16);
-    threefs_read_iov_size    = autil::EnvUtil::getEnv("THREEFS_READ_IOV_SIZE", 1LL << 32);   // 4GB
-    threefs_write_iov_size   = autil::EnvUtil::getEnv("THREEFS_WRITE_IOV_SIZE", 1LL << 32);  // 4GB
+    reuse_cache                        = bool_from_env_for_test("REUSE_CACHE", false);
+    multi_task_prompt                  = autil::EnvUtil::getEnv("MULTI_TASK_PROMPT", "");
+    multi_task_prompt_str              = autil::EnvUtil::getEnv("MULTI_TASK_PROMPT_STR", "");
+    enable_3fs                         = bool_from_env_for_test("ENABLE_3FS", false);
+    match_timeout_ms                   = autil::EnvUtil::getEnv("MATCH_TIMEOUT_MS", 1000);
+    rpc_get_cache_timeout_ms           = autil::EnvUtil::getEnv("RPC_GET_CACHE_TIMEOUT_MS", 2000);
+    rpc_put_cache_timeout_ms           = autil::EnvUtil::getEnv("RPC_PUT_CACHE_TIMEOUT_MS", 2000);
+    threefs_read_timeout_ms            = autil::EnvUtil::getEnv("THREEFS_READ_TIMEOUT_MS", 1000);
+    threefs_write_timeout_ms           = autil::EnvUtil::getEnv("THREEFS_WRITE_TIMEOUT_MS", 2000);
+    max_block_size_per_item            = autil::EnvUtil::getEnv("MAX_BLOCK_SIZE_PER_ITEM", 16);
+    threefs_read_iov_size              = autil::EnvUtil::getEnv("THREEFS_READ_IOV_SIZE", 1LL << 32);   // 4GB
+    threefs_write_iov_size             = autil::EnvUtil::getEnv("THREEFS_WRITE_IOV_SIZE", 1LL << 32);  // 4GB
+    memory_block_cache_size_mb         = autil::EnvUtil::getEnv("MEMORY_BLOCK_CACHE_SIZE_MB", 0);
+    memory_block_cache_sync_timeout_ms = autil::EnvUtil::getEnv("MEMORY_BLOCK_CACHE_SYNC_TIMEOUT_MS", 10000);
 }
 
 std::string KVCacheConfig::to_string() const {
@@ -119,7 +121,9 @@ std::string KVCacheConfig::to_string() const {
         << "threefs_write_timeout_ms: " << threefs_write_timeout_ms << "\n"
         << "max_block_size_per_item: " << max_block_size_per_item << "\n"
         << "threefs_read_iov_size: " << threefs_read_iov_size << "\n"
-        << "threefs_write_iov_size: " << threefs_write_iov_size;
+        << "threefs_write_iov_size: " << threefs_write_iov_size << "\n"
+        << "memory_block_cache_size_mb: " << memory_block_cache_size_mb << "\n"
+        << "memory_block_cache_sync_timeout_ms: " << memory_block_cache_sync_timeout_ms;
     return oss.str();
 }
 
