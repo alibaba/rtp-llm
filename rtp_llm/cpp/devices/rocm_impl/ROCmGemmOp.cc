@@ -166,16 +166,7 @@ struct ROCmGemmArguments {
         ldc      = n;
         stride_c = m * n;
 
-        if (ADtype == DataType::TYPE_QFP8_E4M3 && BDtype == DataType::TYPE_QFP8_E4M3) {
-            float input_scale = getRocmValue(
-                reinterpret_cast<const float*>(reinterpret_cast<const QBuffer&>(params.A).scalesData()), 0);
-            float weight_scale = getRocmValue(
-                reinterpret_cast<const float*>(reinterpret_cast<const QBuffer&>(params.B).scalesData()), 0);
-            alpha = params.alpha * input_scale * weight_scale;
-        } else {
-            alpha = params.alpha;
-        }
-
+        alpha = params.alpha;
         beta = params.beta;
     }
 
