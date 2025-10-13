@@ -174,38 +174,31 @@ void hipblasMMWrapper::FP8_Gemm(hipblasOperation_t transa,
                                                request_solutions,
                                                heuristicResult,
                                                &returnedAlgoCount));
+    RTP_LLM_CHECK_WITH_INFO(returnedAlgoCount > 0, "No valid solution found for FP8 GEMM");
     
-    if(returnedAlgoCount == 0) {
-        std::cerr << "No valid solution found in hipblasMMWrapper::FP8_Gemm" << std::endl;
-        return;
-    }
-
     void* workSpace     = hipblas_workspace_;
     int   workspaceSize = HIPBLAS_WORKSPACE_SIZE;
     const void* alpha = reinterpret_cast<void*>(&alpha_);
     const void* beta  = reinterpret_cast<void*>(&beta_);
 
-    hipblasStatus_t blaslt_status;
-    blaslt_status = hipblasLtMatmul(hipblaslt_handle_,
-                                    matmul,
-                                    alpha,
-                                    A,
-                                    ADesc,
-                                    B,
-                                    BDesc,
-                                    beta,
-                                    C,
-                                    CDesc,
-                                    C,
-                                    CDesc,
-                                    &heuristicResult[0].algo,
-                                    workSpace,
-                                    workspaceSize,
-                                    stream_);
-
-    if (blaslt_status != HIPBLAS_STATUS_SUCCESS) {
-        std::cerr << "hipblasMMWrapper::FP8_Gemm failed" << std::endl;
-        return;
+    {
+        hipblasStatus_t blaslt_status = hipblasLtMatmul(hipblaslt_handle_,
+                                                    matmul,
+                                                    alpha,
+                                                    A,
+                                                    ADesc,
+                                                    B,
+                                                    BDesc,
+                                                    beta,
+                                                    C,
+                                                    CDesc,
+                                                    C,
+                                                    CDesc,
+                                                    &heuristicResult[0].algo,
+                                                    workSpace,
+                                                    workspaceSize,
+                                                    stream_);
+        ROCM_CHECK(blaslt_status);
     }
 
     ROCM_CHECK(hipblasLtMatmulDescDestroy(matmul));
