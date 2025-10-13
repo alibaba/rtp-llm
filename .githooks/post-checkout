@@ -23,4 +23,8 @@ mkdir -p rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/pt
 curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/ckpt_database_testdata/pt_testdata/test.pt" -o rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/pt_testdata/test.pt &
 mkdir -p rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/safetensor_testdata
 curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/ckpt_database_testdata/safetensor_testdata/test.safetensors" -o rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/safetensor_testdata/test.safetensors &
+mkdir -p rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/mixture_testdata
+curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/ckpt_database_testdata/mixture_testdata/pytorch_model.bin" -o rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/mixture_testdata/pytorch_model.bin
+curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/ckpt_database_testdata/mixture_testdata/test.pt" -o rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/mixture_testdata/test.pt
+curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/ckpt_database_testdata/mixture_testdata/test.safetensors" -o rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/mixture_testdata/test.safetensors
 wait
