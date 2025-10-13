@@ -158,6 +158,7 @@ message AuxInfoPB {
     int32 decode_total_reuse_len = 20;
     int32 decode_local_reuse_len = 21;
     int32 decode_remote_reuse_len = 22;
+    string aux_string = 23;
 }
 
 message GenerateOutputPB {

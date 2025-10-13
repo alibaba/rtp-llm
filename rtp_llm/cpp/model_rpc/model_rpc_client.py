@@ -218,6 +218,7 @@ def trans_output(
             decode_total_reuse_len=output_pb.aux_info.decode_total_reuse_len,
             decode_local_reuse_len=output_pb.aux_info.decode_local_reuse_len,
             decode_remote_reuse_len=output_pb.aux_info.decode_remote_reuse_len,
+            aux_string=output_pb.aux_info.aux_string,
             role_addrs=input_py.generate_config.role_addrs,
         )
         # TODO(xinfei.sxf) cum_log_probs is not right, ignore it temporarily
