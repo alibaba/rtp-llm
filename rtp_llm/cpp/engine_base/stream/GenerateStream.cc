@@ -53,9 +53,14 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
         RTP_LLM_LOG_WARNING("beam search does not support PERF_TEST for now");
     }
 
-    // Note it is invalid to use currentBatchSize here, because currentBatchSize depends on complete_token_ids_,
-    // which has not been initialized yet
+    // Note it is invalid to use currentBatchSize and nextBatchSize here, because they depend on
+    // complete_token_ids_, which has not been initialized yet
     const size_t init_batch_size = batchSize(0);
+    const size_t next_batch_size = batchSize(1);
+    // due to logits processing following tiling for logits, the batch size of the 2nd step is used here
+    // TODO(zhangjianning.zjn): tiling for logits should be moved after logits processors
+    const size_t logits_processor_init_batch_size =
+        init_batch_size != next_batch_size && !hasNumBeams() ? next_batch_size : init_batch_size;
 
     begin_time_us_ = input->begin_time_us;
     device_        = rtp_llm::DeviceFactory::getDefaultDevice();
@@ -93,7 +98,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     setReturnAllProbs(generate_input_->generate_config->return_all_probs);
 
     logits_processor_list_ = LogitsProcessorFactory::createLogitsProcessors(
-        device_, generate_input_, init_batch_size, maxBatchSize(), special_tokens_.eos_token_id);
+        device_, generate_input_, logits_processor_init_batch_size, special_tokens_.eos_token_id);
 
     if (generateConfig()->random_seed.has_value()) {
 #if defined(USING_CUDA) || defined(USING_ROCM)
@@ -188,7 +193,7 @@ int GenerateStream::batchSize(int output_len) const {
     if (generate_input_->generate_config->hasNumBeams()) {
         return numBeams(output_len);
     } else {
-        return std::max(numReturnSequences(), 1);
+        return output_len == 0 && !perf_test_ ? 1 : std::max(numReturnSequences(), 1);
     }
 }
 
@@ -857,7 +862,7 @@ bool GenerateStream::updateKvCacheBlocks(const rtp_llm::BufferPtr& src_batch_ind
 }
 
 void GenerateStream::updateLogitProcessorMultiSeqStatus(const rtp_llm::BufferPtr& src_batch_indices) {
-    if (src_batch_indices == nullptr || !hasNumBeams()) {
+    if (src_batch_indices == nullptr) {
         return;
     }
 
