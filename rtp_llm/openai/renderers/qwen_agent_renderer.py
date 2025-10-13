@@ -143,7 +143,7 @@ class QwenAgentRenderer(CustomChatRenderer):
         )
 
         output_length = len(output_ids)
-        output_ids = self._remove_stop_word_ids(output_ids)
+        output_ids = self._remove_stop_word_ids(output_ids, output_ids)
         output_str = self.tokenizer.decode(output_ids)
 
         # following qwen agent function_calling.py process
