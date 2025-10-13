@@ -2,6 +2,7 @@ import asyncio
 import copy
 import functools
 import json
+import logging
 import os
 from contextlib import asynccontextmanager, contextmanager
 from typing import Any, AsyncGenerator, Callable, List
@@ -101,11 +102,9 @@ async def fake_output_generator(
 ) -> AsyncGenerator[GenerateOutputs, None]:
     # 流式的返回结果
     for i in range(0, len(output_ids)):
-        output_tensor = torch.full((1, max_seq_len), eos_id, dtype=torch.int)
+        output_tensor = torch.full((1, 1), eos_id, dtype=torch.int)
 
-        output_tensor[0, : len(output_ids[i : i + 1])] = torch.tensor(
-            output_ids[i : i + 1], dtype=torch.int
-        )
+        output_tensor[0, 0] = torch.tensor(output_ids[i : i + 1], dtype=torch.int)
         finished = torch.full((1,), (i == (len(output_ids) - 1)), dtype=torch.bool)
         outputs = GenerateOutputs()
         aux = AuxInfo()
@@ -132,7 +131,7 @@ async def fake_output_generator_once(
     output_gen: Callable[..., GenerateOutput] = GenerateOutput,
 ) -> AsyncGenerator[GenerateOutputs, None]:
     # 创建包含所有token的完整输出张量, 模拟非流式的返回
-    output_tensor = torch.full((1, max_seq_len), eos_id, dtype=torch.int)
+    output_tensor = torch.full((1, len(output_ids)), eos_id, dtype=torch.int)
     output_tensor[0, : len(output_ids)] = torch.tensor(output_ids, dtype=torch.int)
 
     # 标记为已完成
@@ -1962,11 +1961,9 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
                     first_token = [self.test_ids[0]]
 
                     output_tensor1 = torch.full(
-                        (1, self.max_seq_len), self.eos_token_id, dtype=torch.int
+                        (1, 1), self.eos_token_id, dtype=torch.int
                     )
-                    output_tensor1[0, : len(first_token)] = torch.tensor(
-                        first_token, dtype=torch.int
-                    )
+                    output_tensor1[0, 0] = torch.tensor(first_token, dtype=torch.int)
 
                     outputs1 = GenerateOutputs()
                     aux1 = AuxInfo()
@@ -1992,7 +1989,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
                     remaining_tokens = self.test_ids[1:]
 
                     output_tensor2 = torch.full(
-                        (1, self.max_seq_len), self.eos_token_id, dtype=torch.int
+                        (1, len(remaining_tokens)), self.eos_token_id, dtype=torch.int
                     )
                     output_tensor2[0, : len(remaining_tokens)] = torch.tensor(
                         remaining_tokens, dtype=torch.int

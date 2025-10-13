@@ -60,8 +60,8 @@ class StreamStatus:
     index: int = 0
     request: ChatCompletionRequest
     output: Optional[GenerateOutput] = None
-    origin_output_ids: torch.Tensor = torch.empty(0, dtype=torch.int32)
     output_ids: torch.Tensor = torch.empty(0, dtype=torch.int32)
+    output_ids_list: List[int] = []
     last_output_ids: List[int] = []
     last_token_length: int = 0
     finish_reason = None
@@ -75,18 +75,19 @@ class StreamStatus:
     def update_output(
         self,
         output: GenerateOutput,
-        clean_output_func,
         check_finish_func,
         remove_stop_word_ids_func,
     ):
         self.index += 1
         self.output = output
-        self.origin_output_ids = torch.cat(
-            (self.origin_output_ids, output.output_ids), dim=1
+        delta_output_ids = output.output_ids.cpu().flatten().tolist()
+        self.output_ids_list = copy.deepcopy(
+            self.output_ids_list + delta_output_ids
         )
-        self.output_ids = clean_output_func(self.origin_output_ids)
-        self.finish_reason = check_finish_func(self.output_ids, self.input_token_length)
-        self.output_ids = remove_stop_word_ids_func(self.output_ids)
+        self.finish_reason = check_finish_func(
+            self.output_ids_list, self.input_token_length
+        )
+        self.output_ids = remove_stop_word_ids_func(self.output_ids_list, delta_output_ids)
 
     def update_result(self):
         self.last_token_length = len(self.output_ids) - len(self.last_output_ids)
@@ -119,7 +120,6 @@ class StreamStatus:
             f"index={self.index}, "
             f"request={self.request}, "
             f"output={self.output}, "
-            f"origin_output_ids={self.origin_output_ids}, "
             f"output_ids={self.output_ids}, "
             f"last_output_ids={self.last_output_ids}, "
             f"last_token_length={self.last_token_length}, "
@@ -133,9 +133,9 @@ class StreamStatus:
 class StreamStatusSync:
     index: int = 0
     request: ChatCompletionRequest
-    origin_output_ids: torch.Tensor = torch.empty(0, dtype=torch.int32)
     output_ids: torch.Tensor = torch.empty(0, dtype=torch.int32)
     last_output_ids: List[int] = []
+    output_ids_list: List[int] = []
     last_token_length: int = 0
     finish_reason = None
     tokenizer = None
@@ -149,15 +149,16 @@ class StreamStatusSync:
         self,
         output_ids,
         input_len,
-        clean_output_func,
         check_finish_func,
         remove_stop_word_ids_func,
     ):
         self.index += 1
-        self.origin_output_ids = torch.cat((self.origin_output_ids, output_ids), dim=1)
-        self.output_ids = clean_output_func(self.origin_output_ids)
-        self.finish_reason = check_finish_func(self.output_ids, input_len)
-        self.output_ids = remove_stop_word_ids_func(self.output_ids)
+        delta_output_ids = output.output_ids.cpu().flatten().tolist()
+        self.output_ids_list = copy.deepcopy(
+            self.output_ids_list + delta_output_ids
+        )
+        self.finish_reason = check_finish_func(self.output_ids_list, input_len)
+        self.output_ids = remove_stop_word_ids_func(self.output_ids_list, delta_output_ids)
 
     def update_result(self):
         self.last_token_length = len(self.output_ids) - len(self.last_output_ids)
@@ -551,7 +552,6 @@ class CustomChatRenderer:
             return await self._create_empty_delta(status.output.aux_info)
         status.update_output(
             output,
-            self._clean_output_ids,
             functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens),
             self._remove_stop_word_ids,
         )
@@ -963,7 +963,6 @@ class CustomChatRenderer:
         status.update_output_sync(
             output_ids,
             input_len,
-            self._clean_output_ids,
             functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens),
             self._remove_stop_word_ids,
         )
@@ -1413,10 +1412,17 @@ class CustomChatRenderer:
                 return FinisheReason.stop
         return None
 
-    def _remove_stop_word_ids(self, output_ids: List[int]) -> List[int]:
+    def _remove_stop_word_ids(self, output_ids: List[int], delta_output_ids: List[int]) -> List[int]:
         stop_word_ids_list_all = (
             self.get_all_extra_stop_word_ids_list() + self.stop_words_id_list
         )
+        start_pos = len(output_ids)-len(delta_output_ids)
+        end_pos = len(output_ids)
+        if start_pos >= 0 :
+            for i in range(start_pos, end_pos):
+                if output_ids[i] == self.eos_token_id:
+                    output_ids = output_ids[:i]
+                    break
         for stop_word_ids in stop_word_ids_list_all:
             #  此处应该从最大的范围开始判断
             # 有可能会有stopword_ids 重复的情况，比如[144575, 14098, 144575]
@@ -1425,11 +1431,4 @@ class CustomChatRenderer:
                 if output_ids[-i:] == stop_word_ids[:i]:
                     output_ids = output_ids[:-i]
                     break
-        return output_ids
-
-    def _clean_output_ids(self, output_ids_tensor: torch.Tensor) -> list[int]:
-        output_ids_tensor = output_ids_tensor.cpu().reshape([-1])
-        # TODO(wangyin): This slicing shouldn't be done here.
-        # model should return output length, ids should be sliced with output length.
-        output_ids = output_ids_tensor[output_ids_tensor != self.eos_token_id].tolist()
         return output_ids
