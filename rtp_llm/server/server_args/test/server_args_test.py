@@ -965,7 +965,7 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env["STEP_RECORDS_MAX_SIZE"], "4000")
         self.assertEqual(env["DISABLE_PDL"], "1")
         self.assertEqual(
-            env["AUX_STRING"], '{"DEPLOYMENT_NAME":"DEFAULT_DEPLOYMENT_NAME"}'
+            env["AUX_STRING"], ""
         )
 
         # 31. PD-Separation Configuration
