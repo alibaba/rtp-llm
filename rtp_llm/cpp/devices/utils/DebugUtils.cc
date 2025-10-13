@@ -61,7 +61,8 @@ void printBuffer1d(const std::string&  hint,
                    size_t              column_start,
                    size_t              column_end,
                    size_t              max_print_lines,
-                   int                 log_level) {
+                   int                 log_level,
+                   bool                show_stats_only) {
     size_t dim1 = dims[0];
     RTP_LLM_LOG(
         log_level, "Buffer %s: shape [%d], type: %s", hint.c_str(), dim1, tensor.options().dtype().name().data());
@@ -76,9 +77,11 @@ void printBuffer1d(const std::string&  hint,
     const auto [sum1, sum2] = calculateTensorSum([&](size_t i) -> auto { return tensor[i]; },  // 访问器
                                                  dim1                                          // 当前维度长度
     );
-    print_func(column_start, column_end);
-    ss << " ...... ";
-    print_func(std::max((size_t)0, dim1 - (column_end - column_start)), dim1);
+    if (!show_stats_only) {
+        print_func(column_start, column_end);
+        ss << " ...... ";
+        print_func(std::max((size_t)0, dim1 - (column_end - column_start)), dim1);
+    }
 
     ss << " sum1 = " << sum1 << ", square sum2 = " << sum2;
     RTP_LLM_LOG(log_level, ss.str());
@@ -374,7 +377,7 @@ void printBufferData_(const Buffer& buffer, const std::string& hint, DeviceBase*
     } else if (dims.size() == 2) {
         printBuffer2d(hint, tensor, dims, column_start, column_end, max_print_lines, log_level, show_stats_only);
     } else if (dims.size() == 1) {
-        printBuffer1d(hint, tensor, dims, column_start, column_end, max_print_lines, log_level);
+        printBuffer1d(hint, tensor, dims, column_start, column_end, max_print_lines, log_level, show_stats_only);
     }
 }
 

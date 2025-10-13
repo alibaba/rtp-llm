@@ -100,6 +100,7 @@ public:
 
     // for multi thread no block copy
     virtual void noBlockCopy(const CopyParams& params);
+    virtual void noBlockCopy(const MultiCopyParams& params);
 
     // for perf
     virtual void perfRangePush(const std::string& name) const;
