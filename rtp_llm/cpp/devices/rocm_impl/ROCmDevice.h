@@ -22,6 +22,7 @@
 #include "rtp_llm/cpp/rocm/rocmCKGemmWrapper.h"
 #include "rtp_llm/cpp/kernels/kv_cache/kv_cache_utils.h"
 #include "rtp_llm/cpp/rocm/custom_ar/custom_ar_comm.h"
+#include "rtp_llm/cpp/rocm/custom_ar/quick_ar_comm.h"
 
 #include "torch_hip_allocator.h"
 
@@ -308,6 +309,9 @@ private:
 
     // for custom allreduce use
     std::unique_ptr<CustomAllReduceComm> custom_allreduce_comm_ = nullptr;
+
+    // for quick allreduce use
+    std::unique_ptr<QuickAllReduceComm> quick_allreduce_comm_ = nullptr;
 
     // BufferPtr will be error when multi stream, tmp hold
     // std::vector<BufferPtr> overlap_hold_buffers_;

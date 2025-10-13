@@ -246,6 +246,7 @@ cc_library(
         "ffn/rocm_ffn_moe_fp8_test.cc",
         "ffn/rocm_ffn_moe_fp8_ptpc_test.cc",
         "ffn/rocm_ffn_moe_bf16_test.cc",
+        "custom_ar/rocm_custom_ar_test.cc",
         "layernorm/fusedQkRmsNorm.cpp"
     ]),
     deps = torch_deps() + [
@@ -501,4 +502,25 @@ py_test(
         "//rtp_llm:rtp_llm_lib",
     ],
     exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "rocm_custom_ar_test",
+    srcs = [
+         "custom_ar/rocm_custom_ar_test.py",
+    ],
+    data = [
+        "//:th_transformer",
+        ":rocm_test_ops",
+    ],
+    deps = [
+        "//rtp_llm:torch",
+        "//rtp_llm:rtp_llm_lib",
+    ],
+    env = {
+        "DEVICE_RESERVE_MEMORY_BYTES": "1024000",
+    },
+    tags = [
+        "rocm",
+    ],
 )

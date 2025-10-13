@@ -102,7 +102,8 @@ genrule(
         "aiter/jit/libmodule_rmsnorm.so",
         "aiter/jit/libmodule_smoothquant.so",
         "aiter/jit/libmodule_gemm_a8w8.so",
-        "aiter/jit/libmodule_moe_ck2stages.so"
+        "aiter/jit/libmodule_moe_ck2stages.so",
+        "aiter/jit/libmodule_quick_all_reduce.so",
     ],
     cmd = """
         cd external/aiter_src;
@@ -130,6 +131,7 @@ genrule(
         cp external/aiter_src/aiter/jit/module_mha_fwd.so $(location aiter/jit/libmodule_mha_fwd.so);
         cp external/aiter_src/aiter/jit/module_gemm_a8w8.so $(location aiter/jit/libmodule_gemm_a8w8.so);
         cp external/aiter_src/aiter/jit/module_moe_ck2stages.so $(location aiter/jit/libmodule_moe_ck2stages.so);
+        cp external/aiter_src/aiter/jit/module_quick_all_reduce.so $(location aiter/jit/libmodule_quick_all_reduce.so);
     """,
     visibility = ["//visibility:public"],
     tags = ["rocm","local"],
@@ -309,6 +311,17 @@ cc_library(
     deps = [":cpp_libraries"],
     copts = [],
     linkopts = [],
+    strip_include_prefix = "csrc/include/",
+    visibility = ["//visibility:public"],
+    tags = ["rocm","local"],
+)
+
+cc_library(
+    name = "module_quick_all_reduce",
+    srcs = ["aiter/jit/libmodule_quick_all_reduce.so"],
+    hdrs = ["csrc/include/quick_all_reduce.h"],
+    deps = [":cpp_libraries"],
+    copts = [],
     strip_include_prefix = "csrc/include/",
     visibility = ["//visibility:public"],
     tags = ["rocm","local"],

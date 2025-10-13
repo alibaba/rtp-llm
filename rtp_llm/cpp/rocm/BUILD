@@ -14,9 +14,11 @@ cc_library(
     name = "rocm_custom_ar",
     srcs = [
         "custom_ar/custom_ar_comm.cc",
+        "custom_ar/quick_ar_comm.cc",
     ],
     hdrs = [
-        "custom_ar/custom_ar_comm.h"
+        "custom_ar/custom_ar_comm.h",
+        "custom_ar/quick_ar_comm.h",
     ],
     deps = [
         "//rtp_llm/cpp/cuda:nccl_util",
@@ -25,8 +27,9 @@ cc_library(
     ] + torch_deps() + select({
         "@//:using_aiter_src": [
             "@aiter_src//:module_custom_all_reduce",
+            "@aiter_src//:module_quick_all_reduce",
         ],
-        "//conditions:default": ["@aiter//:module_custom_all_reduce",],
+        "//conditions:default": ["@aiter//:module_custom_all_reduce", "@aiter//:module_quick_all_reduce"],
     }),
     copts = rocm_copts() + ["-DUSE_ROCM=1"],
     include_prefix = "src",

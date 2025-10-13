@@ -51,7 +51,8 @@ genrule(
         "libmodule_norm.so",
         "libmodule_rmsnorm.so",
         "libmodule_gemm_a8w8.so",
-        "libmodule_moe_ck2stages.so"
+        "libmodule_moe_ck2stages.so",
+        "libmodule_quick_all_reduce.so",
     ],
     cmd = """
        cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_aiter_enum.so $(location libmodule_aiter_enum.so);
@@ -70,6 +71,7 @@ cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_norm.so $(locat
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_rmsnorm.so $(location libmodule_rmsnorm.so);
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_gemm_a8w8.so $(location libmodule_gemm_a8w8.so);
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_moe_ck2stages.so $(location libmodule_moe_ck2stages.so);
+cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_quick_all_reduce.so $(location libmodule_quick_all_reduce.so);
 """,
 tags = ["rocm", "local"],
 )
@@ -94,6 +96,7 @@ genrule(
         "module_rmsnorm.so",
         "module_gemm_a8w8.so",
         "module_moe_ck2stages.so",
+        "module_quick_all_reduce.so",
     ],
     cmd = """
         cp external/aiter/aiter/jit/module_aiter_enum.so $(location module_aiter_enum.so);
@@ -112,6 +115,7 @@ genrule(
         cp external/aiter/aiter/jit/module_rmsnorm.so $(location module_rmsnorm.so);
         cp external/aiter/aiter/jit/module_gemm_a8w8.so $(location module_gemm_a8w8.so);
         cp external/aiter/aiter/jit/module_moe_ck2stages.so $(location module_moe_ck2stages.so);
+        cp external/aiter/aiter/jit/module_quick_all_reduce.so $(location module_quick_all_reduce.so);
 """,
 tags = ["rocm", "local"],
 )

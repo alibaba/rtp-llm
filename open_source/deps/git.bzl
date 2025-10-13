@@ -68,6 +68,7 @@ def git_deps():
             "echo '    build_aiter_module(\"module_gemm_a8w8_bpreshuffle\")' >> build_aiter_module.py",
             "echo '    build_aiter_module(\"module_gemm_a8w8\")' >> build_aiter_module.py",
             "echo '    build_aiter_module(\"module_moe_ck2stages\")' >> build_aiter_module.py",
+            "echo '    build_aiter_module(\"module_quick_all_reduce\")' >> build_aiter_module.py",
             "echo 'echo \"building mla kernel\"' >> build_mla_kernel.sh",
             "echo 'so_file=\"./csrc/cpp_itfs/mla/asm_mla_decode_fwd_torch_lib.so\"' >> build_mla_kernel.sh",
             "echo 'if [ -f $so_file ]; then' >> build_mla_kernel.sh",
