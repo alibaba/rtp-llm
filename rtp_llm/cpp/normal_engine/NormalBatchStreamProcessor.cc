@@ -274,7 +274,7 @@ absl::StatusOr<SamplerInputs> NormalBatchStreamProcessor::gatherSamplerInput(
             memcpy(sampler_inputs.token_ids->dataWithOffset<int32_t>((batch_idx) * (sampler_inputs.step + 1)),
                    complete_token_ids->dataWithOffset<int32_t>(cur_batch * complete_seq_len),
                    seq_len * sizeof(int));
-            sampler_inputs.finished_mask->data<bool>()[batch_idx] = stream->isDoneWithoutLock(i);
+            sampler_inputs.finished_mask->data<bool>()[batch_idx] = stream->isDoneWithoutLock(cur_batch);
             batch_idx += 1;
         }
         need_tiling |= stream->needTilingForSampling();
@@ -301,11 +301,12 @@ absl::StatusOr<SamplerInputs> NormalBatchStreamProcessor::gatherSamplerInput(
 
     // copy logits when needs tiling or returning logits
     if (need_tiling) {
+        // TODO(zhangjianning.zjn): tiling for logits should be moved after logits processors
         sampler_inputs.logits = device_->allocateBuffer(
             {model_output.logits->type(), {total_batch_size_in, vocab_size}, rtp_llm::AllocationType::DEVICE}, {});
         device_->copy({sampler_inputs.logits->view(0, total_decode_batch_size_in),
                        model_output.logits->view(0, total_decode_batch_size_in)});
-        size_t input_offset = 0, logits_offset = 0;
+        size_t input_offset = total_decode_batch_size_in, logits_offset = total_decode_batch_size_in;
         for (auto& stream : stream_groups.contextStreams()) {
             auto sampler_batch_size =
                 stream->needTilingForSampling() ? stream->nextBatchSize() : stream->currentBatchSize();
@@ -441,11 +442,13 @@ void NormalBatchStreamProcessor::setLogitsProcessorInputs(SamplerInputs&        
                                                           std::list<GenerateStreamPtr>& all_streams,
                                                           bool                          score_batch) const {
     LogitsProcessorStatesPtr state_ptr = std::make_shared<LogitsProcessorStates>();
+    // TODO(zhangjianning.zjn): tiling for logits should be moved after logits processors
     std::for_each(all_streams.begin(), all_streams.end(), [&state_ptr, idx = 0](auto& stream) mutable {
+        const auto batch_size = stream->needTilingForSampling() ? stream->nextBatchSize() : stream->currentBatchSize();
         for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
-            state_ptr->insert(processor, idx, idx + stream->currentBatchSize());
+            state_ptr->insert(processor, idx, idx + batch_size);
         }
-        idx += stream->currentBatchSize();
+        idx += batch_size;
     });
     sampler_inputs.logits_processor_states_ptr = state_ptr;
 }

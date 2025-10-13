@@ -88,8 +88,9 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 
     setReturnAllProbs(generate_input_->generate_config->return_all_probs);
 
-    think_logits_processor_ptr_ = ThinkModeLogitsProcessor::fromGenerateInput(device_, generate_input_, maxBatchSize());
-    tree_logits_processor_ptr_  = TreeLogitsProcessor::fromGenerateInput(device_, generate_input_, init_batch_size);
+    think_logits_processor_ptr_ =
+        ThinkModeLogitsProcessor::fromGenerateInput(device_, generate_input_, init_batch_size);
+    tree_logits_processor_ptr_ = TreeLogitsProcessor::fromGenerateInput(device_, generate_input_, init_batch_size);
     multi_seq_logits_processor_ptr_ =
         MultiSeqLogitsProcessor::fromGenerateInput(device_, generate_input_, special_tokens_.eos_token_id_);
 
@@ -230,7 +231,7 @@ int GenerateStream::batchSize(int output_len) const {
     if (generate_input_->generate_config->hasNumBeams()) {
         return numBeams(output_len);
     } else {
-        return std::max(numReturnSequences(), 1);
+        return output_len == 0 && !perf_test_ ? 1 : std::max(numReturnSequences(), 1);
     }
 }
 
@@ -877,7 +878,7 @@ bool GenerateStream::updateKvCacheBlocks(const rtp_llm::BufferPtr& src_batch_ind
 }
 
 void GenerateStream::updateLogitProcessorMultiSeqStatus(const rtp_llm::BufferPtr& src_batch_indices) {
-    if (src_batch_indices == nullptr || !hasNumBeams()) {
+    if (src_batch_indices == nullptr) {
         return;
     }
 
