@@ -12,7 +12,7 @@ def git_deps():
         remote = "https://github.com/ROCm/aiter.git",
         commit = "94934e7d7cd5e11d81a2ded2a54d35f9cec4374d", # update codegen.py (#880)
         recursive_init_submodules = True,
-        patches = ["//3rdparty/aiter:rtp-llm.patch", "//3rdparty/aiter:0003-gemm_tune.patch", "//3rdparty/aiter:aiter-fmha.patch", "//3rdparty/aiter:silu.patch"],
+        patches = ["//3rdparty/aiter:aiter.patch", "//3rdparty/aiter:gemm_blockscale.patch", "//3rdparty/aiter:gemm_a8w8.patch"],
         patch_cmds = [
             "echo 'from aiter.jit.core import compile_ops, get_args_of_build, build_module, get_module' >> build_aiter_module.py",
             "echo 'from typing import Dict' >> build_aiter_module.py",
@@ -66,6 +66,7 @@ def git_deps():
             "echo '    build_aiter_module(\"module_attention_asm\")' >> build_aiter_module.py",
             "echo '    build_aiter_module(\"module_activation\")' >> build_aiter_module.py",
             "echo '    build_aiter_module(\"module_gemm_a8w8_bpreshuffle\")' >> build_aiter_module.py",
+            "echo '    build_aiter_module(\"module_gemm_a8w8\")' >> build_aiter_module.py",
             "echo '    build_aiter_module(\"module_moe_ck2stages\")' >> build_aiter_module.py",
             "echo 'echo \"building mla kernel\"' >> build_mla_kernel.sh",
             "echo 'so_file=\"./csrc/cpp_itfs/mla/asm_mla_decode_fwd_torch_lib.so\"' >> build_mla_kernel.sh",
