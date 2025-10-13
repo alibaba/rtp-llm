@@ -18,8 +18,7 @@ filegroup(
     name = "copy_aiter",
     srcs = select({
         "@//:using_aiter_src": [":aiter_src_copy",],
-        "@//:using_rocm": [":aiter_copy"],
-        "//conditions:default": [],
+        "//conditions:default": [":aiter_copy"],
     }),
     visibility = ["//visibility:public"],
 )
@@ -51,6 +50,7 @@ genrule(
         "libmodule_mha_fwd.so",
         "libmodule_norm.so",
         "libmodule_rmsnorm.so",
+        "libmodule_gemm_a8w8.so",
         "libmodule_moe_ck2stages.so"
     ],
     cmd = """
@@ -68,6 +68,7 @@ cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_attention_asm.s
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_mha_fwd.so $(location libmodule_mha_fwd.so);
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_norm.so $(location libmodule_norm.so);
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_rmsnorm.so $(location libmodule_rmsnorm.so);
+cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_gemm_a8w8.so $(location libmodule_gemm_a8w8.so);
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_moe_ck2stages.so $(location libmodule_moe_ck2stages.so);
 """,
 tags = ["rocm", "local"],
@@ -91,6 +92,7 @@ genrule(
         "module_mha_fwd.so",
         "module_norm.so",
         "module_rmsnorm.so",
+        "module_gemm_a8w8.so",
         "module_moe_ck2stages.so",
     ],
     cmd = """
@@ -108,6 +110,7 @@ genrule(
         cp external/aiter/aiter/jit/module_mha_fwd.so $(location module_mha_fwd.so);
         cp external/aiter/aiter/jit/module_norm.so $(location module_norm.so);
         cp external/aiter/aiter/jit/module_rmsnorm.so $(location module_rmsnorm.so);
+        cp external/aiter/aiter/jit/module_gemm_a8w8.so $(location module_gemm_a8w8.so);
         cp external/aiter/aiter/jit/module_moe_ck2stages.so $(location module_moe_ck2stages.so);
 """,
 tags = ["rocm", "local"],
