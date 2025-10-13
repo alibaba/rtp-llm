@@ -81,6 +81,7 @@ class AuxInfo(PyBaseModel):
     decode_remote_reuse_len: int = 0
 
     role_addrs: List[RoleAddr] = []
+    aux_string: str = ""
 
 
 class GenerateOutput(PyBaseModel):

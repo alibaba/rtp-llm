@@ -766,6 +766,7 @@ class GptInitModelParameters:
             ),
             step_records_max_size=get_env_int("STEP_RECORDS_MAX_SIZE", 1000),
             disable_pdl=get_env_bool("DISABLE_PDL", True),
+            aux_string=get_env_str("AUX_STRING", ""),
         )
 
         # ArpcConfig

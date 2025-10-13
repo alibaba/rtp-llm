@@ -964,6 +964,9 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env["STEP_RECORDS_TIME_RANGE"], "240000000")
         self.assertEqual(env["STEP_RECORDS_MAX_SIZE"], "4000")
         self.assertEqual(env["DISABLE_PDL"], "1")
+        self.assertEqual(
+            env["AUX_STRING"], '{"DEPLOYMENT_NAME":"DEFAULT_DEPLOYMENT_NAME"}'
+        )
 
         # 31. PD-Separation Configuration
         self.assertEqual(env["PREFILL_RETRY_TIMES"], "2")
