@@ -597,6 +597,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
     KVBlockArray                  kv_block_array;
     PrefixPromptBatchWeightsParam prefix_prompt_param;
 
+    bool use_fp8_fmha = false;
     if (params.common.kv_cache) {
         const auto max_blocks_per_batch = params.common.kv_cache->kv_cache_block_id->shape()[1];
         kv_cache_block_id =
@@ -610,12 +611,20 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
             prefix_prompt_param.max_prefix_prompt_length = params.common.max_prefix_length;
             prefix_prompt_param.count_length             = 1;
         }
+        use_fp8_fmha = kv_block_array.cache_type == KvCacheDataType::FP8;
     }
     printBufferData(*params.common.input_lengths, "input_lengths");
     if (params.common.cu_seqlens) {
         printBufferData(*params.common.cu_seqlens, "cu_seqlens");
         printBufferData(*params.common.cu_kv_seqlens, "cu_kv_seqlens");
     }
+
+    BufferPtr qkv_buf_fp8 = nullptr;
+    if (use_fp8_fmha) {
+        qkv_buf_fp8 = allocateBuffer({DataType::TYPE_FP8_E4M3,
+                                      {batch_size, (head_num + kv_head_num * 2), seq_len_with_prefix, size_per_head},
+                                      AllocationType::DEVICE},
+                                     {"qkv_fp8_output"});}
 
     // int8
     float* scale_out_ptr = nullptr;
@@ -683,7 +692,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                                              v_output->data(),
                                              &prefix_prompt_param,
                                              params.input.data(),
-                                             nullptr,
+                                             qkv_buf_fp8? qkv_buf_fp8->data(): nullptr,
                                              params.common.position_ids ?
                                                  params.common.position_ids->dataWithOffset<int>(
                                                      decoder_batch_size * params.configs.rope_config.index_factor) :
@@ -754,20 +763,15 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
         }
         writeCacheStore(params);
     }
-
-    fmha_runner_->setup(
-        datatype, params.configs.mask_type, head_num, kv_head_num, size_per_head, params.configs.q_scaling);
-    // auto seq_len_round_32 = (seq_len + 31) / 32 * 32;
-    // auto softmax_lse_ = allocateBuffer({DataType::TYPE_FP32, // params.output.type(),
-    //                                     {batch_size, head_num, seq_len_round_32},
-    //                                     AllocationType::DEVICE},
-    //                                     {"softmax_lse"});
+    if (use_fp8_fmha){
+        fmha_runner_->setup(
+            DataType::TYPE_FP8_E4M3, params.configs.mask_type, head_num, kv_head_num, size_per_head, params.configs.q_scaling);
+    } else {
+        fmha_runner_->setup(
+            datatype, params.configs.mask_type, head_num, kv_head_num, size_per_head, params.configs.q_scaling);
+    }
+    
     printBufferData(*q_output, "q_output");
-    // printBufferData(*k_output, "k_output");
-    // printBufferData(*v_output, "v_output");
-    // if (v_output->shape()[0]>1) {
-    //     printBufferData(*(v_output->index(1)), "v_output_batch1");
-    // }
 
     const size_t hidden_units    = head_num * size_per_head;
     const size_t hidden_units_kv = kv_head_num * size_per_head;
@@ -780,7 +784,25 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
     printBufferData(params.input, "run_ck_input");
     if (skip_add_bias_transpose || prefix_prompt_param.max_prefix_prompt_length <= 0) {
         // not implemented reuse cache for this branch
-        fmha_runner_->runCKFmha(params.input.data(),
+        if (use_fp8_fmha){
+            fmha_runner_->runCKFmha(qkv_buf_fp8->data(),
+                                qkv_buf_fp8->dataWithOffset(hidden_units),
+                                qkv_buf_fp8->dataWithOffset(hidden_units + hidden_units_kv),
+                                params.output.data(),
+                                nullptr,  // buffer for store out softmax_lse, looks like not used by RTP
+                                batch_size,
+                                seq_len,
+                                prefix_prompt_param.max_prefix_prompt_length,
+                                // context_token_num,
+                                params.common.cu_seqlens->data(),
+                                params.common.cu_kv_seqlens->data(),
+                                lse_acc_buf->data(),
+                                params.common.linear_bias_slopes ? params.common.linear_bias_slopes->data() : nullptr,
+                                nullptr,
+                                false,
+                                false);
+        } else {
+            fmha_runner_->runCKFmha(params.input.data(),
                                 params.input.dataWithOffset(hidden_units),
                                 params.input.dataWithOffset(hidden_units + hidden_units_kv),
                                 params.output.data(),
@@ -795,7 +817,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                                 params.common.linear_bias_slopes ? params.common.linear_bias_slopes->data() : nullptr,
                                 nullptr,
                                 false,
-                                false);
+                                false);}
     } else {
         // Processing continuous/variable-length sequences
         torch::Tensor q_output_tensor, k_output_tensor, v_output_tensor;
