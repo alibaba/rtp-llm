@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-10-14 10:12+0800\n"
+"POT-Creation-Date: 2025-10-14 16:20+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -45,18 +45,6 @@ msgid "**tag**"
 msgstr ""
 
 #: ../../release/v0.2.0/package.md:0
-msgid "**CUDA-SM9x**"
-msgstr ""
-
-#: ../../release/v0.2.0/package.md:0
-msgid "hub.docker.alibaba-inc.com/isearch/rtp_llm_sm9x"
-msgstr ""
-
-#: ../../release/v0.2.0/package.md:0
-msgid "0.2.0_2025_09_24_21_00_615e568_accelerated"
-msgstr ""
-
-#: ../../release/v0.2.0/package.md:0
 msgid "**CUDA-SM8x**"
 msgstr ""
 
@@ -68,20 +56,8 @@ msgstr ""
 msgid "0.2.0_0.2.0_2025_10_09_17_35_8fa289f5"
 msgstr ""
 
-#: ../../release/v0.2.0/package.md:0
-msgid "**CUDA-SM7x**"
-msgstr ""
-
-#: ../../release/v0.2.0/package.md:0
-msgid "hub.docker.alibaba-inc.com/isearch/rtp_llm_sm7x"
-msgstr ""
-
-#: ../../release/v0.2.0/package.md:0
-msgid "**AMD**"
-msgstr ""
-
-#: ../../release/v0.2.0/package.md:0
-msgid "hub.docker.alibaba-inc.com/isearch/rtp_llm_rocm"
+#: ../../release/v0.2.0/package.md:15
+msgid "Images of SM9x,SM7x,AMD is comming soon"
 msgstr ""
 
 #: ../../release/v0.2.0/package.md:17
@@ -98,6 +74,10 @@ msgstr ""
 
 #: ../../release/v0.2.0/package.md:0
 msgid "hub.docker.alibaba-inc.com/isearch/rtp_llm_frontend"
+msgstr ""
+
+#: ../../release/v0.2.0/package.md:0
+msgid "0.2.0_2025_09_24_21_00_615e568_accelerated"
 msgstr ""
 
 #: ../../release/v0.2.0/package.md:0
@@ -121,5 +101,17 @@ msgid "**wheel**"
 msgstr ""
 
 #: ../../release/v0.2.0/package.md:0
+msgid "**CUDA-SM9x**"
+msgstr ""
+
+#: ../../release/v0.2.0/package.md:0
 msgid "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/daily/2025_10_09/rtp_llm-0.2.0-0.2.0-2025_10_09_17_35_8fa289f5-cp310-cp310-manylinux1_x86_64.whl"
+msgstr ""
+
+#: ../../release/v0.2.0/package.md:0
+msgid "**CUDA-SM7x**"
+msgstr ""
+
+#: ../../release/v0.2.0/package.md:0
+msgid "**AMD**"
 msgstr ""

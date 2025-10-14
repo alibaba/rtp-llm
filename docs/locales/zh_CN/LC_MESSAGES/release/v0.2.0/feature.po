@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-10-10 11:12+0800\n"
+"POT-Creation-Date: 2025-10-14 15:31+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -21,19 +21,19 @@ msgstr ""
 
 #: ../../release/v0.2.0/feature.md:2
 msgid "Overview"
-msgstr ""
+msgstr "概述"
 
 #: ../../release/v0.2.0/feature.md:3
 msgid "RTP-LLM First Release Version:0.2.0(2025.09)"
-msgstr ""
+msgstr "RTP-LLM 首发版本：0.2.0 (2025.09)"
 
 #: ../../release/v0.2.0/feature.md:4
 msgid "Features"
-msgstr ""
+msgstr "特性"
 
 #: ../../release/v0.2.0/feature.md:5
 msgid "Framkework  Advanced Feature"
-msgstr ""
+msgstr "框架高级特性"
 
 #: ../../release/v0.2.0/feature.md:6
 msgid ""
@@ -105,31 +105,31 @@ msgstr "[前后端解聚](../../backend/Frontend.md)"
 
 #: ../../release/v0.2.0/feature.md:23
 msgid "New Models"
-msgstr ""
+msgstr "新模型"
 
 #: ../../release/v0.2.0/feature.md
 msgid "**Model Family (Variants)**"
-msgstr ""
+msgstr "**模型系列（变体）**"
 
 #: ../../release/v0.2.0/feature.md
 msgid "**Example HuggingFace Identifier**"
-msgstr ""
+msgstr "**HuggingFace标识符示例**"
 
 #: ../../release/v0.2.0/feature.md
 msgid "**Description**"
-msgstr ""
+msgstr "**描述**"
 
 #: ../../release/v0.2.0/feature.md
 msgid "**Support CardType**"
-msgstr ""
+msgstr "**支持的卡类型**"
 
 #: ../../release/v0.2.0/feature.md
 msgid "**DeepSeek** (v1, v2, v3/R1)"
-msgstr ""
+msgstr "**DeepSeek** (v1, v2, v3/R1)"
 
 #: ../../release/v0.2.0/feature.md
 msgid "`deepseek-ai/DeepSeek-R1`"
-msgstr ""
+msgstr "`deepseek-ai/DeepSeek-R1`"
 
 #: ../../release/v0.2.0/feature.md
 msgid ""
@@ -213,32 +213,36 @@ msgstr "Meta的开源大语言模型系列，参数规模从7B到400B（Llama 2,
 msgid "Bug Fixs"
 msgstr "错误修复"
 
-#: ../../release/v0.2.0/feature.md:34
-msgid "Question of omission"
-msgstr "遗漏问题"
-
-#: ../../release/v0.2.0/feature.md:35
+#: ../../release/v0.2.0/feature.md:33
 #, fuzzy
 msgid "metrics of cache is not work"
 msgstr "3fs缓存命中率指标不准确"
 
+#: ../../release/v0.2.0/feature.md:34
+msgid "P/D Disaggregation dead lock"
+msgstr ""
+
 #: ../../release/v0.2.0/feature.md:36
+msgid "Question of omission"
+msgstr "遗漏问题"
+
+#: ../../release/v0.2.0/feature.md:37
 msgid "too many dynamic lora need more **reserver_runtime_mem_mb**"
 msgstr "过多动态lora需要更多 **reserver_runtime_mem_mb**"
 
-#: ../../release/v0.2.0/feature.md:37
+#: ../../release/v0.2.0/feature.md:38
 msgid "AMD not support MoE models"
 msgstr "AMD不支持MoE模型"
 
-#: ../../release/v0.2.0/feature.md:38
+#: ../../release/v0.2.0/feature.md:39
 msgid "MoE model without shared_experter cannot use enable-layer-micro-batch"
 msgstr "没有shared_experter的MoE模型无法使用enable-layer-micro-batch"
 
-#: ../../release/v0.2.0/feature.md:41
+#: ../../release/v0.2.0/feature.md:42
 msgid "Performance"
 msgstr "性能"
 
-#: ../../release/v0.2.0/feature.md:43
+#: ../../release/v0.2.0/feature.md:44
 msgid "Compatibility"
 msgstr "兼容性"
 
