@@ -24,7 +24,6 @@ Single-node resource specifications requiring 4 nodes for multi-node deployment:
 LD_PRELOAD=/usr/lib64/libjemalloc.so
 ali_extend_devs=/dev/gdrdrv:/dev/gdrdrv:rwm \
 RDMA_CONNECT_RETRY_TIMES=2 \
-LOAD_BALANCE_POLICY_NAME=WRR \
 MAX_RPC_TIMEOUT_MS=1800000 \
 PD_SEPARATION=1 \
 ROLE_TYPE=PREFILL \
@@ -33,7 +32,6 @@ PREFILL_RETRY_TIMEOUT_MS=20 \
 PREFILL_RETRY_TIME=1 \
 USE_CACHE_STORE=1 \
 LOAD_CACHE_TIMEOUT_MS=180000 \
-SYNC_STATUS_INTERVAL_MS=200 \
 ENABLE_MERGE_W13=1 \
 /opt/conda310/bin/python3 -m rtp_llm.start_server \
 --checkpoint_path XXXX \
@@ -57,7 +55,6 @@ ENABLE_MERGE_W13=1 \
 --cache_store_rdma_mode 1 \
 --cache_store_rdma_connect_timeout_ms 800 \
 --balance_method mix \
---load_balance 1 \
 --use_deepep_internode 1 \
 --use_deepep_low_latency 0 \
 --use_deepep_moe 1 \
@@ -93,7 +90,6 @@ PREFILL_RETRY_TIMEOUT_MS=20 \
 PREFILL_RETRY_TIME=1 \
 USE_CACHE_STORE=1 \
 LOAD_CACHE_TIMEOUT_MS=180000 \
-SYNC_STATUS_INTERVAL_MS=200 \
 ENABLE_MERGE_W13=1 \
 REDUNDANT_EXPERT=32 \
 /opt/conda310/bin/python3 -m rtp_llm.start_server \
@@ -118,7 +114,6 @@ REDUNDANT_EXPERT=32 \
 --cache_store_rdma_mode 1 \ # delete
 --cache_store_rdma_connect_timeout_ms 800 \
 --balance_method mix \
---load_balance 1 \
 --use_deepep_internode 0 \
 --use_deepep_low_latency 1 \
 --use_deepep_moe 1 \

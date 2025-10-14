@@ -20,5 +20,5 @@
     "@vitejs/plugin-react": "^4.0.3",
     "vite": "^4.4.5"
   },
-  "repository": "git@gitlab.alibaba-inc.com:foundation_models/RTP-LLM.git"
+  "repository": "git@github.com:alibaba/rtp-llm.git"
 }

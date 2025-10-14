@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-10-10 12:58+0800\n"
+"POT-Creation-Date: 2025-10-15 19:12+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -165,28 +165,4 @@ msgstr ""
 
 #: ../../backend/pd_disaggregation.ipynb:147
 msgid "``false``"
-msgstr ""
-
-#: ../../backend/pd_disaggregation.ipynb:149
-msgid "**LOAD_BALANCE_POLICY_NAME**"
-msgstr ""
-
-#: ../../backend/pd_disaggregation.ipynb:149
-msgid "Load balancing policy: RR (round-robin) or WRR (weighted round-robin)"
-msgstr ""
-
-#: ../../backend/pd_disaggregation.ipynb:149
-msgid "``RR``"
-msgstr ""
-
-#: ../../backend/pd_disaggregation.ipynb:151
-msgid "**SYNC_STATUS_INTERVAL_MS**"
-msgstr ""
-
-#: ../../backend/pd_disaggregation.ipynb:151
-msgid "Status synchronization interval between PDs (milliseconds)"
-msgstr ""
-
-#: ../../backend/pd_disaggregation.ipynb:151
-msgid "``50``"
 msgstr ""

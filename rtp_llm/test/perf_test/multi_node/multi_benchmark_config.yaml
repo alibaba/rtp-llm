@@ -4,7 +4,7 @@
 benchmarks:
   - name: "H20_Deepseek-R1_Decode_EP32_4K"
     # git config
-    git_repo_url: "git@gitlab.alibaba-inc.com:foundation_models/RTP-LLM.git"
+    git_repo_url: "git@github.com:alibaba/rtp-llm.git"
     git_checkout_ref: "origin/feature/multi_benchmark"
     # machine config
     ip_lists:

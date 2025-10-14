@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-10-10 12:58+0800\n"
+"POT-Creation-Date: 2025-10-15 19:12+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -41,7 +41,7 @@ msgid "Prefill"
 msgstr ""
 
 #: ../../references/deepseek/deploy.md:14
-#: ../../references/deepseek/deploy.md:75
+#: ../../references/deepseek/deploy.md:72
 msgid "Resource Requirements"
 msgstr ""
 
@@ -94,15 +94,15 @@ msgid "180GB"
 msgstr ""
 
 #: ../../references/deepseek/deploy.md:21
-#: ../../references/deepseek/deploy.md:82
+#: ../../references/deepseek/deploy.md:79
 msgid "Advanced Arguments"
 msgstr ""
 
-#: ../../references/deepseek/deploy.md:73
+#: ../../references/deepseek/deploy.md:70
 msgid "Decode"
 msgstr ""
 
-#: ../../references/deepseek/deploy.md:77
+#: ../../references/deepseek/deploy.md:74
 msgid "Single-node resource specifications requiring 18 nodes for multi-node deployment:"
 msgstr ""
 
