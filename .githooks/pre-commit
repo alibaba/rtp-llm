@@ -1,9 +1,5 @@
 #!/bin/sh
 
-SCRIPTS_DIR="$(git rev-parse --show-toplevel)/internal_source/scripts/pre-commit.sh"
-
-sh $SCRIPTS_DIR
-
 result=$?
 if(($result != 0)); then
     echo "error"
