@@ -208,6 +208,10 @@ class FrontendApp(object):
                 version_info.model_dump(),
             )
 
+        @app.post("/update_weight")
+        async def update_weight():
+            
+
         @app.get("/v1/models")
         async def list_models():
             assert self.frontend_server._openai_endpoint != None

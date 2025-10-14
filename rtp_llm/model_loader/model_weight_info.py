@@ -604,6 +604,40 @@ class ModelWeights:
     def set_layer_weight(self, layer_id: int, name: str, tensor: torch.Tensor):
         self.weights[layer_id][name] = tensor
 
+    def update_layer_weight(
+        self, layer_id: int, name: str, data: torch.Tensor
+    ):
+        if not isinstance(layer_id, int):
+            raise TypeError(
+                f"Invalid 'layer_id' type. Expected an integer, but received {type(layer_id).__name__}.\n"
+                "Please ensure 'layer_id' is an integer representing the layer index."
+            )
+        if layer_id < 0 or layer_id >= len(self.weights):
+            raise ValueError(
+                f"Invalid 'layer_id'. It is out of the valid range for the model's weights.\n"
+                f"Received 'layer_id': {layer_id}\n"
+                f"Valid 'layer_id' range: 0 to {len(self.weights) - 1} (inclusive)."
+            )
+        if not isinstance(data, torch.Tensor):
+            raise TypeError(
+                f"Invalid 'data' type for layer weight. Expected 'torch.Tensor', "
+                f"but received {type(data).__name__}.\n"
+                "Please provide the weight data as a PyTorch tensor."
+            )
+        layer_weight_dict: dict[str, torch.Tensor] = self.weights[layer_id]
+        if name not in layer_weight_dict:
+            raise KeyError(
+                f"Weight name '{name}' not found within layer {layer_id}.\n"
+                f"Available weights in layer {layer_id}: {list(layer_weight_dict.keys())}\n"
+                "Please check the provided weight 'name'."
+            )
+        ori_tensor = layer_weight_dict[name]
+        self.check_data(
+            ori_tensor, data
+        )  # This will raise errors if shape, device, or dtype mismatch
+        with torch.inference_mode():
+            ori_tensor.copy_(data.to(ori_tensor.device))
+
     def set_global_weight(self, name: str, tensor: torch.Tensor):
         self.global_weights[name] = tensor
 
@@ -612,6 +646,31 @@ class ModelWeights:
 
     def get_global_weight(self, name: str) -> torch.Tensor:
         return self.global_weights[name]
+    
+    def update_global_weight(
+        self, name: str, data: torch.Tensor):
+        if not isinstance(name, str):
+            raise TypeError(
+                f"Invalid 'name' type. Expected a string, but received {type(name).__name__}.\n"
+                "Please provide the name of the global weight as a string."
+            )
+        if name not in self.global_weights:
+            raise KeyError(
+                f"Global weight with name '{name}' not found.\n"
+                f"Available global weights: {list(self.global_weights.keys())}\n"
+                "Please check the provided global weight name."
+            )
+        if not isinstance(data, torch.Tensor):
+            raise TypeError(
+                f"Invalid tensor type found in the provided 'data' dictionary. "
+                f"Expected 'torch.Tensor', but found {type(data).__name__}.\n"
+                "If 'data' is a dictionary, its values must be PyTorch tensors."
+            )
+        original_global_tensor = self.global_weights[name]
+        # Use the check_data method to validate shape, device, and dtype
+        self.check_data(original_global_tensor, data)
+        with torch.inference_mode():
+            original_global_tensor.copy_(data.to(original_global_tensor.device))
 
     def steal_global_weight(self, name: str):
         if name not in self.global_weights:
@@ -631,3 +690,23 @@ class ModelWeights:
     @staticmethod
     def global_weight_prefix(tp_rank: int, dp_rank: int, ep_rank: int):
         return f"rank_{tp_rank:02d}_{dp_rank:02d}_{ep_rank:02d}.global."
+
+    def check_data(self, ori_tensor: torch.Tensor, update_tensor: torch.Tensor):
+        if ori_tensor.shape != update_tensor.shape:
+            raise ValueError(
+                "Input error: The shape of your input tensor does not match the original tensor.\n"
+                f"Input tensor shape: {update_tensor.shape}\n"
+                f"Original tensor shape: {ori_tensor.shape}"
+            )
+        if ori_tensor.device != update_tensor.device:
+            raise ValueError(
+                "Input error: The device of your input tensor does not match the original tensor.\n"
+                f"Input tensor device: {update_tensor.device}\n"
+                f"Original tensor device: {ori_tensor.device}"
+            )
+        if ori_tensor.dtype != update_tensor.dtype:
+            raise ValueError(
+                "Input error: The data type of your input tensor does not match the original tensor.\n"
+                f"Input tensor dtype: {update_tensor.dtype}\n"
+                f"Original tensor dtype: {ori_tensor.dtype}"
+            )
