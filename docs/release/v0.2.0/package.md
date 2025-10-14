@@ -12,14 +12,8 @@
 | **CUDA-SM8x**           | ali-hangzhou-hub-registry.cn-hangzhou.cr.aliyuncs.com/isearch/rtp_llm_sm8x_opensource | 0.2.0_0.2.0_2025_10_09_17_35_8fa289f5    |
 
 
-Images of SM9x,SM7x,AMD is comming soon
+Images of SM9x,SM7x,AMD,Frontend,Master is comming soon
 
-### Others
-
-|**Role**| **image** | **tag** |
-|--------------------------|-------------------|-------------------|
-| **Frontend** | hub.docker.alibaba-inc.com/isearch/rtp_llm_frontend | 0.2.0_2025_09_24_21_00_615e568_accelerated |
-| **Master** | hub.docker.alibaba-inc.com/aone/flexlb | 0.2.0_2025_09_19_11_16_3b779f1_accelerated  |
 
 ### Wheel
 

@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-19 11:21+0800\n"
+"POT-Creation-Date: 2025-10-15 19:12+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -192,29 +192,21 @@ msgstr "解码是否作为流量入口点"
 msgid "``false``"
 msgstr "``false``"
 
-#: ../../backend/pd_disaggregation.ipynb:149
-#, fuzzy
-msgid "**LOAD_BALANCE_POLICY_NAME**"
-msgstr "**LOAD_BALANCE_POLICY_NAME**"
+#~ msgid "**LOAD_BALANCE_POLICY_NAME**"
+#~ msgstr "**LOAD_BALANCE_POLICY_NAME**"
 
-#: ../../backend/pd_disaggregation.ipynb:149
-msgid "Load balancing policy: RR (round-robin) or WRR (weighted round-robin)"
-msgstr "负载均衡策略：RR（轮询）或WRR（加权轮询）"
+#~ msgid "Load balancing policy: RR (round-robin) or WRR (weighted round-robin)"
+#~ msgstr "负载均衡策略：RR（轮询）或WRR（加权轮询）"
 
-#: ../../backend/pd_disaggregation.ipynb:149
-msgid "``RR``"
-msgstr "``RR``"
+#~ msgid "``RR``"
+#~ msgstr "``RR``"
 
-#: ../../backend/pd_disaggregation.ipynb:151
-#, fuzzy
-msgid "**SYNC_STATUS_INTERVAL_MS**"
-msgstr "**SYNC_STATUS_INTERVAL_MS**"
+#~ msgid "**SYNC_STATUS_INTERVAL_MS**"
+#~ msgstr "**SYNC_STATUS_INTERVAL_MS**"
 
-#: ../../backend/pd_disaggregation.ipynb:151
-msgid "Status synchronization interval between PDs (milliseconds)"
-msgstr "PD之间状态同步的时间间隔（毫秒）"
+#~ msgid "Status synchronization interval between PDs (milliseconds)"
+#~ msgstr "PD之间状态同步的时间间隔（毫秒）"
 
-#: ../../backend/pd_disaggregation.ipynb:151
-msgid "``50``"
-msgstr "``50``"
+#~ msgid "``50``"
+#~ msgstr "``50``"
 
