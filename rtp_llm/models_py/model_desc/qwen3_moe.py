@@ -18,7 +18,7 @@ from rtp_llm.ops import KVCache, PyAttentionInputs, PyModelInputs, PyModelOutput
 from rtp_llm.utils.model_weight import W
 
 try:
-    from libth_transformer.rtp_llm_ops import SelectTopkOp
+    from librtp_compute_ops.rtp_llm_ops import SelectTopkOp
 except ImportError:
     logging.info("SelectTopkOp not available")
 

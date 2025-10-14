@@ -4,14 +4,13 @@
 #include "rtp_llm/cpp/engine_base/schedulers/EngineScheduleInfo.h"
 #include "rtp_llm/cpp/pybind/multi_gpu_gpt/RtpLLMOp.h"
 #include "rtp_llm/cpp/pybind/multi_gpu_gpt/RtpEmbeddingOp.h"
-#include "rtp_llm/models_py/bindings/RegisterOps.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "pybind11/pybind11.h"
 #include "pybind11/cast.h"
 #include "pybind11/stl.h"
 
 namespace rtp_llm {
-    
+
 void registerKvCacheInfo(const pybind11::module& m) {
     pybind11::class_<KVCacheInfo>(m, "KVCacheInfo")
     .def(pybind11::init<>())
@@ -32,14 +31,14 @@ void registerEngineScheduleInfo(const pybind11::module& m) {
     .def_readwrite("waiting_time_ms", &EngineScheduleInfo::TaskInfo::waiting_time_ms)
     .def_readwrite("iterate_count", &EngineScheduleInfo::TaskInfo::iterate_count)
     .def_readwrite("end_time_ms", &EngineScheduleInfo::TaskInfo::end_time_ms);
-    
+
     pybind11::class_<EngineScheduleInfo>(m, "EngineScheduleInfo")
     .def(pybind11::init<>())
     .def_readwrite("last_schedule_delta", &EngineScheduleInfo::last_schedule_delta)
     .def_readwrite("finished_task_info_list", &EngineScheduleInfo::finished_task_info_list)
     .def_readwrite("running_task_info_list", &EngineScheduleInfo::running_task_info_list);
 }
-    
+
 
 void registerWorkerStatusInfo(const pybind11::module& m) {
     pybind11::class_<WorkerStatusInfo>(m, "WorkerStatusInfo")
@@ -69,17 +68,11 @@ PYBIND11_MODULE(libth_transformer, m) {
     registerKvCacheInfo(m);
     registerWorkerStatusInfo(m);
     registerEngineScheduleInfo(m);
-    
+
     registerRtpLLMOp(m);
     registerRtpEmbeddingOp(m);
-    
-    registerDeviceOps(m);
-    registerPyOpDefs(m);
-    
+
     registerMultimodalInput(m);
-    
-    py::module rtp_ops_m = m.def_submodule("rtp_llm_ops", "rtp llm custom ops");
-    registerPyModuleOps(rtp_ops_m);
 }
 
 }  // namespace rtp_llm

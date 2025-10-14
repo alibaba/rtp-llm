@@ -79,7 +79,8 @@ bool DistKvCache::init(const DistKvCacheInitParams& init_params) {
     }
 
     // parallel IO pool for 3FS get/put of multiple items
-    io_thread_pool_ = std::make_unique<autil::LockFreeThreadPool>(io_thread_num_, io_queue_size_, nullptr, "DistKvCacheIOThreadPool");
+    io_thread_pool_ =
+        std::make_unique<autil::LockFreeThreadPool>(io_thread_num_, io_queue_size_, nullptr, "DistKvCacheIOThreadPool");
     if (!io_thread_pool_->start()) {
         RTP_LLM_LOG_WARNING("init failed, start io thread pool failed, thread num: %zu, queue size: %zu",
                             io_thread_num_,
@@ -216,14 +217,13 @@ int32_t DistKvCache::match(const std::vector<int64_t>&               cache_keys,
     if (cache_keys.empty()) {
         return 0;
     }
-    
+
     RTP_LLM_LOG_DEBUG("match cache_keys size: %zu", cache_keys.size());
     for (auto& [key, value] : default_metas_) {
         if (extra_metas.count(key) == 0) {
             extra_metas[key] = value;
         }
     }
-
 
     RTP_LLM_LOG_DEBUG("cache_keys size: %zu", cache_keys.size());
     RTP_LLM_LOG_DEBUG("ignore_block_num: %zu", ignore_block_num);
@@ -241,12 +241,11 @@ int32_t DistKvCache::match(const std::vector<int64_t>&               cache_keys,
         return cache_keys.size();
     }
 
-    int32_t left = 0;
-    int32_t right = static_cast<int32_t>(layout_items.size()) - 2;
-    int32_t mid = 0;
+    int32_t left      = 0;
+    int32_t right     = static_cast<int32_t>(layout_items.size()) - 2;
+    int32_t mid       = 0;
     int32_t match_len = 0;
-    
-    
+
     while (left <= right) {
         if (stop && stop->load()) {
             return 0;
@@ -262,18 +261,19 @@ int32_t DistKvCache::match(const std::vector<int64_t>&               cache_keys,
     match_len = (right + 1) * init_params_.max_block_size_per_item;
     DistStorage::Item item;
     // deep search partial block
-    item = DistStorage::Item();
-    item.type       = DistStorage::ST_3FS;
-    item.metas      = extra_metas;
-    
+    item       = DistStorage::Item();
+    item.type  = DistStorage::ST_3FS;
+    item.metas = extra_metas;
+
     int start_key = (right + 1) * init_params_.max_block_size_per_item;
-    int end_key = start_key + init_params_.max_block_size_per_item - 1;
-    end_key = std::min(end_key, static_cast<int>(cache_keys.size()) - 1);
+    int end_key   = start_key + init_params_.max_block_size_per_item - 1;
+    end_key       = std::min(end_key, static_cast<int>(cache_keys.size()) - 1);
     for (int i = end_key; i >= start_key; i--) {
-        item.key = std::to_string(cache_keys[start_key]) + "_" + std::to_string(cache_keys[i]);
+        item.key               = std::to_string(cache_keys[start_key]) + "_" + std::to_string(cache_keys[i]);
         item.metas["ITEM_KEY"] = item.key;
         if (storage_->lookup(item)) {
-            RTP_LLM_LOG_DEBUG("request[%ld] deep match item: %s, len: %d", request_id, item.key.c_str(), i - start_key + 1);
+            RTP_LLM_LOG_DEBUG(
+                "request[%ld] deep match item: %s, len: %d", request_id, item.key.c_str(), i - start_key + 1);
             match_len += (i - start_key + 1);
             break;
         }
@@ -327,8 +327,8 @@ bool DistKvCache::get(const std::vector<int64_t>&        cache_keys,
     }
 
     auto layout_items = planner_->layout(cache_keys, block_indices, ignore_block_num, extra_metas);
-    for (auto &item : layout_items) {
-        RTP_LLM_LOG_DEBUG("layout item: %s", item.key.c_str());  
+    for (auto& item : layout_items) {
+        RTP_LLM_LOG_DEBUG("layout item: %s", item.key.c_str());
     }
 
     if (layout_items.empty()) {
@@ -339,13 +339,10 @@ bool DistKvCache::get(const std::vector<int64_t>&        cache_keys,
     auto metrics = DistKvCacheMetricsFactory::createMetrics(metrics_reporter_);
     DistKvCacheMetrics::markGetCacheBeginUs(metrics);
 
-
     std::vector<autil::ThreadPoolBase::Future<bool>> get_futures;
     get_futures.reserve(layout_items.size());
     for (auto& it : layout_items) {
-        auto get_task = [this, it]() mutable -> bool {
-            return storage_->get(it);
-        };
+        auto get_task = [this, it]() mutable -> bool { return storage_->get(it); };
         get_futures.emplace_back(io_thread_pool_->async(get_task));
     }
 
@@ -408,7 +405,6 @@ bool DistKvCache::put(const std::vector<int64_t>&        cache_keys,
         }
     }
 
-
     auto layout_items = planner_->layout(cache_keys, block_indices, ignore_block_num, extra_metas);
     if (layout_items.empty()) {
         RTP_LLM_LOG_WARNING("dist kv cache put cache, layout iovs is empty");
@@ -418,13 +414,10 @@ bool DistKvCache::put(const std::vector<int64_t>&        cache_keys,
     auto metrics = DistKvCacheMetricsFactory::createMetrics(metrics_reporter_);
     DistKvCacheMetrics::markPutCacheBeginUs(metrics);
 
-
     std::vector<autil::ThreadPoolBase::Future<bool>> put_futures;
     put_futures.reserve(layout_items.size());
     for (auto& it : layout_items) {
-        auto put_task = [this, it]() mutable -> bool {
-            return storage_->putIfNotExist(it);
-        };
+        auto put_task = [this, it]() mutable -> bool { return storage_->putIfNotExist(it); };
         put_futures.emplace_back(io_thread_pool_->async(put_task));
     }
 
@@ -439,7 +432,6 @@ bool DistKvCache::put(const std::vector<int64_t>&        cache_keys,
         DistKvCacheMetrics::markPutCacheDoneUs(metrics);
         return false;
     }
-    
 
     DistKvCacheMetrics::markPutCacheDoneUs(metrics);
     return true;

@@ -9,11 +9,11 @@ def random_tensor(shape, dtype, device, mean=0, std=1):
     return torch.empty(shape, dtype=dtype, device=device).normal_(mean, std)
 
 
+from rtp_llm.ops import rtp_llm_ops
+
+
 class TestGemmDequantize(unittest.TestCase):
     def setUp(self) -> None:
-        torch.classes.load_library(
-            os.environ["TEST_SRCDIR"] + "/rtp_llm/libth_transformer.so"
-        )
         torch.classes.load_library(
             os.environ["TEST_SRCDIR"] + "/rtp_llm/tests/libtest_ops.so"
         )

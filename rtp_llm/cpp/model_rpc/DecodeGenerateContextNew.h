@@ -2,9 +2,9 @@
 
 #include "rtp_llm/cpp/model_rpc/GenerateContext.h"
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
+#include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 
 namespace rtp_llm {
-
 
 struct DecodeRpcContextNew {
     DecodeRpcContextNew() {
@@ -16,16 +16,15 @@ struct DecodeRpcContextNew {
         completion_queue->Shutdown();
     }
 
-    bool                                                                            finished = false;
-    RemoteGenerateRequestPBNew                                                      request;
-    RemoteGenerateResponsePBNew                                                     response;
-    grpc::Status                                                                    status;
-    std::shared_ptr<RpcService::Stub>                                               stub;
-    std::shared_ptr<grpc::ClientContext>                                            client_context;
-    std::shared_ptr<grpc::CompletionQueue>                                          completion_queue;
-    std::unique_ptr<grpc::ClientAsyncResponseReader<RemoteGenerateResponsePBNew>>   reader;
+    bool                                                                          finished = false;
+    RemoteGenerateRequestPBNew                                                    request;
+    RemoteGenerateResponsePBNew                                                   response;
+    grpc::Status                                                                  status;
+    std::shared_ptr<RpcService::Stub>                                             stub;
+    std::shared_ptr<grpc::ClientContext>                                          client_context;
+    std::shared_ptr<grpc::CompletionQueue>                                        completion_queue;
+    std::unique_ptr<grpc::ClientAsyncResponseReader<RemoteGenerateResponsePBNew>> reader;
 };
-
 
 struct DecodeGenerateContextNew: public GenerateContext {
 

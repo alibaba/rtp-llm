@@ -1,5 +1,4 @@
 load("//:def.bzl", "copts")
-load("//bazel:arch_select.bzl", "torch_deps")
 
 # System prompt - engine level functionality
 cc_library(
@@ -7,11 +6,8 @@ cc_library(
     hdrs = [
         "SystemPrompt.h",
     ],
-    deps = torch_deps() + [
-        "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/utils:error_code",
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/status:statusor",
+    deps = [
+        "//:rtp_compute_ops",
     ],
     visibility = ["//visibility:public"],
 )
@@ -24,18 +20,11 @@ cc_library(
     srcs = [
         "SystemPromptConstructor.cc",
     ],
-    deps = torch_deps() + [
+    deps = [
         "//rtp_llm/cpp/engine_base:engine_base",
         "//rtp_llm/cpp/engine_base/stream:generate_config",
-        "//rtp_llm/cpp/cache:cache",
-        "//rtp_llm/cpp/config:gpt_init_params",
-        "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/utils:error_code",
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/status:statusor",
-        "//rtp_llm/cpp/devices:devices_base",
-        "//rtp_llm/cpp/devices:device_utils",
-        "//rtp_llm/cpp/models/models_weight:weights_define",
+        "//rtp_llm/cpp/cache",
+        "//rtp_llm/cpp/dataclass:dataclass",
     ],
     visibility = ["//visibility:public"],
 )

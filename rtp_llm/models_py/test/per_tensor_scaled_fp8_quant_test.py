@@ -6,7 +6,7 @@ import torch
 from torch import dtype as _dtype
 
 import rtp_llm.ops  # isort:skip
-from libth_transformer.rtp_llm_ops import per_tensor_quant_fp8  # isort:skip
+from librtp_compute_ops.rtp_llm_ops import per_tensor_quant_fp8  # isort:skip
 
 
 class PerTensorFp8QuantTest(TestCase):

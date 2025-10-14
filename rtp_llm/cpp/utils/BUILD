@@ -66,10 +66,10 @@ cc_library(
         ":core_utils",
         ":stack_trace",
         "@havenask//aios/autil:env_util",
-        "@havenask//aios/autil:net",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
+    alwayslink = True,
 )
 
 # Stack trace utilities

@@ -15,10 +15,12 @@ SO_NAME = "libth_transformer_config.so"
 
 # for py test
 def find_upper_so(current_dir: str):
+    print(f"find_upper_so: {current_dir}")
     p = pathlib.Path(current_dir).resolve()
     while p != p.parent:
         if p.exists():
             for root, _, files in os.walk(p):
+                print(f"find_upper_so: {root}, {files}")
                 if SO_NAME in files:
                     return root
         p = p.parent
@@ -26,6 +28,7 @@ def find_upper_so(current_dir: str):
 
 
 def find_th_transformer(current_dir: str):
+    print(f"find_th_transformer: {current_dir}")
     if not os.path.exists(current_dir):
         return None
     dir_path = pathlib.Path(current_dir)
@@ -164,35 +167,56 @@ class EmptyClass:
         pass
 
 
+frontend_mode = os.environ.get("ROLE_TYPE") == "FRONTEND"
+
 try:
-    from libth_transformer import (
+    from librtp_compute_ops import (
         DeviceExporter,
         DeviceType,
-        EngineScheduleInfo,
         KVCache,
-        KVCacheInfo,
-    )
-    from libth_transformer import MultimodalInput as MultimodalInputCpp
-    from libth_transformer import (
         ParamsBase,
         PyAttentionInputs,
         PyCacheStoreInputs,
         PyModelInitResources,
         PyModelInputs,
         PyModelOutputs,
-        RtpEmbeddingOp,
-        RtpLLMOp,
-        WorkerStatusInfo,
         get_device,
         rtp_llm_ops,
     )
+
 except BaseException as e:
-    if os.environ.get("ROLE_TYPE") == "FRONTEND":
-        MultimodalInputCpp = EngineScheduleInfo = EmptyClass
-        RtpEmbeddingOp = RtpLLMOp = EmptyClass
+    if frontend_mode:
         PyModelInputs = PyModelOutputs = PyAttentionInputs = PyModelInitResources = (
             rtp_llm_ops
         ) = EmptyClass
     else:
+        logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
+        raise e
+
+libth_transformer_imported = False
+python_standalone_mode = os.environ.get("PYTHON_STANDALONE_MODE") == "1"
+
+if frontend_mode or python_standalone_mode:
+    logging.info("libth_transformer not imported under frontend mode")
+    MultimodalInputCpp = EngineScheduleInfo = KVCacheInfo = WorkerStatusInfo = (
+        EmptyClass
+    )
+    RtpEmbeddingOp = RtpLLMOp = EmptyClass
+else:
+    try:
+        print(f"try to import libth_transformer from {so_path}")
+        sys.stdout.flush()
+        sys.stderr.flush()
+
+        from libth_transformer import EngineScheduleInfo, KVCacheInfo
+        from libth_transformer import MultimodalInput as MultimodalInputCpp
+        from libth_transformer import RtpEmbeddingOp, RtpLLMOp, WorkerStatusInfo
+
+        print(f"try to import libth_transformer from {so_path} done")
+        sys.stdout.flush()
+        sys.stderr.flush()
+
+        libth_transformer_imported = True
+    except BaseException as e:
         logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
         raise e

@@ -1,5 +1,6 @@
 load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
+load("//rtp_llm/cpp/devices:device_defs.bzl", "device_impl_target", "device_test_envs")
 
 test_copts = [
     "-fno-access-control",
@@ -64,6 +65,7 @@ cc_library(
     deps = test_deps + [
         "//rtp_llm/cpp/api_server:tokenizer",
         "//rtp_llm/cpp/api_server:openai",
+        "//rtp_llm/cpp/pybind:th_compute_lib",
     ],
     data = [],
     copts = test_copts,

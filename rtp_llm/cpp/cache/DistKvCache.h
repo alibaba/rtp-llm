@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/cache/DistStorage.h"
 #include "rtp_llm/cpp/cache/DistStorageManager.h"
 #include "rtp_llm/cpp/model_rpc/RPCPool.h"
+#include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 
 namespace rtp_llm {
 
