@@ -11,6 +11,7 @@ cc_library(
     deps = torch_deps() + [
         "//rtp_llm/cpp/models:eplb",
         "//rtp_llm/cpp/pybind:th_utils",
+        "//rtp_llm/cpp/pybind:th_compute_lib",
     ],
     copts = cuda_copts(),
     alwayslink = True,

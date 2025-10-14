@@ -8,7 +8,7 @@ from torch.profiler import ProfilerActivity, profile
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 
-from libth_transformer.rtp_llm_ops import SelectTopkOp  # isort:skip
+from librtp_compute_ops.rtp_llm_ops import SelectTopkOp  # isort:skip
 
 
 class SelectTopkOpTest(TestCase):

@@ -64,7 +64,8 @@ py_test(
     ],
     data = [
         "//:th_transformer",
-        "//:th_transformer_config"
+        "//:th_transformer_config",
+        "//:rtp_compute_ops",
     ],
     exec_properties = {'gpu':'A10'}
 )

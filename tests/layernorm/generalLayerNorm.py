@@ -5,6 +5,8 @@ import torch
 from torch import nn
 from torch.nn import LayerNorm
 
+from rtp_llm.ops import rtp_llm_ops
+
 
 class TestLayerNorm(unittest.TestCase):
     def __init__(self, methodName: str = "runTest") -> None:

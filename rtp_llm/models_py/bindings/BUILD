@@ -17,6 +17,7 @@ cc_library(
         "//rtp_llm/cpp/utils:core_utils",
     ],
     visibility = ["//visibility:public"],
+    alwayslink = 1,
 )
 
 cc_library(

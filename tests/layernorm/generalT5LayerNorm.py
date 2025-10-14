@@ -5,6 +5,8 @@ import torch
 from torch import nn
 from transformers.models.t5.modeling_t5 import T5LayerNorm
 
+from rtp_llm.ops import rtp_llm_ops
+
 
 class TestT5LayerNorm(unittest.TestCase):
     def __init__(self, methodName: str = "runTest") -> None:

@@ -19,10 +19,10 @@ cc_library(
     name = "devices_base",
     hdrs = glob([
         "*.h",
-    ]),
+    ], exclude = []),
     srcs = glob([
         "*.cc",
-    ]),
+    ], exclude = []),
     deps = [
         "//rtp_llm/cpp/core:allocator",
         "//rtp_llm/cpp/core:memory_tracker",
@@ -37,10 +37,13 @@ cc_library(
         "//rtp_llm/cpp/models/models_weight:weights_define",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
         "//rtp_llm/cpp/models:stats",
-        "//rtp_llm/models_py/bindings:op_defs"
+        "//rtp_llm/models_py/bindings:op_defs",
+        "@havenask//aios/autil:scope",
+        "//rtp_llm/cpp/utils:signal_utils",
     ],
     visibility = ["//visibility:public"],
     copts = copts(),
+    alwayslink = 1,
 )
 
 cc_library(
@@ -69,22 +72,6 @@ cc_library(
         ":devices_base",
         ":device_utils",
         "//rtp_llm/cpp/config:config_modules",
-    ],
-    visibility = ["//visibility:public"],
-    copts = copts(),
-    alwayslink = 1,
-)
-
-cc_library(
-    name = "device_py_export",
-    hdrs = [
-        "DeviceExport.h",
-    ],
-    srcs = [
-        "DeviceExport.cc",
-    ],
-    deps = [
-        ":devices_base_impl",
     ],
     visibility = ["//visibility:public"],
     copts = copts(),

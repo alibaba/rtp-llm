@@ -67,9 +67,9 @@ cc_binary(
 )
 
 cc_binary(
-    name = "th_transformer",
+    name = "rtp_compute_ops",
     deps = [
-        "//rtp_llm/cpp/pybind:th_transformer_lib",
+        "//rtp_llm/cpp/pybind:th_compute_lib",
     ] + select({
         "@//:using_cuda12": [
             "//rtp_llm/cpp/pybind:th_transformer_gpu",
@@ -81,7 +81,24 @@ cc_binary(
     linkopts = [
         "-Wl,-rpath='$$ORIGIN'",
         "-Wl,-rpath=$(NVSHMEM_DIR)/lib",
-        "-L$(NVSHMEM_DIR)/lib"
+        "-L$(NVSHMEM_DIR)/lib",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_binary(
+    name = "th_transformer",
+    srcs = [
+        ":rtp_compute_ops",
+    ],
+    deps = [
+        "//rtp_llm/cpp/pybind:th_transformer_lib",
+    ],
+    copts = copts(),
+    linkshared = 1,
+    linkopts = [
+        "-Wl,-rpath='$$ORIGIN'",
+        # "-Wl,--exclude-libs,ALL",  # 添加这行，隐藏静态库符号
     ],
     visibility = ["//visibility:public"],
 )

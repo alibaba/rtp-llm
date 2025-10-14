@@ -97,7 +97,7 @@ cc_library(
         "//rtp_llm/cpp/cuda:trt_plugins",
         "@havenask//aios/autil:string_helper",
         "@local_config_cuda//cuda:cuda_headers",
-        "//rtp_llm/cpp/disaggregate/cache_store:cache_store",
+        "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
         ":flashinfer",
         "//3rdparty/flashinfer:flashinfer",
         ":flashmla",

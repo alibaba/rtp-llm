@@ -9,6 +9,7 @@ load("//rtp_llm/cpp/cuda/deep_gemm:template.bzl", "dpsk_gemm_so_num", "qwen_gemm
 def copy_all_so():
     copy_so("//:th_transformer")
     copy_so("//:th_transformer_config")
+    copy_so("//:rtp_compute_ops")
     copy_so("//rtp_llm/cpp/kernels/decoder_masked_multihead_attention:mmha1")
     copy_so("//rtp_llm/cpp/kernels/decoder_masked_multihead_attention:mmha2")
     copy_so("//rtp_llm/cpp/kernels/decoder_masked_multihead_attention:dmmha")
@@ -188,7 +189,12 @@ def select_py_bindings():
         "//:using_rocm": [
             "//rtp_llm/models_py/bindings/rocm:rocm_bindings_register"
         ],
+        "@//:using_arm": [
+            "//rtp_llm/cpp/devices/arm_impl:arm_cpu_impl",
+            "//rtp_llm/models_py/bindings:dummy_register",
+        ],
         "//conditions:default": [
+            "//rtp_llm/cpp/devices/cpu_impl:cpu_impl",
             "//rtp_llm/models_py/bindings:dummy_register",
         ],
     })

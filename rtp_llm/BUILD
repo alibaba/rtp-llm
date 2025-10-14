@@ -601,6 +601,8 @@ py_library(
     name = "testlib",
     data = [
         "//rtp_llm/test/model_test/fake_test/testdata:testdata",
+        "//:th_transformer",
+        "//:rtp_compute_ops",
     ],
     deps = [
         ":rtp_llm_lib",

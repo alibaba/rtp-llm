@@ -315,10 +315,10 @@ cc_library(
         "CudaGraphDecodePaddingOp.h"
     ],
     copts = copts(),
-    deps = test_deps + [
-        "//rtp_llm/models_py/bindings:op_defs",
-        "//rtp_llm/cpp/pybind:th_utils"
-    ],
+    deps = [
+        "//rtp_llm/cpp/pybind:py_utils",
+        "//rtp_llm/cpp/pybind:th_compute_lib",
+    ] + torch_deps(),
     visibility = ["//visibility:public"],
     alwayslink = True, ## make sure pybind11 link
 )
@@ -332,11 +332,10 @@ cc_library(
         "CudaGraphPrefillOp.h"
     ],
     copts = copts(),
-    deps = test_deps + [
-        "//rtp_llm/models_py/bindings:op_defs",
-        "//rtp_llm/cpp/devices/cuda_impl:gpu_base",
-        "//rtp_llm/cpp/pybind:th_utils"
-    ],
+    deps = [
+        "//rtp_llm/cpp/pybind:py_utils",
+        "//rtp_llm/cpp/pybind:th_compute_lib",
+    ] + torch_deps(),
     visibility = ["//visibility:public"],
     alwayslink = True, ## make sure pybind11 link
 )
@@ -345,7 +344,6 @@ cc_binary(
     name = "test_cuda_graph_decode_ops",
     deps = [
         ":test_cuda_graph_decode_libs",
-        # "//:th_transformer"
     ],
     linkshared = 1,
     visibility = ["//visibility:public"],
@@ -366,28 +364,18 @@ py_test(
         "CudaGraphDecodePadding.py",
     ],
     data = [
-        # "//rtp_llm/test/model_test/fake_test/testdata:testdata",
-        # ":py_testdata",
-        # "//rtp_llm/test/model_test/test_util:test_util"
-        ":test_cuda_graph_decode_ops"
+        ":test_cuda_graph_decode_ops",
+        "//:th_transformer"
     ],
     deps = [
-        # "//rtp_llm:torch",
-        # "//rtp_llm:transformers",
         "//rtp_llm/test/model_test/test_util:test_util",
-        # "//rtp_llm:ops"
     ],
-    # env = device_test_envs(),
     env = {
         "TEST_USING_DEVICE": "CUDA",
         "HACK_LAYER_NUM" : "1",
         "CUDA_LAUNCH_BLOCKING" : "1",
-        # "TORCH_USE_CUDA_DSA" : "1"
-        # "ENABLE_CUDA_GRAPH_DEBUG_MODE" : "1",
-        # "ENABLE_DEVICE_PERF" : "1",
     },
     exec_properties = {'gpu':'A10'},
-    # tags = ["manual"],
 )
 
 py_test(
@@ -396,7 +384,8 @@ py_test(
         "CudaGraphPrefill.py",
     ],
     data = [
-        ":test_cuda_graph_prefill_ops"
+        ":test_cuda_graph_prefill_ops",
+        "//:th_transformer"
     ],
     deps = [
         "//rtp_llm/test/model_test/test_util:test_util",
