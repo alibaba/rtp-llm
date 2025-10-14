@@ -57,6 +57,7 @@ cc_library(
         "@com_google_absl//absl/container:inlined_vector",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
+        "@havenask//aios/autil:scope",
     ] + select({
         "@//:using_aiter_src": [
             "@aiter_src//:module_mha_fwd",
