@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-10-20 16:18+0800\n"
+"POT-Creation-Date: 2025-10-15 19:12+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -61,30 +61,14 @@ msgid "ali-hangzhou-hub-registry.cn-hangzhou.cr.aliyuncs.com/isearch/rtp_llm_sm8
 msgstr ""
 
 #: ../../release/v0.2.0/package.md:0
-msgid "**CUDA-SM7x**"
-msgstr ""
-
-#: ../../release/v0.2.0/package.md:0
-msgid "ali-hangzhou-hub-registry.cn-hangzhou.cr.aliyuncs.com/isearch/rtp_llm_sm7x_opensource"
-msgstr ""
-
-#: ../../release/v0.2.0/package.md:0
-msgid "**Frontend**"
-msgstr ""
-
-#: ../../release/v0.2.0/package.md:0
-msgid "ali-hangzhou-hub-registry.cn-hangzhou.cr.aliyuncs.com/isearch/rtp_llm_frontend-opensource"
-msgstr ""
-
-#: ../../release/v0.2.0/package.md:0
-msgid "**AMD**"
-msgstr ""
-
-#: ../../release/v0.2.0/package.md:0
-msgid "ali-hangzhou-hub-registry.cn-hangzhou.cr.aliyuncs.com/isearch/rtp_llm_rocm_opensource"
+msgid "0.2.0_0.2.0_2025_10_09_17_35_8fa289f5"
 msgstr ""
 
 #: ../../release/v0.2.0/package.md:15
+msgid "Images of SM9x,SM7x,AMD,Frontend,Master is comming soon"
+msgstr ""
+
+#: ../../release/v0.2.0/package.md:18
 msgid "Wheel"
 msgstr ""
 

@@ -6,11 +6,11 @@
 
 | **CardType**              | **image** | **tag** |
 |--------------------------|-------------------|-------------------|
-| **CUDA-SM9x**           | ali-hangzhou-hub-registry.cn-hangzhou.cr.aliyuncs.com/isearch/rtp_llm_sm9x_opensource | 0.2.0_0.2.0_2025_10_20_10_42_2b7b389a0    |
-| **CUDA-SM8x**           | ali-hangzhou-hub-registry.cn-hangzhou.cr.aliyuncs.com/isearch/rtp_llm_sm8x_opensource | 0.2.0_0.2.0_2025_10_20_10_42_2b7b389a0    |
-| **CUDA-SM7x**           | ali-hangzhou-hub-registry.cn-hangzhou.cr.aliyuncs.com/isearch/rtp_llm_sm7x_opensource | 0.2.0_0.2.0_2025_10_20_10_42_2b7b389a0    |
-| **Frontend**           | ali-hangzhou-hub-registry.cn-hangzhou.cr.aliyuncs.com/isearch/rtp_llm_frontend-opensource | 0.2.0_0.2.0_2025_10_20_10_42_2b7b389a0    |
-| **AMD**           | ali-hangzhou-hub-registry.cn-hangzhou.cr.aliyuncs.com/isearch/rtp_llm_rocm_opensource | 0.2.0_0.2.0_2025_10_20_10_42_2b7b389a0    |
+| **CUDA-SM8x**           | ali-hangzhou-hub-registry.cn-hangzhou.cr.aliyuncs.com/isearch/rtp_llm_sm8x_opensource | 0.2.0_0.2.0_2025_10_09_17_35_8fa289f5    |
+
+
+Images of SM9x,SM7x,AMD,Frontend,Master is comming soon
+
 
 ### Wheel
 
