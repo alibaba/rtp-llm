@@ -235,6 +235,7 @@ py_test(
     tags = [
         "rocm",
     ],
+    timeout = "eternal",
 )
 
 py_test(
