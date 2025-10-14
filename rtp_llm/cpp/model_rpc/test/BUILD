@@ -25,9 +25,13 @@ test_deps = [
     "//rtp_llm/cpp/devices/testing:device_test_utils",
     "//rtp_llm/cpp/models:models",
     "//rtp_llm/cpp/config:gpt_init_params",
+    "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+    "//rtp_llm/cpp/model_rpc:model_rpc_server",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",
-] + device_impl_target()
+    "@havenask//aios/autil:base64",
+    "@havenask//aios/autil:zlib",
+] + torch_deps() + device_impl_target()
 
 # cc_test(
 #     name = "model_rpc_server_test",
@@ -51,17 +55,7 @@ cc_test(
         "QueryConverterTest.cc",
     ],
     copts = test_copts,
-    deps = [
-        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
-        "//rtp_llm/cpp/model_rpc:model_rpc_server",
-        "//rtp_llm/cpp/config:gpt_init_params",
-        "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/devices:devices_base",
-        "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
-        "//rtp_llm/cpp/devices/testing:device_test_utils",
-        "@com_google_googletest//:gtest",
-        "@com_google_googletest//:gtest_main"
-    ] + torch_deps(),
+    deps = test_deps,
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },

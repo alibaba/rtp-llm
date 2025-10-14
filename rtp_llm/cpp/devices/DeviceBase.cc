@@ -10,6 +10,7 @@
 #include "torch/types.h"
 #include <numeric>
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/ErrorCodeUtil.h"
 
 using namespace std;
 using namespace rtp_llm;

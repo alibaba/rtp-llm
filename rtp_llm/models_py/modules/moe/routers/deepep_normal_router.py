@@ -1,7 +1,7 @@
 from typing import Any, Dict, Optional
 
 import torch
-from libth_transformer.rtp_llm_ops import trt_fp8_quantize_128
+from librtp_compute_ops.rtp_llm_ops import trt_fp8_quantize_128
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.models_py.distributed.deepep_wrapper import get_deepep_wrapper

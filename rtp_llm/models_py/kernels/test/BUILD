@@ -2,10 +2,9 @@ py_test (
     name = "deepgemm_test",
     srcs = ["deepgemm_test.py"],
     deps = [
-        "//rtp_llm:testlib",
-        "//rtp_llm/models_py:kernels",
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
     ],
-    env = {"GPU_COUNT": "1"},
+    env = {"GPU_COUNT": "1", "PYTHON_STANDALONE_MODE": "1"},
     tags = ["H20"],
     exec_properties = {'gpu':'H20', 'gpu_count':'1'},
 )

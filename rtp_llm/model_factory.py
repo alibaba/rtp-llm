@@ -182,6 +182,22 @@ class ModelFactory:
         return ModelFactory.from_model_config(new_model_config)
 
     @staticmethod
+    def creat_standalone_py_model_from_huggingface(
+        model_path_or_name: str,
+        revision: Optional[str] = None,
+        model_config: ModelConfig = ModelConfig(),
+    ):
+        assert os.environ["PYTHON_STANDALONE_MODE"] == "1"
+        assert os.environ["LOAD_PYTHON_MODEL"] == "1"
+        model_path, model_type = get_model_info_from_hf(model_path_or_name, revision)
+        new_model_config = model_config
+        new_model_config = new_model_config._replace(
+            model_type=model_type, ckpt_path=model_path, tokenizer_path=model_path
+        )
+        model = ModelFactory._create_model(model_config)
+        return model
+
+    @staticmethod
     def create_normal_model_config():
         model_type = StaticConfig.model_config.model_type
         ckpt_path = StaticConfig.model_config.checkpoint_path

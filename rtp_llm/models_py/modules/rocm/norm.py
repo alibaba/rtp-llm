@@ -4,10 +4,10 @@ import torch
 import torch.nn.functional as F
 from aiter import layernorm2d_fwd as layernorm2d_fwd
 from aiter import rmsnorm2d_fwd as rms_norm
-from libth_transformer import rtp_llm_ops
 from torch import nn
 
 from rtp_llm.models_py.modules.norm import BaseNorm
+from rtp_llm.ops import rtp_llm_ops
 
 
 class BaseLayerNorm(torch.nn.Module):

@@ -8,7 +8,7 @@ import torch
 import torch.nn.functional as F
 
 import rtp_llm.ops  # isort:skip
-from libth_transformer.rtp_llm_ops import cutlass_moe_mm  # isort:skip
+from librtp_compute_ops.rtp_llm_ops import cutlass_moe_mm  # isort:skip
 
 
 def to_fp8(tensor: torch.Tensor):
