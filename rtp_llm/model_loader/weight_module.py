@@ -184,6 +184,21 @@ class WeightModule(ABC):
         return flat_res
 
     @torch.inference_mode()
+    def update(self, tensor: torch.Tensor, device: str, load_config: LoadConfig):
+        split_tensors = self._split(tensor, load_config)
+        processed_tensors = self._postprocess(split_tensors, device, load_config)
+        flat_res = {}
+        def __extract_tensor(tensors):
+            for k, v in tensors.items():
+                if isinstance(v, dict):
+                    __extract_tensor(v)
+                else:
+                    flat_res.update({k: v.to(device)})
+        __extract_tensor(processed_tensors)
+        shape_info = {k: (v.shape, v.dtype) for k, v in flat_res.items()}
+        return flat_res
+
+    @torch.inference_mode()
     def load_lora(
         self,
         database: BaseDatabase,
