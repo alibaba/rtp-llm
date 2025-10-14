@@ -15,7 +15,7 @@ from rtp_llm.models_py.modules.ep.expert_location_dispatch import (
 )
 
 if utils.is_cuda():
-    from libth_transformer.rtp_llm_ops import moe_topk_softmax
+    from librtp_compute_ops.rtp_llm_ops import moe_topk_softmax
 else:
     logging.warning("can't import from rtp_llm_ops, only support cuda!")
 

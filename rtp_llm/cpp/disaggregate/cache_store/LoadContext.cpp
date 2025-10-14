@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/LoadContext.h"
 
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/ErrorCodeUtil.h"
 
 namespace rtp_llm {
 

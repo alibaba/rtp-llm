@@ -20,7 +20,7 @@ from rtp_llm.models_py.modules.moe.utils import FusedMoEQuantConfig
 from rtp_llm.test.utils.port_util import PortsContext
 
 import rtp_llm.ops  # isort:skip
-from libth_transformer.rtp_llm_ops import trt_fp8_quantize_128  # isort:skip
+from librtp_compute_ops.rtp_llm_ops import trt_fp8_quantize_128  # isort:skip
 
 
 def init_router(rank: int, use_fp8: bool):

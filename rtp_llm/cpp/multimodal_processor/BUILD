@@ -6,7 +6,7 @@ cc_library(
         "MultimodalTypes.h",
     ],
     deps = [
-        "//rtp_llm/cpp/core:buffer_hdr",
+        "//:rtp_compute_ops",
     ],
     visibility = ["//visibility:public"],
 )
@@ -23,9 +23,7 @@ cc_library(
         ":multimodal_types",
         "//rtp_llm/cpp/engine_base/stream:generate_types",
         "//rtp_llm/cpp/embedding_engine:embedding_engine",
-        "//rtp_llm/cpp/devices:devices_base",
         "//rtp_llm/cpp/pybind:py_utils",
-        "//rtp_llm/cpp/config:config_modules",
     ],
     visibility = ["//visibility:public"],
 )

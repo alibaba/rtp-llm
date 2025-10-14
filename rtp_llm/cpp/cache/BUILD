@@ -35,19 +35,14 @@ cc_library(
         "KVCacheAllocator.cc",
         "BlockLRUCache.cc",
     ],
-    deps = torch_deps() + [
-        "//rtp_llm/cpp/metrics:metrics",
+    deps = [
+        "//rtp_llm/cpp/dataclass:dataclass",
         "//rtp_llm/cpp/model_rpc:model_rpc_pool",
-        "//rtp_llm/cpp/config:gpt_init_params",
-        "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/utils:error_code",
-        "//rtp_llm/cpp/utils:time_util",
+        "//rtp_llm/cpp/model_rpc:rpc_error_code",
         "//rtp_llm/cpp/utils:lru_cache",
-        "//rtp_llm/cpp/utils:kv_cache_utils",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
-        "//rtp_llm/cpp/devices:devices_base",
-        "//rtp_llm/cpp/devices:device_utils",
+        "//:rtp_compute_ops",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store",
     ] + select({
         "//:enable_3fs": [
@@ -74,17 +69,10 @@ cc_library(
         "ThreeFSMempool.cc",
     ],
     deps = [
-        "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/utils:error_code",
-        "//rtp_llm/cpp/utils:time_util",
+        "//:rtp_compute_ops",
         "//rtp_llm/cpp/utils:lru_cache",
-        "//rtp_llm/cpp/utils:kv_cache_utils",
-        "//rtp_llm/cpp/cuda:cuda_host_utils",
         "//3rdparty/3fs:hf3fs",
-        "@havenask//aios/autil:lock_free",
-        "@havenask//aios/autil:scope",
-        "@havenask//aios/kmonitor:kmonitor_client_cpp",
-        "@local_config_cuda//cuda:cuda_headers",
+        "//rtp_llm/cpp/disaggregate/cache_store:cache_store",
     ],
     visibility = ["//visibility:public"],
 )

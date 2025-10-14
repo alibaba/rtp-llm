@@ -4,6 +4,8 @@ import unittest
 
 import torch
 
+from rtp_llm.ops import rtp_llm_ops
+
 
 def logn_attention_test(x: torch.Tensor, seq_length: int):
 

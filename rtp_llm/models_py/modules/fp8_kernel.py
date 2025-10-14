@@ -10,7 +10,7 @@ import torch
 import rtp_llm.models_py.modules.utils as utils
 
 if utils.is_cuda():
-    from libth_transformer.rtp_llm_ops import (
+    from librtp_compute_ops.rtp_llm_ops import (
         per_tensor_quant_fp8,
         per_token_group_quant_fp8,
         per_token_group_quant_int8,

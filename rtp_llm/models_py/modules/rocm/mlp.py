@@ -1,12 +1,14 @@
 from typing import Dict
-import torch
-from libth_transformer import rtp_llm_ops
-from torch import nn
+
 import aiter
+import torch
+from torch import nn
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.models_py.modules import Linear
+from rtp_llm.ops import rtp_llm_ops
 from rtp_llm.utils.model_weight import W
+
 
 class DenseMLP(nn.Module):
     def __init__(

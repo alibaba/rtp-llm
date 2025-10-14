@@ -14,4 +14,5 @@ cc_library(
         "@havenask//aios/kmonitor:kmonitor_client_cpp",
     ],
     visibility = ["//visibility:public"],
+    alwayslink = 1,
 )
