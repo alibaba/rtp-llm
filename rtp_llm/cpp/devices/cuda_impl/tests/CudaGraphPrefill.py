@@ -134,8 +134,8 @@ class TestCudaGraphPrefill(unittest.TestCase):
         print(f"outputs3.hidden_states: {outputs3.hidden_states[0]}")
         # slice_index: int = (batch_size + 1) * batch_size * 5
         torch.testing.assert_close(
-            outputs1.hidden_states[:10],
-            outputs3.hidden_states[:10],
+            outputs1.hidden_states,
+            outputs3.hidden_states,
             rtol=1e-2,  # 相对误差容忍度
             atol=1e-2,  # 绝对误差容忍度
         )
