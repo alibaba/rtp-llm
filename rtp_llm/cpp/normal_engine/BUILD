@@ -10,7 +10,6 @@ cc_library(
         "*.cc",
     ]),
     deps = [
-        "//rtp_llm/cpp/dataclass:dataclass",
         "//rtp_llm/cpp/models:models",
         "//rtp_llm/cpp/engine_base:engine_base",
         "//rtp_llm/cpp/engine_base/stream:generate_config",

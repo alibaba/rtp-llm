@@ -1,7 +1,6 @@
 import os
 import sys
 
-os.environ["PYTHON_STANDALONE_MODE"] = "1"
 os.environ["LOAD_PYTHON_MODEL"] = "1"
 
 sys.path.append("/home/wangyin.yx/workspace/FasterTransformer")
@@ -34,9 +33,6 @@ model = ModelFactory.creat_standalone_py_model_from_huggingface(
     model_config.ckpt_path, model_config=model_config
 )
 
-import pdb
-
-pdb.set_trace()
 
 from rtp_llm.ops import KVCache, PyAttentionInputs, PyModelInputs, PyModelOutputs
 

@@ -15,12 +15,12 @@ SO_NAME = "libth_transformer_config.so"
 
 # for py test
 def find_upper_so(current_dir: str):
-    print(f"find_upper_so: {current_dir}")
+    logging.info(f"find_upper_so: {current_dir}")
     p = pathlib.Path(current_dir).resolve()
     while p != p.parent:
         if p.exists():
             for root, _, files in os.walk(p):
-                print(f"find_upper_so: {root}, {files}")
+                logging.info(f"find_upper_so: {root}, {files}")
                 if SO_NAME in files:
                     return root
         p = p.parent
@@ -28,7 +28,7 @@ def find_upper_so(current_dir: str):
 
 
 def find_th_transformer(current_dir: str):
-    print(f"find_th_transformer: {current_dir}")
+    logging.info(f"find_th_transformer: {current_dir}")
     if not os.path.exists(current_dir):
         return None
     dir_path = pathlib.Path(current_dir)
@@ -193,30 +193,17 @@ except BaseException as e:
         logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
         raise e
 
-libth_transformer_imported = False
-python_standalone_mode = os.environ.get("PYTHON_STANDALONE_MODE") == "1"
+try:
 
-if frontend_mode or python_standalone_mode:
-    logging.info("libth_transformer not imported under frontend mode")
+    from libth_transformer import EngineScheduleInfo, KVCacheInfo
+    from libth_transformer import MultimodalInput as MultimodalInputCpp
+    from libth_transformer import RtpEmbeddingOp, RtpLLMOp, WorkerStatusInfo
+
+    libth_transformer_imported = True
+except BaseException as e:
     MultimodalInputCpp = EngineScheduleInfo = KVCacheInfo = WorkerStatusInfo = (
         EmptyClass
     )
     RtpEmbeddingOp = RtpLLMOp = EmptyClass
-else:
-    try:
-        print(f"try to import libth_transformer from {so_path}")
-        sys.stdout.flush()
-        sys.stderr.flush()
 
-        from libth_transformer import EngineScheduleInfo, KVCacheInfo
-        from libth_transformer import MultimodalInput as MultimodalInputCpp
-        from libth_transformer import RtpEmbeddingOp, RtpLLMOp, WorkerStatusInfo
-
-        print(f"try to import libth_transformer from {so_path} done")
-        sys.stdout.flush()
-        sys.stderr.flush()
-
-        libth_transformer_imported = True
-    except BaseException as e:
-        logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
-        raise e
+    logging.info("libth_transformer not imported, you may under python standalone mode or frontend mode now.")
