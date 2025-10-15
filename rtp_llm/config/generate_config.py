@@ -80,6 +80,7 @@ class GenerateConfig(BaseModel):
     logits_index: Optional[int] = None
     return_incremental: bool = False
     return_hidden_states: bool = False
+    return_all_hidden_states: bool = False
     hidden_states_cut_dim: int = 0
     normalized_hidden_states: bool = False
     select_tokens_str: List[str] = []

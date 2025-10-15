@@ -30,9 +30,10 @@ RTP-LLM First Release Version:0.2.0(2025.09)
 | **Llama**         | `meta-llama/Llama-4-Scout-17B-16E-Instruct`  | Meta’s open LLM series, spanning 7B to 400B parameters (Llama 2, 3, and new Llama 4) with well-recognized performance.  | NV ✅<br> AMD ✅ |
 
 ### Bug Fixs
+* metrics of cache is not work
+* P/D Disaggregation dead lock
 
 ## Question of omission
-* metrics of cache is not work
 * too many dynamic lora need more **reserver_runtime_mem_mb**
 * AMD not support MoE models
 * MoE model without shared_experter cannot use enable-layer-micro-batch

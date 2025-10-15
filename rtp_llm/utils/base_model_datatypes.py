@@ -81,10 +81,12 @@ class AuxInfo(PyBaseModel):
     decode_remote_reuse_len: int = 0
 
     role_addrs: List[RoleAddr] = []
+    aux_string: str = ""
 
 
 class GenerateOutput(PyBaseModel):
     hidden_states: Optional[torch.Tensor] = None
+    all_hidden_states: Optional[torch.Tensor] = None
     output_ids: Optional[torch.Tensor] = None
     input_ids: Optional[torch.Tensor] = None
     finished: bool = False

@@ -63,6 +63,9 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
             {rtp_llm::DataType::TYPE_FP32, {init_batch_size, (size_t)max_seq_len_}, rtp_llm::AllocationType::HOST}, {});
         memset(softmax_probs_->data(), 0, softmax_probs_->sizeBytes());
     }
+    if (generate_input_->generate_config->return_all_hidden_states) {
+        setReturnLastHiddenStates(true);
+    }
     complete_token_ids_ = std::make_shared<CompleteTokenIds>(
         device_, init_batch_size, maxBatchSize(), max_seq_len_, params.seq_size_per_block_);
     complete_token_ids_->init(input, extra_reserve_token_num);

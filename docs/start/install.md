@@ -24,7 +24,7 @@ pip install "rtp_llm>=0.2.0"
 
 ```bash
 # Use the last release branch
-git clone -b release/0.0.1 git@gitlab.alibaba-inc.com:foundation_models/RTP-LLM.git
+git clone git@github.com:alibaba/rtp-llm.git
 cd RTP-LLM
 
 # build RTP-LLM whl target
@@ -32,7 +32,8 @@ cd RTP-LLM
 # --config=rocm build target for AMD
 bazelisk build //rtp_llm:rtp_llm --verbose_failures --config=cuda12_6 --test_output=errors --test_env="LOG_LEVEL=INFO"  --jobs=64
 
-ln  -sf `pwd`/bazel-out/k8-opt/bin/rtp_llm/cpp/proto/model_rpc_service_pb2.py  `pwd`/rtp_llm/cpp/proto/
+ln  -sf `pwd`/bazel-out/k8-opt/bin/rtp_llm/cpp/model_rpc/proto/model_rpc_service_pb2_grpc.py  `pwd`/rtp_llm/cpp/model_rpc/proto/
+ln  -sf `pwd`/bazel-out/k8-opt/bin/rtp_llm/cpp/model_rpc/proto/model_rpc_service_pb2.py  `pwd`/rtp_llm/cpp/model_rpc/proto/model_rpc_service_pb2.py
 
 ```
 
@@ -46,7 +47,7 @@ docker run --gpus all \
  -v /mnt:/mnt \
  -v /home:/home \
  --ipc=host \
- hub.docker.alibaba-inc.com/isearch/rtp_llm_gpu_cuda12:2025_07_08_21_00_a1ed8e8 \
+ali-hangzhou-hub-registry.cn-hangzhou.cr.aliyuncs.com/isearch/rtp_llm_sm8x_opensource:0.2.0_0.2.0_2025_10_09_17_35_8fa289f5 \
   /opt/conda310/bin/python -m rtp_llm.start_server \
    --checkpoint_path=/mnt/nas1/hf/models--Qwen--Qwen1.5-0.5B-Chat/snapshots/6114e9c18dac0042fa90925f03b046734369472f/ \
     --model_type=qwen_2 --start_port=30000
@@ -83,7 +84,7 @@ spec:
         app: Qwen1.5-0.5B-Chat
     containers:
     - name: rtp-llm
-      image: hub.docker.alibaba-inc.com/isearch/rtp_llm_gpu_cuda12:2025_07_08_21_00_a1ed8e8
+      image:ali-hangzhou-hub-registry.cn-hangzhou.cr.aliyuncs.com/isearch/rtp_llm_sm8x_opensource:0.2.0_0.2.0_2025_10_09_17_35_8fa289f5
       command:
       - /opt/conda310/bin/python
       - -m
@@ -197,7 +198,7 @@ spec:
       spec:
         containers:
         - name: rtp-llm
-          image: hub.docker.alibaba-inc.com/isearch/rtp_llm_gpu_cuda12:2025_07_08_21_00_a1ed8e8
+          image:ali-hangzhou-hub-registry.cn-hangzhou.cr.aliyuncs.com/isearch/rtp_llm_sm8x_opensource:0.2.0_0.2.0_2025_10_09_17_35_8fa289f5
           command:
           - python3
           - -m
@@ -248,7 +249,7 @@ spec:
       spec:
         containers:
         - name: rtp-llm
-          image: hub.docker.alibaba-inc.com/isearch/rtp_llm_gpu_cuda12:2025_07_08_21_00_a1ed8e8
+          image:ali-hangzhou-hub-registry.cn-hangzhou.cr.aliyuncs.com/isearch/rtp_llm_sm8x_opensource:0.2.0_0.2.0_2025_10_09_17_35_8fa289f5
           command:
           - python3
           - -m

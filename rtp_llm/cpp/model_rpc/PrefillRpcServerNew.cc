@@ -15,18 +15,18 @@ grpc::Status PrefillRpcServerNew::init(const EngineInitParams&                  
 grpc::Status PrefillRpcServerNew::RemoteGenerateNew(grpc::ServerContext*              context,
                                                     const RemoteGenerateRequestPBNew* request,
                                                     RemoteGenerateResponsePBNew*      response) {
-    auto modified_request = const_cast<RemoteGenerateRequestPBNew*>(request);
-	GenerateInputPB* mutable_input = modified_request->mutable_input();
+    auto             modified_request = const_cast<RemoteGenerateRequestPBNew*>(request);
+    GenerateInputPB* mutable_input    = modified_request->mutable_input();
 
     // reset request_id in prefill
     auto request_id = loading_cache_requests_.fetch_add(1, std::memory_order_relaxed);
     mutable_input->set_request_id(request_id);
 
-    // ignore inter_request_id in prefill 
+    // ignore inter_request_id in prefill
     auto modified_config = mutable_input->mutable_generate_config();
     modified_config->set_inter_request_id(-1);
 
-	PrefillGenerateContextNew prefill_context(&resource_, context, request, response, metrics_reporter_, meta_);
+    PrefillGenerateContextNew prefill_context(&resource_, context, request, response, metrics_reporter_, meta_);
     RTP_LLM_LOG_INFO("request [%s] RemoteGenerateNew", prefill_context.request_key.c_str());
 
     prefill_context.error_info = prefill_context.init(engine_);
@@ -76,8 +76,8 @@ grpc::Status PrefillRpcServerNew::RemoteGenerateNew(grpc::ServerContext*        
     //}
 
     RTP_LLM_LOG_DEBUG("request [%s] RemoteGenerateNew success, response is %s",
-                     prefill_context.request_key.c_str(),
-                     response->ShortDebugString().c_str());
+                      prefill_context.request_key.c_str(),
+                      response->ShortDebugString().c_str());
     return grpc::Status::OK;
 }
 
@@ -252,7 +252,8 @@ ErrorInfo PrefillRpcServerNew::generateFirstToken(PrefillGenerateContextNew& pre
         }
         RTP_LLM_LOG_DEBUG("request [%s] generate next output success", prefill_context.request_key.c_str());
         auto response_output = prefill_context.response->mutable_output();
-        QueryConverter::transResponse(response_output, &(result.value()));
+        QueryConverter::transResponse(
+            response_output, &(result.value()), maga_init_params_.gpt_init_parameter.misc_config.aux_string);
         // should only generate one token
         break;
     }
@@ -266,8 +267,8 @@ ErrorInfo PrefillRpcServerNew::generateFirstToken(PrefillGenerateContextNew& pre
 }
 
 ErrorInfo PrefillRpcServerNew::waitStoreCacheForAllRankDone(PrefillGenerateContextNew& prefill_context) {
-    int     finished_count            = 0;
-    bool    all_success               = true;
+    int  finished_count = 0;
+    bool all_success    = true;
 
     ErrorCode   error_code = ErrorCode::NONE_ERROR;
     std::string error_msg  = "failed to load kv cache in rank: ";
@@ -310,8 +311,10 @@ ErrorInfo PrefillRpcServerNew::waitStoreCacheForAllRankDone(PrefillGenerateConte
             const auto& response         = rpc_context->response;
             const auto& pb_error_code    = response.error_info().error_code();
             const auto& pb_error_message = response.error_info().error_message();
-            prefill_context.min_response_done_time_us    = std::min(prefill_context.min_response_done_time_us, response.done_time_us());
-            prefill_context.max_response_done_time_us    = std::max(prefill_context.max_response_done_time_us, response.done_time_us());
+            prefill_context.min_response_done_time_us =
+                std::min(prefill_context.min_response_done_time_us, response.done_time_us());
+            prefill_context.max_response_done_time_us =
+                std::max(prefill_context.max_response_done_time_us, response.done_time_us());
 
             if (!status.ok()) {
                 all_success = false;
@@ -416,8 +419,9 @@ grpc::Status PrefillRpcServerNew::RemoteStore(grpc::ServerContext*        server
             auto request_key = std::to_string(request_id) + "-" + std::to_string(layer_id);
             auto block_num   = request->decode_block_ids_size();
             for (int i = 0; i < block_num; i++) {
-                auto decode_block_key  = makeCacheKey(model_id, std::to_string(request->decode_block_ids(i)), layer_id);
-                auto prefill_block_key = makeCacheKey(model_id, std::to_string(request->prefill_block_ids(i)), layer_id);
+                auto decode_block_key = makeCacheKey(model_id, std::to_string(request->decode_block_ids(i)), layer_id);
+                auto prefill_block_key =
+                    makeCacheKey(model_id, std::to_string(request->prefill_block_ids(i)), layer_id);
 
                 auto addr_info = cache_manager->convertIndexToAddr(request->prefill_block_ids(i), layer_id);
                 store_request->buffer_pairs["k_" + prefill_block_key] = "k_" + decode_block_key;
@@ -433,9 +437,9 @@ grpc::Status PrefillRpcServerNew::RemoteStore(grpc::ServerContext*        server
                 }
             }
         }
-        
-        auto collector = std::make_shared<CacheStoreRemoteStoreMetricsCollector>(metrics_reporter_, 
-            store_request->buffer_pairs.size());
+
+        auto collector = std::make_shared<CacheStoreRemoteStoreMetricsCollector>(metrics_reporter_,
+                                                                                 store_request->buffer_pairs.size());
 
         auto task = resource_.cache_store->submitRemoteStoreTask(store_request, collector, cancel_check_func);
         if (!task) {
@@ -470,8 +474,9 @@ grpc::Status PrefillRpcServerNew::RemoteStore(grpc::ServerContext*        server
     return grpc::Status::OK;
 }
 
-grpc::Status
-PrefillRpcServerNew::RemoteFinish(grpc::ServerContext* context, const RemoteFinishRequestPB* request, EmptyPB* response) {
+grpc::Status PrefillRpcServerNew::RemoteFinish(grpc::ServerContext*         context,
+                                               const RemoteFinishRequestPB* request,
+                                               EmptyPB*                     response) {
     auto request_id = request->request_id();
     resource_.cache_store->markRequestEnd(std::to_string(request_id));
     return grpc::Status::OK;

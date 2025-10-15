@@ -18,7 +18,8 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
     meta_.reset(new RpcServerRuntimeMeta());
     maga_init_params_ = maga_init_params;
     metrics_reporter_ = maga_init_params.metrics_reporter;
-
+    RTP_LLM_LOG_WARNING("LocalRpcServer aux_string %s",
+                        maga_init_params_.gpt_init_parameter.misc_config.aux_string.c_str());
     if (propose_params) {
         propose_maga_init_params_ = propose_params.get();
         if (!mm_process_engine.is_none()) {
@@ -93,7 +94,8 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
         }
         RTP_LLM_LOG_DEBUG("request [%s] generate next output success", request_key.c_str());
         GenerateOutputsPB outputs_pb;
-        QueryConverter::transResponse(&outputs_pb, &(result.value()));
+        QueryConverter::transResponse(
+            &outputs_pb, &(result.value()), maga_init_params_.gpt_init_parameter.misc_config.aux_string);
         if (context->IsCancelled()) {
             stream->cancel();
             RTP_LLM_LOG_WARNING("request [%s] cancelled by user", request_key.c_str());

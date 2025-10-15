@@ -24,6 +24,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->return_logits            = config_proto->return_logits();
     generate_config->return_incremental       = config_proto->return_incremental();
     generate_config->return_hidden_states     = config_proto->return_hidden_states();
+    generate_config->return_all_hidden_states = config_proto->return_all_hidden_states();
     generate_config->hidden_states_cut_dim    = config_proto->hidden_states_cut_dim();
     generate_config->normalized_hidden_states = config_proto->normalized_hidden_states();
     generate_config->calculate_loss           = config_proto->calculate_loss();
@@ -246,7 +247,9 @@ void QueryConverter::transTensorPB(TensorPB* t, const rtp_llm::Buffer* buffer) {
     t->set_data_type(data_type);
 }
 
-void QueryConverter::transResponse(GenerateOutputsPB* outputs, const GenerateOutputs* responses) {
+void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
+                                   const GenerateOutputs* responses,
+                                   const std::string&     aux_string) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     outputs->set_request_id(responses->request_id);
     for (size_t i = 0; i < responses->generate_outputs.size(); i++) {
@@ -268,6 +271,7 @@ void QueryConverter::transResponse(GenerateOutputsPB* outputs, const GenerateOut
         aux_info->set_total_reuse_len(response.aux_info.reuse_len);
         aux_info->set_local_reuse_len(response.aux_info.local_reuse_len);
         aux_info->set_remote_reuse_len(response.aux_info.remote_reuse_len);
+        aux_info->set_aux_string(aux_string);
         if (response.aux_info.cum_log_probs.has_value()) {
             transTensorPB(aux_info->mutable_cum_log_probs(), response.aux_info.cum_log_probs.value().get());
         }
@@ -286,6 +290,9 @@ void QueryConverter::transResponse(GenerateOutputsPB* outputs, const GenerateOut
         }
         if (response.logits.has_value()) {
             transTensorPB(output->mutable_logits(), response.logits.value().get());
+        }
+        if (response.all_hidden_states.has_value()) {
+            transTensorPB(output->mutable_all_hidden_states(), response.all_hidden_states.value().get());
         }
     }
     RTP_LLM_LOG_DEBUG("transResponse done");

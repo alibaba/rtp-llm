@@ -92,7 +92,8 @@ message GenerateConfigPB {
     bool enable_3fs = 48;
     repeated int32 variable_num_beams = 49;
     google.protobuf.StringValue trace_id = 50;
-    bool enable_memory_block_cache = 51;
+    bool enable_memory_block_cache = 52;
+    bool return_all_hidden_states = 51;
 }
 
 message MMPreprocessConfigPB {
@@ -158,6 +159,7 @@ message AuxInfoPB {
     int32 decode_total_reuse_len = 20;
     int32 decode_local_reuse_len = 21;
     int32 decode_remote_reuse_len = 22;
+    string aux_string = 23;
 }
 
 message GenerateOutputPB {
@@ -168,6 +170,7 @@ message GenerateOutputPB {
     TensorPB loss = 5;
     TensorPB logits = 6;
     TensorPB all_probs = 7;
+    TensorPB all_hidden_states = 8;
 }
 
 message GenerateOutputsPB {

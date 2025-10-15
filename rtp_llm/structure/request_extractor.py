@@ -62,6 +62,7 @@ class RequestExtractor:
         update_optional(
             "return_hidden_states", ["return_hidden_states", "output_hidden_states"]
         )
+        update_optional("return_all_hidden_states", ["return_hidden_states"])
         update_optional("return_logits", ["return_logits", "output_logits"])
         update_optional("return_input_ids", ["return_input_ids", "output_input_ids"])
         update_optional("max_new_tokens", ["gen_length", "max_new_tokens"])

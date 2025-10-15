@@ -678,6 +678,8 @@ class MiscellaneousConfig:
     load_balance: int
     step_records_max_size: int
     step_records_time_range: int
+    disable_pdl: bool
+    aux_string: str
 
     def __init__(
         self,
@@ -685,6 +687,7 @@ class MiscellaneousConfig:
         step_records_time_range: int = 60000000,
         step_records_max_size: int = 1000,
         disable_pdl: bool = True,
+        aux_string: str = "",
     ) -> None: ...
     def to_string(self) -> str: ...
     def update_from_env(self) -> None: ...

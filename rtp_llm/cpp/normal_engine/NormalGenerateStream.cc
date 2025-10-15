@@ -77,6 +77,11 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
                     device_->clone({update_info.hidden_states->view(i, 1), rtp_llm::AllocationType::HOST});
             }
         }
+        if (generate_input_->generate_config->return_all_hidden_states && update_info.all_hidden_states
+            && iter_count_ == 1) {
+            generate_output.all_hidden_states =
+                device_->clone({*update_info.all_hidden_states, rtp_llm::AllocationType::HOST});
+        }
         if (loss_) {
             RTP_LLM_CHECK_WITH_INFO(loss_index_ == inputLength() - 1,
                                     "loss index should be input len [%d] - 1 but is [%d]",

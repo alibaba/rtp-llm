@@ -431,17 +431,19 @@ void register_fifo_scheduler_config(pybind11::module& m) {
 // MiscellaneousConfig
 void register_misc_config(pybind11::module& m) {
     pybind11::class_<MiscellaneousConfig>(m, "MiscellaneousConfig")
-        .def(pybind11::init<int, int, int, bool>(),
+        .def(pybind11::init<int, int, int, bool, std::string>(),
              pybind11::arg("load_balance")            = 0,
              pybind11::arg("step_records_time_range") = 60 * 1000 * 1000,
              pybind11::arg("step_records_max_size")   = 1000,
-             pybind11::arg("disable_pdl")             = true)
+             pybind11::arg("disable_pdl")             = true,
+             pybind11::arg("aux_string")              = "")
         .def("to_string", &MiscellaneousConfig::to_string)
         .def("update_from_env", &MiscellaneousConfig::update_from_env_for_test)
         .def_readwrite("load_balance", &MiscellaneousConfig::load_balance)
         .def_readwrite("step_records_time_range", &MiscellaneousConfig::step_records_time_range)
         .def_readwrite("step_records_max_size", &MiscellaneousConfig::step_records_max_size)
-        .def_readwrite("disable_pdl", &MiscellaneousConfig::disable_pdl);
+        .def_readwrite("disable_pdl", &MiscellaneousConfig::disable_pdl)
+        .def_readwrite("aux_string", &MiscellaneousConfig::aux_string);
 }
 
 void registerGptInitParameter(py::module m) {
@@ -682,6 +684,7 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(local_rank, local_rank_)                                                                              \
     DEF_PROPERTY(rotary_embedding_mscale, rotary_embedding_mscale_)                                                    \
     DEF_PROPERTY(rotary_embedding_offset, rotary_embedding_offset_)                                                    \
+    DEF_PROPERTY(rotary_embedding_extrapolation_factor, rotary_embedding_extrapolation_factor_)                        \
     DEF_PROPERTY(use_mla, use_mla_)                                                                                    \
     DEF_PROPERTY(mla_ops_type, mla_ops_type_)                                                                          \
     DEF_PROPERTY(q_lora_rank, q_lora_rank_)                                                                            \

@@ -38,3 +38,11 @@ def init_misc_group_args(parser):
         default=True,
         help="是否禁用PDL",
     )
+
+    misc_group.add_argument(
+        "--aux_string",
+        env_name="AUX_STRING",
+        type=str,
+        default="",
+        help="管控环境变量字符串",
+    )

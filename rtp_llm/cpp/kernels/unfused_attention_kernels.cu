@@ -2265,7 +2265,7 @@ void invokeDecodeAddFusedQKVBiasTranspose(T*               q_buf,
                                           const bool       store_kv,
                                           const bool       store_cache,
                                           cudaStream_t     stream) {
-    if (rope_config.style == RopeStyle::Base && cos_sin_cache) {
+    if (cos_sin_cache) {
         if (batch_size <= 16 || head_num % 4 != 0 || head_num_kv % 4 != 0
             || kv_block_array.cache_type == KvCacheDataType::INT8) {
             dim3   block((size_per_head / Vec_t<T>::size + 31) / 32 * 32);
