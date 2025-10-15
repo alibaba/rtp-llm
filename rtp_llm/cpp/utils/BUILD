@@ -142,19 +142,3 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
 )
-
-cc_library(
-    name = "calc_utils",
-    hdrs = [
-        "RopeCache.h"
-    ],
-    srcs = [
-        "RopeCache.cc"
-    ],
-    deps = torch_deps() + [
-        ":core_utils",
-        "//rtp_llm/cpp/model_utils:model_utils"
-    ],
-    copts = copts(),
-    visibility = ["//visibility:public"],
-)

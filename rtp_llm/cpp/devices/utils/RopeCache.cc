@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/utils/RopeCache.h"
+#include "rtp_llm/cpp/devices/utils/RopeCache.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
