@@ -208,10 +208,6 @@ class FrontendApp(object):
                 version_info.model_dump(),
             )
 
-        @app.post("/update_weight")
-        async def update_weight():
-            
-
         @app.get("/v1/models")
         async def list_models():
             assert self.frontend_server._openai_endpoint != None
@@ -284,6 +280,12 @@ class FrontendApp(object):
         @app.post("/tokenize")
         async def encode(req: Union[str, Dict[Any, Any]]):
             return self.frontend_server.tokenize(req)
+
+        @app.post("/update_weight")
+        async def update_weight(req: Union[str, Dict[Any, Any]]):
+            return await async_request_server(
+                "post", g_worker_info.backend_server_port, "update_weight", req
+            )
 
         if self.frontend_server.is_embedding:
             # embedding
