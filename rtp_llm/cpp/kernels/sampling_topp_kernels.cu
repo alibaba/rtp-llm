@@ -39,6 +39,9 @@
 #include "rtp_llm/cpp/kernels/sampling_penalty_kernels.h"
 #include "rtp_llm/cpp/utils/math_utils.h"
 
+// #include <torch/torch.h>
+// #include <ATen/ATen.h>
+
 constexpr int   ENABLE_SINGLE_PASS_TOP_P = 0;
 constexpr float SINGLE_PASS_THRESHOLD    = 0.9;
 
@@ -1144,6 +1147,74 @@ void invokeBatchTopPSampling(void*           workspace,
 
         //
         if (!output_all_probs) {
+            // // 添加torch实现，代替下面的过程，即：
+            // // 先用log_probs构建一个shape=(batch_size, vocab_size), dtype=fp32的tensor，
+            // // 然后计算得到tensor max_prob shape=(batch_size, index, value)，其中value是这一行中最大的值，index是它对应在当前行中的位置,
+            // // 对于max_prob中value > top_p的行（假定其用batch_id表示），赋值sorted_id_vals[batch_id * vocab_size] = 对应index，赋值sorted_log_probs[batch_id * vocab_size] = 对应value
+            // // 并做begin_offset_buf[batch_id] += vocab_size
+            // // 同时注意，skip_decode[batch_id]可以用来制导对当前行是否做这个过程，相当于一个mask
+
+            // // 创建tensor处理log_probs
+            // // 将log_probs转换为(batch_size, vocab_size)的tensor
+            // torch::TensorOptions options = torch::TensorOptions()
+            //     .dtype(torch::kFloat32)
+            //     .device(torch::kCUDA);
+            // torch::Tensor log_probs_tensor = torch::from_blob(
+            //     const_cast<T*>(log_probs), 
+            //     {batch_size, static_cast<long>(vocab_size)}, 
+            //     options
+            // );
+
+            // // 计算每行的最大值和对应索引
+            // auto max_result = torch::max(log_probs_tensor, 1, true);
+            // torch::Tensor max_values = std::get<0>(max_result);
+            // torch::Tensor max_indices = std::get<1>(max_result);
+
+            // // 获取top_p阈值
+            // // torch::Tensor top_p_tensor;
+            // // if (top_ps != nullptr) {
+            // //     top_p_tensor = torch::from_blob(
+            // //         const_cast<float*>(top_ps), 
+            // //         {batch_size}, 
+            // //         torch::kFloat32
+            // //     ).clone();
+            // // } else {
+            // //     top_p_tensor = torch::full({batch_size}, max_top_p, torch::kFloat32);
+            // // }
+
+            // // 比较最大值是否超过top_p阈值
+            // auto threshold_mask = (max_values.squeeze(1) > 0.95);
+
+            // // 处理skip_decode掩码
+            // // torch::Tensor skip_decode_tensor;
+            // // if (skip_decode != nullptr) {
+            // //     skip_decode_tensor = torch::from_blob(
+            // //         const_cast<bool*>(skip_decode), 
+            // //         {batch_size}, 
+            // //         torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA)
+            // //     );
+            // //     // 合并skip_decode和threshold_mask
+            // //     threshold_mask = threshold_mask & ~skip_decode_tensor;
+            // // }
+
+            // // 对满足条件的batch进行处理
+            // auto mask_accessor = threshold_mask.accessor<bool, 1>();
+            // auto max_val_accessor = max_values.accessor<float, 2>();
+            // auto max_idx_accessor = max_indices.accessor<long, 2>();
+
+            // for (int batch_id = 0; batch_id < batch_size; batch_id++) {
+            //     if (mask_accessor[batch_id]) {
+            //         int max_index = static_cast<int>(max_idx_accessor[batch_id][0]);
+            //         float max_value = max_val_accessor[batch_id][0];
+
+            //         // 赋值操作
+            //         sorted_id_vals[batch_id * vocab_size] = max_index;
+            //         sorted_log_probs[batch_id * vocab_size] = static_cast<T>(max_value);
+
+            //         // 更新offset
+            //         begin_offset_buf[batch_id] += vocab_size;
+            //     }
+            // }
             topp_beam_topk_kernel<T, 1, block_size><<<batch_size, block_size, 0, stream>>>(log_probs,
                                                                                            sorted_id_vals,
                                                                                            sorted_log_probs,

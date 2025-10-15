@@ -268,12 +268,35 @@ GreedyOutput CudaDevice::sampleGreedy(const GreedyParams& params) {
         return GreedyOutput{};
     }
 
+    auto record_dur = [] (auto callback) {
+        if (std::getenv("XBJ_SAMPLE_DUR") == nullptr) {
+            return callback();
+        }
+        cudaEvent_t start, stop;
+        cudaEventCreate(&start);
+        cudaEventCreate(&stop);
+        cudaEventRecord(start);
+        auto ret = callback();
+        cudaEventRecord(stop);
+        cudaEventSynchronize(stop);
+        float milliseconds = 0;
+        cudaEventElapsedTime(&milliseconds, start, stop);
+        std::cout << "XBJ: took " << milliseconds << " ms" << std::endl;
+        cudaEventDestroy(start);
+        cudaEventDestroy(stop);
+        return ret;
+    };
+
     if (checkUseFlashinferSampleGreedy(params)) {
+        return record_dur([&] () {
         return flashinferSampleGreedy(params, transposed_tokens);
+        });
     }
 
+    return record_dur([&] () {
     completeSampleGreedy(params, transposed_tokens);
     return GreedyOutput{};
+    });
 }
 
 // batch sampling explained:

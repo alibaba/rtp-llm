@@ -26,6 +26,9 @@ GreedyOutput ROCmDevice::sampleGreedy(const GreedyParams& params) {
                           init_params_.max_batch_size,
                           batch_size);
     const auto vocab_size_padded = logits.shape()[1];
+    if (std::getenv("XBJ_DUMP_VOCAB_SIZE")) {
+        std::cout << "XBJ vocab size : " << vocab_size_padded << std::endl;
+    }
     const auto step              = params.step;
     RUNTIME_ASSERT_OP_ARG(batch_size == params.token_ids.shape()[0],
                           "logits.shape[0] should equal to token_ids.shape[0], but %d vs %d",
@@ -239,6 +242,13 @@ GreedyOutput ROCmDevice::sampleGreedy(const GreedyParams& params) {
         return GreedyOutput{};
     }
 
+    hipEvent_t start, stop;
+    if (std::getenv("XBJ_SAMPLE_DUR")) {
+        hipEventCreate(&start);
+        hipEventCreate(&stop);
+        hipEventRecord(start);
+    }
+
     // 4. run sampling
     // 4.1 run top_k
     invokeSetupTopKRuntimeArgs(batch_size,
@@ -335,6 +345,15 @@ GreedyOutput ROCmDevice::sampleGreedy(const GreedyParams& params) {
     auto output_tokens = transpose({*transposed_tokens});
     copy({params.token_ids, *output_tokens});
     check_cuda_error();
+    if (std::getenv("XBJ_SAMPLE_DUR")) {
+        hipEventRecord(stop);
+        hipEventSynchronize(stop);
+        float milliseconds = 0;
+        hipEventElapsedTime(&milliseconds, start, stop);
+        std::cout << "XBJ: took " << milliseconds << " ms" << std::endl;
+        hipEventDestroy(start);
+        hipEventDestroy(stop);
+    }
     return GreedyOutput{};
 }
 
