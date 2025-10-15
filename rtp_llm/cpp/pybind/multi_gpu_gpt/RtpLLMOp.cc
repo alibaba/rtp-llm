@@ -321,6 +321,31 @@ void RtpLLMOp::restart() {
     engine->restart();
 }
 
+/**
+ * @brief detach (unmap) all physical GPU memory that backs the KV-cache,
+ *        while keeping the virtual address range alive.
+ * @note After this call the KV-cache is **logically empty**; any attempt to
+ *       access it from kernels will trigger a device page fault until
+ *       attach_physical_memory() is invoked.
+ */
+void RtpLLMOp::detachPhysicalMemory() {
+    auto device = model_rpc_service_->getEngine()->getDevice();
+    device->detachPhysicalMemory();
+}
+
+/**
+ * @brief Re-attach (map) physical GPU memory to the previously reserved virtual
+ *        address range so that the KV-cache becomes usable again.
+ *
+ * Preconditions:
+ *  - detach_physical_memory() must have been called earlier.
+ *
+ */
+void RtpLLMOp::attachPhysicalMemory() {
+    auto device = model_rpc_service_->getEngine()->getDevice();
+    device->attachPhysicalMemory();
+}
+
 void registerRtpLLMOp(const py::module& m) {
     pybind11::class_<RtpLLMOp>(m, "RtpLLMOp")
         .def(pybind11::init<>())
@@ -350,7 +375,9 @@ void registerRtpLLMOp(const py::module& m) {
         .def("stop", &RtpLLMOp::stop)
         .def("update_eplb_config", &RtpLLMOp::updateEplbConfig, py::arg("config"))
         .def("pause", &RtpLLMOp::pause)
-        .def("restart", &RtpLLMOp::restart);
+        .def("restart", &RtpLLMOp::restart)
+        .def("detach_physical_memory", &RtpLLMOp::detachPhysicalMemory)
+        .def("attach_physical_memory", &RtpLLMOp::attachPhysicalMemory);
 }
 
 }  // namespace rtp_llm
