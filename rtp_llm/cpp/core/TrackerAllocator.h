@@ -12,7 +12,7 @@ struct TrackerAllocatorParams {
     size_t      align_size         = 1024;
 };
 
-class TrackerAllocator: public IAllocator {
+class TrackerAllocator: public IVirtualMemAllocator {
 public:
     TrackerAllocator(const TrackerAllocatorParams& params);
     ~TrackerAllocator();
@@ -28,6 +28,10 @@ public:
     void* mallocPrivate(size_t size) override;
 
     TrackerStatus getTrackerStatus() const;
+
+    void* mallocPhysical(size_t size) override;
+    void map() override;
+    void unmap() override;
 
 private:
     std::vector<MemoryChunk*> getChunks() const;
