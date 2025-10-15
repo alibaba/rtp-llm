@@ -92,3 +92,11 @@ class RPCEngine(BaseEngine):
     @override
     def _restart(self) -> None:
         return self.rtp_llm_op_.restart()
+
+    @override
+    def detach_physical_memory(self) -> bool:
+        return self.rtp_llm_op_.detach_physical_memory()
+
+    @override
+    def attach_physical_memory(self) -> bool:
+        return self.rtp_llm_op_.attach_physical_memory()
