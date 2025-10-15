@@ -69,14 +69,18 @@ void CudaGraphRunner::capture() {
     for (int i = 0; i <= capture_range_size - 1; i++) {
         int           bs = capture_range_[i];
         PyModelInputs inputs;
-        inputs.input_ids = capture_mem_hold_.py_model_inputs_.input_ids.slice(0, 0, bs * num_tokens_per_bs_);
-        inputs.attention_inputs.input_lengths =
-            capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths.slice(0, 0, bs);
-        inputs.attention_inputs.sequence_lengths =
-            capture_mem_hold_.py_model_inputs_.attention_inputs.sequence_lengths.slice(0, 0, bs);
-        // we capture the max_block_ids
-        inputs.attention_inputs.kv_cache_block_id_device =
-            capture_mem_hold_.py_model_inputs_.attention_inputs.kv_cache_block_id_device.slice(0, 0, bs);
+        inputs.input_ids        = capture_mem_hold_.py_model_inputs_.input_ids.slice(0, 0, bs * num_tokens_per_bs_);
+        auto options_cpu_int32  = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
+        auto options_cuda_int32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
+        // input_lengths [batch_size, int32]
+        inputs.attention_inputs.input_lengths = torch::full({int(bs)}, num_tokens_per_bs_, options_cpu_int32);
+        // sequence_lengths [batch_size, int32] (decode only)
+        // sequence_length should in pinned memory
+        inputs.attention_inputs.sequence_lengths = torch::ones({int(bs)}, options_cpu_int32);
+        inputs.attention_inputs.sequence_lengths = inputs.attention_inputs.sequence_lengths.pin_memory();
+        // kv_cache_block_id_device [batch_size, block_num]
+        inputs.attention_inputs.kv_cache_block_id_device = torch::zeros(
+            {int(bs), ((max_seq_len_ + seq_size_per_block_ - 1) / seq_size_per_block_)}, options_cuda_int32);
         inputs.attention_inputs.kv_cache_block_id_host =
             capture_mem_hold_.py_model_inputs_.attention_inputs.kv_cache_block_id_host.slice(0, 0, bs);
         // pinned memory
@@ -88,7 +92,6 @@ void CudaGraphRunner::capture() {
             capture_mem_hold_.py_model_inputs_.attention_inputs.padding_offset.slice(0, 0, bs * num_tokens_per_bs_);
         // Copy BertEmbeddingInputs from capture_mem_hold_
         inputs.bert_embedding_inputs = capture_mem_hold_.py_model_inputs_.bert_embedding_inputs;
-
         graph_instances_[bs].mem_hold_ =
             CaptureMemoryHold(capture_mem_hold_.decoder_layer_hidden_states_.slice(0, 0, bs * num_tokens_per_bs_),
                               inputs,
@@ -287,8 +290,6 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     inputs.attention_inputs.is_prefill = is_prefill_cuda_graph_mode_;
     // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
     inputs.input_ids = torch::zeros({max_num_token_}, options_cuda_int32);
-    // prefix_lengths [batch_size, int32] (for attention `prepare`)
-    inputs.attention_inputs.prefix_lengths = torch::full({int(max_bs_)}, num_tokens_per_bs_, options_cpu_int32);
     // input_lengths [batch_size, int32] (decode only)
     inputs.attention_inputs.input_lengths = torch::full({int(max_bs_)}, num_tokens_per_bs_, options_cpu_int32);
     // sequence_lengths [batch_size, int32] (decode only)
@@ -298,6 +299,8 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     // kv_cache_block_id_device [batch_size, block_num]
     inputs.attention_inputs.kv_cache_block_id_device = torch::zeros(
         {int(max_bs_), ((max_seq_len_ + seq_size_per_block_ - 1) / seq_size_per_block_)}, options_cuda_int32);
+    // prefix_lengths [batch_size, int32] (for attention `prepare`)
+    inputs.attention_inputs.prefix_lengths         = torch::full({int(max_bs_)}, num_tokens_per_bs_, options_cpu_int32);
     inputs.attention_inputs.kv_cache_block_id_host = torch::zeros(
         {int(max_bs_), ((max_seq_len_ + seq_size_per_block_ - 1) / seq_size_per_block_)}, options_cpu_int32);
     // padding_offset [max_num_token_, int32] (for attention padding)
