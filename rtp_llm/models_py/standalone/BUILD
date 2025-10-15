@@ -27,7 +27,13 @@ py_library(
         "//rtp_llm/test/utils:port_util",
         "//rtp_llm/test/utils:device_resource",
         "//rtp_llm/test/utils:stream_util",
-    ],
+    ] + select({
+        "@//:using_rocm": [
+            "//rtp_llm:aiter",
+            "//rtp_llm:amdsmi",
+        ],
+        "//conditions:default": [],
+    }),
     data = [
         "//:th_transformer_config",
         "//:rtp_compute_ops",

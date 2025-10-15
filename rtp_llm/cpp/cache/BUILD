@@ -36,7 +36,6 @@ cc_library(
         "BlockLRUCache.cc",
     ],
     deps = [
-        "//rtp_llm/cpp/dataclass:dataclass",
         "//rtp_llm/cpp/model_rpc:model_rpc_pool",
         "//rtp_llm/cpp/model_rpc:rpc_error_code",
         "//rtp_llm/cpp/utils:lru_cache",

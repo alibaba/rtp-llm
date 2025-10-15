@@ -58,6 +58,7 @@ op_test_data = [
 op_test_deps = [
     "//rtp_llm:torch",
     "//rtp_llm:numpy",
+    "//rtp_llm:transformers",
 ]
 
 py_test(
@@ -66,9 +67,7 @@ py_test(
         "layernorm/generalT5LayerNorm.py"
     ],
     data = op_test_data,
-    deps = op_test_deps + [
-        "//rtp_llm:transformers",
-    ],
+    deps = op_test_deps,
     exec_properties = {'gpu':'A10'},
 )
 
@@ -91,7 +90,6 @@ py_test(
     ],
     data = op_test_data,
     deps = op_test_deps + [
-        "//rtp_llm:transformers",
         "//rtp_llm:einops"
     ],
     exec_properties = {'gpu':'A10'},

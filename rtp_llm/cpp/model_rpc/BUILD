@@ -38,7 +38,6 @@ cc_library(
         ":model_rpc_pool",
         ":rpc_error_code",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store",
-        "//rtp_llm/cpp/dataclass:dataclass",
         "//rtp_llm/cpp/engine_base/stream:generate_types",
         "//rtp_llm/cpp/normal_engine:normal_engine",
         "//rtp_llm/cpp/embedding_engine:embedding_engine",

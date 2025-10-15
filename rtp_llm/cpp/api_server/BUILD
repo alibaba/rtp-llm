@@ -34,7 +34,6 @@ cc_library(
     ],
     deps = [
         ":tokenizer",
-        "//rtp_llm/cpp/dataclass:dataclass",
         "//rtp_llm/cpp/engine_base/stream:generate_config",
         "//rtp_llm/cpp/engine_base/stream:generate_types",
         "//rtp_llm/cpp/normal_engine:normal_engine",

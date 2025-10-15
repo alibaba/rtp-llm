@@ -4,7 +4,7 @@ py_test(
     deps = [
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
     ],
-    env = {"GPU_COUNT": "2", "PYTHON_STANDALONE_MODE": "1"},
+    env = {"GPU_COUNT": "2"},
     tags = ["open_skip", "H20"],
     exec_properties = {'gpu':'H20', 'gpu_count':'2'},
 )
@@ -15,7 +15,7 @@ py_test (
     deps = [
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
     ],
-    env = {"GPU_COUNT": "2", "PYTHON_STANDALONE_MODE": "1"},
+    env = {"GPU_COUNT": "2"},
     tags = ["open_skip", "H20"],
     exec_properties = {'gpu':'H20', 'gpu_count':'2'},
 )

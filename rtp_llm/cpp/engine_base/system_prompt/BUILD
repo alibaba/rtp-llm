@@ -24,7 +24,6 @@ cc_library(
         "//rtp_llm/cpp/engine_base:engine_base",
         "//rtp_llm/cpp/engine_base/stream:generate_config",
         "//rtp_llm/cpp/cache",
-        "//rtp_llm/cpp/dataclass:dataclass",
     ],
     visibility = ["//visibility:public"],
 )

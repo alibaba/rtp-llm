@@ -17,7 +17,6 @@ cc_library(
         "GenerateTypes.h",
     ],
     deps = [
-        "//rtp_llm/cpp/dataclass:dataclass",
         "//rtp_llm/cpp/models:position_ids_generator",
         "//rtp_llm/cpp/multimodal_processor:multimodal_types",
         "//:rtp_compute_ops",
@@ -39,9 +38,9 @@ cc_library(
         "//rtp_llm/cpp/engine_base/system_prompt:system_prompt",
         "//rtp_llm/cpp/models:models",
         "//rtp_llm/cpp/cache",
-        "//rtp_llm/cpp/dataclass:dataclass",
         "//rtp_llm/cpp/utils:hash_util",
         "//rtp_llm/cpp/models:dfa_utils",
+        "@havenask//aios/autil:synchronized_queue",
         "//:rtp_compute_ops",
     ],
     visibility = ["//visibility:public"],

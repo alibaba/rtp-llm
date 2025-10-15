@@ -187,9 +187,7 @@ class ModelFactory:
         revision: Optional[str] = None,
         model_config: ModelConfig = ModelConfig(),
     ):
-        assert os.environ["PYTHON_STANDALONE_MODE"] == "1"
         assert os.environ["LOAD_PYTHON_MODEL"] == "1"
-        model_path, model_type = get_model_info_from_hf(model_path_or_name, revision)
         new_model_config = model_config
         new_model_config = new_model_config._replace(
             model_type=model_type, ckpt_path=model_path, tokenizer_path=model_path

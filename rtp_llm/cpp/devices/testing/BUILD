@@ -9,7 +9,6 @@ cc_library(
     deps = [
         "@com_google_googletest//:gtest",
         "//rtp_llm/cpp/cache",
-        "//rtp_llm/cpp/dataclass:dataclass",
         "//:rtp_compute_ops",
     ],
     visibility = ["//visibility:public"],
