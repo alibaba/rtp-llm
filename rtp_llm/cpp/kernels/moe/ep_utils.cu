@@ -295,7 +295,7 @@ void finalizeMoeRoutingKernelLauncher(T const*       expanded_permuted_rows,
 }
 void moe_post_reorder(const torch::Tensor&                permuted_hidden_states,     // [n_token * topk, hidden]
                       const torch::Tensor&                topk_weights,               // [n_token, topk]
-                      const torch::Tensor&                inv_permuted_idx,           // [n_token, topk]
+                      const torch::Tensor&                inv_permuted_idx,           // [topk, n_token]
                       const std::optional<torch::Tensor>& expert_first_token_offset,  // [n_local_expert+1]
                       int64_t                             topk,
                       torch::Tensor&                      hidden_states  // [n_token, hidden]

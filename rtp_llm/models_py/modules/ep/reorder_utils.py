@@ -77,7 +77,7 @@ def moe_unpermute(
     out: torch.Tensor,
     permuted_hidden_states: torch.Tensor,
     topk_weights: torch.Tensor,
-    inv_permuted_idx: torch.Tensor,
+    inv_permuted_idx: torch.Tensor,  # [topk, num_tokens]
     expert_first_token_offset: Optional[torch.Tensor] = None,
 ) -> None:
     topk = topk_weights.size(1)
