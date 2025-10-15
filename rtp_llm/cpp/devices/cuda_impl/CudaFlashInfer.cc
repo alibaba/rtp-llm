@@ -431,17 +431,24 @@ ParamsPtr FlashInferAttnParams::prepare(rtp_llm::DeviceBase*             device,
     const int tokens_per_block  = attn_configs.tokens_per_block;
 
     int input_token_num = 0;
+    int page_num        = 0;
     if (is_prefill) {
         input_token_num =
             std::accumulate(input_lengths_host->data<int>(), input_lengths_host->data<int>() + batch_size, 0);
+        for (int i = 0; i < batch_size; i++) {
+            page_num += input_lengths_host->data<int>()[i] / tokens_per_block + 1;
+        }
     } else {
         input_token_num = input_lengths_host->shape()[0];
+        for (int i = 0; i < batch_size; i++) {
+            page_num += sequence_lengths_host->data<int>()[i] / tokens_per_block + 1;
+        }
     }
 
     auto params          = FlashInferAttnParams::create(cuda_device,
                                                max(MIN_CACHE_BATCH_SIZE, batch_size),
                                                max(MIN_CACHE_INPUT_TOKEN_NUM, input_token_num),
-                                               MIN_CACHE_PAGE_NUM);
+                                               max(MIN_CACHE_PAGE_NUM, page_num));
     params->attn_configs = attn_configs;
     params->is_prefill   = is_prefill;
 
