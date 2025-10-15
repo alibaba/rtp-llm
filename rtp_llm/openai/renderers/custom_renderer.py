@@ -484,10 +484,13 @@ class CustomChatRenderer:
                 "all_probs is None when logprobs is true. There should be a internal bug."
             )
         all_probs = all_probs.squeeze()
-        probs, tokens = all_probs.sort(descending=True)
-        non_zero_size = probs.nonzero().shape[0]
-        log_values = probs.log()
+        non_zero_size = all_probs.nonzero().shape[0]
         prob_return_num = min(prob_return_num, non_zero_size)
+        # 使用 topk 提高计算效率，只计算需要的前 k 个值
+        probs, tokens = all_probs.topk(
+            prob_return_num, dim=-1, largest=True, sorted=True
+        )
+        log_values = probs.log()
 
         selected_token = self.tokenizer.decode([selected_id])
         chat_logprob = ChatCompletionTokenLogprob(
@@ -919,10 +922,13 @@ class CustomChatRenderer:
                 "all_probs is None when logprobs is true. There should be a internal bug."
             )
         all_probs = all_probs.squeeze()
-        probs, tokens = all_probs.sort(descending=True)
-        non_zero_size = probs.nonzero().shape[0]
-        log_values = probs.log()
+        non_zero_size = all_probs.nonzero().shape[0]
         prob_return_num = min(prob_return_num, non_zero_size)
+        # 使用 topk 提高计算效率，只计算需要的前 k 个值
+        probs, tokens = all_probs.topk(
+            prob_return_num, dim=-1, largest=True, sorted=True
+        )
+        log_values = probs.log()
 
         selected_token = self.tokenizer.decode([selected_id])
         chat_logprob = ChatCompletionTokenLogprob(
