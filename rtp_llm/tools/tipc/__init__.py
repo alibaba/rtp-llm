@@ -1,15 +1,5 @@
-from .core import (
-    CudaIpcHelper,
-    CuIpcTensorMeta,
-    SharedMemIpcMeta,
-    SharedMemoryIPCHelper,
-)
-from .html import IPCTransportClient
+from .core import CuIpcTensorMeta, SharedMemIpcMeta, CudaIpcHelper, SharedMemoryIPCHelper
+from .client import IPCTransportClient
+from .ffi import CUDA
 
-__all__ = [
-    "CuIpcTensorMeta",
-    "SharedMemIpcMeta",
-    "CudaIpcHelper",
-    "IPCTransportClient",
-    "SharedMemoryIPCHelper",
-]
+__all__ = ["CuIpcTensorMeta", "SharedMemIpcMeta", "CudaIpcHelper", "IPCTransportClient", "SharedMemoryIPCHelper", "CUDA"]
