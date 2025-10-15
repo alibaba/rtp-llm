@@ -8,7 +8,7 @@ from rtp_llm.async_decoder_engine.async_model import AsyncModel
 from rtp_llm.model_loader.ffn_weight import FfnWeight
 from rtp_llm.model_loader.loader import ModelLoader
 from rtp_llm.model_loader.model_weight_info import ModelWeights
-from rtp_llm.tools.tipc import (
+from .tipc import (
     CudaIpcHelper,
     CuIpcTensorMeta,
     SharedMemIpcMeta,
@@ -132,7 +132,8 @@ class WeightManager:
                 return None
         else:
             return None
-    def update(self, req: Mapping[str, Any], is_master: bool) -> None:
+
+    def update(self, req: Mapping[str, Any]) -> None:
         """
         Receives an Inter-Process Communication (IPC) tensor description and
         updates the corresponding model weights.
@@ -182,8 +183,8 @@ class WeightManager:
             )
         tensor: torch.Tensor | None = None
         if method == "cuda_ipc":
-            cu_meta: CuIpcTensorMeta = CuIpcTensorMeta.decode(desc)
-            tensor = CudaIpcHelper.build_from_meta(cu_meta)
+            helper = CudaIpcHelper()
+            tensor = helper.build_from_meta(bytes.fromhex(desc))
         else:  # method == "shm"
             sm_meta: SharedMemIpcMeta = SharedMemIpcMeta.decode(desc)
             tensor = self._s_helper.build_from_meta(sm_meta)
@@ -216,8 +217,7 @@ class WeightManager:
                             self._weights.update_layer_weight(
                                 layer_id=layer_id,
                                 name=name,
-                                data=shard,
-                                is_master=is_master,
+                                data=shard
                             )
                             fail = False
                 for weight_module in self._weight_module.layer_weights[layer_id]:
@@ -232,8 +232,7 @@ class WeightManager:
                         self._weights.update_layer_weight(
                             layer_id=layer_id,
                             name=name,
-                            data=shard,
-                            is_master=is_master,
+                            data=shard
                         )
                         fail = False
                 if fail:
@@ -253,7 +252,7 @@ class WeightManager:
                         if isinstance(shard, dict):
                             shard = next(iter(shard.values()))
                         self._weights.update_global_weight(
-                            name=name, data=shard, is_master=is_master
+                            name=name, data=shard
                         )
                         fail = False
                 if fail:
