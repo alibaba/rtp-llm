@@ -91,7 +91,8 @@ void PurePointerCudaAllocator::free(void** ptr) {
 
 Allocator<AllocatorType::CUDA>::Allocator(int device_id):
     PurePointerCudaAllocator(device_id),
-    IVirtualMemAllocator() {    
+    IVirtualMemAllocator() {
+    pointer_mapping_ = std::make_unique<std::unordered_map<CUdeviceptr, VmemBlock>>();
 }
 
 Allocator<AllocatorType::CUDA>::~Allocator() {
