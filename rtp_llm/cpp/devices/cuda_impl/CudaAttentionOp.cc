@@ -387,10 +387,20 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
 
         bool use_rope_cache =
             params.configs.rope_config.style == RopeStyle::Base || params.configs.rope_config.style == RopeStyle::Yarn;
-        static torch::Tensor rope_cache;
         std::call_once(rope_cache_flag, [&]() {
             if (use_rope_cache) {
-                rope_cache = getRopeCache(params.configs.rope_config, init_params_.max_seq_len);
+                auto rope_tensor = getRopeCache(params.configs.rope_config, init_params_.max_seq_len);
+                auto rope_buffer = torchTensor2Buffer(rope_tensor);
+
+                rope_ = allocateBuffer(
+                    {
+                        rope_buffer->type(), 
+                        rope_buffer->shape(), 
+                        AllocationType::DEVICE, 
+                        false, VmemCtl::ForcePhysical
+                    }, {"rope cache"}
+                );
+                copy({*rope_, *rope_buffer});
             }
         });
 
@@ -406,8 +416,7 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
                                          params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias ?
                                              params.weights.qkv_weight->bias->data() :
                                              nullptr,
-                                         use_rope_cache && rope_cache.defined() ? rope_cache.data_ptr<float>() :
-                                                                                  nullptr,
+                                         use_rope_cache ? rope_->data<float>() : nullptr,
                                          batch_size,
                                          local_head_num,
                                          local_kv_head_num,
