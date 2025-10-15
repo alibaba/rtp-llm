@@ -224,13 +224,7 @@ py_test (
 py_test (
     name = "per_token_scaled_fp8_quant_test",
     srcs = ["per_token_scaled_fp8_quant_test.py"],
-    deps = [
-        "//rtp_llm/models_py:models",
-        "//rtp_llm:config",
-        "//rtp_llm:utils",
-        "//rtp_llm:testlib",
-        "//rtp_llm/test/model_test/test_util:test_util"
-    ],
+    deps = py_test_deps,
     env = test_envs,
     tags = ["open_skip", "H20"],
     exec_properties = {'gpu':'H20'},
