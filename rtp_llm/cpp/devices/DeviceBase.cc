@@ -79,7 +79,9 @@ BufferStatus DeviceBase::queryBufferStatus() {
 
 BufferPtr DeviceBase::allocateBuffer(const BufferParams& params, const BufferHints& hints) {
     return buffer_manager_->allocate(
-        {params.type, params.dims, params.allocation, nativeGraphCapturing() ? true : params.private_alloc}, hints);
+        {params.type, params.dims, params.allocation, 
+            nativeGraphCapturing() ? true : params.private_alloc, 
+            params.vmem_ctl}, hints);
 }
 
 BufferPtr DeviceBase::allocateBufferLike(const Buffer& buffer, const AllocationType atype, const BufferHints& hints) {
@@ -522,6 +524,16 @@ void DeviceBase::profileStart() {
 
 void DeviceBase::profileStop() {
     return;
+}
+
+void DeviceBase::detachPhysicalMemory() {
+    // maybe we can return true and log an error?
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
+void DeviceBase::attachPhysicalMemory() {
+    // maybe we can return true and log an error?
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
 }  // namespace rtp_llm

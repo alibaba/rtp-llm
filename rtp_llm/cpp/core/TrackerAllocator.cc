@@ -171,4 +171,28 @@ std::vector<MemoryChunk*> TrackerAllocator::getChunks() const {
     return {};
 }
 
+void TrackerAllocator::map() {
+    if (auto allocator_ = dynamic_cast<IVirtualMemAllocator*>(real_allocator_)) {
+        return allocator_->map();
+    } else {
+        return map();  // this will throw not impl.
+    }
+}
+
+void TrackerAllocator::unmap() {
+    if (auto allocator_ = dynamic_cast<IVirtualMemAllocator*>(real_allocator_)) {
+        return allocator_->unmap();
+    } else {
+        return unmap();  // this will throw not impl.
+    }
+}
+
+void* TrackerAllocator::mallocPhysical(size_t size) {
+    if (auto allocator_ = dynamic_cast<IVirtualMemAllocator*>(real_allocator_)) {
+        return allocator_->mallocPhysical(size);
+    } else {
+        return real_allocator_->malloc(size);
+    }
+}
+
 }  // namespace rtp_llm
