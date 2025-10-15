@@ -648,10 +648,12 @@ absl::Status SpeculativeEngine::mtpStep(std::list<GenerateStreamPtr>& streams) {
     {
         bool skip_propose = propose_streams.empty();
         tpSyncDisableSPRun(skip_propose);
-        RTP_LLM_CHECK_WITH_INFO(!skip_propose, "skip propose not allowed now");
-        RTP_LLM_LOG_DEBUG("propose step");
-        // 这里直接core吧，相比skip带来的性能提升，dp下步骤不同步带来的问题更严重
-        THROW_IF_STATUS_ERROR(propose_executor_->propose(propose_streams));
+        // dp 情况下不允许skip propose，有可能步骤不同步
+        RTP_LLM_CHECK_WITH_INFO(score_model_params_.gpt_init_parameter.dp_size_ <= 1 || !skip_propose, "skip propose not allowed now");
+        if (!skip_propose) {
+            RTP_LLM_LOG_DEBUG("propose step");
+            THROW_IF_STATUS_ERROR(propose_executor_->propose(propose_streams));
+        }
 
         for (const GenerateStreamPtr& stream : prefill_streams) {
             size_t            propose_step   = 0;
