@@ -58,8 +58,8 @@ BeamSearchOutput CudaDevice::sampleBeamSearch(const BeamSearchParams& params) {
     } while (0)
 
     // compute log softmax for probability calculation
-    at::Tensor logits_tsr             = Buffer2torchTensor(params.logits, false);
-    at::Tensor log_softmax_logits_tsr = logits_tsr.log_softmax(-1);
+    at::Tensor logits_tsr = Buffer2torchTensor(params.logits, false);
+    at::log_softmax_out(logits_tsr, logits_tsr, -1);
 
     // beam search heuristic
     tensorrt_llm::BeamSearchConfig config;
@@ -127,7 +127,7 @@ BeamSearchOutput CudaDevice::sampleBeamSearch(const BeamSearchParams& params) {
     DISPATCH_TYPE(T, params.logits.type(), [&]() {
         DISPATCH_BOOL(IS_V2, config.mV2, [&]() {
             tensorrt_llm::kernels::invokeTopkBeamSearch<T, IS_V2>(
-                static_cast<T*>(log_softmax_logits_tsr.data_ptr()), nullptr, workspace->data(), BH, stream_);
+                static_cast<T*>(logits_tsr.data_ptr()), nullptr, workspace->data(), BH, stream_);
         });
     });
 
