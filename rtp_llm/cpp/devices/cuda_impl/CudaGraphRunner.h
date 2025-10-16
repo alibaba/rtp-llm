@@ -2,6 +2,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/embed.h>
 #include "ATen/core/TensorBody.h"
+#include "c10/core/TensorOptions.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/devices/cuda_impl/CudaGraphUtils.h"
 #include <ATen/cuda/CUDAEvent.h>
@@ -78,13 +79,11 @@ private:
     void                 copySmallerIntoLarger(const torch::Tensor& source_tensor, torch::Tensor& target_tensor);
     std::vector<int>     getDecodeBatchSizesToCapture(int concurrency_limit);
     std::vector<int>     getPrefillSequenceLengthsToCapture();
-    bool                 tryGetRealGraphBatchSize(PyModelInputs& inputs);
-    void                 extractValidHiddenStates(torch::Tensor& outputs,
-                                                  torch::Tensor& inputs,
-                                                  torch::Tensor& input_lengths,
-                                                  int32_t        total_valid_tokens);
+    void                 tryGetRealGraphDecodeBatchSize(PyModelInputs& inputs);
+    void                 tryGetRealGraphPrefillSeqLen(PyModelInputs& inputs);
     void                 initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs);
     void                 initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token);
+    void                 initCaptureAttentionInputsPost(PyModelInputs& inputs);
     py::object           py_forward_method_;
     py::object           py_fill_params_method_;
     bool                 enable_cuda_graph_{false};
@@ -97,10 +96,11 @@ private:
     int                  num_tokens_per_bs_{1};
     int                  max_num_token_{1};
     int                  current_batch_size_{1};
+    int                  current_seq_len_{1};
     // for decode
     int current_real_graph_bs_{1};
     // for prefill
-    int              current_real_seq_len_{1};
+    int              current_real_graph_seq_len_{1};
     int              max_seq_len_{0};
     int              seq_size_per_block_{0};
     int              kv_cache_block_offset_{0};
@@ -114,6 +114,9 @@ private:
     torch::Tensor                          token_type_embedding_;
     float                                  input_embedding_scalar_;
     caffe2::TypeMeta                       model_data_type_;
+    at::TensorOptions                      options_cuda_int32_;
+    at::TensorOptions                      options_cpu_int32_;
+    at::TensorOptions                      options_cuda_float_;
 
 public:
     DeviceBase* device_{nullptr};
