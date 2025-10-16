@@ -23,12 +23,16 @@ __all__ = [
     "fused_add_rmsnorm",
     "fused_qk_rmsnorm",
     "write_cache_store",
+    "FlashInferMlaAttnParams",
     "layernorm",
     "rmsnorm",
     "silu_and_mul",
 ]
 
 class FlashInferAttnParams:
+    def __init__(self) -> None: ...
+
+class FlashInferMlaAttnParams:
     def __init__(self) -> None: ...
 
 class FlashInferOp:

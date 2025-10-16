@@ -97,6 +97,7 @@ requirement([
     "portalocker",
     "concurrent_log_handler",
     "aiter",
+    "flashinfer-python",
 ] + tensorrt)
 
 filegroup(
@@ -529,6 +530,7 @@ whl_reqs = [
     "bitsandbytes",
     "portalocker",
     "concurrent_log_handler",
+    "flashinfer-python==0.2.5",
 ] + whl_deps() + platform_deps() + xft_dep
 
 py_wheel(

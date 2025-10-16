@@ -7,6 +7,15 @@
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 namespace torch_ext {
+struct MlaParams {
+    torch::Tensor batch_indice;
+    torch::Tensor positions;
+    torch::Tensor paged_kv_last_page_len;
+    torch::Tensor kvlen;
+    torch::Tensor page_indice;
+    torch::Tensor page_indptr;
+    torch::Tensor qo_indptr;
+};
 
 struct KVCache {
     torch::Tensor k_cache_base;
@@ -65,6 +74,7 @@ struct PyAttentionInputs {
     // for `FusedRopeKVCacheDecodeOp`.
     torch::Tensor cu_seqlens;
     torch::Tensor padding_offset;
+
 
     // for write cache store
     std::optional<PyCacheStoreInputs> cache_store_inputs;
