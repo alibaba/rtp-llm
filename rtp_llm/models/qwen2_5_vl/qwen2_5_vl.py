@@ -15,6 +15,7 @@ except ModuleNotFoundError:
 import torch.library as tl
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.models.multimodal.multimodal_util import get_bytes_io_from_url
 from rtp_llm.models.qwen2_5_vl.modeling_qwen2_5_vl import (
     Qwen2_5_VisionTransformerPretrainedModel,
 )
@@ -27,8 +28,6 @@ from rtp_llm.models.qwen2_vl.qwen2_vl_vit import (
     VIDEO_MAX_PIXELS,
     VIDEO_MIN_PIXELS,
     VIDEO_TOTAL_PIXELS,
-    MMPreprocessConfig,
-    MMUrlType,
     Qwen2VLImageEmbedding,
     Qwen2VLImageProcessor,
     ceil_by_factor,
@@ -36,7 +35,7 @@ from rtp_llm.models.qwen2_vl.qwen2_vl_vit import (
     smart_resize,
     timeout_decorator,
 )
-from rtp_llm.utils.multimodal_util import get_bytes_io_from_url
+from rtp_llm.utils.base_model_datatypes import MMPreprocessConfig, MMUrlType
 
 if not hasattr(tl, "wrap_triton"):
 

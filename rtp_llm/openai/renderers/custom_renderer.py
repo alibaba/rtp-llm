@@ -37,8 +37,10 @@ from rtp_llm.utils.base_model_datatypes import (
     GenerateInput,
     GenerateOutput,
     GenerateOutputs,
+    MMPreprocessConfig,
+    MMUrlType,
+    MultimodalInput,
 )
-from rtp_llm.utils.multimodal_util import MMPreprocessConfig, MMUrlType, MultimodalInput
 from rtp_llm.utils.util import has_overlap_kmp
 from rtp_llm.utils.word_util import (
     get_stop_word_slices,
