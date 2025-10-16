@@ -27,39 +27,11 @@ class FusedMoeExecutor(FusedMoeExpertExecutor):
     ):
         super().__init__(FusedMoEQuantConfig())
         
-        self.config = config
         self.ep_size = config.ep_size
         self.ep_rank = config.ep_rank
-
-        # self.num_experts = config.expert_num
-        # assert self.num_experts % self.ep_size == 0
-        # self.num_experts_per_partition = self.num_experts // self.ep_size
-        # self.start_expert_id = self.ep_rank * self.num_experts_per_partition
-        # self.end_expert_id = self.start_expert_id + self.num_experts_per_partition - 1
-
-        # self.top_k = config.moe_k
-        # self.intermediate_size = config.moe_inter_padding_size
-        # self.activation = config.activation_type.lower()
-        # self.renormalize = True
-
-        # self.use_fp8_w8a8 = True
-        # self.use_block_quant = True
         
         self.w13_weight = weights[W.moe_w1]
         self.w2_weight = weights[W.moe_w2]
-        # self.w13_weight_scale_inv = weights[W.moe_s1]
-        # self.w2_weight_scale_inv = weights[W.moe_s2]
-        # self.w13_weight_scale = None
-        # self.w2_weight_scale = None
-
-        # self.w13_weight_fp8 = (
-        #     self.w13_weight,
-        #     self.w13_weight_scale_inv,
-        # )
-        # self.w2_weight_fp8 = (
-        #     self.w2_weight,
-        #     self.w2_weight_scale_inv,
-        # )
 
     def finalize_weight_and_reduce_impl(self) -> TopKWeightAndReduce:
         return TopKWeightAndReduceDelegate()
