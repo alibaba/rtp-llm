@@ -381,6 +381,7 @@ void FIFOSchedulerConfig::update_from_env_for_test() {
     enable_fast_gen                  = bool_from_env_for_test("ENABLE_FAST_GEN", false);
     enable_partial_fallback          = bool_from_env_for_test("ENABLE_PARTIAL_FALLBACK", false);
     fast_gen_context_budget          = autil::EnvUtil::getEnv("FAST_GEN_MAX_CONTEXT_LEN", -1);
+    preallocate_blocks               = autil::EnvUtil::getEnv("PREALLOCATE_BLOCKS", 1);
 }
 
 std::string FIFOSchedulerConfig::to_string() const {
@@ -389,7 +390,8 @@ std::string FIFOSchedulerConfig::to_string() const {
         << "scheduler_reserve_resource_ratio: " << scheduler_reserve_resource_ratio << "\n"
         << "enable_fast_gen: " << enable_fast_gen << "\n"
         << "enable_partial_fallback: " << enable_partial_fallback << "\n"
-        << "fast_gen_context_budget: " << fast_gen_context_budget;
+        << "fast_gen_context_budget: " << fast_gen_context_budget << "\n"
+        << "preallocate_blocks: " << preallocate_blocks;
     return oss.str();
 }
 

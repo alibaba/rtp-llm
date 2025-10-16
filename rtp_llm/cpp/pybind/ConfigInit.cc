@@ -409,19 +409,21 @@ void register_batch_decode_scheduler_config(pybind11::module& m) {
 // FIFOSchedulerConfig
 void register_fifo_scheduler_config(pybind11::module& m) {
     pybind11::class_<FIFOSchedulerConfig>(m, "FIFOSchedulerConfig")
-        .def(pybind11::init<int64_t, int, bool, bool, int64_t>(),
+        .def(pybind11::init<int64_t, int, bool, bool, int64_t, int64_t>(),
              pybind11::arg("max_context_batch_size")           = 1,
              pybind11::arg("scheduler_reserve_resource_ratio") = 5,
              pybind11::arg("enable_fast_gen")                  = false,
              pybind11::arg("enable_partial_fallback")          = false,
-             pybind11::arg("fast_gen_context_budget")          = -1)
+             pybind11::arg("fast_gen_context_budget")          = -1,
+             pybind11::arg("preallocate_blocks")               = 1)
         .def("to_string", &FIFOSchedulerConfig::to_string)
         .def("update_from_env", &FIFOSchedulerConfig::update_from_env_for_test)
         .def_readwrite("max_context_batch_size", &FIFOSchedulerConfig::max_context_batch_size)
         .def_readwrite("scheduler_reserve_resource_ratio", &FIFOSchedulerConfig::scheduler_reserve_resource_ratio)
         .def_readwrite("enable_fast_gen", &FIFOSchedulerConfig::enable_fast_gen)
         .def_readwrite("enable_partial_fallback", &FIFOSchedulerConfig::enable_partial_fallback)
-        .def_readwrite("fast_gen_context_budget", &FIFOSchedulerConfig::fast_gen_context_budget);
+        .def_readwrite("fast_gen_context_budget", &FIFOSchedulerConfig::fast_gen_context_budget)
+        .def_readwrite("preallocate_blocks", &FIFOSchedulerConfig::preallocate_blocks);
 }
 
 // MiscellaneousConfig
@@ -660,6 +662,7 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(prefill_max_wait_timeout_ms, prefill_max_wait_timeout_ms_)                                            \
     DEF_PROPERTY(decode_retry_times, decode_retry_times_)                                                              \
     DEF_PROPERTY(decode_retry_timeout_ms, decode_retry_timeout_ms_)                                                    \
+    DEF_PROPERTY(decode_retry_interval_ms, decode_retry_interval_ms_)                                                  \
     DEF_PROPERTY(decode_polling_kv_cache_step_ms, decode_polling_kv_cache_step_ms_)                                    \
     DEF_PROPERTY(decode_polling_call_prefill_ms, decode_polling_call_prefill_ms_)                                      \
     DEF_PROPERTY(rdma_connect_retry_times, rdma_connect_retry_times_)                                                  \
