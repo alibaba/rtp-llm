@@ -3,7 +3,8 @@ import json
 import logging
 import threading
 from typing import Any, Callable, Dict, Union
-
+import numpy as np
+import base64
 from fastapi import Request
 from fastapi import Request as RawRequest
 from fastapi.responses import ORJSONResponse, StreamingResponse
@@ -318,7 +319,12 @@ class FrontendServer(object):
             else complete_response
         )
         self._access_logger.log_success_access(req, complete_response)
-
+        all_hidden_states = complete_response.get('extra_outputs', {}).get('all_hidden_states')
+        if all_hidden_states is not None:
+            all_hidden_states_array = np.array(all_hidden_states)
+            all_hidden_states_base64 = base64.b64encode(all_hidden_states_array.tobytes()).decode('ascii')
+            complete_response['extra_outputs']['all_hidden_states'] = all_hidden_states_base64
+            
         return complete_response
 
     async def _infer_impl(
