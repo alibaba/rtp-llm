@@ -607,6 +607,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
     auto datatype            = params.input.type();
     auto token_num           = params.input.shape()[0];
     auto batch_size          = params.common.context_batch_size;
+    std::cout << "batch_size: " << batch_size << ", token_num: " << token_num << std::endl;
     auto decoder_batch_size  = params.common.decoder_batch_size;
     auto seq_len             = params.common.context_max_seq_len;
     auto seq_len_with_prefix = seq_len + params.common.max_prefix_length;
