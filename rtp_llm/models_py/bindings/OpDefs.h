@@ -80,6 +80,10 @@ struct PyAttentionInputs {
 
     // for write cache store
     std::optional<PyCacheStoreInputs> cache_store_inputs;
+
+    // for embedding model cuda graph capture, the attenton batch size is padded to max_batch_size,
+    // so we can't get the real batch size for `copy kernel` using `input_lengths.size(0)`(which is max_batch_size).
+    torch::Tensor batch_size;
 };
 
 struct BertEmbeddingInputs {
