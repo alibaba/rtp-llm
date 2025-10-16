@@ -92,11 +92,11 @@ CacheManager::~CacheManager() {
     allocator_.reset();
 }
 
-size_t CacheManager::totalBlocks() const {
+uint32_t CacheManager::totalBlocks() const {
     return allocator_->totalBlocks();
 }
 
-size_t CacheManager::maxSeqLen() const {
+uint32_t CacheManager::maxSeqLen() const {
     return totalBlocks() * seq_size_per_block_;
 }
 
@@ -110,7 +110,7 @@ void CacheManager::reportMetricsLoop() {
             {
                 std::lock_guard<std::mutex> guard(mutex_);
                 collector.kv_cache_item_num         = block_cache_.size();
-                auto available_blocks               = availableBlockNumsWithoutLock();
+                auto available_blocks               = availableBlockNums();
                 collector.kv_cache_left_seq         = available_blocks * seq_size_per_block_;
                 collector.kv_cache_available_blocks = available_blocks;
                 collector.kv_cache_free_blocks      = freeBlockNums();
@@ -156,16 +156,11 @@ size_t CacheManager::freeBlockNums() const {
     return allocator_->freeBlockNums();
 }
 
-size_t CacheManager::availableBlockNums() {
-    std::lock_guard<std::mutex> guard(mutex_);
+size_t CacheManager::availableBlockNums() const {
     return available_blocks_;
 }
 
-size_t CacheManager::availableBlockNumsWithoutLock() {
-    return available_blocks_;
-}
-
-KVCacheInfo CacheManager::getKVCacheInfo(int64_t latest_version, bool need_cache_keys) {
+KVCacheInfo CacheManager::getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const {
     auto                 snapshot = block_cache_.cacheSnapshot(latest_version);
     std::vector<int64_t> cachekeys;
     if (need_cache_keys) {

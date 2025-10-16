@@ -65,9 +65,8 @@ int64_t DecodeGenerateContext::TimeInfo::loadCacheTimeMs() const {
 
 void DecodeGenerateContext::reportTime() {
     RpcMetricsCollector collector;
-
     collectBasicMetrics(collector);
-
+    collector.retry_times                    = retry_times;
     collector.loading_cache_request          = loading_cache_requests;
     collector.prepare_generate_context_rt_us = stat_info.prepare_generate_context_rt_us;
     collector.allocate_resource_rt_us        = stat_info.allocate_resource_rt_us;

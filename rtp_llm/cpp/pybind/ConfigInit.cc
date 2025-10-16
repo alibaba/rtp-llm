@@ -705,7 +705,6 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(prefill_max_wait_timeout_ms, prefill_max_wait_timeout_ms_)                                            \
     DEF_PROPERTY(decode_retry_times, decode_retry_times_)                                                              \
     DEF_PROPERTY(decode_retry_timeout_ms, decode_retry_timeout_ms_)                                                    \
-    DEF_PROPERTY(decode_retry_interval_ms, decode_retry_interval_ms_)                                                  \
     DEF_PROPERTY(decode_polling_kv_cache_step_ms, decode_polling_kv_cache_step_ms_)                                    \
     DEF_PROPERTY(decode_polling_call_prefill_ms, decode_polling_call_prefill_ms_)                                      \
     DEF_PROPERTY(rdma_connect_retry_times, rdma_connect_retry_times_)                                                  \

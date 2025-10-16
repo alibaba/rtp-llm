@@ -24,9 +24,8 @@ public:
     int64_t total_rt_us      = 0;
 
     // pd-sep prefill and decode metrics
-    int     retry_times           = 0;
-    int64_t retry_cost_time_ms    = 0;
-    int     loading_cache_request = 0;
+    int retry_times           = 0;
+    int loading_cache_request = 0;
 
     // pd-sep prefill metrics
     int64_t get_rpc_connection_rt_us       = 0;
@@ -71,7 +70,6 @@ public:
     kmonitor::MutableMetric* total_rt_us_metric      = nullptr;
 
     kmonitor::MutableMetric* retry_times_metric           = nullptr;
-    kmonitor::MutableMetric* retry_cost_time_ms_metric    = nullptr;
     kmonitor::MutableMetric* loading_cache_request_metric = nullptr;
 
     kmonitor::MutableMetric* get_rpc_connection_rt_us_metric       = nullptr;

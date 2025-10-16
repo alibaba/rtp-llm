@@ -195,7 +195,7 @@ absl::Status NormalEngine::initSystemPrompt() {
     return absl::OkStatus();
 }
 
-KVCacheInfo NormalEngine::getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) {
+KVCacheInfo NormalEngine::getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) const {
     return resource_context_.cache_manager->getKVCacheInfo(latest_version, need_cache_keys);
 }
 

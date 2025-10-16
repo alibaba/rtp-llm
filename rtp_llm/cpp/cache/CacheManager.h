@@ -103,10 +103,9 @@ public:
 
     const CacheConfig&                     cacheConfig() const;
     size_t                                 freeBlockNums() const;
-    size_t                                 availableBlockNums();
-    size_t                                 totalBlocks() const;
-    size_t                                 maxSeqLen() const;
-    KVCacheInfo                            getKVCacheInfo(int64_t latest_version, bool need_cache_keys);
+    size_t                                 availableBlockNums() const;
+    KVCacheInfo                            getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
+    uint32_t                               maxSeqLen() const;
     const KVCacheAllocator::KVCacheBuffer& kvCacheBuffer() const;
 
     std::tuple<bool, KVCacheResource> malloc(const KVCacheAllocator::SimpleMallocInfo& malloc_info);
@@ -151,10 +150,10 @@ public:
 protected:
     const BlockCache&  blockCache() const;
     size_t             cacheItemNum() const;
+    uint32_t           totalBlocks() const;
     void               initFreeBlock();
     rtp_llm::BufferPtr tryAllocateMaxBuffer();
     void               allocateAndSync();
-    size_t             availableBlockNumsWithoutLock();
 
     MatchInfo                          matchImpl(const AdvancedMallocInfo& malloc_info);
     std::tuple<bool, std::vector<int>> mallocIndex(const KVCacheAllocator::SimpleMallocInfo& malloc_info);

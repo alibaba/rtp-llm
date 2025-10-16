@@ -87,26 +87,11 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
     auto input                        = QueryConverter::transQuery(&decode_context.allocate_request.input());
     auto generate_stream              = engine_->makeStream(input);
     decode_context.request_timeout_ms = generate_stream->getTimeoutMs();
-
-    auto cache_manager = engine_->resourceContext().cache_manager;
-    auto reserve_block_num =
-        maga_init_params_.gpt_init_parameter.scheduler_reserve_resource_ratio_ * cache_manager->totalBlocks() / 100;
-    auto current_blocks = cache_manager->availableBlockNums();
-    if (current_blocks < reserve_block_num) {
-        string error_msg = "request: [" + decode_context.request_key + "] malloc kv cache block failed at decode node, "
-                           + "current_blocks = " + std::to_string(current_blocks)
-                           + ", reserve_block_num = " + std::to_string(reserve_block_num);
-        RTP_LLM_LOG_ERROR(error_msg);
-        decode_context.error_status = grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED, error_msg);
-        return;
-    }
-
-    auto status = generate_stream->initKVBlock(0);
+    auto status                       = generate_stream->initKVBlock(0);
     decode_context.setStream(generate_stream);
     if (!status.ok()) {
         string error_msg = "request: [" + decode_context.request_key + "] malloc kv cache block failed at decode node";
         RTP_LLM_LOG_ERROR(error_msg);
-        generate_stream->setStop(ErrorCode::DECODE_MALLOC_FAILED, "decode malloc failed");
         decode_context.error_status = grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED, error_msg);
         return;
     }
@@ -695,12 +680,10 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
 
     auto max_retry_times      = maga_init_params_.gpt_init_parameter.decode_retry_times_;
     auto max_retry_timeout_ms = maga_init_params_.gpt_init_parameter.decode_retry_timeout_ms_;
-    auto retry_interval_ms    = maga_init_params_.gpt_init_parameter.decode_retry_interval_ms_;
 
     try {
         EXECUTE_STAGE_FUNC(prepareGenerateContext, decode_context);
-        EXECUTE_WITH_RETRY(
-            allocateResourceFunc, decode_context, max_retry_times, max_retry_timeout_ms, retry_interval_ms);
+        EXECUTE_WITH_RETRY(allocateResourceFunc, decode_context, max_retry_times, max_retry_timeout_ms);
         if (decode_context.hasError()) {
             RTP_LLM_LOG_WARNING("request [%s] allocate resource failed after retry %d times, cost time ms [%ld], "
                                 "max retry time [%ld], max retry timeout ms [%ld]",

@@ -43,7 +43,6 @@ bool RpcMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(total_rt_us_metric, "rtp_llm_rpc_total_rt_us");
 
     REGISTER_GAUGE_MUTABLE_METRIC(retry_times_metric, "rtp_llm_rpc_retry_times");
-    REGISTER_GAUGE_MUTABLE_METRIC(retry_cost_time_ms_metric, "rtp_llm_rpc_retry_cost_time_ms");
     REGISTER_GAUGE_MUTABLE_METRIC(loading_cache_request_metric, "rtp_llm_rpc_loading_cache_request");
 
     REGISTER_GAUGE_MUTABLE_METRIC(get_rpc_connection_rt_us_metric, "rtp_llm_rpc_get_rpc_connection_rt_us");
@@ -103,7 +102,6 @@ void RpcMetrics::report(const kmonitor::MetricsTags* tags, RpcMetricsCollector* 
     REPORT_GAUGE(total_rt_us);
 
     REPORT_GAUGE(retry_times);
-    REPORT_GAUGE(retry_cost_time_ms);
     REPORT_GAUGE(loading_cache_request);
 
     REPORT_GAUGE(get_rpc_connection_rt_us);

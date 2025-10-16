@@ -253,7 +253,6 @@ public:
     int64_t  prefill_max_wait_timeout_ms_     = 0;
     int64_t  decode_retry_times_              = 0;
     int64_t  decode_retry_timeout_ms_         = 0;
-    int64_t  decode_retry_interval_ms_        = 1;
     int64_t  decode_polling_kv_cache_step_ms_ = 0;
     int64_t  decode_polling_call_prefill_ms_  = 0;
     int64_t  rdma_connect_retry_times_        = 0;

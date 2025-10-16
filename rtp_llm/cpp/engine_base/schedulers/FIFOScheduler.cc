@@ -17,6 +17,7 @@ FIFOScheduler::FIFOScheduler(const rtp_llm::GptInitParameter&     params,
     max_seq_len_(params.max_seq_len_),
     max_batch_tokens_size_(params.max_batch_tokens_size_),
     max_generate_batch_size_(params.max_generate_batch_size_),
+    reserve_block_num_(params.scheduler_reserve_resource_ratio_ * cache_manager->availableBlockNums() / 100),
     // not support fallback when use pd_speration:use_cache_store
     enable_partial_fallback_(params.enable_partial_fallback_ && params.role_type_ == RoleType::PDFUSION),
     enable_whole_fallback_(params.role_type_ == RoleType::PDFUSION),
@@ -235,27 +236,13 @@ bool FIFOScheduler::evaluateNewStream(const list<GenerateStreamPtr>& streams,
         return false;
     }
 
-    auto old_blocks = new_stream->maxBlockSize();
-    auto result     = new_stream->initKVBlock(token_capacity_, reserve_step);
+    auto result = new_stream->initKVBlock(token_capacity_, reserve_step);
     if (result.ok() && enable_fast_gen_) {
         token_capacity_ -= result.value();
         RTP_LLM_LOG_DEBUG(
             "after stream [%ld] acquireCapacity, token_capacity is %d", new_stream->streamId(), token_capacity_);
     }
-    if (result.ok()) {
-        if (cache_manager_->availableBlockNums() >= reserve_block_num_) {
-            return true;
-        } else {
-            RTP_LLM_LOG_INFO(
-                "current availableBlockNums is [%ld], reserve_block_num is [%ld], so stream [%ld] malloc failed",
-                cache_manager_->availableBlockNums(),
-                reserve_block_num_,
-                new_stream->streamId());
-            new_stream->tryReleaseKVBlock(new_stream->maxBlockSize() - old_blocks);
-            return false;
-        }
-    }
-    return false;
+    return result.ok() && cache_manager_->availableBlockNums() >= reserve_block_num_;
 }
 
 list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {

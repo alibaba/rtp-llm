@@ -83,7 +83,7 @@ public:
     virtual absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>& generate_input,
                                                      preRunMode                            mode) = 0;
 
-    virtual KVCacheInfo getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) = 0;
+    virtual KVCacheInfo getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) const = 0;
 
     virtual const ResourceContext& resourceContext() const {
         return resource_context_;

@@ -34,7 +34,7 @@ public:
                                              preRunMode                            mode) override;
     absl::Status                      stop() override;
 
-    KVCacheInfo                     getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) override;
+    KVCacheInfo                     getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) const override;
     absl::Status                    step();
     absl::Status                    startLoop();
     int64_t                         getLastScheduleTime() override;

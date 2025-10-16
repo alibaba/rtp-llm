@@ -55,14 +55,6 @@ def init_pd_separation_group_args(parser):
     )
 
     pd_separation_group.add_argument(
-        "--decode_retry_interval_ms",
-        env_name="DECODE_RETRY_INTERVAL_MS",
-        type=int,
-        default=100,
-        help="Decode流程重试的区间间隔（毫秒）",
-    )
-
-    pd_separation_group.add_argument(
         "--rdma_connect_retry_times",
         env_name="RDMA_CONNECT_RETRY_TIMES",
         type=int,

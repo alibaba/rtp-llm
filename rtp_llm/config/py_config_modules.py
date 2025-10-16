@@ -664,7 +664,6 @@ class PdSeparationConfig:
         # Decode related configuration
         self.decode_retry_times: int = 100
         self.decode_retry_timeout_ms: int = 100
-        self.decode_retry_interval_ms: int = 1
         self.decode_polling_kv_cache_step_ms: int = 30
         self.decode_entrance: int = 0
 
@@ -693,9 +692,6 @@ class PdSeparationConfig:
         self.decode_retry_timeout_ms = int(
             os.environ.get("DECODE_RETRY_TIMEOUT_MS", self.decode_retry_timeout_ms)
         )
-        self.decode_retry_interval_ms = int(
-            os.environ.get("DECODE_RETRY_INTERVAL_MS", self.decode_retry_interval_ms)
-        )
         self.decode_polling_kv_cache_step_ms = int(
             os.environ.get(
                 "DECODE_POLLING_KV_CACHE_STEP_MS", self.decode_polling_kv_cache_step_ms
@@ -720,7 +716,6 @@ class PdSeparationConfig:
             f"prefill_max_wait_timeout_ms: {self.prefill_max_wait_timeout_ms}\n"
             f"decode_retry_times: {self.decode_retry_times}\n"
             f"decode_retry_timeout_ms: {self.decode_retry_timeout_ms}\n"
-            f"decode_retry_interval_ms: {self.decode_retry_interval_ms}\n"
             f"decode_polling_kv_cache_step_ms: {self.decode_polling_kv_cache_step_ms}\n"
             f"decode_entrance: {self.decode_entrance}\n"
             f"rdma_connect_retry_times: {self.rdma_connect_retry_times}\n"

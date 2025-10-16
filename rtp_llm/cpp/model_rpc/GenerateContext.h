@@ -97,7 +97,7 @@ protected:
     CHECK_ERROR_STATUS(generate_context)
 
 // for prefill or decode retry
-#define EXECUTE_WITH_RETRY(func, generate_context, max_retries, retry_timeout_ms, retry_interval_ms)                   \
+#define EXECUTE_WITH_RETRY(func, generate_context, max_retries, retry_timeout_ms)                                      \
     int64_t begin_time_us = currentTimeUs();                                                                           \
     auto    stage         = generate_context.stat_info.saveStage();                                                    \
     for (int attempt = 0; attempt <= max_retries; ++attempt) {                                                         \
@@ -114,7 +114,7 @@ protected:
             break;                                                                                                     \
         }                                                                                                              \
         CHECK_REQUEST_STOP(generate_context)                                                                           \
-        usleep(retry_interval_ms * 1000);                                                                              \
+        usleep(1000 * 1);                                                                                              \
     }
 
 }  // namespace rtp_llm

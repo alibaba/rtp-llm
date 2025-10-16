@@ -154,9 +154,8 @@ void PrefillGenerateContext::markRequestEnd() {
 
 void PrefillGenerateContext::reportTime() {
     RpcMetricsCollector collector;
-
     collectBasicMetrics(collector);
-
+    collector.retry_times                    = retry_times;
     collector.loading_cache_request          = loading_cache_requests;
     collector.get_rpc_connection_rt_us       = stat_info.get_rpc_connection_rt_us;
     collector.remote_allocate_resource_rt_us = stat_info.remote_allocate_resource_rt_us;
@@ -167,7 +166,6 @@ void PrefillGenerateContext::reportTime() {
     collector.remote_load_cache_end_rt_us    = stat_info.remote_load_cache_end_rt_us;
     collector.remote_generate_rt_us          = stat_info.remote_generate_rt_us;
     collector.poll_remote_output_rt_us       = stat_info.poll_remote_output_rt_us;
-
     reportMetrics(collector);
     metrics_reporter.reset();  // avoid to report metrics in base class
 }
