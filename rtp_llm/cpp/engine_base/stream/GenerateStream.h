@@ -323,6 +323,12 @@ public:
         need_remote_generate_ = need_remote_generate;
     }
 
+    void setPrefillMtpReady(bool prefill_mtp_ready) {
+        prefill_mtp_ready_ = prefill_mtp_ready;
+    }
+
+    bool waitForPrefillMtpReady();
+
     std::vector<int> getLatestTokens(size_t token_num);
 
     void incBatchWithPrefillTimes(int32_t times);
@@ -531,6 +537,7 @@ protected:
 
     bool          last_block_aligned_   = false;
     volatile bool need_remote_generate_ = false;
+    bool prefill_mtp_ready_ = false;
 
     bool gen_timeline_ = false;
 

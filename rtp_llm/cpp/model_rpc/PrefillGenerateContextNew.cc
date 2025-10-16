@@ -10,14 +10,15 @@ ErrorInfo PrefillGenerateContextNew::init(const std::shared_ptr<EngineBase>& eng
 
     generate_input                                        = QueryConverter::transQuery(&request->input());
     generate_input->generate_config->pd_separation        = true;
-    generate_input->generate_config->force_disable_sp_run = true;
 
-    // TODO: support MTP
-    // if (engine->isMTPEagle()) {
-    //     generate_input->generate_config->force_disable_sp_run = false;
-    // } else {
-    //     generate_input->generate_config->force_disable_sp_run = true;
-    // }
+    // Configure MTP support based on request
+    if (engine->isMTPEagle()) {
+        generate_input->generate_config->force_disable_sp_run = false;
+        RTP_LLM_LOG_DEBUG("request [%s] MTP enabled, allowing speculative run", request_key.c_str());
+    } else {
+        generate_input->generate_config->force_disable_sp_run = true;
+        RTP_LLM_LOG_DEBUG("request [%s] MTP disabled or not supported", request_key.c_str());
+    }
 
     stream_            = engine->makeStream(generate_input);
     request_timeout_ms = stream_->getTimeoutMs();

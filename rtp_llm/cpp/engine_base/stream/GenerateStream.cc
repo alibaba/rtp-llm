@@ -770,6 +770,23 @@ bool GenerateStream::waitForRemoteGenerate() {
     return need_remote_generate_;
 }
 
+bool GenerateStream::waitForPrefillMtpReady() {
+    std::unique_lock<std::mutex> lock(*output_mutex_);
+
+    cv_->wait(lock, [this] {
+        return prefill_mtp_ready_ || generate_status_->status == StreamState::STOPPED 
+            || generate_status_->status == StreamState::FINISHED;
+    });
+
+    if(!prefill_mtp_ready_ && generate_status_->status == StreamState::STOPPED) {
+        RTP_LLM_LOG_WARNING("waitForPrefillMtpReady exits due to stream [%ld] stopped, error: %s",
+                            streamId(),
+                            generate_status_->error_info.ToString().c_str());
+    }
+
+    return prefill_mtp_ready_;
+}
+
 std::vector<int> GenerateStream::getLatestTokens(size_t token_num) {
     return complete_token_ids_->getLatestTokens(token_num);
 }

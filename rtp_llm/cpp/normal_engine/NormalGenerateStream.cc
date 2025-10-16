@@ -202,10 +202,6 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
                       queryPdSep(),
                       isStreaming(),
                       update_info.update_remote_generate);
-    if (!finished_ && queryPdSep() && update_info.update_remote_generate) {
-        RTP_LLM_LOG_DEBUG("stream [%ld] set need_remote_generate", streamId());
-        setNeedRemoteGenerateWithoutLock(true);
-    }
 
     bool pd_sep_first_token = queryPdSep();
     bool need_update        = pd_sep_first_token || isStreaming() || finished_;

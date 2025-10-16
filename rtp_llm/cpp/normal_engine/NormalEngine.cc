@@ -324,6 +324,14 @@ absl::Status NormalEngine::step() {
     }
     int64_t      step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     absl::Status status             = executor_->process(streams);
+    
+    for (auto& stream : streams) {
+        // set need_remote_generate for pd-sep stream
+        if (!stream->finished() && stream->queryPdSep()) {
+            RTP_LLM_LOG_DEBUG("stream [%ld] set need_remote_generate", stream->streamId());
+            stream->setNeedRemoteGenerate(true);
+        }
+    }
 
     if (nullptr != profiler_) {
         profiler_step_--;
