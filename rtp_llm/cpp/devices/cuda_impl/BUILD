@@ -63,7 +63,6 @@ cc_library(
     }),
     srcs = [
         "CudaDevice.cc",
-        "CudaWeights.cc",
         "CudaAttentionOp.cc",
         "CudaFfnLayer.cc",
         "CudaMlaAttentionOp.cc",

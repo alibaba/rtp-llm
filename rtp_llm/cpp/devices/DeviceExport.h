@@ -22,11 +22,6 @@ public:
     void updateCurrentTorchStream();
 
     virtual torch::Tensor preprocessGemmWeightByKey(const std::string& key, torch::Tensor weight, bool = false) = 0;
-    virtual torch::Tensor packInt8TensorToPackedInt4(torch::Tensor weight)                                      = 0;
-    virtual torch::Tensor
-    preprocessWeightsForMixedGemm(torch::Tensor weight, py::object quant_type, const std::string& arch) = 0;
-    virtual std::vector<torch::Tensor>
-    symmetricQuantizeLastAxisOfBatchedMatrix(torch::Tensor weight, py::object quant_type, const std::string& arch) = 0;
     virtual torch::Tensor preprocessWeightScale(torch::Tensor weight, torch::Tensor scale)                         = 0;
 
 protected:
@@ -43,20 +38,6 @@ public:
         return Device::preprocessGemmWeightByKey(key, weight, user_arm_gemm_use_kai);
     }
 
-    torch::Tensor packInt8TensorToPackedInt4(torch::Tensor weight) {
-        return Device::packInt8TensorToPackedInt4(weight);
-    }
-
-    torch::Tensor preprocessWeightsForMixedGemm(torch::Tensor weight, py::object quant_type, const std::string& arch) {
-        const auto dtype = torch::python::detail::py_object_to_dtype(quant_type);
-        return Device::preprocessWeightsForMixedGemm(weight, dtype, arch);
-    }
-
-    std::vector<torch::Tensor>
-    symmetricQuantizeLastAxisOfBatchedMatrix(torch::Tensor weight, py::object quant_type, const std::string& arch) {
-        const auto dtype = torch::python::detail::py_object_to_dtype(quant_type);
-        return Device::symmetricQuantizeLastAxisOfBatchedMatrix(weight, dtype, arch);
-    }
     torch::Tensor preprocessWeightScale(torch::Tensor weight, torch::Tensor scale) {
         return Device::preprocessWeightScale(weight, scale);
     }

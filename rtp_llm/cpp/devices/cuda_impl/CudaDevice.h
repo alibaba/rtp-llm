@@ -213,13 +213,6 @@ public:
     MoeCombineOutput  deepEpLLCombine(const MoeCombineParams& params);
     FfnLayerOutput    deepEpLLMoeFfn(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs);
 
-    static torch::Tensor              packInt8TensorToPackedInt4(torch::Tensor weight);
-    static torch::Tensor              preprocessWeightsForMixedGemm(torch::Tensor      row_major_quantized_weight,
-                                                                    torch::ScalarType  quant_type,
-                                                                    const std::string& arch);
-    static std::vector<torch::Tensor> symmetricQuantizeLastAxisOfBatchedMatrix(torch::Tensor      weight,
-                                                                               torch::ScalarType  quant_type,
-                                                                               const std::string& arch);
     void                              prepareCommBuffer(const PrepareCommBufferParams& params) override;
     void                              maskLogits(Buffer& logits, const Buffer& mask) override;
 
