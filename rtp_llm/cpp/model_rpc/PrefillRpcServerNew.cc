@@ -27,6 +27,15 @@ grpc::Status PrefillRpcServerNew::RemoteGenerateNew(grpc::ServerContext*        
     modified_config->set_inter_request_id(-1);
 
     PrefillGenerateContextNew prefill_context(&resource_, context, request, response, metrics_reporter_, meta_);
+
+    prefill_context.error_info = multimodalProcess(prefill_context);
+    if (!prefill_context.error_info.ok()) {
+        RTP_LLM_LOG_WARNING("request [%s] multimodal process failed, err: %s",
+                            prefill_context.request_key.c_str(),
+                            prefill_context.error_info.ToString().c_str());
+        return serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);
+    }
+
     RTP_LLM_LOG_INFO("request [%s] RemoteGenerateNew", prefill_context.request_key.c_str());
 
     prefill_context.error_info = prefill_context.init(engine_);
@@ -100,11 +109,21 @@ bool PrefillRpcServerNew::validRequest(PrefillGenerateContextNew& prefill_contex
     }
 
     auto generate_stream = prefill_context.getStream();
-    auto block_ids       = generate_stream->kvCache().blocks(0);
-    if (block_ids.size() != request->block_ids_size()) {
+    int block_ids_size   = 0;
+    std::unordered_set<int> prefill_block_id_set;
+    for (int i = 0; i < prefill_context.getStream()->kvCache().batchSize(); i++) {
+        auto block_ids = prefill_context.getStream()->kvCache().blocks(i);
+        for (int j = prefill_context.request->reuse_block_size(); j < block_ids.size(); j++) {
+            if (prefill_block_id_set.insert(block_ids[j]).second) {
+                block_ids_size++;
+            }
+        }
+    }
+
+    if (block_ids_size != request->block_ids_size()) {
         RTP_LLM_LOG_WARNING("request [%s] block_ids size [%d] not match request block_ids size [%d]",
                             prefill_context.request_key.c_str(),
-                            block_ids.size(),
+                            block_ids_size,
                             request->block_ids_size());
         return false;
     }
@@ -184,10 +203,17 @@ void PrefillRpcServerNew::constructRemoteLoadRequest(PrefillGenerateContextNew& 
     for (int i = prefill_context.request->reuse_block_size(); i < prefill_context.request->block_ids_size(); i++) {
         request.add_decode_block_ids(prefill_context.request->block_ids(i));
     }
-    auto block_ids = prefill_context.getStream()->kvCache().blocks(0);
-    for (int i = prefill_context.request->reuse_block_size(); i < block_ids.size(); i++) {
-        request.add_prefill_block_ids(block_ids[i]);
+
+    std::unordered_set<int> prefill_block_id_set;
+    for (int i = 0; i < prefill_context.getStream()->kvCache().batchSize(); i++) {
+        auto block_ids = prefill_context.getStream()->kvCache().blocks(i);
+        for (int j = prefill_context.request->reuse_block_size(); j < block_ids.size(); j++) {
+            if (prefill_block_id_set.insert(block_ids[j]).second) {
+                request.add_prefill_block_ids(block_ids[j]);
+            }
+        }
     }
+
     request.set_reuse_block_size(prefill_context.request->reuse_block_size());
 
     auto decode_worker_size  = prefill_context.decode_workers.size();
@@ -260,9 +286,20 @@ ErrorInfo PrefillRpcServerNew::generateFirstToken(PrefillGenerateContextNew& pre
     if (prefill_context.getStream()->finished()) {
         RTP_LLM_LOG_INFO("request [%s] generate first token success and finished", prefill_context.request_key.c_str());
     }
-    auto first_token = prefill_context.getStream()->currentExecuteTokens()[0];
+
     prefill_context.response->set_finished(prefill_context.getStream()->finished());
-    prefill_context.response->set_first_generate_token_id(first_token);
+    auto batch_size = prefill_context.getStream()->nextBatchSize();
+    for (int i = 0; i < batch_size; i++) {
+        auto first_token = prefill_context.getStream()->currentExecuteTokens(i)[0];
+        prefill_context.response->add_first_generate_token_ids(first_token);
+    }
+    if (stream->getContextPositionIds()) {
+        auto context_position_ids = stream->getContextPositionIds();
+        prefill_context.response->mutable_position_ids()->CopyFrom(
+            {context_position_ids->data<int32_t>(),
+             context_position_ids->data<int32_t>() + context_position_ids->size()});
+    }
+
     return ErrorInfo::OkStatus();
 }
 
@@ -480,6 +517,20 @@ grpc::Status PrefillRpcServerNew::RemoteFinish(grpc::ServerContext*         cont
     auto request_id = request->request_id();
     resource_.cache_store->markRequestEnd(std::to_string(request_id));
     return grpc::Status::OK;
+}
+
+ErrorInfo PrefillRpcServerNew::multimodalProcess(PrefillGenerateContextNew& prefill_context) {
+    auto& input = prefill_context.generate_input;
+    if (mm_processor_ != nullptr && input->multimodal_inputs) {
+        auto result = mm_processor_->updateMultimodalFeatures(input);
+        if (!result.ok()) {
+            RTP_LLM_LOG_WARNING("request [%s] multimodal process failed, err: %s",
+                                prefill_context.request_key.c_str(),
+                                result.ToString().c_str());
+            return result;
+        }
+    }
+    return ErrorInfo::OkStatus();
 }
 
 }  // namespace rtp_llm

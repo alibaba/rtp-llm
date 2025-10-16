@@ -30,6 +30,7 @@ public:
 private:
     bool validRequest(PrefillGenerateContextNew& prefill_context);
 
+    ErrorInfo multimodalProcess(PrefillGenerateContextNew& prefill_context);
     ErrorInfo notifyStoreCacheForAllRank(PrefillGenerateContextNew& prefill_context);
     ErrorInfo notifyStoreCache(PrefillGenerateContextNew& prefill_context, int index);
     void      constructRemoteLoadRequest(PrefillGenerateContextNew& prefill_context, int index);

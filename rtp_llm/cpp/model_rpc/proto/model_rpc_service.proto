@@ -272,6 +272,8 @@ message RemoteGenerateResponsePBNew {
     int32 first_generate_token_id = 3;
     int64 first_token_rt_us = 4;
     bool finished = 5;
+    repeated int32 position_ids = 6;
+    repeated int32 first_generate_token_ids = 7;
 }
 
 message RemoteStorePartition {

@@ -22,6 +22,7 @@ public:
                                     grpc::ServerWriter<GenerateOutputsPB>* response_writer);
 
 private:
+    ErrorInfo multimodalProcess(DecodeGenerateContextNew& decode_context);
     ErrorInfo loadCacheFromPrefill(DecodeGenerateContextNew& decode_context);
     void      makeRemoteGenerateRequest(DecodeGenerateContextNew& decode_context);
     ErrorInfo callPrefill(DecodeGenerateContextNew& decode_context);

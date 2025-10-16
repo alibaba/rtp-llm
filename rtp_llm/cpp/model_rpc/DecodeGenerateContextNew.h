@@ -3,6 +3,8 @@
 #include "rtp_llm/cpp/model_rpc/GenerateContext.h"
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
+#include "rtp_llm/cpp/model_rpc/QueryConverter.h"
+
 
 namespace rtp_llm {
 
@@ -37,8 +39,9 @@ struct DecodeGenerateContextNew: public GenerateContext {
             request->request_id(), request->generate_config().timeout_ms(), server_context, metrics_reporter, meta),
         request(request),
         response_writer(response_writer) {
-        request_begin_time_us = currentTimeUs();
-    }
+            request_begin_time_us = currentTimeUs();
+            generate_input        = QueryConverter::transQuery(request);
+        }
 
     ~DecodeGenerateContextNew();
 

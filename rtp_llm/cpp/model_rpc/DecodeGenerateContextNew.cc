@@ -13,8 +13,6 @@ DecodeGenerateContextNew::~DecodeGenerateContextNew() {
 ErrorInfo DecodeGenerateContextNew::init(const std::shared_ptr<EngineBase>& engine) {
     RTP_LLM_LOG_DEBUG("request [%s] start to prepare generate context", request_key.c_str());
 
-    generate_input                                        = QueryConverter::transQuery(request);
-
     stream_            = engine->makeStream(generate_input);
     request_timeout_ms = stream_->getTimeoutMs();
 
