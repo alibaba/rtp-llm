@@ -7,6 +7,76 @@
 #include <memory>
 #include <mutex>
 
+#include <chrono>
+#include <iostream>
+#include <mutex>
+#include <condition_variable>
+#ifdef _WIN32
+    #include <winsock2.h>
+    #include <ws2tcpip.h>
+    #pragma comment(lib, "ws2_32.lib")
+#else
+    #include <sys/socket.h>
+    #include <netinet/in.h>
+    #include <arpa/inet.h>
+    #include <unistd.h>
+    #include <netdb.h>
+#endif
+
+bool checkPortAvailableSimple(const std::string& host, int port) {
+#ifdef _WIN32
+    WSADATA wsaData;
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+        return false;
+    }
+#endif
+
+    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0) {
+#ifdef _WIN32
+        WSACleanup();
+#endif
+        return false;
+    }
+    struct sockaddr_in server_addr;
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(port);
+    
+    // 设置超时
+#ifdef _WIN32
+    DWORD timeout = 1000; // 1秒超时，单位毫秒
+    setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
+    setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, (char*)&timeout, sizeof(timeout));
+#else
+    struct timeval timeout;
+    timeout.tv_sec = 1;
+    timeout.tv_usec = 0;
+    setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+#endif
+    struct hostent* he = gethostbyname(host.c_str());
+    if (he == nullptr) {
+#ifdef _WIN32
+        closesocket(sockfd);
+        WSACleanup();
+#else
+        close(sockfd);
+#endif
+        return false;
+    }
+    memcpy(&server_addr.sin_addr, he->h_addr_list[0], he->h_length);
+
+    bool connected = (connect(sockfd, (struct sockaddr*)&server_addr, sizeof(server_addr)) == 0);
+
+#ifdef _WIN32
+    closesocket(sockfd);
+    WSACleanup();
+#else
+    close(sockfd);
+#endif
+
+    return connected;
+}
 using namespace std;
 namespace rtp_llm {
 
@@ -216,7 +286,19 @@ void FIFOScheduler::accountBatchMetrics(const list<GenerateStreamPtr>& new_strea
 }
 
 bool FIFOScheduler::waitPredicate() {
-    return stop_ || !waiting_streams_.empty() || !running_streams_.empty() || !remote_running_streams_.empty();
+    
+    // 检查localhost:8066是否可达
+    bool portAvailable = checkPortAvailableSimple("localhost", 8066);
+    
+    if (portAvailable) {
+        // 如果端口可达，只有当waiting_streams_大小达到xx时才返回true
+        const char* batch_size_env = std::getenv("BATCH_SIZE");
+        size_t batch_size = std::stoul(batch_size_env);
+        return stop_ || waiting_streams_.size() >= batch_size || !running_streams_.empty() || !remote_running_streams_.empty();
+    } else {
+        // 如果端口不可达，按照原逻辑执行
+        return stop_ || !waiting_streams_.empty() || !running_streams_.empty() || !remote_running_streams_.empty();
+    }
 }
 
 absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule(size_t reserve_step) {
@@ -230,7 +312,6 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule(size_t reserve_s
     evictDoneStreams(waiting_streams_);
     evictDoneStreams(running_streams_);
     evictDoneStreams(remote_running_streams_);
-
     // TODO(xinfei.sxf) Those who just kicked out of running may join running again immediately.
     evaluateRunningNext(reserve_step);
     auto new_streams = scheduleNew(reserve_step);
