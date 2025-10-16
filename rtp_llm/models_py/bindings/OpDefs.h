@@ -65,6 +65,16 @@ struct PyCaptureMetaData {
     int capture_batch_size{1};
 };
 
+struct PyPrefillCudaGaphCopyParams {
+    // for embedding model cuda graph capture, the attenton batch size is padded to max_batch_size,
+    // so we can't get the real batch size for `copy kernel` using `input_lengths.size(0)`(which is max_batch_size).
+    torch::Tensor cuda_graph_prefill_batch_size;
+    torch::Tensor aligned_attn_buf;
+    int           max_seq_len;
+    int           hidden_size;
+    int           max_batch_size;
+};
+
 struct PyAttentionInputs {
     bool             is_prefill;
     torch::Tensor    prefix_lengths;
@@ -81,9 +91,7 @@ struct PyAttentionInputs {
     // for write cache store
     std::optional<PyCacheStoreInputs> cache_store_inputs;
 
-    // for embedding model cuda graph capture, the attenton batch size is padded to max_batch_size,
-    // so we can't get the real batch size for `copy kernel` using `input_lengths.size(0)`(which is max_batch_size).
-    torch::Tensor batch_size;
+    std::optional<PyPrefillCudaGaphCopyParams> prefill_cuda_graph_copy_params;
 };
 
 struct BertEmbeddingInputs {

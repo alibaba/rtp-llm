@@ -27,6 +27,8 @@ void CudaGraphRunner::capturePrefill() {
         inputs.attention_inputs.padding_offset =
             capture_mem_hold_.py_model_inputs_.attention_inputs.padding_offset.slice(
                 0, 0, max_bs_ * num_tokens_per_bs_);
+        inputs.attention_inputs.prefill_cuda_graph_copy_params =
+            capture_mem_hold_.py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params;
         // Copy BertEmbeddingInputs from capture_mem_hold_
         inputs.bert_embedding_inputs = capture_mem_hold_.py_model_inputs_.bert_embedding_inputs;
 

@@ -59,6 +59,13 @@ void registerPyOpDefs(pybind11::module& m) {
             pybind11::arg("seq_size_per_block"),
             "Fill parameters for CUDA graph execution");
 
+    pybind11::class_<PyPrefillCudaGaphCopyParams>(m, "PyPrefillCudaGaphCopyParams")
+        .def(pybind11::init<>())
+        .def_readonly("cuda_graph_prefill_batch_size", &PyPrefillCudaGaphCopyParams::cuda_graph_prefill_batch_size)
+        .def_readonly("max_seq_len", &PyPrefillCudaGaphCopyParams::max_seq_len)
+        .def_readonly("hidden_size", &PyPrefillCudaGaphCopyParams::hidden_size)
+        .def_readonly("max_batch_size", &PyPrefillCudaGaphCopyParams::max_batch_size);
+
     pybind11::class_<PyAttentionInputs>(m, "PyAttentionInputs")
         .def(pybind11::init<>())
         .def_readwrite("is_prefill", &PyAttentionInputs::is_prefill)
@@ -73,7 +80,8 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("cu_seqlens", &PyAttentionInputs::cu_seqlens)
         .def_readwrite("padding_offset", &PyAttentionInputs::padding_offset)
         .def_readwrite("cache_store_inputs", &PyAttentionInputs::cache_store_inputs)
-        .def("__repr__", [](const PyAttentionInputs& self) { return "PyAttentionInputs"; });
+        .def("__repr__", [](const PyAttentionInputs& self) { return "PyAttentionInputs"; })
+        .def_readonly("prefill_cuda_graph_copy_params", &PyAttentionInputs::prefill_cuda_graph_copy_params);
 
     pybind11::class_<BertEmbeddingInputs>(m, "BertEmbeddingInputs")
         .def(pybind11::init<>())
