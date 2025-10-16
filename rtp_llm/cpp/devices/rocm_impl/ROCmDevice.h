@@ -217,10 +217,6 @@ public:
     BufferPtr dequantize(const QuantizeParams& params);
     void      printBuffer(const BufferPtr buffer);
 
-    static torch::Tensor packInt8TensorToPackedInt4(torch::Tensor weight);
-    static torch::Tensor preprocessWeightsForMixedGemm(torch::Tensor      row_major_quantized_weight,
-                                                       torch::ScalarType  quant_type,
-                                                       const std::string& arch);
     void QInputBatchMatmulWrapper(torch::Tensor& fused_q_input_t, const MlaAttentionModuleParams& params);
     void DecoderOutputGemmWrapper(torch::Tensor&                  qkv_output_t,
                                   const torch::Tensor&            mla_out_t,
