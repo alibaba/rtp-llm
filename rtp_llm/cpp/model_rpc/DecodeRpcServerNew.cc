@@ -287,6 +287,21 @@ ErrorInfo DecodeRpcServerNew::writeAppendFirstToken(DecodeGenerateContextNew& de
         generate_stream->setReuseLength(generate_stream->seqLength() - 1);
         generate_stream->setFallbackPrefixLength(generate_stream->reuseLength());
         generate_stream->setSpEditRun(false);
+        generate_stream->setMtpTokenIndex(generate_stream->seqLength() - 1);
+        generate_stream->setContainProposeToken(true);
+        
+        // Set propose tokens from prefill response
+        if (response.propose_token_ids_size() > 0) {
+            std::vector<int> propose_tokens;
+            propose_tokens.assign(response.propose_token_ids().begin(), response.propose_token_ids().end());
+            generate_stream->setProposeToken(propose_tokens);
+            RTP_LLM_LOG_DEBUG("request [%s] received %d propose tokens from prefill", 
+                              decode_context.request_key.c_str(), 
+                              propose_tokens.size());
+        } else {
+            RTP_LLM_LOG_WARNING("request [%s] MTP enabled but no propose tokens received from prefill", 
+                                decode_context.request_key.c_str());
+        }
     }
     generate_stream->resetBeginTime(currentTimeUs());
 
