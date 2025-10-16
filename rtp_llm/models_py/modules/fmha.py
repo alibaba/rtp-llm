@@ -4,6 +4,13 @@ from typing import Any, List, Optional
 import torch
 import torch.nn.functional as F
 
+from librtp_compute_ops.rtp_llm_ops import (
+    FusedRopeKVCacheDecodeOp,
+    FusedRopeKVCachePrefillOp,
+    cuda_graph_copy_large2small,
+    cuda_graph_copy_small2large,
+)
+
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.models_py.modules.kvcache_store import WriteCacheStoreOp
 from rtp_llm.ops import FMHAType
@@ -28,6 +35,9 @@ class FMHAImplBase(object):
         init_params: bool = True,
     ) -> None:
         self.fmha_impl = fmha_impl
+        self.prefill_cuda_graph_copy_params = attn_inputs.prefill_cuda_graph_copy_params
+        self.input_lengths = attn_inputs.input_lengths
+        self.cu_seq_lens = attn_inputs.cu_seqlens
         self.support_: bool = self.fmha_impl.support(attn_inputs)
         self.fmha_params = None
         self.rope_params = None
@@ -56,7 +66,30 @@ class FMHAImplBase(object):
         ):
             self.write_cache_store_impl(kv_cache)
         assert self.fmha_impl is not None
+        reserve_shape_tensor: torch.Tensor = fmha_input
+        if self.prefill_cuda_graph_copy_params:
+            fmha_input = cuda_graph_copy_small2large(
+                fmha_input,
+                self.prefill_cuda_graph_copy_params.aligned_attn_buf,
+                self.prefill_cuda_graph_copy_params.cuda_graph_prefill_batch_size,
+                self.prefill_cuda_graph_copy_params.max_batch_size,
+                self.prefill_cuda_graph_copy_params.max_seq_len,
+                self.input_lengths,
+                self.prefill_cuda_graph_copy_params.hidden_size,
+                self.cu_seq_lens,
+            )
         res = self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
+        if self.prefill_cuda_graph_copy_params:
+            res = cuda_graph_copy_large2small(
+                res,
+                reserve_shape_tensor,
+                self.prefill_cuda_graph_copy_params.cuda_graph_prefill_batch_size,
+                self.prefill_cuda_graph_copy_params.max_batch_size,
+                self.prefill_cuda_graph_copy_params.max_seq_len,
+                self.input_lengths,
+                self.prefill_cuda_graph_copy_params.hidden_size,
+                self.cu_seq_lens,
+            )
         return res
 
     @staticmethod

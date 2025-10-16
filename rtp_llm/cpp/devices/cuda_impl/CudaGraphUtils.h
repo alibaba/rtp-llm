@@ -28,7 +28,9 @@ public:
         py_model_inputs_.attention_inputs.is_prefill               = is_embedding;
         py_model_inputs_.attention_inputs.dtype                    = inputs.attention_inputs.dtype;
         py_model_inputs_.attention_inputs.kv_block_offset          = kv_cache_block_offset;
-        py_model_inputs_.bert_embedding_inputs                     = inputs.bert_embedding_inputs;
+        py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params =
+            inputs.attention_inputs.prefill_cuda_graph_copy_params;
+        py_model_inputs_.bert_embedding_inputs = inputs.bert_embedding_inputs;
     }
 
 public:
