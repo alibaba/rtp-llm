@@ -22,13 +22,12 @@ from torchvision import transforms
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.distribute.worker_info import g_parallel_info
-from rtp_llm.utils.multimodal_util import (
-    MMPreprocessConfig,
-    MMUrlType,
+from rtp_llm.models.multimodal.multimodal_util import (
     get_bytes_io_from_url,
     get_vit_compute_dtype,
     vit_emb_cache_,
 )
+from rtp_llm.utils.base_model_datatypes import MMPreprocessConfig, MMUrlType
 
 
 def timeout_decorator(timeout_sec):

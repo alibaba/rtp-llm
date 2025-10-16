@@ -19,16 +19,15 @@ from rtp_llm.models.multimodal.multimodal_common import (
     mm_lock,
     timeout_decorator,
 )
+from rtp_llm.models.multimodal.multimodal_util import (
+    get_bytes_io_from_url,
+    get_vit_compute_dtype,
+)
 from rtp_llm.models.qwen2_vl.image_processing_qwen2_vl import Qwen2VLImageProcessor
 from rtp_llm.models.qwen2_vl.modeling_qwen2_vl import (
     Qwen2VisionTransformerPretrainedModel,
 )
-from rtp_llm.utils.multimodal_util import (
-    MMPreprocessConfig,
-    MMUrlType,
-    get_vit_compute_dtype,
-    get_bytes_io_from_url,
-)
+from rtp_llm.utils.base_model_datatypes import MMPreprocessConfig, MMUrlType
 
 IMAGE_FACTOR = 28
 MIN_PIXELS = 4 * 28 * 28
