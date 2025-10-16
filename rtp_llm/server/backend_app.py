@@ -286,5 +286,40 @@ class BackendApp(object):
                     "details": traceback.format_exc(),
                 }
 
+        @app.post("/internal_update_weight")
+        async def internal_update_weight(req: Dict[Any, Any]):
+            """
+            Internal endpoint to update model weights on a worker node.
+            This endpoint is designed for internal communication within a distributed
+            system, allowing a master node to direct worker nodes to update their
+            model weights.
+            Args:
+                req (Dict[Any, Any]): A dictionary containing the weight update information,
+                                     typically IPC handlers for the weights.
+            Returns:
+                dict: A dictionary with a "status" key set to "ok" if the update is successful.
+                      On failure, it returns a dictionary with an "error" key
+                      and a "details" key containing the traceback.
+            """
+            return self.backend_server.internal_update_weight(req)
+
+        @app.post("/update_weight")
+        async def update_weight(req: Dict[Any, Any]):
+            """
+            Updates the model's weights.
+            This endpoint is used to update the model's weights while the server is running,
+            which can be particularly useful in reinforcement learning (RL) procedures.
+            It is crucial to ensure there are no active requests on the server when
+            calling this interface to prevent potential inconsistencies or incorrect results.
+            Args:
+                req (Dict[Any, Any]): A dictionary where keys are model component names
+                                     and values are IPC handlers for the corresponding weights.
+            Returns:
+                dict: A dictionary with a "status" key set to "ok" if the update is successful.
+                      On failure, it returns a dictionary with an "error" key
+                      and a "details" key containing the traceback.
+            """
+            return self.backend_server.update_weight(req)
+
         register_backend_embedding_api(app, self.backend_server)
         return app
