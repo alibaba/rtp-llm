@@ -13,7 +13,8 @@ from rtp_llm.models.multimodal.multimodal_common import (
     MultiModalEmbeddingInterface,
     mm_lock,
 )
-from rtp_llm.utils.multimodal_util import MMPreprocessConfig, MMUrlType, vit_emb_cache_
+from rtp_llm.models.multimodal.multimodal_util import vit_emb_cache_
+from rtp_llm.utils.base_model_datatypes import MMPreprocessConfig, MMUrlType
 from rtp_llm.utils.time_util import Timer
 from rtp_llm.utils.util import check_with_info
 
@@ -169,32 +170,22 @@ class MMProcessEngine:
             pos_res = [] if self.contains_pos else None
 
             # embedding model; gather batches in advance
-            if self.model.config.mm_batch_size != 1:
-                if self.model.config.mm_batch_size == -1:
+            if self.mm_batch_size != 1:
+                mm_batch_size = (
+                    self.mm_batch_size if self.mm_batch_size != -1 else len(urls)
+                )
+                for index in range(0, len(urls), mm_batch_size):
                     work_items.append(
                         MMWorkItem(
-                            urls,
-                            types,
-                            tensors,
-                            configs,
+                            urls[index : index + mm_batch_size],
+                            types[index : index + mm_batch_size],
+                            tensors[index : index + mm_batch_size],
+                            configs[index : index + mm_batch_size],
                             self.model.mm_part,
                             self.mm_preprocess_executor,
                             is_batched=True,
                         )
                     )
-                else:
-                    for index in range(0, len(urls), self.mm_batch_size):
-                        work_items.append(
-                            MMWorkItem(
-                                urls[index : index + self.mm_batch_size],
-                                types[index : index + self.mm_batch_size],
-                                tensors[index : index + self.mm_batch_size],
-                                configs[index : index + self.mm_batch_size],
-                                self.model.mm_part,
-                                self.mm_preprocess_executor,
-                                is_batched=True,
-                            )
-                        )
             else:
                 for index in range(len(urls)):
                     work_items.append(

@@ -13,7 +13,7 @@ from rtp_llm.models.multimodal.multimodal_mixin import MultiModalMixin
 from rtp_llm.models.qwen import QWen
 from rtp_llm.models.qwen_vl_vit import VisionTransformer as QWen_VL_ViT
 from rtp_llm.models.qwen_vl_weight import QwenVLVitWeight, QWenVLWeightInfo
-from rtp_llm.utils.multimodal_util import MMUrlType
+from rtp_llm.utils.base_model_datatypes import MMUrlType
 
 
 class QwenVLImageEmbedding(ImageEmbeddingInterface):
