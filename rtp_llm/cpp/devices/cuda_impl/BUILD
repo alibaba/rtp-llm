@@ -77,6 +77,8 @@ cc_library(
         "CudaDeepEPFfnLayer.cc",
         "CudaFlashInfer.cc",
         "CudaGraphRunner.cc",
+        "CudaGraphPrefill.cc",
+        "CudaGraphDecode.cc",
     ] + select({
         "@//:using_cuda12": [
             "CudaXqa.cc"
