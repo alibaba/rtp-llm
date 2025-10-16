@@ -324,6 +324,83 @@ void RtpLLMOp::restart() {
     engine->restart();
 }
 
+/**
+ * @brief Gracefully detach (unmap) all physical GPU memory that backs the KV-cache,
+ *        while keeping the virtual address range alive.
+ *
+ * The function performs the following steps:
+ *  1. Atomically mark the server as "shutting-down" so that new RPC requests
+ *     are rejected.
+ *  2. Wait up to 60 s for in-flight requests to finish; if some are still
+ *     running after the timeout we proceed anyway.
+ *  3. Call IVirtualMemAllocator::unmap() to release **physical** memory.
+ *
+ * @return true if unmapping succeeded or nothing to do.
+ * @return false if there are some requests still running or execution failed.
+ *
+ * @note After this call the KV-cache is **logically empty**; any attempt to
+ *       access it from kernels will trigger a device page fault until
+ *       attach_physical_memory() is invoked.
+ */
+void RtpLLMOp::detachPhysicalMemory() {
+
+    if (is_server_shutdown_) {
+        RTP_LLM_LOG_INFO("Cannot initialize cache: server is not in shutdown state.");
+    }
+
+    // Wait for all in-flight requests to complete.
+    if (grpc_server_) {
+        int64_t STOP_TIMEOUT_MS = 60 * 1000;
+        auto    begin_wait_us   = autil::TimeUtility::currentTimeInMicroSeconds();
+        while (auto onflight_request = model_rpc_service_->onflightRequestNum()) {
+            RTP_LLM_LOG_INFO("RPC service has [%lu] on-flight requests, waiting 1s", onflight_request);
+            sleep(1);
+            if (autil::TimeUtility::currentTimeInMicroSeconds() - begin_wait_us > STOP_TIMEOUT_MS * 1000) {
+                // Timeout occurred while waiting for requests to finish.
+                RTP_LLM_LOG_INFO("RPC service wait for requests timed out. Proceeding with deallocation.");
+                break;
+            }
+        }
+    }
+
+    auto device = model_rpc_service_->getEngine()->getDevice();
+    device->detachPhysicalMemory();
+    is_server_shutdown_ = true;
+}
+
+/**
+ * @brief Re-attach (map) physical GPU memory to the previously reserved virtual
+ *        address range so that the KV-cache becomes usable again.
+ *
+ * Preconditions:
+ *  - detach_physical_memory() must have been called earlier.
+ *  - No requests should be in-flight (guaranteed by is_server_shutdown_ flag).
+ *
+ * Post-conditions:
+ *  - Physical memory is (re)allocated and bound to the same virtual addresses.
+ *  - is_server_shutdown_ is reset to false, allowing new requests.
+ *
+ * @return true  if mapping succeeded.
+ * @return false if the allocator does not support virtual memory.
+ */
+void RtpLLMOp::attachPhysicalMemory() {
+
+    if (!is_server_shutdown_) {
+        // If the server is not in a shutdown state, it means it's actively serving requests.
+        // We cannot re-initialize the cache in this state, so we return false.
+        RTP_LLM_LOG_INFO("Cannot initialize cache: Server is not in shutdown state.");
+    }
+
+    auto device = model_rpc_service_->getEngine()->getDevice();
+    device->attachPhysicalMemory();
+    is_server_shutdown_ = false;
+}
+
+void RtpLLMOp::rebuildRope(const float rescale_factor) {
+    auto device = model_rpc_service_->getEngine()->getDevice();
+    device->rebuildRope(rescale_factor);
+}
+
 void registerRtpLLMOp(const py::module& m) {
     pybind11::class_<RtpLLMOp>(m, "RtpLLMOp")
         .def(pybind11::init<>())
@@ -353,7 +430,10 @@ void registerRtpLLMOp(const py::module& m) {
         .def("stop", &RtpLLMOp::stop)
         .def("update_eplb_config", &RtpLLMOp::updateEplbConfig, py::arg("config"))
         .def("pause", &RtpLLMOp::pause)
-        .def("restart", &RtpLLMOp::restart);
+        .def("restart", &RtpLLMOp::restart)
+        .def("detachPhysicalMemory", &RtpLLMOp::detachPhysicalMemory)
+        .def("attachPhysicalMemory", &RtpLLMOp::attachPhysicalMemory)
+        .def("rebuildRope", &RtpLLMOp::rebuildRope);
 }
 
 }
