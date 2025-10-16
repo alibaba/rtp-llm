@@ -54,46 +54,6 @@ def get_base64_prefix(s):
     return match.end()
 
 
-class MMUrlType(IntEnum):
-    DEFAULT = 0
-    IMAGE = 1
-    VIDEO = 2
-    AUDIO = 3
-    TENSOR = 4
-    IGRAPH = 5
-
-
-@dataclass
-class MMPreprocessConfig:
-    width: int = -1
-    height: int = -1
-    min_pixels: int = -1
-    max_pixels: int = -1
-    fps: int = -1
-    min_frames: int = -1
-    max_frames: int = -1
-    mm_timeout_ms: int = 30000
-
-
-class MultimodalInput:
-    url: str
-    mm_type: MMUrlType
-    config: MMPreprocessConfig
-    tensor: torch.Tensor
-
-    def __init__(
-        self,
-        url: str,
-        mm_type: MMUrlType = MMUrlType.DEFAULT,
-        config: MMPreprocessConfig = MMPreprocessConfig(),
-        tensor: torch.Tensor = torch.empty(1),
-    ):
-        self.url = url
-        self.mm_type = mm_type
-        self.config = config
-        self.tensor = tensor
-
-
 def get_vit_compute_dtype(dtype: str):
     if dtype == "bf16":
         return torch.bfloat16
@@ -102,13 +62,15 @@ def get_vit_compute_dtype(dtype: str):
 
 
 class IgraphItemKeyCountMismatchError(Exception):
-    
+
     def __init__(self, requested_count: int, received_count: int, message: str = None):
         self.requested_count = requested_count
         self.received_count = received_count
         super().__init__(
-            message or f"item number from igraph response ({received_count}) diff with keys number from request({requested_count})"
+            message
+            or f"item number from igraph response ({received_count}) diff with keys number from request({requested_count})"
         )
+
 
 def retry_on_assertion_error(retries: int = 3):
     def decorator(func):
@@ -116,7 +78,11 @@ def retry_on_assertion_error(retries: int = 3):
             for attempt in range(1, retries + 1):
                 try:
                     return func(*args, **kwargs)
-                except (AssertionError, ValueError, IgraphItemKeyCountMismatchError) as e:
+                except (
+                    AssertionError,
+                    ValueError,
+                    IgraphItemKeyCountMismatchError,
+                ) as e:
                     logger.warning(
                         f"[retry_on_assertion_error] AssertionError on attempt {attempt}: {str(e)}"
                     )

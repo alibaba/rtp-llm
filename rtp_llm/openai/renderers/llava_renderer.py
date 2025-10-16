@@ -18,7 +18,7 @@ from rtp_llm.openai.renderers.custom_renderer import (
     RenderedInputs,
     RendererParams,
 )
-from rtp_llm.utils.multimodal_util import MMPreprocessConfig, MMUrlType
+from rtp_llm.utils.base_model_datatypes import MMPreprocessConfig, MMUrlType
 
 
 class SeparatorStyle(Enum):

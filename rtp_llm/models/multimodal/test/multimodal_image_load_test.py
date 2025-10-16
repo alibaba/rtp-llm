@@ -10,7 +10,7 @@ from PIL import Image, ImageFile
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.models.multimodal.multimodal_common import ImageEmbeddingInterface
-from rtp_llm.utils.multimodal_util import MMPreprocessConfig, MMUrlType
+from rtp_llm.utils.base_model_datatypes import MMPreprocessConfig, MMUrlType
 
 
 class ImageLoadTest(TestCase):
