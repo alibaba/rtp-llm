@@ -14,9 +14,9 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
 )
 from rtp_llm.distribute.worker_info import g_worker_info
 from rtp_llm.model_factory import ModelFactory
-from rtp_llm.utils.grpc_util import trans_from_tensor, trans_tensor
 from rtp_llm.models.multimodal.mm_process_engine import MMEmbeddingRes, MMProcessEngine
 from rtp_llm.models.multimodal.multimodal_common import MMUrlType
+from rtp_llm.utils.grpc_util import trans_from_tensor, trans_tensor
 
 
 def trans_config(mm_process_config_pb: MMPreprocessConfigPB):
@@ -28,7 +28,7 @@ def trans_config(mm_process_config_pb: MMPreprocessConfigPB):
         mm_process_config_pb.fps,
         mm_process_config_pb.min_frames,
         mm_process_config_pb.max_frames,
-        mm_process_config_pb.timeout,
+        mm_process_config_pb.mm_timeout_ms,
     ]
 
 
