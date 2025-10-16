@@ -182,6 +182,12 @@ py_library(
     srcs = glob([
         "device/**/*.py",
     ]),
+    deps = [
+        ":torch",
+        ":psutil",
+        ":utils",
+        ":ops",
+    ],
 )
 
 py_library(
