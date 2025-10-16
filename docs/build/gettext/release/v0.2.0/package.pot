@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-10-15 19:12+0800\n"
+"POT-Creation-Date: 2025-10-16 17:40+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -49,18 +49,22 @@ msgid "**CUDA-SM8x**"
 msgstr ""
 
 #: ../../release/v0.2.0/package.md:0
+msgid "ali-hangzhou-hub-registry.cn-hangzhou.cr.aliyuncs.com/isearch/rtp_llm_sm9x_opensource"
+msgstr ""
+
+#: ../../release/v0.2.0/package.md:0
+msgid "0.2.0_0.2.0_2025_10_16_16_07_adb6d933a"
+msgstr ""
+
+#: ../../release/v0.2.0/package.md:0
 msgid "ali-hangzhou-hub-registry.cn-hangzhou.cr.aliyuncs.com/isearch/rtp_llm_sm8x_opensource"
 msgstr ""
 
 #: ../../release/v0.2.0/package.md:0
-msgid "0.2.0_0.2.0_2025_10_09_17_35_8fa289f5"
+msgid "ali-hangzhou-hub-registry.cn-hangzhou.cr.aliyuncs.com/isearch/rtp_llm_sm7x_opensource"
 msgstr ""
 
-#: ../../release/v0.2.0/package.md:15
-msgid "Images of SM9x,SM7x,AMD,Frontend,Master is comming soon"
-msgstr ""
-
-#: ../../release/v0.2.0/package.md:18
+#: ../../release/v0.2.0/package.md:17
 msgid "Wheel"
 msgstr ""
 
@@ -73,7 +77,11 @@ msgid "**CUDA-SM9x**"
 msgstr ""
 
 #: ../../release/v0.2.0/package.md:0
-msgid "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/daily/2025_10_09/rtp_llm-0.2.0-0.2.0-2025_10_09_17_35_8fa289f5-cp310-cp310-manylinux1_x86_64.whl"
+msgid "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/daily/2025_10_16/rtp_llm-0.2.0-0.2.0-2025_10_16_16_07_adb6d933a-sm9x-cp310-cp310-manylinux1_x86_64.whl"
+msgstr ""
+
+#: ../../release/v0.2.0/package.md:0
+msgid "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/daily/2025_10_16/rtp_llm-0.2.0-0.2.0-2025_10_16_16_07_adb6d933a-sm8x-cp310-cp310-manylinux1_x86_64.whl"
 msgstr ""
 
 #: ../../release/v0.2.0/package.md:0
@@ -81,5 +89,9 @@ msgid "**CUDA-SM7x**"
 msgstr ""
 
 #: ../../release/v0.2.0/package.md:0
-msgid "**AMD**"
+msgid "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/daily/2025_10_16/rtp_llm-0.2.0-0.2.0-2025_10_16_16_07_adb6d933a-sm7x-cp310-cp310-manylinux1_x86_64.whl"
+msgstr ""
+
+#: ../../release/v0.2.0/package.md:26
+msgid "Images and Wheel of AMD,Frontend,Master is comming soon"
 msgstr ""

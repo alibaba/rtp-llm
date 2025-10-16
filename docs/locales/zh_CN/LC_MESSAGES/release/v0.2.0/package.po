@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-10-15 19:12+0800\n"
+"POT-Creation-Date: 2025-10-16 17:40+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -55,18 +55,26 @@ msgstr "**CUDA**"
 #: ../../release/v0.2.0/package.md
 msgid ""
 "ali-hangzhou-hub-registry.cn-"
+"hangzhou.cr.aliyuncs.com/isearch/rtp_llm_sm9x_opensource"
+msgstr ""
+
+#: ../../release/v0.2.0/package.md
+msgid "0.2.0_0.2.0_2025_10_16_16_07_adb6d933a"
+msgstr ""
+
+#: ../../release/v0.2.0/package.md
+msgid ""
+"ali-hangzhou-hub-registry.cn-"
 "hangzhou.cr.aliyuncs.com/isearch/rtp_llm_sm8x_opensource"
 msgstr ""
 
 #: ../../release/v0.2.0/package.md
-msgid "0.2.0_0.2.0_2025_10_09_17_35_8fa289f5"
+msgid ""
+"ali-hangzhou-hub-registry.cn-"
+"hangzhou.cr.aliyuncs.com/isearch/rtp_llm_sm7x_opensource"
 msgstr ""
 
-#: ../../release/v0.2.0/package.md:15
-msgid "Images of SM9x,SM7x,AMD,Frontend,Master is comming soon"
-msgstr "SM9x,SM7x,AMD,Frontend,Master 的image 我们会尽快提供"
-
-#: ../../release/v0.2.0/package.md:18
+#: ../../release/v0.2.0/package.md:17
 #, fuzzy
 msgid "Wheel"
 msgstr "whl包"
@@ -84,7 +92,15 @@ msgstr "**CUDA**"
 #: ../../release/v0.2.0/package.md
 msgid ""
 "https://rtp-opensource.oss-cn-"
-"hangzhou.aliyuncs.com/package/daily/2025_10_09/rtp_llm-0.2.0-0.2.0-2025_10_09_17_35_8fa289f5-cp310-cp310-manylinux1_x86_64.whl"
+"hangzhou.aliyuncs.com/package/daily/2025_10_16/rtp_llm-0.2.0-0.2.0"
+"-2025_10_16_16_07_adb6d933a-sm9x-cp310-cp310-manylinux1_x86_64.whl"
+msgstr ""
+
+#: ../../release/v0.2.0/package.md
+msgid ""
+"https://rtp-opensource.oss-cn-"
+"hangzhou.aliyuncs.com/package/daily/2025_10_16/rtp_llm-0.2.0-0.2.0"
+"-2025_10_16_16_07_adb6d933a-sm8x-cp310-cp310-manylinux1_x86_64.whl"
 msgstr ""
 
 #: ../../release/v0.2.0/package.md
@@ -93,8 +109,16 @@ msgid "**CUDA-SM7x**"
 msgstr "**CUDA**"
 
 #: ../../release/v0.2.0/package.md
-msgid "**AMD**"
-msgstr "**AMD**"
+msgid ""
+"https://rtp-opensource.oss-cn-"
+"hangzhou.aliyuncs.com/package/daily/2025_10_16/rtp_llm-0.2.0-0.2.0"
+"-2025_10_16_16_07_adb6d933a-sm7x-cp310-cp310-manylinux1_x86_64.whl"
+msgstr ""
+
+#: ../../release/v0.2.0/package.md:26
+#, fuzzy
+msgid "Images and Wheel of AMD,Frontend,Master is comming soon"
+msgstr "AMD,Frontend,Master 的image和wheel包 我们会尽快提供"
 
 #~ msgid "hub.docker.alibaba-inc.com/isearch/rtp_llm_sm8x"
 #~ msgstr "hub.docker.alibaba-inc.com/isearch/rtp_llm_gpu_cuda12"
@@ -107,15 +131,6 @@ msgstr "**AMD**"
 
 #~ msgid "hub.docker.alibaba-inc.com/isearch/rtp_llm_rocm"
 #~ msgstr "hub.docker.alibaba-inc.com/isearch/rtp_llm_rocm"
-
-#~ msgid "Images of SM9x,SM7x is comming soon"
-#~ msgstr ""
-
-#~ msgid "SM9x,SM7x,AMD 的image 我们会尽快提供"
-#~ msgstr ""
-
-#~ msgid "Images of SM9x,SM7x,AMD is comming soon"
-#~ msgstr ""
 
 #~ msgid "Others"
 #~ msgstr ""
@@ -139,5 +154,16 @@ msgstr "**AMD**"
 #~ msgstr ""
 
 #~ msgid "0.2.0_2025_09_19_11_16_3b779f1_accelerated"
+#~ msgstr ""
+
+#~ msgid "0.2.0_0.2.0_2025_10_09_17_35_8fa289f5"
+#~ msgstr ""
+
+#~ msgid "**AMD**"
+#~ msgstr "**AMD**"
+
+#~ msgid ""
+#~ "https://rtp-opensource.oss-cn-"
+#~ "hangzhou.aliyuncs.com/package/daily/2025_10_09/rtp_llm-0.2.0-0.2.0-2025_10_09_17_35_8fa289f5-cp310-cp310-manylinux1_x86_64.whl"
 #~ msgstr ""
 
