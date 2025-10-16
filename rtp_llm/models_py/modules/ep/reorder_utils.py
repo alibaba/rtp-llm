@@ -5,7 +5,7 @@ import torch
 import rtp_llm.models_py.modules.utils as utils
 
 if utils.is_cuda():
-    from libth_transformer.rtp_llm_ops import moe_post_reorder, moe_pre_reorder
+    from librtp_compute_ops.rtp_llm_ops import moe_post_reorder, moe_pre_reorder
 else:
     logging.warning("can't import from rtp_llm_ops, only support cuda!")
 
