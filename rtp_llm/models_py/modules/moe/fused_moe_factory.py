@@ -156,18 +156,43 @@ class FusedMoeFactory(object):
     @staticmethod
     def create_amd_fused_moe(
         config: GptInitModelParameters, weights: Dict[str, torch.Tensor]
-    ) -> FusedMoe:
-        
-        init_deepep_env_once(config)
-        from rtp_llm.models_py.modules.rocm.moe.executors.deepep_normal_fused_moe_executor import (
-            FusedMoeExecutor,
-        )
-        from rtp_llm.models_py.modules.rocm.moe.routers.deepep_normal_router import (
-            DeepepNormalRouter,
-        )
-        router = DeepepNormalRouter(config)
-        executor = FusedMoeExecutor(config, weights)
-        return FusedMoe(router, executor, config.expert_num)
+    ) -> FusedMoe: 
+        if config.ep_size > 1: 
+            if config.moe_config.use_deepep_low_latency == False:
+                init_deepep_env_once(config)
+                from rtp_llm.models_py.modules.rocm.moe.executors.deepep_normal_fused_moe_executor import (
+                    FusedMoeExecutor,
+                )
+                from rtp_llm.models_py.modules.rocm.moe.routers.deepep_normal_router import (
+                    DeepepNormalRouter,
+                )
+                router = DeepepNormalRouter(config)
+                executor = FusedMoeExecutor(config, weights)
+                return FusedMoe(router, executor, config.expert_num)
+            else:
+                raise ValueError(
+                    f"deepep_low_latency for rocm moe is not yet supported"
+                )
+        else:
+            from rtp_llm.models_py.modules.moe.fused_batched_moe import (
+                BatchedTritonExperts,
+            )
+            max_num_tokens = (
+                config.max_generate_batch_size + config.tp_size - 1
+            ) // config.tp_size
+            router = BatchedDataRouter(
+                max_num_tokens=max_num_tokens,
+                num_local_experts=config.expert_num,
+                num_dispatchers=1,
+                rank=0,
+            )
+            experts = BatchedTritonExperts(
+                max_num_tokens=max_num_tokens,
+                num_dispatchers=1,
+                w1=weights[W.moe_w1],
+                w2=weights[W.moe_w2],
+            )
+            return FusedMoe(router, experts, expert_num=config.expert_num)
 
     @staticmethod
     def create_fused_moe(
@@ -177,8 +202,11 @@ class FusedMoeFactory(object):
         device_type = get_device().get_device_type()
         if device_type == DeviceType.ROCm:
             if config.quant_config is None:
-                if config.ep_size > 1 and config.moe_config.use_deepep_low_latency == False:
-                    return FusedMoeFactory.create_amd_fused_moe(config, weights)
+                return FusedMoeFactory.create_amd_fused_moe(config, weights)
+            else:
+                raise ValueError(
+                    f"Quantization for rocm moe is not yet supported"
+                )
         else:
             if config.quant_config is None:
                 if config.ep_size > 1 and config.moe_config.use_deepep_low_latency:
