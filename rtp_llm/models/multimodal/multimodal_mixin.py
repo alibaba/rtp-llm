@@ -20,9 +20,9 @@ from rtp_llm.model_loader.model_weight_info import (
 from rtp_llm.model_loader.weight_module import MMAtomicWeight
 from rtp_llm.models.multimodal.multimodal_common import MultiModalEmbeddingInterface
 from rtp_llm.models.multimodal.multimodal_trt_engine import MultiModalTRTEngine
+from rtp_llm.models.multimodal.multimodal_util import get_vit_compute_dtype
 from rtp_llm.ops.comm.nccl_op import NcclOp
 from rtp_llm.utils.model_weight import CkptWeightInfo, identity, sp_id
-from rtp_llm.utils.multimodal_util import MultimodalInput, get_vit_compute_dtype
 
 
 class BaseVitWeights:
