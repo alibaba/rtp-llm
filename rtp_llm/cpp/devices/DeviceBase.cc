@@ -546,4 +546,16 @@ void DeviceBase::profileStop() {
     return;
 }
 
+void DeviceBase::detachPhysicalMemory() {
+    // maybe we can return true and log an error?
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+void DeviceBase::attachPhysicalMemory() {
+    // maybe we can return true and log an error?
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+void DeviceBase::rebuildRope(const float rescale_factor) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
 }  // namespace rtp_llm

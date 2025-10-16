@@ -64,3 +64,12 @@ class RtpLLMOp:
 
     def restart(self):
         return self.ft_op.restart()
+
+    def detach_physical_memory(self) -> bool:
+        return self.ft_op.detach_physical_memory()
+
+    def attach_physical_memory(self) -> bool:
+        return self.ft_op.attach_physical_memory()
+
+    def rebuild_rope(self, rescale_factor: float) -> None:
+        return self.ft_op.rebuild_rope(rescale_factor)

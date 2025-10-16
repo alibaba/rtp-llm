@@ -321,5 +321,142 @@ class BackendApp(object):
             """
             return self.backend_server.update_weight(req)
 
+        @app.post("/detach_physical_memory")
+        async def detach_physical_memory():
+            """
+            Release physical GPU memory while retaining the virtual address space.
+            This method is intended for engines that support virtual memory. It
+            immediately unmaps and frees all **physical** backing memory without
+            releasing the reserved **virtual** addresses.  If any requests are still
+            in flight, the engine **must** wait for them to complete before
+            performing the detach operation.
+            Returns
+            -------
+            bool
+                ``True``  – physical memory was successfully released.
+                ``False`` – the engine does not support virtual memory **or** the
+                detach operation failed.
+            Notes
+            -----
+            After a successful detach, the virtual addresses remain valid but
+            accessing them will raise a device page-fault until
+            :meth:`attach_physical_memory` is called.
+            """
+            try:
+                self.backend_server.detach_physical_memory()
+                return {"status": "ok"}
+            except Exception as e:
+                # Using f-string for error details
+                return {
+                    "error": "Failed to detach physical memory",
+                    "details": traceback.format_exc(),
+                }
+
+        @app.post("/internal_detach_physical_memory")
+        async def internal_detach_physical_memory():
+            try:
+                self.backend_server.internal_detach_physical_memory()
+                return {"status": "ok"}
+            except Exception as e:
+                # Using f-string for error details
+                return {
+                    "error": "Internal Failure",
+                    "details": traceback.format_exc(),
+                }
+
+        @app.post("/attach_physical_memory")
+        async def attach_physical_memory():
+            """
+            Re-attach / map physical memory to previously reserved virtual addresses.
+            For every virtual address range that was **reserved but not mapped**
+            (e.g., after :meth:`detach_physical_memory`), this method allocates
+            physical GPU memory and binds it to those ranges.  Virtual addresses that
+            already have physical backing are **not** re-allocated.
+            Returns
+            -------
+            bool
+                ``True``  – physical memory was successfully (re-)mapped.
+                ``False`` – the engine lacks virtual-memory support **or** the
+                mapping operation failed.
+            """
+            try:
+                self.backend_server.attach_physical_memory()
+                return {"status": "ok"}
+            except Exception as e:
+                # Using f-string for error details
+                return {
+                    "error": "Failed to attach physical memory",
+                    "details": traceback.format_exc(),
+                }
+
+        @app.post("/internal_attach_physical_memory")
+        async def internal_attach_physical_memory():
+            try:
+                self.backend_server.internal_attach_physical_memory()
+                return {"status": "ok"}
+            except Exception as e:
+                # Using f-string for error details
+                return {
+                    "error": "Internal Failure",
+                    "details": traceback.format_exc(),
+                }
+
+        @app.post("/rebuild_rope")
+        async def rebuild_rope(req: Dict[Any, Any]):
+            """
+            Re-generate the RoPE (Rotary Position Embedding) cache with a new rescale
+            factor.  This is typically used by YaRN-style length-extension algorithms
+            to adapt the frequency scaling when the context window is enlarged or
+            shrunk.
+            Parameters
+            ----------
+            rescale_factor : float
+                Multiplicative factor applied to the original base frequencies
+                (e.g. 1.0 keeps the original scale, 2.0 doubles the effective
+                wavelength, 0.5 halves it).
+            Returns
+            -------
+            None
+            Raises
+            ------
+            NotImplementedError
+                If the backend does not support dynamic RoPE re-scaling.
+            """
+            rescale_factor = req.get("rescale_factor", 1.0)
+            if not isinstance(rescale_factor, float):
+                return {"error": "rescale factor type error"}
+            if rescale_factor < 1.0:
+                return {"error": "rescale factor value error, must >= 1.0"}
+
+            try:
+                self.backend_server.rebuild_rope(rescale_factor)
+                return {"status": "ok"}
+            except Exception as e:
+                # Using f-string for error details
+                return {
+                    "error": "Failed to rebuild rope",
+                    "details": traceback.format_exc(),
+                }
+
+        @app.post("/internal_rebuild_rope")
+        async def internal_rebuild_rope(req: Dict[Any, Any]):
+
+            rescale_factor = req.get("rescale_factor", 1.0)
+            if not isinstance(rescale_factor, float):
+                return {"error": "rescale factor type error"}
+            if rescale_factor < 1.0:
+                return {"error": "rescale factor value error, must >= 1.0"}
+
+            try:
+                self.backend_server.internal_rebuild_rope(rescale_factor)
+                return {"status": "ok"}
+
+            except Exception as e:
+                # Using f-string for error details
+                return {
+                    "error": "Failed to rebuild rope",
+                    "details": traceback.format_exc(),
+                }
+
         register_backend_embedding_api(app, self.backend_server)
         return app
