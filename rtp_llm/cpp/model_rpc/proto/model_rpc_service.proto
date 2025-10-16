@@ -269,9 +269,10 @@ message RemoteGenerateRequestPBNew {
 message RemoteGenerateResponsePBNew {
     ErrorDetailsPB error_info = 1;
     GenerateOutputsPB output = 2;
-    int32 first_generate_token_id = 3;
+    repeated int32 first_generate_token_ids = 3;
     int64 first_token_rt_us = 4;
-    bool finished = 5;
+    repeated int32 position_ids = 5;
+    bool finished = 6;
 }
 
 message RemoteStorePartition {

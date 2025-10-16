@@ -24,6 +24,14 @@ grpc::Status DecodeRpcServerNew::GenerateStreamCall(grpc::ServerContext*        
 
     RTP_LLM_LOG_DEBUG("request [%s] start generate", decode_context.request_key.c_str());
 
+    decode_context.error_info = multimodalProcess(decode_context);
+    if (!decode_context.error_info.ok()) {
+        RTP_LLM_LOG_WARNING("request [%s] multimodal process failed, err: %s",
+                            decode_context.request_key.c_str(),
+                            decode_context.error_info.ToString().c_str());
+        return serializeErrorMsg(decode_context.request_key, decode_context.error_info);
+    }
+
     decode_context.error_info = decode_context.init(engine_);
     if (!decode_context.error_info.ok()) {
         RTP_LLM_LOG_WARNING("request [%s] prepare generate context failed, err: %s",
@@ -81,10 +89,15 @@ void DecodeRpcServerNew::makeRemoteGenerateRequest(DecodeGenerateContextNew& dec
         request.add_addrs(addr);
     }
 
-    auto  generate_stream = decode_context.getStream();
-    auto& block_ids       = generate_stream->kvCache().blocks(0);
-    for (auto& block_id : block_ids) {
-        request.add_block_ids(block_id);
+    auto generate_stream = decode_context.getStream();
+    std::unordered_set<int> decode_block_id_set;
+    for (int i = 0; i < decode_context.getStream()->kvCache().batchSize(); i++) {
+        auto block_ids = decode_context.getStream()->kvCache().blocks(i);
+        for (auto& block_id : block_ids) {
+            if (decode_block_id_set.insert(block_id).second) {
+                request.add_block_ids(block_id);
+            }
+        }
     }
 
     // reuse block no need sent back from prefill
@@ -203,6 +216,18 @@ ErrorInfo DecodeRpcServerNew::callPrefill(DecodeGenerateContextNew& decode_conte
         }
     }
 
+    if (decode_context.remote_generate_response.position_ids_size() > 0) {
+        auto context_position_ids =
+            engine_->getDevice()->allocateBuffer({rtp_llm::DataType::TYPE_INT32,
+                                                  {(size_t)decode_context.remote_generate_response.position_ids_size()},
+                                                  rtp_llm::AllocationType::HOST},
+                                                 {});
+        memcpy(context_position_ids->data<int32_t>(),
+               decode_context.remote_generate_response.position_ids().data(),
+               decode_context.remote_generate_response.position_ids_size() * sizeof(int32_t));
+        decode_context.getStream()->setContextPositionIds(context_position_ids);
+    }
+
     decode_context.load_cache_from_prefill_done_time_us = currentTimeUs();
     RTP_LLM_LOG_DEBUG("request [%s] call prefill done", decode_context.request_key.c_str());
     return ErrorInfo::OkStatus();
@@ -273,16 +298,34 @@ ErrorInfo DecodeRpcServerNew::writeAppendFirstToken(DecodeGenerateContextNew& de
     generate_stream->setIsContextStream(false);
     generate_stream->step();
 
-    // append first token to generate stream
-    auto new_tokens     = engine_->getDevice()->allocateBuffer({rtp_llm::DataType::TYPE_INT32,
-                                                                {(size_t)generate_stream->nextBatchSize(), (size_t)1},
-                                                                rtp_llm::AllocationType::HOST},
-                                                               {});
-    auto data           = new_tokens->data<int32_t>();
-    auto first_token_id = response.first_generate_token_id();
-    *data               = first_token_id;
+    // append first tokens to generate stream
+    const int next_batch_size = generate_stream->nextBatchSize();
+    std::vector<int32_t> first_token_ids;
+    first_token_ids.reserve(std::max(1, next_batch_size));
+    for (int i = 0; i < response.first_generate_token_ids_size(); ++i) {
+        first_token_ids.push_back(response.first_generate_token_ids(i));
+    }
+    if (first_token_ids.empty()) {
+        RTP_LLM_LOG_WARNING("request [%ld] no first_generate_token_ids in response", decode_context.request_id);
+        return ErrorInfo(ErrorCode::INVALID_PARAMS, "no first_generate_token_ids in response");
+    }
+    auto new_tokens = engine_->getDevice()->allocateBuffer(
+        {rtp_llm::DataType::TYPE_INT32, {(size_t)next_batch_size, (size_t)1}, rtp_llm::AllocationType::HOST}, {});
+    auto data = new_tokens->data<int32_t>();
+    if ((int)first_token_ids.size() == next_batch_size) {
+        for (int i = 0; i < next_batch_size; ++i) {
+            data[i] = first_token_ids[i];
+        }
+    } else {
+        RTP_LLM_LOG_WARNING("request [%ld] first_generate_token_ids size[%zu] mismatch next_batch_size[%d]",
+                            decode_context.request_id,
+                            first_token_ids.size(),
+                            next_batch_size);
+        return ErrorInfo(ErrorCode::INVALID_PARAMS, "first_generate_token_ids size mismatch");
+    }
     generate_stream->incLastOutputPos();
     generate_stream->update({new_tokens, 1, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr});
+    
     if (propose_maga_init_params_) {
         generate_stream->setReuseLength(generate_stream->seqLength() - 1);
         generate_stream->setFallbackPrefixLength(generate_stream->reuseLength());
@@ -290,6 +333,20 @@ ErrorInfo DecodeRpcServerNew::writeAppendFirstToken(DecodeGenerateContextNew& de
     }
     generate_stream->resetBeginTime(currentTimeUs());
 
+    return ErrorInfo::OkStatus();
+}
+
+ErrorInfo DecodeRpcServerNew::multimodalProcess(DecodeGenerateContextNew& decode_context) {
+    auto& input = decode_context.generate_input;
+    if (mm_processor_ != nullptr && input->multimodal_inputs) {
+        auto result = mm_processor_->updateMultimodalFeatures(input);
+        if (!result.ok()) {
+            RTP_LLM_LOG_WARNING("request [%s] multimodal process failed, err: %s",
+                                decode_context.request_key.c_str(),
+                                result.ToString().c_str());
+            return result;
+        }
+    }
     return ErrorInfo::OkStatus();
 }
 
