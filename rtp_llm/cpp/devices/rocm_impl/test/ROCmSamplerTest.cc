@@ -11,6 +11,73 @@ public:
 protected:
 };
 
+TEST_F(CudaSamplerTest, testFlashinferKernelTopP) {
+    DeviceInitParams device_init_params;
+    device_init_params.sampler_config.enable_flashinfer_sample_kernel = true;
+    device_                                                           = new ROCmDevice(device_init_params);
+    device_->init();
+    size_t    batch_size   = 4;
+    BufferPtr logits       = createBuffer<float>({batch_size, 10},
+                                                 {
+                                                    0,0,0,0.1,0.2,0.3,0,0,0,0.01,
+                                                    0.987,0.887,0.99999,0.1,0.2,0.3,0,0,0.99,0.989,
+                                                    0.221,0,0,0.1,0.2,0.321,0,0.4432,0.44,0.01,
+                                                    0.221,0,0,0.1,0.2,0.321,0,0.4432,0.44,0.01,
+                                           });
+    size_t    step         = 5;  // also max_input_length
+    BufferPtr eos_token_id = createBuffer<int32_t>({1}, {2});
+    BufferPtr output_token_ids =
+        createBuffer<int32_t>({batch_size, step + 1},
+                              {
+                                  100, 1, 1, 1, 1, 0, 1, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0,
+                              });
+
+    // TODO: test lengths
+    BufferPtr sequence_lengths = createBuffer<int32_t>({4}, {5, 5, 5, 5});
+    BufferPtr input_lengths    = createBuffer<int32_t>({4}, {-1, -1, -1, -1});
+
+    auto top_k      = createBuffer<uint32_t>({4}, {0, 0, 0, 0}, AllocationType::HOST);
+    auto top_p      = createBuffer<float>({4}, {0.1, 0.28, 0.37, 0.37}, AllocationType::HOST);
+    auto temperture = createBuffer<float>({4}, {1.0, 1.0, 1.0, 1.0}, AllocationType::HOST);
+
+    GreedyParams params({
+        *logits,
+        *input_lengths,
+        *sequence_lengths,
+        *output_token_ids,
+        step,
+        *top_k,
+        *top_p,
+        *temperture,
+        nullopt,
+        nullopt,
+        nullopt,
+        nullopt,
+        nullopt,
+        nullopt,
+        nullopt,
+        nullopt,
+    });
+    auto         greedy_output = device_->sampleGreedy(params);
+    check_cuda_error();
+    // ASSERT_TRUE(greedy_output.success != nullptr);
+    // ASSERT_EQ(greedy_output.success->size(), 4);
+
+    // // printBuffer<int32_t>(*output_token_ids, "output_token_ids");
+    // auto         success_buffer = device_->clone({*greedy_output.success, AllocationType::HOST});
+    // auto         success        = success_buffer->data<bool>();
+    // vector<bool> expect_success{true, true, true, true};
+    // for (int i = 0; i < expect_success.size(); ++i) {
+    //     ASSERT_EQ(success[i], expect_success[i]);
+    // }
+
+    auto output_token_ids_host = getBufferValues<int32_t>(*output_token_ids);
+    ASSERT_EQ(output_token_ids_host[5], 5);
+    ASSERT_EQ(output_token_ids_host[11], 2); // or 8
+    ASSERT_EQ(output_token_ids_host[17], 7); // or 8
+    ASSERT_EQ(output_token_ids_host[23], 7); // or 8
+}
+
 TEST_F(CudaSamplerTest, testTopK) {
     size_t    batch_size   = 4;
     BufferPtr logits       = createBuffer<float>({batch_size, 10},
