@@ -1,10 +1,11 @@
+from dataclasses import dataclass
+from enum import IntEnum
 from typing import Any, Dict, List, NamedTuple, Optional
 
 import torch
 from pydantic import BaseModel as PyBaseModel
 
 from rtp_llm.config.generate_config import GenerateConfig, RoleAddr, RoleType
-from rtp_llm.utils.multimodal_util import MultimodalInput
 from rtp_llm.utils.weight_type import WEIGHT_TYPE
 
 
@@ -24,6 +25,46 @@ class EmbeddingOutput:
                 raise Exception("Extra input must have same shape except dim 0")
         else:
             self.extra_input = None
+
+
+class MMUrlType(IntEnum):
+    DEFAULT = 0
+    IMAGE = 1
+    VIDEO = 2
+    AUDIO = 3
+    TENSOR = 4
+    IGRAPH = 5
+
+
+@dataclass
+class MMPreprocessConfig:
+    width: int = -1
+    height: int = -1
+    min_pixels: int = -1
+    max_pixels: int = -1
+    fps: int = -1
+    min_frames: int = -1
+    max_frames: int = -1
+    mm_timeout_ms: int = 30000
+
+
+class MultimodalInput:
+    url: str
+    mm_type: MMUrlType
+    config: MMPreprocessConfig
+    tensor: torch.Tensor
+
+    def __init__(
+        self,
+        url: str,
+        mm_type: MMUrlType = MMUrlType.DEFAULT,
+        config: MMPreprocessConfig = MMPreprocessConfig(),
+        tensor: torch.Tensor = torch.empty(1),
+    ):
+        self.url = url
+        self.mm_type = mm_type
+        self.config = config
+        self.tensor = tensor
 
 
 # single batch prompt input
