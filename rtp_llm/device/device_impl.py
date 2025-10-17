@@ -122,7 +122,7 @@ class GpuImpl(DeviceBase):
         # unpack inputs packed in int32/float32 into uint4 and store them in int8 format
         w_packed_int4x2 = w_packed.contiguous().view(torch.uint8)
         w_unpacked = torch.zeros(
-            w_packed_int4x2.shape[0], w_packed_int4x2.shape[1] * 2, dtype=torch.int8
+            w_packed_int4x2.shape[0], w_packed_int4x2.shape[1] * 2, dtype=torch.int8, device=w_packed_int4x2.device
         )
         w_unpacked[:, ::2] = w_packed_int4x2 % 16
         w_unpacked[:, 1::2] = w_packed_int4x2 // 16
@@ -137,6 +137,113 @@ class GpuImpl(DeviceBase):
         )
 
         return reorder_tensor
+    
+    def get_sm_version(self):
+        prop = torch.cuda.get_device_properties(0)
+        return prop.major * 10 + prop.minor
+    
+    def preprocess_weights_for_mixed_gemm(
+        self,
+        tensor: torch.Tensor,
+        quant_mode: torch.dtype,
+        act_dtype: torch.dtype,
+        sm_: int = -1,
+        do_weight_interleave: bool = True
+    ) -> torch.Tensor:
+        sm_ = sm_ if sm_ > 0 else self.get_sm_version()
+        if len(tensor.shape) == 2:
+            tensor = tensor.unsqueeze(0)
+
+        permutation_map = {
+            "16_8": [0, 1, 8, 9, 2, 3, 10, 11, 4, 5, 12, 13, 6, 7, 14, 15],
+            "16_4": [
+                0, 1, 8, 9, 16, 17, 24, 25, 2, 3, 10, 11, 18, 19, 26, 27, 4, 5, 12,
+                13, 20, 21, 28, 29, 6, 7, 14, 15, 22, 23, 30, 31
+            ],
+            "8_4": [
+                0, 1, 2, 3, 16, 17, 18, 19, 4, 5, 6, 7, 20, 21, 22, 23, 8, 9, 10,
+                11, 24, 25, 26, 27, 12, 13, 14, 15, 28, 29, 30, 31
+            ]
+        }
+
+        # permute_B_rows_for_mixed_gemm
+        BITS_PER_ELT_A = 8 if act_dtype == torch.float8_e4m3fn else 16
+        BITS_PER_ELT_B = 4 if quant_mode == torch.quint4x2 else 8
+        MMA_SHAPE_N = 8
+        B_ROWS_PER_MMA = 8 * 16 // BITS_PER_ELT_B
+
+        num_experts = tensor.shape[0]
+        num_rows = tensor.shape[1]
+        num_cols = tensor.shape[2]
+
+        assert (sm_ >= 75)
+        assert (num_rows % B_ROWS_PER_MMA == 0)
+        assert (num_cols % MMA_SHAPE_N == 0)
+
+        if do_weight_interleave:
+            row_idx_list = [(row_idx // B_ROWS_PER_MMA) * B_ROWS_PER_MMA +
+                            permutation_map[f"{BITS_PER_ELT_A}_{BITS_PER_ELT_B}"][
+                                row_idx % B_ROWS_PER_MMA]
+                            for row_idx in range(num_rows)]
+            tensor = tensor[:, row_idx_list, :]
+
+        # subbyte_transpose
+        original_shape = tensor.shape
+        if BITS_PER_ELT_B == 4:
+            tensor = tensor.view(torch.uint8)
+            high_tensor = (tensor >> 4).permute(0, 2, 1).unsqueeze(2)
+            low_tensor = ((tensor << 4) >> 4).permute(0, 2, 1).unsqueeze(2)
+            new_tensor = torch.cat([low_tensor, high_tensor],
+                                dim=2).reshape(tensor.shape[0], -1,
+                                                tensor.shape[1])
+            new_tensor = new_tensor[:, :, 0::2] + new_tensor[:, :, 1::2] * 16
+            tensor = new_tensor.view(torch.int8).reshape(original_shape)
+        else:
+            tensor = tensor.permute(0, 2, 1).reshape(original_shape)
+
+        if do_weight_interleave:
+            # interleave_column_major_tensor
+            interleave = BITS_PER_ELT_A // BITS_PER_ELT_B
+            if interleave > 1:
+                rows_per_tile = 128 * 8 // BITS_PER_ELT_A
+                elts_in_int32 = 32 // BITS_PER_ELT_B
+
+                assert (num_rows % elts_in_int32 == 0)
+                assert (num_rows % rows_per_tile == 0)
+
+                tensor = tensor.reshape(num_experts, -1, interleave,
+                                        num_rows // rows_per_tile,
+                                        rows_per_tile * 4 // elts_in_int32)
+                tensor = tensor.permute(0, 1, 3, 2, 4).reshape(original_shape)
+
+            # add_bias_and_interleave_quantized_tensor_inplace
+            if BITS_PER_ELT_B == 8:
+                tensor += -256 * (tensor > 127).byte() + 128
+                tensor = tensor.reshape(-1, 4)[:,
+                                            [0, 2, 1, 3]].reshape(tensor.shape)
+            elif BITS_PER_ELT_B == 4:
+                tensor = tensor.view(torch.uint8)
+                high_tensor = (tensor >> 4).unsqueeze(-1)
+                low_tensor = ((tensor << 4) >> 4).unsqueeze(-1)
+                new_tensor = torch.cat([low_tensor, high_tensor],
+                                    dim=-1).reshape(tensor.shape[0],
+                                                    tensor.shape[1], -1)
+                new_tensor = new_tensor.reshape(
+                    -1, 8)[:, [0, 2, 4, 6, 1, 3, 5, 7]].reshape(new_tensor.shape)
+                new_tensor += -16 * (new_tensor > 7).byte() + 8
+                new_tensor = new_tensor[:, :, 0::2] + new_tensor[:, :, 1::2] * 16
+                tensor = new_tensor.view(torch.int8)
+            else:
+                raise NotImplementedError
+
+        return tensor.squeeze(0).contiguous()
+    
+    def pack_int8_tensor_to_packed_int4(self, tensor: torch.Tensor):
+        assert (tensor.dtype == torch.int8)
+        tensor -= (tensor >> 4) << 4
+        tensor = tensor.view(torch.uint8)
+        tensor = (tensor[:, 1::2] * 16 + tensor[:, ::2]).view(torch.int8)
+        return tensor
 
     @property
     def specify_gpu_arch(self):
@@ -178,11 +285,9 @@ class GpuImpl(DeviceBase):
         weight_bits: int,
     ):
         GPTQ_FLAG = 1 if gptq == True else 0
-        qweight = qweight_int32.reshape(qweight_int32.shape[0], -1).cpu()
-        qzeros = qzeros_int32.reshape(qzeros_int32.shape[0], -1).cpu()
-        scales_fp16 = scales_fp16.reshape(scales_fp16.shape[0], -1).cpu()
-        packer = self.exported_device.pack_int8_tensor_to_packed_int4
-        preprocessor = self.exported_device.preprocess_weights_for_mixed_gemm
+        qweight = qweight_int32.reshape(qweight_int32.shape[0], -1)
+        qzeros = qzeros_int32.reshape(qzeros_int32.shape[0], -1)
+        scales_fp16 = scales_fp16.reshape(scales_fp16.shape[0], -1)
         is_int8 = weight_bits == 8
         if is_int8:
             zero_shift = 128
@@ -204,8 +309,8 @@ class GpuImpl(DeviceBase):
 
         qweight = qweight.to(torch.int8)
         if not is_int8:
-            qweight = packer(qweight)
-        qweight_interleaved = preprocessor(qweight, quant_type, self.specify_gpu_arch)
+            qweight = self.pack_int8_tensor_to_packed_int4(qweight)
+        qweight_interleaved = self.preprocess_weights_for_mixed_gemm(qweight, quant_type, torch.float16)
 
         # zero = 0 if qzeros_int32 = -2004318072 torch.int32 for awq
         # zero = 0 if qzeros_int32 = 2004318071  torch.int32 for gptq
