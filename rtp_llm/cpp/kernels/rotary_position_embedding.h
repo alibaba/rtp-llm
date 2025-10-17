@@ -707,6 +707,20 @@ apply_rope(RopeConfig rope_config, vector_t& x, scalar_t* smem, int tidx, int se
     }
 }
 
+template<typename vector_t, typename scalar_t, RopeStyle ROPE_STYLE>
+__device__ inline void
+apply_rope_with_cache(vector_t& x, scalar_t* smem, const int tidx, const int dim, const float2& coef, const bool work) {
+    switch (ROPE_STYLE) {
+        case RopeStyle::Base:
+        case RopeStyle::Yarn:
+            normal_rope_with_cache<vector_t, scalar_t>(x, smem, tidx, dim, coef, work);
+            break;
+
+        default:
+            break;
+    }
+}
+
 template<typename scalar_t, typename vector_t, RopeStyle ROPE_STYLE>
 __device__ inline void context_rope(RopeConfig rope_config,
                                     vector_t&  q,
