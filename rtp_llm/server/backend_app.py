@@ -4,6 +4,7 @@ import socket
 import threading
 from typing import Any, Dict, List, Optional, Union
 
+import traceback
 import uvicorn
 from anyio import CapacityLimiter
 from anyio.lowlevel import RunVar
@@ -398,63 +399,6 @@ class BackendApp(object):
                 # Using f-string for error details
                 return {
                     "error": "Internal Failure",
-                    "details": traceback.format_exc(),
-                }
-
-        @app.post("/rebuild_rope")
-        async def rebuild_rope(req: Dict[Any, Any]):
-            """
-            Re-generate the RoPE (Rotary Position Embedding) cache with a new rescale
-            factor.  This is typically used by YaRN-style length-extension algorithms
-            to adapt the frequency scaling when the context window is enlarged or
-            shrunk.
-            Parameters
-            ----------
-            rescale_factor : float
-                Multiplicative factor applied to the original base frequencies
-                (e.g. 1.0 keeps the original scale, 2.0 doubles the effective
-                wavelength, 0.5 halves it).
-            Returns
-            -------
-            None
-            Raises
-            ------
-            NotImplementedError
-                If the backend does not support dynamic RoPE re-scaling.
-            """
-            rescale_factor = req.get("rescale_factor", 1.0)
-            if not isinstance(rescale_factor, float):
-                return {"error": "rescale factor type error"}
-            if rescale_factor < 1.0:
-                return {"error": "rescale factor value error, must >= 1.0"}
-
-            try:
-                self.backend_server.rebuild_rope(rescale_factor)
-                return {"status": "ok"}
-            except Exception as e:
-                # Using f-string for error details
-                return {
-                    "error": "Failed to rebuild rope",
-                    "details": traceback.format_exc(),
-                }
-
-        @app.post("/internal_rebuild_rope")
-        async def internal_rebuild_rope(req: Dict[Any, Any]):
-
-            rescale_factor = req.get("rescale_factor", 1.0)
-            if not isinstance(rescale_factor, float):
-                return {"error": "rescale factor type error"}
-            if rescale_factor < 1.0:
-                return {"error": "rescale factor value error, must >= 1.0"}
-
-            try:
-                self.backend_server.internal_rebuild_rope(rescale_factor)
-                return {"status": "ok"}
-
-            except Exception as e:
-                # Using f-string for error details
-                return {
-                    "error": "Failed to rebuild rope",
                     "details": traceback.format_exc(),
                 }
 
