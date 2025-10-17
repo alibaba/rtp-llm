@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/speculative_engine/score_executor/ScoreExecutor.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 
 using namespace std;
 
@@ -41,12 +42,12 @@ std::shared_ptr<GenerateStream> SpeculativeEngine::enqueueMinFakeQuery(int32_t m
     fake_input->input_ids =
         device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {(size_t)1}, rtp_llm::AllocationType::HOST});
 
-    std::default_random_engine         generator;
-    std::uniform_int_distribution<int> distribution(0, score_model_params_.gpt_init_parameter.vocab_size_ - 1);
-    for (size_t i = 0; i < fake_input->input_ids->size(); ++i) {
-        *fake_input->input_ids->dataWithOffset<int32_t>(i) = distribution(generator);
-    }
-
+    // std::default_random_engine         generator;
+    // std::uniform_int_distribution<int> distribution(0, score_model_params_.gpt_init_parameter.vocab_size_ - 1);
+    // for (size_t i = 0; i < fake_input->input_ids->size(); ++i) {
+    //     *fake_input->input_ids->dataWithOffset<int32_t>(i) = distribution(generator);
+    // }
+    device_->bufMemset(*fake_input->input_ids, 0);
     fake_input->generate_config = make_shared<GenerateConfig>();
     if (fake_hidden_states) {
         fake_input->generate_config->max_new_tokens = max_new_tokens + 1;
@@ -79,7 +80,7 @@ std::shared_ptr<GenerateStream> SpeculativeEngine::enqueueMinFakeQuery(int32_t m
         stream->setReturnLastHiddenStates(true);
         BufferPtr new_tokens =
             device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {(size_t)1, 1}, rtp_llm::AllocationType::HOST});
-        *new_tokens->dataWithOffset<int32_t>(0) = distribution(generator);
+        *new_tokens->dataWithOffset<int32_t>(0) = 0;
         StreamUpdateInfo update_info{new_tokens,
                                      (int)1,
                                      nullptr,
@@ -546,6 +547,11 @@ absl::Status SpeculativeEngine::prefillMtpStep(std::list<GenerateStreamPtr>& str
             stream->setSpEditRun(false);
             stream->setLastHiddenStates(nullptr);
             stream->setSPOutputBuffer(nullptr);
+            // 前面stream的状态准备完了，可以先将remote generate设置为true然后让另外的线程开始发送kv cache，最后再清理一些不需要的资源
+            if (stream->queryPdSep()) {
+                RTP_LLM_LOG_DEBUG("stream [%ld] set setNeedRemoteGenerate", stream->streamId());
+                stream->setNeedRemoteGenerate(true);
+            }
             auto score_stream   = stream->getScoreStream();
             auto propose_stream = stream->getProposeStream();
             if (score_stream) {
@@ -555,10 +561,6 @@ absl::Status SpeculativeEngine::prefillMtpStep(std::list<GenerateStreamPtr>& str
             if (propose_stream) {
                 propose_stream->setLastHiddenStates(nullptr);
                 propose_stream->setSPOutputBuffer(nullptr);
-            }
-            if (stream->queryPdSep()) {
-                RTP_LLM_LOG_DEBUG("stream [%ld] set setNeedRemoteGenerate", stream->streamId());
-                stream->setNeedRemoteGenerate(true);
             }
         }
     }
@@ -612,11 +614,11 @@ absl::Status SpeculativeEngine::mtpStep(std::list<GenerateStreamPtr>& streams) {
     {
         bool skip_propose = propose_streams.empty();
         tpSyncDisableSPRun(skip_propose);
+        // dp 情况下不允许skip propose，有可能步骤不同步
+        RTP_LLM_CHECK_WITH_INFO(score_model_params_.gpt_init_parameter.dp_size_ <= 1 || !skip_propose, "skip propose not allowed now");
         if (!skip_propose) {
             RTP_LLM_LOG_DEBUG("propose step");
             THROW_IF_STATUS_ERROR(propose_executor_->propose(propose_streams));
-        } else {
-            RTP_LLM_LOG_DEBUG("skip propose");
         }
 
         for (const GenerateStreamPtr& stream : prefill_streams) {
@@ -640,7 +642,10 @@ absl::Status SpeculativeEngine::mtpStep(std::list<GenerateStreamPtr>& streams) {
             sp_output_buffer_->tokens                            = device_->allocateBuffer(
                 {rtp_llm::DataType::TYPE_INT32, {1, propose_tokens.size()}, rtp_llm::AllocationType::HOST}, {});
             memcpy(sp_output_buffer_->tokens->data(), propose_tokens.data(), sizeof(int) * propose_tokens.size());
-
+            // set output token to zero when steam is fake query and can debug easily
+            if (stream->isDummyStream()) {
+                device_->bufMemset(*(sp_output_buffer_->tokens), 0);
+            }
             stream->setProposeStream(propose_stream);
         }
     }
