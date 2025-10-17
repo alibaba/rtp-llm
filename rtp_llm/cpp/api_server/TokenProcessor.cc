@@ -123,24 +123,43 @@ std::vector<std::string> TokenProcessorPerStream::decodeTokens(GenerateOutputs& 
                                                                std::shared_ptr<GenerateConfig> config) {
     py::gil_scoped_acquire   acquire;
     std::vector<std::string> texts;
+    if (responses.generate_outputs.empty()) {
+        return texts;
+    }
+    py::list batch_token_ids;
+    py::list batch_finished_flags;
+    
     for (size_t i = 0; i < responses.generate_outputs.size(); i++) {
         auto&            response = responses.generate_outputs[i];
         py::array_t<int> token_ids(response.output_ids->size(), response.output_ids->data<int>());
-        py::tuple        result = token_processor_stream_.attr("decode_tokens")(i,
-                                                                         token_ids,
-                                                                         response.finished,
-                                                                         config->print_stop_words,
-                                                                         config->stop_words_str,
-                                                                         config->stop_words_list,
-                                                                         config->return_incremental);
-        if (result.size() != 2) {
-            RTP_LLM_LOG_WARNING("token_processor_per_stream.decodeTokens() failed.");
-            continue;
-        }
-        int         len  = result[0].cast<int>();
-        std::string text = result[1].cast<std::string>();
-        output_lens.push_back(len);
-        texts.push_back(text);
+        batch_token_ids.append(token_ids);
+        batch_finished_flags.append(response.finished);
+    }
+    py::tuple result = token_processor_stream_.attr("decode_tokens_batch")(
+        batch_token_ids,
+        batch_finished_flags,
+        config->print_stop_words,
+        config->stop_words_str,
+        config->stop_words_list,
+        config->return_incremental);
+
+    if (result.size() != 2) {
+        RTP_LLM_LOG_WARNING("token_processor_per_stream.decodeTokens() failed.");
+        texts.resize(responses.generate_outputs.size(), ""); 
+        output_lens.resize(responses.generate_outputs.size(), 0);
+        return texts;
+    }
+    py::list py_output_lens = result[0].cast<py::list>();
+    py::list py_texts = result[1].cast<py::list>();
+    if (py_texts.size() != responses.generate_outputs.size() || py_output_lens.size() != responses.generate_outputs.size()) {
+         RTP_LLM_LOG_WARNING("Batch decode returned a different number of results than expected. expected: %d, actual test size: %d, actual py_output_lens size: %d", responses.generate_outputs.size(), py_texts.size(),  py_output_lens.size());
+         texts.resize(responses.generate_outputs.size(), ""); 
+         output_lens.resize(responses.generate_outputs.size(), 0);
+         return texts;
+    }
+    for (size_t i = 0; i < py_texts.size(); i++) {
+        output_lens.push_back(py_output_lens[i].cast<int>());
+        texts.push_back(py_texts[i].cast<std::string>());
     }
     return texts;
 }
