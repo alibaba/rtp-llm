@@ -17,6 +17,7 @@
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/cache/KvCacheInfo.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/MemoryBlockCache.h"
 
 namespace rtp_llm {
 
@@ -36,11 +37,12 @@ public:
         AdvancedMallocInfo(int64_t                                  request_id,
                            const std::vector<int32_t>&              token_ids,
                            const std::vector<int64_t>&              cache_keys,
-                           const std::vector<std::vector<int32_t>>& mm_bounds    = {},
-                           bool                                     need_loss    = false,
-                           bool                                     verbose      = false,
-                           const std::string                        adapter_name = "",
-                           bool                                     enable_3fs   = false):
+                           const std::vector<std::vector<int32_t>>& mm_bounds                 = {},
+                           bool                                     need_loss                 = false,
+                           bool                                     verbose                   = false,
+                           const std::string                        adapter_name              = "",
+                           bool                                     enable_3fs                = false,
+                           bool                                     enable_memory_block_cache = false):
             request_id(request_id),
             token_ids(token_ids),
             cache_keys(cache_keys),
@@ -48,7 +50,8 @@ public:
             need_loss(need_loss),
             verbose(verbose),
             adapter_name(adapter_name),
-            enable_3fs(enable_3fs) {}
+            enable_3fs(enable_3fs),
+            enable_memory_block_cache(enable_memory_block_cache) {}
 
         int64_t                                 request_id;
         const std::vector<int32_t>&             token_ids;
@@ -57,7 +60,8 @@ public:
         bool                                    need_loss = false;
         bool                                    verbose   = false;
         const std::string                       adapter_name;
-        bool                                    enable_3fs = false;
+        bool                                    enable_3fs                = false;
+        bool                                    enable_memory_block_cache = false;
     };
 
     struct FreeInfo {
@@ -65,16 +69,18 @@ public:
                  const std::vector<int32_t>& token_ids,
                  const std::vector<int64_t>& cache_keys,
                  const std::vector<int32_t>& block_indices,
-                 const std::vector<float>    loss         = {},
-                 const std::string           adapter_name = "",
-                 bool                        enable_3fs   = false):
+                 const std::vector<float>    loss                      = {},
+                 const std::string           adapter_name              = "",
+                 bool                        enable_3fs                = false,
+                 bool                        enable_memory_block_cache = false):
             request_id(request_id),
             token_ids(token_ids),
             cache_keys(cache_keys),
             block_indices(block_indices),
             loss(loss),
             adapter_name(adapter_name),
-            enable_3fs(enable_3fs) {}
+            enable_3fs(enable_3fs),
+            enable_memory_block_cache(enable_memory_block_cache) {}
 
         int64_t                     request_id;
         const std::vector<int32_t>& token_ids;
@@ -83,7 +89,8 @@ public:
         const std::vector<float>    loss;
         bool                        is_resident = false;
         const std::string           adapter_name;
-        bool                        enable_3fs = false;
+        bool                        enable_3fs                = false;
+        bool                        enable_memory_block_cache = false;
     };
 
 public:
@@ -138,6 +145,8 @@ public:
                          int64_t                                   request_id,
                          const std::map<std::string, std::string>& extra_metas) const;
 
+    const std::shared_ptr<MemoryBlockCache>& memoryBlockCache() const;
+
 protected:
     const BlockCache&  blockCache() const;
     size_t             cacheItemNum() const;
@@ -171,6 +180,9 @@ private:
     std::map<std::string, std::string> getLoraInfo() const;
     std::string                        getLoraCkptPath(const std::string& adapter_name) const;
 
+    void matchInMemoryBlockCache(const AdvancedMallocInfo& malloc_info, BlockCache::MatchResult& match_result);
+    void putToMemoryBlockCache(const CacheItem& item, const FreeInfo& free_info);
+
     void incrBlockRefCounter(const std::vector<int>& blocks);
 
 protected:
@@ -193,6 +205,8 @@ protected:
     std::map<std::string, std::string> lora_info_map_;
     bool                               enable_dist_kvcache_{false};
     std::shared_ptr<DistKvCache>       dist_kvcache_;
+
+    std::shared_ptr<MemoryBlockCache> memory_block_cache_;
 };
 
 typedef std::shared_ptr<CacheManager> CacheManagerPtr;
