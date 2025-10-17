@@ -3,6 +3,8 @@
 #include "rtp_llm/cpp/model_rpc/RemoteServerResource.h"
 #include "rtp_llm/cpp/model_rpc/GenerateContext.h"
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
+#include "rtp_llm/cpp/model_rpc/QueryConverter.h"
+
 
 
 namespace rtp_llm {
@@ -46,6 +48,7 @@ struct PrefillGenerateContextNew: public GenerateContext {
         for (int i = 0; i < request->addrs_size(); ++i) {
             decode_workers.push_back(request->addrs(i));
         }
+        generate_input = QueryConverter::transQuery(&request->input());
     }
 
     ~PrefillGenerateContextNew() { 
