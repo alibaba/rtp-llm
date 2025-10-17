@@ -66,6 +66,9 @@ cc_library(
         "@//:using_cuda12": [
             "common/NcclOp.cc",
         ],
+        "@//:using_cuda": [
+            "common/NcclOp.cc",
+        ],
         "@//:using_rocm": [
             "common/NcclOp.cc",
         ],
