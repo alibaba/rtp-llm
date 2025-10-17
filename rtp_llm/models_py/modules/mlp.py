@@ -4,6 +4,7 @@ import torch
 from torch import nn
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.distribute.collective import Group, all_reduce
 from rtp_llm.models_py.modules.linear_factory import LinearFactory
 from rtp_llm.ops import rtp_llm_ops
 from rtp_llm.utils.model_weight import W
@@ -49,10 +50,10 @@ class FusedSiluActDenseMLP(nn.Module):
         assert (
             config.activation_type == "SiGLU"
         ), "FusedSiluActDenseMLP only supports SiGLU activation"
+        self.config = config
 
         # Handle merged or separate weights
         if W.ffn_w13 in weights:
-            # Pre-merged weights
             self.gate_up_proj = LinearFactory.create_linear_from_weights(
                 weights, W.ffn_w13, W.ffn_s13, W.ffn_b13, config
             )
@@ -60,7 +61,6 @@ class FusedSiluActDenseMLP(nn.Module):
                 weights, W.ffn_w2, W.ffn_s2, W.ffn_b2, config
             )
         else:
-            # Separate weights: concatenate w1 and w3
             self.gate_up_proj = LinearFactory.create_merged_linear(
                 weights,
                 weight_keys=[W.ffn_w1, W.ffn_w3],
@@ -82,6 +82,8 @@ class FusedSiluActDenseMLP(nn.Module):
         stream_id = torch.cuda.current_stream().cuda_stream
         rtp_llm_ops.silu_and_mul(output, gate_up, stream_id)
         down_proj = self.down_proj(output)
+        if self.config.tp_size > 1:
+            down_proj = all_reduce(down_proj, group=Group.TP)
         return down_proj
 
 
