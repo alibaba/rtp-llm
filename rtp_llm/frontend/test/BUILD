@@ -44,3 +44,16 @@ py_test(
     ],
     exec_properties = {'gpu':'A10'},
 )
+
+py_test(
+    name = "token_processor_test",
+    srcs = ["token_processor_test.py"],
+    data = [
+        "//rtp_llm/test/model_test/fake_test/testdata:testdata",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm:frontend",
+    ],
+    exec_properties = {'gpu':'A10'},
+)
