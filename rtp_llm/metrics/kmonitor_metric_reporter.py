@@ -60,6 +60,7 @@ class GaugeMetrics(Enum):
 
     # vit preprocess
     VIT_PREPROCESS_RT_METRIC = "py_rtp_vit_preprocess_rt"
+    VIT_EMBEDDING_RT_METRIC = "py_rtp_vit_embedding_rt"
 
 
 class MetricReporter(object):
