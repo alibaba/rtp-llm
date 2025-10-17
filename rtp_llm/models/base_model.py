@@ -28,9 +28,9 @@ from rtp_llm.utils.base_model_datatypes import (
     GenerateOutputs,
     GenerateResponse,
     ModelConfig,
+    MultimodalInput,
 )
 from rtp_llm.utils.database import CkptDatabase
-from rtp_llm.utils.multimodal_util import MultimodalInput
 from rtp_llm.utils.time_util import timer_wrapper
 from rtp_llm.utils.util import to_torch_dtype
 

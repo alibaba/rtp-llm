@@ -23,9 +23,8 @@ from rtp_llm.openai.renderers.custom_renderer import (
     StreamStatus,
 )
 from rtp_llm.openai.renderers.llava_renderer import Conversation, SeparatorStyle
-from rtp_llm.utils.base_model_datatypes import GenerateOutput
+from rtp_llm.utils.base_model_datatypes import GenerateOutput, MMUrlType
 from rtp_llm.utils.fuser import fetch_remote_file_to_local
-from rtp_llm.utils.multimodal_util import MMUrlType
 from rtp_llm.utils.word_util import is_truncated
 
 

@@ -30,3 +30,17 @@ py_test(
     ],
     exec_properties = {'gpu':'A10'},
 )
+
+py_test(
+    name = "multimodal_util_test",
+    srcs = [
+        "multimodal_util_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib"
+    ],
+    data = [
+        ":testdata",
+    ],
+    exec_properties = {'gpu':'A10'}
+)

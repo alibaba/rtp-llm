@@ -11,9 +11,8 @@ from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.models.multimodal.multimodal_common import (
     ImageEmbeddingInterface,
     ImageTransform,
-    MMUrlType,
-    mm_lock,
 )
+from rtp_llm.utils.base_model_datatypes import MMUrlType
 
 
 class EVA2CLIPImageEmbedding(ImageEmbeddingInterface):
@@ -34,9 +33,7 @@ class EVA2CLIPImageEmbedding(ImageEmbeddingInterface):
 
     @torch.inference_mode()
     def embedding(self, data, mm_type: MMUrlType, **kwargs):
-        tensor_images = self.image_transform.encode(
-            data, self._device, self._data_type
-        )
+        tensor_images = self.image_transform.encode(data, self._device, self._data_type)
         tensor_images = self.vit(tensor_images).to(device=self._device)
         assert tensor_images.shape[0] == len(data)
         return tensor_images, None

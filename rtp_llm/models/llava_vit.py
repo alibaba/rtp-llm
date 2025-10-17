@@ -25,7 +25,8 @@ from rtp_llm.models.multimodal.multimodal_common import (
     MultiModalEmbeddingInterface,
     mm_lock,
 )
-from rtp_llm.utils.multimodal_util import MMPreprocessConfig, MMUrlType, get_bytes_io_from_url
+from rtp_llm.models.multimodal.multimodal_util import get_bytes_io_from_url
+from rtp_llm.utils.base_model_datatypes import MMPreprocessConfig, MMUrlType
 
 try:
     from decord import VideoReader, cpu
@@ -323,17 +324,13 @@ class LlavaImageEmbedding(MultiModalEmbeddingInterface):
             image.unsqueeze(0) if image.ndim == 3 else image
             for image in processed_images
         ]
-        split_sizes = [
-            processed_image.shape[0] for processed_image in processed_images
-        ]
+        split_sizes = [processed_image.shape[0] for processed_image in processed_images]
         processed_images = torch.cat(processed_images)
         image_features = self.encode_images(processed_images)
         image_features = list(torch.split(image_features, split_sizes, dim=0))
 
         if mm_type == MMUrlType.VIDEO:
-            image_features = [
-                self.get_2dPool(feature) for feature in image_features
-            ]
+            image_features = [self.get_2dPool(feature) for feature in image_features]
 
         if mm_patch_merge_type == "flat":
             image_features = [x.flatten(0, 1) for x in image_features]
@@ -357,9 +354,7 @@ class LlavaImageEmbedding(MultiModalEmbeddingInterface):
                             image_feature = torch.cat(
                                 (
                                     image_feature,
-                                    self.image_newline[None].to(
-                                        image_feature.device
-                                    ),
+                                    self.image_newline[None].to(image_feature.device),
                                 ),
                                 dim=0,
                             )

@@ -37,8 +37,10 @@ from rtp_llm.utils.base_model_datatypes import (
     GenerateInput,
     GenerateOutput,
     GenerateOutputs,
+    MMPreprocessConfig,
+    MMUrlType,
+    MultimodalInput,
 )
-from rtp_llm.utils.multimodal_util import MMPreprocessConfig, MMUrlType, MultimodalInput
 from rtp_llm.utils.util import has_overlap_kmp
 from rtp_llm.utils.word_util import (
     get_stop_word_slices,
@@ -81,13 +83,13 @@ class StreamStatus:
         self.index += 1
         self.output = output
         delta_output_ids = output.output_ids.cpu().flatten().tolist()
-        self.output_ids_list = copy.deepcopy(
-            self.output_ids_list + delta_output_ids
-        )
+        self.output_ids_list = copy.deepcopy(self.output_ids_list + delta_output_ids)
         self.finish_reason = check_finish_func(
             self.output_ids_list, self.input_token_length
         )
-        self.output_ids = remove_stop_word_ids_func(self.output_ids_list, delta_output_ids)
+        self.output_ids = remove_stop_word_ids_func(
+            self.output_ids_list, delta_output_ids
+        )
 
     def update_result(self):
         self.last_token_length = len(self.output_ids) - len(self.last_output_ids)
@@ -154,11 +156,11 @@ class StreamStatusSync:
     ):
         self.index += 1
         delta_output_ids = output.output_ids.cpu().flatten().tolist()
-        self.output_ids_list = copy.deepcopy(
-            self.output_ids_list + delta_output_ids
-        )
+        self.output_ids_list = copy.deepcopy(self.output_ids_list + delta_output_ids)
         self.finish_reason = check_finish_func(self.output_ids_list, input_len)
-        self.output_ids = remove_stop_word_ids_func(self.output_ids_list, delta_output_ids)
+        self.output_ids = remove_stop_word_ids_func(
+            self.output_ids_list, delta_output_ids
+        )
 
     def update_result(self):
         self.last_token_length = len(self.output_ids) - len(self.last_output_ids)
@@ -1418,13 +1420,15 @@ class CustomChatRenderer:
                 return FinisheReason.stop
         return None
 
-    def _remove_stop_word_ids(self, output_ids: List[int], delta_output_ids: List[int]) -> List[int]:
+    def _remove_stop_word_ids(
+        self, output_ids: List[int], delta_output_ids: List[int]
+    ) -> List[int]:
         stop_word_ids_list_all = (
             self.get_all_extra_stop_word_ids_list() + self.stop_words_id_list
         )
-        start_pos = len(output_ids)-len(delta_output_ids)
+        start_pos = len(output_ids) - len(delta_output_ids)
         end_pos = len(output_ids)
-        if start_pos >= 0 :
+        if start_pos >= 0:
             for i in range(start_pos, end_pos):
                 if output_ids[i] == self.eos_token_id:
                     output_ids = output_ids[:i]
