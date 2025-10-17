@@ -281,6 +281,18 @@ class FrontendApp(object):
         async def encode(req: Union[str, Dict[Any, Any]]):
             return self.frontend_server.tokenize(req)
 
+        @app.post("/detach_physical_memory")
+        async def detach_physical_memory():
+            return await async_request_server(
+                "post", g_worker_info.backend_server_port, "detach_physical_memory"
+            )
+
+        @app.post("/attach_physical_memory")
+        async def attach_physical_memory():
+            return await async_request_server(
+                "post", g_worker_info.backend_server_port, "attach_physical_memory"
+            )
+
         if self.frontend_server.is_embedding:
             # embedding
             @app.post("/v1/embeddings")

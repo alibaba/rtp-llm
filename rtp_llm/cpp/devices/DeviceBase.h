@@ -110,6 +110,8 @@ public:
     virtual DeviceEventPtr   createEvent();
     virtual DeviceEventPtr   createTorchEvent();
     virtual void             updateCurrentTorchStream();
+    virtual void             detachPhysicalMemory();
+    virtual void             attachPhysicalMemory();
     virtual GraphBase*       getDeviceGraphRunner(const DeviceInitParams& params,
                                                   py::object              py_instance,
                                                   int                     kv_cache_block_offset,
