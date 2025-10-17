@@ -1,9 +1,7 @@
 #include "rocmFmhaWrapper.h"
-#include "fmha_fwd.hpp"
+#include "mha_fwd.h"
 #include "ck_tile/host.hpp"
-#include "mask.hpp"
 #include "utils.hpp"
-#include "bias.hpp"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 // #include "aiter_meta/3rdparty/composable_kernel/example/ck_tile/01_fmha/mask.hpp"
@@ -670,17 +668,17 @@ uint32_t rocmFmhaWrapper::runCKFmhaMLA(void*  q,
     // ck_tile::DeviceMem lse_acc_buf(lse_acc_host.get_element_space_size_in_bytes());
     auto has_logits_soft_cap = false;
 
-    auto fmha_traits = fmha_fwd_traits{hdim_q,
-                                       hdim_v,
-                                       data_type,
-                                       mode == mode_enum::group,
-                                       is_v_rowmajor,
-                                       has_logits_soft_cap,
-                                       mask.type,
-                                       bias.type,
-                                       lse,
-                                       p_drop > 0.0f,
-                                       squant};
+    // auto fmha_traits = fmha_fwd_traits{hdim_q,
+    //                                    hdim_v,
+    //                                    data_type,
+    //                                    mode == mode_enum::group,
+    //                                    is_v_rowmajor,
+    //                                    has_logits_soft_cap,
+    //                                    mask.type,
+    //                                    bias.type,
+    //                                    lse,
+    //                                    p_drop > 0.0f,
+    //                                    squant};
 
     auto fmha_args = [&]() {
         assert(nhead % nhead_k == 0);
@@ -813,8 +811,13 @@ uint32_t rocmFmhaWrapper::runCKFmhaMLA(void*  q,
         1,        // nrepeat_
         // false     //
     };
-
-    float run_time = fmha_fwd(fmha_traits, fmha_args, stream_config);
+    float run_time;
+    if (data_type == "bf16" && size_per_head_ == 128 && msk_str == "b")
+        run_time = aiter::mha_fwd(
+            fmha_args, stream_config, data_type, mode == mode_enum::group, mask.type, bias.type, lse, true);
+    else
+        run_time = aiter::mha_fwd(
+            fmha_args, stream_config, data_type, mode == mode_enum::group, mask.type, bias.type, lse, false);
     // std::cout << "\nrun_time for ck fmha_fwd: " << run_time << std::endl;
     if (run_time < 0) {
         CK_FAIL("fmha_fwd faild");

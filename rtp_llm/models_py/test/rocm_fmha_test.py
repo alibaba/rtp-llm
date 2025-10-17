@@ -432,8 +432,8 @@ def run_aiter(
             max_seq_len,
             alibi_slopes,
             kv_cache_dtype,
-            k_scale.item(),
-            v_scale.item(),
+            k_scale,
+            v_scale,
             fp8_out_scale if cpa_fp8_out else None,
             _PARTITION_SIZE_ROCM,
         )

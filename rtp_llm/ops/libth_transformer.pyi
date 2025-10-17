@@ -581,9 +581,11 @@ class HWKernelConfig:
     enable_stable_scatter_add: bool
     ft_disable_custom_ar: bool
     rocm_hipblaslt_config: str
+    use_swizzleA: bool
     enable_cuda_graph: bool
     enable_cuda_graph_debug_mode: bool
     use_aiter_pa: bool
+    use_asm_pa: bool
     enable_native_cuda_graph: bool
     num_native_cuda_graph: int
     def __init__(
@@ -594,9 +596,11 @@ class HWKernelConfig:
         enable_multi_block_mode: bool = True,
         ft_disable_custom_ar: bool = True,
         rocm_hipblaslt_config: str = "gemm_config.csv",
+        use_swizzleA: bool = False,
         enable_cuda_graph: bool = False,
         enable_cuda_graph_debug_mode: bool = False,
         use_aiter_pa: bool = True,
+        use_asm_pa: bool = True,
         enable_native_cuda_graph: bool = False,
         num_native_cuda_graph: int = 200,
     ) -> None: ...

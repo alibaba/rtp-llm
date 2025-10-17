@@ -1,7 +1,21 @@
+load(
+    "@local_config_rocm//rocm:build_defs.bzl",
+    "rocm_default_copts",
+)
+
 cc_library(
     name = "aiter_so",
     srcs = glob([
         "aiter/jit/*.so",
+    ]),
+    visibility = ["//visibility:public"],
+    tags = ["rocm"],
+)
+
+cc_library(
+    name = "aiter_meta",
+    data = glob([
+        "aiter_meta/**",
     ]),
     visibility = ["//visibility:public"],
     tags = ["rocm"],
@@ -13,6 +27,87 @@ cc_library(
         "aiter_meta/**/*.h",
         "aiter_meta/**/*.hpp",
     ]),
+    visibility = ["//visibility:public"],
+    tags = ["rocm"],
+)
+
+genrule(
+    name = "config_h",
+    srcs = [
+        "aiter_meta/3rdparty/composable_kernel/include/ck/config.h.in",
+    ],
+    outs = [
+        "aiter_meta/3rdparty/composable_kernel/include/ck/config.h",
+    ],
+    cmd = """
+       awk '{gsub(/^#cmakedefine DTYPES \"@DTYPES@\"/, "/* #undef DTYPES*/");
+            gsub(/^#cmakedefine CK_ENABLE_ALL_DTYPES @CK_ENABLE_ALL_DTYPES@/, "#define CK_ENABLE_ALL_DTYPES ON");
+            gsub(/^#cmakedefine CK_ENABLE_INT8 @CK_ENABLE_INT8@/, "/* #undef CK_ENABLE_INT8*/");
+            gsub(/^#cmakedefine CK_ENABLE_FP8 @CK_ENABLE_FP8@/, "/* #undef CK_ENABLE_FP8*/");
+            gsub(/^#cmakedefine CK_ENABLE_BF8 @CK_ENABLE_BF8@/, "/* #undef CK_ENABLE_BF8*/");
+            gsub(/^#cmakedefine CK_ENABLE_FP16 @CK_ENABLE_FP16@/, "/* #undef CK_ENABLE_FP16*/");
+            gsub(/^#cmakedefine CK_ENABLE_BF16 @CK_ENABLE_BF16@/, "/* #undef CK_ENABLE_BF16*/");
+            gsub(/^#cmakedefine CK_ENABLE_FP32 @CK_ENABLE_FP32@/, "/* #undef CK_ENABLE_FP32*/");
+            gsub(/^#cmakedefine CK_ENABLE_FP64 @CK_ENABLE_FP64@/, "/* #undef CK_ENABLE_FP64*/");
+            gsub(/^#cmakedefine CK_ENABLE_DL_KERNELS @CK_ENABLE_DL_KERNELS@/, "/* #undef CK_ENABLE_DL_KERNELS*/");
+            gsub(/^#cmakedefine CK_ENABLE_DPP_KERNELS @CK_ENABLE_DPP_KERNELS@/, "/* #undef CK_ENABLE_DPP_KERNELS*/");
+            gsub(/^#cmakedefine CK_ENABLE_INSTANCES_ONLY @CK_ENABLE_INSTANCES_ONLY@/, "/* #undef CK_ENABLE_INSTANCES_ONLY*/");
+            gsub(/^#cmakedefine CK_USE_XDL @CK_USE_XDL@/, "#define CK_USE_XDL ON");
+            gsub(/^#cmakedefine CK_USE_WMMA @CK_USE_WMMA@/, "/* #undef CK_USE_WMMA*/");
+            gsub(/^#cmakedefine CK_USE_GFX94 @CK_USE_GFX94@/, "/* #undef CK_USE_GFX94*/");
+            gsub(/^#cmakedefine CK_USE_OCP_FP8 @CK_USE_OCP_FP8@/, "/* #undef CK_USE_OCP_FP8*/");
+            gsub(/^#cmakedefine CK_USE_FNUZ_FP8 @CK_USE_FNUZ_FP8@/, "/* #undef CK_USE_FNUZ_FP8*/");
+            gsub(/^#cmakedefine CK_USE_FP8_ON_UNSUPPORTED_ARCH @CK_USE_FP8_ON_UNSUPPORTED_ARCH@/, "/* #undef CK_USE_FP8_ON_UNSUPPORTED_ARCH*/");
+            gsub(/^#cmakedefine CK_USE_NATIVE_MX_SUPPORT @CK_USE_NATIVE_MX_SUPPORT@/, "/* #undef CK_USE_NATIVE_MX_SUPPORT*/");
+            gsub(/^#cmakedefine CK_USE_WMMA @CK_USE_WMMA@/, "/* #undef CK_USE_WMMA*/");
+            gsub(/^#cmakedefine/, "//cmakedefine");print;}' $(<) > $(@)
+    """,
+)
+
+cc_library(
+    name = "ck_headers_real",
+    hdrs = glob([
+        "aiter_meta/3rdparty/composable_kernel/include/**/*.h",
+        "aiter_meta/3rdparty/composable_kernel/include/**/*.inc",
+        "aiter_meta/3rdparty/composable_kernel/include/**/*.hpp",
+    ]) + ["aiter_meta/3rdparty/composable_kernel/include/ck/config.h"],
+    copts = rocm_default_copts() + ["-std=c++20"],
+    strip_include_prefix = "aiter_meta/3rdparty/composable_kernel/include/",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@local_config_rocm//rocm:rocm_headers",
+        ":config_h"
+    ],
+    tags = ["rocm"],
+)
+
+cc_library(
+    name = "ck_library_headers",
+    srcs = glob(["aiter_meta/3rdparty/composable_kernel/library/src/utility/**/*.cpp"]),
+    hdrs = glob([
+        "aiter_meta/3rdparty/composable_kernel/library/include/**/*.h",
+        "aiter_meta/3rdparty/composable_kernel/library/include/**/*.inc",
+        "aiter_meta/3rdparty/composable_kernel/library/include/**/*.hpp",
+    ]),
+    strip_include_prefix = "aiter_meta/3rdparty/composable_kernel/library/include/",
+    copts = rocm_default_copts() + ["-std=c++20"],
+    deps = [
+        ":ck_headers_real",
+    ],
+    tags = ["rocm"],
+)
+
+cc_library(
+    name = "ck_fmha_example_headers",
+    hdrs = glob([
+        "aiter_meta/3rdparty/composable_kernel/example/ck_tile/01_fmha/*.hpp",
+    ]),
+    copts = rocm_default_copts() + ["-std=c++20"],
+    deps = [
+        ":ck_headers_real",
+        ":ck_library_headers",
+    ],
+    strip_include_prefix = "aiter_meta/3rdparty/composable_kernel/example/ck_tile/01_fmha",
     visibility = ["//visibility:public"],
     tags = ["rocm"],
 )
@@ -60,6 +155,21 @@ cc_library(
 )
 
 cc_library(
+    name = "module_smoothquant",
+    srcs = ["aiter/jit/module_smoothquant.so"],
+    hdrs = ["aiter_meta/csrc/include/smoothquant.h"],
+    deps = [
+        ":aiter_so",
+        ":aiter_headers",
+    ],
+    copts = [],
+    linkopts = [],
+    strip_include_prefix = "aiter_meta/csrc/include/",
+    visibility = ["//visibility:public"],
+    tags = ["rocm"],
+)
+
+cc_library(
     name = "module_gemm_a8w8_blockscale",
     srcs = ["aiter/jit/module_gemm_a8w8_blockscale.so"],
     hdrs = ["aiter_meta/csrc/ck_gemm_a8w8_blockscale/include/gemm_a8w8_blockscale.h"],
@@ -69,20 +179,6 @@ cc_library(
     ],
     copts = [],
     strip_include_prefix = "aiter_meta/csrc/ck_gemm_a8w8_blockscale/include/",
-    visibility = ["//visibility:public"],
-    tags = ["rocm"],
-)
-
-cc_library(
-    name = "module_moe",
-    srcs = ["aiter/jit/module_moe.so"],
-    hdrs = ["aiter_meta/csrc/include/moe_ck.h"],
-    deps = [
-        ":aiter_so",
-        ":aiter_headers",
-    ],
-    copts = [],
-    strip_include_prefix = "aiter_meta/csrc/include/",
     visibility = ["//visibility:public"],
     tags = ["rocm"],
 )
@@ -131,8 +227,14 @@ cc_library(
 
 cc_library(
     name = "module_pa",
-    srcs = ["aiter/jit/module_pa.so"],
-    hdrs = ["aiter_meta/csrc/include/attention.h"],
+    srcs = [
+        "aiter/jit/module_pa.so",
+        "aiter/jit/module_attention_asm.so"
+    ],
+    hdrs = [
+        "aiter_meta/csrc/include/attention.h",
+        "aiter_meta/csrc/include/attention_asm.h"
+    ],
     deps = [
         ":aiter_so",
         ":aiter_headers",
@@ -152,6 +254,82 @@ cc_library(
         ":aiter_headers",
     ],
     copts = [],
+    strip_include_prefix = "aiter_meta/csrc/include/",
+    visibility = ["//visibility:public"],
+    tags = ["rocm"],
+)
+
+cc_library(
+    name = "module_mha_fwd",
+    srcs = ["aiter/jit/module_mha_fwd.so"],
+    hdrs = ["aiter_meta/csrc/include/mha_fwd.h", "aiter_meta/csrc/include/aiter_hip_common.h"],
+    deps = [
+        ":aiter_so",
+        ":aiter_headers",
+        ":ck_fmha_example_headers",
+    ],
+    copts = [],
+    linkopts = [],
+    strip_include_prefix = "aiter_meta/csrc/include/",
+    visibility = ["//visibility:public"],
+    tags = ["rocm"],
+)
+
+cc_library(
+    name = "module_rmsnorm",
+    srcs = ["aiter/jit/module_rmsnorm.so"],
+    hdrs = ["aiter_meta/csrc/include/rmsnorm.h"],
+    deps = [
+        ":aiter_so",
+        ":aiter_headers",
+    ],
+    copts = [],
+    linkopts = [],
+    strip_include_prefix = "aiter_meta/csrc/include/",
+    visibility = ["//visibility:public"],
+    tags = ["rocm"],
+)
+
+cc_library(
+    name = "module_norm",
+    srcs = ["aiter/jit/module_norm.so"],
+    hdrs = ["aiter_meta/csrc/include/norm.h"],
+    deps = [
+        ":aiter_so",
+        ":aiter_headers",
+    ],
+    copts = [],
+    linkopts = [],
+    strip_include_prefix = "aiter_meta/csrc/include/",
+    visibility = ["//visibility:public"],
+    tags = ["rocm"],
+)
+
+cc_library(
+    name = "module_gemm_a8w8",
+    srcs = ["aiter/jit/libmodule_gemm_a8w8.so"],
+    hdrs = ["csrc/ck_gemm_a8w8/include/gemm_a8w8.h"],
+    deps = [
+        ":aiter_so",
+        ":aiter_headers",
+    ],
+    copts = [],
+    linkopts = [],
+    strip_include_prefix = "aiter_meta/csrc/include/",
+    visibility = ["//visibility:public"],
+    tags = ["rocm"],
+)
+
+cc_library(
+    name = "module_moe_ck2stages",
+    srcs = ["aiter/jit/module_moe_ck2stages.so"],
+    hdrs = ["aiter_meta/csrc/include/moe_ck.h"],
+    deps = [
+        ":aiter_so",
+        ":aiter_headers",
+    ],
+    copts = [],
+    linkopts = [],
     strip_include_prefix = "aiter_meta/csrc/include/",
     visibility = ["//visibility:public"],
     tags = ["rocm"],

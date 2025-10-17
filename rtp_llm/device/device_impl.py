@@ -7,7 +7,7 @@ import torch
 from rtp_llm.device.device_base import DeviceBase, MemInfo
 from rtp_llm.ops import DeviceExporter
 from rtp_llm.utils.model_weight import W
-
+from rtp_llm.utils.swizzle_utils import swizzle_tensor
 
 class CpuImpl(DeviceBase):
     def __init__(self, exported_device: DeviceExporter):
@@ -526,6 +526,12 @@ class RocmImpl(GpuImpl):
             weight = weight_as_int8.view(torch.float8_e4m3fnuz)
         elif key == "scale":
             weight = weight * 2.0
+
+        if key in [W.attn_qkv_w, W.attn_o_w, W.ffn_w2, W.ffn_w13]:
+            if self.py_env_configs.py_hw_kernel_config.use_swizzleA:
+                weight = swizzle_tensor(weight, weight.dtype != torch.float8_e4m3fn)
+            elif weight.dtype == torch.float8_e4m3fn:
+                weight = self.shuffle_gemm_weight(weight)
 
         return weight
 

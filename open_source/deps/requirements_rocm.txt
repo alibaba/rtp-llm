@@ -1,8 +1,8 @@
 -r requirements_base.txt
-http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/amd%2Fpytorch_triton_rocm-3.0.0%2Brocm6.3.0.75cc27c26a-cp310-cp310-linux_x86_64.whl
-http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/amd%2Ftorch-2.4.0%2Brocm6.3.0-cp310-cp310-linux_x86_64.whl
-http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/amd%2Ftorchvision-0.19.0%2Brocm6.3.0-cp310-cp310-linux_x86_64.whl
+https://repo.radeon.com/rocm/manylinux/rocm-rel-6.4.1/pytorch_triton_rocm-3.0.0%2Brocm6.4.1.git75cc27c2-cp310-cp310-linux_x86_64.whl
+https://repo.radeon.com/rocm/manylinux/rocm-rel-6.4.1/torch-2.4.1%2Brocm6.4.1.git4e7ae583-cp310-cp310-linux_x86_64.whl
+https://repo.radeon.com/rocm/manylinux/rocm-rel-6.4.1/torchvision-0.19.0%2Brocm6.4.1.git4d41ad71-cp310-cp310-linux_x86_64.whl
 pyrsmi
 pyyaml
-https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/amd_pkgs/aiter-0.1.0-py3-none-any.whl
+https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/RTP/aiter-0.1.0%2Bgit.94934e7d.date.202508252342-py3-none-any.whl
 https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis%2FAMD%2Famd_smi%2Fali%2Famd_smi.tar

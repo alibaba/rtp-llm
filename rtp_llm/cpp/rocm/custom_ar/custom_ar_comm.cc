@@ -35,7 +35,7 @@ bool CustomAllReduceComm::checkAllReduceAvailable(size_t elts_total_num, DataTyp
     }
 
     if (world_size == 2 or support_nv_link_) {
-        return elts_total_size < comm_buf_threshold_;
+        return elts_total_size <= comm_buf_threshold_;
     }
 
     return false;
@@ -50,15 +50,17 @@ void CustomAllReduceComm::allReduce(torch::Tensor& input_tensor, torch::Tensor& 
 }
 
 void CustomAllReduceComm::registerGraphBuffers() {
-    auto [handle, offset] = aiter::get_graph_buffer_ipc_meta(fa_);
-    auto _handles         = all_gather(handle.data_ptr(), handle.numel(), at::hip::getCurrentHIPStream().stream());
-    auto _offsets = all_gather(offset.data(), sizeof(int64_t) * offset.size(), at::hip::getCurrentHIPStream().stream());
-    std::vector<std::string>          handles(world_size_);
-    std::vector<std::vector<int64_t>> offsets(world_size_);
+    auto handle_and_offset = aiter::get_graph_buffer_ipc_meta(fa_); // tuple<tensor, vector<int64_t>> -> vector<tensor> size=2
+    auto handle = handle_and_offset[0];
+    auto offset = handle_and_offset[1];
+
+    auto _handles = all_gather(handle.data_ptr(), handle.element_size() * handle.numel(), at::hip::getCurrentHIPStream().stream());
+    auto _offsets = all_gather(offset.data_ptr(), offset.element_size() * offset.numel(), at::hip::getCurrentHIPStream().stream());
+    std::vector<torch::Tensor> handles(world_size_); // vector<string>          -> vector<tensor>
+    std::vector<torch::Tensor> offsets(world_size_); // vector<vector<int64_t>> -> vector<tensor>
     for (int i = 0; i < world_size_; ++i) {
-        handles[i] = std::string(_handles[i].data(), handle.numel());
-        offsets[i] = std::vector<int64_t>(_offsets[i].size() / sizeof(int64_t));
-        std::memcpy(offsets[i].data(), _offsets[i].data(), _offsets[i].size());
+        handles[i] = torch::from_blob(_handles[i].data(), handle.sizes(), handle.dtype());
+        offsets[i] = torch::from_blob(_offsets[i].data(), offset.sizes(), offset.dtype());
     }
     aiter::register_graph_buffers(fa_, handles, offsets);
 }
@@ -89,10 +91,10 @@ void CustomAllReduceComm::init(const NcclParam& nccl_para, hipStream_t stream) {
             comm_buf_threshold_,
         },
         torch::dtype(torch::kUInt8).device(torch::kCUDA));
-    rank_data_ = torch::empty({8 * 1024 * 1024}, torch::dtype(torch::kUInt8).device(torch::kCUDA));
+    rank_data_ = torch::empty({16 * 1024 * 1024}, torch::dtype(torch::kUInt8).device(torch::kCUDA));
 
-    std::vector<std::string> meta_handles   = prepareP2PBuffer_(nccl_para, meta_, stream);
-    std::vector<std::string> buffer_handles = prepareP2PBuffer_(nccl_para, buffer_, stream);
+    std::vector<torch::Tensor> meta_handles   = prepareP2PBuffer_(nccl_para, meta_, stream);
+    std::vector<torch::Tensor> buffer_handles = prepareP2PBuffer_(nccl_para, buffer_, stream);
 
     std::vector<int64_t> meta_offsets(world_size_, 0);
     std::vector<int64_t> buffer_offsets(world_size_, 0);
@@ -103,7 +105,7 @@ void CustomAllReduceComm::init(const NcclParam& nccl_para, hipStream_t stream) {
     nccl_para_ = nccl_para;
 }
 
-std::vector<std::string>
+std::vector<torch::Tensor>
 CustomAllReduceComm::prepareP2PBuffer_(const NcclParam& nccl_para, torch::Tensor& local_buffer, hipStream_t stream) {
     // malloc serial handle buffer
     char* serial_handle_buffer_ptr;
@@ -125,16 +127,17 @@ CustomAllReduceComm::prepareP2PBuffer_(const NcclParam& nccl_para, torch::Tensor
         serial_handle_buffer_ptr, serial_handle_buffer_ptr, HIP_IPC_HANDLE_SIZE, rank_index_, nccl_para, stream);
     ROCM_CHECK(hipStreamSynchronize(stream));
 
-    // deserialize all ranks' hipIpcMemHandle, and convert to std::string for aiter use
-    std::vector<std::string> handles(world_size_);
+    // deserialize all ranks' hipIpcMemHandle, and convert to std::tensor for aiter use
+    std::vector<torch::Tensor> handles(world_size_);
+    auto options = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU);
     for (size_t i = 0; i < handles.size(); ++i) {
         char tmp[HIP_IPC_HANDLE_SIZE];
-        ROCM_CHECK(hipMemcpyAsync(tmp,
-                                  serial_handle_buffer_ptr + HIP_IPC_HANDLE_SIZE * i,
-                                  HIP_IPC_HANDLE_SIZE,
-                                  hipMemcpyDeviceToHost,
-                                  stream));
-        handles[i] = std::string(tmp, HIP_IPC_HANDLE_SIZE);
+        handles[i] = torch::empty({static_cast<int64_t>(HIP_IPC_HANDLE_SIZE)}, options);
+        ROCM_CHECK(hipMemcpyAsync(handles[i].data_ptr(),
+                                   serial_handle_buffer_ptr + HIP_IPC_HANDLE_SIZE * i,
+                                   HIP_IPC_HANDLE_SIZE,
+                                   hipMemcpyDeviceToHost,
+                                   stream));
     }
 
     ROCM_CHECK(hipFreeAsync(serial_handle_buffer_ptr, stream));
@@ -178,7 +181,7 @@ bool CustomAllReduceComm::shouldCustomAR(const std::vector<size_t>& tp_ranks, si
 }
 
 size_t CustomAllReduceComm::getCommBufThreshold() {
-    int64_t custom_ar_size_threshold = 8192 * 1024 * 8;
+    int64_t custom_ar_size_threshold = 8192 * 1024 * 16;
     return custom_ar_size_threshold;
 }
 

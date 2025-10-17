@@ -114,8 +114,8 @@ aiosignal==1.3.1 \
     --hash=sha256:54cd96e15e1649b75d6c87526a6ff0b6c1b0dd3459f43d9ca11d48c339b68cfc \
     --hash=sha256:f8376fb07dd1e86a584e4fcdec80b36b7f81aac666ebc724e2c090300dd83b17
     # via aiohttp
-aiter @ https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/amd_pkgs/aiter-0.1.0-py3-none-any.whl \
-    --hash=sha256:88178ba538a58fd82e2fbccfd9dcb3dbcc85eb5d75814ea5b4243b048beb5898
+aiter @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/RTP/aiter-0.1.0%2Bgit.94934e7d.date.202508252342-py3-none-any.whl \
+    --hash=sha256:b89328e61855aba0ee3e96f800dbd9c1f8f400adee596978652d3891483bca51
     # via -r open_source/deps/requirements_rocm.txt
 aliyun-python-sdk-core==2.15.2 \
     --hash=sha256:54f66a53e193c61c5e16ea4505a0cab43543f8ad2ef22833f69c4d5e5151c17d
@@ -2266,8 +2266,8 @@ python-dateutil==2.9.0.post0 \
     # via
     #   matplotlib
     #   pandas
-pytorch-triton-rocm @ http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/amd%2Fpytorch_triton_rocm-3.0.0%2Brocm6.3.0.75cc27c26a-cp310-cp310-linux_x86_64.whl \
-    --hash=sha256:aa87bc8a5b62a0cd6a3170fda1924c19e7c9801a0f868fad1035e1f8e0a8b0dc
+pytorch-triton-rocm @ https://repo.radeon.com/rocm/manylinux/rocm-rel-6.4.1/pytorch_triton_rocm-3.0.0%2Brocm6.4.1.git75cc27c2-cp310-cp310-linux_x86_64.whl \
+    --hash=sha256:350947d4a8a056ec3ff6f18263eae1ee34a21ea6597849fa9b0365989f978b12
     # via
     #   -r open_source/deps/requirements_rocm.txt
     #   torch
@@ -2975,8 +2975,8 @@ tokenizers==0.20.3 \
     --hash=sha256:fbaf3ea28fedfb2283da60e710aff25492e795a7397cad8a50f1e079b65a5a70 \
     --hash=sha256:ff1ef8bd47a02b0dc191688ccb4da53600df5d4c9a05a4b68e1e3de4823e78eb
     # via transformers
-torch @ http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/amd%2Ftorch-2.4.0%2Brocm6.3.0-cp310-cp310-linux_x86_64.whl \
-    --hash=sha256:8ccd35611d0f761e570f7904ecbbe27cfa4f48253abc48884b95e7bfaa936e7c
+torch @ https://repo.radeon.com/rocm/manylinux/rocm-rel-6.4.1/torch-2.4.1%2Brocm6.4.1.git4e7ae583-cp310-cp310-linux_x86_64.whl \
+    --hash=sha256:39287cb8d52e4a71eb7194727365aa6be767da614fa5e44468155c90ba4a4e0c
     # via
     #   -r open_source/deps/requirements_rocm.txt
     #   accelerate
@@ -2984,8 +2984,8 @@ torch @ http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/amd%2Ftorch-2.4.0%2Brocm
     #   sentence-transformers
     #   timm
     #   torchvision
-torchvision @ http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/amd%2Ftorchvision-0.19.0%2Brocm6.3.0-cp310-cp310-linux_x86_64.whl \
-    --hash=sha256:c5a47d66ead2620f62ba7921db5a8999f80fe190fbe71a614d26e167d22797ea
+torchvision @ https://repo.radeon.com/rocm/manylinux/rocm-rel-6.4.1/torchvision-0.19.0%2Brocm6.4.1.git4d41ad71-cp310-cp310-linux_x86_64.whl \
+    --hash=sha256:772f6af6c11724639a460524d53521a31393c20e85818a3f4debf030c7f98aa1
     # via
     #   -r open_source/deps/requirements_rocm.txt
     #   timm

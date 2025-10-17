@@ -38,12 +38,12 @@ cc_library(
     srcs = glob([
         "*.cc",
         "int4_gemm_kernels/*.cc",
-    ]),
+    ], exclude=["rocmMoeWrapper.cc"]),
     hdrs = glob([
         "*.h",
         "int4_gemm_kernels/*.h",
         "*.cuh",
-    ]),
+    ], exclude=["rocmMoeWrapper.h"]),
     deps = [
         "@local_config_rocm//rocm:rocm",
         "@local_config_rocm//rocm:rocm_headers",
@@ -53,15 +53,17 @@ cc_library(
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/core:allocator",
         "//rtp_llm/cpp/core:types",
-        "@composable_kernel//:ck_fmha_example",
-        "@composable_kernel//:ck_layernorm2d_example",
-        "@composable_kernel//:ck_rmsnorm2d_example",
-        "@composable_kernel//:ck_fused_moe_example",
         "@com_google_absl//absl/container:node_hash_map",
         "@com_google_absl//absl/container:inlined_vector",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
-    ],
+        "@havenask//aios/autil:scope",
+    ] + select({
+        "@//:using_aiter_src": [
+            "@aiter_src//:module_mha_fwd",
+        ],
+        "//conditions:default": ["@aiter//:module_mha_fwd",],
+    }),
     copts = rocm_copts(),
     include_prefix = "src",
     visibility = ["//visibility:public"],

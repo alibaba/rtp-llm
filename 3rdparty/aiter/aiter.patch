@@ -1,0 +1,233 @@
+--- aiter/jit/optCompilerConfig.json
++++ aiter/jit/optCompilerConfig.json
+@@ -619,6 +619,7 @@
+         "verbose": "False",
+         "hip_clang_path": "os.environ.get('MHA_HIP_CLANG_PATH')",
+         "blob_gen_cmd": [
++            "f'{get_asm_dir()}/fmha_v3_fwd/codegen.py --output_dir {{}}'",
+             "f'{CK_DIR}/example/ck_tile/01_fmha/generate.py -d fwd --receipt 600 --output_dir {{}}'",
+             "f'{AITER_CSRC_DIR}/cpp_itfs/mha_fwd_generate.py --receipt 3 --output_dir {{}}'"
+         ]
+
+--- csrc/cpp_itfs/mha_fwd_generate.py
++++ csrc/cpp_itfs/mha_fwd_generate.py
+@@ -150,7 +150,7 @@ COMBINED_API = """t = fmha_fwd_v3(traits, args, stream_config);
+ API_MAP = {
+     1: FMHA_FWD_API.format(F_inner_dispatch=V3_API),
+     2: FMHA_FWD_API.format(F_inner_dispatch=V2_API),
+-    3: FMHA_FWD_API.format(F_inner_dispatch=V2_API) + FMHA_FWD_SPLITKV_API,
++    3: FMHA_FWD_API.format(F_inner_dispatch=COMBINED_API),
+     4: FMHA_BATCH_PREFILL_API,
+     5: FMHA_FWD_API.format(F_inner_dispatch=COMBINED_API)
+     + FMHA_FWD_SPLITKV_API
+
+--- csrc/py_itfs_cu/asm_pa.cu
++++ csrc/py_itfs_cu/asm_pa.cu
+@@ -97,7 +97,7 @@ torch::Tensor pa_fwd(torch::Tensor& Q, //   [num_seqs, num_heads, head_size]
+     int num_heads       = Q.size(1);
+     int head_size       = Q.size(2);
+     int num_kv_heads    = K.size(1);
+-    int block_size      = K.size(3);
++    int block_size      = K.size(2);
+     const int gqa_ratio = num_heads / num_kv_heads;
+     TORCH_CHECK(block_size == 16, __func__, " for now only support block_size == 16");
+
+
+--- aiter/jit/core.py
++++ aiter/jit/core.py
+@@ -62,35 +62,19 @@ this_dir = os.path.dirname(os.path.abspath(__file__))
+ AITER_ROOT_DIR = os.path.abspath(f"{this_dir}/../../")
+ AITER_LOG_MORE = int(os.getenv("AITER_LOG_MORE", 0))
+ 
+-find_aiter = importlib.util.find_spec("aiter")
+-if find_aiter is not None:
+-    if find_aiter.submodule_search_locations:
+-        package_path = find_aiter.submodule_search_locations[0]
+-    elif find_aiter.origin:
+-        package_path = find_aiter.origin
+-    package_path = os.path.dirname(package_path)
+-    package_parent_path = os.path.dirname(package_path)
+-    import site
+-
+-    site_packages_dirs = site.getsitepackages()
+-    # develop mode
+-    isDevelopMode = (package_path not in site_packages_dirs) and (
+-        package_parent_path not in site_packages_dirs
+-    )
+-    if isDevelopMode:
+-        AITER_META_DIR = AITER_ROOT_DIR
+-    # install mode
+-    else:
+-        AITER_META_DIR = os.path.abspath(f"{AITER_ROOT_DIR}/aiter_meta/")
++meta_path = os.path.abspath(f"{AITER_ROOT_DIR}/aiter_meta")
++if os.path.exists(meta_path):
++    AITER_META_DIR = meta_path
+ else:
+-    AITER_META_DIR = AITER_ROOT_DIR
+-    logger.warning("aiter is not installed.")
++    AITER_META_DIR = os.path.abspath(AITER_ROOT_DIR)
++
+ sys.path.insert(0, AITER_META_DIR)
+ AITER_CSRC_DIR = f"{AITER_META_DIR}/csrc"
+ AITER_GRADLIB_DIR = f"{AITER_META_DIR}/gradlib"
+ gfx = get_gfx()
+ AITER_ASM_DIR = f"{AITER_META_DIR}/hsa/{gfx}/"
+-os.environ["AITER_ASM_DIR"] = AITER_ASM_DIR
++if "AITER_ASM_DIR" not in os.environ:
++    os.environ["AITER_ASM_DIR"] = AITER_ASM_DIR
+ CK_3RDPARTY_DIR = os.environ.get(
+     "CK_DIR", f"{AITER_META_DIR}/3rdparty/composable_kernel"
+ )
+
+--- csrc/kernels/activation_kernels.cu
++++ csrc/kernels/activation_kernels.cu
+@@ -18,6 +18,7 @@
+ #include <torch/extension.h>
+ #include <c10/cuda/CUDAGuard.h>
+
++#include <cassert>
+ #include <cmath>
+
+ #include "hip_compat.h"
+@@ -27,6 +28,88 @@
+
+ using fp8_type = ck_tile::fp8_t;
+
++namespace {
++#define FLASHINFER_INLINE inline __attribute__((always_inline)) __device__
++
++template <typename float_t, size_t vec_size>
++struct vec_t {
++  FLASHINFER_INLINE float_t& operator[](size_t i);
++  FLASHINFER_INLINE const float_t& operator[](size_t i) const;
++  FLASHINFER_INLINE void load(const float_t* ptr);
++  FLASHINFER_INLINE void store(float_t* ptr) const;
++  FLASHINFER_INLINE float_t* ptr();
++};
++
++template <size_t vec_size>
++struct vec_t<c10::BFloat16, vec_size> {
++  static_assert(vec_size % 8 == 0, "Invalid vector size");
++  int4 data[vec_size / 8];
++
++  FLASHINFER_INLINE c10::BFloat16& operator[](size_t i) { return ((c10::BFloat16*)data)[i]; }
++  FLASHINFER_INLINE const c10::BFloat16& operator[](size_t i) const {
++    return ((const c10::BFloat16*)data)[i];
++  }
++  FLASHINFER_INLINE c10::BFloat16* ptr() { return reinterpret_cast<c10::BFloat16*>(&data); }
++  FLASHINFER_INLINE void load(const c10::BFloat16* ptr) {
++#pragma unoll
++    for (size_t i = 0; i < vec_size / 8; ++i) {
++      data[i] = ((int4*)ptr)[i];
++    }
++  }
++  FLASHINFER_INLINE void store(c10::BFloat16* ptr) const {
++#pragma unoll
++    for (size_t i = 0; i < vec_size / 8; ++i) {
++      ((int4*)ptr)[i] = data[i];
++    }
++  }
++};
++
++
++template <size_t vec_size>
++struct vec_t<c10::Half, vec_size> {
++  static_assert(vec_size % 8 == 0, "Invalid vector size");
++  int4 data[vec_size / 8];
++  FLASHINFER_INLINE c10::Half& operator[](size_t i) { return ((c10::Half*)data)[i]; }
++  FLASHINFER_INLINE const c10::Half& operator[](size_t i) const { return ((const c10::Half*)data)[i]; }
++  FLASHINFER_INLINE c10::Half* ptr() { return reinterpret_cast<c10::Half*>(&data); }
++  FLASHINFER_INLINE void load(const c10::Half* ptr) {
++#pragma unroll
++    for (size_t i = 0; i < vec_size / 8; ++i) {
++      data[i] = ((int4*)ptr)[i];
++    }
++  }
++  FLASHINFER_INLINE void store(c10::Half* ptr) const {
++#pragma unroll
++    for (size_t i = 0; i < vec_size / 8; ++i) {
++      ((int4*)ptr)[i] = data[i];
++    }
++  }
++};
++
++template <size_t vec_size>
++struct vec_t<float, vec_size> {
++  static_assert(vec_size % 4 == 0, "Invalid vector size");
++  float4 data[vec_size / 4];
++
++  FLASHINFER_INLINE float& operator[](size_t i) { return ((float*)(data))[i]; }
++  FLASHINFER_INLINE const float& operator[](size_t i) const { return ((const float*)(data))[i]; }
++  FLASHINFER_INLINE float* ptr() { return reinterpret_cast<float*>(&data); }
++  FLASHINFER_INLINE void load(const float* ptr) {
++#pragma unroll
++    for (size_t i = 0; i < vec_size / 4; ++i) {
++      data[i] = ((float4*)ptr)[i];
++    }
++  }
++  FLASHINFER_INLINE void store(float* ptr) const {
++#pragma unroll
++    for (size_t i = 0; i < vec_size / 4; ++i) {
++      ((float4*)ptr)[i] = data[i];
++    }
++  }
++};
++
++}
++
+ namespace vllm
+ {
+
+@@ -37,12 +120,25 @@
+       const scalar_t *__restrict__ input, // [..., 2, d]
+       const int d)
+   {
++    constexpr uint32_t vec_size = 16 / sizeof(scalar_t);
+     const int64_t token_idx = blockIdx.x;
+-    for (int64_t idx = threadIdx.x; idx < d; idx += blockDim.x)
+-    {
+-      const scalar_t x = VLLM_LDG(&input[token_idx * 2 * d + idx]);
+-      const scalar_t y = VLLM_LDG(&input[token_idx * 2 * d + d + idx]);
+-      out[token_idx * d + idx] = ACT_FN(x) * y;
++    const int64_t thread_idx = threadIdx.x;
++    const int64_t stride = blockDim.x;
++    const int64_t offset = token_idx * 2 * d;
++    const scalar_t* x_ptr = input + offset;
++    const scalar_t* y_ptr = x_ptr + d;
++    const int64_t iters = d / vec_size;
++    out += token_idx * d;
++
++    for (uint32_t idx = thread_idx; idx < iters; idx += stride) {
++      vec_t<scalar_t, vec_size> x_vec, y_vec, out_vec;
++      x_vec.load(x_ptr + idx * vec_size);
++      y_vec.load(y_ptr + idx * vec_size);
++      #pragma unroll
++      for (uint32_t i = 0; i < vec_size; ++i) {
++        out_vec[i] = ACT_FN(x_vec[i]) * y_vec[i];
++      }
++     out_vec.store(out + idx * vec_size);
+     }
+   }
+
+@@ -105,6 +201,7 @@
+   dim3 block(std::min(d, 1024));                                                                                  \
+   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));                                               \
+   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();                                                   \
++  assert(d % 8 == 0);                                                                                             \
+   VLLM_DISPATCH_FLOATING_TYPES(                                                                                   \
+       input.scalar_type(), "act_and_mul_kernel", [&] { vllm::act_and_mul_kernel<scalar_t, KERNEL<scalar_t>>       \
+                                                            <<<grid, block, 0, stream>>>(out.data_ptr<scalar_t>(), \
+
+--- aiter/jit/optCompilerConfig.json
++++ aiter/jit/optCompilerConfig.json
+@@ -17,7 +17,7 @@
+             "f'{AITER_CSRC_DIR}/kernels/activation_kernels.cu'"
+         ],
+         "flags_extra_cc": [],
+-        "flags_extra_hip": [],
++        "flags_extra_hip": ["'-ffast-math'"],
+         "extra_ldflags": "None",
+         "extra_include": [
+             "f'{AITER_CSRC_DIR}/include/ck_tile'"
+
+
