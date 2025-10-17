@@ -16,7 +16,7 @@ from rtp_llm.models.multimodal.multimodal_common import MultiModalEmbeddingInter
 from rtp_llm.models.qwen2_vl.image_processing_qwen2_vl import Qwen2VLImageProcessor
 from rtp_llm.models.qwen2_vl.qwen2_vl import QWen2_VL
 from rtp_llm.models.qwen2_vl.qwen2_vl_vit import Qwen2VLImageEmbedding
-from rtp_llm.utils.multimodal_util import MMPreprocessConfig, MMUrlType
+from rtp_llm.utils.base_model_datatypes import MMPreprocessConfig, MMUrlType
 
 
 class FakeMultiModalEmbeddingInterface(Qwen2VLImageEmbedding):

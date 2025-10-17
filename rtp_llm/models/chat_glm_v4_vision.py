@@ -10,7 +10,7 @@ from rtp_llm.models.chat_glm_v4_vision_weight import (
 from rtp_llm.models.eva2clip_vit import EVA2CLIPImageEmbedding
 from rtp_llm.models.multimodal.multimodal_common import mm_lock
 from rtp_llm.models.multimodal.multimodal_mixin import MultiModalMixin
-from rtp_llm.utils.multimodal_util import MMUrlType
+from rtp_llm.utils.base_model_datatypes import MMUrlType
 from rtp_llm.utils.util import get_config_from_path
 
 
