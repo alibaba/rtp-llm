@@ -387,10 +387,11 @@ void register_cache_store_config(pybind11::module& m) {
 // SchedulerConfig
 void register_scheduler_config(pybind11::module& m) {
     pybind11::class_<SchedulerConfig>(m, "SchedulerConfig")
-        .def(pybind11::init<bool>(), pybind11::arg("use_batch_decode_scheduler") = false)
+        .def(pybind11::init<bool, bool>(), pybind11::arg("use_batch_decode_scheduler") = false, pybind11::arg("use_gather_batch_scheduler") = false)
         .def("to_string", &SchedulerConfig::to_string)
         .def("update_from_env", &SchedulerConfig::update_from_env_for_test)
-        .def_readwrite("use_batch_decode_scheduler", &SchedulerConfig::use_batch_decode_scheduler);
+        .def_readwrite("use_batch_decode_scheduler", &SchedulerConfig::use_batch_decode_scheduler)
+        .def_readwrite("use_gather_batch_scheduler", &SchedulerConfig::use_gather_batch_scheduler);
 }
 
 // BatchDecodeSchedulerConfig

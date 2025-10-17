@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/speculative_engine/propose_executor/MTPStream.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/speculative_engine/SpeculativeScheduler.h"
+#include "rtp_llm/cpp/speculative_engine/SpeculativeGatherBatchScheduler.h"
 #include "rtp_llm/cpp/speculative_engine/propose_executor/VanillaExecutor.h"
 #include "rtp_llm/cpp/speculative_engine/propose_executor/MTPExecutor.h"
 #include "rtp_llm/cpp/speculative_engine/score_executor/ScoreExecutor.h"
@@ -131,11 +132,20 @@ absl::Status SpeculativeEngine::init() {
     score_executor_.reset(
         new ScoreExecutor(score_model_params_, device_, resource_context_.cache_manager, getLoraManager()));
 
-    scheduler_.reset(new SpeculativeScheduler(score_model_params_.gpt_init_parameter,
-                                              resource_context_.cache_manager,
-                                              metrics_reporter_,
-                                              propose_model_params_->genNumPerCircle() + 1));
-    RTP_LLM_LOG_INFO("create fifo scheduler done");
+    if (score_model_params_.gpt_init_parameter.scheduler_config.use_gather_batch_scheduler) {
+        RTP_LLM_LOG_INFO("create speculative gather batch scheduler");
+        scheduler_.reset(new SpeculativeGatherBatchScheduler(score_model_params_.gpt_init_parameter,
+                                                             resource_context_.cache_manager,
+                                                             metrics_reporter_,
+                                                             propose_model_params_->genNumPerCircle() + 1));
+    } else {
+        RTP_LLM_LOG_INFO("create speculative scheduler");
+        scheduler_.reset(new SpeculativeScheduler(score_model_params_.gpt_init_parameter,
+                                                  resource_context_.cache_manager,
+                                                  metrics_reporter_,
+                                                  propose_model_params_->genNumPerCircle() + 1));
+
+    }
     speculative_sampler_ = std::make_unique<SpeculativeSampler>(device_);
     RTP_LLM_LOG_INFO("create speculative sampler");
     RETURN_IF_STATUS_ERROR(startLoop());

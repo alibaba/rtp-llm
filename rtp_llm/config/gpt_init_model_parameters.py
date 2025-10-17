@@ -713,7 +713,10 @@ class GptInitModelParameters:
         # SchedulerConfig
         self.gpt_init_params.scheduler_config = SchedulerConfig(
             use_batch_decode_scheduler=get_env_bool("USE_BATCH_DECODE_SCHEDULER"),
+            use_gather_batch_scheduler=get_env_bool("USE_GATHER_BATCH_SCHEDULER"),
         )
+        if self.gpt_init_params.scheduler_config.use_gather_batch_scheduler and self.gpt_init_params.scheduler_config.use_batch_decode_scheduler:
+            raise ValueError("use_gather_batch_scheduler and use_batch_decode_scheduler cannot be true at the same time")
 
         # BatchDecodeSchedulerConfig
         self.gpt_init_params.batch_decode_scheduler_config = BatchDecodeSchedulerConfig(

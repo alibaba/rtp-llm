@@ -37,6 +37,9 @@ public:
     std::vector<EngineScheduleInfo::TaskInfo> runningTaskList();
     int64_t                                   onflightStreams() override;
 
+protected:
+    virtual std::list<GenerateStreamPtr> scheduleNew(size_t reserve_step);
+
 private:
     void                 evictDoneStreams(std::list<GenerateStreamPtr>& streams);
     bool                 evaluateNewStream(const std::list<GenerateStreamPtr>& streams,
@@ -48,11 +51,10 @@ private:
     int                  runningNextBlockNum(size_t reserve_step) const;
     bool evaluateRunningMemory(const std::list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream) const;
     void accountBatchMetrics(const std::list<GenerateStreamPtr>& new_streams,
-                             const std::list<GenerateStreamPtr>& running_streams);
-    std::list<GenerateStreamPtr> scheduleNew(size_t reserve_step);
+                             const std::list<GenerateStreamPtr>& running_streams);    
     bool                         waitPredicate();
 
-private:
+protected:
     rtp_llm::GptInitParameter     params_;
     std::list<GenerateStreamPtr>  waiting_streams_;
     std::list<GenerateStreamPtr>  running_streams_;
