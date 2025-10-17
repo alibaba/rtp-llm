@@ -229,3 +229,18 @@ py_test (
     exec_properties = {'gpu':'H20'},
 )
 
+py_test (
+    name = "moe_ep_reorder_test",
+    srcs = ["moe_ep_reorder_test.py"],
+    deps = [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm:config",
+        "//rtp_llm:utils",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/model_test/test_util:test_util"
+    ],
+    env = test_envs,
+    tags = ["open_skip", "H20"],
+    exec_properties = {'gpu':'H20'},
+)
+

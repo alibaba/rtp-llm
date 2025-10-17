@@ -363,6 +363,7 @@ cc_library(
         "cutlass_kernels/int8_gemm/int8_gemm.h",
         "cutlass_kernels/group_gemm/group_gemm.h",
         "cutlass_kernels/moe_gemm/moe_kernels.h",
+        "cutlass_kernels/moe_gemm/moe_kernels.inl",
         "cutlass_kernels/moe_gemm/moe_fp8_kernels.h",
         "cutlass_kernels/moe_gemm/moe_gemm_kernels.h",
         "cutlass_kernels/cutlass_preprocessors.h",

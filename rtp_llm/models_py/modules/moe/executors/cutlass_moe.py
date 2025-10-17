@@ -1,14 +1,14 @@
 from dataclasses import dataclass
 from math import prod
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Union
 
 import torch
 
 import rtp_llm.models_py.modules.moe.fused_moe as mm
+from rtp_llm.models_py.modules.ep.reorder_utils import moe_permute, moe_unpermute
 from rtp_llm.models_py.modules.moe import TopKWeightAndReduceDelegate
 from rtp_llm.models_py.modules.moe.utils import (
     FusedMoEQuantConfig,
-    _fp8_perm,
     moe_kernel_quantize_input,
     resize_cache,
 )
@@ -16,7 +16,7 @@ from rtp_llm.models_py.modules.moe.utils import (
 from librtp_compute_ops.rtp_llm_ops import (  # isort:skip
     cutlass_moe_mm,
     get_cutlass_batched_moe_mm_data,
-    get_cutlass_moe_mm_data,
+    get_cutlass_moe_mm_without_permute_info,
     silu_and_mul,
 )
 
@@ -41,6 +41,7 @@ def run_cutlass_moe_fp8(
     per_act_token: bool,
     per_out_ch: bool,
     use_batched_format: bool,
+    topk_weights: Optional[torch.Tensor],
 ):
     a1q = hidden_states
     assert w1_scale is not None
@@ -94,10 +95,13 @@ def run_cutlass_moe_fp8(
 
     topk = local_topk_ids.size(1)
     local_E = w1.size(0)
+    inv_perm = None
 
     if use_batched_format:
         assert expert_num_tokens is not None
-
+        c1 = resize_cache(workspace13, (local_E * padded_M, N * 2))
+        c2 = resize_cache(workspace2, (local_E * padded_M, N))
+        c3 = resize_cache(workspace13, (local_E * padded_M, K))
         expert_offsets = torch.empty((local_E), dtype=torch.int32, device=device)
         problem_sizes1 = torch.empty((local_E, 3), dtype=torch.int32, device=device)
         problem_sizes2 = torch.empty((local_E, 3), dtype=torch.int32, device=device)
@@ -122,64 +126,40 @@ def run_cutlass_moe_fp8(
         )
 
     else:
-        expert_offsets = torch.empty(
-            (global_num_experts + 1), dtype=torch.int32, device=device
-        )
-        problem_sizes1 = torch.empty(
-            (global_num_experts, 3), dtype=torch.int32, device=device
-        )
-        problem_sizes2 = torch.empty(
-            (global_num_experts, 3), dtype=torch.int32, device=device
-        )
+        c1 = resize_cache(workspace13, (M * topk, N * 2))
+        c2 = resize_cache(workspace2, (M * topk, N))
+        c3 = resize_cache(workspace13, (M * topk, K))
 
-        # With expert_map each Rank processes only a subset of experts. As
-        # a result not all of a_map and c2 tensors are filled. We fill it
-        # zeros for correctness.
-        if expert_map is not None:
-            a_map = torch.zeros(
-                (local_topk_ids.numel()), dtype=torch.int32, device=device
-            )
-        else:
-            a_map = torch.empty(
-                (local_topk_ids.numel()), dtype=torch.int32, device=device
-            )
-
-        c_map = torch.empty((local_topk_ids.numel()), dtype=torch.int32, device=device)
-
-        get_cutlass_moe_mm_data(
+        a1q_permute = resize_cache(
+            workspace2.view(dtype=torch.float8_e4m3fn), (M * topk, K)
+        )
+        problem_sizes1 = torch.empty((local_E, 3), dtype=torch.int32, device=device)
+        problem_sizes2 = torch.empty((local_E, 3), dtype=torch.int32, device=device)
+        a1q, a1q_scale, expert_offsets, inv_perm = moe_permute(
+            hidden_states=a1q,
+            a1q_scale=a1q_scale,
+            topk_ids=topk_ids,
+            num_experts=global_num_experts,
+            num_local_experts=local_E,
+            expert_map=expert_map,
+            permuted_hidden_states=a1q_permute,
+        )
+        expert_offsets = expert_offsets[:-1].to(torch.int32)
+        get_cutlass_moe_mm_without_permute_info(
             local_topk_ids,
-            expert_offsets,
             problem_sizes1,
             problem_sizes2,
-            a_map,
-            c_map,
-            global_num_experts,
+            local_E,
             N,
             K,
         )
-
-        a1q = _fp8_perm(a1q, a_map)
-        a1q_scale = a1q_scale[a_map] if per_act_token else a1q_scale
-        expert_offsets = expert_offsets[:-1]
 
     ab_strides1 = torch.full((w1.size(0),), K, device=device, dtype=torch.int64)
     c_strides1 = torch.full((w1.size(0),), 2 * N, device=device, dtype=torch.int64)
     ab_strides2 = torch.full((w1.size(0),), N, device=device, dtype=torch.int64)
     c_strides2 = torch.full((w1.size(0),), K, device=device, dtype=torch.int64)
 
-    if use_batched_format:
-        c1 = resize_cache(workspace13, (local_E * padded_M, N * 2))
-        c2 = resize_cache(workspace2, (local_E * padded_M, N))
-        c3 = resize_cache(workspace13, (local_E * padded_M, K))
-    else:
-        c1 = resize_cache(workspace13, (M * topk, N * 2))
-        c2 = resize_cache(workspace2, (M * topk, N))
-        c3 = resize_cache(workspace13, (M * topk, K))
-
     if not per_act_token and (expert_map is not None or use_batched_format):
-        # this is necessary to avoid imprecise scale calculation caused by
-        # random data in the unused workspace. The workspace is unused when
-        # this rank handles only partial tokens, or when it is batched .
         c1.fill_(0)
 
     cutlass_moe_mm(
@@ -224,20 +204,15 @@ def run_cutlass_moe_fp8(
     if use_batched_format:
         output.copy_(c3.reshape(local_E, padded_M, K), non_blocking=True)
     else:
-        # We can't do this inplace because output may point to the same tensor
-        # as c3.
-        output.copy_(c3[c_map].view(M * topk, K), non_blocking=True)
+        moe_unpermute(
+            out=output,
+            permuted_hidden_states=c3,
+            topk_weights=topk_weights,
+            inv_permuted_idx=inv_perm,
+        )
 
 
 class CutlassExpertsFp8(mm.FusedMoeExpertExecutor):
-    """
-    FusedMoeExpertExecutor non-batched mode mplemented based on cutlass GroupedGEMM.
-    In this class, the input tokens are not padded: thus, the shape
-    of the input is [total_num_tokens, hidden_size]. The input and output
-    require shuffling by a_map and c_map such that the tokens assigned to
-    each expert are contiguous.
-    """
-
     def __init__(
         self,
         w1: torch.Tensor,
@@ -271,9 +246,8 @@ class CutlassExpertsFp8(mm.FusedMoeExpertExecutor):
     def local_num_experts(self) -> int:
         return self.w1.size(0)
 
-    def finalize_weight_and_reduce_impl(self) -> mm.TopKWeightAndReduce:
-        # Let PrepareAndFinalize::finalize() decide the impl.
-        return TopKWeightAndReduceDelegate()
+    def finalize_weight_and_reduce_impl(self) -> Union[mm.TopKWeightAndReduce, None]:
+        return None
 
     def execute(
         self,
@@ -287,6 +261,7 @@ class CutlassExpertsFp8(mm.FusedMoeExpertExecutor):
     ) -> torch.Tensor:
 
         topk_ids = payload.expert_topk_ids
+        topk_weights = payload.expert_topk_weights
         expert_num_tokens = (
             payload.expert_tokens_meta.expert_num_tokens if expert_map is None else None
         )
@@ -302,7 +277,7 @@ class CutlassExpertsFp8(mm.FusedMoeExpertExecutor):
         if payload.expert_x.dtype is not torch.float8_e4m3fn:
             assert payload.expert_x.dtype == torch.bfloat16
             assert payload.expert_x_scale is None
-            # per tensor quant bf16 input to fp8
+            # quant bf16 inputs to fp8
             expert_x, expert_x_scale = moe_kernel_quantize_input(
                 payload.expert_x,
                 None,
@@ -316,8 +291,8 @@ class CutlassExpertsFp8(mm.FusedMoeExpertExecutor):
             expert_x_scale = payload.expert_x_scale
 
         workspace13_shape = (M * topk, max(N, K))
-        workspace2_shape = (M * topk, (N // 2))
-        output_shape = (M * topk, K)
+        workspace2_shape = (M * topk, max(N // 2, K))
+        output_shape = (M, K)
         workspace_dtype = payload.expert_x_origin_dtype
         workspace13 = torch.empty(
             prod(workspace13_shape),
@@ -331,16 +306,14 @@ class CutlassExpertsFp8(mm.FusedMoeExpertExecutor):
         )
         output = resize_cache(workspace13, output_shape)
 
-        activation_callable = silu_and_mul
-
         run_cutlass_moe_fp8(
             output,
             expert_x,
             self.w1,
             self.w2,
             topk_ids,
-            activation_callable,
-            self.local_num_experts,
+            silu_and_mul,
+            global_num_experts,
             expert_map,
             self.w1_scale,
             self.w2_scale,
@@ -353,7 +326,9 @@ class CutlassExpertsFp8(mm.FusedMoeExpertExecutor):
             self.quant_config.is_per_act_token,
             False,
             False,
+            topk_weights,
         )
+
         return output
 
 
@@ -405,7 +380,6 @@ class CutlassBatchedExpertsFp8(mm.FusedMoeExpertExecutor):
         assert block_shape is None
 
     def finalize_weight_and_reduce_impl(self) -> mm.TopKWeightAndReduce:
-        # Let PrepareAndFinalize::finalize() decide the impl.
         return TopKWeightAndReduceDelegate()
 
     @property
@@ -438,9 +412,10 @@ class CutlassBatchedExpertsFp8(mm.FusedMoeExpertExecutor):
         if payload.expert_x.dtype is not torch.float8_e4m3fn:
             assert payload.expert_x.dtype == torch.bfloat16
             assert payload.expert_x_scale is None
+
             # per tensor quant bf16 input to fp8
-            # Note: deepep low latency dispatch not always pad 0, this will cause an incorrect scale to be calculated here.
-            if self.quant_config.is_per_tensor:
+            if not self.quant_config.is_per_act_token:
+                # Note: deepep low latency dispatch not always pad 0, this will cause an incorrect scale to be calculated here.
                 E, M, H = payload.expert_x.shape
                 x = payload.expert_x.view(-1, H)
 
@@ -461,7 +436,7 @@ class CutlassBatchedExpertsFp8(mm.FusedMoeExpertExecutor):
                 else:
                     scale = torch.tensor([1], dtype=torch.float32, device=x.device)
                 q_x, expert_x_scale = moe_kernel_quantize_input(
-                    x, scale, torch.float8_e4m3fn, per_act_token, None
+                    x, scale, torch.float8_e4m3fn, False, None
                 )
                 expert_x = q_x.view(E, -1, H)
         else:
@@ -489,15 +464,13 @@ class CutlassBatchedExpertsFp8(mm.FusedMoeExpertExecutor):
             dtype=workspace_dtype,
         )
 
-        activation_callable = silu_and_mul
-
         run_cutlass_moe_fp8(
             output,
             expert_x,
             self.w1,
             self.w2,
             topk_ids,
-            activation_callable,
+            silu_and_mul,
             global_num_experts,
             None,
             self.w1_scale,
@@ -511,5 +484,6 @@ class CutlassBatchedExpertsFp8(mm.FusedMoeExpertExecutor):
             self.quant_config.is_per_act_token,
             False,
             True,
+            None,
         )
         return output
