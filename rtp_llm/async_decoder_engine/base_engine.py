@@ -133,26 +133,3 @@ class BaseEngine:
             mapping operation failed.
         """
         raise NotImplementedError()
-
-    @abstractmethod
-    def rebuild_rope(self, rescale_factor: float) -> None:
-        """
-        Re-generate the RoPE (Rotary Position Embedding) cache with a new rescale
-        factor.  This is typically used by YaRN-style length-extension algorithms
-        to adapt the frequency scaling when the context window is enlarged or
-        shrunk.
-        Parameters
-        ----------
-        rescale_factor : float
-            Multiplicative factor applied to the original base frequencies
-            (e.g. 1.0 keeps the original scale, 2.0 doubles the effective
-            wavelength, 0.5 halves it).
-        Returns
-        -------
-        None
-        Raises
-        ------
-        NotImplementedError
-            If the backend does not support dynamic RoPE re-scaling.
-        """
-        raise NotImplementedError()

@@ -112,7 +112,6 @@ public:
     virtual void             updateCurrentTorchStream();
     virtual void             detachPhysicalMemory();
     virtual void             attachPhysicalMemory();
-    virtual void             rebuildRope(const float rescale_factor);
     virtual GraphBase*       getDeviceGraphRunner(const DeviceInitParams& params,
                                                   py::object              py_instance,
                                                   int                     kv_cache_block_offset,

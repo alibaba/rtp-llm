@@ -100,7 +100,8 @@ Allocator<AllocatorType::CUDA>::~Allocator() {
 }
 
 void* Allocator<AllocatorType::CUDA>::mallocPhysical(size_t size) {
-    RTP_LLM_LOG_DEBUG("Malloc Pin memory with size %lu\n", size);
+    RTP_LLM_LOG_DEBUG("malloc physical memory with size %lu\n", size);
+    printf("malloc physical %lu\n", size);
     auto address = doMallocSync(size);
     if (!address) {
         return nullptr;
@@ -112,8 +113,9 @@ void* Allocator<AllocatorType::CUDA>::mallocPhysical(size_t size) {
         RTP_LLM_LOG_ERROR("Unexpected allocation, pointer mapping missing.");
         return address;
     }
-    auto& block = it->second;
-    block.pin   = true;
+    auto& block  = it->second;
+    block.pin    = true;
+    block.mapped = true;
     return address;
 }
 
@@ -195,17 +197,15 @@ void Allocator<AllocatorType::CUDA>::doFree(void* address) {
 }
 
 void Allocator<AllocatorType::CUDA>::unmap() {
-
     std::lock_guard<std::mutex> lock(lock_);
-    RTP_LLM_LOG_DEBUG("Vmem allocator unmap all allocated buffer\n");
+    RTP_LLM_LOG_INFO("Vmem allocator unmap all allocated buffer\n");
 
     for (auto& [dptr, block] : *pointer_mapping_) {
 
         if (block.pin || !block.mapped) {
             continue;
         }
-
-        RTP_LLM_LOG_DEBUG("Vmem allocator unmap %p[%lu]\n", dptr, block.size);
+        RTP_LLM_LOG_INFO("Vmem allocator unmap %p[%lu]\n", dptr, block.size);
 
         // 1. 解除映射
         check_cuda_value(cuMemUnmap(dptr, block.size));
@@ -218,7 +218,7 @@ void Allocator<AllocatorType::CUDA>::unmap() {
 void Allocator<AllocatorType::CUDA>::map() {
     std::lock_guard<std::mutex> lock(lock_);
 
-    RTP_LLM_LOG_DEBUG("Vmem allocator map all allocated buffer\n");
+    RTP_LLM_LOG_INFO("Vmem allocator map all allocated buffer\n");
 
     for (auto& [dptr, block] : *pointer_mapping_) {
 
@@ -226,7 +226,7 @@ void Allocator<AllocatorType::CUDA>::map() {
             continue;
         }
 
-        RTP_LLM_LOG_DEBUG("Vmem allocator map %p[%lu]\n", dptr, block.size);
+        RTP_LLM_LOG_INFO("Vmem allocator map %p[%lu]\n", dptr, block.size);
 
         size_t              padded_size = block.size;  // 沿用之前对齐后的大小
         CUmemAllocationProp prop{};
@@ -250,6 +250,8 @@ void Allocator<AllocatorType::CUDA>::map() {
 
         // 4. 更新 mapping 中的 handle
         block.handle = new_handle;
+
+        block.mapped = true;
     }
 }
 

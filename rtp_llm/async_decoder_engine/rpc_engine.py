@@ -100,7 +100,3 @@ class RPCEngine(BaseEngine):
     @override
     def attach_physical_memory(self) -> bool:
         return self.rtp_llm_op_.attach_physical_memory()
-
-    @override
-    def rebuild_rope(self, rescale_factor: float):
-        return self.rtp_llm_op_.rebuild_rope(rescale_factor)

@@ -114,7 +114,6 @@ public:
     bool             useGroupGemm() const;
     void detachPhysicalMemory() override;
     void attachPhysicalMemory() override;
-    void rebuildRope(const float rescale_factor) override;
     GraphBase*       getDeviceGraphRunner(const DeviceInitParams& params,
                                           py::object              py_instance,
                                           int                     kv_cache_block_offset,
@@ -381,8 +380,7 @@ protected:
     // for local perf
     bool                                        hack_moe_expert_ = false;
     std::shared_ptr<c10::cuda::CUDAStreamGuard> guard_;
-    float         rope_rescale_factor_         = 1.0;
-    torch::Tensor ropeCosSin                   = torch::empty({0});
+    BufferPtr                                   rope_;
 };
 
 }  // namespace rtp_llm

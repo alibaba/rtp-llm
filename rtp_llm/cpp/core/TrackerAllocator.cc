@@ -178,6 +178,7 @@ void TrackerAllocator::map() {
         return map();  // this will throw not impl.
     }
 }
+
 void TrackerAllocator::unmap() {
     if (auto allocator_ = dynamic_cast<IVirtualMemAllocator*>(real_allocator_)) {
         return allocator_->unmap();
@@ -185,6 +186,7 @@ void TrackerAllocator::unmap() {
         return unmap();  // this will throw not impl.
     }
 }
+
 void* TrackerAllocator::mallocPhysical(size_t size) {
     if (auto allocator_ = dynamic_cast<IVirtualMemAllocator*>(real_allocator_)) {
         return allocator_->mallocPhysical(size);

@@ -240,7 +240,8 @@ void CudaDevice::init() {
     DeviceBase::init();
 
     RTP_LLM_LOG_INFO("cuda device init max batch size: %d\n", init_params_.max_batch_size);
-    curandstate_buf_ = allocateBuffer({init_params_.max_batch_size * sizeof(curandState_t)}, {"curandstate"});
+    curandstate_buf_ = allocateBuffer({init_params_.max_batch_size * sizeof(curandState_t), 
+        AllocationType::DEVICE, false, VmemCtl::ForcePhysical}, {"curandstate"});
 }
 
 // pre-allocate buffer before buffer managaer
@@ -932,29 +933,21 @@ void CudaDevice::chainSpeculativeSampling(const SpeculativeSamplingParams& param
                                int64_t(stream_));
 }
 
-void CudaDevice::rebuildRope(const float rope_rescale_factor) {
-    // The rebuildRope function is designed to clear CUDA device memory. 
-    // When the CUDA device memory is cleared, the RoPE (Rotary Position Embedding) cache
-    // within the XQA kernel is also cleared. This function needs to be called to
-    // rebuild the XQA's RoPE cache; otherwise, the calculation results will be incorrect.
-    // Here, we directly set the ropeCosSin member variable to empty. The subsequent
-    // processing logic in CudaAttentionOp will initialize this value.
-    ropeCosSin           = torch::empty({0});
-    rope_rescale_factor_ = rope_rescale_factor;
-}
 void CudaDevice::detachPhysicalMemory() {
     // Attempt to detach and clear physical memory.
     if (auto allocator = dynamic_cast<rtp_llm::IVirtualMemAllocator*>(getAllocator())) {
-        allocator->unmap();
+        return allocator->unmap();
+    } else {
+        throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }
-    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 void CudaDevice::attachPhysicalMemory() {
     // Try to allocate physical memory and attach it to a virtual address.
     if (auto allocator = dynamic_cast<rtp_llm::IVirtualMemAllocator*>(getAllocator())) {
-        allocator->map();
+        return allocator->map();
+    } else {
+        throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }
-    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
 };  // namespace rtp_llm

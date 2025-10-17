@@ -70,6 +70,3 @@ class RtpLLMOp:
 
     def attach_physical_memory(self) -> bool:
         return self.ft_op.attach_physical_memory()
-
-    def rebuild_rope(self, rescale_factor: float) -> None:
-        return self.ft_op.rebuild_rope(rescale_factor)

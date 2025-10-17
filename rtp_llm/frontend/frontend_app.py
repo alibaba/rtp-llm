@@ -298,12 +298,6 @@ class FrontendApp(object):
                 "post", g_worker_info.backend_server_port, "attach_physical_memory"
             )
 
-        @app.post("/rebuild_rope")
-        async def rebuild_rope(req: Dict[Any, Any]):
-            return await async_request_server(
-                "post", g_worker_info.backend_server_port, "rebuild_rope", req
-            )
-
         if self.frontend_server.is_embedding:
             # embedding
             @app.post("/v1/embeddings")
