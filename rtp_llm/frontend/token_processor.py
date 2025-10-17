@@ -5,7 +5,6 @@ import numpy as np
 import numpy.typing as npt
 
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
-
 from rtp_llm.frontend.tokenizer_factory.tokenizer_utils import (
     DecodingState,
     IncrementDecodingUtils,
@@ -93,6 +92,67 @@ class TokenProcessorPerStream:
             self.token_buffers[i],
         )
         return output_len, text
+
+    def decode_tokens_batch(
+        self,
+        batch_token_ids: List[npt.NDArray[np.int32]],
+        batch_finished: List[bool],
+        print_stop_words: bool,
+        stop_word_str_list: List[str],
+        stop_word_ids: List[List[int]],
+        return_incremental: bool = False,
+    ):
+        batch_output_lens = []
+        final_texts = []
+        texts_to_process = []
+        all_texts_for_stop_words = [] 
+        tokens_to_decode_batch = []
+        for i, tokens in enumerate(batch_token_ids):
+            if not self.has_num_beams:
+                self.ouput_tokens_list[i] = np.concatenate(
+                    (self.ouput_tokens_list[i], tokens), axis=1
+                )
+                tokens = self.ouput_tokens_list[i]
+         
+            tokens = remove_padding_eos_with_numpy(
+                tokens, self.special_tokens.eos_token_id
+            ).tolist()
+            
+            batch_output_lens.append(len(tokens))
+
+            tokens = self.process_stop_id(print_stop_words, batch_finished[i], tokens, stop_word_ids)
+
+            tokens_to_decode_batch.append(tokens)
+
+        if self.has_num_beams:
+            all_texts_batch = self.tokenizer.batch_decode(tokens_to_decode_batch)
+            texts_to_process = all_texts_batch
+            all_texts_for_stop_words = all_texts_batch
+        else:
+            for i, all_text in enumerate(all_texts_batch):
+                decoding_state = self.decoding_states[i]
+                new_text, all_text = self.tokenids_decode(
+                    tokens, decoding_state, return_incremental=True 
+                )
+                new_text = all_text[len(decoding_state.all_text):]
+            text_for_stop_processing = new_text if return_incremental else all_text
+            texts_to_process.append(text_for_stop_processing)
+            all_texts_for_stop_words.append(all_text)
+
+        for i in range(len(batch_token_ids)):
+            final_text, self.token_buffers[i] = self.process_stop_str(
+                batch_finished[i],
+                return_incremental,
+                print_stop_words,
+                texts_to_process[i],
+                all_texts_for_stop_words[i],
+                stop_word_str_list,
+                self.token_buffers[i],
+            )
+            final_texts.append(final_text)
+
+        return batch_output_lens, final_texts
+
 
     def process_stop_id(
         self,
