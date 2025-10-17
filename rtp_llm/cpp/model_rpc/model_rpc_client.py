@@ -294,6 +294,23 @@ class ModelRpcClient(object):
             self._addresses = self._addresses[:serving_ranks]
         logging.info(f"client connect to rpc addresses: {self._addresses}")
         self.model_config = config
+        self.options = []
+        self.options.append(
+            (
+                "grpc.max_metadata_size",
+                self.model_config.py_env_configs.grpc_client_config.max_metadata_size,
+            )
+        )
+        self.options.append(
+            (
+                "grpc.max_receive_message_length",
+                self.model_config.py_env_configs.grpc_client_config.max_receive_message_length,
+            )
+        )
+        if self.model_config.py_env_configs.grpc_client_config.need_compression:
+            self.options.append(
+                ("grpc.default_compression_algorithm", grpc.Compression.Gzip)
+            )
 
     async def enqueue(
         self, input_py: GenerateInput
@@ -332,11 +349,9 @@ class ModelRpcClient(object):
                     break
 
         try:
-            options = [
-                ("grpc.max_metadata_size", 1024 * 1024 * 1024),
-            ]
             async with grpc.aio.insecure_channel(
-                address_list[input_py.request_id % len(address_list)], options=options
+                address_list[input_py.request_id % len(address_list)],
+                options=self.options,
             ) as channel:
                 stub = RpcServiceStub(channel)
                 response_iterator = stub.GenerateStreamCall(
