@@ -262,6 +262,7 @@ InferenceService::iterateStreams(std::vector<std::shared_ptr<GenerateStreamWrapp
     int                            iterate_counter = 0;
 
     while (true) {
+        auto startTimeMs = autil::TimeUtility::currentTimeInMilliSeconds();
         for (int i = 0; i < streams.size(); i++) {
             auto [response, finished] = streams[i]->generateResponse();
             batch_state[i]            = response;
@@ -269,12 +270,20 @@ InferenceService::iterateStreams(std::vector<std::shared_ptr<GenerateStreamWrapp
                 done_idxs.insert(i);
             }
         }
+        RTP_LLM_LOG_INFO("generateReponse: %d",  autil::TimeUtility::currentTimeInMilliSeconds() - startTimeMs);
+        startTimeMs = autil::TimeUtility::currentTimeInMilliSeconds();
         if (done_idxs.size() == streams.size()) {
             writeDoneResponse(writer, req);
             break;
         }
+        RTP_LLM_LOG_INFO("writeDoneResponse: %d",  autil::TimeUtility::currentTimeInMilliSeconds() - startTimeMs);
+        startTimeMs = autil::TimeUtility::currentTimeInMilliSeconds();
         auto res             = formatResponse(batch_state, req.batch_infer);
+        RTP_LLM_LOG_INFO("formatResponse: %d",  autil::TimeUtility::currentTimeInMilliSeconds() - startTimeMs);
+        startTimeMs = autil::TimeUtility::currentTimeInMilliSeconds();
         auto [err, response] = writeResponse(writer, req, res);
+        RTP_LLM_LOG_INFO("writeResponse: %d",  autil::TimeUtility::currentTimeInMilliSeconds() - startTimeMs);
+        startTimeMs = autil::TimeUtility::currentTimeInMilliSeconds();
         if (err) {
             throw HttpApiServerException(HttpApiServerException::CANCELLED_ERROR, "client disconnects");
         }

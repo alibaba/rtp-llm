@@ -56,11 +56,13 @@ std::pair<MultiSeqsResponse, bool> GenerateStreamWrapper::generateResponse() {
         token_processor_ctx_ = token_processor_->getTokenProcessorCtx(
             generate_config_->hasNumBeams(), outputs_cache_.generate_outputs.size(), token_processor_);
     }
+    auto currentTimeMs = autil::TimeUtility::currentTimeInMilliSeconds();
     std::vector<std::string> texts =
         token_processor_->decodeTokens(token_processor_ctx_, outputs_cache_, output_lens_, generate_config_);
     if (metric_reporter_) {
         metric_reporter_->reportFTPostTokenProcessorRtMetric(timer.done_ms());
     }
+    RTP_LLM_LOG_INFO("decode token time: %d",  autil::TimeUtility::currentTimeInMilliSeconds() - currentTimeMs);
     auto response = formatResponse(texts, outputs_cache_, generate_config_, input_ids_);
 
     bool all_finished = std::all_of(outputs_cache_.generate_outputs.begin(),
@@ -72,6 +74,7 @@ std::pair<MultiSeqsResponse, bool> GenerateStreamWrapper::generateResponse() {
             metric_reporter_->reportFTOutputTokenLengthMetric(len);
         }
     }
+    RTP_LLM_LOG_INFO("generate response: %d",  autil::TimeUtility::currentTimeInMilliSeconds() - currentTimeMs);
     return std::make_pair(response, false);
 }
 
