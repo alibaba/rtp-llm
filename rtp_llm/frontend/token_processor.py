@@ -5,7 +5,7 @@ import numpy as np
 import numpy.typing as npt
 
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
-
+from viztracer import VizTracer
 from rtp_llm.frontend.tokenizer_factory.tokenizer_utils import (
     DecodingState,
     IncrementDecodingUtils,
@@ -103,6 +103,8 @@ class TokenProcessorPerStream:
         stop_word_ids: List[List[int]],
         return_incremental: bool = False,
     ):
+        #tracer = VizTracer()
+        #tracer.start()
         batch_output_lens = []
         final_texts = []
         texts_to_process = []
@@ -151,6 +153,8 @@ class TokenProcessorPerStream:
                 self.token_buffers[i],
             )
             final_texts.append(final_text)
+        #tracer.stop()
+        #tracer.save()
 
         return batch_output_lens, final_texts
 
