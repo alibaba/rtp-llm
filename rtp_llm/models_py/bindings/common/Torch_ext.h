@@ -23,6 +23,7 @@ using StreamType = hipStream_t;
 #include <cuda_fp8.h>
 #include "rtp_llm/cpp/kernels/layernorm_kernels.h"
 #include "rtp_llm/cpp/kernels/fused_qk_rmsnorm.h"
+#include "rtp_llm/cpp/kernels/rmsnormKernels.h"
 using bf16_type  = nv_bfloat16;
 using StreamType = cudaStream_t;
 #define GET_CURRENT_STREAM() at::cuda::getCurrentCUDAStream(at::cuda::current_device()).stream()

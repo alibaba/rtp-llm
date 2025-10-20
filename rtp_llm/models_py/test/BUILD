@@ -244,3 +244,14 @@ py_test (
     exec_properties = {'gpu':'H20'},
 )
 
+
+py_test (
+    name = "mla_attention_test",
+    srcs = ["mla_attention_test.py"],
+    deps = py_test_deps + [
+        "//rtp_llm:testlib",
+    ],
+    env = test_envs,
+    tags = ["open_skip", "H20"],
+    exec_properties = {'gpu':'H20'},
+)

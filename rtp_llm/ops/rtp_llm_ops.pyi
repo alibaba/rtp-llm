@@ -4,9 +4,11 @@ rtp llm custom ops
 
 from __future__ import annotations
 
+from typing import Any, Optional
+
 import libth_transformer
 import torch
-from typing import Optional, Any
+
 from rtp_llm.ops import KVCache, PyCacheStoreInputs
 
 __all__ = [
@@ -23,12 +25,16 @@ __all__ = [
     "fused_add_rmsnorm",
     "fused_qk_rmsnorm",
     "write_cache_store",
+    "FlashInferMlaAttnParams",
     "layernorm",
     "rmsnorm",
     "silu_and_mul",
 ]
 
 class FlashInferAttnParams:
+    def __init__(self) -> None: ...
+
+class FlashInferMlaAttnParams:
     def __init__(self) -> None: ...
 
 class FlashInferOp:

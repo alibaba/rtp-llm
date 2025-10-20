@@ -22,6 +22,10 @@ tensorrt = [
     "tensorrt-cu12-libs",
 ]
 
+flashinfer = [
+    "flashinfer-python",
+]
+
 xft_dep = select({
     "@//:using_arm": [],
     "//:xft_use_icx": [
@@ -98,7 +102,7 @@ requirement([
     "concurrent_log_handler",
     "aiter",
     "fastsafetensors",
-] + tensorrt)
+] + tensorrt + flashinfer)
 
 filegroup(
     name = "cutlass_config",
@@ -210,7 +214,7 @@ py_library(
         "//rtp_llm/model_loader:loader",
         "//rtp_llm/models_py:models",
     ] + arch_dep + select({
-        "@//:using_cuda12": tensorrt,
+        "@//:using_cuda12": tensorrt + flashinfer,
         "//conditions:default": []
     }) + select({
         "@//:using_arm": [],
@@ -540,6 +544,7 @@ whl_reqs = [
     "bitsandbytes",
     "portalocker",
     "concurrent_log_handler",
+    "flashinfer-python==0.2.5",
 ] + whl_deps() + platform_deps() + xft_dep
 
 py_wheel(
