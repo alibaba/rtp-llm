@@ -51,8 +51,7 @@ absl::Status FIFOScheduler::stop() {
 
 void FIFOScheduler::evaluateRunningRemote() {
     for (auto it = running_streams_.begin(); it != running_streams_.end();) {
-        if ((*it)->needRemoteGenerate()) {
-            (*it)->setRemoteGenerate();
+        if ((*it)->needRemoteGenerate() && (*it)->setRemoteGenerate()) {
             remote_running_streams_.emplace_back(*it);
             RTP_LLM_LOG_DEBUG("stream [%ld] move to remote running streams", (*it)->streamId());
             it = running_streams_.erase(it);
@@ -83,10 +82,6 @@ void FIFOScheduler::evictDoneStreams(list<GenerateStreamPtr>& streams) {
 absl::Status FIFOScheduler::enqueue(const GenerateStreamPtr& stream) {
     {
         std::lock_guard<std::mutex> lock(lock_);
-        if (stream->isDummyStream() && !waiting_streams_.empty() && waiting_streams_.back()->isDummyStream()) {
-            stream->stopAndRelease(ErrorCode::UNKNOWN_ERROR, "multi fake query");
-            return absl::OkStatus();
-        }
         waiting_streams_.emplace_back(stream);
     }
     cond_.notify_all();
@@ -246,12 +241,6 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
     list<GenerateStreamPtr> new_streams;
     for (auto it = waiting_streams_.begin(); it != waiting_streams_.end();) {
         auto& stream = *it;
-        if (stream->isDummyStream() && (waiting_streams_.size() > 1 || new_streams.size() > 0)) {
-            stream->stopAndRelease(ErrorCode::UNKNOWN_ERROR, "multi fake query");
-            RTP_LLM_LOG_WARNING("waiting streams should has just one fake query");
-            it = waiting_streams_.erase(it);
-            continue;
-        }
         if (evaluateNewStream(new_streams, *it, reserve_step)) {
             RTP_LLM_LOG_DEBUG("stream [%ld] add to new queue", stream->streamId());
             // if setRunning fails, it must be in stopped state, evict it in next iteration
@@ -283,15 +272,6 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
             }
             it++;
         } else {
-            // for dp run must out one fake query
-            if (need_fill_fake_stream_ && !waiting_streams_.empty() && waiting_streams_.back()->isDummyStream()) {
-                auto& fake_stream = waiting_streams_.back();
-                if (evaluateNewStream(new_streams, fake_stream, 0)) {
-                    new_streams.emplace_back(fake_stream);
-                    waiting_streams_.pop_back();
-                }
-            }
-            // try to join new streams in the next schedule cycle
             break;
         }
     }
