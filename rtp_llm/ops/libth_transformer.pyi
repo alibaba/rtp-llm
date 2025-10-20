@@ -1012,6 +1012,7 @@ class PyCacheStoreInputs:
 class PyPrefillCudaGaphCopyParams:
     cuda_graph_prefill_batch_size: torch.Tensor
     aligned_attn_buf: torch.Tensor
+    compact_attn_buf: torch.Tensor
     max_seq_len: int
     hidden_size: int
     max_batch_size: int

@@ -66,23 +66,23 @@ class FMHAImplBase(object):
         ):
             self.write_cache_store_impl(kv_cache)
         assert self.fmha_impl is not None
-        reserve_shape_tensor: torch.Tensor = fmha_input
         if self.prefill_cuda_graph_copy_params:
-            fmha_input = cuda_graph_copy_small2large(
+            cuda_graph_copy_small2large(
                 fmha_input,
                 self.prefill_cuda_graph_copy_params.aligned_attn_buf,
                 self.prefill_cuda_graph_copy_params.cuda_graph_prefill_batch_size,
                 self.prefill_cuda_graph_copy_params.max_batch_size,
                 self.prefill_cuda_graph_copy_params.max_seq_len,
                 self.input_lengths,
-                self.prefill_cuda_graph_copy_params.hidden_size,
+                self.prefill_cuda_graph_copy_params.aligned_attn_buf.shape[1],
                 self.cu_seq_lens,
             )
+            fmha_input = self.prefill_cuda_graph_copy_params.aligned_attn_buf
         res = self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
         if self.prefill_cuda_graph_copy_params:
-            res = cuda_graph_copy_large2small(
+            cuda_graph_copy_large2small(
                 res,
-                reserve_shape_tensor,
+                self.prefill_cuda_graph_copy_params.compact_attn_buf,
                 self.prefill_cuda_graph_copy_params.cuda_graph_prefill_batch_size,
                 self.prefill_cuda_graph_copy_params.max_batch_size,
                 self.prefill_cuda_graph_copy_params.max_seq_len,
@@ -90,6 +90,7 @@ class FMHAImplBase(object):
                 self.prefill_cuda_graph_copy_params.hidden_size,
                 self.cu_seq_lens,
             )
+            res = self.prefill_cuda_graph_copy_params.compact_attn_buf
         return res
 
     @staticmethod

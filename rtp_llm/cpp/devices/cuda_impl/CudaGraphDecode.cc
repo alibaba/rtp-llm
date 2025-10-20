@@ -5,9 +5,9 @@ void CudaGraphRunner::replayDecode(int bs) {
     graph_instances_[bs].graph_.replay();
 }
 
-std::vector<int> CudaGraphRunner::getDecodeBatchSizesToCapture(int concurrency_limit) {
+std::vector<int> CudaGraphRunner::getDecodeBatchSizesToCapture() {
     std::vector<int> capture_bs;
-    int              max_generate_batch_size = concurrency_limit;
+    int              max_generate_batch_size = max_bs_;
     RTP_LLM_LOG_INFO("max_generate_batch_size for cuda graph: %d", max_generate_batch_size);
     // Add range 1 to 32 (inclusive)
     for (int i = 1; i <= std::min(32, max_generate_batch_size); i += 1) {
@@ -82,8 +82,8 @@ void CudaGraphRunner::captureDecode() {
             capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens.slice(0, 0, bs + 1);
         inputs.attention_inputs.prefix_lengths = capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths;
         inputs.attention_inputs.dtype          = capture_mem_hold_.py_model_inputs_.attention_inputs.dtype;
-        inputs.attention_inputs.padding_offset =
-            capture_mem_hold_.py_model_inputs_.attention_inputs.padding_offset.slice(0, 0, bs * num_tokens_per_bs_);
+        // inputs.attention_inputs.padding_offset =
+        //     capture_mem_hold_.py_model_inputs_.attention_inputs.padding_offset.slice(0, 0, bs * num_tokens_per_bs_);
         // Copy BertEmbeddingInputs from capture_mem_hold_
         inputs.bert_embedding_inputs = capture_mem_hold_.py_model_inputs_.bert_embedding_inputs;
 

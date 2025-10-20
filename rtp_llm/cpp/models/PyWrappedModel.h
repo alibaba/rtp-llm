@@ -87,6 +87,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             graph_runner_->setTokenTypeEmbedding(
                 Buffer2torchTensor(weights_.token_type_embedding->kernel, false).cuda());
         }
+        if (weights_.layers[0].self_attention_weights.qkv_weight->kernel) {
+            graph_runner_->setQKVDim(weights_.layers[0].self_attention_weights.qkv_weight->kernel->shape()[1]);
+        }
         graph_runner_->setInputEmbeddingScalar(description_.input_embedding_scalar);
         caffe2::TypeMeta dtype = torch::scalarTypeToTypeMeta(dataTypeToTorchType(description_.data_type));
         graph_runner_->setModelDataType(dtype);
