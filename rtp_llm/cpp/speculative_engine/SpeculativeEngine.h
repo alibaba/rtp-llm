@@ -134,7 +134,7 @@ private:
     void         tpSyncDisableSPRun(bool& all_streams_disable_sp_run);
     void         reportMetrics();
 
-    std::shared_ptr<GenerateStream> enqueueMinFakeQuery(int32_t max_new_tokens, bool fake_hidden_states = false);
+    std::shared_ptr<GenerateStream> createMinFakeStream(int32_t max_new_tokens, bool fake_hidden_states = false);
 
     std::list<GenerateStreamPtr> extractFirstPrefillStreams(std::list<GenerateStreamPtr>& streams);
 
