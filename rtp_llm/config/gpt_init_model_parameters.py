@@ -593,6 +593,7 @@ class GptInitModelParameters:
             reuse_cache=get_env_bool("REUSE_CACHE", False),
             multi_task_prompt=get_env_str("MULTI_TASK_PROMPT"),
             multi_task_prompt_str=get_env_str("MULTI_TASK_PROMPT_STR"),
+            enable_dist_kvcache=get_env_bool("ENABLE_DIST_KVCACHE", True),
             enable_3fs=get_env_bool("ENABLE_3FS", False),
             match_timeout_ms=get_env_int("THREEFS_MATCH_TIMEOUT_MS", 1000),
             rpc_get_cache_timeout_ms=get_env_int(

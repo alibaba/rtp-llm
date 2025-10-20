@@ -7,10 +7,38 @@
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
+#include "rtp_llm/cpp/cache2/kv_cache_connector/KVCMClientWrapper.h"
 
 using namespace std;
 
 namespace rtp_llm {
+
+namespace {
+kv_cache_manager::BlockMask kvcmBlockMaskFromPB(const KVCMBlockMaskPB& proto) {
+    kv_cache_manager::BlockMask block_mask;
+    switch (proto.info_case()) {
+        case KVCMBlockMaskPB::InfoCase::kOffset: {
+            block_mask = kv_cache_manager::BlockMaskOffset(static_cast<size_t>(proto.offset()));
+            break;
+        }
+        case KVCMBlockMaskPB::InfoCase::kBoolMasks: {
+            kv_cache_manager::BlockMaskVector mask_vector;
+            const auto&                       bool_masks = proto.bool_masks();
+            mask_vector.reserve(bool_masks.values_size());
+            for (const auto& value : bool_masks.values()) {
+                mask_vector.push_back(value);
+            }
+            block_mask = std::move(mask_vector);
+            break;
+        }
+        default: {
+            block_mask = static_cast<kv_cache_manager::BlockMaskOffset>(0);
+            break;
+        }
+    }
+    return block_mask;
+}
+}  // namespace
 
 grpc::Status LocalRpcServer::init(const EngineInitParams&                       maga_init_params,
                                   py::object                                    mm_process_engine,
@@ -56,7 +84,7 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
             }
         }
     }
-
+    RTP_LLM_LOG_INFO("init local rpc success, this=%p, engine=%p, cache_manager=%p", this, engine_.get(), engine_->getCacheManager().get());
     return grpc::Status::OK;
 }
 
@@ -336,30 +364,34 @@ EngineScheduleInfo LocalRpcServer::getEngineScheduleInfo(int64_t latest_finished
     }
 
     if (!engine_) {
-        RTP_LLM_LOG_WARNING("dist kvcache failed, engine is null, request: %ld", request_id);
+        RTP_LLM_LOG_WARNING("dist kvcache failed, engine is null, request: %ld, this=%p", request_id, this);
         return grpc::Status(grpc::StatusCode::INTERNAL, "engine is null");
     }
     auto cache_manager = engine_->getCacheManager();
     if (!cache_manager) {
-        RTP_LLM_LOG_WARNING("dist kvcache failed, cache manager is null, request: %ld, op: %s",
+        RTP_LLM_LOG_WARNING("dist kvcache failed, cache manager is null, request: %ld, op: %s, this=%p, engine: %p",
                             request_id,
-                            ::DistKvCacheOp_Name(op_code).c_str());
+                            ::DistKvCacheOp_Name(op_code).c_str(), this, engine_.get());
         return grpc::Status(grpc::StatusCode::INTERNAL, "cache manager is null");
     }
 
-    std::vector<int64_t>               cache_keys(request->cache_keys().begin(), request->cache_keys().end());
-    std::vector<int32_t>               block_ids(request->block_ids().begin(), request->block_ids().end());
-    const auto                         ignore_block_num = request->ignore_block_num();
+    std::vector<int64_t> cache_keys(request->cache_keys().begin(), request->cache_keys().end());
+    std::vector<int32_t> block_ids(request->block_ids().begin(), request->block_ids().end());
+    auto                 ignore_block_num = request->ignore_block_num();  // TODO : deprecated
+
     std::map<std::string, std::string> extra_metas;
     for (const auto& meta : request->extra_metas()) {
         extra_metas[meta.key()] = meta.value();
     }
+    kv_cache_manager::Locations locations(request->kvcm_locations().begin(), request->kvcm_locations().end());
+    kv_cache_manager::BlockMask block_mask =
+        ignore_block_num > 0 ? ignore_block_num : kvcmBlockMaskFromPB(request->kvcm_block_mask());
 
     bool result = false;
     if (op_code == ::DistKvCacheOp::GET) {
-        result = cache_manager->getCacheForRank(cache_keys, block_ids, ignore_block_num, request_id, extra_metas);
+        result = cache_manager->getCacheForRank(cache_keys, block_ids, locations, block_mask, request_id, extra_metas);
     } else {
-        result = cache_manager->putCacheForRank(cache_keys, block_ids, ignore_block_num, request_id, extra_metas);
+        result = cache_manager->putCacheForRank(cache_keys, block_ids, locations, block_mask, request_id, extra_metas);
     }
 
     if (!result) {

@@ -40,10 +40,11 @@ struct FMHAConfig {
 };
 
 struct KVCacheConfig {
-    bool        reuse_cache                        = false;
-    std::string multi_task_prompt                  = "";
-    std::string multi_task_prompt_str              = "";
-    bool        enable_3fs                         = false;
+    bool        reuse_cache           = false;
+    std::string multi_task_prompt     = "";
+    std::string multi_task_prompt_str = "";
+    bool        enable_dist_kvcache   = false;  // 控制是否开启分布式缓存，默认使用RemoteKVCacheManager
+    bool        enable_3fs = false;  // TODO 即将删除。表示不使用RemoteKVCacheManager，而直接使用之前的3FS缓存模式
     int         match_timeout_ms                   = 1000;
     int         rpc_get_cache_timeout_ms           = 2000;
     int         rpc_put_cache_timeout_ms           = 2000;
@@ -207,8 +208,8 @@ struct FIFOSchedulerConfig {
 };
 
 struct MiscellaneousConfig {
-    bool        disable_pdl             = true;
-    std::string aux_string              = "";
+    bool        disable_pdl = true;
+    std::string aux_string  = "";
     std::string to_string() const;
     void        update_from_env_for_test();
 };
