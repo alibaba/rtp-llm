@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-12 17:38+0800\n"
+"POT-Creation-Date: 2025-10-20 10:08+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -21,276 +21,276 @@ msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md:1
 msgid "Multimodal Language Models"
-msgstr "多模态语言模型"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md:3
 msgid ""
 "These models accept multi-modal inputs (e.g., images/video and text) and "
 "generate text output. They augment language models with multimodal "
 "encoders."
-msgstr "这些模型接受多模态输入（例如，图像/视频和文本）并生成文本输出。它们通过多模态编码器增强语言模型。"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md:5
 msgid "Example launch Command"
-msgstr "示例启动命令"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md:15
 msgid "Supported models"
-msgstr "支持的模型"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md:17
 msgid "Below the supported models are summarized in a table."
-msgstr "以下表格总结了支持的模型。"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md:19
 msgid ""
 "If you are unsure if a specific architecture is implemented, you can "
 "search for it via GitHub. For example, to search for "
 "`Qwen2_5_VLForConditionalGeneration`, use the expression:"
-msgstr "如果您不确定特定架构是否已实现，可以通过GitHub进行搜索。例如，要搜索`Qwen2_5_VLForConditionalGeneration`，请使用以下表达式："
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md:25
 msgid "in the GitHub search bar."
-msgstr "在GitHub搜索栏中。"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid "Model Family (Variants)"
-msgstr "模型系列（变体）"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid "Example HuggingFace Identifier"
-msgstr "HuggingFace标识符示例"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid "Chat Template"
-msgstr "聊天模板"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid "Model Type"
-msgstr "模型类型"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid "Description"
-msgstr "描述"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid "**Qwen3-VL** (Qwen3 series)"
-msgstr "**Qwen3-VL**（Qwen3系列）"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid "`Qwen/Qwen3-VL-7B-Instruct`"
-msgstr "`Qwen/Qwen3-VL-7B-Instruct`"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid "`qwen3_vl_moe`"
-msgstr "`qwen3_vl_moe`"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid ""
 "Alibaba’s vision-language extension of Qwen3MoE; for example, Qwen3-VL "
 "(7B and larger variants) can analyze and converse about image content."
-msgstr "阿里巴巴Qwen3MoE的视觉-语言扩展；例如，Qwen3-VL（7B及以上变体）可以分析和讨论图像内容。"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid "**Qwen-VL** (Qwen2.5 series)"
-msgstr "**Qwen-VL**（Qwen2.5系列）"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid "`Qwen/Qwen2.5-VL-7B-Instruct`"
-msgstr "`Qwen/Qwen2.5-VL-7B-Instruct`"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid "`qwen2_5_vl`"
-msgstr "`qwen2_5_vl`"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid ""
 "Alibaba’s vision-language extension of Qwen; for example, Qwen2.5-VL (7B "
 "and larger variants) can analyze and converse about image content."
-msgstr "阿里巴巴Qwen的视觉-语言扩展；例如，Qwen2.5-VL（7B及以上变体）可以分析和讨论图像内容。"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid "**Qwen-VL** (Qwen2 series)"
-msgstr "**Qwen-VL**（Qwen2系列）"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid "`Qwen/Qwen2-VL-7B-Instruct`"
-msgstr "`Qwen/Qwen2-VL-7B-Instruct`"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid "`qwen2_vl`"
-msgstr "`qwen2_vl`"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid ""
 "Alibaba’s vision-language extension of Qwen; for example, Qwen2-VL (7B "
 "and larger variants) can analyze and converse about image content."
-msgstr "阿里巴巴Qwen的视觉-语言扩展；例如，Qwen2-VL（7B及以上变体）可以分析和讨论图像内容。"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid "**Qwen-VL** (Qwen series)"
-msgstr "**Qwen-VL**（Qwen系列）"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid "`qwen_vl`"
-msgstr "`qwen_vl`"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid ""
 "Alibaba’s vision-language extension of Qwen; for example, Qwen-VL (7B and"
 " larger variants) can analyze and converse about image content."
-msgstr "阿里巴巴Qwen的视觉-语言扩展；例如，Qwen-VL（7B及以上变体）可以分析和讨论图像内容。"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid "**DeepSeek-VL2**"
-msgstr "**DeepSeek-VL2**"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid "`deepseek-ai/deepseek-vl2`"
-msgstr "`deepseek-ai/deepseek-vl2`"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid "`deepseek-vl2`"
-msgstr "`deepseek-vl2`"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid "`qwen2-vl`"
-msgstr "`qwen2-vl`"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid ""
 "Vision-language variant of DeepSeek (with a dedicated image processor), "
 "enabling advanced multimodal reasoning on image and text inputs."
-msgstr "DeepSeek的视觉-语言变体（配备专用图像处理器），支持对图像和文本输入进行高级多模态推理。"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid "**MiniCPM-V / MiniCPM-o**"
-msgstr "**MiniCPM-V / MiniCPM-o**"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid "`openbmb/MiniCPM-V-2_6`"
-msgstr "`openbmb/MiniCPM-V-2_6`"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid "`minicpmv`"
-msgstr "`minicpmv`"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid ""
 "MiniCPM-V (2.6, ~8B) supports image inputs, and MiniCPM-o adds "
 "audio/video; these multimodal LLMs are optimized for end-side deployment "
 "on mobile/edge devices."
-msgstr "MiniCPM-V（2.6，约8B）支持图像输入，MiniCPM-o增加了音频/视频功能；这些多模态大语言模型针对移动端/边缘设备部署进行了优化。"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid "**Llama 3.2 Vision** (11B)"
-msgstr "**Llama 3.2 Vision**（11B）"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid "`meta-llama/Llama-3.2-11B-Vision-Instruct`"
-msgstr "`meta-llama/Llama-3.2-11B-Vision-Instruct`"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid "`llama_3_vision`"
-msgstr "`llama_3_vision`"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid "`llava`"
-msgstr "`llava`"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid ""
 "Vision-enabled variant of Llama 3 (11B) that accepts image inputs for "
 "visual question answering and other multimodal tasks."
-msgstr "支持视觉的Llama 3（11B）变体，可接受图像输入以进行视觉问答和其他多模态任务。"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid "**LLaVA** (v1.5 & v1.6)"
-msgstr "**LLaVA**（v1.5 & v1.6）"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid "*e.g.* `liuhaotian/llava-v1.5-13b`"
-msgstr "*例如* `liuhaotian/llava-v1.5-13b`"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid "`vicuna_v1.1`"
-msgstr "`vicuna_v1.1`"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid ""
 "Open vision-chat models that add an image encoder to LLaMA/Vicuna (e.g. "
 "LLaMA2 13B) for following multimodal instruction prompts."
-msgstr "开源视觉聊天模型，通过向LLaMA/Vicuna（例如LLaMA2 13B）添加图像编码器来遵循多模态指令提示。"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid "**LLaVA-NeXT** (8B, 72B)"
-msgstr "**LLaVA-NeXT**（8B, 72B）"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid "`lmms-lab/llava-next-72b`"
-msgstr "`lmms-lab/llava-next-72b`"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid "`chatml-llava`"
-msgstr "`chatml-llava`"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid "`llava\t`"
-msgstr "`llava\t`"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid ""
 "Improved LLaVA models (with an 8B Llama3 version and a 72B version) "
 "offering enhanced visual instruction-following and accuracy on multimodal"
 " benchmarks."
-msgstr "改进的LLaVA模型（包含8B Llama3版本和72B版本），在视觉指令遵循和多模态基准测试中提供增强的准确性和性能。"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid "**LLaVA-OneVision**"
-msgstr "**LLaVA-OneVision**"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid "`lmms-lab/llava-onevision-qwen2-7b-ov`"
-msgstr "`lmms-lab/llava-onevision-qwen2-7b-ov`"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid ""
 "Enhanced LLaVA variant integrating Qwen as the backbone; supports "
 "multiple images (and even video frames) as inputs via an OpenAI Vision "
 "API-compatible format."
-msgstr "增强版LLaVA变体，以Qwen为骨干；支持通过OpenAI Vision API兼容格式将多张图像（甚至视频帧）作为输入。"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid "**ChatGlmV4Vision**"
-msgstr "**ChatGlmV4Vision**"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid "`zai-org/glm-4v-9b`"
-msgstr "`zai-org/glm-4v-9b`"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid "`chatglm4v`"
-msgstr "`chatglm4v`"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid ""
 "GLM-4V is a multimodal language model with visual understanding "
 "capabilities."
-msgstr "GLM-4V是一种具有视觉理解能力的多模态语言模型。"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid "**InternVL**"
-msgstr "**InternVL**"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid "`OpenGVLab/InternVL3-78B`"
-msgstr "`OpenGVLab/InternVL3-78B`"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid "`internvl`"
-msgstr "`internvl`"
+msgstr ""
 
 #: ../../supported_models/multimodal_language_models.md
 msgid "A pioneering open-source alternative to GPT-4V"
-msgstr "GPT-4V的开创性开源替代方案"
+msgstr ""
 

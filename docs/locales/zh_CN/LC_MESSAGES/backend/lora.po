@@ -1,14 +1,18 @@
-
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
 #, fuzzy
 msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-24 14:39+0800\n"
+"POT-Creation-Date: 2025-10-20 10:08+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
-"Last-Translator: FULL NAME EMAIL@ADDRESS\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
-"Language-Team: zh_CN LL@li.org\n"
+"Language-Team: zh_CN <LL@li.org>\n"
 "Plural-Forms: nplurals=1; plural=0;\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
@@ -17,148 +21,128 @@ msgstr ""
 
 #: ../../backend/lora.ipynb:9
 msgid "LoRA Serving"
-msgstr "LoRA 服务"
+msgstr ""
 
 #: ../../backend/lora.ipynb:20
-#, fuzzy
 msgid ""
 "RTP-LLM supports **Static LoRA** and **Dynamic LoRA** inference modes. "
 "For information on LoRA principles, refer to `Hugging Face Official "
 "Documentation "
 "<https://huggingface.co/docs/peft/conceptual_guides/lora>`__."
 msgstr ""
-"RTP-LLM 支持静态 LoRA和动态 LoRA推理模式。有关 LoRA 原理的详细信息，请参考Hugging Face 官方文档 \" "
-"\"<https://huggingface.co/docs/peft/conceptual_guides/lora>。"
 
 #: ../../backend/lora.ipynb:32
 msgid "Serving Single Adaptor（Static LoRA）"
-msgstr "单适配器服务（静态 LoRA）"
+msgstr ""
 
 #: ../../backend/lora.ipynb:35 ../../backend/lora.ipynb:147
 msgid "Feature"
-msgstr "功能特性"
+msgstr ""
 
 #: ../../backend/lora.ipynb:35 ../../backend/lora.ipynb:147
 msgid "Description"
-msgstr "功能描述"
+msgstr ""
 
 #: ../../backend/lora.ipynb:37 ../../backend/lora.ipynb:149
-#, fuzzy
 msgid "**Fusion Method**"
-msgstr "融合方式"
+msgstr ""
 
 #: ../../backend/lora.ipynb:37
-#, fuzzy
 msgid ""
 "Before inference, the base model and specified LoRA weights are "
 "**permanently fused** (irreversible)."
-msgstr "推理前将基座模型与指定 LoRA 权重进行永久性融合（不可逆操作）"
+msgstr ""
 
 #: ../../backend/lora.ipynb:39 ../../backend/lora.ipynb:151
-#, fuzzy
 msgid "**Applicable Scenarios**"
-msgstr "适用场景"
+msgstr ""
 
 #: ../../backend/lora.ipynb:39
-#, fuzzy
 msgid "Scenarios requiring **single LoRA** with pursuit of optimal performance."
-msgstr "需要单一 LoRA 适配且追求最佳性能的场景"
+msgstr ""
 
 #: ../../backend/lora.ipynb:41 ../../backend/lora.ipynb:153
-#, fuzzy
 msgid "**Limitations**"
-msgstr "限制条件"
+msgstr ""
 
 #: ../../backend/lora.ipynb:41
 msgid ""
 "After fusion, the base model cannot be restored; the original output "
 "before applying LoRA cannot be obtained simultaneously."
-msgstr "融合后无法恢复基座模型，无法同时获得应用 LoRA 前的原始输出"
+msgstr ""
 
 #: ../../backend/lora.ipynb:45 ../../backend/lora.ipynb:157
 msgid "Usage"
-msgstr "使用方式"
+msgstr ""
 
 #: ../../backend/lora.ipynb:47
-#, fuzzy
 msgid ""
 "When the startup parameter ``--lora_info`` contains only **1 element**, "
 "it automatically enters static mode."
-msgstr "当启动参数 --lora_info 仅包含1个元素时自动进入静态模式"
+msgstr ""
 
 #: ../../backend/lora.ipynb:48
-#, fuzzy, python-brace-format
+#, python-brace-format
 msgid ""
 "Example: ``--lora_info "
 "{\"test0\":\"/mnt/nas1/lora/taoshang_qwen_lora_18000/lora\"}``"
 msgstr ""
-"示例：--lora_info \" "
-"\"{\"test0\":\"/mnt/nas1/lora/taoshang_qwen_lora_18000/lora\"}"
 
 #: ../../backend/lora.ipynb:144
 msgid "Serving Multiple Adaptors(Dynamic LoRA)"
-msgstr "多适配器服务（动态 LoRA）"
+msgstr ""
 
 #: ../../backend/lora.ipynb:149
-#, fuzzy
 msgid ""
 "Load LoRA dynamically as a plugin during inference, **without modifying "
 "base weights**."
-msgstr "在推理过程中以插件形式动态加载 LoRA，不修改基座权重"
+msgstr ""
 
 #: ../../backend/lora.ipynb:151
-#, fuzzy
 msgid ""
 "Scenarios requiring **multiple LoRA switching** or **dynamic selection by"
 " request**."
-msgstr "需要多个 LoRA 切换或按请求动态选择的场景"
+msgstr ""
 
 #: ../../backend/lora.ipynb:153
 msgid "Only some models support LoRA"
-msgstr "当前仅部分模型支持 LoRA"
+msgstr ""
 
 #: ../../backend/lora.ipynb:159
-#, fuzzy
 msgid ""
 "Specify the LoRA to be used for this request through "
 "``generate_config.adapter_name``."
-msgstr "通过 generate_config.adapter_name 字段指定本次请求使用的 LoRA"
+msgstr ""
 
 #: ../../backend/lora.ipynb:160
 msgid "Field rules"
-msgstr "字段规则"
+msgstr ""
 
 #: ../../backend/lora.ipynb:161
-#, fuzzy
 msgid "Type: ``str`` or ``list[str]``"
-msgstr "类型：str 或 list[str]"
+msgstr ""
 
 #: ../../backend/lora.ipynb:162
-#, fuzzy
 msgid ""
 "The number of elements and order must be **completely aligned** with "
 "``prompt``"
-msgstr "元素数量和顺序必须与 prompt 完全对齐"
+msgstr ""
 
 #: ../../backend/lora.ipynb:163
-#, fuzzy
 msgid "Leave empty or omit to indicate **not using LoRA**"
-msgstr "留空或省略表示不使用 LoRA"
+msgstr ""
 
 #: ../../backend/lora.ipynb:164
-#, fuzzy
 msgid ""
 "When the startup parameter ``--lora_info`` contains **multiple** "
 "elements, it automatically enters dynamic mode."
-msgstr "当启动参数 --lora_info 包含多个元素时自动进入动态模式"
+msgstr ""
 
 #: ../../backend/lora.ipynb:165
-#, fuzzy, python-brace-format
+#, python-brace-format
 msgid ""
 "Example: ``--lora_info "
 "{\"test0\":\"/mnt/nas1/lora/qwen_lora_18000/lora\", "
 "\"test1\":\"/mnt/nas1/lora/qwen_lora_18000/lora\"}``"
 msgstr ""
-"示例：--lora_info \" \"{\"test0\":\"/mnt/nas1/lora/qwen_lora_18000/lora\", "
-"\" \"\"test1\":\"/mnt/nas1/lora/qwen_lora_18000/lora\"}"
 

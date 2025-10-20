@@ -58,7 +58,7 @@
     <link rel="prev" title="PD Disaggregation" href="pd_disaggregation.html" /> 
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
-    <meta name="docbuild:last-update" content="Oct 15, 2025"/>
+    <meta name="docbuild:last-update" content="Oct 20, 2025"/>
 <link
   rel="stylesheet"
   href="../_static/css/language-switcher.css"
@@ -471,9 +471,12 @@ document.write(`
 </li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#usage">Usage</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#startup-commands">Startup Commands</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#set-up-environment-variables">0. Set Up Environment Variables</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#build-flexlb">1. Build FlexLB</a><ul class="nav section-nav flex-column">
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#run-unit-tests">Run Unit Tests</a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#build-package">Build Package</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#run-locally">Run Locally</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#run-with-spring-boot-maven-plugin">Run with Spring Boot Maven Plugin</a></li>
 </ul>
 </li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#docker-image-build">2. Docker Image Build</a><ul class="nav section-nav flex-column">
@@ -584,6 +587,44 @@ document.write(`
 </section>
 <section id="startup-commands">
 <h2>Startup Commands<a class="headerlink" href="#startup-commands" title="Link to this heading">#</a></h2>
+<section id="set-up-environment-variables">
+<h3>0. Set Up Environment Variables<a class="headerlink" href="#set-up-environment-variables" title="Link to this heading">#</a></h3>
+<p>FlexLB requires some environment variables to be set:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Load balancing configuration</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">WHALE_MASTER_CONFIG</span><span class="o">=</span><span class="s1">&#39;{</span>
+<span class="s1">    &quot;deploy&quot;:&quot;DISAGGREGATED&quot;,</span>
+<span class="s1">    &quot;loadBalanceStrategy&quot;:&quot;ROUND_ROBIN_LOWEST_CONCURRENCY&quot;,</span>
+<span class="s1">    &quot;prefillBatchWaitTimeMs&quot;:100,</span>
+<span class="s1">    &quot;kvCache&quot;:&quot;LOCAL_STATIC&quot;,</span>
+<span class="s1">    &quot;staticCacheBlockSize&quot;:500,</span>
+<span class="s1">    &quot;batchSize&quot;:1,</span>
+<span class="s1">    &quot;prefillLbTimeoutMs&quot;:300,</span>
+<span class="s1">    &quot;prefillGenerateTimeoutMs&quot;: 5000,</span>
+<span class="s1">    &quot;enableGrpcPrefillMaster&quot;: false</span>
+<span class="s1">}&#39;</span>
+
+<span class="c1"># ZooKeeper consistency configuration</span>
+<span class="c1"># Set needConsistency to true if you want to test with ZooKeeper (requires ZK on localhost:2181)</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">WHALE_SYNC_LB_CONSISTENCY_CONFIG</span><span class="o">=</span><span class="s1">&#39;{</span>
+<span class="s1">    &quot;needConsistency&quot;:false,</span>
+<span class="s1">    &quot;masterElectType&quot;:&quot;ZOOKEEPER&quot;,</span>
+<span class="s1">    &quot;zookeeperConfig&quot;:{&quot;zkHost&quot;:&quot;127.0.0.1:2181&quot;,&quot;zkTimeoutMs&quot;:10000}</span>
+<span class="s1">}&#39;</span>
+
+<span class="c1"># Backend model service configuration</span>
+<span class="c1"># Update the address to point to your actual model service endpoints</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">MODEL_SERVICE_CONFIG</span><span class="o">=</span><span class="s1">&#39;{</span>
+<span class="s1">    &quot;prefill_endpoint&quot;: {</span>
+<span class="s1">        &quot;path&quot;: &quot;/&quot;,</span>
+<span class="s1">        &quot;protocol&quot;: &quot;http&quot;,</span>
+<span class="s1">        &quot;type&quot;: &quot;SpecifiedIpPortList&quot;,</span>
+<span class="s1">        &quot;address&quot;: &quot;[\&quot;localhost:8080\&quot;]&quot;</span>
+<span class="s1">    },</span>
+<span class="s1">    &quot;service_id&quot;: &quot;aigc.text-generation.generation.engine_service&quot;</span>
+<span class="s1">}&#39;</span>
+</pre></div>
+</div>
+</section>
 <section id="build-flexlb">
 <h3>1. Build FlexLB<a class="headerlink" href="#build-flexlb" title="Link to this heading">#</a></h3>
 <p>Navigate to the FlexLB module directory from the project root:</p>
@@ -595,14 +636,28 @@ document.write(`
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>mvn<span class="w"> </span>-B<span class="w"> </span><span class="nb">test</span><span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>-Dmaven.test.failure.ignore<span class="o">=</span><span class="nb">true</span><span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>-Derror-prone.skip<span class="o">=</span><span class="nb">true</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-Dautoconfig.skip<span class="o">=</span><span class="nb">true</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-T<span class="w"> </span>1C
+<span class="w">  </span>-Dautoconfig.skip<span class="o">=</span><span class="nb">true</span>
 </pre></div>
 </div>
 </section>
 <section id="build-package">
 <h4>Build Package<a class="headerlink" href="#build-package" title="Link to this heading">#</a></h4>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>mvn<span class="w"> </span>clean<span class="w"> </span>package<span class="w"> </span>-DskipTests<span class="w"> </span>-T<span class="w"> </span>1C
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>mvn<span class="w"> </span>clean<span class="w"> </span>package<span class="w"> </span>-DskipTests
+</pre></div>
+</div>
+</section>
+<section id="run-locally">
+<h4>Run Locally<a class="headerlink" href="#run-locally" title="Link to this heading">#</a></h4>
+<p>If you want to start FlexLB locally, you can run the following command after build package:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>java<span class="w"> </span>-jar<span class="w"> </span>flexlb-api/target/flexlb-api-1.0.0-SNAPSHOT.jar
+</pre></div>
+</div>
+</section>
+<section id="run-with-spring-boot-maven-plugin">
+<h4>Run with Spring Boot Maven Plugin<a class="headerlink" href="#run-with-spring-boot-maven-plugin" title="Link to this heading">#</a></h4>
+<p>FlexLB is built upon Spring Boot, users can use <code class="docutils literal notranslate"><span class="pre">spring-boot-maven-plugin</span></code> to run it directly without build and start. After setting all environment variables, you can start FlexLB directly by running:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nb">cd</span><span class="w"> </span>flexlb-api
+mvn<span class="w"> </span>spring-boot:run
 </pre></div>
 </div>
 </section>
@@ -624,12 +679,12 @@ cp<span class="w"> </span>flexlb-api/target/ai-whale.tgz<span class="w"> </span>
 <h4>Build Docker Images<a class="headerlink" href="#build-docker-images" title="Link to this heading">#</a></h4>
 <p>Base image build:</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>docker<span class="w"> </span>build<span class="w"> </span>./<span class="w"> </span>-f<span class="w"> </span>rtp_llm/flexlb/APP-META/docker-config/Dockerfile_base<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-t<span class="w"> </span>xx_docs.com/rtp_llm_flexlb_base
+<span class="w">  </span>-t<span class="w"> </span>hub.docker.alibaba-inc.com/isearch/rtp_llm_flexlb_base
 </pre></div>
 </div>
 <p>Production environment image build:</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>docker<span class="w"> </span>build<span class="w"> </span>./<span class="w"> </span>-f<span class="w"> </span>rtp_llm/flexlb/APP-META/docker-config/Dockerfile_production<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-t<span class="w"> </span>xx_docs.com/flexlb:latest
+<span class="w">  </span>-t<span class="w"> </span>hub.docker.alibaba-inc.com/aone/flexlb:latest
 </pre></div>
 </div>
 </section>
@@ -640,7 +695,7 @@ cp<span class="w"> </span>flexlb-api/target/ai-whale.tgz<span class="w"> </span>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>docker<span class="w"> </span>run<span class="w"> </span>-d<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--name<span class="w"> </span>flexlb-master<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>-p<span class="w"> </span><span class="m">8080</span>:8080<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>xx_docs.com/flexlb:latest
+<span class="w">  </span>hub.docker.alibaba-inc.com/aone/flexlb:latest
 </pre></div>
 </div>
 </section>
@@ -678,11 +733,11 @@ mvn<span class="w"> </span>clean<span class="w"> </span>package<span class="w"> 
 <span class="nb">echo</span><span class="w"> </span><span class="s2">&quot;=== Step 4: Building Docker Images ===&quot;</span>
 <span class="c1"># Build base image</span>
 docker<span class="w"> </span>build<span class="w"> </span>./<span class="w"> </span>-f<span class="w"> </span>APP-META/docker-config/Dockerfile_base<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-t<span class="w"> </span>xx_docs.com/rtp_llm_flexlb_base
+<span class="w">  </span>-t<span class="w"> </span>hub.docker.alibaba-inc.com/isearch/rtp_llm_flexlb_base
 
 <span class="c1"># Build production image</span>
 docker<span class="w"> </span>build<span class="w"> </span>./<span class="w"> </span>-f<span class="w"> </span>APP-META/docker-config/Dockerfile_production<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-t<span class="w"> </span>xx_docs.com/flexlb:latest
+<span class="w">  </span>-t<span class="w"> </span>hub.docker.alibaba-inc.com/isearch/flexlb:latest
 
 <span class="nb">echo</span><span class="w"> </span><span class="s2">&quot;=== FlexLB Build Complete ===&quot;</span>
 </pre></div>
@@ -748,9 +803,12 @@ docker<span class="w"> </span>build<span class="w"> </span>./<span class="w"> </
 </li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#usage">Usage</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#startup-commands">Startup Commands</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#set-up-environment-variables">0. Set Up Environment Variables</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#build-flexlb">1. Build FlexLB</a><ul class="nav section-nav flex-column">
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#run-unit-tests">Run Unit Tests</a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#build-package">Build Package</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#run-locally">Run Locally</a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#run-with-spring-boot-maven-plugin">Run with Spring Boot Maven Plugin</a></li>
 </ul>
 </li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#docker-image-build">2. Docker Image Build</a><ul class="nav section-nav flex-column">
@@ -795,7 +853,7 @@ By RTP-LLM Team
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Oct 15, 2025.
+  Last updated on Oct 20, 2025.
   <br/>
 </p>
   </div>

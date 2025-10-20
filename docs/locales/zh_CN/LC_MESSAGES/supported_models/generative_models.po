@@ -8,9 +8,9 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-15 16:46+0800\n"
-"PO-Revision-Date: 2025-09-17 15:08+0800\n"
-"Last-Translator: 来羽 <xj226049@alibaba-inc.com>\n"
+"POT-Creation-Date: 2025-10-20 10:08+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
 "Language-Team: zh_CN <LL@li.org>\n"
 "Plural-Forms: nplurals=1; plural=0;\n"
@@ -21,65 +21,65 @@ msgstr ""
 
 #: ../../supported_models/generative_models.md:1
 msgid "Large Language Models"
-msgstr "大语言模型"
+msgstr ""
 
 #: ../../supported_models/generative_models.md:3
 msgid ""
 "These models accept text input and produce text output (e.g., chat "
 "completions). They are primarily large language models (LLMs), some with "
 "mixture-of-experts (MoE) architectures for scaling."
-msgstr "这些模型接受文本输入并生成文本输出（例如聊天完成）。它们主要是大语言模型（LLMs），其中一些采用专家混合（MoE）架构来扩展。"
+msgstr ""
 
 #: ../../supported_models/generative_models.md:5
 msgid "Example launch Command"
-msgstr "示例启动命令"
+msgstr ""
 
 #: ../../supported_models/generative_models.md:15
 msgid "Supported models"
-msgstr "支持的模型"
+msgstr ""
 
 #: ../../supported_models/generative_models.md:17
 msgid "Below the supported models are summarized in a table."
-msgstr "以下是支持的模型的表格总结。"
+msgstr ""
 
 #: ../../supported_models/generative_models.md:19
 msgid ""
 "If you are unsure if a specific architecture is implemented, you can "
 "search for it via GitHub. For example, to search for `Qwen3ForCausalLM`, "
 "use the expression:"
-msgstr "如果您不确定某个特定架构是否已实现，可以通过GitHub搜索。例如，要搜索`Qwen3ForCausalLM`，请使用以下表达式："
+msgstr ""
 
 #: ../../supported_models/generative_models.md:25
 msgid "in the GitHub search bar."
-msgstr "在GitHub搜索栏中。"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "Model Family (Variants)"
-msgstr "模型系列（变体）"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "Example HuggingFace Identifier"
-msgstr "HuggingFace标识符示例"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "ModelType"
-msgstr "模型类型"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "Description"
-msgstr "描述"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "**DeepSeek** (v1, v2, v3/R1)"
-msgstr "**DeepSeek** (v1, v2, v3/R1)"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "`deepseek-ai/DeepSeek-R1`"
-msgstr "`deepseek-ai/DeepSeek-R1`"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "deepseek_v3"
-msgstr "deepseek_v3"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid ""
@@ -88,285 +88,283 @@ msgid ""
 "reasoning, math, and code tasks. [RTP-LLM provides Deepseek v3/R1 model-"
 "specific optimizations](../references/deepseek/reporter.md)"
 msgstr ""
-"一系列先进的推理优化模型（包括671B MoE），通过强化学习训练；在复杂推理、数学和代码任务上表现优异。[RTP-LLM为Deepseek "
-"v3/R1模型提供特定优化](../references/deepseek/reporter.md)"
 
 #: ../../supported_models/generative_models.md
 msgid "**DeepSeek** (v1, v2)"
-msgstr "**DeepSeek** (v1, v2)"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "`deepseek-ai/DeepSeek-V2`"
-msgstr "`deepseek-ai/DeepSeek-V2`"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "deepseek_v2"
-msgstr "deepseek_v2"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid ""
 "Series of advanced reasoning-optimized models (including a 671B MoE) "
 "trained with reinforcement learning; top performance on complex "
 "reasoning, math, and code tasks."
-msgstr "一系列先进的推理优化模型（包括671B MoE），通过强化学习训练；在复杂推理、数学和代码任务上表现优异。"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "**Qwen** (3MoE, 2.5MoE, Coder)"
-msgstr "**Qwen** (3MoE, 2.5MoE, Coder)"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "`Qwen/Qwen3-30B-A3B`, `Qwen/Qwen3-Coder-480B-A35B-Instruct`"
-msgstr "`Qwen/Qwen3-30B-A3B`, `Qwen/Qwen3-Coder-480B-A35B-Instruct`"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "qwen_3_moe"
-msgstr "qwen_3_moe"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid ""
 "Alibaba’s latest Qwen3Moe series for complex reasoning, language "
 "understanding, and generation tasks; Support for MoE variants along with "
 "previous generation 3, etc."
-msgstr "阿里巴巴最新的Qwen3Moe系列，用于复杂推理、语言理解和生成任务；支持MoE变体以及前代3等。"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "**Qwen** (3 series)"
-msgstr "**Qwen** (3系列)"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "`Qwen/Qwen3-32B`"
-msgstr "`Qwen/Qwen3-32B`"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "qwen_3"
-msgstr "qwen_3"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid ""
 "Alibaba’s latest Qwen3 series for complex reasoning, language "
 "understanding, and generation tasks; Support for dense variants along "
 "with previous generation 3,  etc."
-msgstr "阿里巴巴最新的Qwen3系列，用于复杂推理、语言理解和生成任务；支持密集变体以及前代3等。"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "**Qwen** (2.5, 2, 1.5, QWQ series)"
-msgstr "**Qwen** (2.5, 2, 1.5, QWQ系列)"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "`Qwen/Qwen2-72B`"
-msgstr "`Qwen/Qwen2-72B`"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "qwen_2"
-msgstr "qwen_2"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid ""
 "Alibaba’s latest Qwen2 series for complex reasoning, language "
 "understanding, and generation tasks; Support fo dense along with previous"
 " generation 2.5, 2, 1.5, etc."
-msgstr "阿里巴巴最新的Qwen2系列，用于复杂推理、语言理解和生成任务；支持密集变体以及前代2.5、2、1.5等。"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "**Qwen** (1 series)"
-msgstr "**Qwen** (1系列)"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "`Qwen/Qwen-72B`"
-msgstr "`Qwen/Qwen-72B`"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "qwen"
-msgstr "qwen"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid ""
 "Alibaba’s latest Qwen3 series for complex reasoning, language "
 "understanding, and generation tasks; Support for MoE variants along with "
 "previous generation 2.5, 2, etc."
-msgstr "阿里巴巴最新的Qwen3系列，用于复杂推理、语言理解和生成任务；支持MoE变体以及前代2.5、2等。"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "**Llama** (2, 3.x, 4 series)"
-msgstr "**Llama** (2, 3.x, 4系列)"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "`meta-llama/Llama-4-Scout-17B-16E-Instruct`"
-msgstr "`meta-llama/Llama-4-Scout-17B-16E-Instruct`"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "llama"
-msgstr "llama"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid ""
 "Meta’s open LLM series, spanning 7B to 400B parameters (Llama 2, 3, and "
 "new Llama 4) with well-recognized performance."
-msgstr "Meta的开源LLM系列，参数规模从7B到400B（Llama 2、3和新Llama 4），性能卓越。"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "**Mistral** (Mixtral, NeMo, Small3)"
-msgstr "**Mistral** (Mixtral, NeMo, Small3)"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "`mistralai/Mistral-7B-Instruct-v0.2`"
-msgstr "`mistralai/Mistral-7B-Instruct-v0.2`"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "mistral"
-msgstr "mistral"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid ""
 "Open 7B LLM by Mistral AI with strong performance; extended into MoE "
 "(“Mixtral”) and NeMo Megatron variants for larger scale."
-msgstr "Mistral AI开源的7B LLM，性能强劲；扩展为MoE（\"Mixtral\"）和NeMo Megatron变体以支持更大规模。"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "**Gemma** (v1, v2, v3)"
-msgstr "**Gemma** (v1, v2, v3)"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "`google/gemma-3-1b-it`"
-msgstr "`google/gemma-3-1b-it`"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "gemma"
-msgstr "gemma"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid ""
 "Google’s family of efficient multilingual models (1B–27B); Gemma 3 offers"
 " a 128K context window, and its larger (4B+) variants support vision "
 "input."
-msgstr "Google高效的多语言模型系列（1B-27B）；Gemma 3提供128K上下文窗口，其较大的（4B+）变体支持视觉输入。"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "**Phi** (Phi-1.5, Phi-2, Phi-3, Phi-4, Phi-MoE series)"
-msgstr "**Phi** (Phi-1.5, Phi-2, Phi-3, Phi-4, Phi-MoE系列)"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "`microsoft/Phi-4-multimodal-instruct`, `microsoft/Phi-3.5-MoE-instruct`"
-msgstr "`microsoft/Phi-4-multimodal-instruct`, `microsoft/Phi-3.5-MoE-instruct`"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "phi"
-msgstr "phi"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid ""
 "Microsoft’s Phi family of small models (1.3B–5.6B); Phi-4-multimodal "
 "(5.6B) processes text, images, and speech, Phi-4-mini is a high-accuracy "
 "text model and Phi-3.5-MoE is a mixture-of-experts model."
-msgstr "微软的小型模型Phi系列（1.3B-5.6B）；Phi-4-multimodal（5.6B）处理文本、图像和语音，Phi-4-mini是高精度文本模型，Phi-3.5-MoE是专家混合模型。"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "**DBRX** (Databricks)"
-msgstr "**DBRX** (Databricks)"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "`databricks/dbrx-instruct`"
-msgstr "`databricks/dbrx-instruct`"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "Dbrx"
-msgstr "Dbrx"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid ""
 "Databricks’ 132B-parameter MoE model (36B active) trained on 12T tokens; "
 "competes with GPT-3.5 quality as a fully open foundation model."
-msgstr "Databricks的132B参数MoE模型（36B激活），在12T token上训练；作为完全开源的基础模型，与GPT-3.5质量竞争。"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "**ChatGLM2**"
-msgstr "**ChatGLM2**"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "`zai-org/chatglm2-6b`"
-msgstr "`zai-org/chatglm2-6b`"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "chat_glm_2"
-msgstr "chat_glm_2"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid ""
 "Zhipu AI’s bilingual chat model (6B) excelling at Chinese-English "
 "dialogue; fine-tuned for conversational quality and alignment."
-msgstr "智谱AI的双语聊天模型（6B），在中英文对话方面表现出色；为对话质量和对齐进行了微调。"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "**ChatGLM3**"
-msgstr "**ChatGLM3**"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "`zai-org/chatglm3-6b`"
-msgstr "`zai-org/chatglm3-6b`"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "chat_glm_3"
-msgstr "chat_glm_3"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "**GLM4**"
-msgstr "**GLM4**"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "`zai-org/glm-4-9b-hf`"
-msgstr "`zai-org/glm-4-9b-hf`"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "chat_glm_4"
-msgstr "chat_glm_4"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "**InternLM 2** (7B, 20B)"
-msgstr "**InternLM 2** (7B, 20B)"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "`internlm/internlm2-7b`"
-msgstr "`internlm/internlm2-7b`"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "internlm2"
-msgstr "internlm2"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid ""
 "Next-gen InternLM (7B and 20B) from SenseTime, offering strong reasoning "
 "and ultra-long context support (up to 200K tokens)."
-msgstr "商汤科技的下一代InternLM（7B和20B），提供强大的推理能力和超长上下文支持（最多200K token）。"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "**Baichuan 2** (7B, 13B)"
-msgstr "**Baichuan 2** (7B, 13B)"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "`baichuan-inc/Baichuan2-13B-Chat`"
-msgstr "`baichuan-inc/Baichuan2-13B-Chat`"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "baichuan2"
-msgstr "baichuan2"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid ""
 "BaichuanAI’s second-generation Chinese-English LLM (7B/13B) with improved"
 " performance and an open commercial license."
-msgstr "百川智能的第二代中英文LLM（7B/13B），性能提升并具有开放的商业许可。"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "**XVERSE**"
-msgstr "**XVERSE**"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid "`xverse/XVERSE-13B`"
-msgstr "`xverse/XVERSE-13B`"
+msgstr ""
 
 #: ../../supported_models/generative_models.md
 msgid ""
 "Yuanxiang’s open LLM supporting ~40 languages; delivers 100B+ dense-level"
 " performance via expert routing."
-msgstr "元象的开源LLM，支持约40种语言；通过专家路由实现100B+的密集级性能。"
+msgstr ""
 

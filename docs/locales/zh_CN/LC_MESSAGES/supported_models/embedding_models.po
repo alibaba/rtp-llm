@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-12 17:38+0800\n"
+"POT-Creation-Date: 2025-10-20 10:08+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../supported_models/embedding_models.md:1
 msgid "Embedding Models"
-msgstr "Embedding 模型"
+msgstr ""
 
 #: ../../supported_models/embedding_models.md:3
 msgid ""
@@ -30,7 +30,7 @@ msgid ""
 "architectures such as BGE-M3, enabling hybrid request processing within a"
 " single service instance. Built on Sentence Transformers, it allows users"
 " to tailor post-processing workflows to standard model architectures."
-msgstr "RTP-LLM支持部署主流的嵌入模型、重排模型和分类模型，专门处理多嵌入架构如BGE-M3，实现在单一服务实例内的混合请求处理。基于Sentence Transformers构建，允许用户为标准模型架构定制后处理工作流程。"
+msgstr ""
 
 #: ../../supported_models/embedding_models.md:5
 msgid ""
@@ -38,79 +38,80 @@ msgid ""
 " accelerate inference. The engine optimizes both intra- and inter-request"
 " sequence batching according to user configuration, eliminating redundant"
 " computation and improving GPU utilization."
-msgstr "在模型层，RTP-LLM利用高性能计算内核来加速推理。引擎根据用户配置优化请求内和请求间的序列批处理，消除冗余计算并提高GPU利用率。"
+msgstr ""
 
 #: ../../supported_models/embedding_models.md:7
 msgid "Example Launch Command"
-msgstr "示例启动命令"
+msgstr ""
 
 #: ../../supported_models/embedding_models.md:20
 msgid "Example Client Request"
-msgstr "示例客户端请求"
+msgstr ""
 
 #: ../../supported_models/embedding_models.md:21
 msgid "Dense Embedding"
-msgstr "Dense Embedding"
+msgstr ""
 
 #: ../../supported_models/embedding_models.md:31
 msgid "Reranker"
-msgstr "重排器"
+msgstr ""
 
 #: ../../supported_models/embedding_models.md:47
 msgid "Classifier"
-msgstr "分类器"
+msgstr ""
 
 #: ../../supported_models/embedding_models.md:63
 msgid "BGE_M3"
-msgstr "BGE_M3模型"
+msgstr ""
 
 #: ../../supported_models/embedding_models.md:77
 msgid "Supported models"
-msgstr "支持的模型"
+msgstr ""
 
 #: ../../supported_models/embedding_models.md
 msgid "Model Family (Embedding)"
-msgstr "模型系列（嵌入模型）"
+msgstr ""
 
 #: ../../supported_models/embedding_models.md
 msgid "Example HuggingFace Identifier"
-msgstr "HuggingFace标识符示例"
+msgstr ""
 
 #: ../../supported_models/embedding_models.md
 msgid "Chat Template"
-msgstr "聊天模板"
+msgstr ""
 
 #: ../../supported_models/embedding_models.md
 msgid "Description"
-msgstr "描述"
+msgstr ""
 
 #: ../../supported_models/embedding_models.md
 msgid "**Qwen3 Embedding/Reranker**"
-msgstr "**Qwen3 Embedding/重排模型**"
+msgstr ""
 
 #: ../../supported_models/embedding_models.md
 msgid "`Qwen/Qwen3-Embedding-8B`"
-msgstr "`Qwen/Qwen3-Embedding-8B`"
+msgstr ""
 
 #: ../../supported_models/embedding_models.md
 msgid "N/A"
-msgstr "不适用"
+msgstr ""
 
 #: ../../supported_models/embedding_models.md
 msgid "Support all size of qwen3 embedding/reranker"
-msgstr "支持所有尺寸的qwen3嵌入/重排模型"
+msgstr ""
 
 #: ../../supported_models/embedding_models.md
 msgid "**BGE (BgeEmbeddingModel)**"
-msgstr "**BGE (BgeEmbeddingModel)**"
+msgstr ""
 
 #: ../../supported_models/embedding_models.md
 msgid "`BAAI/bge-large-en-v1.5`"
-msgstr "`BAAI/bge-large-en-v1.5`"
+msgstr ""
 
 #: ../../supported_models/embedding_models.md
 msgid ""
 "only support BGE family with model_type=`Bert/Roberta/Qwen2`  including "
 "bge_m3, not suport `ModernBert` or `NewModel` . Specially, please set "
 "`model_type=qwen_2_embedding` for `Alibaba-NLP/gte-Qwen2-7B-instruct`"
-msgstr "仅支持model_type=`Bert/Roberta/Qwen2`的BGE系列，包括bge_m3，不支持`ModernBert`或`NewModel`。特别地，请为`Alibaba-NLP/gte-Qwen2-7B-instruct`设置`model_type=qwen_2_embedding`"
+msgstr ""
+

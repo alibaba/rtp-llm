@@ -1,15 +1,16 @@
-# RTP-LLM 调试文档翻译
+# SOME DESCRIPTIVE TITLE.
 # Copyright (C) 2023-2025, RTP-LLM
 # This file is distributed under the same license as the RTP-LLM package.
 # FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
 #
+#, fuzzy
 msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-17 10:23+0800\n"
-"PO-Revision-Date: 2025-09-17 15:06+0800\n"
-"Last-Translator: 来羽 <xj226049@alibaba-inc.com>\n"
+"POT-Creation-Date: 2025-10-20 10:08+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
 "Language-Team: zh_CN <LL@li.org>\n"
 "Plural-Forms: nplurals=1; plural=0;\n"
@@ -20,7 +21,7 @@ msgstr ""
 
 #: ../../references/debug.md:1
 msgid "Debugging RTP-LLM"
-msgstr "RTP-LLM调试"
+msgstr ""
 
 #: ../../references/debug.md:3
 msgid ""
@@ -30,16 +31,14 @@ msgid ""
 "combination of Python and C++ code, we will introduce several commonly "
 "used debugging methods in this guide."
 msgstr ""
-"RTP-LLM项目使用Bazel构建系统。在了解如何从头开始本地编译和运行RTP-LLM之后，本文将介绍如何调试代码。由于RTP-"
-"LLM主要由Python和C++代码组合而成，我们将在本指南中介绍几种常用的调试方法。"
 
 #: ../../references/debug.md:4
 msgid "Debug Python Part"
-msgstr "调试Python部分"
+msgstr ""
 
 #: ../../references/debug.md:6
 msgid "Method 1: logging or print"
-msgstr "方法一：日志或打印"
+msgstr ""
 
 #: ../../references/debug.md:8
 msgid ""
@@ -49,22 +48,20 @@ msgid ""
 "frontend server is launched, allowing print statements and logging "
 "outputs to be directly displayed in the terminal."
 msgstr ""
-"在本地运行调试模式时，将rtp_llm/config/py_config_modules.py中ServerConfig类的self.frontend_server_count"
-" = 4修改为1。这个修改确保只启动一个前端服务器，允许打印语句和日志输出直接在终端中显示。"
 
 #: ../../references/debug.md:11
 msgid "Method 2: python debugger"
-msgstr "方法二：Python调试器"
+msgstr ""
 
 #: ../../references/debug.md:12
 msgid ""
 "Assuming we already have an existing container, access it and set up an "
 "SSH port mapping to enable remote connections."
-msgstr "假设我们已经有一个现有的容器，访问它并设置SSH端口映射以启用远程连接。"
+msgstr ""
 
 #: ../../references/debug.md:17
 msgid "Access the container via the SSH extension in VS Code."
-msgstr "通过VS Code中的SSH扩展访问容器。"
+msgstr ""
 
 #: ../../references/debug.md:25
 msgid ""
@@ -72,117 +69,110 @@ msgid ""
 "extension is installed within the container. ![alt text](../pics"
 "/debug_image-debugger.png)"
 msgstr ""
-"通过VS Code访问容器后，确保Python调试器扩展已安装在容器中。![替代文本](../pics/debug_image-"
-"debugger.png)"
 
 #: ../../references/debug.md:25 ../../references/debug.md:107
 #: ../../references/debug.md:132 ../../references/debug.md:141
 #: ../../references/debug.md:151 ../../references/debug.md:208
 #: ../../references/debug.md:216
 msgid "alt text"
-msgstr "替代文本"
+msgstr ""
 
 #: ../../references/debug.md:28
-#, fuzzy
 msgid ""
 "Write the launch.json configuration file for debugging. Here’s an example"
 " of a VS Code launch.json configuration file for debugging Python and C++"
 " code in the RTP-LLM project (adjust paths as needed):"
 msgstr ""
-"编写调试用的launch.json配置文件。以下是RTP-LLM项目中用于调试Python和C++代码的VS Code "
-"launch.json配置文件示例（根据需要调整路径）："
 
 #: ../../references/debug.md:67
 msgid ""
 "Set up the required environment variables before running or debugging the"
 " code."
-msgstr "在运行或调试代码之前设置所需的环境变量。"
+msgstr ""
 
 #: ../../references/debug.md:105
 msgid ""
 "open the file containing start_server.py, set breakpoints, and begin "
 "debugging."
-msgstr "打开包含start_server.py的文件，设置断点，然后开始调试。"
+msgstr ""
 
 #: ../../references/debug.md:107
 msgid "![alt text](../pics/debug_image-1.png)"
-msgstr "![替代文本](../pics/debug_image-1.png)"
+msgstr ""
 
 #: ../../references/debug.md:110
 msgid "Debug C++ Part"
-msgstr "调试C++部分"
+msgstr ""
 
 #: ../../references/debug.md:111
 msgid "Method 1: logging"
-msgstr "方法一：日志记录"
+msgstr ""
 
 #: ../../references/debug.md:112
 msgid "Add the following log statements for output:"
-msgstr "添加以下日志语句进行输出："
+msgstr ""
 
 #: ../../references/debug.md:116
 msgid "other similar functions include:"
-msgstr "其他类似函数包括："
+msgstr ""
 
 #: ../../references/debug.md:122
 msgid "Set the log level using the LOG_LEVEL=\"INFO\" environment variable."
-msgstr "使用LOG_LEVEL=\"INFO\"环境变量设置日志级别。"
+msgstr ""
 
 #: ../../references/debug.md:124
 msgid "Method 2: GDB debug"
-msgstr "方法二：GDB调试"
+msgstr ""
 
 #: ../../references/debug.md:125
 msgid "GDB debug core"
-msgstr "GDB调试核心"
+msgstr ""
 
 #: ../../references/debug.md:126
 msgid ""
 "When the code crashes with a core dump in the container, a core file is "
 "generated (e.g., core-rtp_llm_backend-78933-1757510512). To debug:"
 msgstr ""
-"当代码在容器中崩溃并产生核心转储时，会生成一个核心文件（例如，core-"
-"rtp_llm_backend-78933-1757510512）。调试方法："
 
 #: ../../references/debug.md:130
 msgid ""
 "After loading the core file into GDB, run the bt (backtrace) command to "
 "display the error stack trace."
-msgstr "将核心文件加载到GDB后，运行bt（回溯）命令显示错误堆栈跟踪。"
+msgstr ""
 
 #: ../../references/debug.md:132
 msgid "![alt text](../pics/debug_image-2.png)"
-msgstr "![替代文本](../pics/debug_image-2.png)"
+msgstr ""
 
 #: ../../references/debug.md:141
 msgid "![alt text](../pics/debug_image-3.png)"
-msgstr "![替代文本](../pics/debug_image-3.png)"
+msgstr ""
 
 #: ../../references/debug.md:143
 msgid "check propose_stream_ info"
-msgstr "检查propose_stream_信息"
+msgstr ""
 
 #: ../../references/debug.md:149
 msgid "check tokens info"
-msgstr "检查token信息"
+msgstr ""
 
 #: ../../references/debug.md:151
 msgid "![alt text](../pics/debug_image-4.png)"
-msgstr "![替代文本](../pics/debug_image-4.png)"
+msgstr ""
 
 #: ../../references/debug.md:153
 msgid "A null pointer (data_ = 0) was detected, causing a memcpy error."
-msgstr "检测到空指针（data_ = 0），导致memcpy错误。"
+msgstr ""
 
 #: ../../references/debug.md:155
 msgid "GDB debug process"
-msgstr "GDB调试进程"
+msgstr ""
 
 #: ../../references/debug.md:174
 msgid ""
 "After starting the service, you can view the relevant processes as "
 "follows:"
-msgstr "启动服务后，您可以按如下方式查看相关进程："
+msgstr ""
 
 #: ../../references/debug.md:177
 msgid ""
@@ -192,50 +182,48 @@ msgid ""
 "rtp_llm_frontend_server_0 frontend service process will be active to "
 "handle external requests."
 msgstr ""
-"rtp_llm_backend_server进程将作为推理服务的主进程运行。如果设置了TP_SIZE=2，您将看到两个子进程（例如，rank-"
-"0和rank-1）用于张量并行。rtp_llm_frontend_server_0前端服务进程将处于活动状态以处理外部请求。"
 
 #: ../../references/debug.md:185
 msgid ""
 "To begin debugging with GDB: Attach GDB to the target process (e.g., PID "
 "40954):"
-msgstr "开始GDB调试：将GDB附加到目标进程（例如，PID 40954）："
+msgstr ""
 
 #: ../../references/debug.md:190
 msgid ""
 "Set breakpoints in the code Use curl to send a test request and trigger "
 "the breakpoint:"
-msgstr "在代码中设置断点，使用curl发送测试请求并触发断点："
+msgstr ""
 
 #: ../../references/debug.md:206
 msgid ""
 "The breakpoint will be triggered, and you can then examine the code path "
 "by inspecting the stack trace."
-msgstr "断点将被触发，然后通过检查堆栈跟踪来检查代码路径。"
+msgstr ""
 
 #: ../../references/debug.md:208
 msgid "![alt text](../pics/debug_image-5.png)"
-msgstr "![替代文本](../pics/debug_image-5.png)"
+msgstr ""
 
 #: ../../references/debug.md:210
 msgid "Method 3: Unit Test"
-msgstr "方法三：单元测试"
+msgstr ""
 
 #: ../../references/debug.md:212
 msgid "Example: Unit Testing for the ViT Module"
-msgstr "示例：ViT模块的单元测试"
+msgstr ""
 
 #: ../../references/debug.md:214
 msgid "File Structure of the ViT Module"
-msgstr "ViT模块的文件结构"
+msgstr ""
 
 #: ../../references/debug.md:216
 msgid "![alt text](../pics/debug_image-6.png)"
-msgstr "![替代文本](../pics/debug_image-6.png)"
+msgstr ""
 
 #: ../../references/debug.md:218
 msgid "Steps to Create Unit Tests Create Test Files:"
-msgstr "创建单元测试的步骤 创建测试文件："
+msgstr ""
 
 #: ../../references/debug.md:221
 msgid ""
@@ -243,12 +231,10 @@ msgid ""
 "directory. Write Google Test (gtest) cases using assertions like "
 "EXPECT_EQ to validate behavior."
 msgstr ""
-"在测试目录下添加一个.cc测试文件（例如，multimodal_processor_test.cc）。使用EXPECT_EQ等断言语句编写Google"
-" Test（gtest）用例来验证行为。"
 
 #: ../../references/debug.md:230
 msgid "Define the BUILD File:"
-msgstr "定义BUILD文件："
+msgstr ""
 
 #: ../../references/debug.md:243
 msgid "Run the Test: Execute the following command in the project’s container:"
@@ -262,53 +248,53 @@ msgstr ""
 msgid ""
 "To retrieve debugging information via a curl request, use the following "
 "command with verbose output:"
-msgstr "要通过curl请求获取调试信息，请使用以下带有详细输出的命令："
+msgstr ""
 
 #: ../../references/debug.md:254
 msgid ""
 "Enabling aux_info: true and debug_info: true in the request will return "
 "additional auxiliary information and debugging details."
-msgstr "在请求中启用aux_info: true和debug_info: true将返回额外的辅助信息和调试详细信息。"
+msgstr ""
 
 #: ../../references/debug.md:270 ../../references/debug.md:416
 msgid "response:"
-msgstr "响应："
+msgstr ""
 
 #: ../../references/debug.md:398
 msgid ""
 "Enabling return_softmax_probs: true in the request will return softmax "
 "probs details."
-msgstr "在请求中启用return_softmax_probs: true将返回softmax概率详细信息。\""
+msgstr ""
 
 #: ../../references/debug.md:473
 msgid "Additional configuration options are available, such as:"
-msgstr "还有其他配置选项可用，例如："
+msgstr ""
 
 #: ../../references/debug.md:475
 msgid "return_logits"
-msgstr "返回logits"
+msgstr ""
 
 #: ../../references/debug.md:476
 msgid "return_cum_log_probs"
-msgstr "返回累积对数概率"
+msgstr ""
 
 #: ../../references/debug.md:477
 msgid "return_incremental"
-msgstr "返回增量"
+msgstr ""
 
 #: ../../references/debug.md:478
 msgid "return_hidden_states"
-msgstr "返回隐藏状态"
+msgstr ""
 
 #: ../../references/debug.md:479
 msgid "return_output_ids"
-msgstr "返回输出ID"
+msgstr ""
 
 #: ../../references/debug.md:480
 msgid "return_input_ids"
-msgstr "返回输入ID"
+msgstr ""
 
 #: ../../references/debug.md:481
 msgid "return_all_probs"
-msgstr "返回所有概率"
+msgstr ""
 

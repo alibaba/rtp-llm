@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-19 11:21+0800\n"
+"POT-Creation-Date: 2025-10-20 10:08+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -21,18 +21,18 @@ msgstr ""
 
 #: ../../backend/openai_api_completions.ipynb:9
 msgid "OpenAI APIs - Completions"
-msgstr "OpenAI API - 文本生成/会话"
+msgstr ""
 
 #: ../../backend/openai_api_completions.ipynb:11
 msgid ""
 "RTP-LLM provides OpenAI-compatible APIs to enable a smooth transition "
 "from OpenAI services to self-hosted local models. This tutorial covers "
 "the following popular APIs:"
-msgstr "RTP-LLM提供与OpenAI兼容的API，以实现从OpenAI服务到自托管本地模型的平稳过渡。本教程涵盖了以下热门API："
+msgstr ""
 
 #: ../../backend/openai_api_completions.ipynb:13
 msgid "``v1/chat/completions``"
-msgstr "``v1/chat/completions``"
+msgstr ""
 
 #: ../../backend/openai_api_completions.ipynb:15
 msgid ""
@@ -40,42 +40,39 @@ msgid ""
 "<./openai_api_vision.ipynb>`__ for vision-language models and `embedding "
 "APIs <./openai_api_embeddings.ipynb>`__ for embedding models."
 msgstr ""
-"查看其他教程了解视觉语言模型的`视觉API <./openai_api_vision.ipynb>`__和嵌入模型的`嵌入API "
-"<./openai_api_embeddings.ipynb>`__。"
 
 #: ../../backend/openai_api_completions.ipynb:27
 msgid "Launch A Server"
-msgstr "启动服务器"
+msgstr ""
 
 #: ../../backend/openai_api_completions.ipynb:29
 msgid "Launch the server in your terminal and wait for it to initialize."
-msgstr "在终端中启动服务器并等待其初始化完成。"
+msgstr ""
 
 #: ../../backend/openai_api_completions.ipynb:31
-#, fuzzy
 msgid "export CUDA_VISIBLE_DEVICES=1"
-msgstr "export CUDA_VISIBLE_DEVICES=1"
+msgstr ""
 
 #: ../../backend/openai_api_completions.ipynb:62
 msgid "Chat Completions"
-msgstr "聊天补全"
+msgstr ""
 
 #: ../../backend/openai_api_completions.ipynb:65
 #: ../../backend/openai_api_completions.ipynb:179
 msgid "Usage"
-msgstr "用法"
+msgstr ""
 
 #: ../../backend/openai_api_completions.ipynb:67
 msgid ""
 "The server fully implements the OpenAI API. It will automatically apply "
 "the chat template specified in the Hugging Face tokenizer, if one is "
 "available."
-msgstr "服务器完全实现了OpenAI API。如果Hugging Face分词器中指定了聊天模板，它将自动应用该模板。"
+msgstr ""
 
 #: ../../backend/openai_api_completions.ipynb:102
 #: ../../backend/openai_api_completions.ipynb:211
 msgid "Parameters"
-msgstr "参数"
+msgstr ""
 
 #: ../../backend/openai_api_completions.ipynb:104
 msgid ""
@@ -84,8 +81,6 @@ msgid ""
 "<https://platform.openai.com/docs/api-reference/chat/create>`__ for more "
 "details."
 msgstr ""
-"聊天补全API接受OpenAI聊天补全API的参数。更多详情请参考`OpenAI聊天补全API "
-"<https://platform.openai.com/docs/api-reference/chat/create>`__。"
 
 #: ../../backend/openai_api_completions.ipynb:106
 msgid ""
@@ -94,22 +89,20 @@ msgid ""
 "``extra_configs`` is ``chat_template_kwargs``, which can be used to pass "
 "arguments to the chat template processor."
 msgstr ""
-"RTP-"
-"LLM通过``extra_configs``参数扩展了标准API，允许进行额外的自定义。``extra_configs``中的一个关键选项是``chat_template_kwargs``，可用于向聊天模板处理器传递参数。"
 
 #: ../../backend/openai_api_completions.ipynb:109
 msgid "Enabling Model Thinking/Reasoning"
-msgstr "启用模型思考/推理"
+msgstr ""
 
 #: ../../backend/openai_api_completions.ipynb:176
 msgid "Completions"
-msgstr "补全"
+msgstr ""
 
 #: ../../backend/openai_api_completions.ipynb:181
 msgid ""
 "Completions API is similar to Chat Completions API, but without the "
 "``messages`` parameter or chat templates."
-msgstr "补全API与聊天补全API类似，但没有``messages``参数或聊天模板。"
+msgstr ""
 
 #: ../../backend/openai_api_completions.ipynb:213
 msgid ""
@@ -117,10 +110,8 @@ msgid ""
 " `OpenAI Completions API <https://platform.openai.com/docs/api-"
 "reference/completions/create>`__ for more details."
 msgstr ""
-"补全API接受OpenAI补全API的参数。更多详情请参考`OpenAI补全API "
-"<https://platform.openai.com/docs/api-reference/completions/create>`__。"
 
 #: ../../backend/openai_api_completions.ipynb:215
 msgid "Here is an example of a detailed completions request:"
-msgstr "以下是一个详细的补全请求示例："
+msgstr ""
 

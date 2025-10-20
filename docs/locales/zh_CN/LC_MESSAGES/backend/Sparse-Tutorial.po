@@ -3,13 +3,14 @@
 # This file is distributed under the same license as the RTP-LLM package.
 # FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
 #
+#, fuzzy
 msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-15 16:46+0800\n"
-"PO-Revision-Date: 2025-09-17 15:01+0800\n"
-"Last-Translator: 来羽 <xj226049@alibaba-inc.com>\n"
+"POT-Creation-Date: 2025-10-20 10:08+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
 "Language-Team: zh_CN <LL@li.org>\n"
 "Plural-Forms: nplurals=1; plural=0;\n"
@@ -20,7 +21,7 @@ msgstr ""
 
 #: ../../backend/Sparse-Tutorial.md:1
 msgid "Background"
-msgstr "背景"
+msgstr ""
 
 #: ../../backend/Sparse-Tutorial.md:2
 msgid ""
@@ -31,15 +32,10 @@ msgid ""
 "by layer. Applied to [Large Language Model based Long-tail Query "
 "Rewriting in Taobao Search](https://arxiv.org/abs/2311.03758)."
 msgstr ""
-"支持结构化剪枝 [LLM-Pruner: On the Structural Pruning of "
-"Large Language Models](https://arxiv.org/abs/2305.11627)。具体来说，"
-"对于注意力层，head_num 在每一层都有所不同（其中 head "
-"数量可以减少到 0）；对于 FFN 层，inter_size 在每一层都有所不同。应用于 [Large Language Model based Long-tail Query "
-"Rewriting in Taobao Search](https://arxiv.org/abs/2311.03758)。"
 
 #: ../../backend/Sparse-Tutorial.md:5
 msgid "Usage"
-msgstr "使用方法"
+msgstr ""
 
 #: ../../backend/Sparse-Tutorial.md:7
 msgid ""
@@ -48,16 +44,14 @@ msgid ""
 "to be consistent with layer_num. The config needs to be consistent with "
 "the trained ckpt. For example:"
 msgstr ""
-"在模型的 config.json 中添加两个列表来指定每一层的 head_num 和 "
-"inter_size，列表中元素的数量需要与 layer_num 保持一致。配置需要与训练的 ckpt 保持一致。例如："
 
 #: ../../backend/Sparse-Tutorial.md:18
 msgid "Then you can call it directly."
-msgstr "然后您可以直接调用它。"
+msgstr ""
 
 #: ../../backend/Sparse-Tutorial.md:20
 msgid ""
 "Currently, sparse only supports limited models such as Qwen, but it can "
 "be easily extended to other models with reference to Qwen."
 msgstr ""
-"目前，稀疏化仅支持有限的模型，如 Qwen，但可以参考 Qwen 轻松扩展到其他模型。"
+

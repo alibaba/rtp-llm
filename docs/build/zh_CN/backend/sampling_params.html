@@ -8,7 +8,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
-    <title>采样配置 &#8212; RTP-LLM</title>
+    <title>Sampling Config &#8212; RTP-LLM</title>
   
   
   
@@ -55,11 +55,11 @@
     <link rel="icon" href="../_static/logo.ico"/>
     <link rel="index" title="索引" href="../genindex.html" />
     <link rel="search" title="搜索" href="../search.html" />
-    <link rel="next" title="注意力后端" href="attention_backend.html" />
-    <link rel="prev" title="服务器参数" href="server_arguments.html" /> 
+    <link rel="next" title="Attention Backend" href="attention_backend.html" />
+    <link rel="prev" title="ServerArgs" href="server_arguments.html" /> 
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="zh-CN"/>
-    <meta name="docbuild:last-update" content="2025 年 10 月 15 日"/>
+    <meta name="docbuild:last-update" content="2025 年 10 月 20 日"/>
 <link
   rel="stylesheet"
   href="../_static/css/language-switcher.css"
@@ -173,64 +173,64 @@
  </script></div>
         <div class="sidebar-primary-item"><nav class="bd-links bd-docs-nav" aria-label="Main">
     <div class="bd-toc-item navbar-nav active">
-        <p aria-level="2" class="caption" role="heading"><span class="caption-text">安装</span></p>
+        <p aria-level="2" class="caption" role="heading"><span class="caption-text">Installation</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../start/install.html">安装 RTP-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../start/install.html">Install RTP-LLM</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">发布版本</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Release Version</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../release/v0.2.0/release.html">RTP-LLM 0.2.0</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">基本用法</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Basic Usage</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="send_request.html">发送请求</a></li>
-<li class="toctree-l1"><a class="reference internal" href="openai_api_completions.html">OpenAI API - 文本生成/会话</a></li>
-<li class="toctree-l1"><a class="reference internal" href="openai_api_vision.html">OpenAI API - 多模态</a></li>
-<li class="toctree-l1"><a class="reference internal" href="openai_api_embeddings.html">OpenAI API - Embedding</a></li>
-<li class="toctree-l1"><a class="reference internal" href="native_api.html">RTP-LLM Native API</a></li>
+<li class="toctree-l1"><a class="reference internal" href="send_request.html">Sending Requests</a></li>
+<li class="toctree-l1"><a class="reference internal" href="openai_api_completions.html">OpenAI APIs - Completions</a></li>
+<li class="toctree-l1"><a class="reference internal" href="openai_api_vision.html">OpenAI APIs - Vision</a></li>
+<li class="toctree-l1"><a class="reference internal" href="openai_api_embeddings.html">OpenAI APIs - Embedding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="native_api.html">RTP-LLM Native APIs</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">后端教程</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Backend Tutorial</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../references/deepseek/index.html">deepseek</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../references/qwen/index.html">qwen-moe</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../references/kimi/index.html">kimi</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">高级后端配置</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Advanced Backend Configurations</span></p>
 <ul class="current nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="server_arguments.html">服务器参数</a></li>
-<li class="toctree-l1 current active"><a class="current reference internal" href="#">采样配置</a></li>
-<li class="toctree-l1"><a class="reference internal" href="attention_backend.html">注意力后端</a></li>
+<li class="toctree-l1"><a class="reference internal" href="server_arguments.html">ServerArgs</a></li>
+<li class="toctree-l1 current active"><a class="current reference internal" href="#">Sampling Config</a></li>
+<li class="toctree-l1"><a class="reference internal" href="attention_backend.html">Attention Backend</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">支持的模型</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Supported Models</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../supported_models/generative_models.html">大语言模型</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../supported_models/multimodal_language_models.html">多模态语言模型</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../supported_models/embedding_models.html">Embedding 模型</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../supported_models/support_new_models.html">如何支持新模型</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/generative_models.html">Large Language Models</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/multimodal_language_models.html">Multimodal Language Models</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/embedding_models.html">Embedding Models</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/support_new_models.html">How to Support New Models</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">高级功能</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Advanced Features</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="speculative_decoding.html">推测解码</a></li>
-<li class="toctree-l1"><a class="reference internal" href="reuse_kv_cache.html">重用缓存</a></li>
+<li class="toctree-l1"><a class="reference internal" href="speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="reuse_kv_cache.html">ReuseCache</a></li>
 
-<li class="toctree-l1"><a class="reference internal" href="function_calling.html">工具和函数调用</a></li>
-<li class="toctree-l1"><a class="reference internal" href="quantization.html">量化</a></li>
-<li class="toctree-l1"><a class="reference internal" href="lora.html">LoRA 服务</a></li>
-<li class="toctree-l1"><a class="reference internal" href="pd_disaggregation.html">PD分离</a></li>
+<li class="toctree-l1"><a class="reference internal" href="function_calling.html">Tool and Function Calling</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="lora.html">LoRA Serving</a></li>
+<li class="toctree-l1"><a class="reference internal" href="pd_disaggregation.html">PD Disaggregation</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">RTP-LLM 路由器</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">RTP-LLM Router</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="flexlb.html">FlexLB（弹性负载均衡器）- 主节点</a></li>
+<li class="toctree-l1"><a class="reference internal" href="flexlb.html">FlexLB (Flexible Load Balancer) - Master Role</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Benchmark</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../benchmark/benchmark.html">RTP-LLM 性能基准测试工具</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../benchmark/benchmark.html">RTP-LLM Performance Benchmark Tool</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">参考文献</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">References</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../references/general.html">通用指南</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../references/developer.html">开发者参考</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../README.html">文档手册</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../references/general.html">General Guidance</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../references/developer.html">Developer Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../README.html">Documentation Manual</a></li>
 </ul>
 
     </div>
@@ -450,7 +450,7 @@ document.write(`
               
 
 <div id="jb-print-docs-body" class="onlyprint">
-    <h1>采样配置</h1>
+    <h1>Sampling Config</h1>
     <!-- Table of contents -->
     <div id="print-main-content">
         <div id="jb-print-toc">
@@ -460,17 +460,17 @@ document.write(`
             </div>
             <nav aria-label="Page">
                 <ul class="visible nav section-nav flex-column">
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#basic-control-parameters">基础控制参数</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#advanced-control-parameters">高级控制参数</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#return-control-parameters">返回控制参数</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#special-mode-parameters">特殊模式参数</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#environment-variable-description">环境变量说明</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#sampling-strategy-description">采样策略说明</a><ul class="visible nav section-nav flex-column">
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#combined-strategy-example">组合策略示例</a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#strategy-recommended-values">策略推荐值</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#basic-control-parameters">Basic Control Parameters</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#advanced-control-parameters">Advanced Control Parameters</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#return-control-parameters">Return Control Parameters</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#special-mode-parameters">Special Mode Parameters</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#environment-variable-description">Environment Variable Description</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#sampling-strategy-description">Sampling Strategy Description</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#combined-strategy-example">Combined Strategy Example</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#strategy-recommended-values">Strategy Recommended Values</a></li>
 </ul>
 </li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#parameter-usage-notes">参数使用注意事项</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#parameter-usage-notes">Parameter Usage Notes</a></li>
 </ul>
             </nav>
         </div>
@@ -483,8 +483,8 @@ document.write(`
                 <article class="bd-article">
                   
   <section class="tex2jax_ignore mathjax_ignore" id="sampling-config">
-<h1>采样配置<a class="headerlink" href="#sampling-config" title="Link to this heading">#</a></h1>
-<p>对于 OpenAI 协议，<strong>top_p</strong> 和 <strong>temperature</strong> 在外层协议中指定，而其他采样参数在 <strong>extra_configs</strong> 中指定。示例：</p>
+<h1>Sampling Config<a class="headerlink" href="#sampling-config" title="Link to this heading">#</a></h1>
+<p>For the OpenAI protocol, <strong>top_p</strong> and <strong>temperature</strong> are specified in the outer protocol, while other sampling parameters are specified in <strong>extra_configs</strong>. Example:</p>
 <div class="highlight-JSON notranslate"><div class="highlight"><pre><span></span><span class="p">{</span>
 <span class="w">    </span><span class="nt">&quot;model&quot;</span><span class="p">:</span><span class="s2">&quot;Qwen_14B_pressure_test&quot;</span><span class="p">,</span>
 <span class="w">    </span><span class="nt">&quot;messages&quot;</span><span class="p">:[</span>
@@ -507,7 +507,7 @@ document.write(`
 <span class="p">}</span>
 </pre></div>
 </div>
-<p>原始协议通过 <strong>generate_config</strong> 指定采样参数。示例：</p>
+<p>The raw protocol specifies sampling parameters through <strong>generate_config</strong>. Example:</p>
 <div class="highlight-JSON notranslate"><div class="highlight"><pre><span></span><span class="p">{</span>
 <span class="w">    </span><span class="nt">&quot;model&quot;</span><span class="p">:</span><span class="s2">&quot;m6-13b-v1&quot;</span><span class="p">,</span>
 <span class="w">    </span><span class="nt">&quot;prompt&quot;</span><span class="p">:</span><span class="s2">&quot;Human: write a list for trip\n\nAssitant:&quot;</span><span class="p">,</span><span class="nt">&quot;generate_config&quot;</span><span class="p">:{</span>
@@ -518,53 +518,53 @@ document.write(`
 </pre></div>
 </div>
 <section id="basic-control-parameters">
-<h2>基础控制参数<a class="headerlink" href="#basic-control-parameters" title="Link to this heading">#</a></h2>
+<h2>Basic Control Parameters<a class="headerlink" href="#basic-control-parameters" title="Link to this heading">#</a></h2>
 <div class="pst-scrollable-table-container"><table class="table">
 <thead>
-<tr class="row-odd"><th class="head"><p>参数名称</p></th>
-<th class="head"><p>核心功能</p></th>
+<tr class="row-odd"><th class="head"><p>Parameter Name</p></th>
+<th class="head"><p>Core Function</p></th>
 </tr>
 </thead>
 <tbody>
-<tr class="row-even"><td><p>温度</p></td>
-<td><p>控制采样随机性：<br>→ 0: 确定性模式<br>→ 1: 标准随机模式</p></td>
+<tr class="row-even"><td><p>temperature</p></td>
+<td><p>Controls sampling randomness:<br>→ 0: Deterministic mode<br>→ 1: Standard random mode</p></td>
 </tr>
 <tr class="row-odd"><td><p>top_k</p></td>
-<td><p>候选集截断策略：<br>→ 0: 禁用<br>→ N: 取前 N 个高概率 token</p></td>
+<td><p>Candidate set truncation strategy:<br>→ 0: Disabled<br>→ N: Take top N high-probability tokens</p></td>
 </tr>
 <tr class="row-even"><td><p>top_p</p></td>
-<td><p>核采样策略：<br>→ 0.95: 取累积概率为 95% 的候选集</p></td>
+<td><p>Nucleus sampling strategy:<br>→ 0.95: Take candidate set with cumulative probability of 95%</p></td>
 </tr>
-<tr class="row-odd"><td><p>最大新 token 数</p></td>
-<td><p>最大生成长度：<br>MIN(input_length + max_new_tokens, MAX_SEQ_LEN)</p></td>
+<tr class="row-odd"><td><p>max_new_tokens</p></td>
+<td><p>Maximum generation length:<br>MIN(input_length + max_new_tokens, MAX_SEQ_LEN)</p></td>
 </tr>
-<tr class="row-even"><td><p>最小新 token 数</p></td>
-<td><p>强制最小生成长度</p></td>
+<tr class="row-even"><td><p>min_new_tokens</p></td>
+<td><p>Enforces minimum generation length</p></td>
 </tr>
 </tbody>
 </table>
 </div>
 </section>
 <section id="advanced-control-parameters">
-<h2>高级控制参数<a class="headerlink" href="#advanced-control-parameters" title="Link to this heading">#</a></h2>
+<h2>Advanced Control Parameters<a class="headerlink" href="#advanced-control-parameters" title="Link to this heading">#</a></h2>
 <div class="pst-scrollable-table-container"><table class="table">
 <thead>
-<tr class="row-odd"><th class="head"><p>参数名称</p></th>
-<th class="head"><p>功能描述</p></th>
+<tr class="row-odd"><th class="head"><p>Parameter Name</p></th>
+<th class="head"><p>Function Description</p></th>
 </tr>
 </thead>
 <tbody>
-<tr class="row-even"><td><p>重复惩罚</p></td>
-<td><p>重复抑制因子：<br>→ &gt;1.0 抑制重复<br>→ &lt;1.0 鼓励重复</p></td>
+<tr class="row-even"><td><p>repetition_penalty</p></td>
+<td><p>Repetition suppression factor:<br>→ &gt;1.0 suppresses repetition<br>→ &lt;1.0 encourages repetition</p></td>
 </tr>
-<tr class="row-odd"><td><p>停用词列表</p></td>
-<td><p>Token ID 停用词（性能更好）：<br><code class="docutils literal notranslate"><span class="pre">[[20490,25],[1024]]</span></code></p></td>
+<tr class="row-odd"><td><p>stop_words_list</p></td>
+<td><p>Token ID stop words (better performance):<br><code class="docutils literal notranslate"><span class="pre">[[20490,25],[1024]]</span></code></p></td>
 </tr>
-<tr class="row-even"><td><p>停用词字符串</p></td>
-<td><p>字符串停用词（兼容性更好）：<br><code class="docutils literal notranslate"><span class="pre">[&quot;&lt;end&gt;&quot;,&quot;\nObservation&quot;]</span></code></p></td>
+<tr class="row-even"><td><p>stop_words_str</p></td>
+<td><p>String stop words (better compatibility):<br><code class="docutils literal notranslate"><span class="pre">[&quot;&lt;end&gt;&quot;,&quot;\nObservation&quot;]</span></code></p></td>
 </tr>
-<tr class="row-odd"><td><p>随机种子</p></td>
-<td><p>随机种子控制：<br>→ None: 真随机<br>→ 固定值: 可重现生成</p></td>
+<tr class="row-odd"><td><p>random_seed</p></td>
+<td><p>Random seed control:<br>→ None: True random<br>→ Fixed value: Reproducible generation</p></td>
 </tr>
 </tbody>
 </table>
@@ -579,30 +579,30 @@ document.write(`
 <p><a id="返回控制参数"></a></p>
 </section>
 <section id="return-control-parameters">
-<h2>返回控制参数<a class="headerlink" href="#return-control-parameters" title="Link to this heading">#</a></h2>
+<h2>Return Control Parameters<a class="headerlink" href="#return-control-parameters" title="Link to this heading">#</a></h2>
 <div class="pst-scrollable-table-container"><table class="table">
 <thead>
-<tr class="row-odd"><th class="head"><p>参数名称</p></th>
-<th class="head"><p>效果</p></th>
-<th class="head"><p>使用场景</p></th>
+<tr class="row-odd"><th class="head"><p>Parameter Name</p></th>
+<th class="head"><p>Effect</p></th>
+<th class="head"><p>Use Case</p></th>
 </tr>
 </thead>
 <tbody>
-<tr class="row-even"><td><p>返回 logits</p></td>
-<td><p>返回每个位置的 logits 矩阵</p></td>
-<td><p>输出分析/后处理</p></td>
+<tr class="row-even"><td><p>return_logits</p></td>
+<td><p>Returns logits matrix for each position</p></td>
+<td><p>Output analysis/post-processing</p></td>
 </tr>
-<tr class="row-odd"><td><p>返回隐藏状态</p></td>
-<td><p>返回 transformer 层的隐藏状态</p></td>
-<td><p>模型调试/特征提取</p></td>
+<tr class="row-odd"><td><p>return_hidden_states</p></td>
+<td><p>Returns hidden states of transformer layers</p></td>
+<td><p>Model debugging/feature extraction</p></td>
 </tr>
-<tr class="row-even"><td><p>返回输入 ID</p></td>
-<td><p>返回输入序列编码结果</p></td>
-<td><p>输入验证</p></td>
+<tr class="row-even"><td><p>return_input_ids</p></td>
+<td><p>Returns input sequence encoding result</p></td>
+<td><p>Input validation</p></td>
 </tr>
-<tr class="row-odd"><td><p>返回输出 ID</p></td>
-<td><p>返回输出序列编码结果</p></td>
-<td><p>输出解码验证</p></td>
+<tr class="row-odd"><td><p>return_output_ids</p></td>
+<td><p>Returns output sequence encoding result</p></td>
+<td><p>Output decoding validation</p></td>
 </tr>
 </tbody>
 </table>
@@ -610,26 +610,26 @@ document.write(`
 <p><a id="特殊模式参数"></a></p>
 </section>
 <section id="special-mode-parameters">
-<h2>特殊模式参数<a class="headerlink" href="#special-mode-parameters" title="Link to this heading">#</a></h2>
+<h2>Special Mode Parameters<a class="headerlink" href="#special-mode-parameters" title="Link to this heading">#</a></h2>
 <div class="pst-scrollable-table-container"><table class="table">
 <thead>
-<tr class="row-odd"><th class="head"><p>模式名称</p></th>
-<th class="head"><p>控制参数</p></th>
-<th class="head"><p>功能描述</p></th>
+<tr class="row-odd"><th class="head"><p>Mode Name</p></th>
+<th class="head"><p>Control Parameter</p></th>
+<th class="head"><p>Function Description</p></th>
 </tr>
 </thead>
 <tbody>
-<tr class="row-even"><td><p>思考模式</p></td>
+<tr class="row-even"><td><p>Thinking Mode</p></td>
 <td><p>in_think_mode=True</p></td>
-<td><p>Agent 特定场景：<br>使用 max_thinking_tokens 控制思考阶段长度</p></td>
+<td><p>Agent-specific scenario:<br>Control thinking phase length with max_thinking_tokens</p></td>
 </tr>
-<tr class="row-odd"><td><p>流式输出</p></td>
+<tr class="row-odd"><td><p>Streaming Output</p></td>
 <td><p>yield_generator=True</p></td>
-<td><p>启用分块返回机制</p></td>
+<td><p>Enable chunked return mechanism</p></td>
 </tr>
-<tr class="row-even"><td><p>并行解码</p></td>
+<tr class="row-even"><td><p>Parallel Decoding</p></td>
 <td><p>pd_separation=True</p></td>
-<td><p>启用并行解码优化（需要硬件支持）</p></td>
+<td><p>Enable parallel decoding optimization (hardware support required)</p></td>
 </tr>
 </tbody>
 </table>
@@ -637,7 +637,7 @@ document.write(`
 <p><a id="环境变量说明"></a></p>
 </section>
 <section id="environment-variable-description">
-<h2>环境变量说明<a class="headerlink" href="#environment-variable-description" title="Link to this heading">#</a></h2>
+<h2>Environment Variable Description<a class="headerlink" href="#environment-variable-description" title="Link to this heading">#</a></h2>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Force override stop words configuration</span>
 <span class="nb">export</span><span class="w"> </span><span class="nv">FORCE_STOP_WORDS</span><span class="o">=</span><span class="nb">true</span>
 <span class="nb">export</span><span class="w"> </span><span class="nv">STOP_WORDS_STR</span><span class="o">=</span><span class="s2">&quot;[\&quot;&lt;/end&gt;\&quot;,\&quot;\\n\&quot;]&quot;</span>
@@ -649,9 +649,9 @@ document.write(`
 <p><a id="采样策略说明"></a></p>
 </section>
 <section id="sampling-strategy-description">
-<h2>采样策略说明<a class="headerlink" href="#sampling-strategy-description" title="Link to this heading">#</a></h2>
+<h2>Sampling Strategy Description<a class="headerlink" href="#sampling-strategy-description" title="Link to this heading">#</a></h2>
 <section id="combined-strategy-example">
-<h3>组合策略示例<a class="headerlink" href="#combined-strategy-example" title="Link to this heading">#</a></h3>
+<h3>Combined Strategy Example<a class="headerlink" href="#combined-strategy-example" title="Link to this heading">#</a></h3>
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="p">{</span>
     <span class="s2">&quot;temperature&quot;</span><span class="p">:</span> <span class="mf">0.7</span><span class="p">,</span>
     <span class="s2">&quot;top_k&quot;</span><span class="p">:</span> <span class="mi">50</span><span class="p">,</span>
@@ -664,17 +664,17 @@ document.write(`
 </div>
 </section>
 <section id="strategy-recommended-values">
-<h3>策略推荐值<a class="headerlink" href="#strategy-recommended-values" title="Link to this heading">#</a></h3>
+<h3>Strategy Recommended Values<a class="headerlink" href="#strategy-recommended-values" title="Link to this heading">#</a></h3>
 <div class="pst-scrollable-table-container"><table class="table">
 <thead>
-<tr class="row-odd"><th class="head"><p>场景</p></th>
-<th class="head"><p>温度</p></th>
+<tr class="row-odd"><th class="head"><p>Scenario</p></th>
+<th class="head"><p>temperature</p></th>
 <th class="head"><p>top_p</p></th>
 <th class="head"><p>top_k</p></th>
 </tr>
 </thead>
 <tbody>
-<tr class="row-even"><td><p>代码生成</p></td>
+<tr class="row-even"><td><p>Code Generation</p></td>
 <td><p>0.2-0.4</p></td>
 <td><p>0.9</p></td>
 <td><p>40</p></td>
@@ -696,15 +696,15 @@ document.write(`
 </section>
 </section>
 <section id="parameter-usage-notes">
-<h2>参数使用注意事项<a class="headerlink" href="#parameter-usage-notes" title="Link to this heading">#</a></h2>
+<h2>Parameter Usage Notes<a class="headerlink" href="#parameter-usage-notes" title="Link to this heading">#</a></h2>
 <ol class="arabic">
-<li><p><strong>停用词选择原则</strong></p>
+<li><p><strong>Stop Words Selection Principles</strong></p>
 <ul class="simple">
-<li><p>性能优先：在高频触发场景下使用 <code class="docutils literal notranslate"><span class="pre">stop_words_list</span></code></p></li>
-<li><p>兼容性优先：在复杂模式匹配场景下使用 <code class="docutils literal notranslate"><span class="pre">stop_words_str</span></code></p></li>
+<li><p>Performance priority: Use <code class="docutils literal notranslate"><span class="pre">stop_words_list</span></code> for high-frequency triggering scenarios</p></li>
+<li><p>Compatibility priority: Use <code class="docutils literal notranslate"><span class="pre">stop_words_str</span></code> for complex pattern matching</p></li>
 </ul>
 </li>
-<li><p><strong>长度限制协调</strong></p>
+<li><p><strong>Length Limit Coordination</strong></p>
 <div class="highlight-math notranslate"><div class="highlight"><pre><span></span>Actual maximum length = min(
     input_token_len + max_new_tokens,
     MAX_SEQ_LEN
@@ -712,7 +712,7 @@ document.write(`
 </pre></div>
 </div>
 </li>
-<li><p><strong>思考模式特殊约束</strong></p>
+<li><p><strong>Thinking Mode Special Constraints</strong></p>
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># Need to configure simultaneously</span>
 <span class="p">{</span>
     <span class="s2">&quot;in_think_mode&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span>
@@ -722,10 +722,10 @@ document.write(`
 </pre></div>
 </div>
 </li>
-<li><p><strong>流式输出限制</strong></p>
+<li><p><strong>Streaming Output Limitations</strong></p>
 <ul class="simple">
-<li><p>需要同时启用 <code class="docutils literal notranslate"><span class="pre">yield_generator=True</span></code></p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">return_logits</span></code> 仅在非流式模式下返回完整数据</p></li>
+<li><p>Need to enable <code class="docutils literal notranslate"><span class="pre">yield_generator=True</span></code> simultaneously</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">return_logits</span></code> only returns complete data in non-streaming mode</p></li>
 </ul>
 </li>
 </ol>
@@ -749,7 +749,7 @@ document.write(`
       <i class="fa-solid fa-angle-left"></i>
       <div class="prev-next-info">
         <p class="prev-next-subtitle">上一页</p>
-        <p class="prev-next-title">服务器参数</p>
+        <p class="prev-next-title">ServerArgs</p>
       </div>
     </a>
     <a class="right-next"
@@ -757,7 +757,7 @@ document.write(`
        title="next page">
       <div class="prev-next-info">
         <p class="prev-next-subtitle">下一页</p>
-        <p class="prev-next-title">注意力后端</p>
+        <p class="prev-next-title">Attention Backend</p>
       </div>
       <i class="fa-solid fa-angle-right"></i>
     </a>
@@ -777,17 +777,17 @@ document.write(`
   </div>
   <nav class="bd-toc-nav page-toc">
     <ul class="visible nav section-nav flex-column">
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#basic-control-parameters">基础控制参数</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#advanced-control-parameters">高级控制参数</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#return-control-parameters">返回控制参数</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#special-mode-parameters">特殊模式参数</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#environment-variable-description">环境变量说明</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#sampling-strategy-description">采样策略说明</a><ul class="visible nav section-nav flex-column">
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#combined-strategy-example">组合策略示例</a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#strategy-recommended-values">策略推荐值</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#basic-control-parameters">Basic Control Parameters</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#advanced-control-parameters">Advanced Control Parameters</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#return-control-parameters">Return Control Parameters</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#special-mode-parameters">Special Mode Parameters</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#environment-variable-description">Environment Variable Description</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#sampling-strategy-description">Sampling Strategy Description</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#combined-strategy-example">Combined Strategy Example</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#strategy-recommended-values">Strategy Recommended Values</a></li>
 </ul>
 </li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#parameter-usage-notes">参数使用注意事项</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#parameter-usage-notes">Parameter Usage Notes</a></li>
 </ul>
   </nav></div>
 
@@ -821,7 +821,7 @@ document.write(`
   
   <div class="footer-item">
     <p class="last-updated">
-  最后更新于 2025 年 10 月 15 日.
+  最后更新于 2025 年 10 月 20 日.
   <br/>
 </p>
   </div>

@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-12 17:38+0800\n"
+"POT-Creation-Date: 2025-10-20 10:08+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../backend/Multimodal-Tutorial.md:1
 msgid "Background"
-msgstr "背景"
+msgstr ""
 
 #: ../../backend/Multimodal-Tutorial.md:3
 msgid ""
@@ -29,33 +29,33 @@ msgid ""
 "modalities with computers, aiming to enable models to process and "
 "understand multi-modal information. Currently, common multimodal research"
 " directions include images, videos, audio, etc."
-msgstr "多模态模型是指通过多种模态与计算机进行交互的模型，旨在使模型能够处理和理解多模态信息。目前，常见的多模态研究方向包括图像、视频、音频等。"
+msgstr ""
 
 #: ../../backend/Multimodal-Tutorial.md:5
 msgid ""
 "In rtp-llm, the currently supported multimodal models are mainly models "
 "that accept images as input, such as [qwen-vl](https://github.com/QwenLM"
 "/Qwen-VL) and [llava](https://github.com/haotian-liu/LLaVA)."
-msgstr "在 rtp-llm 中，目前支持的多模态模型主要是接受图像作为输入的模型，如 [qwen-vl](https://github.com/QwenLM/Qwen-VL) 和 [llava](https://github.com/haotian-liu/LLaVA)。"
+msgstr ""
 
 #: ../../backend/Multimodal-Tutorial.md:7
 msgid "Usage"
-msgstr "用法"
+msgstr ""
 
 #: ../../backend/Multimodal-Tutorial.md:9
 msgid "LLaVA"
-msgstr "LLaVA"
+msgstr ""
 
 #: ../../backend/Multimodal-Tutorial.md:11
 msgid ""
 "The config.json of LLaVA in HF format contains the mm_vision_tower "
 "keyword as the path to the ViT, typically using OpenAI's pretrained CLIP."
-msgstr "HF 格式的 LLaVA 的 config.json 包含 mm_vision_tower 关键字作为 ViT 的路径，通常使用 OpenAI 预训练的 CLIP。"
+msgstr ""
 
 #: ../../backend/Multimodal-Tutorial.md:13
 #: ../../backend/Multimodal-Tutorial.md:21
 msgid "Invocation"
-msgstr "调用"
+msgstr ""
 
 #: ../../backend/Multimodal-Tutorial.md:15
 msgid ""
@@ -66,18 +66,18 @@ msgid ""
 "supported models on multiple images is not good. Additionally, it is "
 "necessary to strictly ensure that the number of image tags matches the "
 "number of images."
-msgstr "与 HF 格式一致，在调用时使用 `<image>` 标签在提示中指示图像插入位置，并以 List[str] 格式插入图像序列：rtp-llm 的多模态接口允许在单个提示中插入多个图像，但当前支持的模型对多个图像的效果不好。此外，必须严格确保图像标签的数量与图像数量匹配。"
+msgstr ""
 
 #: ../../backend/Multimodal-Tutorial.md:17
 msgid "Qwen-VL"
-msgstr "Qwen-VL"
+msgstr ""
 
 #: ../../backend/Multimodal-Tutorial.md:19
 msgid ""
 "Slightly different from LLaVA, although Qwen-VL's ViT also uses CLIP, its"
 " parameters are written together with the LLM part, so the ViT part "
 "parameters will be read from the checkpoint."
-msgstr "与 LLaVA 略有不同，虽然 Qwen-VL 的 ViT 也使用 CLIP，但其参数与 LLM 部分一起写入，因此 ViT 部分的参数将从检查点中读取。"
+msgstr ""
 
 #: ../../backend/Multimodal-Tutorial.md:23
 #, python-brace-format
@@ -86,21 +86,21 @@ msgid ""
 "`<img>{img_url}</img>` tag to mark images in the prompt; additionally, "
 "you can also directly use the `<img/>` image placeholder to achieve "
 "separation of URL and prompt input."
-msgstr "与 HF 格式一致，在调用时直接使用 `<img>{img_url}</img>` 标签在提示中标记图像；此外，您还可以直接使用 `<img/>` 图像占位符来实现 URL 和提示输入的分离。"
+msgstr ""
 
 #: ../../backend/Multimodal-Tutorial.md:25
 msgid "Demo"
-msgstr "演示"
+msgstr ""
 
 #: ../../backend/Multimodal-Tutorial.md:41
 msgid "Request response in the following way:"
-msgstr "以以下方式请求响应："
+msgstr ""
 
 #: ../../backend/Multimodal-Tutorial.md:49
 msgid "Or"
-msgstr "或者"
+msgstr ""
 
 #: ../../backend/Multimodal-Tutorial.md:56
 msgid "Additionally, if starting as a service:"
-msgstr "此外，如果作为服务启动："
+msgstr ""
 

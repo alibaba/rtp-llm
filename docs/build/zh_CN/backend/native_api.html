@@ -8,7 +8,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
-    <title>RTP-LLM Native API &#8212; RTP-LLM</title>
+    <title>RTP-LLM Native APIs &#8212; RTP-LLM</title>
   
   
   
@@ -59,10 +59,10 @@
     <link rel="index" title="索引" href="../genindex.html" />
     <link rel="search" title="搜索" href="../search.html" />
     <link rel="next" title="deepseek" href="../references/deepseek/index.html" />
-    <link rel="prev" title="OpenAI API - Embedding" href="openai_api_embeddings.html" /> 
+    <link rel="prev" title="OpenAI APIs - Embedding" href="openai_api_embeddings.html" /> 
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="zh-CN"/>
-    <meta name="docbuild:last-update" content="2025 年 10 月 15 日"/>
+    <meta name="docbuild:last-update" content="2025 年 10 月 20 日"/>
 <link
   rel="stylesheet"
   href="../_static/css/language-switcher.css"
@@ -176,64 +176,64 @@
  </script></div>
         <div class="sidebar-primary-item"><nav class="bd-links bd-docs-nav" aria-label="Main">
     <div class="bd-toc-item navbar-nav active">
-        <p aria-level="2" class="caption" role="heading"><span class="caption-text">安装</span></p>
+        <p aria-level="2" class="caption" role="heading"><span class="caption-text">Installation</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../start/install.html">安装 RTP-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../start/install.html">Install RTP-LLM</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">发布版本</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Release Version</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../release/v0.2.0/release.html">RTP-LLM 0.2.0</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">基本用法</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Basic Usage</span></p>
 <ul class="current nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="send_request.html">发送请求</a></li>
-<li class="toctree-l1"><a class="reference internal" href="openai_api_completions.html">OpenAI API - 文本生成/会话</a></li>
-<li class="toctree-l1"><a class="reference internal" href="openai_api_vision.html">OpenAI API - 多模态</a></li>
-<li class="toctree-l1"><a class="reference internal" href="openai_api_embeddings.html">OpenAI API - Embedding</a></li>
-<li class="toctree-l1 current active"><a class="current reference internal" href="#">RTP-LLM Native API</a></li>
+<li class="toctree-l1"><a class="reference internal" href="send_request.html">Sending Requests</a></li>
+<li class="toctree-l1"><a class="reference internal" href="openai_api_completions.html">OpenAI APIs - Completions</a></li>
+<li class="toctree-l1"><a class="reference internal" href="openai_api_vision.html">OpenAI APIs - Vision</a></li>
+<li class="toctree-l1"><a class="reference internal" href="openai_api_embeddings.html">OpenAI APIs - Embedding</a></li>
+<li class="toctree-l1 current active"><a class="current reference internal" href="#">RTP-LLM Native APIs</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">后端教程</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Backend Tutorial</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../references/deepseek/index.html">deepseek</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../references/qwen/index.html">qwen-moe</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../references/kimi/index.html">kimi</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">高级后端配置</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Advanced Backend Configurations</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="server_arguments.html">服务器参数</a></li>
-<li class="toctree-l1"><a class="reference internal" href="sampling_params.html">采样配置</a></li>
-<li class="toctree-l1"><a class="reference internal" href="attention_backend.html">注意力后端</a></li>
+<li class="toctree-l1"><a class="reference internal" href="server_arguments.html">ServerArgs</a></li>
+<li class="toctree-l1"><a class="reference internal" href="sampling_params.html">Sampling Config</a></li>
+<li class="toctree-l1"><a class="reference internal" href="attention_backend.html">Attention Backend</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">支持的模型</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Supported Models</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../supported_models/generative_models.html">大语言模型</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../supported_models/multimodal_language_models.html">多模态语言模型</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../supported_models/embedding_models.html">Embedding 模型</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../supported_models/support_new_models.html">如何支持新模型</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/generative_models.html">Large Language Models</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/multimodal_language_models.html">Multimodal Language Models</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/embedding_models.html">Embedding Models</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/support_new_models.html">How to Support New Models</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">高级功能</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Advanced Features</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="speculative_decoding.html">推测解码</a></li>
-<li class="toctree-l1"><a class="reference internal" href="reuse_kv_cache.html">重用缓存</a></li>
+<li class="toctree-l1"><a class="reference internal" href="speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="reuse_kv_cache.html">ReuseCache</a></li>
 
-<li class="toctree-l1"><a class="reference internal" href="function_calling.html">工具和函数调用</a></li>
-<li class="toctree-l1"><a class="reference internal" href="quantization.html">量化</a></li>
-<li class="toctree-l1"><a class="reference internal" href="lora.html">LoRA 服务</a></li>
-<li class="toctree-l1"><a class="reference internal" href="pd_disaggregation.html">PD分离</a></li>
+<li class="toctree-l1"><a class="reference internal" href="function_calling.html">Tool and Function Calling</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="lora.html">LoRA Serving</a></li>
+<li class="toctree-l1"><a class="reference internal" href="pd_disaggregation.html">PD Disaggregation</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">RTP-LLM 路由器</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">RTP-LLM Router</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="flexlb.html">FlexLB（弹性负载均衡器）- 主节点</a></li>
+<li class="toctree-l1"><a class="reference internal" href="flexlb.html">FlexLB (Flexible Load Balancer) - Master Role</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Benchmark</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../benchmark/benchmark.html">RTP-LLM 性能基准测试工具</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../benchmark/benchmark.html">RTP-LLM Performance Benchmark Tool</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">参考文献</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">References</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../references/general.html">通用指南</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../references/developer.html">开发者参考</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../README.html">文档手册</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../references/general.html">General Guidance</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../references/developer.html">Developer Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../README.html">Documentation Manual</a></li>
 </ul>
 
     </div>
@@ -453,7 +453,7 @@ document.write(`
               
 
 <div id="jb-print-docs-body" class="onlyprint">
-    <h1>RTP-LLM Native API</h1>
+    <h1>RTP-LLM Native APIs</h1>
     <!-- Table of contents -->
     <div id="print-main-content">
         <div id="jb-print-toc">
@@ -463,18 +463,18 @@ document.write(`
             </div>
             <nav aria-label="Page">
                 <ul class="visible nav section-nav flex-column">
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#启动服务器">启动服务器</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#生成（文本生成模型）">生成（文本生成模型）</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#聊天渲染/分词器">聊天渲染/分词器</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#Worker状态">Worker状态</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#健康检查">健康检查</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#更新Lora信息">更新Lora信息</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#获取模型信息">获取模型信息</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#更新日志级别">更新日志级别</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#为MoE更新EPLB配置">为MoE更新EPLB配置</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#编码（嵌入模型）">编码（嵌入模型）</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#v1/rerank（交叉编码器重排序模型）">v1/rerank（交叉编码器重排序模型）</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#分类">分类</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#Launch-A-Server">Launch A Server</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#Generate-(text-generation-model)">Generate (text generation model)</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#Chat-Render-/-Tokenizer">Chat Render / Tokenizer</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#Worker-Status">Worker Status</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#Health-Check">Health Check</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#Update-Lora-Info">Update Lora Info</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#Get-Model-Info">Get Model Info</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#Update-Log-Level">Update Log Level</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#Update-EPLB-Config-for-MoE">Update EPLB Config for MoE</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#Encode-(embedding-model)">Encode (embedding model)</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#v1/rerank-(cross-encoder-rerank-model)">v1/rerank (cross encoder rerank model)</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#Classify">Classify</a></li>
 </ul>
             </nav>
         </div>
@@ -490,16 +490,16 @@ document.write(`
     .output_area.stderr, .output_area.stdout {
         color: #d3d3d3 !important; /* light gray */
     }
-</style><section id="RTP-LLM-Native-API">
-<h1>RTP-LLM Native API<a class="headerlink" href="#RTP-LLM-Native-API" title="Link to this heading">#</a></h1>
-<p>除了OpenAI兼容的API之外，RTP-LLM运行时还提供其Native服务器API。我们介绍以下API：</p>
+</style><section id="RTP-LLM-Native-APIs">
+<h1>RTP-LLM Native APIs<a class="headerlink" href="#RTP-LLM-Native-APIs" title="Link to this heading">#</a></h1>
+<p>Apart from the OpenAI compatible APIs, the RTP-LLM Runtime also provides its native server APIs. We introduce these following APIs:</p>
 <div class="pst-scrollable-table-container"><table class="table">
 <thead>
-<tr class="row-odd"><th class="head"><p>方法名</p></th>
-<th class="head"><p>请求示例</p></th>
-<th class="head"><p>是否POST</p></th>
-<th class="head"><p>是否GET</p></th>
-<th class="head"><p>描述</p></th>
+<tr class="row-odd"><th class="head"><p>method_name</p></th>
+<th class="head"><p>example_request</p></th>
+<th class="head"><p>is_post</p></th>
+<th class="head"><p>is_get</p></th>
+<th class="head"><p>desc</p></th>
 </tr>
 </thead>
 <tbody>
@@ -507,134 +507,170 @@ document.write(`
 <td><p><code class="docutils literal notranslate"><span class="pre">{&quot;prompt&quot;:</span> <span class="pre">&quot;Hello&quot;,</span> <span class="pre">&quot;generate_config&quot;:</span> <span class="pre">{&quot;max_new_tokens&quot;:</span> <span class="pre">10,</span> <span class="pre">&quot;top_k&quot;:</span> <span class="pre">1,</span> <span class="pre">&quot;top_p&quot;:</span> <span class="pre">0}}</span></code></p></td>
 <td><p>✅</p></td>
 <td><p>❌</p></td>
-<td><p>基本文本生成端点（向后兼容早期版本）。</p></td>
+<td><p>Basic text-generation endpoint
+(backward-compatible with
+early versions).</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">/chat/render</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">{&quot;messages&quot;:</span> <span class="pre">[{&quot;role&quot;:</span> <span class="pre">&quot;user&quot;,&quot;content&quot;:</span> <span class="pre">&quot;hello？&quot;}]}</span></code></p></td>
 <td><p>✅</p></td>
 <td><p>✅</p></td>
-<td><p>将聊天模板渲染成将发送给模型的最终提示。</p></td>
+<td><p>Render the chat template into
+the final prompt that will be
+sent to the model.</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">/v1/chat/render</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">{&quot;messages&quot;:</span> <span class="pre">[{&quot;role&quot;:</span> <span class="pre">&quot;user&quot;,&quot;content&quot;:</span> <span class="pre">&quot;hello？&quot;}]}</span></code></p></td>
 <td><p>✅</p></td>
 <td><p>❌</p></td>
-<td><p><a href="#id1"><span class="problematic" id="id2">``</span></a>/chat/render``的v1路径（仅POST）。</p></td>
+<td><p>v1 path for <code class="docutils literal notranslate"><span class="pre">/chat/render</span></code>
+(POST only).</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">/tokenizer/encode</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">{&quot;prompt&quot;:</span> <span class="pre">&quot;hello&quot;}</span></code></p></td>
 <td><p>✅</p></td>
 <td><p>❌</p></td>
-<td><p>使用内部tokenizer将文本编码成token ID列表。</p></td>
+<td><p>Encode text into a list of
+token IDs using the internal
+tokenizer.</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">/tokenize</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">{&quot;prompt&quot;:</span> <span class="pre">&quot;hello&quot;}</span></code></p></td>
 <td><p>✅</p></td>
 <td><p>❌</p></td>
-<td><p>轻量级tokenization端点，返回token数组。</p></td>
+<td><p>Lightweight tokenization
+endpoint that returns an array
+of tokens.</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">/rtp_llm/worker_status</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">{</span> <span class="pre">&quot;latest_cache_version&quot;:</span> <span class="pre">-1}</span></code></p></td>
 <td><p>✅</p></td>
 <td><p>✅</p></td>
-<td><p>RTP-LLM框架中worker的详细状态。</p></td>
+<td><p>Detailed status of a worker in
+the RTP-LLM framework.</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">/worker_status</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">{</span> <span class="pre">&quot;latest_cache_version&quot;:</span> <span class="pre">-1}</span></code></p></td>
 <td><p>✅</p></td>
 <td><p>✅</p></td>
-<td><p>查询推理worker的运行时状态。</p></td>
+<td><p>Query runtime status of the
+inference worker.</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">/health</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">{}</span></code></p></td>
 <td><p>✅</p></td>
 <td><p>✅</p></td>
-<td><p>通用健康检查；返回服务是否存活。</p></td>
+<td><p>Generic health check; returns
+whether the service is alive.</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">/status</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">{}</span></code></p></td>
 <td><p>✅</p></td>
 <td><p>✅</p></td>
-<td><p>获取当前服务实例的全面状态信息。</p></td>
+<td><p>Retrieve comprehensive status
+information for the current
+service instance.</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">/health_check</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">{&quot;latest_cache_version&quot;:</span> <span class="pre">-1}</span></code></p></td>
 <td><p>✅</p></td>
 <td><p>✅</p></td>
-<td><p>深度健康检查，包含缓存版本号。</p></td>
+<td><p>Deep health check that
+includes a cache version
+number.</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">/update</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">{&quot;peft_info&quot;:</span> <span class="pre">{&quot;lora_info&quot;:</span> <span class="pre">{&quot;lora_0&quot;:</span> <span class="pre">&quot;/lora/llama-lora-test/&quot;}}}</span></code></p></td>
 <td><p>✅</p></td>
 <td><p>❌</p></td>
-<td><p>热加载LoRA信息到运行中的服务。</p></td>
+<td><p>Hot-reload LoRA info into the
+running service.</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">/v1/models</span></code></p></td>
 <td></td>
 <td><p>❌</p></td>
 <td><p>✅</p></td>
-<td><p>列出当前部署的模型（OpenAI兼容）。</p></td>
+<td><p>List currently deployed models
+(OpenAI-compatible).</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">/set_log_level</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">{</span> <span class="pre">&quot;log_level&quot;:</span> <span class="pre">&quot;INFO&quot;}</span></code></p></td>
 <td><p>✅</p></td>
 <td><p>❌</p></td>
-<td><p>动态调整服务日志级别。</p></td>
+<td><p>Dynamically adjust the service
+log level.</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">/update_eplb_config</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">{&quot;model&quot;:</span> <span class="pre">&quot;EPLB&quot;,</span> <span class="pre">&quot;update_time&quot;:1000}</span></code></p></td>
 <td><p>✅</p></td>
 <td><p>❌</p></td>
-<td><p>更新EPLB（弹性负载均衡器）配置。</p></td>
+<td><p>Update the EPLB (Elastic Load
+Balancer) configuration.</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">/v1/embeddings</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">{&quot;input&quot;:</span> <span class="pre">&quot;who</span> <span class="pre">are</span> <span class="pre">u&quot;,</span> <span class="pre">&quot;model&quot;:</span> <span class="pre">&quot;text-embedding-ada-002&quot;}</span></code></p></td>
 <td><p>✅</p></td>
 <td><p>❌</p></td>
-<td><p>OpenAI兼容的稠密向量嵌入端点。</p></td>
+<td><p>OpenAI-compatible dense-vector
+embedding endpoint.</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">/v1/embeddings/dense</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">{&quot;input&quot;:</span> <span class="pre">&quot;who</span> <span class="pre">are</span> <span class="pre">u&quot;}</span></code></p></td>
 <td><p>✅</p></td>
 <td><p>❌</p></td>
-<td><p>仅返回**稠密**嵌入。</p></td>
+<td><p>Return <strong>dense</strong> embeddings
+only.</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">/v1/embeddings/sparse</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">{&quot;input&quot;:</span> <span class="pre">&quot;who</span> <span class="pre">are</span> <span class="pre">u&quot;}</span></code></p></td>
 <td><p>✅</p></td>
 <td><p>❌</p></td>
-<td><p>仅返回**稀疏**嵌入（例如，BM25/TF-IDF）。</p></td>
+<td><p>Return <strong>sparse</strong> embeddings
+only (e.g., BM25/TF-IDF).</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">/v1/embeddings/colbert</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">{&quot;input&quot;:[&quot;hello,</span> <span class="pre">what</span> <span class="pre">is</span> <span class="pre">your</span> <span class="pre">name?&quot;,&quot;hello&quot;],&quot;model&quot;:&quot;xx&quot;}</span></code></p></td>
 <td><p>✅</p></td>
 <td><p>❌</p></td>
-<td><p>返回用于高精度语义检索的**ColBERT**后期交互多向量表示。</p></td>
+<td><p>Return <strong>ColBERT</strong>
+late-interaction multi-vector
+representations for
+high-accuracy semantic
+retrieval.</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">/v1/embeddings/similarity</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">{&quot;left&quot;:[&quot;hello,</span> <span class="pre">what</span> <span class="pre">is</span> <span class="pre">your</span> <span class="pre">name?&quot;],&quot;right&quot;:[&quot;hello&quot;,&quot;what</span> <span class="pre">is</span> <span class="pre">your</span> <span class="pre">name&quot;],&quot;embedding_config&quot;:{&quot;type&quot;:&quot;sparse&quot;},&quot;model&quot;:&quot;xx&quot;}</span></code></p></td>
 <td><p>✅</p></td>
 <td><p>❌</p></td>
-<td><p>接受查询-文档对，直接返回成对相似度（余弦/点积），跳过单独的嵌入步骤。</p></td>
+<td><p>Accept query–doc pairs and
+return pairwise similarities
+(cosine/dot) directly,
+skipping the separate
+embedding step.</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">/v1/classifier</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">{&quot;input&quot;:[[&quot;what</span> <span class="pre">is</span> <span class="pre">panda?&quot;,&quot;hi&quot;],[&quot;what</span> <span class="pre">is</span> <span class="pre">panda?&quot;,&quot;The</span> <span class="pre">giant</span> <span class="pre">panda</span> <span class="pre">(Ailuropoda</span> <span class="pre">melanoleuca),</span> <span class="pre">sometimes</span> <span class="pre">called</span> <span class="pre">a</span> <span class="pre">panda</span> <span class="pre">bear</span> <span class="pre">or</span> <span class="pre">simply</span> <span class="pre">panda,</span> <span class="pre">is</span> <span class="pre">a</span> <span class="pre">bear</span> <span class="pre">species</span> <span class="pre">endemic</span> <span class="pre">to</span> <span class="pre">China.&quot;]],&quot;model&quot;:&quot;xx&quot;}</span></code></p></td>
 <td><p>✅</p></td>
 <td><p>❌</p></td>
-<td><p>通用文本分类端点，支持情感分类或主题分类等任务。</p></td>
+<td><p>Generic text-classification
+endpoint supporting tasks such
+as sentiment or topic
+classification.</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">/v1/reranker</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">{&quot;query&quot;:&quot;what</span> <span class="pre">is</span> <span class="pre">panda?</span> <span class="pre">&quot;,&quot;documents&quot;:[&quot;hi&quot;,&quot;The</span> <span class="pre">giant</span> <span class="pre">panda</span> <span class="pre">(Ailuropoda</span> <span class="pre">melanoleuca),</span> <span class="pre">sometimes</span> <span class="pre">called</span> <span class="pre">a</span> <span class="pre">panda</span> <span class="pre">bear</span> <span class="pre">or</span> <span class="pre">simply</span> <span class="pre">panda,</span> <span class="pre">is</span> <span class="pre">a</span> <span class="pre">bear</span> <span class="pre">species</span> <span class="pre">endemic</span> <span class="pre">to</span> <span class="pre">China.&quot;,&quot;gg&quot;]}</span></code></p></td>
 <td><p>✅</p></td>
 <td><p>❌</p></td>
-<td><p>根据相关性重新排序检索到的文档列表并返回重新排序的结果。</p></td>
+<td><p>Rerank a list of retrieved
+documents by relevance and
+return the reordered results.</p></td>
 </tr>
 </tbody>
 </table>
 </div>
-<p>我们主要使用**requests**在以下示例中测试这些API。您也可以使用**curl**。</p>
-<section id="启动服务器">
-<h2>启动服务器<a class="headerlink" href="#启动服务器" title="Link to this heading">#</a></h2>
+<p>We mainly use <strong>requests</strong> to test these APIs in the following examples. You can also use <strong>curl</strong>.</p>
+<section id="Launch-A-Server">
+<h2>Launch A Server<a class="headerlink" href="#Launch-A-Server" title="Link to this heading">#</a></h2>
 <div class="nbinput nblast docutils container">
 <div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[ ]:
 </pre></div>
@@ -660,9 +696,9 @@ document.write(`
 </div>
 </div>
 </section>
-<section id="生成（文本生成模型）">
-<h2>生成（文本生成模型）<a class="headerlink" href="#生成（文本生成模型）" title="Link to this heading">#</a></h2>
-<p>生成补全。这类似于OpenAI API中的``/v1/completions``。详细参数可以在`sampling parameters &lt;./sampling_params.md&gt;`__中找到。</p>
+<section id="Generate-(text-generation-model)">
+<h2>Generate (text generation model)<a class="headerlink" href="#Generate-(text-generation-model)" title="Link to this heading">#</a></h2>
+<p>Generate completions. This is similar to the <code class="docutils literal notranslate"><span class="pre">/v1/completions</span></code> in OpenAI API. Detailed parameters can be found in the <a class="reference internal" href="sampling_params.html"><span class="doc">sampling parameters</span></a>.</p>
 <div class="nbinput nblast docutils container">
 <div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[ ]:
 </pre></div>
@@ -679,11 +715,11 @@ document.write(`
 </div>
 </div>
 </section>
-<section id="聊天渲染/分词器">
-<h2>聊天渲染/分词器<a class="headerlink" href="#聊天渲染/分词器" title="Link to this heading">#</a></h2>
+<section id="Chat-Render-/-Tokenizer">
+<h2>Chat Render / Tokenizer<a class="headerlink" href="#Chat-Render-/-Tokenizer" title="Link to this heading">#</a></h2>
 <ul class="simple">
-<li><p><code class="docutils literal notranslate"><span class="pre">/chat/render</span></code>、<code class="docutils literal notranslate"><span class="pre">/v1/chat/render</span></code>: 聊天模板渲染</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">/tokenizer/encode</span></code>、<code class="docutils literal notranslate"><span class="pre">/tokenize</span></code>: 原始提示分词</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">/chat/render</span></code>、<code class="docutils literal notranslate"><span class="pre">/v1/chat/render</span></code>: Chat Template Render</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">/tokenizer/encode</span></code>, <code class="docutils literal notranslate"><span class="pre">/tokenize</span></code>: Raw prompt tokenize</p></li>
 </ul>
 <div class="nbinput nblast docutils container">
 <div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[ ]:
@@ -712,10 +748,10 @@ document.write(`
 </div>
 </div>
 </section>
-<section id="Worker状态">
-<h2>Worker状态<a class="headerlink" href="#Worker状态" title="Link to this heading">#</a></h2>
+<section id="Worker-Status">
+<h2>Worker Status<a class="headerlink" href="#Worker-Status" title="Link to this heading">#</a></h2>
 <ul class="simple">
-<li><p><code class="docutils literal notranslate"><span class="pre">/rtp_llm/worker_status</span></code>、<code class="docutils literal notranslate"><span class="pre">/worker_status</span></code>: 处理快照的服务器，包括RunningTask、FinishedTask、CacheStatus。</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">/rtp_llm/worker_status</span></code>、<code class="docutils literal notranslate"><span class="pre">/worker_status</span></code>: Server for processing snapshot, includes RunningTask, FinishedTask, CacheStatus.</p></li>
 </ul>
 <div class="nbinput nblast docutils container">
 <div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[ ]:
@@ -731,10 +767,10 @@ document.write(`
 </div>
 </div>
 </section>
-<section id="健康检查">
-<h2>健康检查<a class="headerlink" href="#健康检查" title="Link to this heading">#</a></h2>
+<section id="Health-Check">
+<h2>Health Check<a class="headerlink" href="#Health-Check" title="Link to this heading">#</a></h2>
 <ul class="simple">
-<li><p><code class="docutils literal notranslate"><span class="pre">/health</span></code>、<code class="docutils literal notranslate"><span class="pre">/status</span></code>: 检查服务器健康状况。</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">/health</span></code>、<code class="docutils literal notranslate"><span class="pre">/status</span></code>: Check the health of the server.</p></li>
 </ul>
 <div class="nbinput nblast docutils container">
 <div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[ ]:
@@ -748,10 +784,10 @@ document.write(`
 </div>
 </div>
 </section>
-<section id="更新Lora信息">
-<h2>更新Lora信息<a class="headerlink" href="#更新Lora信息" title="Link to this heading">#</a></h2>
+<section id="Update-Lora-Info">
+<h2>Update Lora Info<a class="headerlink" href="#Update-Lora-Info" title="Link to this heading">#</a></h2>
 <ul class="simple">
-<li><p><code class="docutils literal notranslate"><span class="pre">/update</span></code>: 更新完整LoRA信息</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">/update</span></code>: Update full LoRA Info</p></li>
 </ul>
 <div class="nbinput nblast docutils container">
 <div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[ ]:
@@ -767,8 +803,8 @@ document.write(`
 </div>
 </div>
 </section>
-<section id="获取模型信息">
-<h2>获取模型信息<a class="headerlink" href="#获取模型信息" title="Link to this heading">#</a></h2>
+<section id="Get-Model-Info">
+<h2>Get Model Info<a class="headerlink" href="#Get-Model-Info" title="Link to this heading">#</a></h2>
 <ul class="simple">
 <li><p><code class="docutils literal notranslate"><span class="pre">/v1/models</span></code></p></li>
 </ul>
@@ -784,8 +820,8 @@ document.write(`
 </div>
 </div>
 </section>
-<section id="更新日志级别">
-<h2>更新日志级别<a class="headerlink" href="#更新日志级别" title="Link to this heading">#</a></h2>
+<section id="Update-Log-Level">
+<h2>Update Log Level<a class="headerlink" href="#Update-Log-Level" title="Link to this heading">#</a></h2>
 <ul class="simple">
 <li><p><code class="docutils literal notranslate"><span class="pre">/set_log_level</span></code></p></li>
 </ul>
@@ -803,8 +839,8 @@ document.write(`
 </div>
 </div>
 </section>
-<section id="为MoE更新EPLB配置">
-<h2>为MoE更新EPLB配置<a class="headerlink" href="#为MoE更新EPLB配置" title="Link to this heading">#</a></h2>
+<section id="Update-EPLB-Config-for-MoE">
+<h2>Update EPLB Config for MoE<a class="headerlink" href="#Update-EPLB-Config-for-MoE" title="Link to this heading">#</a></h2>
 <ul class="simple">
 <li><p><code class="docutils literal notranslate"><span class="pre">/update_eplb_config</span></code></p></li>
 </ul>
@@ -822,9 +858,9 @@ document.write(`
 </div>
 </div>
 </section>
-<section id="编码（嵌入模型）">
-<h2>编码（嵌入模型）<a class="headerlink" href="#编码（嵌入模型）" title="Link to this heading">#</a></h2>
-<p>将文本编码为嵌入。请注意，此API仅适用于`嵌入模型&lt;openai_api_embeddings.html#openai-apis-embedding&gt;`__，对于生成模型将引发错误。因此，我们启动一个新的服务器来服务嵌入模型。</p>
+<section id="Encode-(embedding-model)">
+<h2>Encode (embedding model)<a class="headerlink" href="#Encode-(embedding-model)" title="Link to this heading">#</a></h2>
+<p>Encode text into embeddings. Note that this API is only available for <a class="reference external" href="openai_api_embeddings.html#openai-apis-embedding">embedding models</a> and will raise an error for generation models. Therefore, we launch a new server to server an embedding model.</p>
 <div class="nbinput nblast docutils container">
 <div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[ ]:
 </pre></div>
@@ -911,9 +947,9 @@ document.write(`
 </div>
 </div>
 </section>
-<section id="v1/rerank（交叉编码器重排序模型）">
-<h2>v1/rerank（交叉编码器重排序模型）<a class="headerlink" href="#v1/rerank（交叉编码器重排序模型）" title="Link to this heading">#</a></h2>
-<p>使用交叉编码器模型对给定查询的文档列表进行重排序。请注意，此API仅适用于像`BAAI/bge-reranker-v2-m3 &lt;<a class="reference external" href="https://huggingface.co/BAAI/bge-reranker-v2-m3">https://huggingface.co/BAAI/bge-reranker-v2-m3</a>&gt;`__这样的交叉编码器模型，并且需要``attention-backend``为``triton``和``torch_native``。</p>
+<section id="v1/rerank-(cross-encoder-rerank-model)">
+<h2>v1/rerank (cross encoder rerank model)<a class="headerlink" href="#v1/rerank-(cross-encoder-rerank-model)" title="Link to this heading">#</a></h2>
+<p>Rerank a list of documents given a query using a cross-encoder model. Note that this API is only available for cross encoder model like <a class="reference external" href="https://huggingface.co/BAAI/bge-reranker-v2-m3">BAAI/bge-reranker-v2-m3</a> with <code class="docutils literal notranslate"><span class="pre">attention-backend</span></code> <code class="docutils literal notranslate"><span class="pre">triton</span></code> and <code class="docutils literal notranslate"><span class="pre">torch_native</span></code>.</p>
 <div class="nbinput nblast docutils container">
 <div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[ ]:
 </pre></div>
@@ -971,9 +1007,9 @@ document.write(`
 </div>
 </div>
 </section>
-<section id="分类">
-<h2>分类<a class="headerlink" href="#分类" title="Link to this heading">#</a></h2>
-<p>RTP-LL运行时还支持分类模型。这里我们使用分类模型对成对生成的质量进行分类。</p>
+<section id="Classify">
+<h2>Classify<a class="headerlink" href="#Classify" title="Link to this heading">#</a></h2>
+<p>RTP-LL Runtime also supports classify models. Here we use a classify model to classify the quality of pairwise generations.</p>
 <div class="nbinput nblast docutils container">
 <div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[ ]:
 </pre></div>
@@ -1053,7 +1089,7 @@ document.write(`
       <i class="fa-solid fa-angle-left"></i>
       <div class="prev-next-info">
         <p class="prev-next-subtitle">上一页</p>
-        <p class="prev-next-title">OpenAI API - Embedding</p>
+        <p class="prev-next-title">OpenAI APIs - Embedding</p>
       </div>
     </a>
     <a class="right-next"
@@ -1081,18 +1117,18 @@ document.write(`
   </div>
   <nav class="bd-toc-nav page-toc">
     <ul class="visible nav section-nav flex-column">
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#启动服务器">启动服务器</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#生成（文本生成模型）">生成（文本生成模型）</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#聊天渲染/分词器">聊天渲染/分词器</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#Worker状态">Worker状态</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#健康检查">健康检查</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#更新Lora信息">更新Lora信息</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#获取模型信息">获取模型信息</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#更新日志级别">更新日志级别</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#为MoE更新EPLB配置">为MoE更新EPLB配置</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#编码（嵌入模型）">编码（嵌入模型）</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#v1/rerank（交叉编码器重排序模型）">v1/rerank（交叉编码器重排序模型）</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#分类">分类</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#Launch-A-Server">Launch A Server</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#Generate-(text-generation-model)">Generate (text generation model)</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#Chat-Render-/-Tokenizer">Chat Render / Tokenizer</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#Worker-Status">Worker Status</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#Health-Check">Health Check</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#Update-Lora-Info">Update Lora Info</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#Get-Model-Info">Get Model Info</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#Update-Log-Level">Update Log Level</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#Update-EPLB-Config-for-MoE">Update EPLB Config for MoE</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#Encode-(embedding-model)">Encode (embedding model)</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#v1/rerank-(cross-encoder-rerank-model)">v1/rerank (cross encoder rerank model)</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#Classify">Classify</a></li>
 </ul>
   </nav></div>
 
@@ -1126,7 +1162,7 @@ document.write(`
   
   <div class="footer-item">
     <p class="last-updated">
-  最后更新于 2025 年 10 月 15 日.
+  最后更新于 2025 年 10 月 20 日.
   <br/>
 </p>
   </div>
