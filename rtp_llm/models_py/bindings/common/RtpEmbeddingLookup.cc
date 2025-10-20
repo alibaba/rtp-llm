@@ -29,30 +29,30 @@ void embedding(at::Tensor& output, at::Tensor& input, at::Tensor& weight) {
         const int vecSize = sizeof(float4) / sizeof(c_type);
         if (hidden_size % vecSize == 0) {
             invokeEmbeddingLookupVec(static_cast<c_type*>(output.data_ptr()),
-                                      static_cast<const c_type*>(weight.data_ptr()),
-                                      1.0,
-                                      static_cast<const c_type*>(nullptr),  // postition_table
-                                      static_cast<const c_type*>(nullptr),  // token_type_table
-                                      static_cast<const int*>(input.data_ptr()),
-                                      static_cast<const int*>(nullptr),  // position_ids
-                                      static_cast<const int*>(nullptr),  // token_types
-                                      static_cast<const int*>(nullptr),  // mask
-                                      tokens,
-                                      hidden_size,
-                                      stream);
+                                     static_cast<const c_type*>(weight.data_ptr()),
+                                     1.0,
+                                     static_cast<const c_type*>(nullptr),  // postition_table
+                                     static_cast<const c_type*>(nullptr),  // token_type_table
+                                     static_cast<const int*>(input.data_ptr()),
+                                     static_cast<const int*>(nullptr),  // position_ids
+                                     static_cast<const int*>(nullptr),  // token_types
+                                     static_cast<const int*>(nullptr),  // mask
+                                     tokens,
+                                     hidden_size,
+                                     stream);
         } else {
             invokeEmbeddingLookup(static_cast<c_type*>(output.data_ptr()),
-                                   static_cast<const c_type*>(weight.data_ptr()),
-                                   1.0,
-                                   static_cast<const c_type*>(nullptr),  // postition_table
-                                   static_cast<const c_type*>(nullptr),  // token_type_table
-                                   static_cast<const int*>(input.data_ptr()),
-                                   static_cast<const int*>(nullptr),  // position_ids
-                                   static_cast<const int*>(nullptr),  // token_types
-                                   static_cast<const int*>(nullptr),  // mask
-                                   tokens,
-                                   hidden_size,
-                                   stream);
+                                  static_cast<const c_type*>(weight.data_ptr()),
+                                  1.0,
+                                  static_cast<const c_type*>(nullptr),  // postition_table
+                                  static_cast<const c_type*>(nullptr),  // token_type_table
+                                  static_cast<const int*>(input.data_ptr()),
+                                  static_cast<const int*>(nullptr),  // position_ids
+                                  static_cast<const int*>(nullptr),  // token_types
+                                  static_cast<const int*>(nullptr),  // mask
+                                  tokens,
+                                  hidden_size,
+                                  stream);
         }
         return true;
     });
@@ -85,22 +85,22 @@ void embeddingBert(at::Tensor& output,
     const int hidden_size = weight.size(1);
     CHECK_EQ(output.size(0), tokens);
     CHECK_EQ(output.size(1), hidden_size);
-
+    RTP_LLM_LOG_INFO("start embedding bert in cpp");
     StreamType stream = GET_CURRENT_STREAM();
 
     DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FP16(weight.scalar_type(), c_type, [&] {
         invokeEmbeddingLookup(static_cast<c_type*>(output.data_ptr()),
-                               static_cast<const c_type*>(weight.data_ptr()),
-                               input_embedding_scalar,
-                               static_cast<const c_type*>(position_encoding.data_ptr()),     // postition_table
-                               static_cast<const c_type*>(token_type_embedding.data_ptr()),  // token_type_table
-                               static_cast<const int*>(input.data_ptr()),
-                               static_cast<const int*>(combo_position_ids.data_ptr()),     // position_ids
-                               static_cast<const int*>(combo_tokens_type_ids.data_ptr()),  // token_types
-                               static_cast<const int*>(nullptr),                           // mask
-                               tokens,
-                               hidden_size,
-                               stream);
+                              static_cast<const c_type*>(weight.data_ptr()),
+                              input_embedding_scalar,
+                              static_cast<const c_type*>(position_encoding.data_ptr()),     // postition_table
+                              static_cast<const c_type*>(token_type_embedding.data_ptr()),  // token_type_table
+                              static_cast<const int*>(input.data_ptr()),
+                              static_cast<const int*>(combo_position_ids.data_ptr()),     // position_ids
+                              static_cast<const int*>(combo_tokens_type_ids.data_ptr()),  // token_types
+                              static_cast<const int*>(nullptr),                           // mask
+                              tokens,
+                              hidden_size,
+                              stream);
         return true;
     });
 }
