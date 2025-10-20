@@ -62,6 +62,8 @@ void registerPyOpDefs(pybind11::module& m) {
     pybind11::class_<PyPrefillCudaGaphCopyParams>(m, "PyPrefillCudaGaphCopyParams")
         .def(pybind11::init<>())
         .def_readonly("cuda_graph_prefill_batch_size", &PyPrefillCudaGaphCopyParams::cuda_graph_prefill_batch_size)
+        .def_readonly("aligned_attn_buf", &PyPrefillCudaGaphCopyParams::aligned_attn_buf)
+        .def_readonly("compact_attn_buf", &PyPrefillCudaGaphCopyParams::compact_attn_buf)
         .def_readonly("max_seq_len", &PyPrefillCudaGaphCopyParams::max_seq_len)
         .def_readonly("hidden_size", &PyPrefillCudaGaphCopyParams::hidden_size)
         .def_readonly("max_batch_size", &PyPrefillCudaGaphCopyParams::max_batch_size);

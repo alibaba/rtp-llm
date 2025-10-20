@@ -82,7 +82,6 @@ class BertModel(GptModelBase):
     def forward(self, inputs: PyModelInputs) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
         bert_embedding_inputs = inputs.bert_embedding_inputs
-
         inputs_embeds = self.embed_tokens(
             input_ids,
             bert_embedding_inputs.combo_position_ids,

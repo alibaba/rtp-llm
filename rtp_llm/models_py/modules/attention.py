@@ -54,7 +54,6 @@ class CausalAttention(nn.Module):
             qkv = self.qk_fuse_norm(qkv)
         attn_output = fmha_impl.forward(qkv, kv_cache)
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
-
         output = self.o_proj(attn_output)
         if self.config.tp_size > 1:
             output = all_reduce(output, group=Group.TP)
