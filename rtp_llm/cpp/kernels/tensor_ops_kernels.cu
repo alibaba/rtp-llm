@@ -31,6 +31,14 @@
 #endif
 #include "rtp_llm/cpp/kernels/tensor_ops_kernels.h"
 
+#if USING_CUDA
+#include "rtp_llm/cpp/kernels/vec_dtypes.cuh"
+#endif
+
+#if USING_ROCM
+#include "rtp_llm/cpp/kernels/rocm_utils/vec_dtypes_hip.h"
+#endif
+
 namespace rtp_llm {
 
 // Transpose operations
@@ -233,6 +241,41 @@ INSTANTIATE_INVOKE_LOOKUP_HIDDEN_OF_LAST(__nv_bfloat16);
 
 #ifdef ENABLE_FP8
 INSTANTIATE_INVOKE_LOOKUP_HIDDEN_OF_LAST(__nv_fp8_e4m3);
+#endif
+
+template<typename T, size_t vec_size = 8>
+__global__ void checkNANKernel(T* input, int64_t nums, int circle) {
+    int64_t            index = ((int64_t)blockIdx.x * blockDim.x + threadIdx.x) * vec_size * circle;
+    vec_t<T, vec_size> inputs;
+    int64_t            max_index = min(index + vec_size * circle, nums - vec_size);
+    for (int64_t i = index; i < max_index; i += vec_size) {
+        inputs.load(input + i);
+        for (int j = 0; j < vec_size; ++j)
+            if (isnan(float(inputs[j]))) {
+                // 触发非法内存访问以生成core dump
+                volatile int* ptr = nullptr;
+                *ptr              = 0;
+                break;  // 检测到NaN后立即跳出循环
+            }
+    }
+}
+
+template<typename T>
+void invokeCheckNAN(T* input, size_t nums, cudaStream_t stream) {
+    const int vec_size = 8;
+    int       circle   = nums / 512 / 65536 + 1;
+    dim3      grid(nums / circle / 512);
+    dim3      block(512);
+    checkNANKernel<T, vec_size><<<grid, block, 0, stream>>>(input, nums, circle);
+}
+
+template void invokeCheckNAN(float* input, size_t nums, cudaStream_t stream);
+template void invokeCheckNAN(half* input, size_t nums, cudaStream_t stream);
+#ifdef ENABLE_BF16
+template void invokeCheckNAN(nv_bfloat16* input, size_t nums, cudaStream_t stream);
+#endif
+#ifdef ENABLE_FP8
+template void invokeCheckNAN(__nv_fp8_e4m3* input, size_t nums, cudaStream_t stream);
 #endif
 
 }  // namespace rtp_llm

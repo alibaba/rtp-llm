@@ -106,6 +106,9 @@ public:
     virtual void perfRangePush(const std::string& name) const;
     virtual void perfRangePop() const;
 
+    // for check
+    virtual bool checkNAN(const Buffer& input);
+
     // for device-specific weights preprocess
     static torch::Tensor
     preprocessGemmWeightByKey(const std::string& key, torch::Tensor weight, bool user_arm_gemm_use_kai);

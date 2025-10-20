@@ -176,6 +176,7 @@ void register_profiling_debug_logging_config(pybind11::module& m) {
                             bool,
                             bool,
                             bool,
+                            bool,
                             bool>(),
              pybind11::arg("trace_memory")              = false,
              pybind11::arg("trace_malloc_stack")        = false,
@@ -194,7 +195,8 @@ void register_profiling_debug_logging_config(pybind11::module& m) {
              pybind11::arg("dg_print_reg_reuse")        = false,
              pybind11::arg("qwen_agent_debug")          = false,
              pybind11::arg("disable_dpc_random")        = false,
-             pybind11::arg("enable_detail_log")         = false)
+             pybind11::arg("enable_detail_log")         = false,
+             pybind11::arg("check_nan")                 = false)
         .def("to_string", &ProfilingDebugLoggingConfig::to_string)
         .def("update_from_env", &ProfilingDebugLoggingConfig::update_from_env_for_test)
         .def_readwrite("trace_memory", &ProfilingDebugLoggingConfig::trace_memory)
@@ -214,7 +216,8 @@ void register_profiling_debug_logging_config(pybind11::module& m) {
         .def_readwrite("dg_print_reg_reuse", &ProfilingDebugLoggingConfig::dg_print_reg_reuse)
         .def_readwrite("qwen_agent_debug", &ProfilingDebugLoggingConfig::qwen_agent_debug)
         .def_readwrite("disable_dpc_random", &ProfilingDebugLoggingConfig::disable_dpc_random)
-        .def_readwrite("enable_detail_log", &ProfilingDebugLoggingConfig::enable_detail_log);
+        .def_readwrite("enable_detail_log", &ProfilingDebugLoggingConfig::enable_detail_log)
+        .def_readwrite("check_nan", &ProfilingDebugLoggingConfig::check_nan);
 }
 
 void register_hwkernel_config(pybind11::module& m) {
@@ -396,7 +399,9 @@ void register_cache_store_config(pybind11::module& m) {
 // SchedulerConfig
 void register_scheduler_config(pybind11::module& m) {
     pybind11::class_<SchedulerConfig>(m, "SchedulerConfig")
-        .def(pybind11::init<bool, bool>(), pybind11::arg("use_batch_decode_scheduler") = false, pybind11::arg("use_gather_batch_scheduler") = false)
+        .def(pybind11::init<bool, bool>(),
+             pybind11::arg("use_batch_decode_scheduler") = false,
+             pybind11::arg("use_gather_batch_scheduler") = false)
         .def("to_string", &SchedulerConfig::to_string)
         .def("update_from_env", &SchedulerConfig::update_from_env_for_test)
         .def_readwrite("use_batch_decode_scheduler", &SchedulerConfig::use_batch_decode_scheduler)
@@ -436,9 +441,7 @@ void register_fifo_scheduler_config(pybind11::module& m) {
 // MiscellaneousConfig
 void register_misc_config(pybind11::module& m) {
     pybind11::class_<MiscellaneousConfig>(m, "MiscellaneousConfig")
-        .def(pybind11::init<bool, std::string>(),
-             pybind11::arg("disable_pdl") = true,
-             pybind11::arg("aux_string")  = "")
+        .def(pybind11::init<bool, std::string>(), pybind11::arg("disable_pdl") = true, pybind11::arg("aux_string") = "")
         .def("to_string", &MiscellaneousConfig::to_string)
         .def("update_from_env", &MiscellaneousConfig::update_from_env_for_test)
         .def_readwrite("disable_pdl", &MiscellaneousConfig::disable_pdl)
