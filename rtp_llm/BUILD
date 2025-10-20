@@ -452,6 +452,16 @@ py_library(
     ]
 )
 
+py_library(
+    name = "rtp_llm_package_libs",
+    deps = [
+        ":rtp_llm_lib",
+    ],
+    data = [
+        "//rtp_llm/libs:whl_package_libs"
+    ]
+)
+
 py_package(
     name = "rtp_llm_frontend_package",
     deps = [
@@ -465,7 +475,7 @@ py_package(
 py_package(
     name = "rtp_llm_package",
     deps = [
-        ":rtp_llm_lib",
+        ":rtp_llm_package_libs",
     ] + jit_deps(),
     packages = [
         "rtp_llm",

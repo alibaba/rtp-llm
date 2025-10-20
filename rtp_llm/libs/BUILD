@@ -122,8 +122,15 @@ filegroup(
         ":copy_hf3fs_libs",
         ":copy_aiter",
         ":copy_acclep_libs",
-        # ":libth_transformer_config_so",
-        # ":libth_transformer_so",
-        # ":librtp_compute_ops_so",
     ] + kernel_so_deps()
+)
+
+filegroup(
+    name = "whl_package_libs",
+    srcs = [],
+    data = [
+        ":libth_transformer_config_so",
+        ":libth_transformer_so",
+        ":librtp_compute_ops_so",
+    ]
 )
