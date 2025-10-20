@@ -84,10 +84,6 @@ public:
         }
     }
 
-    const ResourceContext& resourceContext() const {
-        return resource_context_;
-    }
-
     bool isMTPEagle() override {
         return sp_type_ == "mtp" || isEagle();
     }
@@ -159,7 +155,6 @@ private:
     const std::string               sp_type_;
     std::thread                     loop_thread_;
     std::atomic<bool>               running_{false};
-    ResourceContext                 resource_context_;
     std::shared_ptr<CudaProfiler_E> profiler_;
     int                             profiler_step_ = 0;
 };
