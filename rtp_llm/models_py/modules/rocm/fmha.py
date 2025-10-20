@@ -116,9 +116,9 @@ class AiterPrefillAttnOp:
         batch_size_actual, head_num_actual, seq_len, head_dim = q_tensor.shape
 
         # dimensions for aiter.flash_attn_func  {batch_size, seq_len, head_num, head_dim}
-        q = q_tensor.transpose(1, 2)  # {batch_size, seq_len, head_num, head_dim}
-        k = k_tensor.transpose(1, 2)  # {batch_size, seq_len_with_prefix, head_num_kv, head_dim}
-        v = v_tensor.transpose(1, 2)  # {batch_size, seq_len_with_prefix, head_dim}
+        q = q_tensor.transpose(1, 2).contiguous()  # {batch_size, seq_len, head_num, head_dim}
+        k = k_tensor.transpose(1, 2).contiguous()  # {batch_size, seq_len_with_prefix, head_num_kv, head_dim}
+        v = v_tensor.transpose(1, 2).contiguous()  # {batch_size, seq_len_with_prefix, head_dim}
         res = aiter.flash_attn_func(q, k, v, dropout_p=0., softmax_scale=None, causal=True)
         input_lengths = fmha_params.input_lengths  # 每个 batch 的真实长度
         hidden_size = head_num_actual * head_dim
