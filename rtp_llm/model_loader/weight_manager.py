@@ -5,6 +5,7 @@ from typing import Any, Mapping
 import torch
 from rtp_llm.async_decoder_engine.async_model import AsyncModel
 # Assuming these imports are from your project and accessible
+from rtp_llm.model_loader.weight_module import WeightModule
 from rtp_llm.model_loader.ffn_weight import FfnWeight
 from rtp_llm.model_loader.loader import ModelLoader
 from rtp_llm.model_loader.model_weight_info import ModelWeights
@@ -40,6 +41,7 @@ RENAME_DICTIONARY = {
     # ???
     "mlp.linear_fc1.weight": "",
 }
+
 def rename_function(layer_name: str) -> str:
     """
     Transforms a layer weight name from an external format (e.g., 'verl')
@@ -80,6 +82,7 @@ def rename_function(layer_name: str) -> str:
         if name in RENAME_DICTIONARY:
             return RENAME_DICTIONARY[name]
         return name
+
 class WeightManager:
     """
     Manages model weight updates, including renaming weights from an external
@@ -112,6 +115,7 @@ class WeightManager:
         # serialized via the server's request handling, a per-update lock might
         # be redundant or require finer-grained locking within _weights.update_...
         self._lock = threading.Lock()
+
     def extract_layer_number(self, s: str) -> int | None:
         """
         Extracts the layer number (an integer) from a string that follows
@@ -177,22 +181,27 @@ class WeightManager:
         method: str = str(req["method"])
         desc: str = str(req["desc"])
         name: str = str(req["name"])
+        stored_name: str = name
+
         if method not in {"cuda_ipc", "shm"}:
             raise ValueError(
                 f"Invalid IPC method '{method}' provided. Only 'cuda_ipc' and 'shm' are allowed."
             )
         tensor: torch.Tensor | None = None
+
         if method == "cuda_ipc":
             helper = CudaIpcHelper()
             tensor = helper.build_from_meta(bytes.fromhex(desc))
         else:  # method == "shm"
             sm_meta: SharedMemIpcMeta = SharedMemIpcMeta.decode(desc)
             tensor = self._s_helper.build_from_meta(sm_meta)
+
         if tensor is None:
             # This should ideally not be reached if build_from_meta consistently returns a tensor or raises an error.
             raise Exception(
                 f"Failed to build tensor from IPC description '{desc}' using method '{method}'. Tensor is None."
             )
+
         with torch.cuda.stream(self._working_stream):
             config = self._weights_loader.get_load_config()
             if "layers" in name:
@@ -205,41 +214,30 @@ class WeightManager:
                     )
                 name: str = rename_function(name)
                 fail: bool = True
-                if "ffn_weights" in name:
-                    for module in self._weight_module.layer_weights[layer_id]:
-                        if module.name == "__ffn_weights__":
-                            assert isinstance(module, FfnWeight)
-                            shard = module.sub_weights[name].update(
-                                tensor, self._device, load_config=config
-                            )
-                            if isinstance(shard, dict):
-                                shard = next(iter(shard.values()))
-                            self._weights.update_layer_weight(
-                                layer_id=layer_id,
-                                name=name,
-                                data=shard
-                            )
-                            fail = False
-                for weight_module in self._weight_module.layer_weights[layer_id]:
-                    if weight_module.name == name:
-                        shard: dict = weight_module.update(
-                            tensor,
-                            self._device,
-                            load_config=self._weights_loader.get_load_config(),
-                        )
+
+                for receptor in self._weight_module.layer_weights[layer_id]:
+                    if receptor.name == name or ("ffn_weights" in name and receptor.name == "__ffn_weights__"):
+                        assert isinstance(receptor, WeightModule)
+
+                        # split tensor into shards
+                        shard = receptor.update(tensor=tensor, device=self._device, load_config=config, module_name=name)
                         if isinstance(shard, dict):
                             shard = next(iter(shard.values()))
+                        
+                        # update tensor weight
                         self._weights.update_layer_weight(
-                            layer_id=layer_id,
-                            name=name,
-                            data=shard
+                            layer_id=layer_id, name=name, data=shard
                         )
                         fail = False
+
                 if fail:
                     raise KeyError(
-                        f"{name} not found. accept name is {[w.name for w in self._weight_module.layer_weights[layer_id]]}"
+                        f"{stored_name} not found. wanted name list is {[w.name for w in self._weight_module.layer_weights[layer_id]]}"
                     )
+
             else:
+                # weight is global weight
+
                 name: str = rename_function(name)
                 fail: bool = True
                 for weight in self._weight_module.weights:
@@ -255,8 +253,10 @@ class WeightManager:
                             name=name, data=shard
                         )
                         fail = False
+
                 if fail:
                     raise KeyError(
-                        f"{name} not found. accept name is {[w.name for w in self._weight_module.weights]}"
+                        f"{stored_name} not found. wanted name list is {[w.name for w in self._weight_module.weights]}"
                     )
+
             self._working_stream.synchronize()

@@ -184,7 +184,7 @@ class WeightModule(ABC):
         return flat_res
 
     @torch.inference_mode()
-    def update(self, tensor: torch.Tensor, device: str, load_config: LoadConfig):
+    def update(self, tensor: torch.Tensor, device: str, load_config: LoadConfig, **kwargs):
         split_tensors = self._split(tensor, load_config)
         processed_tensors = self._postprocess(split_tensors, device, load_config)
         flat_res = {}

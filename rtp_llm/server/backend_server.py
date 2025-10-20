@@ -36,6 +36,7 @@ from rtp_llm.utils.concurrency_controller import (
 from rtp_llm.utils.fuser import _nfs_manager
 from rtp_llm.utils.time_util import Timer
 from rtp_llm.utils.version_info import VersionInfo
+import traceback
 
 StreamObjectType = Union[Dict[str, Any], BaseModel]
 
@@ -398,11 +399,11 @@ class BackendServer(object):
             self._weight_manager.update(req)
             return {"status": "ok"}
         except Exception as e:
-            return {"status": "error", "details": str(e)}
+            return {"status": "error", "details": traceback.format_exc()}
 
     def internal_update_weight(self, req: Dict[str, str]):
         try:
             self._weight_manager.update(req)
             return {"status": "ok"}
         except Exception as e:
-            return {"status": "error", "details": str(e)}
+            return {"status": "error", "details": traceback.format_exc()}
