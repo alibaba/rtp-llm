@@ -805,4 +805,16 @@ void CudaDevice::reduceScatter(const ReduceScatterParams& params) {
                                 stream));
 }
 
+bool CudaDevice::checkNAN(const Buffer& input) {
+    if (input.size() <= 0) {
+        return true;
+    }
+    cudaStreamSynchronize(stream_);
+    check_cuda_value(cudaGetLastError());
+    DISPATCH_CUDA_FUNCTION_DATA_TYPE(input.type(), invokeCheckNAN, input.data(), input.size(), stream_);
+    cudaStreamSynchronize(stream_);
+    check_cuda_value(cudaGetLastError());
+    return true;
+}
+
 }  // namespace rtp_llm

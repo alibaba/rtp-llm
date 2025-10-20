@@ -4,7 +4,7 @@
 #include "rtp_llm/cpp/kernels/mla_kernels_rocm/exception.h"
 #include "rtp_llm/cpp/kernels/mla_kernels_rocm/fastdiv.h"
 #include "rtp_llm/cpp/kernels/mla_kernels_rocm/pytorch_extension_utils_hip.h"
-#include "rtp_llm/cpp/kernels/mla_kernels_rocm/vec_dtypes_hip.h"
+#include "rtp_llm/cpp/kernels/rocm_utils/vec_dtypes_hip.h"
 #include <hip/hip_fp16.h>
 
 using namespace rtp_llm;

@@ -212,19 +212,19 @@ public:
     BeamSearchOutput       sampleBeamSearch(const BeamSearchParams& params) override;
     BufferPtr              quantize(const QuantizeParams& params) override;
     void                   preRun() override;
-
-    void              moeGateSelectWithBias(const FfnLayerParams& params,
-                                            BufferPtr             gate,
-                                            BufferPtr             gate_with_bias,
-                                            BufferPtr             expert_scales,
-                                            BufferPtr             expert_for_source_row,
-                                            int                   normalization_mode);
-    void              prepareMoEGate(const FfnLayerParams& params, BufferPtr gate);
-    void              mlaAbsorbAttention(const MlaAttentionModuleParams& params) override;
-    void              mlaContextAttention(const MlaAttentionModuleParams& params) override;
-    MoeDispatchOutput epDispatch(const MoeDispatchParams& params) override;
-    MoeCombineOutput  epCombine(const MoeCombineParams& params) override;
-    FfnLayerOutput    gatherCombineOutput(const MoeCombineOutput& params) override;
+    bool                   checkNAN(const Buffer& input) override;
+    void                   moeGateSelectWithBias(const FfnLayerParams& params,
+                                                 BufferPtr             gate,
+                                                 BufferPtr             gate_with_bias,
+                                                 BufferPtr             expert_scales,
+                                                 BufferPtr             expert_for_source_row,
+                                                 int                   normalization_mode);
+    void                   prepareMoEGate(const FfnLayerParams& params, BufferPtr gate);
+    void                   mlaAbsorbAttention(const MlaAttentionModuleParams& params) override;
+    void                   mlaContextAttention(const MlaAttentionModuleParams& params) override;
+    MoeDispatchOutput      epDispatch(const MoeDispatchParams& params) override;
+    MoeCombineOutput       epCombine(const MoeCombineParams& params) override;
+    FfnLayerOutput         gatherCombineOutput(const MoeCombineOutput& params) override;
 
     void QInputBatchMatmulWrapper(torch::Tensor& fused_q_input_t, const MlaAttentionModuleParams& params);
     void DecoderOutputGemmWrapper(torch::Tensor&                  qkv_output_t,

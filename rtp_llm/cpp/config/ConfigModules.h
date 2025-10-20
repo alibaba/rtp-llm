@@ -75,6 +75,7 @@ struct ProfilingDebugLoggingConfig {
     bool        qwen_agent_debug          = false;
     bool        disable_dpc_random        = false;
     bool        enable_detail_log         = false;
+    bool        check_nan                 = false;
 
     std::string to_string() const;
     void        update_from_env_for_test();
@@ -203,8 +204,8 @@ struct FIFOSchedulerConfig {
 };
 
 struct MiscellaneousConfig {
-    bool        disable_pdl             = true;
-    std::string aux_string              = "";
+    bool        disable_pdl = true;
+    std::string aux_string  = "";
     std::string to_string() const;
     void        update_from_env_for_test();
 };
