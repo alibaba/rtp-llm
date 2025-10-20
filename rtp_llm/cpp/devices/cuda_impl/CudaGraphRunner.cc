@@ -7,7 +7,7 @@
 #include "rtp_llm/cpp/devices/cuda_impl/CudaFlashInfer.h"
 #include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 #include "rtp_llm/models_py/bindings/OpDefsUtils.h"
-
+#include "rtp_llm/cpp/devices/utils/DevicePerfWrapper.h"
 using namespace torch_ext;
 namespace rtp_llm {
 
@@ -53,7 +53,8 @@ void CudaGraphRunner::copySmallerIntoLarger(const torch::Tensor& source_tensor, 
 
 void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
     if (!is_prefill_cuda_graph_mode_) {
-        auto& py_model_inputs_ = graph_instances_[current_real_graph_bs_].mem_hold_.py_model_inputs_;
+        DevicePerfWrapper wrapper(device_, "cuda graph prefill prepareInputs");
+        auto&             py_model_inputs_ = graph_instances_[current_real_graph_bs_].mem_hold_.py_model_inputs_;
         py_model_inputs_.attention_inputs.input_lengths.slice(0, 0, current_batch_size_) =
             inputs.attention_inputs.input_lengths;
         // pinned memory
@@ -72,7 +73,8 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
             current_batch_size_,
             seq_size_per_block_);
     } else {
-        auto& py_model_inputs_ = graph_instances_[current_real_graph_seq_len_].mem_hold_.py_model_inputs_;
+        DevicePerfWrapper wrapper(device_, "cuda graph decode prepareInputs");
+        auto&             py_model_inputs_ = graph_instances_[current_real_graph_seq_len_].mem_hold_.py_model_inputs_;
         py_model_inputs_.attention_inputs.input_lengths.slice(0, 0, current_batch_size_) =
             inputs.attention_inputs.input_lengths;
         // pinned memory
@@ -97,6 +99,7 @@ PyModelOutputs CudaGraphRunner::forward(PyModelInputs& inputs) {
     // decode or embedding model only
     if (canRun(inputs)) {
         RTP_LLM_LOG_INFO("Replay Start");
+        DevicePerfWrapper wrapper(device_, "cuda graph replay");
         prepareInputs(inputs);
         if (is_prefill_cuda_graph_mode_) {
             replayPrefill(current_seq_len_);

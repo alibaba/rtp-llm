@@ -11,7 +11,7 @@
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 #include <cstdlib>
 #include <iostream>
-
+#include "rtp_llm/cpp/devices/utils/DevicePerfWrapper.h"
 namespace rtp_llm {
 
 PyWrappedModel::~PyWrappedModel() {
@@ -210,7 +210,7 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
 }
 
 GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
-
+    DevicePerfWrapper      wrapper(device_, "py model forward");
     py::gil_scoped_acquire gil;
     printBufferDataDebug(*inputs.combo_position_ids, "forward inputs.combo_position_ids");
     try {
@@ -235,11 +235,13 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         PyModelOutputs py_model_outputs;
         // Cast the Python object to PyModelOutputs and extract hidden states
         if (enable_cuda_graph_) {
+            DevicePerfWrapper wrapper(device_, "cuda graph python forward");
             py_model_outputs = graph_runner_->forward(py_model_inputs);
         } else {
-            auto py_model_forward = py_model_.attr("forward");
-            auto outputs          = py_model_forward(py_model_inputs);
-            py_model_outputs      = outputs.cast<PyModelOutputs>();
+            DevicePerfWrapper wrapper(device_, "normal forward");
+            auto              py_model_forward = py_model_.attr("forward");
+            auto              outputs          = py_model_forward(py_model_inputs);
+            py_model_outputs                   = outputs.cast<PyModelOutputs>();
         }
         auto hidden_states_tensor = py_model_outputs.hidden_states;
         auto hidden_states        = torchTensor2Buffer(hidden_states_tensor);
