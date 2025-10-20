@@ -7,6 +7,7 @@ cc_library(
         "OpDefs.h",
         "OpDefsUtils.h",
         "ParamsBase.h",
+        "MlaParamsBase.h",
     ],
     srcs = [
         "OpDefs.cc",

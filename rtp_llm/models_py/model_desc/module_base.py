@@ -6,6 +6,7 @@ from torch import Tensor, nn
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.modules import DECODE_MHA_IMPS, PREFILL_MHA_IMPS, FMHAImplBase
+from rtp_llm.models_py.modules.fmha import DECODE_MLA_IMPS, PREFILL_MLA_IMPS
 from rtp_llm.ops import (
     DeviceType,
     KVCache,
@@ -15,6 +16,7 @@ from rtp_llm.ops import (
     PyModelOutputs,
     get_device,
 )
+from rtp_llm.utils.model_weight import W
 
 
 class GptModelBase(nn.Module):
@@ -76,10 +78,24 @@ class GptModelBase(nn.Module):
     def forward(self, inputs: PyModelInputs) -> PyModelOutputs:
         raise NotImplementedError("forward method must be implemented in subclass")
 
+    def get_mla_impl(self, attn_inputs: PyAttentionInputs) -> FMHAImplBase:
+        mha_impls = PREFILL_MLA_IMPS if attn_inputs.is_prefill else DECODE_MLA_IMPS
+        for fmha_impl in mha_impls:
+            cos_sin_cache = self.weight.get_global_weight(W.rope_cos_sin_cache)
+            impl = fmha_impl(
+                self.config,
+                attn_inputs,
+                self.weight.weights,
+                cos_sin_cache,
+            )
+            if impl.support():
+                return impl
+        raise Exception(f"can not find fmha type")
+
     def get_fmha_impl(self, attn_inputs: PyAttentionInputs) -> FMHAImplBase:
         mha_impls = PREFILL_MHA_IMPS if attn_inputs.is_prefill else DECODE_MHA_IMPS
         for fmha_impl in mha_impls:
             impl = fmha_impl(self.config, attn_inputs)
             if impl.support():
                 return impl
-        raise Exception(f"can not find fmha type: {attn_inputs.fmha_type}")
+        raise Exception(f"can not find fmha type")

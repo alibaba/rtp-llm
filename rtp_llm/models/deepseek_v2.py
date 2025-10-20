@@ -27,6 +27,8 @@ from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.rotary_embedding.deepseek_rotary_embedding import (
     DeepseekV3YarnRotaryEmbedding,
 )
+from rtp_llm.models_py.model_desc.deepseek_v2 import DeepSeekV2Model
+from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
@@ -516,9 +518,13 @@ class DeepSeekV2(BaseModel):
             norm_type="rmsnorm",
             has_post_decoder_layernorm=True,
         )
-        config.activation_type = "gated-silu"
+        # config.activation_type = "gated-silu"
+        config.activation_type = "SiGLU"
         DeepSeekV2._from_hf(config, ckpt_path)
         return config
+
+    def _create_python_model(self) -> Optional[GptModelBase]:
+        self.py_model = DeepSeekV2Model(self.config, self.weight)
 
     @staticmethod
     def _from_hf(config: GptInitModelParameters, ckpt_path: str):

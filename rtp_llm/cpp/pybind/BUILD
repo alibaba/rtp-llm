@@ -47,6 +47,7 @@ cc_library(
     deps = [
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/devices:devices_base",
+        "//rtp_llm/cpp/devices:device_utils",
         "@havenask//aios/autil:base64",
         "@havenask//aios/autil:zlib",
     ] + torch_deps() + select_py_bindings(),
