@@ -15,12 +15,12 @@ DefaultDistKvCachePlanner::DefaultDistKvCachePlanner(CacheManager*              
     init_params_3fs_(init_params_3fs),
     metrics_reporter_(metrics_reporter) {}
 
-
-std::vector<DistStorage::Item> DefaultDistKvCachePlanner::layout(const std::vector<int64_t>& cache_keys,
-                                                                 const std::vector<int32_t>& block_indices,
-                                                                 size_t                      ignore_block_num,
+std::vector<DistStorage::Item> DefaultDistKvCachePlanner::layout(const std::vector<int64_t>&        cache_keys,
+                                                                 const std::vector<int32_t>&        block_indices,
+                                                                 const kv_cache_manager::BlockMask& block_mask,
                                                                  const std::map<std::string, std::string>& metas) {
-    uint32_t total_len = cache_keys.size();
+    auto     ignore_block_num = std::get<kv_cache_manager::BlockMaskOffset>(block_mask);
+    uint32_t total_len        = cache_keys.size();
     if (total_len == 0) {
         return {};
     }
@@ -33,7 +33,7 @@ std::vector<DistStorage::Item> DefaultDistKvCachePlanner::layout(const std::vect
             ignore_block_num);
         return {};
     }
-    
+
     const auto& cache_config = cache_manager_->cacheConfig();
     const auto  k_block_len  = cache_config.k_block_stride;
     const auto  v_block_len  = cache_config.v_block_stride;
@@ -44,7 +44,7 @@ std::vector<DistStorage::Item> DefaultDistKvCachePlanner::layout(const std::vect
     std::vector<DistStorage::Item>     items;
 
     for (int i = 0; i < total_len; i++) {
-        bool ignore   = i < ignore_block_num;
+        bool ignore = i < ignore_block_num;
         if (item == nullptr) {
             item             = std::make_shared<DistStorage::Item>();
             item->type       = DistStorage::ST_3FS;
@@ -64,14 +64,10 @@ std::vector<DistStorage::Item> DefaultDistKvCachePlanner::layout(const std::vect
                     if (!block_addrs.k_addr || !block_addrs.v_addr) {
                         return {};
                     }
-                    item->iovs.push_back(DistStorage::Iov{std::shared_ptr<void>(block_addrs.k_addr, [](void* p) {}),
-                                                        k_block_len,
-                                                        true,
-                                                        ignore});
-                    item->iovs.push_back(DistStorage::Iov{std::shared_ptr<void>(block_addrs.v_addr, [](void* p) {}),
-                                                        v_block_len,
-                                                        true,
-                                                        ignore});
+                    item->iovs.push_back(DistStorage::Iov{
+                        std::shared_ptr<void>(block_addrs.k_addr, [](void* p) {}), k_block_len, true, ignore});
+                    item->iovs.push_back(DistStorage::Iov{
+                        std::shared_ptr<void>(block_addrs.v_addr, [](void* p) {}), v_block_len, true, ignore});
                 }
             }
         }
@@ -80,7 +76,7 @@ std::vector<DistStorage::Item> DefaultDistKvCachePlanner::layout(const std::vect
         item_keys.push_back(cache_keys[i]);
 
         if (item_block_count >= gpt_init_params_.kv_cache_config.max_block_size_per_item && item_keys.size() > 0) {
-            item->key = std::to_string(item_keys.front()) + "_" + std::to_string(item_keys.back());
+            item->key               = std::to_string(item_keys.front()) + "_" + std::to_string(item_keys.back());
             item->metas["ITEM_KEY"] = item->key;
             RTP_LLM_LOG_DEBUG("push item: %s", item->key.c_str());
             items.push_back(*item);
@@ -89,7 +85,7 @@ std::vector<DistStorage::Item> DefaultDistKvCachePlanner::layout(const std::vect
     }
 
     if (item != nullptr && item_keys.size() > 0) {
-        item->key = std::to_string(item_keys.front()) + "_" + std::to_string(item_keys.back());
+        item->key               = std::to_string(item_keys.front()) + "_" + std::to_string(item_keys.back());
         item->metas["ITEM_KEY"] = item->key;
         RTP_LLM_LOG_DEBUG("push item: %s", item->key.c_str());
         items.push_back(*item);

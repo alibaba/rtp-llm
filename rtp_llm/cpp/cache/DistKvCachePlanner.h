@@ -3,6 +3,7 @@
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/cache/DistStorage.h"
 #include "rtp_llm/cpp/config/GptInitParameter.h"
+#include "kvcm_client/common.h"
 
 namespace rtp_llm {
 
@@ -10,7 +11,7 @@ class DistKvCachePlanner {
 public:
     virtual std::vector<DistStorage::Item> layout(const std::vector<int64_t>&               cache_keys,
                                                   const std::vector<int32_t>&               block_indices,
-                                                  size_t                                    ignore_block_num,
+                                                  const kv_cache_manager::BlockMask&        block_mask,
                                                   const std::map<std::string, std::string>& metas) = 0;
 
     virtual bool verify(const std::vector<DistStorage::Item>&     buffers,
@@ -32,7 +33,7 @@ public:
 public:
     std::vector<DistStorage::Item> layout(const std::vector<int64_t>&               cache_keys,
                                           const std::vector<int32_t>&               block_indices,
-                                          size_t                                    ignore_block_num,
+                                          const kv_cache_manager::BlockMask&        block_mask,
                                           const std::map<std::string, std::string>& metas) override;
 
     bool verify(const std::vector<DistStorage::Item>&     buffers,

@@ -95,6 +95,7 @@ void KVCacheConfig::update_from_env_for_test() {
     reuse_cache                        = bool_from_env_for_test("REUSE_CACHE", false);
     multi_task_prompt                  = autil::EnvUtil::getEnv("MULTI_TASK_PROMPT", "");
     multi_task_prompt_str              = autil::EnvUtil::getEnv("MULTI_TASK_PROMPT_STR", "");
+    enable_dist_kvcache                = bool_from_env_for_test("ENABLE_DIST_KVCACHE", false);
     enable_3fs                         = bool_from_env_for_test("ENABLE_3FS", false);
     match_timeout_ms                   = autil::EnvUtil::getEnv("MATCH_TIMEOUT_MS", 1000);
     rpc_get_cache_timeout_ms           = autil::EnvUtil::getEnv("RPC_GET_CACHE_TIMEOUT_MS", 2000);
@@ -113,6 +114,7 @@ std::string KVCacheConfig::to_string() const {
     oss << "reuse_cache: " << reuse_cache << "\n"
         << "multi_task_prompt: " << multi_task_prompt << "\n"
         << "multi_task_prompt_str: " << multi_task_prompt_str << "\n"
+        << "enable_dist_kvcache: " << enable_dist_kvcache << "\n"
         << "enable_3fs: " << enable_3fs << "\n"
         << "match_timeout_ms: " << match_timeout_ms << "\n"
         << "rpc_get_cache_timeout_ms: " << rpc_get_cache_timeout_ms << "\n"

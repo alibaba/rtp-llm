@@ -587,4 +587,12 @@ const BlockRefCounter& KVCacheAllocator::blockRefCounter() const {
     return block_ref_counter_;
 }
 
+void* KVCacheAllocator::getCacheBasePtr() const {
+    return cache_base_ptr_;
+}
+
+size_t KVCacheAllocator::getCacheBufferSize() const {
+    return cache_aligned_buffer_->sizeBytes();
+}
+
 }  // namespace rtp_llm

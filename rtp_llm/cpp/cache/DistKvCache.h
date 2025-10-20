@@ -7,6 +7,8 @@
 #include "rtp_llm/cpp/cache/DistStorageManager.h"
 #include "rtp_llm/cpp/model_rpc/RPCPool.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
+#include "rtp_llm/cpp/cache2/kv_cache_connector/KVCMClientWrapper.h"
+#include "rtp_llm/cpp/devices/DeviceBase.h"
 
 namespace rtp_llm {
 
@@ -38,30 +40,27 @@ public:
                 const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr);
     virtual ~DistKvCache();
 
-    virtual bool init(const DistKvCacheInitParams& init_params);
+    virtual bool init(const DistKvCacheInitParams& init_params, bool is_legacy);
 
 public:
     // virtual for mock test
     virtual int32_t matchForAllRank(const std::vector<int64_t>&        cache_keys,
                                     size_t                             ignore_block_num,
                                     int64_t                            request_id,
-                                    std::map<std::string, std::string> extra_metas);
+                                    std::map<std::string, std::string> extra_metas,
+                                    kv_cache_manager::LocationsMap&    locations_map);
 
-    virtual int32_t match(const std::vector<int64_t>&               cache_keys,
-                          size_t                                    ignore_block_num,
-                          int64_t                                   request_id,
-                          std::map<std::string, std::string>        extra_metas,
-                          const std::shared_ptr<std::atomic<bool>>& stop) const;
-
-    virtual bool getForAllRank(const std::vector<int64_t>&        cache_keys,
-                               const std::vector<int32_t>&        block_indices,
-                               size_t                             ignore_block_num,
-                               int64_t                            request_id,
-                               std::map<std::string, std::string> extra_metas) const;
+    virtual bool getForAllRank(const std::vector<int64_t>&           cache_keys,
+                               const std::vector<int32_t>&           block_indices,
+                               const kv_cache_manager::LocationsMap& locations_map,
+                               size_t                                ignore_block_num,
+                               int64_t                               request_id,
+                               std::map<std::string, std::string>    extra_metas) const;
 
     virtual bool get(const std::vector<int64_t>&        cache_keys,
                      const std::vector<int32_t>&        block_indices,
-                     size_t                             ignore_block_num,
+                     const kv_cache_manager::Locations& locations,
+                     const kv_cache_manager::BlockMask& block_mask,
                      int64_t                            request_id,
                      std::map<std::string, std::string> extra_metas) const;
 
@@ -73,31 +72,45 @@ public:
 
     virtual bool put(const std::vector<int64_t>&        cache_keys,
                      const std::vector<int32_t>&        block_indices,
-                     size_t                             ignore_block_num,
+                     const kv_cache_manager::Locations& locations,
+                     const kv_cache_manager::BlockMask& block_mask,
                      int64_t                            request_id,
                      std::map<std::string, std::string> extra_metas) const;
-
-    bool initDefaultMetas();
+    bool         initDefaultMetas();
 
 private:
     enum OpType {
         OP_GET = 0,
         OP_PUT = 1
     };
-    bool syncCallAllRank(const std::vector<int64_t>&              cache_keys,
-                         const std::vector<int32_t>&              block_indices,
-                         size_t                                   ignore_block_num,
-                         int64_t                                  request_id,
-                         const std::map<std::string, std::string> extra_metas,
-                         DistKvCache::OpType                      op_type) const;
+
+    virtual int32_t match(const std::vector<int64_t>&               cache_keys,
+                          kv_cache_manager::LocationsMap&           locations_map,
+                          size_t                                    ignore_block_num,
+                          int64_t                                   request_id,
+                          std::map<std::string, std::string>        extra_metas,
+                          const std::shared_ptr<std::atomic<bool>>& stop) const;
+
+    bool syncCallAllRank(const std::vector<int64_t>&               cache_keys,
+                         const std::vector<int32_t>&               block_indices,
+                         const kv_cache_manager::LocationsMap&     locations_map,
+                         const kv_cache_manager::BlockMask&        block_mask,
+                         int64_t                                   request_id,
+                         const std::map<std::string, std::string>& extra_metas,
+                         DistKvCache::OpType                       op_type) const;
+
+    bool initRemoteKvCacheClient();
+
+    bool                               initWithPure3FSMode();
+    std::map<std::string, std::string> genKVCMClientConfig() const;
+    std::string                        genUniqueId(const std::map<std::string, std::string>& extra_metas) const;
 
 private:
-    CacheManager*                cache_manager_{nullptr};
-    const GptInitParameter       gpt_init_params_;
-    kmonitor::MetricsReporterPtr metrics_reporter_;
-
-    std::map<std::string, std::string> default_metas_;
-
+    bool                                is_legacy_ = true;
+    CacheManager*                       cache_manager_{nullptr};
+    const GptInitParameter              gpt_init_params_;
+    kmonitor::MetricsReporterPtr        metrics_reporter_;
+    std::map<std::string, std::string>  default_metas_;
     DistKvCacheInitParams               init_params_;
     std::unique_ptr<DistKvCachePlanner> planner_;
     std::unique_ptr<DistStorageManager> storage_;
@@ -114,6 +127,7 @@ private:
     std::unique_ptr<autil::LockFreeThreadPool> io_thread_pool_;
     const size_t                               io_thread_num_{8};
     const size_t                               io_queue_size_{4096};
+    std::unique_ptr<KVCMClientWrapper>         kvcm_client_wrapper_;
 };
 
 }  // namespace rtp_llm

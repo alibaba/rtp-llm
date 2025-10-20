@@ -84,8 +84,10 @@ public:
 
     const CacheConfig& cacheConfig() const;
 
-    void incrBlockRefCounter(const std::vector<int>& blocks);
-    void decrBlockRefCounter(const std::vector<int>& blocks);
+    void   incrBlockRefCounter(const std::vector<int>& blocks);
+    void   decrBlockRefCounter(const std::vector<int>& blocks);
+    void*  getCacheBasePtr() const;
+    size_t getCacheBufferSize() const;
 
 protected:
     void initFreeBlock();

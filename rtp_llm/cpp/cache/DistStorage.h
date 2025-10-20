@@ -11,9 +11,11 @@ namespace rtp_llm {
 
 class DistStorage {
 public:
+    // TODO 待删除
     enum StorageType {
         ST_LOCAL_MEM = 0,
         ST_3FS       = 1,
+        ST_REMOTE    = 2,
     };
 
     struct Iov {

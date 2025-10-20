@@ -18,6 +18,7 @@
 #include "rtp_llm/cpp/cache/KvCacheInfo.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/MemoryBlockCache.h"
+#include "kvcm_client/common.h"
 
 namespace rtp_llm {
 
@@ -101,12 +102,16 @@ public:
                  const GptInitParameter&            params           = GptInitParameter{});
     ~CacheManager();
 
-    const CacheConfig&                     cacheConfig() const;
-    size_t                                 freeBlockNums() const;
-    size_t                                 availableBlockNums() const;
-    KVCacheInfo                            getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
-    uint32_t                               maxSeqLen() const;
-    const KVCacheAllocator::KVCacheBuffer& kvCacheBuffer() const;
+    const CacheConfig&                        cacheConfig() const;
+    size_t                                    freeBlockNums() const;
+    size_t                                    availableBlockNums() const;
+    KVCacheInfo                               getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
+    uint32_t                                  maxSeqLen() const;
+    const KVCacheAllocator::KVCacheBuffer&    kvCacheBuffer() const;
+    DeviceBase*                               device() const;
+    const GptInitParameter&                   gptInitParameter() const;
+    const std::map<std::string, std::string>& lora_info_map() const;
+    const std::shared_ptr<KVCacheAllocator>&  kvCacheAllocator() const;
 
     std::tuple<bool, KVCacheResource> malloc(const KVCacheAllocator::SimpleMallocInfo& malloc_info);
     MatchInfo                         mallocWithCache(const AdvancedMallocInfo& malloc_info);
@@ -136,12 +141,14 @@ public:
 
     bool getCacheForRank(const std::vector<int64_t>&               cache_keys,
                          const std::vector<int32_t>&               block_indices,
-                         size_t                                    ignore_block_num,
+                         const kv_cache_manager::Locations&        locations,
+                         const kv_cache_manager::BlockMask&        block_mask,
                          int64_t                                   request_id,
                          const std::map<std::string, std::string>& extra_metas) const;
     bool putCacheForRank(const std::vector<int64_t>&               cache_keys,
                          const std::vector<int32_t>&               block_indices,
-                         size_t                                    ignore_block_num,
+                         const kv_cache_manager::Locations&        locations,
+                         const kv_cache_manager::BlockMask&        block_mask,
                          int64_t                                   request_id,
                          const std::map<std::string, std::string>& extra_metas) const;
 
@@ -167,10 +174,8 @@ protected:
 
     void reportMetricsLoop();
 
-    const std::shared_ptr<KVCacheAllocator>& kvCacheAllocator() const;
-
 private:
-    bool initDistKvCache();
+    bool initDistKvCache(bool is_legacy);
     void matchInDistKvCache(const AdvancedMallocInfo& malloc_info, BlockCache::MatchResult& match_result);
     bool putToDistKvCache(const std::vector<int64_t>& cache_keys,
                           const std::vector<int32_t>& block_indices,
@@ -185,7 +190,7 @@ private:
 
     void incrBlockRefCounter(const std::vector<int>& blocks);
 
-protected:
+public:
     CacheConfig          config_;
     int                  seq_size_per_block_;
     BlockRefCounter      query_ref_counter_;

@@ -127,6 +127,7 @@ void register_kvcache_config(pybind11::module& m) {
              pybind11::arg("reuse_cache")                        = false,
              pybind11::arg("multi_task_prompt")                  = "",
              pybind11::arg("multi_task_prompt_str")              = "",
+             pybind11::arg("enable_dist_kvcache")                = false,
              pybind11::arg("enable_3fs")                         = false,
              pybind11::arg("match_timeout_ms")                   = 1000,
              pybind11::arg("rpc_get_cache_timeout_ms")           = 2000,
@@ -143,6 +144,7 @@ void register_kvcache_config(pybind11::module& m) {
         .def_readwrite("reuse_cache", &KVCacheConfig::reuse_cache)
         .def_readwrite("multi_task_prompt", &KVCacheConfig::multi_task_prompt)
         .def_readwrite("multi_task_prompt_str", &KVCacheConfig::multi_task_prompt_str)
+        .def_readwrite("enable_dist_kvcache", &KVCacheConfig::enable_dist_kvcache)
         .def_readwrite("enable_3fs", &KVCacheConfig::enable_3fs)
         .def_readwrite("match_timeout_ms", &KVCacheConfig::match_timeout_ms)
         .def_readwrite("rpc_get_cache_timeout_ms", &KVCacheConfig::rpc_get_cache_timeout_ms)

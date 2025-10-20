@@ -306,6 +306,14 @@ enum DistKvCacheOp {
     PUT = 2;
 }
 
+message KVCMBoolMasksTypePB { repeated bool values = 1; }
+message KVCMBlockMaskPB {
+    oneof info {
+        int32 offset = 1;
+        KVCMBoolMasksTypePB bool_masks = 2;
+    }
+}
+
 message DistKvCacheRequestPB {
     message MetaKV {
         string key = 1;
@@ -314,9 +322,11 @@ message DistKvCacheRequestPB {
     int64 request_id = 1;
     repeated int64 cache_keys = 2;
     repeated int32 block_ids = 3;
-    uint32 ignore_block_num = 4;
+    uint32 ignore_block_num = 4 [deprecated = true];
     DistKvCacheOp op = 5;
     repeated MetaKV extra_metas = 6;
+    repeated string kvcm_locations = 7;
+    KVCMBlockMaskPB kvcm_block_mask = 8;
 }
 
 message DistKvCacheResponsePB {
