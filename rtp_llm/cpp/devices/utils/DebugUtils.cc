@@ -484,7 +484,6 @@ void saveBufferData_(const Buffer&      buffer,
                      DeviceBase*        device,
                      const std::string& fileName,
                      const std::string& sourceFile) {
-    return;
 #if (defined(USING_ROCM) || defined(USE_CUDA))
     const auto log_level = alog::LOG_LEVEL_INFO;
 
@@ -550,7 +549,6 @@ void saveBufferData_(const Buffer&      buffer,
 }
 
 void saveBufferData_(Buffer& buffer, DeviceBase* device, const std::string& fileName, const std::string& sourceFile) {
-    return;
 #if (defined(USING_ROCM) || defined(USE_CUDA))
     const auto log_level = alog::LOG_LEVEL_INFO;
 
