@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-12 17:38+0800\n"
+"POT-Creation-Date: 2025-10-20 10:08+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../backend/reuse_kv_cache.md:1
 msgid "ReuseCache"
-msgstr "重用缓存"
+msgstr ""
 
 #: ../../backend/reuse_kv_cache.md:2
 msgid ""
@@ -35,35 +35,35 @@ msgid ""
 "each KV cache block. **Note: ReuseCache cannot currently use flash "
 "attention due to mismatched lengths between Q and KV, requiring "
 "`--reuse_cache true` to be added in the CMD**"
-msgstr "在多轮对话场景中，多个提示通常共享公共前缀。这些前缀token对应的KV缓存是相同的，重用KV缓存可以减少这些重复部分的计算时间，降低首token延迟。通过设置环境变量`REUSE_CACHE=1`启用KV缓存重用。启用时，启动日志将显示\"reuse_cache: True\"。环境变量`SEQ_SIZE_PER_BLOCK`指定每个KV缓存块对应的序列数量。**注意：由于Q和KV之间的长度不匹配，ReuseCache目前无法使用flash attention，需要在CMD中添加`--reuse_cache true`**"
+msgstr ""
 
 #: ../../backend/reuse_kv_cache.md:33 ../../backend/reuse_kv_cache.md:37
 msgid "MultiTaskPrompt"
-msgstr "多任务提示"
+msgstr ""
 
 #: ../../backend/reuse_kv_cache.md:34
 msgid ""
 "Create static cache for long-text System Prompts, directly reading KV "
 "cache from static cache in each request instead of recomputing. This "
 "method can significantly reduce the model's First Token Latency."
-msgstr "为长文本系统提示创建静态缓存，在每个请求中直接从静态缓存读取KV缓存而不是重新计算。这种方法可以显著减少模型的首token延迟。"
+msgstr ""
 
 #: ../../backend/reuse_kv_cache.md:36
 msgid "Usage"
-msgstr "用法"
+msgstr ""
 
 #: ../../backend/reuse_kv_cache.md:38
 msgid ""
 "rtp-llm specifies the system prompt information file that needs static "
 "caching through the `--multi_task_prompt` parameter. The format is "
 "similar to the following:"
-msgstr "rtp-llm通过`--multi_task_prompt`参数指定需要静态缓存的系统提示信息文件。格式如下："
+msgstr ""
 
 #: ../../backend/reuse_kv_cache.md:45
 msgid ""
 "You can also pass the above JSON through the `multi_task_prompt_str` "
 "environment variable."
-msgstr "您也可以通过`multi_task_prompt_str`环境变量传递上述JSON。"
+msgstr ""
 
 #: ../../backend/reuse_kv_cache.md:47
 msgid ""
@@ -73,11 +73,11 @@ msgid ""
 "MultiTaskPrompt cannot currently use flash attention due to mismatched "
 "lengths between Q and KV, requiring the environment variable `export "
 "ENABLE_FMHA=OFF` to be configured before running the code**"
-msgstr "启动后，模型将运行上述系统提示并将KV缓存缓存在GPU内存中。在后续运行中，如果指定了task_id，则可以使用此前缀。示例如下：**注意：由于Q和KV之间的长度不匹配，MultiTaskPrompt目前无法使用flash attention，需要在运行代码前配置环境变量`export ENABLE_FMHA=OFF`**"
+msgstr ""
 
 #: ../../backend/reuse_kv_cache.md:85
 msgid "Note:"
-msgstr "注意:"
+msgstr ""
 
 #: ../../backend/reuse_kv_cache.md:86
 msgid ""
@@ -89,5 +89,5 @@ msgid ""
 "cache. When no task ID is specified, the user's prompt is used to find "
 "the longest matching historical request in the KV cache to reuse the KV "
 "cache."
-msgstr "使用MULTI_TASK_PROMPT时，如果启用了REUSE_CACHE功能，则可以重用KV缓存。请参考文档[ReuseKVCache](docs/ReuseKVCache-Tutorial.md)。当指定任务ID时，使用task_id的系统提示来连接请求，并在KV缓存中找到最长匹配的历史请求以重用KV缓存。当未指定任务ID时，使用用户的提示在KV缓存中找到最长匹配的历史请求以重用KV缓存。"
+msgstr ""
 

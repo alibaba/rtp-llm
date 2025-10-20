@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-10-10 11:12+0800\n"
+"POT-Creation-Date: 2025-10-20 10:08+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -21,123 +21,87 @@ msgstr ""
 
 #: ../../README.md:1
 msgid "Documentation Manual"
-msgstr "文档手册"
+msgstr ""
 
 #: ../../README.md:2
 msgid "Prepare Docs Requirements"
-msgstr "准备文档环境"
+msgstr ""
 
 #: ../../README.md:13
 msgid "Add Documentation"
-msgstr "添加文档"
+msgstr ""
 
 #: ../../README.md:15
 msgid "1. Add Documentation File"
-msgstr "1. 添加文档文件"
+msgstr ""
 
 #: ../../README.md:16
 msgid ""
 "For design-related content, add MD (Markdown) files. For usage "
 "documentation that can be executed, consider adding Jupyter Notebook "
 "(`.ipynb`) files."
-msgstr "对于设计相关内容，添加 MD（Markdown）文件。对于可执行的使用文档，建议添加 Jupyter Notebook（`.ipynb`）文件。"
+msgstr ""
 
 #: ../../README.md:17
 msgid ""
 "If images are included, it is recommended to place them in the "
 "`docs/pics/` directory."
-msgstr "如果包含图片，建议将它们放在 `docs/pics/` 目录中。"
+msgstr ""
 
 #: ../../README.md:19
 msgid "2. Add Index"
-msgstr "2. 添加索引"
+msgstr ""
 
 #: ../../README.md:20
 msgid ""
 "The documentation index is built from `.rst` files. After adding "
 "documentation, organize files into the appropriate directory structure "
 "based on their purpose."
-msgstr "文档索引由 `.rst` 文件构建。添加文档后，根据文档的用途将文件组织到适当的目录结构中。"
+msgstr ""
 
 #: ../../README.md:22
 msgid "3. Add Chinese Support"
-msgstr "3. 添加中文支持"
+msgstr ""
 
 #: ../../README.md:23
 msgid "Navigate to the `docs` directory."
-msgstr "进入 `docs` 目录。"
+msgstr ""
 
 #: ../../README.md:24
 msgid ""
 "Run the command `make update`. This command extracts all translatable "
 "messages and updates the PO translation files."
-msgstr "运行命令 `make update`。此命令会提取所有可翻译的消息并更新 PO 翻译文件。"
+msgstr ""
 
 #: ../../README.md:25
 msgid ""
 "Manually update the newly generated translation files under "
 "`docs/locales/zh_CN/LC_MESSAGES`, filling in the `msgstr` fields for the "
 "target language."
-msgstr "手动更新 `docs/locales/zh_CN/LC_MESSAGES` 目录下新生成的翻译文件，填入目标语言的 `msgstr` 字段。"
+msgstr ""
 
 #: ../../README.md:26 ../../README.md:31
 msgid ""
 "Run `make html` to generate both Chinese and English HTML versions. "
 "Alternatively, run `make html-zh` or `make html-en` separately to build "
 "specific language versions."
-msgstr "运行 `make html` 生成中英文 HTML 版本。或者分别运行 `make html-zh` 或 `make html-en` 来构建特定语言版本。"
+msgstr ""
 
 #: ../../README.md:28
 msgid "Modify Documentation"
-msgstr "修改文档"
+msgstr ""
 
 #: ../../README.md:29
 msgid ""
 "Similar to adding documentation, if you modify existing documentation, "
 "ensure to update the corresponding Chinese PO files and regenerate HTML "
 "output by running `make html`."
-msgstr "与添加文档类似，如果您修改现有文档，请确保更新相应的中文 PO 文件并通过运行 `make html` 重新生成 HTML 输出。"
+msgstr ""
 
 #: ../../README.md:30
 msgid ""
 "Run `make update`, Manually update the newly generated translation files "
 "under `docs/locales/zh_CN/LC_MESSAGES`, filling in the `msgstr` fields "
 "for the target language."
-msgstr "运行 `make update`，手动更新 `docs/locales/zh_CN/LC_MESSAGES` 目录下新生成的翻译文件，填入目标语言的 `msgstr` 字段。"
-
-#~ msgid "添加文档手册"
-#~ msgstr "添加文档手册"
-
-#~ msgid "1. 添加文档"
-#~ msgstr "1. 添加文档"
-
-#~ msgid "如果是设计可以添加MD文档，如果是使用文档可以在Jupyter Notebook 上运行则建议添加ipynb文档"
-#~ msgstr "如果是设计可以添加MD文档，如果是使用文档可以在Jupyter Notebook 上运行则建议添加ipynb文档"
-
-#~ msgid "2. 添加索引"
-#~ msgstr "2. 添加索引"
-
-#~ msgid "docs 的索引由.rst 文件构建，添加好文档之后根据文档的用途将文档放到对应的目录结构"
-#~ msgstr "docs 的索引由.rst 文件构建，添加好文档之后根据文档的用途将文档放到对应的目录结构"
-
-#~ msgid "3. 增加中文"
-#~ msgstr "3. 增加中文"
-
-#~ msgid "进入 docs 目录。"
-#~ msgstr "进入 docs 目录。"
-
-#~ msgid "运行命令 `make update`。此命令会提取所有可翻译的消息并更新 PO 翻译文件。"
-#~ msgstr "运行命令 `make update`。此命令会提取所有可翻译的消息并更新 PO 翻译文件。"
-
-#~ msgid "手动修改新增的翻译文件，文件位于 docs/locales/zh_CN/LC_MESSAGES 下，补全对应语言的 msgstr 字段。"
-#~ msgstr "手动修改新增的翻译文件，文件位于 docs/locales/zh_CN/LC_MESSAGES 下，补全对应语言的 msgstr 字段。"
-
-#~ msgid ""
-#~ "运行命令 `make html`，此命令会同时生成中英两语的 HTML "
-#~ "版本。您也可以分别运行 `make html-zh` 和 `make "
-#~ "html-en` 命令生成中英文两个版本。"
-#~ msgstr ""
-#~ "运行命令 `make html`，此命令会同时生成中英两语的 HTML "
-#~ "版本。您也可以分别运行 `make html-zh` 和 `make "
-#~ "html-en` 命令生成中英文两个版本。"
+msgstr ""
 

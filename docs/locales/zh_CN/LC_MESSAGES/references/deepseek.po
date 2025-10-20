@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-12 17:38+0800\n"
+"POT-Creation-Date: 2025-10-20 10:08+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -21,11 +21,11 @@ msgstr ""
 
 #: ../../references/deepseek.md:1
 msgid "RTP-LLM DeepSeek Replay Tech Report"
-msgstr "RTP-LLM DeepSeek复现技术报告"
+msgstr ""
 
 #: ../../references/deepseek.md:3
 msgid "Overview"
-msgstr "概述"
+msgstr ""
 
 #: ../../references/deepseek.md:5
 msgid ""
@@ -38,8 +38,6 @@ msgid ""
 "completed optimization work on RTP-LLM, aligning with the performance of "
 "the DeepSeek inference system."
 msgstr ""
-"DeepSeek-V3在多项评估中表现出色，成为最引人注目的开源大模型之一。由于其大规模MoE架构，优化推理性能是工程部署的关键挑战。2月，DeepSeek团队相继开源了DeepEP、DeepGEMM、FlashMLA和EPLB等关键组件。基于开源社区的工作，我们完成了RTP-LLM的优化工作，与DeepSeek推理系统的性能保持一致。"
-""
 
 #: ../../references/deepseek.md:7
 msgid ""
@@ -51,8 +49,6 @@ msgid ""
 " refactored, and complete code and reproduction methods will be updated "
 "soon."
 msgstr ""
-"RTP-LLM是阿里巴巴爱橙技术开发的LLM推理加速引擎，主要服务阿里巴巴集团内部业务。本文将分享一些实现过程中的关键技术点、不足和反思，以感谢开源社区的帮助。相关代码正在整理和重构中，完整代码和复现方法将尽快更新。"
-""
 
 #: ../../references/deepseek.md:9
 msgid ""
@@ -60,25 +56,18 @@ msgid ""
 "Overview](https://github.com/deepseek-ai/open-infra-"
 "index/blob/main/202502OpenSourceWeek/day_6_one_more_thing_deepseekV3R1_inference_system_overview.md)"
 msgstr ""
-"根据[DeepSeek推理系统概述](https://github.com/deepseek-ai/open-infra-"
-"index/blob/main/202502OpenSourceWeek/day_6_one_more_thing_deepseekV3R1_inference_system_overview.md)中的介绍"
-""
 
 #: ../../references/deepseek.md:12
 msgid ""
 "Total input tokens: 608B, of which 342B tokens (56.3%) hit the on-disk KV"
 " cache."
 msgstr ""
-"总输入token数：608B，其中342B个token (56.3%)命中磁盘KV缓存。"
-""
 
 #: ../../references/deepseek.md:14
 msgid ""
 "Total output tokens: 168B. The average output speed was 20–22 tokens per "
 "second, and the average kvcache length per output token was 4,989 tokens."
 msgstr ""
-"总输出token数：168B。平均输出速度为每秒20-22个token，每个输出token的平均kvcache长度为4,989个token。"
-""
 
 #: ../../references/deepseek.md:16
 msgid ""
@@ -86,8 +75,6 @@ msgid ""
 "(including cache hits) during prefilling or ~14.8k tokens/s output during"
 " decoding."
 msgstr ""
-"每个H800节点在预填充阶段提供约73.7k tokens/s的平均吞吐量（包括缓存命中）或在解码阶段提供约14.8k tokens/s的输出吞吐量。"
-""
 
 #: ../../references/deepseek.md:19
 msgid ""
@@ -98,16 +85,14 @@ msgid ""
 "performance of 42.6K TPS per H800 node and decode performance of 14.7K "
 "TPS per H800 node**."
 msgstr ""
-"**在实际生产服务中，DeepSeek推理系统在每个H800节点上实现32.2K的预填充吞吐量**和**每个H800节点14.8K TPS的解码吞吐量**。在RTP-LLM测试中，使用4K输入/2K输出，**在1.6s TTFT和50ms ITL约束下，我们实现了每个H800节点42.6K TPS的预填充性能和每个H800节点14.7K TPS的解码性能**。"
-""
 
 #: ../../references/deepseek.md:21
 msgid "Test Results"
-msgstr "测试结果"
+msgstr ""
 
 #: ../../references/deepseek.md:23
 msgid "Settings"
-msgstr "设置"
+msgstr ""
 
 #: ../../references/deepseek.md:25
 msgid ""
@@ -118,8 +103,6 @@ msgid ""
 "GPUs. During testing, we used 4 prefill instances and 1 decode instance, "
 "totaling 272 H800 GPUs."
 msgstr ""
-"我们在**阿里云灵骏H800 RoCE环境中部署，使用PD分离和分布式EP架构**，设置TP=1，DP=EP=GPU数量。预填充单实例规格为4个节点32个GPU，解码单实例规格为18个节点144个GPU。测试期间，我们使用了4个预填充实例和1个解码实例，总计272个H800 GPU。"
-""
 
 #: ../../references/deepseek.md:27
 msgid ""
@@ -128,16 +111,14 @@ msgid ""
 "fluctuations will be faced, requiring integration with scheduling systems"
 " to dynamically and elastically adjust the number of PD instances."
 msgstr ""
-"测试采用了4:1的PD实例比例，这不是完美的PD比例。在实际生产负载中，将面临更复杂的输入/输出长度波动，需要与调度系统集成以动态和弹性调整PD实例数量。"
-""
 
 #: ../../references/deepseek.md:29
 msgid "Prefill"
-msgstr "预填充"
+msgstr ""
 
 #: ../../references/deepseek.md:31
 msgid "![image.png](../pics/prefill.png)"
-msgstr "![image.png](../pics/prefill.png)"
+msgstr ""
 
 #: ../../references/deepseek.md:31 ../../references/deepseek.md:41
 #: ../../references/deepseek.md:45 ../../references/deepseek.md:57
@@ -151,16 +132,12 @@ msgid ""
 "single GPU executing 2 4K requests takes 1.5s, with a throughput of 5333 "
 "TPS."
 msgstr ""
-"预填充实例使用32个EP部署。在极端压力下，单个GPU执行2个4K请求需要1.5秒，吞吐量为5333 TPS。"
-""
 
 #: ../../references/deepseek.md:35
 msgid ""
 "The test did not simulate the impact of cache, which is one of the "
 "subsequent areas for improvement."
 msgstr ""
-"测试没有模拟缓存的影响，这是后续改进的领域之一。"
-""
 
 #: ../../references/deepseek.md:37
 msgid ""
@@ -168,16 +145,14 @@ msgid ""
 "use TP=1 on high-compute H800 GPUs; on compute-constrained cards like "
 "H20, choose TP=2/4 based on latency constraints.**"
 msgstr ""
-"**RTP-LLM还支持混合TP/DP/EP部署。建议在高算力H800 GPU上使用TP=1；在算力受限的卡如H20上，根据延迟约束选择TP=2/4。**"
-""
 
 #: ../../references/deepseek.md:39
 msgid "Decode"
-msgstr "解码"
+msgstr ""
 
 #: ../../references/deepseek.md:41
 msgid "![image.png](../pics/decode.png)"
-msgstr "![image.png](../pics/decode.png)"
+msgstr ""
 
 #: ../../references/deepseek.md:43
 msgid ""
@@ -187,12 +162,10 @@ msgid ""
 "IB network differences, lack of CUDA Graph optimization, and some slow "
 "kernel implementations. This is also a direction for future optimization."
 msgstr ""
-"解码实例使用144个EP部署（128+16个冗余）。由于实现差异，主机端耗时减少2ms，但设备端稍慢。分析表明原因是RoCE与IB网络差异、缺少CUDA Graph优化以及一些慢速内核实现。这也是未来优化的方向。"
-""
 
 #: ../../references/deepseek.md:45
 msgid "![image.png](../pics/throughput_latency.png)"
-msgstr "![image.png](../pics/throughput_latency.png)"
+msgstr ""
 
 #: ../../references/deepseek.md:47
 msgid ""
@@ -201,8 +174,6 @@ msgid ""
 "SLA limit of 20 TPS per user is reached, with a single GPU throughput of "
 "1850 TPS."
 msgstr ""
-"上图显示了解码阶段的压力测试曲线。在较低并发下，单个用户可以达到42 TPS。在13200并发下，达到每个用户20 TPS的SLA限制，单个GPU吞吐量为1850 TPS。"
-""
 
 #: ../../references/deepseek.md:49
 msgid ""
@@ -216,16 +187,14 @@ msgid ""
 "performance; ASIC accelerator cards can go further and directly perform "
 "MoE/Dispatch/Combine overlap.**"
 msgstr ""
-"在DeepEP开源之前，我们通过All2All实现了分布式EP，与单节点设置相比实现了卓越的吞吐量改进，但延迟过高。除了高网络延迟外，All2All还带来了严重的主机同步开销，这对网络和计算时间重叠也是不利的。**建议不支持DeepEP机制的GPU可以等效实现纯设备All2All以实现类似性能；ASIC加速卡可以更进一步，直接执行MoE/Dispatch/Combine重叠。**"
-""
 
 #: ../../references/deepseek.md:51
 msgid "Implementation and Tricks"
-msgstr "实现和技巧"
+msgstr ""
 
 #: ../../references/deepseek.md:53
 msgid "EPLB"
-msgstr "EPLB"
+msgstr ""
 
 #: ../../references/deepseek.md:55
 msgid ""
@@ -235,16 +204,14 @@ msgid ""
 "balancing strategies remain an area for in-depth exploration in the "
 "future."
 msgstr ""
-"下图显示了EPLB延迟影响测试。我们发现EP平衡状态受测试数据显著影响，**测试数据无法完全模拟真实应用负载状态**。EP负载均衡策略仍是未来深入探索的领域。"
-""
 
 #: ../../references/deepseek.md:57
 msgid "![image.png](../pics/eplb.png)"
-msgstr "![image.png](../pics/eplb.png)"
+msgstr ""
 
 #: ../../references/deepseek.md:59
 msgid "MicroBatch & Overlapping"
-msgstr "微批处理和重叠"
+msgstr ""
 
 #: ../../references/deepseek.md:61
 msgid ""
@@ -253,8 +220,6 @@ msgid ""
 "with DeepEP's overlap mechanism. During the process, we made the "
 "following observations:"
 msgstr ""
-"为了使GPU计算和网络通信能够重叠，我们全面实现了Prefill/Decode微批处理解决方案，并将其与DeepEP的重叠机制集成。在此过程中，我们做出了以下观察："
-""
 
 #: ../../references/deepseek.md:63
 msgid ""
@@ -266,8 +231,6 @@ msgid ""
 "quantized communication in the inference phase is a potential improvement"
 " direction for the future.**"
 msgstr ""
-"无论是预填充还是解码，由于Dispatch阶段传输FP8张量而Combine阶段传输FP16张量，Combine阶段的通信时间显著高于Dispatch。因此，**在设计重叠解决方案时，需要考虑更大的时间块来覆盖Combine阶段通信。在推理阶段引入量化通信是未来的潜在改进方向。**"
-""
 
 #: ../../references/deepseek.md:65
 msgid ""
@@ -280,8 +243,6 @@ msgid ""
 "always overlaid in the Combine portion to ensure that the computation "
 "time covering Combine is more than that covering Dispatch**."
 msgstr ""
-"对于预填充，Attention所花费的时间占比较小。最终的Attention+MoE门控部分和MoE MLP部分花费的时间相似，都能覆盖Combine阶段相对较长的通信时间。只需要请求分割，两个MicroBatch的计算/通信就可以交错进行。一个重要细节是**共享专家计算总是与Combine部分重叠，以确保覆盖Combine的计算时间多于覆盖Dispatch的时间**。"
-""
 
 #: ../../references/deepseek.md:67
 msgid ""
@@ -295,12 +256,10 @@ msgid ""
 "interface, enabling MicroBatch capabilities to be easily extended to "
 "other accelerator cards**."
 msgstr ""
-"考虑到Qwen3模型，虽然它没有共享专家，但在解码阶段仍可采用相同的重叠方案，使用Attention算子作为边界插入MLP计算，分别覆盖前后Dispatch和Combine通信时间。在框架层面，为了兼容DeepEP和Vanilla All2All通信重叠功能并考虑扩展到各种硬件，我们开发了**统一的通信回调接口，使微批处理能力能够轻松扩展到其他加速卡**。"
-""
 
 #: ../../references/deepseek.md:69
 msgid "MTP"
-msgstr "MTP"
+msgstr ""
 
 #: ../../references/deepseek.md:71
 msgid ""
@@ -315,12 +274,10 @@ msgid ""
 "increased latency. **MTP can reduce average ITL and compensate for the "
 "latency caused by MicroBatch**. A win-win situation."
 msgstr ""
-"我们在之前实现的[通用推测采样框架](https://mp.weixin.qq.com/s/EiSRF2ORy22I1pimCCvcPQ)中增加了MTP推测采样支持。MTP是DeepSeek ITL优化中最关键的环节。增加解码阶段计算强度的唯一方法是增加GEMM BS。**KV缓存容量限制了全局BS，而MTP只需要BS/2就能达到与原始相同的计算强度**。启用微批处理进行计算-通信重叠会带来延迟增加的副作用。**MTP可以减少平均ITL并补偿微批处理引起的延迟**。双赢局面。"
-""
 
 #: ../../references/deepseek.md:73
 msgid "PD Disaggregation"
-msgstr "PD分离"
+msgstr ""
 
 #: ../../references/deepseek.md:75
 msgid ""
@@ -336,12 +293,10 @@ msgid ""
 "Seq variance factors need to be comprehensively considered, or Decode "
 "instances can be further split according to traffic characteristics."
 msgstr ""
-"在DeepSeek-V3模型中，由于预填充和解码计算需求存在显著差异以及不同的EP策略，PD分离部署是必要选择。我们扩展了**对不同TP规格的预填充-解码部署的支持，这对低算力卡特别重要**。我们实现了两种PD负载均衡策略：基于KV缓存的均衡和基于BS的均衡。测试数据的BS方差较小，在高压和**高EP流量下，BS均衡对Dispatch/Combine延迟更重要**。在生产环境中，需要综合考虑BS方差和Seq方差因素，或者可以根据流量特征进一步拆分解码实例。"
-""
 
 #: ../../references/deepseek.md:77
 msgid "DeepEP / Network"
-msgstr "DeepEP/网络"
+msgstr ""
 
 #: ../../references/deepseek.md:79
 msgid ""
@@ -350,8 +305,6 @@ msgid ""
 "production, to achieve engineering deployment and optimal performance, we"
 " made the following optimizations and improvements:"
 msgstr ""
-"DeepEP主要针对IB环境进行优化。面对实际生产中多样化的底层环境和技术栈，为了实现工程部署和最佳性能，我们进行了以下优化和改进："
-""
 
 #: ../../references/deepseek.md:81
 msgid ""
@@ -365,8 +318,6 @@ msgid ""
 "performance that can match or even slightly surpass single uplink IB "
 "network solutions."
 msgstr ""
-"双上联性能修复：通过深入分析Normal内核（少量QP，大消息）和低延迟内核（大量QP，小消息）的特性，我们提供了一个纯IAAS层修复功能，不会引入性能开销。具体而言，我们在NVSHMEM层为Normal内核和低延迟内核提供了消息级和队列级负载均衡解决方案。优化版本保持了双上联的稳定性优势，同时实现了可以匹配甚至略微超越单上联IB网络解决方案的通信性能。"
-""
 
 #: ../../references/deepseek.md:83
 msgid ""
@@ -378,8 +329,6 @@ msgid ""
 "communication efficiency. In Low Latency communication mode, "
 "communication latency can be reduced by 60%+."
 msgstr ""
-"通信模式优化：通过综合考虑节点内和节点间网络架构，我们优化了节点内和节点间流量模式，充分利用系统中的可用链路，实现了网络轨道和平面之间的流量平衡，避免了网络流量冲突和碰撞，最大化了整体系统通信效率。在低延迟通信模式下，通信延迟可以减少60%以上。"
-""
 
 #: ../../references/deepseek.md:85
 msgid ""
@@ -391,8 +340,6 @@ msgid ""
 "ensuring affinity relationships between GPUs and network cards across "
 "different machine types."
 msgstr ""
-"节点内拓扑自修复能力：异常的节点内拓扑报告会影响网卡和GPU之间的通信链路，导致网络性能下降。为了解决这个问题，我们实现了节点内拓扑自修复功能，屏蔽了上层与底层服务器硬件和软件差异，确保不同机器类型间GPU和网卡的亲和关系。"
-""
 
 #: ../../references/deepseek.md:87
 msgid ""
@@ -403,20 +350,16 @@ msgid ""
 "scale deployment through optimization to make VF and PF performance "
 "consistent."
 msgstr ""
-"虚拟化环境适配：为了灵活支持复杂多变的业务场景，我们支持基于商业卡硬件SRIOV虚拟化的高性能网络解决方案，解决了SRIOV与DeepEP之间的适配问题，并通过优化完成了大规模部署，使VF和PF性能保持一致。"
-""
 
 #: ../../references/deepseek.md:89
 msgid "CUDA Kernel Fusion"
-msgstr "CUDA内核融合"
+msgstr ""
 
 #: ../../references/deepseek.md:91
 msgid ""
 "We conducted detailed analysis of the CUDA kernel execution flow and "
 "optimized based on model characteristics:"
 msgstr ""
-"我们对CUDA内核执行流程进行了详细分析，并根据模型特点进行了优化："
-""
 
 #: ../../references/deepseek.md:93
 msgid ""
@@ -424,32 +367,28 @@ msgid ""
 "matrix multiplication incurs greater overhead due to the need for "
 "quantization operations when the scale is insufficient."
 msgstr ""
-"**将部分矩阵乘法转移到BF16格式计算**。当规模不足时，FP8矩阵乘法由于需要量化操作而产生更大的开销。"
-""
 
 #: ../../references/deepseek.md:95
 msgid ""
 "Advanced the transpose in Rotary Embedding to the weight loading phase to"
 " avoid introducing Elementwise operators."
 msgstr ""
-"将旋转Embedding中的转置操作提前到权重加载阶段，以避免引入逐元素操作符。"
-""
 
 #: ../../references/deepseek.md:97
 msgid "Fuse Quantization and Transpose before GEMM computation."
-msgstr "在GEMM计算前融合量化和转置。"
+msgstr ""
 
 #: ../../references/deepseek.md:99
 msgid "Future plans include fusing Activation and Quantization."
-msgstr "未来计划包括融合激活和量化。"
+msgstr ""
 
 #: ../../references/deepseek.md:101
 msgid "![image.png](../pics/fusion.png)"
-msgstr "![image.png](../pics/fusion.png)"
+msgstr ""
 
 #: ../../references/deepseek.md:103
 msgid "PDL"
-msgstr "PDL"
+msgstr ""
 
 #: ../../references/deepseek.md:105
 msgid ""
@@ -461,8 +400,6 @@ msgid ""
 "operations in advance during the computation of other kernels like "
 "Quantization, improving overall system performance**."
 msgstr ""
-"Hopper架构引入了程序依赖启动（PDL），允许同一CUDA流上的两个相邻内核执行重叠，使后一个内核在前一个内核执行时提前完成初始化和其他工作。通过将PDL引入GEMM内核，**我们可以在其他内核（如量化）计算期间提前执行GEMM初始化操作，提高整体系统性能**。"
-""
 
 #: ../../references/deepseek.md:107
 msgid ""
@@ -474,12 +411,10 @@ msgid ""
 "already in the L2 cache, achieving the purpose of accelerating the GEMM "
 "kernel."
 msgstr ""
-"PDL的引入也为内核级优化带来了更多可能性，比如GEMM**权重预取**。通过PDL将量化操作与GEMM重叠后，可以在GEMM内核的重叠部分添加权重预取操作，这样当MMA实际执行时，所需的权重张量已经在L2缓存中，达到加速GEMM内核的目的。"
-""
 
 #: ../../references/deepseek.md:109
 msgid "Framework Overhead"
-msgstr "框架开销"
+msgstr ""
 
 #: ../../references/deepseek.md:111
 msgid ""
@@ -487,8 +422,6 @@ msgid ""
 "is host overhead between adjacent Forward Steps, around 1.5ms; the other "
 "part is kernel launch overhead, around 2ms**."
 msgstr ""
-"整体框架开销主要集中在两个部分：**一部分是相邻前向步骤之间的主机开销，约1.5ms；另一部分是内核启动开销，约2ms**。"
-""
 
 #: ../../references/deepseek.md:113
 msgid ""
@@ -501,8 +434,6 @@ msgid ""
 "additional Dynamic Batch in MTP situations, which can be further "
 "optimized away."
 msgstr ""
-"前向步骤之间主机开销的主要问题是我们的笨重动态批次实现，其性能开销与BS线性相关。我们轻量化了动态批次实现，异步或使用多线程处理不依赖于下一步的操作。理想情况下，在128 BS条件下，我们可以实现200us以下。当前过多的主机开销主要由于MTP情况下的额外动态批次，这可以进一步优化掉。"
-""
 
 #: ../../references/deepseek.md:115
 msgid ""
@@ -517,12 +448,10 @@ msgid ""
 "**We look forward to NVIDIA being able to thoroughly solve this problem "
 "in future drivers or hardware versions**."
 msgstr ""
-"**内核启动开销主要是由于GPU内核过多**。启用微批处理后，GPU内核数量翻倍，使问题更加严重。更好的解决方案是CUDA Graph。这里需要平衡性能和架构复杂性。RTP-LLM框架已经通过C++实现避免了主机端启动开销问题。然而，我们观察到**即使启动速度远超内核执行速度，在GPU设备级别仍有一些启动开销**，CUDA Graph可以在一定程度上缓解这个问题。**我们期待NVIDIA能在未来的驱动或硬件版本中彻底解决这个问题**。"
-""
 
 #: ../../references/deepseek.md:117
 msgid "Weights Loading"
-msgstr "权重加载"
+msgstr ""
 
 #: ../../references/deepseek.md:119
 msgid ""
@@ -530,8 +459,6 @@ msgid ""
 "efficiency. For 671B weights, we achieved **minute-level loading** "
 "through optimization with the following specific plan:"
 msgstr ""
-"模型权重加载速度直接影响研发和部署效率。对于671B权重，我们通过优化实现了**分钟级加载**，具体方案如下："
-""
 
 #: ../../references/deepseek.md:121
 msgid ""
@@ -541,8 +468,6 @@ msgid ""
 "weight format required by the framework in advance. After preprocessing, "
 "computational overhead during loading is eliminated."
 msgstr ""
-"**权重预处理和格式预转换**。RTP-LLM在加载过程中需要对权重执行分割、转置等操作。我们设计了一个预处理系统，提前将原始权重转换为框架所需的权重格式。预处理后，加载过程中的计算开销被消除。"
-""
 
 #: ../../references/deepseek.md:123
 msgid ""
@@ -552,12 +477,10 @@ msgid ""
 "fixed memory pool through CUDA Pinned Memory, and eliminated multiple "
 "memory copies between kernel space and user space."
 msgstr ""
-"**直接IO + 固定内存加速大文件读取**。为了解决单个权重文件超过100GB的I/O瓶颈，我们使用直接IO绕过系统页面缓存机制，通过CUDA固定内存建立固定内存池，消除了内核空间和用户空间之间的多次内存拷贝。"
-""
 
 #: ../../references/deepseek.md:125
 msgid "Limitations and Future Work"
-msgstr "局限性和未来工作"
+msgstr ""
 
 #: ../../references/deepseek.md:127
 msgid ""
@@ -567,8 +490,6 @@ msgid ""
 "optimization. Additionally, CUDA Graph is also a key improvement "
 "direction."
 msgstr ""
-"在算子性能方面，我们尚未完全与DeepSeek对齐。预填充注意力和解码量化等核心算子存在一定的性能差距，需要进一步优化。此外，CUDA Graph也是一个关键的改进方向。"
-""
 
 #: ../../references/deepseek.md:129
 msgid ""
@@ -578,8 +499,6 @@ msgid ""
 "application scenarios, more adaptive and robust load balancing strategies"
 " need to be explored."
 msgstr ""
-"EPLB本质上需要算法设计和系统工程之间的深度协作。目前还没有通用且高效的解决方案。对于特定应用场景下的动态负载分布特性，需要探索更多自适应和稳健的负载均衡策略。"
-""
 
 #: ../../references/deepseek.md:131
 msgid ""
@@ -588,8 +507,6 @@ msgid ""
 "multiple parallel mode fusion is a direction worth exploring in the "
 "future."
 msgstr ""
-"微批处理并不是计算-通信重叠的唯一解决方案。结合FLUX和Triton-distributed等优秀工作，多种并行模式融合是未来值得探索的方向。"
-""
 
 #: ../../references/deepseek.md:133
 msgid ""
@@ -598,8 +515,6 @@ msgid ""
 "capacity, more sophisticated parallel modes need to be designed to "
 "improve MoE computational efficiency."
 msgstr ""
-"在DeepSeek-V3上，纯EP解决方案与6K长度短序列任务匹配良好。对于更长序列场景，受KV缓存容量限制，需要设计更复杂的并行模式来提高MoE计算效率。"
-""
 
 #: ../../references/deepseek.md:135
 msgid ""
@@ -613,8 +528,6 @@ msgid ""
 "Library) framework with high fault tolerance and elastic scaling "
 "capabilities."
 msgstr ""
-"在大规模测试和部署实践中，我们观察到多起单个GPU故障导致整个144 GPU解码实例故障的情况。为了解决这个问题，我们在PD分离架构中引入了ACCL结合服务发现机制，构建了具有弹性和高可用性的无服务器PD服务。我们计划在未来进一步结合任务调度器和通信库能力，构建具有高容错和弹性扩展能力的无服务器CCL（集体通信库）框架。"
-""
 
 #: ../../references/deepseek.md:137
 msgid ""
@@ -625,12 +538,10 @@ msgid ""
 "across various card types and generations is also a problem we need to "
 "work to solve."
 msgstr ""
-"与H800不同，我们生产环境中可扩展的异构计算卡通常算力较低。在这种情况下，在TTFT和ITL约束下优化吞吐量是一个极具挑战性的问题。同时，如何在各种卡类型和代际间良好地优化性能也是我们需要努力解决的问题。"
-""
 
 #: ../../references/deepseek.md:139
 msgid "For Qwen3 MoE"
-msgstr "对于Qwen3 MoE"
+msgstr ""
 
 #: ../../references/deepseek.md:141
 msgid ""
@@ -640,8 +551,6 @@ msgid ""
 "parallel modes in combination with specific model parameter "
 "configurations."
 msgstr ""
-"与DeepSeek-V3相比，Qwen3-235B-A22B模型规模较小，但支持无缝思考模式切换。对于4K输入/2K输出场景，可以采用类似的优化策略，结合特定模型参数配置调整并行模式。"
-""
 
 #: ../../references/deepseek.md:143
 msgid ""
@@ -649,8 +558,6 @@ msgid ""
 " overhead is 94×4×128×2=96KB, while DeepSeek-V3 is 61×1536=93KB, which "
 "are close."
 msgstr ""
-"从KV缓存使用角度来看，Qwen3-235B-A22B每个token的KV缓存开销是94×4×128×2=96KB，而DeepSeek-V3是61×1536=93KB，两者接近。"
-""
 
 #: ../../references/deepseek.md:145
 #, python-format
@@ -660,8 +567,6 @@ msgid ""
 "latency being approximately 50% of the latter. Considering the impact of "
 "memory access latency, actual latency will be slightly higher."
 msgstr ""
-"从注意力计算延迟角度来看，Qwen3-235B-A22B使用64头GQA，而DeepSeek-V3使用128头MLA，计算延迟约为后者的50%。考虑到内存访问延迟的影响，实际延迟会略高。"
-""
 
 #: ../../references/deepseek.md:147
 #, python-format
@@ -669,8 +574,6 @@ msgid ""
 "From the Dispatch/Combine communication perspective, Qwen3-235B-A22B is "
 "about 40% of DeepSeek-V3."
 msgstr ""
-"从Dispatch/Combine通信角度来看，Qwen3-235B-A22B约为DeepSeek-V3的40%。"
-""
 
 #: ../../references/deepseek.md:149
 #, python-format
@@ -679,8 +582,6 @@ msgid ""
 "A22B's parameter scale being 40%-50%, the computation latency is about "
 "50%."
 msgstr ""
-"从MoE GEMM计算延迟角度来看，由于Qwen3-235B-A22B的参数规模为40%-50%，计算延迟约为50%。"
-""
 
 #: ../../references/deepseek.md:151
 msgid ""
@@ -693,12 +594,10 @@ msgid ""
 " TP introduced to reduce network latency while achieving good "
 "computational utilization."
 msgstr ""
-"总之，在大规模集群部署中，从KV缓存容量限制和MoE计算效率两个维度综合评估，Qwen3-235B-A22B可以采用类似的部署模式。与DeepSeek-V3相比，Qwen3-235B-A22B可以支持更长的序列长度，在延迟和吞吐量方面表现更好。对于H20等算力受限的卡，可以减少EP并引入TP，以减少网络延迟并实现良好的计算利用率。"
-""
 
 #: ../../references/deepseek.md:153
 msgid "Thanks"
-msgstr "致谢"
+msgstr ""
 
 #: ../../references/deepseek.md:155
 msgid ""
@@ -712,5 +611,4 @@ msgid ""
 "hope to jointly promote AI technology innovation and ecosystem prosperity"
 " through in-depth discussion and exchange with the community."
 msgstr ""
-"经过两个月的持续努力，我们已与DeepSeek推理引擎的性能保持一致。我们感谢开源社区分享优秀的开源模型如DeepSeek、Qwen和Llama，以及优秀的工程引擎和优化如FasterTransformer、TensoRT-LLM、FlashAttention、FlashInfer、Transformers、vLLM和SGLang。我们相信开源、开放和交流是实现AGI的必由之路。我们希望通过与社区的深入讨论和交流，共同推进AI技术创新和生态繁荣。"
-""
+

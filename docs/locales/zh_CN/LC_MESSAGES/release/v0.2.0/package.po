@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-10-15 19:12+0800\n"
+"POT-Creation-Date: 2025-10-20 10:08+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -21,15 +21,15 @@ msgstr ""
 
 #: ../../release/v0.2.0/package.md:1
 msgid "package"
-msgstr "包"
+msgstr ""
 
 #: ../../release/v0.2.0/package.md:3
 msgid "whl"
-msgstr "whl包"
+msgstr ""
 
 #: ../../release/v0.2.0/package.md:7
 msgid "docker"
-msgstr "docker镜像"
+msgstr ""
 
 #: ../../release/v0.2.0/package.md:8
 msgid "Inference"
@@ -37,20 +37,19 @@ msgstr ""
 
 #: ../../release/v0.2.0/package.md
 msgid "**CardType**"
-msgstr "**卡类型**"
+msgstr ""
 
 #: ../../release/v0.2.0/package.md
 msgid "**image**"
-msgstr "**镜像**"
+msgstr ""
 
 #: ../../release/v0.2.0/package.md
 msgid "**tag**"
-msgstr "**标签**"
+msgstr ""
 
 #: ../../release/v0.2.0/package.md
-#, fuzzy
 msgid "**CUDA-SM8x**"
-msgstr "**CUDA**"
+msgstr ""
 
 #: ../../release/v0.2.0/package.md
 msgid ""
@@ -64,22 +63,19 @@ msgstr ""
 
 #: ../../release/v0.2.0/package.md:15
 msgid "Images of SM9x,SM7x,AMD,Frontend,Master is comming soon"
-msgstr "SM9x,SM7x,AMD,Frontend,Master 的image 我们会尽快提供"
+msgstr ""
 
 #: ../../release/v0.2.0/package.md:18
-#, fuzzy
 msgid "Wheel"
-msgstr "whl包"
+msgstr ""
 
 #: ../../release/v0.2.0/package.md
-#, fuzzy
 msgid "**wheel**"
-msgstr "whl包"
+msgstr ""
 
 #: ../../release/v0.2.0/package.md
-#, fuzzy
 msgid "**CUDA-SM9x**"
-msgstr "**CUDA**"
+msgstr ""
 
 #: ../../release/v0.2.0/package.md
 msgid ""
@@ -88,56 +84,10 @@ msgid ""
 msgstr ""
 
 #: ../../release/v0.2.0/package.md
-#, fuzzy
 msgid "**CUDA-SM7x**"
-msgstr "**CUDA**"
+msgstr ""
 
 #: ../../release/v0.2.0/package.md
 msgid "**AMD**"
-msgstr "**AMD**"
-
-#~ msgid "hub.docker.alibaba-inc.com/isearch/rtp_llm_sm8x"
-#~ msgstr "hub.docker.alibaba-inc.com/isearch/rtp_llm_gpu_cuda12"
-
-#~ msgid "hub.docker.alibaba-inc.com/isearch/rtp_llm_sm9x"
-#~ msgstr "hub.docker.alibaba-inc.com/isearch/rtp_llm_gpu_cuda12"
-
-#~ msgid "hub.docker.alibaba-inc.com/isearch/rtp_llm_sm7x"
-#~ msgstr "hub.docker.alibaba-inc.com/isearch/rtp_llm_gpu_cuda12"
-
-#~ msgid "hub.docker.alibaba-inc.com/isearch/rtp_llm_rocm"
-#~ msgstr "hub.docker.alibaba-inc.com/isearch/rtp_llm_rocm"
-
-#~ msgid "Images of SM9x,SM7x is comming soon"
-#~ msgstr ""
-
-#~ msgid "SM9x,SM7x,AMD 的image 我们会尽快提供"
-#~ msgstr ""
-
-#~ msgid "Images of SM9x,SM7x,AMD is comming soon"
-#~ msgstr ""
-
-#~ msgid "Others"
-#~ msgstr ""
-
-#~ msgid "**Role**"
-#~ msgstr "**卡类型**"
-
-#~ msgid "**Frontend**"
-#~ msgstr ""
-
-#~ msgid "hub.docker.alibaba-inc.com/isearch/rtp_llm_frontend"
-#~ msgstr "hub.docker.alibaba-inc.com/isearch/rtp_llm_rocm"
-
-#~ msgid "0.2.0_2025_09_24_21_00_615e568_accelerated"
-#~ msgstr "hub.docker.alibaba-inc.com/isearch/rtp_llm_gpu_cuda12"
-
-#~ msgid "**Master**"
-#~ msgstr "**镜像**"
-
-#~ msgid "hub.docker.alibaba-inc.com/aone/flexlb"
-#~ msgstr ""
-
-#~ msgid "0.2.0_2025_09_19_11_16_3b779f1_accelerated"
-#~ msgstr ""
+msgstr ""
 

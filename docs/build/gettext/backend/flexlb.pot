@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-10-10 12:58+0800\n"
+"POT-Creation-Date: 2025-10-20 10:08+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -205,57 +205,81 @@ msgid "Startup Commands"
 msgstr ""
 
 #: ../../backend/flexlb.md:71
-msgid "1. Build FlexLB"
+msgid "0. Set Up Environment Variables"
 msgstr ""
 
 #: ../../backend/flexlb.md:73
+msgid "FlexLB requires some environment variables to be set:"
+msgstr ""
+
+#: ../../backend/flexlb.md:110
+msgid "1. Build FlexLB"
+msgstr ""
+
+#: ../../backend/flexlb.md:112
 msgid "Navigate to the FlexLB module directory from the project root:"
 msgstr ""
 
-#: ../../backend/flexlb.md:79
+#: ../../backend/flexlb.md:118
 msgid "Run Unit Tests"
 msgstr ""
 
-#: ../../backend/flexlb.md:89
+#: ../../backend/flexlb.md:127
 msgid "Build Package"
 msgstr ""
 
-#: ../../backend/flexlb.md:95
+#: ../../backend/flexlb.md:133
+msgid "Run Locally"
+msgstr ""
+
+#: ../../backend/flexlb.md:135
+msgid "If you want to start FlexLB locally, you can run the following command after build package:"
+msgstr ""
+
+#: ../../backend/flexlb.md:141
+msgid "Run with Spring Boot Maven Plugin"
+msgstr ""
+
+#: ../../backend/flexlb.md:143
+msgid "FlexLB is built upon Spring Boot, users can use `spring-boot-maven-plugin` to run it directly without build and start. After setting all environment variables, you can start FlexLB directly by running:"
+msgstr ""
+
+#: ../../backend/flexlb.md:150
 msgid "2. Docker Image Build"
 msgstr ""
 
-#: ../../backend/flexlb.md:97
+#: ../../backend/flexlb.md:152
 msgid "Prepare Docker Build Context"
 msgstr ""
 
-#: ../../backend/flexlb.md:99
+#: ../../backend/flexlb.md:154
 msgid "After build completion, copy the generated ai-whale.tgz to the Docker build context directory:"
 msgstr ""
 
-#: ../../backend/flexlb.md:109
+#: ../../backend/flexlb.md:164
 msgid "Build Docker Images"
 msgstr ""
 
-#: ../../backend/flexlb.md:111
+#: ../../backend/flexlb.md:166
 msgid "Base image build:"
 msgstr ""
 
-#: ../../backend/flexlb.md:118
+#: ../../backend/flexlb.md:173
 msgid "Production environment image build:"
 msgstr ""
 
-#: ../../backend/flexlb.md:125
+#: ../../backend/flexlb.md:180
 msgid "3. Run FlexLB"
 msgstr ""
 
-#: ../../backend/flexlb.md:127
+#: ../../backend/flexlb.md:182
 msgid "Start the FlexLB service using the built Docker image:"
 msgstr ""
 
-#: ../../backend/flexlb.md:136
+#: ../../backend/flexlb.md:191
 msgid "4. Complete Build Script"
 msgstr ""
 
-#: ../../backend/flexlb.md:138
+#: ../../backend/flexlb.md:193
 msgid "The following is a complete build and deployment script example:"
 msgstr ""

@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-10-14 15:31+0800\n"
+"POT-Creation-Date: 2025-10-20 10:08+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -21,115 +21,113 @@ msgstr ""
 
 #: ../../release/v0.2.0/feature.md:2
 msgid "Overview"
-msgstr "概述"
+msgstr ""
 
 #: ../../release/v0.2.0/feature.md:3
 msgid "RTP-LLM First Release Version:0.2.0(2025.09)"
-msgstr "RTP-LLM 首发版本：0.2.0 (2025.09)"
+msgstr ""
 
 #: ../../release/v0.2.0/feature.md:4
 msgid "Features"
-msgstr "特性"
+msgstr ""
 
 #: ../../release/v0.2.0/feature.md:5
 msgid "Framkework  Advanced Feature"
-msgstr "框架高级特性"
+msgstr ""
 
 #: ../../release/v0.2.0/feature.md:6
 msgid ""
 "[PD Disaggregation](../../backend/pd_disaggregation.ipynb) && [PD "
 "Entrance Transpose](../../backend/pd_entrance_transpose.md)"
 msgstr ""
-"[PD 分离](../../backend/pd_disaggregation.ipynb) && [PD "
-"入口转置](../../backend/pd_entrance_transpose.md)"
 
 #: ../../release/v0.2.0/feature.md:7
 msgid ""
 "[Attention Support more Backend](../../backend/attention_backend.md): "
 "XQA, FlashInfer"
-msgstr "[注意力支持更多后端](../../backend/attention_backend.md)：XQA, FlashInfer"
+msgstr ""
 
 #: ../../release/v0.2.0/feature.md:8
 msgid "[Speculative Decoding](../../backend/speculative_decoding.md)"
-msgstr "[推测解码](../../backend/speculative_decoding.md)"
+msgstr ""
 
 #: ../../release/v0.2.0/feature.md:9
 msgid "[EPLB](../../references/deepseek/reporter.md#eplb)"
-msgstr "[EPLB](../../references/deepseek/reporter.md#eplb)"
+msgstr ""
 
 #: ../../release/v0.2.0/feature.md:10
 msgid ""
 "[MicroBatch & Overlapping](../../references/deepseek/reporter.md"
 "#microbatch-overlapping)"
-msgstr "[微批处理与重叠](../../references/deepseek/reporter.md#microbatch-overlapping)"
+msgstr ""
 
 #: ../../release/v0.2.0/feature.md:11
 msgid "[MTP](../../references/deepseek/reporter.md#mtp)"
-msgstr "[MTP](../../references/deepseek/reporter.md#mtp)"
+msgstr ""
 
 #: ../../release/v0.2.0/feature.md:12
 msgid "[DeepEP](../../references/deepseek/reporter.md#deepep-network)"
-msgstr "[DeepEP](../../references/deepseek/reporter.md#deepep-network)"
+msgstr ""
 
 #: ../../release/v0.2.0/feature.md:13
 msgid "[LoadBalance](../../backend/flexlb.md)"
-msgstr "[负载均衡](../../backend/flexlb.md)"
+msgstr ""
 
 #: ../../release/v0.2.0/feature.md:14
 msgid "[3FS](../../backend/3fs.md)"
-msgstr "[3FS](../../backend/3fs.md)"
+msgstr ""
 
 #: ../../release/v0.2.0/feature.md:15
 msgid "[FP8 KVCache](../../backend/KvCache.md)"
-msgstr "[FP8 KV缓存](../../backend/KvCache.md)"
+msgstr ""
 
 #: ../../release/v0.2.0/feature.md:16
 msgid "[REUSE KV CACHE](../../backend/reuse_kv_cache.md)"
-msgstr "[复用 KV 缓存](../../backend/reuse_kv_cache.md)"
+msgstr ""
 
 #: ../../release/v0.2.0/feature.md:17
 msgid "[Quantization](../../backend/quantization.md)"
-msgstr "[量化](../../backend/quantization.md)"
+msgstr ""
 
 #: ../../release/v0.2.0/feature.md:18
 msgid "[MultiLoRA](../../backend/lora.ipynb)"
-msgstr "[多LoRA](../../backend/lora.ipynb)"
+msgstr ""
 
 #: ../../release/v0.2.0/feature.md:19
 msgid "[Attention FFN Disaggregation](../../backend/af_disaggregation.md)"
-msgstr "[注意力FFN解聚](../../backend/af_disaggregation.md)"
+msgstr ""
 
 #: ../../release/v0.2.0/feature.md:20
 msgid "[Frontend/Backend Disaggregation](../../backend/Frontend.md)"
-msgstr "[前后端解聚](../../backend/Frontend.md)"
+msgstr ""
 
 #: ../../release/v0.2.0/feature.md:23
 msgid "New Models"
-msgstr "新模型"
+msgstr ""
 
 #: ../../release/v0.2.0/feature.md
 msgid "**Model Family (Variants)**"
-msgstr "**模型系列（变体）**"
+msgstr ""
 
 #: ../../release/v0.2.0/feature.md
 msgid "**Example HuggingFace Identifier**"
-msgstr "**HuggingFace标识符示例**"
+msgstr ""
 
 #: ../../release/v0.2.0/feature.md
 msgid "**Description**"
-msgstr "**描述**"
+msgstr ""
 
 #: ../../release/v0.2.0/feature.md
 msgid "**Support CardType**"
-msgstr "**支持的卡类型**"
+msgstr ""
 
 #: ../../release/v0.2.0/feature.md
 msgid "**DeepSeek** (v1, v2, v3/R1)"
-msgstr "**DeepSeek** (v1, v2, v3/R1)"
+msgstr ""
 
 #: ../../release/v0.2.0/feature.md
 msgid "`deepseek-ai/DeepSeek-R1`"
-msgstr "`deepseek-ai/DeepSeek-R1`"
+msgstr ""
 
 #: ../../release/v0.2.0/feature.md
 msgid ""
@@ -138,8 +136,6 @@ msgid ""
 "reasoning, math, and code tasks.<br> [RTP-LLM provides Deepseek v3/R1 "
 "model-specific optimizations](../../references/deepseek/reporter.md)"
 msgstr ""
-"一系列先进的推理优化模型（包括一个671B MoE），通过强化学习训练；<br>在复杂推理、数学和代码任务上表现出色。<br>[RTP-LLM "
-"提供 Deepseek v3/R1 模型特定优化](../../references/deepseek/reporter.md)"
 
 #: ../../release/v0.2.0/feature.md
 msgid "NV ✅<br> AMD ✅"
@@ -207,16 +203,15 @@ msgstr ""
 msgid ""
 "Meta’s open LLM series, spanning 7B to 400B parameters (Llama 2, 3, and "
 "new Llama 4) with well-recognized performance."
-msgstr "Meta的开源大语言模型系列，参数规模从7B到400B（Llama 2, 3, 和新Llama 4），性能卓越。"
+msgstr ""
 
 #: ../../release/v0.2.0/feature.md:32
 msgid "Bug Fixs"
-msgstr "错误修复"
+msgstr ""
 
 #: ../../release/v0.2.0/feature.md:33
-#, fuzzy
 msgid "metrics of cache is not work"
-msgstr "3fs缓存命中率指标不准确"
+msgstr ""
 
 #: ../../release/v0.2.0/feature.md:34
 msgid "P/D Disaggregation dead lock"
@@ -224,43 +219,25 @@ msgstr ""
 
 #: ../../release/v0.2.0/feature.md:36
 msgid "Question of omission"
-msgstr "遗漏问题"
+msgstr ""
 
 #: ../../release/v0.2.0/feature.md:37
 msgid "too many dynamic lora need more **reserver_runtime_mem_mb**"
-msgstr "过多动态lora需要更多 **reserver_runtime_mem_mb**"
+msgstr ""
 
 #: ../../release/v0.2.0/feature.md:38
 msgid "AMD not support MoE models"
-msgstr "AMD不支持MoE模型"
+msgstr ""
 
 #: ../../release/v0.2.0/feature.md:39
 msgid "MoE model without shared_experter cannot use enable-layer-micro-batch"
-msgstr "没有shared_experter的MoE模型无法使用enable-layer-micro-batch"
+msgstr ""
 
 #: ../../release/v0.2.0/feature.md:42
 msgid "Performance"
-msgstr "性能"
+msgstr ""
 
 #: ../../release/v0.2.0/feature.md:44
 msgid "Compatibility"
-msgstr "兼容性"
-
-#~ msgid "**TBStars**"
-#~ msgstr ""
-
-#~ msgid "Alibaba Internal LLM"
-#~ msgstr ""
-
-#~ msgid "**TBStarsVL**"
-#~ msgstr ""
-
-#~ msgid "Series of advanced  Vision-language model series based on TBStars"
-#~ msgstr ""
-
-#~ msgid "**MixTBstars**"
-#~ msgstr ""
-
-#~ msgid "PD Entrance Transpose not worker with front app"
-#~ msgstr "PD入口转置无法与前端应用配合工作"
+msgstr ""
 

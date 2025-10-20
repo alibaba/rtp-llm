@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-12 17:38+0800\n"
+"POT-Creation-Date: 2025-10-20 10:08+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -21,54 +21,55 @@ msgstr ""
 
 #: ../../backend/send_request.ipynb:9
 msgid "Sending Requests"
-msgstr "发送请求"
+msgstr ""
 
 #: ../../backend/send_request.ipynb:11
 msgid ""
 "This section provides a quick-start guide for using RTP-LLM in chat "
 "completions after successfully installing RTP-LLM."
-msgstr "本节提供 RTP-LLM 安装完成后，在聊天补全中使用的快速入门指南。"
+msgstr ""
 
 #: ../../backend/send_request.ipynb:13
 msgid ""
 "For multimodal models, refer to `OpenAI APIs - Vision "
 "<./openai_api_vision.ipynb>`__."
-msgstr "对于多模态模型，请参考 `OpenAI APIs - 视觉 <./openai_api_vision.ipynb>`__。"
+msgstr ""
 
 #: ../../backend/send_request.ipynb:14
 msgid ""
 "For embedding models, refer to `OpenAI APIs - Embedding "
 "<../backend/openai_api_embeddings.ipynb>`__ and `Encode (embedding model)"
 " <../backend/native_api.html#Encode-(embedding-model)>`__."
-msgstr "对于嵌入模型，请参考 `OpenAI APIs - Embedding <../backend/openai_api_embeddings.ipynb>`__ 和 `Encode（嵌入模型）<../backend/native_api.html#Encode-(embedding-model)>`__。"
+msgstr ""
 
 #: ../../backend/send_request.ipynb:26
 msgid "Launch A Server"
-msgstr "启动服务器"
+msgstr ""
 
 #: ../../backend/send_request.ipynb:63
 msgid "Using cURL"
-msgstr "使用 cURL"
+msgstr ""
 
 #: ../../backend/send_request.ipynb:93
 msgid "Using Python Requests"
-msgstr "使用 Python Requests 库"
+msgstr ""
 
 #: ../../backend/send_request.ipynb:127
 msgid "Using OpenAI Python Client"
-msgstr "使用 OpenAI Python 客户端"
+msgstr ""
 
 #: ../../backend/send_request.ipynb:160 ../../backend/send_request.ipynb:238
 msgid "Streaming"
-msgstr "流式输出"
+msgstr ""
 
 #: ../../backend/send_request.ipynb:199
 msgid "Using Native Generation APIs"
-msgstr "使用Native生成 API"
+msgstr ""
 
 #: ../../backend/send_request.ipynb:201
 msgid ""
 "You can also use the native ``/generate`` endpoint with requests, which "
 "provides more flexibility. An API reference is available at `Sampling "
 "Parameters <sampling_params.md>`__."
-msgstr "你也可以使用Native的 ``/generate`` 接口发起请求，该接口提供更高的灵活性。API 参考请见 `采样参数 <sampling_params.md>`__。"
+msgstr ""
+

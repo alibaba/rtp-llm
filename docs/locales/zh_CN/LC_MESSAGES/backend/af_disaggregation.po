@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-12 17:38+0800\n"
+"POT-Creation-Date: 2025-10-20 10:08+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../backend/af_disaggregation.md:1
 msgid "Attention FFN Disaggregation (AFD)"
-msgstr "注意力FFN解聚(AFD)"
+msgstr ""
 
 #: ../../backend/af_disaggregation.md:3
 msgid ""
@@ -30,58 +30,58 @@ msgid ""
 "optimize performance. Currently, this feature only supports Qwen3 dense "
 "models (Qwen3-32B and Qwen3-8B), with support for MOE versions planned "
 "for future releases."
-msgstr "注意力FFN解聚是一种将Transformer模型中的注意力和前馈网络(FFN)计算分离以优化性能的技术。目前该功能仅支持Qwen3稠密模型(Qwen3-32B和Qwen3-8B)，对MOE版本的支持计划在未来的版本中提供。"
+msgstr ""
 
 #: ../../backend/af_disaggregation.md:5
 msgid "Example launch Command"
-msgstr "启动命令示例"
+msgstr ""
 
 #: ../../backend/af_disaggregation.md:20
 msgid "Supported models"
-msgstr "支持的模型"
+msgstr ""
 
 #: ../../backend/af_disaggregation.md:22
 msgid "Below the supported models are summarized in a table."
-msgstr "以下表格总结了支持的模型。"
+msgstr ""
 
 #: ../../backend/af_disaggregation.md:24
 msgid ""
 "If you are unsure if a specific architecture is implemented, you can "
 "search for it via GitHub. For example, to search for `Qwen3ForCausalLM`, "
 "use the expression:"
-msgstr "如果您不确定某个特定架构是否已实现，可以通过GitHub搜索。例如，要搜索`Qwen3ForCausalLM`，请使用以下表达式："
+msgstr ""
 
 #: ../../backend/af_disaggregation.md:30
 msgid "in the GitHub search bar."
-msgstr "在GitHub搜索栏中。"
+msgstr ""
 
 #: ../../backend/af_disaggregation.md
 msgid "Model Family (Variants)"
-msgstr "模型系列(变体)"
+msgstr ""
 
 #: ../../backend/af_disaggregation.md
 msgid "Example HuggingFace Identifier"
-msgstr "HuggingFace标识符示例"
+msgstr ""
 
 #: ../../backend/af_disaggregation.md
 msgid "ModelType"
-msgstr "模型类型"
+msgstr ""
 
 #: ../../backend/af_disaggregation.md
 msgid "Description"
-msgstr "描述"
+msgstr ""
 
 #: ../../backend/af_disaggregation.md
 msgid "**Qwen** (3 series)"
-msgstr "**Qwen**(3系列)"
+msgstr ""
 
 #: ../../backend/af_disaggregation.md
 msgid "`Qwen/Qwen3-32B`, `Qwen/Qwen3-8B`"
-msgstr "`Qwen/Qwen3-32B`、`Qwen/Qwen3-8B`"
+msgstr ""
 
 #: ../../backend/af_disaggregation.md
 msgid "qwen_3"
-msgstr "qwen_3"
+msgstr ""
 
 #: ../../backend/af_disaggregation.md
 msgid ""
@@ -89,5 +89,5 @@ msgid ""
 "understanding, and generation tasks; Currently supports dense variants "
 "(Qwen3-32B and Qwen3-8B) with AFD. MOE versions will be supported in "
 "future releases."
-msgstr "阿里巴巴最新的Qwen3系列，适用于复杂推理、语言理解和生成任务；目前支持使用AFD的稠密变体(Qwen3-32B和Qwen3-8B)。MOE版本将在未来版本中支持。"
+msgstr ""
 
