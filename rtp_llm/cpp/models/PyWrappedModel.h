@@ -8,7 +8,6 @@
 #include <pybind11/embed.h>
 #include "rtp_llm/models_py/bindings/OpDefsUtils.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
-
 namespace py = pybind11;
 
 namespace rtp_llm {

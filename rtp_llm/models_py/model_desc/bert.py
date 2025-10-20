@@ -6,12 +6,11 @@ from torch import nn
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
-from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.attention import CausalAttention
 from rtp_llm.models_py.modules.embedding import EmbeddingBert
 from rtp_llm.models_py.modules.fmha import FMHAImplBase
 from rtp_llm.models_py.modules.mlp import BertGeluActDenseMLP
-from rtp_llm.models_py.modules.norm import LayerNorm
+from rtp_llm.models_py.modules.norm import LayerNorm, AddBiasResLayerNorm
 from rtp_llm.ops.compute_ops import (
     KVCache,
     PyAttentionInputs,
@@ -28,12 +27,12 @@ class BertDecoderLayer(nn.Module):
         super().__init__()
         self.self_attn = CausalAttention(config, weights)
         self.mlp = BertGeluActDenseMLP(config, weights)
-        self.input_layernorm = LayerNorm(
+        self.input_layernorm = AddBiasResLayerNorm(
             weights[W.post_ln_gamma],
             beta=weights[W.post_ln_beta],
             eps=config.layernorm_eps,
         )
-        self.post_attention_layernorm = LayerNorm(
+        self.post_attention_layernorm = AddBiasResLayerNorm(
             weights[W.post_ffn_ln_gamma],
             beta=weights[W.post_ffn_ln_beta],
             eps=config.layernorm_eps,
@@ -48,16 +47,19 @@ class BertDecoderLayer(nn.Module):
         residual = hidden_states
         # Self Attention
         hidden_states = self.self_attn(
-            hidden_states=hidden_states, fmha_impl=fmha_impl, kv_cache=kv_cache
+            hidden_states=hidden_states,
+            fmha_impl=fmha_impl,
+            kv_cache=kv_cache,
+            need_rope_kv_cache=False,
         )
-        hidden_states = residual + hidden_states
-        hidden_states = self.input_layernorm(hidden_states)
+        hidden_states = self.input_layernorm(hidden_states, residual, torch.empty(0))
 
         # Fully Connected
         residual = hidden_states
         hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = self.post_attention_layernorm(
+            hidden_states, residual, torch.empty(0)
+        )
         return hidden_states
 
 
