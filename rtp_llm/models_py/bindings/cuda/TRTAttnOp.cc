@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/core/Dispatch.h"
 #include "rtp_llm/cpp/kernels/decoder_masked_multihead_attention/decoder_masked_multihead_attention.h"
+#include "rtp_llm/cpp/kernels/unfused_attention_kernels.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 
 using namespace torch_ext;
@@ -110,6 +111,15 @@ ParamsBasePtr TRTPrefillOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
 torch::Tensor TRTPrefillOp::forward(const torch::Tensor&              input,
                                     std::optional<torch_ext::KVCache> kv_cache,
                                     const TRTAttnPtr&                 params) {
+    DISPATCH_CUDA_FUNCTION_DATA_TYPE(torchDTypeToDataType(input.dtype()),
+                                     invoke_debug_kernel2,
+                                     input.data_ptr(),
+                                     0,
+                                     10,
+                                     10,
+                                     2304,
+                                     1,
+                                     device_->getStream());
     KVBlockArray kv_block_array;
     if (kv_cache.has_value()) {
         kv_block_array                 = params->kv_block_array;
@@ -170,7 +180,15 @@ torch::Tensor TRTPrefillOp::forward(const torch::Tensor&              input,
             output = tmp_fmha_output.to(output.dtype());
         }
     }
-
+    DISPATCH_CUDA_FUNCTION_DATA_TYPE(torchDTypeToDataType(output.dtype()),
+                                     invoke_debug_kernel2,
+                                     output.data_ptr(),
+                                     0,
+                                     10,
+                                     10,
+                                     768,
+                                     2,
+                                     device_->getStream());
     return output;
 }
 

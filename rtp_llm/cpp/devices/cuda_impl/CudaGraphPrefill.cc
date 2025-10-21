@@ -130,12 +130,19 @@ std::vector<int> CudaGraphRunner::getPrefillSequenceLengthsToCapture() {
         }
     }
 
+    // Filter out sequence lengths greater than 1450
+    capture_seq_lens.erase(std::remove_if(capture_seq_lens.begin(),
+                                          capture_seq_lens.end(),
+                                          [&](int len) { return len > max_perfill_cuda_graph_len_; }),
+                           capture_seq_lens.end());
+
     // Remove duplicates and sort
     std::sort(capture_seq_lens.begin(), capture_seq_lens.end());
     capture_seq_lens.erase(std::unique(capture_seq_lens.begin(), capture_seq_lens.end()), capture_seq_lens.end());
 
-    // Ensure we have the maximum possible length if it's <= 16384
-    if (max_possible_length <= 16384 && capture_seq_lens[capture_seq_lens.size() - 1] != max_possible_length) {
+    // Ensure we have the maximum possible length if it's <= 1450
+    if (max_possible_length <= max_perfill_cuda_graph_len_
+        && capture_seq_lens[capture_seq_lens.size() - 1] != max_possible_length) {
         capture_seq_lens.push_back(max_possible_length);
     }
 

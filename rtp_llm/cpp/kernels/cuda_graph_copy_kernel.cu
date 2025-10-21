@@ -59,6 +59,16 @@ __global__ void cudaGraphCopySmall2LargeKernel(T*         input_tensor,
                                                const int* cu_seq_len) {
     const int tid           = blockIdx.x * blockDim.x + threadIdx.x;
     const int total_threads = blockDim.x * gridDim.x;
+    if (tid == 0) {
+        printf(
+            "cu_seq_len[*batch_size]: %d, hidden_size: %d, cu_seq_len[*batch_size] * hidden_size: %d, batch_size: %d\n",
+            cu_seq_len[*batch_size],
+            hidden_size,
+            cu_seq_len[*batch_size] * hidden_size,
+            *batch_size);
+        printf("max_seq_len: %d, batch_size: %d\n", max_seq_len, *batch_size);
+        printf("cu_seq_len: %d, %d, %d\n", cu_seq_len[0], cu_seq_len[1], cu_seq_len[2]);
+    }
     // Calculate total_valid_elements using cu_seq_len array
     // cu_seq_len[i] contains cumulative length up to batch i
     // cu_seq_len[batch_size] contains total elements
