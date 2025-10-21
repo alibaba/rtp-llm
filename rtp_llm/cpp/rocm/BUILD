@@ -80,3 +80,43 @@ cc_library(
     include_prefix = "src",
     visibility = ["//visibility:public"],
 )
+
+cc_library(
+    name="speculative_sampling",
+    srcs=[
+        "speculative_sampling/sampling_ops.cu",
+        "speculative_sampling/sampling.cu"
+    ],
+    hdrs=[
+        "speculative_sampling/sampling.cuh",
+        "speculative_sampling/utils.cuh",
+        "speculative_sampling/vec_dtypes.cuh"
+    ],
+    deps = torch_deps(),
+    copts = rocm_copts() + ["-DHIP_ENABLE_WARP_SYNC_BUILTINS=1"],
+    strip_include_prefix = "speculative_sampling",
+    visibility=["//visibility:public"],
+)
+
+
+cc_library(
+    name="memory_utils",
+    srcs=[
+        # "memory_utils.cu",
+    ],
+
+    hdrs=[
+        # "memory_utils.h",
+    ],
+
+    deps=[
+        ":rocm_utils",
+        "//rtp_llm/cpp:utils",
+        "//rtp_llm/cpp/core:allocator",
+        "@local_config_rocm//rocm:rocm_headers",
+        "@local_config_rocm//rocm:rocm",
+    ],
+    copts=rocm_copts(),
+    include_prefix="src",
+    visibility=["//visibility:public"],
+)

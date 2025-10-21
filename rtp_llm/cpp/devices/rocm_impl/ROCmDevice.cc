@@ -15,6 +15,7 @@
 #include "rtp_llm/cpp/kernels/mask_logits.h"
 #include "rtp_llm/cpp/cuda/nccl/nccl_utils_torch.h"
 #include "rtp_llm/cpp/cuda/nccl/nccl_utils.h"
+#include "rtp_llm/cpp/rocm/speculative_sampling/sampling.cuh"
 
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 #include "rtp_llm/cpp/core/BufferHelper.h"
@@ -666,6 +667,18 @@ ROCmCommHook::~ROCmCommHook() {
 
 void ROCmCommHook::hook_sync() const {
     ROCM_CHECK(hipStreamWaitEvent(main_stream_, hook_event_, 0));
+}
+
+void ROCmDevice::chainSpeculativeSampling(const SpeculativeSamplingParams& params) {
+    chain_speculative_sampling(params.draft_probs_d,
+                               params.draft_token_ids_d,
+                               params.uniform_samples_d,
+                               params.target_probs_d,
+                               params.output_token_ids_d,
+                               params.output_accepted_token_num_d,
+                               params.output_emitted_token_num_d,
+                               false,
+                               int64_t(stream_));
 }
 
 // void ROCmDevice::prepareCommBuffer(const PrepareCommBufferParams& params) {
