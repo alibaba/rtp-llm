@@ -67,7 +67,6 @@ FrontendWorker.inference = fake_inference
 
 BackendServer.start = fake_start
 BackendServer.ready = fake_ready
-BackendServer.model_runtime_meta = lambda x: "fake_model"
 
 OpenaiEndpoint.__init__ = fake_init
 OpenaiEndpoint.chat_completion = fake_inference

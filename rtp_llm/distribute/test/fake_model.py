@@ -19,10 +19,6 @@ class FakeConfig(object):
 
 
 class FakeModel(BaseModel):
-    @property
-    def model_runtime_meta(self) -> str:
-        return ""
-
     def load_tokenizer(self):
         self.tokenizer = FakeTokenizer()
 
