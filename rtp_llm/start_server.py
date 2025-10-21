@@ -150,16 +150,17 @@ def monitor_and_release_process(backend_process, frontend_process):
 def main():
     setup_args()
 
+    start_server()
+
+
+def start_server():
     try:
         multiprocessing.set_start_method("spawn")
     except RuntimeError as e:
         logging.warn(str(e))
-
     global_controller = init_controller()
-
     backend_process = None
     frontend_process = None
-
     try:
         if os.environ.get("ROLE_TYPE", "") != "FRONTEND":
             logging.info("start backend server")
