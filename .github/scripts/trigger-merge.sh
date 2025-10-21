@@ -15,7 +15,7 @@ MERGE_MESSAGE=$5
 GITHUB_PR_ID=$6
 MERGE_TYPE="REBASE"
 SOURCE_BRANCH="open_merge/${GITHUB_PR_ID}"
-TARGET_BRANCH="main-internal"
+TARGET_BRANCH="main-pre"
 
 # Get current timestamp
 timestamp=$(date +%s)
@@ -57,4 +57,4 @@ echo "Sending MERGE-TASK for commitId: ${COMMIT_ID} ${JSON_BODY} "
 curl -v -H "Content-Type: application/json" \
      -H "Authorization: Basic ${SECURITY}" \
      -d "${JSON_BODY}" \
-     "https://triggerid-to-mq-wjrdhcgbie.cn-hangzhou.fcapp.run"
+     "https://triggero-mq-pre-rbmuaqmqmz.cn-hangzhou.fcapp.run"
