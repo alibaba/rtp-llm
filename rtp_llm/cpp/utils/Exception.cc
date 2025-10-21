@@ -28,16 +28,16 @@ namespace {
 int constexpr VOID_PTR_SZ = 2 + sizeof(void*) * 2;
 }
 
-FTException::FTException(char const* file, std::size_t line, const std::string& msg): std::runtime_error{""} {
-    mNbFrames        = backtrace(mCallstack.data(), MAX_FRAMES);
-    auto const trace = getTrace();
+RTPException::RTPException(char const* file, std::size_t line, const std::string& msg): std::runtime_error{""} {
+    mNbFrames                 = backtrace(mCallstack.data(), MAX_FRAMES);
+    auto const          trace = getTrace();
     std::runtime_error::operator=(
         std::runtime_error{rtp_llm::fmtstr("%s (%s:%zu)\n%s", msg.c_str(), file, line, trace.c_str())});
 }
 
-FTException::~FTException() noexcept = default;
+RTPException::~RTPException() noexcept = default;
 
-std::string FTException::getTrace() const {
+std::string RTPException::getTrace() const {
     auto const         trace = backtrace_symbols(mCallstack.data(), mNbFrames);
     std::ostringstream buf;
     for (auto i = 1; i < mNbFrames; ++i) {
@@ -65,7 +65,7 @@ std::string FTException::getTrace() const {
     return buf.str();
 }
 
-std::string FTException::demangle(char const* name) {
+std::string RTPException::demangle(char const* name) {
     std::string clearName{name};
     auto        status    = -1;
     auto const  demangled = abi::__cxa_demangle(name, nullptr, nullptr, &status);

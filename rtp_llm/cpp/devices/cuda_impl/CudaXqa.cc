@@ -88,10 +88,8 @@ bool supportXqa(DataType input_type,
     bool support = (input_type == DataType::TYPE_BF16 || input_type == DataType::TYPE_FP16)
                    && (output_type == DataType::TYPE_BF16 || output_type == DataType::TYPE_FP16
                        || output_type == DataType::TYPE_FP8_E4M3)
-                   && ((is_sm90()
-                        && (kv_cache_type == DataType::TYPE_BF16 || kv_cache_type == DataType::TYPE_FP16
-                            || kv_cache_type == DataType::TYPE_FP8_E4M3))
-                       || (is_sm100() && kv_cache_type == DataType::TYPE_FP8_E4M3))
+                   && (kv_cache_type == DataType::TYPE_BF16 || kv_cache_type == DataType::TYPE_FP16
+                       || kv_cache_type == DataType::TYPE_FP8_E4M3)
                    && (group_size <= 16) && (head_dim == 64 || head_dim == 128 || head_dim == 256)
                    && (page_size == 16 || page_size == 32 || page_size == 64 || page_size == 128);
     if (!support) {

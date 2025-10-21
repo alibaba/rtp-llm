@@ -19,6 +19,10 @@
 #include "rtp_llm/cpp/cuda/reduce_kernel_utils.cuh"
 #include "rtp_llm/cpp/kernels/quantization_tensor.h"
 
+#if USING_CUDA
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
+#endif
+
 #if USING_ROCM
 #include "rtp_llm/cpp/rocm/cuda_shims.h"
 #endif
@@ -74,6 +78,10 @@ void invokeQuantization(
     } else if (std::is_same_v<T, half>) {
         quantizedKernel<<<grid, block, 0, stream>>>((char4*)dst, (const half2*)src, size / 4, scalePtr);
     }
+#if USING_CUDA
+    check_cuda_value(cudaPeekAtLastError());
+    check_cuda_error();
+#endif
 }
 
 #define INSTANTIATE_INVOKE_QUANTIZATION(T)                                                                             \
@@ -147,6 +155,10 @@ void dispatch_per_token_quantization_shift(int8_t*       dst,
         perTokenQuantization<T, IS_SMOOTHER, false>
             <<<grid, block, 0, stream>>>(dst, src, numRows, numCols, scalePtr, smoother, nullptr);
     }
+#if USING_CUDA
+    check_cuda_value(cudaPeekAtLastError());
+    check_cuda_error();
+#endif
 }
 
 template<typename T>

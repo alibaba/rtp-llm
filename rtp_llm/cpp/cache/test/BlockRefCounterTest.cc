@@ -146,7 +146,7 @@ TEST_F(BlockRefCounterTest, testDecrementZeroRefCount) {
     EXPECT_EQ(counter.busyBlockNum(), 1);
 
     // 尝试减少混合状态的块，应该在遇到零引用计数时抛异常
-    EXPECT_THROW(counter.decrementRefCounter(mixed_blocks), rtp_llm::FTException);
+    EXPECT_THROW(counter.decrementRefCounter(mixed_blocks), rtp_llm::RTPException);
 
     // 验证状态：块1的引用计数应该已经被减少了
     EXPECT_EQ(counter.getRefCounter(1), 0);

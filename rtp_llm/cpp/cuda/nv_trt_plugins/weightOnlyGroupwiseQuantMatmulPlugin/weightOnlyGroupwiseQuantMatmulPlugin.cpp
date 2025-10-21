@@ -35,16 +35,13 @@ void WeightOnlyGroupwiseQuantMatmulPlugin::init(nvinfer1::DataType type,
                                                 bool               has_zeros,
                                                 int                group_size,
                                                 int                weight_bits) {
-    if (m_weightOnlyGroupwiseGemmRunner != nullptr && 
-        mType == type && 
-        mGroupSize == group_size && 
-        mHasZeros == has_zeros &&
-        mWeightBits == weight_bits) {
+    if (m_weightOnlyGroupwiseGemmRunner != nullptr && mType == type && mGroupSize == group_size
+        && mHasZeros == has_zeros && mWeightBits == weight_bits) {
         // 参数相同且已经初始化过，直接返回
         return;
     }
-    mArch = rtp_llm::get_sm();
-    mType = type;
+    mArch      = rtp_llm::get_sm();
+    mType      = type;
     mGroupSize = group_size;
     mHasZeros  = has_zeros;
     FT_SWITCH_T(mType == nvinfer1::DataType::kHALF, T, half, __nv_bfloat16, [&] {

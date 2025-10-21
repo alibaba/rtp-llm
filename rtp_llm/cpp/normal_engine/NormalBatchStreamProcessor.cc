@@ -148,8 +148,13 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
         auto current_batch_size     = stream->currentBatchSize();
 
         const auto& kv_cache = stream->kvCache();
-        RTP_LLM_LOG_DEBUG("context kv_cache: %s", kv_cache.debugString().c_str());
-        RTP_LLM_LOG_DEBUG("context stream: %s", stream->debugString().c_str());
+        if (enable_detail_log_) {
+            RTP_LLM_LOG_DEBUG("context kv_cache: %s", kv_cache.debugString().c_str());
+            RTP_LLM_LOG_DEBUG("context stream: %s", stream->debugString().c_str());
+        } else {
+            RTP_LLM_LOG_TRACE("context kv_cache: %s", kv_cache.debugString().c_str());
+            RTP_LLM_LOG_TRACE("context stream: %s", stream->debugString().c_str());
+        }
 
         // TODO(xinfei.sxf) deal with adjusted common seq len.
         for (auto i = 0; i < current_batch_size; ++i) {

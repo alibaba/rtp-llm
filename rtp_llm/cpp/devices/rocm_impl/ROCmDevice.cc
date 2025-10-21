@@ -421,7 +421,7 @@ SelectOutput ROCmDevice::select(const SelectParams& params) {
                                         output->data(),
                                         input.data(),
                                         (int*)params.index.data(),
-                                        (int)params.index.size(),
+                                        params.index.size(),
                                         num_selected_element,
                                         0,
                                         stream_);

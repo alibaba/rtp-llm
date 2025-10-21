@@ -83,7 +83,9 @@ void invokeMaskLogits(T* logits_batch,
     grid.z  = 1;
 
     mask_logits<<<grid, block, 0, stream>>>(batch_size, vocab_size, logits_batch, mask_batch);
-
+#if USING_CUDA
+    check_cuda_value(cudaPeekAtLastError());
+#endif
     check_cuda_error();
 }
 

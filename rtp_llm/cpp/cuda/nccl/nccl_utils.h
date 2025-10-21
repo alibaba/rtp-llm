@@ -39,16 +39,9 @@
 #endif
 
 namespace rtp_llm {
-#define NCCLCHECK(cmd)                                                                                                 \
-    do {                                                                                                               \
-        ncclResult_t __r = cmd;                                                                                        \
-        if (__r != ncclSuccess) {                                                                                      \
-            printf("Failed, NCCL error %s:%d '%s'\n", __FILE__, __LINE__, ncclGetErrorString(__r));                    \
-            fflush(stdout);                                                                                            \
-            fflush(stderr);                                                                                            \
-            abort();                                                                                                   \
-        }                                                                                                              \
-    } while (0)
+
+void ncclCheck(ncclResult_t result, const char* const file, int const line);
+#define NCCLCHECK(val) rtp_llm::ncclCheck((val), __FILE__, __LINE__)
 
 struct NcclUid {
     ncclUniqueId nccl_uid_;
