@@ -69,6 +69,26 @@ class ServerConfig:
         )
 
 
+class GrpcClientConfig:
+    def __init__(self):
+        self.max_receive_message_length: int = 1024 * 1024 * 1024
+        self.max_metadata_size: int = 1024 * 1024 * 1024
+
+    def update_from_env(self):
+        self.max_receive_message_length = get_env_int(
+            "GRPC_CLIENT_MAX_RECEIVE_MESSAGE_LENGTH", self.max_receive_message_length
+        )
+        self.max_metadata_size = get_env_int(
+            "GRPC_CLIENT_MAX_METADATA_SIZE", self.max_metadata_size
+        )
+
+    def to_string(self):
+        return (
+            f"max_receive_message_length: {self.max_receive_message_length}\n"
+            f"max_metadata_size: {self.max_metadata_size}\n"
+        )
+
+
 class ModelConfig:
     def __init__(self):
         self.extra_data_path: str = ""
@@ -848,6 +868,7 @@ class PyEnvConfigs:
         self.concurrency_config = ConcurrencyConfig()
         self.jit_config = JITConfig()
         self.py_hw_kernel_config = PyHwKernelConfig()
+        self.grpc_client_config = GrpcClientConfig()
 
     def update_from_env(self):
         self.server_config.update_from_env()
@@ -879,6 +900,7 @@ class PyEnvConfigs:
         self.ffn_disaggregate_config.update_from_env()
         self.jit_config.update_from_env()
         self.py_hw_kernel_config.update_from_env()
+        self.grpc_client_config.update_from_env()
         logging.info(self.to_string())
 
     def to_string(self):
@@ -920,6 +942,7 @@ class PyEnvConfigs:
             "[concurrency_config]\n" + self.concurrency_config.to_string() + "\n\n"
             "[jit_config]\n" + self.jit_config.to_string() + "\n\n"
             "[py_hw_kernel_config]\n" + self.py_hw_kernel_config.to_string() + "\n\n"
+            "[grpc_client_config]\n" + self.grpc_client_config.to_string() + "\n\n"
         )
 
 
