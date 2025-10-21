@@ -18,3 +18,11 @@ def init_embedding_group_args(parser):
         default=None,
         help='在多模态嵌入中使用额外的输入，可选值"INDEX"',
     )
+
+    embedding_group.add_argument(
+        "--embedding_need_norm",
+        env_name="EMBEDDING_NEED_NORM",
+        type=bool,
+        default=False,
+        help="在多模态嵌入中是否需要需要norm处理",
+    )

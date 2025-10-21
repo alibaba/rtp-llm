@@ -59,7 +59,7 @@ class ALLEmbeddingRenderer(EmbeddingRendererBase):
         for i in range(len(outputs.outputs)):
             embedding = outputs.outputs[i][: inputs.input_lengths[i]]
             token_ids = inputs.token_ids[bias : bias + inputs.input_lengths[i]].tolist()
-            if request.normalize:
+            if self.config_.py_env_configs.embedding_config.embedding_need_norm:
                 embedding = torch.nn.functional.normalize(embedding, dim=-1)
             data.append(
                 ALLEmbeddingResponseFormat(

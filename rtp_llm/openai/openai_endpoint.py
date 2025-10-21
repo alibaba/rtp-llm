@@ -392,6 +392,8 @@ class OpenaiEndpoint(object):
             self.template_renderer if chat_request.user_template else self.chat_renderer
         )
         rendered_input = self.render_chat(chat_request)
+        logging.warning(f"Rendered input ids: {rendered_input.input_ids}")
+        logging.warning(f"Rendered input prompt: {rendered_input.rendered_prompt}")
         generate_config = self._extract_generation_config(chat_request)
 
         mm_inputs = rendered_input.multimodal_inputs
