@@ -93,6 +93,9 @@ message GenerateConfigPB {
     repeated int32 variable_num_beams = 49;
     google.protobuf.StringValue trace_id = 50;
     bool return_all_hidden_states = 51;
+    bool return_mtp_hidden_states = 52;
+    int32 mtp_input_len = 53;
+    string mtp_hidden_states_saved_path = 54;
 }
 
 message MMPreprocessConfigPB {

@@ -407,6 +407,36 @@ void saveBufferDataToTorch(const Buffer& buffer, DeviceBase* device, const std::
     fout.close();
 }
 
+torch::Tensor convertBufferDataToTorch(const Buffer& buffer, DeviceBase* device) {
+    if (!device) {
+        device = DeviceFactory::getDefaultDevice();
+    }
+    auto host_buffer = device->allocateBuffer({buffer.type(), buffer.shape(), AllocationType::HOST});
+    device->copy({*host_buffer, buffer});
+    device->syncAndCheck();
+    auto tensor = torch::from_blob(
+        host_buffer->data(),
+        bufferShapeToTorchShape(buffer),
+        c10::TensorOptions().device(torch::Device(torch::kCPU)).dtype(dataTypeToTorchType(buffer.type())));
+    if (tensor.dtype() == torch::kFloat8_e4m3fn) {
+        tensor = tensor.to(torch::kFloat);
+    }
+    return tensor.clone();
+}
+void saveMtpDataToTorch(const Buffer&      hidden,
+                        const Buffer&      input_ids,
+                        const int32_t&     mtp_len,
+                        const std::string& fileName) {
+    auto hidden_tensor = convertBufferDataToTorch(hidden, nullptr);
+    auto ids_tensor    = convertBufferDataToTorch(input_ids, nullptr);
+
+    std::vector<torch::Tensor> tensor_list = {hidden_tensor, ids_tensor, torch::tensor(mtp_len, torch::kInt64)};
+    auto                       pickled     = torch::pickle_save(tensor_list);
+    std::ofstream              fout(fileName, std::ios::out | std::ios::binary);
+    fout.write(pickled.data(), pickled.size());
+    fout.close();
+}
+
 void saveTorchDataTofile(const torch::Tensor& tensor, const std::string& fileName) {
     auto          tensor_cpu = tensor.contiguous().cpu();
     auto          pickled    = torch::pickle_save(tensor_cpu);

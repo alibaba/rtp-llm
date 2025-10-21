@@ -523,7 +523,7 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_gro
         }
 
         BufferPtr all_hidden_states = nullptr;
-        if (stream->needReturnHiddenStates()) {
+        if (stream->needReturnHiddenStates() || stream->generateConfig()->return_mtp_hidden_states) {
             all_hidden_states = model_output.all_hidden_states->slice(token_offset, token_size, false);
             all_hidden_states->updateParent(model_output.all_hidden_states);
         }

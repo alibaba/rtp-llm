@@ -64,6 +64,11 @@ void saveBufferDataToTorch(const Buffer& buffer, DeviceBase* device, const std::
 
 void saveTorchDataTofile(const torch::Tensor& tensor, const std::string& fileName);
 
+void saveMtpDataToTorch(const Buffer&      hidden,
+                        const Buffer&      input_ids,
+                        const int32_t&     mtp_len,
+                        const std::string& fileName);
+
 torch::Tensor loadTensorFromFile(const std::string& fileName);
 
 template<typename TensorAccessor>
