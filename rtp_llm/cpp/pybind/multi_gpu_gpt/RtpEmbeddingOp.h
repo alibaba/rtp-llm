@@ -27,23 +27,29 @@ public:
     ~RtpEmbeddingOp();
     void       init(py::object model, py::object mm_process_engine);
     void       stop();
-    py::object decode(th::Tensor                            token_ids,
-                      th::Tensor                            token_type_ids,
-                      th::Tensor                            input_lengths,
-                      int64_t                               request_id,
+    py::object decode(th::Tensor                   token_ids,
+                      th::Tensor                   token_type_ids,
+                      th::Tensor                   input_lengths,
+                      int64_t                      request_id,
                       std::vector<MultimodalInput> multimodal_inputs = {});
 
 private:
-    void startRpcServer(const GptInitParameter&              gpt_init_params,
-                        py::object                                    py_render,
-                        py::object                                    py_tokenizer,
-                        kmonitor::MetricsReporterPtr                  reporter,
-                        std::shared_ptr<MultimodalProcessor> mm_processor);
+    void startArpcServer(const GptInitParameter&              gpt_init_params,
+                         py::object                           py_render,
+                         py::object                           py_tokenizer,
+                         kmonitor::MetricsReporterPtr         reporter,
+                         std::shared_ptr<MultimodalProcessor> mm_processor);
+
+    void startGrpcServer(const GptInitParameter&              gpt_init_params,
+                         py::object                           py_render,
+                         py::object                           py_tokenizer,
+                         kmonitor::MetricsReporterPtr         reporter,
+                         std::shared_ptr<MultimodalProcessor> mm_processor);
 
     void startHttpServer(std::shared_ptr<EmbeddingEngine>     embedding_engine,
                          std::shared_ptr<MultimodalProcessor> mm_processor,
                          const EngineInitParams&              params,
-                         py::object                                    py_render);
+                         py::object                           py_render);
 
 private:
     // need to be shared to pass into rpc service
@@ -58,4 +64,4 @@ private:
 
 void registerRtpEmbeddingOp(const py::module& m);
 
-}  // namespace torch_ext
+}  // namespace rtp_llm
