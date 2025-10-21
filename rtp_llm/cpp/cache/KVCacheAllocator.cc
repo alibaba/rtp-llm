@@ -63,6 +63,160 @@ MallocResult KVCacheAllocator::malloc(const MallocInfo& malloc_info) {
     }
 }
 
+void KVCacheAllocator::free(const std::vector<KVCacheResource>& resource) {
+    for (const auto& kv_block : resource) {
+        free(kv_block.block_id);
+    }
+}
+
+void KVCacheAllocator::free(const std::vector<int>& block_indices) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    auto                        free_blocks = block_ref_counter_.decrementRefCounterWithFreeInfo(block_indices);
+    free_blocks_index_.insert(free_blocks.begin(), free_blocks.end());
+}
+
+bool KVCacheAllocator::setKVBlockValue(int              block_index,
+                                       int              layer_id,
+                                       rtp_llm::Buffer& k_buffer,
+                                       rtp_llm::Buffer& v_buffer) {
+    // 检查block_index是否有效
+    if (block_index < 0 || block_index >= config_.block_nums) {
+        RTP_LLM_LOG_WARNING("Invalid block_index: %d, valid range: [0, %d)", block_index, config_.block_nums);
+        return false;
+    }
+
+    // 检查layer_id是否有效
+    if (layer_id < 0 || layer_id >= config_.layer_num) {
+        RTP_LLM_LOG_WARNING("Invalid layer_id: %d, valid range: [0, %d)", layer_id, config_.layer_num);
+        return false;
+    }
+
+    auto k_offset = config_.getKeyOffset(block_index, layer_id);
+    auto v_offset = config_.getValueOffset(block_index, layer_id);
+    auto k_shape  = config_.getKeyShape();
+    auto v_shape  = config_.getValueShape();
+
+    auto copyFunc = [&](rtp_llm::Buffer& src_buffer, rtp_llm::BufferPtr& dst_blocks, size_t offset, size_t shape) {
+        if (shape == 0) {
+            return;
+        }
+        auto dst_data   = (char*)dst_blocks->data() + offset;
+        auto dst_buffer = Buffer(dst_blocks->where(), src_buffer.type(), {shape}, dst_data);
+        device_->copy({dst_buffer, src_buffer});
+    };
+
+    copyFunc(k_buffer, kv_cache_.k_blocks, k_offset, k_shape);
+    copyFunc(v_buffer, kv_cache_.v_blocks, v_offset, v_shape);
+
+    return true;
+}
+
+bool KVCacheAllocator::setKVBlockValue(int block_index, rtp_llm::Buffer& k_buffer, rtp_llm::Buffer& v_buffer) {
+    // 检查block_index是否有效
+    if (block_index < 0 || block_index >= config_.block_nums) {
+        RTP_LLM_LOG_WARNING("Invalid block_index: %d, valid range: [0, %d)", block_index, config_.block_nums);
+        return false;
+    }
+
+    bool all_success = true;
+    for (uint32_t layer_id = 0; layer_id < config_.layer_num; layer_id++) {
+        auto layer_k_data   = (char*)(k_buffer.data()) + layer_id * config_.getKeyBlockStride();
+        auto layer_k_buffer = Buffer(k_buffer.where(), k_buffer.type(), {config_.getKeyShape()}, layer_k_data);
+        auto layer_v_data   = (char*)(v_buffer.data()) + layer_id * config_.getValueBlockStride();
+        auto layer_v_buffer = Buffer(v_buffer.where(), v_buffer.type(), {config_.getValueShape()}, layer_v_data);
+        if (!setKVBlockValue(block_index, layer_id, layer_k_buffer, layer_v_buffer)) {
+            all_success = false;
+        }
+    }
+    return all_success;
+}
+
+std::tuple<bool, rtp_llm::BufferPtr, rtp_llm::BufferPtr> KVCacheAllocator::getKVBlockValue(int block_index,
+                                                                                           int layer_id) {
+    // 检查block_index是否有效
+    if (block_index < 0 || block_index >= config_.block_nums) {
+        RTP_LLM_LOG_WARNING("Invalid block_index: %d, valid range: [0, %d)", block_index, config_.block_nums);
+        return {false, nullptr, nullptr};
+    }
+
+    // 检查layer_id是否有效
+    if (layer_id < 0 || layer_id >= config_.layer_num) {
+        RTP_LLM_LOG_WARNING("Invalid layer_id: %d, valid range: [0, %d)", layer_id, config_.layer_num);
+        return {false, nullptr, nullptr};
+    }
+
+    auto k_offset = config_.getKeyOffset(block_index, layer_id);
+    auto v_offset = config_.getValueOffset(block_index, layer_id);
+    auto k_shape  = config_.getKeyShape();
+    auto v_shape  = config_.getValueShape();
+
+    auto kdst_buffer = device_->allocateBuffer({config_.dtype, {k_shape}, atype_});
+    auto vdst_buffer = device_->allocateBuffer({config_.dtype, {v_shape}, atype_});
+
+    auto copyFunc = [&](rtp_llm::BufferPtr& src_blocks, rtp_llm::BufferPtr& dst_buffer, size_t offset, size_t shape) {
+        auto src_data   = (char*)(src_blocks->data()) + offset;
+        auto src_buffer = Buffer(src_blocks->where(), config_.dtype, {shape}, src_data);
+        device_->copy({*dst_buffer, src_buffer});
+    };
+
+    copyFunc(kv_cache_.k_blocks, kdst_buffer, k_offset, k_shape);
+    copyFunc(kv_cache_.v_blocks, vdst_buffer, v_offset, v_shape);
+
+    return {true, kdst_buffer, vdst_buffer};
+}
+
+std::tuple<bool, rtp_llm::BufferPtr, rtp_llm::BufferPtr> KVCacheAllocator::getKVBlockValue(int block_index) {
+    // 检查block_index是否有效
+    if (block_index < 0 || block_index >= config_.block_nums) {
+        RTP_LLM_LOG_WARNING("Invalid block_index: %d, valid range: [0, %d)", block_index, config_.block_nums);
+        return {false, nullptr, nullptr};
+    }
+
+    auto k_shape     = config_.getKeyShape();
+    auto v_shape     = config_.getValueShape();
+    auto kdst_buffer = device_->allocateBuffer({config_.dtype, {config_.layer_num, k_shape}, atype_});
+    auto vdst_buffer = device_->allocateBuffer({config_.dtype, {config_.layer_num, v_shape}, atype_});
+
+    for (uint32_t layer_id = 0; layer_id < config_.layer_num; layer_id++) {
+        auto k_offset = config_.getKeyOffset(block_index, layer_id);
+        auto v_offset = config_.getValueOffset(block_index, layer_id);
+        auto copyFunc =
+            [&](rtp_llm::BufferPtr& src_blocks, rtp_llm::BufferPtr& dst_buffer, size_t offset, size_t shape) {
+                auto src_data   = (char*)(src_blocks->data()) + offset;
+                auto src_buffer = Buffer(src_blocks->where(), config_.dtype, {shape}, src_data);
+                device_->copy({dst_buffer->view(layer_id, 1)[0], src_buffer});
+            };
+        copyFunc(kv_cache_.k_blocks, kdst_buffer, k_offset, k_shape);
+        copyFunc(kv_cache_.v_blocks, vdst_buffer, v_offset, v_shape);
+    }
+
+    return {true, kdst_buffer, vdst_buffer};
+}
+
+std::tuple<bool, rtp_llm::BufferPtr, rtp_llm::BufferPtr> KVCacheAllocator::getKVBlockValueRef(int block_index,
+                                                                                              int layer_id) {
+    if (block_index < 0 || block_index >= config_.block_nums) {
+        RTP_LLM_LOG_WARNING("Invalid block_index: %d, valid range: [0, %d)", block_index, config_.block_nums);
+        return {false, nullptr, nullptr};
+    }
+
+    if (layer_id < 0 || layer_id >= config_.layer_num) {
+        RTP_LLM_LOG_WARNING("Invalid layer_id: %d, valid range: [0, %d)", layer_id, config_.layer_num);
+        return {false, nullptr, nullptr};
+    }
+
+    auto k_offset = config_.getKeyOffset(block_index, layer_id);
+    auto v_offset = config_.getValueOffset(block_index, layer_id);
+    auto k_shape  = config_.getKeyShape();
+    auto v_shape  = config_.getValueShape();
+
+    std::shared_ptr<rtp_llm::Buffer> k_buffer(new rtp_llm::Buffer(
+        kv_cache_.k_blocks->where(), config_.dtype, {k_shape}, (void*)((char*)kv_cache_.k_blocks->data() + k_offset)));
+    std::shared_ptr<rtp_llm::Buffer> v_buffer(new rtp_llm::Buffer(
+        kv_cache_.v_blocks->where(), config_.dtype, {v_shape}, (void*)((char*)kv_cache_.v_blocks->data() + v_offset)));
+    return {true, k_buffer, v_buffer};
+}
+
 void KVCacheAllocator::blockCopy(int src_block_index, int dest_block_index) {
     BlockIdPair copy_mapping{src_block_index, dest_block_index};
     blockBatchCopy(&copy_mapping, &copy_mapping + 1);
