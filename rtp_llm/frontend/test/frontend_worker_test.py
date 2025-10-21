@@ -3,12 +3,9 @@ import logging
 import os
 from unittest import TestCase, main
 
-from rtp_llm.async_decoder_engine.async_model import AsyncModel
+from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 from rtp_llm.config.log_config import LOGGING_CONFIG
-from rtp_llm.distribute.worker_info import (
-    g_worker_info,
-    update_master_info,
-)
+from rtp_llm.distribute.worker_info import g_worker_info, update_master_info
 from rtp_llm.frontend.frontend_worker import BatchPipelineResponse, FrontendWorker
 from rtp_llm.pipeline.pipeline import Pipeline
 from rtp_llm.structure.request_extractor import request_id_field_name
@@ -51,7 +48,7 @@ class FrontendWorkerTest(TestCase):
             ckpt_path=self.ckpt_path,
             max_seq_len=2048,
         )
-        model: AsyncModel = self.fake_model_loader.load_model()
+        model: BaseEngine = self.fake_model_loader.load_model()
         pipeline = Pipeline(model.config, model.tokenizer)
         return FakeFrontendWorker(model, pipeline)
 

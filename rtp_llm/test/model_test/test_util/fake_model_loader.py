@@ -2,7 +2,7 @@ import json
 import logging
 import os
 
-from rtp_llm.async_decoder_engine.async_model import AsyncModel
+from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_factory import ModelConfig, ModelFactory
 from rtp_llm.utils.weight_type import WEIGHT_TYPE
@@ -104,5 +104,4 @@ class FakeModelLoader(object):
         )
         raw_config.is_causal = self.is_causal
         model = model_cls.from_config(raw_config)
-        model = AsyncModel(model, None)
         return model
