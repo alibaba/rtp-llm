@@ -189,6 +189,7 @@ public:
     AttentionModuleOutput  contextAttention(const AttentionModuleParams& params) override;
     AttentionModuleOutput  mlaContextAttention(const MlaAttentionModuleParams& params) override;
     AttentionModuleOutput  decoderSelfAttention(const AttentionModuleParams& params) override;
+    void                   chainSpeculativeSampling(const SpeculativeSamplingParams& params) override;
     MoeGateSelectOutput    moeGateSelect(const FfnLayerParams& params) override;
     FfnLayerOutput         moeFfn(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs) override;
     FfnLayerOutput         ffnLayer(const FfnLayerParams& params) override;
@@ -260,6 +261,9 @@ public:
     hipStream_t getStream() {
         return stream_;
     }
+    torch::Device getTorchDevice() override {
+        return torch::Device(torch::kCUDA);
+    };
     hipDeviceProp_t* getRocmDeviceProperties() {
         return &rocmDevProp;
     }

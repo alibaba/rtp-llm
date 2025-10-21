@@ -242,3 +242,19 @@ cc_test(
     ],
     tags = ["custom_ar_ut", "rocm"],
 )
+
+cc_test(
+    name="rocm_speculative_sampling",
+    srcs=[
+        "ops/SpeculativeSampling.cc",
+    ],
+    data=[],
+    env = device_test_envs(),
+    copts=test_copts + copts(),
+    linkopts=test_linkopts,
+    deps=test_deps + [
+        "//rtp_llm/cpp/rocm:speculative_sampling"
+    ],
+    tags = ["rocm"],
+    exec_properties = {'gpu':'MI308X'},
+)
