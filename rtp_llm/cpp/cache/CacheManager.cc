@@ -286,26 +286,17 @@ void CacheManager::incrBlockRefCounter(const std::vector<int>& indices) {
 }
 
 void CacheManager::incrQueryRefCounter(const std::vector<int>& blocks) {
-    std::set<int> unique_blocks(blocks.begin(), blocks.end());
-    for (auto block : unique_blocks) {
-        // it is okey to use getRefCounterUnchecked here, as the ref counters are about to increase
-        if (query_ref_counter_.getRefCounterUnchecked(block) == 0) {
-            available_blocks_--;
-        }
-    }
-
+    auto original_busy_blocks_num = query_ref_counter_.busyBlockNum();
     query_ref_counter_.incrementRefCounter(blocks);
+    auto busy_blocks_num = query_ref_counter_.busyBlockNum();
+    available_blocks_ -= busy_blocks_num - original_busy_blocks_num;
 }
 
 void CacheManager::decrQueryRefCounter(const std::vector<int>& blocks) {
+    auto original_busy_blocks_num = query_ref_counter_.busyBlockNum();
     query_ref_counter_.decrementRefCounter(blocks);
-
-    std::set<int> unique_blocks(blocks.begin(), blocks.end());
-    for (auto block : unique_blocks) {
-        if (query_ref_counter_.getRefCounter(block) == 0) {
-            available_blocks_++;
-        }
-    }
+    auto busy_blocks_num = query_ref_counter_.busyBlockNum();
+    available_blocks_ += original_busy_blocks_num - busy_blocks_num;
 }
 
 std::tuple<bool, KVCacheResource> CacheManager::malloc(const KVCacheAllocator::SimpleMallocInfo& malloc_info) {
@@ -333,8 +324,7 @@ void CacheManager::free(const std::vector<KVCacheResource>& resource) {
 
 void CacheManager::free(const std::vector<int>& block_indices) {
     std::lock_guard<std::mutex> guard(mutex_);
-    decrQueryRefCounter(block_indices);
-    allocator_->free(block_indices);
+    freeWithoutLock(block_indices);
 }
 
 void CacheManager::freeWithoutLock(const std::vector<int>& block_indices) {

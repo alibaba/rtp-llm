@@ -201,12 +201,8 @@ void KVCacheAllocator::free(const std::vector<KVCacheResource>& resource) {
 
 void KVCacheAllocator::free(const std::vector<int>& block_indices) {
     std::lock_guard<std::mutex> guard(mutex_);
-    block_ref_counter_.decrementRefCounter(block_indices);
-    for (auto block : block_indices) {
-        if (block_ref_counter_.getRefCounter(block) == 0) {
-            free_blocks_index_.insert(block);
-        }
-    }
+    auto                        free_blocks = block_ref_counter_.decrementRefCounterWithFreeInfo(block_indices);
+    free_blocks_index_.insert(free_blocks.begin(), free_blocks.end());
 }
 
 bool KVCacheAllocator::setKVBlockValue(int              block_index,
