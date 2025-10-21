@@ -1,9 +1,12 @@
 import asyncio
+import base64
 import json
 import logging
 import threading
 from typing import Any, Callable, Dict, Union
 
+import numpy as np
+import torch
 from fastapi import Request
 from fastapi import Request as RawRequest
 from fastapi.responses import ORJSONResponse, StreamingResponse
@@ -312,6 +315,13 @@ class FrontendServer(object):
         self, req: Dict[Any, Any], res: Any
     ):
         complete_response = await res.gen_complete_response_once()
+        all_hidden_states = None
+        if (
+            complete_response.extra_outputs is not None
+            and complete_response.extra_outputs.all_hidden_states is not None
+        ):
+            all_hidden_states = complete_response.extra_outputs.all_hidden_states
+            complete_response.extra_outputs.all_hidden_states = None
         complete_response = (
             complete_response.model_dump(exclude_none=True)
             if isinstance(complete_response, BaseModel)
@@ -319,6 +329,23 @@ class FrontendServer(object):
         )
         self._access_logger.log_success_access(req, complete_response)
 
+        def numpy_to_bf16(arr: np.ndarray) -> np.ndarray:
+            arr_float32 = arr.astype(np.float32)
+            uint8_view = arr_float32.view(np.uint8).reshape(-1, 4)
+            bf16_bytes = uint8_view[:, 2:].reshape(arr.shape + (2,))
+            return np.frombuffer(bf16_bytes.tobytes(), dtype=np.uint16).reshape(
+                arr.shape
+            )
+
+        if all_hidden_states is not None:
+            all_hidden_states_array = np.array(all_hidden_states)
+            all_hidden_states_bf16 = numpy_to_bf16(all_hidden_states_array)
+            all_hidden_states_base64 = base64.b64encode(
+                all_hidden_states_bf16.tobytes()
+            ).decode("ascii")
+            complete_response["extra_outputs"][
+                "all_hidden_states"
+            ] = all_hidden_states_base64
         return complete_response
 
     async def _infer_impl(
