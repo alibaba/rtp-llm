@@ -98,21 +98,14 @@ torch_ext::BertEmbeddingInputs PyWrappedModel::buildBertEmbeddingInputs(const Gp
 
     // Get position_encoding from model weights (no clone needed for weights)
     if (weights_.position_encoding) {
-        // {
-        //     DevicePerfWrapper      wrapper(device_, "py model weights_.position_encoding->kernel");
-        //     bert_embedding_inputs.position_encoding = Buffer2torchTensor(weights_.position_encoding->kernel, false);
-        // }
-        {
-            DevicePerfWrapper wrapper(device_, "py model weights_.position_encoding->kernel.cuda()");
-            bert_embedding_inputs.position_encoding =
-                Buffer2torchTensor(weights_.position_encoding->kernel, false).cuda();
-        }
+        DevicePerfWrapper wrapper(device_, "py model weights_.position_encoding->kernel");
+        bert_embedding_inputs.position_encoding = Buffer2torchTensor(weights_.position_encoding->kernel, false);
     }
 
     // Get token_type_embedding from model weights (no clone needed for weights)
     if (weights_.token_type_embedding) {
-        bert_embedding_inputs.token_type_embedding =
-            Buffer2torchTensor(weights_.token_type_embedding->kernel, false).cuda();
+        DevicePerfWrapper wrapper(device_, "py model weights_.token_type_embedding->kernel");
+        bert_embedding_inputs.token_type_embedding = Buffer2torchTensor(weights_.token_type_embedding->kernel, false);
     }
 
     // Set input_embedding_scalar

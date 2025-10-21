@@ -81,12 +81,6 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
         // pinned memory
         py_model_inputs_.attention_inputs.cu_seqlens.slice(0, 0, current_batch_size_ + 1) =
             inputs.attention_inputs.cu_seqlens.slice(0, 0, current_batch_size_ + 1);
-        std::cout << "inputs.attention_inputs.cu_seqlens: " << inputs.attention_inputs.cu_seqlens[0] << ", "
-                  << inputs.attention_inputs.cu_seqlens[1] << ", " << inputs.attention_inputs.cu_seqlens[2]
-                  << std::endl;
-        std::cout << "py_model_inputs_.attention_inputs.cu_seqlens: " << py_model_inputs_.attention_inputs.cu_seqlens[0]
-                  << ", " << py_model_inputs_.attention_inputs.cu_seqlens[1] << ", "
-                  << py_model_inputs_.attention_inputs.cu_seqlens[2] << std::endl;
         py_model_inputs_.input_ids.slice(0, 0, current_seq_len_) = inputs.input_ids.slice(0, 0, current_seq_len_);
         if (py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params) {
             (*(py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params->cuda_graph_prefill_batch_size

@@ -160,6 +160,7 @@ void CudaGraphRunner::capturePrefillOneSeqLen(int seq_len) {
         py_forward_method_(inputs);
 
         py_forward_method_(inputs);
+
         RTP_LLM_LOG_INFO("WarmUp for seq len %d successfully.", seq_len);
         {
             CudaGraphStreamLife  stream_life(capture_stream_, device_);
@@ -174,9 +175,7 @@ void CudaGraphRunner::capturePrefillOneSeqLen(int seq_len) {
             CaptureCheck::in_cuda_graph_capture = true;
             auto py_outputs_obj                 = py_forward_method_(inputs);
             auto outputs                        = py_outputs_obj.cast<PyModelOutputs>();
-            std::cout << "decoder_layer_hidden_states_ copy start" << std::endl;
             graph_instances_[seq_len].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
-            std::cout << "decoder_layer_hidden_states_ copy end" << std::endl;
             graph.capture_end();
             RTP_LLM_LOG_INFO("Capture for seq len %d end.", seq_len);
             CaptureCheck::in_cuda_graph_capture = false;

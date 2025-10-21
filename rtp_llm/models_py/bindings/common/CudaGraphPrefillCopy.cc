@@ -39,15 +39,15 @@ void cuda_graph_copy_small2large(at::Tensor& input_tensor,
     auto       input_lengths_ptr = input_lengths.data_ptr<int>();
     auto       cu_seq_len_ptr    = cu_seq_len.data_ptr<int>();
     StreamType stream            = GET_CURRENT_STREAM();
-    DISPATCH_CUDA_FUNCTION_DATA_TYPE(torchDTypeToDataType(input_tensor.dtype()),
-                                     invoke_debug_kernel2,
-                                     input_tensor.data_ptr(),
-                                     0,
-                                     10,
-                                     10,
-                                     2304,
-                                     9,
-                                     stream);
+    // DISPATCH_CUDA_FUNCTION_DATA_TYPE(torchDTypeToDataType(input_tensor.dtype()),
+    //                                  invoke_debug_kernel2,
+    //                                  input_tensor.data_ptr(),
+    //                                  0,
+    //                                  10,
+    //                                  10,
+    //                                  2304,
+    //                                  9,
+    //                                  stream);
     // Dispatch based on tensor dtype
     DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FP16(input_tensor.scalar_type(), c_type, [&] {
         rtp_llm::invokeCudaGraphCopySmall2Large<c_type>(static_cast<c_type*>(input_ptr),
