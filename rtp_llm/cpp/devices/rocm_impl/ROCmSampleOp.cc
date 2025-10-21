@@ -350,7 +350,13 @@ GreedyOutput ROCmDevice::sampleGreedy(const GreedyParams& params) {
         hipEventSynchronize(stop);
         float milliseconds = 0;
         hipEventElapsedTime(&milliseconds, start, stop);
-        std::cout << "XBJ: took " << milliseconds << " ms" << std::endl;
+        std::ofstream outfile(std::string(std::getenv("XBJ_SAMPLE_DUR")), std::ios_base::app);
+        if (outfile.is_open()) {
+            outfile << milliseconds << std::endl;
+            outfile.close();
+        } else {
+            std::cerr << "Unable to open file for writing." << std::endl;
+        }
         hipEventDestroy(start);
         hipEventDestroy(stop);
     }

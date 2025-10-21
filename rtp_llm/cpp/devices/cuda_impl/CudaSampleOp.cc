@@ -281,7 +281,13 @@ GreedyOutput CudaDevice::sampleGreedy(const GreedyParams& params) {
         cudaEventSynchronize(stop);
         float milliseconds = 0;
         cudaEventElapsedTime(&milliseconds, start, stop);
-        std::cout << "XBJ: took " << milliseconds << " ms" << std::endl;
+        std::ofstream outfile(std::string(std::getenv("XBJ_SAMPLE_DUR")), std::ios_base::app);
+        if (outfile.is_open()) {
+            outfile << milliseconds << std::endl;
+            outfile.close();
+        } else {
+            std::cerr << "Unable to open file for writing." << std::endl;
+        }
         cudaEventDestroy(start);
         cudaEventDestroy(stop);
         return ret;
