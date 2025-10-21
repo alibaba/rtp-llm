@@ -17,7 +17,7 @@
 #define TLLM_CUDA_CHECK check_cuda_value
 #define TLLM_THROW(...)                                                                                                \
     do {                                                                                                               \
-        throw FT_EXCEPTION(__VA_ARGS__);                                                                               \
+        throw RTP_EXCEPTION(__VA_ARGS__);                                                                              \
     } while (0)
 
 namespace nvinfer1 {

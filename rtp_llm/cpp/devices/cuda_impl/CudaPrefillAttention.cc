@@ -38,7 +38,7 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
     if (FMHAType::PAGED_TRT_V2 == fmha_type || FMHAType::TRT_V2 == fmha_type) {
         tiled_counter_ptr =
             allocateBuffer({DataType::TYPE_UINT32, {1}, AllocationType::DEVICE}, {"tiled_counter_pointer"});
-        cudaMemsetAsync(tiled_counter_ptr->data(), 0, sizeof(uint32_t), stream);
+        check_cuda_value(cudaMemsetAsync(tiled_counter_ptr->data(), 0, sizeof(uint32_t), stream));
     }
     switch (fmha_type) {
 #ifdef USING_CUDA12
@@ -96,7 +96,7 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
                 tmp_fmha_output = allocateBuffer(
                     {datatype, {batch_size, head_num * seq_len_with_prefix * size_per_head}, AllocationType::DEVICE},
                     {"fmha_fp16_output"});
-                cudaMemsetAsync(tmp_fmha_output->data(), 0, tmp_fmha_output->sizeBytes(), stream);
+                check_cuda_value(cudaMemsetAsync(tmp_fmha_output->data(), 0, tmp_fmha_output->sizeBytes(), stream));
                 fmha_output_ptr = tmp_fmha_output->data();
             } else if (use_fp8_fmha && params.output.type() != DataType::TYPE_QFP8_E4M3) {
                 tmp_fmha_output = allocateBuffer({DataType::TYPE_FP8_E4M3,
@@ -129,18 +129,21 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
                                    (OptionalConstBufferRef)*params.weights.static_quant_weight->kernel,
                                    (OptionalConstBufferRef)*params.weights.static_scale_reciprocal_weight->kernel);
                 auto quant_output = quantize(quant_params);
-                cudaMemcpyAsync(
-                    params.output.data(), quant_output->data(), params.output.size(), cudaMemcpyDeviceToDevice, stream);
+                check_cuda_value(cudaMemcpyAsync(params.output.data(),
+                                                 quant_output->data(),
+                                                 params.output.size(),
+                                                 cudaMemcpyDeviceToDevice,
+                                                 stream));
             } else if (use_fp8_fmha && params.output.type() != DataType::TYPE_QFP8_E4M3) {
                 RTP_LLM_CHECK_WITH_INFO(tmp_fmha_output != nullptr, "tmp_fmha_output must be provided for fp8 fmha");
                 printBufferData(*tmp_fmha_output, "tmp_fmha_output");
                 auto quant_fmha_output_t   = Buffer2torchTensor(*tmp_fmha_output, false);
                 auto dequant_fmha_output_t = quant_fmha_output_t.to(dataTypeToTorchType(datatype));
-                cudaMemcpyAsync(params.output.data(),
-                                dequant_fmha_output_t.data_ptr(),
-                                params.output.sizeBytes(),
-                                cudaMemcpyDeviceToDevice,
-                                stream);
+                check_cuda_value(cudaMemcpyAsync(params.output.data(),
+                                                 dequant_fmha_output_t.data_ptr(),
+                                                 params.output.sizeBytes(),
+                                                 cudaMemcpyDeviceToDevice,
+                                                 stream));
                 printBufferData(params.output, "params.output");
             }
             break;
@@ -162,7 +165,7 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
                 tmp_fmha_output = allocateBuffer(
                     {datatype, {batch_size, head_num * seq_len_with_prefix * size_per_head}, AllocationType::DEVICE},
                     {"fmha_fp16_output"});
-                cudaMemsetAsync(tmp_fmha_output->data(), 0, tmp_fmha_output->sizeBytes(), stream);
+                check_cuda_value(cudaMemsetAsync(tmp_fmha_output->data(), 0, tmp_fmha_output->sizeBytes(), stream));
                 fmha_output_ptr = tmp_fmha_output->data();
             } else if (use_fp8_fmha && params.output.type() != DataType::TYPE_QFP8_E4M3) {
                 tmp_fmha_output = allocateBuffer({DataType::TYPE_FP8_E4M3,
@@ -193,18 +196,21 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
                                    (OptionalConstBufferRef)*params.weights.static_quant_weight->kernel,
                                    (OptionalConstBufferRef)*params.weights.static_scale_reciprocal_weight->kernel);
                 auto quant_output = quantize(quant_params);
-                cudaMemcpyAsync(
-                    params.output.data(), quant_output->data(), params.output.size(), cudaMemcpyDeviceToDevice, stream);
+                check_cuda_value(cudaMemcpyAsync(params.output.data(),
+                                                 quant_output->data(),
+                                                 params.output.size(),
+                                                 cudaMemcpyDeviceToDevice,
+                                                 stream));
             } else if (use_fp8_fmha && params.output.type() != DataType::TYPE_QFP8_E4M3) {
                 RTP_LLM_CHECK_WITH_INFO(tmp_fmha_output != nullptr, "tmp_fmha_output must be provided for fp8 fmha");
                 printBufferData(*tmp_fmha_output, "tmp_fmha_output");
                 auto quant_fmha_output_t   = Buffer2torchTensor(*tmp_fmha_output, false);
                 auto dequant_fmha_output_t = quant_fmha_output_t.to(dataTypeToTorchType(datatype));
-                cudaMemcpyAsync(params.output.data(),
-                                dequant_fmha_output_t.data_ptr(),
-                                params.output.sizeBytes(),
-                                cudaMemcpyDeviceToDevice,
-                                stream);
+                check_cuda_value(cudaMemcpyAsync(params.output.data(),
+                                                 dequant_fmha_output_t.data_ptr(),
+                                                 params.output.sizeBytes(),
+                                                 cudaMemcpyDeviceToDevice,
+                                                 stream));
                 printBufferData(params.output, "params.output");
             }
             break;

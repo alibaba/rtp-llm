@@ -454,8 +454,13 @@ __device__ __inline__ __nv_bfloat162 rotary_embedding_transform(const __nv_bfloa
 #endif
 
 template<typename RopeInit>
-__device__ __inline__ void
-apply_rotary_embedding(float2& q, int tid, int rot_embed_dim, int t_step, float base, const RopeInit& rope_init, const float2* cos_sin_cache=nullptr) {
+__device__ __inline__ void apply_rotary_embedding(float2&         q,
+                                                  int             tid,
+                                                  int             rot_embed_dim,
+                                                  int             t_step,
+                                                  float           base,
+                                                  const RopeInit& rope_init,
+                                                  const float2*   cos_sin_cache = nullptr) {
     if (2 * tid >= rot_embed_dim) {
         return;
     }
@@ -469,15 +474,20 @@ apply_rotary_embedding(float2& q, int tid, int rot_embed_dim, int t_step, float 
 }
 
 template<typename RopeInit>
-__device__ __inline__ void
-apply_rotary_embedding(float4& q, int tid, int rot_embed_dim, int t_step, float base, const RopeInit& rope_init, const float2* cos_sin_cache=nullptr) {
+__device__ __inline__ void apply_rotary_embedding(float4&         q,
+                                                  int             tid,
+                                                  int             rot_embed_dim,
+                                                  int             t_step,
+                                                  float           base,
+                                                  const RopeInit& rope_init,
+                                                  const float2*   cos_sin_cache = nullptr) {
     if (4 * tid >= rot_embed_dim) {
         return;
     }
 
-    Float4_& q_    = *reinterpret_cast<Float4_*>(&q);
-    float2 coef0;
-    float2 coef1;
+    Float4_& q_ = *reinterpret_cast<Float4_*>(&q);
+    float2   coef0;
+    float2   coef1;
     if (cos_sin_cache) {
         coef0 = cos_sin_cache[t_step * rot_embed_dim / 2 + 2 * tid];
         coef1 = cos_sin_cache[t_step * rot_embed_dim / 2 + 2 * tid + 1];
@@ -490,8 +500,13 @@ apply_rotary_embedding(float4& q, int tid, int rot_embed_dim, int t_step, float 
 }
 
 template<typename RopeInit>
-__device__ __inline__ void
-apply_rotary_embedding(uint32_t& q, int tid, int rot_embed_dim, int t_step, float base, const RopeInit& rope_init, const float2* cos_sin_cache=nullptr) {
+__device__ __inline__ void apply_rotary_embedding(uint32_t&       q,
+                                                  int             tid,
+                                                  int             rot_embed_dim,
+                                                  int             t_step,
+                                                  float           base,
+                                                  const RopeInit& rope_init,
+                                                  const float2*   cos_sin_cache = nullptr) {
     if (2 * tid >= rot_embed_dim) {
         return;
     }
@@ -505,8 +520,13 @@ apply_rotary_embedding(uint32_t& q, int tid, int rot_embed_dim, int t_step, floa
 }
 
 template<typename RopeInit>
-__device__ __inline__ void
-apply_rotary_embedding(uint2& q, int tid, int rot_embed_dim, int t_step, float base, const RopeInit& rope_init, const float2* cos_sin_cache=nullptr) {
+__device__ __inline__ void apply_rotary_embedding(uint2&          q,
+                                                  int             tid,
+                                                  int             rot_embed_dim,
+                                                  int             t_step,
+                                                  float           base,
+                                                  const RopeInit& rope_init,
+                                                  const float2*   cos_sin_cache = nullptr) {
     if (4 * tid >= rot_embed_dim) {
         return;
     }
@@ -525,8 +545,13 @@ apply_rotary_embedding(uint2& q, int tid, int rot_embed_dim, int t_step, float b
 }
 
 template<typename RopeInit>
-__device__ __inline__ void
-apply_rotary_embedding(uint4& q, int tid, int rot_embed_dim, int t_step, float base, const RopeInit& rope_init, const float2* cos_sin_cache=nullptr) {
+__device__ __inline__ void apply_rotary_embedding(uint4&          q,
+                                                  int             tid,
+                                                  int             rot_embed_dim,
+                                                  int             t_step,
+                                                  float           base,
+                                                  const RopeInit& rope_init,
+                                                  const float2*   cos_sin_cache = nullptr) {
     if (8 * tid >= rot_embed_dim) {
         return;
     }
@@ -556,8 +581,13 @@ apply_rotary_embedding(uint4& q, int tid, int rot_embed_dim, int t_step, float b
 #ifdef ENABLE_BF16
 
 template<typename RopeInit>
-__device__ __inline__ void apply_rotary_embedding(
-    __nv_bfloat162& q, int tid, int rot_embed_dim, int t_step, float base, const RopeInit& rope_init, const float2* cos_sin_cache=nullptr) {
+__device__ __inline__ void apply_rotary_embedding(__nv_bfloat162& q,
+                                                  int             tid,
+                                                  int             rot_embed_dim,
+                                                  int             t_step,
+                                                  float           base,
+                                                  const RopeInit& rope_init,
+                                                  const float2*   cos_sin_cache = nullptr) {
     if (2 * tid >= rot_embed_dim) {
         return;
     }
@@ -571,8 +601,13 @@ __device__ __inline__ void apply_rotary_embedding(
 }
 
 template<typename RopeInit>
-__device__ __inline__ void
-apply_rotary_embedding(bf16_4_t& q, int tid, int rot_embed_dim, int t_step, float base, const RopeInit& rope_init, const float2* cos_sin_cache=nullptr) {
+__device__ __inline__ void apply_rotary_embedding(bf16_4_t&       q,
+                                                  int             tid,
+                                                  int             rot_embed_dim,
+                                                  int             t_step,
+                                                  float           base,
+                                                  const RopeInit& rope_init,
+                                                  const float2*   cos_sin_cache = nullptr) {
     if (4 * tid >= rot_embed_dim) {
         return;
     }
@@ -591,8 +626,13 @@ apply_rotary_embedding(bf16_4_t& q, int tid, int rot_embed_dim, int t_step, floa
 }
 
 template<typename RopeInit>
-__device__ __inline__ void
-apply_rotary_embedding(bf16_8_t& q, int tid, int rot_embed_dim, int t_step, float base, const RopeInit& rope_init, const float2* cos_sin_cache=nullptr) {
+__device__ __inline__ void apply_rotary_embedding(bf16_8_t&       q,
+                                                  int             tid,
+                                                  int             rot_embed_dim,
+                                                  int             t_step,
+                                                  float           base,
+                                                  const RopeInit& rope_init,
+                                                  const float2*   cos_sin_cache = nullptr) {
     if (8 * tid >= rot_embed_dim) {
         return;
     }
@@ -628,8 +668,8 @@ __device__ __inline__ void normal_rope(vector_t&       x,
                                        const int       dim,
                                        const float     base,
                                        const RopeInit& rope_init,
-                                       const int       offset = 0,
-                                       const float2*   cos_sin_cache=nullptr) {
+                                       const int       offset        = 0,
+                                       const float2*   cos_sin_cache = nullptr) {
     const int  vec_size  = vector_size<scalar_t, vector_t>::size;
     const int  rope_idx  = tidx * vec_size - offset;
     const bool work      = (rope_idx >= 0 && rope_idx < dim);
@@ -702,8 +742,13 @@ get_qwen_dynamic_ntk_base(const int dim, const float base, const int seq_len, co
 }
 
 template<typename scalar_t, typename vector_t, RopeStyle ROPE_STYLE>
-__device__ inline void
-apply_rope(RopeConfig rope_config, vector_t& x, scalar_t* smem, int tidx, int seqidx, int seq_len, const float2* cos_sin_cache=nullptr) {
+__device__ inline void apply_rope(RopeConfig    rope_config,
+                                  vector_t&     x,
+                                  scalar_t*     smem,
+                                  int           tidx,
+                                  int           seqidx,
+                                  int           seq_len,
+                                  const float2* cos_sin_cache = nullptr) {
     auto base = rope_config.base;
     auto dim  = rope_config.dim;
     switch (ROPE_STYLE) {
@@ -779,19 +824,19 @@ apply_rope_with_cache(vector_t& x, scalar_t* smem, const int tidx, const int dim
 }
 
 template<typename scalar_t, typename vector_t, RopeStyle ROPE_STYLE>
-__device__ inline void context_rope(RopeConfig     rope_config,
-                                    vector_t&      q,
-                                    vector_t&      k,
-                                    scalar_t*      smem,
-                                    int            tidx,
-                                    int            seqidx,
-                                    int            position_id,
-                                    int            seq_len,
-                                    int            input_len,
-                                    bool           PREFIX_PROMPT,
-                                    int            prefix_prompt_length,
-                                    int            count_length,
-                                    const float2* cos_sin_cache=nullptr) {
+__device__ inline void context_rope(RopeConfig    rope_config,
+                                    vector_t&     q,
+                                    vector_t&     k,
+                                    scalar_t*     smem,
+                                    int           tidx,
+                                    int           seqidx,
+                                    int           position_id,
+                                    int           seq_len,
+                                    int           input_len,
+                                    bool          PREFIX_PROMPT,
+                                    int           prefix_prompt_length,
+                                    int           count_length,
+                                    const float2* cos_sin_cache = nullptr) {
     if (PREFIX_PROMPT && count_length) {
         input_len = input_len + prefix_prompt_length;
         seqidx    = seqidx + prefix_prompt_length;
@@ -820,9 +865,9 @@ __device__ inline void attention_rope(RopeConfig rope_config,
 #pragma nv_diag_suppress 550
                                       [[maybe_unused]] int prefix_prompt_length,
 #pragma nv_diagnostic pop
-                                      int  count_prefix_length,
-                                      bool handle_kv,
-                                      const float2* cos_sin_cache=nullptr) {
+                                      int           count_prefix_length,
+                                      bool          handle_kv,
+                                      const float2* cos_sin_cache = nullptr) {
     if (count_prefix_length) {
         prefix_prompt_length = 0;
     }

@@ -16,8 +16,10 @@
 
 #include "nccl_utils.h"
 #include "nccl_utils_torch.h"
+#include "rtp_llm/cpp/utils/StackTrace.h"
 #include <chrono>
 #include <string>
+
 using namespace std;
 
 namespace rtp_llm {
@@ -406,6 +408,18 @@ std::vector<size_t> fcNcclGatherRanks(NcclParam& para, cudaStream_t stream) {
     std::vector<size_t> ranks_converted(para.world_size_);
     transform(ranks.begin(), ranks.end(), ranks_converted.begin(), [](int val) { return static_cast<size_t>(val); });
     return ranks_converted;
+}
+
+void ncclCheck(ncclResult_t result, const char* const file, int const line) {
+    if (result) {
+        std::string error_str = std::string("[ERROR] NCCL error: ") + (ncclGetErrorString(result)) + " " + file + ":"
+                                + std::to_string(line);
+        printStackTrace();
+        RTP_LLM_LOG_ERROR(error_str);
+        fflush(stdout);
+        fflush(stderr);
+        throw std::runtime_error(error_str);
+    }
 }
 
 }  // namespace rtp_llm

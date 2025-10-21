@@ -19,6 +19,7 @@
 #include "rtp_llm/cpp/cuda/cuda_type_utils.cuh"
 #include "rtp_llm/cpp/cuda/cuda_fp8_utils.h"
 #if USING_CUDA
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 #ifndef CUDART_VERSION
 #error CUDART_VERSION Undefined!
 #elif (CUDART_VERSION >= 11050)
@@ -175,17 +176,17 @@ __global__ void embedding_lookup_kernel_vec(T*            from_tensor,
 
 template<typename T>
 void invokeEmbeddingLookupVec(T*           from_tensor,
-                               const T*     embedding_table,
-                               double       input_embedding_scalar,
-                               const T*     pos_table,
-                               const T*     type_table,
-                               const int*   input_ids,
-                               const int*   input_pos,
-                               const int*   input_type,
-                               const int*   input_mask,
-                               const int    token_num,
-                               const int    hidden_units,
-                               cudaStream_t stream) {
+                              const T*     embedding_table,
+                              double       input_embedding_scalar,
+                              const T*     pos_table,
+                              const T*     type_table,
+                              const int*   input_ids,
+                              const int*   input_pos,
+                              const int*   input_type,
+                              const int*   input_mask,
+                              const int    token_num,
+                              const int    hidden_units,
+                              cudaStream_t stream) {
     using VectorType          = float4;
     const int64_t vector_size = sizeof(VectorType) / sizeof(T);
     assert(hidden_units % vector_size == 0);
@@ -193,21 +194,25 @@ void invokeEmbeddingLookupVec(T*           from_tensor,
     dim3 grid(std::min(token_num, 65536));
     dim3 block(std::min(int(hidden_units / vector_size), 1024));
     INVOKE_WORD_EMBED_LOOKUP_VEC(false, false, false);
+#if USING_CUDA
+    check_cuda_value(cudaPeekAtLastError());
+    check_cuda_error();
+#endif
 }
 
 template<typename T>
 void invokeEmbeddingLookup(T*           from_tensor,
-                            const T*     embedding_table,
-                            double       input_embedding_scalar,
-                            const T*     pos_table,
-                            const T*     type_table,
-                            const int*   input_ids,
-                            const int*   input_pos,
-                            const int*   input_type,
-                            const int*   input_mask,
-                            const int    token_num,
-                            const int    hidden_units,
-                            cudaStream_t stream) {
+                           const T*     embedding_table,
+                           double       input_embedding_scalar,
+                           const T*     pos_table,
+                           const T*     type_table,
+                           const int*   input_ids,
+                           const int*   input_pos,
+                           const int*   input_type,
+                           const int*   input_mask,
+                           const int    token_num,
+                           const int    hidden_units,
+                           cudaStream_t stream) {
     dim3 grid(std::min(token_num, 65536));
     dim3 block(std::min(hidden_units, 1024));
     if (!pos_table) {
@@ -239,88 +244,92 @@ void invokeEmbeddingLookup(T*           from_tensor,
             }
         }
     }
+#if USING_CUDA
+    check_cuda_value(cudaPeekAtLastError());
+    check_cuda_error();
+#endif
 }
 #undef INVOKE_WORD_EMBED_LOOKUP
 
 template void invokeEmbeddingLookup(float*       from_tensor,
-                                     const float* embedding_table,
-                                     double       input_embedding_scalar,
-                                     const float* pos_table,
-                                     const float* type_table,
-                                     const int*   input_ids,
-                                     const int*   input_pos,
-                                     const int*   input_type,
-                                     const int*   input_mask,
-                                     const int    token_num,
-                                     const int    hidden_units,
-                                     cudaStream_t stream);
+                                    const float* embedding_table,
+                                    double       input_embedding_scalar,
+                                    const float* pos_table,
+                                    const float* type_table,
+                                    const int*   input_ids,
+                                    const int*   input_pos,
+                                    const int*   input_type,
+                                    const int*   input_mask,
+                                    const int    token_num,
+                                    const int    hidden_units,
+                                    cudaStream_t stream);
 
-template void invokeEmbeddingLookup(half*       from_tensor,
-                                     const half* embedding_table,
-                                     double      input_embedding_scalar,
-                                     const half* pos_table,
-                                     const half* type_table,
-                                     const int*  input_ids,
-                                     const int*  input_pos,
-                                     const int*  input_type,
-                                     const int*  input_mask,
-                                     const int   token_num,
-                                     const int   hidden_units,
-                                     cudaStream_t stream);
+template void invokeEmbeddingLookup(half*        from_tensor,
+                                    const half*  embedding_table,
+                                    double       input_embedding_scalar,
+                                    const half*  pos_table,
+                                    const half*  type_table,
+                                    const int*   input_ids,
+                                    const int*   input_pos,
+                                    const int*   input_type,
+                                    const int*   input_mask,
+                                    const int    token_num,
+                                    const int    hidden_units,
+                                    cudaStream_t stream);
 #ifdef ENABLE_BF16
 template void invokeEmbeddingLookup(__nv_bfloat16*       from_tensor,
-                                     const __nv_bfloat16* embedding_table,
-                                     double               input_embedding_scalar,
-                                     const __nv_bfloat16* pos_table,
-                                     const __nv_bfloat16* type_table,
-                                     const int*           input_ids,
-                                     const int*           input_pos,
-                                     const int*           input_type,
-                                     const int*           input_mask,
-                                     const int            token_num,
-                                     const int            hidden_units,
-                                     cudaStream_t         stream);
+                                    const __nv_bfloat16* embedding_table,
+                                    double               input_embedding_scalar,
+                                    const __nv_bfloat16* pos_table,
+                                    const __nv_bfloat16* type_table,
+                                    const int*           input_ids,
+                                    const int*           input_pos,
+                                    const int*           input_type,
+                                    const int*           input_mask,
+                                    const int            token_num,
+                                    const int            hidden_units,
+                                    cudaStream_t         stream);
 #endif
 
 template void invokeEmbeddingLookupVec(float*       from_tensor,
-                                        const float* embedding_table,
-                                        double       input_embedding_scalar,
-                                        const float* pos_table,
-                                        const float* type_table,
-                                        const int*   input_ids,
-                                        const int*   input_pos,
-                                        const int*   input_type,
-                                        const int*   input_mask,
-                                        const int    token_num,
-                                        const int    hidden_units,
-                                        cudaStream_t stream);
+                                       const float* embedding_table,
+                                       double       input_embedding_scalar,
+                                       const float* pos_table,
+                                       const float* type_table,
+                                       const int*   input_ids,
+                                       const int*   input_pos,
+                                       const int*   input_type,
+                                       const int*   input_mask,
+                                       const int    token_num,
+                                       const int    hidden_units,
+                                       cudaStream_t stream);
 
-template void invokeEmbeddingLookupVec(half*       from_tensor,
-                                        const half* embedding_table,
-                                        double      input_embedding_scalar,
-                                        const half* pos_table,
-                                        const half* type_table,
-                                        const int*  input_ids,
-                                        const int*  input_pos,
-                                        const int*  input_type,
-                                        const int*  input_mask,
-                                        const int   token_num,
-                                        const int   hidden_units,
-                                        cudaStream_t stream);
+template void invokeEmbeddingLookupVec(half*        from_tensor,
+                                       const half*  embedding_table,
+                                       double       input_embedding_scalar,
+                                       const half*  pos_table,
+                                       const half*  type_table,
+                                       const int*   input_ids,
+                                       const int*   input_pos,
+                                       const int*   input_type,
+                                       const int*   input_mask,
+                                       const int    token_num,
+                                       const int    hidden_units,
+                                       cudaStream_t stream);
 
 #ifdef ENABLE_BF16
 template void invokeEmbeddingLookupVec(__nv_bfloat16*       from_tensor,
-                                        const __nv_bfloat16* embedding_table,
-                                        double               input_embedding_scalar,
-                                        const __nv_bfloat16* pos_table,
-                                        const __nv_bfloat16* type_table,
-                                        const int*           input_ids,
-                                        const int*           input_pos,
-                                        const int*           input_type,
-                                        const int*           input_mask,
-                                        const int            token_num,
-                                        const int            hidden_units,
-                                        cudaStream_t         stream);
+                                       const __nv_bfloat16* embedding_table,
+                                       double               input_embedding_scalar,
+                                       const __nv_bfloat16* pos_table,
+                                       const __nv_bfloat16* type_table,
+                                       const int*           input_ids,
+                                       const int*           input_pos,
+                                       const int*           input_type,
+                                       const int*           input_mask,
+                                       const int            token_num,
+                                       const int            hidden_units,
+                                       cudaStream_t         stream);
 #endif
 
 }  // namespace rtp_llm

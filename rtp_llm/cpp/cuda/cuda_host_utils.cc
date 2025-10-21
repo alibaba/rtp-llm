@@ -83,8 +83,8 @@ static const char* _cudaGetErrorEnum(CUresult error) {
 template<typename T>
 void check(T result, const char* const file, int const line) {
     if (result) {
-        std::string error_str = std::string("[FT][ERROR] CUDA runtime error: ") + (_cudaGetErrorEnum(result)) + " "
-                                + file + ":" + std::to_string(line);
+        std::string error_str = std::string("[ERROR] CUDA runtime error: ") + (_cudaGetErrorEnum(result)) + " " + file
+                                + ":" + std::to_string(line);
         printStackTrace();
         RTP_LLM_LOG_ERROR(error_str);
         fflush(stdout);
@@ -382,7 +382,7 @@ int getVisibleDeviceNum() {
 
 std::tuple<size_t, size_t> getDeviceMemoryInfo(bool const useUvm) {
     if (useUvm) {
-        size_t freeSysMem, totalSysMem;
+        size_t         freeSysMem, totalSysMem;
         struct sysinfo info;
         sysinfo(&info);
         totalSysMem = info.totalram * info.mem_unit;

@@ -173,7 +173,7 @@ TEST_F(ChatServiceTest, ChatCompletions_ThrowException) {
     try {
         chat_service_->chatCompletions(writer_, request, 10086);
     } catch (const std::runtime_error& e) {
-        EXPECT_EQ(typeid(e), typeid(FTException));
+        EXPECT_EQ(typeid(e), typeid(RTPException));
     }
 }
 

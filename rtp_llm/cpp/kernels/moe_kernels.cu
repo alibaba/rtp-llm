@@ -101,6 +101,10 @@ void invokeScatterAddStable(T const* src, int N, int K, int32_t const* index, T*
     } else {
         throw std::invalid_argument("scatter add unsupport type or K [%d]" + std::to_string(K));
     }
+#if USING_CUDA
+    check_cuda_value(cudaPeekAtLastError());
+    check_cuda_error();
+#endif
 }
 
 template<typename T, int ELEM_PER_THREAD>
@@ -155,6 +159,10 @@ void invokeScatterAdd(
     } else {
         throw std::invalid_argument("scatter add unsupport type or K [%d]" + std::to_string(K));
     }
+#if USING_CUDA
+    check_cuda_value(cudaPeekAtLastError());
+    check_cuda_error();
+#endif
 }
 
 #define INSTANTIATE_INVOKE_SCATTER_ADD(T)                                                                              \
@@ -221,6 +229,10 @@ void invokeSliceDim1Copy(T const* src, int dim0, int dim1, int dim1_start, int d
         dim3      block(512);
         sliceDim1CopyKernel<T><<<grid, block, 0, stream>>>(src, dim0, dim1, dim1_start, dim1_size, out);
     }
+#if USING_CUDA
+    check_cuda_value(cudaPeekAtLastError());
+    check_cuda_error();
+#endif
 }
 
 #define INSTANTIATE_INVOKE_SlICE_DIM1_COPTY(T)                                                                         \
@@ -256,12 +268,20 @@ __global__ void fakeBalanceExpertKernel(T* expert, float* expert_scales, int sta
 void fake_balance_expert(int* expert, float* expert_scales, int start, int expert_num, int size, cudaStream_t stream) {
     fakeBalanceExpertKernel<int>
         <<<(size + 255) / 256, 256, 0, stream>>>(expert, expert_scales, start, expert_num, size);
+#if USING_CUDA
+    check_cuda_value(cudaPeekAtLastError());
+    check_cuda_error();
+#endif
 }
 
 void fake_balance_expert(
     int64_t* expert, float* expert_scales, int start, int expert_num, int size, cudaStream_t stream) {
     fakeBalanceExpertKernel<int64_t>
         <<<(size + 255) / 256, 256, 0, stream>>>(expert, expert_scales, start, expert_num, size);
+#if USING_CUDA
+    check_cuda_value(cudaPeekAtLastError());
+    check_cuda_error();
+#endif
 }
 
 // Expert indexing operations
@@ -286,6 +306,10 @@ void genSourceRowRevert(
 
     genSourceRowKernelRevert<<<blocks, threads, 0, stream>>>(
         expert_rows, expert_rows_dst, token_num, top_k, start_expert);
+#if USING_CUDA
+    check_cuda_value(cudaPeekAtLastError());
+    check_cuda_error();
+#endif
 }
 
 }  // namespace rtp_llm

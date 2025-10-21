@@ -139,13 +139,13 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
                                       {batch_size, (head_num + kv_head_num * 2), seq_len_with_prefix, size_per_head},
                                       AllocationType::DEVICE},
                                      {"qkv_fp8_output"});
-        cudaMemsetAsync(qkv_buf_fp8->data(), 0, qkv_buf_fp8->sizeBytes(), stream_);
+        check_cuda_value(cudaMemsetAsync(qkv_buf_fp8->data(), 0, qkv_buf_fp8->sizeBytes(), stream_));
     }
 
     if (fmha_type_ == FMHAType::NONE) {
-        cudaMemsetAsync(q_output->data(), 0, q_output->sizeBytes(), stream_);
-        cudaMemsetAsync(k_output->data(), 0, k_output->sizeBytes(), stream_);
-        cudaMemsetAsync(v_output->data(), 0, v_output->sizeBytes(), stream_);
+        check_cuda_value(cudaMemsetAsync(q_output->data(), 0, q_output->sizeBytes(), stream_));
+        check_cuda_value(cudaMemsetAsync(k_output->data(), 0, k_output->sizeBytes(), stream_));
+        check_cuda_value(cudaMemsetAsync(v_output->data(), 0, v_output->sizeBytes(), stream_));
     }
 
     PrefixPromptBatchWeightsParam prefix_prompt_param;

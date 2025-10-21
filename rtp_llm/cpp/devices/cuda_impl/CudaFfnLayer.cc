@@ -116,7 +116,7 @@ MoeDispatchOutput CudaDevice::epDispatch(const MoeDispatchParams& params) {
     printBufferData(*all_token_indices_cpu, "all_token_indices_cpu");
     BufferPtr all_token_indices = clone({*all_token_indices_cpu});
     // sync allToAll all_token_nums_per_rank_gpu
-    cudaStreamSynchronize(stream_);
+    check_cuda_value(cudaStreamSynchronize(stream_));
     syncCommunication(false);
     auto                all_token_nums_per_rank = clone({*all_token_nums_per_rank_gpu, AllocationType::HOST});
     std::vector<size_t> input_split_sizes;
@@ -219,7 +219,7 @@ FfnLayerOutput CudaDevice::gatherCombineOutput(const MoeCombineOutput& combine_o
             // TODO: why this assertion?
             // assert(all_output->shape()[0] == current_token_num);
             if (scatter_output->shape()[0] > 0) {
-                cudaMemsetAsync(scatter_output->data(), 0, scatter_output->sizeBytes(), stream_);
+                check_cuda_value(cudaMemsetAsync(scatter_output->data(), 0, scatter_output->sizeBytes(), stream_));
                 DISPATCH_CUDA_FUNCTION_DATA_TYPE(scatter_output->type(),
                                                  invokeScatterAdd,
                                                  all_output->data(),
@@ -258,7 +258,7 @@ FfnLayerOutput CudaDevice::gatherCombineOutput(const MoeCombineOutput& combine_o
             BufferPtr output         = params.output ? params.output : allocateBuffer({all_output->type(), new_shape});
             printBufferData(*output, "scatter_add_input");
             if (output->shape()[0] > 0 && params.origin_token_num > 0) {
-                cudaMemsetAsync(output->data(), 0, output->sizeBytes(), stream_);
+                check_cuda_value(cudaMemsetAsync(output->data(), 0, output->sizeBytes(), stream_));
                 DISPATCH_CUDA_FUNCTION_DATA_TYPE(output->type(),
                                                  invokeScatterAdd,
                                                  all_output->data(),

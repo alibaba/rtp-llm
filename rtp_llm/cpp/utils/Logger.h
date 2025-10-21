@@ -99,7 +99,7 @@ public:
             __LINE__,
             __PRETTY_FUNCTION__,
             "%s: %s",
-            FTException::demangle(typeid(ex).name()).c_str(),
+            RTPException::demangle(typeid(ex).name()).c_str(),
             ex.what());
     }
 
