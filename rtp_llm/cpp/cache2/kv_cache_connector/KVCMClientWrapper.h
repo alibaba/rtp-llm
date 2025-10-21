@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 #include <shared_mutex>
+#include <mutex>
 #include "kvcm_client/meta_client.h"
 #include "kvcm_client/transfer_client.h"
 #include "KVCMClientWrapperConfig.h"
@@ -45,17 +46,24 @@ public:
                                                               const kv_cache_manager::BlockBuffers& block_buffers);
 
 private:
+    using KvcmConfigMap     = std::map<std::string, std::shared_ptr<KVCMClientWrapperConfig>>;
+    using KvcmMetaClientMap = std::map<std::string, std::shared_ptr<kv_cache_manager::MetaClient>>;
+
     bool initMetaClient(const std::string& unique_id, const std::string& config_str);
-    bool reinit(const std::string& unique_id);
+    // reinit if address_snapshot_ change
+    bool reinit(const std::string&           unique_id,
+                KvcmConfigMap::iterator&     config_iter,
+                KvcmMetaClientMap::iterator& meta_client_iter);
     bool tryReinit(const std::string& unique_id);
 
-private:
-    kv_cache_manager::InitParams                                         init_params_;
-    std::shared_mutex                                                    vipserver_mutex_;
-    std::map<std::string, std::shared_ptr<KVCMClientWrapperConfig>>      config_map_;
-    std::map<std::string, std::unique_ptr<kv_cache_manager::MetaClient>> meta_client_map_;
-    static std::unique_ptr<kv_cache_manager::TransferClient>             transfer_client_;
-    static std::unique_ptr<KVCMSubscriber>                               subscriber_;
-    std::vector<std::string>                                             address_snapshot_;
+    kv_cache_manager::InitParams init_params_;
+    // keys of config_map_/meta_client_map_ will not change after init
+    KvcmConfigMap            config_map_;
+    KvcmMetaClientMap        meta_client_map_;
+    std::vector<std::string> address_snapshot_;
+    std::shared_mutex        reinit_mutex_;
+
+    static std::unique_ptr<kv_cache_manager::TransferClient> transfer_client_;
+    static std::unique_ptr<KVCMSubscriber>                   subscriber_;
 };
 }  // namespace rtp_llm
