@@ -54,7 +54,7 @@ void CompleteTokenIds::init(const std::shared_ptr<GenerateInput>& generate_input
     size_t max_token_num = max_seq_len_ + extra_reserve_token_num;
 
     complete_token_ids_ = torch::zeros({(int64_t)max_batch_size_, (int64_t)max_token_num}, torch::kInt32);
-    for (int i = 0; i < batch_size_; ++i) {
+    for (int i = 0; i < max_batch_size_; ++i) {
         memcpy(complete_token_ids_.data_ptr<int32_t>() + i * max_token_num,
                generate_input->input_ids.data_ptr<int32_t>(),
                generate_input->input_ids.nbytes());
@@ -168,7 +168,7 @@ bool CompleteTokenIds::update(const torch::Tensor& new_tokens,
 
     auto       new_tokens_ptr     = new_tokens.data_ptr<int>();  // [batch_size, max_num_new_tokens]
     auto       max_num_new_tokens = new_tokens.size(1);
-    const auto get_token_id       = [&](auto batch_idx, auto token_idx) {
+    const auto get_new_token_id       = [&](auto batch_idx, auto token_idx) {
         if (is_beam_search) {
             return (new_tokens_ptr + max_num_new_tokens * batch_idx)[seq_length_ + token_idx];
         } else {
@@ -178,18 +178,17 @@ bool CompleteTokenIds::update(const torch::Tensor& new_tokens,
 
     for (size_t i = 0; i < new_batch_size; ++i) {
         for (size_t j = 0; j < num_new_tokens; ++j) {
-            auto current_token_id = get_token_id(i, j);
+            auto current_token_id = get_new_token_id(i, j);
             if (!(current_token_id >= 0 && current_token_id < vocab_size)) {  // check tokenid
                 error_token_id = current_token_id;
                 return false;
             }
         }
         if (is_beam_search) {
-            memcpy(data(i), new_tokens_ptr + i * max_num_new_tokens, sizeof(int) * max_num_new_tokens);
+            memcpy(data(i) + common_len_,
+                   new_tokens_ptr + i * max_num_new_tokens + common_len_,
+                   sizeof(int) * (max_num_new_tokens - common_len_));
         } else {
-            if (batch_size_ != new_batch_size && i > 0) {
-                memcpy(data(i), data(0), sizeof(int) * seq_length_);
-            }
             memcpy(data(i) + seq_length_, new_tokens_ptr + i * num_new_tokens, sizeof(int) * num_new_tokens);
         }
     }
