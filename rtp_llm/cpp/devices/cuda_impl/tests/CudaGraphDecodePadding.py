@@ -3,6 +3,7 @@ import os
 import sys
 import unittest
 
+from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 import torch
 
 from rtp_llm.cpp.devices.cuda_impl.tests.libtest_cuda_graph_decode_ops import (
@@ -27,9 +28,9 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
             data_type=WEIGHT_TYPE.FP16.to_str(),
             device_reserve_memory_bytes=-536870912,
         )
-        async_model = loader.load_model()
-        assert async_model.model.py_model is not None
-        return async_model.model.py_model
+        engine: BaseEngine = loader.init_engine()
+        assert engine.model.py_model is not None
+        return engine.model.py_model
 
     def __init__(self, methodName: str = "runTest") -> None:
         super().__init__(methodName)
