@@ -568,6 +568,11 @@ py_wheel(
     python_tag = "py3",
     tags = ["manual", "local", "no-remote"],
     version = RELEASE_VERSION,
+    entry_points = {
+        "console_scripts": [
+            "rtp-llm = rtp_llm.cli.main:main",
+        ],
+    }
     deps = [
         ":rtp_llm_package",
         "//deps:extension_package"
