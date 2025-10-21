@@ -3,6 +3,7 @@ import os
 import sys
 import unittest
 
+from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 import torch
 from numpy import append
 
@@ -29,9 +30,9 @@ class TestCudaGraphPrefill(unittest.TestCase):
             data_type="fp16",
             is_causal=False,
         )
-        async_model = loader.load_model()
-        assert async_model.model.py_model is not None
-        return async_model.model.py_model
+        engine: BaseEngine = loader.init_engine()
+        assert engine.model.py_model is not None
+        return engine.model.py_model
 
     def check_pos(self, outputs1: torch.Tensor, outputs2: torch.Tensor):
         # 精确匹配版本

@@ -1,20 +1,39 @@
 from abc import abstractmethod
 from typing import Any, AsyncGenerator, Dict
 
+from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.task_type import TaskType
+from rtp_llm.models.base_model import BaseModel
 from rtp_llm.ops import EngineScheduleInfo, KVCacheInfo, WorkerStatusInfo
 
 
 class BaseEngine:
-    def __init__(self) -> None:
+    def __init__(self, model: BaseModel) -> None:
+        self.started = False
+        self.model: BaseModel = model
+        self.config: GptInitModelParameters = model.config
+        self.role_type = str(model.config.role_type)
         pass
 
-    @abstractmethod
     def start(self) -> None:
-        raise NotImplementedError()
+        self._start()
+        self.started = True
 
     @abstractmethod
-    def stop(self) -> None:
+    def _start(self) -> None:
         raise NotImplementedError()
+
+    def stop(self) -> None:
+        self.started = False
+        self._stop()
+
+    @abstractmethod
+    def _stop(self) -> None:
+        raise NotImplementedError()
+
+    def ready(self) -> bool:
+        return self.started
 
     @abstractmethod
     def decode(self, input: Any) -> AsyncGenerator[Any, None]:
@@ -43,6 +62,10 @@ class BaseEngine:
         raise NotImplementedError()
 
     def pause(self) -> None:
+        self.started = False
+        self._pause()
+
+    def _pause(self) -> None:
         """Pauses the engine's execution.
 
         When called, this method sets the `pause_` flag to true. The engine's
@@ -55,5 +78,19 @@ class BaseEngine:
         raise NotImplementedError()
 
     def restart(self) -> None:
+        self.started = False
+        self._restart()
+        self.started = True
+
+    @abstractmethod
+    def _restart(self) -> None:
         """Restarts the engine's execution."""
         raise NotImplementedError()
+
+    @property
+    def task_type(self) -> TaskType:
+        return self.model.task_type
+
+    @property
+    def default_generate_config(self) -> GenerateConfig:
+        return self.model.default_generate_config

@@ -2,7 +2,8 @@ import json
 import logging
 import os
 
-from rtp_llm.async_decoder_engine.async_model import AsyncModel
+from rtp_llm.async_decoder_engine.base_engine import BaseEngine
+from rtp_llm.async_decoder_engine.engine_creator import create_engine
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_factory import ModelConfig, ModelFactory
 from rtp_llm.utils.weight_type import WEIGHT_TYPE
@@ -40,7 +41,7 @@ class FakeModelLoader(object):
         logging.info(f"tokenizer path: {self.tokenizer_path}")
         logging.info(f"check point path: {self.ckpt_path}")
 
-    def load_model(self):
+    def init_engine(self) -> BaseEngine:
         config_path = os.path.join(self.ckpt_path, "config.json")
         if os.path.exists(config_path):
             with open(config_path) as reader:
@@ -104,5 +105,6 @@ class FakeModelLoader(object):
         )
         raw_config.is_causal = self.is_causal
         model = model_cls.from_config(raw_config)
-        model = AsyncModel(model, None)
-        return model
+        engine = create_engine(model)
+        engine.start()
+        return engine

@@ -1,6 +1,7 @@
 import os
 from unittest import TestCase, main, mock
 
+from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 import torch
 
 from rtp_llm.models.base_model import GenerateOutput, GenerateOutputs
@@ -19,10 +20,10 @@ class SliceStopWordListTest(TestCase):
             os.getcwd(),
             "rtp_llm/test/model_test/fake_test/testdata/llama/fake/hf_source",
         )
-        model = FakeModelLoader(
+        engine: BaseEngine = FakeModelLoader(
             "llama", ckpt_path, ckpt_path, max_seq_len=1024
-        ).load_model()
-        self.pipeline = Pipeline(model.config, model.tokenizer)
+        ).init_engine()
+        self.pipeline = Pipeline(engine.config, engine.model.tokenizer)
 
     async def mock_generate(self):
         yield GenerateOutputs(
