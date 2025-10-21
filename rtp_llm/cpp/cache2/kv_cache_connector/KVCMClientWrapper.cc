@@ -69,19 +69,6 @@ bool KVCMClientWrapper::initMetaClient(const std::string& unique_id, const std::
         return false;
     }
     config_map_[unique_id] = config;
-    if (!reinit(unique_id)) {
-        return false;
-    }
-    return true;
-}
-
-bool KVCMClientWrapper::reinit(const std::string& unique_id) {
-    auto config_iter = config_map_.find(unique_id);
-    if (config_iter == config_map_.end()) {
-        RTP_LLM_LOG_ERROR("not find unique_id [%s] config", unique_id.c_str());
-        return false;
-    }
-    auto config = config_iter->second;
     if (config->enable_vipserver()) {
         if (subscriber_ == nullptr) {
             subscriber_ = std::make_unique<VIPServerSubscriber>();
@@ -101,34 +88,59 @@ bool KVCMClientWrapper::reinit(const std::string& unique_id) {
         }
         subscriber_->init(config->addresses());
     }
-    auto config_str = autil::legacy::ToJsonString(*config);
-    RTP_LLM_LOG_INFO("unique_id[%s], kvcm real config[%s]", unique_id.c_str(), config_str.c_str());
-    config_map_[unique_id]      = config;
-    meta_client_map_[unique_id] = kv_cache_manager::MetaClient::Create(config_str, init_params_);
+    if (config->addresses().empty()) {
+        RTP_LLM_LOG_ERROR("empty kvcm addresses");
+        return false;
+    }
+    auto real_config_str = autil::legacy::ToJsonString(*config);
+    RTP_LLM_LOG_INFO("init unique_id[%s], kvcm real config[%s]", unique_id.c_str(), real_config_str.c_str());
+    config_map_[unique_id] = config;
+    auto meta_client       = kv_cache_manager::MetaClient::Create(real_config_str, init_params_);
+    if (meta_client == nullptr) {
+        RTP_LLM_LOG_ERROR("create meta client failed");
+        return false;
+    }
+    meta_client_map_[unique_id] = std::move(meta_client);
+    return true;
+}
+
+bool KVCMClientWrapper::reinit(const std::string&           unique_id,
+                               KvcmConfigMap::iterator&     config_iter,
+                               KvcmMetaClientMap::iterator& meta_client_iter) {
+    auto config          = config_iter->second;
+    auto real_config_str = autil::legacy::ToJsonString(*config);
+    RTP_LLM_LOG_INFO("reinit unique_id[%s], kvcm real config[%s]", unique_id.c_str(), real_config_str.c_str());
+    auto meta_client = kv_cache_manager::MetaClient::Create(real_config_str, init_params_);
+    if (meta_client == nullptr) {
+        RTP_LLM_LOG_ERROR("create meta client failed");
+        return false;
+    }
+    config->set_addresses(address_snapshot_);
+    meta_client_iter->second = std::move(meta_client);
     return true;
 }
 
 bool KVCMClientWrapper::tryReinit(const std::string& unique_id) {
-    auto config_iter = config_map_.find(unique_id);
-    if (config_iter == config_map_.end()) {
-        RTP_LLM_LOG_ERROR("not find unique_id [%s] config", unique_id.c_str());
+    auto config_iter      = config_map_.find(unique_id);
+    auto meta_client_iter = meta_client_map_.find(unique_id);
+    if (config_iter == config_map_.end() || meta_client_iter == meta_client_map_.end()) {
+        RTP_LLM_LOG_WARNING("not find unique_id [%s]", unique_id.c_str());
         return false;
     }
-    auto config = config_iter->second;
-    if (config->enable_vipserver()) {
+    if (config_iter->second->enable_vipserver()) {
         std::vector<std::string> addresses;
         if (!subscriber_->getAddresses(addresses)) {
             return false;
         }
         {
-            std::shared_lock read_guard(vipserver_mutex_);
+            std::shared_lock read_guard(reinit_mutex_);
             if (addresses == address_snapshot_) {
                 return true;
             }
         }
         {
-            std::scoped_lock write_guard(vipserver_mutex_);
-            // double checkout
+            std::unique_lock write_guard(reinit_mutex_);
+            // double check
             if (addresses == address_snapshot_) {
                 return true;
             }
@@ -147,7 +159,7 @@ bool KVCMClientWrapper::tryReinit(const std::string& unique_id) {
                              current_address_str.c_str(),
                              new_address_str.c_str());
             address_snapshot_.swap(addresses);
-            if (!reinit(unique_id)) {
+            if (!reinit(unique_id, config_iter, meta_client_iter)) {
                 RTP_LLM_LOG_ERROR("KVCMClientWrapper reinit failed");
                 return false;
             }
