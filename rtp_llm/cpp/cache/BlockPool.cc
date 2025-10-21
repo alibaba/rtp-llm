@@ -213,12 +213,8 @@ void BlockPool::blockCacheFree(const BlockIndicesType& block_ids) {
 
 void BlockPool::freeImpl(const BlockIndicesType& block_ids) {
     std::scoped_lock lock(ref_mu_, free_mu_);
-    all_ref_counter_.decrementRefCounter(block_ids);
-    for (auto& block_id : block_ids) {
-        if (all_ref_counter_.getRefCounter(block_id) == 0) {
-            free_block_ids_.insert(block_id);
-        }
-    }
+    auto             new_free_block_ids = all_ref_counter_.decrementRefCounterWithFreeInfo(block_ids);
+    free_block_ids_.insert(new_free_block_ids.begin(), new_free_block_ids.end());
 }
 
 void BlockPool::requestReference(BlockIdxType block_idx) {
