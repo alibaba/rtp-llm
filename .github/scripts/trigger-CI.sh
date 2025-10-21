@@ -42,4 +42,4 @@ curl -v -H "Content-Type: application/json" \
             \"newBranch\": { \"name\": \"${BRANCH_NAME}\", \"ref\": \"${BRANCH_REF}\" },  
             \"params\": {\"cancel-in-progress\": \"${CANCEL_IN_PROGRESS}\", \"github_commit\":\"${GITHUB_COMMIT_ID}\", \"github_source_repo\": \"${GITHUB_SOURCE_REPO}\"}
          }" \
-     "https://triggerid-to-mq-wjrdhcgbie.cn-hangzhou.fcapp.run"
+     "https://triggero-mq-pre-rbmuaqmqmz.cn-hangzhou.fcapp.run"
