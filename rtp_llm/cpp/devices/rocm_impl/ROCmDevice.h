@@ -283,6 +283,9 @@ public:
     hipStream_t getStream() {
         return stream_;
     }
+    torch::Device getTorchDevice() override {
+        return torch::Device(torch::kCUDA);
+    };
     hipDeviceProp_t* getRocmDeviceProperties() {
         return &rocmDevProp;
     }
