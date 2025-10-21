@@ -5,16 +5,16 @@
 Note that all future modules must be lazily loaded within main
 to avoid certain eager import breakage.'''
 from __future__ import annotations
-
+import rtp_llm
 
 def main():
-    import rtp_llm.cli.serve
+    import serve
     from utils import LLM_SUBCMD_PARSER_EPILOG, cli_env_setup
     from utils import FlexibleArgumentParser
     from rtp_llm.release_version import RELEASE_VERSION
 
     CMD_MODULES = [
-        rtp_llm.cli.serve
+        serve
     ]
 
     cli_env_setup()
