@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/cache/MemoryLayoutStrategy.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
+#include "rtp_llm/cpp/utils/StlUtil.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/NormalCacheStore.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -248,9 +249,11 @@ void BlockPool::requestFree(const BlockIndicesType& block_ids) {
     RTP_LLM_PROFILE_FUNCTION();
     std::scoped_lock lock(ref_mu_, free_mu_);
     request_ref_counter_.decrementRefCounter(block_ids);
-    req_con_ref_counter_.decrementRefCounter(block_ids);
+    auto free_indices = req_con_ref_counter_.decrementRefCounterWithFreeInfo(block_ids);
     req_cache_ref_counter_.decrementRefCounter(block_ids);
-    tryFreeBlocks(block_ids);
+    vectorRemoveIf(free_indices,
+                   [this](BlockIdxType block_id) { return block_cache_ref_counter_.getRefCounter(block_id) != 0; });
+    freeBlocks(free_indices);
 }
 
 void BlockPool::connectorFree(BlockIdxType block_idx) {
@@ -262,8 +265,10 @@ void BlockPool::connectorFree(const BlockIndicesType& block_indices) {
     RTP_LLM_PROFILE_FUNCTION();
     std::scoped_lock lock(ref_mu_, free_mu_);
     connector_ref_counter_.decrementRefCounter(block_indices);
-    req_con_ref_counter_.decrementRefCounter(block_indices);
-    tryFreeBlocks(block_indices);
+    auto free_indices = req_con_ref_counter_.decrementRefCounterWithFreeInfo(block_indices);
+    vectorRemoveIf(free_indices,
+                   [this](BlockIdxType block_id) { return block_cache_ref_counter_.getRefCounter(block_id) != 0; });
+    freeBlocks(free_indices);
 }
 
 void BlockPool::blockCacheFree(BlockIdxType block_idx) {
@@ -274,9 +279,11 @@ void BlockPool::blockCacheFree(BlockIdxType block_idx) {
 void BlockPool::blockCacheFree(const BlockIndicesType& block_ids) {
     RTP_LLM_PROFILE_FUNCTION();
     std::scoped_lock lock(ref_mu_, free_mu_);
-    block_cache_ref_counter_.decrementRefCounter(block_ids);
+    auto             free_indices = block_cache_ref_counter_.decrementRefCounterWithFreeInfo(block_ids);
     req_cache_ref_counter_.decrementRefCounter(block_ids);
-    tryFreeBlocks(block_ids);
+    vectorRemoveIf(free_indices,
+                   [this](BlockIdxType block_id) { return req_con_ref_counter_.getRefCounter(block_id) != 0; });
+    freeBlocks(free_indices);
 }
 
 // Must be called with ref_mu_ and free_mu_ held.
@@ -288,6 +295,11 @@ void BlockPool::tryFreeBlocks(const BlockIndicesType& block_ids) {
             free_block_ids_.insert(block_id);
         }
     }
+}
+
+// Must be called with ref_mu_ and free_mu_ held.
+void BlockPool::freeBlocks(const BlockIndicesType& block_ids) {
+    free_block_ids_.insert(block_ids.begin(), block_ids.end());
 }
 
 void BlockPool::requestReference(BlockIdxType block_idx) {

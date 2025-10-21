@@ -55,6 +55,15 @@ cc_library(
 )
 
 cc_library(
+    name = "stl_utils",
+    hdrs = [
+        "StlUtil.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "error_code",
     hdrs = [
         "ErrorCode.h",

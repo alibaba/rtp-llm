@@ -78,6 +78,7 @@ public:
 private:
     void initFreeBlocks();
     void tryFreeBlocks(const BlockIndicesType& block_indices);
+    void freeBlocks(const BlockIndicesType& block_indices);
     // global_layer_id -> {layout_index, local_layer_id}
     std::pair<int, int> mapGlobalLayerIdToLocal(int global_layer_id) const;
     void                checkLayoutValidity(int layout_id) const;
