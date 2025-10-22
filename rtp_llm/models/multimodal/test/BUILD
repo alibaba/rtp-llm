@@ -28,6 +28,9 @@ py_test(
     data = [
         ":testdata",
     ],
+    env = {
+        "MM_CACHE_ITEM_NUM": "0"
+    },
     exec_properties = {'gpu':'A10'},
 )
 
