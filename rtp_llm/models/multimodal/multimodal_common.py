@@ -27,7 +27,11 @@ from rtp_llm.models.multimodal.multimodal_util import (
     get_vit_compute_dtype,
     vit_emb_cache_,
 )
-from rtp_llm.utils.base_model_datatypes import MMPreprocessConfig, MMUrlType
+from rtp_llm.utils.base_model_datatypes import (
+    MMPreprocessConfig,
+    MMUrlType,
+    MultimodalInput,
+)
 
 
 def timeout_decorator(timeout_sec):
@@ -94,10 +98,7 @@ class MultiModalEmbeddingInterface:
 
     @staticmethod
     def preprocess_input(
-        url,
-        mm_type: MMUrlType,
-        tensor: torch.Tensor,
-        config: MMPreprocessConfig,
+        mm_inputs: List[MultimodalInput],
         **kwargs,
     ):
         raise NotImplementedError
@@ -115,40 +116,34 @@ class MultiModalEmbeddingInterface:
 class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
     @staticmethod
     def preprocess_input(
-        url,
-        mm_type: MMUrlType,
-        tensor: torch.Tensor,
-        config: MMPreprocessConfig,
+        mm_inputs: List[MultimodalInput],
         **kwargs,
     ):
-        data = get_bytes_io_from_url(url)
+        assert len(mm_inputs) == 1
+        data = get_bytes_io_from_url(mm_inputs[0].url)
         return Image.open(data).convert("RGB")
 
 
 class AudioEmbeddingInterface(MultiModalEmbeddingInterface):
     @staticmethod
     def preprocess_input(
-        url,
-        mm_type: MMUrlType,
-        tensor: torch.Tensor,
-        config: MMPreprocessConfig,
+        mm_inputs: List[MultimodalInput],
         **kwargs,
     ):
         # temporary
         import torchaudio
 
-        data = get_bytes_io_from_url(url)
+        assert len(mm_inputs) == 1
+        data = get_bytes_io_from_url(mm_inputs[0].url)
         return torchaudio.load(data)
 
 
 class VideoEmbeddingInterface(MultiModalEmbeddingInterface):
     @staticmethod
     def preprocess_input(
-        url,
-        mm_type: MMUrlType,
-        tensor: torch.Tensor,
-        config: MMPreprocessConfig,
+        mm_inputs: List[MultimodalInput],
         **kwargs,
     ):
-        data = get_bytes_io_from_url(url)
+        assert len(mm_inputs) == 1
+        data = get_bytes_io_from_url(mm_inputs[0].url)
         return VideoReader(data, ctx=cpu(0))

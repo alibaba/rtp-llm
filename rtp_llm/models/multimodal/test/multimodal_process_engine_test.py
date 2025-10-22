@@ -1,3 +1,4 @@
+import concurrent.futures
 import os
 import tempfile
 from random import randint
@@ -49,7 +50,7 @@ class MMProcessEngineTest(TestCase):
         self.mm_process_engine = MMProcessEngine(self.model)
 
     def test(self):
-        self.mm_process_engine.submit(
+        self.mm_process_engine.mm_embedding_cpp(
             ["./rtp_llm/models/multimodal/test/testdata/qwen2_vl/1.jpg"],
             [MMUrlType.IMAGE],
             [None],
@@ -57,8 +58,8 @@ class MMProcessEngineTest(TestCase):
         )
 
     def test_timeout(self):
-        with self.assertRaises(TimeoutError):
-            self.mm_process_engine.submit(
+        with self.assertRaises(concurrent.futures._base.TimeoutError):
+            self.mm_process_engine.mm_embedding_cpp(
                 ["./rtp_llm/models/multimodal/test/testdata/qwen2_vl/1.jpg"],
                 [MMUrlType.IMAGE],
                 [None],
