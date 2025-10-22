@@ -116,6 +116,10 @@ class MetaChannelConfig: public autil::legacy::Jsonizable {
 public:
     void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override;
 
+    inline uint32_t retry_time() const {
+        return retry_time_;
+    }
+
 private:
     uint32_t retry_time_         = 3;
     uint32_t connection_timeout_ = 1000;  // ms
@@ -143,6 +147,9 @@ public:
     }
     inline const std::vector<std::string>& addresses() const {
         return addresses_;
+    }
+    inline const MetaChannelConfig meta_channel_config() const {
+        return meta_channel_config_;
     }
 
 private:

@@ -16,7 +16,6 @@ cc_library(
         "KVCacheAllocator.cc",
         "KVCacheResource.cc",
         "MemoryBlockCache.cc",
-        "RemoteKvCachePlanner.cc",
     ],
     hdrs = [
         "BatchKVCacheResource.h",
@@ -36,7 +35,6 @@ cc_library(
         "KVCacheResource.h",
         "KvCacheInfo.h",
         "MemoryBlockCache.h",
-        "RemoteKvCachePlanner.h",
         "WarmUpResult.h",
     ],
     copts = copts(),

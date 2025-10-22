@@ -100,7 +100,7 @@ public:
                  bool                               warmup           = false,
                  const kmonitor::MetricsReporterPtr metrics_reporter = nullptr,
                  const GptInitParameter&            params           = GptInitParameter{});
-    ~CacheManager();
+    virtual ~CacheManager();
 
     const CacheConfig&                        cacheConfig() const;
     size_t                                    freeBlockNums() const;
@@ -154,6 +154,8 @@ public:
 
     const std::shared_ptr<MemoryBlockCache>& memoryBlockCache() const;
 
+    virtual bool initDistKvCache();
+
 protected:
     const BlockCache&  blockCache() const;
     size_t             cacheItemNum() const;
@@ -174,8 +176,8 @@ protected:
 
     void reportMetricsLoop();
 
-private:
-    bool initDistKvCache(bool is_legacy);
+protected:
+    virtual std::map<std::string, std::string> genExtraMeta(const std::string& adapter_name) const;
     void matchInDistKvCache(const AdvancedMallocInfo& malloc_info, BlockCache::MatchResult& match_result);
     bool putToDistKvCache(const std::vector<int64_t>& cache_keys,
                           const std::vector<int32_t>& block_indices,
@@ -190,7 +192,7 @@ private:
 
     void incrBlockRefCounter(const std::vector<int>& blocks);
 
-public:
+protected:
     CacheConfig          config_;
     int                  seq_size_per_block_;
     BlockRefCounter      query_ref_counter_;

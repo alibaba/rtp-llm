@@ -122,8 +122,21 @@ void register_fmha_config(pybind11::module& m) {
 // KVCacheConfig
 void register_kvcache_config(pybind11::module& m) {
     pybind11::class_<KVCacheConfig>(m, "KVCacheConfig")
-        .def(pybind11::
-                 init<bool, std::string, std::string, bool, int, int, int, int, int, int, int64_t, int64_t, int, int>(),
+        .def(pybind11::init<bool,
+                            std::string,
+                            std::string,
+                            bool,
+                            bool,
+                            int,
+                            int,
+                            int,
+                            int,
+                            int,
+                            int,
+                            int64_t,
+                            int64_t,
+                            int,
+                            int>(),
              pybind11::arg("reuse_cache")                        = false,
              pybind11::arg("multi_task_prompt")                  = "",
              pybind11::arg("multi_task_prompt_str")              = "",
