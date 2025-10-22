@@ -74,6 +74,6 @@ class MlaRotaryEmbeddingOp(object):
                 k_cache,
                 v_cache,
                 rope_params.page_indice,
-                rope_params.page_indptr,
+                rope_params.decode_page_indptr,
                 rope_params.paged_kv_last_page_len,
             )
