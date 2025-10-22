@@ -14,14 +14,6 @@ cc_library(
 )
 
 cc_library(
-    name = "device_types_hdr",
-    hdrs = [
-        "DeviceTypes.h",
-    ],
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
     name = "types",
     srcs = [
         "Types.cc",
