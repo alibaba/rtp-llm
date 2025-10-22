@@ -31,10 +31,10 @@ class BaseDatabase:
 
     def get_tensor_type(self, name: str) -> torch.dtype:
         raise NotImplementedError
-    
+
     def get_max_file_size(self) -> int:
         raise NotImplementedError
-    
+
     @property
     def is_safetensor(self) -> bool:
         return False
@@ -85,7 +85,7 @@ class CkptDatabase(BaseDatabase):
     @property
     def is_ft_style(self) -> bool:
         return self._is_ft_style
-    
+
     @property
     def is_safetensor(self) -> bool:
         return all(map(lambda file: file.is_safetensor(), self.pretrain_file_list))
@@ -93,7 +93,7 @@ class CkptDatabase(BaseDatabase):
     @property
     def ft_weight_params(self) -> Optional[Dict[str, Any]]:
         return self._ft_weight_params
-    
+
     def get_max_file_size(self) -> int:
         return max([file.file_size for file in self.pretrain_file_list])
 
@@ -189,17 +189,17 @@ class CkptDatabase(BaseDatabase):
     ) -> dict[str, List[torch.Tensor]]:
         try:
             from fast_safetensors import LoadWithShm
+
             loader = LoadWithShm(2 * 1024 * 1024 * 1024, device, direct_io)
-            load_tensors = lambda ckptfile: loader.load_safetensors_to_device(ckptfile.file_name)
         except (ModuleNotFoundError, ImportError):
-            load_tensors = lambda ckptfile: ckptfile.load_tensors(device, direct_io)
+            loader = None
 
         res = {}
         for ckptfile in self.pretrain_file_list:
             if any(
                 tensor.startswith(prefix_list) for tensor in ckptfile.get_tensor_names()
             ):
-                tensors = load_tensors(ckptfile)
+                tensors = ckptfile.load_tensors(device, direct_io, loader)
                 for k, v in tensors.items():
                     if not k.startswith(prefix_list):
                         continue
@@ -208,9 +208,10 @@ class CkptDatabase(BaseDatabase):
                     else:
                         res[k].append(v)
         return res
-    
+
     def fastsafetensors_weights_iterator(self, device: str, use_tqdm_on_load: bool):
         from fastsafetensors import ParallelLoader, SingleGroup
+
         def iterator(device: str, use_tqdm_on_load: bool):
             if torch.distributed.is_initialized():
                 pg = torch.distributed.group.WORLD
@@ -237,6 +238,7 @@ class CkptDatabase(BaseDatabase):
                 yield from iterator.iterate_weights()
             finally:
                 iterator.loader.close()
+
         return iterator(device, use_tqdm_on_load)
 
     def get_lora_tensor_names(self, config_name: str) -> List[str]:

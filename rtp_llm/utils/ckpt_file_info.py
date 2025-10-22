@@ -177,7 +177,7 @@ class CkptFileInfo:
 
                     return tensor
 
-    def load_tensors(self, device: str = "cuda:0", direct_io=True):
+    def load_tensors(self, device: str = "cuda:0", direct_io=True, loader=None):
         file_path = os.path.abspath(self.file_name)
         if file_path.startswith(("/dev/shm", "/run/shm", "/sys/fs/cgroup")):
             logging.info(f"abs path : {file_path} cannot use direct_io")
@@ -191,13 +191,16 @@ class CkptFileInfo:
                 logging.info(
                     f"use fast_safetensors to device: {device} direct_io:{direct_io} use_shm:{use_shm}"
                 )
-                res = load_safetensors_to_device(
-                    self.file_name,
-                    max_buf_size=2 * 1024 * 1024 * 1024,
-                    direct_io=direct_io,
-                    use_shm=use_shm,
-                    device=device,
-                )
+                if loader is not None:
+                    res = loader.load_safetensors_to_device(self.file_name)
+                else:
+                    res = load_safetensors_to_device(
+                        self.file_name,
+                        max_buf_size=2 * 1024 * 1024 * 1024,
+                        direct_io=direct_io,
+                        use_shm=use_shm,
+                        device=device,
+                    )
                 logging.debug("load_safetensors_to_device result: %s", list(res.keys()))
                 return res
             except ModuleNotFoundError:
