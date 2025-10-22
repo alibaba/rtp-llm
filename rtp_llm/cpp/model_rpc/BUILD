@@ -42,6 +42,7 @@ cc_library(
         "//rtp_llm/cpp/normal_engine:normal_engine",
         "//rtp_llm/cpp/embedding_engine:embedding_engine",
         "//rtp_llm/cpp/engine_base/stream:stream",
+        "//rtp_llm/cpp/metrics:metrics",
         "//rtp_llm/cpp/engine_base/schedulers:schedulers",
         "//rtp_llm/cpp/speculative_engine:speculative_engine",
         "//rtp_llm/cpp/multimodal_processor:multimodal_processor",
