@@ -5,7 +5,6 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/NormalCacheStore.h"
 #include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/core/Types.h"
-#include "rtp_llm/cpp/core/DeviceTypes.h"
 
 using namespace std;
 
