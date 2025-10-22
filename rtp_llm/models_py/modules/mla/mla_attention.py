@@ -79,7 +79,7 @@ class DeepSeekV2Attention(nn.Module):
                 dim=-1,
             )
             q = self.q_a_layernorm(q.contiguous())
-            q = self.q_b_proj(fused_qkv)
+            q = self.q_b_proj(q)
         else:
             fused_qkv = self.fused_qkv_proj(hidden_states)
             kv_offset = self.num_heads * self.config.size_per_head

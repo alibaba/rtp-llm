@@ -13,7 +13,9 @@ struct MlaParams {
     torch::Tensor paged_kv_last_page_len;
     torch::Tensor kvlen;
     torch::Tensor page_indice;
-    torch::Tensor page_indptr;
+    torch::Tensor reuse_cache_page_indice;
+    torch::Tensor decode_page_indptr;
+    torch::Tensor prefill_page_indptr;
     torch::Tensor qo_indptr;
 };
 

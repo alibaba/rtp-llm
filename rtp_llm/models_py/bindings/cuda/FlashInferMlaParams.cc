@@ -31,6 +31,7 @@ MlaParams FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
     int max_kv_len     = 0;
     int max_q_len      = 0;
     int accu_q_len     = 0;
+    int accu_kv_len    = 0;
     int offset         = 0;
     int total_page_idx = 0;
 
@@ -39,8 +40,10 @@ MlaParams FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
     std::vector<int32_t> paged_kv_last_page_len;
     std::vector<int32_t> kvlen;
     std::vector<int32_t> page_indice;
-    std::vector<int32_t> page_indptr = {0};
-    std::vector<int32_t> qo_indptr   = {0};
+    std::vector<int32_t> reuse_cache_page_indice;
+    std::vector<int32_t> decode_page_indptr  = {0};
+    std::vector<int32_t> prefill_page_indptr = {0};
+    std::vector<int32_t> qo_indptr           = {0};
 
     auto input_lengths     = input_lengths_host->data<int>();
     auto prefix_lengths    = prefix_lengths_host ? prefix_lengths_host->data<int>() : nullptr;
@@ -61,11 +64,21 @@ MlaParams FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
             seq_len   = input_length + prefix_length;
             max_q_len = max(max_q_len, input_length);
             accu_q_len += input_length;
+            accu_kv_len += seq_len;
+
+            int page_num = (prefix_length + seq_size_per_block - 1) / seq_size_per_block;
+            if (kv_cache_block_id) {
+                for (int j = 0; j < page_num; j++) {
+                    auto page_idx = kv_cache_block_id[i * max_batch_blocks + j];
+                    reuse_cache_page_indice.push_back(page_idx);
+                }
+            }
         } else {
             batch_indice.push_back(i);
             positions.push_back(sequence_lengths[i]);
             seq_len = sequence_lengths[i] + 1;
             accu_q_len += 1;
+            accu_kv_len += 1;
         }
         paged_kv_last_page_len.push_back((seq_len - 1) % seq_size_per_block + 1);
         kvlen.push_back(seq_len);
@@ -80,22 +93,20 @@ MlaParams FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
                 total_page_idx++;
             }
         }
-        if (prefix_lengths) {
-            page_indptr.push_back(seq_len);
-        } else {
-            page_indptr.push_back(total_page_idx);
-        }
-        // page_indptr.push_back(total_page_idx);
+        decode_page_indptr.push_back(total_page_idx);
+        prefill_page_indptr.push_back(accu_kv_len);
         qo_indptr.push_back(accu_q_len);
     }
-    auto cuda_option              = torch::dtype(torch::kInt).device(torch::DeviceType::CUDA).requires_grad(false);
-    params.batch_indice           = torch::tensor(batch_indice, cuda_option);
-    params.page_indice            = torch::tensor(page_indice, cuda_option);
-    params.page_indptr            = torch::tensor(page_indptr, cuda_option);
-    params.paged_kv_last_page_len = torch::tensor(paged_kv_last_page_len, cuda_option);
-    params.qo_indptr              = torch::tensor(qo_indptr, cuda_option);
-    params.kvlen                  = torch::tensor(kvlen, cuda_option);
-    params.positions              = torch::tensor(positions, cuda_option);
+    auto cuda_option               = torch::dtype(torch::kInt).device(torch::DeviceType::CUDA).requires_grad(false);
+    params.batch_indice            = torch::tensor(batch_indice, cuda_option);
+    params.page_indice             = torch::tensor(page_indice, cuda_option);
+    params.reuse_cache_page_indice = torch::tensor(reuse_cache_page_indice, cuda_option);
+    params.decode_page_indptr      = torch::tensor(decode_page_indptr, cuda_option);
+    params.prefill_page_indptr     = torch::tensor(prefill_page_indptr, cuda_option);
+    params.paged_kv_last_page_len  = torch::tensor(paged_kv_last_page_len, cuda_option);
+    params.qo_indptr               = torch::tensor(qo_indptr, cuda_option);
+    params.kvlen                   = torch::tensor(kvlen, cuda_option);
+    params.positions               = torch::tensor(positions, cuda_option);
     return params;
 }
 
