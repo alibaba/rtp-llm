@@ -41,6 +41,7 @@ cc_library(
         "//rtp_llm/cpp/model_rpc:model_rpc_pool",
         "//rtp_llm/cpp/model_rpc:rpc_error_code",
         "//rtp_llm/cpp/utils:lru_cache",
+        "//rtp_llm/cpp/metrics:metrics",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "//:rtp_compute_ops",
