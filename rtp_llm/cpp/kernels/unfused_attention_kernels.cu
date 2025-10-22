@@ -21,7 +21,6 @@
 #include "rtp_llm/cpp/kernels/rotary_position_embedding.h"
 #include "rtp_llm/cpp/kernels/unfused_attention_kernels.h"
 #include "rtp_llm/cpp/cuda/cuda_type_utils.cuh"
-#include "rtp_llm/cpp/core/DeviceTypes.h"
 #if USING_CUDA
 #include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 #endif
