@@ -15,37 +15,12 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
 from rtp_llm.distribute.worker_info import g_worker_info
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models.multimodal.mm_process_engine import MMEmbeddingRes, MMProcessEngine
-from rtp_llm.utils.base_model_datatypes import MMUrlType
+from rtp_llm.utils.base_model_datatypes import (
+    MMPreprocessConfig,
+    MMUrlType,
+    MultimodalInput,
+)
 from rtp_llm.utils.grpc_util import trans_from_tensor, trans_tensor
-
-
-def trans_config(mm_process_config_pb: MMPreprocessConfigPB):
-    return [
-        mm_process_config_pb.width,
-        mm_process_config_pb.height,
-        mm_process_config_pb.min_pixels,
-        mm_process_config_pb.max_pixels,
-        mm_process_config_pb.fps,
-        mm_process_config_pb.min_frames,
-        mm_process_config_pb.max_frames,
-        mm_process_config_pb.mm_timeout_ms,
-    ]
-
-
-def trans_input(mutlimodal_inputs_pb: MultimodalInputsPB):
-    urls = []
-    types = []
-    tensors = []
-    configs = []
-    try:
-        for mm_input in mutlimodal_inputs_pb.multimodal_inputs:
-            urls.append(mm_input.multimodal_url)
-            types.append(MMUrlType(mm_input.multimodal_type))
-            tensors.append(trans_tensor(mm_input.multimodal_tensor))
-            configs.append(trans_config(mm_input.mm_preprocess_config))
-    except Exception as e:
-        raise Exception(str(e))
-    return urls, types, tensors, configs
 
 
 def trans_output(res: MMEmbeddingRes):
@@ -67,10 +42,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
         self.engine = mm_process_engine
 
     def RemoteMultimodalEmbedding(self, multimodal_inputs: MultimodalInputsPB, context):
-        urls, types, tensors, configs = trans_input(multimodal_inputs)
-        res: MMEmbeddingRes = self.engine.submit(
-            urls, types, tensors=tensors, preprocess_configs=configs
-        )
+        res: MMEmbeddingRes = self.engine.mm_embedding_rpc(multimodal_inputs)
         return trans_output(res)
 
 

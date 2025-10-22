@@ -234,3 +234,6 @@ class MultiModalMixin:
             return
 
         self._load_mm_weight(self.config.mm_related_params, ctype, device)
+
+    def mm_gather_batch(self):
+        raise NotImplementedError("MultiModalMixin.mm_gather_batch is not implemented")

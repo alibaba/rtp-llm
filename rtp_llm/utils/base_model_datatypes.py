@@ -47,24 +47,30 @@ class MMPreprocessConfig:
     max_frames: int = -1
     mm_timeout_ms: int = 30000
 
+    def to_string(self):
+        return f"{self.width}_{self.height}_{self.min_pixels}_{self.max_pixels}_{self.fps}_{self.min_frames}_{self.max_frames}_{self.mm_timeout_ms}"
+
 
 class MultimodalInput:
     url: str
     mm_type: MMUrlType
-    config: MMPreprocessConfig
     tensor: torch.Tensor
+    config: MMPreprocessConfig
 
     def __init__(
         self,
         url: str,
         mm_type: MMUrlType = MMUrlType.DEFAULT,
+        tensor: Optional[torch.Tensor] = None,
         config: MMPreprocessConfig = MMPreprocessConfig(),
-        tensor: torch.Tensor = torch.empty(1),
     ):
         self.url = url
         self.mm_type = mm_type
         self.config = config
         self.tensor = tensor
+
+    def to_string(self):
+        return f"{self.url}_{self.mm_type}_{self.config.to_string()}"
 
 
 # single batch prompt input
