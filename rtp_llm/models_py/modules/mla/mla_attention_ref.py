@@ -247,7 +247,7 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids, unsqueeze_dim=1):
     return q_embed, k_embed
 
 
-class DeepseekV2AttentionRef(nn.Module):
+class MlaAttentionRef(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
     def __init__(
@@ -325,7 +325,7 @@ class DeepseekV2AttentionRef(nn.Module):
                 dim=-1,
             )
             q = self.q_a_layernorm(q.contiguous())
-            q = self.q_b_proj(fused_qkv)
+            q = self.q_b_proj(q)
         else:
             fused_qkv = self.fused_qkv_proj(hidden_states)
             kv_offset = self.config.head_num * self.config.size_per_head

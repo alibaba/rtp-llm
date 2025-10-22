@@ -27,7 +27,7 @@ from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.rotary_embedding.deepseek_rotary_embedding import (
     DeepseekV3YarnRotaryEmbedding,
 )
-from rtp_llm.models_py.model_desc.deepseek_v2 import DeepSeekV2Model
+from rtp_llm.models_py.model_desc.generic_moe import GenericMoeModel
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
@@ -524,7 +524,8 @@ class DeepSeekV2(BaseModel):
         return config
 
     def _create_python_model(self) -> Optional[GptModelBase]:
-        self.py_model = DeepSeekV2Model(self.config, self.weight)
+        attention_type = "mla"
+        self.py_model = GenericMoeModel(self.config, self.weight, attention_type)
 
     @staticmethod
     def _from_hf(config: GptInitModelParameters, ckpt_path: str):

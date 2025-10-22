@@ -10,6 +10,7 @@ import torch
 from torch.nn import Module
 
 import rtp_llm.models_py.modules.utils as utils
+from rtp_llm.distribute.collective import Group, all_reduce
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.modules.utils import ceil_div, dispose_tensor
@@ -137,6 +138,8 @@ class FusedMoE(torch.nn.Module):
             selected_experts,
             final_hidden_states,
         )
+        if self.config.tp_size > 1:
+            final_hidden_states = all_reduce(final_hidden_states, group=Group.TP)
         return final_hidden_states
 
 

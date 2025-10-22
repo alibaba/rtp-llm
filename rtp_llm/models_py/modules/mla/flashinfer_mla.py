@@ -5,8 +5,15 @@ import sys
 from typing import Any, Dict, List, Optional
 
 import pkg_resources
+import torch
 
 import rtp_llm.models_py.modules.utils as utils
+
+g_workspace_buffer = torch.empty(
+    512 * 1024 * 1024,
+    dtype=torch.int8,
+    device="cuda",
+)
 
 
 # 确保是从site-packages加载的Python包，避免同名的cpp flashinfer包冲突
@@ -87,11 +94,11 @@ class MlaFlashInferPrefillOp(object):
         self.token_per_block = page_size
         self.softmax_extra_scale = softmax_extra_scale
         self.use_mla = use_mla
-        g_workspace_buffer = torch.empty(
-            512 * 1024 * 1024,
-            dtype=torch.int8,
-            device=self.weights[0].get(W.mla_k_nope_w).device,
-        )
+        # g_workspace_buffer = torch.empty(
+        #     512 * 1024 * 1024,
+        #     dtype=torch.int8,
+        #     device=self.weights[0].get(W.mla_k_nope_w).device,
+        # )
         self.prefill_wrapper_ragged = (
             flashinfer_python.prefill.BatchPrefillWithRaggedKVCacheWrapper(
                 g_workspace_buffer, "NHD", backend="fa2"
@@ -143,7 +150,7 @@ class MlaFlashInferPrefillOp(object):
 
         self.prefill_wrapper_ragged.plan(
             fmha_params.qo_indptr,
-            fmha_params.page_indptr,
+            fmha_params.prefill_page_indptr,
             self.num_heads,
             self.num_heads,
             self.qk_rope_head_dim + self.qk_nope_head_dim,
@@ -184,17 +191,17 @@ class MlaFlashInferDecodeOp(object):
         self.softmax_extra_scale = softmax_extra_scale
         self.weights = weights
         self.use_mla = use_mla
-        g_workspace_buffer = torch.empty(
-            512 * 1024 * 1024,
-            dtype=torch.int8,
-            device=self.weights[0].get(W.mla_vc).device,
-        )
+        # g_workspace_buffer = torch.empty(
+        #     512 * 1024 * 1024,
+        #     dtype=torch.int8,
+        #     device=self.weights[0].get(W.mla_vc).device,
+        # )
         self.mla_wrapper = flashinfer_python.mla.BatchMLAPagedAttentionWrapper(
             g_workspace_buffer, backend="fa2"
         )
 
     def support(self, attention_inputs: PyAttentionInputs):
-        return self.use_mla and not attention_inputs.is_prefill
+        return self.use_mla
 
     def prepare(self, attention_inputs: PyAttentionInputs):
         check_attention_inputs(attention_inputs)
@@ -222,7 +229,7 @@ class MlaFlashInferDecodeOp(object):
 
         self.mla_wrapper.plan(
             fmha_params.qo_indptr,
-            fmha_params.page_indptr,
+            fmha_params.decode_page_indptr,
             fmha_params.page_indice,
             fmha_params.kvlen,
             self.num_heads,
@@ -316,7 +323,6 @@ class TrtV2PrefillAttentionOp(object):
         fmha_params: Any,
         layer_id: int,
     ) -> torch.Tensor:
-
         k_pe = k_pe.view(-1, 1, self.qk_rope_head_dim)
         self.k_nope_proj = LinearFactory.create_linear_from_weights(
             self.weights[layer_id], W.mla_k_nope_w, W.mla_k_nope_s, None, self.config
