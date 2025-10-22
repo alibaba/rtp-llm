@@ -10,7 +10,11 @@ from PIL import Image, ImageFile
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.models.multimodal.multimodal_common import ImageEmbeddingInterface
-from rtp_llm.utils.base_model_datatypes import MMPreprocessConfig, MMUrlType
+from rtp_llm.utils.base_model_datatypes import (
+    MMPreprocessConfig,
+    MMUrlType,
+    MultimodalInput,
+)
 
 
 class ImageLoadTest(TestCase):
@@ -38,13 +42,31 @@ class ImageLoadTest(TestCase):
 
             try:
                 self.image_embedding.preprocess_input(
-                    temp_dir + "/test.png", MMUrlType.IMAGE, None, MMPreprocessConfig()
+                    [
+                        MultimodalInput(
+                            url=temp_dir + "/test.png",
+                            mm_type=MMUrlType.IMAGE,
+                            config=MMPreprocessConfig(),
+                        )
+                    ]
                 )
                 self.image_embedding.preprocess_input(
-                    temp_dir + "/test.avif", MMUrlType.IMAGE, None, MMPreprocessConfig()
+                    [
+                        MultimodalInput(
+                            url=temp_dir + "/test.avif",
+                            mm_type=MMUrlType.IMAGE,
+                            config=MMPreprocessConfig(),
+                        )
+                    ]
                 )
                 self.image_embedding.preprocess_input(
-                    temp_dir + "/test.heic", MMUrlType.IMAGE, None, MMPreprocessConfig()
+                    [
+                        MultimodalInput(
+                            url=temp_dir + "/test.heic",
+                            mm_type=MMUrlType.IMAGE,
+                            config=MMPreprocessConfig(),
+                        )
+                    ]
                 )
 
                 self.assertTrue(
