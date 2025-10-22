@@ -16,7 +16,6 @@ from torchvision.transforms import InterpolationMode
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.models.multimodal.multimodal_common import (
     MultiModalEmbeddingInterface,
-    mm_lock,
     timeout_decorator,
 )
 from rtp_llm.models.multimodal.multimodal_util import (
@@ -27,7 +26,11 @@ from rtp_llm.models.qwen2_vl.image_processing_qwen2_vl import Qwen2VLImageProces
 from rtp_llm.models.qwen2_vl.modeling_qwen2_vl import (
     Qwen2VisionTransformerPretrainedModel,
 )
-from rtp_llm.utils.base_model_datatypes import MMPreprocessConfig, MMUrlType
+from rtp_llm.utils.base_model_datatypes import (
+    MMPreprocessConfig,
+    MMUrlType,
+    MultimodalInput,
+)
 
 IMAGE_FACTOR = 28
 MIN_PIXELS = 4 * 28 * 28
@@ -217,21 +220,21 @@ class Qwen2VLImageEmbedding(MultiModalEmbeddingInterface):
 
     @staticmethod
     def preprocess_input(
-        url,
-        mm_type: MMUrlType,
-        tensor: torch.Tensor,
-        config: MMPreprocessConfig,
+        mm_inputs: List[MultimodalInput],
         processor,
     ):
-        data = get_bytes_io_from_url(url)
+        assert len(mm_inputs) == 1
+        mm_input = mm_inputs[0]
+        mm_type = mm_input.mm_type
+        data = get_bytes_io_from_url(mm_input.url)
         if mm_type == MMUrlType.DEFAULT:
             raise Exception("cannot infer multimodal input type")
         elif mm_type == MMUrlType.IMAGE:
-            data = Qwen2VLImageEmbedding.load_image(data, config)
+            data = Qwen2VLImageEmbedding.load_image(data, mm_input.config)
             res = processor(images=data, videos=None, return_tensors="pt")
             return res["pixel_values"], res["image_grid_thw"]
         elif mm_type == MMUrlType.VIDEO:
-            data = Qwen2VLImageEmbedding.load_video(data, config)
+            data = Qwen2VLImageEmbedding.load_video(data, mm_input.config)
             res = processor(images=None, videos=data, return_tensors="pt")
             return res["pixel_values_videos"], res["video_grid_thw"]
         else:

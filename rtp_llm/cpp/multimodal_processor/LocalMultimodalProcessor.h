@@ -9,7 +9,8 @@ public:
     using MultimodalProcessor::MultimodalProcessor;
 
 private:
-    ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs, std::string ip_port = "") {
+    ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,
+                                                      std::string                                 ip_port = "") {
         if (mm_inputs.size() == 0) {
             return MultimodalOutput();
         } else if (!mm_process_engine_.is_none()) {
@@ -32,7 +33,7 @@ private:
             }
             try {
                 py::gil_scoped_acquire acquire;
-                auto res              = mm_process_engine_.attr("submit")(urls, types, tensors, mm_preprocess_configs);
+                auto res = mm_process_engine_.attr("mm_embedding_cpp")(urls, types, tensors, mm_preprocess_configs);
                 auto mm_embedding_vec = convertPyObjectToVec(res.attr("embeddings"));
 
                 MultimodalOutput           mm_embedding_res;
