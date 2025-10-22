@@ -6,6 +6,8 @@ Note that all future modules must be lazily loaded within main
 to avoid certain eager import breakage."""
 from __future__ import annotations
 
+from rtp_llm.server.server_args.server_args import EnvArgumentParser
+
 
 def main():
     import rtp_llm.cli.serve
@@ -20,7 +22,7 @@ def main():
 
     cli_env_setup()
 
-    parser = FlexibleArgumentParser(
+    parser = EnvArgumentParser(
         description="rtp-llm CLI",
         epilog=LLM_SUBCMD_PARSER_EPILOG,
     )

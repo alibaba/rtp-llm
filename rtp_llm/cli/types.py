@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import typing
 
+from rtp_llm.server.server_args.server_args import EnvArgumentParser
+
 if typing.TYPE_CHECKING:
     from rtp_llm.utils.util import FlexibleArgumentParser
 
@@ -25,5 +27,5 @@ class CLISubcommand:
 
     def subparser_init(
             self,
-            subparsers: argparse._SubParsersAction) -> FlexibleArgumentParser:
+            subparsers: argparse._SubParsersAction) -> EnvArgumentParser:
         raise NotImplementedError("Subclasses should implement this method")

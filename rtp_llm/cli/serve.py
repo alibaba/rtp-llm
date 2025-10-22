@@ -2,15 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import argparse
-import signal
-from typing import Optional
 import logging
 
-
 from rtp_llm.cli.types import CLISubcommand
-from rtp_llm.cli.utils import FlexibleArgumentParser
-
-
+from rtp_llm.server.server_args.server_args import EnvArgumentParser, init_all_group_args
 
 
 class ServeSubcommand(CLISubcommand):
@@ -26,17 +21,15 @@ class ServeSubcommand(CLISubcommand):
 
     def subparser_init(
             self,
-            subparsers: argparse._SubParsersAction) -> FlexibleArgumentParser:
+            subparsers: argparse._SubParsersAction) -> EnvArgumentParser:
         serve_parser = subparsers.add_parser(
             "serve",
             help="Start the vLLM OpenAI Compatible API server.",
             description="Start the vLLM OpenAI Compatible API server.",
             usage="vllm serve [model_tag] [options]")
-
+        init_all_group_args(serve_parser)
         return serve_parser
 
 
 def cmd_init() -> list[CLISubcommand]:
     return [ServeSubcommand()]
-
-
