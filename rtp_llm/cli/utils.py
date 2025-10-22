@@ -4,23 +4,27 @@
 import argparse
 import asyncio
 import functools
+import json
+import logging
 import os
 import subprocess
+import sys
+import textwrap
+from argparse import (
+    Action,
+    ArgumentDefaultsHelpFormatter,
+    ArgumentParser,
+    ArgumentTypeError,
+    Namespace,
+    RawDescriptionHelpFormatter,
+    _ArgumentGroup,
+)
+from collections import defaultdict
 from typing import Any, Optional, Union
 
-from fastapi import Request
-
-
-from argparse import (Action, ArgumentDefaultsHelpFormatter, ArgumentParser,
-                      ArgumentTypeError, RawDescriptionHelpFormatter,
-                      _ArgumentGroup)
 import regex as re
-import textwrap
-import sys
-from collections import defaultdict
 import yaml
-import logging
-import json
+from fastapi import Request
 
 LLM_SUBCMD_PARSER_EPILOG = (
     "Tip: Use `rtp-vllm [serve|run-batch|bench <bench_type>] "
@@ -29,7 +33,8 @@ LLM_SUBCMD_PARSER_EPILOG = (
     "   - To view a single argument:    --help=max-num-seqs\n"
     "   - To search by keyword:         --help=max\n"
     "   - To list all groups:           --help=listgroup\n"
-    "   - To view help with pager:      --help=page")
+    "   - To view help with pager:      --help=page"
+)
 
 
 async def listen_for_disconnect(request: Request) -> None:
@@ -40,9 +45,9 @@ async def listen_for_disconnect(request: Request) -> None:
             # If load tracking is enabled *and* the counter exists, decrement
             # it. Combines the previous nested checks into a single condition
             # to satisfy the linter rule.
-            if (getattr(request.app.state, "enable_server_load_tracking",
-                        False)
-                    and hasattr(request.app.state, "server_load_metrics")):
+            if getattr(
+                request.app.state, "enable_server_load_tracking", False
+            ) and hasattr(request.app.state, "server_load_metrics"):
                 request.app.state.server_load_metrics -= 1
             break
 
@@ -80,8 +85,9 @@ def with_cancellation(handler_func):
         handler_task = asyncio.create_task(handler_func(*args, **kwargs))
         cancellation_task = asyncio.create_task(listen_for_disconnect(request))
 
-        done, pending = await asyncio.wait([handler_task, cancellation_task],
-                                           return_when=asyncio.FIRST_COMPLETED)
+        done, pending = await asyncio.wait(
+            [handler_task, cancellation_task], return_when=asyncio.FIRST_COMPLETED
+        )
         for task in pending:
             task.cancel()
 
@@ -94,7 +100,6 @@ def with_cancellation(handler_func):
 
 def decrement_server_load(request: Request):
     request.app.state.server_load_metrics -= 1
-
 
 
 def cli_env_setup():
@@ -132,7 +137,8 @@ def _validate_truncation_size(
             raise ValueError(
                 f"truncate_prompt_tokens value ({truncate_prompt_tokens}) "
                 f"is greater than max_model_len ({max_model_len})."
-                f" Please, select a smaller truncation size.")
+                f" Please, select a smaller truncation size."
+            )
 
         if tokenization_kwargs is not None:
             tokenization_kwargs["truncation"] = True
@@ -148,12 +154,10 @@ def _validate_truncation_size(
 def _output_with_pager(text: str):
     """Output text using scrolling view if available and appropriate."""
 
-    pagers = ['less -R', 'more']
+    pagers = ["less -R", "more"]
     for pager_cmd in pagers:
         try:
-            proc = subprocess.Popen(pager_cmd.split(),
-                                    stdin=subprocess.PIPE,
-                                    text=True)
+            proc = subprocess.Popen(pager_cmd.split(), stdin=subprocess.PIPE, text=True)
             proc.communicate(input=text)
             return
         except (subprocess.SubprocessError, OSError, FileNotFoundError):
@@ -163,8 +167,9 @@ def _output_with_pager(text: str):
     print(text)
 
 
-def show_filtered_argument_or_group_from_help(parser: argparse.ArgumentParser,
-                                              subcommand_name: list[str]):
+def show_filtered_argument_or_group_from_help(
+    parser: argparse.ArgumentParser, subcommand_name: list[str]
+):
 
     # Only handle --help=<keyword> for the current subcommand.
     # Since subparser_init() runs for all subcommands during CLI setup,
@@ -173,30 +178,32 @@ def show_filtered_argument_or_group_from_help(parser: argparse.ArgumentParser,
     # e.g., for `vllm bench latency`,
     # sys.argv is `['vllm', 'bench', 'latency', ...]`
     # and subcommand_name is "bench latency".
-    if len(sys.argv) <= len(subcommand_name) or sys.argv[
-            1:1 + len(subcommand_name)] != subcommand_name:
+    if (
+        len(sys.argv) <= len(subcommand_name)
+        or sys.argv[1 : 1 + len(subcommand_name)] != subcommand_name
+    ):
         return
 
     for arg in sys.argv:
-        if arg.startswith('--help='):
-            search_keyword = arg.split('=', 1)[1]
+        if arg.startswith("--help="):
+            search_keyword = arg.split("=", 1)[1]
 
             # Enable paged view for full help
-            if search_keyword == 'page':
+            if search_keyword == "page":
                 help_text = parser.format_help()
                 _output_with_pager(help_text)
                 sys.exit(0)
 
             # List available groups
-            if search_keyword == 'listgroup':
+            if search_keyword == "listgroup":
                 output_lines = ["\nAvailable argument groups:"]
                 for group in parser._action_groups:
                     if group.title and not group.title.startswith(
-                            "positional arguments"):
+                        "positional arguments"
+                    ):
                         output_lines.append(f"  - {group.title}")
                         if group.description:
-                            output_lines.append("    " +
-                                                group.description.strip())
+                            output_lines.append("    " + group.description.strip())
                         output_lines.append("")
                 _output_with_pager("\n".join(output_lines))
                 sys.exit(0)
@@ -204,8 +211,7 @@ def show_filtered_argument_or_group_from_help(parser: argparse.ArgumentParser,
             # For group search
             formatter = parser._get_formatter()
             for group in parser._action_groups:
-                if group.title and group.title.lower() == search_keyword.lower(
-                ):
+                if group.title and group.title.lower() == search_keyword.lower():
                     formatter.start_section(group.title)
                     formatter.add_text(group.description)
                     formatter.add_arguments(group._group_actions)
@@ -219,8 +225,10 @@ def show_filtered_argument_or_group_from_help(parser: argparse.ArgumentParser,
             for group in parser._action_groups:
                 for action in group._group_actions:
                     # search option name
-                    if any(search_keyword.lower() in opt.lower()
-                           for opt in action.option_strings):
+                    if any(
+                        search_keyword.lower() in opt.lower()
+                        for opt in action.option_strings
+                    ):
                         matched_actions.append(action)
 
             if matched_actions:
@@ -235,7 +243,6 @@ def show_filtered_argument_or_group_from_help(parser: argparse.ArgumentParser,
             sys.exit(1)
 
 
-
 class StoreBoolean(Action):
 
     def __call__(self, parser, namespace, values, option_string=None):
@@ -244,10 +251,12 @@ class StoreBoolean(Action):
         elif values.lower() == "false":
             setattr(namespace, self.dest, False)
         else:
-            raise ValueError(f"Invalid boolean value: {values}. "
-                             "Expected 'true' or 'false'.")
-class SortedHelpFormatter(ArgumentDefaultsHelpFormatter,
-                          RawDescriptionHelpFormatter):
+            raise ValueError(
+                f"Invalid boolean value: {values}. " "Expected 'true' or 'false'."
+            )
+
+
+class SortedHelpFormatter(ArgumentDefaultsHelpFormatter, RawDescriptionHelpFormatter):
     """SortedHelpFormatter that sorts arguments by their option strings."""
 
     def _split_lines(self, text, width):
@@ -259,13 +268,14 @@ class SortedHelpFormatter(ArgumentDefaultsHelpFormatter,
         # The patterns also include whitespace after the newline
         single_newline = re.compile(r"(?<!\n)\n(?!\n)\s*")
         multiple_newlines = re.compile(r"\n{2,}\s*")
-        text = single_newline.sub(' ', text)
+        text = single_newline.sub(" ", text)
         lines = re.split(multiple_newlines, text)
         return sum([textwrap.wrap(line, width) for line in lines], [])
 
     def add_arguments(self, actions):
         actions = sorted(actions, key=lambda x: x.option_strings)
         super().add_arguments(actions)
+
 
 class FlexibleArgumentParser(ArgumentParser):
     """ArgumentParser that allows both underscore and dash in names."""
@@ -278,7 +288,8 @@ class FlexibleArgumentParser(ArgumentParser):
         "   --json-arg.key1 value1 --json-arg.key2.key3 value2\n\n"
         "Additionally, list elements can be passed individually using +:\n"
         '   --json-arg \'{"key4": ["value3", "value4", "value5"]}\'\n'
-        "   --json-arg.key4+ value3 --json-arg.key4+=\'value4,value5\'\n\n")
+        "   --json-arg.key4+ value3 --json-arg.key4+='value4,value5'\n\n"
+    )
 
     def __init__(self, *args, **kwargs):
         # Set the default "formatter_class" to SortedHelpFormatter
@@ -296,11 +307,14 @@ class FlexibleArgumentParser(ArgumentParser):
                 logging.warning(
                     "argument '--disable-log-requests' is deprecated and "
                     "replaced with '--enable-log-requests'. This will be "
-                    "removed in v0.12.0.")
+                    "removed in v0.12.0."
+                )
             namespace, args = super().parse_known_args(args, namespace)
             for action in FlexibleArgumentParser._deprecated:
-                if (hasattr(namespace, dest := action.dest)
-                        and getattr(namespace, dest) != action.default):
+                if (
+                    hasattr(namespace, dest := action.dest)
+                    and getattr(namespace, dest) != action.default
+                ):
                     logging.warning("argument '%s' is deprecated", dest)
             return namespace, args
 
@@ -342,15 +356,16 @@ class FlexibleArgumentParser(ArgumentParser):
 
         # Check for --model in command line arguments first
         if args and args[0] == "serve":
-            model_in_cli_args = any(arg == '--model' for arg in args)
+            model_in_cli_args = any(arg == "--model" for arg in args)
 
             if model_in_cli_args:
                 raise ValueError(
                     "With `vllm serve`, you should provide the model as a "
                     "positional argument or in a config file instead of via "
-                    "the `--model` option.")
+                    "the `--model` option."
+                )
 
-        if '--config' in args:
+        if "--config" in args:
             args = self._pull_args_from_config(args)
 
         def repl(match: re.Match) -> str:
@@ -363,25 +378,27 @@ class FlexibleArgumentParser(ArgumentParser):
         # Convert underscores to dashes and vice versa in argument names
         processed_args = list[str]()
         for i, arg in enumerate(args):
-            if arg.startswith('--'):
-                if '=' in arg:
-                    key, value = arg.split('=', 1)
+            if arg.startswith("--"):
+                if "=" in arg:
+                    key, value = arg.split("=", 1)
                     key = pattern.sub(repl, key, count=1)
-                    processed_args.append(f'{key}={value}')
+                    processed_args.append(f"{key}={value}")
                 else:
                     key = pattern.sub(repl, arg, count=1)
                     processed_args.append(key)
-            elif arg.startswith('-O') and arg != '-O' and arg[2] != '.':
+            elif arg.startswith("-O") and arg != "-O" and arg[2] != ".":
                 # allow -O flag to be used without space, e.g. -O3 or -Odecode
                 # -O.<...> handled later
                 # also handle -O=<level> here
-                level = arg[3:] if arg[2] == '=' else arg[2:]
-                processed_args.append(f'-O.level={level}')
-            elif arg == '-O' and i + 1 < len(args) and args[i + 1] in {
-                    "0", "1", "2", "3"
-            }:
+                level = arg[3:] if arg[2] == "=" else arg[2:]
+                processed_args.append(f"-O.level={level}")
+            elif (
+                arg == "-O"
+                and i + 1 < len(args)
+                and args[i + 1] in {"0", "1", "2", "3"}
+            ):
                 # Convert -O <n> to -O.level <n>
-                processed_args.append('-O.level')
+                processed_args.append("-O.level")
             else:
                 processed_args.append(arg)
 
@@ -445,14 +462,11 @@ class FlexibleArgumentParser(ArgumentParser):
 
                 # Merge all values with the same key into a single dict
                 arg_dict = create_nested_dict(keys, value)
-                arg_duplicates = recursive_dict_update(dict_args[key],
-                                                       arg_dict)
-                duplicates |= {f'{key}.{d}' for d in arg_duplicates}
+                arg_duplicates = recursive_dict_update(dict_args[key], arg_dict)
+                duplicates |= {f"{key}.{d}" for d in arg_duplicates}
                 delete.add(i)
         # Filter out the dict args we set to None
-        processed_args = [
-            a for i, a in enumerate(processed_args) if i not in delete
-        ]
+        processed_args = [a for i, a in enumerate(processed_args) if i not in delete]
         if duplicates:
             logging.warning("Found duplicate keys %s", ", ".join(duplicates))
 
@@ -509,13 +523,14 @@ class FlexibleArgumentParser(ArgumentParser):
         this way the order of priorities is maintained when these are args
         parsed by super().
         """
-        assert args.count(
-            '--config') <= 1, "More than one config file specified!"
+        assert args.count("--config") <= 1, "More than one config file specified!"
 
-        index = args.index('--config')
+        index = args.index("--config")
         if index == len(args) - 1:
-            raise ValueError("No config file specified! \
-                             Please check your command-line arguments.")
+            raise ValueError(
+                "No config file specified! \
+                             Please check your command-line arguments."
+            )
 
         file_path = args[index + 1]
 
@@ -528,25 +543,29 @@ class FlexibleArgumentParser(ArgumentParser):
         # maintaining this order will enforce the precedence
         # of cli > config > defaults
         if args[0] == "serve":
-            model_in_cli = len(args) > 1 and not args[1].startswith('-')
-            model_in_config = any(arg == '--model' for arg in config_args)
+            model_in_cli = len(args) > 1 and not args[1].startswith("-")
+            model_in_config = any(arg == "--model" for arg in config_args)
 
             if not model_in_cli and not model_in_config:
                 raise ValueError(
                     "No model specified! Please specify model either "
-                    "as a positional argument or in a config file.")
+                    "as a positional argument or in a config file."
+                )
 
             if model_in_cli:
                 # Model specified as positional arg, keep CLI version
-                args = [args[0]] + [
-                    args[1]
-                ] + config_args + args[2:index] + args[index + 2:]
+                args = (
+                    [args[0]]
+                    + [args[1]]
+                    + config_args
+                    + args[2:index]
+                    + args[index + 2 :]
+                )
             else:
                 # No model in CLI, use config if available
-                args = [args[0]
-                        ] + config_args + args[1:index] + args[index + 2:]
+                args = [args[0]] + config_args + args[1:index] + args[index + 2 :]
         else:
-            args = [args[0]] + config_args + args[1:index] + args[index + 2:]
+            args = [args[0]] + config_args + args[1:index] + args[index + 2 :]
 
         return args
 
@@ -563,11 +582,13 @@ class FlexibleArgumentParser(ArgumentParser):
                 '--tensor-parallel-size': '4'
             ]
         """
-        extension: str = file_path.split('.')[-1]
-        if extension not in ('yaml', 'yml'):
+        extension: str = file_path.split(".")[-1]
+        if extension not in ("yaml", "yml"):
             raise ValueError(
                 "Config file must be of a yaml/yml type.\
-                              %s supplied", extension)
+                              %s supplied",
+                extension,
+            )
 
         # only expecting a flat dictionary of atomic types
         processed_args: list[str] = []
@@ -579,20 +600,21 @@ class FlexibleArgumentParser(ArgumentParser):
         except Exception as ex:
             logging.error(
                 "Unable to read the config file at %s. \
-                Make sure path is correct", file_path)
+                Make sure path is correct",
+                file_path,
+            )
             raise ex
 
         store_boolean_arguments = [
-            action.dest for action in self._actions
-            if isinstance(action, StoreBoolean)
+            action.dest for action in self._actions if isinstance(action, StoreBoolean)
         ]
 
         for key, value in config.items():
             if isinstance(value, bool) and key not in store_boolean_arguments:
                 if value:
-                    processed_args.append('--' + key)
+                    processed_args.append("--" + key)
             else:
-                processed_args.append('--' + key)
+                processed_args.append("--" + key)
                 processed_args.append(str(value))
 
         return processed_args

@@ -583,8 +583,8 @@ py_wheel(
     entry_points = {
         "console_scripts": [
             "rtp-llm = rtp_llm.cli.main:main",
-        ],
-    }
+        ]
+    },
     deps = [
         ":rtp_llm_package",
         "//deps:extension_package"
