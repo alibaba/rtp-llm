@@ -495,6 +495,7 @@ py_package(
     ] + jit_deps(),
     packages = [
         "rtp_llm",
+        "fla",
     ] + select({
         "@//:using_cuda12": ["deep_gemm"],
         "//conditions:default": [],
