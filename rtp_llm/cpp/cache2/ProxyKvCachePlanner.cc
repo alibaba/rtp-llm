@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cache/RemoteKvCachePlanner.h"
+#include "ProxyKvCachePlanner.h"
 
 #include <filesystem>
 
@@ -6,15 +6,15 @@
 
 namespace rtp_llm {
 
-RemoteKvCachePlanner::RemoteKvCachePlanner(CacheManager*                       cache_manager,
-                                           const GptInitParameter&             gpt_init_params,
-                                           const kmonitor::MetricsReporterPtr& metrics_reporter):
+ProxyKvCachePlanner::ProxyKvCachePlanner(CacheManager*                       cache_manager,
+                                         const GptInitParameter&             gpt_init_params,
+                                         const kmonitor::MetricsReporterPtr& metrics_reporter):
     cache_manager_(cache_manager), gpt_init_params_(gpt_init_params), metrics_reporter_(metrics_reporter) {}
 
-std::vector<DistStorage::Item> RemoteKvCachePlanner::layout(const std::vector<int64_t>&               cache_keys,
-                                                            const std::vector<int32_t>&               block_indices,
-                                                            const kv_cache_manager::BlockMask&        block_mask,
-                                                            const std::map<std::string, std::string>& metas) {
+std::vector<DistStorage::Item> ProxyKvCachePlanner::layout(const std::vector<int64_t>&               cache_keys,
+                                                           const std::vector<int32_t>&               block_indices,
+                                                           const kv_cache_manager::BlockMask&        block_mask,
+                                                           const std::map<std::string, std::string>& metas) {
     // TODO : refactor this
     uint32_t total_len = cache_keys.size();
     if (total_len == 0 || block_indices.empty()) {
@@ -51,7 +51,7 @@ std::vector<DistStorage::Item> RemoteKvCachePlanner::layout(const std::vector<in
 
         if (item == nullptr) {
             item       = std::make_shared<DistStorage::Item>();
-            item->type = DistStorage::ST_REMOTE;
+            item->type = DistStorage::ST_PROXY;
         }
 
         if (!block_indices.empty()) {
@@ -91,10 +91,10 @@ std::vector<DistStorage::Item> RemoteKvCachePlanner::layout(const std::vector<in
     return items;
 }
 
-bool RemoteKvCachePlanner::verify(const std::vector<DistStorage::Item>&     items,
-                                  const std::vector<int64_t>&               cache_keys,
-                                  const std::vector<int32_t>&               block_indices,
-                                  const std::map<std::string, std::string>& metas) {
+bool ProxyKvCachePlanner::verify(const std::vector<DistStorage::Item>&     items,
+                                 const std::vector<int64_t>&               cache_keys,
+                                 const std::vector<int32_t>&               block_indices,
+                                 const std::map<std::string, std::string>& metas) {
     return true;
 }
 

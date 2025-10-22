@@ -4,11 +4,11 @@ namespace rtp_llm {
 
 class CacheManager;
 
-class RemoteKvCachePlanner: public DistKvCachePlanner {
+class ProxyKvCachePlanner: public DistKvCachePlanner {
 public:
-    RemoteKvCachePlanner(CacheManager*                       cache_manager,
-                         const GptInitParameter&             gpt_init_params,
-                         const kmonitor::MetricsReporterPtr& metrics_reporter);
+    ProxyKvCachePlanner(CacheManager*                       cache_manager,
+                        const GptInitParameter&             gpt_init_params,
+                        const kmonitor::MetricsReporterPtr& metrics_reporter);
 
 public:
     std::vector<DistStorage::Item> layout(const std::vector<int64_t>&               cache_keys,

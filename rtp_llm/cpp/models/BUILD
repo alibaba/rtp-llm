@@ -6,25 +6,25 @@ cc_library(
     hdrs = [
         "SampleInfos.h",
     ],
+    visibility = ["//visibility:public"],
     deps = [
         "//:rtp_compute_ops",
     ],
-    visibility = ["//visibility:public"],
 )
 
 # Position IDs generator - model inference component
 cc_library(
     name = "position_ids_generator",
-    hdrs = [
-        "position_ids/PositionIdsGenerator.h",
-    ],
     srcs = [
         "position_ids/PositionIdsGenerator.cc",
     ],
-    deps = [
-        "//:rtp_compute_ops"
+    hdrs = [
+        "position_ids/PositionIdsGenerator.h",
     ],
     visibility = ["//visibility:public"],
+    deps = [
+        "//:rtp_compute_ops",
+    ],
 )
 
 # DFA utilities - includes PrefixToCandidateTokens functionality
@@ -34,72 +34,72 @@ cc_library(
         "logits_processor/DFAUtil.h",
         "logits_processor/PrefixToCandidateTokens.h",
     ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
     deps = [
         "//:rtp_compute_ops",
     ],
-    copts = copts(),
-    visibility = ["//visibility:public"],
 )
 
 # Logits processor - model output processing
 cc_library(
     name = "logits_processor",
-    hdrs = [
-        "logits_processor/BaseLogitsProcessor.h",
-        "logits_processor/MultiSeqLogitsProcessor.h",
-        "logits_processor/LogitsProcessorStates.h",
-        "logits_processor/ThinkModeLogitsProcessor.h",
-        "logits_processor/TreeLogitsProcessor.h",
-    ],
     srcs = [
         "logits_processor/BaseLogitsProcessor.cc",
-        "logits_processor/MultiSeqLogitsProcessor.cc",
         "logits_processor/LogitsProcessorStates.cc",
+        "logits_processor/MultiSeqLogitsProcessor.cc",
         "logits_processor/ThinkModeLogitsProcessor.cc",
         "logits_processor/TreeLogitsProcessor.cc",
     ],
-    deps = [
-        ":sample_infos",
-        ":dfa_utils",
-        "//rtp_llm/cpp/engine_base/stream:generate_types",
-        "//rtp_llm/cpp/engine_base/stream:generate_config",
-        "//rtp_llm/cpp/multimodal_processor:multimodal_types",
-        "//rtp_llm/cpp/cache",
-        "//rtp_llm/cpp/pybind:py_utils",
+    hdrs = [
+        "logits_processor/BaseLogitsProcessor.h",
+        "logits_processor/LogitsProcessorStates.h",
+        "logits_processor/MultiSeqLogitsProcessor.h",
+        "logits_processor/ThinkModeLogitsProcessor.h",
+        "logits_processor/TreeLogitsProcessor.h",
     ],
     visibility = ["//visibility:public"],
+    deps = [
+        ":dfa_utils",
+        ":sample_infos",
+        "//rtp_llm/cpp/cache2",
+        "//rtp_llm/cpp/engine_base/stream:generate_config",
+        "//rtp_llm/cpp/engine_base/stream:generate_types",
+        "//rtp_llm/cpp/multimodal_processor:multimodal_types",
+        "//rtp_llm/cpp/pybind:py_utils",
+    ],
 )
 
 # LoRA - model fine-tuning
 cc_library(
     name = "lora",
-    hdrs = [
-        "lora/LoraManager.h",
-    ],
     srcs = [
         "lora/LoraManager.cc",
     ],
+    hdrs = [
+        "lora/LoraManager.h",
+    ],
+    visibility = ["//visibility:public"],
     deps = [
         "//:rtp_compute_ops",
     ],
-    visibility = ["//visibility:public"],
 )
 
 cc_library(
     name = "models",
-    hdrs = glob([
-        "*.h",
-    ]),
     srcs = glob([
         "*.cc",
     ]),
+    hdrs = glob([
+        "*.h",
+    ]),
+    visibility = ["//visibility:public"],
     deps = [
-        ":sample_infos",
-        ":logits_processor",
         ":dfa_utils",
+        ":logits_processor",
+        ":sample_infos",
         "//:rtp_compute_ops",
     ],
-    visibility = ["//visibility:public"],
 )
 
 # Expert statistics - monitoring component
@@ -123,18 +123,18 @@ cc_library(
 # Expert Load Balancer
 cc_library(
     name = "eplb",
-    hdrs = [
-        "eplb/ExpertBalancer.h",
-        "eplb/ExpertBalancerPythonWrapper.h",
-    ],
     srcs = [
         "eplb/ExpertBalancer.cc",
         "eplb/ExpertBalancerPythonWrapper.cc",
     ],
-    deps = [
-        ":models",
-        ":dfa_utils",
-        "//rtp_llm/cpp/pybind:py_utils",
+    hdrs = [
+        "eplb/ExpertBalancer.h",
+        "eplb/ExpertBalancerPythonWrapper.h",
     ],
     visibility = ["//visibility:public"],
+    deps = [
+        ":dfa_utils",
+        ":models",
+        "//rtp_llm/cpp/pybind:py_utils",
+    ],
 )

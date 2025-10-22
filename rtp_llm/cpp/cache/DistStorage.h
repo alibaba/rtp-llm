@@ -15,7 +15,7 @@ public:
     enum StorageType {
         ST_LOCAL_MEM = 0,
         ST_3FS       = 1,
-        ST_REMOTE    = 2,
+        ST_PROXY     = 2,
     };
 
     struct Iov {

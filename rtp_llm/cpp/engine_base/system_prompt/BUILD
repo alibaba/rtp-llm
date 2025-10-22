@@ -6,24 +6,24 @@ cc_library(
     hdrs = [
         "SystemPrompt.h",
     ],
+    visibility = ["//visibility:public"],
     deps = [
         "//:rtp_compute_ops",
     ],
-    visibility = ["//visibility:public"],
 )
 
 cc_library(
     name = "system_prompt_constructor",
-    hdrs = [
-        "SystemPromptConstructor.h",
-    ],
     srcs = [
         "SystemPromptConstructor.cc",
     ],
-    deps = [
-        "//rtp_llm/cpp/engine_base:engine_base",
-        "//rtp_llm/cpp/engine_base/stream:generate_config",
-        "//rtp_llm/cpp/cache",
+    hdrs = [
+        "SystemPromptConstructor.h",
     ],
     visibility = ["//visibility:public"],
+    deps = [
+        "//rtp_llm/cpp/cache2",
+        "//rtp_llm/cpp/engine_base",
+        "//rtp_llm/cpp/engine_base/stream:generate_config",
+    ],
 )

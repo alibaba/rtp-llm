@@ -6,7 +6,6 @@
 
 #include "rtp_llm/cpp/cache/CacheManager.h"
 #include "rtp_llm/cpp/cache/DistKvCacheMetrics.h"
-#include "rtp_llm/cpp/cache/RemoteKvCachePlanner.h"
 
 using namespace rtp_llm::threefs;
 
@@ -16,11 +15,6 @@ namespace {
 inline std::size_t hashString(const std::string& str) {
     std::hash<std::string> hasher;
     return hasher(str);
-}
-
-inline std::string genLocationSpecName(int tp_rank) {
-    static std::string location_spec_name("tp_rank_");
-    return location_spec_name + std::to_string(tp_rank);
 }
 
 inline void kvcmBlockMaskToPB(const kv_cache_manager::BlockMask& block_mask, KVCMBlockMaskPB* proto) {
@@ -64,38 +58,34 @@ DistKvCache::~DistKvCache() {
     cache_manager_ = nullptr;
 }
 
-bool DistKvCache::init(const DistKvCacheInitParams& init_params, bool is_legacy) {
-    RTP_LLM_LOG_INFO("dist kvcache init params: [%s], legacy [%d]", init_params.toString().c_str(), is_legacy);
-    is_legacy_                       = is_legacy;
-    init_params_                     = init_params;
-    auto& storage_params             = init_params_.storage_manager_params;
+bool DistKvCache::init(const DistKvCacheInitParams& init_params) {
+    RTP_LLM_LOG_INFO("dist kvcache init params: [%s]", init_params.toString().c_str());
+    init_params_         = init_params;
+    auto& storage_params = init_params_.storage_manager_params;
+
     storage_params.lookup_timeout_ms = init_params.match_timeout_ms;
     storage_params.get_timeout_ms    = init_params.rpc_get_cache_timeout_ms;
     storage_params.put_timeout_ms    = init_params.rpc_put_cache_timeout_ms;
 
-    if (is_legacy_) {
-        const auto& init_params_3fs = storage_params.init_params_3fs.value();
-        planner_                    = std::make_unique<DefaultDistKvCachePlanner>(
-            cache_manager_, gpt_init_params_, init_params_3fs, metrics_reporter_);
-        storage_ = std::make_unique<DistStorageManager>(metrics_reporter_);
-        if (!storage_->init(storage_params)) {
-            RTP_LLM_LOG_WARNING("init failed, init storage failed");
-            return false;
-        }
-
-        if (!initDefaultMetas()) {
-            RTP_LLM_LOG_WARNING("init failed, init default metas failed");
-            return false;
-        }
-    } else {
-        planner_ = std::make_unique<RemoteKvCachePlanner>(cache_manager_, gpt_init_params_, metrics_reporter_);
-        if (!initRemoteKvCacheClient()) {
-            RTP_LLM_LOG_WARNING("init failed, init remote kv cache client failed");
-            return false;
-        }
+    // default 3fs planner
+    if (!storage_params.init_params_3fs.has_value()) {
+        RTP_LLM_LOG_WARNING("init failed, 3fs init params is empty");
+        return false;
+    }
+    const auto& init_params_3fs = storage_params.init_params_3fs.value();
+    planner_                    = std::make_unique<DefaultDistKvCachePlanner>(
+        cache_manager_, gpt_init_params_, init_params_3fs, metrics_reporter_);
+    storage_ = std::make_unique<DistStorageManager>(metrics_reporter_);
+    if (!storage_->init(storage_params)) {
+        RTP_LLM_LOG_WARNING("init failed, init storage failed");
+        return false;
     }
 
-    // TODO KVCM client需要简化pool的使用
+    if (!initDefaultMetas()) {
+        RTP_LLM_LOG_WARNING("init failed, init default metas failed");
+        return false;
+    }
+
     wait_match_thread_pool_ =
         std::make_unique<autil::LockFreeThreadPool>(thread_num_, queue_size_, nullptr, "WaitMatchThreadPool");
     if (!wait_match_thread_pool_->start()) {
@@ -153,168 +143,13 @@ bool DistKvCache::initDefaultMetas() {
     return true;
 }
 
-std::map<std::string, std::string> DistKvCache::genKVCMClientConfig() const {
-    static std::string config_format = R"(
-{
-"enable_vipserver" : %s,
-"vipserver_domain" : "%s",
-"instance_group": "%s",
-"instance_id": "%lu",
-"address": ["%s"],
-"meta_channel_config": {
-    "retry_time":%u,
-    "connection_timeout":%u,
-    "call_timeout":%u
-},
-"block_size": %d,
-"location_spec_infos": %s,
-"sdk_config": {
-    "thread_num":%d,
-    "queue_size":%d,
-    "sdk_backend_configs":%s,
-    "timeout_config": {
-        "put_timeout_ms":%d,
-        "get_timeout_ms":%d
-}},
-"model_deployment": {
-    "model_name": "%s",
-    "dtype": "%s",
-    "use_mla": %s,
-    "tp_size": %ld,
-    "dp_size": %ld,
-    "lora_name": "%s",
-    "pp_size": 1,
-    "extra": "%s",
-    "user_data": "%s"
-}
-})";
-
-    bool enable_vip_server = autil::EnvUtil::getEnv("KVCM_ENABLE_VIPSERVER", false);
-    auto vipserver_domain  = autil::EnvUtil::getEnv("KVCM_VIPSERVER_DOMAIN", std::string(""));
-    auto server_address    = autil::EnvUtil::getEnv("KVCM_SERVER_ADDRESS", std::string(""));
-    auto instance_group    = autil::EnvUtil::getEnv("KVCM_INSTANCE_GROUP", std::string("default"));
-    auto extra_info        = autil::EnvUtil::getEnv("KVCM_MODEL_EXTRA_INFO", std::string(""));
-
-    uint32_t channel_retry_time         = autil::EnvUtil::getEnv("KVCM_META_CHANNEL_RETRY_TIME", 3);
-    uint32_t channel_connection_timeout = autil::EnvUtil::getEnv("KVCM_META_CHANNEL_CONNECTION_TIMEOUT", 1000);
-    uint32_t channel_call_timeout       = autil::EnvUtil::getEnv("KVCM_META_CHANNEL_CALL_TIMEOUT", 100);
-    if (extra_info.empty()) {
-        // legacy info
-        auto biz_name  = autil::EnvUtil::getEnv("BIZ_NAME", std::string(""));
-        auto ckpt_path = autil::EnvUtil::getEnv("CHECKPOINT_PATH", std::string(""));
-        extra_info += biz_name + '/' + std::to_string(hashString(ckpt_path));
-    }
-    auto user_data          = autil::EnvUtil::getEnv("KVCM_MODEL_USER_DATA", std::string(""));
-    int  storage_thread_num = autil::EnvUtil::getEnv("KVCM_STORAGE_THREAD_NUM", 4);
-    int  storage_queue_size = autil::EnvUtil::getEnv("KVCM_STORAGE_QUEUE_SIZE", 2000);
-    int  put_timeout_ms     = autil::EnvUtil::getEnv("KVCM_PUT_TIMEOUT_MS", 2000);
-    int  get_timeout_ms     = autil::EnvUtil::getEnv("KVCM_GET_TIMEOUT_MS", 2000);
-    auto sdk_backend_configs =
-        autil::EnvUtil::getEnv("KVCM_MODEL_SDK_CONFIG", std::string(R"([{"type":"local","sdk_log_level":"DEBUG"}])"));
-
-    const auto& cache_config        = cache_manager_->cacheConfig();
-    uint32_t    block_size          = cache_config.seq_size_per_block;
-    size_t      byte_size_per_block = cache_config.block_size;
-    const auto& model_parameter     = cache_manager_->gptInitParameter();
-    const auto& model_name          = model_parameter.model_name_;
-    const auto& dtype_str           = model_parameter.data_type_str_;
-    bool        use_mla             = model_parameter.use_mla_;
-    int64_t     tp_size             = model_parameter.tp_size_;
-    int64_t     dp_size             = model_parameter.dp_size_;
-    auto        lora_info_map       = cache_manager_->lora_info_map();
-    std::string self_location_spec_name;
-    auto        location_spec_info_map = KVCMClientWrapperConfig::LocationSpecInfoMap{};
-    for (size_t i = 0; i < cache_manager_->device()->getDeviceProperties().tp_size; ++i) {
-        location_spec_info_map.emplace(genLocationSpecName(i), byte_size_per_block);
-    }
-    auto location_spec_infos_str = autil::legacy::ToJsonString(location_spec_info_map, true);
-    lora_info_map[""]            = "";  // default : no lora
-    std::map<std::string, std::string> result;
-    for (const auto& [lora_adapter_name, lora_path] : lora_info_map) {
-        std::array<char, 40960> buffer;
-        std::string             lora_info_str;
-        if (!lora_adapter_name.empty()) {
-            lora_info_str = lora_adapter_name + '_' + std::to_string(hashString(lora_path));
-        }
-        std::stringstream instance_id_hash_ss;
-        instance_id_hash_ss << cache_config.debugString() << ";model_name:" << model_name << ";use_mla:" << use_mla
-                            << ";tp_size:" << tp_size << ";dp_size:" << dp_size << ";extra_info:" << extra_info
-                            << ";lora_info:" << lora_info_str << ";location_spec_info:" << location_spec_infos_str;
-        std::string instance_id_hash_str = instance_id_hash_ss.str();
-        auto        instance_id          = hashString(instance_id_hash_str);
-        RTP_LLM_LOG_INFO("lora_adapter_name[%s], instance_id_hash_str[%s], instance_id[%lu]",
-                         lora_adapter_name.c_str(),
-                         instance_id_hash_str.c_str(),
-                         instance_id);
-        int n = std::snprintf(buffer.data(),
-                              buffer.size(),
-                              config_format.c_str(),
-                              enable_vip_server ? "true" : "false",
-                              vipserver_domain.c_str(),
-                              instance_group.c_str(),
-                              instance_id,
-                              server_address.c_str(),
-                              channel_retry_time,
-                              channel_connection_timeout,
-                              channel_call_timeout,
-                              block_size,
-                              location_spec_infos_str.c_str(),
-                              storage_thread_num,
-                              storage_queue_size,
-                              sdk_backend_configs.c_str(),
-                              put_timeout_ms,
-                              get_timeout_ms,
-                              model_name.c_str(),
-                              dtype_str.c_str(),
-                              use_mla ? "true" : "false",
-                              tp_size,
-                              dp_size,
-                              lora_info_str.c_str(),
-                              extra_info.c_str(),
-                              user_data.c_str());
-
-        result[lora_info_str] = std::string(buffer.data(), n);
-    }
-    return result;
-}
-
-bool DistKvCache::initRemoteKvCacheClient() {
-    auto client_config_map_str = autil::EnvUtil::getEnv("KVCM_CLIENT_CONFIG", std::string(""));
-    std::map<std::string, std::string> client_config_map;
-    if (!client_config_map_str.empty()) {
-        try {
-            autil::legacy::FromJsonString(client_config_map, client_config_map_str);
-        } catch (autil::legacy::ExceptionBase& e) {
-            RTP_LLM_LOG_ERROR(
-                "parse KVCM_CLIENT_CONFIG [%s] fail.\n %s, exception: [%s]", client_config_map_str.c_str(), e.what());
-            return false;
-        }
-    } else {
-        client_config_map = genKVCMClientConfig();
-    }
-    auto tp_rank         = cache_manager_->device()->getDeviceProperties().tp_rank;
-    kvcm_client_wrapper_ = std::make_unique<KVCMClientWrapper>();
-    kv_cache_manager::RegistSpan regist_span{cache_manager_->kvCacheAllocator()->getCacheBasePtr(),
-                                             cache_manager_->kvCacheAllocator()->getCacheBufferSize()};
-    kv_cache_manager::InitParams client_init_params{tp_rank == 0 ? kv_cache_manager::RoleType::HYBRID :
-                                                                   kv_cache_manager::RoleType::WORKER,
-                                                    &regist_span,
-                                                    genLocationSpecName(tp_rank)};
-    if (!kvcm_client_wrapper_->init(client_config_map, client_init_params)) {
-        RTP_LLM_LOG_ERROR("create remote kv cache client failed");
-        return false;
-    }
-    RTP_LLM_LOG_INFO("create remote kv cache client success");
-    return true;
-}
-
 int32_t DistKvCache::matchForAllRank(const std::vector<int64_t>&        cache_keys,
                                      size_t                             ignore_block_num,
                                      int64_t                            request_id,
                                      std::map<std::string, std::string> extra_metas,
-                                     kv_cache_manager::LocationsMap&    locations_map) {
-    if (cache_keys.empty() || !planner_ || (is_legacy_ && !storage_) || (!is_legacy_ && !kvcm_client_wrapper_)) {
-        RTP_LLM_LOG_WARNING("invalid state, ignore match request, %p, %p", planner_.get(), kvcm_client_wrapper_.get());
+                                     const LocationsMapPtr&             locations_map_ptr) {
+    assert(planner_);
+    if (cache_keys.empty()) {
         return 0;
     }
 
@@ -332,7 +167,7 @@ int32_t DistKvCache::matchForAllRank(const std::vector<int64_t>&        cache_ke
 
     auto stop = std::make_shared<std::atomic<bool>>(false);
     auto task =
-        [weak_this = weak_from_this(), &cache_keys, ignore_block_num, request_id, &extra_metas, stop, &locations_map]()
+        [weak_this = weak_from_this(), cache_keys, ignore_block_num, request_id, extra_metas, stop, locations_map_ptr]()
         -> int32_t {
         if (weak_this.expired()) {
             RTP_LLM_LOG_WARNING("match for all rank failed, dist kv cache has been expired, request_id: %ld",
@@ -340,22 +175,8 @@ int32_t DistKvCache::matchForAllRank(const std::vector<int64_t>&        cache_ke
             return 0;
         }
         auto shared_this = weak_this.lock();
-        if (!(shared_this->is_legacy_)) {
-            return shared_this->match(cache_keys, locations_map, ignore_block_num, request_id, extra_metas, stop);
-        }
-        int32_t match_len = static_cast<int32_t>(cache_keys.size());
-        auto    metas     = extra_metas;
-        for (int i = 0; i < shared_this->gpt_init_params_.tp_size_; i++) {
-            metas["TP_RANK"] = std::to_string(i);
-            auto ret         = shared_this->match(cache_keys, locations_map, ignore_block_num, request_id, metas, stop);
-            if (ret < match_len) {
-                match_len = ret;
-            }
-            if (match_len == 0) {
-                break;
-            }
-        }
-        return match_len;
+        return shared_this->matchAllRankImpl(
+            cache_keys, locations_map_ptr, ignore_block_num, request_id, extra_metas, stop);
     };
 
     auto future = wait_match_thread_pool_->async(task);
@@ -392,11 +213,36 @@ int32_t DistKvCache::matchForAllRank(const std::vector<int64_t>&        cache_ke
     return match_len;
 }
 
+int32_t DistKvCache::matchAllRankImpl(const std::vector<int64_t>&               cache_keys,
+                                      LocationsMapPtr                           locations_map_ptr,
+                                      size_t                                    ignore_block_num,
+                                      int64_t                                   request_id,
+                                      const std::map<std::string, std::string>& extra_metas,
+                                      const std::shared_ptr<std::atomic<bool>>& stop) const {
+    int32_t match_len = static_cast<int32_t>(cache_keys.size());
+    auto    metas     = extra_metas;
+    for (auto& [key, value] : default_metas_) {
+        if (metas.count(key) == 0) {
+            metas[key] = value;
+        }
+    }
+    for (int i = 0; i < gpt_init_params_.tp_size_; i++) {
+        metas["TP_RANK"] = std::to_string(i);
+        auto ret         = match(cache_keys, ignore_block_num, request_id, metas, stop);
+        if (ret < match_len) {
+            match_len = ret;
+        }
+        if (match_len == 0) {
+            break;
+        }
+    }
+    return match_len;
+}
+
 int32_t DistKvCache::match(const std::vector<int64_t>&               cache_keys,
-                           kv_cache_manager::LocationsMap&           locations_map,
                            size_t                                    ignore_block_num,
                            int64_t                                   request_id,
-                           std::map<std::string, std::string>        extra_metas,
+                           const std::map<std::string, std::string>& extra_metas,
                            const std::shared_ptr<std::atomic<bool>>& stop) const {
     if ((stop && stop->load()) || cache_keys.empty()) {
         return 0;
@@ -404,27 +250,6 @@ int32_t DistKvCache::match(const std::vector<int64_t>&               cache_keys,
 
     RTP_LLM_LOG_DEBUG("cache_keys size: %zu", cache_keys.size());
     RTP_LLM_LOG_DEBUG("ignore_block_num: %zu", ignore_block_num);
-
-    if (!is_legacy_) {
-        std::string trace_id   = "match_" + std::to_string(request_id);
-        auto        query_type = kv_cache_manager::QueryType::QT_PREFIX_MATCH;
-        // TODO 这接口后面几个参数不需要，要改一下，block_mask要放前面去。
-        auto [success, result] = kvcm_client_wrapper_->match(
-            genUniqueId(extra_metas), trace_id, query_type, cache_keys, ignore_block_num, {});
-        if (!success) {
-            RTP_LLM_LOG_ERROR("remote match failed");
-            return 0;
-        }
-        locations_map = std::move(result);
-        return ignore_block_num + (locations_map.empty() ? 0 : locations_map.begin()->second.size());
-    }
-
-    for (auto& [key, value] : default_metas_) {
-        if (extra_metas.count(key) == 0) {
-            extra_metas[key] = value;
-        }
-    }
-
     RTP_LLM_LOG_DEBUG("extra_metas: %s", extra_metas.at("TP_RANK").c_str());
 
     // get layout at the granularity of items i.e. blocks collection
@@ -480,12 +305,12 @@ int32_t DistKvCache::match(const std::vector<int64_t>&               cache_keys,
     return match_len;
 }
 
-bool DistKvCache::getForAllRank(const std::vector<int64_t>&           cache_keys,
-                                const std::vector<int32_t>&           block_indices,
-                                const kv_cache_manager::LocationsMap& locations_map,
-                                size_t                                ignore_block_num,
-                                int64_t                               request_id,
-                                std::map<std::string, std::string>    extra_metas) const {
+bool DistKvCache::getForAllRank(const std::vector<int64_t>&        cache_keys,
+                                const std::vector<int32_t>&        block_indices,
+                                const LocationsMapPtr&             locations_map_ptr,
+                                size_t                             ignore_block_num,
+                                int64_t                            request_id,
+                                std::map<std::string, std::string> extra_metas) const {
     auto metrics = DistKvCacheMetricsFactory::createMetrics(metrics_reporter_);
 
     const auto input_len        = static_cast<int32_t>(cache_keys.size());
@@ -503,7 +328,7 @@ bool DistKvCache::getForAllRank(const std::vector<int64_t>&           cache_keys
     DistKvCacheMetrics::markTotalGetCacheBeginUs(metrics);
 
     bool result = syncCallAllRank(
-        cache_keys, block_indices, locations_map, ignore_block_num, request_id, extra_metas, OpType::OP_GET);
+        cache_keys, block_indices, *locations_map_ptr, ignore_block_num, request_id, extra_metas, OpType::OP_GET);
 
     DistKvCacheMetrics::markTotalGetCacheDoneUs(metrics);
     DistKvCacheMetrics::setGetCacheFailedQps(metrics, result == false);
@@ -521,11 +346,9 @@ bool DistKvCache::get(const std::vector<int64_t>&        cache_keys,
                       const kv_cache_manager::BlockMask& block_mask,
                       int64_t                            request_id,
                       std::map<std::string, std::string> extra_metas) const {
-    if (is_legacy_) {
-        for (auto& [key, value] : default_metas_) {
-            if (extra_metas.count(key) == 0) {
-                extra_metas[key] = value;
-            }
+    for (auto& [key, value] : default_metas_) {
+        if (extra_metas.count(key) == 0) {
+            extra_metas[key] = value;
         }
     }
 
@@ -535,42 +358,14 @@ bool DistKvCache::get(const std::vector<int64_t>&        cache_keys,
         return false;
     }
 
-    for (auto& item : layout_items) {
-        RTP_LLM_LOG_DEBUG("layout item: %s", item.key.c_str());
-    }
-
     auto metrics = DistKvCacheMetricsFactory::createMetrics(metrics_reporter_);
     DistKvCacheMetrics::markGetCacheBeginUs(metrics);
 
     std::vector<autil::ThreadPoolBase::Future<bool>> get_futures;
-    if (is_legacy_) {
-        get_futures.reserve(layout_items.size());
-        for (auto& it : layout_items) {
-            auto get_task = [this, it]() mutable -> bool { return storage_->get(it); };
-            get_futures.emplace_back(io_thread_pool_->async(get_task));
-        }
-    } else {
-        // TODO 先在这里转换为client认识的内存地址
-        kv_cache_manager::BlockBuffers block_buffers;
-        for (auto& item : layout_items) {
-            kv_cache_manager::BlockBuffer block_buffer;
-            for (auto item_iov : item.iovs) {
-                kv_cache_manager::Iov iov = {
-                    kv_cache_manager::MemoryType::GPU, item_iov.data.get(), item_iov.len, item_iov.ignore};
-                block_buffer.iovs.push_back(iov);
-            }
-            block_buffers.push_back(std::move(block_buffer));
-        }
-        RTP_LLM_LOG_INFO("kvcm_match: key_size=%zu,match_len=%zu,first=%s,buffer_size=%zu",
-                         cache_keys.size(),
-                         locations.size(),
-                         locations[0].c_str(),
-                         block_buffers.size());
 
-        get_futures.reserve(1);
-        auto get_task = [this, &locations, x = std::move(block_buffers)]() mutable -> bool {
-            return kvcm_client_wrapper_->loadKvCaches(locations, x);
-        };
+    get_futures.reserve(layout_items.size());
+    for (auto& it : layout_items) {
+        auto get_task = [this, it]() mutable -> bool { return storage_->get(it); };
         get_futures.emplace_back(io_thread_pool_->async(get_task));
     }
 
@@ -601,60 +396,26 @@ bool DistKvCache::putForAllRank(const std::vector<int64_t>&        cache_keys,
                                 size_t                             ignore_block_num,
                                 int64_t                            request_id,
                                 std::map<std::string, std::string> extra_metas) const {
-    std::map<std::string, std::string> rpc_extra_metas;
-    if (is_legacy_) {
-        rpc_extra_metas = extra_metas;  // 拷贝一份用于rpc传输, 否则rpc可能会传比较多冗余信息
-        for (auto& [key, value] : default_metas_) {
-            if (extra_metas.count(key) == 0) {
-                extra_metas[key] = value;
-            }
-        }
-    }
     auto metrics = DistKvCacheMetricsFactory::createMetrics(metrics_reporter_);
     DistKvCacheMetrics::markTotalPutCacheBeginUs(metrics);
-    kv_cache_manager::WriteLocation write_location;
-    if (!is_legacy_) {
-        std::string trace_id = "put_start_" + std::to_string(request_id);
-        // TODO timeout不需要传递了，每个instance一个。
-        // 有个session id还挺烦的，能自己指定一个吗？这样就可以用这次所有key的hash + requestid？
-        auto [success, res] =
-            kvcm_client_wrapper_->getWriteLocation(genUniqueId(extra_metas), trace_id, cache_keys, {}, 1800, {});
-        if (!success) {
-            RTP_LLM_LOG_WARNING("kvcm getWriteLocation failed, [%s]", trace_id.c_str());
-            return false;
-        }
-        if (res.locations_map.empty()) {
-            RTP_LLM_LOG_WARNING("kvcm getWriteLocation empty, [%s]", trace_id.c_str());
-            return true;
-        }
-        write_location = std::move(res);
-    }
-    bool result = syncCallAllRank(cache_keys,
-                                  block_indices,
-                                  write_location.locations_map,
-                                  is_legacy_ ? ignore_block_num : write_location.block_mask,
-                                  request_id,
-                                  is_legacy_ ? rpc_extra_metas : extra_metas,
-                                  OpType::OP_PUT);
 
-    if (!is_legacy_) {
-        bool        all_block_succeed = result;
-        size_t      succeed_block     = all_block_succeed ? write_location.locations_map.begin()->second.size() : 0;
-        std::string trace_id          = "put_finish_" + std::to_string(request_id);
-        // TODO write_location里面有个session_id貌似不太合理
-        result = kvcm_client_wrapper_->finishWrite(
-            genUniqueId(extra_metas), trace_id, write_location.write_session_id, succeed_block, {});
-        if (!result) {
-            RTP_LLM_LOG_WARNING("kvcm finishWrite failed, [%s]", trace_id.c_str());
-        }
-    }
+    bool result = putAllRankImpl(cache_keys, block_indices, ignore_block_num, request_id, extra_metas);
 
     const auto& cache_config = cache_manager_->cacheConfig();
     DistKvCacheMetrics::markTotalPutCacheDoneUs(metrics);
     DistKvCacheMetrics::setPutCacheFailedQps(metrics, result == false);
+    // TODO: 下面这个指标可能要修正一下
     DistKvCacheMetrics::setCachePutLength(metrics, cache_keys.size() * cache_config.seq_size_per_block);
 
     return result;
+}
+
+bool DistKvCache::putAllRankImpl(const std::vector<int64_t>&               cache_keys,
+                                 const std::vector<int32_t>&               block_indices,
+                                 size_t                                    ignore_block_num,
+                                 int64_t                                   request_id,
+                                 const std::map<std::string, std::string>& extra_metas) const {
+    return syncCallAllRank(cache_keys, block_indices, {}, ignore_block_num, request_id, extra_metas, OpType::OP_PUT);
 }
 
 bool DistKvCache::put(const std::vector<int64_t>&        cache_keys,
@@ -663,11 +424,9 @@ bool DistKvCache::put(const std::vector<int64_t>&        cache_keys,
                       const kv_cache_manager::BlockMask& block_mask,
                       int64_t                            request_id,
                       std::map<std::string, std::string> extra_metas) const {
-    if (is_legacy_) {
-        for (auto& [key, value] : default_metas_) {
-            if (extra_metas.count(key) == 0) {
-                extra_metas[key] = value;
-            }
+    for (auto& [key, value] : default_metas_) {
+        if (extra_metas.count(key) == 0) {
+            extra_metas[key] = value;
         }
     }
 
@@ -681,35 +440,9 @@ bool DistKvCache::put(const std::vector<int64_t>&        cache_keys,
     DistKvCacheMetrics::markPutCacheBeginUs(metrics);
 
     std::vector<autil::ThreadPoolBase::Future<bool>> put_futures;
-    if (is_legacy_) {
-        put_futures.reserve(layout_items.size());
-        for (auto& it : layout_items) {
-            auto put_task = [this, it]() mutable -> bool { return storage_->putIfNotExist(it); };
-            put_futures.emplace_back(io_thread_pool_->async(put_task));
-        }
-    } else {
-        // TODO 先在这里转换为client认识的内存地址
-        kv_cache_manager::BlockBuffers block_buffers;
-        for (auto& item : layout_items) {
-            kv_cache_manager::BlockBuffer block_buffer;
-            for (const auto& item_iov : item.iovs) {
-                kv_cache_manager::Iov iov = {
-                    kv_cache_manager::MemoryType::GPU, item_iov.data.get(), item_iov.len, item_iov.ignore};
-                block_buffer.iovs.push_back(iov);
-            }
-            block_buffers.push_back(std::move(block_buffer));
-        }
-
-        RTP_LLM_LOG_INFO("kvcm_get_write_location:keys_size=%zu,location_size=%zu,buffer_size=%zu,first_location=%s\n",
-                         cache_keys.size(),
-                         locations.size(),
-                         block_buffers.size(),
-                         locations[0].c_str());
-        put_futures.reserve(1);
-        auto put_task = [this, &locations, x = std::move(block_buffers)]() mutable -> bool {
-            // TODO(qisa.cb)
-            return kvcm_client_wrapper_->saveKvCaches(locations, x).first;
-        };
+    put_futures.reserve(layout_items.size());
+    for (auto& it : layout_items) {
+        auto put_task = [this, it]() mutable -> bool { return storage_->putIfNotExist(it); };
         put_futures.emplace_back(io_thread_pool_->async(put_task));
     }
 
@@ -742,6 +475,33 @@ struct WorkerRpcContext {
     DistKvCacheResponsePB                response;
     grpc::CompletionQueue                completion_queue;
 };
+
+bool DistKvCache::fillDistKvCacheRequestPB(DistKvCacheRequestPB&                     request,
+                                           const std::vector<int64_t>&               cache_keys,
+                                           const std::vector<int32_t>&               block_indices,
+                                           const kv_cache_manager::LocationsMap&     locations_map,
+                                           const kv_cache_manager::BlockMask&        block_mask,
+                                           int64_t                                   request_id,
+                                           const std::map<std::string, std::string>& extra_metas,
+                                           DistKvCache::OpType                       op_type,
+                                           int                                       rank) const {
+    request.set_request_id(request_id);
+    for (const auto cache_key : cache_keys) {
+        request.add_cache_keys(cache_key);
+    }
+    for (const auto block_index : block_indices) {
+        request.add_block_ids(block_index);
+    }
+    request.set_ignore_block_num(std::get<size_t>(block_mask));
+    request.set_op(op_type == OpType::OP_GET ? DistKvCacheOp::GET : DistKvCacheOp::PUT);
+    for (const auto& extra_meta : extra_metas) {
+        auto* meta = request.add_extra_metas();
+        meta->set_key(extra_meta.first);
+        meta->set_value(extra_meta.second);
+    }
+    kvcmBlockMaskToPB(block_mask, request.mutable_kvcm_block_mask());
+    return true;
+}
 
 // TODO: sync call all rank 的逻辑用到的地方比较多, 抽一下
 bool DistKvCache::syncCallAllRank(const std::vector<int64_t>&               cache_keys,
@@ -777,34 +537,17 @@ bool DistKvCache::syncCallAllRank(const std::vector<int64_t>&               cach
         }
         auto& rpc_context = worker_rpc_contexts[rank];
         auto& request     = rpc_context.request;
-
-        request.set_request_id(request_id);
-        for (const auto cache_key : cache_keys) {
-            request.add_cache_keys(cache_key);
+        if (!fillDistKvCacheRequestPB(request,
+                                      cache_keys,
+                                      block_indices,
+                                      locations_map,
+                                      block_mask,
+                                      request_id,
+                                      extra_metas,
+                                      op_type,
+                                      rank)) {
+            return false;
         }
-        for (const auto block_index : block_indices) {
-            request.add_block_ids(block_index);
-        }
-        request.set_ignore_block_num(is_legacy_ ? std::get<size_t>(block_mask) : 0);  // TODO : deprecated
-        request.set_op(op_type == OpType::OP_GET ? DistKvCacheOp::GET : DistKvCacheOp::PUT);
-        for (const auto& extra_meta : extra_metas) {
-            auto* meta = request.add_extra_metas();
-            meta->set_key(extra_meta.first);
-            meta->set_value(extra_meta.second);
-        }
-        if (!is_legacy_) {
-            auto       location_spec_name = genLocationSpecName(rank);
-            const auto locations_iter     = locations_map.find(location_spec_name);
-            if (locations_iter == locations_map.end()) {
-                RTP_LLM_LOG_WARNING("not exist location spce name [%s]", location_spec_name.c_str());
-                return false;
-            }
-            const auto& locations = locations_iter->second;
-            for (const auto& location : locations) {
-                request.add_kvcm_locations(location);
-            }
-        }
-        kvcmBlockMaskToPB(block_mask, request.mutable_kvcm_block_mask());
 
         rpc_context.stub        = connect_status.value().stub;
         rpc_context.server_addr = worker_addr;
@@ -884,22 +627,6 @@ bool DistKvCache::syncCallAllRank(const std::vector<int64_t>&               cach
         }
     }
     return all_request_success;
-}
-
-std::string DistKvCache::genUniqueId(const std::map<std::string, std::string>& extra_metas) const {
-    const auto& adpater_iter = extra_metas.find("LORA_ADAPTER_NAME");
-    if (adpater_iter == extra_metas.end()) {
-        return "";
-    }
-    const auto& lora_adapter_name = adpater_iter->second;
-    if (lora_adapter_name.empty()) {
-        return "";
-    }
-    const auto& lora_info_map = cache_manager_->lora_info_map();
-    if (const auto& iter = lora_info_map.find(lora_adapter_name); iter != lora_info_map.end()) {
-        return lora_adapter_name + '_' + std::to_string(hashString(iter->second));
-    }
-    return "";
 }
 
 }  // namespace rtp_llm

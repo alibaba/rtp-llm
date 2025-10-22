@@ -1,41 +1,41 @@
 load("//:def.bzl", "copts")
-load("//bazel:arch_select.bzl", "torch_deps", "select_py_bindings")
+load("//bazel:arch_select.bzl", "select_py_bindings", "torch_deps")
 
 package(default_visibility = ["//:__subpackages__"])
 
 cc_library(
     name = "py_utils",
-    hdrs = [
-        "PyUtils.h",
-    ],
     srcs = [
         "PyUtils.cc",
     ],
-    deps = [
-        "//:rtp_compute_ops",
+    hdrs = [
+        "PyUtils.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
+    deps = [
+        "//:rtp_compute_ops",
+    ],
 )
 
 cc_library(
     name = "th_transformer_config_lib",
     srcs = [
-        "common/blockUtil.cc",
         "ConfigInit.cc",
+        "common/blockUtil.cc",
     ],
     hdrs = [
         "common/blockUtil.h",
     ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
     deps = [
         ":py_utils",
         "//rtp_llm/cpp/config:gpt_init_params",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:hash_util",
     ],
-    copts = copts(),
     alwayslink = True,
-    visibility = ["//visibility:public"],
 )
 
 cc_library(
@@ -44,26 +44,26 @@ cc_library(
         "ComputeInit.cc",
     ],
     hdrs = [],
+    copts = copts(),
+    visibility = ["//visibility:public"],
     deps = [
-        "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/devices:devices_base",
         "//rtp_llm/cpp/devices:device_utils",
+        "//rtp_llm/cpp/devices:devices_base",
+        "//rtp_llm/cpp/utils:core_utils",
         "@havenask//aios/autil:base64",
         "@havenask//aios/autil:zlib",
     ] + torch_deps() + select_py_bindings(),
-    copts = copts(),
     alwayslink = True,
-    visibility = ["//visibility:public"],
 )
 
 cc_library(
     name = "th_transformer_lib",
     srcs = [
-        "init.cc",
         "common/InitEngineOps.cc",
+        "init.cc",
         "multi_gpu_gpt/RtpEmbeddingOp.cc",
         "multi_gpu_gpt/RtpLLMOp.cc",
-    ] +  select({
+    ] + select({
         "@//:using_cuda12": [
             "common/NcclOp.cc",
         ],
@@ -76,22 +76,22 @@ cc_library(
         "//conditions:default": [],
     }),
     hdrs = [
-        "common/NcclOp.h",
         "common/InitEngineOps.h",
+        "common/NcclOp.h",
         "common/blockUtil.h",
         "multi_gpu_gpt/RtpEmbeddingOp.h",
         "multi_gpu_gpt/RtpLLMOp.h",
     ],
-    deps = [
-        "//rtp_llm/cpp/api_server:http_api_server",
-        "//rtp_llm/cpp/model_rpc:model_rpc_server",
-        "//rtp_llm/cpp/engine_base/schedulers:schedulers",
-        "//rtp_llm/cpp/cache:cache",
-        "//:rtp_compute_ops",
-    ] + torch_deps(),
     copts = copts(),
-    alwayslink = True,
     visibility = ["//visibility:public"],
+    deps = [
+        "//:rtp_compute_ops",
+        "//rtp_llm/cpp/api_server:http_api_server",
+        "//rtp_llm/cpp/cache2",
+        "//rtp_llm/cpp/engine_base/schedulers",
+        "//rtp_llm/cpp/model_rpc:model_rpc_server",
+    ] + torch_deps(),
+    alwayslink = True,
 )
 
 cc_library(
@@ -102,12 +102,12 @@ cc_library(
         ],
         "//conditions:default": [],
     }),
+    copts = copts(),
+    visibility = ["//visibility:public"],
     deps = [
         "//rtp_llm/cpp/cuda/cutlass:cutlass_kernels_common",
     ] + torch_deps(),
-    copts = copts(),
     alwayslink = True,
-    visibility = ["//visibility:public"],
 )
 
 cc_library(
@@ -115,9 +115,9 @@ cc_library(
     hdrs = [
         "th_utils.h",
     ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
     deps = [
         "//rtp_llm/cpp/utils:core_utils",
     ],
-    copts = copts(),
-    visibility = ["//visibility:public"],
 )

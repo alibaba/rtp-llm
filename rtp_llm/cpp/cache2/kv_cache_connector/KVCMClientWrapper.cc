@@ -58,7 +58,7 @@ bool KVCMClientWrapper::init(const std::map<std::string, std::string>& config_st
 }
 
 bool KVCMClientWrapper::initMetaClient(const std::string& unique_id, const std::string& config_str) {
-    RTP_LLM_LOG_INFO("kvcm init config [%s]", config_str.c_str());
+    RTP_LLM_LOG_INFO("kvcm unique_id [%s], init config [%s]", unique_id.c_str(), config_str.c_str());
     auto        config = std::make_shared<KVCMClientWrapperConfig>();
     std::string rtp_llm_clint_config;
     try {
@@ -95,7 +95,14 @@ bool KVCMClientWrapper::initMetaClient(const std::string& unique_id, const std::
     auto real_config_str = autil::legacy::ToJsonString(*config);
     RTP_LLM_LOG_INFO("init unique_id[%s], kvcm real config[%s]", unique_id.c_str(), real_config_str.c_str());
     config_map_[unique_id] = config;
-    auto meta_client       = kv_cache_manager::MetaClient::Create(real_config_str, init_params_);
+    std::unique_ptr<kv_cache_manager::MetaClient> meta_client;
+    for (int i = 1; i <= config->meta_channel_config().retry_time(); ++i) {
+        RTP_LLM_LOG_INFO("try meta client, try time[%d]", i);
+        meta_client = kv_cache_manager::MetaClient::Create(real_config_str, init_params_);
+        if (meta_client) {
+            break;
+        }
+    }
     if (meta_client == nullptr) {
         RTP_LLM_LOG_ERROR("create meta client failed");
         return false;

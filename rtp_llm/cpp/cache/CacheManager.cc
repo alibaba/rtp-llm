@@ -51,13 +51,6 @@ CacheManager::CacheManager(const CacheConfig&                 config,
     if (metrics_reporter_) {
         metrics_reporter_thread_ = std::thread(&CacheManager::reportMetricsLoop, this);
     }
-    bool enable_dist_kv_cache = params_.kv_cache_config.enable_dist_kvcache || params_.kv_cache_config.enable_3fs;
-    if (enable_dist_kv_cache) {
-        enable_dist_kvcache_ = initDistKvCache(!params_.kv_cache_config.enable_dist_kvcache);
-        if (!enable_dist_kvcache_) {
-            RTP_LLM_FAIL("dist kv cache init failed");
-        }
-    }
 
     if (params_.kv_cache_config.memory_block_cache_size_mb > 0) {
         int64_t block_nums =
@@ -76,6 +69,8 @@ CacheManager::CacheManager(const CacheConfig&                 config,
             RTP_LLM_FAIL("memory block cache init failed");
         }
     }
+
+    enable_dist_kvcache_ = params_.kv_cache_config.enable_dist_kvcache || params_.kv_cache_config.enable_3fs;
 }
 
 void CacheManager::regUserMr(size_t model_id) {
@@ -468,7 +463,7 @@ KVCacheAllocator::BlockAddrInfo CacheManager::convertIndexToAddr(int block_index
     return allocator_->convertIndexToAddr(block_index, layer_id);
 }
 
-bool CacheManager::initDistKvCache(bool is_legacy) {
+bool CacheManager::initDistKvCache() {
     DistKvCacheInitParams init_params;
     init_params.match_timeout_ms         = params_.kv_cache_config.match_timeout_ms;
     init_params.rpc_get_cache_timeout_ms = params_.kv_cache_config.rpc_get_cache_timeout_ms;
@@ -483,7 +478,7 @@ bool CacheManager::initDistKvCache(bool is_legacy) {
         init_params.storage_manager_params.init_params_3fs = init_params_3fs;
     }
     auto dist_kvcache = std::make_shared<DistKvCache>(this, params_, metrics_reporter_);
-    if (!dist_kvcache->init(init_params, is_legacy)) {
+    if (!dist_kvcache->init(init_params)) {
         RTP_LLM_LOG_WARNING("dist kvcache init failed!!!");
         return false;
     }
@@ -493,9 +488,9 @@ bool CacheManager::initDistKvCache(bool is_legacy) {
 }
 
 void CacheManager::matchInDistKvCache(const AdvancedMallocInfo& malloc_info, BlockCache::MatchResult& match_result) {
-    const auto cache_keys           = malloc_info.cache_keys;
-    const auto request_id           = malloc_info.request_id;
-    const auto local_matched_blocks = match_result.block_indices.size();
+    const auto& cache_keys           = malloc_info.cache_keys;
+    const auto  request_id           = malloc_info.request_id;
+    const auto  local_matched_blocks = match_result.block_indices.size();
     if (local_matched_blocks >= cache_keys.size()) {
         return;
     }
@@ -504,12 +499,11 @@ void CacheManager::matchInDistKvCache(const AdvancedMallocInfo& malloc_info, Blo
         return;
     }
 
-    std::map<std::string, std::string> extra_metas;
-    extra_metas["LORA_CKPT_PATH"]    = getLoraCkptPath(malloc_info.adapter_name);
-    extra_metas["LORA_ADAPTER_NAME"] = malloc_info.adapter_name;
-    kv_cache_manager::LocationsMap locations_map;
-    auto                           matched_blocks =
-        dist_kvcache_->matchForAllRank(cache_keys, local_matched_blocks, request_id, extra_metas, locations_map);
+    std::map<std::string, std::string> extra_metas = genExtraMeta(malloc_info.adapter_name);
+
+    auto locations_map_ptr = std::make_shared<kv_cache_manager::LocationsMap>();
+    auto matched_blocks =
+        dist_kvcache_->matchForAllRank(cache_keys, local_matched_blocks, request_id, extra_metas, locations_map_ptr);
     if (matched_blocks <= 0) {
         return;
     }
@@ -530,7 +524,7 @@ void CacheManager::matchInDistKvCache(const AdvancedMallocInfo& malloc_info, Blo
 
     std::vector<int64_t> matched_cache_keys(cache_keys.begin(), cache_keys.begin() + matched_blocks);
     if (!dist_kvcache_->getForAllRank(
-            matched_cache_keys, block_id, locations_map, local_matched_blocks, request_id, extra_metas)) {
+            matched_cache_keys, block_id, locations_map_ptr, local_matched_blocks, request_id, extra_metas)) {
         freeWithoutLock(block_id);
         return;
     }
@@ -552,9 +546,7 @@ bool CacheManager::putToDistKvCache(const std::vector<int64_t>& cache_keys,
         return false;
     }
     if (dist_kvcache_) {
-        std::map<std::string, std::string> extra_metas;
-        extra_metas["LORA_CKPT_PATH"]    = getLoraCkptPath(adapter_name);
-        extra_metas["LORA_ADAPTER_NAME"] = adapter_name;
+        std::map<std::string, std::string> extra_metas = genExtraMeta(adapter_name);
         return dist_kvcache_->putForAllRank(cache_keys, block_indices, ignore_block_num, request_id, extra_metas);
     }
     return false;
@@ -595,6 +587,12 @@ public:
     std::map<std::string, std::string> lora_info_map;
 };
 
+std::map<std::string, std::string> CacheManager::genExtraMeta(const std::string& adapter_name) const {
+    std::map<std::string, std::string> extra_metas;
+    extra_metas["LORA_CKPT_PATH"] = getLoraCkptPath(adapter_name);
+    return extra_metas;
+}
+
 std::map<std::string, std::string> CacheManager::getLoraInfo() const {
     const auto lora_info_str = autil::EnvUtil::getEnv("LORA_INFO", std::string(""));
     RTP_LLM_LOG_INFO("lora info: %s", lora_info_str.c_str());
@@ -605,7 +603,7 @@ std::map<std::string, std::string> CacheManager::getLoraInfo() const {
         LoraInfo lora_info;
         autil::legacy::FromJsonString(lora_info, lora_info_str);
         return lora_info.lora_info_map;
-    } catch (autil::legacy::ExceptionBase& e) {
+    } catch (const std::exception& e) {
         RTP_LLM_LOG_WARNING(
             "found exception when parse lora info. lora info: %s, exception: [%s]", lora_info_str.c_str(), e.what());
     }

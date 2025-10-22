@@ -9,7 +9,7 @@ test_deps = [
     "//rtp_llm/cpp/devices/testing:device_test_utils",
     "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
     "//rtp_llm/cpp/config:gpt_init_params",
-    "//rtp_llm/cpp/cache",
+    "//rtp_llm/cpp/cache2",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",
     "@local_config_cuda//cuda:cuda_headers",
@@ -21,15 +21,15 @@ cc_test(
     srcs = [
         "CacheManagerTest.cc",
     ],
-    data = [],
     copts = test_copts,
-    deps = test_deps + [
-        ":mock_dist_kvcache",
-    ],
+    data = [],
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10"},
+    deps = test_deps + [
+        ":mock_dist_kvcache",
+    ],
 )
 
 cc_test(
@@ -37,13 +37,13 @@ cc_test(
     srcs = [
         "CacheConfigCreatorTest.cc",
     ],
-    data = [],
     copts = test_copts,
-    deps = test_deps,
+    data = [],
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10"},
+    deps = test_deps,
 )
 
 cc_test(
@@ -51,12 +51,12 @@ cc_test(
     srcs = [
         "DistStorage3FSTest.cc",
     ],
-    data = [],
     copts = test_copts,
+    data = [],
+    tags = ["manual"],
     deps = test_deps + [
         ":mock_dist_storage_3fs_file",
     ],
-    tags = ["manual"],
 )
 
 cc_library(
@@ -71,14 +71,15 @@ cc_test(
     srcs = [
         "KVCacheAllocatorTest.cc",
     ],
-    data = [],
     copts = test_copts,
-    deps = test_deps,
+    data = [],
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10"},
+    deps = test_deps,
 )
+
 cc_library(
     name = "mock_dist_storage_3fs_file",
     hdrs = [
@@ -91,11 +92,11 @@ cc_test(
     srcs = [
         "BlockRefCounterTest.cc",
     ],
-    data = [],
     copts = test_copts,
-    deps = test_deps,
+    data = [],
     env = {},
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10"},
+    deps = test_deps,
 )
 
 cc_test(
@@ -103,11 +104,11 @@ cc_test(
     srcs = [
         "BlockLRUCacheTest.cc",
     ],
-    data = [],
     copts = test_copts,
-    deps = test_deps,
+    data = [],
     env = {},
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10"},
+    deps = test_deps,
 )
 
 cc_test(
@@ -115,11 +116,11 @@ cc_test(
     srcs = [
         "MemoryBlockCacheTest.cc",
     ],
-    data = [],
     copts = test_copts,
-    deps = test_deps,
+    data = [],
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10"},
+    deps = test_deps,
 )

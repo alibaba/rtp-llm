@@ -5,10 +5,10 @@ cc_library(
     hdrs = [
         "GenerateConfig.h",
     ],
+    visibility = ["//visibility:public"],
     deps = [
         "//:rtp_compute_ops",
     ],
-    visibility = ["//visibility:public"],
 )
 
 cc_library(
@@ -16,32 +16,35 @@ cc_library(
     hdrs = [
         "GenerateTypes.h",
     ],
+    visibility = ["//visibility:public"],
     deps = [
+        "//:rtp_compute_ops",
         "//rtp_llm/cpp/models:position_ids_generator",
         "//rtp_llm/cpp/multimodal_processor:multimodal_types",
-        "//:rtp_compute_ops",
     ],
-    visibility = ["//visibility:public"],
 )
 
 cc_library(
     name = "stream",
-    hdrs = glob([
-        "*.h",
-    ], exclude = ["GenerateTypes.h"]),
     srcs = glob([
         "*.cc",
     ]),
-    deps = [
-        ":generate_types",
-        ":generate_config",
-        "//rtp_llm/cpp/engine_base/system_prompt:system_prompt",
-        "//rtp_llm/cpp/models:models",
-        "//rtp_llm/cpp/cache",
-        "//rtp_llm/cpp/utils:hash_util",
-        "//rtp_llm/cpp/models:dfa_utils",
-        "@havenask//aios/autil:synchronized_queue",
-        "//:rtp_compute_ops",
-    ],
+    hdrs = glob(
+        [
+            "*.h",
+        ],
+        exclude = ["GenerateTypes.h"],
+    ),
     visibility = ["//visibility:public"],
+    deps = [
+        ":generate_config",
+        ":generate_types",
+        "//:rtp_compute_ops",
+        "//rtp_llm/cpp/cache2",
+        "//rtp_llm/cpp/engine_base/system_prompt",
+        "//rtp_llm/cpp/models",
+        "//rtp_llm/cpp/models:dfa_utils",
+        "//rtp_llm/cpp/utils:hash_util",
+        "@havenask//aios/autil:synchronized_queue",
+    ],
 )

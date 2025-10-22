@@ -5,15 +5,15 @@ cc_binary(
     srcs = [
         "KVCacheOptionBase.h",
         "KVCacheReadPerfTest.h",
-        "KVCacheWritePerfTest.h",
         "KVCacheReadWriteMain.cc",
-    ],
-    deps = [
-        "//rtp_llm/cpp/cache",
-        "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
-        "@havenask//aios/autil:option_parser",
+        "KVCacheWritePerfTest.h",
     ],
     linkstatic = False,
+    deps = [
+        "//rtp_llm/cpp/cache2",
+        "//rtp_llm/cpp/devices/cuda_impl",
+        "@havenask//aios/autil:option_parser",
+    ],
 )
 
 cc_binary(
@@ -21,8 +21,8 @@ cc_binary(
     srcs = [
         "DistStorage3FSTest.cc",
     ],
+    linkstatic = False,
     deps = [
         "//rtp_llm/cpp/cache:storage_3fs",
     ],
-    linkstatic = False,
 )
