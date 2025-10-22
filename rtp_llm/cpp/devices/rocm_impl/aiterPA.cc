@@ -93,7 +93,7 @@ void runAiterPA(const AttentionModuleParams& params, rtp_llm::DeviceBase* device
 
     int64_t block_size = params.configs.tokens_per_block;
 
-    std::string kv_cache_dtype = "auto";
+    std::string kv_cache_dtype = key_cache.dtype() == at::kFloat8_e4m3fnuz ? "fp8" : "auto";
 
     double k_scale = 1.0;
     double v_scale = 1.0;
