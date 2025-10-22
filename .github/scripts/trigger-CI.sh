@@ -11,13 +11,13 @@ COMMIT_ID=$1
 SECURITY=$2
 REPO_URL="https://github.com/${GITHUB_REPOSITORY}.git"
 PROJECT_ID="2654816"
-BRANCH_REF="main-internal"
+BRANCH_REF="develop/main_pre"
 CANCEL_IN_PROGRESS="true"
 PIPELINE_ID="1346"
 GITHUB_COMMIT_ID="${COMMIT_ID}"
 GITHUB_SOURCE_REPO=$3
 GITHUB_PR_ID=$4
-BRANCH_NAME="open_merge/${GITHUB_PR_ID}"
+BRANCH_NAME="open_merge_pre/${GITHUB_PR_ID}"
 
 # Get current timestamp
 timestamp=$(date +%s)
