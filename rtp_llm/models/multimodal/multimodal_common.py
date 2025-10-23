@@ -1,7 +1,11 @@
+import logging
 import time
 from typing import Any, List, Tuple, Union
 
 import torch
+
+from rtp_llm.metrics import kmonitor
+from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
 
 try:
     from decord import VideoReader, cpu
@@ -112,6 +116,9 @@ class MultiModalEmbeddingInterface:
         download_cost = download_time - start_time
         preprocess_cost = preprocess_time - download_time
         mm_process_cost = mm_process_time - preprocess_time
+        logging.warning(
+            f"download_cost: {download_cost}ms, preprocess_cost: {preprocess_cost}ms, mm_process_cost: {mm_process_cost}ms,"
+        )
         kmonitor.report(GaugeMetrics.VIT_DOWNLOAD_RT_METRIC, download_cost * 1000)
         kmonitor.report(
             GaugeMetrics.VIT_PREPROCESS_IMAGE_RT_METRIC, preprocess_cost * 1000
