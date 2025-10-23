@@ -3,7 +3,7 @@ from typing import Optional, Any, List
 from rtp_llm.models_py.modules.fmha import FMHAImplBase
 from rtp_llm.ops import PyAttentionInputs, FMHAType, KVCache, ParamsBase
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from libth_transformer.rtp_llm_ops import FusedRopeKVCachePrefillOp, FusedRopeKVCacheDecodeOp
+from librtp_compute_ops.rtp_llm_ops import FusedRopeKVCachePrefillOp, FusedRopeKVCacheDecodeOp
 import aiter
 import os
 from typing import Any, List, Optional
