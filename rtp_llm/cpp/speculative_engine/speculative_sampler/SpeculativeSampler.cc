@@ -139,7 +139,7 @@ void SpeculativeSampler::streamSample(SpeculativeSamplerOutput&           sample
             }
         }
 
-        if (!stream->isDummyStream()) {
+        if (!stream->isDummyStream() && propose_step != 0) {
             sample_output.propose_token_num += propose_step;
             sample_output.accept_token_num += accept_len;
             sample_output.stream_num++;
