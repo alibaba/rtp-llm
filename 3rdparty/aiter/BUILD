@@ -149,7 +149,7 @@ cc_library(
 cc_library(
     name = "module_mha_fwd",
     srcs = ["aiter/jit/libmodule_mha_fwd.so"],
-    hdrs = ["csrc/include/mha_fwd.h", "csrc/include/aiter_hip_common.h"],
+    hdrs = ["csrc/include/mha_fwd.h", "csrc/include/aiter_hip_common.h", "csrc/include/torch/mha_fwd.h"],
     deps = [":cpp_libraries", ":ck_fmha_example_headers"],
     copts = ["-std=c++20"],
     linkopts = [],

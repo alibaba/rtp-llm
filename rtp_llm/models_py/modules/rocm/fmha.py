@@ -62,6 +62,18 @@ try:
 except ImportError:
     logging.info("AiterPrefillImpl not available, skipped.")
 
+def per_tensor_quant(
+    x, scale=None, scale_dtype=dtypes.fp32, quant_dtype=dtypes.i8, dtypeMax=None
+):
+    x = x.to(dtypes.fp32)
+    if scale is None:
+        if dtypeMax is None:
+            dtypeMax = get_dtype_max(quant_dtype)
+        scale = torch.abs(x).max() / dtypeMax
+    y = x / scale
+
+    return y.to(quant_dtype), scale.view(1).to(scale_dtype)
+
 class AiterPrefillAttnOp():
     def __init__(
         self , config: GptInitModelParameters
@@ -101,7 +113,17 @@ class AiterPrefillAttnOp():
         k = k_tensor.transpose(1, 2)  # {batch_size, seq_len_with_prefix, head_num_kv, head_dim}
         v = v_tensor.transpose(1, 2)  # {batch_size, seq_len_with_prefix, head_dim}
 
-        res = aiter.flash_attn_func(q, k, v, dropout_p=0., softmax_scale=None, causal=True)
+
+        q_quant, _ = per_tensor_quant(q, scale=torch.tensor(1), quant_dtype=torch.float8_e4m3fnuz)
+        k_quant, _ = per_tensor_quant(k, scale=torch.tensor(1), quant_dtype=torch.float8_e4m3fnuz)
+        v_quant, _ = per_tensor_quant(v, scale=torch.tensor(1), quant_dtype=torch.float8_e4m3fnuz)
+        
+        # q = q_tensor.transpose(1, 2)  # {batch_size, seq_len, head_num, head_dim}
+        # k = k_tensor.transpose(1, 2)  # {batch_size, seq_len_with_prefix, head_num_kv, head_dim}
+        # v = v_tensor.transpose(1, 2)  # {batch_size, seq_len_with_prefix, head_dim}
+
+        # res = aiter.flash_attn_func(q, k, v, dropout_p=0., softmax_scale=None, causal=True)
+        res = aiter.flash_attn_fp8_pertensor_func(q_quant, k_quant, v_quant, causal=True, window_size=(-1, 0))
         
         input_lengths = fmha_params.input_lengths  # 每个 batch 的真实长度
         hidden_size = head_num_actual * head_dim

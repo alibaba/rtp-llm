@@ -67,6 +67,29 @@ BufferPtr ROCmDevice::quantize(const QuantizeParams& params) {
                     /*scales=*/scales_tensor,
                     /*scale_ub=*/std::nullopt);
             }
+        } else if (params.qscheme == QScheme::Qfp8PerTensor) {
+            // TODO: now only for bf16 -> fp8, scales == 1, if scales exist then exchange torch::Tensor scales_tensor
+            ROCM_CHECK_VALUE((params.qtype == DataType::TYPE_QFP8_E4M3),
+                            "Qfp8PerTensor only support qtype = TYPE_QFP8_E4M3");
+            ROCM_CHECK_VALUE((params.axis == 1), "Qfp8PerToken only support axis = 1");
+            size_t num_token = params.input.shape()[0];
+            auto scale_shape = params.input.shape();
+            scale_shape.back() = 1;
+            kernel = allocateBuffer({DataType::TYPE_FP8_E4M3, params.input.shape()}, {"quant_kernel"});
+            scales = allocateBuffer({DataType::TYPE_FP32,     scale_shape},          {"quant_scale"});
+            zeros  = BufferPtr(new Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_INVALID, {0}, nullptr));
+            if (num_token > 0) {
+                torch::Tensor input_tensor  = Buffer2torchTensor(params.input, false);
+                torch::Tensor kernel_tensor = Buffer2torchTensor(kernel,       false);
+                // TODO: now only for bf16 -> fp8, scales == 1, if scales exist then exchange torch::Tensor scales_tensor
+                torch::Tensor scales_tensor = torch::full({1}, 1.0f, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+
+                aiter::static_per_tensor_quant(
+                    /*out=*/kernel_tensor,
+                    /*input=*/input_tensor,
+                    /*scales=*/scales_tensor);
+            }
+
         } else if (params.qscheme == QScheme::Qfp8PerTokenBlock) {
             ROCM_CHECK_VALUE((params.groupSize == 32 || params.groupSize == 64 || params.groupSize == 128),
                              "Qfp8PerTokenBlock only support groupSize = 32,64 or 128");
