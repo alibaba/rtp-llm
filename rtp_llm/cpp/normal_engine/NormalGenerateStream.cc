@@ -82,6 +82,17 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             generate_output.all_hidden_states =
                 device_->clone({*update_info.all_hidden_states, rtp_llm::AllocationType::HOST});
         }
+
+        if (device_->getDeviceProperties().tp_rank == 0 && generate_input_->generate_config->return_mtp_hidden_states
+            && update_info.all_hidden_states) {
+            std::cout << "[Info] Saved: " << generate_input_->generate_config->mtp_hidden_states_saved_path
+                      << std::endl;
+            saveMtpDataToTorch(*update_info.all_hidden_states,
+                               *generate_input_->input_ids,
+                               generate_input_->generate_config->mtp_input_len,
+                               generate_input_->generate_config->mtp_hidden_states_saved_path);
+        }
+
         if (loss_) {
             RTP_LLM_CHECK_WITH_INFO(loss_index_ == inputLength() - 1,
                                     "loss index should be input len [%d] - 1 but is [%d]",

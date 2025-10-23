@@ -44,6 +44,9 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     memcpy(generate_config->select_tokens_id.data(),
            config_proto->select_tokens_id().data(),
            config_proto->select_tokens_id_size() * sizeof(int));
+    generate_config->mtp_hidden_states_saved_path = config_proto->mtp_hidden_states_saved_path();
+    generate_config->return_mtp_hidden_states     = config_proto->return_mtp_hidden_states();
+    generate_config->mtp_input_len                = config_proto->mtp_input_len();
     for (const auto& stop_words_proto : config_proto->stop_words_list().rows()) {
         std::vector<int> stop_words;
         for (const int value : stop_words_proto.values()) {
