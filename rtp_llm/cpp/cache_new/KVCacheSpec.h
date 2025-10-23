@@ -3,8 +3,10 @@
 #include <memory>
 #include <vector>
 #include <string>
-#include "rtp_llm/cpp/cache_new/KVCacheSpec.h"
 #include <unordered_map>
+
+#include "rtp_llm/cpp/cache_new/KVCacheSpec.h"
+#include "rtp_llm/cpp/core/Types.h"
 
 namespace rtp_llm {
 

@@ -18,7 +18,7 @@ public:
 
     size_t availableTokenNums() const;
     
-    std::vector<BufferPtr> layerCacheBase() const;
+    CacheLayerLayout layerCacheBase() const;
 
     KVCacheManager(const CacheConfig&      config,
         rtp_llm::DeviceBase*               device,
