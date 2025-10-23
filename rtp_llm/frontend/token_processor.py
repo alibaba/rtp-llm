@@ -71,9 +71,13 @@ class TokenProcessorPerStream:
         return_incremental: bool = False,
     ):
         if not self.has_num_beams:
-            self.ouput_tokens_list[i] = np.concatenate(
-                (self.ouput_tokens_list[i], tokens), axis=1
-            )
+            # Handle case when self.ouput_tokens_list[i] is empty
+            if self.ouput_tokens_list[i].size == 0:
+                self.ouput_tokens_list[i] = tokens
+            else:
+                self.ouput_tokens_list[i] = np.concatenate(
+                    (self.ouput_tokens_list[i], tokens), axis=1
+                )
             tokens = self.ouput_tokens_list[i]
         tokens = remove_padding_eos_with_numpy(
             tokens, self.special_tokens.eos_token_id
