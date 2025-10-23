@@ -119,7 +119,8 @@ void invokeAddFusedQKVBiasTranspose(T*                             q_no_transpos
                                     cudaStream_t                   stream);
 
 template<typename T>
-void invoke_debug_kernel2(T* data, int start_col, int m, int n, int row_len, int info_id, cudaStream_t stream);
+void invoke_debug_kernel2(
+    T* data, int strat_row, int start_col, int m, int n, int row_len, int info_id, cudaStream_t stream);
 
 #if USING_ROCM
 template<typename T>

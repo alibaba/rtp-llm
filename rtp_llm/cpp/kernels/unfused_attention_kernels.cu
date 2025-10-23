@@ -863,10 +863,10 @@ __device__ float convert_to_float(int val) {
 }
 
 template<typename T>
-__global__ void debug_kernel2(T* data, int start_col, int m, int n, int row_len, int info_id) {
+__global__ void debug_kernel2(T* data, int start_row, int start_col, int m, int n, int row_len, int info_id) {
     if (blockIdx.x == 0 && threadIdx.x == 0) {
         printf("debug_kernel2 start: %d\n", info_id);
-        for (int i = 0; i < m; i++) {
+        for (int i = start_row; i < start_row + m; i++) {
             for (int j = start_col; j < start_col + n; j++) {
                 int   index = i * row_len + j;
                 float value = convert_to_float(data[index]);
@@ -879,13 +879,14 @@ __global__ void debug_kernel2(T* data, int start_col, int m, int n, int row_len,
 }
 
 template<typename T>
-void invoke_debug_kernel2(T* data, int start_col, int m, int n, int row_len, int info_id, cudaStream_t stream) {
-    debug_kernel2<<<1, 1, 0, stream>>>(data, start_col, m, n, row_len, info_id);
+void invoke_debug_kernel2(
+    T* data, int start_row, int start_col, int m, int n, int row_len, int info_id, cudaStream_t stream) {
+    debug_kernel2<<<1, 1, 0, stream>>>(data, start_row, start_col, m, n, row_len, info_id);
 }
 
 #define INSTANTIATEDEBUGKERNEL2(T)                                                                                     \
     template void invoke_debug_kernel2(                                                                                \
-        T* data, int start_col, int m, int n, int row_len, int info_id, cudaStream_t stream)
+        T* data, int start_row, int start_col, int m, int n, int row_len, int info_id, cudaStream_t stream)
 INSTANTIATEDEBUGKERNEL2(float);
 INSTANTIATEDEBUGKERNEL2(half);
 INSTANTIATEDEBUGKERNEL2(int);

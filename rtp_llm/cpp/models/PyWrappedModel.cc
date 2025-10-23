@@ -7,6 +7,8 @@
 #include <stdexcept>
 #include <mutex>
 #include <vector>
+#include <chrono>
+#include <cuda_runtime.h>
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 #include <cstdlib>
@@ -224,8 +226,8 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
 }
 
 GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
-    DevicePerfWrapper wrapper(device_, "py model forward");
-
+    py::gil_scoped_acquire gil;
+    DevicePerfWrapper      wrapper(device_, "py model forward");
     // printBufferDataDebug(*inputs.combo_position_ids, "forward inputs.combo_position_ids");
     try {
         // RTP_LLM_LOG_DEBUG("Calling forward method on Python object instance.");
@@ -249,8 +251,6 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
 
         auto           py_model_inputs = PyModelInputs({token_ids, attention_inputs, bert_embedding_inputs});
         PyModelOutputs py_model_outputs;
-        // Cast the Python object to PyModelOutputs and extract hidden states
-        py::gil_scoped_acquire gil;
         if (enable_cuda_graph_) {
             DevicePerfWrapper wrapper(device_, "cuda graph python forward");
             py_model_outputs = graph_runner_->forward(py_model_inputs);
@@ -264,7 +264,6 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         auto hidden_states        = torchTensor2Buffer(hidden_states_tensor);
 
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
-
         return callForwardPostLayers(hidden_states, inputs, true);
 
     } catch (const py::error_already_set& e) {

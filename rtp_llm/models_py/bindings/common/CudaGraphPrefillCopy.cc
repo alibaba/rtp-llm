@@ -43,6 +43,7 @@ void cuda_graph_copy_small2large(at::Tensor& input_tensor,
     //                                  invoke_debug_kernel2,
     //                                  input_tensor.data_ptr(),
     //                                  0,
+    //                                  0,
     //                                  10,
     //                                  10,
     //                                  2304,
@@ -90,6 +91,18 @@ void cuda_graph_copy_large2small(at::Tensor& input_tensor,
 
     StreamType stream = GET_CURRENT_STREAM();
 
+    // // Debug output before kernel execution
+    // DISPATCH_CUDA_FUNCTION_DATA_TYPE(torchDTypeToDataType(input_tensor.dtype()),
+    //     invoke_debug_kernel2,
+    //     input_tensor.data_ptr(),
+    //     0,
+    //     0,
+    //     10,
+    //     10,
+    //     768,
+    //     10,
+    //     stream);
+
     // Dispatch based on tensor dtype
     DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FP16(input_tensor.scalar_type(), c_type, [&] {
         rtp_llm::invokeCudaGraphCopyLarge2Small<c_type>(static_cast<c_type*>(input_ptr),
@@ -103,6 +116,18 @@ void cuda_graph_copy_large2small(at::Tensor& input_tensor,
                                                         stream);
         return true;
     });
+
+    // // Debug output after kernel execution
+    // DISPATCH_CUDA_FUNCTION_DATA_TYPE(torchDTypeToDataType(output_tensor.dtype()),
+    //     invoke_debug_kernel2,
+    //     output_tensor.data_ptr(),
+    //     0,
+    //     0,
+    //     10,
+    //     10,
+    //     768,
+    //     11,
+    //     stream);
 }
 
 }  // namespace torch_ext

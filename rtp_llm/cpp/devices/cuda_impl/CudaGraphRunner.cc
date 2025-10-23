@@ -1,6 +1,7 @@
 #include <cuda_runtime_api.h>
 #include <torch/torch.h>
 #include <chrono>
+#include <cstring>
 #include "ATen/core/TensorBody.h"
 #include "ATen/ops/zeros.h"
 #include "rtp_llm/cpp/devices/cuda_impl/CudaGraphRunner.h"
@@ -11,6 +12,19 @@
 #include "rtp_llm/cpp/devices/utils/DevicePerfWrapper.h"
 using namespace torch_ext;
 namespace rtp_llm {
+
+// Helper function for optimized tensor copy
+void optimizedCopy(const torch::Tensor& src, torch::Tensor& dst, size_t size) {
+    if (src.is_cuda() && dst.is_cuda()) {
+        cudaMemcpy(dst.data_ptr(), src.data_ptr(), size, cudaMemcpyDeviceToDevice);
+    } else if (!src.is_cuda() && !dst.is_cuda()) {
+        memcpy(dst.data_ptr(), src.data_ptr(), size);
+    } else if (src.is_cuda() && !dst.is_cuda()) {
+        cudaMemcpy(dst.data_ptr(), src.data_ptr(), size, cudaMemcpyDeviceToHost);
+    } else {
+        cudaMemcpy(dst.data_ptr(), src.data_ptr(), size, cudaMemcpyHostToDevice);
+    }
+}
 
 GraphBase* CudaDevice::getDeviceGraphRunner(const DeviceInitParams& params,
                                             py::object              py_instance,
@@ -56,15 +70,23 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
     if (!is_prefill_cuda_graph_mode_) {
         DevicePerfWrapper wrapper(device_, "cuda graph prefill prepareInputs");
         auto&             py_model_inputs_ = graph_instances_[current_real_graph_bs_].mem_hold_.py_model_inputs_;
-        py_model_inputs_.attention_inputs.input_lengths.slice(0, 0, current_batch_size_) =
-            inputs.attention_inputs.input_lengths;
-        // pinned memory
-        py_model_inputs_.attention_inputs.cu_seqlens.slice(0, 0, current_batch_size_ + 1) =
-            inputs.attention_inputs.cu_seqlens.slice(0, 0, current_batch_size_ + 1);
+
+        // Optimized copies using cudaMemcpy/memcpy
+        optimizedCopy(inputs.attention_inputs.input_lengths,
+                      py_model_inputs_.attention_inputs.input_lengths,
+                      current_batch_size_ * sizeof(int));
+
+        optimizedCopy(inputs.attention_inputs.cu_seqlens,
+                      py_model_inputs_.attention_inputs.cu_seqlens,
+                      (current_batch_size_ + 1) * sizeof(int));
+
         py_model_inputs_.input_ids.fill_(0);
-        py_model_inputs_.input_ids.slice(0, 0, inputs.input_ids.size(0)) = inputs.input_ids;
-        py_model_inputs_.attention_inputs.sequence_lengths.slice(0, 0, current_batch_size_) =
-            inputs.attention_inputs.sequence_lengths;
+        optimizedCopy(inputs.input_ids, py_model_inputs_.input_ids, inputs.input_ids.size(0) * sizeof(int));
+
+        optimizedCopy(inputs.attention_inputs.sequence_lengths,
+                      py_model_inputs_.attention_inputs.sequence_lengths,
+                      current_batch_size_ * sizeof(int));
+
         copySmallerIntoLarger(inputs.attention_inputs.kv_cache_block_id_device,
                               py_model_inputs_.attention_inputs.kv_cache_block_id_device);
         graph_instances_[current_real_graph_bs_].mem_hold_.params_ptr->fillParams(
@@ -76,21 +98,31 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
     } else {
         DevicePerfWrapper wrapper(device_, "cuda graph prefill prepareInputs");
         auto&             py_model_inputs_ = graph_instances_[current_real_graph_seq_len_].mem_hold_.py_model_inputs_;
-        py_model_inputs_.attention_inputs.input_lengths.slice(0, 0, current_batch_size_) =
-            inputs.attention_inputs.input_lengths;
-        // pinned memory
-        py_model_inputs_.attention_inputs.cu_seqlens.slice(0, 0, current_batch_size_ + 1) =
-            inputs.attention_inputs.cu_seqlens.slice(0, 0, current_batch_size_ + 1);
-        py_model_inputs_.input_ids.slice(0, 0, current_seq_len_) = inputs.input_ids.slice(0, 0, current_seq_len_);
+
+        // Optimized copies using cudaMemcpy/memcpy
+        optimizedCopy(inputs.attention_inputs.input_lengths,
+                      py_model_inputs_.attention_inputs.input_lengths,
+                      current_batch_size_ * sizeof(int));
+
+        optimizedCopy(inputs.attention_inputs.cu_seqlens,
+                      py_model_inputs_.attention_inputs.cu_seqlens,
+                      (current_batch_size_ + 1) * sizeof(int));
+
+        optimizedCopy(inputs.input_ids, py_model_inputs_.input_ids, current_seq_len_ * sizeof(int));
+
         if (py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params) {
             (*(py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params->cuda_graph_prefill_batch_size
                    .data_ptr<int>())) = current_batch_size_;
         }
+
         if (inputs.bert_embedding_inputs.position_encoding.numel() > 0) {
-            py_model_inputs_.bert_embedding_inputs.combo_position_ids.slice(0, 0, current_seq_len_) =
-                inputs.bert_embedding_inputs.combo_position_ids.slice(0, 0, current_seq_len_);
-            py_model_inputs_.bert_embedding_inputs.combo_tokens_type_ids.slice(0, 0, current_seq_len_) =
-                inputs.bert_embedding_inputs.combo_tokens_type_ids.slice(0, 0, current_seq_len_);
+            optimizedCopy(inputs.bert_embedding_inputs.combo_position_ids,
+                          py_model_inputs_.bert_embedding_inputs.combo_position_ids,
+                          current_seq_len_ * sizeof(int));
+
+            optimizedCopy(inputs.bert_embedding_inputs.combo_tokens_type_ids,
+                          py_model_inputs_.bert_embedding_inputs.combo_tokens_type_ids,
+                          current_seq_len_ * sizeof(int));
         }
     }
 }
@@ -114,6 +146,7 @@ PyModelOutputs CudaGraphRunner::forward(PyModelInputs& inputs) {
         }
         RTP_LLM_LOG_INFO("Replay End");
     } else {
+        RTP_LLM_LOG_INFO("Normal Cuda Graph Start");
         auto py_outputs_obj = normalForward(inputs);
         // Cast the Python object to PyModelOutputs and extract hidden states
         outputs = py_outputs_obj.cast<PyModelOutputs>();
