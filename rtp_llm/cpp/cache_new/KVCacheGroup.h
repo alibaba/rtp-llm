@@ -14,9 +14,12 @@ namespace rtp_llm {
 class KVCacheGroup {
 public:
     std::vector<int> alloc(vector<int64_t> cache_keys, int reuse_len = 0)
-    void reuse_len(vector<int64_t> cache_keys) const;
-    
-    // MatchResult match(vector<int64_t> cache_keys) const;
+    // void reuse_len(vector<int64_t> cache_keys) const;
+    MatchResult match(vector<int64_t> cache_keys) const;
+    void free(vector<int> block_indices);
+    void insertIntoCache(vector<int64_t> cache_keys, vector<int> block_indices);
+
+    int get_block_stride() const;
 
 private:
     // global_layer_id

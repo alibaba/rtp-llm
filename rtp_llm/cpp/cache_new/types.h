@@ -3,8 +3,16 @@
 #include <vector>
 #include <cstdint>
 
+#include <map>
 
 namespace rtp_llm {
+
+
+struct CacheLayerLayout {
+    vector<int> layer_to_groups;
+    vector<BufferPtr> layers_to_buffer_ptrs;
+}
+
 
 // KVCacheResource share_ptr 析构自动 kv cache manager free block_indices
 struct GroupedKVCacheResource {
@@ -29,7 +37,7 @@ struct MallocResult {
 struct MallocInfo {
     MallocInfo(int64_t                                  request_id,
                const std::vector<int32_t>&              token_ids,
-               const std::vector<int64_t>&              cache_keys, // cal in kvcache manager
+               const std::shared_ptr<std::vector<int64_t>>&              cache_keys,
                const std::vector<std::vector<int32_t>>& mm_bounds    = {},
                bool                                     need_loss    = false,
                bool                                     verbose      = false):
