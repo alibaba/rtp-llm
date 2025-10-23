@@ -1,26 +1,20 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The CLI entrypoints of vLLM
-
-Note that all future modules must be lazily loaded within main
-to avoid certain eager import breakage."""
-from __future__ import annotations
-
 from rtp_llm.server.server_args.server_args import EnvArgumentParser
 
+LLM_SUBCMD_PARSER_EPILOG = (
+    "Tip: Use `rtp-llm [serve|run-batch|bench <bench_type>] "
+    "--help=<keyword>` to explore arguments from help.\n"
+    "   - To view a argument group:     --help=ModelConfig\n"
+    "   - To view a single argument:    --help=max-num-seqs\n"
+    "   - To search by keyword:         --help=max\n"
+    "   - To list all groups:           --help=listgroup\n"
+    "   - To view help with pager:      --help=page"
+)
 
 def main():
     import rtp_llm.cli.serve
-    from rtp_llm.cli.utils import (
-        LLM_SUBCMD_PARSER_EPILOG,
-        FlexibleArgumentParser,
-        cli_env_setup,
-    )
     from rtp_llm.release_version import RELEASE_VERSION
 
     CMD_MODULES = [rtp_llm.cli.serve]
-
-    cli_env_setup()
 
     parser = EnvArgumentParser(
         description="rtp-llm CLI",

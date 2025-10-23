@@ -1,11 +1,10 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import argparse
 import logging
 
 from rtp_llm.cli.types import CLISubcommand
 from rtp_llm.server.server_args.server_args import EnvArgumentParser, init_all_group_args
+from rtp_llm.start_server import start_server
 
 
 class ServeSubcommand(CLISubcommand):
@@ -14,7 +13,8 @@ class ServeSubcommand(CLISubcommand):
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
-        logging.info("call serve cmd")
+        logging.info("start rtp serve cmd")
+        start_server()
 
     def validate(self, args: argparse.Namespace) -> None:
         logging.info("call serve validate")
@@ -24,10 +24,12 @@ class ServeSubcommand(CLISubcommand):
             subparsers: argparse._SubParsersAction) -> EnvArgumentParser:
         serve_parser = subparsers.add_parser(
             "serve",
-            help="Start the vLLM OpenAI Compatible API server.",
-            description="Start the vLLM OpenAI Compatible API server.",
-            usage="vllm serve [model_tag] [options]")
+            help="Start the RTP-LLM OpenAI Compatible API server.",
+            description="Start the RTP-LLM OpenAI Compatible API server.",
+            usage="rtp-llm serve [options]")
         init_all_group_args(serve_parser)
+        serve_parser.parse_args()
+
         return serve_parser
 
 
