@@ -72,6 +72,7 @@ class EmbeddingBert(nn.Module):
             token_type_embedding,
             input_embedding_scalar,
         )
+
         if self.config.tp_size > 1:
             m, n = output.shape
             output = all_gather(output, group=Group.TP)

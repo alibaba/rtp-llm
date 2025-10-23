@@ -7,6 +7,8 @@ try:
     from librtp_compute_ops.rtp_llm_ops import (
         FusedRopeKVCacheDecodeOp,
         FusedRopeKVCachePrefillOp,
+        cuda_graph_copy_large2small,
+        cuda_graph_copy_small2large,
     )
 except ImportError:
     logging.info("rope kv cache not available, skipped.")
@@ -33,6 +35,9 @@ class FMHAImplBase(object):
         init_params: bool = True,
     ) -> None:
         self.fmha_impl = fmha_impl
+        self.prefill_cuda_graph_copy_params = attn_inputs.prefill_cuda_graph_copy_params
+        self.input_lengths = attn_inputs.input_lengths
+        self.cu_seq_lens = attn_inputs.cu_seqlens
         self.support_: bool = self.fmha_impl.support(attn_inputs)
         self.fmha_params = None
         self.rope_params = None
@@ -49,11 +54,19 @@ class FMHAImplBase(object):
                     self.attn_inputs.cache_store_inputs,
                 )
 
-    def forward(self, qkv: torch.Tensor, kv_cache: Optional[KVCache]) -> torch.Tensor:
+    def forward(
+        self,
+        qkv: torch.Tensor,
+        kv_cache: Optional[KVCache],
+        need_rope_kv_cache: bool = True,
+    ) -> torch.Tensor:
         assert self.rope_kvcache_impl is not None and self.rope_params is not None
-        fmha_input = self.rope_kvcache_impl.forward(
-            qkv, self.fmha_type(), kv_cache, self.rope_params
-        )
+        if need_rope_kv_cache:
+            fmha_input = self.rope_kvcache_impl.forward(
+                qkv, self.fmha_type(), kv_cache, self.rope_params
+            )
+        else:
+            fmha_input = qkv
         if (
             self.attn_inputs.is_prefill
             and self.attn_inputs.cache_store_inputs
@@ -61,7 +74,31 @@ class FMHAImplBase(object):
         ):
             self.write_cache_store_impl(kv_cache)
         assert self.fmha_impl is not None
+        if self.prefill_cuda_graph_copy_params:
+            cuda_graph_copy_small2large(
+                fmha_input,
+                self.prefill_cuda_graph_copy_params.aligned_attn_buf,
+                self.prefill_cuda_graph_copy_params.cuda_graph_prefill_batch_size,
+                self.prefill_cuda_graph_copy_params.max_batch_size,
+                self.prefill_cuda_graph_copy_params.max_seq_len,
+                self.input_lengths,
+                self.prefill_cuda_graph_copy_params.aligned_attn_buf.shape[1],
+                self.cu_seq_lens,
+            )
+            fmha_input = self.prefill_cuda_graph_copy_params.aligned_attn_buf
         res = self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
+        if self.prefill_cuda_graph_copy_params:
+            cuda_graph_copy_large2small(
+                res,
+                self.prefill_cuda_graph_copy_params.compact_attn_buf,
+                self.prefill_cuda_graph_copy_params.cuda_graph_prefill_batch_size,
+                self.prefill_cuda_graph_copy_params.max_batch_size,
+                self.prefill_cuda_graph_copy_params.max_seq_len,
+                self.input_lengths,
+                self.prefill_cuda_graph_copy_params.hidden_size,
+                self.cu_seq_lens,
+            )
+            res = self.prefill_cuda_graph_copy_params.compact_attn_buf
         return res
 
     @staticmethod

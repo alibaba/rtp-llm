@@ -1013,6 +1013,15 @@ class KVCache:
 class PyCacheStoreInputs:
     def __init__(self) -> None: ...
 
+class PyPrefillCudaGaphCopyParams:
+    cuda_graph_prefill_batch_size: torch.Tensor
+    aligned_attn_buf: torch.Tensor
+    compact_attn_buf: torch.Tensor
+    max_seq_len: int
+    hidden_size: int
+    max_batch_size: int
+    def __init__(self) -> None: ...
+
 class PyAttentionInputs:
     is_prefill: bool
     prefix_lengths: torch.Tensor
@@ -1024,6 +1033,8 @@ class PyAttentionInputs:
     kv_block_offset: int = 0
     cu_seqlens: torch.Tensor
     padding_offset: torch.Tensor
+    cache_store_inputs: PyCacheStoreInputs | None
+    prefill_cuda_graph_copy_params: PyPrefillCudaGaphCopyParams | None
     def get_prefill_flash_infer_attn(self) -> typing.Any:
         pass
 

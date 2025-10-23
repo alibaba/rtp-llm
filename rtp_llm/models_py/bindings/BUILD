@@ -10,7 +10,6 @@ cc_library(
     ],
     srcs = [
         "OpDefs.cc",
-        "OpDefsUtils.cc",
     ],
     deps = torch_deps() + [
         "//rtp_llm/cpp/model_utils:model_utils",
