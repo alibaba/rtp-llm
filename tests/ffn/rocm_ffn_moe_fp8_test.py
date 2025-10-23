@@ -10,6 +10,7 @@ from aiter.ops.moe_sorting import moe_sorting_fwd
 from aiter.ops.quant import dynamic_per_token_scaled_quant, pertoken_quant
 from aiter.ops.topk import biased_grouped_topk, biased_grouped_topk_torch
 from aiter.test_common import checkAllclose
+from torch.testing import assert_close
 from einops import rearrange
 
 torch.manual_seed(42)
@@ -377,28 +378,49 @@ def subprocess_moe_fp8(
         output,
     )
 
-    checkAllclose(
+    # checkAllclose(
+    #     torch_ref_output,
+    #     output,
+    #     rtol=0.05,
+    #     atol=0.05,
+    #     msg=f"[ep_size={ep_size}, ep_rank={ep_rank}]: python torch vs rtp",
+    # )
+    # checkAllclose(
+    #     aiter_ref_output,
+    #     output,
+    #     rtol=0.05,
+    #     atol=0.05,
+    #     msg=f"[ep_size={ep_size}, ep_rank={ep_rank}]: python aiter vs rtp",
+    # )
+    # checkAllclose(
+    #     torch_ref_output,
+    #     aiter_ref_output,
+    #     rtol=0.05,
+    #     atol=0.05,
+    #     msg=f"[ep_size={ep_size}, ep_rank={ep_rank}]: python torch vs rtp",
+    # )   
+    
+    assert_close(
         torch_ref_output,
         output,
         rtol=0.05,
         atol=0.05,
         msg=f"[ep_size={ep_size}, ep_rank={ep_rank}]: python torch vs rtp",
     )
-    checkAllclose(
+    assert_close(
         aiter_ref_output,
         output,
         rtol=0.05,
         atol=0.05,
         msg=f"[ep_size={ep_size}, ep_rank={ep_rank}]: python aiter vs rtp",
     )
-    checkAllclose(
+    assert_close(
         torch_ref_output,
         aiter_ref_output,
         rtol=0.05,
         atol=0.05,
         msg=f"[ep_size={ep_size}, ep_rank={ep_rank}]: python torch vs rtp",
     )
-
 
 class TestROCmFfnMoeFp8(unittest.TestCase):
 
@@ -542,6 +564,9 @@ class TestROCmFfnMoeFp8(unittest.TestCase):
             )
             proc.start()
             procs.append(proc)
+        for i, p in enumerate(procs):
+            p.join()
+            assert p.exitcode == 0, f"[EP rank {i}] subprocess failed with exitcode={p.exitcode}"                
         try:
             [p.join() for p in procs]
         except Exception:

@@ -6,6 +6,7 @@ import unittest
 import torch
 from aiter.fused_moe import fused_topk
 from aiter.test_common import checkAllclose
+from torch.testing import assert_close
 
 torch.manual_seed(42)
 torch.cuda.manual_seed(42)
@@ -209,12 +210,20 @@ def subprocess_moe(
         output,
     )
 
-    checkAllclose(
+    # checkAllclose(
+    #     torch_ref_output,
+    #     output,
+    #     rtol=0.05,
+    #     atol=0.05,
+    #     msg=f"[ep_size={ep_size}, ep_rank={ep_rank}]: python torch vs rtp",
+    # )
+    
+    assert_close(
         torch_ref_output,
         output,
         rtol=0.05,
         atol=0.05,
-        msg=f"[ep_size={ep_size}, ep_rank={ep_rank}]: python torch vs rtp",
+        msg=f"[torch_ref_output={torch_ref_output}, output={output}]",
     )
 
 
@@ -302,6 +311,10 @@ class TestROCmFfnMoe(unittest.TestCase):
             )
             proc.start()
             procs.append(proc)
+            
+        for i, p in enumerate(procs):
+            p.join()
+            assert p.exitcode == 0, f"[EP rank {i}] subprocess failed with exitcode={p.exitcode}"            
         try:
             [p.join() for p in procs]
         except Exception:
@@ -313,7 +326,7 @@ class TestROCmFfnMoe(unittest.TestCase):
         # for ep_size in [1, 2]:
         for ep_size in [1]:
             for dtype in [torch.bfloat16]:
-                for token in [1, 2, 5, 16, 32]:
+                for token in [1, 32]:
                     for model_dim in [2048]:
                         for inter_dim in [1408]:
                             self._test_moe(

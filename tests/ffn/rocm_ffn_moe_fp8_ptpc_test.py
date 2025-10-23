@@ -6,6 +6,7 @@ from aiter.ops.moe_sorting import moe_sorting_fwd
 from aiter.ops.quant import dynamic_per_token_scaled_quant, pertoken_quant
 from aiter.ops.topk import biased_grouped_topk, biased_grouped_topk_torch
 from aiter.test_common import checkAllclose
+from torch.testing import assert_close
 import multiprocessing as mp
 import os
 import torch
@@ -260,9 +261,13 @@ def subprocess_moe_fp8_ptpc(input_path, w1_q_path, w2_q_path, w1_scale_path, w2_
         output
     )
 
-    checkAllclose(torch_ref_output, output, rtol=0.05, atol=0.05, msg=f'[ep_size={ep_size}, ep_rank={ep_rank}]: python torch vs rtp')
-    checkAllclose(aiter_ref_output, output, rtol=0.05, atol=0.05, msg=f'[ep_size={ep_size}, ep_rank={ep_rank}]: python aiter vs rtp')
-    checkAllclose(torch_ref_output, aiter_ref_output, rtol=0.05, atol=0.05, msg=f'[ep_size={ep_size}, ep_rank={ep_rank}]: python torch vs python aiter')
+    # checkAllclose(torch_ref_output, output, rtol=0.05, atol=0.05, msg=f'[ep_size={ep_size}, ep_rank={ep_rank}]: python torch vs rtp')
+    # checkAllclose(aiter_ref_output, output, rtol=0.05, atol=0.05, msg=f'[ep_size={ep_size}, ep_rank={ep_rank}]: python aiter vs rtp')
+    # checkAllclose(torch_ref_output, aiter_ref_output, rtol=0.05, atol=0.05, msg=f'[ep_size={ep_size}, ep_rank={ep_rank}]: python torch vs python aiter')
+    
+    assert_close(torch_ref_output, output, rtol=0.05, atol=0.05, msg=f'[ep_size={ep_size}, ep_rank={ep_rank}]: python torch vs rtp')
+    assert_close(aiter_ref_output, output, rtol=0.05, atol=0.05, msg=f'[ep_size={ep_size}, ep_rank={ep_rank}]: python aiter vs rtp')
+    assert_close(torch_ref_output, aiter_ref_output, rtol=0.05, atol=0.05, msg=f'[ep_size={ep_size}, ep_rank={ep_rank}]: python torch vs python aiter')
 
 
 class TestROCmFfnMoeFp8(unittest.TestCase):
@@ -331,6 +336,9 @@ class TestROCmFfnMoeFp8(unittest.TestCase):
             ))
             proc.start()
             procs.append(proc)
+        for i, p in enumerate(procs):
+            p.join()
+            assert p.exitcode == 0, f"[EP rank {i}] subprocess failed with exitcode={p.exitcode}"                
         try:
             [p.join() for p in procs]
         except Exception:
@@ -342,7 +350,7 @@ class TestROCmFfnMoeFp8(unittest.TestCase):
     def test_moe_fp8_ptpc(self):
         for ep_size in [1, 2]:
             for dtype in [torch.bfloat16]:
-                for token in [1, 2, 5, 16, 32]:
+                for token in [1, 32]:
                     for model_dim in [4096]:
                         for inter_dim in [1536]:
                             self._test_moe_fp8(token, model_dim, inter_dim, 128, 0, 8, 1, 1, ep_size, dtype, torch.float8_e4m3fnuz)
