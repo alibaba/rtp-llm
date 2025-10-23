@@ -1,3 +1,4 @@
+import time
 from typing import Any, List, Tuple, Union
 
 import torch
@@ -95,15 +96,27 @@ class MultiModalEmbeddingInterface:
         cached_res = vit_emb_cache_.check_cache(url)
         if cached_res is not None:
             return cached_res
+        start_time = time.time()
         bytes_io = get_bytes_io_from_url(url)
+        download_time = time.time()
         mm_input = self._mm_preprocess(bytes_io, mm_type=mm_type, **kwargs)
+        preprocess_time = time.time()
         with mm_lock:
             features = self.mm_process(mm_input, mm_type=mm_type, **kwargs)
+        mm_process_time = time.time()
         if isinstance(features, tuple):
             features = (features[0].to(dtype).contiguous(), features[1].contiguous())
         else:
             features = (features.to(dtype).contiguous(), None)
         vit_emb_cache_.insert_cache(url, features)
+        download_cost = download_time - start_time
+        preprocess_cost = preprocess_time - download_time
+        mm_process_cost = mm_process_time - preprocess_time
+        kmonitor.report(GaugeMetrics.VIT_DOWNLOAD_RT_METRIC, download_cost * 1000)
+        kmonitor.report(
+            GaugeMetrics.VIT_PREPROCESS_IMAGE_RT_METRIC, preprocess_cost * 1000
+        )
+        kmonitor.report(GaugeMetrics.VIT_PROCESS_RT_METRIC, mm_process_cost * 1000)
         return features
 
     @timeout_decorator(10)
