@@ -26,6 +26,7 @@ from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.ops import EngineScheduleInfo, KVCacheInfo, WorkerStatusInfo
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.server.misc import format_exception
+from rtp_llm.model_loader.weight_manager import WeightManager
 from rtp_llm.server.worker_status import TaskInfo, WorkStatus
 from rtp_llm.structure.request_extractor import request_id_field_name
 from rtp_llm.utils.concurrency_controller import (
@@ -35,6 +36,7 @@ from rtp_llm.utils.concurrency_controller import (
 from rtp_llm.utils.fuser import _nfs_manager
 from rtp_llm.utils.time_util import Timer
 from rtp_llm.utils.version_info import VersionInfo
+import traceback
 
 StreamObjectType = Union[Dict[str, Any], BaseModel]
 
@@ -67,6 +69,7 @@ class BackendServer(object):
         self.dp_rank = g_parallel_info.dp_rank
         self.dp_size = g_parallel_info.dp_size
         self.tp_size = g_parallel_info.tp_size
+        self._weight_manager = None
 
     def start(self, py_env_configs: PyEnvConfigs):
         self._gang_server.start()
@@ -99,6 +102,7 @@ class BackendServer(object):
                         self._openai_endpoint.chat_renderer,
                     )
                     self._lora_manager = LoraManager(self.model)
+                    self._weight_manager = WeightManager(self.model)
 
     def model_runtime_meta(self) -> str:
         return "unknown" if self.model is None else self.model.model_runtime_meta
@@ -369,3 +373,37 @@ class BackendServer(object):
 
     def internal_restart(self) -> None:
         self.model.decoder_engine_.restart()
+
+    def update_weight(self, req: Dict[str, str]):
+        """
+        Receives an Inter-Process Communication (IPC) tensor description and
+        updates the corresponding model weights.
+        For models with Tensor Parallelism (TP) or Pipeline Parallelism (PP),
+        this function expects the transmitted tensor to be a complete, unsharded tensor.
+        It then handles the internal sharding or replication according to the
+        rtp-llm's specific model parallelism configuration.
+        Args:
+            req: A dictionary containing the IPC request details. Expected keys are:
+                 - "desc": A string describing the tensor's IPC metadata
+                           (e.g., `CuIpcTensorMeta` or `SharedMemIpcMeta` encoded string).
+                 - "name": A string representing the original name of the weight
+                           (e.g., 'model.layers.1.self_attn_qkv_proj.bias').
+                 - "method": A string indicating the IPC method used ("cuda_ipc" or "shm").
+        Returns:
+            {"state": "ok"} if all correct.
+            {"error": "detail error mssage"} if there is an error.
+        """
+        try:
+            if g_parallel_info.is_master and g_parallel_info.world_size > 1:
+                self._gang_server.request_workers(req, "internal_update_weight", True)
+            self._weight_manager.update(req)
+            return {"status": "ok"}
+        except Exception as e:
+            return {"status": "error", "details": traceback.format_exc()}
+
+    def internal_update_weight(self, req: Dict[str, str]):
+        try:
+            self._weight_manager.update(req)
+            return {"status": "ok"}
+        except Exception as e:
+            return {"status": "error", "details": traceback.format_exc()}

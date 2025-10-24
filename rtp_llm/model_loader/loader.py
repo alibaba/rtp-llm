@@ -60,6 +60,9 @@ class ModelLoader:
             compute_dtype, database, get_current_device()
         )
 
+    def get_load_config(self) -> LoadConfig:
+        return self._load_config
+
     @property
     def weights_info(self):
         return self._weights_info

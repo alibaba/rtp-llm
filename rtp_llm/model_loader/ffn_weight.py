@@ -253,6 +253,16 @@ class FfnWeight(CompositeWeight):
     ) -> bool:
         return False
 
+    @torch.inference_mode()
+    def update(self, tensor: torch.Tensor, device: str, load_config: LoadConfig, **kwargs):
+        if "module_name" in kwargs:
+            name: str = kwargs["module_name"]
+            if name not in self.sub_weights:
+                raise KeyError(f"can not find key: {name} in ffn weights, allow key names are {[name for name in self.sub_weights]}")
+            return self.sub_weights[name].update(tensor, device, load_config)
+        else:
+            return super().update(tensor, device, load_config)
+
     def _split(
         self,
         tensor: Union[torch.Tensor, Dict[str, torch.Tensor]],

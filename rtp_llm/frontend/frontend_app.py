@@ -281,6 +281,12 @@ class FrontendApp(object):
         async def encode(req: Union[str, Dict[Any, Any]]):
             return self.frontend_server.tokenize(req)
 
+        @app.post("/update_weight")
+        async def update_weight(req: Union[str, Dict[Any, Any]]):
+            return await async_request_server(
+                "post", g_worker_info.backend_server_port, "update_weight", req
+            )
+
         if self.frontend_server.is_embedding:
             # embedding
             @app.post("/v1/embeddings")
