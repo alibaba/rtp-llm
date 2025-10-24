@@ -684,8 +684,13 @@ bool GenerateStream::needRemoteGenerate() const {
     return need_remote_generate_;
 }
 
-void GenerateStream::setRemoteGenerate() {
+bool GenerateStream::setRemoteGenerate() {
+    std::lock_guard<std::mutex> lock(*output_mutex_);
+    if (stoppedWithoutLock() || finishedWithoutLock()) {
+        return false;
+    }
     generate_status_->status = StreamState::REMOTE_RUNNING;
+    return true;
 }
 
 size_t GenerateStream::iterCount() const {

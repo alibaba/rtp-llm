@@ -688,7 +688,9 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
                                     enable_ffn_tp});
     }
     device_->checkError();
-
+    if (device_->initParams().profile_debug_logging_config.check_nan) {
+        (void)device_->checkNAN(*hidden);
+    }
     if (int(device_props_.enable_layer_micro_batch)) {
         auto micro_batch_plan = planMicroBatches(inputs);
         auto micro_batch_inputs =
@@ -795,7 +797,9 @@ vector<GptLayerInputs> GptModel::forwardPrefillMicroBatchedLayers(vector<GptLaye
             const auto& ffn_params     = batch_ep_input.moe_ffn_params;
 
             auto hidden_states = dispatched_output.hidden;
-
+            if (device_->initParams().profile_debug_logging_config.check_nan) {
+                (void)device_->checkNAN(*hidden_states);
+            }
             auto moe_ffn_params = FfnLayerParams(
                 {*hidden_states, ffn_params.configs, ffn_params.weights, ffn_params.residual, ffn_params.qscheme});
             prepareExpertStats(i, moe_ffn_params);
@@ -813,7 +817,9 @@ vector<GptLayerInputs> GptModel::forwardPrefillMicroBatchedLayers(vector<GptLaye
                                           dispatched_output.deep_ep_ll_output})
                                 .hidden_states;
             device_->checkError();
-
+            if (device_->initParams().profile_debug_logging_config.check_nan) {
+                (void)device_->checkNAN(*hidden_states);
+            }
             // shared experts to overlap combine
             if (micro_batch_idx) {
                 auto shared_expert_output =
@@ -1098,6 +1104,9 @@ GptLayerOutputs GptModel::forwardGptLayer(GptLayerInputs                        
         // other buffer before the actual allreduce operations. Otherwise, it will raise an error in custom ar.
         ffn_output_buf = device_->prepareAllReduce({std::move(ffn_output_buf), ReduceOp::Sum}).buffer;
     }
+    if (device_->initParams().profile_debug_logging_config.check_nan) {
+        (void)device_->checkNAN(*hidden);
+    }
     auto ffn_layer_params =
         FfnLayerParams({*hidden,
                         description_.ffn_conf,
@@ -1118,6 +1127,9 @@ GptLayerOutputs GptModel::forwardGptLayer(GptLayerInputs                        
     auto ffn_output = device_->ffnLayer(ffn_layer_params);
     device_->checkError();
     hidden = ffn_output.hidden_states;
+    if (device_->initParams().profile_debug_logging_config.check_nan) {
+        (void)device_->checkNAN(*hidden);
+    }
     if (inputs.need_moe_gating) {
         moe_gating = std::move(ffn_output.moe_gating);
     }
@@ -1292,7 +1304,10 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(const GptLayerInputs&     
         attention_common_inputs.lora_input = lora_model_input->getAttentionLayerLoraInput(layer_id);
     }
     AttentionLayerOutput attn_output;
-    auto                 attn_params =
+    if (device_->initParams().profile_debug_logging_config.check_nan) {
+        (void)device_->checkNAN(*hidden);
+    }
+    auto attn_params =
         AttentionLayerParams({layer_id,
                               *hidden,
                               move(attn_out_buf),
@@ -1313,6 +1328,9 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(const GptLayerInputs&     
     device_->checkError();
 
     auto attn_hidden = std::move(attn_output.hidden_states);
+    if (device_->initParams().profile_debug_logging_config.check_nan) {
+        (void)device_->checkNAN(*attn_hidden);
+    }
     if (device_props_.tp_size > 1 && !enable_sp) {
         // Note: for custom all reduce, allReduce will allocate a new buffer and replace the original attn_hidden with
         // it
@@ -1506,6 +1524,10 @@ GptModelOutputs GptModel::forwardPostLayers(rtp_llm::BufferPtr       input,
         if (device_props_.tp_size > 1) {
             logits = tpSyncEmbeddingOrLogits(logits);
         }
+        if (device_->initParams().profile_debug_logging_config.check_nan) {
+            (void)device_->checkNAN(*last_hidden);
+            (void)device_->checkNAN(*logits);
+        }
         // TODO(xinfei.sxf) calculate softmax_result
         rtp_llm::BufferPtr softmax_result;
         // logits is too big, tmp not print default
@@ -1557,7 +1579,9 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     }
 
     BufferPtr merged_eagle3_hidden = mergeEagle3HiddenState(layer_inputs, eagle3_selected_hidden);
-
+    if (device_->initParams().profile_debug_logging_config.check_nan) {
+        (void)device_->checkNAN(*layer_outputs.hidden);
+    }
     auto outputs = forwardPostLayers(layer_outputs.hidden,
                                      inputs.input_lengths->shape()[0] != inputs.sequence_lengths->shape()[0],
                                      inputs.need_all_logits,

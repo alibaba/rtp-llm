@@ -113,7 +113,8 @@ std::shared_ptr<GenerateInput> NormalEngine::makeFakeInput(size_t seq_len) {
     fake_input->generate_config               = make_shared<GenerateConfig>();
     fake_input->input_ids =
         device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {seq_len}, rtp_llm::AllocationType::HOST});
-
+    fake_input->begin_time_us          = autil::TimeUtility::currentTimeInMicroSeconds();
+    fake_input->generate_config->top_k = 1;
     std::default_random_engine generator;
     size_t                     token_size =
         params_.embedding_size_ ? std::min(params_.embedding_size_, params_.vocab_size_) : params_.vocab_size_;
@@ -129,7 +130,6 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
     auto fake_input                                   = makeFakeInput((size_t)params_.max_seq_len_ - 1);
     fake_input->generate_config->num_return_sequences = params_.max_context_batch_size_;
     fake_input->generate_config->calculate_loss       = int(params_.warm_up_with_loss_);
-    fake_input->begin_time_us                         = autil::TimeUtility::currentTimeInMicroSeconds();
     device_->setTraceMemory(true);
     executor_.reset(new NormalExecutor(params, nullptr, device_, nullptr, true));
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::prefill_warm_up));
@@ -144,7 +144,6 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     auto fake_input                                   = makeFakeInput((size_t)params_.max_seq_len_ - 1);
     fake_input->generate_config->num_return_sequences = params_.max_generate_batch_size_;
     fake_input->generate_config->calculate_loss       = int(params_.warm_up_with_loss_);
-    fake_input->begin_time_us                         = autil::TimeUtility::currentTimeInMicroSeconds();
     device_->setTraceMemory(true);
 
     auto cache_config               = CacheConfigCreator::createBasicConfig(params_);
@@ -160,20 +159,17 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
         {device_status.device_memory_status.preserved_bytes, device_status.device_memory_status.max_consumed_bytes});
 }
 
-std::shared_ptr<GenerateStream> NormalEngine::enqueueMinFakeQuery(int32_t max_new_tokens) {
-    RTP_LLM_LOG_DEBUG("enqueue min fake query");
+std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_new_tokens) {
+    RTP_LLM_LOG_DEBUG("create min fake query");
     auto fake_input                             = makeFakeInput(1);
     fake_input->generate_config->max_new_tokens = max_new_tokens;
-    fake_input->generate_config->top_k          = 1;
-    fake_input->begin_time_us                   = autil::TimeUtility::currentTimeInMicroSeconds();
     fake_input->fake_query                      = true;
     auto stream                                 = makeStream(fake_input);
     stream->setIsDummyStream(true);
     stream->setMetricsReporter(nullptr);
-    enqueue(stream);
+    stream->fakeInitKVBlock();
     return stream;
 }
-
 
 void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {
     auto result = CacheConfigCreator::createConfig(params_, warm_up_result);
@@ -279,8 +275,7 @@ absl::Status NormalEngine::step() {
             if (params_.dp_size_ > 1) {
                 CHECK_AND_ASSIGN(streams, scheduler_->schedule());
                 if (streams.empty()) {
-                    enqueueMinFakeQuery(1);
-                    return absl::OkStatus();
+                    streams.emplace_back(createMinFakeStream(1));
                 }
             } else {
                 return absl::OkStatus();

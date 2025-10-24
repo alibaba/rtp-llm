@@ -640,6 +640,7 @@ class GptInitModelParameters:
                 qwen_agent_debug=get_env_bool("QWEN_AGENT_DEBUG", False),
                 disable_dpc_random=get_env_bool("DISABLE_DPC_RANDOM", False),
                 enable_detail_log=get_env_bool("ENABLE_DETAIL_LOG", False),
+                check_nan=get_env_bool("CHECK_NAN", False),
             )
         )
         # HWKernelConfig
@@ -723,8 +724,13 @@ class GptInitModelParameters:
             use_batch_decode_scheduler=get_env_bool("USE_BATCH_DECODE_SCHEDULER"),
             use_gather_batch_scheduler=get_env_bool("USE_GATHER_BATCH_SCHEDULER"),
         )
-        if self.gpt_init_params.scheduler_config.use_gather_batch_scheduler and self.gpt_init_params.scheduler_config.use_batch_decode_scheduler:
-            raise ValueError("use_gather_batch_scheduler and use_batch_decode_scheduler cannot be true at the same time")
+        if (
+            self.gpt_init_params.scheduler_config.use_gather_batch_scheduler
+            and self.gpt_init_params.scheduler_config.use_batch_decode_scheduler
+        ):
+            raise ValueError(
+                "use_gather_batch_scheduler and use_batch_decode_scheduler cannot be true at the same time"
+            )
 
         # BatchDecodeSchedulerConfig
         self.gpt_init_params.batch_decode_scheduler_config = BatchDecodeSchedulerConfig(
@@ -1157,33 +1163,61 @@ class GptInitModelParameters:
             f" stop_words_id_list [{self.special_tokens.stop_words_id_list}]"
         )
 
-        model_override_args = json.loads(StaticConfig.model_config.json_model_override_args)
+        model_override_args = json.loads(
+            StaticConfig.model_config.json_model_override_args
+        )
         if model_override_args:
             if "rope_scaling" in model_override_args:
                 # be consistent with RopeStyle
-                rope_type = {"no": 0, "base": 1, "glm2": 2, "dynamicntk": 3,
-                             "qwendynamicntk": 4, "yarn": 5, "llama3": 6, "mrope": 7}
+                rope_type = {
+                    "no": 0,
+                    "base": 1,
+                    "glm2": 2,
+                    "dynamicntk": 3,
+                    "qwendynamicntk": 4,
+                    "yarn": 5,
+                    "llama3": 6,
+                    "mrope": 7,
+                }
                 rope_override_args = model_override_args["rope_scaling"]
-                assert "type" in rope_override_args and rope_override_args["type"] in rope_type
+                assert (
+                    "type" in rope_override_args
+                    and rope_override_args["type"] in rope_type
+                )
                 self.rotary_embedding_style = rope_type[rope_override_args["type"]]
                 if rope_override_args["type"] == "yarn":
-                    assert "factor" in rope_override_args and "original_max_position_embeddings" in rope_override_args
+                    assert (
+                        "factor" in rope_override_args
+                        and "original_max_position_embeddings" in rope_override_args
+                    )
                     self.rotary_embedding_scale = rope_override_args["factor"]
-                    self.org_embedding_max_pos = rope_override_args["original_max_position_embeddings"]
+                    self.org_embedding_max_pos = rope_override_args[
+                        "original_max_position_embeddings"
+                    ]
                     self.rotary_factor1 = rope_override_args.get("beta_slow", 1.0)
                     self.rotary_factor2 = rope_override_args.get("beta_fast", 1.0)
                     mscale = rope_override_args.get("mscale", 1.0)
                     self.rotary_embedding_mscale = float(
-                        (1.0 if self.rotary_embedding_scale <= 1 else 0.1 * math.log(self.rotary_embedding_scale) + 1.0) * mscale)
-                    self.rotary_embedding_extrapolation_factor = rope_override_args.get("extrapolation_factor", 1.0)
+                        (
+                            1.0
+                            if self.rotary_embedding_scale <= 1
+                            else 0.1 * math.log(self.rotary_embedding_scale) + 1.0
+                        )
+                        * mscale
+                    )
+                    self.rotary_embedding_extrapolation_factor = rope_override_args.get(
+                        "extrapolation_factor", 1.0
+                    )
 
-                logging.info(f"rotary_embedding_style: {self.rotary_embedding_style}, "
-                             f"rotary_embedding_scale: {self.rotary_embedding_scale}, "
-                             f"org_embedding_max_pos: {self.org_embedding_max_pos}, "
-                             f"rotary_factor1: {self.rotary_factor1}, "
-                             f"rotary_factor2: {self.rotary_factor2}, "
-                             f"rotary_embedding_mscale: {self.rotary_embedding_mscale}, "
-                             f"rotary_embedding_extrapolation_factor: {self.rotary_embedding_extrapolation_factor}")
+                logging.info(
+                    f"rotary_embedding_style: {self.rotary_embedding_style}, "
+                    f"rotary_embedding_scale: {self.rotary_embedding_scale}, "
+                    f"org_embedding_max_pos: {self.org_embedding_max_pos}, "
+                    f"rotary_factor1: {self.rotary_factor1}, "
+                    f"rotary_factor2: {self.rotary_factor2}, "
+                    f"rotary_embedding_mscale: {self.rotary_embedding_mscale}, "
+                    f"rotary_embedding_extrapolation_factor: {self.rotary_embedding_extrapolation_factor}"
+                )
 
     def _init_precision_config(
         self,

@@ -146,6 +146,7 @@ void ProfilingDebugLoggingConfig::update_from_env_for_test() {
     dg_print_reg_reuse        = bool_from_env_for_test("DG_PRINT_REG_REUSE", false);
     qwen_agent_debug          = bool_from_env_for_test("QWEN_AGENT_DEBUG", false);
     disable_dpc_random        = bool_from_env_for_test("DISABLE_DPC_RANDOM", false);
+    check_nan                 = bool_from_env_for_test("CHECK_NAN", false);
 }
 
 std::string ProfilingDebugLoggingConfig::to_string() const {
@@ -166,7 +167,8 @@ std::string ProfilingDebugLoggingConfig::to_string() const {
         << "debug_start_fake_process: " << debug_start_fake_process << "\n"
         << "dg_print_reg_reuse: " << dg_print_reg_reuse << "\n"
         << "qwen_agent_debug" << qwen_agent_debug << "\n"
-        << "disable_dpc_random" << disable_dpc_random << "\n";
+        << "disable_dpc_random" << disable_dpc_random << "\n"
+        << "check_nan" << check_nan << "\n";
     return oss.str();
 }
 
@@ -403,8 +405,8 @@ std::string FIFOSchedulerConfig::to_string() const {
 
 // MiscellaneousConfig
 void MiscellaneousConfig::update_from_env_for_test() {
-    disable_pdl             = bool_from_env_for_test("DISABLE_PDL", true);
-    aux_string              = autil::EnvUtil::getEnv("AUX_STRING", "");
+    disable_pdl = bool_from_env_for_test("DISABLE_PDL", true);
+    aux_string  = autil::EnvUtil::getEnv("AUX_STRING", "");
 }
 
 std::string MiscellaneousConfig::to_string() const {

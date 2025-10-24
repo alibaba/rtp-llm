@@ -61,7 +61,14 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
     RTP_LLM_LOG_DEBUG("stream [%ld] try release [%lu] blocks", stream_->streamId(), nums);
     size_t release_blocks_num = 0;
     size_t reserved_blocks    = 0;
-
+    if (fake_inited_) {
+        int max_block_size = maxBlockSize();
+        int batch_size     = batch_resource_.batchSize();
+        batch_resource_.clear();
+        batch_resource_.resize(batch_size);
+        fake_inited_ = false;
+        return max_block_size;
+    }
     // NOTE: all batch has same number of blocks
     for (size_t batch_id = 0; batch_id < batch_resource_.batchSize(); batch_id++) {
         const auto& blocks = batch_resource_.blocks(batch_id);
@@ -148,6 +155,9 @@ absl::StatusOr<int> StreamCacheResource::initKVBlock(int token_capacity, size_t 
 absl::StatusOr<int> StreamCacheResource::incrKVBlock(int token_capacity, size_t reserve_step) {
     // TODO(xinfei.sxf) rollback token_capacity
     // TODO(xinfei.sxf) add reserver_blocks
+    if (fake_inited_) {
+        return absl::InternalError("fake inited not allow to incr block");
+    }
     int real_occupy = 0;
     if (stream_->enable_fast_gen_) {
         if (stream_->isChunkStream() || !stream_->isContextStream()) {
@@ -400,6 +410,7 @@ const std::vector<int64_t>& StreamCacheResource::cacheKeys(int32_t batch_id) con
 }
 
 void StreamCacheResource::fakeInitKVBlock() {
+    fake_inited_ = true;
     batch_resource_.resize(stream_->maxBatchSize());
     for (size_t i = 0; i < stream_->maxBatchSize(); i++) {
         batch_resource_.resize(i, stream_->seqLength(), true);

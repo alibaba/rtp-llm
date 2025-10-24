@@ -222,7 +222,7 @@ public:
     void         cancelIfNotRunning();
     void         setFinishedWithoutLock();
     bool         needRemoteGenerate() const;
-    void         setRemoteGenerate();
+    bool         setRemoteGenerate();
     size_t       iterCount() const;
     size_t       spIterCount() const;
     void         setSpIterCount(int sp_iter_count);
