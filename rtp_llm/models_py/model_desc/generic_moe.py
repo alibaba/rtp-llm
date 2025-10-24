@@ -67,7 +67,7 @@ class GenericMoeLayer(nn.Module):
         )
         topk_ids = torch.zeros(
             (num_tokens, self.top_k),
-            dtype=torch.int32,
+            dtype=torch.int64,
             device=hidden_states.device,
         )
         

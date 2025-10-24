@@ -61,7 +61,7 @@ class DeepepNormalRouter(FusedMoeDataRouter):
         # else:
         input = a1
         # pre dispatch
-        topk_ids = topk_ids.long()
+        # topk_ids = topk_ids.long()
         (
             num_tokens_per_rank,
             num_tokens_per_rdma_rank,
