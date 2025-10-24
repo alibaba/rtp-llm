@@ -6,13 +6,14 @@
 #include <string>
 #include <shared_mutex>
 #include <mutex>
+#include <atomic>
 #include "kvcm_client/meta_client.h"
 #include "kvcm_client/transfer_client.h"
 #include "KVCMClientWrapperConfig.h"
 
 namespace rtp_llm {
 class KVCMSubscriber;
-class KVCMClientWrapper {
+class KVCMClientWrapper: public std::enable_shared_from_this<KVCMClientWrapper> {
 public:
     ~KVCMClientWrapper();
     bool init(const std::map<std::string, std::string>& config_str_map,
@@ -55,6 +56,8 @@ private:
                 KvcmConfigMap::iterator&     config_iter,
                 KvcmMetaClientMap::iterator& meta_client_iter);
     bool tryReinit(const std::string& unique_id);
+    bool checkError(kv_cache_manager::ClientErrorCode ec);
+    void reRegistration();
 
     kv_cache_manager::InitParams init_params_;
     // keys of config_map_/meta_client_map_ will not change after init
@@ -62,6 +65,10 @@ private:
     KvcmMetaClientMap        meta_client_map_;
     std::vector<std::string> address_snapshot_;
     std::shared_mutex        reinit_mutex_;
+
+    // for re-registration
+    std::atomic_bool  rr_other_working_ = false;
+    std::shared_mutex rr_mutex_;
 
     static std::unique_ptr<kv_cache_manager::TransferClient> transfer_client_;
     static std::unique_ptr<KVCMSubscriber>                   subscriber_;

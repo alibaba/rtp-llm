@@ -57,7 +57,7 @@ private:
     std::string                        genUniqueId(const std::map<std::string, std::string>& extra_metas) const;
 
 private:
-    std::unique_ptr<KVCMClientWrapper> kvcm_client_wrapper_;
+    std::shared_ptr<KVCMClientWrapper> kvcm_client_wrapper_;
 };
 
 }  // namespace rtp_llm

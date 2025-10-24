@@ -4,8 +4,38 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include <algorithm>
 #include <numeric>
+#include <thread>
+#include <random>
+#include <chrono>
 
 namespace rtp_llm {
+
+namespace {
+
+class ReRegistrationPolicy {
+public:
+    ReRegistrationPolicy(): rd_(), gen_(rd_()), jitter_dist_(jitter_min_, jitter_max_) {}
+
+    int sleep_time_ms() {
+        int sleep_time_ms = next_sleep_time_ms_ + jitter_dist_(gen_);
+        next_sleep_time_ms_ *= multiplier_;
+        next_sleep_time_ms_ = std::min(next_sleep_time_ms_, max_delay_ms_);
+        return sleep_time_ms;
+    }
+
+private:
+    static constexpr int            base_delay_ms_      = 100;
+    static constexpr int            max_delay_ms_       = 20000;
+    static constexpr double         multiplier_         = 1.5;
+    static constexpr int            jitter_min_         = 0;
+    static constexpr int            jitter_max_         = 2000;
+    int                             next_sleep_time_ms_ = base_delay_ms_;
+    std::random_device              rd_;
+    std::mt19937                    gen_;
+    std::uniform_int_distribution<> jitter_dist_;
+};
+
+}  // namespace
 
 std::unique_ptr<kv_cache_manager::TransferClient> KVCMClientWrapper::transfer_client_;
 std::unique_ptr<KVCMSubscriber>                   KVCMClientWrapper::subscriber_;
@@ -183,13 +213,14 @@ KVCMClientWrapper::match(const std::string&                      unique_id,
                          const std::vector<int64_t>&             keys,
                          const kv_cache_manager::BlockMask&      block_mask,
                          const kv_cache_manager::ForwardContext& forward_context) {
+    std::shared_lock read_guard(rr_mutex_, std::try_to_lock);
     if (!tryReinit(unique_id)) {
         return {false, {}};
     }
     if (const auto& client_iter = meta_client_map_.find(unique_id); client_iter != meta_client_map_.end()) {
         auto [ec, result] =
             client_iter->second->MatchLocation(trace_id, query_type, keys, {}, block_mask, forward_context.sw_size, {});
-        if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
+        if (!checkError(ec)) {
             RTP_LLM_LOG_ERROR("kvcm client match fail, ec [%d]", ec);
             return {false, {}};
         }
@@ -206,13 +237,14 @@ KVCMClientWrapper::getWriteLocation(const std::string&                      uniq
                                     const std::vector<std::string>&         location_spec_names,
                                     int64_t                                 write_timeout_seconds,
                                     const kv_cache_manager::ForwardContext& forward_context) {
+    std::shared_lock read_guard(rr_mutex_, std::try_to_lock);
     if (!tryReinit(unique_id)) {
         return {false, {}};
     }
     if (const auto& client_iter = meta_client_map_.find(unique_id); client_iter != meta_client_map_.end()) {
         auto [ec, result] =
             client_iter->second->StartWrite(trace_id, keys, {}, location_spec_names, write_timeout_seconds);
-        if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
+        if (!checkError(ec)) {
             RTP_LLM_LOG_ERROR("kvcm client getWriteLocation fail, ec [%d]", ec);
             return {false, {}};
         }
@@ -227,12 +259,13 @@ bool KVCMClientWrapper::finishWrite(const std::string&                    unique
                                     const std::string&                    write_session_id,
                                     const kv_cache_manager::BlockMask&    block_mask,
                                     const kv_cache_manager::LocationsMap& locations_map) {
+    std::shared_lock read_guard(rr_mutex_, std::try_to_lock);
     if (!tryReinit(unique_id)) {
         return false;
     }
     if (const auto& client_iter = meta_client_map_.find(unique_id); client_iter != meta_client_map_.end()) {
         auto ec = client_iter->second->FinishWrite(trace_id, write_session_id, block_mask, locations_map);
-        if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
+        if (!checkError(ec)) {
             RTP_LLM_LOG_ERROR("kvcm client finishWrite fail, ec [%d]", ec);
             return false;
         }
@@ -240,6 +273,51 @@ bool KVCMClientWrapper::finishWrite(const std::string&                    unique
     }
     RTP_LLM_LOG_ERROR("kvcm client not find client [%s]", unique_id.c_str());
     return false;
+}
+
+bool KVCMClientWrapper::checkError(kv_cache_manager::ClientErrorCode ec) {
+    if (ec == kv_cache_manager::ClientErrorCode::ER_OK) {
+        return true;
+    } else if (ec == kv_cache_manager::ClientErrorCode::ER_SERVICE_INSTANCE_NOT_EXIST) {
+        std::thread([self = shared_from_this()]() { self->reRegistration(); }).detach();
+        return false;
+    }
+    return false;
+}
+
+void KVCMClientWrapper::reRegistration() {
+    auto expected = false;
+    if (!rr_other_working_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        RTP_LLM_LOG_INFO("other thread is working");
+        return;
+    }
+    std::unique_lock write_guard(rr_mutex_);
+    RTP_LLM_LOG_INFO("re-registration start");
+    ReRegistrationPolicy policy;
+    while (true) {
+        RTP_LLM_INTERVAL_LOG(5, INFO, "doing re-registering...");
+        std::this_thread::sleep_for(std::chrono::milliseconds(policy.sleep_time_ms()));
+        if (!subscriber_->getAddresses(address_snapshot_)) {
+            continue;
+        }
+        bool all_succeed = false;
+        for (auto config_iter = config_map_.begin(); config_iter != config_map_.end(); ++config_iter) {
+            const auto& unique_id = config_iter->first;
+            if (auto meta_client_iter = meta_client_map_.find(unique_id); meta_client_iter != meta_client_map_.end()) {
+                all_succeed = reinit(unique_id, config_iter, meta_client_iter);
+                if (!all_succeed) {
+                    break;
+                }
+            } else {
+                continue;
+            }
+        }
+        if (all_succeed) {
+            break;
+        }
+    }
+    RTP_LLM_LOG_INFO("re-registration finish");
+    rr_other_working_.store(false, std::memory_order_release);
 }
 
 bool KVCMClientWrapper::loadKvCaches(const kv_cache_manager::Locations& locations,
