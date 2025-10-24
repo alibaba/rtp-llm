@@ -89,9 +89,7 @@ void PurePointerCudaAllocator::free(void** ptr) {
     return;
 }
 
-Allocator<AllocatorType::CUDA>::Allocator(int device_id):
-    PurePointerCudaAllocator(device_id),
-    IVirtualMemAllocator() {
+Allocator<AllocatorType::CUDA>::Allocator(int device_id): PurePointerCudaAllocator(device_id), IVirtualMemAllocator() {
     pointer_mapping_ = std::make_unique<std::unordered_map<CUdeviceptr, VmemBlock>>();
 }
 
@@ -101,14 +99,13 @@ Allocator<AllocatorType::CUDA>::~Allocator() {
 
 void* Allocator<AllocatorType::CUDA>::mallocPhysical(size_t size) {
     RTP_LLM_LOG_DEBUG("malloc physical memory with size %lu\n", size);
-    printf("malloc physical %lu\n", size);
     auto address = doMallocSync(size);
     if (!address) {
         return nullptr;
     }
     CUdeviceptr                 dptr = reinterpret_cast<CUdeviceptr>(address);
     std::lock_guard<std::mutex> lock(lock_);
-    auto it = pointer_mapping_->find(dptr);
+    auto                        it = pointer_mapping_->find(dptr);
     if (it == pointer_mapping_->end()) {
         RTP_LLM_LOG_ERROR("Unexpected allocation, pointer mapping missing.");
         return address;
