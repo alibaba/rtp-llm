@@ -155,7 +155,10 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
                                                       mayGetRef(params.weights.up_weight->bias),
                                                       std::nullopt,
                                                       std::nullopt,
-                                                      mayGetRef(params.weights.act_scale));
+                                                      mayGetRef(params.weights.act_scale),
+                                                      nullptr,
+                                                      false,
+                                                      params.qscheme);
             up_output               = loraLinearWithActivation({lora_linear_params, activation_params});
         }
 

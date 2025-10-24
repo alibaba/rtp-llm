@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/rocm/quantizePreprocessors.h"
 #include "rtp_llm/cpp/kernels/rocm/quantization_rocm.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "quant.h"
 // #include "aiter_meta/csrc/include/quant.h"
 
@@ -12,10 +13,11 @@ using namespace rocm;
 BufferPtr ROCmDevice::quantize(const QuantizeParams& params) {
     ROCM_CHECK_VALUE((params.input.dim() == 2 || params.input.dim() == 3), "quantize only support 2D or 3D.");
     ROCM_CHECK_VALUE((params.input.type() == DataType::TYPE_FP16 || params.input.type() == DataType::TYPE_FP32
-                      || params.input.type() == DataType::TYPE_BF16),
-                     "quantize only support half or float quantize. but get %d.",
-                     params.input.type());
-
+                        || params.input.type() == DataType::TYPE_BF16 || params.input.type() == DataType::TYPE_INT8
+                    ),"quantize only support half or float quantize. but get %d.",params.input.type());
+    ROCM_CHECK_VALUE((params.qtype == DataType::TYPE_INT8 || params.qtype == DataType::TYPE_QINT8 || 
+                      params.qtype == DataType::TYPE_QINT4X2 || params.qtype == DataType::TYPE_QFP8_E4M3),
+                       "quantize only support int8/fp8/qint4x2 quantize. but get %d.",params.qtype);
     BufferPtr kernel, scales, zeros;
     if (params.input.where() == MemoryType::MEMORY_GPU) {
         if (params.qtype == DataType::TYPE_QINT4X2) {
@@ -23,15 +25,15 @@ BufferPtr ROCmDevice::quantize(const QuantizeParams& params) {
             size_t groupSize   = params.groupSize;
             size_t scales_dim0 = params.input.shape()[0] / groupSize;
 
-            kernel = allocateBuffer({QBufferDtype2BufferDtype(params.qtype),
+            auto kernel = allocateBuffer({QBufferDtype2BufferDtype(params.qtype),
                                      params.input.shape(),
                                      getMemAllocationType(params.input.where())},
                                     {"kernel"});
-            scales = allocateBuffer({DataType::TYPE_FP16,
+            auto scales = allocateBuffer({DataType::TYPE_FP16,
                                      {scales_dim0, params.input.shape()[1]},
                                      getMemAllocationType(params.input.where())},
                                     {"scales"});
-            zeros  = allocateBuffer({DataType::TYPE_FP16,
+            auto zeros  = allocateBuffer({DataType::TYPE_FP16,
                                      {scales_dim0, params.input.shape()[1]},
                                      getMemAllocationType(params.input.where())},
                                     {"zeros"});
@@ -45,6 +47,41 @@ BufferPtr ROCmDevice::quantize(const QuantizeParams& params) {
                                              scales->data<half>(),
                                              zeros->data<half>(),
                                              stream_);
+                                                               
+        }
+        else if (params.qscheme == QScheme::Qint8PerTensor) 
+        {                
+            ROCM_CHECK_VALUE((params.qtype == DataType::TYPE_INT8 || params.qtype == DataType::TYPE_QINT8),
+                "Qint8PerTensor only support qtype = TYPE_INT8 or TYPE_QINT8");
+            ROCM_CHECK_VALUE((params.axis == 1), "Qint8PerTensor only support axis = 1");
+            size_t num_token = params.input.shape()[0];
+            size_t model_dim = params.input.shape()[1];
+            kernel = allocateBuffer({DataType::TYPE_INT8, params.input.shape()}, {"quant_kernel"});
+	    if (params.static_scale_reciprocal.has_value()) {
+            const Buffer& srec = params.static_scale_reciprocal.value().get(); // = scale
+	        scales = BufferPtr(new Buffer(srec.where(), srec.type(), srec.shape(), srec.data()));
+	    } else {
+	        scales = allocateBuffer({DataType::TYPE_FP32, {1}}, {"static_quant_scale"});
+	    }
+            zeros  = BufferPtr(new Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_INVALID, {0}, nullptr));
+
+            if (num_token > 0) {
+                torch::Tensor input_tensor   = Buffer2torchTensor(params.input, false);
+                torch::Tensor kernel_tensor  = Buffer2torchTensor(kernel, false);
+                torch::Tensor scales_tensor  = Buffer2torchTensor(scales, false);
+                if (scales_tensor.dtype() != torch::kFloat) scales_tensor = scales_tensor.to(torch::kFloat);
+                if (params.static_scale_reciprocal.has_value()) {
+                    aiter::static_per_tensor_quant(
+                        /*out=*/kernel_tensor,
+                        /*input=*/input_tensor,
+                        /*scales=*/scales_tensor);
+                } else {
+                    aiter::dynamic_per_tensor_quant(
+                        /*out=*/kernel_tensor,
+                        /*input=*/input_tensor,
+                        /*scales=*/scales_tensor);
+                }
+	        }
         } else if (params.qscheme == QScheme::Qfp8PerToken) {
             ROCM_CHECK_VALUE((params.qtype == DataType::TYPE_QFP8_E4M3),
                              "Qfp8PerToken only support qtype = TYPE_QFP8_E4M3");
@@ -141,3 +178,4 @@ BufferPtr ROCmDevice::dequantize(const QuantizeParams& params) {
 }
 
 }  // namespace rtp_llm
+

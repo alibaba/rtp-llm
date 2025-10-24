@@ -107,6 +107,8 @@ void hipblasMMWrapper::FP8_Gemm(hipblasOperation_t transa,
               const int          ldc,
               const float*       d_scale_a,
               const float*       d_scale_b,
+              const void*        bias,
+              const hipblasLtEpilogue_t epilogue,
               float              alpha_,
               float              beta_) {
     
@@ -166,6 +168,15 @@ void hipblasMMWrapper::FP8_Gemm(hipblasOperation_t transa,
         matmul, HIPBLASLT_MATMUL_DESC_A_SCALE_POINTER, &d_scale_a, sizeof(d_scale_a)));
     ROCM_CHECK(hipblasLtMatmulDescSetAttribute(
         matmul, HIPBLASLT_MATMUL_DESC_B_SCALE_POINTER, &d_scale_b, sizeof(d_scale_b)));
+    if (epilogue == HIPBLASLT_EPILOGUE_BIAS) {
+        ROCM_CHECK(hipblasLtMatmulDescSetAttribute(
+            matmul, HIPBLASLT_MATMUL_DESC_EPILOGUE, &epilogue, sizeof(epilogue)));
+        int32_t bias_data_type = Ctype_;
+        ROCM_CHECK(hipblasLtMatmulDescSetAttribute(
+            matmul, HIPBLASLT_MATMUL_DESC_BIAS_DATA_TYPE, &bias_data_type, sizeof(bias_data_type)));
+        ROCM_CHECK(hipblasLtMatmulDescSetAttribute(
+            matmul, HIPBLASLT_MATMUL_DESC_BIAS_POINTER, &bias, sizeof(void*)));
+    }
 
     const int                        request_solutions = 1;
     hipblasLtMatmulHeuristicResult_t heuristicResult[request_solutions];
@@ -207,7 +218,6 @@ void hipblasMMWrapper::FP8_Gemm(hipblasOperation_t transa,
         ROCM_CHECK(blaslt_status);
     }
 }
-
 
 void hipblasMMWrapper::Gemm(hipblasOperation_t transa,
                             hipblasOperation_t transb,
@@ -440,7 +450,9 @@ void hipblasMMWrapper::GemmBiasAct(hipblasOperation_t        transa,
                                    void*                     C,
                                    const int                 ldc,
                                    const void*               bias,
-                                   const hipblasLtEpilogue_t epilogue) {
+                                   const hipblasLtEpilogue_t epilogue,
+                                   const float*              scale_A,
+                                   const float*              scale_B) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     float f_alpha(1.0);
     float f_beta(0.0);
@@ -504,6 +516,19 @@ void hipblasMMWrapper::GemmBiasAct(hipblasOperation_t        transa,
         ROCM_CHECK(hipblasLtMatmulDescSetAttribute(
             matmul, HIPBLASLT_MATMUL_DESC_BIAS_DATA_TYPE, &bias_data_type, sizeof(bias_data_type)));
         ROCM_CHECK(hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_BIAS_POINTER, &bias, sizeof(void*)));
+
+        if (scale_A) {
+            hipblasLtMatmulMatrixScale_t scale_mode = HIPBLASLT_MATMUL_MATRIX_SCALE_OUTER_VEC_32F;
+            ROCM_CHECK(hipblasLtMatmulDescSetAttribute(
+                matmul, HIPBLASLT_MATMUL_DESC_A_SCALE_MODE, &scale_mode, sizeof(uint32_t)));
+            ROCM_CHECK(hipblasLtMatmulDescSetAttribute(
+                matmul, HIPBLASLT_MATMUL_DESC_B_SCALE_MODE, &scale_mode, sizeof(uint32_t)));
+
+            ROCM_CHECK(hipblasLtMatmulDescSetAttribute(
+                matmul, HIPBLASLT_MATMUL_DESC_A_SCALE_POINTER, &scale_A, sizeof(scale_A)));
+            ROCM_CHECK(hipblasLtMatmulDescSetAttribute(
+                matmul, HIPBLASLT_MATMUL_DESC_B_SCALE_POINTER, &scale_B, sizeof(scale_B)));
+        }
 
         const int                        request_solutions = 1;
         hipblasLtMatmulHeuristicResult_t heuristicResult[request_solutions];

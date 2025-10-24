@@ -460,6 +460,9 @@ MultimodalEmbeddingOutput DeviceBase::multimodalEmbedding(const MultimodalEmbedd
 
     RUNTIME_ASSERT_OP_ARG(embeddings->typeSize() == features[0]->typeSize(),
                           "type size of embeddings and multimodal features should be equal.");
+    RUNTIME_ASSERT_OP_ARG(embeddings->type() == features[0]->type(),
+        "data type of embeddings %d and multimodal features %d are not equal",
+        embeddings->type(), features[0]->type());
 
     for (int i = 0; i < mm_num; ++i) {
         auto& feature = features[i];
