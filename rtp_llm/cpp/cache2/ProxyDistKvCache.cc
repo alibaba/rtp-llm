@@ -209,7 +209,7 @@ bool ProxyDistKvCache::initKVCMClientWrapper() {
         client_config_map = genKVCMClientConfig();
     }
     auto tp_rank         = cache_manager_->device()->getDeviceProperties().tp_rank;
-    kvcm_client_wrapper_ = std::make_unique<KVCMClientWrapper>();
+    kvcm_client_wrapper_ = std::make_shared<KVCMClientWrapper>();
     kv_cache_manager::RegistSpan regist_span{cache_manager_->kvCacheAllocator()->getCacheBasePtr(),
                                              cache_manager_->kvCacheAllocator()->getCacheBufferSize()};
     kv_cache_manager::InitParams client_init_params{tp_rank == 0 ? kv_cache_manager::RoleType::HYBRID :
@@ -367,7 +367,7 @@ int32_t ProxyDistKvCache::matchAllRankImpl(const std::vector<int64_t>&          
         return 0;
     }
     *locations_map_ptr = std::move(locations_map);
-    return ignore_block_num + (locations_map.empty() ? 0 : locations_map.begin()->second.size());
+    return ignore_block_num + (locations_map_ptr->empty() ? 0 : locations_map_ptr->begin()->second.size());
 }
 
 std::string ProxyDistKvCache::genUniqueId(const std::map<std::string, std::string>& extra_metas) const {
