@@ -15,7 +15,7 @@ from rtp_llm.openai.renderers.custom_renderer import (
     RenderedInputs,
     RendererParams,
 )
-from rtp_llm.utils.multimodal_util import MMPreprocessConfig, MMUrlType
+from rtp_llm.utils.base_model_datatypes import MMPreprocessConfig, MMUrlType
 
 
 class QwenVLRenderer(CustomChatRenderer):
@@ -82,6 +82,7 @@ class Qwen2VLRenderer(CustomChatRenderer):
                 fps=config.fps or -1,
                 min_frames=config.min_frames or -1,
                 max_frames=config.max_frames or -1,
+                mm_timeout_ms=config.mm_timeout_ms,
             )
 
         for message in messages:

@@ -18,7 +18,7 @@ from rtp_llm.openai.renderers.custom_renderer import (
     RenderedInputs,
     RendererParams,
 )
-from rtp_llm.utils.multimodal_util import MMPreprocessConfig, MMUrlType
+from rtp_llm.utils.base_model_datatypes import MMPreprocessConfig, MMUrlType
 
 
 class SeparatorStyle(Enum):
@@ -79,8 +79,11 @@ class Conversation:
                 width=config.resized_width or -1,
                 height=config.resized_height or -1,
                 fps=config.fps or -1,
+                min_pixels=config.min_pixels or -1,
+                max_pixels=config.max_pixels or -1,
                 min_frames=config.min_frames or -1,
                 max_frames=config.max_frames or -1,
+                mm_timeout_ms=config.mm_timeout_ms,
             )
 
         if messages[0].role != RoleEnum.system:
