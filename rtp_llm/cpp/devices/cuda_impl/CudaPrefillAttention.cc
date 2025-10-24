@@ -221,10 +221,14 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
                 batch_size, seq_len, max_blocks_per_batch * params.configs.tokens_per_block, true);
             auto ws =
                 allocateBuffer({DataType::TYPE_INT8, {ws_size}, AllocationType::DEVICE}, {"open_source_paged_fmha_ws"});
+            // head_num * seq_size_per_block * size_per_head
+            auto kv_offset = params.common.kv_cache->k_cache_buffer->shape()[2]
+                             * params.common.kv_cache->k_cache_buffer->shape()[3]
+                             * params.common.kv_cache->k_cache_buffer->shape()[4];
             cufmha_runner->runOpenSourceFmhaPaged(
                 params.input.data(),
                 params.common.kv_cache->k_cache_buffer->data(),
-                params.common.kv_cache->v_cache_buffer->data(),
+                params.common.kv_cache->k_cache_buffer->dataWithOffset(kv_offset),
                 params.output.data(),
                 params.common.cu_seqlens->data<int>(),
                 params.common.cu_kv_seqlens->data<int>(),

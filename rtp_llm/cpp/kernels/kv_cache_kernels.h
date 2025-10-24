@@ -34,7 +34,6 @@ void invokeConvertOffsetToBlockArrayData(int32_t*     offset_addr,  // [b, 2, m]
                                          const int*   offset,       // [b, m]
                                          int          batch_size,
                                          int          max_block_num,
-                                         int          kv_block_offset,
                                          cudaStream_t stream);
 
 }  // namespace rtp_llm
