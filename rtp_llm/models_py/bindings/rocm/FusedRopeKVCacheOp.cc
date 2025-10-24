@@ -243,11 +243,7 @@ torch::Tensor FusedRopeKVCacheDecodeOp::forward(const torch::Tensor&            
 
     // Create offset_kv_block_array similar to ROCmAttentionOp
     PrefixPromptBatchWeightsParam prefix_prompt_param;
-    auto                          offset_kv_block_array = OffsetIndexedKVBlockArray(
-        kv_block_array,
-        (rtp_llm::KVBlockArrayForContextFMHA::DataType*)params->kv_cache_block_id_device.data_ptr(),
-        kv_cache.value().k_cache_base.size(0) * layer_num_);
-    prefix_prompt_param.offset_kv_block_array = offset_kv_block_array;
+    prefix_prompt_param.kv_block_array = kv_block_array;
 
     // prefix_prompt_param.kv_block_array = kv_block_array;
     // if (params->prefix_lengths.defined() && params->prefix_lengths.numel() > 0) {
