@@ -20,8 +20,8 @@ CacheConfig CacheConfigCreator::createBasicConfig(const rtp_llm::GptInitParamete
     if (param.use_mla_ && param.mla_ops_type_ != rtp_llm::MlaOpsType::MHA) {
         return CacheConfig(MlaCacheParam{(uint)param.num_layers_,
                                          (uint)0,
-                                         (uint)(param.kv_lora_rank_ + param.rope_head_dim_),
-                                         (uint)0,
+                                         (uint)(param.kv_lora_rank_),
+                                         (uint)(param.rope_head_dim_),
                                          (uint)param.seq_size_per_block_,
                                          dtype});
     }

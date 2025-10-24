@@ -67,16 +67,16 @@ struct CacheConfig {
         }
 
         block_size = layer_num * local_head_num_kv * (size_per_head + scale_size) * seq_size_per_block * dtype_size * 2;
-        kv_block_size       = layer_num * local_head_num_kv * size_per_head * seq_size_per_block * dtype_size;
+        kv_block_size       = layer_num * local_head_num_kv * size_per_head * seq_size_per_block * dtype_size * 2;
         kv_scale_block_size = layer_num * local_head_num_kv * scale_size * seq_size_per_block * dtype_size;
 
         // k_block_stride/v_block_stride is the size of a single block in a single layer
         k_block_stride        = kv_block_size / layer_num;
-        v_block_stride        = k_block_stride;
+        v_block_stride        = 0;
         kv_scale_block_stride = kv_scale_block_size / layer_num;
 
         k_block_size = kv_block_size;
-        v_block_size = kv_block_size;
+        v_block_size = 0;
 
         refresh();
     }
@@ -89,11 +89,11 @@ struct CacheConfig {
         rope_head_dim = param.rope_head_dim;
 
         auto dtype_size = rtp_llm::getTypeSize(dtype);
-        block_size      = layer_num * local_head_num_kv * (kv_lora_rank + rope_head_dim + scale_size * 2)
-                     * seq_size_per_block * dtype_size;
+        block_size = layer_num * local_head_num_kv * (kv_lora_rank + rope_head_dim) * seq_size_per_block * dtype_size;
 
-        k_block_stride = local_head_num_kv * (kv_lora_rank + scale_size) * seq_size_per_block * dtype_size;
-        v_block_stride = local_head_num_kv * (rope_head_dim + scale_size) * seq_size_per_block * dtype_size;
+        k_block_stride =
+            local_head_num_kv * (kv_lora_rank + rope_head_dim + scale_size) * seq_size_per_block * dtype_size;
+        v_block_stride = 0;
 
         k_block_size = layer_num * k_block_stride;
         v_block_size = layer_num * v_block_stride;
