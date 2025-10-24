@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from libth_transformer.rtp_llm_ops import SelectTopkOp
+from librtp_compute_ops.rtp_llm_ops import SelectTopkOp
     
 class SelectTopk(nn.Module):
     def __init__(self, config: GptInitModelParameters):

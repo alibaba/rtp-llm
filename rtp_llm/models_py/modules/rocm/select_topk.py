@@ -11,6 +11,7 @@ class SelectTopk(nn.Module):
 
     def forward(self, router_logits_fp32: torch.Tensor, topk_ids: torch.Tensor, topk_weights: torch.Tensor):
         token_expert_indicies = torch.empty(topk_ids.shape[0], self.top_k, dtype=torch.int32, device=topk_ids.device)
+        topk_ids = topk_ids.int()
         aiter.topk_softmax(
             topk_weights,
             topk_ids,

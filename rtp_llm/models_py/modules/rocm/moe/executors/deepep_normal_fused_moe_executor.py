@@ -179,6 +179,7 @@ class FusedMoeExecutor(FusedMoeExpertExecutor):
             num_valid_ids=num_valid_ids,
             out=a2,
             topk=topk,
+            kernelName="",
             w1_scale=fc1_scale,
             a1_scale=a1_scale,     
             block_m=block_size,
@@ -201,6 +202,7 @@ class FusedMoeExecutor(FusedMoeExpertExecutor):
             num_valid_ids=num_valid_ids,
             out=moe_buf,  # [M, D]
             topk=topk,
+            kernelName="",
             w2_scale=fc2_scale,
             a2_scale=a2_scale,
             block_m=block_size,
