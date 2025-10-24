@@ -10,18 +10,13 @@ from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules.attention import CausalAttention
 from rtp_llm.models_py.modules.embedding import Embedding
 from rtp_llm.models_py.modules.fmha import FMHAImplBase
-from rtp_llm.models_py.modules.linear import Linear
+from rtp_llm.models_py.modules import Linear
 from rtp_llm.models_py.modules.moe import FusedMoe
 from rtp_llm.models_py.modules.moe.fused_moe_factory import FusedMoeFactory
-from rtp_llm.models_py.modules.norm import RMSNorm
+from rtp_llm.models_py.modules import RMSNorm
+from rtp_llm.models_py.modules import SelectTopk
 from rtp_llm.ops import KVCache, PyAttentionInputs, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
-
-try:
-    from librtp_compute_ops.rtp_llm_ops import SelectTopkOp
-except ImportError:
-    logging.info("SelectTopkOp not available")
-
 
 class Qwen3MoeLayer(nn.Module):
     def __init__(
@@ -35,7 +30,7 @@ class Qwen3MoeLayer(nn.Module):
         self.num_experts = config.expert_num
         self.top_k = config.moe_k
         self.gate = Linear(weights[W.moe_gate], None)
-        self.select_topk_op = SelectTopkOp(config)
+        self.select_topk = SelectTopk(config)
         self.fused_moe: FusedMoe = FusedMoeFactory.create_fused_moe(config, weights)
         self.w1 = weights.get(W.moe_w1, None)
         self.w2 = weights.get(W.moe_w2, None)
@@ -70,7 +65,8 @@ class Qwen3MoeLayer(nn.Module):
             dtype=torch.int64,
             device=hidden_states.device,
         )
-        self.select_topk_op.forward(router_logits_fp32, topk_ids, topk_weights)
+        
+        self.select_topk(router_logits_fp32, topk_ids, topk_weights)
 
         return self.fused_moe(
             hidden_states=hidden_states,
