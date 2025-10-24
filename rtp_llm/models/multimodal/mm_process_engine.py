@@ -10,10 +10,7 @@ import torch
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import MultimodalInputsPB
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
-from rtp_llm.models.multimodal.multimodal_common import (
-    MultiModalEmbeddingInterface,
-    mm_lock,
-)
+from rtp_llm.models.multimodal.multimodal_common import MultiModalEmbeddingInterface
 from rtp_llm.models.multimodal.multimodal_util import trans_mm_input, vit_emb_cache_
 from rtp_llm.utils.base_model_datatypes import (
     MMPreprocessConfig,
@@ -36,20 +33,21 @@ class MMEmbeddingRes:
 class MMWorkItemStatus(enum.Enum):
     WAITING = 0
     PREPROCESSING = 1
-    RUNNING = 2
-    FINISHED = 3
-    STOPPED = 4
-    ERROR = 5
+    PREPROCESSED = 2
+    RUNNING = 3
+    FINISHED = 4
+    STOPPED = 5
+    ERROR = 6
 
 
 class MMWorkItem:
     def __init__(
         self,
         mm_inputs: List[MultimodalInput],
-        is_batched: bool = False,
+        lock: Lock = None,
     ):
         self.mm_inputs = mm_inputs
-        self.is_batched = is_batched
+        self.lock = lock
         self.status = MMWorkItemStatus.WAITING
 
         self.mm_timeout_ms = self.mm_inputs[0].config.mm_timeout_ms
@@ -59,12 +57,13 @@ class MMWorkItem:
 
     def check_cache(self):
         # only cache url, type and config
-        if self.mm_inputs[0].url is not None:
-            for mm_input in self.mm_inputs:
-                cached_res = vit_emb_cache_.check_cache(mm_input.to_string())
-                if cached_res is not None:
-                    self.status = MMWorkItemStatus.FINISHED
-                    self.res = cached_res
+        # consider multimodal embedding cases, they
+        if len(self.mm_inputs) == 1 and self.mm_inputs[0].url is not None:
+            mm_input = self.mm_inputs[0]
+            cached_res = vit_emb_cache_.check_cache(mm_input.to_string())
+            if cached_res is not None:
+                self.status = MMWorkItemStatus.FINISHED
+                self.res = cached_res
 
     @staticmethod
     def download_and_preprocess(
@@ -90,6 +89,7 @@ class MMWorkItem:
                 mm_part.get_preprocess_params(),
                 mm_part.preprocess_input,
             )
+            return self.future
 
     # TODO: should be replaced by embedding engine
     def run_embedding(self, embedding_func: callable):
@@ -102,8 +102,9 @@ class MMWorkItem:
             except Exception as e:
                 self.future.cancel()
                 raise e
+
             with Timer() as route_timer:
-                with mm_lock:
+                with self.lock:
                     res = embedding_func(result, mm_type=self.mm_inputs[0].mm_type)
             kmonitor.report(GaugeMetrics.VIT_EMBEDDING_RT_METRIC, route_timer.cost_ms())
             return res
@@ -113,15 +114,21 @@ class MMWorkItem:
 #     def __init__(
 #         self, mm_part: MultiModalEmbeddingInterface = None, max_batch_size: int = 1
 #     ):
-#         self.mm_queue = Queue(max_batch_size)
+#         self.waiting_queue = Queue(max_batch_size)
+#         self.running_list = []
+#         self.finished_list = []
 #         self.lock = Lock()
 
 #     def submit(self, work_item: MMWorkItem):
 #         with self.lock:
-#             self.mm_queue.put(work_item)
+#             self.waiting_queue.put(work_item)
 
-#     def gather_batch(self):
-#         raise NotImplementedError("MMBatchProcessEngine.gather_batch is not implemented")
+#     def get_batched_data(self):
+#         while self.waiting_queue.qsize() > 0:
+#             with self.lock:
+#                 work_item = self.waiting_queue.get()
+#             self.running_list.append(work_item)
+#             work_item.submit_preprocess(self.mm_part, self.mm_preprocess_executor)
 
 
 class MMProcessEngine:
@@ -137,9 +144,12 @@ class MMProcessEngine:
         self.mm_preprocess_executor = concurrent.futures.ProcessPoolExecutor(
             max_workers=self.model.config.py_env_configs.vit_config.mm_preprocess_max_workers
         )
+        self.preprocess_lock = Lock()
 
     def _maybe_tensor_to_list(self, tensor):
-        if not isinstance(tensor, torch.Tensor):
+        if tensor == None:
+            return []
+        elif not isinstance(tensor, torch.Tensor):
             return tensor
         elif len(tensor.shape) > 2:
             return list(tensor)
@@ -183,20 +193,18 @@ class MMProcessEngine:
                 self.mm_batch_size if self.mm_batch_size != -1 else len(mm_inputs)
             )
             for index in range(0, len(mm_inputs), mm_batch_size):
-                work_items.append(
-                    MMWorkItem(
-                        mm_inputs[index : index + mm_batch_size],
-                        is_batched=True if self.mm_batch_size != 1 else False,
-                    )
+                work_item = MMWorkItem(
+                    mm_inputs[index : index + mm_batch_size],
+                    lock=self.preprocess_lock,
                 )
-                work_items[-1].submit_preprocess(
+                work_item.submit_preprocess(
                     self.model.mm_part, self.mm_preprocess_executor
                 )
+                work_items.append(work_item)
             for work_item in work_items:
                 emb, pos = work_item.run_embedding(self.model.mm_part.embedding)
                 emb_res.extend(self._maybe_tensor_to_list(emb))
-                if self.contains_pos:
-                    pos_res.extend(self._maybe_tensor_to_list(pos))
+                pos_res.extend(self._maybe_tensor_to_list(pos))
             return MMEmbeddingRes(emb_res, pos_res)
         except Exception as e:
             torch.cuda.empty_cache()

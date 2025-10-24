@@ -25,7 +25,7 @@ from rtp_llm.utils.grpc_util import trans_from_tensor, trans_tensor
 
 def trans_output(res: MMEmbeddingRes):
     output_pb = MultimodalOutputsPB()
-    contain_pos = res.position_ids is not None
+    contain_pos = (res.position_ids is not None) and (len(res.position_ids) > 0)
     for i in range(len(res.embeddings)):
         output = MultimodalOutputPB(
             multimodal_embedding=trans_from_tensor(res.embeddings[i]),
