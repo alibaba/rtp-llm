@@ -393,3 +393,13 @@ def git_deps():
             "rm -rf deep_gemm/include && mv deep_gemm_headers_temp deep_gemm/include",
         ],
     )
+
+    new_git_repository(
+        name = "flash-linear-attention",
+        remote = "https://github.com/fla-org/flash-linear-attention.git",
+        commit = "0d3e202a9c5a1a829ac3fe7c0a0c5fec0bf8f00b",
+        patches = [
+            "//3rdparty/flash_linear_attention:0001-modify-init.patch",
+        ],
+        build_file = str(Label("//3rdparty/flash_linear_attention:fla.BUILD")),
+    )
