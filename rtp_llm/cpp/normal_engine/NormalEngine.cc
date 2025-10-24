@@ -315,7 +315,8 @@ absl::Status NormalEngine::step() {
                                                                stream_group.totalModelBatchSize(),
                                                                stream_group.maxSeqLen(),
                                                                int(stream_group.totalContextBatchSize() > 0));
-        profiler_            = std::make_shared<CudaProfiler>(profiler_prefix);
+        profiler_            = std::make_shared<CudaProfiler>(profiler_prefix,
+                                                   params_.profiling_debug_logging_config.torch_cuda_profiler_dir);
         profiler_->start();
     }
     int64_t      step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
