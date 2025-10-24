@@ -131,6 +131,7 @@ private:
     bool                     last_block_aligned_    = false;
     bool                     need_release_resource_ = true;
     int                      malloc_failed_times_   = 0;
+    bool                     fake_inited_           = false;
     const std::string        adapter_name_;
 };
 

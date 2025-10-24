@@ -61,6 +61,7 @@ std::shared_ptr<GenerateStream> SpeculativeEngine::createMinFakeStream(int32_t m
     auto stream                        = makeStream(fake_input);
     stream->setIsDummyStream(true);
     stream->setMetricsReporter(nullptr);
+    stream->fakeInitKVBlock();
 
     if (fake_hidden_states) {
         auto      dtype = score_model_params_.gpt_init_parameter.data_type_;

@@ -806,7 +806,8 @@ void CudaDevice::reduceScatter(const ReduceScatterParams& params) {
 }
 
 bool CudaDevice::checkNAN(const Buffer& input) {
-    if (input.size() <= 0) {
+    // every grid deal with 512 element
+    if (input.size() < 512) {
         return true;
     }
     cudaStreamSynchronize(stream_);
