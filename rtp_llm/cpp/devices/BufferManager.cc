@@ -70,9 +70,7 @@ BufferPtr BufferManager::doAllocate(const BufferParams& params, const BufferHint
         accumulate(shape.begin(), shape.end(), (size_t)1, std::multiplies<size_t>()) * getTypeSize(params.type);
 
     if (params.vmem_ctl == VmemCtl::ForcePhysical) {
-        printf("Calling here\n");
         if (auto vmem_allocator = dynamic_cast<IVirtualMemAllocator*>(allocator)) {
-            printf("Calling here 2\n");
             const auto data    = vmem_allocator->mallocPhysical(alloc_bytes);
             const auto deleter = [this, vmem_allocator](Buffer* buffer) { this->recycle(buffer, vmem_allocator); };
             const auto buffer  = new Buffer(vmem_allocator->memoryType(), params.type, shape, data, deleter);
