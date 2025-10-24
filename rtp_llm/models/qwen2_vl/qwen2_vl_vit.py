@@ -16,7 +16,6 @@ from torchvision.transforms import InterpolationMode
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.models.multimodal.multimodal_common import (
     MultiModalEmbeddingInterface,
-    mm_lock,
     timeout_decorator,
 )
 from rtp_llm.models.multimodal.multimodal_util import (

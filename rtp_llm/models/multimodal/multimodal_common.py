@@ -50,9 +50,6 @@ def timeout_decorator(timeout_sec):
     return decorator
 
 
-mm_lock = threading.Lock()
-
-
 class ImageTransform:
 
     def __init__(self, image_size: int):
@@ -106,11 +103,16 @@ class MultiModalEmbeddingInterface:
     def get_preprocess_params(self):
         return {}
 
-    # embedding interface should be locked by mm_lock
-    # todo: batch interface
     @torch.inference_mode()
     def embedding(self, data, **kwargs):
         raise NotImplementedError
+
+    @torch.inference_mode()
+    def batched_embedding(self, data_list: List[Any], **kwargs):
+        res_list = []
+        for data in data_list:
+            res_list.append(self.embedding(data, **kwargs))
+        return res_list
 
 
 class ImageEmbeddingInterface(MultiModalEmbeddingInterface):

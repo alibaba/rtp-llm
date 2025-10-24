@@ -13,4 +13,6 @@ from rtp_llm.server.vit_rpc_server import MultimodalRpcServer
 class VitApp:
     def __init__(self, py_env_configs: PyEnvConfigs = StaticConfig):
         self.py_env_configs = py_env_configs
-        self.rpc_server = MultimodalRpcServer(MMProcessEngine(model))
+        self.rpc_server = MultimodalRpcServer(
+            MMProcessEngine(ModelFactory.create_from_env())
+        )
