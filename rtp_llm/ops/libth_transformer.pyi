@@ -254,6 +254,7 @@ class FIFOSchedulerConfig:
     fast_gen_context_budget: int
     max_context_batch_size: int
     scheduler_reserve_resource_ratio: int
+    preallocate_blocks: int
 
     def __init__(
         self,
@@ -262,6 +263,7 @@ class FIFOSchedulerConfig:
         enable_fast_gen: bool = False,
         enable_partial_fallback: bool = False,
         fast_gen_context_budget: int = -1,
+        preallocate_blocks: int = 1,
     ) -> None: ...
     def to_string(self) -> str: ...
     def update_from_env(self) -> None: ...
@@ -398,8 +400,9 @@ class GptInitParameter:
     cross_attn_input_len: int
     data_type: str
     decode_polling_kv_cache_step_ms: int
-    decode_retry_timeout_ms: int
     decode_retry_times: int
+    decode_retry_timeout_ms: int
+    decode_retry_interval_ms: int
     deepseek_mscale_all_dim: float
     deepseek_rope_mscale: float
     device_resource_config: DeviceResourceConfig

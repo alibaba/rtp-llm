@@ -48,7 +48,7 @@ public:
     absl::Status                releaseSequenceKVCache(size_t total_seq_len, size_t release_seq_len);
     void                        freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);
     void                        releaseResource();
-    int                         singleBatchNeedBlocks(int seq_len) const;
+    int                         singleBatchNeedBlocks(int seq_len, int preallocate_blocks = 0) const;
     int                         maxBlockSize() const;
     int                         mallocFailedTimes() const;
 
@@ -104,6 +104,10 @@ public:
         stream_ = stream;
     }
 
+    void setPreAllocateBlocks(int preallocate_blocks) {
+        preallocate_blocks_ = preallocate_blocks;
+    }
+
     bool reuseCache() const;
     bool enable3FS() const;
     bool enableMemoryBlockCache() const;
@@ -134,6 +138,7 @@ private:
     bool                     need_release_resource_ = true;
     int                      malloc_failed_times_   = 0;
     const std::string        adapter_name_;
+    int                      preallocate_blocks_    = 0;
 };
 
 }  // namespace rtp_llm

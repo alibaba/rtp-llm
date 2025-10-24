@@ -172,6 +172,7 @@ absl::StatusOr<int> GenerateStream::incrKVBlock(int token_capacity, size_t reser
 
 int GenerateStream::tryReleaseKVBlock(int nums) {
     std::lock_guard<std::mutex> lock(*output_mutex_);
+    RTP_LLM_CHECK_WITH_INFO(nums >= 0, "release block nums is < 0");
     auto                        release_blocks = stream_cache_resource_->tryReleaseKVBlock(nums);
     incrFallbackBlock(release_blocks);
     return release_blocks;
@@ -993,6 +994,10 @@ std::string GenerateStream::debugString() const {
     debug_string << "}";
 
     return debug_string.str();
+}
+
+void GenerateStream::setPreAllocateBlocks(int preallocate_blocks) {
+    stream_cache_resource_->setPreAllocateBlocks(preallocate_blocks);
 }
 
 int GenerateStream::reuseBlockSize() const {

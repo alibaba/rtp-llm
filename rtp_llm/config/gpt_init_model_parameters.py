@@ -240,6 +240,7 @@ class GptInitModelParameters:
     decode_polling_kv_cache_step_ms: int
     decode_retry_timeout_ms: int
     decode_retry_times: int
+    decode_retry_interval: int
     deepseek_mscale_all_dim: float
     deepseek_rope_mscale: float
     dp_rank: int
@@ -745,6 +746,7 @@ class GptInitModelParameters:
             enable_fast_gen=get_env_bool("ENABLE_FAST_GEN", False),
             enable_partial_fallback=get_env_bool("ENABLE_PARTIAL_FALLBACK", False),
             fast_gen_context_budget=get_env_int("FAST_GEN_MAX_CONTEXT_LEN", 0),
+            preallocate_blocks=get_env_int("PREALLOCATE_BLOCKS", 1),
         )
 
         # SamplerConfig
@@ -1094,6 +1096,10 @@ class GptInitModelParameters:
                 self.py_env_configs.pd_separation_config.decode_retry_timeout_ms
             )
             logging.info(f"decode_retry_timeout_ms: {self.decode_retry_timeout_ms}")
+            self.decode_retry_interval_ms = (
+                self.py_env_configs.pd_separation_config.decode_retry_interval_ms
+            )
+            logging.info(f"decode_retry_interval_ms: {self.decode_retry_interval_ms}")
 
             self.rdma_connect_retry_times = (
                 self.py_env_configs.pd_separation_config.rdma_connect_retry_times
@@ -1125,6 +1131,7 @@ class GptInitModelParameters:
         logging.info(
             f"scheduler_reserve_resource_ratio: {self.scheduler_reserve_resource_ratio}"
         )
+
         self.reuse_cache = self.py_env_configs.py_kv_cache_config.reuse_cache
         logging.info(f"reuse_cache: {self.reuse_cache}")
         self.pre_allocate_op_mem = bool(int(os.environ.get("PRE_ALLOCATE_OP_MEM", 1)))

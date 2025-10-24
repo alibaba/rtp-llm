@@ -97,8 +97,9 @@ absl::Status StreamCacheResource::releaseSequenceKVCache(size_t total_seq_len, s
     return absl::OkStatus();
 }
 
-int StreamCacheResource::singleBatchNeedBlocks(int seq_len) const {
-    return std::max((seq_len + seqSizePerBlock() - 1) / seqSizePerBlock() - maxBlockSize(), 0);
+int StreamCacheResource::singleBatchNeedBlocks(int seq_len, int preallocate_blocks) const {
+    int need_blocks = (seq_len + seqSizePerBlock() - 1) / seqSizePerBlock() + preallocate_blocks;
+    return std::max(need_blocks - maxBlockSize(), 0);
 }
 
 // TODO(xinfei.sxf) 保证这个函数的原子性
@@ -171,7 +172,7 @@ absl::StatusOr<int> StreamCacheResource::incrKVBlock(int token_capacity, size_t 
     }
     batch_resource_.appendClone(kv_cache_resource, resource_context_.cache_manager);
 
-    auto extra_blocks_num = singleBatchNeedBlocks(seq_len);
+    auto extra_blocks_num = singleBatchNeedBlocks(seq_len, preallocate_blocks_);
     if (extra_blocks_num <= 0) {
         return real_occupy;
     }
@@ -180,6 +181,17 @@ absl::StatusOr<int> StreamCacheResource::incrKVBlock(int token_capacity, size_t 
     auto total_blocks = batch_size * extra_blocks_num;
     std::tie(success, kv_cache_resource) =
         resource_context_.cache_manager->malloc({stream_->streamId(), (uint32_t)total_blocks, verbose});
+    if (!success) {
+        // if malloc with preallocate failed, try to malloc without preallocate
+        extra_blocks_num = singleBatchNeedBlocks(seq_len);
+        if (extra_blocks_num <= 0) {
+            return real_occupy;
+        }
+        total_blocks = batch_size * extra_blocks_num;
+        std::tie(success, kv_cache_resource) =
+            resource_context_.cache_manager->malloc({stream_->streamId(), (uint32_t)total_blocks, verbose});
+    }
+
     if (success) {
         const auto&                  all_blocks = kv_cache_resource.block_id;
         std::vector<KVCacheResource> resource;

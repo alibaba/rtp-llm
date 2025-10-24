@@ -65,6 +65,7 @@ protected:
     size_t                        max_batch_tokens_size_    = 0;
     size_t                        max_generate_batch_size_  = 1;
     int                           reserve_block_num_        = 0;
+    int                           preallocate_blocks_       = 0;
     bool                          enable_partial_fallback_  = false;
     bool                          enable_whole_fallback_    = true;
     bool                          enable_fast_gen_          = false;

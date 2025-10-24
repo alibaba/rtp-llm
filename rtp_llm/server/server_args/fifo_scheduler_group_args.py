@@ -42,3 +42,10 @@ def init_fifo_scheduler_group_args(parser):
         default=False,
         help="若为 True，则允许默认调度器在系统内存不足以满足活动请求时，从某些请求中回收一部分 KV cache blocks。这可以在高负载下提高系统利用率，但可能会影响那些资源被回收的请求的公平性。注意：在使用默认调度器时有效。",
     )
+    fifo_scheduler_group.add_argument(
+        "--preallocate_blocks",
+        env_name="PREALLOCATE_BLOCKS",
+        type=int,
+        default=1,
+        help="为query预先分配的blocks的数量",
+    )
