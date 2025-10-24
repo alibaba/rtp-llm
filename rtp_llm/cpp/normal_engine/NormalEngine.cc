@@ -174,7 +174,6 @@ std::shared_ptr<GenerateStream> NormalEngine::enqueueMinFakeQuery(int32_t max_ne
     return stream;
 }
 
-
 void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {
     auto result = CacheConfigCreator::createConfig(params_, warm_up_result);
     RTP_LLM_LOG_INFO(
@@ -320,7 +319,8 @@ absl::Status NormalEngine::step() {
                                                                stream_group.totalModelBatchSize(),
                                                                stream_group.maxSeqLen(),
                                                                int(stream_group.totalContextBatchSize() > 0));
-        profiler_            = std::make_shared<CudaProfiler>(profiler_prefix);
+        profiler_            = std::make_shared<CudaProfiler>(profiler_prefix,
+                                                   params_.profiling_debug_logging_config.torch_cuda_profiler_dir);
         profiler_->start();
     }
     int64_t      step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
