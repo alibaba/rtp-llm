@@ -1,16 +1,8 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
-from __future__ import annotations
 
 import argparse
 import typing
 
 from rtp_llm.server.server_args.server_args import EnvArgumentParser
-
-if typing.TYPE_CHECKING:
-    from rtp_llm.utils.util import FlexibleArgumentParser
-
 
 class CLISubcommand:
     """Base class for CLI argument handlers."""

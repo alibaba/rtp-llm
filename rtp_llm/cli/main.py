@@ -1,14 +1,7 @@
+from rtp_llm.cli.utils import LLM_SUBCMD_PARSER_EPILOG
 from rtp_llm.server.server_args.server_args import EnvArgumentParser
 
-LLM_SUBCMD_PARSER_EPILOG = (
-    "Tip: Use `rtp-llm [serve|run-batch|bench <bench_type>] "
-    "--help=<keyword>` to explore arguments from help.\n"
-    "   - To view a argument group:     --help=ModelConfig\n"
-    "   - To view a single argument:    --help=max-num-seqs\n"
-    "   - To search by keyword:         --help=max\n"
-    "   - To list all groups:           --help=listgroup\n"
-    "   - To view help with pager:      --help=page"
-)
+
 
 def main():
     import rtp_llm.cli.serve
