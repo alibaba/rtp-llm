@@ -27,8 +27,9 @@ class ServeSubcommand(CLISubcommand):
             help="Start the RTP-LLM OpenAI Compatible API server.",
             description="Start the RTP-LLM OpenAI Compatible API server.",
             usage="rtp-llm serve [options]")
-        init_all_group_args(serve_parser)
-        serve_parser.parse_args()
+        serve_sub_parser = serve_parser.add_subparsers(required=False, dest="options")
+        init_all_group_args(serve_sub_parser)
+        serve_sub_parser.parse_args()
 
         return serve_parser
 
