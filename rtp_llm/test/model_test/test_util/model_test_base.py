@@ -7,7 +7,7 @@ from unittest import TestCase, main
 import pynvml
 import torch
 
-from rtp_llm.async_decoder_engine.async_model import AsyncModel
+from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 from rtp_llm.model_factory import ModelConfig, ModelFactory
 from rtp_llm.pipeline.pipeline import Pipeline
 from rtp_llm.utils.ft_plugin import plguin_loader
@@ -291,7 +291,7 @@ class ModelTestBase(TestCase):
                 expected_path += "/expect.pt"
                 self._test_ft_async_score(pipeline, expected_path)
         finally:
-            if isinstance(model, AsyncModel):
+            if isinstance(model, BaseEngine):
                 model.stop()
 
 
