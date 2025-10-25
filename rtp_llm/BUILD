@@ -278,6 +278,17 @@ py_library(
     ])
 )
 
+py_library(
+    name = "cli",
+    deps = [
+        ":config",
+        ":release_version"
+    ],
+    srcs = glob([
+        "cli/*.py",
+    ])
+)
+
 filegroup(
     name = "async_model_files",
     srcs = glob(["async_decoder_engine/**/*.py"]),
@@ -408,6 +419,7 @@ py_library(
         ":ops",
         ":pipeline",
         ":device",
+        ":cli",
         ":config",
         ":structure",
         "//rtp_llm/server:server",
@@ -573,6 +585,11 @@ py_wheel(
     python_tag = "py3",
     tags = ["manual", "local", "no-remote"],
     version = RELEASE_VERSION,
+    entry_points = {
+        "console_scripts": [
+            "rtp-llm = rtp_llm.cli.main:main",
+        ]
+    },
     deps = [
         ":rtp_llm_package",
         "//deps:extension_package"
