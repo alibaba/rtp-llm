@@ -1,50 +1,70 @@
 # RTP-LLM Multi-Benchmark Configuration
 # This file defines various benchmark configurations for distributed inference testing
 
+experiment_name: "H20_Node4"
+
+test_config:
+  num_retry_times: 3
+  build_from_scratch: 2
+  copy_test_result: true
+
+machine_config:
+  ip_lists:
+    - "33.105.178.103"
+    - "33.110.169.117"
+    - "33.105.178.172"
+    - "33.105.47.221"
+  run_user: "admin"
+  ssh_port: 2222
+
+build_config:
+  git_repo_url: "git@gitlab.alibaba-inc.com:foundation_models/RTP-LLM.git"
+  git_checkout_ref: "origin/main-internal"
+  # open_source_url: "git@github.com:alibaba/rtp-llm.git"
+  open_source_ref: "origin/main"
+  ft_sub_dir: "rtp_llm_perf_test"
+  bazel_build_args: '" --jobs 64 --verbose_failures --config=cuda12_6 "'
+
+common_config:
+  warm_up: true
+  act_type: "bf16"
+  hack_layer_num: 4
+  start_port: 12333
+  decode_test_length: 2048
+  max_context_batch_size: 1
+  load_ckpt_num_process: 64
+  reserver_runtime_mem_mb: 0
+  device_reserve_memory_bytes: 0
+
 benchmarks:
-  - name: "H20_Deepseek-R1_Decode_EP32_4K"
-    # git config
-    git_repo_url: "git@github.com:alibaba/rtp-llm.git"
-    git_checkout_ref: "origin/feature/multi_benchmark"
-    # machine config
-    ip_lists:
-      - "33.126.67.231"
-      - "33.126.67.17"
-      - "33.126.51.159"
-      - "33.126.83.168"
-    run_user: "admin"
-    ssh_port: 2222
-    # model config
-    tokenizer_path: "/mnt/nas1/hf/deepseek_r1_4layers/"
-    checkpoint_path: "/mnt/nas1/hf/deepseek_r1_4layers/"
-    model_type: "deepseek3"
-    # test config
-    is_decode: true
-    batch_size_list: "[1,2,4,8,16,32,48,64,80]"
-    input_len_list: "[4096]"
-    # test suit
-    tp_size: [1,2,4]
-    dp_size: [32,16,8]
-    # build config
-    bazel_build_args: '" --jobs 100 --verbose_failures --config=cuda12_6 "'
-    # file dir config
-    ft_sub_dir: "rtp_llm_perf_test"
-    # model config
-    start_port: 12333
-    concurrency_limit: 80
-    accl_dispatch_num_warp_groups: 4
-    accl_combine_num_warp_groups: 4
-    decode_test_length: 2048
-    warm_up: 1
-    act_type: "bf16"
-    weight_type: "fp16"
-    reserver_runtime_mem_mb: 0
-    device_reserve_memory_bytes: 0
-    load_ckpt_num_process: 96
-    max_context_batch_size: 1
-    enable_merge_w13: true
-    use_deepep_moe: true
-    enable_layer_micro_batch: 2
-    enable_comm_overlap: true
-    redundant_expert: 0
-    accl_low_latency_optimize: 1
+  - benchmark_name: "Qwen3-Coder-480B-A35B-Instruct"
+    # fixed config
+    fixed_config:
+      tokenizer_path: "Qwen/Qwen3-Coder-480B-A35B-Instruct"
+      checkpoint_path: "Qwen/Qwen3-Coder-480B-A35B-Instruct"
+      model_type: "qwen_3_moe"
+      is_decode: true
+      weight_type: "fp8"
+      use_deepep_moe: true
+      use_deepep_low_latency: true
+      accl_fp8_cast_level: 1
+      accl_low_latency_optimize: 1
+      accl_dispatch_num_warp_groups: 4
+      accl_combine_num_warp_groups: 4
+      enable_merge_w13: true
+    # iterative search config
+    # As shown below, there are two possible configuration combinations for
+    # (dp_size, tp_size, concurrency_limit, batch_size_list, input_len_list):
+    # (1, 8, 8, [8], [2048,4096,8192]) and (4, 8, 4, [4], [65536])
+    iterative_search_config:
+      dp_size: [1, 4]
+      tp_size: [8, 8]
+      concurrency_limit: [8, 4]
+      batch_size_list: ["[8]", "[4]"]
+      input_len_list: ["[2048,4096,8192]", "[65536]"]
+    # recursive search config
+    # The script will recursively search the configuration space composed of all the following configurations,
+    # with a total of four configuration groups ultimately undergoing testing: (false, 0), (false, 2), (true, 0), (true, 2)
+    recursive_search_config:
+      enable_comm_overlap: [false, true]
+      enable_layer_micro_batch: [0, 2]

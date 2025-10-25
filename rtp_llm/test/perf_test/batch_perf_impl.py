@@ -96,6 +96,7 @@ class BatchPerfImpl(object):
         is_decode: bool = True,
         wait_time: int = 100,
         decode_test_length: int = 10,
+        profile: bool = True,
     ):
         self.base_port = base_port
         self.dp_size = dp_size
@@ -116,6 +117,7 @@ class BatchPerfImpl(object):
         self.executor = ProcessPoolExecutor(max_workers=self.num_processes)
         self.wait_time = wait_time
         self.decode_test_length = decode_test_length
+        self.profile = profile
 
     # 需要做3次
     # 第一次：warmup, 预编译jit
@@ -125,7 +127,8 @@ class BatchPerfImpl(object):
         self._set_concurrency()
         _ = self._curl_server()
         results = self._curl_server()
-        _ = self._curl_server(True)
+        if self.profile:
+            _ = self._curl_server(True)
         return results
 
     def _set_concurrency(self):
