@@ -7,6 +7,7 @@ py_library(
         "csrc/export.cc",
         "csrc/ipc.cc",
         "csrc/ipc.h",
+        "build/readme.md"
     ],
     srcs = glob([
         "*.py",
