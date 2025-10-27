@@ -6,7 +6,7 @@ import unittest
 import torch
 import torch.nn.functional as F
 
-from rtp_llm.triton_kernels.causal_conv1d import causal_conv1d_fn
+from rtp_llm.models_py.triton_kernels.causal_conv1d import causal_conv1d_fn
 
 logging.basicConfig(
     level="INFO",

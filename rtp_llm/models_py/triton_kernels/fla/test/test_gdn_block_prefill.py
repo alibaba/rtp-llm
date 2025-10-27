@@ -6,7 +6,7 @@ from typing import List
 
 import torch
 
-from rtp_llm.triton_kernels.fla import (
+from rtp_llm.models_py.triton_kernels.fla import (
     load_initial_state_from_block_map,
     store_ssm_state_to_block_map,
 )

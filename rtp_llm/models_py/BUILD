@@ -8,20 +8,6 @@ py_library(
 )
 
 py_library(
-    name = "kernels",
-    srcs = glob([
-        "kernels/*.py",
-    ]),
-    deps = [
-        "//rtp_llm:utils",
-    ] + select({
-        "@//:using_cuda12":["@deep_gemm_ext//:deep_gemm"],
-        "//conditions:default": [],
-    }),
-    visibility = ["//visibility:public"],
-)
-
-py_library(
     name = "distributed",
     srcs = glob([
         "distributed/*.py",
@@ -41,7 +27,7 @@ py_library(
     ]),
     deps = [
         ":utils",
-        ":kernels",
+        "//rtp_llm/models_py/triton_kernels:triton_kernels",
         ":distributed",
     ],
     visibility = ["//visibility:public"],

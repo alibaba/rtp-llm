@@ -1,5 +1,4 @@
 import logging
-import os
 from typing import Optional
 
 import torch
@@ -10,69 +9,14 @@ from rtp_llm.models_py.modules import utils
 
 logger = logging.getLogger(__name__)
 
-try:
-    from rtp_llm.models_py.modules.fp8_kernel import (
-        scaled_fp8_per_tensor_quant,
-        sgl_per_token_group_quant_fp8,
-    )
-
-    FP8_AVAILABLE = True
-    # FP8 quantization available
-except ImportError:
-    # FP8 quantization not available
-    FP8_AVAILABLE = False
-
-if utils.is_cuda():
-    try:
-        from rtp_llm.models_py.kernels.deepgemm_wrapper import fp8_gemm_nt
-
-        DEEPGEMM_AVAILABLE = True
-        # Setup CUTLASS include paths for JIT compilation
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        # Search for CUTLASS headers
-        cutlass_paths = []
-        parts = current_dir.split("/")
-        for i in range(len(parts)):
-            base_path = "/".join(parts[: i + 1])
-            for subpath in [
-                "deep_gemm/third-party/cutlass/include",
-                "external/deep_gemm/third-party/cutlass/include",
-            ]:
-                path = os.path.join(base_path, subpath)
-                if os.path.exists(path):
-                    cutlass_paths.append(path)
-        # Check runfiles directory
-        if "runfiles" in current_dir:
-            runfiles_root = current_dir.split("runfiles")[0] + "runfiles"
-            for subdir in ["deep_gemm", "external/deep_gemm"]:
-                path = os.path.join(
-                    runfiles_root, subdir, "third-party/cutlass/include"
-                )
-                if os.path.exists(path):
-                    cutlass_paths.append(path)
-        # Set environment variables if CUTLASS found
-        if cutlass_paths:
-            cutlass_path = cutlass_paths[0]
-            for env_var in ["CPLUS_INCLUDE_PATH", "C_INCLUDE_PATH", "CPATH"]:
-                current_val = os.environ.get(env_var, "")
-                os.environ[env_var] = (
-                    f"{cutlass_path}:{current_val}" if current_val else cutlass_path
-                )
-            nvcc_flags = os.environ.get("NVCC_PREPEND_FLAGS", "")
-            os.environ["NVCC_PREPEND_FLAGS"] = f"-I{cutlass_path} {nvcc_flags}".strip()
-        logger.info(f"DeepGEMM successfully imported with fp8_gemm_nt: {fp8_gemm_nt}")
-    except ImportError as e:
-        logger.warning(f"DeepGEMM not available: {e}")
-        DEEPGEMM_AVAILABLE = False
-        fp8_gemm_nt = None
-    except Exception as e:
-        logger.warning(f"Error importing DeepGEMM: {e}")
-        DEEPGEMM_AVAILABLE = False
-        fp8_gemm_nt = None
-else:
-    # Not CUDA device, deep_gemm not available
-    DEEPGEMM_AVAILABLE = False
-    fp8_gemm_nt = None
+from rtp_llm.models_py.modules.fp8_kernel import (
+    scaled_fp8_per_tensor_quant,
+    sgl_per_token_group_quant_fp8,
+)
+from rtp_llm.models_py.modules.quantization.deepgemm_wrapper import (
+    fp8_gemm_nt,
+    has_deep_gemm,
+)
 
 
 class Fp8DeepGEMMLinear(nn.Module):
@@ -86,6 +30,10 @@ class Fp8DeepGEMMLinear(nn.Module):
         config=None,
     ) -> None:
         super().__init__()
+        if not has_deep_gemm():
+            raise RuntimeError(
+                "DeepGEMM is not available. Please install the `deep_gemm` package to enable DeepGEMM kernels."
+            )
         self.hidden_size = weight.shape[0]  # k
         self.output_size = weight.shape[1]  # n
         self.weight = weight.reshape([weight.shape[1], weight.shape[0]])
@@ -112,14 +60,6 @@ class Fp8DeepGEMMLinear(nn.Module):
         input_bf16 = input
 
         # Quantize input to FP8
-        if not FP8_AVAILABLE:
-            # FP8 not available - fail fast for easier debugging
-            error_msg = (
-                "FP8 quantization is not available but required for Fp8DeepGEMMLinear. "
-                "Please ensure FP8 kernel is properly installed and imported."
-            )
-            logger.error(error_msg)
-            raise RuntimeError(error_msg)
 
         alignment = self._get_padding_size(input_m)
         target_m = (input_m + alignment - 1) // alignment * alignment
@@ -152,38 +92,28 @@ class Fp8DeepGEMMLinear(nn.Module):
         )
 
         # Call DeepGEMM
-        if DEEPGEMM_AVAILABLE:
-            deepgemm_input_scales = input_scales
-            input_fp8 = input_fp8.contiguous()
-            deepgemm_input_scales = deepgemm_input_scales.contiguous()
-            weight = self.weight.contiguous()
-            weight_scales = self.weight_scales.contiguous()
-            output = output.contiguous()
-            try:
-                fp8_gemm_nt(
-                    (input_fp8, deepgemm_input_scales),
-                    (weight, weight_scales),
-                    output,
-                    c=None,
-                    disable_ue8m0_cast=True,
-                )
-            except Exception as e:
-                # DeepGEMM call failed - log error and re-raise
-                error_msg = f"DeepGEMM fp8_gemm_nt call failed: {type(e).__name__}: {e}"
-                logger.error(error_msg)
-                import traceback
-
-                logger.error(f"Traceback: {traceback.format_exc()}")
-                raise RuntimeError(error_msg) from e
-        else:
-            # DeepGEMM not available - fail fast for easier debugging
-            error_msg = (
-                "DeepGEMM is not available but required for FP8 computation. "
-                "Please ensure DeepGEMM is properly installed and imported."
+        deepgemm_input_scales = input_scales
+        input_fp8 = input_fp8.contiguous()
+        deepgemm_input_scales = deepgemm_input_scales.contiguous()
+        weight = self.weight.contiguous()
+        weight_scales = self.weight_scales.contiguous()
+        output = output.contiguous()
+        try:
+            fp8_gemm_nt(
+                (input_fp8, deepgemm_input_scales),
+                (weight, weight_scales),
+                output,
+                c=None,
+                disable_ue8m0_cast=True,
             )
+        except Exception as e:
+            # DeepGEMM call failed - log error and re-raise
+            error_msg = f"DeepGEMM fp8_gemm_nt call failed: {type(e).__name__}: {e}"
             logger.error(error_msg)
-            raise RuntimeError(error_msg)
+            import traceback
 
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            raise RuntimeError(error_msg) from e
         if need_padding:
             output = output[:input_m, :]
         if self.bias is not None:

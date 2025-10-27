@@ -8,7 +8,7 @@ py_test(
         "test_gdn_block_prefill.py"
     ],
     deps = [
-        "//rtp_llm/triton_kernels:fla",
+        "//rtp_llm/models_py/triton_kernels:fla",
         "@flash-linear-attention//:fla_lib_py"
     ] + [":triton", ":torch", ":numpy", ":einops", ":packaging"],
     visibility = ["//visibility:public"],
@@ -21,7 +21,7 @@ py_test(
         "test_gdn_decode.py"
     ],
     deps = [
-        "//rtp_llm/triton_kernels:fla",
+        "//rtp_llm/models_py/triton_kernels:fla",
         "@flash-linear-attention//:fla_lib_py"
     ] + [":triton", ":torch", ":numpy", ":einops", ":packaging"],
     visibility = ["//visibility:public"],
@@ -34,7 +34,7 @@ py_test(
         "test_chunk_prefill.py"
     ],
     deps = [
-        "//rtp_llm/triton_kernels:fla",
+        "//rtp_llm/models_py/triton_kernels:fla",
         "@flash-linear-attention//:fla_lib_py"
     ] + [":triton", ":torch", ":numpy", ":einops", ":packaging"],
     visibility = ["//visibility:public"],

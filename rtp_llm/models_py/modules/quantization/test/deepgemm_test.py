@@ -7,7 +7,7 @@ from unittest import SkipTest, TestCase, main
 
 import torch
 
-from rtp_llm.models_py.kernels.deepgemm_wrapper import (
+from rtp_llm.models_py.modules.quantization.deepgemm_wrapper import (
     bf16_gemm_nt,
     fp8_gemm_nt,
     m_grouped_bf16_gemm_nt_contiguous,
