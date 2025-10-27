@@ -167,6 +167,8 @@ Output NativeGraphRunnerBase<Input, Output>::run(size_t                       pr
                                                  size_t                       decode_bs,
                                                  Input                        input,
                                                  std::function<Output(Input)> forward) {
+        std::cout << "XBJ: syncAndCheck 0" << std::endl;
+        device_->syncAndCheck();
     bool       hasCudaGraph = false;
     bool       doCapture    = false;
     BatchState state        = {prefill_bs, decode_bs, 0, 0};
@@ -186,8 +188,10 @@ Output NativeGraphRunnerBase<Input, Output>::run(size_t                       pr
     if (hasCudaGraph) {
         auto [_, cudagraph, input_buffer, output_buffer] = *map_->get(state);
         copy(&input_buffer, input);
+        std::cout << "XBJ: syncAndCheck 1" << std::endl;
         device_->syncAndCheck();
         cudagraph->replay();
+        std::cout << "XBJ: syncAndCheck 2" << std::endl;
         device_->syncAndCheck();
         CUDAGRAPH_LOG("cudagraph launch done");
         return output_buffer;
