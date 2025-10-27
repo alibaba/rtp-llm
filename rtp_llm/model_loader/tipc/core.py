@@ -216,9 +216,11 @@ class SharedMemoryIPCHelper:
             # Create a PyTorch tensor from the NumPy array (zero-copy on CPU)
             rebuilt_tensor = torch.from_numpy(shared_np_array)
 
-            # Important: The `shm` object reference in `_active_shm_blocks` must be kept alive
-            # until the tensor is no longer needed, and then explicitly closed.
-            # You might want a separate method for closing/unlinking.
+            # clone tensor here, so that we can close shm obj ASAP.
+            rebuilt_tensor = rebuilt_tensor.clone()
+            if shm:
+                shm.close()
+
             return rebuilt_tensor
 
         except FileNotFoundError:
@@ -227,9 +229,6 @@ class SharedMemoryIPCHelper:
                 "It might have been unlinked or never created."
             )
         except Exception as e:
-            # Ensure shm is closed on error
-            if shm:
-                shm.close()
             raise RuntimeError(f"Failed to rebuild tensor from shared memory: {e}")
 
 
