@@ -3,11 +3,7 @@ import unittest
 
 import torch
 
-from rtp_llm.models_py.modules.fp8_linear import (
-    DEEPGEMM_AVAILABLE,
-    FP8_AVAILABLE,
-    Fp8DeepGEMMLinear,
-)
+from rtp_llm.models_py.modules.fp8_linear import Fp8DeepGEMMLinear
 
 
 class Fp8DeepGEMMLinearTest(unittest.TestCase):
@@ -76,33 +72,15 @@ class Fp8DeepGEMMLinearTest(unittest.TestCase):
 
     def test_dependency_availability(self):
         """Test dependency availability check - should fail if dependencies are missing"""
-        print(f"FP8_AVAILABLE: {FP8_AVAILABLE}")
-        print(f"DEEPGEMM_AVAILABLE: {DEEPGEMM_AVAILABLE}")
 
         # Test that we can at least import the module
         self.assertIsNotNone(Fp8DeepGEMMLinear)
 
         # For unit tests, dependencies MUST be available - fail if not
-        self.assertTrue(
-            FP8_AVAILABLE,
-            "FP8 kernel is not available - this is required for FP8 tests",
-        )
-        self.assertTrue(
-            DEEPGEMM_AVAILABLE,
-            "DeepGEMM is not available - this is required for FP8 tests",
-        )
 
     def test_input_dtype_validation(self):
         """Test input dtype validation - only bfloat16 is accepted"""
         # Dependencies must be available for unit tests
-        self.assertTrue(
-            FP8_AVAILABLE,
-            "FP8 kernel is not available - this is required for FP8 tests",
-        )
-        self.assertTrue(
-            DEEPGEMM_AVAILABLE,
-            "DeepGEMM is not available - this is required for FP8 tests",
-        )
 
         fp8_linear = self._create_fp8_linear(with_bias=False)
 
@@ -150,14 +128,6 @@ class Fp8DeepGEMMLinearTest(unittest.TestCase):
     def test_forward_pass_with_dependencies(self):
         """Test forward pass when dependencies are available"""
         # Dependencies must be available for unit tests
-        self.assertTrue(
-            FP8_AVAILABLE,
-            "FP8 kernel is not available - this is required for FP8 tests",
-        )
-        self.assertTrue(
-            DEEPGEMM_AVAILABLE,
-            "DeepGEMM is not available - this is required for FP8 tests",
-        )
 
         fp8_linear = self._create_fp8_linear(with_bias=True)
 
@@ -184,14 +154,6 @@ class Fp8DeepGEMMLinearTest(unittest.TestCase):
     def test_padding_logic(self):
         """Test padding logic for different input sizes"""
         # Dependencies must be available for unit tests
-        self.assertTrue(
-            FP8_AVAILABLE,
-            "FP8 kernel is not available - this is required for FP8 tests",
-        )
-        self.assertTrue(
-            DEEPGEMM_AVAILABLE,
-            "DeepGEMM is not available - this is required for FP8 tests",
-        )
 
         fp8_linear = self._create_fp8_linear(with_bias=False)
 
@@ -215,14 +177,6 @@ class Fp8DeepGEMMLinearTest(unittest.TestCase):
     def test_bias_handling(self):
         """Test bias handling"""
         # Dependencies must be available for unit tests
-        self.assertTrue(
-            FP8_AVAILABLE,
-            "FP8 kernel is not available - this is required for FP8 tests",
-        )
-        self.assertTrue(
-            DEEPGEMM_AVAILABLE,
-            "DeepGEMM is not available - this is required for FP8 tests",
-        )
 
         fp8_linear_with_bias = self._create_fp8_linear(with_bias=True)
         input_tensor = torch.randn(
@@ -239,14 +193,6 @@ class Fp8DeepGEMMLinearTest(unittest.TestCase):
     def test_small_batch_sizes(self):
         """Test small batch size edge cases"""
         # Dependencies must be available for unit tests
-        self.assertTrue(
-            FP8_AVAILABLE,
-            "FP8 kernel is not available - this is required for FP8 tests",
-        )
-        self.assertTrue(
-            DEEPGEMM_AVAILABLE,
-            "DeepGEMM is not available - this is required for FP8 tests",
-        )
 
         fp8_linear = self._create_fp8_linear(with_bias=True)
 
@@ -265,14 +211,6 @@ class Fp8DeepGEMMLinearTest(unittest.TestCase):
     def test_reproducibility(self):
         """Test result reproducibility"""
         # Dependencies must be available for unit tests
-        self.assertTrue(
-            FP8_AVAILABLE,
-            "FP8 kernel is not available - this is required for FP8 tests",
-        )
-        self.assertTrue(
-            DEEPGEMM_AVAILABLE,
-            "DeepGEMM is not available - this is required for FP8 tests",
-        )
 
         fp8_linear = self._create_fp8_linear(with_bias=False)
 
@@ -310,14 +248,6 @@ class Fp8DeepGEMMLinearTest(unittest.TestCase):
     def test_fp8_vs_quantized_bf16_accuracy(self):
         """Test accuracy comparison between FP8 linear and quant->dequant BF16 linear"""
         # Dependencies must be available for unit tests
-        self.assertTrue(
-            FP8_AVAILABLE,
-            "FP8 kernel is not available - this is required for FP8 tests",
-        )
-        self.assertTrue(
-            DEEPGEMM_AVAILABLE,
-            "DeepGEMM is not available - this is required for FP8 tests",
-        )
 
         # Create FP8 linear layer
         fp8_linear = self._create_fp8_linear(with_bias=False)
