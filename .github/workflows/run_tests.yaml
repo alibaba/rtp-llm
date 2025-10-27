@@ -131,7 +131,7 @@ jobs:
       if: always()
       run: |
         if [ ${{ github.event_name }} == 'pull_request' ]; then
-          comment_body="The unit test result of this PR is: https://rocm.github.io/${{ github.event.repository.name }}/${{ steps.deploy_logs.outputs.target_subdir }}/"
+          comment_body="The unit test result of this PR is: https://yuzho-amd.github.io/${{ github.event.repository.name }}/${{ steps.deploy_logs.outputs.target_subdir }}/"
           comment_link="https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments"
           get_comment_result=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" ${comment_link})
           if echo "${get_comment_result}" | grep -q "${comment_body}"; then
