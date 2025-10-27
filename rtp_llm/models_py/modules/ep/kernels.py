@@ -1003,9 +1003,7 @@ def recompute_topk_ids_triton_kernel(
     tl.store(adjusted_topk_ids_ptr + token_indices, out, mask=mask)
 
     # 4. Atomic add - use scalar value for efficiency
-    tl.atomic_add(expert_count_ptr + adjusted,
-                  1,  # Use scalar instead of full vector
-                  mask=valid)
+    tl.atomic_add(expert_count_ptr + adjusted, 1, mask=valid)
 
 
 def recompute_topk_ids_sum_expert_count(

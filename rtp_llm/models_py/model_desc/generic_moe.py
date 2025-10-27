@@ -11,6 +11,7 @@ from rtp_llm.models_py.modules.attention import CausalAttention
 from rtp_llm.models_py.modules.embedding import Embedding
 from rtp_llm.models_py.modules.fmha import FMHAImplBase
 from rtp_llm.models_py.modules.linear import Linear
+from rtp_llm.models_py.modules.mlp import FusedSiluActDenseMLP
 from rtp_llm.models_py.modules.moe import FusedMoe
 from rtp_llm.models_py.modules.moe.fused_moe_factory import FusedMoeFactory
 from rtp_llm.models_py.modules.norm import RMSNorm
@@ -23,7 +24,9 @@ except ImportError:
     logging.info("SelectTopkOp not available")
 
 
-class Qwen3MoeLayer(nn.Module):
+class GenericMoeLayer(nn.Module):
+    """Generic MoE layer supporting both Qwen3 and internal model."""
+    
     def __init__(
         self, config: GptInitModelParameters, weights: Dict[str, torch.Tensor]
     ):
@@ -34,19 +37,22 @@ class Qwen3MoeLayer(nn.Module):
         self.ffn_dim = config.moe_inter_padding_size
         self.num_experts = config.expert_num
         self.top_k = config.moe_k
+        
         self.gate = Linear(weights[W.moe_gate], None)
+        config.has_moe_norm = False
         self.select_topk_op = SelectTopkOp(config)
         self.fused_moe: FusedMoe = FusedMoeFactory.create_fused_moe(config, weights)
+        
         self.w1 = weights.get(W.moe_w1, None)
         self.w2 = weights.get(W.moe_w2, None)
         assert (
             self.w1 is not None and self.w2 is not None
         ), "Weights w1 and w2 must be provided"
         self.num_local_experts = self.w1.shape[0]
-
         self.expert_map = self.build_expert_map()
 
     def build_expert_map(self):
+        """Build expert mapping for EP (Expert Parallelism)."""
         num_local_experts = self.num_local_experts
         global_num_experts = self.num_experts
         expert_map = torch.full((global_num_experts,), fill_value=-1, dtype=torch.int32)
@@ -59,6 +65,7 @@ class Qwen3MoeLayer(nn.Module):
         num_tokens, _ = hidden_states.shape
         router_logits = self.gate(hidden_states)
 
+        # Top-K selection using C++ SelectTopkOp
         router_logits_fp32 = router_logits.float()
         topk_weights = torch.zeros(
             (num_tokens, self.top_k),
@@ -71,6 +78,9 @@ class Qwen3MoeLayer(nn.Module):
             device=hidden_states.device,
         )
         self.select_topk_op.forward(router_logits_fp32, topk_ids, topk_weights)
+        
+        # renormalize weights
+        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
 
         return self.fused_moe(
             hidden_states=hidden_states,
@@ -81,7 +91,9 @@ class Qwen3MoeLayer(nn.Module):
         )
 
 
-class Qwen3MoeDecoderLayer(nn.Module):
+class GenericMoeDecoderLayer(nn.Module):
+    """Generic MoE decoder layer supporting Dense/MoE hybrid and shared experts."""
+    
     def __init__(
         self,
         config: GptInitModelParameters,
@@ -91,7 +103,20 @@ class Qwen3MoeDecoderLayer(nn.Module):
         super().__init__()
         self.layer_idx = layer_idx
         self.self_attn = CausalAttention(config, weights)
-        self.mlp = Qwen3MoeLayer(config, weights)
+        
+        # Determine if this is a Dense layer (before first MoE layer)
+        self.is_dense_layer = (
+            len(config.moe_layer_index) > 0 and layer_idx < config.moe_layer_index[0]
+        )
+        
+        # For MoE layers, create MoE module
+        if not self.is_dense_layer:
+            self.moe_mlp = GenericMoeLayer(config, weights)
+        
+        # Shared experts support (moe_style == 2 logic)
+        self.add_shared_expert = getattr(config, 'moe_style', 1) == 2
+        if self.add_shared_expert or self.is_dense_layer:
+            self.shared_mlp = FusedSiluActDenseMLP(config, weights)
 
         self.input_layernorm = RMSNorm(
             weights[W.pre_ln_gamma], eps=config.layernorm_eps
@@ -106,32 +131,48 @@ class Qwen3MoeDecoderLayer(nn.Module):
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[KVCache] = None,
     ) -> torch.Tensor:
+        # Self Attention
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-
-        # Self Attention
+        
         hidden_states = self.self_attn(
             hidden_states=hidden_states, fmha_impl=fmha_impl, kv_cache=kv_cache
         )
+        
+        attn_output = hidden_states
         hidden_states = residual + hidden_states
 
-        # Fully Connected
+        # MLP (Dense or MoE with optional shared experts)
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
-
-        hidden_states = self.mlp(hidden_states)
+        
+        if self.is_dense_layer:
+            # Dense layer uses shared_mlp
+            hidden_states = self.shared_mlp(hidden_states)
+        else:
+            # MoE layer
+            experts_output = self.moe_mlp(hidden_states)
+            
+            if self.add_shared_expert:
+                shared_mlp_output = self.shared_mlp(hidden_states)
+                hidden_states = experts_output + shared_mlp_output
+            else:
+                hidden_states = experts_output
+        
         hidden_states = residual + hidden_states
-
+        
         return hidden_states
 
 
-class Qwen3MoeModel(GptModelBase):
+class GenericMoeModel(GptModelBase):
+    """Generic MoE model supporting Qwen3-MoE, internal model, and other MoE architectures."""
+    
     def __init__(self, config: GptInitModelParameters, weights: ModelWeights):
         super().__init__(config, weights)
         self.embed_tokens = Embedding(config, weights.get_global_weight(W.embedding))
         self.layers = nn.ModuleList(
             [
-                Qwen3MoeDecoderLayer(config, weights.weights[idx], idx)
+                GenericMoeDecoderLayer(config, weights.weights[idx], idx)
                 for idx in range(self.layer_num)
             ]
         )
@@ -146,11 +187,22 @@ class Qwen3MoeModel(GptModelBase):
 
         attention_inputs: PyAttentionInputs = inputs.attention_inputs
         fmha_impl = self.get_fmha_impl(attention_inputs)
+
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             hidden_states = decoder_layer(
                 hidden_states,
                 fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
             )
+        
         hidden_states = self.norm(hidden_states)
+        
         return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
+
+
+__all__ = [
+    "GenericMoeLayer",
+    "GenericMoeDecoderLayer",
+    "GenericMoeModel",
+]
+
