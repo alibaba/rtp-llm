@@ -989,7 +989,7 @@ def recompute_topk_ids_triton_kernel(
     BLOCK_SIZE: tl.constexpr,
 ):
     token_indices = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = token_indices < num_total          # Mask out-of-bounds threads
+    mask = token_indices < num_total  # Mask out-of-bounds threads
 
     # 1. Load
     expert_id = tl.load(topk_ids_ptr + token_indices, mask=mask, other=-1)

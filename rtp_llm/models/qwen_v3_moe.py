@@ -7,8 +7,8 @@ from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
 from rtp_llm.models.qwen_v2 import QWenV2, QWenV2Weight
 from rtp_llm.models.qwen_v2_moe import Qwen2Moe, QWenV2MoeWeight
-from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeModel
+from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
