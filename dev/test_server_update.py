@@ -17,6 +17,7 @@ PATH = "/mnt/nas1/hf/Qwen2___5-0___5B-Instruct"
 
 class RtpLLMHttpClient(IPCTransportClient):
     def __init__(self, address: str, frentend_port: int, backend_port: int):
+        super().__init__()
         self.client1 = httpx.AsyncClient(
             base_url=f"http://{address}:{frentend_port}", timeout=30.0
         )
@@ -58,7 +59,7 @@ class RtpLLMHttpClient(IPCTransportClient):
             "end_time": time(),
         }
 
-    async def update_model_weight(self, path: str, method: str = "cuda_ipc"):
+    async def update_model_weight(self, path: str, method: str = "shm"):
         files = sorted(glob.glob(os.path.join(path, "model*.safetensors")))
         if not files:
             files = sorted(glob.glob(os.path.join(path, "*.safetensors")))
@@ -126,7 +127,7 @@ class TestRtpClient(unittest.IsolatedAsyncioTestCase):
             )
 
             await client.pause()
-            await client.update_model_weight(path=PATH)
+            await client.update_model_weight(path=PATH, method="cuda_ipc")
             await client.restart()
 
             await client.chat_completion(

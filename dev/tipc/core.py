@@ -219,7 +219,10 @@ class SharedMemoryIPCHelper:
             # Important: The `shm` object reference in `_active_shm_blocks` must be kept alive
             # until the tensor is no longer needed, and then explicitly closed.
             # You might want a separate method for closing/unlinking.
-            return rebuilt_tensor
+            tensor = rebuilt_tensor.clone()
+            if shm:
+                shm.close()
+            return tensor
 
         except FileNotFoundError:
             raise RuntimeError(
@@ -228,8 +231,7 @@ class SharedMemoryIPCHelper:
             )
         except Exception as e:
             # Ensure shm is closed on error
-            if shm:
-                shm.close()
+
             raise RuntimeError(f"Failed to rebuild tensor from shared memory: {e}")
 
 

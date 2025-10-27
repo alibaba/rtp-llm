@@ -208,12 +208,17 @@ class WeightManager:
             raise Exception(
                 f"Failed to build tensor from IPC description '{desc}' using method '{method}'. Tensor is None."
             )
+        logging.info(
+            f"RtpLLM Updating Weights: {name}, shape: {tensor.shape}, device: {tensor.device}, method: {method}"
+        )
 
         logging.info(
             f"update weight request: {name}, shape: {tensor.shape}, device: {tensor.device}, dtype: {tensor.dtype}"
         )
         with torch.cuda.stream(self._working_stream):
             config = self._weights_loader.get_load_config()
+            tensor = tensor.to(self._device)
+
             if "layers" in name:
                 # This is a layer-specific weight
                 layer_id: int | None = self.extract_layer_number(name)
@@ -254,7 +259,6 @@ class WeightManager:
 
             else:
                 # weight is global weight
-
                 name: str = rename_function(name)
                 fail: bool = True
                 for weight in self._weight_module.weights:

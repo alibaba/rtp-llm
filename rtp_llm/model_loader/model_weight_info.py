@@ -696,12 +696,6 @@ class ModelWeights:
                 f"Input tensor shape: {update_tensor.shape}\n"
                 f"Original tensor shape: {ori_tensor.shape}"
             )
-        if ori_tensor.device != update_tensor.device:
-            raise ValueError(
-                "Input error: The device of your input tensor does not match the original tensor.\n"
-                f"Input tensor device: {update_tensor.device}\n"
-                f"Original tensor device: {ori_tensor.device}"
-            )
         if ori_tensor.dtype != update_tensor.dtype:
             raise ValueError(
                 "Input error: The data type of your input tensor does not match the original tensor.\n"
