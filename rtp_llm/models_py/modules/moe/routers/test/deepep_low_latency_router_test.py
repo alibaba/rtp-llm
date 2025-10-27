@@ -3,8 +3,14 @@ import os
 
 import torch
 import torch.multiprocessing as mp
+from librtp_compute_ops import init_device
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.distribute.worker_info import (
+    g_master_info,
+    g_parallel_info,
+    update_master_info,
+)
 from rtp_llm.models_py.distributed.deepep_wrapper import (
     destroy_deepep_wrapper,
     init_deepep_wrapper,
@@ -23,8 +29,7 @@ from rtp_llm.models_py.modules.moe.topk_weight_and_reduce import (
 from rtp_llm.models_py.modules.moe.utils import FusedMoEQuantConfig
 from rtp_llm.test.utils.port_util import PortsContext
 
-WORLD_SIZE = 2
-NUM_TOKEN_PER_RANK = 32
+NUM_TOKEN_PER_RANK = 64
 HIDDEN_SIZE = 7168
 TOPK = 8
 NUM_EXPERTS = 128
@@ -50,12 +55,17 @@ def per_token_cast_back(x_fp8: torch.Tensor, x_scales: torch.Tensor):
 
 def _init_router(rank: int, use_fp8: bool):
     # set env
-    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(WORLD_SIZE))
+    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
+        str(i) for i in range(int(os.environ["WORLD_SIZE"]))
+    )
     os.environ["ACCL_DISPATCH_NUM_WARP_GROUPS"] = "4"
     os.environ["ACCL_COMBINE_NUM_WARP_GROUPS"] = "4"
     os.environ["ACCL_LOW_LATENCY_OPTIMIZE"] = "1"
     os.environ["ACCL_TOPO_FIX"] = "1"
     os.environ["ACCL_LOAD_BALANCE"] = "1"
+    os.environ["WORLD_RANK"] = str(rank)
+    g_parallel_info.reload()
+    update_master_info(f"0.0.0.0", int(os.environ["MASTER_PORT"]))
     # init params
     config = GptInitModelParameters(
         head_num=2,
@@ -65,15 +75,14 @@ def _init_router(rank: int, use_fp8: bool):
         vocab_size=500000,
     )
     config.nccl_ip = "127.0.0.1"
-    config.th_nccl_port = int(os.getenv("MASTER_PORT", "8376"))
-    config.dp_rank = rank
-    config.dp_size = WORLD_SIZE
-    config.tp_rank = 0
-    config.tp_size = 1
-    config.ep_rank = rank
-    config.ep_size = WORLD_SIZE
+    config.dp_rank = g_parallel_info.dp_rank
+    config.dp_size = g_parallel_info.dp_size
+    config.tp_rank = g_parallel_info.tp_rank
+    config.tp_size = g_parallel_info.tp_size
+    config.ep_rank = g_parallel_info.ep_rank
+    config.ep_size = g_parallel_info.ep_size
     config.local_rank = rank
-    config.world_size = WORLD_SIZE
+    config.world_size = g_parallel_info.world_size
     config.moe_config.use_deepep_low_latency = True
     config.moe_config.use_deepep_internode = False
     config.gpt_init_params.ffn_disaggregate_config.enable_ffn_disaggregate = False
@@ -92,6 +101,11 @@ def _init_router(rank: int, use_fp8: bool):
         async_finish=False,
         return_recv_hook=False,
     )
+    config.dp_tp_nccl_port = g_master_info.dp_tp_nccl_port
+    config.th_nccl_port = g_master_info.th_nccl_port
+    config.tp_nccl_port = g_master_info.tp_nccl_port
+    config.ffn_tp_nccl_port = g_master_info.ffn_tp_nccl_port
+    init_device(config)
     return config, router
 
 
@@ -108,43 +122,62 @@ def _run_deepep_low_latency_router_test(rank: int, use_fp8: bool):
     torch.cuda.manual_seed(42)
     ep_size = config.ep_size
     ep_rank = config.ep_rank
+    dp_size = config.dp_size
+    dp_rank = config.dp_rank
     num_experts = config.expert_num
     hidden_size = config.hidden_size
     num_topk = config.moe_k
-    num_token_per_rank = (config.max_generate_batch_size + config.tp_size - 1) // config.tp_size
-    num_max_tokens = num_token_per_rank * ep_size
+    ll_num_token_per_rank = (
+        config.max_generate_batch_size + config.tp_size - 1
+    ) // config.tp_size
+    num_max_tokens = ll_num_token_per_rank * ep_size
+
+    # for per dp rank
+    num_token_per_rank = config.max_generate_batch_size
     int_mask = (2**32) - 1
-    hidden_states = torch.randn((ep_size, num_token_per_rank, hidden_size)).to(torch.bfloat16)
+    hidden_states = torch.randn((dp_size, num_token_per_rank, hidden_size)).to(
+        torch.bfloat16
+    )
     # hidden_states = torch.ones((ep_size, num_token_per_rank, hidden_size)).to(torch.bfloat16) * torch.arange(
     #     2, ep_size + 2, dtype=torch.bfloat16
     # ).view(ep_size, 1, 1)
     hidden_states[:, :, :128] = (
-        torch.arange(ep_size * num_token_per_rank, dtype=torch.bfloat16)
-        .view(ep_size, num_token_per_rank, 1)
+        torch.arange(dp_size * num_token_per_rank, dtype=torch.bfloat16)
+        .view(dp_size, num_token_per_rank, 1)
         .repeat(1, 1, 128)
         .cuda()
     )
-    topk_ids = torch.rand(ep_size, num_token_per_rank, num_experts).topk(num_topk, dim=-1, largest=True)[1]
-    topk_weights = torch.ones((ep_size, num_token_per_rank, num_topk)).to(torch.float32) / num_topk
+    topk_ids = torch.rand(dp_size, num_token_per_rank, num_experts).topk(
+        num_topk, dim=-1, largest=True
+    )[1]
+    topk_weights = (
+        torch.ones((dp_size, num_token_per_rank, num_topk)).to(torch.float32) / num_topk
+    )
     # print(f"[rank: {rank}] hidden_states: {hidden_states[:5, :5, 127:132]}")
     # reference data
     assert num_experts % ep_size == 0
     num_local_experts = num_experts // ep_size
-    ref_recv_x = torch.zeros((num_local_experts, num_max_tokens, hidden_size)).to(torch.bfloat16).cuda()
+    ref_recv_x = (
+        torch.zeros((num_local_experts, num_max_tokens, hidden_size))
+        .to(torch.bfloat16)
+        .cuda()
+    )
     ref_recv_count = torch.zeros((num_local_experts), dtype=torch.int32).cuda()
     for local_expert_id in range(num_local_experts):
         expert_id = ep_rank * num_local_experts + local_expert_id
-        expert_mask = (topk_ids == expert_id).any(dim=-1)  # shape: (ep_size, num_token_per_rank)
+        expert_mask = (topk_ids == expert_id).any(
+            dim=-1
+        )  # shape: (ep_size, num_token_per_rank)
         num_selected_tokens = expert_mask.sum()
         ref_recv_x[local_expert_id, :num_selected_tokens] = hidden_states[expert_mask]
         ref_recv_count[local_expert_id] = num_selected_tokens
     # router prepare
     payload = router.prepare(
-        hidden_states[ep_rank],
+        hidden_states[dp_rank],
         None,
         None,
-        topk_weights[ep_rank],
-        topk_ids[ep_rank],
+        topk_weights[dp_rank],
+        topk_ids[dp_rank],
         num_experts,
         (
             FusedMoEQuantConfig(
@@ -186,11 +219,15 @@ def _run_deepep_low_latency_router_test(rank: int, use_fp8: bool):
         recv_src_info = router.handle[0][local_expert_id]
         recv_layout_range = router.handle[1][local_expert_id]
         for j in range(ep_size):
-            begin_idx, count = (recv_layout_range[j] >> 32).item(), (recv_layout_range[j] & int_mask).item()
-            sorted_indices_per_rank = torch.argsort(recv_src_info[begin_idx : begin_idx + count])
-            permuted_recv_x[local_expert_id, current_start_idx : current_start_idx + count] = recv_x[
-                local_expert_id, begin_idx + sorted_indices_per_rank
-            ]
+            begin_idx, count = (recv_layout_range[j] >> 32).item(), (
+                recv_layout_range[j] & int_mask
+            ).item()
+            sorted_indices_per_rank = torch.argsort(
+                recv_src_info[begin_idx : begin_idx + count]
+            )
+            permuted_recv_x[
+                local_expert_id, current_start_idx : current_start_idx + count
+            ] = recv_x[local_expert_id, begin_idx + sorted_indices_per_rank]
             current_start_idx += count
     # check recv_x
     # print(f"[rank: {rank}] recv_x: {recv_x[:5, :5, 127:132]}, ref_recv_x: {ref_recv_x[:5, :5, 127:132]}")
@@ -204,29 +241,41 @@ def _run_deepep_low_latency_router_test(rank: int, use_fp8: bool):
     # print(
     #     f"[rank: {rank}] ref_recv_count: {ref_recv_count}, payload.expert_tokens_meta.expert_num_tokens: {payload.expert_tokens_meta.expert_num_tokens}"
     # )
-    torch.testing.assert_close(ref_recv_count, num_expert_recv_tokens, atol=1e-8, rtol=1e-8)
+    torch.testing.assert_close(
+        ref_recv_count, num_expert_recv_tokens, atol=1e-8, rtol=1e-8
+    )
+    # pass num_token_per_rank to finalize for gather
+    extra_finalize_args = {"original_num_tokens": num_token_per_rank}
     # router finalize
     combined_x = router.finalize(
         recv_x,
-        topk_weights[ep_rank],
-        topk_ids[ep_rank],
+        payload.expert_topk_weights,
+        payload.expert_topk_ids,
         False,
         TopKWeightAndReduceDelegate(),
-        None,
+        extra_finalize_args,
     )
     # print(f"[rank: {rank}] combined_x: {combined_x[:5, 127:132]}, hidden_states: {hidden_states[ep_rank][:5, 127:132]}")
-    torch.testing.assert_close(hidden_states[ep_rank, :, :128], combined_x[:, :128])
+    torch.testing.assert_close(hidden_states[dp_rank, :, :128], combined_x[:, :128])
     _destroy_router(router)
 
 
 def test_deepep_low_latency_router():
     with PortsContext(None, 1) as ports:
         os.environ["MASTER_PORT"] = str(ports[0])
-        for use_fp8 in [True, False]:
+
+    world_size = 2
+    test_tp_sizes = [1, 2]
+
+    for use_fp8 in [True, False]:
+        for test_tp_size in test_tp_sizes:
+            os.environ["WORLD_SIZE"] = str(world_size)
+            os.environ["TP_SIZE"] = str(test_tp_size)
+            os.environ["DP_SIZE"] = str(world_size // test_tp_size)
             mp.spawn(  # pyright: ignore[reportPrivateImportUsage]
                 _run_deepep_low_latency_router_test,
                 args=(use_fp8,),
-                nprocs=WORLD_SIZE,
+                nprocs=world_size,
                 join=True,
             )
 
