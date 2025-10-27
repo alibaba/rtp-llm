@@ -139,9 +139,11 @@ LayernormOutput ROCmDevice::layernorm(const LayernormParams& params) {
     const auto  eps       = params.eps;
     const auto& weights   = params.norm_weight;
 
+
     if ((!params.is_inplace
         && (params.qscheme == QScheme::NoQuantize || params.qscheme == QScheme::Qfp8PerTokenBlock))
-            || params.qscheme == QScheme::Qfp8PerToken || params.qscheme == QScheme::Qint8PerTensor) {
+           || (params.qscheme == QScheme::Qfp8PerToken && params.norm_type == NormType::layernorm) 
+           || params.qscheme == QScheme::Qint8PerTensor) {
         norm_output = allocateBufferLike(*params.input);
     } else if (params.qscheme != QScheme::NoQuantize) {
         auto quant_data_type = (params.qscheme == QScheme::Qfp8PerTensor) ? DataType::TYPE_FP8_E4M3 : DataType::TYPE_INT8;
@@ -164,6 +166,16 @@ LayernormOutput ROCmDevice::layernorm(const LayernormParams& params) {
         if (params.qscheme == QScheme::Qint8PerToken) { 
             scales_ptr = std::dynamic_pointer_cast<QBuffer>(norm_output)->scalesData<float>();
         }
+        scales_ptr   = std::dynamic_pointer_cast<QBuffer>(norm_output)->scalesData<float>();
+    } else if (params.qscheme == QScheme::Qfp8PerToken && params.norm_type == NormType::rmsnorm) {
+        auto scale_shape = params.input->shape();
+        scale_shape.back() = 1;
+        auto kernel  = allocateBuffer({DataType::TYPE_FP8_E4M3, {input->shape()}, AllocationType::DEVICE}, {"kernel"});
+        auto scales  = allocateBuffer({DataType::TYPE_FP32, {scale_shape}, AllocationType::DEVICE}, {"scales"});
+        norm_output  = BufferPtr(new QBuffer(
+            std::move(kernel),
+            std::move(scales),
+            std::move(BufferPtr(new Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_INVALID, {0}, nullptr)))));
     }
 
     if (params.norm_type == NormType::alphanorm || !norm_weight.has_value()) {
@@ -213,11 +225,11 @@ LayernormOutput ROCmDevice::layernorm(const LayernormParams& params) {
         int xbias = params.bias? 1: 0;
 
         auto input_tensor = Buffer2torchTensor(input, false);
-        auto out_tensor = Buffer2torchTensor(norm_output, false);
         auto weight_tensor = Buffer2torchTensor(*norm_weight->get().gamma.get(), false);
 
         if (params.norm_type == NormType::layernorm)
         {
+            auto out_tensor = Buffer2torchTensor(norm_output, false);
             std::optional<torch::Tensor> bias_tensor;
             if (xbias)
                 bias_tensor = Buffer2torchTensor(params.bias.value().get(), false);
@@ -247,18 +259,47 @@ LayernormOutput ROCmDevice::layernorm(const LayernormParams& params) {
         }
         else if(params.norm_type == NormType::rmsnorm)
         {
-            if (fused_add)
-            {
-                auto residual_in_tensor = Buffer2torchTensor(params.residual1.value().get(), false);
-                auto residual_out_tensor = Buffer2torchTensor((params.before_norm_output == nullptr) ? params.input:params.before_norm_output, false);
-                rmsnorm2d_with_add(out_tensor, input_tensor, residual_in_tensor, residual_out_tensor, weight_tensor, static_cast<double>(eps), 0);
-            }
-            else
-            {
-                auto res_tensor = rmsnorm2d(input_tensor, weight_tensor, static_cast<double>(eps), 0);
-                copy({*norm_output, *torchTensor2Buffer(res_tensor)});
-            }    
+            if (params.qscheme == QScheme::Qfp8PerToken /* Do fuse fp8 pertoken*/) {
+                auto qout = std::dynamic_pointer_cast<QBuffer>(norm_output);
+                auto out_kernel_tensor = Buffer2torchTensor(qout->kernelPtr(), /*copyData=*/false); // [m,n], FP8/Byte
+                auto out_scale_tensor  = Buffer2torchTensor(qout->scalesPtr(), /*copyData=*/false); // [m,1], FP32
 
+                if (fused_add)
+                {
+                    auto residual_in_tensor = Buffer2torchTensor(params.residual1.value().get(), false);
+                    auto residual_out_tensor = Buffer2torchTensor((params.before_norm_output == nullptr) ? params.input:params.before_norm_output, false);
+                    rmsnorm2d_with_add_dynamicquant(
+                        /*out=*/out_kernel_tensor,
+                        /*input=*/input_tensor,
+                        /*residual_in=*/residual_in_tensor,
+                        /*residual_out=*/residual_out_tensor,
+                        /*yscale=*/out_scale_tensor,
+                        /*weight=*/weight_tensor,
+                        /*epsilon=*/static_cast<double>(eps),
+                        /*use_model_sensitive_rmsnorm=*/0);
+                } else {
+                    rmsnorm2d_with_dynamicquant(
+                        /*out=*/out_kernel_tensor,
+                        /*input=*/input_tensor,
+                        /*yscale=*/out_scale_tensor,
+                        /*weight=*/weight_tensor,
+                        /*epsilon=*/static_cast<double>(eps),
+                        /*use_model_sensitive_rmsnorm=*/0);
+                }
+            } else {
+                auto out_tensor = Buffer2torchTensor(norm_output, false);
+                if (fused_add)
+                {
+                    auto residual_in_tensor = Buffer2torchTensor(params.residual1.value().get(), false);
+                    auto residual_out_tensor = Buffer2torchTensor((params.before_norm_output == nullptr) ? params.input:params.before_norm_output, false);
+                    rmsnorm2d_with_add(out_tensor, input_tensor, residual_in_tensor, residual_out_tensor, weight_tensor, static_cast<double>(eps), 0);
+                }
+                else
+                {
+                    auto res_tensor = rmsnorm2d(input_tensor, weight_tensor, static_cast<double>(eps), 0);
+                    copy({*norm_output, *torchTensor2Buffer(res_tensor)});
+                }
+            }
         }
         else
         {
@@ -365,6 +406,7 @@ LayernormOutput ROCmDevice::layernorm(const LayernormParams& params) {
     ROCM_CHECK_ERROR();
     return LayernormOutput({norm_output, params.before_norm_output});
 }
+
 
 #define ARGS_DISPATCH(Atype, Dtype, out, bias, gate, gate_bias, m, n, stream)                                          \
     do {                                                                                                               \
