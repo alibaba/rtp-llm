@@ -109,20 +109,25 @@ class GenericMoeDecoderLayer(nn.Module):
 
         # Determine if this is a Dense layer (before first MoE layer)
         # If moe_layer_index is empty or contains all layers, all layers are MoE layers
-        self.is_dense_layer = (
-            len(config.moe_layer_index) > 0 and layer_idx not in config.moe_layer_index
-        )
-
-        # For MoE layers, create MoE module
-        if not self.is_dense_layer:
+        if len(config.moe_layer_index) > 0 and layer_idx < config.moe_layer_index[0]:
+            self.is_dense_layer = True
+        else:
+            self.is_dense_layer = False
             self.moe_mlp = GenericMoeLayer(config, weights)
 
-        # Shared experts support (moe_style == 2 logic for internal model)
         self.add_shared_expert = getattr(config, "moe_style", 1) == 2
-        if self.is_dense_layer:
-            self.shared_mlp = FusedSiluActDenseMLP(config, weights)
-        else:
-            self.shared_mlp = None
+
+        # Try to create shared_mlp and catch errors if weights don't exist
+        self.shared_mlp = None
+        if self.is_dense_layer or self.add_shared_expert:
+            try:
+                self.shared_mlp = FusedSiluActDenseMLP(config, weights)
+            except (KeyError, AssertionError) as e:
+                # If weights don't exist, shared_mlp remains None
+                logging.warning(
+                    f"[GenericMoeDecoderLayer] Layer {self.layer_idx}: Failed to create shared_mlp: {e}"
+                )
+                pass
 
         self.input_layernorm = RMSNorm(
             weights[W.pre_ln_gamma], eps=config.layernorm_eps
@@ -144,8 +149,6 @@ class GenericMoeDecoderLayer(nn.Module):
         hidden_states = self.self_attn(
             hidden_states=hidden_states, fmha_impl=fmha_impl, kv_cache=kv_cache
         )
-
-        attn_output = hidden_states
         hidden_states = residual + hidden_states
 
         # MLP (Dense or MoE with optional shared experts)
@@ -153,7 +156,8 @@ class GenericMoeDecoderLayer(nn.Module):
         hidden_states = self.post_attention_layernorm(hidden_states)
 
         if self.is_dense_layer:
-            # Dense layer uses shared_mlp
+            # Dense layer uses shared_mlp (must exist)
+            assert self.shared_mlp is not None, "Dense layer must have shared_mlp"
             hidden_states = self.shared_mlp(hidden_states)
         else:
             # MoE layer
