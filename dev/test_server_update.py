@@ -70,7 +70,6 @@ class RtpLLMHttpClient(IPCTransportClient):
             weights.update(part)
 
         for name, tensor in tqdm(weights.items(), "updating weights"):
-            print(tensor)
             await self.update(tensor, name, method)
 
     async def update(
@@ -108,8 +107,7 @@ class RtpLLMHttpClient(IPCTransportClient):
 
 class TestRtpClient(unittest.IsolatedAsyncioTestCase):
     async def test_full_flow(self):
-        async with RtpLLMHttpClient("localhost", 26000, 8080) as client:
-            """
+        async with RtpLLMHttpClient("localhost", 26000, 26006) as client:
             await client.restart()
             await client.chat_completion("chat_1", "hello qwen.")
             await client.pause()
@@ -120,9 +118,7 @@ class TestRtpClient(unittest.IsolatedAsyncioTestCase):
             )
 
             await asyncio.sleep(3)
-            """
             timestamp = time()
-            """
             await client.restart()
 
             await client.chat_completion("chat_4", "tell me 1+1=?")
@@ -131,7 +127,6 @@ class TestRtpClient(unittest.IsolatedAsyncioTestCase):
             )
 
             await client.pause()
-            """
             await client.update_model_weight(path=PATH, method="shm")
             await client.restart()
 
