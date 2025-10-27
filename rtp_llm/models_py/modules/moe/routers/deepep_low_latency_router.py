@@ -4,6 +4,7 @@ from typing import Any, Optional, Tuple
 import torch
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.distribute.collective import Group, all_gather
 from rtp_llm.models_py.distributed.deepep_wrapper import get_deepep_wrapper
 from rtp_llm.models_py.modules.moe.fused_moe import (
     ExpertForwardPayload,
@@ -99,10 +100,24 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
 
         # dispatch
         topk_ids = topk_ids.to(torch.int64)
+
+        # scatter by tp
+        tp_size = self._config.tp_size
+        tp_rank = self._config.tp_rank
+        token_num = a1.size(0)
+        tp_token_size = (token_num + tp_size - 1) // tp_size
+
+        slice_begin = min(tp_token_size * tp_rank, token_num)
+        slice_size = min(token_num - slice_begin, tp_token_size)
+
+        tp_expert_input = torch.narrow(a1, 0, slice_begin, slice_size)
+        tp_expert_ids = torch.narrow(topk_ids, 0, slice_begin, slice_size)
+        tp_expert_scales = torch.narrow(topk_weights, 0, slice_begin, slice_size)
+
         expert_x, expert_num_tokens, self._handle, _, _ = (
             self._buffer.low_latency_dispatch(
-                a1,
-                topk_ids,
+                tp_expert_input,
+                tp_expert_ids,
                 self._num_max_dispatch_tokens_per_rank,
                 num_experts,
                 use_fp8=self._use_fp8_dispatch,
@@ -121,8 +136,8 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
             expert_x=expert_x[0] if self._use_fp8_dispatch else expert_x,
             expert_x_scale=expert_x[1] if self._use_fp8_dispatch else None,
             expert_x_origin_dtype=a1.dtype,
-            expert_topk_weights=None,
-            expert_topk_ids=None,
+            expert_topk_weights=tp_expert_scales,
+            expert_topk_ids=tp_expert_ids,
             expert_tokens_meta=ExpertTokensMetadata(
                 expert_num_tokens=expert_num_tokens, expert_num_tokens_cpu=None
             ),
@@ -162,4 +177,26 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         )
         # reset handle
         self._handle = None
+
+        # gather
+        tp_size = self._config.tp_size
+        original_num_tokens = extra_finalize_args["original_num_tokens"]
+        tp_token_size = (original_num_tokens + tp_size - 1) // tp_size
+
+        if tp_size > 1:
+            # combine_x.size(0) might be 0
+            if combined_x.size(0) < tp_token_size:
+                padding_combined_x = torch.empty(
+                    size=(tp_token_size - combined_x.size(0), combined_x.size(1)),
+                    device=combined_x.device,
+                    dtype=combined_x.dtype,
+                )
+                combined_x = torch.cat([combined_x, padding_combined_x], dim=0)
+
+            gatherd_output = all_gather(combined_x, group=Group.TP).reshape(
+                tp_size * tp_token_size, -1
+            )
+            gatherd_output = gatherd_output[:original_num_tokens, :]
+            return gatherd_output
+
         return combined_x

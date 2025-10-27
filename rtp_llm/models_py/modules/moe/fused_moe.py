@@ -172,6 +172,8 @@ class FusedMoe(torch.nn.Module):
         else:
             extra_finalize_args.update({"a1_shape": a1.shape})
 
+        extra_finalize_args.update({"original_num_tokens": hidden_states.size(0)})
+
         output = self.router.finalize(
             fused_out,
             payload.expert_topk_weights,
