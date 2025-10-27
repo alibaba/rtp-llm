@@ -1,4 +1,3 @@
-import copy
 import logging
 from typing import Dict, Optional
 
@@ -40,10 +39,11 @@ class GenericMoeLayer(nn.Module):
         self.top_k = config.moe_k
 
         self.gate = Linear(weights[W.moe_gate], None)
-        # Fix: Don't modify global config, create a local copy for SelectTopkOp
-        local_config = copy.deepcopy(config)
-        local_config.has_moe_norm = False
-        self.select_topk_op = SelectTopkOp(local_config)
+        # Fix: Don't modify global config, save and restore has_moe_norm
+        original_has_moe_norm = config.has_moe_norm
+        config.has_moe_norm = False
+        self.select_topk_op = SelectTopkOp(config)
+        config.has_moe_norm = original_has_moe_norm
         self.fused_moe: FusedMoe = FusedMoeFactory.create_fused_moe(config, weights)
 
         self.w1 = weights.get(W.moe_w1, None)
