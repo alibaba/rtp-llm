@@ -1342,6 +1342,12 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(const GptLayerInputs&     
     }
     printBufferData(*attn_hidden, "layer_" + to_string(layer_id) + "_attn_output");
 
+    // TO DO: moe model not support quant input, therefore LayerNormOp need transfer QScheme::NoQuantize
+    auto modelType = autil::EnvUtil::getEnv("MODEL_TYPE", "");      
+    auto quant_type = QScheme::NoQuantize;
+    if (modelType.find("moe") == std::string::npos) {
+        quant_type = description_.act_qscheme;
+    }
     if (layer.post_layernorm) {
         // attn_hidden = attn_hidden + residual
         // hidden = layernorm(attn_hidden)
@@ -1358,7 +1364,7 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(const GptLayerInputs&     
                             false,
                             description_.post_layernorm,
                             description_.norm_type,
-                            description_.act_qscheme,
+                            quant_type,
                             false,
                             true);
 

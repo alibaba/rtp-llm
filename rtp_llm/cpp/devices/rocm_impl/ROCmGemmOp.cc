@@ -141,6 +141,10 @@ struct ROCmGemmArguments {
         compute_type = (params.compute_type == DataType::TYPE_INVALID) ? DataType::TYPE_FP32 : params.compute_type;
         if (params.D) {
             DDtype = params.D->type();
+        } else if (params.A.type() == DataType::TYPE_INT8 || params.A.type() == DataType::TYPE_QINT8){
+            DDtype = DataType::TYPE_FP16;
+        } else if (params.A.type() == DataType::TYPE_FP8_E4M3 || params.A.type() == DataType::TYPE_QFP8_E4M3){
+            DDtype = DataType::TYPE_BF16;            
         } else {
             DDtype = params.compute_type == DataType::TYPE_INVALID ? ADtype : compute_type;
         }
@@ -162,16 +166,7 @@ struct ROCmGemmArguments {
         ldc      = n;
         stride_c = m * n;
 
-        if (ADtype == DataType::TYPE_QFP8_E4M3 && BDtype == DataType::TYPE_QFP8_E4M3) {
-            float input_scale = getRocmValue(
-                reinterpret_cast<const float*>(reinterpret_cast<const QBuffer&>(params.A).scalesData()), 0);
-            float weight_scale = getRocmValue(
-                reinterpret_cast<const float*>(reinterpret_cast<const QBuffer&>(params.B).scalesData()), 0);
-            alpha = params.alpha * input_scale * weight_scale;
-        } else {
-            alpha = params.alpha;
-        }
-
+        alpha = params.alpha;
         beta = params.beta;
     }
 
@@ -236,11 +231,22 @@ void ROCmDevice::InvokeROCmPTPCGemm(const GemmParams& params, BufferPtr output) 
     const size_t k = params.A.shape()[1];
     const size_t n = W_kernel->shape()[1];
 
-    QBufferPtr q_hidden = std::dynamic_pointer_cast<QBuffer>(
-        quantize(QuantizeParams(params.A, DataType::TYPE_QFP8_E4M3, 1, QScheme::Qfp8PerToken, 0, 0)));
+    BufferPtr  A_quant_buffer;
+    BufferPtr  A_scales;
+    if (params.A.isQBuffer()) {
+        RTP_LLM_LOG_DEBUG("aiter ptpc gemm: A is already QBuffer, skip quantize.");
+        A_quant_buffer = reinterpret_cast<const QBuffer&>(params.A).kernelPtr();
+        A_scales       = reinterpret_cast<const QBuffer&>(params.A).scalesPtr();
+    } else {
+        QBufferPtr q_hidden = std::dynamic_pointer_cast<QBuffer>(
+            quantize(QuantizeParams(params.A, DataType::TYPE_QFP8_E4M3, 1, QScheme::Qfp8PerToken, 0, 0)));
+        A_quant_buffer = q_hidden->kernelPtr();
+        A_scales       = q_hidden->scalesPtr();
+    }
 
-    torch::Tensor A_quant_tensor       = Buffer2torchTensor(q_hidden->kernelPtr(), false);
-    torch::Tensor A_quant_scale_tensor = Buffer2torchTensor(q_hidden->scalesPtr(), false);
+
+    torch::Tensor A_quant_tensor       = Buffer2torchTensor(A_quant_buffer, false);
+    torch::Tensor A_quant_scale_tensor = Buffer2torchTensor(A_scales, false);
 
     torch::Tensor W_kernel_tensor = Buffer2torchTensor(W_kernel, false);
     torch::Tensor W_scale_tensor  = Buffer2torchTensor(W_scales, false);
@@ -257,12 +263,19 @@ void ROCmDevice::InvokeROCmPTPCGemm(const GemmParams& params, BufferPtr output) 
 void ROCmDevice::HipblasltPTPCGemm(const GemmParams& params, BufferPtr output) {
     RTP_LLM_LOG_DEBUG("use hipBLASLt ptpc gemm.");
     ROCmGemmArguments arguments(params);
+    BufferPtr  A_quant_buffer;
+    BufferPtr  A_scales;
+    if (params.A.isQBuffer()) {
+        RTP_LLM_LOG_DEBUG("hipBLASLt ptpc gemm: A is already QBuffer, skip quantize.");
+        A_quant_buffer = reinterpret_cast<const QBuffer&>(params.A).kernelPtr();
+        A_scales       = reinterpret_cast<const QBuffer&>(params.A).scalesPtr();
+    } else {
+        QBufferPtr q_hidden = std::dynamic_pointer_cast<QBuffer>(
+            quantize(QuantizeParams(params.A, DataType::TYPE_QFP8_E4M3, 1, QScheme::Qfp8PerToken, 0, 0)));
+        A_quant_buffer = q_hidden->kernelPtr();
+        A_scales       = q_hidden->scalesPtr();
+    }
 
-    QBufferPtr q_hidden = std::dynamic_pointer_cast<QBuffer>(
-        quantize(QuantizeParams(params.A, DataType::TYPE_QFP8_E4M3, 1, QScheme::Qfp8PerToken, 0, 0)));
-    
-    BufferPtr A_quant_buffer = q_hidden->kernelPtr();
-    BufferPtr A_scales = q_hidden->scalesPtr();
     BufferPtr W_kernel = reinterpret_cast<const QBuffer&>(params.B).kernelPtr();
     BufferPtr W_scales = reinterpret_cast<const QBuffer&>(params.B).scalesPtr();
 
@@ -299,7 +312,9 @@ BufferPtr ROCmDevice::gemm(const GemmParams& params) {
                               "Gemm output D shape and dtype mismatch: expected [%d][%s] but got [%s]",
                               arguments.DDtype,
                               autil::StringUtil::toString(arguments.Dshape).c_str(),
-                              params.D->debugString().c_str());
+                              params.D->debugString().c_str());                         
+    } else if (params.A.type() == DataType::TYPE_QFP8_E4M3 && params.B.type() == DataType::TYPE_QFP8_E4M3 /* if fused fp8 pertoken & rmsnorm */) {
+        output = allocateBuffer({DataType::TYPE_BF16, arguments.Dshape, AllocationType::DEVICE}, {"gemm_output"});
     } else {
         output = allocateBuffer({arguments.DDtype, arguments.Dshape, AllocationType::DEVICE}, {"gemm_output"});
     }
@@ -418,6 +433,36 @@ BufferPtr ROCmDevice::gemm(const GemmParams& params) {
         }
     }
 
+    if (params.dispatch() == GemmType::QBufferA_QBufferB_BufferC_2DGemm) {
+        if (params.A.type() == DataType::TYPE_QFP8_E4M3 && params.B.type() == DataType::TYPE_QFP8_E4M3) {
+            const QBuffer& qB        = reinterpret_cast<const QBuffer&>(params.B);
+            Buffer         qB_kernel = qB.kernel();
+            Buffer         qB_scales = qB.scales();
+            ROCM_CHECK_VALUE((qB_kernel.dim() == 2), "quant Gemm only support 2D");
+            size_t kernel_K = qB_kernel.shape()[0], kernel_N = qB_kernel.shape()[1];
+            size_t scale_K = qB_scales.shape()[0], scale_N = qB_scales.shape()[1];
+            if (1 == scale_K && scale_N == kernel_N) {
+                if (hipblas_mm_wrapper_->use_swizzleA() || hipblas_mm_wrapper_->test_swizzleA()){
+                    HipblasltPTPCGemm(params, output);
+                }
+                else {
+                    InvokeROCmPTPCGemm(params, output);
+                }
+            } else {
+                ROCM_FAIL(
+                    "[GEMM]: Other FP8 weight quantization not implemented, with weight kernel [%d, %d], weight scales [%d, %d]",
+                    kernel_K,
+                    kernel_N,
+                    scale_K,
+                    scale_N);
+            }
+            return std::move(output);            
+
+        } else {
+            ROCM_FAIL("[GEMM]: Other weight quantization not implemented");
+        }
+
+    }
     auto A_data_type = dtypeConvert(arguments.ADtype);
     auto B_data_type = dtypeConvert(arguments.BDtype);
     auto D_data_type = dtypeConvert(arguments.DDtype);
