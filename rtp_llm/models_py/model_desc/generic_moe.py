@@ -1,3 +1,4 @@
+import copy
 import logging
 from typing import Dict, Optional
 
@@ -39,8 +40,10 @@ class GenericMoeLayer(nn.Module):
         self.top_k = config.moe_k
 
         self.gate = Linear(weights[W.moe_gate], None)
-        config.has_moe_norm = False
-        self.select_topk_op = SelectTopkOp(config)
+        # Fix: Don't modify global config, create a local copy for SelectTopkOp
+        local_config = copy.deepcopy(config)
+        local_config.has_moe_norm = False
+        self.select_topk_op = SelectTopkOp(local_config)
         self.fused_moe: FusedMoe = FusedMoeFactory.create_fused_moe(config, weights)
 
         self.w1 = weights.get(W.moe_w1, None)
@@ -105,18 +108,21 @@ class GenericMoeDecoderLayer(nn.Module):
         self.self_attn = CausalAttention(config, weights)
 
         # Determine if this is a Dense layer (before first MoE layer)
+        # If moe_layer_index is empty or contains all layers, all layers are MoE layers
         self.is_dense_layer = (
-            len(config.moe_layer_index) > 0 and layer_idx < config.moe_layer_index[0]
+            len(config.moe_layer_index) > 0 and layer_idx not in config.moe_layer_index
         )
 
         # For MoE layers, create MoE module
         if not self.is_dense_layer:
             self.moe_mlp = GenericMoeLayer(config, weights)
 
-        # Shared experts support (moe_style == 2 logic)
+        # Shared experts support (moe_style == 2 logic for internal model)
         self.add_shared_expert = getattr(config, "moe_style", 1) == 2
-        if self.add_shared_expert or self.is_dense_layer:
+        if self.is_dense_layer:
             self.shared_mlp = FusedSiluActDenseMLP(config, weights)
+        else:
+            self.shared_mlp = None
 
         self.input_layernorm = RMSNorm(
             weights[W.pre_ln_gamma], eps=config.layernorm_eps
@@ -153,7 +159,7 @@ class GenericMoeDecoderLayer(nn.Module):
             # MoE layer
             experts_output = self.moe_mlp(hidden_states)
 
-            if self.add_shared_expert:
+            if self.add_shared_expert and self.shared_mlp is not None:
                 shared_mlp_output = self.shared_mlp(hidden_states)
                 hidden_states = experts_output + shared_mlp_output
             else:
