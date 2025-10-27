@@ -10,6 +10,7 @@ class GemmOp: public torch::jit::CustomClassHolder {
 public:
     GemmOp();
 
+
     void forward(torch::Tensor input,
                  torch::Tensor weight,
                  torch::Tensor weight_scale,
