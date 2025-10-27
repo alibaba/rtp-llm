@@ -27,8 +27,6 @@ public:
 
     CacheLayerLayout layerCacheBase() const {}
 
-    std::vector<std::shared_ptr<KVCacheGroup>> kvCacheGroups() const;
-
 private:
     std::vector<std::shared_ptr<KVCacheGroup>> kv_cache_groups_;
 };

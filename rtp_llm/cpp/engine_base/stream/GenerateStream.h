@@ -487,11 +487,6 @@ public:
     void fillSubGenerateStatus(StreamState state);
     void resizeSubGenerateStatus(size_t new_size);
 
-    struct CacheReuseInfo {
-        size_t reuse_block_num;
-        size_t memory_reuse_block_num;
-    }
-
 public:
     struct TimeInfo {
         int64_t begin_time_us;
@@ -589,8 +584,6 @@ protected:
     bool perf_test_ = false;
     friend class StreamCacheResource;
     bool is_dummy_stream = false;
-    
-    CacheReuseInfo cache_reuse_info_;
 };
 
 typedef std::shared_ptr<GenerateStream> GenerateStreamPtr;
