@@ -46,14 +46,14 @@ cc_library(
     name = "logits_processor",
     hdrs = [
         "logits_processor/BaseLogitsProcessor.h",
-        "logits_processor/BeamSearchLogitsProcessor.h",
+        "logits_processor/MultiSeqLogitsProcessor.h",
         "logits_processor/LogitsProcessorStates.h",
         "logits_processor/ThinkModeLogitsProcessor.h",
         "logits_processor/TreeLogitsProcessor.h",
     ],
     srcs = [
         "logits_processor/BaseLogitsProcessor.cc",
-        "logits_processor/BeamSearchLogitsProcessor.cc",
+        "logits_processor/MultiSeqLogitsProcessor.cc",
         "logits_processor/LogitsProcessorStates.cc",
         "logits_processor/ThinkModeLogitsProcessor.cc",
         "logits_processor/TreeLogitsProcessor.cc",
