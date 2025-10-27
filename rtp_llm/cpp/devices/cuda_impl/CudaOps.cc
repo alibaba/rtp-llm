@@ -766,15 +766,15 @@ void CudaDevice::allGather(const AllGatherParams& params) {
     }
     NCCLCHECK(ncclGroupStart());
     for (auto i = 0; i < params.recv_buffers.size(); ++i) {
-        auto&      recv_buffer    = params.recv_buffers[i];
-        const auto nccl_data_type = getNcclDataType(recv_buffer->type());
-        const auto data_num       = recv_buffer->size() / nccl_param.world_size_;
-        RUNTIME_ASSERT_OP_ARG(data_num * nccl_param.world_size_ == recv_buffer->size(),
-                              "Buffer size %ld must be divisible by world size %d",
+        auto&        recv_buffer    = params.recv_buffers[i];
+        const auto   nccl_data_type = getNcclDataType(recv_buffer->type());
+        const size_t data_num       = recv_buffer->size() / static_cast<size_t>(nccl_param.world_size_);
+        RUNTIME_ASSERT_OP_ARG(data_num * static_cast<size_t>(nccl_param.world_size_) == recv_buffer->size(),
+                              "Buffer size %zu must be divisible by world size %d",
                               recv_buffer->size(),
                               nccl_param.world_size_);
         if (params.inplace) {
-            const auto data_size = data_num * recv_buffer->typeSize();
+            const size_t data_size = data_num * recv_buffer->typeSize();
             NCCLCHECK(ncclAllGather((char*)(recv_buffer->data()) + nccl_param.rank_ * data_size,
                                     recv_buffer->data(),
                                     data_num,
@@ -827,10 +827,10 @@ bool CudaDevice::checkNAN(const Buffer& input) {
     if (input.size() < 512) {
         return true;
     }
-    cudaStreamSynchronize(stream_);
+    check_cuda_value(cudaStreamSynchronize(stream_));
     check_cuda_value(cudaGetLastError());
     DISPATCH_CUDA_FUNCTION_DATA_TYPE(input.type(), invokeCheckNAN, input.data(), input.size(), stream_);
-    cudaStreamSynchronize(stream_);
+    check_cuda_value(cudaStreamSynchronize(stream_));
     check_cuda_value(cudaGetLastError());
     return true;
 }

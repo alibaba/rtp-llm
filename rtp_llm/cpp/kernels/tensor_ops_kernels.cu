@@ -43,26 +43,31 @@ namespace rtp_llm {
 
 // Transpose operations
 template<typename T>
-__global__ void transposeAxis01(T* out, T* in, const size_t dim0, const size_t dim1, const size_t dim2) {
-    size_t index = threadIdx.x + blockIdx.x * blockDim.x;
-    if (index < dim0 * dim1 * dim2) {
+__global__ void
+transposeAxis01(T* out, T* in, const size_t dim0, const size_t dim1, const size_t dim2, const size_t elem_num) {
+    size_t index = static_cast<size_t>(threadIdx.x) + static_cast<size_t>(blockIdx.x) * static_cast<size_t>(blockDim.x);
+    if (index < elem_num) {
         const size_t input_dim2_index = index % dim2;
         index                         = (index - input_dim2_index) / dim2;
         const size_t input_dim1_index = index % dim1;
         index                         = (index - input_dim1_index) / dim1;
         const size_t input_dim0_index = index % dim0;
 
-        out[input_dim1_index * dim0 * dim2 + input_dim0_index * dim2 + input_dim2_index] =
-            in[input_dim0_index * dim1 * dim2 + input_dim1_index * dim2 + input_dim2_index];
+        const size_t src_idx = input_dim0_index * dim1 * dim2 + input_dim1_index * dim2 + input_dim2_index;
+        const size_t dst_idx = input_dim1_index * dim0 * dim2 + input_dim0_index * dim2 + input_dim2_index;
+        out[dst_idx]         = in[src_idx];
     }
 }
 
 template<typename T>
 void invokeTransposeAxis012(
     T* out, T* in, const size_t dim0, const size_t dim1, const size_t dim2, cudaStream_t stream) {
-    dim3 block(512);
-    dim3 grid(ceil_div<size_t>(dim0 * dim1 * dim2, 512ul));
-    transposeAxis01<<<grid, block, 0, stream>>>(out, in, dim0, dim1, dim2);
+    const size_t elem_num   = dim0 * dim1 * dim2;
+    const size_t thread_num = 512;
+    const size_t block_num  = ceil_div<size_t>(elem_num, thread_num);
+    dim3         block(thread_num);
+    dim3         grid(block_num);
+    transposeAxis01<<<grid, block, 0, stream>>>(out, in, dim0, dim1, dim2, elem_num);
 #if USING_CUDA
     check_cuda_value(cudaPeekAtLastError());
     check_cuda_error();
@@ -70,28 +75,34 @@ void invokeTransposeAxis012(
 }
 
 template<typename T>
-__global__ void transposeAxis01(T* out, T* in, const int* in_skipping_dim1, const size_t dim0, const size_t dim1) {
+__global__ void transposeAxis01(
+    T* out, T* in, const int* in_skipping_dim1, const size_t dim0, const size_t dim1, const size_t elem_num) {
     // out: [dim1, dim0]
     // in: [dim0, dim1]
     // in_skipping_dim1: [dim1]
 
-    size_t index = threadIdx.x + blockIdx.x * blockDim.x;
-    if (index < dim0 * dim1) {
+    size_t index = static_cast<size_t>(threadIdx.x) + static_cast<size_t>(blockIdx.x) * static_cast<size_t>(blockDim.x);
+    if (index < elem_num) {
         const size_t input_dim1_index = index % dim1;
         index                         = (index - input_dim1_index) / dim1;
         const size_t input_dim0_index = index % dim0;
         const size_t in_offset =
             in_skipping_dim1 == nullptr ? 0 : static_cast<size_t>(in_skipping_dim1[input_dim1_index]) * dim1;
 
-        out[input_dim1_index * dim0 + input_dim0_index] = in[in_offset + input_dim0_index * dim1 + input_dim1_index];
+        const size_t src_idx = in_offset + input_dim0_index * dim1 + input_dim1_index;
+        const size_t dst_idx = input_dim1_index * dim0 + input_dim0_index;
+        out[dst_idx]         = in[src_idx];
     }
 }
 
 template<typename T>
 void invokeTransposeAxis01(T* out, T* in, const size_t dim0, const size_t dim1, cudaStream_t stream) {
-    dim3 block(512);
-    dim3 grid(ceil_div<size_t>(dim0 * dim1, 512));
-    transposeAxis01<<<grid, block, 0, stream>>>(out, in, nullptr, dim0, dim1);
+    const size_t elem_num   = dim0 * dim1;
+    const size_t thread_num = 512;
+    const size_t block_num  = ceil_div<size_t>(elem_num, thread_num);
+    dim3         block(thread_num);
+    dim3         grid(block_num);
+    transposeAxis01<<<grid, block, 0, stream>>>(out, in, nullptr, dim0, dim1, elem_num);
 #if USING_CUDA
     check_cuda_value(cudaPeekAtLastError());
     check_cuda_error();
@@ -120,10 +131,10 @@ DEFINE_INVOKETRANSPOSE(__nv_fp8_e4m3);
 #endif
 
 template<typename T>
-__global__ void
-transposeAxis12(T* out, T* in, const size_t dim0, const size_t dim1, const size_t dim2, const size_t dim3) {
-    size_t index = threadIdx.x + blockIdx.x * blockDim.x;
-    if (index < dim0 * dim1 * dim2 * dim3) {
+__global__ void transposeAxis12(
+    T* out, T* in, const size_t dim0, const size_t dim1, const size_t dim2, const size_t dim3, const size_t elem_num) {
+    size_t index = static_cast<size_t>(threadIdx.x) + static_cast<size_t>(blockIdx.x) * static_cast<size_t>(blockDim.x);
+    if (index < elem_num) {
         const size_t input_dim3_index = index % dim3;
         index                         = (index - input_dim3_index) / dim3;
         const size_t input_dim2_index = index % dim2;
@@ -131,18 +142,24 @@ transposeAxis12(T* out, T* in, const size_t dim0, const size_t dim1, const size_
         const size_t input_dim1_index = index % dim1;
         index                         = (index - input_dim1_index) / dim1;
         const size_t input_dim0_index = index % dim0;
-        out[input_dim0_index * dim1 * dim2 * dim3 + input_dim2_index * dim1 * dim3 + input_dim1_index * dim3
-            + input_dim3_index]       = in[input_dim0_index * dim1 * dim2 * dim3 + input_dim1_index * dim2 * dim3
-                                     + input_dim2_index * dim3 + input_dim3_index];
+
+        const size_t src_idx = input_dim0_index * dim1 * dim2 * dim3 + input_dim1_index * dim2 * dim3
+                               + input_dim2_index * dim3 + input_dim3_index;
+        const size_t dst_idx = input_dim0_index * dim1 * dim2 * dim3 + input_dim2_index * dim1 * dim3
+                               + input_dim1_index * dim3 + input_dim3_index;
+        out[dst_idx] = in[src_idx];
     }
 }
 
 template<typename T>
 void invokeTransposeAxis12(
     T* out, T* in, const size_t dim0, const size_t dim1, const size_t dim2, const size_t dim_3, cudaStream_t stream) {
-    dim3 block(512);
-    dim3 grid(ceil_div<size_t>(dim0 * dim1 * dim2 * dim_3, 512ul));
-    transposeAxis12<<<grid, block, 0, stream>>>(out, in, dim0, dim1, dim2, dim_3);
+    const size_t elem_num   = dim0 * dim1 * dim2 * dim_3;
+    const size_t thread_num = 512;
+    const size_t block_num  = ceil_div<size_t>(elem_num, thread_num);
+    dim3         block(thread_num);
+    dim3         grid(block_num);
+    transposeAxis12<<<grid, block, 0, stream>>>(out, in, dim0, dim1, dim2, dim_3, elem_num);
 #if USING_CUDA
     check_cuda_value(cudaPeekAtLastError());
     check_cuda_error();
@@ -243,14 +260,16 @@ INSTANTIATE_INVOKE_LOOKUP_HIDDEN_OF_LAST(__nv_bfloat16);
 INSTANTIATE_INVOKE_LOOKUP_HIDDEN_OF_LAST(__nv_fp8_e4m3);
 #endif
 
-template<typename T, size_t vec_size = 8>
-__global__ void checkNANKernel(T* input, int64_t nums, int circle) {
-    int64_t            index = ((int64_t)blockIdx.x * blockDim.x + threadIdx.x) * vec_size * circle;
+template<typename T, size_t vec_size>
+__global__ void checkNANKernel(T* input, size_t nums, size_t circle) {
+    size_t index =
+        (static_cast<size_t>(threadIdx.x) + static_cast<size_t>(blockIdx.x) * static_cast<size_t>(blockDim.x))
+        * vec_size * circle;
     vec_t<T, vec_size> inputs;
-    int64_t            max_index = min(index + vec_size * circle, nums - vec_size);
-    for (int64_t i = index; i < max_index; i += vec_size) {
+    size_t             max_index = min(index + vec_size * circle, nums - vec_size);
+    for (size_t i = index; i < max_index; i += vec_size) {
         inputs.load(input + i);
-        for (int j = 0; j < vec_size; ++j)
+        for (size_t j = 0; j < vec_size; ++j)
             if (isnan(float(inputs[j]))) {
                 // 触发非法内存访问以生成core dump
                 volatile int* ptr = nullptr;
@@ -262,10 +281,10 @@ __global__ void checkNANKernel(T* input, int64_t nums, int circle) {
 
 template<typename T>
 void invokeCheckNAN(T* input, size_t nums, cudaStream_t stream) {
-    const int vec_size = 8;
-    int       circle   = nums / 512 / 65536 + 1;
-    dim3      grid(nums / circle / 512);
-    dim3      block(512);
+    constexpr size_t vec_size = 16 / sizeof(T);
+    size_t           circle   = nums / 512 / 65536 + 1;
+    dim3             grid(nums / circle / 512);
+    dim3             block(512);
     checkNANKernel<T, vec_size><<<grid, block, 0, stream>>>(input, nums, circle);
 }
 
