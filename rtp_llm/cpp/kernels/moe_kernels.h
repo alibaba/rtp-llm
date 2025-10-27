@@ -48,6 +48,6 @@ void fake_balance_expert(
 
 // Expert indexing operations
 void genSourceRowRevert(
-    int64_t* expert_rows, int* expert_rows_dst, int token_num, int top_k, int start_expert, cudaStream_t stream);
+    int64_t* expert_rows, int* expert_rows_dst, size_t token_num, size_t top_k, int start_expert, cudaStream_t stream);
 
 }  // namespace rtp_llm
