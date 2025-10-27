@@ -8,11 +8,6 @@ import torch
 from librtp_compute_ops.rtp_llm_ops import trt_fp8_quantize_128
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.models_py.kernels.activation import silu_and_mul
-from rtp_llm.models_py.kernels.deepgemm_wrapper import (
-    is_deep_gemm_e8m0_used,
-    m_grouped_fp8_gemm_nt_contiguous,
-)
 from rtp_llm.models_py.modules.ep.kernels import (
     ep_gather,
     ep_scatter,
@@ -27,7 +22,12 @@ from rtp_llm.models_py.modules.moe import (
 from rtp_llm.models_py.modules.moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
 )
+from rtp_llm.models_py.modules.quantization.deepgemm_wrapper import (
+    is_deep_gemm_e8m0_used,
+    m_grouped_fp8_gemm_nt_contiguous,
+)
 from rtp_llm.models_py.modules.utils import ceil_div, dispose_tensor
+from rtp_llm.models_py.triton_kernels.common.activation import silu_and_mul
 from rtp_llm.utils.model_weight import W
 
 BLOCK_SIZE = 128

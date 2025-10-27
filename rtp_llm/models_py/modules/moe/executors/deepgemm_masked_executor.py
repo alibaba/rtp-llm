@@ -3,15 +3,6 @@ from typing import Any, Dict, Optional
 import torch
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.models_py.kernels.activation import (
-    silu_mul_bf16_deep_gemm_masked,
-    silu_mul_fp8_quant_deep_gemm_masked,
-)
-from rtp_llm.models_py.kernels.deepgemm_wrapper import (
-    is_deep_gemm_e8m0_used,
-    m_grouped_bf16_gemm_nt_masked,
-    m_grouped_fp8_gemm_nt_masked,
-)
 from rtp_llm.models_py.modules.moe.fused_moe import (
     ExpertForwardPayload,
     FusedMoeExpertExecutor,
@@ -21,6 +12,15 @@ from rtp_llm.models_py.modules.moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
 )
 from rtp_llm.models_py.modules.moe.utils import FusedMoEQuantConfig
+from rtp_llm.models_py.modules.quantization.deepgemm_wrapper import (
+    is_deep_gemm_e8m0_used,
+    m_grouped_bf16_gemm_nt_masked,
+    m_grouped_fp8_gemm_nt_masked,
+)
+from rtp_llm.models_py.triton_kernels.common.activation import (
+    silu_mul_bf16_deep_gemm_masked,
+    silu_mul_fp8_quant_deep_gemm_masked,
+)
 from rtp_llm.utils.model_weight import W
 
 

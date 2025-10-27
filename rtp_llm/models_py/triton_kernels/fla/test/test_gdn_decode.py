@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from einops import rearrange, repeat
 from fla.utils import assert_close
 
-from rtp_llm.triton_kernels.fla import fused_recurrent_gated_delta_rule
+from rtp_llm.models_py.triton_kernels.fla import fused_recurrent_gated_delta_rule
 
 logging.basicConfig(
     level="INFO",
