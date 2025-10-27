@@ -58,8 +58,8 @@ public:
 
 public:
     void process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override;
-    void beamSearchLogitProcessorUpdate(const std::vector<int>& beam_idx_vec) override;
-    void updateLogitProcessorStatus(const rtp_llm::BufferPtr& new_tokens, int32_t num_new_tokens) override;
+    void updateMultiSeqStatus(const std::vector<int>& src_batch_indices) override;
+    void updateStatus(const rtp_llm::BufferPtr& new_tokens, int32_t num_new_tokens) override;
 
 private:
     void setVocabMask(std::shared_ptr<StringContainDFA<size_t, int>> dfa_ptr,

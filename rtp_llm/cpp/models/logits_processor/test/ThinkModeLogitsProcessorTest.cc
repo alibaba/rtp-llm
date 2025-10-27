@@ -195,7 +195,7 @@ void setBuffer(rtp_llm::BufferPtr buf, std::vector<std::vector<Dtype>> content) 
     }
 }
 
-TEST_F(SamplerTest, testUpdateLogitProcessorStatus) {
+TEST_F(SamplerTest, testUpdateStatus) {
     {
         SamplerDataBuilder     builder;
         size_t                 batch_size          = 4;
@@ -210,7 +210,7 @@ TEST_F(SamplerTest, testUpdateLogitProcessorStatus) {
         std::vector<std::vector<int>> new_token_ids = {{0}, {1}, {5}, {9}};
         setBuffer(new_token, new_token_ids);
 
-        processor->updateLogitProcessorStatus(new_token, 1);
+        processor->updateStatus(new_token, 1);
 
         auto                proc        = std::dynamic_pointer_cast<ThinkModeLogitsProcessor>(processor);
         std::vector<size_t> status_list = proc->thinkEndTokensStatus();
@@ -234,7 +234,7 @@ TEST_F(SamplerTest, testUpdateLogitProcessorStatus) {
         std::vector<std::vector<int>> new_token_ids = {{0}, {1}, {5}, {9}};
         setBuffer(new_token, new_token_ids);
 
-        processor->updateLogitProcessorStatus(new_token, 1);
+        processor->updateStatus(new_token, 1);
 
         auto                proc        = std::dynamic_pointer_cast<ThinkModeLogitsProcessor>(processor);
         std::vector<size_t> status_list = proc->thinkEndTokensStatus();
@@ -258,7 +258,7 @@ TEST_F(SamplerTest, testUpdateLogitProcessorStatus) {
         std::vector<std::vector<int>> new_token_ids = {{5}, {6}, {5}, {6}};
         setBuffer(new_token, new_token_ids);
 
-        processor->updateLogitProcessorStatus(new_token, 1);
+        processor->updateStatus(new_token, 1);
 
         auto                proc        = std::dynamic_pointer_cast<ThinkModeLogitsProcessor>(processor);
         std::vector<size_t> status_list = proc->thinkEndTokensStatus();
