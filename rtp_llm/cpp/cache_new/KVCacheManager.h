@@ -35,6 +35,11 @@ public:
     FreeResult free(const FreeInfo& free_info);
     InsertResult insertIntoCache(const InsertInfo& insert_info); 
 
+    // connector need kvCacheGroups to transfer caches
+    std::vector<std::shared_ptr<KVCacheGroup>> kvCacheGroups() const {
+        return allocator_->kvCacheGroups();
+    }
+
     // groupInfo groupInfo()
     // TODO: InsertInfo 考虑  hicache distkvcache 的逻辑
 private:
@@ -46,4 +51,9 @@ private:
     const GptInitParameter& params_;
 };
 
-}  // namespace rtp_llm
+    HashUtil hash_util_;
+    std::shared_ptr<MemoryBlockCache> memory_block_cache_;
+    std::shared_ptr<KVCacheReaderWriter> kv_cache_reader_writer_;
+    std::shared_ptr<Notifier> notifier_;
+    // HashUtil hash_util_;
+};
