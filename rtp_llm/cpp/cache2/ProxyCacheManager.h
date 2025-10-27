@@ -19,6 +19,7 @@ public:
 
 private:
     std::map<std::string, std::string> genExtraMeta(const std::string& adapter_name) const override;
+    bool                               dynamicEnableDist(bool manualFlag) const override;
 };
 
 }  // namespace rtp_llm

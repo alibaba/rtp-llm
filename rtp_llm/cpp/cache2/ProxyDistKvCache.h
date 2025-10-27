@@ -1,7 +1,7 @@
 #pragma once
 
 #include "rtp_llm/cpp/cache/DistKvCache.h"
-#include "rtp_llm/cpp/cache2/kv_cache_connector/KVCMClientWrapper.h"
+#include "rtp_llm/cpp/cache2/kvcm_client_wrapper/KVCMClientWrapper.h"
 
 namespace rtp_llm {
 

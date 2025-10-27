@@ -254,7 +254,7 @@ TEST_F(MemoryBlockCacheTest, MatchWithDataTest) {
     std::vector<float>   losses        = {0.1f, 0.2f, 0.3f};
 
     // 为GPU block创建测试数据
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < 3; ++i) {
         for (uint32_t layer_id = 0; layer_id < gpu_config_.layer_num; ++layer_id) {
             createTestKVData(gpu_block_ids[i], layer_id, 1.0f + i, 2.0f + i);
         }
@@ -310,7 +310,7 @@ TEST_F(MemoryBlockCacheTest, PutBasicTest) {
     std::vector<float>   losses        = {0.1f, 0.2f, 0.3f};
 
     // 为GPU block创建测试数据
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < 3; ++i) {
         for (uint32_t layer_id = 0; layer_id < gpu_config_.layer_num; ++layer_id) {
             createTestKVData(gpu_block_ids[i], layer_id, 1.0f + i, 2.0f + i);
         }

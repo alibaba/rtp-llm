@@ -190,7 +190,8 @@ protected:
     void matchInMemoryBlockCache(const AdvancedMallocInfo& malloc_info, BlockCache::MatchResult& match_result);
     void putToMemoryBlockCache(const CacheItem& item, const FreeInfo& free_info);
 
-    void incrBlockRefCounter(const std::vector<int>& blocks);
+    void         incrBlockRefCounter(const std::vector<int>& blocks);
+    virtual bool dynamicEnableDist(bool manualFlag) const;
 
 protected:
     CacheConfig          config_;

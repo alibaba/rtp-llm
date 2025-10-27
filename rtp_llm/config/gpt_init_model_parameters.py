@@ -593,7 +593,7 @@ class GptInitModelParameters:
             reuse_cache=get_env_bool("REUSE_CACHE", False),
             multi_task_prompt=get_env_str("MULTI_TASK_PROMPT"),
             multi_task_prompt_str=get_env_str("MULTI_TASK_PROMPT_STR"),
-            enable_dist_kvcache=get_env_bool("ENABLE_DIST_KVCACHE", True),
+            enable_dist_kvcache=get_env_bool("ENABLE_DIST_KVCACHE", False),
             enable_3fs=get_env_bool("ENABLE_3FS", False),
             match_timeout_ms=get_env_int("THREEFS_MATCH_TIMEOUT_MS", 1000),
             rpc_get_cache_timeout_ms=get_env_int(
@@ -653,9 +653,7 @@ class GptInitModelParameters:
             rocm_hipblaslt_config=get_env_str(
                 "ROCM_HIPBLASLT_CONFIG", "gemm_config.csv"
             ),
-            use_swizzleA = (
-                get_env_bool("USE_SWIZZLEA", False)
-            ),
+            use_swizzleA=(get_env_bool("USE_SWIZZLEA", False)),
             ft_disable_custom_ar=get_env_bool("FT_DISABLE_CUSTOM_AR", True),
             enable_cuda_graph=get_env_bool("ENABLE_CUDA_GRAPH", False),
             enable_cuda_graph_debug_mode=get_env_bool(
@@ -833,14 +831,20 @@ class GptInitModelParameters:
                     inter_size
                     + (
                         get_pad_size(inter_size, align_size)
-                        if (self.quant_algo.isQuant() or self.gpt_init_params.hw_kernel_config.use_swizzleA)
+                        if (
+                            self.quant_algo.isQuant()
+                            or self.gpt_init_params.hw_kernel_config.use_swizzleA
+                        )
                         else 0
                     )
                 )
             self.layer_inter_padding_size = layer_inter_padding_size
         self.inter_padding_size = self.inter_size + (
             get_pad_size(self.inter_size, align_size)
-            if (self.quant_algo.isQuant() or self.gpt_init_params.hw_kernel_config.use_swizzleA)
+            if (
+                self.quant_algo.isQuant()
+                or self.gpt_init_params.hw_kernel_config.use_swizzleA
+            )
             else 0
         )
         if self.head_num_kv <= 0:

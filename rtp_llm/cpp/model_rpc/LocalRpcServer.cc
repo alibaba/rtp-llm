@@ -7,7 +7,7 @@
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
-#include "rtp_llm/cpp/cache2/kv_cache_connector/KVCMClientWrapper.h"
+#include "rtp_llm/cpp/cache2/kvcm_client_wrapper/KVCMClientWrapper.h"
 
 using namespace std;
 
@@ -84,7 +84,10 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
             }
         }
     }
-    RTP_LLM_LOG_INFO("init local rpc success, this=%p, engine=%p, cache_manager=%p", this, engine_.get(), engine_->getCacheManager().get());
+    RTP_LLM_LOG_INFO("init local rpc success, this=%p, engine=%p, cache_manager=%p",
+                     this,
+                     engine_.get(),
+                     engine_->getCacheManager().get());
     return grpc::Status::OK;
 }
 
@@ -371,7 +374,9 @@ EngineScheduleInfo LocalRpcServer::getEngineScheduleInfo(int64_t latest_finished
     if (!cache_manager) {
         RTP_LLM_LOG_WARNING("dist kvcache failed, cache manager is null, request: %ld, op: %s, this=%p, engine: %p",
                             request_id,
-                            ::DistKvCacheOp_Name(op_code).c_str(), this, engine_.get());
+                            ::DistKvCacheOp_Name(op_code).c_str(),
+                            this,
+                            engine_.get());
         return grpc::Status(grpc::StatusCode::INTERNAL, "cache manager is null");
     }
 

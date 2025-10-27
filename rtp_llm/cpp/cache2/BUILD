@@ -15,6 +15,6 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//rtp_llm/cpp/cache",
-        "//rtp_llm/cpp/cache2/kv_cache_connector",
+        "//rtp_llm/cpp/cache2/kvcm_client_wrapper",
     ],
 )

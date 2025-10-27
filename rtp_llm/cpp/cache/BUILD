@@ -41,7 +41,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//:rtp_compute_ops",
-        "//rtp_llm/cpp/cache2/kv_cache_connector",
+        "//rtp_llm/cpp/cache2/kvcm_client_wrapper",
         "//rtp_llm/cpp/disaggregate/cache_store",
         "//rtp_llm/cpp/metrics",
         "//rtp_llm/cpp/model_rpc:model_rpc_pool",

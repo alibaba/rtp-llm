@@ -23,5 +23,5 @@ cc_test(
     ],
     copts = test_copts,
     data = [],
-    deps = test_deps + ["//rtp_llm/cpp/cache2/kv_cache_connector"],
+    deps = test_deps + ["//rtp_llm/cpp/cache2/kvcm_client_wrapper"],
 )

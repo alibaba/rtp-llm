@@ -713,8 +713,10 @@ TEST_F(CacheManagerTest, testMatchImpl_SkipsDistKvCache_WhenEngineFlagDisabled) 
     cache_manager.dist_kvcache_        = mock_ptr;
     cache_manager.enable_dist_kvcache_ = false;  // engine flag off
 
-    EXPECT_CALL(*mock_ptr, matchForAllRank(::testing::_, ::testing::_, ::testing::_, ::testing::_)).Times(0);
-    EXPECT_CALL(*mock_ptr, getForAllRank(::testing::_, ::testing::_, ::testing::_, ::testing::_, ::testing::_))
+    EXPECT_CALL(*mock_ptr, matchForAllRank(::testing::_, ::testing::_, ::testing::_, ::testing::_, ::testing::_))
+        .Times(0);
+    EXPECT_CALL(*mock_ptr,
+                getForAllRank(::testing::_, ::testing::_, ::testing::_, ::testing::_, ::testing::_, ::testing::_))
         .Times(0);
 
     auto match_info = cache_manager.mallocWithCache(malloc_info);
@@ -743,8 +745,10 @@ TEST_F(CacheManagerTest, testMatchImpl_SkipsDistKvCache_When3FSDisabled) {
     cache_manager.dist_kvcache_        = mock_ptr;
     cache_manager.enable_dist_kvcache_ = true;
 
-    EXPECT_CALL(*mock_ptr, matchForAllRank(::testing::_, ::testing::_, ::testing::_, ::testing::_)).Times(0);
-    EXPECT_CALL(*mock_ptr, getForAllRank(::testing::_, ::testing::_, ::testing::_, ::testing::_, ::testing::_))
+    EXPECT_CALL(*mock_ptr, matchForAllRank(::testing::_, ::testing::_, ::testing::_, ::testing::_, ::testing::_))
+        .Times(0);
+    EXPECT_CALL(*mock_ptr,
+                getForAllRank(::testing::_, ::testing::_, ::testing::_, ::testing::_, ::testing::_, ::testing::_))
         .Times(0);
 
     auto match_info = cache_manager.mallocWithCache(malloc_info);
@@ -773,8 +777,10 @@ TEST_F(CacheManagerTest, testMatchImpl_SkipsDistKvCache_WhenNeedLossTrue) {
     cache_manager.dist_kvcache_        = mock_ptr;
     cache_manager.enable_dist_kvcache_ = true;
 
-    EXPECT_CALL(*mock_ptr, matchForAllRank(::testing::_, ::testing::_, ::testing::_, ::testing::_)).Times(0);
-    EXPECT_CALL(*mock_ptr, getForAllRank(::testing::_, ::testing::_, ::testing::_, ::testing::_, ::testing::_))
+    EXPECT_CALL(*mock_ptr, matchForAllRank(::testing::_, ::testing::_, ::testing::_, ::testing::_, ::testing::_))
+        .Times(0);
+    EXPECT_CALL(*mock_ptr,
+                getForAllRank(::testing::_, ::testing::_, ::testing::_, ::testing::_, ::testing::_, ::testing::_))
         .Times(0);
 
     auto match_info = cache_manager.mallocWithCache(malloc_info);
@@ -809,8 +815,10 @@ TEST_F(CacheManagerTest, testMatchImpl_SkipsDistKvCache_WhenLocalMatchedAll) {
     cache_manager.dist_kvcache_        = mock_ptr;
     cache_manager.enable_dist_kvcache_ = true;
 
-    EXPECT_CALL(*mock_ptr, matchForAllRank(::testing::_, ::testing::_, ::testing::_, ::testing::_)).Times(0);
-    EXPECT_CALL(*mock_ptr, getForAllRank(::testing::_, ::testing::_, ::testing::_, ::testing::_, ::testing::_))
+    EXPECT_CALL(*mock_ptr, matchForAllRank(::testing::_, ::testing::_, ::testing::_, ::testing::_, ::testing::_))
+        .Times(0);
+    EXPECT_CALL(*mock_ptr,
+                getForAllRank(::testing::_, ::testing::_, ::testing::_, ::testing::_, ::testing::_, ::testing::_))
         .Times(0);
 
     auto match_info = cache_manager.mallocWithCache(malloc_info);
@@ -848,9 +856,10 @@ TEST_F(CacheManagerTest, testMatchImpl_LocalMatchedNone_RemoteMatchedPartially) 
     cache_manager.enable_dist_kvcache_ = true;
 
     // local matched len is 0, remote total matched len returns 3; get succeeds
-    EXPECT_CALL(*mock_ptr, matchForAllRank(::testing::_, ::testing::_, ::testing::_, ::testing::_))
+    EXPECT_CALL(*mock_ptr, matchForAllRank(::testing::_, ::testing::_, ::testing::_, ::testing::_, ::testing::_))
         .WillOnce(::testing::Return(3));
-    EXPECT_CALL(*mock_ptr, getForAllRank(::testing::_, ::testing::_, ::testing::_, ::testing::_, ::testing::_))
+    EXPECT_CALL(*mock_ptr,
+                getForAllRank(::testing::_, ::testing::_, ::testing::_, ::testing::_, ::testing::_, ::testing::_))
         .WillOnce(::testing::Return(true));
 
     auto match_info = cache_manager.mallocWithCache(malloc_info);
@@ -887,14 +896,16 @@ TEST_F(CacheManagerTest, testMatchImpl_LocalMatchedNone_RemoteMatchedAll) {
     cache_manager.dist_kvcache_        = mock_ptr;
     cache_manager.enable_dist_kvcache_ = true;
 
-    EXPECT_CALL(*mock_ptr, matchForAllRank(::testing::_, ::testing::_, ::testing::_, ::testing::_))
+    EXPECT_CALL(*mock_ptr, matchForAllRank(::testing::_, ::testing::_, ::testing::_, ::testing::_, ::testing::_))
         .WillOnce(::testing::Return(5));  // remote matched full length
-    EXPECT_CALL(*mock_ptr, getForAllRank(::testing::_, ::testing::_, ::testing::_, ::testing::_, ::testing::_))
-        .WillOnce(Invoke([=](const std::vector<int64_t>&        actual_cache_keys,
-                             const std::vector<int32_t>&        block_indices,
-                             size_t                             ignore_block_num,
-                             int64_t                            request_id,
-                             std::map<std::string, std::string> extra_metas) -> bool {
+    EXPECT_CALL(*mock_ptr,
+                getForAllRank(::testing::_, ::testing::_, ::testing::_, ::testing::_, ::testing::_, ::testing::_))
+        .WillOnce(Invoke([=](const std::vector<int64_t>&         actual_cache_keys,
+                             const std::vector<int32_t>&         block_indices,
+                             const DistKvCache::LocationsMapPtr& locations_map_ptr,
+                             size_t                              ignore_block_num,
+                             int64_t                             request_id,
+                             std::map<std::string, std::string>  extra_metas) -> bool {
             EXPECT_EQ(actual_cache_keys.size(), 5u);
             EXPECT_EQ(actual_cache_keys, (std::vector<int64_t>(cache_keys.begin(), cache_keys.begin() + 5)));
             // need_block_num = 5
@@ -902,6 +913,7 @@ TEST_F(CacheManagerTest, testMatchImpl_LocalMatchedNone_RemoteMatchedAll) {
             EXPECT_EQ(block_indices, (std::vector<int32_t>{1, 2, 3, 4, 5}));
             EXPECT_EQ(ignore_block_num, 0u);
             EXPECT_EQ(request_id, malloc_info.request_id);
+            EXPECT_EQ(0, locations_map_ptr->size());
             return true;
         }));
 
@@ -944,20 +956,23 @@ TEST_F(CacheManagerTest, testMatchImpl_LocalMatchedPartially_RemoteMatchedPartia
     cache_manager.dist_kvcache_        = mock_ptr;
     cache_manager.enable_dist_kvcache_ = true;
 
-    EXPECT_CALL(*mock_ptr, matchForAllRank(::testing::_, ::testing::_, ::testing::_, ::testing::_))
+    EXPECT_CALL(*mock_ptr, matchForAllRank(::testing::_, ::testing::_, ::testing::_, ::testing::_, ::testing::_))
         .WillOnce(::testing::Return(3));  // total matched 3 (local 1 + remote 2)
-    EXPECT_CALL(*mock_ptr, getForAllRank(::testing::_, ::testing::_, ::testing::_, ::testing::_, ::testing::_))
-        .WillOnce(Invoke([=](const std::vector<int64_t>&        actual_cache_keys,
-                             const std::vector<int32_t>&        block_indices,
-                             size_t                             ignore_block_num,
-                             int64_t                            request_id,
-                             std::map<std::string, std::string> extra_metas) -> bool {
+    EXPECT_CALL(*mock_ptr,
+                getForAllRank(::testing::_, ::testing::_, ::testing::_, ::testing::_, ::testing::_, ::testing::_))
+        .WillOnce(Invoke([=](const std::vector<int64_t>&         actual_cache_keys,
+                             const std::vector<int32_t>&         block_indices,
+                             const DistKvCache::LocationsMapPtr& locations_map_ptr,
+                             size_t                              ignore_block_num,
+                             int64_t                             request_id,
+                             std::map<std::string, std::string>  extra_metas) -> bool {
             EXPECT_EQ(actual_cache_keys.size(), 3u);
             EXPECT_EQ(block_indices.size(), 2u);  // need_block_num = 2
             // With block 1 already held, remote allocates {2,3}
             EXPECT_EQ(block_indices, (std::vector<int32_t>{2, 3}));
             EXPECT_EQ(ignore_block_num, 1u);
             EXPECT_EQ(request_id, malloc_info.request_id);
+            EXPECT_EQ(0, locations_map_ptr->size());
             return true;
         }));
 
@@ -1001,20 +1016,23 @@ TEST_F(CacheManagerTest, testMatchImpl_LocalMatchedPartially_RemoteMatchedAll) {
     cache_manager.dist_kvcache_        = mock_ptr;
     cache_manager.enable_dist_kvcache_ = true;
 
-    EXPECT_CALL(*mock_ptr, matchForAllRank(::testing::_, ::testing::_, ::testing::_, ::testing::_))
+    EXPECT_CALL(*mock_ptr, matchForAllRank(::testing::_, ::testing::_, ::testing::_, ::testing::_, ::testing::_))
         .WillOnce(::testing::Return(6));  // total matched = 6
-    EXPECT_CALL(*mock_ptr, getForAllRank(::testing::_, ::testing::_, ::testing::_, ::testing::_, ::testing::_))
-        .WillOnce(Invoke([=](const std::vector<int64_t>&        actual_cache_keys,
-                             const std::vector<int32_t>&        block_indices,
-                             size_t                             ignore_block_num,
-                             int64_t                            request_id,
-                             std::map<std::string, std::string> extra_metas) -> bool {
+    EXPECT_CALL(*mock_ptr,
+                getForAllRank(::testing::_, ::testing::_, ::testing::_, ::testing::_, ::testing::_, ::testing::_))
+        .WillOnce(Invoke([=](const std::vector<int64_t>&         actual_cache_keys,
+                             const std::vector<int32_t>&         block_indices,
+                             const DistKvCache::LocationsMapPtr& locations_map_ptr,
+                             size_t                              ignore_block_num,
+                             int64_t                             request_id,
+                             std::map<std::string, std::string>  extra_metas) -> bool {
             EXPECT_EQ(actual_cache_keys.size(), 6u);
             EXPECT_EQ(block_indices.size(), 5u);  // need_block_num = 6 - local(1) = 5
             // With blocks {1,2} held, remote allocates {3,4,5,6,7}
             EXPECT_EQ(block_indices, (std::vector<int32_t>{3, 4, 5, 6, 7}));
             EXPECT_EQ(ignore_block_num, 1u);
             EXPECT_EQ(request_id, malloc_info.request_id);
+            EXPECT_EQ(0, locations_map_ptr->size());
             return true;
         }));
 
@@ -1278,7 +1296,7 @@ TEST_F(CacheManagerTest, testMatchInDistKvCache_MatchedLenLessThanZero) {
     match_result.block_indices = {5};
     cache_manager.incrRefCounter(match_result.block_indices);
 
-    EXPECT_CALL(*mock_ptr, matchForAllRank(::testing::_, ::testing::_, ::testing::_, ::testing::_))
+    EXPECT_CALL(*mock_ptr, matchForAllRank(::testing::_, ::testing::_, ::testing::_, ::testing::_, ::testing::_))
         .WillOnce(::testing::Return(0));
 
     cache_manager.matchInDistKvCache(malloc_info, match_result);
@@ -1303,7 +1321,7 @@ TEST_F(CacheManagerTest, testMatchInDistKvCache_NoAdditionalNeed) {
     match_result.block_indices = {1, 2};
     cache_manager.incrRefCounter(match_result.block_indices);
 
-    EXPECT_CALL(*mock_ptr, matchForAllRank(::testing::_, ::testing::_, ::testing::_, ::testing::_))
+    EXPECT_CALL(*mock_ptr, matchForAllRank(::testing::_, ::testing::_, ::testing::_, ::testing::_, ::testing::_))
         .WillOnce(::testing::Return(2));  // equal to local
 
     cache_manager.matchInDistKvCache(malloc_info, match_result);
@@ -1327,7 +1345,7 @@ TEST_F(CacheManagerTest, testMatchInDistKvCache_MallocFailed) {
     BlockCache::MatchResult          match_result;
     match_result.block_indices = {};
 
-    EXPECT_CALL(*mock_ptr, matchForAllRank(::testing::_, ::testing::_, ::testing::_, ::testing::_))
+    EXPECT_CALL(*mock_ptr, matchForAllRank(::testing::_, ::testing::_, ::testing::_, ::testing::_, ::testing::_))
         .WillOnce(::testing::Return(3));  // need_block_num = 3 > free (=1)
 
     cache_manager.matchInDistKvCache(malloc_info, match_result);
@@ -1351,9 +1369,10 @@ TEST_F(CacheManagerTest, testMatchInDistKvCache_GetFailed) {
     match_result.block_indices = {7};
     cache_manager.incrRefCounter(match_result.block_indices);
 
-    EXPECT_CALL(*mock_ptr, matchForAllRank(::testing::_, ::testing::_, ::testing::_, ::testing::_))
+    EXPECT_CALL(*mock_ptr, matchForAllRank(::testing::_, ::testing::_, ::testing::_, ::testing::_, ::testing::_))
         .WillOnce(::testing::Return(3));  // need_block_num = 2
-    EXPECT_CALL(*mock_ptr, getForAllRank(::testing::_, ::testing::_, ::testing::_, ::testing::_, ::testing::_))
+    EXPECT_CALL(*mock_ptr,
+                getForAllRank(::testing::_, ::testing::_, ::testing::_, ::testing::_, ::testing::_, ::testing::_))
         .WillOnce(::testing::Return(false));
 
     auto free_before = cache_manager.freeBlockNums();
@@ -1387,22 +1406,26 @@ TEST_F(CacheManagerTest, testMatchInDistKvCache_Success) {
     ASSERT_EQ(resource.block_id.size(), 2u);
     match_result.block_indices = resource.block_id;
 
-    EXPECT_CALL(*mock_ptr, matchForAllRank(::testing::_, ::testing::_, ::testing::_, ::testing::_))
-        .WillOnce(Invoke([=](const std::vector<int64_t>&        actual_cache_keys,
-                             size_t                             ignore_block_num,
-                             int64_t                            request_id,
-                             std::map<std::string, std::string> extra_metas) -> int {
+    EXPECT_CALL(*mock_ptr, matchForAllRank(::testing::_, ::testing::_, ::testing::_, ::testing::_, ::testing::_))
+        .WillOnce(Invoke([=](const std::vector<int64_t>&         actual_cache_keys,
+                             size_t                              ignore_block_num,
+                             int64_t                             request_id,
+                             std::map<std::string, std::string>  extra_metas,
+                             const DistKvCache::LocationsMapPtr& locations_map_ptr) -> int {
             EXPECT_EQ(actual_cache_keys, cache_keys);
             EXPECT_EQ(ignore_block_num, match_result.block_indices.size());
             EXPECT_EQ(request_id, malloc_info.request_id);
+            EXPECT_EQ(0, locations_map_ptr->size());
             return 4;  // need_block_num = 2
         }));
-    EXPECT_CALL(*mock_ptr, getForAllRank(::testing::_, ::testing::_, ::testing::_, ::testing::_, ::testing::_))
-        .WillOnce(Invoke([=](const std::vector<int64_t>&        actual_cache_keys,
-                             const std::vector<int32_t>&        block_indices,
-                             size_t                             ignore_block_num,
-                             int64_t                            request_id,
-                             std::map<std::string, std::string> extra_metas) -> bool {
+    EXPECT_CALL(*mock_ptr,
+                getForAllRank(::testing::_, ::testing::_, ::testing::_, ::testing::_, ::testing::_, ::testing::_))
+        .WillOnce(Invoke([=](const std::vector<int64_t>&         actual_cache_keys,
+                             const std::vector<int32_t>&         block_indices,
+                             const DistKvCache::LocationsMapPtr& locations_map_ptr,
+                             size_t                              ignore_block_num,
+                             int64_t                             request_id,
+                             std::map<std::string, std::string>  extra_metas) -> bool {
             EXPECT_EQ(actual_cache_keys.size(), 4);
             EXPECT_EQ(actual_cache_keys, (std::vector<int64_t>(cache_keys.begin(), cache_keys.begin() + 4)));
             // remote allocation should fill the next free blocks {3,4}
@@ -1410,6 +1433,7 @@ TEST_F(CacheManagerTest, testMatchInDistKvCache_Success) {
             EXPECT_EQ(block_indices, (std::vector<int32_t>{3, 4}));
             EXPECT_EQ(ignore_block_num, match_result.block_indices.size());
             EXPECT_EQ(request_id, malloc_info.request_id);
+            EXPECT_EQ(0, locations_map_ptr->size());
             return true;
         }));
 

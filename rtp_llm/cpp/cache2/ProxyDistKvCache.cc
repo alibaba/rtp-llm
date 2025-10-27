@@ -46,7 +46,7 @@ bool ProxyDistKvCache::init(const DistKvCacheInitParams& init_params) {
         RTP_LLM_LOG_WARNING("init failed, init remote kv cache client failed");
         return false;
     }
-    // TODO : 看看 wait_match_thread_pool_ / io_thread_pool_ 这两个pool怎么设计, 是否需要
+    // TODO : how to design wait_match_thread_pool_ / io_thread_pool_
 
     wait_match_thread_pool_ =
         std::make_unique<autil::LockFreeThreadPool>(thread_num_, queue_size_, nullptr, "WaitMatchThreadPool");
@@ -268,7 +268,7 @@ bool ProxyDistKvCache::putAllRankImpl(const std::vector<int64_t>&               
                                       int64_t                                   request_id,
                                       const std::map<std::string, std::string>& extra_metas) const {
     std::string trace_id = "put_start_" + std::to_string(request_id);
-    // TODO timeout不需要传递了，每个instance一个。
+    // TODO : remove timeout ?
     auto [success, write_location] =
         kvcm_client_wrapper_->getWriteLocation(genUniqueId(extra_metas), trace_id, cache_keys, {}, 1800, {});
 
@@ -290,18 +290,17 @@ bool ProxyDistKvCache::putAllRankImpl(const std::vector<int64_t>&               
                                   extra_metas,
                                   OpType::OP_PUT);
 
-    // TODO : 这里考虑一下 syncCallAllRank 失败了要做什么操作
+    // TODO : what should we do if syncCallAllRank failed?
     if (!result) {
         RTP_LLM_LOG_WARNING("kvcm request_id [%ld], syncCallAllRank failed", request_id);
     }
 
-    // TODO : 另外下面的 finishWrite 可以考虑成完全异步, 不用同步等待 finishWrite 结束
-    // TODO : 另外目前的 succeed_block 还没用起来, 看看有没有办法使用起来
+    // TODO : become async finishWrite?
+    // TODO : succeed_block useless now
     bool   all_block_succeed = result;
     size_t succeed_block     = all_block_succeed ? write_location.locations_map.begin()->second.size() : 0;
     trace_id                 = "put_finish_" + std::to_string(request_id);
-    // TODO write_location里面有个session_id貌似不太合理
-    result = kvcm_client_wrapper_->finishWrite(
+    result                   = kvcm_client_wrapper_->finishWrite(
         genUniqueId(extra_metas), trace_id, write_location.write_session_id, succeed_block, {});
     if (!result) {
         RTP_LLM_LOG_WARNING("kvcm finishWrite failed, [%s]", trace_id.c_str());
@@ -332,8 +331,7 @@ bool ProxyDistKvCache::put(const std::vector<int64_t>&        cache_keys,
                      block_buffers.size(),
                      locations[0].c_str());
 
-    // TODO : 这里的 saveKvCaches 会返回真实写入的location
-    // 之后要收集到 rank0 返回给 kv cache managers
+    // TODO : saveKvCaches will return real location, should be returned to rank0 and kv_cache_manager
     if (!kvcm_client_wrapper_->saveKvCaches(locations, block_buffers).first) {
         RTP_LLM_LOG_WARNING("SaveKvCaches failed");
         DistKvCacheMetrics::markPutCacheDoneUs(metrics);
@@ -359,7 +357,6 @@ int32_t ProxyDistKvCache::matchAllRankImpl(const std::vector<int64_t>&          
 
     std::string trace_id   = "match_" + std::to_string(request_id);
     auto        query_type = kv_cache_manager::QueryType::QT_PREFIX_MATCH;
-    // TODO 这接口后面几个参数不需要，要改一下，block_mask要放前面去。
     auto [success, locations_map] =
         kvcm_client_wrapper_->match(genUniqueId(extra_metas), trace_id, query_type, cache_keys, ignore_block_num, {});
     if (!success) {

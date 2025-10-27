@@ -13,10 +13,11 @@ ProxyCacheManager::ProxyCacheManager(const CacheConfig&                 config,
     if (!params_.kv_cache_config.enable_dist_kvcache) {
         RTP_LLM_FAIL("not set enable_dist_kvcache");
     }
+    enable_dist_kvcache_ = true;
 }
 
 bool ProxyCacheManager::initDistKvCache() {
-    // TODO : 下面这些原来的参数可以利用起来
+    // TODO : use these legacy parameters?
     DistKvCacheInitParams init_params;
     init_params.match_timeout_ms         = params_.kv_cache_config.match_timeout_ms;
     init_params.rpc_get_cache_timeout_ms = params_.kv_cache_config.rpc_get_cache_timeout_ms;
@@ -38,6 +39,10 @@ std::map<std::string, std::string> ProxyCacheManager::genExtraMeta(const std::st
     std::map<std::string, std::string> extra_metas;
     extra_metas["LORA_ADAPTER_NAME"] = adapter_name;
     return extra_metas;
+}
+
+bool ProxyCacheManager::dynamicEnableDist(bool manualFlag) const {
+    return true;
 }
 
 }  // namespace rtp_llm

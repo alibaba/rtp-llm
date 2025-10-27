@@ -26,18 +26,21 @@ public:
 public:
     MOCK_METHOD(bool, init, (const DistKvCacheInitParams& init_params), (override));
 
-    MOCK_METHOD(
-        int32_t,
-        matchForAllRank,
-        (const std::vector<int64_t>& cache_keys, size_t ignore_block_num, int64_t request_id, MapStrStr extra_metas),
-        (override));
+    MOCK_METHOD(int32_t,
+                matchForAllRank,
+                (const std::vector<int64_t>& cache_keys,
+                 size_t                      ignore_block_num,
+                 int64_t                     request_id,
+                 MapStrStr                   extra_metas,
+                 const LocationsMapPtr&      locations_map_ptr),
+                (override));
 
     MOCK_METHOD(int32_t,
                 match,
                 (const std::vector<int64_t>&               cache_keys,
                  size_t                                    ignore_block_num,
                  int64_t                                   request_id,
-                 MapStrStr                                 extra_metas,
+                 const MapStrStr&                          extra_metas,
                  const std::shared_ptr<std::atomic<bool>>& stop),
                 (const, override));
 
@@ -45,6 +48,7 @@ public:
                 getForAllRank,
                 (const std::vector<int64_t>& cache_keys,
                  const std::vector<int32_t>& block_indices,
+                 const LocationsMapPtr&      locations_map_ptr,
                  size_t                      ignore_block_num,
                  int64_t                     request_id,
                  MapStrStr                   extra_metas),
@@ -52,11 +56,12 @@ public:
 
     MOCK_METHOD(bool,
                 get,
-                (const std::vector<int64_t>& cache_keys,
-                 const std::vector<int32_t>& block_indices,
-                 size_t                      ignore_block_num,
-                 int64_t                     request_id,
-                 MapStrStr                   extra_metas),
+                (const std::vector<int64_t>&        cache_keys,
+                 const std::vector<int32_t>&        block_indices,
+                 const kv_cache_manager::Locations& locations,
+                 const kv_cache_manager::BlockMask& block_mask,
+                 int64_t                            request_id,
+                 MapStrStr                          extra_metas),
                 (const, override));
 
     MOCK_METHOD(bool,
@@ -70,11 +75,12 @@ public:
 
     MOCK_METHOD(bool,
                 put,
-                (const std::vector<int64_t>& cache_keys,
-                 const std::vector<int32_t>& block_indices,
-                 size_t                      ignore_block_num,
-                 int64_t                     request_id,
-                 MapStrStr                   extra_metas),
+                (const std::vector<int64_t>&        cache_keys,
+                 const std::vector<int32_t>&        block_indices,
+                 const kv_cache_manager::Locations& locations,
+                 const kv_cache_manager::BlockMask& block_mask,
+                 int64_t                            request_id,
+                 MapStrStr                          extra_metas),
                 (const, override));
 };
 

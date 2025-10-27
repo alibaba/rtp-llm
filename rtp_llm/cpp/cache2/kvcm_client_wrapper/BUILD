@@ -4,7 +4,7 @@ config_setting(
 )
 
 cc_library(
-    name = "kv_cache_connector",
+    name = "kvcm_client_wrapper",
     srcs = [
         "KVCMClientWrapper.cc",
         "KVCMClientWrapperConfig.cc",

@@ -70,7 +70,7 @@ CacheManager::CacheManager(const CacheConfig&                 config,
         }
     }
 
-    enable_dist_kvcache_ = params_.kv_cache_config.enable_dist_kvcache || params_.kv_cache_config.enable_3fs;
+    enable_dist_kvcache_ = params_.kv_cache_config.enable_3fs;
 }
 
 void CacheManager::regUserMr(size_t model_id) {
@@ -237,7 +237,8 @@ CacheManager::MatchInfo CacheManager::matchImpl(const AdvancedMallocInfo& malloc
     }
 
     // match in dist kvcache if cache keys not fully matched
-    if (enable_dist_kvcache_ && !malloc_info.need_loss && local_match_blocks < malloc_info.cache_keys.size()) {
+    if (dynamicEnableDist(malloc_info.enable_3fs) && !malloc_info.need_loss
+        && local_match_blocks < malloc_info.cache_keys.size()) {
         matchInDistKvCache(malloc_info, match_result);
     }
 
@@ -394,8 +395,8 @@ void CacheManager::insertIntoCache(FreeInfo& free_info) {
                                     token_len / seq_size_per_block_);
         token_len        = block_len * seq_size_per_block_;
         CacheItem        item{{free_info.token_ids.begin(), free_info.token_ids.begin() + token_len},
-                       {free_info.block_indices.begin(), free_info.block_indices.begin() + block_len},
-                       {free_info.cache_keys.begin(), free_info.cache_keys.begin() + block_len},
+                              {free_info.block_indices.begin(), free_info.block_indices.begin() + block_len},
+                              {free_info.cache_keys.begin(), free_info.cache_keys.begin() + block_len},
                        free_info.loss.empty() ?
                                   free_info.loss :
                                   std::vector<float>{free_info.loss.begin(), free_info.loss.begin() + token_len},
@@ -407,7 +408,7 @@ void CacheManager::insertIntoCache(FreeInfo& free_info) {
             putToMemoryBlockCache(item, free_info);
         }
 
-        if (enable_dist_kvcache_ && free_info.loss.empty()) {
+        if (dynamicEnableDist(free_info.enable_3fs) && free_info.loss.empty()) {
             putToDistKvCache(item.cache_key, item.block_indices, 0, free_info.request_id, free_info.adapter_name);
         }
         allocator_->free(indices);
@@ -675,4 +676,9 @@ void CacheManager::putToMemoryBlockCache(const CacheItem& item, const FreeInfo& 
 const std::shared_ptr<MemoryBlockCache>& CacheManager::memoryBlockCache() const {
     return memory_block_cache_;
 }
+
+bool CacheManager::dynamicEnableDist(bool manualFlag) const {
+    return enable_dist_kvcache_ && manualFlag;
+}
+
 }  // namespace rtp_llm
