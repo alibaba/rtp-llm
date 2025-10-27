@@ -398,8 +398,9 @@ class GptInitParameter:
     cross_attn_input_len: int
     data_type: str
     decode_polling_kv_cache_step_ms: int
-    decode_retry_timeout_ms: int
     decode_retry_times: int
+    decode_retry_timeout_ms: int
+    decode_retry_interval_ms: int
     deepseek_mscale_all_dim: float
     deepseek_rope_mscale: float
     device_resource_config: DeviceResourceConfig
