@@ -728,7 +728,7 @@ bool SpeculativeEngine::updateEplbConfig(const EplbConfig& config) {
     return true;
 }
 
-KVCacheInfo SpeculativeEngine::getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) const {
+KVCacheInfo SpeculativeEngine::getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) {
     return resource_context_.cache_manager->getKVCacheInfo(latest_version, need_cache_keys);
 }
 
