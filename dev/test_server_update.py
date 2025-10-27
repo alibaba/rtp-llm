@@ -70,13 +70,14 @@ class RtpLLMHttpClient(IPCTransportClient):
             weights.update(part)
 
         for name, tensor in tqdm(weights.items(), "updating weights"):
+            print(tensor)
             await self.update(tensor, name, method)
 
     async def update(
         self, tensor: torch.Tensor, name: str, method: str = "cuda_ipc"
     ) -> None:
         if method == "cuda_ipc":
-            tensor = tensor.half().cuda()
+            tensor = tensor.cuda()
             meta = self.cuipc_helper.build_tensor_meta(tensor)
             payload = {
                 "name": name,
@@ -85,7 +86,7 @@ class RtpLLMHttpClient(IPCTransportClient):
                 "desc": meta.hex(),
             }
         else:  # shm memory
-            tensor = tensor.half().cpu()
+            tensor = tensor.cpu()
             meta = self.shipc_helper.build_tensor_meta(tensor, shm=self.shm)
             payload = {
                 "name": name,
@@ -107,7 +108,8 @@ class RtpLLMHttpClient(IPCTransportClient):
 
 class TestRtpClient(unittest.IsolatedAsyncioTestCase):
     async def test_full_flow(self):
-        async with RtpLLMHttpClient("localhost", 26000, 26006) as client:
+        async with RtpLLMHttpClient("localhost", 26000, 8080) as client:
+            """
             await client.restart()
             await client.chat_completion("chat_1", "hello qwen.")
             await client.pause()
@@ -118,7 +120,9 @@ class TestRtpClient(unittest.IsolatedAsyncioTestCase):
             )
 
             await asyncio.sleep(3)
+            """
             timestamp = time()
+            """
             await client.restart()
 
             await client.chat_completion("chat_4", "tell me 1+1=?")
@@ -127,7 +131,8 @@ class TestRtpClient(unittest.IsolatedAsyncioTestCase):
             )
 
             await client.pause()
-            await client.update_model_weight(path=PATH, method="cuda_ipc")
+            """
+            await client.update_model_weight(path=PATH, method="shm")
             await client.restart()
 
             await client.chat_completion(

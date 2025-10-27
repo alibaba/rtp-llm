@@ -46,22 +46,27 @@ class RtpLLMHttpClient:
             "content": content["choices"][0]["message"],
             "end_time": time.time(),
         }
+        print(content["choices"][0]["message"])
 
     async def pause(self) -> None:
         response = await self.client2.post("/pause")
         await self._handle_response(response)
+        print(f"make server hold: {response}")
 
     async def restart(self) -> None:
         response = await self.client2.post("/restart")
         await self._handle_response(response)
+        print(f"make server restart: {response}")
 
     async def detach(self) -> None:
         response = await self.client2.post("/detach_physical_memory")
         await self._handle_response(response)
+        print(f"detach server memory: {response}")
 
     async def attach(self) -> None:
         response = await self.client2.post("/attach_physical_memory")
         await self._handle_response(response)
+        print(f"attach server memory: {response}")
 
 
 class TestRtpClient(unittest.IsolatedAsyncioTestCase):

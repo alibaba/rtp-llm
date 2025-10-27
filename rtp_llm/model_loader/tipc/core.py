@@ -43,7 +43,6 @@ class SharedMemIpcMeta:
     dtype: (
         torch.dtype
     )  # PyTorch dtype, will be converted to NumPy dtype for shared memory operations
-    stride: tuple[int, ...]  # Stride is essential for non-contiguous views
     offset_bytes: int  # Offset within the shared memory block, in bytes
     size_bytes: (
         int  # Total size of the tensor data within the shared memory block, in bytes
@@ -68,42 +67,9 @@ class SharedMemIpcMeta:
         # Convert specific types to serializable formats
         metadata_dict["shape"] = tuple(self.shape)
         metadata_dict["dtype"] = torch_dtype_to_str(self.dtype)
-        metadata_dict["stride"] = tuple(self.stride)  # Ensure stride is tuple
 
         json_string = json.dumps(metadata_dict)
         return base64.b64encode(json_string.encode("utf-8")).decode("utf-8")
-
-
-@dataclass
-class CuIpcTensorMeta:
-    """
-    Data class representing the metadata required to rebuild a torch.Tensor,
-    including considerations for sharing CUDA tensors.
-    """
-
-    dtype: torch.dtype
-    shape: torch.Size
-    stride: tuple[int, ...]
-    storage_device: int
-    storage_handle: bytes
-    storage_size_bytes: int
-    storage_offset_bytes: int
-    requires_grad: bool
-    ref_counter_handle: bytes
-    ref_counter_offset: int
-    event_handle: bytes
-    event_sync_required: bool
-
-    @classmethod
-    def decode(cls, encoded: str) -> "CuIpcTensorMeta":
-        """Decodes a hex string back into a CuIpcTensorMeta instance."""
-        decoded_bytes = bytes.fromhex(encoded)
-        return cls(raw=decoded_bytes)
-
-    def encode(self) -> str:
-        """Encodes this CuIpcTensorMeta instance into a base64 string."""
-        # Take the raw bytes, encode them using base64, and decode the result into a string
-        return base64.b64encode(self.raw).decode("utf-8")
 
 
 class SharedMemoryIPCHelper:
@@ -155,18 +121,14 @@ class SharedMemoryIPCHelper:
             )
 
         try:
-            # Create a NumPy array that views the shared memory's buffer
-            # Use t.numpy() to get a NumPy array view (zero-copy for CPU tensors).
-            # Then copy data into the shared memory's buffer.
-            # Important: The dtype for the NumPy array viewing shm.buf must match the tensor's data type
-            shared_np_array = np.ndarray(
-                t.shape,
-                dtype=str_to_np_dtype(torch_dtype_to_str(t.dtype)),
+            buffer = np.ndarray(
+                [t.numel() * t.element_size()],
+                dtype=np.uint8,
                 buffer=shm.buf,
             )
 
             # Copy data from PyTorch tensor's NumPy view to the shared NumPy array
-            shared_np_array[:] = t.numpy()[:]
+            buffer[:] = t.flatten().view(dtype=torch.uint8).numpy()[:]
 
             # Get the name of the shared memory block from the provided object
             shm_name = shm.name
@@ -175,7 +137,6 @@ class SharedMemoryIPCHelper:
                 shm_name=shm_name,
                 shape=t.size(),
                 dtype=t.dtype,
-                stride=t.stride(),
                 offset_bytes=0,  # Assuming the tensor starts at the beginning of the SHM block
                 size_bytes=tensor_size_bytes,
             )
@@ -201,27 +162,22 @@ class SharedMemoryIPCHelper:
             # Attach to the shared memory block
             shm = shared_memory.SharedMemory(name=m.shm_name)
 
-            # Create a NumPy array view into the shared memory
-            np_dtype = str_to_np_dtype(
-                torch_dtype_to_str(m.dtype)
-            )  # Convert PyTorch dtype string to NumPy dtype
-            shared_np_array = np.ndarray(
-                m.shape,
-                dtype=np_dtype,
-                buffer=shm.buf,
-                offset=m.offset_bytes,
-                strides=[s * m.dtype.itemsize for s in m.stride],
+            buffer = np.ndarray(
+                [m.size_bytes], dtype=np.uint8, buffer=shm.buf, offset=m.offset_bytes
             )
 
             # Create a PyTorch tensor from the NumPy array (zero-copy on CPU)
-            rebuilt_tensor = torch.from_numpy(shared_np_array)
+            rebuilt_tensor = torch.from_numpy(buffer)
+            rebuilt_tensor = rebuilt_tensor.view(dtype=m.dtype)
+            rebuilt_tensor = rebuilt_tensor.view(size=m.shape)
 
-            # clone tensor here, so that we can close shm obj ASAP.
-            rebuilt_tensor = rebuilt_tensor.clone()
+            # Important: The `shm` object reference in `_active_shm_blocks` must be kept alive
+            # until the tensor is no longer needed, and then explicitly closed.
+            # You might want a separate method for closing/unlinking.
+            tensor = rebuilt_tensor.clone()
             if shm:
                 shm.close()
-
-            return rebuilt_tensor
+            return tensor
 
         except FileNotFoundError:
             raise RuntimeError(
@@ -229,6 +185,8 @@ class SharedMemoryIPCHelper:
                 "It might have been unlinked or never created."
             )
         except Exception as e:
+            # Ensure shm is closed on error
+
             raise RuntimeError(f"Failed to rebuild tensor from shared memory: {e}")
 
 
