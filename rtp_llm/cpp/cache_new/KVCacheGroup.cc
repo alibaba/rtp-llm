@@ -3,6 +3,18 @@
 
 namespace rtp_llm {
 
+bool KVCacheGroup::init() {
+    auto layer_tensors = block_pool_->layerCacheBase();
+
+    for(int i = 0; i < layer_ids_.size(); ++i) {
+        gloabl_layer_to_kv_tensors[layer_ids_[i]] = layer_tensors[i];
+        gloabl_layer_to_local_layer[layer_ids_[i]] = i;
+    }
+
+    return true;
+}
+
+
 std::vector<int> KVCacheGroup::alloc(int needed_blocks) {
     if (needed_blocks <= 0) {
         RTP_LLM_LOG_DEBUG("No blocks needed for allocation");
@@ -90,15 +102,13 @@ bool KVCacheGroup::evict(int need_evict_len) {
 
 
 std::unordered_map<int, torch::Tensor> KVCacheGroup::layerCacheBase() const {
-    std::unordered_map<int, torch::Tensor> gloabl_layer_kv_tensors;
+    return gloabl_layer_to_kv_tensors;
+}
 
-    auto layer_tensors = block_pool_->layerCacheBase();
 
-    for(int i = 0; i < layer_ids_.size(); ++i) {
-        gloabl_layer_kv_tensors[layer_ids_[i]] = layer_tensors[i];
-    }
-    
-    return gloabl_layer_kv_tensors;
+BufferPtr KVCacheGroup::convertIndexToAddr(int layer_id, int block_id) const {
+    local_layer_id = gloabl_layer_to_local_layer[layer_id];
+    return block_pool_->convertIndexToAddr(local_layer_id, block_id);
 }
 
 }  // namespace rtp_llm
