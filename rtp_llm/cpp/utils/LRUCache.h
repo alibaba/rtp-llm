@@ -61,6 +61,7 @@ private:
     int64_t                                                                                  version = -1;
 };
 
+// TODO(xinfei.sxf) put 如果触发了pop，那么也返回出去
 template<typename KeyType, typename ValueType>
 void LRUCache<KeyType, ValueType>::put(const KeyType& key, const ValueType& value) {
     auto it = cache_items_map_.find(key);
