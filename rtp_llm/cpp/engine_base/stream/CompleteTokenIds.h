@@ -5,6 +5,8 @@
 
 namespace rtp_llm {
 
+using CompleteTokenIdsPtr = std::shared_ptr<CompleteTokenIds>;
+
 class CompleteTokenIds {
 public:
     CompleteTokenIds(

@@ -10,7 +10,7 @@
 
 namespace rtp_llm {
 
-enum struct KVCacheType {
+enum KVCacheGroupType {
     FULL,
     LINEAR,
 };
@@ -18,7 +18,6 @@ enum struct KVCacheType {
 struct KVCacheSpec {
     std::vector<int> layer_ids_;
     KVCacheGroupType type_;
-    uint             block_stride = 1; // record block Every 'block_stride' blocks
 };
 
 struct MHAKVCacheSpec : public KVCacheSpec {

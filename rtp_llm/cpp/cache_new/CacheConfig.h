@@ -1,52 +1,79 @@
 #pragma once
 
 #include "rtp_llm/cpp/core/Types.h"
+#include "rtp_llm/cpp/cache_new/types.h"
 #include <sstream>
 #include <string>
 
 namespace rtp_llm {
 
-struct KVCacheParam {
-    uint              layer_num;
-    uint              block_nums;
-    uint              local_head_num_kv;
-    uint              size_per_head;
-    uint              seq_size_per_block = 1;
+enum KVCacheType {
+    MultiHeadAttention,
+    MultiLayerAttention,
+    LinearAttention,
+};
+
+enum MemoryLayout {
+    LAYER_FIRST,      // [layer_num, num_blocks, block_size] -> hybrid attention 
+    KV_FIRST,         // [2, layer_num, num_blocks, kv_block_size] -> full attention
+};
+
+struct KVCacheParam {    
+    size_t            seq_size_per_block = 1;
+    KVCacheType       type;
     rtp_llm::DataType dtype;
 };
 
-struct MlaCacheParam {
+struct MHACacheParam: public KVCacheParam {
+    uint              layer_num;
+    uint              block_num;
+    uint              local_head_num_kv;
+    uint              size_per_head;
+    uint              scale_size;
+};
+
+struct MLACacheParam: public KVCacheParam {
     uint              layer_num;
     uint              block_nums;
     uint              kv_lora_rank;
     uint              rope_head_dim;
-    uint              seq_size_per_block = 1;
-    rtp_llm::DataType dtype;
 };
 
-struct LinearCacheParam {
+struct LinearCacheParam: public KVCacheParam{
     uint              conv_state_size;
     uint              temporal_state_size;
-    rtp_llm::DataType dtype;
 };
 
 struct CacheConfig {
-    uint32_t          linear_layer_num          = 0;
-    uint32_t          linear_block_nums         = 0;
-    uint32_t          full_layer_num            = 0;
-    uint32_t          full_block_nums           = 0;
+    uint32_t                      layer_type_num; 
+    std::vector<KVCacheParam>     layer_type_params;
+    std::vector<std::vector<int>> layer_ids;
 
-
-    uint32_t          padding_block_size        = 0;
-    uint32_t          linear_block_size         = 0;
-    uint32_t          full_block_size           = 0;
-
-    LinearCacheParam  linear_cache_param;
-    KVCacheParam      full_cache_param;
-    MlaCacheParam     mla_cache_param;
-
-    rtp_llm::DataType dtype              = rtp_llm::TYPE_INVALID;
+    int                           layer_num;
+    int                           block_num;   
+    int                           block_size;
 };
+
+
+struct BlockPoolConfig {
+    uint32_t          layer_num;
+    uint32_t          block_num;
+    uint32_t          block_size;
+    
+    MemoryLayout      layout = LAYER_FIRST;
+    
+    size_t total_size;
+
+    size_t k_block_size;
+    size_t v_block_size;
+    
+    size_t k_block_stride = 0;
+    size_t v_block_stride = 0;
+    size_t k_layer_stride = 0;
+    size_t v_layer_stride = 0;
+
+};
+
 
 // struct CacheConfig {
 //     uint32_t          layer_num          = 0;
