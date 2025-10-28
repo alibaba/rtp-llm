@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/devices/DeviceBase.h"
 
@@ -68,5 +69,7 @@ private:
 
     rtp_llm::BufferPtr complete_token_ids_;
 };
+
+using CompleteTokenIdsPtr = std::shared_ptr<CompleteTokenIds>;
 
 }  // namespace rtp_llm
