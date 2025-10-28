@@ -39,7 +39,8 @@ uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
                                     bool   o_perm_) {  // if false, will be batch * seqlen * nhead * hdim
 
     // map parms from FT to CK
-    mode_enum mode      = mode_enum::group;
+    // mode_enum mode      = mode_enum::group;
+    mode_enum mode      = mode_enum::batch;
     auto      data_type = getDataTypeStr(dtype_);
     auto      batch     = static_cast<ck_tile::index_t>(batch_size);
     auto      nhead     = static_cast<ck_tile::index_t>(head_num_);
@@ -286,10 +287,10 @@ uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
         // false     //
     };
     float run_time;
-    // if (data_type == "bf16" && size_per_head_ == 128 && msk_str == "b")
-    //     run_time = aiter::mha_fwd(
-    //         fmha_args, stream_config, data_type, mode == mode_enum::group, mask.type, bias.type, lse, true);
-    // else
+    if (data_type == "bf16" && size_per_head_ == 128 && msk_str == "b")
+        run_time = aiter::mha_fwd(
+            fmha_args, stream_config, data_type, mode == mode_enum::group, mask.type, bias.type, lse, true);
+    else
         run_time = aiter::mha_fwd(
             fmha_args, stream_config, data_type, mode == mode_enum::group, mask.type, bias.type, lse, false);
     // std::cout << "\nrun_time for ck fmha_fwd: " << run_time << std::endl;
