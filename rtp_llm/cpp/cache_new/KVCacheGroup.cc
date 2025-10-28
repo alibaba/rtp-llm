@@ -12,7 +12,7 @@ std::vector<int> KVCacheGroup::alloc(int needed_blocks) {
     auto new_blocks = block_pool_->alloc(needed_blocks);
 
     RTP_LLM_LOG_DEBUG("Allocated %zu blocks (requested %d)", 
-                      allocated_blocks.size(), needed_blocks);
+                      new_blocks.size(), needed_blocks);
     return new_blocks;
 }
 
@@ -20,7 +20,7 @@ MatchResult KVCacheGroup::match(std::vector<int64_t> cache_keys) const {
     MatchResult result;
     result.reuse_length = 0;
 
-    if (group_spec_.type_ != KVCacheType::LINEAR) {
+    if (group_spec_.type_ != rtp_llm::KVCacheGroupType::LINEAR) {
         result = block_cache_->prefixMatch(cache_keys);
     } else {
         result = block_cache_->match(cache_keys);
@@ -64,7 +64,7 @@ void KVCacheGroup::insertIntoCache(std::vector<int64_t> cache_keys, std::vector<
 }
 
 
-KVCacheType KVCacheGroup::type() const {
+KVCacheGroupType KVCacheGroup::type() const {
     return group_spec_.type_;
 }
 
@@ -74,17 +74,31 @@ bool KVCacheGroup::evict(int need_evict_len) {
     }
     
     vector<int> evicted_blocks;
-    while (evicted_blocks.size() < need_evict_len && !block_cache_->empty()) {
+    while (static_cast<int>(evicted_blocks.size()) < need_evict_len && !block_cache_->empty()) {
         auto evicted_block = block_cache_->pop();
         evicted_blocks.push_back(evicted_block);
     }
     block_pool_->free(evicted_blocks);
     
+    int evicted_count = static_cast<int>(evicted_blocks.size());
     bool success = (evicted_count >= need_evict_len);
     RTP_LLM_LOG_DEBUG("Evicted %d blocks (needed %d): %s", 
                       evicted_count, need_evict_len, success ? "success" : "partial");
     
     return success;
+}
+
+
+std::unordered_map<int, torch::Tensor> KVCacheGroup::layerCacheBase() const {
+    std::unordered_map<int, torch::Tensor> gloabl_layer_kv_tensors;
+
+    auto layer_tensors = block_pool_->layerCacheBase();
+
+    for(int i = 0; i < layer_ids_.size(); ++i) {
+        gloabl_layer_kv_tensors[layer_ids_[i]] = layer_tensors[i];
+    }
+    
+    return gloabl_layer_kv_tensors;
 }
 
 }  // namespace rtp_llm
