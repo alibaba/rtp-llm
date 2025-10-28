@@ -1,3 +1,4 @@
+import enum
 import json
 import logging
 from typing import Any, List, Optional, Union
@@ -10,6 +11,12 @@ from rtp_llm.device.device_base import DeviceBase
 from rtp_llm.utils.database import BaseDatabase
 from rtp_llm.utils.fuser import fetch_remote_file_to_local
 from rtp_llm.utils.util import check_with_info
+
+
+class LoadMethod(str, enum.Enum):
+    AUTO = "auto"
+    FASTSAFETENSORS = "fastsafetensors"
+    SCRATCH = "scratch"
 
 
 class LoadConfig(BaseModel):
@@ -53,6 +60,7 @@ class LoadConfig(BaseModel):
 
     phy2log: Optional[List[List[int]]] = None
     use_swizzleA: bool = False
+    load_method: LoadMethod = LoadMethod.AUTO
 
     @field_validator("database", "compute_dtype", "quant_algo", "exported_device")
     @classmethod

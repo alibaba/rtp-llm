@@ -214,6 +214,7 @@ class LoadConfig:
         self.tokenizers_parallelism: bool = False
         # seem like it's a third-party pkg environment, but we reserve it temporar
         self.load_ckpt_num_process: int = 0
+        self.load_method: str = "auto"
 
     def update_from_env(self):
         self.phy2log_path = os.environ.get("PHY2LOG_PATH", self.phy2log_path)
@@ -226,13 +227,15 @@ class LoadConfig:
         self.load_ckpt_num_process = int(
             os.environ.get("LOAD_CKPT_NUM_PROCESS", self.load_ckpt_num_process)
         )
+        self.load_method = str(os.environ.get("LOAD_METHOD", self.load_method)).lower()
 
     def to_string(self):
         return (
             f"phy2log_path: {self.phy2log_path}\n"
             f"converter_num_per_gpu: {self.converter_num_per_gpu}\n"
             f"tokenizers_parallelism: {self.tokenizers_parallelism}\n"
-            f"load_ckpt_num_process: {self.load_ckpt_num_process}"
+            f"load_ckpt_num_process: {self.load_ckpt_num_process}\n"
+            f"load_method: {self.load_method}"
         )
 
 
@@ -770,9 +773,7 @@ class PyHwKernelConfig:
         self.rocm_hipblaslt_config = get_env_str(
             "ROCM_HIPBLASLT_CONFIG", self.rocm_hipblaslt_config
         )
-        self.use_swizzleA = get_env_bool(
-            "USE_SWIZZLEA", self.use_swizzleA
-        )
+        self.use_swizzleA = get_env_bool("USE_SWIZZLEA", self.use_swizzleA)
         self.enable_cuda_graph = get_env_bool(
             "ENABLE_CUDA_GRAPH", self.enable_cuda_graph
         )
