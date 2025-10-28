@@ -2,7 +2,8 @@ import argparse
 import glob
 import logging
 import os
-from typing import Any, Dict, Optional, Sequence, TypeVar
+from argparse import Namespace
+from typing import Any, Dict, Optional, Sequence, TypeVar, Tuple
 
 from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.server.server_args.batch_decode_scheduler_group_args import (
@@ -88,11 +89,10 @@ class EnvArgumentGroup:
 
 
 class EnvArgumentParser(argparse.ArgumentParser):
+    _env_mappings: Dict[str, str] = {}
     def __init__(self, *args, env_prefix: str = "", **kwargs):
         self.env_prefix = env_prefix.upper()
-        self._env_mappings: Dict[str, str] = {}
         self._groups: Dict[str, EnvArgumentGroup] = {}
-
         super().__init__(*args, **kwargs)
 
         self._default_group = EnvArgumentGroup(self._positionals, self)
@@ -146,7 +146,7 @@ class EnvArgumentParser(argparse.ArgumentParser):
         else:
             full_env_name = effective_env_name
 
-        self._env_mappings[action.dest] = full_env_name
+        EnvArgumentParser._env_mappings[action.dest] = full_env_name
 
     def parse_args(
         self,
@@ -156,7 +156,7 @@ class EnvArgumentParser(argparse.ArgumentParser):
         logging.info("Parsing arguments and setting environment variables...")
         parsed_args = super().parse_args(args, namespace)
 
-        for dest, env_name in self._env_mappings.items():
+        for dest, env_name in EnvArgumentParser._env_mappings.items():
             value = getattr(parsed_args, dest, None)
 
             if value is None:
@@ -177,6 +177,34 @@ class EnvArgumentParser(argparse.ArgumentParser):
 
         return parsed_args
 
+    @staticmethod
+    def update_env_from_args(
+            parser: argparse.ArgumentParser,
+            args_name: str,
+            namespace: argparse.Namespace,
+    ) -> None:
+        env_name  = EnvArgumentParser._env_mappings[args_name]
+        value = getattr(namespace, args_name, None)
+        if value is None:
+            return None
+
+        # 如果环境变量已存在且值等于默认值，则跳过
+        if env_name in os.environ and value == parser.get_default(args_name):
+            return None
+
+        # 转换值为字符串形式
+        env_value: str
+        if isinstance(value, bool):
+            env_value = "1" if value else "0"
+        elif isinstance(value, list):
+            env_value = ",".join(map(str, value))
+        else:
+            env_value = str(value)
+
+        # 更新环境变量
+        os.environ[env_name] = env_value
+        logging.info(f"Updated environment variable: {env_name} = {env_value}")
+
     def print_env_mappings(self, group_name: Optional[str] = None) -> None:
         logging.info("Argument -> Environment Variable Mappings:")
         logging.info("-" * 50)
@@ -185,14 +213,14 @@ class EnvArgumentParser(argparse.ArgumentParser):
             if group_name in self._groups:
                 group = self._groups[group_name]._group
                 for action in group._group_actions:
-                    if action.dest in self._env_mappings:
+                    if action.dest in EnvArgumentParser._env_mappings:
                         logging.info(
-                            f"{action.dest:<20} -> {self._env_mappings[action.dest]}"
+                            f"{action.dest:<20} -> {EnvArgumentParser._env_mappings[action.dest]}"
                         )
             else:
                 logging.info(f"Group '{group_name}' not found.")
         else:
-            for dest, env_name in self._env_mappings.items():
+            for dest, env_name in EnvArgumentParser._env_mappings.items():
                 logging.info(f"{dest:<20} -> {env_name}")
 
         logging.info("-" * 50)
@@ -202,11 +230,11 @@ class EnvArgumentParser(argparse.ArgumentParser):
             group = self._groups[group_name]._group
             mappings = {}
             for action in group._group_actions:
-                if action.dest in self._env_mappings:
-                    mappings[action.dest] = self._env_mappings[action.dest]
+                if action.dest in EnvArgumentParser._env_mappings:
+                    mappings[action.dest] = EnvArgumentParser._env_mappings[action.dest]
             return mappings
         else:
-            return self._env_mappings.copy()
+            return EnvArgumentParser._env_mappings.copy()
 
 
 def init_all_group_args(parser: EnvArgumentParser) -> None:
@@ -252,13 +280,13 @@ def init_all_group_args(parser: EnvArgumentParser) -> None:
     init_pd_separation_group_args(parser)
 
 
-def setup_args():
+def setup_args() -> tuple[EnvArgumentParser, Namespace]:
     parser = EnvArgumentParser(description="RTP LLM")
 
     # 使用统一的函数初始化所有参数组
     init_all_group_args(parser)
 
-    parser.parse_args()
+    args = parser.parse_args()
 
     # add rocm env config, if using default value, change it to optimize version
     if os.path.exists("/dev/kfd") and os.getenv("FT_DISABLE_CUSTOM_AR") is None:
@@ -279,3 +307,4 @@ def setup_args():
 
     parser.print_env_mappings()
     StaticConfig.update_from_env()
+    return parser, args
