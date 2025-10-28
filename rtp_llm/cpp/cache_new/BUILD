@@ -15,9 +15,18 @@ cc_library(
         "//rtp_llm/cpp/utils:lru_cache",
         "//rtp_llm/cpp/metrics:metrics",
         "//:rtp_compute_ops",
+        "//rtp_llm/cpp/config:gpt_init_params",
+        "//rtp_llm/cpp/devices:devices_base",
+        "//rtp_llm/cpp/engine_base/stream:stream",
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/utils:hash_util",
+        "//rtp_llm/cpp/utils:kv_cache_utils",
+        "//rtp_llm/cpp/core:buffer",
+        "//rtp_llm/cpp/core:buffer_torch",
+        "//rtp_llm/cpp/disaggregate/cache_store:cache_store",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
-    ] + select({
+    ] + torch_deps() + select({
         "//:enable_3fs": [
             ":storage_3fs",
         ],

@@ -31,7 +31,7 @@ public:
         std::vector<float> loss;
     };
 
-    using CacheSnapshot = typename LRUCache<size_t, CacheItem>::CacheSnapshot;
+    using CacheSnapshot = typename LRUCache<CacheKeyType, CacheItem>::CacheSnapshot;
 
 public:
     explicit BlockCacheV1(size_t seq_size_per_block):
