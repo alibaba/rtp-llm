@@ -331,7 +331,7 @@ class RocmImpl(GpuImpl):
         id = self.get_device_id()
         used = rocml.smi_get_device_memory_used(id)
         total = rocml.smi_get_device_memory_total(id)
-        return MemInfo(total - used, used)
+        return MemInfo(free=total - used, used=used)
 
     @property
     def arch(self) -> str:
