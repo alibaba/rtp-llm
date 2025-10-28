@@ -1,13 +1,12 @@
 package org.flexlb.domain.worker;
 
-import java.util.List;
-
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
 import org.flexlb.dao.master.CacheStatus;
-import org.flexlb.dao.master.ProfileMeta;
 import org.flexlb.dao.master.TaskInfo;
+
+import java.util.List;
 
 /**
  * @author zjw
@@ -41,9 +40,6 @@ public class WorkerStatusResponse {
 
     @JsonProperty("cache_status")
     private CacheStatus cacheStatus;
-
-    @JsonProperty("profile_meta")
-    private ProfileMeta profileMeta;
 
     @JsonProperty("step_latency_ms")
     private double stepLatencyMs;
