@@ -1,7 +1,6 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.LoadBalanceStrategyFactory;
-import org.flexlb.balance.SchedulerFactory;
 import org.flexlb.balance.strategy.LoadBalancer;
 import org.flexlb.dao.loadbalance.MasterRequest;
 import org.flexlb.dao.loadbalance.MasterResponse;
@@ -10,7 +9,6 @@ import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.domain.balance.BalanceContext;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
-import org.flexlb.enums.ScheduleType;
 import org.flexlb.service.config.ConfigService;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
@@ -30,6 +28,7 @@ import java.util.Map;
 @Component("defaultScheduler")
 @DependsOn({"randomStrategy", "lowestCacheUsedStrategy", "shortestTTFTStrategy"})
 public class DefaultScheduler implements Scheduler {
+
     private final LoadBalancer prefillLoadBalancer;
     private final LoadBalancer decodeLoadBalancer;
     private final LoadBalancer vitLoadBalancer;
@@ -45,7 +44,6 @@ public class DefaultScheduler implements Scheduler {
                 configService.loadBalanceConfig().getLoadBalanceStrategy());
         fusionLoadBalancer = LoadBalanceStrategyFactory.getLoadBalanceStrategy(
                 configService.loadBalanceConfig().getLoadBalanceStrategy());
-        SchedulerFactory.register(ScheduleType.DEFAULT, this);
     }
 
     public MasterResponse select(BalanceContext balanceContext) {
@@ -90,7 +88,7 @@ public class DefaultScheduler implements Scheduler {
             group = prefillServerStatus.getGroup();
             ServerStatus decodeServerStatus = decodeLoadBalancer.select(balanceContext, RoleType.DECODE, group);
             if (!decodeServerStatus.isSuccess()) {
-                prefillLoadBalancer.releaseLocalCache(modelName, ip+":"+port, interRequestId);
+                prefillLoadBalancer.releaseLocalCache(modelName, ip + ":" + port, interRequestId);
                 masterResponse.setSuccess(false);
                 masterResponse.setCode(StrategyErrorType.NO_DECODE_WORKER.getErrorCode());
                 masterResponse.setErrorCode(StrategyErrorType.NO_DECODE_WORKER.getErrorMsg() + " : " + decodeServerStatus.getMessage());
@@ -139,10 +137,4 @@ public class DefaultScheduler implements Scheduler {
         masterResponse.setSuccess(true);
         return masterResponse;
     }
-
-    @Override
-    public LoadBalancer getPrefillLoadBalancer() {
-        return prefillLoadBalancer;
-    }
-
 }

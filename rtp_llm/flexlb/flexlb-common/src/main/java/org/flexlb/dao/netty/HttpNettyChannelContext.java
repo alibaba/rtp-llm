@@ -1,6 +1,5 @@
 package org.flexlb.dao.netty;
 
-
 import io.netty.channel.Channel;
 import io.netty.handler.codec.http.HttpObject;
 import io.netty.handler.codec.http.HttpResponse;
@@ -18,6 +17,7 @@ import java.util.function.Consumer;
 
 /**
  * NettyChannel 的上下文信息
+ *
  * @author lushirong
  */
 @Data
@@ -25,6 +25,7 @@ import java.util.function.Consumer;
 @Builder
 @AllArgsConstructor
 public class HttpNettyChannelContext<T> {
+
     /**
      * 客户请求上下文
      */
