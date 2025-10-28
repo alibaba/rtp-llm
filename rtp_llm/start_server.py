@@ -1,3 +1,4 @@
+import argparse
 import logging
 import multiprocessing
 import os
@@ -8,15 +9,16 @@ import traceback
 
 import requests
 
-from rtp_llm.config.py_config_modules import ServerConfig
+from rtp_llm.config.py_config_modules import ServerConfig, StaticConfig
 from rtp_llm.metrics import kmonitor
 from rtp_llm.ops import ProfilingDebugLoggingConfig
+from rtp_llm.tools.api.hf_model_helper import get_hf_model_info
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
 from rtp_llm.distribute.worker_info import WorkerInfo, g_parallel_info
-from rtp_llm.server.server_args.server_args import setup_args
+from rtp_llm.server.server_args.server_args import setup_args, EnvArgumentParser
 from rtp_llm.utils.concurrency_controller import init_controller
 from rtp_llm.utils.process_manager import ProcessManager
 
@@ -129,13 +131,30 @@ def start_frontend_server_impl(
 
     return frontend_processes
 
+
+def get_model_type_and_update_env(parser: EnvArgumentParser, args: argparse.Namespace):
+    if hasattr(args, 'checkpoint_path') and args.checkpoint_path is not None and args.checkpoint_path != "":
+        model_path = args.checkpoint_path
+        current_model_type = os.environ.get("MODEL_TYPE", StaticConfig.model_config.model_type)
+        if current_model_type is None or current_model_type == "":
+            if hasattr(args, 'model_type') and args.model_type is not None and args.model_type != "":
+                config_model_type = args.model_type
+            else:
+                model_info = get_hf_model_info(model_path)
+                config_model_type = model_info.ft_model_type
+                setattr(args, "model_type", config_model_type)
+            if config_model_type is not None and config_model_type != "":
+                EnvArgumentParser.update_env_from_args(parser, "model_type", args)
+    StaticConfig.update_from_env()
+
+
 def main():
-    setup_args()
+    parser, args = setup_args()
 
-    start_server()
+    start_server(parser, args)
 
 
-def start_server():
+def start_server(parser: EnvArgumentParser, args: argparse.Namespace):
     try:
         multiprocessing.set_start_method("spawn")
     except RuntimeError as e:
