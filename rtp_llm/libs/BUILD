@@ -18,8 +18,7 @@ filegroup(
     name = "copy_aiter",
     srcs = select({
         "@//:using_aiter_src": [":aiter_src_copy",],
-        "@//:using_rocm": [":aiter_copy"],
-        "//conditions:default": [],
+        "//conditions:default": [":aiter_copy"],
     }),
     visibility = ["//visibility:public"],
 )
