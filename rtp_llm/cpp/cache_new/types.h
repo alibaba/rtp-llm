@@ -4,58 +4,62 @@
 #include <cstdint>
 
 #include <map>
+#include "rtp_llm/cpp/core/Buffer.h"
+#include "rtp_llm/cpp/core/Types.h"
 
 namespace rtp_llm {
 
-
 struct CacheLayerLayout {
-    vector<int> layer_to_groups;
-    vector<BufferPtr> layers_to_buffer_ptrs;
-}
+    std::vector<int>       layer_to_groups;
+    std::vector<BufferPtr> layers_to_buffer_ptrs;
+};
 
 struct MatchResult {
-    size_t                              reuse_length;
-    std::vector<std::vector<int64_t>>   cached_keys;
-    std::vector<std::vector<int>>       block_indices;   
+    size_t                            reuse_length;
+    std::vector<std::vector<int64_t>> cached_keys;
+    std::vector<std::vector<int>>     block_indices;
 };
 
 // is_reuse_cache = true，基于输入的 cache_keys 做 block_cache 匹配，再走 block_pool 分配；
 // is_reuse_cache = false, 直接走 block_pool 分配
 
 struct MallocInfo {
-    MallocInfo(GenerateStreamPtr stream):
-        stream(stream) {}
+    MallocInfo(void* stream): stream(stream) {}
 
-    GenerateStreamPtr stream;
+    void* stream;
 };
 
-
 struct MallocResult {
-    bool success;
+    bool        success;
     MatchResult match_result;
 };
 
-// fallback 
-struct FreeInfo { 
-    FreeInfo(GenerateStreamPtr stream):
-        stream(stream) {}
-    GenerateStreamPtr stream;
+// fallback
+struct FreeInfo {
+    FreeInfo(void* stream): stream(stream) {}
+    void* stream;
 };
-
 
 struct FreeResult {
     bool success;
 };
 
 struct InsertInfo {
-    InsertInfo(GenerateStreamPtr stream):
-        stream(stream) {}
-    GenerateStreamPtr stream;
+    InsertInfo(void* stream): stream(stream) {}
+    void* stream;
 };
-
 
 struct InsertResult {
     bool success;
 };
 
+typedef size_t  CacheKeyType;
+typedef int32_t BlockIdxType;
+
+int32_t NULL_BLOCK_IDX = -1;
+
+inline bool isNullBlockIdx(BlockIdxType block_idx) {
+    return block_idx == NULL_BLOCK_IDX;
 }
+
+}  // namespace rtp_llm
