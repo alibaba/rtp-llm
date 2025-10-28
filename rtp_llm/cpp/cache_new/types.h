@@ -20,24 +20,24 @@ struct MatchResult {
     std::vector<std::vector<int>>     block_indices;
 };
 
-// is_reuse_cache = true，基于输入的 cache_keys 做 block_cache 匹配，再走 block_pool 分配；
-// is_reuse_cache = false, 直接走 block_pool 分配
-
 struct MallocInfo {
-    MallocInfo(void* stream): stream(stream) {}
+    MallocInfo(BatchKVCacheResourcePtr batch_kv_cache_resource, CompleteTokenIdsPtr complete_token_ids):
+        batch_kv_cache_resource(batch_kv_cache_resource), complete_token_ids(complete_token_ids) {}
 
-    void* stream;
+    BatchKVCacheResourcePtr batch_kv_cache_resource;
+    CompleteTokenIdsPtr complete_token_ids;
 };
 
 struct MallocResult {
-    bool        success;
-    MatchResult match_result;
+    bool    success;
+    int     reuse_len;
 };
 
-// fallback
-struct FreeInfo {
-    FreeInfo(void* stream): stream(stream) {}
-    void* stream;
+// fallback 
+struct FreeInfo { 
+    FreeInfo(BatchKVCacheResourcePtr batch_kv_cache_resource, CompleteTokenIdsPtr complete_token_ids):
+        batch_kv_cache_resource(batch_kv_cache_resource), complete_token_ids(complete_token_ids) {}
+    BatchKVCacheResourcePtr batch_kv_cache_resource;
 };
 
 struct FreeResult {
@@ -45,8 +45,9 @@ struct FreeResult {
 };
 
 struct InsertInfo {
-    InsertInfo(void* stream): stream(stream) {}
-    void* stream;
+    InsertInfo(BatchKVCacheResourcePtr batch_kv_cache_resource, CompleteTokenIdsPtr complete_token_ids):
+        batch_kv_cache_resource(batch_kv_cache_resource), complete_token_ids(complete_token_ids) {}
+    BatchKVCacheResourcePtr batch_kv_cache_resource;
 };
 
 struct InsertResult {
