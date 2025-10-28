@@ -8,6 +8,10 @@
 #include "rtp_llm/cpp/cache_new/types.h"
 #include "rtp_llm/cpp/cache_new/CacheConfig.h"
 #include "rtp_llm/cpp/cache_new/KVCacheAllocator.h"
+#include "rtp_llm/cpp/config/GptInitParameter.h"
+#include "kmonitor/client/MetricsReporter.h"
+
+namespace rtp_llm {
 
 class KVCacheManager {
 public:
@@ -35,6 +39,11 @@ public:
     // TODO: InsertInfo 考虑  hicache distkvcache 的逻辑
 private:
     CacheConfig config_;
+    rtp_llm::DeviceBase* device_;
     KVCacheAllocatorPtr allocator_; 
-    // HashUtil hash_util_;
-w}
+
+    const kmonitor::MetricsReporterPtr metrics_reporter_;
+    const GptInitParameter& params_;
+};
+
+}  // namespace rtp_llm
