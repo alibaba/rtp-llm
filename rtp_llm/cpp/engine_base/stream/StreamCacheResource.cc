@@ -311,6 +311,7 @@ bool StreamCacheResource::updateKVBlock(const std::vector<int>& block_src_batch,
         }
     }
 
+    // TODO(chanyin): update batch_kv_cache_resource's kv_cache_resource here
     // generate update mapping for block ids
     vector<vector<int32_t>> old_block_ids = std::move(batch_resource_.batch_block_id);
     batch_resource_.batch_block_id.reserve(new_batch_size);
