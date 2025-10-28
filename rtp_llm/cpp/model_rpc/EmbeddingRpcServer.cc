@@ -42,8 +42,9 @@ grpc::Status EmbeddingRpcServiceImpl::decode(grpc::ServerContext*               
     }
     std::shared_ptr<EmbeddingOutput> embedding_output = embedding_engine_->decode(embedding_input);
     py::gil_scoped_acquire           acquire;
+    EmbeddingOutputPB                outputs_pb;
     if (embedding_output->output.isTensor) {
-        EmbeddingOutputPB outputs_pb;
+        outputs_pb.set_output_is_tensor(true);
         QueryConverter::transTensorPB(outputs_pb.mutable_output_t(), embedding_output->output.t.value());
         if (context->IsCancelled()) {
             return grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled by user");
@@ -51,10 +52,22 @@ grpc::Status EmbeddingRpcServiceImpl::decode(grpc::ServerContext*               
         if (!writer->Write(outputs_pb)) {
             return grpc::Status(grpc::StatusCode::INTERNAL, "request write outputs pb failed");
         }
-
     } else {
+        for (const auto& tensor_map_data : embedding_output->output.map.value()) {
+            auto* embedding_map_pb = outputs_pb.add_output_map();
+            for (const auto& [key, tensor_data] : tensor_map_data) {
+                TensorPB tensor_pb;
+                QueryConverter::transTensorPB(&tensor_pb, tensor_data);
+                (*embedding_map_pb->mutable_tensor_map())[key] = tensor_pb;
+            }
+        }
+        if (context->IsCancelled()) {
+            return grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled by user");
+        }
+        if (!writer->Write(outputs_pb)) {
+            return grpc::Status(grpc::StatusCode::INTERNAL, "request write outputs pb failed");
+        }
     }
-
     return grpc::Status::OK;
 }
 
