@@ -1,4 +1,5 @@
 import json
+import logging
 from typing import Any, Dict, Optional, Tuple
 
 from rtp_llm.async_decoder_engine.async_model import AsyncModel
@@ -26,6 +27,7 @@ class EmbeddingEndpoint(object):
         try:
             formated_request = renderer.render_request(request)
             batch_input = renderer.create_input(formated_request)
+            logging.warning(f"Embedding batch_input: {batch_input}")
         except Exception as e:
             raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, str(e))
         try:

@@ -29,7 +29,12 @@ public:
                             int                              request_id,
                             std::optional<MultimodalFeature> multimodal_features = std::nullopt,
                             std::optional<torch::Tensor>     input_embeddings    = std::nullopt);
-
+    explicit EmbeddingInput(const std::vector<int32_t>&                     token_ids_,
+                            const std::vector<int32_t>&                     token_type_ids_,
+                            const std::vector<int32_t>&                     input_lengths_,
+                            int64_t                                         request_id_,
+                            std::optional<MultimodalFeature>                multimodal_features_,
+                            std::optional<std::shared_ptr<rtp_llm::Buffer>> input_embeddings_ = std::nullopt);
     std::shared_ptr<rtp_llm::Buffer>                token_ids;
     std::shared_ptr<rtp_llm::Buffer>                token_type_ids;
     std::shared_ptr<rtp_llm::Buffer>                input_lengths;

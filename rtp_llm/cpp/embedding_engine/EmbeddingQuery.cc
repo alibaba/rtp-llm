@@ -21,6 +21,34 @@ EmbeddingInput::EmbeddingInput(const std::shared_ptr<rtp_llm::Buffer>&         t
     checkVaild();
 }
 
+EmbeddingInput::EmbeddingInput(const std::vector<int32_t>&                     token_ids_,
+                               const std::vector<int32_t>&                     token_type_ids_,
+                               const std::vector<int32_t>&                     input_lengths_,
+                               int64_t                                         request_id_,
+                               std::optional<MultimodalFeature>                multimodal_features_,
+                               std::optional<std::shared_ptr<rtp_llm::Buffer>> input_embeddings_) {
+    token_ids = std::make_shared<rtp_llm::Buffer>(rtp_llm::MemoryType::MEMORY_CPU,
+                                                  rtp_llm::DataType::TYPE_INT32,
+                                                  std::vector<size_t>{token_ids_.size()},
+                                                  (void*)token_ids_.data());
+
+    token_type_ids = std::make_shared<rtp_llm::Buffer>(rtp_llm::MemoryType::MEMORY_CPU,
+                                                       rtp_llm::DataType::TYPE_INT32,
+                                                       std::vector<size_t>{token_type_ids_.size()},
+                                                       (void*)token_type_ids_.data());
+
+    total_length = std::accumulate(input_lengths_.begin(), input_lengths_.end(), 0);
+
+    input_lengths       = std::make_shared<rtp_llm::Buffer>(rtp_llm::MemoryType::MEMORY_CPU,
+                                                      rtp_llm::DataType::TYPE_INT32,
+                                                      std::vector<size_t>{input_lengths_.size()},
+                                                      (void*)input_lengths_.data());
+    request_id          = request_id_;
+    multimodal_features = multimodal_features_;
+    input_embeddings    = input_embeddings_;
+    checkVaild();
+}
+
 EmbeddingInput::EmbeddingInput(const torch::Tensor&             token_ids_,
                                const torch::Tensor&             token_type_ids_,
                                const torch::Tensor&             input_lengths_,
