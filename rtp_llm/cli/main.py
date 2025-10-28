@@ -31,7 +31,7 @@ def main():
         cmds[args.subparser].validate(args)
 
     if hasattr(args, "dispatch_function"):
-        args.dispatch_function(args)
+        args.dispatch_function(parser)
     else:
         parser.print_help()
 

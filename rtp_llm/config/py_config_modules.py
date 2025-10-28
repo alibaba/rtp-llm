@@ -12,6 +12,7 @@ from rtp_llm.ops import (
     ProfilingDebugLoggingConfig,
     RoleType,
 )
+from rtp_llm.tools.api.hf_model_helper import get_hf_model_info
 from rtp_llm.utils.fuser import MountRwMode, fetch_remote_file_to_local
 from rtp_llm.utils.weight_type import WEIGHT_TYPE
 
@@ -132,6 +133,16 @@ class ModelConfig:
             "JSON_MODEL_OVERRIDE_ARGS", self.json_model_override_args
         )
 
+    def get_model_type_and_update_env(self):
+        model_path = os.environ.get("CHECKPOINT_PATH", self.checkpoint_path)
+        if model_path is not None and model_path != "":
+            current_model_type = os.environ.get("MODEL_TYPE", self.model_type)
+            if current_model_type is None or current_model_type == "":
+                model_info = get_hf_model_info(model_path)
+                config_model_type = model_info.ft_model_type
+                if config_model_type is not None and config_model_type != "":
+                    self.model_type = config_model_type
+                    os.environ["MODEL_TYPE"] = config_model_type
     def to_string(self):
         return (
             f"extra_data_path: {self.extra_data_path}\n"

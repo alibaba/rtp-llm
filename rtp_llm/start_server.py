@@ -6,9 +6,10 @@ import time
 
 import requests
 
-from rtp_llm.config.py_config_modules import ServerConfig
+from rtp_llm.config.py_config_modules import ServerConfig, StaticConfig
 from rtp_llm.metrics import kmonitor
 from rtp_llm.ops import ProfilingDebugLoggingConfig
+from rtp_llm.tools.api.hf_model_helper import get_hf_model_info
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
@@ -178,6 +179,7 @@ def start_server():
         logging.error(f"start failed, {str(e)}")
     finally:
         monitor_and_release_process(backend_process, frontend_process)
+
 
 
 if __name__ == "__main__":
