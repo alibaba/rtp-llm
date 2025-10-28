@@ -39,11 +39,7 @@ class GenericMoeLayer(nn.Module):
         self.top_k = config.moe_k
 
         self.gate = Linear(weights[W.moe_gate], None)
-        # Fix: Don't modify global config, save and restore has_moe_norm
-        original_has_moe_norm = config.has_moe_norm
-        config.has_moe_norm = False
         self.select_topk_op = SelectTopkOp(config)
-        config.has_moe_norm = original_has_moe_norm
         self.fused_moe: FusedMoe = FusedMoeFactory.create_fused_moe(config, weights)
 
         self.w1 = weights.get(W.moe_w1, None)
@@ -81,9 +77,6 @@ class GenericMoeLayer(nn.Module):
             device=hidden_states.device,
         )
         self.select_topk_op.forward(router_logits_fp32, topk_ids, topk_weights)
-
-        # renormalize weights
-        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
 
         return self.fused_moe(
             hidden_states=hidden_states,
