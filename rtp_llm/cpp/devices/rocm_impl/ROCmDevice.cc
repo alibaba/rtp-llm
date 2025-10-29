@@ -130,6 +130,7 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
         hipDataType::HIP_R_16F, hipDataType::HIP_R_16F, hipDataType::HIP_R_16F, hipDataType::HIP_R_32F);
 
     hipblas_mm_wrapper_->setStream(stream_);
+    aiter_wrapper_.reset(new AiterWrapper());
     fmha_runner_.reset(new rocmFmhaWrapper());
     fmha_runner_->init(stream_);
     //moe_runner_.reset(new rocmMoeWrapper());
