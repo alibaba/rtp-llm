@@ -36,9 +36,13 @@ public:
         bool    is_resident = false;
     };
 
-    MatchResult match(const std::vector<int64_t>& cache_keys);
+    MatchResult match(const std::vector<int64_t>& cache_keys) {
+        // return reader_writer match;
+    }
     
-    std::vector<int> put(const std::vector<int64_t> cache_keys, const std::vector<int> block_indices);
+    std::vector<int> put(const std::vector<int64_t> cache_keys, const std::vector<int> block_indices) {
+        return reader_writer_->write(cache_keys, block_indices);
+    }
 
     std::vector<int> pop();
 

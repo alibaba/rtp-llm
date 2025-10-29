@@ -80,24 +80,29 @@ KVCacheGroupType KVCacheGroup::type() const {
     return group_spec_.type_;
 }
 
-bool KVCacheGroup::evict(int need_evict_len) {
+std::vector<std::pair<int64_t, int32_t>> KVCacheGroup::evict(int need_evict_len) {
     if (need_evict_len <= 0) {
         return true;
     }
     
-    vector<int> evicted_blocks;
+    std::vector<std::pair<int64_t, int32_t>> evicted_blocks;
     while (static_cast<int>(evicted_blocks.size()) < need_evict_len && !block_cache_->empty()) {
-        auto evicted_block = block_cache_->pop();
-        evicted_blocks.push_back(evicted_block);
+        auto [cache_key, block_index] = block_cache_->pop();
+        evicted_blocks.push_back(std::make_pair(cache_key, block_index));
     }
-    block_pool_->free(evicted_blocks);
+    
+    std::vector<int> need_free_block_indices;
+    for (auto& [cache_key, block_index] : evicted_blocks) {
+        need_free_block_indices.push_back(block_index);
+    }
+    block_pool_->free(need_free_block_indices);
     
     int evicted_count = static_cast<int>(evicted_blocks.size());
     bool success = (evicted_count >= need_evict_len);
     RTP_LLM_LOG_DEBUG("Evicted %d blocks (needed %d): %s", 
                       evicted_count, need_evict_len, success ? "success" : "partial");
     
-    return success;
+    return evicted_blocks;
 }
 
 
@@ -109,6 +114,14 @@ std::unordered_map<int, torch::Tensor> KVCacheGroup::layerCacheBase() const {
 BufferPtr KVCacheGroup::convertIndexToAddr(int layer_id, int block_id) const {
     local_layer_id = gloabl_layer_to_local_layer[layer_id];
     return block_pool_->convertIndexToAddr(local_layer_id, block_id);
+}
+
+std::vector<BufferPtr> KVCacheGroup::convertIndexToAddr(int block_id) const {
+    std::vector<BufferPtr> buffers;
+    for (const auto &[global_layer_id, local_layer_id] : gloabl_layer_to_local_layer) {
+        buffers.push_back(convertIndexToAddr(local_layer_id, block_id));
+    }
+    return buffers;
 }
 
 }  // namespace rtp_llm
