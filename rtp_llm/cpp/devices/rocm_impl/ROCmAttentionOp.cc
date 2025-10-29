@@ -852,6 +852,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                                 nullptr,
                                 false,
                                 false);
+        printBufferData(params.output, "run_ck_data_output");
     } else {
         // Processing continuous/variable-length sequences
         torch::Tensor q_output_tensor, k_output_tensor, v_output_tensor;

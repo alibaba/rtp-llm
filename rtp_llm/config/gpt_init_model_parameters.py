@@ -824,6 +824,8 @@ class GptInitModelParameters:
         else:
             align_size = tp_size * 64
             moe_align_size = 64
+            if self.quant_algo.isFp8PTPC():
+                moe_align_size = 128
         if self.layer_inter_size:
             layer_inter_padding_size = []
             for idx in range(len(self.layer_inter_size)):

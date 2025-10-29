@@ -307,15 +307,15 @@ cc_library(
 
 cc_library(
     name = "module_gemm_a8w8",
-    srcs = ["aiter/jit/libmodule_gemm_a8w8.so"],
-    hdrs = ["csrc/ck_gemm_a8w8/include/gemm_a8w8.h"],
+    srcs = ["aiter/jit/module_gemm_a8w8.so"],
+    hdrs = ["aiter_meta/csrc/ck_gemm_a8w8/include/gemm_a8w8.h"],
     deps = [
         ":aiter_so",
         ":aiter_headers",
     ],
     copts = [],
     linkopts = [],
-    strip_include_prefix = "aiter_meta/csrc/include/",
+    strip_include_prefix = "aiter_meta/csrc/ck_gemm_a8w8/include/",
     visibility = ["//visibility:public"],
     tags = ["rocm"],
 )

@@ -24,7 +24,10 @@ BufferPtr DeviceBase::mhaQKVGemm(const AttentionLayerParams& params) {
                                     mayGetRef(params.weights.qkv_weight->bias),
                                     std::nullopt,
                                     std::nullopt,
-                                    std::nullopt);
+                                    std::nullopt,
+                                    nullptr,
+                                    false,
+                                    params.qscheme);
         qkv = loraLinearWithActivation(LoraLinearWithActivationParams(lora_linear_params, act_params));
     } else {
         qkv = loraLinear(LoraLinearParams(qkv_gemm_params, params.common.lora_input.qkv_lora_input)).output;

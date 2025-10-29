@@ -86,6 +86,8 @@ public:
               const int          ldc,
               const float*       d_scale_a,
               const float*       d_scale_b,
+              const void*        bias = nullptr,
+              const hipblasLtEpilogue_t epilogue = HIPBLASLT_EPILOGUE_DEFAULT,
               float              alpha_ = float(1.0f),
               float              beta_  = float(0.0f));
 
@@ -101,7 +103,9 @@ public:
                      void*                     C,
                      const int                 ldc,
                      const void*               bias,
-                     const hipblasLtEpilogue_t epilogue);
+                     const hipblasLtEpilogue_t epilogue,
+                     const float*              scale_A = nullptr,
+                     const float*              scale_B = nullptr);
 
     void setFP32GemmConfig();
     void setFP16GemmConfig();

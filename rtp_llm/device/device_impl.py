@@ -527,7 +527,7 @@ class RocmImpl(GpuImpl):
         elif key == "scale":
             weight = weight * 2.0
 
-        if key in [W.attn_qkv_w, W.attn_o_w, W.ffn_w2, W.ffn_w13]:
+        if key in [W.attn_qkv_w, W.attn_o_w, W.ffn_w2, W.ffn_w13, W.ffn_w3]:
             if self.py_env_configs.py_hw_kernel_config.use_swizzleA:
                 weight = swizzle_tensor(weight, weight.dtype != torch.float8_e4m3fn)
             elif weight.dtype == torch.float8_e4m3fn:
