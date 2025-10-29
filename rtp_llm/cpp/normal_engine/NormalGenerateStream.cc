@@ -33,10 +33,7 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
 
     for (int i = 0; i < nextBatchSize(); i++) {
         GenerateOutput generate_output;
-        generate_output.aux_info.iter_count      = iter_count_;
-        generate_output.aux_info.fallback_tokens = fallback_blocks_ * seqSizePerBlock();
-        generate_output.aux_info.fallback_times  = fallback_times_;
-        generate_output.output_ids               = SAFE_CACHED_HOST_BUF(TYPE_INT32, {1lu, output_len});
+        generate_output.output_ids = SAFE_CACHED_HOST_BUF(TYPE_INT32, {1lu, output_len});
 
         // TODO(xinfei.sxf) optimize this copy : only copy last token
         complete_token_ids_->copyTokensTo(i, generate_output.output_ids->data(), last_output_pos_, output_len);
@@ -96,38 +93,40 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             generate_output.loss = loss;
         }
 
-        if (generate_input_->generate_config->return_softmax_probs && softmax_probs_) {
-            generate_output.aux_info.softmax_probs = device_->clone(
-                {(*softmax_probs_)[i].view(last_output_pos_, output_len), rtp_llm::AllocationType::HOST});
-        }
-
-        generate_output.finished              = sub_generate_status_[i].status == StreamState::FINISHED;
-        generate_output.aux_info.cost_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
-        generate_output.aux_info.first_token_cost_time_us = complete_token_ids_->firstTokenLatencyUs();
-        generate_output.aux_info.wait_time_us             = wait_time_us_;
-        generate_output.aux_info.input_len                = generate_input_->promptLength();
-        generate_output.aux_info.prefix_len               = generate_input_->prefix_length;
-        // TODO(xinfei.sxf) 提前结束的query，output len要设置正确
-        generate_output.aux_info.output_len       = seqLength() - generate_input_->inputLength();
-        generate_output.aux_info.step_output_len  = output_len;
-        generate_output.aux_info.reuse_len        = reuse_length_;
-        generate_output.aux_info.pd_sep           = queryPdSep();
-        generate_output.aux_info.local_reuse_len  = local_reuse_length_;
-        generate_output.aux_info.remote_reuse_len = remote_reuse_length_;
-
-        if (update_info.cum_log_probs) {
-            generate_output.aux_info.cum_log_probs = SAFE_CACHED_HOST_BUF(TYPE_FP32, {1lu});
-            memcpy(generate_output.aux_info.cum_log_probs.value()->data(),
-                   cum_log_probs_->dataWithOffset<float>(i),
-                   sizeof(float));
-        }
-
-        if (generate_input_->generate_config->return_all_probs) {
-            if (!update_info.all_probs) {
-                throw std::runtime_error("all_probs is not while generate_config return_all_probs is true");
+        generate_output.finished = sub_generate_status_[i].status == StreamState::FINISHED;
+        if (generate_input_->generate_config->aux_info) {
+            generate_output.aux_info.iter_count      = iter_count_;
+            generate_output.aux_info.fallback_tokens = fallback_blocks_ * seqSizePerBlock();
+            generate_output.aux_info.fallback_times  = fallback_times_;
+            generate_output.aux_info.cost_time_us    = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
+            generate_output.aux_info.first_token_cost_time_us = complete_token_ids_->firstTokenLatencyUs();
+            generate_output.aux_info.wait_time_us             = wait_time_us_;
+            generate_output.aux_info.input_len                = generate_input_->promptLength();
+            generate_output.aux_info.prefix_len               = generate_input_->prefix_length;
+            // TODO(xinfei.sxf) 提前结束的query，output len要设置正确
+            generate_output.aux_info.output_len       = seqLength() - generate_input_->inputLength();
+            generate_output.aux_info.step_output_len  = output_len;
+            generate_output.aux_info.reuse_len        = reuse_length_;
+            generate_output.aux_info.pd_sep           = queryPdSep();
+            generate_output.aux_info.local_reuse_len  = local_reuse_length_;
+            generate_output.aux_info.remote_reuse_len = remote_reuse_length_;
+            if (generate_input_->generate_config->return_softmax_probs && softmax_probs_) {
+                generate_output.aux_info.softmax_probs = device_->clone(
+                    {(*softmax_probs_)[i].view(last_output_pos_, output_len), rtp_llm::AllocationType::HOST});
             }
-            generate_output.aux_info.all_probs =
-                device_->clone({all_probs_->view(i, 1), rtp_llm::AllocationType::HOST});
+            if (update_info.cum_log_probs) {
+                generate_output.aux_info.cum_log_probs = SAFE_CACHED_HOST_BUF(TYPE_FP32, {1lu});
+                memcpy(generate_output.aux_info.cum_log_probs.value()->data(),
+                       cum_log_probs_->dataWithOffset<float>(i),
+                       sizeof(float));
+            }
+            if (generate_input_->generate_config->return_all_probs) {
+                if (!update_info.all_probs) {
+                    throw std::runtime_error("all_probs is not while generate_config return_all_probs is true");
+                }
+                generate_output.aux_info.all_probs =
+                    device_->clone({all_probs_->view(i, 1), rtp_llm::AllocationType::HOST});
+            }
         }
         // hidden_states post process
         if (generate_output.finished && generate_input_->generate_config->return_hidden_states
