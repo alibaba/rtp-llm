@@ -95,7 +95,6 @@ TEST_F(AttentionOpTest, MultiBlockSelfAttentionOpTest) {
     }
 }
 */
-
 TEST_F(AttentionOpTest, ContextAttentionOpTest) {
     printf("Runing ContextAttentionOpTest\n");
     auto device_init_params = DeviceInitParams();

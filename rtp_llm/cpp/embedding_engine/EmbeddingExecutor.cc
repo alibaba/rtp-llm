@@ -53,9 +53,9 @@ static bool has_arg(const Flag& flag, Arg idx) {
 }  // namespace HandlerArgs
 
 EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, rtp_llm::DeviceBase* device, py::object handler):
+    device_(device),
     handler_(handler),
     handler_args_(),
-    device_(device),
     metrics_reporter_(params.metrics_reporter),
     params_(params.gpt_init_parameter) {
     GptModelInitParams model_init_params({
