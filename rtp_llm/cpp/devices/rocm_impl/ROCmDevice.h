@@ -23,6 +23,7 @@
 #include "rtp_llm/cpp/rocm/rocmCKW8A8GeluGemmWrapper.h"
 #include "rtp_llm/cpp/kernels/kv_cache/kv_cache_utils.h"
 #include "rtp_llm/cpp/rocm/custom_ar/custom_ar_comm.h"
+#include "rtp_llm/cpp/devices/rocm_impl/aiterPA.h"
 
 #include "torch_hip_allocator.h"
 
@@ -294,6 +295,7 @@ private:
     hipblasLtHandle_t hipblaslt_handle_;
 
     std::unique_ptr<rocm::hipblasMMWrapper> hipblas_mm_wrapper_;
+    std::unique_ptr<rtp_llm::AiterWrapper> aiter_wrapper_;
 
     // fmha
     std::unique_ptr<rocmFmhaWrapper> fmha_runner_;
