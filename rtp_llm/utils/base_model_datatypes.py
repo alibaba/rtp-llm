@@ -1,7 +1,7 @@
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, NamedTuple, Optional
 
 import torch
-from pydantic import BaseModel as PyBaseModel
 
 from rtp_llm.config.generate_config import GenerateConfig, RoleAddr, RoleType
 from rtp_llm.utils.multimodal_util import MultimodalInput
@@ -27,14 +27,15 @@ class EmbeddingOutput:
 
 
 # single batch prompt input
-class GenerateInput(PyBaseModel):
+@dataclass
+class GenerateInput:
     request_id: int
     token_ids: torch.Tensor
     mm_inputs: List[MultimodalInput]
     generate_config: GenerateConfig
     tokenizer: Any = None  # TODO: remove this
     prefix_length: int = 0
-    token_type_ids: List[int] = []
+    token_type_ids: List[int] = field(default_factory=list)
 
     class Config:
         arbitrary_types_allowed = True
@@ -52,7 +53,8 @@ class GenerateInput(PyBaseModel):
         self.prefix_length = prefix_tokens.nelement()
 
 
-class AuxInfo(PyBaseModel):
+@dataclass
+class AuxInfo:
     cost_time: float = 0
     iter_count: int = 0
     prefix_len: int = 0
@@ -64,9 +66,9 @@ class AuxInfo(PyBaseModel):
     first_token_cost_time: float = 0
     wait_time: float = 0
     pd_sep: bool = False
-    cum_log_probs: List[float] = []
-    beam_responses: List[str] = []
-    softmax_probs: List[float] = []
+    cum_log_probs: List[float] = field(default_factory=list)
+    beam_responses: List[str] = field(default_factory=list)
+    softmax_probs: List[float] = field(default_factory=list)
 
     reuse_len: int = 0
     local_reuse_len: int = 0
@@ -80,11 +82,12 @@ class AuxInfo(PyBaseModel):
     decode_local_reuse_len: int = 0
     decode_remote_reuse_len: int = 0
 
-    role_addrs: List[RoleAddr] = []
+    role_addrs: List[RoleAddr] = field(default_factory=list)
     aux_string: str = ""
 
 
-class GenerateOutput(PyBaseModel):
+@dataclass
+class GenerateOutput:
     hidden_states: Optional[torch.Tensor] = None
     all_hidden_states: Optional[torch.Tensor] = None
     output_ids: Optional[torch.Tensor] = None
@@ -99,11 +102,13 @@ class GenerateOutput(PyBaseModel):
         arbitrary_types_allowed = True
 
 
-class GenerateOutputs(PyBaseModel):
-    generate_outputs: List[GenerateOutput] = []
+@dataclass
+class GenerateOutputs:
+    generate_outputs: List[GenerateOutput] = field(default_factory=list)
 
 
-class GenerateResponse(PyBaseModel):
+@dataclass
+class GenerateResponse:
     generate_outputs: GenerateOutputs
     generate_texts: List[str]
 
