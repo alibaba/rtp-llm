@@ -97,6 +97,7 @@ class GenerateConfig(BaseModel):
     return_cum_log_probs: bool = False
     return_all_probs: bool = False
     return_softmax_probs: bool = False
+    aux_info: bool = False
     can_use_pd_separation: bool = True
     gen_timeline: bool = False
     profile_step: int = 3
