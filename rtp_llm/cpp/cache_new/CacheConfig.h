@@ -49,6 +49,9 @@ struct CacheConfig {
     std::vector<KVCacheParam>     layer_type_params;
     std::vector<std::vector<int>> layer_ids;
 
+    bool                          enable_independent_pool = true;
+
+
     int                           layer_num;
     int                           block_num;   
     int                           block_size;

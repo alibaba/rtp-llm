@@ -9,6 +9,21 @@
 
 namespace rtp_llm {
 
+// TODO(chanyin): check here 
+struct BlockAddrInfo {
+    void* k_addr = nullptr;
+    void* v_addr = nullptr;
+    void* k_scale_addr = nullptr;
+    void* v_scale_addr = nullptr;
+};
+
+struct BlockBufferInfo {
+    BufferPtr k_addr;
+    BufferPtr v_addr;
+    BufferPtr k_scale_addr;
+    BufferPtr v_scale_addr;
+};
+    
 struct CacheLayerLayout {
     std::vector<int>       layer_to_groups;
     std::vector<BufferPtr> layers_to_buffer_ptrs;

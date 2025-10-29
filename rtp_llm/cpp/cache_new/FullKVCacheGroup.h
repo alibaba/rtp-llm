@@ -30,7 +30,9 @@ public:
     BufferPtr convertIndexToAddr(int layer_id, int block_id) const override;
     KVCacheGroupType type() const override;
     
+    size_t freeBlockNums() const override;
     bool evict(int need_evict_len) override;
+    int seqSizePerBlock() const override;
 
 private:
     std::shared_ptr<BlockCacheV1> block_cache_;

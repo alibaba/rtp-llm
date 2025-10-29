@@ -25,21 +25,6 @@ public:
         torch::Tensor      kv_blocks;
     };
 
-    // TODO(chanyin): check here 
-    struct BlockAddrInfo {
-        void* k_addr = nullptr;
-        void* v_addr = nullptr;
-        void* k_scale_addr = nullptr;
-        void* v_scale_addr = nullptr;
-    };
-
-    struct BlockBufferInfo {
-        BufferPtr k_addr;
-        BufferPtr v_addr;
-        BufferPtr k_scale_addr;
-        BufferPtr v_scale_addr;
-    };
-
     BlockPool(const BlockPoolConfig& config, rtp_llm::DeviceBase* device, AllocationType atype = AllocationType::DEVICE);
 
     bool init();

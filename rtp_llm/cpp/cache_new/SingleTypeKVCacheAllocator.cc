@@ -58,81 +58,47 @@ MallocResult SingleTypeKVCacheAllocator::malloc(const MallocInfo& malloc_info) {
         return {false, 0};
     }
 
-    auto cache_keys = malloc_info.batch_kv_cache_resource->batch_block
-    
+    auto& cache_keys = malloc_info.batch_kv_cache_resource->cache_keys[0];
+    auto& block_ids = malloc_info.batch_kv_cache_resource->batch_block_id[0];
 
-
+    // all block has been allocated
+    // if (block_ids.size() >= cache_keys.size()) {
+    //     return {true, block_ids.size()};
+    // }
     
-    
+    // TODO: add reserve_step in malloc_info
 
+    auto& seq_len = malloc_info.complete_token_ids->seqLength();
+
+    auto seq_size_per_block = full_kv_cache_group_->seqSizePerBlock();
+    int need_block_num = std::max((seq_len + seq_size_per_block - 1) / seq_size_per_block - block_ids.size(), 0);
+
+    if (malloc_info.batch_kv_cache_resource->enable_reuse_cache && block_ids.size() < cache_keys.size()) {
+        vector<int64_t> match_cache_keys(cache_keys.begin() + block_ids.size(), cache_keys.end());
+        auto match_result = full_kv_cache_group_->match(cache_keys);
+        need_block_num = need_block_num - match_result.reuse_length;
+    }
+
+    if (full_kv_cache_group_->freeBlockNums() < need_block_num) {
+        full_kv_cache_group_->evict(need_block_num);
+    }
+
+    auto new_block_ids = full_kv_cache_group_->alloc(need_block_num);
+    if new_block_ids.empty() {
+        RTP_LLM_LOG_ERROR("Failed to allocate %d blocks", need_block_num);
+        return {false, 0};
+    }
+
+    block_ids.insert(block_ids.end(), new_block_ids.begin(), new_block_ids.end());
+    return {true, match_result.reuse_length};
 }
 
-// MallocResult SingleTypeKVCacheAllocator::mallocWithCache(const MallocInfo& malloc_info) {
-//     MallocResult result = {false, 0};
-    
-//     auto token_ids = malloc_info.complete_token_ids->commonCompleteTokenIdsVec(0);
-//     std::vector<int64_t> cache_keys;
-//     for (auto token_id : token_ids) {
-//         cache_keys.push_back(static_cast<int64_t>(token_id));
-//     }
-    
-//     auto match_result = full_kv_cache_group_->match(cache_keys);
-//     result.reuse_len = match_result.reuse_length;
-    
-//     // 3. 计算需要分配的新块数量
-//     int total_needed_blocks = cache_keys.size();
-//     int new_blocks_needed = total_needed_blocks - match_result.reuse_length;
-    
-//     if (new_blocks_needed > 0) {
-//         // 4. 分配新块
-//         auto new_block_ids = full_kv_cache_group_->alloc(new_blocks_needed);
-//         if (new_block_ids.size() != new_blocks_needed) {
-//             RTP_LLM_LOG_ERROR("Failed to allocate %d blocks, only got %zu", 
-//                              new_blocks_needed, new_block_ids.size());
-//             return result;
-//         }
-        
-//         // 5. 将新分配的块添加到 BatchKVCacheResource
-//         // 这里需要根据具体的 BatchKVCacheResource 接口来实现
-//         // 暂时简化处理
-//         RTP_LLM_LOG_DEBUG("Allocated %zu new blocks, reused %d blocks", 
-//                          new_block_ids.size(), result.reuse_len);
-//     }
-    
-//     result.success = true;
-//     return result;
-// }
-
-// MallocResult SingleTypeKVCacheAllocator::mallocSimple(const MallocInfo& malloc_info) {
-//     MallocResult result = {false, 0};
-    
-//     // 简单分配：直接从 block_pool 分配新块
-//     int blocks_needed = 1;  // 这里需要根据实际需求计算
-    
-//     auto new_block_ids = full_kv_cache_group_->alloc(blocks_needed);
-//     if (new_block_ids.size() != blocks_needed) {
-//         RTP_LLM_LOG_ERROR("Failed to allocate %d blocks, only got %zu", 
-//                          blocks_needed, new_block_ids.size());
-//         return result;
-//     }
-    
-//     // 将分配的块添加到 BatchKVCacheResource
-//     RTP_LLM_LOG_DEBUG("Simple allocation: allocated %zu blocks", new_block_ids.size());
-    
-//     result.success = true;
-//     result.reuse_len = 0;
-//     return result;
-// }
-
 FreeResult SingleTypeKVCacheAllocator::free(const FreeInfo& free_info) {
-    FreeResult result = {false};
-    
     if (!free_info.batch_kv_cache_resource) {
         RTP_LLM_LOG_ERROR("BatchKVCacheResource is null");
-        return result;
+        return {false};
     }
     
-    // 收集所有需要释放的块
     std::vector<int> blocks_to_free;
     for (int batch_id = 0; batch_id < free_info.batch_kv_cache_resource->batchSize(); ++batch_id) {
         const auto& blocks = free_info.batch_kv_cache_resource->blocks(batch_id);
@@ -144,42 +110,43 @@ FreeResult SingleTypeKVCacheAllocator::free(const FreeInfo& free_info) {
         RTP_LLM_LOG_DEBUG("Freed %zu blocks", blocks_to_free.size());
     }
     
-    result.success = true;
-    return result;
+    return {true};
 }
 
 InsertResult SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
-    InsertResult result = {false};
-    
-    if (!insert_info.batch_kv_cache_resource) {
+    if (!malloc_info.batch_kv_cache_resource) {
         RTP_LLM_LOG_ERROR("BatchKVCacheResource is null");
-        return result;
+        return {false, 0};
     }
-    
-    // 这里需要根据具体的缓存插入逻辑来实现
-    // 暂时简化处理
-    RTP_LLM_LOG_DEBUG("Insert into cache requested");
-    
-    result.success = true;
-    return result;
+
+    auto& cache_keys = malloc_info.batch_kv_cache_resource->cache_keys[0];
+    auto& block_ids = malloc_info.batch_kv_cache_resource->batch_block_id[0];
+
+
+    auto put_len = std::min(cache_keys.size(), block_ids.size());
+
+    vector<int64_t> put_cache_keys(cache_keys.begin(), cache_keys.begin() + put_len);
+    vector<int> put_block_ids(block_ids.begin(), block_ids.begin() + put_len);
+    full_kv_cache_group_->insertIntoCache(put_cache_keys, put_block_ids);
+
+    return {true};
 }
 
 CacheLayerLayout SingleTypeKVCacheAllocator::layerCacheBase() const {
     CacheLayerLayout layout;
-    
-    if (!full_kv_cache_group_) {
-        RTP_LLM_LOG_ERROR("FullKVCacheGroup is not initialized");
-        return layout;
-    }
-    
-    // 设置层到组的映射（所有层都属于同一个组）
-    layout.layer_to_groups.resize(config_.layer_num, 0);
-    
-    // 获取层级缓存张量
     auto layer_tensors = full_kv_cache_group_->layerCacheBase();
-    layout.layers_to_buffer_ptrs = layer_tensors;
-    
+    for (int i = 0; i < layer_tensors.size(); i++) {
+        layout.layers_to_buffer_ptrs.push_back(layer_tensors[i]);
+    }
     return layout;
+}
+
+BlockAddrInfo SingleTypeKVCacheAllocator::convertIndexToAddr(int layer_id, int block_id) const {
+    return full_kv_cache_group_->convertIndexToAddr(layer_id, block_id);
+}
+
+BlockBufferInfo SingleTypeKVCacheAllocator::convertIndexToBuffer(int layer_id, int block_id) const {
+    return full_kv_cache_group_->convertIndexToBuffer(layer_id, block_id);
 }
 
 }  // namespace rtp_llm

@@ -83,24 +83,28 @@ KVCacheGroupType FullKVCacheGroup::type() const {
     return KVCacheGroupType::FULL;
 }
 
+size_t FullKVCacheGroup::freeBlockNums() const {
+    return block_pool_->freeBlockNums();
+}
+
+int FullKVCacheGroup::seqSizePerBlock() const {
+    return group_spec_.seq_size_per_block;
+}
+
 bool FullKVCacheGroup::evict(int need_evict_len) {
     if (need_evict_len <= 0) {
         return true;
     }
     
-    std::vector<int> evicted_blocks;
-    while (static_cast<int>(evicted_blocks.size()) < need_evict_len && !block_cache_->empty()) {
-        auto evicted_block = block_cache_->pop();
-        evicted_blocks.push_back(evicted_block);
+    // blocks popped by block_cache_ might be occupied by other query
+    // it's necessary to checkout whether free blocks are enough
+    while(block_pool_->freeBlockNums() < need_evict_len) {
+        int need_evict_len_cur = need_evict_len - block_pool_->freeBlockNums();
+        auto evicted_blocks = block_cache_->pop(need_evict_len_cur);
+        block_pool_->free(evicted_blocks);
     }
-    block_pool_->free(evicted_blocks);
     
-    int evicted_count = static_cast<int>(evicted_blocks.size());
-    bool success = (evicted_count >= need_evict_len);
-    RTP_LLM_LOG_DEBUG("Evicted %d blocks (needed %d): %s", 
-                      evicted_count, need_evict_len, success ? "success" : "partial");
-    
-    return success;
+    return true;
 }
 
 std::unordered_map<int, torch::Tensor> FullKVCacheGroup::layerCacheBase() const {

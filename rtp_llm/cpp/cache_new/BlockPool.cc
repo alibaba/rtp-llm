@@ -111,26 +111,26 @@ void BlockPool::regUserMr(size_t model_id) {
         mr_cost_time_ms_ += cost_time_ms;
         kvcache_reg_mr_ = true;
         
-        // register user buffer by block_index for decode entrance scenario
-        if(config_.layout == LAYER_FIRST) {
-            std::vector<std::shared_ptr<BlockBuffer>> buffers;
-            for (int block_index = 0; block_index < config_.block_num; ++block_index) {
-                for (int layer_index = 0; layer_index < config_.layer_num; ++layer_index) {
-                    auto block_key = makeCacheKey(model_id, std::to_string(layer_index), block_index);
-                    auto addr_info = convertIndexToAddr(layer_index, block_index);
-                    auto kv_buffer = std::make_shared<BlockBuffer>(
-                        "kv_" + block_key, 
-                        std::shared_ptr<void>(addr_info.k_addr, [](void*) {}), 
-                        config_.block_size, 
-                        true, 
-                        true);
-                    buffers.push_back(kv_buffer);
-                }
-            }
-            device_->cacheStore()->regUserBuffers(buffers);
-         } else if (config_.layout == KV_FIRST) {
-             // TODO: implement kv first layout
-         }
+        // // register user buffer by block_index for decode entrance scenario
+        // if(config_.layout == LAYER_FIRST) {
+        //     std::vector<std::shared_ptr<BlockBuffer>> buffers;
+        //     for (int block_index = 0; block_index < config_.block_num; ++block_index) {
+        //         for (int layer_index = 0; layer_index < config_.layer_num; ++layer_index) {
+        //             auto block_key = makeCacheKey(model_id, std::to_string(layer_index), block_index);
+        //             auto addr_info = convertIndexToAddr(layer_index, block_index);
+        //             auto kv_buffer = std::make_shared<BlockBuffer>(
+        //                 "kv_" + block_key, 
+        //                 std::shared_ptr<void>(addr_info.k_addr, [](void*) {}), 
+        //                 config_.block_size, 
+        //                 true, 
+        //                 true);
+        //             buffers.push_back(kv_buffer);
+        //         }
+        //     }
+        //     device_->cacheStore()->regUserBuffers(buffers);
+        //  } else if (config_.layout == KV_FIRST) {
+        //      // TODO: implement kv first layout
+        //  }
     }
 }
 
@@ -174,6 +174,14 @@ void* BlockPool::getVCacheAddr(int layer_id, int block_id) const {
         return nullptr;
     }
     return layout_strategy_->getVCacheAddr(layer_id, block_id);
+}
+
+BlockBufferInfo BlockPool::convertIndexToBuffer(int layer_id, int block_id) const {
+    if (!layout_strategy_) {
+        RTP_LLM_LOG_ERROR("Layout strategy not initialized");
+        return {nullptr, nullptr, nullptr, nullptr};
+    }
+    return layout_strategy_->convertIndexToBuffer(layer_id, block_id);
 }
 
 }  // namespace rtp_llm
