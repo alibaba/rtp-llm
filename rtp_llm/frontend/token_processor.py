@@ -1,20 +1,19 @@
 from typing import Any, List, Optional, Union
 
-import torch
 import numpy as np
 import numpy.typing as npt
-
+import torch
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 from rtp_llm.frontend.tokenizer_factory.tokenizer_utils import (
     DecodingState,
     IncrementDecodingUtils,
 )
 from rtp_llm.utils.word_util import (
-    remove_padding_eos_with_numpy,
     get_stop_word_slices,
+    match_stop_words,
+    remove_padding_eos_with_numpy,
     truncate_response_with_stop_words,
     truncate_token_with_stop_word_id,
-    match_stop_words,
 )
 
 
@@ -82,7 +81,10 @@ class TokenProcessorPerStream:
             tokens, self.special_tokens.eos_token_id
         ).tolist()
         output_len = len(tokens)
-        tokens = self.process_stop_id(print_stop_words, finished, tokens, stop_word_ids)
+        stop_word_id_slices = get_stop_word_slices(stop_word_ids)
+        tokens = self.process_stop_id(
+            print_stop_words, finished, tokens, stop_word_ids, stop_word_id_slices
+        )
         text, all_text = self.tokenids_decode(
             tokens, self.decoding_states[i], return_incremental
         )
@@ -97,7 +99,7 @@ class TokenProcessorPerStream:
         )
         return output_len, text
 
-    def decode_tokens_batch(
+    def batch_decode_tokens(
         self,
         batch_token_ids: List[npt.NDArray[np.int32]],
         batch_finished: List[bool],
@@ -109,22 +111,29 @@ class TokenProcessorPerStream:
         batch_output_lens = []
         final_texts = []
         texts_to_process = []
-        all_texts_for_stop_words = [] 
+        all_texts_for_stop_words = []
         tokens_to_decode_batch = []
+        stop_word_id_slices = get_stop_word_slices(stop_word_ids)
         for i, tokens in enumerate(batch_token_ids):
             if not self.has_num_beams:
                 self.ouput_tokens_list[i] = np.concatenate(
                     (self.ouput_tokens_list[i], tokens), axis=1
                 )
                 tokens = self.ouput_tokens_list[i]
-         
+
             tokens = remove_padding_eos_with_numpy(
                 tokens, self.special_tokens.eos_token_id
             ).tolist()
-            
+
             batch_output_lens.append(len(tokens))
 
-            tokens = self.process_stop_id(print_stop_words, batch_finished[i], tokens, stop_word_ids)
+            tokens = self.process_stop_id(
+                print_stop_words,
+                batch_finished[i],
+                tokens,
+                stop_word_ids,
+                stop_word_id_slices,
+            )
 
             tokens_to_decode_batch.append(tokens)
 
@@ -136,9 +145,9 @@ class TokenProcessorPerStream:
             for i, all_text in enumerate(all_texts_batch):
                 decoding_state = self.decoding_states[i]
                 new_text, all_text = self.tokenids_decode(
-                    tokens, decoding_state, return_incremental=True 
+                    tokens, decoding_state, return_incremental=True
                 )
-                new_text = all_text[len(decoding_state.all_text):]
+                new_text = all_text[len(decoding_state.all_text) :]
             text_for_stop_processing = new_text if return_incremental else all_text
             texts_to_process.append(text_for_stop_processing)
             all_texts_for_stop_words.append(all_text)
@@ -157,16 +166,15 @@ class TokenProcessorPerStream:
 
         return batch_output_lens, final_texts
 
-
     def process_stop_id(
         self,
         print_stop_words: bool,
         finished: bool,
         tokens: List[int],
         stop_word_ids: List[List[int]],
+        stop_word_id_slices=List[Union[str, List[int]]],
     ) -> List[int]:
 
-        stop_word_id_slices = get_stop_word_slices(stop_word_ids)
         if not print_stop_words:
             if not finished:
                 tokens = truncate_token_with_stop_word_id(tokens, stop_word_id_slices)
@@ -193,7 +201,7 @@ class TokenProcessorPerStream:
                 if not print_stop_words:
                     text = text[:stop_idx]
                 else:
-                    text = text[:stop_idx + stop_len]
+                    text = text[: stop_idx + stop_len]
                 token_buffer = ""
                 finished = True
 
@@ -203,7 +211,9 @@ class TokenProcessorPerStream:
         stop_word_str_slices = get_stop_word_slices(stop_word_str_list)
 
         if return_incremental or not print_stop_words:
-            trunc_text = truncate_response_with_stop_words(text, stop_word_str_slices, True, True)
+            trunc_text = truncate_response_with_stop_words(
+                text, stop_word_str_slices, True, True
+            )
             if return_incremental:
                 token_buffer = text[len(trunc_text) :]
             text = trunc_text
