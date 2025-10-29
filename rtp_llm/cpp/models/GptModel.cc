@@ -531,7 +531,7 @@ vector<LayerMicroBatchInputs> GptModel::prepareMicroBatchInputs(const GptModelIn
 
         if (!micro_batch_plan.enable) {
             final_inputs.emplace_back(LayerMicroBatchInputs{
-                micro_inputs.combo_tokens, hidden, pre_decoder_residual, std::move(attention_common_inputs)});
+                micro_inputs.combo_tokens,  i == 0 ? hidden : hidden->slice(0, 1), pre_decoder_residual, std::move(attention_common_inputs)});
             if (i > 0) {
                 // The second micro-batch is a fake/dummy input used when micro-batching is disabled.
                 // This is a workaround to maintain the original structure, which results in some tight coupling.
