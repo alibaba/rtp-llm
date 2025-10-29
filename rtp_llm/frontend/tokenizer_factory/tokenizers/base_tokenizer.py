@@ -31,8 +31,6 @@ class BaseTokenizer:
             for seq in token_ids
         ]
 
-        #return self.tokenizer.batch_decode(token_ids, **kwargs)
-    
     def apply_chat_template(self, messages, **kwargs):
         return self.tokenizer.apply_chat_template(messages, **kwargs)
 

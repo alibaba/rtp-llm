@@ -94,13 +94,15 @@ MultiSeqsResponse GenerateStreamWrapper::formatResponse(const std::vector<std::s
                                generate_outputs.generate_outputs.end(),
                                [](const auto& out) { return out.finished; });
 
-    std::transform(generate_outputs.generate_outputs.begin(),
-                   generate_outputs.generate_outputs.end(),
-                   std::back_inserter(res.aux_info),
-                   [generate_config, generate_texts](const auto& out) {
-                       auto aux_info = AuxInfoAdapter(out.aux_info);
-                       return aux_info;
-                   });
+    if (generate_config->aux_info) {
+        std::transform(generate_outputs.generate_outputs.begin(),
+                       generate_outputs.generate_outputs.end(),
+                       std::back_inserter(res.aux_info),
+                       [generate_config, generate_texts](const auto& out) {
+                           auto aux_info = AuxInfoAdapter(out.aux_info);
+                           return aux_info;
+                       });
+    }
 
     if (generate_config->return_logits)
         res.logits.emplace();

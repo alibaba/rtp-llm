@@ -128,34 +128,38 @@ std::vector<std::string> TokenProcessorPerStream::decodeTokens(GenerateOutputs& 
     }
     py::list batch_token_ids;
     py::list batch_finished_flags;
-    
+
     for (size_t i = 0; i < responses.generate_outputs.size(); i++) {
         auto&            response = responses.generate_outputs[i];
         py::array_t<int> token_ids(response.output_ids->size(), response.output_ids->data<int>());
         batch_token_ids.append(token_ids);
         batch_finished_flags.append(response.finished);
     }
-    py::tuple result = token_processor_stream_.attr("decode_tokens_batch")(
-        batch_token_ids,
-        batch_finished_flags,
-        config->print_stop_words,
-        config->stop_words_str,
-        config->stop_words_list,
-        config->return_incremental);
+    py::tuple result = token_processor_stream_.attr("batch_decode_tokens")(batch_token_ids,
+                                                                           batch_finished_flags,
+                                                                           config->print_stop_words,
+                                                                           config->stop_words_str,
+                                                                           config->stop_words_list,
+                                                                           config->return_incremental);
 
     if (result.size() != 2) {
         RTP_LLM_LOG_WARNING("token_processor_per_stream.decodeTokens() failed.");
-        texts.resize(responses.generate_outputs.size(), ""); 
+        texts.resize(responses.generate_outputs.size(), "");
         output_lens.resize(responses.generate_outputs.size(), 0);
         return texts;
     }
     py::list py_output_lens = result[0].cast<py::list>();
-    py::list py_texts = result[1].cast<py::list>();
-    if (py_texts.size() != responses.generate_outputs.size() || py_output_lens.size() != responses.generate_outputs.size()) {
-         RTP_LLM_LOG_WARNING("Batch decode returned a different number of results than expected. expected: %d, actual test size: %d, actual py_output_lens size: %d", responses.generate_outputs.size(), py_texts.size(),  py_output_lens.size());
-         texts.resize(responses.generate_outputs.size(), ""); 
-         output_lens.resize(responses.generate_outputs.size(), 0);
-         return texts;
+    py::list py_texts       = result[1].cast<py::list>();
+    if (py_texts.size() != responses.generate_outputs.size()
+        || py_output_lens.size() != responses.generate_outputs.size()) {
+        RTP_LLM_LOG_WARNING(
+            "Batch decode returned a different number of results than expected. expected: %d, actual test size: %d, actual py_output_lens size: %d",
+            responses.generate_outputs.size(),
+            py_texts.size(),
+            py_output_lens.size());
+        texts.resize(responses.generate_outputs.size(), "");
+        output_lens.resize(responses.generate_outputs.size(), 0);
+        return texts;
     }
     for (size_t i = 0; i < py_texts.size(); i++) {
         output_lens.push_back(py_output_lens[i].cast<int>());
