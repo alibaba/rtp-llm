@@ -62,7 +62,8 @@ NcclParam ROCmDevice::getNcclParam(ParallelMode mode) {
 }
 
 void ROCmDevice::broadcast(const BroadcastParams& params) {
-    RTP_LLM_CHECK_WITH_INFO(params.mode == ParallelMode::TP, "broadcast not support mode [%d]", params.mode);
+    RTP_LLM_CHECK_WITH_INFO(params.mode == ParallelMode::TP || params.mode == ParallelMode::DP_AND_TP,
+        "broadcast not support mode [%d]", params.mode);
     if (tp_nccl_param_.world_size_ < 2) {
         return;
     }
