@@ -221,17 +221,13 @@ def test_grpc_input():
 
     try:
         # 调用 decode 方法（返回一个响应流）
-        response_stream = stub.decode(request)  # 注意这里是流式响应
-
-        # 遍历流式响应
-        for response in response_stream:
-
-            tensor_pb = response.output_t
-            torch_tensor = tensor_pb_to_torch(tensor_pb)
-            if torch_tensor is not None:
-                print("Tensor shape:", torch_tensor.shape)
-                print("Tensor dtype:", torch_tensor.dtype)
-                print("Tensor data (first 5 elements):", torch_tensor.flatten()[:5])
+        response = stub.decode(request)  # 注意这里是流式响应
+        tensor_pb = response.output_t
+        torch_tensor = tensor_pb_to_torch(tensor_pb)
+        if torch_tensor is not None:
+            print("Tensor shape:", torch_tensor.shape)
+            print("Tensor dtype:", torch_tensor.dtype)
+            print("Tensor data (first 5 elements):", torch_tensor.flatten()[:5])
 
     except grpc.RpcError as e:
         print(f"RPC failed: {e.code()}: {e.details()}")

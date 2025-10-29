@@ -20,9 +20,7 @@ public:
                                      std::shared_ptr<MultimodalProcessor> mm_processor):
         embedding_engine_(engine), pyRenderer_(pyRenderer), mm_processor_(mm_processor) {}
     explicit EmbeddingRpcServiceImpl() {};
-    grpc::Status decode(grpc::ServerContext*                   context,
-                        const EmbeddingInputPB*                request,
-                        grpc::ServerWriter<EmbeddingOutputPB>* writer);
+    grpc::Status decode(grpc::ServerContext* context, const EmbeddingInputPB* request, EmbeddingOutputPB* response);
 
     grpc::Status health(grpc::ServerContext* context, const EmbeddingHealthRequestPB* request, EmptyPB* writer);
 

@@ -407,7 +407,7 @@ message EmbeddingOutputPB {
 }
 
 service EmbeddingRpcService {
-    rpc decode(EmbeddingInputPB) returns (stream EmbeddingOutputPB);
+    rpc decode(EmbeddingInputPB) returns (EmbeddingOutputPB);
     rpc health(EmbeddingHealthRequestPB) returns (EmptyPB);
 }
 
