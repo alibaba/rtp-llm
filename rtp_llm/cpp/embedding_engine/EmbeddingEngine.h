@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/embedding_engine/EmbeddingExecutor.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
+#include "rtp_llm/cpp/engine_base/TorchProfiler.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/embedding_engine/EmbeddingStream.h"
 #include "rtp_llm/cpp/embedding_engine/EmbeddingScheduler.h"
@@ -56,6 +57,7 @@ private:
     std::unique_ptr<EmbeddingScheduler> scheduler_;
     ResourceContext                     resource_context_;
     kmonitor::MetricsReporterPtr        metrics_reporter_ = nullptr;
+    std::shared_ptr<CudaProfiler>       profiler_;
 };
 
 }  // namespace rtp_llm

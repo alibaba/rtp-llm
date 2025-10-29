@@ -133,24 +133,37 @@ LayernormOutput ROCmDevice::layernorm(const LayernormParams& params) {
     const auto  n            = input->shape()[1];
     auto        norm_weight  = params.norm_weight;
     const auto& gamma        = norm_weight ? norm_weight->get().gamma.get()->data() : nullptr;
-    const auto& beta      = (norm_weight && norm_weight->get().beta) ? norm_weight->get().beta.get()->data() : nullptr;
+    const auto& beta         = (norm_weight && norm_weight->get().beta) ? norm_weight->get().beta.get()->data() : nullptr;
+    const auto& static_scale = (norm_weight && norm_weight->get().static_scale) ? norm_weight->get().static_scale.get()->data<float>() : nullptr;
     const auto  norm_type = params.norm_type;
     const auto  eps       = params.eps;
     const auto& weights   = params.norm_weight;
 
-    if (!params.is_inplace
-        && (params.qscheme == QScheme::NoQuantize || params.qscheme == QScheme::Qfp8PerTokenBlock
-            || params.qscheme == QScheme::Qfp8PerToken)) {
+    if ((!params.is_inplace
+        && (params.qscheme == QScheme::NoQuantize || params.qscheme == QScheme::Qfp8PerTokenBlock))
+            || params.qscheme == QScheme::Qfp8PerToken || params.qscheme == QScheme::Qint8PerTensor) {
         norm_output = allocateBufferLike(*params.input);
-    } else if (params.qscheme == Qint8PerToken) {
-        auto kernel  = allocateBuffer({DataType::TYPE_INT8, {input->shape()}, AllocationType::DEVICE}, {"kernel"});
-        auto scales  = allocateBuffer({DataType::TYPE_FP32, {input->shape()[1]}, AllocationType::DEVICE}, {"scales"});
+    } else if (params.qscheme != QScheme::NoQuantize) {
+        auto quant_data_type = (params.qscheme == QScheme::Qfp8PerTensor) ? DataType::TYPE_FP8_E4M3 : DataType::TYPE_INT8;
+        auto kernel  = allocateBuffer({quant_data_type, {input->shape()}, AllocationType::DEVICE}, {"kernel"});
+
+        BufferPtr scales;
+        if (params.qscheme == QScheme::Qint8PerToken) {
+            scales  = allocateBuffer({DataType::TYPE_FP32, {input->shape()[1]}, AllocationType::DEVICE}, {"scales"});
+        } else if (params.qscheme == QScheme::Qfp8PerTensor){
+            RTP_LLM_LOG_ERROR("Qfp8PerTensor not implemented!!!");
+            throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+        } else {
+            RTP_LLM_CHECK_WITH_INFO(false, "unknown qscheme type : %d", int(params.qscheme));
+        }
         norm_output  = BufferPtr(new QBuffer(
             std::move(kernel),
             std::move(scales),
             std::move(BufferPtr(new Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_INVALID, {0}, nullptr)))));
         quant_output = std::dynamic_pointer_cast<QBuffer>(norm_output)->kernel().data<int8_t>();
-        scales_ptr   = std::dynamic_pointer_cast<QBuffer>(norm_output)->scalesData<float>();
+        if (params.qscheme == QScheme::Qint8PerToken) { 
+            scales_ptr = std::dynamic_pointer_cast<QBuffer>(norm_output)->scalesData<float>();
+        }
     }
 
     if (params.norm_type == NormType::alphanorm || !norm_weight.has_value()) {
@@ -189,7 +202,12 @@ LayernormOutput ROCmDevice::layernorm(const LayernormParams& params) {
             throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
         }
     }
-    if ((params.qscheme == QScheme::NoQuantize || params.qscheme == QScheme::Qfp8PerToken) && data_type != DataType::TYPE_FP32 && ((params.norm_type == NormType::layernorm && beta && !params.residual1) || (params.norm_type == NormType::rmsnorm)))
+
+    if ((params.qscheme == QScheme::NoQuantize || params.qscheme == QScheme::Qfp8PerToken ||
+             params.qscheme == QScheme::Qint8PerTensor) && 
+        data_type != DataType::TYPE_FP32 && 
+        ((params.norm_type == NormType::layernorm && beta) || 
+         (params.norm_type == NormType::rmsnorm)))
     {
         int fused_add = params.residual1 ? 1: 0;
         int xbias = params.bias? 1: 0;
@@ -208,13 +226,22 @@ LayernormOutput ROCmDevice::layernorm(const LayernormParams& params) {
             if (fused_add)
             {
                 auto residual_in_tensor = Buffer2torchTensor(params.residual1.value().get(), false);
+                if (params.is_inplace && !params.return_normed_output) {
+                    RTP_LLM_CHECK_WITH_INFO(params.before_norm_output != norm_output, "input, output before/after norm cannot be the same");
+                }
                 auto residual_out_tensor = Buffer2torchTensor((params.before_norm_output == nullptr) ? params.input:params.before_norm_output, false);
                 layernorm2d_with_add(out_tensor, input_tensor, residual_in_tensor, residual_out_tensor, weight_tensor, beta_tensor, static_cast<double>(eps), bias_tensor);
+                if (params.return_normed_output) {
+                    copy({*torchTensor2Buffer(residual_out_tensor), *norm_output});
+                }
             }
             else
             {
                 auto res_tensor = layernorm2d(input_tensor, weight_tensor, beta_tensor, static_cast<double>(eps), bias_tensor);
                 copy({*norm_output, *torchTensor2Buffer(res_tensor)});
+                if (params.return_normed_output) {
+                    copy({*params.before_norm_output, *torchTensor2Buffer(res_tensor)});
+                }
             }
             
         }
@@ -271,7 +298,7 @@ LayernormOutput ROCmDevice::layernorm(const LayernormParams& params) {
                 DISPATCH_CUDA_FUNCTION_DATA_TYPE(
                     data_type,
                     invokeGeneralLayerNorm,
-                    nullptr,
+                    params.before_norm_output == nullptr ? nullptr: params.before_norm_output->data(),
                     norm_output->data(),
                     input->data(),
                     gamma,

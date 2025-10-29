@@ -115,6 +115,7 @@ cc_test(
             "@aiter_src//:module_moe_ck2stages",
             "@aiter_src//:module_quant",
             "@aiter_src//:module_moe_sorting",
+            "@aiter_src//:module_gemm_a8w8",
         ],
         "//conditions:default": [
             "@aiter//:module_aiter_enum",
@@ -122,6 +123,7 @@ cc_test(
             "@aiter//:module_moe_ck2stages",
             "@aiter//:module_quant",
             "@aiter//:module_moe_sorting",
+            "@aiter//:module_gemm_a8w8",
         ],
     }),
     tags = ["rocm"],
