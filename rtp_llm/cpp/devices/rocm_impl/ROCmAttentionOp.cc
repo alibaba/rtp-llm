@@ -608,6 +608,7 @@ ParamsPtr ROCmDevice::PrepareCKAttn(const AttentionConfigs& configs,
 }
 
 AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& params) {
+    aiter_wrapper_->mtp();
     auto datatype            = params.input.type();
     auto token_num           = params.input.shape()[0];
     auto batch_size          = params.common.context_batch_size;
