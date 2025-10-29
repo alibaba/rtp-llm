@@ -1,4 +1,5 @@
 import datetime
+import gc
 import json
 import logging
 import random
@@ -19,8 +20,8 @@ from rtp_llm.model_loader.model_weight_info import (
     ModelDeployWeightInfo,
     ModelWeightInfo,
 )
-from rtp_llm.utils.database import BaseDatabase
 from rtp_llm.model_loader.tensor_source import DatabaseTensorSource
+from rtp_llm.utils.database import BaseDatabase
 from rtp_llm.utils.model_weight import W
 
 
@@ -189,7 +190,7 @@ class ExpertBalancer:
         log2phy_pad[:, :k] = log2phy[0]
 
         logging.info(f"[EPLB_py PLAN] phy2log for layer {layer_id}: {phy2log[0]}")
-
+        gc.collect()
         dtype = torch.int32
         return (
             torch.tensor([layer_id], dtype=torch.int32).contiguous(),
@@ -218,7 +219,9 @@ class ExpertBalancer:
             f"[EPLB_py][RANK {self._load_config.ep_rank}] Load MOE weight layer {layer_id} for {choose_expert_id}"
         )
         try:
-            res = moe_weight.load(DatabaseTensorSource(self.database), layer_id, "cpu", self._load_config)
+            res = moe_weight.load(
+                DatabaseTensorSource(self.database), layer_id, "cpu", self._load_config
+            )
         except:
             logging.error(
                 f"[EPLB_py][RANK {self._load_config.ep_rank}] Load MOE weight layer failed: 完整堆栈:\n{traceback.format_exc()}"
@@ -227,6 +230,7 @@ class ExpertBalancer:
         logging.info(
             f"[EPLB_py][RANK {self._load_config.ep_rank}] Load MOE weight layer {layer_id} done"
         )
+        gc.collect()
         return (
             layer_id,
             res.get(W.moe_w1),
