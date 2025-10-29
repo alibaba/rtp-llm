@@ -3,7 +3,60 @@
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/devices/rocm_impl/ROCmDevice.h"
 
+using namespace pybind11::literals;
+
 namespace rtp_llm {
+
+AiterWrapper::AiterWrapper() {
+    py::gil_scoped_acquire acquire;
+    aiter_module = py::module::import("aiter");
+    pa_func = aiter_module.attr("paged_attn").attr("PagedAttention").attr("forward_decode");
+}
+
+torch::Tensor read_tensor_from_file(std::string filename) {
+    std::ifstream input(filename, std::ios::binary);
+    std::vector<char> bytes(
+        (std::istreambuf_iterator<char>(input)),
+        (std::istreambuf_iterator<char>()));
+    input.close();
+    torch::IValue x = torch::pickle_load(bytes);
+    return x.toTensor();
+}
+
+void AiterWrapper::mtp() {
+    py::gil_scoped_acquire acquire;
+    printf("DEBUG: in AiterWrapper::mtp\n");
+    torch::Tensor query = read_tensor_from_file("/mnt/raid0/hangy/aiter/op_tests/play_around_mtp/data/query.pt");
+    torch::Tensor key_cache = read_tensor_from_file("/mnt/raid0/hangy/aiter/op_tests/play_around_mtp/data/k_cache.pt");
+    torch::Tensor value_cache = read_tensor_from_file("/mnt/raid0/hangy/aiter/op_tests/play_around_mtp/data/v_cache.pt");
+    torch::Tensor block_tables = read_tensor_from_file("/mnt/raid0/hangy/aiter/op_tests/play_around_mtp/data/block_table.pt");
+    torch::Tensor seq_lens = read_tensor_from_file("/mnt/raid0/hangy/aiter/op_tests/play_around_mtp/data/seq_lens.pt");
+    
+    torch::Tensor ref = read_tensor_from_file("/mnt/raid0/hangy/aiter/op_tests/play_around_mtp/data/hip_pa_ret.pt");
+
+    // Call the Python function
+    int mtp = 5;
+    float scale = 1.0 / std::sqrt(128);
+    py::object result = pa_func(
+        query,
+        key_cache,
+        value_cache,
+        block_tables,
+        seq_lens,
+        128,
+        "auto",
+        8,
+        scale,
+        py::none(),
+        py::none(),
+        py::none(),
+        "q_scale"_a = py::none(),
+        "mtp"_a = mtp,
+        "output_dtype"_a = torch::kBFloat16
+    );
+    torch::Tensor output_tensor = result.cast<torch::Tensor>();
+    printf("DEBUG: in AiterWrapper::mtp done\n");
+}
 
 inline torch::Tensor Buffer2torchTensorCustom(const Buffer& buf, std::vector<int64_t> shape, size_t offset = 0) {
     auto option =
