@@ -599,7 +599,8 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
 
     KVBlockArray                  kv_block_array;
     PrefixPromptBatchWeightsParam prefix_prompt_param;
-
+    
+    bool use_fmha_fp8 = false;
     if (params.common.kv_cache) {
         const auto max_blocks_per_batch = params.common.kv_cache->kv_cache_block_id->shape()[1];
         kv_cache_block_id =
@@ -613,12 +614,18 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
             prefix_prompt_param.max_prefix_prompt_length = params.common.max_prefix_length;
             prefix_prompt_param.count_length             = 1;
         }
+        use_fmha_fp8 = kv_block_array.cache_type == KvCacheDataType::FP8;
     }
     printBufferData(*params.common.input_lengths, "input_lengths");
     if (params.common.cu_seqlens) {
         printBufferData(*params.common.cu_seqlens, "cu_seqlens");
         printBufferData(*params.common.cu_kv_seqlens, "cu_kv_seqlens");
     }
+
+    BufferPtr qkv_buf_fp8 = nullptr;
+    if (use_fmha_fp8) {
+        qkv_buf_fp8 = allocateBuffer({DataType::TYPE_FP8_E4M3, params.input.shape(), AllocationType::DEVICE},
+                                     {"qkv_buf_fp8"});}
 
     // int8
     float* scale_out_ptr = nullptr;
@@ -704,7 +711,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                                              v_output->data(),
                                              &prefix_prompt_param,
                                              params.input.data(),
-                                             nullptr,
+                                             qkv_buf_fp8? qkv_buf_fp8->data(): nullptr,
                                              params.common.position_ids ?
                                                  params.common.position_ids->dataWithOffset<int>(
                                                      decoder_batch_size * params.configs.rope_config.index_factor) :
@@ -811,13 +818,15 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
         writeCacheStore(params);
     }
 
-    fmha_runner_->setup(
-        datatype, params.configs.mask_type, head_num, kv_head_num, size_per_head, params.configs.q_scaling);
-    // auto seq_len_round_32 = (seq_len + 31) / 32 * 32;
-    // auto softmax_lse_ = allocateBuffer({DataType::TYPE_FP32, // params.output.type(),
-    //                                     {batch_size, head_num, seq_len_round_32},
-    //                                     AllocationType::DEVICE},
-    //                                     {"softmax_lse"});
+    
+    if (use_fmha_fp8){
+        fmha_runner_->setup(
+            DataType::TYPE_FP8_E4M3, params.configs.mask_type, head_num, kv_head_num, size_per_head, params.configs.q_scaling);
+    } else {
+        fmha_runner_->setup(
+            datatype, params.configs.mask_type, head_num, kv_head_num, size_per_head, params.configs.q_scaling);
+    }
+
     printBufferData(*q_output, "q_output");
     // printBufferData(*k_output, "k_output");
     // printBufferData(*v_output, "v_output");
@@ -836,9 +845,9 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
     printBufferData(params.input, "run_ck_input");
     if (skip_add_bias_transpose || prefix_prompt_param.max_prefix_prompt_length <= 0) {
         // not implemented reuse cache for this branch
-        fmha_runner_->runCKFmha(params.input.data(),
-                                params.input.dataWithOffset(hidden_units),
-                                params.input.dataWithOffset(hidden_units + hidden_units_kv),
+        fmha_runner_->runCKFmha(use_fmha_fp8? qkv_buf_fp8->data(): params.input.data(),
+                                use_fmha_fp8? qkv_buf_fp8->dataWithOffset(hidden_units): params.input.dataWithOffset(hidden_units), 
+                                use_fmha_fp8? qkv_buf_fp8->dataWithOffset(hidden_units + hidden_units_kv): params.input.dataWithOffset(hidden_units + hidden_units_kv),
                                 params.output.data(),
                                 nullptr,  // buffer for store out softmax_lse, looks like not used by RTP
                                 batch_size,
