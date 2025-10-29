@@ -32,7 +32,7 @@ public:
     std::string debugString() const;
 
 public:
-    bool is_allocated_blocks = false;
+    // bool is_allocated_blocks = false;
     bool enable_reuse_cache = true;
 
     // [batch_size, max_block_per_seq]

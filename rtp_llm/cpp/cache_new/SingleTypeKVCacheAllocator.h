@@ -10,7 +10,6 @@ namespace rtp_llm {
 
 
 // SingleTypedKVCacheAllocator is used for model with full attentions only
-
 class SingleTypeKVCacheAllocator : public KVCacheAllocator {
 public: 
     SingleTypeKVCacheAllocator(const CacheConfig& config, rtp_llm::DeviceBase* device, AllocationType atype = AllocationType::DEVICE);
@@ -22,9 +21,6 @@ public:
     CacheLayerLayout layerCacheBase() const override;
 
 private:
-    MallocResult mallocWithCache(const MallocInfo& malloc_info);
-    MallocResult mallocSimple(const MallocInfo& malloc_info);
-    
     BlockPoolPtr block_pool_;
     std::shared_ptr<FullKVCacheGroup> full_kv_cache_group_;
 };

@@ -28,6 +28,8 @@ public:
     
     virtual BlockAddrInfo convertIndexToAddr(int layer_id, int block_id) const = 0;
 
+    virtual BlockBufferInfo convertIndexToBuffer(int layer_id, int block_id) const = 0;
+
     virtual void* getKCacheAddr(int layer_id, int block_id) const = 0;
     
     virtual void* getVCacheAddr(int layer_id, int block_id) const = 0;
@@ -47,6 +49,7 @@ public:
               
     std::vector<torch::Tensor> getLayerCacheTensors() const override;
     BlockAddrInfo convertIndexToAddr(int layer_id, int block_id) const override;
+    BlockBufferInfo convertIndexToBuffer(int layer_id, int block_id) const override;
     void* getKCacheAddr(int layer_id, int block_id) const override;
     void* getVCacheAddr(int layer_id, int block_id) const override;
 };
@@ -60,6 +63,7 @@ public:
               
     std::vector<torch::Tensor> getLayerCacheTensors() const override;
     BlockAddrInfo convertIndexToAddr(int layer_id, int block_id) const override;
+    BlockBufferInfo convertIndexToBuffer(int layer_id, int block_id) const override;
     void* getKCacheAddr(int layer_id, int block_id) const override;
     void* getVCacheAddr(int layer_id, int block_id) const override;
 

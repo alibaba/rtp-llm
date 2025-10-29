@@ -37,4 +37,4 @@ private:
     CacheConfig config_;
     KVCacheAllocatorPtr allocator_; 
     // HashUtil hash_util_;
-w}
+};

@@ -26,18 +26,19 @@ public:
 
     virtual ~KVCacheGroup() = default;
 
-    // 纯虚函数，由派生类实现
     virtual bool init() = 0;
     virtual std::vector<int> alloc(int needed_blocks) = 0;
     virtual MatchResult match(std::vector<int64_t> cache_keys) const = 0;
     virtual void free(std::vector<int> block_indices) = 0;
     virtual void insertIntoCache(std::vector<int64_t> cache_keys, std::vector<int> block_indices) = 0;
     virtual std::unordered_map<int, torch::Tensor> layerCacheBase() const = 0;
-    virtual BufferPtr convertIndexToAddr(int layer_id, int block_id) const = 0;
+    virtual BlockAddrInfo convertIndexToAddr(int layer_id, int block_id) const = 0;
+    virtual BlockBufferInfo convertIndexToBuffer(int layer_id, int block_id) const = 0;
     virtual KVCacheGroupType type() const = 0;
 
-    // evict first if block_pool's blocks are not enough when alloc 
+    virtual size_t freeBlockNums() const = 0;
     virtual bool evict(int need_evict_len) = 0;
+    virtual int seqSizePerBlock() const = 0;
 
 protected:
     std::vector<int> layer_ids_;

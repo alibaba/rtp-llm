@@ -26,6 +26,8 @@ public:
     virtual MallocResult malloc(const MallocInfo& malloc_info) = 0;
     virtual FreeResult free(const FreeInfo& free_info) = 0;
     virtual InsertResult insertIntoCache(const InsertInfo& insert_info) = 0;
+    virtual BlockAddrInfo convertIndexToAddr(int layer_id, int block_id) const = 0;
+    virtual BlockBufferInfo convertIndexToBuffer(int layer_id, int block_id) const = 0;
     virtual CacheLayerLayout layerCacheBase() const = 0;
 
 protected:
