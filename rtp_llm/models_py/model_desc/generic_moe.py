@@ -20,9 +20,8 @@ from rtp_llm.utils.model_weight import W
 
 try:
     from librtp_compute_ops.rtp_llm_ops import SelectTopkOp
-except ImportError as e:
-    logging.error(f"SelectTopkOp is required but not available: {e}")
-    raise
+except ImportError:
+    logging.error("SelectTopkOp is required but not available")
 
 
 class GenericMoeLayer(nn.Module):
