@@ -8,6 +8,7 @@ namespace rtp_llm {
 
 struct BlockIds {
     std::vector<int> block_indices;
+    // TODO(LXQ): maybe need RAII to manage block ref counter
 };
 
 using BatchKVCacheResourcePtr = std::shared_ptr<BatchKVCacheResource>;
