@@ -168,7 +168,6 @@ void invokeAddFusedQKVBiasTransposePrefillV1(T*                             q_bu
                                              const bool                     store_q,
                                              const bool                     store_kv,
                                              const bool                     store_cache,
-                                             const float2*                  cos_sin_cache,
                                              cudaStream_t                   stream);
 
 template<typename T>
@@ -197,7 +196,6 @@ void invokeAddFusedQKVBiasTransposePrefill(T*                             q_buf,
                                            const bool                     store_q,
                                            const bool                     store_kv,
                                            const bool                     store_cache,
-                                           const float2*                  cos_sin_cache,
                                            cudaStream_t                   stream);
 template<typename T>
 void invokeAddFusedQKVBiasTransposeDecodeV1(T*                             q_buf,
