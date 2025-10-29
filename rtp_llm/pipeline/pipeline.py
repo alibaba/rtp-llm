@@ -269,66 +269,72 @@ class Pipeline(object):
                 for _ in range(len(generate_outputs.generate_outputs))
             ]
 
-        def tokenids_decode_func(
-            tokens: List[int],
-            tokenizer: BaseTokenizer,
-            decoding_state: Optional[DecodingState] = None,
-            return_incremental: bool = False,
-            **kwargs: Any
-        ) -> Tuple[str, str]:
-            if decoding_state is None:
-                all_text = tokenizer.decode(tokens, **kwargs)
-                # For some tokenizers (e.g. ChatGLM), decode a single token differs from decode a list of tokens.
-                while (len(all_text) > 0) and ("\uFFFD" == all_text[-1]):
-                    all_text = all_text[:-1]
-                return all_text, all_text
+        is_incremental = bool(decoding_states and decoding_states[0] is not None)
 
-            new_text = IncrementDecodingUtils.detokenize_incrementally(
-                tokenizer, tokens, decoding_state
-            )
-            decoding_state.all_text += new_text
-            return (
-                new_text if return_incremental == True else decoding_state.all_text
-            ), decoding_state.all_text
-
-        # TODO(xinfei.sxf) remove i
-        i = 0
-        for generate_output in generate_outputs.generate_outputs:
-            # all model incremental return output_ids
+        # Preprocess
+        token_lists_to_decode = []
+        output_lens = []
+        for i, generate_output in enumerate(generate_outputs.generate_outputs):
             if not generate_config.has_num_beams():
                 ouput_tokens_list[i] = torch.cat(
                     (ouput_tokens_list[i], generate_output.output_ids), dim=1
                 )
                 generate_output.output_ids = ouput_tokens_list[i]
+
             tokens = generate_output.output_ids
             if not generate_config.ignore_eos:
                 tokens = remove_padding_eos(tokens, self._special_tokens.eos_token_id)
             else:
                 tokens = tokens.reshape(-1)
+
             output_lens.append(tokens.nelement())
-            tokens = self.process_stop_id(
+
+            processed_tokens = self.process_stop_id(
                 generate_config,
                 generate_output,
                 tokens.tolist(),
                 stop_word_ids,
                 stop_word_id_slices,
             )
+            token_lists_to_decode.append(processed_tokens)
 
-            text, all_text = tokenids_decode_func(
-                tokens,
-                generate_config=generate_config.model_dump(),
-                tokenizer=self.tokenizer,
-                decoding_state=decoding_states[i],
-                return_incremental=generate_config.return_incremental,
+        # Decode
+        newly_decoded_texts: List[str]
+        all_texts: List[str]
+
+        if is_incremental:
+            newly_decoded_texts = []
+            all_texts = []
+            for i, tokens in enumerate(token_lists_to_decode):
+                new_text = IncrementDecodingUtils.detokenize_incrementally(
+                    self.tokenizer, tokens, decoding_states[i]
+                )
+                decoding_states[i].all_text += new_text
+
+                text_to_return = (
+                    new_text
+                    if generate_config.return_incremental
+                    else decoding_states[i].all_text
+                )
+                newly_decoded_texts.append(text_to_return)
+                all_texts.append(decoding_states[i].all_text)
+        else:
+            decoded_batch = self.tokenizer.batch_decode(
+                token_lists_to_decode,
                 skip_special_tokens=generate_config.skip_special_tokens,
                 **kwargs
             )
+            newly_decoded_texts = [text.rstrip("\uFFFD") for text in decoded_batch]
+            all_texts = newly_decoded_texts
 
-            text, token_buffers[i] = self.process_stop_str(
+        # PostProcess
+        final_texts = []
+        for i in range(len(all_texts)):
+            processed_text, token_buffers[i] = self.process_stop_str(
                 generate_config,
-                generate_output,
-                text,
-                all_text,
+                generate_outputs.generate_outputs[i],
+                newly_decoded_texts[i],
+                all_texts[i],
                 stop_word_str_list,
                 stop_word_str_slices,
                 token_buffers[i],
@@ -336,12 +342,17 @@ class Pipeline(object):
             )
 
             if generate_config.out_prefix:
-                text = generate_config.out_prefix + text
+                processed_text = generate_config.out_prefix + processed_text
 
-            texts.append(text)
-            all_texts.append(all_text)
-            i += 1
-        return texts, output_lens, decoding_states, token_buffers, ouput_tokens_list
+            final_texts.append(processed_text)
+
+        return (
+            final_texts,
+            output_lens,
+            decoding_states,
+            token_buffers,
+            ouput_tokens_list,
+        )
 
     @torch.inference_mode()
     async def generate_stream(
