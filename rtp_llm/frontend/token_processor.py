@@ -124,6 +124,7 @@ class TokenProcessorPerStream:
                         (self.ouput_tokens_list[i], tokens), axis=1
                     )
                 tokens = self.ouput_tokens_list[i]
+
             tokens = remove_padding_eos_with_numpy(
                 tokens, self.special_tokens.eos_token_id
             ).tolist()
