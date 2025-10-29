@@ -20,8 +20,9 @@ from rtp_llm.utils.model_weight import W
 
 try:
     from librtp_compute_ops.rtp_llm_ops import SelectTopkOp
-except ImportError:
-    logging.info("SelectTopkOp not available")
+except ImportError as e:
+    logging.error(f"SelectTopkOp is required but not available: {e}")
+    raise
 
 
 class GenericMoeLayer(nn.Module):
@@ -100,9 +101,8 @@ class GenericMoeDecoderLayer(nn.Module):
         self.layer_idx = layer_idx
         self.self_attn = CausalAttention(config, weights)
 
-        # Determine if this is a Dense layer (before first MoE layer)
-        # If moe_layer_index is empty or contains all layers, all layers are MoE layers
-        if len(config.moe_layer_index) > 0 and layer_idx < config.moe_layer_index[0]:
+        # Determine if this is a Dense layer (before first MoE layer or dense only)
+        if layer_idx not in config.moe_layer_index:
             self.is_dense_layer = True
         else:
             self.is_dense_layer = False
@@ -120,7 +120,6 @@ class GenericMoeDecoderLayer(nn.Module):
                 logging.warning(
                     f"[GenericMoeDecoderLayer] Layer {self.layer_idx}: Failed to create shared_mlp: {e}"
                 )
-                pass
 
         self.input_layernorm = RMSNorm(
             weights[W.pre_ln_gamma], eps=config.layernorm_eps
@@ -156,7 +155,7 @@ class GenericMoeDecoderLayer(nn.Module):
             # MoE layer
             experts_output = self.moe_mlp(hidden_states)
 
-            if self.add_shared_expert and self.shared_mlp is not None:
+            if self.shared_mlp is not None:
                 shared_mlp_output = self.shared_mlp(hidden_states)
                 hidden_states = experts_output + shared_mlp_output
             else:
