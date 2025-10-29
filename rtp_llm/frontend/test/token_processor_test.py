@@ -1,10 +1,11 @@
 import logging
 import logging.config
 import os
+from typing import List
+from unittest import TestCase, main
+
 import numpy as np
 import numpy.typing as npt
-from unittest import TestCase, main
-from typing import List
 
 from rtp_llm.frontend.token_processor import TokenProcessor, TokenProcessorPerStream
 from rtp_llm.frontend.tokenizer_factory.tokenizer_utils import DecodingState
@@ -25,8 +26,10 @@ class TokenProcessorTest(TestCase):
         self.inputs = [
             ["你好,你的名字是什么", "Hello, what's your name?"],
             ["Testing batch decode", "Another test string"],
-            ["sxsadasfdjsadfas asdas djbnasdb asj asiokdnaskd asnkdnaskd naskdnas knask",
-             "Another long string for testing batch processing"]
+            [
+                "sxsadasfdjsadfas asdas djbnasdb asj asiokdnaskd asnkdnaskd naskdnas knask",
+                "Another long string for testing batch processing",
+            ],
         ]
 
     def _get_tokenizer_list(self):
@@ -48,8 +51,8 @@ class TokenProcessorTest(TestCase):
                 logging.warning(f"Failed to load tokenizer {cls} from {path}: {e}")
         return ret
 
-    def test_decode_tokens_batch_simple(self):
-        """Test basic functionality of decode_tokens_batch"""
+    def test_batch_decode_tokens_simple(self):
+        """Test basic functionality of batch_decode_tokens"""
         for tokenizer in self.tokenizers:
             with self.subTest(tokenizer=type(tokenizer).__name__):
                 # Create TokenProcessor and TokenProcessorPerStream
@@ -69,20 +72,20 @@ class TokenProcessorTest(TestCase):
                     # Convert to numpy array with correct shape (1, len)
                     batch_token_ids.append(np.array([encoded], dtype=np.int32))
 
-                # Call decode_tokens_batch
+                # Call batch_decode_tokens
                 batch_finished = [True, True]
                 print_stop_words = False
                 stop_word_str_list = []
                 stop_word_ids = []
 
                 try:
-                    output_lens, final_texts = stream_processor.decode_tokens_batch(
+                    output_lens, final_texts = stream_processor.batch_decode_tokens(
                         batch_token_ids=batch_token_ids,
                         batch_finished=batch_finished,
                         print_stop_words=print_stop_words,
                         stop_word_str_list=stop_word_str_list,
                         stop_word_ids=stop_word_ids,
-                        return_incremental=False
+                        return_incremental=False,
                     )
 
                     # Basic assertions
@@ -97,11 +100,13 @@ class TokenProcessorTest(TestCase):
                         self.assertEqual(output_lens[i], expected_len)
 
                 except Exception as e:
-                    logging.error(f"Failed to test decode_tokens_batch with {type(tokenizer).__name__}: {e}")
+                    logging.error(
+                        f"Failed to test batch_decode_tokens with {type(tokenizer).__name__}: {e}"
+                    )
                     # Some tokenizers might not work in test environment, that's OK
 
-    def test_decode_tokens_batch_incremental(self):
-        """Test decode_tokens_batch with incremental decoding"""
+    def test_batch_decode_tokens_incremental(self):
+        """Test batch_decode_tokens with incremental decoding"""
         for tokenizer in self.tokenizers:
             with self.subTest(tokenizer=type(tokenizer).__name__):
                 # Create TokenProcessor and TokenProcessorPerStream
@@ -121,20 +126,20 @@ class TokenProcessorTest(TestCase):
                     # Convert to numpy array with correct shape (1, len)
                     batch_token_ids.append(np.array([encoded], dtype=np.int32))
 
-                # Call decode_tokens_batch
+                # Call batch_decode_tokens
                 batch_finished = [True, True]
                 print_stop_words = False
                 stop_word_str_list = []
                 stop_word_ids = []
 
                 try:
-                    output_lens, final_texts = stream_processor.decode_tokens_batch(
+                    output_lens, final_texts = stream_processor.batch_decode_tokens(
                         batch_token_ids=batch_token_ids,
                         batch_finished=batch_finished,
                         print_stop_words=print_stop_words,
                         stop_word_str_list=stop_word_str_list,
                         stop_word_ids=stop_word_ids,
-                        return_incremental=True
+                        return_incremental=True,
                     )
 
                     # Basic assertions
@@ -143,10 +148,12 @@ class TokenProcessorTest(TestCase):
                     self.assertEqual(len(output_lens), len(final_texts))
 
                 except Exception as e:
-                    logging.error(f"Failed to test decode_tokens_batch with incremental decoding for {type(tokenizer).__name__}: {e}")
+                    logging.error(
+                        f"Failed to test batch_decode_tokens with incremental decoding for {type(tokenizer).__name__}: {e}"
+                    )
 
-    def test_decode_tokens_batch_with_stop_words(self):
-        """Test decode_tokens_batch with stop words"""
+    def test_batch_decode_tokens_with_stop_words(self):
+        """Test batch_decode_tokens with stop words"""
         for tokenizer in self.tokenizers:
             with self.subTest(tokenizer=type(tokenizer).__name__):
                 # Create TokenProcessor and TokenProcessorPerStream
@@ -165,20 +172,20 @@ class TokenProcessorTest(TestCase):
                     encoded = tokenizer.encode(text)
                     batch_token_ids.append(np.array([encoded], dtype=np.int32))
 
-                # Call decode_tokens_batch with stop words
+                # Call batch_decode_tokens with stop words
                 batch_finished = [True]
                 print_stop_words = False
                 stop_word_str_list = ["world"]
                 stop_word_ids = []
 
                 try:
-                    output_lens, final_texts = stream_processor.decode_tokens_batch(
+                    output_lens, final_texts = stream_processor.batch_decode_tokens(
                         batch_token_ids=batch_token_ids,
                         batch_finished=batch_finished,
                         print_stop_words=print_stop_words,
                         stop_word_str_list=stop_word_str_list,
                         stop_word_ids=stop_word_ids,
-                        return_incremental=False
+                        return_incremental=False,
                     )
 
                     # Basic assertions
@@ -186,7 +193,9 @@ class TokenProcessorTest(TestCase):
                     self.assertEqual(len(final_texts), 1)
 
                 except Exception as e:
-                    logging.error(f"Failed to test decode_tokens_batch with stop words for {type(tokenizer).__name__}: {e}")
+                    logging.error(
+                        f"Failed to test batch_decode_tokens with stop words for {type(tokenizer).__name__}: {e}"
+                    )
 
 
 if __name__ == "__main__":
