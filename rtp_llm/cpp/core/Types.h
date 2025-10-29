@@ -69,6 +69,8 @@ inline std::string getDataTypeStr(const DataType& data_type) {
         type_str = "bf16";
     } else if (data_type == TYPE_FP32) {
         type_str = "fp32";
+    } else if (data_type == TYPE_FP8_E4M3) {
+        type_str = "fp8bf16";
     } else {
         throw std::runtime_error("wrong data type");
     }

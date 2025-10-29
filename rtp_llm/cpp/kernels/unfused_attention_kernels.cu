@@ -2404,6 +2404,24 @@ void invokeDecodeAddFusedQKVBiasTranspose(T*               q_buf,
 }
 
 #if USING_ROCM
+inline __device__ void convert_to_fp8(__hip_fp8x2_e4m3_fnuz* v, const amd_bfloat162 u) {
+    __hip_bfloat162_raw raw_bf16 = *reinterpret_cast<const __hip_bfloat162_raw*>(&u);
+    __hip_fp8x2_storage_t raw_fp8x2 = __hip_cvt_bfloat16raw2_to_fp8x2(raw_bf16, __HIP_SATFINITE, __HIP_E4M3_FNUZ);
+    *v = *reinterpret_cast<__hip_fp8x2_e4m3_fnuz*>(&raw_fp8x2);
+}
+
+inline __device__ void convert_to_fp8(__hip_fp8x2_e4m3_fnuz* v, const float2 u) {
+    __half2 h2 = __float22half2_rn(u);
+    __half2_raw raw_h2 = *reinterpret_cast<const __half2_raw*>(&h2);
+    __hip_fp8x2_storage_t raw_fp8x2 = __hip_cvt_halfraw2_to_fp8x2(raw_h2, __HIP_SATFINITE, __HIP_E4M3_FNUZ);
+    *v = *reinterpret_cast<const __hip_fp8x2_e4m3_fnuz*>(&raw_fp8x2);
+}
+
+inline __device__ void convert_to_fp8(__hip_fp8x2_e4m3_fnuz* v, const uint32_t u) {
+   __half2_raw raw_h2 = *reinterpret_cast<const __half2_raw*>(&u);
+   __hip_fp8x2_storage_t raw_fp8x2 = __hip_cvt_halfraw2_to_fp8x2(raw_h2, __HIP_SATFINITE, __HIP_E4M3_FNUZ);
+   *v = *reinterpret_cast<const __hip_fp8x2_e4m3_fnuz*>(&raw_fp8x2);
+}
 
 template<typename T, typename Tcache, bool PREFIX_PROMPT, bool USE_PAGED_FMHA, RopeStyle ROPE_STYLE>
 __global__ void add_fusedQKV_bias_transpose_prefill_kernel_v1(T*                            q_buf,
@@ -2745,11 +2763,11 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel(T*                   
 
     static constexpr bool ENABLE_8BITS_CACHE = sizeof(Tcache) == 1;
 
-#ifdef ENABLE_FP8
+
     // Quantized output only supports fp8 currently.
-    using QuantizedEltType = __nv_fp8_e4m3;
-    using QuantizedVecType = typename Vec_t<T>::QuantizedType;
-#endif
+    using QuantizedEltType = __hip_fp8_e4m3_fnuz;
+    using QuantizedVecType = __hip_fp8x2_e4m3_fnuz;
+
     constexpr int vec_size         = Vec_t<T>::size;
     using Vec_t                    = typename Vec_t<T>::Type;
     const int token_idx            = blockIdx.x;
@@ -2840,7 +2858,6 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel(T*                   
     if (store_qkv) {
         *reinterpret_cast<Vec_t*>(&QKV[src_q_idx]) = q;
         if (head_idx < head_num_kv) {
-#ifdef ENABLE_FP8
             if (QuantizedQKV != nullptr) {
                 // use 1.0f scale currently for qkv input of FP8 FMHA.
                 convert_to_fp8(
@@ -2850,11 +2867,10 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel(T*                   
                     reinterpret_cast<QuantizedVecType*>(reinterpret_cast<QuantizedEltType*>(QuantizedQKV) + src_v_idx),
                     v);
             }
-#endif
             *reinterpret_cast<Vec_t*>(&QKV[src_k_idx]) = k;
             *reinterpret_cast<Vec_t*>(&QKV[src_v_idx]) = v;
         }
-#ifdef ENABLE_FP8
+
         if (QuantizedQKV != nullptr) {
             size_t dest_q_idx = batch_idx * size_per_head * seq_len * head_num + head_idx * size_per_head * seq_len
                                 + seq_idx * size_per_head + tidx * vec_size;
@@ -2868,7 +2884,6 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel(T*                   
                                  reinterpret_ptr<QuantizedEltType, QuantizedVecType>(QuantizedQKV, src_q_idx);
             convert_to_fp8(quantized_q_ptr, q);
         }
-#endif
     }
 
     if (store_q) {
