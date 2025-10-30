@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import pathlib
@@ -11,6 +12,8 @@ from rtp_llm.config.py_config_modules import StaticConfig
 
 current_file_path = pathlib.Path(__file__).parent.absolute()
 sys.path.append(str(current_file_path.parent.absolute()))
+
+from dataclasses import asdict
 
 from pydantic import BaseModel
 
@@ -147,13 +150,12 @@ class FrontendWorker:
         input_ids = gen_responses.generate_outputs.generate_outputs[0].input_ids
         loss = gen_responses.generate_outputs.generate_outputs[0].loss
         logits = gen_responses.generate_outputs.generate_outputs[0].logits
-
         if generate_config.has_num_beams():
             aux_info.beam_responses = generate_texts
         response = PipelineResponse(
             response=generate_texts[0],
             finished=finished,
-            aux_info=aux_info.model_dump(mode="json"),
+            aux_info=asdict(aux_info),
             hidden_states=(
                 hidden_states.tolist()
                 if generate_config.return_hidden_states and hidden_states is not None
@@ -191,7 +193,7 @@ class FrontendWorker:
             aux_info = []
             if generate_config.aux_info:
                 aux_info = [
-                    seq.aux_info.model_dump(mode="json")
+                    asdict(seq.aux_info)
                     for seq in gen_responses.generate_outputs.generate_outputs
                 ]
             sequences_pipeline_response = MultiSequencesPipelineResponse(
