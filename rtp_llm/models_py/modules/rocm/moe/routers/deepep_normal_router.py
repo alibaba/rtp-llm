@@ -6,7 +6,7 @@ import torch.distributed as dist
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.distribute.collective import Group
-from rtp_llm.models_py.distributed.rocm.deepep_wrapper import get_deepep_wrapper
+from rtp_llm.models_py.distributed.deepep_wrapper import get_deepep_wrapper
 from rtp_llm.models_py.modules.moe import (
     ExpertForwardPayload,
     ExpertTokensMetadata,
