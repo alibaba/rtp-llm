@@ -255,6 +255,7 @@ void ROCmDevice::copy(const CopyParams& params) {
         return;
     }
 
+    const auto stream = (params.overlapped && init_params_.enable_comm_overlap) ? communication_stream_ : stream_;
     hipMemcpyKind copyType;
     if (src.where() == MemoryType::MEMORY_GPU && dst.where() != MemoryType::MEMORY_GPU) {
         copyType = hipMemcpyDeviceToHost;
@@ -271,14 +272,14 @@ void ROCmDevice::copy(const CopyParams& params) {
         std::memcpy(dst.data(), src.data(), src.sizeBytes());
     } else {
         if (params.async) {
-            ROCM_CHECK(hipMemcpyAsync(dst.data(), src.data(), src.sizeBytes(), copyType, stream_));
+            ROCM_CHECK(hipMemcpyAsync(dst.data(), src.data(), src.sizeBytes(), copyType, stream));
         } else {
-            ROCM_CHECK(hipMemcpyWithStream(dst.data(), src.data(), src.sizeBytes(), copyType, stream_));
+            ROCM_CHECK(hipMemcpyWithStream(dst.data(), src.data(), src.sizeBytes(), copyType, stream));
         }
     }
 
     if (copyType == hipMemcpyDeviceToHost) {
-        ROCM_CHECK(hipStreamSynchronize(stream_));
+        ROCM_CHECK(hipStreamSynchronize(stream));
     }
 }
 

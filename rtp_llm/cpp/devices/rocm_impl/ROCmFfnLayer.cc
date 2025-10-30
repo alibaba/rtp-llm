@@ -19,6 +19,7 @@ using namespace std;
 namespace rtp_llm {
 
 MoeDispatchOutput ROCmDevice::epDispatch(const MoeDispatchParams& params) {
+
     DevicePerfWrapper wrapper(this, "epDispatch");
     // if (init_params_.use_deepep_moe) {
     //     if (init_params_.use_deepep_low_latency) {
@@ -66,18 +67,10 @@ MoeDispatchOutput ROCmDevice::epDispatch(const MoeDispatchParams& params) {
         }
     }
 
-    if (params.overlapped && params.compute_stream_event) {
-        const auto casted_event = dynamic_cast<TorchEvent*>(params.compute_stream_event.get());
-        if (!casted_event) {
-            throw OpException({OpErrorType::ERROR_INTERNAL, "compute_stream_event is not TorchEvent"});
-        }
-        casted_event->event->block(*torch_comm_stream_);
-    }
-
     printBufferData(*token_nums_per_rank, "token_nums_per_rank");
-    auto token_nums_per_rank_gpu = clone({*token_nums_per_rank, AllocationType::DEVICE, BufferHints(), false, false});
+    auto token_nums_per_rank_gpu = clone({*token_nums_per_rank, AllocationType::DEVICE, BufferHints(), params.overlapped, params.overlapped});
     // all_token_nums_per_rank_gpu[i]: current rank receive token num from other rank
-    auto all_token_nums_per_rank_gpu = allToAll({{token_nums_per_rank_gpu}}).outputs[0];
+    auto all_token_nums_per_rank_gpu = allToAll({{token_nums_per_rank_gpu}, {}, {}, params.overlapped, ParallelMode::DP_AND_TP, params.compute_stream_event}).outputs[0];
     printBufferData(*all_token_nums_per_rank_gpu, "all_token_nums_per_rank_gpu");
     size_t    total_size = std::accumulate(token_nums_per_rank_ptr, token_nums_per_rank_ptr + ep_size, 0);
     BufferPtr all_token_indices_cpu =
@@ -93,13 +86,10 @@ MoeDispatchOutput ROCmDevice::epDispatch(const MoeDispatchParams& params) {
 
     printBufferData(*all_token_indices_cpu, "all_token_indices_cpu");
     // each rank token idx
-    BufferPtr all_token_indices = clone({*all_token_indices_cpu, AllocationType::DEVICE, BufferHints(), false, false});
-    // sync allToAll all_token_nums_per_rank_gpu
-    cudaStreamSynchronize(stream_);
-    syncCommunication(false);
-
+    BufferPtr all_token_indices = clone({*all_token_indices_cpu, AllocationType::DEVICE, BufferHints(), params.overlapped, params.overlapped});
+    // D2H will make sure stream synchronized
     auto all_token_nums_per_rank =
-        clone({*all_token_nums_per_rank_gpu, AllocationType::HOST, BufferHints(), false, false});
+        clone({*all_token_nums_per_rank_gpu, AllocationType::HOST, BufferHints(), params.overlapped, params.overlapped});
     std::vector<size_t> input_split_sizes;
     std::vector<size_t> output_split_sizes;
     input_split_sizes.resize(ep_size);
