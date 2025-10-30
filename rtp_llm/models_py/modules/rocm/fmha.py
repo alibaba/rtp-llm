@@ -10,37 +10,14 @@ from librtp_compute_ops.rtp_llm_ops import (
     FusedRopeKVCachePrefillOp,
 )
 
+try:
+    from librtp_compute_ops.rtp_llm_ops import AiterAttnPyParams
+except ImportError:
+    AiterAttnPyParams = None
+
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.models_py.modules.fmha import FMHAImplBase
 from rtp_llm.ops import FMHAType, KVCache, ParamsBase, PyAttentionInputs
-
-
-# Simple data structure for fmha_params
-class FMHAParams(ParamsBase):
-    def __init__(
-        self,
-        batch_size: int,
-        max_seq_len: int,
-        seq_lens: Optional[torch.Tensor] = None,
-        kv_cache_block_id_host: Optional[torch.Tensor] = None,
-        kv_cache_block_id_device: Optional[torch.Tensor] = None,
-        input_lengths: Optional[torch.Tensor] = None,
-    ):
-        super().__init__()
-        self.batch_size = batch_size
-        self.max_seq_len = max_seq_len
-        self.seq_lens = seq_lens
-        self.kv_cache_block_id_host = kv_cache_block_id_host
-        self.kv_cache_block_id_device = kv_cache_block_id_device
-        if input_lengths is not None:
-            self.input_lengths = input_lengths
-            self.cu_seqlens_q = torch.zeros(
-                self.batch_size + 1, dtype=torch.int32, device=input_lengths.device
-            )
-            self.cu_seqlens_q[1:] = torch.cumsum(input_lengths, dim=0)
-            self.cu_seqlens_k = self.cu_seqlens_q.clone()
-            self.max_seqlen_q = self.max_seq_len
-            self.max_seqlen_k = self.max_seq_len
 
 
 class FMHAPrefillImplBase(FMHAImplBase):
@@ -72,7 +49,6 @@ class FMHADecodeImplBase(FMHAImplBase):
 PREFILL_MHA_IMPS: List[type[FMHAPrefillImplBase]] = []
 DECODE_MHA_IMPS: List[type[FMHADecodeImplBase]] = []
 
-
 try:
 
     class AiterPrefillImpl(FMHAPrefillImplBase):
@@ -101,16 +77,15 @@ class AiterPrefillAttnOp:
         return True
 
     def prepare(self, attn_inputs: PyAttentionInputs):
-        # Extract batch size and max sequence length from attention inputs
-        batch_size = attn_inputs.input_lengths.size(0)
-        max_seq_len = attn_inputs.input_lengths.max().item()
+        if AiterAttnPyParams is None:
+            raise ImportError(
+                "AiterAttnPyParams is not available from librtp_compute_ops.rtp_llm_ops"
+            )
+        from librtp_compute_ops.rtp_llm_ops import AiterParamsCreator
 
-        # Create and return fmha_params with the required attributes
-        self.fmha_params = FMHAParams(
-            batch_size=batch_size,
-            max_seq_len=max_seq_len,
-            input_lengths=attn_inputs.input_lengths,
-        )
+        fmha_params = AiterAttnPyParams(attn_inputs.input_lengths, True)
+        params_creator = AiterParamsCreator()
+        self.fmha_params = params_creator.create_prefill_params(fmha_params)
         return self.fmha_params
 
     def advanced_qkv_split(self, qkv, head_num, head_num_kv, size_per_head):
@@ -121,11 +96,11 @@ class AiterPrefillAttnOp:
         v = qkv_reshaped[:, head_num + head_num_kv : head_num + 2 * head_num_kv, :]
         return q, k, v
 
-    def forward(self, qkv, kv_cache, fmha_params: FMHAParams):
-        cu_seqlens_q = fmha_params.cu_seqlens_q.to(qkv.device)
-        cu_seqlens_k = fmha_params.cu_seqlens_k.to(qkv.device)
-        max_seqlen_q = fmha_params.max_seqlen_q
-        max_seqlen_k = fmha_params.max_seqlen_k
+    def forward(self, qkv, kv_cache, fmha_params):
+        cu_seqlens_q = fmha_params.cu_seqlens_q_.to(qkv.device)
+        cu_seqlens_k = fmha_params.cu_seqlens_k_.to(qkv.device)
+        max_seqlen_q = fmha_params.max_seqlen_q_
+        max_seqlen_k = fmha_params.max_seqlen_k_
 
         q_tensor, k_tensor, v_tensor = self.advanced_qkv_split(
             qkv, self.head_num, self.head_num_kv, self.head_dim
@@ -166,38 +141,40 @@ class AiterDecodeAttnOp:
         self.head_num_kv = config.head_num_kv
         self.kv_cache_data_type = config.kv_cache_data_type
         self.use_asm_pa = config.hw_kernel_config.use_asm_pa
+        self.enable_cuda_graph = (
+            config.gpt_init_params.hw_kernel_config.enable_cuda_graph
+        )
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
         return True
 
     def prepare(self, attn_inputs: PyAttentionInputs):
-        # Extract batch size and max sequence length from attention inputs
-        batch_size = attn_inputs.input_lengths.size(0)
-        max_seq_len = attn_inputs.input_lengths.max().item()
-        seq_lens = attn_inputs.sequence_lengths.cpu() + 1
-        seq_lens = seq_lens.cuda()
-        kv_cache_block_id_host = attn_inputs.kv_cache_block_id_host
-        kv_cache_block_id_device = attn_inputs.kv_cache_block_id_device
-        # Create and return fmha_params with the required attributes
-        self.fmha_params = FMHAParams(
-            batch_size=batch_size,
-            max_seq_len=max_seq_len,
-            seq_lens=seq_lens,
-            kv_cache_block_id_host=kv_cache_block_id_host,
-            kv_cache_block_id_device=kv_cache_block_id_device,
+        if AiterAttnPyParams is None:
+            raise ImportError(
+                "AiterAttnPyParams is not available from librtp_compute_ops.rtp_llm_ops"
+            )
+        from librtp_compute_ops.rtp_llm_ops import AiterParamsCreator
+
+        fmha_params = AiterAttnPyParams(
+            attn_inputs.input_lengths,
+            attn_inputs.sequence_lengths,
+            attn_inputs.kv_cache_block_id_host,
+            attn_inputs.kv_cache_block_id_device,
+            self.enable_cuda_graph,
         )
+
+        params_creator = AiterParamsCreator()
+        self.fmha_params = params_creator.create_decode_params(fmha_params)
         return self.fmha_params
 
     def forward(
-        self,
-        query: torch.Tensor,
-        kv_cache: Optional[KVCache],
-        fmha_params: Optional[Any],
+        self, query: torch.Tensor, kv_cache: Optional[KVCache], fmha_params
     ) -> torch.Tensor:
-        seq_lens = fmha_params.seq_lens
+        seq_lens = fmha_params.seq_lens_
         key_cache = kv_cache.k_cache_base
         value_cache = kv_cache.v_cache_base
-        block_tables_id_device = fmha_params.kv_cache_block_id_device
+
+        block_tables_id_device = fmha_params.kv_cache_block_id_device_
         max_num_blocks = block_tables_id_device.shape[1]
         # for now not support fp8
         if self.use_asm_pa:
@@ -210,7 +187,7 @@ class AiterDecodeAttnOp:
                 max_num_blocks,
             )
         else:
-            max_seq_len = fmha_params.max_seq_len + 1
+            max_seq_len = fmha_params.max_seq_len_
             scale = 1.0 / (self.head_dim**0.5)
             alibi_slopes = None
             k_scale = (
