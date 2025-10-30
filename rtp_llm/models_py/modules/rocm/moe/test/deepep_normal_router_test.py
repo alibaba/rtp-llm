@@ -7,7 +7,7 @@ import torch
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.distribute.worker_info import g_parallel_info, update_master_info
-from rtp_llm.models_py.distributed.rocm.deepep_wrapper import init_deepep_wrapper
+from rtp_llm.models_py.distributed.deepep_wrapper import init_deepep_wrapper
 from rtp_llm.models_py.distributed.process_group_state import (
     destroy_distributed_environment,
     get_ep_group,

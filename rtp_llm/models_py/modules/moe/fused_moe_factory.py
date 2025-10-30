@@ -18,16 +18,13 @@ initialized = False
 
 from rtp_llm.ops import DeviceType, get_device
 
+
 def init_deepep_env_once(config: GptInitModelParameters):
     global initialized
     if initialized:
         return
     initialized = True
-    device_type = get_device().get_device_type()
-    if device_type == DeviceType.ROCm:
-        from rtp_llm.models_py.distributed.rocm.deepep_wrapper import init_deepep_wrapper
-    else:  
-        from rtp_llm.models_py.distributed.deepep_wrapper import init_deepep_wrapper
+    from rtp_llm.models_py.distributed.deepep_wrapper import init_deepep_wrapper
     from rtp_llm.models_py.distributed.process_group_state import (
         get_ep_group,
         init_distributed_environment,
@@ -37,6 +34,7 @@ def init_deepep_env_once(config: GptInitModelParameters):
     ep_group = get_ep_group()
     assert ep_group.device_group is not None, "ep group device group is not initialized"
     init_deepep_wrapper(group=ep_group.device_group, params=config)
+
 
 class FusedMoeFactory(object):
     @staticmethod
@@ -109,6 +107,7 @@ class FusedMoeFactory(object):
         from rtp_llm.models_py.modules.moe.routers.deepep_normal_router import (
             DeepepNormalRouter,
         )
+
         if config.ep_size > 1:
             init_deepep_env_once(config)
             if config.moe_config.use_deepep_low_latency:
@@ -156,8 +155,8 @@ class FusedMoeFactory(object):
     @staticmethod
     def create_amd_fused_moe(
         config: GptInitModelParameters, weights: Dict[str, torch.Tensor]
-    ) -> FusedMoe: 
-        if config.ep_size > 1: 
+    ) -> FusedMoe:
+        if config.ep_size > 1:
             if config.moe_config.use_deepep_low_latency == False:
                 init_deepep_env_once(config)
                 from rtp_llm.models_py.modules.rocm.moe.executors.deepep_normal_fused_moe_executor import (
@@ -166,6 +165,7 @@ class FusedMoeFactory(object):
                 from rtp_llm.models_py.modules.rocm.moe.routers.deepep_normal_router import (
                     DeepepNormalRouter,
                 )
+
                 router = DeepepNormalRouter(config)
                 executor = FusedMoeExecutor(config, weights)
                 return FusedMoe(router, executor, config.expert_num)
@@ -177,6 +177,7 @@ class FusedMoeFactory(object):
             from rtp_llm.models_py.modules.moe.fused_batched_moe import (
                 BatchedTritonExperts,
             )
+
             max_num_tokens = (
                 config.max_generate_batch_size + config.tp_size - 1
             ) // config.tp_size
@@ -204,9 +205,7 @@ class FusedMoeFactory(object):
             if config.quant_config is None:
                 return FusedMoeFactory.create_amd_fused_moe(config, weights)
             else:
-                raise ValueError(
-                    f"Quantization for rocm moe is not yet supported"
-                )
+                raise ValueError(f"Quantization for rocm moe is not yet supported")
         else:
             if config.quant_config is None:
                 if config.ep_size > 1 and config.moe_config.use_deepep_low_latency:
