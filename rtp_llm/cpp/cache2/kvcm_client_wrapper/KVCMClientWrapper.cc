@@ -144,7 +144,8 @@ bool KVCMClientWrapper::initMetaClient(const std::string& unique_id, const std::
 bool KVCMClientWrapper::reinit(const std::string&           unique_id,
                                KvcmConfigMap::iterator&     config_iter,
                                KvcmMetaClientMap::iterator& meta_client_iter) {
-    auto config          = config_iter->second;
+    auto config = config_iter->second;
+    config->set_addresses(address_snapshot_);
     auto real_config_str = autil::legacy::ToJsonString(*config);
     RTP_LLM_LOG_INFO("reinit unique_id[%s], kvcm real config[%s]", unique_id.c_str(), real_config_str.c_str());
     auto meta_client = kv_cache_manager::MetaClient::Create(real_config_str, init_params_);
@@ -152,7 +153,6 @@ bool KVCMClientWrapper::reinit(const std::string&           unique_id,
         RTP_LLM_LOG_ERROR("create meta client failed");
         return false;
     }
-    config->set_addresses(address_snapshot_);
     meta_client_iter->second = std::move(meta_client);
     return true;
 }
