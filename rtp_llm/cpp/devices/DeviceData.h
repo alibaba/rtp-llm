@@ -26,7 +26,6 @@ enum class MicroBatchType {
 struct DeviceInitParams {
     DeviceType device_type;
     size_t     device_id               = 0;
-    size_t     max_batch_size          = 256;
     size_t     max_generate_batch_size = 128;
 
     size_t tp_rank        = 0;
@@ -80,7 +79,6 @@ struct DeviceInitParams {
     FMHAConfig                   fmha_config;
     HWKernelConfig               hw_kernel_config;
     DeviceResourceConfig         device_resource_config;
-    SamplerConfig                sampler_config;
     MoeConfig                    moe_config;
     SpeculativeExecutionConfig   sp_config;
     // FIFOSchedulerConfig fields are now in RuntimeConfig

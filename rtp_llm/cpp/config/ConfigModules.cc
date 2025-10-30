@@ -171,12 +171,6 @@ std::string DeviceResourceConfig::to_string() const {
     return oss.str();
 }
 
-std::string SamplerConfig::to_string() const {
-    std::ostringstream oss;
-    oss << "max_batch_size: " << max_batch_size << "\n"
-        << "enable_flashinfer_sample_kernel: " << enable_flashinfer_sample_kernel;
-    return oss.str();
-}
 
 // MoeConfig
 std::string MoeConfig::to_string() const {

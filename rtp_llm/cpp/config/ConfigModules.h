@@ -169,12 +169,6 @@ struct DeviceResourceConfig {
     std::string to_string() const;
 };
 
-struct SamplerConfig {
-    int64_t     max_batch_size                  = 0;
-    bool        enable_flashinfer_sample_kernel = true;
-    std::string to_string() const;
-};
-
 struct MoeConfig {
     bool        use_deepep_moe                  = false;
     bool        use_deepep_internode            = false;

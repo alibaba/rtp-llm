@@ -567,29 +567,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 return c;
             }));
 
-    // Register SamplerConfig
-    py::class_<SamplerConfig>(m, "SamplerConfig")
-        .def(py::init<>())
-        .def_readwrite("max_batch_size", &SamplerConfig::max_batch_size)
-        .def_readwrite("enable_flashinfer_sample_kernel", &SamplerConfig::enable_flashinfer_sample_kernel)
-        .def("to_string", &SamplerConfig::to_string)
-        .def(py::pickle(
-            [](const SamplerConfig& self) {
-                return py::make_tuple(self.max_batch_size, self.enable_flashinfer_sample_kernel);
-            },
-            [](py::tuple t) {
-                if (t.size() != 2)
-                    throw std::runtime_error("Invalid state!");
-                SamplerConfig c;
-                try {
-                    c.max_batch_size                  = t[0].cast<int64_t>();
-                    c.enable_flashinfer_sample_kernel = t[1].cast<bool>();
-                } catch (const std::exception& e) {
-                    throw std::runtime_error(std::string("SamplerConfig unpickle error: ") + e.what());
-                }
-                return c;
-            }));
-
     // LinearAttentionConfig
     pybind11::class_<LinearAttentionConfig>(m, "LinearAttentionConfig")
         .def(pybind11::init<int, int, int, int, int>(),

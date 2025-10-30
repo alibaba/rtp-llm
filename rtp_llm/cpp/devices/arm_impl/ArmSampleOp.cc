@@ -95,21 +95,6 @@ void repetitionPenalty(float*       logits,
     }
 }
 
-void minLengthPenaltyNew(float*     logits,
-                         const int* min_lengths,
-                         const int* end_ids,
-                         const int* sequence_lengths,
-                         const int* input_lengths,
-                         const int  batch_size,
-                         const int  vocab_size) {
-    for (int i = 0; i < batch_size; i++) {
-        if (sequence_lengths[i] - input_lengths[i] < min_lengths[i]) {
-            logits[i * vocab_size + end_ids[i]] = -FLT_MAX;
-            ;
-        }
-    }
-}
-
 void topKKernel(float*          output,
                 int*            output_indices,
                 const float*    logits,
@@ -151,7 +136,6 @@ void topk_sampling(int                        batch_size,
                    const uint32_t*            top_ks,
                    const float                top_p,
                    const float*               top_ps,
-                   const int*                 end_ids,
                    const int                  vocab_size,
                    const bool*                skip_decode,
                    int                        step) {
@@ -161,7 +145,6 @@ void topk_sampling(int                        batch_size,
         }
 
         if (finished != nullptr && finished[batch_id] == true) {
-            ids[batch_id * step + step - 1] = end_ids[batch_id];
             return;
         }
 
@@ -195,7 +178,6 @@ void topk_sampling(int                        batch_size,
         }
         if (sequence_length != nullptr && finished != nullptr) {
             sequence_length[batch_id] = finished[batch_id] ? sequence_length[batch_id] : sequence_length[batch_id] + 1;
-            finished[batch_id]        = ids[batch_id] == end_ids[batch_id] ? true : false;
         }
     });
 }
@@ -203,10 +185,6 @@ void topk_sampling(int                        batch_size,
 GreedyOutput ArmCpuDevice::sampleGreedy(const GreedyParams& params) {
     const auto& logits     = params.logits;
     const auto  batch_size = logits.shape()[0];
-    RUNTIME_ASSERT_OP_ARG(batch_size < init_params_.max_batch_size,
-                          "batch_size exceeded device limit %ld: %ld",
-                          init_params_.max_batch_size,
-                          batch_size);
     const auto vocab_size_padded = logits.shape()[1];
     const auto step              = params.step;
     RUNTIME_ASSERT_OP_ARG(batch_size == params.token_ids.shape()[0],
@@ -224,7 +202,7 @@ GreedyOutput ArmCpuDevice::sampleGreedy(const GreedyParams& params) {
     auto& top_k       = params.top_k;
     auto& top_p       = params.top_p;
     auto& temperature = params.temperature;
-    auto& random_seed = params.random_seed;
+
     RTP_LLM_CHECK(top_k.size() == batch_size);
     RTP_LLM_CHECK(top_p.size() == batch_size);
     RTP_LLM_CHECK(temperature.size() == batch_size);
@@ -253,23 +231,10 @@ GreedyOutput ArmCpuDevice::sampleGreedy(const GreedyParams& params) {
     std::vector<std::mt19937> generator_lists(batch_size);
     unsigned                  one_seed = std::random_device{}();
     for (size_t i = 0; i < batch_size; i++) {
-        generator_lists[i] = std::mt19937(one_seed + i);
-    }
-    if (random_seed) {
-        auto&     seeds    = random_seed.value().get();
-        uint64_t* seedsPtr = seeds.data<uint64_t>();
-        if (seeds.size() == 1) {
-            for (int i = 0; i < batch_size; i++) {
-                generator_lists[i] = std::mt19937(seedsPtr[0]);
-            }
+        if (params.generator[i].defined()) {
+            generator_lists[i] = std::mt19937(params.generator[i].current_seed());
         } else {
-            RUNTIME_ASSERT_OP_ARG((seeds.size() == batch_size),
-                                  "random_seed.size() should equal to batch_size, but %ld vs %ld",
-                                  seeds.size(),
-                                  batch_size);
-            for (int i = 0; i < batch_size; i++) {
-                generator_lists[i] = std::mt19937(seedsPtr[i]);
-            }
+            generator_lists[i] = std::mt19937(one_seed + i);
         }
     }
 
@@ -297,16 +262,6 @@ GreedyOutput ArmCpuDevice::sampleGreedy(const GreedyParams& params) {
                                   step);
             }
         }
-        if (params.min_lengths.has_value())
-            if (params.min_lengths && params.eos_ids) {
-                minLengthPenaltyNew(logits.data<float>(),
-                                    params.min_lengths.value().get().data<int32_t>(),
-                                    params.eos_ids.value().get().data<int32_t>(),
-                                    params.sequence_lengths.data<int32_t>(),
-                                    params.input_lengths.data<int32_t>(),
-                                    batch_size,
-                                    vocab_size_padded);
-            }
     }
 
     // 4. run sampling
@@ -345,7 +300,6 @@ GreedyOutput ArmCpuDevice::sampleGreedy(const GreedyParams& params) {
                   top_k.data<uint32_t>(),
                   1.0f,
                   top_p.data<float>(),
-                  params.eos_ids.value().get().data<int32_t>(),
                   vocab_size_padded,
                   skip_top_k_decode_buf->data<bool>(),
                   step + 1);
