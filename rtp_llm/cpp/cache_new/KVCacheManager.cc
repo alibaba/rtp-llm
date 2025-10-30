@@ -109,6 +109,13 @@ InsertResult KVCacheManager::insertIntoCache(const InsertInfo& insert_info) {
     return allocator_->insertIntoCache(insert_info);
 }
 
-}  // namespace rtp_llm
-
+// 被调用的时机需要考虑: 是全量还是增量, 增量的话是单个block还是一组block
+void KVCacheManager::insertIntoMemoryCache(const InsertInfo& insert_info) {
+    auto callback = [](bool success) {
+        if (!success) {
+            RTP_LLM_LOG_ERROR("insert into memory cache failed");
+        }
+    };
+    mem_reader_writer_->asyncWrite(insert_info.batch_kv_cache_resource, callback);
+}
 

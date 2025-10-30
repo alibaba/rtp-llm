@@ -10,12 +10,14 @@ public:
     virtual ~KVCacheConnector() = default;
 
 public:
+    // 远端cache是一个kkv的结构
     struct Buffer {
+        int64_t              key1;  // group id
+        int32_t              key2;  // cache key
         BufferPtr            buffer;
-        int64_t              key;
-        int32_t              layer;
         std::optional<float> loss;
-    } using Buffers = std::vector<Buffer>;
+    };
+    using Buffers = std::vector<Buffer>;
 
     struct Meta {
         int64_t request_id;
