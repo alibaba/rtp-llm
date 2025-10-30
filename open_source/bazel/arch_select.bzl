@@ -35,8 +35,8 @@ def requirement(names):
         native.py_library(
             name = name,
             deps = select({
-                "@//:cuda_not_12_9": [requirement_gpu_cuda12(name)],
-                "@//:using_cuda12_9": [requirement_gpu_cuda12_9(name)],
+                "@//:cuda_pre_12_9": [requirement_gpu_cuda12(name)],
+                "@//:using_cuda12_9_x86": [requirement_gpu_cuda12_9(name)],
                 "@//:using_rocm": [requirement_gpu_rocm(name)],
                 "@//:using_arm": [requirement_arm(name)],
                 "//conditions:default": [requirement_cpu(name)],
@@ -72,6 +72,7 @@ def whl_deps():
 def platform_deps():
     return select({
         "@//:using_arm": [],
+        "@//:using_cuda12_arm": [],
         "@//:using_rocm": ["pyyaml","decord==0.6.0"],
         "//conditions:default": ["decord==0.6.0"],
     })
@@ -88,12 +89,12 @@ def torch_deps():
             "@torch_2.3_py310_cpu_aarch64//:torch",
             "@torch_2.3_py310_cpu_aarch64//:torch_libs",
         ],
-        "@//:cuda_not_12_9": [
+        "@//:cuda_pre_12_9": [
             "@torch_2.6_py310_cuda//:torch_api",
             "@torch_2.6_py310_cuda//:torch",
             "@torch_2.6_py310_cuda//:torch_libs",
         ],
-        "@//:using_cuda12_9": [
+        "@//:using_cuda12_9_x86": [
             "@torch_2.8_py310_cuda//:torch_api",
             "@torch_2.8_py310_cuda//:torch",
             "@torch_2.8_py310_cuda//:torch_libs",

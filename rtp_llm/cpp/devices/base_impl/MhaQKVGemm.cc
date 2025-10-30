@@ -8,7 +8,7 @@ BufferPtr DeviceBase::mhaQKVGemm(const AttentionLayerParams& params) {
     const auto& input      = params.input;
     const auto& qkv_weight = params.weights.qkv_weight;
 
-#if defined(__aarch64__)
+#if BUILDING_ARM_ONLY
     // Arm attention op only support fp32 data type
     auto qkv_gemm_params = GemmParams(input, *(qkv_weight->kernel), std::nullopt, nullptr, DataType::TYPE_FP32);
 #else

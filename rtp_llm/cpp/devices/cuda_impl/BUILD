@@ -16,7 +16,7 @@ config_setting(
 config_setting(
     name = "use_accl_ep",
     values = {
-        "copt": "-DUSE_ACCL_EP=1",
+        "define": "use_accl_ep=1",
     },
 )
 
@@ -41,7 +41,10 @@ cc_library(
         ],
         "//conditions:default": [":deep_ep",],
     }) + torch_deps(),
-    copts = cuda_copts(),
+    copts = cuda_copts() + select({
+        ":use_accl_ep": ["-DUSE_ACCL_EP=1"],
+        "//conditions:default": ["-DUSE_ACCL_EP=0"],
+    }),
     visibility = ["//visibility:public"],
 )
 

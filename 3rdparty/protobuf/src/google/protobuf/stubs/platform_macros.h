@@ -53,7 +53,7 @@
 #elif defined(_M_ARM64)
 #define GOOGLE_PROTOBUF_ARCH_ARM 1
 #define GOOGLE_PROTOBUF_ARCH_64_BIT 1
-#elif defined(__aarch64__)
+#elif BUILDING_ARM_ONLY
 #define GOOGLE_PROTOBUF_ARCH_AARCH64 1
 #define GOOGLE_PROTOBUF_ARCH_64_BIT 1
 #elif defined(__mips__)

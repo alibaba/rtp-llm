@@ -47,12 +47,15 @@ cc_library(
         "//:rtp_compute_ops",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store",
     ] + select({
-        "//:enable_3fs": [
+        "//:using_3fs": [
             ":storage_3fs",
         ],
         "//conditions:default": [],
     }),
-    copts = copts(),
+    copts = copts() + select({
+        "//:using_3fs": ["-DENABLE_3FS=1"],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
 )
 
