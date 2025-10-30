@@ -2407,6 +2407,7 @@ void invokeDecodeAddFusedQKVBiasTranspose(T*               q_buf,
 
 template<typename T, typename Tcache, bool PREFIX_PROMPT, bool USE_PAGED_FMHA, RopeStyle ROPE_STYLE>
 __global__ void add_fusedQKV_bias_transpose_prefill_kernel_v1(T*                            q_buf,
+                                                              T*                            q_mtp_buf,
                                                               T*                            k_buf,
                                                               T*                            v_buf,
                                                               PrefixPromptBatchWeightsParam param,
@@ -2425,6 +2426,7 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel_v1(T*                
                                                               const bool    use_logn_attn,
                                                               bool          store_qkv,
                                                               bool          store_q,
+                                                              bool          store_q_mtp,
                                                               bool          store_kv,
                                                               bool          store_cache,
                                                               const float2* cos_sin_cache) {
@@ -2580,6 +2582,11 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel_v1(T*                
         *reinterpret_cast<Vec_t*>(&q_buf[dest_q_idx]) = q;
     }
 
+    if (store_q_mtp) {
+        size_t dest_q_mtp_idx = (pre_len + seq_idx) * head_num * size_per_head + head_idx * size_per_head + tidx * vec_size;
+        *reinterpret_cast<Vec_t*>(&q_mtp_buf[dest_q_mtp_idx]) = q;
+    }
+
     if (store_kv) {
         const int dest_kv_idx = batch_idx * size_per_head * total_seq_len * head_num_kv
                                 + head_idx * size_per_head * total_seq_len + dst_kv_seq_idx * size_per_head
@@ -2641,6 +2648,7 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel_v1(T*                
 
 template<typename T>
 void invokeAddFusedQKVBiasTransposePrefillV1(T*                             q_buf,
+                                             T*                             q_mtp_buf,
                                              T*                             k_buf,
                                              T*                             v_buf,
                                              PrefixPromptBatchWeightsParam* param_ptr,
@@ -2663,6 +2671,7 @@ void invokeAddFusedQKVBiasTransposePrefillV1(T*                             q_bu
                                              const bool                     use_paged_fmha,
                                              const bool                     store_qkv,
                                              const bool                     store_q,
+                                             const bool                     store_q_mtp,
                                              const bool                     store_kv,
                                              const bool                     store_cache,
                                              const float2*                  cos_sin_cache,
@@ -2678,6 +2687,7 @@ void invokeAddFusedQKVBiasTransposePrefillV1(T*                             q_bu
                 FT_ROPE_SWITCH(rope_config.style, ROPE_STYLE, [&] {
                     add_fusedQKV_bias_transpose_prefill_kernel_v1<T, Tcache, PREFIX_PROMPT, USE_PAGED_FMHA, ROPE_STYLE>
                         <<<grid, block, smem_size, stream>>>(q_buf,
+                                                             q_mtp_buf,
                                                              k_buf,
                                                              v_buf,
                                                              param,
@@ -2696,6 +2706,7 @@ void invokeAddFusedQKVBiasTransposePrefillV1(T*                             q_bu
                                                              use_logn_attn,
                                                              store_qkv,
                                                              store_q,
+                                                             store_q_mtp,
                                                              store_kv,
                                                              store_cache,
                                                              cos_sin_cache);
@@ -2707,6 +2718,7 @@ void invokeAddFusedQKVBiasTransposePrefillV1(T*                             q_bu
 
 template<typename T, typename Tcache, bool PREFIX_PROMPT, bool USE_PAGED_FMHA, RopeStyle ROPE_STYLE>
 __global__ void add_fusedQKV_bias_transpose_prefill_kernel(T*                            q_buf,
+                                                           T*                            q_mtp_buf,
                                                            T*                            k_buf,
                                                            T*                            v_buf,
                                                            PrefixPromptBatchWeightsParam param,
@@ -2725,6 +2737,7 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel(T*                   
                                                            const bool    use_logn_attn,
                                                            bool          store_qkv,
                                                            bool          store_q,
+                                                           bool          store_q_mtp,
                                                            bool          store_kv,
                                                            bool          store_cache,
                                                            const float2* cos_sin_cache) {
@@ -2880,6 +2893,11 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel(T*                   
         *reinterpret_cast<Vec_t*>(&q_buf[dest_q_idx]) = q;
     }
 
+    if (store_q_mtp) {
+        size_t dest_q_mtp_idx = (pre_len + seq_idx) * head_num * size_per_head + head_idx * size_per_head + tidx * vec_size;
+        *reinterpret_cast<Vec_t*>(&q_mtp_buf[dest_q_mtp_idx]) = q;
+    }
+
     if (store_kv) {
         const int dest_kv_idx = batch_idx * size_per_head * total_seq_len * head_num_kv
                                 + head_idx * size_per_head * total_seq_len + dst_kv_seq_idx * size_per_head
@@ -2944,6 +2962,7 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel(T*                   
 
 template<typename T>
 void invokeAddFusedQKVBiasTransposePrefill(T*                             q_buf,
+                                           T*                             q_mtp_buf,
                                            T*                             k_buf,
                                            T*                             v_buf,
                                            PrefixPromptBatchWeightsParam* param_ptr,
@@ -2966,6 +2985,7 @@ void invokeAddFusedQKVBiasTransposePrefill(T*                             q_buf,
                                            const bool                     use_paged_fmha,
                                            const bool                     store_qkv,
                                            const bool                     store_q,
+                                           const bool                     store_q_mtp,
                                            const bool                     store_kv,
                                            const bool                     store_cache,
                                            const float2*                  cos_sin_cache,
@@ -2981,6 +3001,7 @@ void invokeAddFusedQKVBiasTransposePrefill(T*                             q_buf,
                 FT_ROPE_SWITCH(rope_config.style, ROPE_STYLE, [&] {
                     add_fusedQKV_bias_transpose_prefill_kernel<T, Tcache, PREFIX_PROMPT, USE_PAGED_FMHA, ROPE_STYLE>
                         <<<grid, block, smem_size, stream>>>(q_buf,
+                                                             q_mtp_buf,
                                                              k_buf,
                                                              v_buf,
                                                              param,
@@ -2999,6 +3020,7 @@ void invokeAddFusedQKVBiasTransposePrefill(T*                             q_buf,
                                                              use_logn_attn,
                                                              store_qkv,
                                                              store_q,
+                                                             store_q_mtp,
                                                              store_kv,
                                                              store_cache,
                                                              cos_sin_cache);
@@ -4013,6 +4035,7 @@ INSTANTIATEDECODEADDFUSEDQKVBIASTRANSPOSE(__nv_bfloat16);
 
 #define INSTANTIATEADDFUSEDQKVBIASTRANSPOSEPREFILLV1(T)                                                                \
     template void invokeAddFusedQKVBiasTransposePrefillV1(T*                             q_buf,                        \
+                                                          T*                             q_mtp_buf,                    \
                                                           T*                             k_buf,                        \
                                                           T*                             v_buf,                        \
                                                           PrefixPromptBatchWeightsParam* param,                        \
@@ -4035,6 +4058,7 @@ INSTANTIATEDECODEADDFUSEDQKVBIASTRANSPOSE(__nv_bfloat16);
                                                           const bool                     use_paged_fmha,               \
                                                           const bool                     store_qkv,                    \
                                                           const bool                     store_q,                      \
+                                                          const bool                     store_q_mtp,                    \
                                                           const bool                     store_kv,                     \
                                                           const bool                     store_cache,                  \
                                                           const float2*                  cos_sin_cache,                \
@@ -4048,6 +4072,7 @@ INSTANTIATEADDFUSEDQKVBIASTRANSPOSEPREFILLV1(__nv_bfloat16);
 
 #define INSTANTIATEADDFUSEDQKVBIASTRANSPOSEPREFILL(T)                                                                  \
     template void invokeAddFusedQKVBiasTransposePrefill(T*                             q_buf,                          \
+                                                        T*                             q_mtp_buf,                      \
                                                         T*                             k_buf,                          \
                                                         T*                             v_buf,                          \
                                                         PrefixPromptBatchWeightsParam* param,                          \
@@ -4070,6 +4095,7 @@ INSTANTIATEADDFUSEDQKVBIASTRANSPOSEPREFILLV1(__nv_bfloat16);
                                                         const bool                     use_paged_fmha,                 \
                                                         const bool                     store_qkv,                      \
                                                         const bool                     store_q,                        \
+                                                        const bool                     store_q_mtp,                    \
                                                         const bool                     store_kv,                       \
                                                         const bool                     store_cache,                    \
                                                         const float2*                  cos_sin_cache,                  \

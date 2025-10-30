@@ -22,38 +22,65 @@ torch::Tensor read_tensor_from_file(std::string filename) {
     return x.toTensor();
 }
 
-void AiterWrapper::mtp() {
+void AiterWrapper::mtp(const AttentionModuleParams& params, rtp_llm::DeviceBase* device, Buffer& q_mtp) {
     py::gil_scoped_acquire acquire;
     printf("DEBUG: in AiterWrapper::mtp\n");
-    torch::Tensor query = read_tensor_from_file("/mnt/raid0/hangy/aiter/op_tests/play_around_mtp/data/query.pt");
-    torch::Tensor key_cache = read_tensor_from_file("/mnt/raid0/hangy/aiter/op_tests/play_around_mtp/data/k_cache.pt");
-    torch::Tensor value_cache = read_tensor_from_file("/mnt/raid0/hangy/aiter/op_tests/play_around_mtp/data/v_cache.pt");
-    torch::Tensor block_tables = read_tensor_from_file("/mnt/raid0/hangy/aiter/op_tests/play_around_mtp/data/block_table.pt");
-    torch::Tensor seq_lens = read_tensor_from_file("/mnt/raid0/hangy/aiter/op_tests/play_around_mtp/data/seq_lens.pt");
+    // torch::Tensor query = read_tensor_from_file("/mnt/raid0/hangy/aiter/op_tests/play_around_mtp/data/query.pt");
+    // torch::Tensor key_cache = read_tensor_from_file("/mnt/raid0/hangy/aiter/op_tests/play_around_mtp/data/k_cache.pt");
+    // torch::Tensor value_cache = read_tensor_from_file("/mnt/raid0/hangy/aiter/op_tests/play_around_mtp/data/v_cache.pt");
+    // torch::Tensor block_tables = read_tensor_from_file("/mnt/raid0/hangy/aiter/op_tests/play_around_mtp/data/block_table.pt");
+    // torch::Tensor seq_lens = read_tensor_from_file("/mnt/raid0/hangy/aiter/op_tests/play_around_mtp/data/seq_lens.pt");
     
-    torch::Tensor ref = read_tensor_from_file("/mnt/raid0/hangy/aiter/op_tests/play_around_mtp/data/hip_pa_ret.pt");
+    // torch::Tensor ref = read_tensor_from_file("/mnt/raid0/hangy/aiter/op_tests/play_around_mtp/data/hip_pa_ret.pt");
 
     // Call the Python function
-    int mtp = 5;
-    float scale = 1.0 / std::sqrt(128);
+    // int mtp = 5;
+    // float scale = 1.0 / std::sqrt(128);
+
+    auto query        = Buffer2torchTensor(q_mtp, false);
+    auto key_cache    = Buffer2torchTensor(params.common.kv_cache->k_cache_buffer, false);
+    auto value_cache  = Buffer2torchTensor(params.common.kv_cache->v_cache_buffer, false);
+    auto block_tables = Buffer2torchTensor(params.common.kv_cache->kv_cache_block_id, false);
+
+    auto aiter_attn = (AiterAttnParams*)params.common.decode_aiter_attn.get();
+    auto seq_lens = aiter_attn->sequence_lengths_t;
+    int64_t max_seq_len = device->nativeGraphCapturing() ? device->initParams().max_seq_len : params.common.decoder_max_seq_len + 1;
+
+    std::optional<torch::Tensor> q_scale = std::nullopt;
+    std::optional<torch::Tensor> k_scale = std::nullopt;
+    std::optional<torch::Tensor> v_scale = std::nullopt;
+
+    std::string kv_cache_dtype = "auto";
+    if (key_cache.dtype() == at::kFloat8_e4m3fnuz) {
+        kv_cache_dtype = "fp8";
+        k_scale = Buffer2torchTensor(params.common.kv_cache->k_scale_buffer,false);
+        v_scale = Buffer2torchTensor(params.common.kv_cache->v_scale_buffer,false);
+    }
+
+    int64_t num_kv_heads = params.configs.kv_head_num;
+    float scale = params.configs.softmax_extra_scale / sqrtf(params.configs.size_per_head * 1.0f);
+    int64_t mtp = params.common.context_max_seq_len;
+
     py::object result = pa_func(
         query,
         key_cache,
         value_cache,
         block_tables,
         seq_lens,
-        128,
-        "auto",
-        8,
+        max_seq_len,
+        kv_cache_dtype,
+        num_kv_heads,
         scale,
         py::none(),
-        py::none(),
-        py::none(),
-        "q_scale"_a = py::none(),
+        k_scale,
+        v_scale,
+        q_scale,
         "mtp"_a = mtp,
         "output_dtype"_a = torch::kBFloat16
     );
     torch::Tensor output_tensor = result.cast<torch::Tensor>();
+    BufferPtr output_buf = torchTensor2Buffer(output_tensor);
+    params.output.swap(*output_buf);
     printf("DEBUG: in AiterWrapper::mtp done\n");
 }
 
