@@ -221,15 +221,15 @@ class ModelLoader:
     def _load_weight(self, device: str):
         is_safetensor = self._load_config.database.is_safetensor
         convert_device = self._choose_weight_convert_device(device)
-        if (
-            is_safetensor
-            and convert_device != "cpu"
-            and self._is_memory_enough_for_fastsafetensor()
-        ):
-            try:
-                return self._load_from_fastsafetensor(device)
-            except Exception as e:
-                logging.warning(f"Failed to load from fastsafetensors: {e}")
+        # if (
+        #     is_safetensor
+        #     and convert_device != "cpu"
+        #     and self._is_memory_enough_for_fastsafetensor()
+        # ):
+        #     try:
+        #         return self._load_from_fastsafetensor(device)
+        #     except Exception as e:
+        #         logging.warning(f"Failed to load from fastsafetensors: {e}")
 
         logging.info(
             f"database is safetensor: {is_safetensor}, device: {device}, choose devie: {convert_device}"

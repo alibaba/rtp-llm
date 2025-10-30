@@ -43,22 +43,31 @@ protected:
     bool isTpRank0() const;
 
     absl::Status prefillStep(const std::list<GenerateStreamPtr>& streams);
+
     absl::Status decodeStep(const std::list<GenerateStreamPtr>& streams);
-
-    void updatePrefillProposeInput(GptModelInputs&  model_input,
-                                   GptModelOutputs& model_output,
-                                   SamplerOutput&   sampler_output);
-    void
-    updateDecodeProposeInput(GptModelInputs& model_input, GptModelOutputs& model_output, SamplerOutput& sampler_output);
-    void
-    updateDecodeScoreInput(GptModelInputs& model_input, GptModelOutputs& model_output, SamplerOutput& sampler_output);
-
-    std::tuple<torch::Tensor, torch::Tensor> fastTopK(const torch::Tensor& probs, int top_k, int dim);
 
     void draftModelSample(const BufferPtr& logits,
                           SamplerOutput&   sampler_output,
                           torch::Tensor&   draft_probs,
                           torch::Tensor&   draft_token_ids);
+
+    void prepareOneStepSpecDecodeModelInput(const StreamGroups& stream_groups, GptModelInputs& model_input);
+
+    void updatePrefillPostDraftModelInput(GptModelInputs&  model_input,
+                                          GptModelOutputs& model_output,
+                                          SamplerOutput&   sampler_output);
+
+    void updateDecodePostDraftModelInput(GptModelInputs&                        model_input,
+                                         GptModelOutputs&                       model_output,
+                                         speculative::SpeculativeSamplerOutput& speculative_sampler_output,
+                                         size_t                                 batch_size,
+                                         torch::Tensor&                         hidden_states_d_t);
+
+    void updateOneStepDraftSamplerOutput(const StreamGroups& stream_groups,
+                                         SamplerOutput&      draft_sampler_output,
+                                         torch::Tensor&      draft_token_probs_d_t);
+
+    std::tuple<torch::Tensor, torch::Tensor> fastTopK(const torch::Tensor& probs, int top_k, int dim);
 
 private:
     std::unique_ptr<GptModel>                model_;
@@ -67,6 +76,7 @@ private:
     std::shared_ptr<CacheManager>            cache_manager_;
     std::shared_ptr<lora::LoraManager>       lora_manager_;
     bool                                     enable_ffn_disaggregate_ = false;
+    bool                                     enable_detail_log_       = false;
     std::shared_ptr<ExpertBalancer>          expert_balancer_;
     size_t                                   vocab_size_;
 
