@@ -13,7 +13,8 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readonly("reuse_cache_page_indice", &MlaParams::reuse_cache_page_indice)
         .def_readonly("decode_page_indptr", &MlaParams::decode_page_indptr)
         .def_readonly("prefill_page_indptr", &MlaParams::prefill_page_indptr)
-        .def_readonly("qo_indptr", &MlaParams::qo_indptr);
+        .def_readonly("qo_indptr", &MlaParams::qo_indptr)
+        .def_readonly("batch_reuse_info_vec", &MlaParams::batch_reuse_info_vec);
 
     pybind11::class_<KVCache>(m, "KVCache")
         .def(pybind11::init<>())

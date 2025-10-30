@@ -298,10 +298,6 @@ try:
             """使用索引操作的优化版本 - 根据kv_len和q_len的差值确定concat位置"""
 
             # 获取参数
-            prefill_page_indptr = (
-                self.fmha_params.prefill_page_indptr
-            )  # [0, 17, 93, 175, 191]
-            qo_indptr = self.fmha_params.qo_indptr  # [0, 17, 29, 47, 63]
             reuse_cache_page_indice = self.fmha_params.reuse_cache_page_indice  # [5, 3]
             num_blocks = reuse_cache_page_indice.size(0)  # 2
 
@@ -309,36 +305,11 @@ try:
                 return compressed_kv, k_pe
 
             compressed_kv_dim = compressed_kv.size(1)
-            token_per_block = self.fmha_impl.token_per_block
-
-            # 计算每个batch的reuse信息
-            batch_size = prefill_page_indptr.size(0) - 1
-            batch_reuse_info = []
-            block_start_idx = 0  # 在reuse_cache_page_indice中的起始位置
-
-            for i in range(batch_size):
-                kv_len = (
-                    prefill_page_indptr[i + 1].item() - prefill_page_indptr[i].item()
-                )
-                q_len = qo_indptr[i + 1].item() - qo_indptr[i].item()
-
-                # 当前batch的reuse_len = kv_len - (q_len + 前面累积的reuse_len)
-                current_reuse_len = kv_len - q_len
-
-                if current_reuse_len > 0:
-                    # 计算这个batch需要多少个reuse blocks
-                    blocks_needed = (
-                        current_reuse_len + token_per_block - 1
-                    ) // token_per_block
-                    # 存储batch_idx, reuse_len, block_start_idx, blocks_needed
-                    batch_reuse_info.append(
-                        (i, current_reuse_len, block_start_idx, blocks_needed)
-                    )
-                    block_start_idx += blocks_needed  # 更新下一个batch的起始位置
-                else:
-                    batch_reuse_info.append((i, 0, 0, 0))
+            qo_indptr = self.fmha_params.qo_indptr  # [0, 17, 29, 47, 63]
 
             # 准备结果tensor
+            batch_reuse_info = self.fmha_params.batch_reuse_info_vec.cpu().tolist()
+            qo_indptr_list = qo_indptr.cpu().tolist()
             total_reuse_len = sum(info[1] for info in batch_reuse_info)
             if total_reuse_len == 0:
                 return compressed_kv, k_pe
@@ -365,9 +336,7 @@ try:
                 block_start_idx,
                 blocks_needed,
             ) in batch_reuse_info:
-                batch_q_len = (
-                    qo_indptr[batch_idx + 1].item() - qo_indptr[batch_idx].item()
-                )
+                batch_q_len = qo_indptr_list[batch_idx + 1] - qo_indptr_list[batch_idx]
 
                 if reuse_len > 0:
                     # 获取这个batch需要的reuse blocks

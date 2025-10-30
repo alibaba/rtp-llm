@@ -17,6 +17,7 @@ struct MlaParams {
     torch::Tensor decode_page_indptr;
     torch::Tensor prefill_page_indptr;
     torch::Tensor qo_indptr;
+    torch::Tensor batch_reuse_info_vec;
 };
 
 struct KVCache {

@@ -35,15 +35,17 @@ MlaParams FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
     int offset         = 0;
     int total_page_idx = 0;
 
-    std::vector<int32_t> batch_indice;
-    std::vector<int32_t> positions;
-    std::vector<int32_t> paged_kv_last_page_len;
-    std::vector<int32_t> kvlen;
-    std::vector<int32_t> page_indice;
-    std::vector<int32_t> reuse_cache_page_indice;
-    std::vector<int32_t> decode_page_indptr  = {0};
-    std::vector<int32_t> prefill_page_indptr = {0};
-    std::vector<int32_t> qo_indptr           = {0};
+    std::vector<int32_t>              batch_indice;
+    std::vector<int32_t>              positions;
+    std::vector<int32_t>              paged_kv_last_page_len;
+    std::vector<int32_t>              kvlen;
+    std::vector<int32_t>              page_indice;
+    std::vector<int32_t>              reuse_cache_page_indice;
+    std::vector<int32_t>              decode_page_indptr  = {0};
+    std::vector<int32_t>              prefill_page_indptr = {0};
+    std::vector<int32_t>              qo_indptr           = {0};
+    std::vector<std::vector<int32_t>> batch_reuse_info_vec;
+    int                               batch_start_idx = 0;
 
     auto input_lengths     = input_lengths_host->data<int>();
     auto prefix_lengths    = prefix_lengths_host ? prefix_lengths_host->data<int>() : nullptr;
@@ -72,6 +74,12 @@ MlaParams FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
                     auto page_idx = kv_cache_block_id[i * max_batch_blocks + j];
                     reuse_cache_page_indice.push_back(page_idx);
                 }
+            }
+            if (prefix_length) {
+                batch_reuse_info_vec.push_back({i, prefix_length, batch_start_idx, page_num});
+                batch_start_idx += page_num;
+            } else {
+                batch_reuse_info_vec.push_back({i, 0, 0, 0});
             }
         } else {
             batch_indice.push_back(i);
@@ -107,6 +115,16 @@ MlaParams FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
     params.qo_indptr               = torch::tensor(qo_indptr, cuda_option);
     params.kvlen                   = torch::tensor(kvlen, cuda_option);
     params.positions               = torch::tensor(positions, cuda_option);
+    if (reuse_cache_page_indice.size() > 0) {
+        std::vector<int32_t> flat;
+        flat.reserve(batch_reuse_info_vec.size() * batch_reuse_info_vec[0].size());
+        for (const auto& row : batch_reuse_info_vec) {
+            flat.insert(flat.end(), row.begin(), row.end());
+        }
+        params.batch_reuse_info_vec =
+            torch::tensor(flat, cuda_option)
+                .view({(int64_t)batch_reuse_info_vec.size(), (int64_t)batch_reuse_info_vec[0].size()});
+    }
     return params;
 }
 
