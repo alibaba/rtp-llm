@@ -47,6 +47,14 @@ protected:
                                            std::list<GenerateStreamPtr>& all_streams,
                                            bool                          score_batch = false) const;
 
+    void dispatchSingleStream(GenerateStreamPtr   stream,
+                              const MergedOutput& merge_outputs,
+                              int                 batch_idx_in,
+                              int                 batch_idx_out,
+                              int                 token_offset,
+                              bool                return_all_probs,
+                              const BufferPtr&    new_tokens_all) const;
+
 protected:
     size_t           num_layers_;
     size_t           vocab_size_;
