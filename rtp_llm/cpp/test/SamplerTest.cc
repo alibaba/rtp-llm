@@ -11,8 +11,8 @@ class SamplerTest: public DeviceTestBase {
 public:
     void SetUp() override {
         DeviceTestBase::SetUp();
-        const auto eos_id = 1;
-        sampler_.reset(new Sampler({device_, eos_id, 256}));
+        SamplerInitParams params{device_};
+        sampler_.reset(new Sampler(params));
     }
 
 protected:
@@ -45,17 +45,18 @@ TEST_F(SamplerTest, testGeneralSampling) {
     BufferPtr num_beams_out    = createBuffer<uint64_t>({batch_size}, {1, 1, 1, 1, 1}, AllocationType::HOST);
 
     BufferPtr cum_log_probs = createBuffer<float>({batch_size}, {-1, -1, -1, -1, -1});
-    BufferPtr rand_seed     = createBuffer<uint64_t>({batch_size}, {0, 0, 0, 0, 0}, AllocationType::HOST);
     BufferPtr repetition_penalty =
         createBuffer<float>({batch_size}, {1.0f, 1.0f, 1.0f, 10000.0f, 1.0f}, AllocationType::HOST);
     BufferPtr presence_penalty  = createBuffer<float>({batch_size}, {0, 0, 0, 0, 0}, AllocationType::HOST);
     BufferPtr frequency_penalty = createBuffer<float>({batch_size}, {0, 0, 0, 0, 0}, AllocationType::HOST);
-    BufferPtr min_length        = createBuffer<int32_t>({batch_size}, {0, 0, 0, 0, 10}, AllocationType::HOST);
 
     auto top_k       = createBuffer<uint32_t>({batch_size}, {1, 4, 0, 0, 8}, AllocationType::HOST);
     auto top_p       = createBuffer<float>({batch_size}, {0.0, 0.0, 0.001, 0.99, 0.9}, AllocationType::HOST);
     auto temperature = createBuffer<float>({batch_size}, {0.1, 0.001, 0.2, 1.0, 100.0f}, AllocationType::HOST);
     LogitsProcessorStatesPtr state_ptr = std::make_shared<LogitsProcessorStates>();
+
+    std::vector<at::Generator> generator;
+    generator.resize(batch_size);
 
     SamplerInputs inputs{
         move(logits),
@@ -72,16 +73,15 @@ TEST_F(SamplerTest, testGeneralSampling) {
         move(top_k),
         move(top_p),
         move(temperature),
-        rand_seed,
         repetition_penalty,
         presence_penalty,
         frequency_penalty,
-        min_length,
         nullptr,  // no_repeat_ngram_size
         nullptr,  // do_sample
         nullptr,  // finished_mask
         device_->clone({*cum_log_probs}),
         nullptr,  // all_probs
+        generator,
     };
 
     auto outputs = sampler_->forward(inputs);
@@ -97,9 +97,6 @@ TEST_F(SamplerTest, testGeneralSampling) {
 
     vector<vector<int32_t>> token_bins(batch_size, vector<int32_t>(vocab_size, 0));
     for (size_t i = 0; i < 10000; i++) {
-        for (size_t j = 0; j < batch_size; j++) {
-            rand_seed->data<uint64_t>()[j] = i * 1000 + j;
-        }
 
         inputs.token_ids     = device_->clone({*output_token_ids, AllocationType::HOST});
         inputs.cum_log_probs = device_->clone({*cum_log_probs});
@@ -159,17 +156,6 @@ TEST_F(SamplerTest, testGeneralSampling) {
             ASSERT_EQ(std::min_element(token_bins[3].begin(), token_bins[3].end()), token_bins[3].begin() + 3);
             for (size_t token = 0; token < vocab_size; token++) {
                 ASSERT_GT(token_bins[i][token], 0);
-            }
-        }
-        // batch 4: temperature = 100.0, expected uniform distribution
-        // except token 1, which is eos token and should be punished by min_length
-        if (i == 4) {
-            for (size_t token = 0; token < vocab_size; token++) {
-                if (token == 1) {
-                    ASSERT_EQ(token_bins[4][token], 0);
-                } else {
-                    ASSERT_GT(token_bins[4][token], 0);
-                }
             }
         }
     }
