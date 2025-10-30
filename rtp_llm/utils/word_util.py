@@ -4,12 +4,33 @@ import numpy as np
 import torch
 
 
-def remove_padding_eos_with_numpy(token_ids: np.ndarray, eos_token_id: int) -> np.ndarray:
+def remove_padding_eos_with_numpy(
+    token_ids: np.ndarray, eos_token_id: int
+) -> np.ndarray:
     # token_ids shape: [max_length]
     return token_ids[token_ids != eos_token_id]
 
+
 def remove_padding_eos(token_ids: torch.Tensor, eos_token_id: int) -> torch.Tensor:
-    return torch.IntTensor(remove_padding_eos_with_numpy(token_ids.cpu().numpy(), eos_token_id).tolist())
+    return torch.IntTensor(
+        remove_padding_eos_with_numpy(token_ids.cpu().numpy(), eos_token_id).tolist()
+    )
+
+
+import numpy as np
+
+
+def batch_remove_padding_eos(
+    batched_tokens: np.ndarray, eos_token_id: int
+) -> List[np.ndarray]:
+    eos_mask = batched_tokens == eos_token_id
+    first_eos_indices = np.argmax(eos_mask, axis=1)
+    seq_len = batched_tokens.shape[1]
+    end_indices = np.where(np.any(eos_mask, axis=1), first_eos_indices, seq_len)
+    truncated_tokens_list = [
+        batched_tokens[i, : end_indices[i]] for i in range(len(batched_tokens))
+    ]
+    return truncated_tokens_list
 
 
 def remove_padding_eos_for_list(

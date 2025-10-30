@@ -4,6 +4,7 @@ import numpy as np
 import numpy.typing as npt
 import torch
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
+
 from rtp_llm.frontend.tokenizer_factory.tokenizer_utils import (
     DecodingState,
     IncrementDecodingUtils,
@@ -69,7 +70,6 @@ class TokenProcessorPerStream:
         return_incremental: bool = False,
     ):
         if not self.has_num_beams:
-            # Handle case when self.ouput_tokens_list[i] is empty
             if self.ouput_tokens_list[i].size == 0:
                 self.ouput_tokens_list[i] = tokens
             else:
@@ -120,7 +120,6 @@ class TokenProcessorPerStream:
                     (self.ouput_tokens_list[i], tokens), axis=1
                 )
                 tokens = self.ouput_tokens_list[i]
-
             tokens = remove_padding_eos_with_numpy(
                 tokens, self.special_tokens.eos_token_id
             ).tolist()
