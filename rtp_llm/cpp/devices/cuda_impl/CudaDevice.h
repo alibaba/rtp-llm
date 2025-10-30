@@ -99,7 +99,6 @@ private:
     void         checkUseMultiBlockMode();
     void         checkUseXQA();
     void         checkSupportTrtFp8FMHA();
-    void         checkUseFlashinferSampleKernel();
     bool         useFp8Fmha(const DevicePrepParams& params) const;
     void         initMoeRunner(const DataType compute_type, const DataType weights_type);
     void         initNcclParam(size_t             rank,
@@ -117,10 +116,8 @@ private:
     cudaStream_t getCommStream(ParallelMode mode, bool overlap);
     template<typename QuantType>
     LayernormOutput _layernorm(const LayernormParams& params);
-    bool            checkUseFlashinferSampleGreedy(const GreedyParams& params);
     GreedyOutput    flashinferSampleGreedy(const GreedyParams& params, const BufferPtr& transposed_tokens);
     void processLogits(const GreedyParams& params, const BufferPtr& device_tokens, const BufferPtr& transposed_tokens);
-    void completeSampleGreedy(const GreedyParams& params, const BufferPtr& transposed_tokens);
 
 public:
     void setStream(cudaStream_t stream) {
@@ -305,8 +302,6 @@ private:
 
     GraphBase* graph_runner_{nullptr};
 
-    BufferPtr curandstate_buf_;  // for sampler use.
-
     std::unique_ptr<CustomAllReduceComm> custom_allreduce_comm_ = nullptr;  // for custom allreduce use
 
     // BufferPtr will be error when multi stream, tmp hold
@@ -333,7 +328,6 @@ protected:
     bool use_group_gemm               = false;
     bool support_trt_fp8_fmha         = false;
     bool use_fp8_fmha_                = false;
-    bool use_flashinfer_sample_kernel = false;
 
     bool use_stable_scatter_add = false;
 
