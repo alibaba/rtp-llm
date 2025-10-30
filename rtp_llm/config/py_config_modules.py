@@ -22,7 +22,6 @@ from rtp_llm.ops import (
     ProfilingDebugLoggingConfig,
     RoleType,
     RuntimeConfig,
-    SamplerConfig,
     SpeculativeExecutionConfig,
     VitSeparation,
 )
@@ -349,7 +348,6 @@ class PyEnvConfigs:
         self.sp_config = SpeculativeExecutionConfig()
         self.cache_store_config = CacheStoreConfig()
         self.arpc_config = ArpcConfig()
-        self.sampler_config = SamplerConfig()
         self.grpc_config = GrpcConfig()
         self.deep_ep_config = DeepEPConfig()
 

@@ -12,8 +12,6 @@ typedef std::shared_ptr<LogitsProcessorStates> LogitsProcessorStatesPtr;
 
 struct SamplerInitParams {
     rtp_llm::DeviceBase* device;
-    int32_t              eos_id;
-    size_t               max_batch_size = 256;  // default max batch size
 };
 
 struct SamplerInputs {
@@ -50,17 +48,17 @@ public:
     rtp_llm::BufferPtr top_k;                 // shape: [batch_size]
     rtp_llm::BufferPtr top_p;                 // shape: [batch_size]
     rtp_llm::BufferPtr temperature;           // shape: [batch_size]
-    rtp_llm::BufferPtr random_seeds;          // shape: [batch_size]
     rtp_llm::BufferPtr repetition_penalty;    // shape: [batch_size]
     rtp_llm::BufferPtr presence_penalty;      // shape: [batch_size]
     rtp_llm::BufferPtr frequency_penalty;     // shape: [batch_size]
-    rtp_llm::BufferPtr min_lengths;           // shape: [batch_size]
     rtp_llm::BufferPtr no_repeat_ngram_size;  // shape: [batch_size]
     rtp_llm::BufferPtr do_sample;             // shape: [batch_size]
     rtp_llm::BufferPtr finished_mask;         // shape: [batch_size]
 
     mutable rtp_llm::BufferPtr cum_log_probs;  // shape: [batch_size]
     mutable rtp_llm::BufferPtr all_probs;      // shape: [batch_size, vocab_size]
+
+    std::vector<at::Generator> generator;
 };
 
 struct SamplerOutput {
