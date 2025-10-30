@@ -188,7 +188,6 @@ class DeepSeekV2DecoderLayer(nn.Module):
 
 class DeepSeekV2Model(GptModelBase):
     def __init__(self, config: GptInitModelParameters, weights: ModelWeights):
-        config.head_num = config.head_num // config.tp_size
         super().__init__(config, weights)
         self.layer_num = config.layer_num
         self.vocab_size = config.vocab_size

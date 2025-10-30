@@ -22,7 +22,7 @@ class DeepSeekV2Attention(nn.Module):
     ):
         super().__init__()
         self.config = config
-        self.num_heads = self.config.head_num
+        self.num_heads = self.config.head_num // self.config.tp_size
         self.qk_nope_head_dim = self.config.nope_head_dim
         self.qk_rope_head_dim = self.config.rope_head_dim
         self.q_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim

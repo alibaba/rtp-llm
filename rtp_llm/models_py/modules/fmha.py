@@ -177,7 +177,7 @@ try:
             )
             self.absorb_opt_len = absorb_opt_len
             self.aborb_fmha = MlaFlashInferDecodeOp(
-                config.head_num,
+                config.head_num // config.tp_size,
                 config.kv_lora_rank,
                 config.rope_head_dim,
                 config.nope_head_dim,
@@ -222,7 +222,7 @@ try:
             #     )
             return MlaFlashInferPrefillOp(
                 config,
-                config.head_num,
+                config.head_num // config.tp_size,
                 config.kv_lora_rank,
                 config.rope_head_dim,
                 config.nope_head_dim,
@@ -441,7 +441,7 @@ try:
         ) -> None:
             super().__init__(
                 MlaFlashInferDecodeOp(
-                    config.head_num,
+                    config.head_num // config.tp_size,
                     config.kv_lora_rank,
                     config.rope_head_dim,
                     config.nope_head_dim,
