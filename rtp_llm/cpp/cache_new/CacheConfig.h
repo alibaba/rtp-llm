@@ -19,7 +19,6 @@ enum MemoryLayout {
 };
 
 struct KVCacheParam {    
-    size_t            seq_size_per_block = 1;
     KVCacheType       type;
     rtp_llm::DataType dtype;
 };
@@ -51,10 +50,10 @@ struct CacheConfig {
 
     bool                          enable_independent_pool = true;
 
-
     int                           layer_num;
     int                           block_num;   
     int                           block_size;
+    size_t                        seq_size_per_block = 1;
 };
 
 

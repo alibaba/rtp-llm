@@ -35,6 +35,11 @@ public:
     // TODO: InsertInfo 考虑  hicache distkvcache 的逻辑
 private:
     CacheConfig config_;
+    rtp_llm::DeviceBase* device_;
     KVCacheAllocatorPtr allocator_; 
-    // HashUtil hash_util_;
+
+    const kmonitor::MetricsReporterPtr metrics_reporter_;
+    const GptInitParameter& params_;
+
+    HashUtil hash_util_;
 };
