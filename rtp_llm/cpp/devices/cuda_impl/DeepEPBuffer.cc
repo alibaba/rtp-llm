@@ -13,7 +13,7 @@ namespace rtp_llm {
  */
 bool DeepEPBuffer::init() {
     buffer_.reset(deep_ep::createDeepEPBuffer(
-        world_rank_, local_world_size_, world_size_, num_nvl_bytes_, num_rdma_bytes_, low_latency_mode_));
+        world_rank_, local_world_size_, world_size_, num_nvl_bytes_, num_rdma_bytes_, low_latency_mode_, true));
 
     int              local_device_id = buffer_->get_local_device_id();
     std::vector<int> device_ids      = allGatherDeviceIds(local_device_id);
@@ -62,7 +62,7 @@ void DeepEPBuffer::setAcclEPLowLatencyEnv(int ll_opt_level, int num_nodes) {
             setenv("NVSHMEM_DISABLE_P2P", "1", 1);
             setenv("NVSHMEM_IB_ENABLE_IBGDA", "1", 1);
         }
-        
+
         setenv("NVSHMEM_IBGDA_NIC_HANDLER", "gpu", 1);
 
         if (getenv("NVSHMEM_IBGDA_NUM_RC_PER_PE") == nullptr) {

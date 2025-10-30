@@ -29,20 +29,22 @@ flashinfer = [
 xft_dep = select({
     "@//:using_arm": [],
     "//:xft_use_icx": [
-        "xfastertransformer_devel_icx",
+        # "xfastertransformer_devel_icx",
     ],
     "//conditions:default": [
-        "xfastertransformer_devel",
+        # "xfastertransformer_devel",
     ],
 })
 
 arch_dep = select({
     "@//:using_arm": [],
+    "@//:using_cuda12_arm": [],
     "//conditions:default": [":decord"],
 })
 
 arch_with_version_dep = select({
     "@//:using_arm": [],
+    "@//:using_cuda12_arm": [],
     "//conditions:default": ["decord==0.6.0"],
 })
 
@@ -95,7 +97,7 @@ requirement([
     "av",
     "pyrsmi",
     "amdsmi",
-    "fast-safetensors",
+    # "fast-safetensors",
     "setproctitle",
     "bitsandbytes",
     "portalocker",
@@ -214,13 +216,15 @@ py_library(
         "//rtp_llm/model_loader:loader",
         "//rtp_llm/models_py:models",
     ] + arch_dep + select({
-        "@//:using_cuda12": tensorrt + flashinfer,
+        "@//:using_cuda12_9_x86": tensorrt + flashinfer,
+        "@//:cuda_pre_12_9": tensorrt + flashinfer,
         "//conditions:default": []
     }) + select({
         "@//:using_arm": [],
-        "//:xft_use_icx": [
-            "xfastertransformer_devel_icx",
-        ],
+        "@//:using_cuda12_arm": [],
+        # "//:xft_use_icx": [
+        #     "xfastertransformer_devel_icx",
+        # ],
         "//conditions:default": [
             "xfastertransformer_devel",
         ],
@@ -228,6 +232,7 @@ py_library(
         "@//:using_arm": [],
 	    "@//:using_rocm": ["pyrsmi", "amdsmi"],
         "@//:using_cpu": [],
+        "@//:using_cuda12_arm": [],
         "//conditions:default": ["flash_attn"]
     }),
 )
@@ -535,8 +540,8 @@ whl_reqs = [
     "timm==0.9.12",
     "onnx",
     "sentence-transformers==2.7.0",
-    "xfastertransformer_devel==1.8.1.1",
-    "xfastertransformer_devel_icx==1.8.1.1",
+    # "xfastertransformer_devel==1.8.1.1",
+    # "xfastertransformer_devel_icx==1.8.1.1",
     "grpcio==1.62.0",
     #"decord==0.6.0",
     "accelerate==0.25.0",

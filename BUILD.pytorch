@@ -83,7 +83,7 @@ cc_library(
         "torch.libs/libopenblasp*.so",
     ]),
     linkopts = select({
-        "@//:cuda_not_12_9": [
+        "@//:cuda_pre_12_9": [
             "-L/usr/local/cuda/lib64",
             "-L/usr/local/cuda/extras/CUPTI/lib64",
             "-lcupti",
@@ -92,7 +92,7 @@ cc_library(
             "-lcudnn",
             "-lnvToolsExt",
         ],
-        "@//:using_cuda12_9": [
+        "@//:using_cuda12_9_x86": [
             "-L/usr/local/cuda/lib64",
             "-L/usr/local/cuda/extras/CUPTI/lib64",
             "-lcupti",

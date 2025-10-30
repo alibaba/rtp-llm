@@ -127,7 +127,7 @@ BufferPtr DeviceBase::attentionAttn(const AttentionLayerParams& params) {
                         BufferPtr(new Buffer(scales->where(), scales->type(), scales->shape(), scales->data())),
                         BufferPtr(new Buffer(scales->where(), scales->type(), {0}, nullptr))));
     } else {
-#if defined(__aarch64__)
+#if BUILDING_ARM_ONLY
         // Arm attention op only support fp32 data type
         qkv_output = allocateBuffer({DataType::TYPE_FP32, {pad_token_num, qkv_hidden_size}}, {"qkv_output"});
 #else
@@ -220,7 +220,7 @@ BufferPtr DeviceBase::attentionOutGemm(const AttentionLayerParams& params) {
         quanted_attn_input = quantize(quant_params);
     }
     auto& output_gemm_input = quanted_attn_input ? *quanted_attn_input : qkv_output;
-#if defined(__aarch64__)
+#if BUILDING_ARM_ONLY
     // Arm attention op only support fp32 data type, convert to original dtype
     GemmParams output_gemm_params =
         GemmParams(output_gemm_input, *(output_weight->kernel), nullopt, gemm_output, gemm_output->type());
