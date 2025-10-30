@@ -55,27 +55,26 @@ while true; do
         status_json="$status_raw"
     fi
 
+    status_summary=""
+    if echo "$status_json" | jq empty 2>/dev/null; then
+        status_summary=$(echo "$status_raw" | jq -c '.status')
+    else
+        status_summary="$status_json"
+    fi
     main_status="UNKNOWN"
     if [[ "$status_json" == "null" ]]; then
         main_status="UNKNOWN"
-    elif echo "$status_json" | jq -e '.jobs' >/dev/null 2>&1; then
+    elif [[ "$status_summary" != "" ]]; then
         # 有 jobs 字段，说明是对象
-        if echo "$status_json" | jq -e '.jobs[].status | select(. == "PENDING")' >/dev/null; then
+        echo "Current status: $status_summary"
+        if echo "$status_summary" | grep -q "PENDING"; then
             main_status="PENDING"
-        elif echo "$status_json" | jq -e '.jobs[].status | select(. == "CANCELED")' >/dev/null; then
-            main_status="CANCELED"
-        elif echo "$status_json" | jq -e '.jobs[].status | select(. == "RUNNING")' >/dev/null; then
+        elif echo "$status_summary" | grep -q "RUNNING"; then
             main_status="RUNNING"
-        elif echo "$status_json" | jq -e '.jobs[].status | select(. == "FAILED")' >/dev/null; then
+        elif echo "$status_summary" | sed 's/SUCCESS//g' | sed 's/NOT_RUN//g' | grep -q '[a-zA-Z]'; then
             main_status="FAILED"
-        elif echo "$status_json" | jq -e '.jobs[].status | select(. == "NOT_RUN")' >/dev/null; then
-            main_status="NOT_RUN"
-        elif echo "$status_json" | jq -e '.jobs[].status | select(. == "UNKNOWN")' >/dev/null; then
-            main_status="UNKNOWN"
-        elif [[ $(echo "$status_json" | jq '[.jobs[].status] | all(. == "SUCCESS")') == "true" ]]; then
-            main_status="DONE"
         else
-            main_status="UNKNOWN"
+            main_status="DONE"
         fi
     else
         main_status="$status_json"
@@ -83,18 +82,13 @@ while true; do
 
     echo "Current main status: $main_status"
 
-    if [[ "$main_status" == "DONE"     || 
-          "$main_status" == "FAILED"   || 
-          "$main_status" == "UNKNOWN"  || 
-          "$main_status" == "CANCELED" || 
-          "$main_status" == "NOT_RUN"     ]]; then
-        status_summary=$(echo "$status_raw" | jq -c '.status')
+    if [[ "$main_status" == "DONE" || "$main_status" == "FAILED"  ]]; then
         echo "Current status: $status_summary"
-        if [[ "$main_status" == "DONE" || "$main_status" == "NOT_RUN" ]]; then
+        if [[ "$main_status" == "DONE" ]]; then
             echo "CI completed successfully"
             exit 0
         else
-            echo "CI failed with status: $main_status"
+            echo "CI failed with status: $status_summary"
             exit 1
         fi
         break
