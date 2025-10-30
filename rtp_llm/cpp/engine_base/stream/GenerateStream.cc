@@ -1,6 +1,10 @@
 #include <condition_variable>
 #include <cstddef>
 #include <memory>
+#include <ATen/Generator.h>
+#ifdef USING_CUDA
+#include <ATen/cuda/CUDAGeneratorImpl.h>
+#endif
 #include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
@@ -94,6 +98,14 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
         MultiSeqLogitsProcessor::fromGenerateInput(device_, generate_input_, special_tokens_.eos_token_id_);
 
     initializeLogitsProcessorList();
+    if (generateConfig()->random_seed.has_value()) {
+        #ifdef USING_CUDA
+        generator_ = torch::make_generator<torch::CUDAGeneratorImpl>();
+        #else
+        generator_ = torch::make_generator<torch::CPUGeneratorImpl>();
+        generator_.set_current_seed(generateConfig()->random_seed.value());
+        #endif
+    }
 }
 
 void GenerateStream::initializeLogitsProcessorList() {

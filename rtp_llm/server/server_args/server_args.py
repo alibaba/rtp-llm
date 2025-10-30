@@ -49,7 +49,6 @@ from rtp_llm.server.server_args.role_group_args import init_role_group_args
 from rtp_llm.server.server_args.rpc_discovery_group_args import (
     init_rpc_discovery_group_args,
 )
-from rtp_llm.server.server_args.sampling_group_args import init_sampling_group_args
 from rtp_llm.server.server_args.scheduler_group_args import init_scheduler_group_args
 from rtp_llm.server.server_args.server_group_args import init_server_group_args
 from rtp_llm.server.server_args.sparse_group_args import init_sparse_group_args
@@ -241,7 +240,6 @@ def init_all_group_args(parser: EnvArgumentParser) -> None:
     init_render_group_args(parser)
     init_role_group_args(parser)
     init_rpc_discovery_group_args(parser)
-    init_sampling_group_args(parser)
     init_scheduler_group_args(parser)
     init_server_group_args(parser)
     init_sparse_group_args(parser)

@@ -54,7 +54,6 @@ from rtp_llm.ops import (
     ProfilingDebugLoggingConfig,
     QuantAlgo,
     RoleType,
-    SamplerConfig,
     SchedulerConfig,
     ServiceDiscoveryConfig,
     SpecialTokens,
@@ -395,7 +394,6 @@ class GptInitModelParameters:
     moe_config: MoeConfig
     parallelism_distributed_config: ParallelismDistributedConfig
     profiling_debug_logging_config: ProfilingDebugLoggingConfig
-    sampler_config: SamplerConfig
     scheduler_config: SchedulerConfig
     service_discovery_config: ServiceDiscoveryConfig
     speculative_decoding_config: SpeculativeExecutionConfig
@@ -751,14 +749,6 @@ class GptInitModelParameters:
             enable_fast_gen=get_env_bool("ENABLE_FAST_GEN", False),
             enable_partial_fallback=get_env_bool("ENABLE_PARTIAL_FALLBACK", False),
             fast_gen_context_budget=get_env_int("FAST_GEN_MAX_CONTEXT_LEN", 0),
-        )
-
-        # SamplerConfig
-        self.gpt_init_params.sampler_config = SamplerConfig(
-            max_batch_size=get_env_int("SAMPLER_MAX_BATCH_SIZE", 0),
-            enable_flashinfer_sample_kernel=get_env_bool(
-                "ENABLE_FLASHINFER_SAMPLE_KERNEL", True
-            ),
         )
 
         # SpeculativeExecutionConfig

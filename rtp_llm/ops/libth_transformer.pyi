@@ -39,7 +39,6 @@ __all__ = [
     "RoleType",
     "RtpEmbeddingOp",
     "RtpLLMOp",
-    "SamplerConfig",
     "SchedulerConfig",
     "ServiceDiscoveryConfig",
     "SpecialTokens",
@@ -518,7 +517,6 @@ class GptInitParameter:
     rotary_factor1: float
     rotary_factor2: float
     partial_rotary_factor: float
-    sampler_config: SamplerConfig
     scheduler_config: SchedulerConfig
     scheduler_reserve_resource_ratio: int
     scoring_func: int
@@ -927,16 +925,6 @@ class RtpLLMOp:
     def stop(self) -> None: ...
     def update_eplb_config(self, config: EplbConfig) -> bool: ...
     def update_scheduler_info(self, arg0: str) -> None: ...
-
-class SamplerConfig:
-    enable_flashinfer_sample_kernel: bool
-    max_batch_size: int
-
-    def __init__(
-        self, max_batch_size: int = 0, enable_flashinfer_sample_kernel: bool = True
-    ) -> None: ...
-    def to_string(self) -> str: ...
-    def update_from_env(self) -> None: ...
 
 class SchedulerConfig:
     use_batch_decode_scheduler: bool

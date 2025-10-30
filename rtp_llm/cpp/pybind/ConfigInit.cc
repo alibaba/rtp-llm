@@ -277,18 +277,6 @@ void register_device_resource_config(pybind11::module& m) {
         .def_readwrite("not_use_default_stream", &DeviceResourceConfig::not_use_default_stream);
 }
 
-// SamplerConfig
-void register_sampler_config(pybind11::module& m) {
-    pybind11::class_<SamplerConfig>(m, "SamplerConfig")
-        .def(pybind11::init<int64_t, bool>(),
-             pybind11::arg("max_batch_size")                  = 0,
-             pybind11::arg("enable_flashinfer_sample_kernel") = true)
-        .def("to_string", &SamplerConfig::to_string)
-        .def("update_from_env", &SamplerConfig::update_from_env_for_test)
-        .def_readwrite("max_batch_size", &SamplerConfig::max_batch_size)
-        .def_readwrite("enable_flashinfer_sample_kernel", &SamplerConfig::enable_flashinfer_sample_kernel);
-}
-
 // MoeConfig
 void register_moe_config(pybind11::module& m) {
     pybind11::class_<MoeConfig>(m, "MoeConfig")
@@ -743,7 +731,6 @@ void registerGptInitParameter(py::module m) {
         .def_readwrite("profiling_debug_logging_config", &GptInitParameter::profiling_debug_logging_config)
         .def_readwrite("hw_kernel_config", &GptInitParameter::hw_kernel_config)
         .def_readwrite("device_resource_config", &GptInitParameter::device_resource_config)
-        .def_readwrite("sampler_config", &GptInitParameter::sampler_config)
         .def_readwrite("moe_config", &GptInitParameter::moe_config)
         .def_readwrite("model_specific_config", &GptInitParameter::model_specific_config)
         .def_readwrite("sp_config", &GptInitParameter::sp_config)
@@ -765,7 +752,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     register_profiling_debug_logging_config(m);
     register_hwkernel_config(m);
     register_device_resource_config(m);
-    register_sampler_config(m);
     register_moe_config(m);
     register_model_specific_config(m);
     register_speculative_execution_config(m);

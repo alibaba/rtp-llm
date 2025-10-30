@@ -280,7 +280,6 @@ public:
     ProfilingDebugLoggingConfig  profiling_debug_logging_config;
     HWKernelConfig               hw_kernel_config;
     DeviceResourceConfig         device_resource_config;
-    SamplerConfig                sampler_config;
     MoeConfig                    moe_config;
     ModelSpecificConfig          model_specific_config;
     SpeculativeExecutionConfig   sp_config;
@@ -310,7 +309,6 @@ public:
         profiling_debug_logging_config.update_from_env_for_test();
         hw_kernel_config.update_from_env_for_test();
         device_resource_config.update_from_env_for_test();
-        sampler_config.update_from_env_for_test();
         moe_config.update_from_env_for_test();
         model_specific_config.update_from_env_for_test();
         sp_config.update_from_env_for_test();
