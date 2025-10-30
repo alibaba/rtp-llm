@@ -348,7 +348,6 @@ SamplerInputs NormalBatchStreamProcessor::allocateSamplerInputs(const StreamGrou
     sampler_inputs.top_k                = CACHED_HOST_BUF(TYPE_UINT32, {total_batch_size_in});
     sampler_inputs.top_p                = CACHED_HOST_BUF(TYPE_FP32, {total_batch_size_in});
     sampler_inputs.temperature          = CACHED_HOST_BUF(TYPE_FP32, {total_batch_size_in});
-    sampler_inputs.random_seeds         = CACHED_HOST_BUF(TYPE_UINT64, {total_batch_size_in});
     sampler_inputs.repetition_penalty   = CACHED_HOST_BUF(TYPE_FP32, {total_batch_size_in});
     sampler_inputs.presence_penalty     = CACHED_HOST_BUF(TYPE_FP32, {total_batch_size_in});
     sampler_inputs.frequency_penalty    = CACHED_HOST_BUF(TYPE_FP32, {total_batch_size_in});
@@ -363,6 +362,7 @@ SamplerInputs NormalBatchStreamProcessor::allocateSamplerInputs(const StreamGrou
     sampler_inputs.token_ids = device_->allocateBuffer(
         {rtp_llm::DataType::TYPE_INT32, {total_batch_size_in, sampler_inputs.step + 1}, rtp_llm::AllocationType::HOST},
         {});
+    sampler_inputs.generator.resize(total_batch_size_in);
     return sampler_inputs;
 }
 
@@ -376,7 +376,6 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs&          
     uint32_t* top_k                = sampler_inputs.top_k->data<uint32_t>();
     float*    top_p                = sampler_inputs.top_p->data<float>();
     float*    temperature          = sampler_inputs.temperature->data<float>();
-    uint64_t* random_seeds         = sampler_inputs.random_seeds->data<uint64_t>();
     float*    repetition_penalty   = sampler_inputs.repetition_penalty->data<float>();
     float*    presence_penalty     = sampler_inputs.presence_penalty->data<float>();
     float*    frequency_penalty    = sampler_inputs.frequency_penalty->data<float>();
@@ -385,7 +384,6 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs&          
     bool*     do_sample            = sampler_inputs.do_sample->data<bool>();
 
     int  batch_idx       = 0;
-    bool has_random_seed = false;
     for (auto& stream : all_streams) {
         int sampler_batch_size;
         if (score_batch) {
@@ -419,21 +417,10 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs&          
                 top_p[batch_idx]       = 1;
                 temperature[batch_idx] = 1;
             }
-            if (stream->generateConfig()->random_seed.has_value()) {
-                random_seeds[batch_idx] = stream->generateConfig()->random_seed.value();
-                has_random_seed         = true;
-            } else {
-                std::random_device                          rd;
-                std::mt19937_64                             gen(rd());
-                std::uniform_int_distribution<std::int64_t> distrib(0, std::numeric_limits<std::int64_t>::max());
-                random_seeds[batch_idx] = distrib(gen);
-            }
             no_repeat_ngram_size[batch_idx] = stream->generateConfig()->no_repeat_ngram_size.value_or(0);
+            sampler_inputs.generator[batch_idx] = stream->getGenerator();
             batch_idx += 1;
         }
-    }
-    if (!has_random_seed) {
-        sampler_inputs.random_seeds.reset();
     }
 }
 

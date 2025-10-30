@@ -131,7 +131,6 @@ try:
         ProfilingDebugLoggingConfig,
         QuantAlgo,
         RoleType,
-        SamplerConfig,
         SchedulerConfig,
         ServiceDiscoveryConfig,
         SpecialTokens,
