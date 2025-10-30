@@ -5,9 +5,11 @@ cc_library(
     name = "normal_engine",
     hdrs = glob([
         "*.h",
+        "speculative/*.h",
     ]),
     srcs = glob([
         "*.cc",
+        "speculative/*.cc",
     ]),
     deps = [
         "//rtp_llm/cpp/models:models",
