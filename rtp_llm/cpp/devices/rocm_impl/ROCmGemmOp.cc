@@ -177,17 +177,7 @@ struct ROCmGemmArguments {
         ldc      = n;
         stride_c = m * n;
         
-        // TODO[perf opt]: for per_tensor quant, setting hipblaslt attribute to avoid D2H copy
-        if (ADtype == DataType::TYPE_QFP8_E4M3 && BDtype == DataType::TYPE_QFP8_E4M3) {
-            float input_scale = getRocmValue(
-                reinterpret_cast<const float*>(reinterpret_cast<const QBuffer&>(params.A).scalesData()), 0);
-            float weight_scale = getRocmValue(
-                reinterpret_cast<const float*>(reinterpret_cast<const QBuffer&>(params.B).scalesData()), 0);
-            alpha = params.alpha * input_scale * weight_scale;
-        } else {
-            alpha = params.alpha;
-        }
-
+        alpha = params.alpha;
         beta = params.beta;
     }
 
@@ -501,7 +491,7 @@ BufferPtr ROCmDevice::gemm(const GemmParams& params) {
     }
 
     if (params.dispatch() == GemmType::QBufferA_QBufferB_BufferC_2DGemm) {
-        if (params.A.type() == DataType::TYPE_INT8 && params.B.type() == DataType::TYPE_INT8){
+        if ((params.A.type() == DataType::TYPE_INT8 || params.A.type() == DataType::TYPE_QINT8)){
             BUFFER_DTYPE_CHECK(params.A, {DataType::TYPE_INT8, DataType::TYPE_QINT8});
             BUFFER_DTYPE_CHECK(params.B, {DataType::TYPE_INT8, DataType::TYPE_QINT8});
             InvokeROCmDeepGemmWi8Ai8(params, output);

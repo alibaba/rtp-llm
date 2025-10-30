@@ -145,28 +145,15 @@ LayernormOutput ROCmDevice::layernorm(const LayernormParams& params) {
            || (params.qscheme == QScheme::Qfp8PerToken && params.norm_type == NormType::layernorm) 
            || params.qscheme == QScheme::Qint8PerTensor) {
         norm_output = allocateBufferLike(*params.input);
-    } else if (params.qscheme != QScheme::NoQuantize) {
-        auto quant_data_type = (params.qscheme == QScheme::Qfp8PerTensor) ? DataType::TYPE_FP8_E4M3 : DataType::TYPE_INT8;
-        auto kernel  = allocateBuffer({quant_data_type, {input->shape()}, AllocationType::DEVICE}, {"kernel"});
-
-        BufferPtr scales;
-        if (params.qscheme == QScheme::Qint8PerToken) {
-            scales  = allocateBuffer({DataType::TYPE_FP32, {input->shape()[1]}, AllocationType::DEVICE}, {"scales"});
-        } else if (params.qscheme == QScheme::Qfp8PerTensor){
-            RTP_LLM_LOG_ERROR("Qfp8PerTensor not implemented!!!");
-            throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
-        } else {
-            RTP_LLM_CHECK_WITH_INFO(false, "unknown qscheme type : %d", int(params.qscheme));
-        }
-        norm_output  = BufferPtr(new QBuffer(
-            std::move(kernel),
-            std::move(scales),
-            std::move(BufferPtr(new Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_INVALID, {0}, nullptr)))));
-        quant_output = std::dynamic_pointer_cast<QBuffer>(norm_output)->kernel().data<int8_t>();
-        if (params.qscheme == QScheme::Qint8PerToken) { 
-            scales_ptr = std::dynamic_pointer_cast<QBuffer>(norm_output)->scalesData<float>();
-        }
-        scales_ptr   = std::dynamic_pointer_cast<QBuffer>(norm_output)->scalesData<float>();
+    } else if (params.qscheme == QScheme::Qint8PerToken) {
+            auto kernel  = allocateBuffer({DataType::TYPE_INT8, {input->shape()}, AllocationType::DEVICE}, {"kernel"});
+            auto scales  = allocateBuffer({DataType::TYPE_FP32, {input->shape()[1]}, AllocationType::DEVICE}, {"scales"});
+            norm_output  = BufferPtr(new QBuffer(
+                std::move(kernel),
+                std::move(scales),
+                std::move(BufferPtr(new Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_INVALID, {0}, nullptr)))));
+            quant_output = std::dynamic_pointer_cast<QBuffer>(norm_output)->kernel().data<int8_t>();
+            scales_ptr   = std::dynamic_pointer_cast<QBuffer>(norm_output)->scalesData<float>();
     } else if (params.qscheme == QScheme::Qfp8PerToken && params.norm_type == NormType::rmsnorm) {
         auto scale_shape = params.input->shape();
         scale_shape.back() = 1;
@@ -176,7 +163,11 @@ LayernormOutput ROCmDevice::layernorm(const LayernormParams& params) {
             std::move(kernel),
             std::move(scales),
             std::move(BufferPtr(new Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_INVALID, {0}, nullptr)))));
+    } else if(params.qscheme == QScheme::Qfp8PerTensor) {
+        RTP_LLM_LOG_ERROR("Qfp8PerTensor not implemented!!!");
+        throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }
+    
 
     if (params.norm_type == NormType::alphanorm || !norm_weight.has_value()) {
         if (params.alpha == 0.f || params.bias.has_value() || params.residual1.has_value()
@@ -255,7 +246,6 @@ LayernormOutput ROCmDevice::layernorm(const LayernormParams& params) {
                     copy({*params.before_norm_output, *torchTensor2Buffer(res_tensor)});
                 }
             }
-            
         }
         else if(params.norm_type == NormType::rmsnorm)
         {
