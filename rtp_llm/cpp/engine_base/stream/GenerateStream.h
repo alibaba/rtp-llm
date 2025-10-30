@@ -109,7 +109,11 @@ public:
     bool         updateKvCacheBlocks(const rtp_llm::BufferPtr& src_batch_indices);
 
     virtual size_t scoreLen() const {
-        return 1;
+        return score_len_ == 0 ? 1 : score_len_;
+    }
+
+    void setScoreLen(size_t score_len) {
+        score_len_ = score_len;
     }
 
     // Only used in C++ world.
@@ -370,6 +374,14 @@ public:
         return propose_token_;
     }
 
+    void setProposeProbs(rtp_llm::BufferPtr propose_probs) {
+        propose_probs_ = propose_probs;
+    }
+
+    rtp_llm::BufferPtr getProposeProbs() const {
+        return propose_probs_;
+    }
+
     void setContainProposeToken(bool contain_propose_token) {
         contain_propose_token_ = contain_propose_token;
     }
@@ -484,6 +496,14 @@ public:
         return generate_input_->generate_config->enable_memory_block_cache;
     }
 
+    bool isSpDecodeStream() const {
+        return is_sp_decode_stream_;
+    }
+
+    void setSpDecodeStream() {
+        is_sp_decode_stream_ = true;
+    }
+
     void fillSubGenerateStatus(StreamState state);
     void resizeSubGenerateStatus(size_t new_size);
 
@@ -563,9 +583,11 @@ protected:
     bool                               sp_edit_first_time_   = true;
     bool                               sp_edit_run_          = false;
     std::vector<int>                   propose_token_;
+    rtp_llm::BufferPtr                 propose_probs_         = nullptr;
     bool                               contain_propose_token_ = false;
     int                                mtp_token_index_       = 0;
     SpeculativeExecutorStreamOutputPtr sp_output_buffer_      = nullptr;
+    bool                               is_sp_decode_stream_   = false;
 
     bool return_all_hidden_states_ = false;
 
