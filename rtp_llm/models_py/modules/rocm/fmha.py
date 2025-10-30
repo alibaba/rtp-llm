@@ -1,10 +1,4 @@
 import logging
-from typing import Optional, Any, List
-from rtp_llm.models_py.modules.fmha import FMHAImplBase
-from rtp_llm.ops import PyAttentionInputs, FMHAType, KVCache, ParamsBase
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from librtp_compute_ops.rtp_llm_ops import FusedRopeKVCachePrefillOp, FusedRopeKVCacheDecodeOp
-import aiter
 import os
 from typing import Any, List, Optional
 
@@ -18,22 +12,35 @@ from librtp_compute_ops.rtp_llm_ops import (
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.models_py.modules.fmha import FMHAImplBase
-from rtp_llm.ops import FMHAType, KVCache, PyAttentionInputs
+from rtp_llm.ops import FMHAType, KVCache, ParamsBase, PyAttentionInputs
 
 
 # Simple data structure for fmha_params
 class FMHAParams(ParamsBase):
-    def __init__(self, batch_size: int, max_seq_len: int , seq_lens: Optional[torch.Tensor] = None,
-                 kv_cache_block_id_host: Optional[torch.Tensor] = None,
-                 kv_cache_block_id_device: Optional[torch.Tensor] = None,
-                 input_lengths: Optional[torch.Tensor] = None):
+    def __init__(
+        self,
+        batch_size: int,
+        max_seq_len: int,
+        seq_lens: Optional[torch.Tensor] = None,
+        kv_cache_block_id_host: Optional[torch.Tensor] = None,
+        kv_cache_block_id_device: Optional[torch.Tensor] = None,
+        input_lengths: Optional[torch.Tensor] = None,
+    ):
         super().__init__()
         self.batch_size = batch_size
         self.max_seq_len = max_seq_len
         self.seq_lens = seq_lens
         self.kv_cache_block_id_host = kv_cache_block_id_host
         self.kv_cache_block_id_device = kv_cache_block_id_device
-        self.input_lengths = input_lengths
+        if input_lengths is not None:
+            self.input_lengths = input_lengths
+            self.cu_seqlens_q = torch.zeros(
+                self.batch_size + 1, dtype=torch.int32, device=input_lengths.device
+            )
+            self.cu_seqlens_q[1:] = torch.cumsum(input_lengths, dim=0)
+            self.cu_seqlens_k = self.cu_seqlens_q.clone()
+            self.max_seqlen_q = self.max_seq_len
+            self.max_seqlen_k = self.max_seq_len
 
 
 class FMHAPrefillImplBase(FMHAImplBase):
@@ -106,35 +113,36 @@ class AiterPrefillAttnOp:
         )
         return self.fmha_params
 
-    def forward(self, qkv, kv_cache, fmha_params):
+    def advanced_qkv_split(self, qkv, head_num, head_num_kv, size_per_head):
+        token_num = qkv.shape[0]
+        qkv_reshaped = qkv.reshape(token_num, head_num + 2 * head_num_kv, size_per_head)
+        q = qkv_reshaped[:, :head_num, :]
+        k = qkv_reshaped[:, head_num : head_num + head_num_kv, :]
+        v = qkv_reshaped[:, head_num + head_num_kv : head_num + 2 * head_num_kv, :]
+        return q, k, v
 
-        # q_tensor: {batch_size, head_num, seq_len, head_dim}
-        # k_tensor: {batch_size, head_num_kv, seq_len_with_prefix, head_dim}
-        # v_tensor: {batch_size, head_num_kv, seq_len_with_prefix, head_dim}
-        q_tensor, k_tensor, v_tensor = qkv[0], qkv[1], qkv[2]
+    def forward(self, qkv, kv_cache, fmha_params: FMHAParams):
+        cu_seqlens_q = fmha_params.cu_seqlens_q.to(qkv.device)
+        cu_seqlens_k = fmha_params.cu_seqlens_k.to(qkv.device)
+        max_seqlen_q = fmha_params.max_seqlen_q
+        max_seqlen_k = fmha_params.max_seqlen_k
 
-        batch_size_actual, head_num_actual, seq_len, head_dim = q_tensor.shape
-
-        # dimensions for aiter.flash_attn_func  {batch_size, seq_len, head_num, head_dim}
-        q = q_tensor.transpose(1, 2).contiguous()  # {batch_size, seq_len, head_num, head_dim}
-        k = k_tensor.transpose(1, 2).contiguous()  # {batch_size, seq_len_with_prefix, head_num_kv, head_dim}
-        v = v_tensor.transpose(1, 2).contiguous()  # {batch_size, seq_len_with_prefix, head_dim}
-        res = aiter.flash_attn_func(q, k, v, dropout_p=0., softmax_scale=None, causal=True)
-        input_lengths = fmha_params.input_lengths  # 每个 batch 的真实长度
-        hidden_size = head_num_actual * head_dim
-
-        valid_results = []
-        for batch_idx in range(batch_size_actual):
-            actual_len = input_lengths[batch_idx].item()
-            batch_result = res[
-                batch_idx, :actual_len, :, :
-            ]  # {actual_len, head_num, head_dim}
-            batch_result = batch_result.reshape(
-                actual_len, hidden_size
-            )  # {actual_len, hidden_size}
-            valid_results.append(batch_result)
-
-        final_result = torch.cat(valid_results, dim=0)  # {total_token_num, hidden_size}
+        q_tensor, k_tensor, v_tensor = self.advanced_qkv_split(
+            qkv, self.head_num, self.head_num_kv, self.head_dim
+        )
+        res = aiter.flash_attn_varlen_func(
+            q_tensor,  # Query张量: (total_q, nheads, headdim_q) - 批次中所有query token的总数
+            k_tensor,  # Key张量: (total_k, nheads_k, headdim_q) - 批次中所有key token的总数
+            v_tensor,  # Value张量: (total_k, nheads_k, headdim_v) - 批次中所有value token的总数
+            cu_seqlens_q,  # Query累积序列长度: (batch_size + 1,) dtype=int32 - 用于索引q张量
+            cu_seqlens_k,  # Key累积序列长度: (batch_size + 1,) dtype=int32 - 用于索引k/v张量
+            max_seqlen_q,  # 批次中最大query序列长度
+            max_seqlen_k,  # 批次中最大key序列长度
+            dropout_p=0.0,  # Dropout概率 - 评估时应设为0.0
+            causal=True,  # 因果注意力掩码 - 用于自回归建模，每个位置只能关注自己和之前的位置
+        )
+        token_num = res.shape[0]
+        final_result = res.reshape(token_num, self.head_num * self.head_dim)
         return final_result
 
 
@@ -191,7 +199,7 @@ class AiterDecodeAttnOp:
         value_cache = kv_cache.v_cache_base
         block_tables_id_device = fmha_params.kv_cache_block_id_device
         max_num_blocks = block_tables_id_device.shape[1]
-        # for now not support fp8 
+        # for now not support fp8
         if self.use_asm_pa:
             output = aiter.pa_fwd_asm(
                 query,  # [num_seqs, num_heads, head_size]
@@ -201,12 +209,20 @@ class AiterDecodeAttnOp:
                 seq_lens,
                 max_num_blocks,
             )
-        else :
+        else:
             max_seq_len = fmha_params.max_seq_len + 1
-            scale = 1.0 / (self.head_dim ** 0.5)
+            scale = 1.0 / (self.head_dim**0.5)
             alibi_slopes = None
-            k_scale = kv_cache.k_scale_base if kv_cache and kv_cache.k_scale_base is not None else torch.tensor(1.0, device=query.device, dtype=query.dtype)
-            v_scale = kv_cache.v_scale_base if kv_cache and kv_cache.v_scale_base is not None else torch.tensor(1.0, device=query.device, dtype=query.dtype)
+            k_scale = (
+                kv_cache.k_scale_base
+                if kv_cache and kv_cache.k_scale_base is not None
+                else torch.tensor(1.0, device=query.device, dtype=query.dtype)
+            )
+            v_scale = (
+                kv_cache.v_scale_base
+                if kv_cache and kv_cache.v_scale_base is not None
+                else torch.tensor(1.0, device=query.device, dtype=query.dtype)
+            )
             num_kv_heads = self.head_num_kv
             num_seqs, num_heads, head_size = query.shape
             block_size = value_cache.shape[2]
