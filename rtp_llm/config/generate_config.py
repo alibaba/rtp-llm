@@ -97,7 +97,7 @@ class GenerateConfig(BaseModel):
     return_cum_log_probs: bool = False
     return_all_probs: bool = False
     return_softmax_probs: bool = False
-    aux_info: bool = False
+    aux_info: bool = True
     can_use_pd_separation: bool = True
     gen_timeline: bool = False
     profile_step: int = 3
@@ -105,7 +105,6 @@ class GenerateConfig(BaseModel):
     # for load balance
     role_addrs: List[RoleAddr] = []
     trace_id: str = ""
-
     # inter request id, from master
     inter_request_id: int = -1
 
