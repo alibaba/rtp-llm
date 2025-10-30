@@ -154,6 +154,8 @@ class FrontendWorker:
         loss = gen_responses.generate_outputs.generate_outputs[0].loss
         logits = gen_responses.generate_outputs.generate_outputs[0].logits
 
+        if generate_config.has_num_beams():
+            aux_info.beam_responses = generate_texts
         response = PipelineResponse(
             response=generate_texts[0],
             finished=finished,
