@@ -11,6 +11,8 @@ namespace rtp_llm {
 using namespace rocm;
 
 BufferPtr ROCmDevice::quantize(const QuantizeParams& params) {
+    const auto stream = (params.overlapped && init_params_.enable_comm_overlap) ? communication_stream_ : stream_;
+
     ROCM_CHECK_VALUE((params.input.dim() == 2 || params.input.dim() == 3), "quantize only support 2D or 3D.");
     ROCM_CHECK_VALUE((params.input.type() == DataType::TYPE_FP16 || params.input.type() == DataType::TYPE_FP32
                         || params.input.type() == DataType::TYPE_BF16 || params.input.type() == DataType::TYPE_INT8
@@ -46,7 +48,7 @@ BufferPtr ROCmDevice::quantize(const QuantizeParams& params) {
                                              (uint8_t*)(kernel->data()),
                                              scales->data<half>(),
                                              zeros->data<half>(),
-                                             stream_);
+                                             stream);
                                                                
         }
         else if (params.qscheme == QScheme::Qint8PerTensor) 

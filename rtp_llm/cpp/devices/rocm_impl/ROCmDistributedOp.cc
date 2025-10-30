@@ -176,7 +176,7 @@ SplitOutput ROCmDevice::split(const SplitParams& params) {
     size_t                 offset = 0;
     if (params.dim == 0) {
         for (auto& size : params.split_sizes) {
-            outputs.emplace_back(clone({params.input.view(offset, size)}));
+            outputs.emplace_back(clone({params.input.view(offset, size), AllocationType::DEVICE, BufferHints(), params.overlapped}));
             offset += size;
         }
     } else {
@@ -275,25 +275,6 @@ AllToAllOutput ROCmDevice::allToAll(const AllToAllParams& params) {
             torch::cat_out(packed_tensor, input_tensors, 1);
         }
     }
-    if (stream == communication_stream_) {
-        if (params.compute_stream_event) {
-            const auto casted_event = dynamic_cast<TorchEvent*>(params.compute_stream_event.get());
-            if (!casted_event) {
-                throw OpException({OpErrorType::ERROR_INTERNAL, "compute_stream_event is not TorchEvent"});
-            }
-            // FT_LOG_INFO("alltoall wait compute stream event");
-            casted_event->event->block(*torch_comm_stream_);
-        } else {
-            // NOTE: before starting communication, we need to make sure that the previous computation
-            // has been finished. Otherwise, the communication may overlap with the computation.
-            // We use cuda event to ensure the computation on main stream has been finished.
-            cudaEvent_t event;
-            ROCM_CHECK(hipEventCreate(&event));
-            ROCM_CHECK(hipEventRecord(event, stream_));
-            ROCM_CHECK(hipStreamWaitEvent(communication_stream_, event, 0));
-            ROCM_CHECK(hipEventDestroy(event));
-        }
-    }
     BufferPtr output;
     if (params.input_split_sizes.size() || params.output_split_sizes.size()) {
         RTP_LLM_CHECK_WITH_INFO(
@@ -367,7 +348,7 @@ AllToAllOutput ROCmDevice::allToAll(const AllToAllParams& params) {
         }
         all_to_all_output = {{outputs}, input_buffer, output};
     }
-    if (params.overlapped) {
+    if (params.overlapped && (params.input_split_sizes.size() || params.output_split_sizes.size())) {
         all_to_all_output.comm_barrier_hook = createCommHook();
     }
     return all_to_all_output;

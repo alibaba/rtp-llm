@@ -255,6 +255,7 @@ void ROCmDevice::copy(const CopyParams& params) {
         return;
     }
 
+    const auto stream = (params.overlapped && init_params_.enable_comm_overlap) ? communication_stream_ : stream_;
     hipMemcpyKind copyType;
     if (src.where() == MemoryType::MEMORY_GPU && dst.where() != MemoryType::MEMORY_GPU) {
         copyType = hipMemcpyDeviceToHost;
@@ -271,14 +272,14 @@ void ROCmDevice::copy(const CopyParams& params) {
         std::memcpy(dst.data(), src.data(), src.sizeBytes());
     } else {
         if (params.async) {
-            ROCM_CHECK(hipMemcpyAsync(dst.data(), src.data(), src.sizeBytes(), copyType, stream_));
+            ROCM_CHECK(hipMemcpyAsync(dst.data(), src.data(), src.sizeBytes(), copyType, stream));
         } else {
-            ROCM_CHECK(hipMemcpyWithStream(dst.data(), src.data(), src.sizeBytes(), copyType, stream_));
+            ROCM_CHECK(hipMemcpyWithStream(dst.data(), src.data(), src.sizeBytes(), copyType, stream));
         }
     }
 
     if (copyType == hipMemcpyDeviceToHost) {
-        ROCM_CHECK(hipStreamSynchronize(stream_));
+        ROCM_CHECK(hipStreamSynchronize(stream));
     }
 }
 
@@ -421,6 +422,7 @@ SelectOutput ROCmDevice::select(const SelectParams& params) {
         return DeviceBase::select(params);
     }
 
+    const auto stream = (params.overlapped && init_params_.enable_comm_overlap) ? communication_stream_ : stream_;
     RUNTIME_ASSERT_OP_ARG(params.index.type() == DataType::TYPE_INT32, "Select index must be int32.");
     RUNTIME_ASSERT_OP_ARG(params.dim == 0, "select op tmp only support dim == 0");
     const auto& input        = params.input;
@@ -439,7 +441,7 @@ SelectOutput ROCmDevice::select(const SelectParams& params) {
                                         params.index.size(),
                                         num_selected_element,
                                         0,
-                                        stream_);
+                                        stream);
     return output;
 }
 

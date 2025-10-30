@@ -10,6 +10,7 @@
 #if ENABLE_BF16
 #include <hip/hip_bf16.h>
 #endif
+#include "c10/hip/HIPGuard.h"
 
 #include "rtp_llm/cpp/cuda/nccl/nccl_utils.h"
 

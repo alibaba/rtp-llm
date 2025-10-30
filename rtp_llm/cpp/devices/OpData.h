@@ -272,6 +272,7 @@ struct SelectParams {
     const Buffer& input;
     const Buffer& index;
     size_t        dim = 0;
+    bool          overlapped = false;
 };
 
 using TransposeOutput = BufferPtr;
@@ -1235,6 +1236,9 @@ struct QuantizeParams {
     int64_t groupSize;
     int64_t paddingSize = 0;
 
+    // overlapped stream
+    bool    overlapped = false;
+
     QuantizeParams(const Buffer&          input,
                    DataType               qtype,
                    size_t                 axis,
@@ -1261,6 +1265,9 @@ struct QuantizeParams {
     QuantizeParams(
         const Buffer& input, DataType qtype, size_t axis, QScheme qscheme, int64_t groupSize, int64_t paddingSize):
         input(input), qtype(qtype), axis(axis), qscheme(qscheme), groupSize(groupSize), paddingSize(paddingSize) {}
+    QuantizeParams(
+        const Buffer& input, DataType qtype, size_t axis, QScheme qscheme, int64_t groupSize, int64_t paddingSize, bool overlapped):
+        input(input), qtype(qtype), axis(axis), qscheme(qscheme), groupSize(groupSize), paddingSize(paddingSize), overlapped(overlapped) {}
 };
 
 }  // namespace rtp_llm

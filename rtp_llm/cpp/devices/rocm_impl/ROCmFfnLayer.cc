@@ -19,6 +19,9 @@ using namespace std;
 namespace rtp_llm {
 
 MoeDispatchOutput ROCmDevice::epDispatch(const MoeDispatchParams& params) {
+    const torch::Stream torch_stream = (params.overlapped && init_params_.enable_comm_overlap) ? *torch_comm_stream_ : *torch_default_stream_;
+    c10::hip::HIPStreamGuard guard(torch_stream);
+
     DevicePerfWrapper wrapper(this, "epDispatch");
     // if (init_params_.use_deepep_moe) {
     //     if (init_params_.use_deepep_low_latency) {
@@ -43,7 +46,17 @@ MoeDispatchOutput ROCmDevice::epDispatch(const MoeDispatchParams& params) {
     auto      expert_ids       = params.expert_ids.slice(slice_begin, slice_size);
     auto      expert_scales    = params.expert_scales.slice(slice_begin, slice_size);
     token_num                  = hidden->shape()[0];
-    BufferPtr experts_ids_host = clone({*expert_ids, AllocationType::HOST, BufferHints(), false, false});
+    // ensure expert_ids in place
+    if (params.overlapped && params.compute_stream_event) {
+        const auto casted_event = dynamic_cast<TorchEvent*>(params.compute_stream_event.get());
+        if (!casted_event) {
+            throw OpException({OpErrorType::ERROR_INTERNAL, "compute_stream_event is not TorchEvent"});
+        }
+        casted_event->event->block(*torch_comm_stream_);
+    }
+    // D2H will make sure sync
+    BufferPtr experts_ids_host = clone({*expert_ids, AllocationType::HOST, BufferHints(), params.overlapped});
+
     BufferPtr token_nums_per_rank =
         allocateBuffer({DataType::TYPE_INT32, {ep_size}, AllocationType::HOST}, {"token_nums_per_rank"});
     bufMemset(*token_nums_per_rank, 0);
@@ -66,18 +79,10 @@ MoeDispatchOutput ROCmDevice::epDispatch(const MoeDispatchParams& params) {
         }
     }
 
-    if (params.overlapped && params.compute_stream_event) {
-        const auto casted_event = dynamic_cast<TorchEvent*>(params.compute_stream_event.get());
-        if (!casted_event) {
-            throw OpException({OpErrorType::ERROR_INTERNAL, "compute_stream_event is not TorchEvent"});
-        }
-        casted_event->event->block(*torch_comm_stream_);
-    }
-
     printBufferData(*token_nums_per_rank, "token_nums_per_rank");
-    auto token_nums_per_rank_gpu = clone({*token_nums_per_rank, AllocationType::DEVICE, BufferHints(), false, false});
+    auto token_nums_per_rank_gpu = clone({*token_nums_per_rank, AllocationType::DEVICE, BufferHints(), params.overlapped});
     // all_token_nums_per_rank_gpu[i]: current rank receive token num from other rank
-    auto all_token_nums_per_rank_gpu = allToAll({{token_nums_per_rank_gpu}}).outputs[0];
+    auto all_token_nums_per_rank_gpu = allToAll({{token_nums_per_rank_gpu}, {}, {}, params.overlapped}).outputs[0];
     printBufferData(*all_token_nums_per_rank_gpu, "all_token_nums_per_rank_gpu");
     size_t    total_size = std::accumulate(token_nums_per_rank_ptr, token_nums_per_rank_ptr + ep_size, 0);
     BufferPtr all_token_indices_cpu =
@@ -93,13 +98,10 @@ MoeDispatchOutput ROCmDevice::epDispatch(const MoeDispatchParams& params) {
 
     printBufferData(*all_token_indices_cpu, "all_token_indices_cpu");
     // each rank token idx
-    BufferPtr all_token_indices = clone({*all_token_indices_cpu, AllocationType::DEVICE, BufferHints(), false, false});
-    // sync allToAll all_token_nums_per_rank_gpu
-    cudaStreamSynchronize(stream_);
-    syncCommunication(false);
-
+    BufferPtr all_token_indices = clone({*all_token_indices_cpu, AllocationType::DEVICE, BufferHints(), params.overlapped});
+    // D2H will make sure stream synchronized
     auto all_token_nums_per_rank =
-        clone({*all_token_nums_per_rank_gpu, AllocationType::HOST, BufferHints(), false, false});
+        clone({*all_token_nums_per_rank_gpu, AllocationType::HOST, BufferHints(), params.overlapped});
     std::vector<size_t> input_split_sizes;
     std::vector<size_t> output_split_sizes;
     input_split_sizes.resize(ep_size);
@@ -110,18 +112,18 @@ MoeDispatchOutput ROCmDevice::epDispatch(const MoeDispatchParams& params) {
     }
     vector<BufferPtr> selected_buffers;
     QBufferPtr        q_hidden;
-    BufferPtr         select_hidden = select({*hidden, *all_token_indices});
+    BufferPtr         select_hidden = select({*hidden, *all_token_indices, 0, params.overlapped});
     if (params.qscheme != QScheme::NoQuantize) {
         // ignore groupSize when using per_token quantization
         q_hidden = std::dynamic_pointer_cast<QBuffer>(
-            quantize(QuantizeParams(*select_hidden, DataType::TYPE_QFP8_E4M3, 1, params.qscheme, 128, 0)));
+            quantize(QuantizeParams(*select_hidden, DataType::TYPE_QFP8_E4M3, 1, params.qscheme, 128, 0, params.overlapped)));
         selected_buffers.emplace_back(q_hidden->kernelPtr());
         selected_buffers.emplace_back(q_hidden->scalesPtr());
     } else {
         selected_buffers.emplace_back(select_hidden);
     }
-    selected_buffers.emplace_back(select({*expert_ids, *all_token_indices}));
-    selected_buffers.emplace_back(select({*expert_scales, *all_token_indices}));
+    selected_buffers.emplace_back(select({*expert_ids, *all_token_indices, 0, params.overlapped}));
+    selected_buffers.emplace_back(select({*expert_scales, *all_token_indices, 0, params.overlapped}));
 
     auto all2all_output = allToAll({selected_buffers, input_split_sizes, output_split_sizes, params.overlapped});
     // syncCommunication(false);  // Debug only
@@ -171,7 +173,14 @@ MoeCombineOutput ROCmDevice::epCombine(const MoeCombineParams& params) {
     // }
     // 当前卡接受计算完moe的token
 
-
+    if (params.overlapped && params.compute_stream_event) {
+        const auto casted_event = dynamic_cast<TorchEvent*>(params.compute_stream_event.get());
+        if (!casted_event) {
+            throw OpException({OpErrorType::ERROR_INTERNAL, "compute_stream_event is not TorchEvent"});
+        }
+        // FT_LOG_INFO("alltoall wait compute stream event");
+        casted_event->event->block(*torch_comm_stream_);
+    }
     auto all2all_ret = allToAll({{params.input}, params.output_split_sizes, params.input_split_sizes, 
                                   params.overlapped, ParallelMode::DP_AND_TP, params.compute_stream_event});
 
