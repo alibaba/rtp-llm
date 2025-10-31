@@ -36,7 +36,7 @@ public:
     struct AdvancedMallocInfo {
         AdvancedMallocInfo(int64_t                                  request_id,
                            const std::vector<int32_t>&              token_ids,
-                           const std::vector<int64_t>&              cache_keys,
+                           const std::vector<size_t>&               cache_keys,
                            const std::vector<std::vector<int32_t>>& mm_bounds                 = {},
                            bool                                     need_loss                 = false,
                            bool                                     verbose                   = false,
@@ -55,7 +55,7 @@ public:
 
         int64_t                                 request_id;
         const std::vector<int32_t>&             token_ids;
-        const std::vector<int64_t>&             cache_keys;
+        const std::vector<size_t>&              cache_keys;
         const std::vector<std::vector<int32_t>> mm_bounds = {};
         bool                                    need_loss = false;
         bool                                    verbose   = false;
@@ -67,7 +67,7 @@ public:
     struct FreeInfo {
         FreeInfo(int64_t                     request_id,
                  const std::vector<int32_t>& token_ids,
-                 const std::vector<int64_t>& cache_keys,
+                 const std::vector<size_t>&  cache_keys,
                  const std::vector<int32_t>& block_indices,
                  const std::vector<float>    loss                      = {},
                  const std::string           adapter_name              = "",
@@ -84,7 +84,7 @@ public:
 
         int64_t                     request_id;
         const std::vector<int32_t>& token_ids;
-        const std::vector<int64_t>& cache_keys;
+        const std::vector<size_t>&  cache_keys;
         const std::vector<int32_t>& block_indices;
         const std::vector<float>    loss;
         bool                        is_resident = false;
@@ -135,12 +135,12 @@ public:
 
     void regUserMr(size_t model_id);
 
-    bool getCacheForRank(const std::vector<int64_t>&               cache_keys,
+    bool getCacheForRank(const std::vector<size_t>&                cache_keys,
                          const std::vector<int32_t>&               block_indices,
                          size_t                                    ignore_block_num,
                          int64_t                                   request_id,
                          const std::map<std::string, std::string>& extra_metas) const;
-    bool putCacheForRank(const std::vector<int64_t>&               cache_keys,
+    bool putCacheForRank(const std::vector<size_t>&                cache_keys,
                          const std::vector<int32_t>&               block_indices,
                          size_t                                    ignore_block_num,
                          int64_t                                   request_id,
@@ -173,7 +173,7 @@ protected:
 private:
     bool initDistKvCache();
     void matchInDistKvCache(const AdvancedMallocInfo& malloc_info, BlockCache::MatchResult& match_result);
-    bool putToDistKvCache(const std::vector<int64_t>& cache_keys,
+    bool putToDistKvCache(const std::vector<size_t>&  cache_keys,
                           const std::vector<int32_t>& block_indices,
                           size_t                      ignore_block_num,
                           int64_t                     request_id,
