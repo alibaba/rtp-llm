@@ -83,7 +83,9 @@ class FusedSiluActDenseMLP(nn.Module):
         rtp_llm_ops.silu_and_mul(output, gate_up, stream_id)
         down_proj = self.down_proj(output)
         if self.config.tp_size > 1:
+            print(f"mlp all reduce 1")
             down_proj = all_reduce(down_proj, group=Group.TP)
+            print(f"mlp all reduce 2")
         return down_proj
 
 
