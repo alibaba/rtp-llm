@@ -58,22 +58,22 @@ BlockAddrInfo LayerFirstLayoutStrategy::convertIndexToAddr(int layer_id, int blo
 BlockBufferInfo LayerFirstLayoutStrategy::convertIndexToBuffer(int layer_id, int block_id) const {
     if (layer_id >= layer_kv_tensors_.size()) {
         RTP_LLM_LOG_ERROR("Layer ID %d out of range (max: %zu)", layer_id, layer_kv_tensors_.size());
-        return {nullptr, nullptr, nullptr, nullptr};
+        return {nullptr, nullptr};
     }
     
     torch::Tensor tensor = layer_kv_tensors_[layer_id][block_id];
     BufferPtr buffer = torchTensor2Buffer(tensor);
-    return {buffer, buffer, nullptr, nullptr};
+    return {buffer, buffer};
 }
 
 void* LayerFirstLayoutStrategy::getKCacheAddr(int layer_id, int block_id) const {
     auto addr_info = convertIndexToAddr(layer_id, block_id);
-    return addr_info.k_addr ? addr_info.k_addr->data() : nullptr;
+    return addr_info.k_addr;
 }
 
 void* LayerFirstLayoutStrategy::getVCacheAddr(int layer_id, int block_id) const {
     auto addr_info = convertIndexToAddr(layer_id, block_id);
-    return addr_info.v_addr ? addr_info.v_addr->data() : nullptr;
+    return addr_info.v_addr;
 }
 
 
@@ -135,14 +135,14 @@ BlockAddrInfo KVFirstLayoutStrategy::convertIndexToAddr(int layer_id, int block_
 BlockBufferInfo KVFirstLayoutStrategy::convertIndexToBuffer(int layer_id, int block_id) const {
     if (layer_id >= config_.layer_num) {
         RTP_LLM_LOG_ERROR("Layer ID %d out of range (max: %d)", layer_id, config_.layer_num);
-        return {nullptr, nullptr, nullptr, nullptr};
+        return {nullptr, nullptr};
     }
     
     torch::Tensor k_tensor = k_cache_tensor_[layer_id][block_id];
     BufferPtr k_buffer = torchTensor2Buffer(k_tensor);
     torch::Tensor v_tensor = v_cache_tensor_[layer_id][block_id];
     BufferPtr v_buffer = torchTensor2Buffer(v_tensor);
-    return {k_buffer, v_buffer, nullptr, nullptr};
+    return {k_buffer, v_buffer};
 }
 
 void* KVFirstLayoutStrategy::getKCacheAddr(int layer_id, int block_id) const {

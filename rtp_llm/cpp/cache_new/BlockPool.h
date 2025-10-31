@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <unordered_map>
+#include <set>
 
 #include <torch/torch.h>
 
@@ -26,6 +27,7 @@ public:
     };
 
     BlockPool(const BlockPoolConfig& config, rtp_llm::DeviceBase* device, AllocationType atype = AllocationType::DEVICE);
+    ~BlockPool();
 
     bool init();
 
@@ -34,9 +36,9 @@ public:
 
     std::vector<torch::Tensor> layerCacheBase() const;
 
-    std::vector<int> alloc(int num_blocks);
-    void free(const std::vector<int>& block_ids);
-    void reference(const std::vector<int>& block_ids);
+    std::vector<BlockIdxType> alloc(int num_blocks);
+    void free(const std::vector<BlockIdxType>& block_ids);
+    void reference(const std::vector<BlockIdxType>& block_ids);
 
     void regUserMr(size_t model_id);
     BlockAddrInfo convertIndexToAddr(int layer_id, int block_id) const;
@@ -47,6 +49,8 @@ public:
     void* getVCacheAddr(int layer_id, int block_id) const;
 
 private:
+    void initFreeBlocks();
+    void deregUserMr();
     // void initKvCacheNormal();
     // void initKvCacheMla();
     // void initKvCacheScale();
@@ -58,7 +62,7 @@ private:
 
 private:
     BlockPoolConfig config_;
-    std::set<int> free_block_ids;
+    std::set<BlockIdxType> free_block_ids;
     std::unordered_map<int, torch::Tensor> layer_kv_tensors_;        // global_layer_id -> kv cache addresses
     KVCacheBuffer kv_cache_;
     BlockRefCounter block_ref_counter_;

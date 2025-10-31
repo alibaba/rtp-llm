@@ -6,8 +6,11 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/HashUtil.h"
 
+namespace rtp_llm {
+
 KVCacheManager::KVCacheManager(const CacheConfig&      config,
                                rtp_llm::DeviceBase*    device,
+                               bool                    warmup,
                                const kmonitor::MetricsReporterPtr metrics_reporter,
                                const GptInitParameter& params)
     : config_(config), device_(device), metrics_reporter_(metrics_reporter), params_(params) {}
@@ -65,12 +68,12 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
         return {false, 0};
     }
 
-    auto batch_size = malloc_info.batch_kv_cache_resource->batch_size;
+    int batch_size = malloc_info.batch_kv_cache_resource->batchSize();
     if ((int)malloc_info.batch_kv_cache_resource->cache_keys.size() < batch_size) {
         malloc_info.batch_kv_cache_resource->cache_keys.resize(batch_size);
     }
 
-    size_t seq_size_per_block = config_.seq_size_per_block;
+    int seq_size_per_block = config_.seq_size_per_block;
 
     const int seq_len = malloc_info.complete_token_ids->seqLength();
     const int desired_blocks = seq_len / (int)seq_size_per_block;
@@ -84,9 +87,9 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
         int64_t rolling_hash = keys.empty() ? 0 : keys.back();
         int start_index = (int)keys.size();
         if (start_index < desired_blocks) {
-            int32_t* token_ids = malloc_info.complete_token_ids->data(i);
+            auto* token_ids = malloc_info.complete_token_ids->data(i);
             for (int index = start_index; index < desired_blocks; ++index) {
-                int pos = index * (int)seq_size_per_block;
+                int pos = index * seq_size_per_block;
                 rolling_hash = rtp_llm::hashInt64Array(rolling_hash,
                                               token_ids + pos,
                                               token_ids + pos + (int)seq_size_per_block);
@@ -105,5 +108,7 @@ FreeResult KVCacheManager::free(const FreeInfo& free_info) {
 InsertResult KVCacheManager::insertIntoCache(const InsertInfo& insert_info) {
     return allocator_->insertIntoCache(insert_info);
 }
+
+}  // namespace rtp_llm
 
 

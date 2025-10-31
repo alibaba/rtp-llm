@@ -10,7 +10,6 @@
 
 #include "rtp_llm/cpp/cache_new/KVCacheSpec.h"
 #include "rtp_llm/cpp/cache_new/BlockPool.h"
-#include "rtp_llm/cpp/cache_new/BlockCache.h"
 #include "rtp_llm/cpp/core/Buffer.h"
 
 namespace rtp_llm {
@@ -19,18 +18,17 @@ class KVCacheGroup {
 public:
     KVCacheGroup(const std::vector<int>& layer_ids, 
                  const KVCacheSpec& group_spec,
-                 BlockCachePtr block_cache,
                  BlockPoolPtr block_pool)
         : layer_ids_(layer_ids), group_spec_(group_spec), 
-          block_cache_(block_cache), block_pool_(block_pool) {}
+          block_pool_(block_pool) {}
 
     virtual ~KVCacheGroup() = default;
 
     virtual bool init() = 0;
-    virtual std::vector<int> alloc(int needed_blocks) = 0;
-    virtual MatchResult match(std::vector<int64_t> cache_keys) const = 0;
-    virtual void free(std::vector<int> block_indices) = 0;
-    virtual void insertIntoCache(std::vector<int64_t> cache_keys, std::vector<int> block_indices) = 0;
+    virtual std::vector<BlockIdxType> alloc(int needed_blocks) = 0;
+    virtual MatchResult match(std::vector<CacheKeyType> cache_keys) const = 0;
+    virtual void free(std::vector<BlockIdxType> block_indices) = 0;
+    virtual void insertIntoCache(std::vector<CacheKeyType> cache_keys, std::vector<BlockIdxType> block_indices) = 0;
     virtual std::unordered_map<int, torch::Tensor> layerCacheBase() const = 0;
     virtual BlockAddrInfo convertIndexToAddr(int layer_id, int block_id) const = 0;
     virtual BlockBufferInfo convertIndexToBuffer(int layer_id, int block_id) const = 0;
@@ -47,7 +45,7 @@ protected:
     BlockPoolPtr block_pool_;
 
     std::unordered_map<int, torch::Tensor> gloabl_layer_to_kv_tensors;
-    std::unordered_map<int, torch::Tensor> gloabl_layer_to_local_layer;
+    std::unordered_map<int, int> gloabl_layer_to_local_layer;
 };
 
 using KVCacheGroupPtr = std::shared_ptr<KVCacheGroup>;

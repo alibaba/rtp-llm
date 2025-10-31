@@ -10,8 +10,6 @@ struct BlockIds {
     std::vector<int> block_indices;
 };
 
-using BatchKVCacheResourcePtr = std::shared_ptr<BatchKVCacheResource>;
-
 class BatchKVCacheResource {
 public:
     BatchKVCacheResource() {}
@@ -47,12 +45,14 @@ public:
 
 
     // block_idx that has been cached in block_cache
-    // batch_id -> group_id -> block_indices 
+    // batch_id -> layer_id -> block_indices 
     std::vector<std::vector<std::shared_ptr<BlockIds>>> batch_cache_layer_cached_layouts;
     std::vector<std::vector<std::shared_ptr<BlockIds>>> group_id_to_cached_block_ids;
 
     // cache_keys and batch_block_id are not consistent at all times
     std::vector<std::vector<int64_t>> cache_keys;
 };
+
+using BatchKVCacheResourcePtr = std::shared_ptr<BatchKVCacheResource>;
 
 }  // namespace rtp_llm

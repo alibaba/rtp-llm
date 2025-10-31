@@ -6,23 +6,17 @@
 
 #include "rtp_llm/cpp/cache_new/CacheConfig.h"
 #include "rtp_llm/cpp/core/Buffer.h"
+#include "rtp_llm/cpp/cache_new/types.h"
 
 namespace rtp_llm {
-
-struct BlockAddrInfo {
-    BufferPtr k_addr;
-    BufferPtr v_addr;
-    BufferPtr k_scale_addr;
-    BufferPtr v_scale_addr;
-};
 
 class MemoryLayoutStrategy {
 public:
     virtual ~MemoryLayoutStrategy() = default;
     
-    bool init(const BlockPoolConfig& config, 
-                     torch::Tensor& cache_buffer,
-                     void* cache_base_ptr) = 0;
+    virtual bool init(const BlockPoolConfig& config, 
+                      torch::Tensor& cache_buffer,
+                      void* cache_base_ptr) = 0;
     
     virtual std::vector<torch::Tensor> getLayerCacheTensors() const = 0;
     
