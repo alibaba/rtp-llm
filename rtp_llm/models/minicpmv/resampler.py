@@ -1,6 +1,6 @@
 import warnings
 from functools import partial
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 
 import numpy as np
 import torch
