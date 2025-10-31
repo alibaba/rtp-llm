@@ -46,7 +46,21 @@ NormalEngine::NormalEngine(const EngineInitParams& params):
     }
     initCacheManager(warm_up_result);
     RTP_LLM_LOG_INFO("create cache manager done");
-    executor_.reset(new NormalExecutor(params, resource_context_.cache_manager, device_, getLoraManager()));
+    if (params_.engine_async_worker_count_ > 0) {
+        thread_pool_ = std::make_shared<autil::LockFreeThreadPool>(params_.engine_async_worker_count_,
+                                                                   2 * params_.concurrency_config.concurrency_limit,
+                                                                   nullptr,
+                                                                   "EngineThreadPool");
+        if (!thread_pool_->start()) {
+            RTP_LLM_LOG_WARNING("failed to start thread pool of engine async worker, fallback to serial processing");
+            thread_pool_ = nullptr;
+        }
+        RTP_LLM_LOG_INFO("create thread pool of engine async worker done");
+    } else {
+        RTP_LLM_LOG_INFO("number of engine async worker <= 0, skip creation for thread pool of engine async worker");
+    }
+    executor_.reset(
+        new NormalExecutor(params, resource_context_.cache_manager, device_, thread_pool_, getLoraManager()));
     RTP_LLM_LOG_INFO("create normal executor done");
     initScheduler();
     (void)startLoop();
@@ -131,7 +145,7 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
     fake_input->generate_config->num_return_sequences = params_.max_context_batch_size_;
     fake_input->generate_config->calculate_loss       = int(params_.warm_up_with_loss_);
     device_->setTraceMemory(true);
-    executor_.reset(new NormalExecutor(params, nullptr, device_, nullptr, true));
+    executor_.reset(new NormalExecutor(params, nullptr, device_, thread_pool_, nullptr, true));
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::prefill_warm_up));
     const auto device_status = device_->getDeviceStatus();
     device_->setTraceMemory(false);
@@ -150,7 +164,7 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     cache_config.seq_size_per_block = params_.seq_size_per_block_;
     cache_config.block_nums         = 5;
     auto cache_manager              = make_shared<CacheManager>(cache_config, device_, true);
-    executor_.reset(new NormalExecutor(params, cache_manager, device_, nullptr, true));
+    executor_.reset(new NormalExecutor(params, cache_manager, device_, thread_pool_, nullptr, true));
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
     const auto device_status = device_->getDeviceStatus();
     device_->setTraceMemory(false);
@@ -214,6 +228,11 @@ absl::Status NormalEngine::stop() {
     running_ = false;
     RETURN_IF_STATUS_ERROR(scheduler_->stop());
     loop_thread_->join();
+    if (thread_pool_) {
+        thread_pool_->stop();
+        thread_pool_->waitFinish();
+        thread_pool_.reset();
+    }
     return absl::OkStatus();
 }
 

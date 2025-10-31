@@ -28,10 +28,13 @@ namespace rtp_llm {
         if (!buffer) {                                                                                                 \
             buffer = device_->allocateBuffer({rtp_llm::DataType::dtype, shape, atype}, {});                            \
         }                                                                                                              \
-        return std::make_shared<rtp_llm::Buffer>(                                                                      \
-            buffer->where(), buffer->type(), shape, buffer->data(), [buffer](rtp_llm::Buffer* buf) {                   \
-                buffers.emplace_back(std::move(buffer));                                                               \
-            });                                                                                                        \
+        auto where   = buffer->where();                                                                                \
+        auto type    = buffer->type();                                                                                 \
+        auto data    = buffer->data();                                                                                 \
+        auto deleter = [buffer = std::move(buffer)](rtp_llm::Buffer* buf) {                                            \
+            buffers.emplace_back(std::move(buffer));                                                                   \
+        };                                                                                                             \
+        return std::make_shared<rtp_llm::Buffer>(where, type, shape, data, deleter);                                   \
     }()
 
 #define CACHED_HOST_BUF(dtype, ...) CACHED_BUF(dtype, rtp_llm::AllocationType::HOST, __VA_ARGS__)
@@ -40,30 +43,39 @@ namespace rtp_llm {
 
 #define SAFE_CACHED_HOST_BUF(dtype, ...)                                                                               \
     [&]() {                                                                                                            \
-        static std::deque<rtp_llm::BufferPtr> buffers;                                                                 \
-        static std::mutex                     mu;                                                                      \
-        rtp_llm::BufferPtr                    buffer;                                                                  \
-        std::vector<size_t>                   shape = __VA_ARGS__;                                                     \
-        auto size = std::accumulate(shape.begin(), shape.end(), 1, std::multiplies<int>());                            \
-        {                                                                                                              \
-            std::unique_lock lock(mu);                                                                                 \
-            if (!buffers.empty()) {                                                                                    \
-                buffer = std::move(buffers.back());                                                                    \
-                buffers.pop_back();                                                                                    \
-                if (buffer->size() < size) {                                                                           \
-                    buffer = nullptr;                                                                                  \
-                }                                                                                                      \
+        using Queue                      = std::deque<rtp_llm::BufferPtr>;                                             \
+        using BoxedQueue                 = std::unique_ptr<Queue>;                                                     \
+        thread_local auto   buffers      = std::make_unique<Queue>();                                                  \
+        thread_local auto   free_buffers = std::make_shared<BoxedQueue>(std::make_unique<Queue>());                    \
+        thread_local auto   mu           = std::make_shared<std::mutex>();                                             \
+        rtp_llm::BufferPtr  buffer;                                                                                    \
+        std::vector<size_t> shape = __VA_ARGS__;                                                                       \
+        auto                size  = std::accumulate(shape.begin(), shape.end(), 1, std::multiplies<int>());            \
+        if (buffers->empty()) {                                                                                        \
+            std::unique_lock lock(*mu, std::try_to_lock);                                                              \
+            if (lock.owns_lock()) {                                                                                    \
+                buffers.swap(*free_buffers);                                                                           \
+            }                                                                                                          \
+        }                                                                                                              \
+        if (!buffers->empty()) {                                                                                       \
+            buffer = std::move(buffers->back());                                                                       \
+            buffers->pop_back();                                                                                       \
+            if (buffer->size() < size) {                                                                               \
+                buffer = nullptr;                                                                                      \
             }                                                                                                          \
         }                                                                                                              \
         if (!buffer) {                                                                                                 \
             auto atype = rtp_llm::AllocationType::HOST;                                                                \
             buffer     = device_->allocateBuffer({rtp_llm::DataType::dtype, shape, atype}, {});                        \
         }                                                                                                              \
-        return std::make_shared<rtp_llm::Buffer>(                                                                      \
-            buffer->where(), buffer->type(), shape, buffer->data(), [buffer](rtp_llm::Buffer* buf) {                   \
-                std::unique_lock lock(mu);                                                                             \
-                buffers.emplace_back(std::move(buffer));                                                               \
-            });                                                                                                        \
+        auto where   = buffer->where();                                                                                \
+        auto type    = buffer->type();                                                                                 \
+        auto data    = buffer->data();                                                                                 \
+        auto deleter = [free_buffers = free_buffers, mu = mu, buffer = std::move(buffer)](rtp_llm::Buffer* buf) {      \
+            std::unique_lock lock(*mu);                                                                                \
+            (*free_buffers)->emplace_back(std::move(buffer));                                                          \
+        };                                                                                                             \
+        return std::make_shared<rtp_llm::Buffer>(where, type, shape, data, std::move(deleter));                        \
     }()
 
 using NativeGraphRunner = NativeGraphRunnerBase<GptModelInputs, GptModelOutputs>;

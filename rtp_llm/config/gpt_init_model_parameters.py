@@ -257,6 +257,7 @@ class GptInitModelParameters:
     enable_partial_fallback: bool
     enable_sp: bool
     enable_speculative_decoding: bool
+    engine_async_worker_count: int
     ep_rank: int
     ep_size: int
     eplb_mode: EplbMode
@@ -1315,6 +1316,10 @@ class GptInitModelParameters:
             self.py_env_configs.engine_config.warm_up_with_loss
         )
         logging.info(f"warm_up_with_loss: {self.warm_up_with_loss}")
+        self.engine_async_worker_count = int(
+            self.py_env_configs.engine_config.engine_async_worker_count
+        )
+        logging.info(f"engine_async_worker_count: {self.engine_async_worker_count}")
 
         self.fast_gen_max_context_len = (
             1024

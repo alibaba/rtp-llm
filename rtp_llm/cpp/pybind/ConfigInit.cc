@@ -671,6 +671,7 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(enable_fast_gen, enable_fast_gen_)                                                                    \
     DEF_PROPERTY(warm_up, warm_up_)                                                                                    \
     DEF_PROPERTY(warm_up_with_loss, warm_up_with_loss_)                                                                \
+    DEF_PROPERTY(engine_async_worker_count, engine_async_worker_count_)                                                \
     DEF_PROPERTY(fast_gen_max_context_len, fast_gen_max_context_len_)                                                  \
     DEF_PROPERTY(is_causal, is_causal_)                                                                                \
     DEF_PROPERTY(nccl_ip, nccl_ip_)                                                                                    \
