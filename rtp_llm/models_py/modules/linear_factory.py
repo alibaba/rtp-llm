@@ -9,7 +9,7 @@ from torch import nn
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.models_py.modules import utils
-from rtp_llm.models_py.modules.linear import Linear
+from rtp_llm.models_py.modules import Linear
 
 if utils.is_cuda():
     from rtp_llm.models_py.modules.fp8_linear import Fp8PerTensorLinear
