@@ -188,6 +188,12 @@ class FrontendWorker:
     ) -> Dict[str, Any]:
         generate_texts = gen_responses.generate_texts
         if generate_config.num_return_sequences > 0:
+            aux_info = []
+            if generate_config.aux_info:
+                aux_info = [
+                    seq.aux_info.model_dump(mode="json")
+                    for seq in gen_responses.generate_outputs.generate_outputs
+                ]
             sequences_pipeline_response = MultiSequencesPipelineResponse(
                 response=generate_texts,
                 finished=all(
@@ -196,10 +202,7 @@ class FrontendWorker:
                         for seq in gen_responses.generate_outputs.generate_outputs
                     ]
                 ),
-                aux_info=[
-                    seq.aux_info.model_dump(mode="json")
-                    for seq in gen_responses.generate_outputs.generate_outputs
-                ],
+                aux_info=aux_info,
             )
             return sequences_pipeline_response
         else:
@@ -225,7 +228,6 @@ class FrontendWorker:
 
     def is_streaming(self, req: Dict[str, Any]):
         return RequestExtractor.is_streaming(req) or req.get("stream", False)
-
 
     async def _parallel_batch_async_generators(
         self,
