@@ -20,15 +20,9 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
     metrics_reporter_ = maga_init_params.metrics_reporter;
     RTP_LLM_LOG_WARNING("LocalRpcServer aux_string %s",
                         maga_init_params_.gpt_init_parameter.misc_config.aux_string.c_str());
-    bool use_new_mtp_engine = false;
+    const bool use_new_sp_engine = maga_init_params_.gpt_init_parameter.sp_config.use_new_sp_engine;
 
-    // load from env
-    const char* use_new_mtp_engine_env = getenv("USE_NEW_MTP_ENGINE");
-    if (use_new_mtp_engine_env != nullptr && std::string(use_new_mtp_engine_env) == "1") {
-        use_new_mtp_engine = true;
-    }
-
-    if (propose_params && !use_new_mtp_engine) {
+    if (propose_params && !use_new_sp_engine) {
         propose_maga_init_params_ = propose_params.get();
         if (!mm_process_engine.is_none()) {
             return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
