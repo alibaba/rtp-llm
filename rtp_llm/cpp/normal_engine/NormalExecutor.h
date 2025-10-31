@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <optional>
+#include "autil/LockFreeThreadPool.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/engine_base/Executor.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
@@ -16,13 +17,14 @@ namespace rtp_llm {
 
 class NormalExecutor: public Executor {
 public:
-    explicit NormalExecutor(const EngineInitParams&                   params,
-                            const std::shared_ptr<KVCacheManager>&    cache_manager,
-                            rtp_llm::DeviceBase*                      device,
-                            const std::shared_ptr<lora::LoraManager>& lora_manager        = nullptr,
-                            bool                                      warm_up             = false,
-                            bool                                      is_propose          = false,
-                            int                                       propose_model_index = 0);
+    explicit NormalExecutor(std::shared_ptr<autil::LockFreeThreadPool> thread_pool,
+                            const EngineInitParams&                    params,
+                            const std::shared_ptr<KVCacheManager>&     cache_manager,
+                            rtp_llm::DeviceBase*                       device,
+                            const std::shared_ptr<lora::LoraManager>&  lora_manager        = nullptr,
+                            bool                                       warm_up             = false,
+                            bool                                       is_propose          = false,
+                            int                                        propose_model_index = 0);
     ~NormalExecutor() {
         device_->profileStop();
     }
@@ -48,6 +50,7 @@ private:
     std::shared_ptr<KVCacheManager>                                          cache_manager_;
     std::shared_ptr<lora::LoraManager>                                       lora_manager_;
     std::shared_ptr<ExpertBalancer>                                          expert_balancer_;
+    std::shared_ptr<autil::LockFreeThreadPool>                               thread_pool_;
     bool                                                                     warm_up_;
     bool                                                                     use_all_gather_;
     kmonitor::MetricsReporterPtr                                             metrics_reporter_ = nullptr;
