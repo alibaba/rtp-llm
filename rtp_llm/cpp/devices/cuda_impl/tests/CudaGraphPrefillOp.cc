@@ -129,7 +129,6 @@ PyModelInputs CudaGraphPrefillOp::buildInputs(int64_t batch_size,
     size_t    cu_len = batch_size + 1;
     BufferPtr cu_seqlens_buf =
         cuda_graph_runner_->device_->allocateBuffer({DataType::TYPE_INT32, {cu_len}, AllocationType::HOST});
-
     // 手动计算 cu_seqlens - 使用真实有效的长度
     int32_t* cu_seqlens_data = cu_seqlens_buf->data<int32_t>();
     int32_t  total_seq_len   = 0;
@@ -148,6 +147,7 @@ PyModelInputs CudaGraphPrefillOp::buildInputs(int64_t batch_size,
     cu_seqlens_data[batch_size] = total_seq_len;
     RTP_LLM_LOG_INFO("cu_seqlens_data build success\n");
     inputs.attention_inputs.cu_seqlens = Buffer2torchTensor(cu_seqlens_buf, false);
+    inputs.attention_inputs.cu_kv_seqlens = Buffer2torchTensor(cu_seqlens_buf, false);
     if (!use_max_padded_mode) {
         calculatePaddingOffset(inputs.attention_inputs);
     }

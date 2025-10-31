@@ -263,11 +263,11 @@ void CudaGraphRunner::initKernelInternalMemory() {
     BufferPtr cu_seqlens_buf = device_->allocateBuffer({DataType::TYPE_INT32, {max_bs_ + 1}, AllocationType::HOST});
     capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens = Buffer2torchTensor(cu_seqlens_buf, false);
     RTP_LLM_CHECK_WITH_INFO(capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens.is_pinned(),
-                            "capture_mem_hold_ sequence_lengths is not pinned memory");
+                            "capture_mem_hold_ cu_seqlens is not pinned memory");
     BufferPtr cu_kv_seqlens_buf = device_->allocateBuffer({DataType::TYPE_INT32, {max_bs_ + 1}, AllocationType::HOST});
     capture_mem_hold_.py_model_inputs_.attention_inputs.cu_kv_seqlens = Buffer2torchTensor(cu_kv_seqlens_buf, false);
     RTP_LLM_CHECK_WITH_INFO(capture_mem_hold_.py_model_inputs_.attention_inputs.cu_kv_seqlens.is_pinned(),
-                            "capture_mem_hold_ sequence_lengths is not pinned memory");
+                            "capture_mem_hold_ cu_kv_seqlens is not pinned memory");
 }
 
 int CudaGraphRunner::getCurrentRealGraphBs() {
