@@ -42,7 +42,7 @@ cc_library(
         "3rdparty/composable_kernel/include/**/*.h",
         "3rdparty/composable_kernel/include/**/*.inc",
         "3rdparty/composable_kernel/include/**/*.hpp",
-    ]),
+    ], exclude = ["3rdparty/composable_kernel/include/rapidjson/**"]),
     copts = rocm_default_copts() + ["-std=c++20"],
     strip_include_prefix = "3rdparty/composable_kernel/include",
     visibility = ["//visibility:public"],

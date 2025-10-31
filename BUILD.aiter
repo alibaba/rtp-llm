@@ -70,7 +70,7 @@ cc_library(
         "aiter_meta/3rdparty/composable_kernel/include/**/*.h",
         "aiter_meta/3rdparty/composable_kernel/include/**/*.inc",
         "aiter_meta/3rdparty/composable_kernel/include/**/*.hpp",
-    ]) + ["aiter_meta/3rdparty/composable_kernel/include/ck/config.h"],
+    ], exclude = ["aiter_meta/3rdparty/composable_kernel/include/rapidjson/**"]) + ["aiter_meta/3rdparty/composable_kernel/include/ck/config.h"],
     copts = rocm_default_copts() + ["-std=c++20"],
     strip_include_prefix = "aiter_meta/3rdparty/composable_kernel/include/",
     visibility = ["//visibility:public"],
