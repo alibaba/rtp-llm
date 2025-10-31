@@ -173,7 +173,8 @@ std::string DeviceResourceConfig::to_string() const {
         << "overlap_comm_type: " << overlap_comm_type << "\n"
         << "m_split: " << m_split << "\n"
         << "enable_comm_overlap: " << enable_comm_overlap << "\n"
-        << "enable_layer_micro_batch: " << enable_layer_micro_batch;
+        << "enable_layer_micro_batch: " << enable_layer_micro_batch << "\n"
+        << "engine_async_worker_count: " << engine_async_worker_count;
     return oss.str();
 }
 

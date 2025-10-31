@@ -145,7 +145,7 @@ public:
         std::swap(data_, other.data_);
         std::swap(deleter_, other.deleter_);
         std::swap(parent_, other.parent_);
-        std::swap(view_count_, other.view_count_);
+        view_count_.exchange(other.view_count_, std::memory_order_relaxed);
     }
 
     std::string debugStringMeta() const;
@@ -154,12 +154,12 @@ private:
     DeleterFuncType getSubBufferDeleter() const;
 
 protected:
-    MemoryType          where_;
-    DataType            type_;
-    std::vector<size_t> shape_;
-    void*               data_;
-    DeleterFuncType     deleter_    = nullptr;
-    mutable size_t      view_count_ = 0;
+    MemoryType                  where_;
+    DataType                    type_;
+    std::vector<size_t>         shape_;
+    void*                       data_;
+    DeleterFuncType             deleter_    = nullptr;
+    mutable std::atomic<size_t> view_count_ = 0;
 
     std::shared_ptr<Buffer> parent_ = nullptr;
 

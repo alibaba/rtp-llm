@@ -239,6 +239,7 @@ class DeviceResourceConfig:
     device_reserve_memory_bytes: int
     enable_comm_overlap: bool
     enable_layer_micro_batch: int
+    engine_async_worker_count: int
     host_reserve_memory_bytes: int
     m_split: int
     overlap_comm_type: int

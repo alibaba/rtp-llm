@@ -60,6 +60,20 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     initCacheManager(warm_up_result);
     RTP_LLM_LOG_INFO("create cache manager done");
 
+    int async_worker_count = params.device_resource_config.engine_async_worker_count;
+    if (async_worker_count > 0) {
+        thread_pool_ = std::make_shared<autil::LockFreeThreadPool>(
+            async_worker_count, 2 * async_worker_count, nullptr, "EngineThreadPool");
+        if (!thread_pool_->start()) {
+            RTP_LLM_LOG_WARNING("failed to start thread pool of engine async worker, fallback to serial processing");
+            thread_pool_ = nullptr;
+        }
+        RTP_LLM_LOG_INFO("create thread pool of engine async worker done");
+    } else {
+        RTP_LLM_LOG_INFO(
+            "number of engine async worker <= 0, skip the creation for thread pool of engine async worker");
+    }
+
     initExecutor(params, propose_params_);
     if (propose_params_) {
         reserve_step_ = propose_params_->gen_num_per_circle + 1;
@@ -78,7 +92,8 @@ void NormalEngine::initExecutor(const EngineInitParams&                        p
         executor_.reset(
             new MtpExecutor(params, propose_params, resource_context_.cache_manager, device_, getLoraManager()));
     } else {
-        executor_.reset(new NormalExecutor(params, resource_context_.cache_manager, device_, getLoraManager()));
+        executor_.reset(
+            new NormalExecutor(thread_pool_, params, resource_context_.cache_manager, device_, getLoraManager()));
     }
 }
 
@@ -179,7 +194,7 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
     fake_input->generate_config->num_return_sequences = runtime_config.fifo_scheduler_config.max_context_batch_size;
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
     device_->setTraceMemory(true);
-    executor_.reset(new NormalExecutor(params, nullptr, device_, nullptr, true));
+    executor_.reset(new NormalExecutor(thread_pool_, params, nullptr, device_, nullptr, true));
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::prefill_warm_up));
     const auto device_status = device_->getDeviceStatus();
     device_->setTraceMemory(false);
@@ -204,7 +219,7 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     if (!cache_manager->init()) {
         RTP_LLM_FAIL("init kv cache manager failed in decodeWarmUp");
     }
-    executor_.reset(new NormalExecutor(params, cache_manager, device_, nullptr, true));
+    executor_.reset(new NormalExecutor(thread_pool_, params, cache_manager, device_, nullptr, true));
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
     const auto device_status = device_->getDeviceStatus();
     device_->setTraceMemory(false);
@@ -304,6 +319,11 @@ absl::Status NormalEngine::stop() {
     running_ = false;
     RETURN_IF_STATUS_ERROR(scheduler_->stop());
     loop_thread_->join();
+    if (thread_pool_) {
+        thread_pool_->stop();
+        thread_pool_->waitFinish();
+        thread_pool_.reset();
+    }
     return absl::OkStatus();
 }
 

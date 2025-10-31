@@ -44,10 +44,10 @@ public:
             }
 
             auto executor = std::make_shared<NormalExecutor>(
-                *mtp_params, cache_manager, device_, lora_manager, warm_up, true, index);
+                nullptr, *mtp_params, cache_manager, device_, lora_manager, warm_up, true, index);
 
             auto norm_executor = std::make_shared<NormalExecutor>(
-                *mtp_params, cache_manager, device_, lora_manager, warm_up, true, index);
+                nullptr, *mtp_params, cache_manager, device_, lora_manager, warm_up, true, index);
 
             const CacheConfig& cache_config =
                 cache_manager ? cache_manager->getMTPModuleCacheConfig(index) : CacheConfig();

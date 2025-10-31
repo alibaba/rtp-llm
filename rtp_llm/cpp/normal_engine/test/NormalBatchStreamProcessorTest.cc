@@ -29,7 +29,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     CacheConfig                 cache_config;
     RuntimeConfig               runtime_config;
     NormalBatchStreamProcessor  processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+        nullptr, model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
     std::shared_ptr<GenerateInput> query1 = make_shared<GenerateInput>();
     query1->input_ids                     = createBuffer<int32_t>({2}, {1, 2}, AllocationType::HOST);
     query1->generate_config               = make_shared<GenerateConfig>();
@@ -111,7 +111,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         MMModelConfig mm_model_config;
         model_config.mm_model_config = mm_model_config;
         NormalBatchStreamProcessor processor(
-            model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+            nullptr, model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
         StreamGroups stream_groups(streams);
         auto         merge_input_status = processor.gatherModelInput(stream_groups);
         EXPECT_TRUE(merge_input_status.ok());
@@ -151,7 +151,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSoftmaxProbs) {
         stream->setRunning();
     }
     NormalBatchStreamProcessor processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+        nullptr, model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
     StreamGroups stream_groups(streams);
     auto         merge_input_status = processor.gatherModelInput(stream_groups);
     EXPECT_TRUE(merge_input_status.ok());
@@ -226,7 +226,7 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
         stream->setRunning();
     }
     NormalBatchStreamProcessor processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+        nullptr, model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
     StreamGroups stream_groups(streams);
     auto         merge_input_status = processor.gatherModelInput(stream_groups);
     EXPECT_TRUE(merge_input_status.ok());
@@ -266,7 +266,7 @@ TEST_F(NormalBatchStreamProcessorTest, testMultimodalGatherBatch) {
     CacheConfig                 cache_config;
     RuntimeConfig               runtime_config;
     NormalBatchStreamProcessor  processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+        nullptr, model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
     std::shared_ptr<GenerateInput> query1 = make_shared<GenerateInput>();
     query1->input_ids                     = createBuffer<int32_t>({5}, {1, -1, -1, -1, 2}, AllocationType::HOST);
     query1->generate_config               = make_shared<GenerateConfig>();

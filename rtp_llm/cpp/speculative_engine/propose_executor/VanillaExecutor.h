@@ -17,7 +17,8 @@ public:
                              bool                                           warm_up = false):
         ProposeExecutor(device),
         propose_step_(propose_model_engine_init_params->gen_num_per_circle),
-        normal_executor_(*propose_model_engine_init_params->vanilla_model_params,
+        normal_executor_(nullptr,
+                         *propose_model_engine_init_params->vanilla_model_params,
                          cache_manager,
                          device_,
                          lora_manager,
