@@ -18,7 +18,6 @@
         "DEBUG": true
     },
     "typeCheckingMode": "strict",
-    "reportMissingImports": "warning",
     "reportUnknownMemberType": "warning",
     "reportUnknownArgumentType": "warning",
     "reportUnknownParameterType": "warning",

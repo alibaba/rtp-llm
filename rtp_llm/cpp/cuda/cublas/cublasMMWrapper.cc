@@ -17,7 +17,13 @@
 #include "cublasMMWrapper.h"
 #include "autil/Scope.h"
 #include <algorithm>
+#include <cuda.h>
+
+#if CUDA_VERSION >= 12090
+#include "nvtx3/nvToolsExt.h"
+#else
 #include "nvToolsExt.h"
+#endif
 
 #ifndef CUDART_VERSION
 #error CUDART_VERSION Undefined!

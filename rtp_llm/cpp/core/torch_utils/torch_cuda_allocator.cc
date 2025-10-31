@@ -93,12 +93,22 @@ void TorchCudaAllocator::setMemoryFraction(double fraction, TORCH_CUDA_ALLOCATOR
     throw std::runtime_error("not implemented.");
 }
 
+#ifdef UNDER_TORCH_2_8
+void TorchCudaAllocator::recordHistory(bool                                            enabled,
+                                       at::cuda::CUDACachingAllocator::CreateContextFn context_recorder,
+                                       size_t                                          alloc_trace_max_entries,
+                                       at::cuda::CUDACachingAllocator::RecordContext   when,
+                                       bool                                            clearHistory) {
+    throw std::runtime_error("not implemented.");
+}
+#else
 void TorchCudaAllocator::recordHistory(bool                                            enabled,
                                        at::cuda::CUDACachingAllocator::CreateContextFn context_recorder,
                                        size_t                                          alloc_trace_max_entries,
                                        at::cuda::CUDACachingAllocator::RecordContext   when) {
     throw std::runtime_error("not implemented.");
 }
+#endif
 
 bool TorchCudaAllocator::isHistoryEnabled() {
     return false;
@@ -114,7 +124,11 @@ void TorchCudaAllocator::attachOutOfMemoryObserver(at::cuda::CUDACachingAllocato
     throw std::runtime_error("not implemented.");
 }
 
+#ifdef UNDER_TORCH_2_8
+void TorchCudaAllocator::emptyCache(at::cuda::MempoolId_t mempool_id) {}
+#else
 void TorchCudaAllocator::emptyCache() {}
+#endif
 
 void* TorchCudaAllocator::getBaseAllocation(void* ptr, size_t* outSize) {
     return ptr;
@@ -122,9 +136,15 @@ void* TorchCudaAllocator::getBaseAllocation(void* ptr, size_t* outSize) {
 
 void TorchCudaAllocator::recordStream(const at::DataPtr& ptr, at::cuda::CUDAStream stream) {}
 
+#ifdef UNDER_TORCH_2_8
+at::cuda::CUDACachingAllocator::SnapshotInfo TorchCudaAllocator::snapshot(at::cuda::MempoolId_t mempool_id) {
+    throw std::runtime_error("not implemented.");
+}
+#else
 at::cuda::CUDACachingAllocator::SnapshotInfo TorchCudaAllocator::snapshot() {
     throw std::runtime_error("not implemented.");
 }
+#endif
 
 std::shared_ptr<at::cuda::CUDACachingAllocator::AllocatorState>
 TorchCudaAllocator::getCheckpointState(TORCH_CUDA_ALLOCATOR_INDEX_DTYPE device, at::cuda::MempoolId_t id) {

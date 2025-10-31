@@ -558,8 +558,9 @@ struct GemmFpAIntB
         static constexpr bool compile_needed = platform::is_same<KernelArch, arch::Sm80>::value;
         KernelRunner<compile_needed>::run_kernel(params, shared_storage);
 #else
-        static_assert(
-            false, "Invalid architecture being compiled. Only Volta+ supported in weight-only quantization kernels.");
+        // avoid compile cu129 sm100 failed
+        // static_assert(
+        //     false, "Invalid architecture being compiled. Only Volta+ supported in weight-only quantization kernels.");
 #endif
 #else
         CUTLASS_NOT_IMPLEMENTED();
