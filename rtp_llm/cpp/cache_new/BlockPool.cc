@@ -8,7 +8,7 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
-BlockPool::BlockPool(const BlockPoolConfig& config, rtp_llm::DeviceBase* device, AllocationType atype = AllocationType::DEVICE):
+BlockPool::BlockPool(const BlockPoolConfig& config, rtp_llm::DeviceBase* device, AllocationType atype):
     config_(config), device_(device), atype_(atype) {}
 
 
@@ -47,7 +47,7 @@ bool BlockPool::init() {
 
 // 初始化空闲块列表
 void BlockPool::initFreeBlocks() {
-    for(int i = 0; i < config_.block_num; ++i) {
+    for (BlockIdxType i = 0; i < static_cast<BlockIdxType>(config_.block_num); ++i) {
         free_block_ids.insert(i);
     }
     block_ref_counter_.init(config_.block_num);
@@ -62,31 +62,33 @@ std::vector<torch::Tensor> BlockPool::layerCacheBase() const {
     return layout_strategy_->getLayerCacheTensors();
 }
 
-std::vector<int> BlockPool::alloc(int num_blocks) {
-    std::vector<int> block_ids;
+std::vector<BlockIdxType> BlockPool::alloc(int num_blocks) {
+    std::vector<BlockIdxType> block_ids;
     block_ids.reserve(num_blocks);
-    if (free_block_ids.size() < num_blocks) {
-        RTP_LLM_LOG_DEBUG("Block pool only has %d free blocks, cannot allocate %d blocks", free_block_ids.size(), num_blocks);
+    if (free_block_ids.size() < static_cast<size_t>(num_blocks)) {
+        RTP_LLM_LOG_DEBUG("Block pool only has %zu free blocks, cannot allocate %d blocks", free_block_ids.size(), num_blocks);
         return {};
     }
-    for(int i = 0; i < num_blocks; ++i) {
-        block_ids.push_back(free_block_ids.top());
-        free_block_ids.pop();
+    for (int i = 0; i < num_blocks; ++i) {
+        auto it = free_block_ids.begin();
+        if (it == free_block_ids.end()) break;
+        block_ids.push_back(*it);
+        free_block_ids.erase(it);
     }
     return block_ids;
 }
 
 
-void BlockPool::free(const std::vector<int>& block_ids) {
+void BlockPool::free(const std::vector<BlockIdxType>& block_ids) {
     block_ref_counter_.decrementRefCounter(block_ids);
-    for(auto& block_id : block_ids) {
+    for (auto& block_id : block_ids) {
         if (block_ref_counter_.getRefCounter(block_id) == 0) {
-            block_ref_counter_.incrementRefCounter({block_id});
+            free_block_ids.insert(block_id);
         }
     }
 }
 
-void BlockPool::reference(const std::vector<int>& block_ids) {
+void BlockPool::reference(const std::vector<BlockIdxType>& block_ids) {
     block_ref_counter_.incrementRefCounter(block_ids);
 }
 
@@ -179,7 +181,7 @@ void* BlockPool::getVCacheAddr(int layer_id, int block_id) const {
 BlockBufferInfo BlockPool::convertIndexToBuffer(int layer_id, int block_id) const {
     if (!layout_strategy_) {
         RTP_LLM_LOG_ERROR("Layout strategy not initialized");
-        return {nullptr, nullptr, nullptr, nullptr};
+        return {nullptr, nullptr};
     }
     return layout_strategy_->convertIndexToBuffer(layer_id, block_id);
 }

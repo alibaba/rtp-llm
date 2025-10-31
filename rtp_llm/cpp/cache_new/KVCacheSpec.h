@@ -18,6 +18,7 @@ enum KVCacheGroupType {
 struct KVCacheSpec {
     std::vector<int> layer_ids_;
     KVCacheGroupType type_;
+    uint             seq_size_per_block = 1;
 };
 
 struct MHAKVCacheSpec : public KVCacheSpec {
@@ -25,7 +26,6 @@ struct MHAKVCacheSpec : public KVCacheSpec {
     uint              block_nums;
     uint              local_head_num_kv;
     uint              size_per_head;
-    uint              seq_size_per_block = 1;
     rtp_llm::DataType dtype;
 };
 
@@ -34,7 +34,6 @@ struct MLAKVCacheSpec : public KVCacheSpec {
     uint              block_nums;
     uint              kv_lora_rank;
     uint              rope_head_dim;
-    uint              seq_size_per_block = 1;
     rtp_llm::DataType dtype;
 };
 

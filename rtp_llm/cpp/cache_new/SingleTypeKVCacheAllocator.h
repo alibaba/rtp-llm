@@ -18,6 +18,8 @@ public:
     MallocResult malloc(const MallocInfo& malloc_info) override;
     FreeResult free(const FreeInfo& free_info) override;
     InsertResult insertIntoCache(const InsertInfo& insert_info) override;
+    BlockAddrInfo convertIndexToAddr(int layer_id, int block_id) const override;
+    BlockBufferInfo convertIndexToBuffer(int layer_id, int block_id) const override;
     CacheLayerLayout layerCacheBase() const override;
 
 private:

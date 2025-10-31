@@ -8,6 +8,10 @@
 #include "rtp_llm/cpp/cache_new/types.h"
 #include "rtp_llm/cpp/cache_new/CacheConfig.h"
 #include "rtp_llm/cpp/cache_new/KVCacheAllocator.h"
+#include "rtp_llm/cpp/config/GptInitParameter.h"
+#include "kmonitor/client/MetricsReporter.h"
+
+namespace rtp_llm {
 
 class KVCacheManager {
 public:
@@ -40,6 +44,6 @@ private:
 
     const kmonitor::MetricsReporterPtr metrics_reporter_;
     const GptInitParameter& params_;
-
-    HashUtil hash_util_;
 };
+
+}  // namespace rtp_llm
