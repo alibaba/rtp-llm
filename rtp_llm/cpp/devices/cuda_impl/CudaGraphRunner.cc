@@ -86,6 +86,8 @@ void CudaGraphRunner::capture() {
         // pinned memory
         inputs.attention_inputs.cu_seqlens =
             capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens.slice(0, 0, bs + 1);
+        inputs.attention_inputs.cu_kv_seqlens =
+            capture_mem_hold_.py_model_inputs_.attention_inputs.cu_kv_seqlens.slice(0, 0, bs + 1);
         inputs.attention_inputs.prefix_lengths = capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths;
         inputs.attention_inputs.dtype          = capture_mem_hold_.py_model_inputs_.attention_inputs.dtype;
         inputs.attention_inputs.padding_offset =
@@ -138,6 +140,8 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
     // pinned memory
     py_model_inputs_.attention_inputs.cu_seqlens.slice(0, 0, current_batch_size_ + 1) =
         inputs.attention_inputs.cu_seqlens.slice(0, 0, current_batch_size_ + 1);
+    py_model_inputs_.attention_inputs.cu_kv_seqlens.slice(0, 0, current_batch_size_ + 1) =
+        inputs.attention_inputs.cu_kv_seqlens.slice(0, 0, current_batch_size_ + 1);
     if (!is_prefill_cuda_graph_mode_) {
         py_model_inputs_.input_ids.fill_(0);
         py_model_inputs_.input_ids.slice(0, 0, inputs.input_ids.size(0)) = inputs.input_ids;
@@ -259,7 +263,11 @@ void CudaGraphRunner::initKernelInternalMemory() {
     BufferPtr cu_seqlens_buf = device_->allocateBuffer({DataType::TYPE_INT32, {max_bs_ + 1}, AllocationType::HOST});
     capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens = Buffer2torchTensor(cu_seqlens_buf, false);
     RTP_LLM_CHECK_WITH_INFO(capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens.is_pinned(),
-                            "capture_mem_hold_ sequence_lengths is not pinned memory");
+                            "capture_mem_hold_ cu_seqlens is not pinned memory");
+    BufferPtr cu_kv_seqlens_buf = device_->allocateBuffer({DataType::TYPE_INT32, {max_bs_ + 1}, AllocationType::HOST});
+    capture_mem_hold_.py_model_inputs_.attention_inputs.cu_kv_seqlens = Buffer2torchTensor(cu_kv_seqlens_buf, false);
+    RTP_LLM_CHECK_WITH_INFO(capture_mem_hold_.py_model_inputs_.attention_inputs.cu_kv_seqlens.is_pinned(),
+                            "capture_mem_hold_ cu_kv_seqlens is not pinned memory");
 }
 
 int CudaGraphRunner::getCurrentRealGraphBs() {
