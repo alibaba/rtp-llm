@@ -6,10 +6,11 @@ using namespace pybind11::literals;
 
 namespace rtp_llm {
 
-AiterWrapper::AiterWrapper() {
+AiterWrapper::AiterWrapper(const DeviceInitParams& params) {
     py::gil_scoped_acquire acquire;
     aiter_module = py::module::import("aiter");
     pa_func = aiter_module.attr("paged_attn").attr("PagedAttention").attr("forward_decode");
+    use_asm_pa_ = params.use_asm_pa;
 }
 
 torch::Tensor read_tensor_from_file(std::string filename) {
@@ -42,8 +43,18 @@ void AiterWrapper::mtp(const AttentionModuleParams& params, rtp_llm::DeviceBase*
     auto value_cache  = Buffer2torchTensor(params.common.kv_cache->v_cache_buffer, false);
     auto block_tables = Buffer2torchTensor(params.common.kv_cache->kv_cache_block_id, false);
 
-    auto aiter_attn = (AiterAttnParams*)params.common.decode_aiter_attn.get();
-    auto seq_lens = aiter_attn->sequence_lengths_t;
+    if (use_asm_pa_) {
+        int64_t x = 16 / value_cache.element_size();
+        auto sizes = value_cache.sizes();
+        // view(num_blocks, num_kv_heads, head_size, block_size // x, x)
+        value_cache = value_cache.view({sizes[0], sizes[1], sizes[3], sizes[2] / x, x});
+        value_cache = value_cache.permute({0, 1, 3, 2, 4});
+    }
+    
+    // auto aiter_attn = (AiterAttnParams*)params.common.decode_aiter_attn.get();
+    // auto seq_lens = aiter_attn->sequence_lengths_t;
+    auto seq_lens = Buffer2torchTensor(params.common.kv_seqlens,false);
+    // seq_lens = seq_lens + 1;
     int64_t max_seq_len = device->nativeGraphCapturing() ? device->initParams().max_seq_len : params.common.decoder_max_seq_len + 1;
 
     std::optional<torch::Tensor> q_scale = std::nullopt;
