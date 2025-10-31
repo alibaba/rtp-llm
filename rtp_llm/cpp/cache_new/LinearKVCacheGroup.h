@@ -13,7 +13,7 @@ namespace rtp_llm {
 
 class LinearKVCacheGroup: public KVCacheGroup {
 public:
-    void                              malloc(CacheKeysType& cache_keys, int reuse_len = 0);
+    void                              alloc(CacheKeysType& cache_keys, int reuse_len = 0);
     MatchResult                       match(CacheKeysType& cache_keys);
     void                              free(BlockIndicesType& block_indices);
     void                              insertIntoCache(CacheKeysType& cache_keys, BlockIndicesType& block_indices);
@@ -26,6 +26,8 @@ private:
     KVCacheSpec   group_spec_;
     BlockCachePtr block_cache_;
     BlockPoolPtr  block_pool_;
+    int_t         seq_size_per_block_;
+    int           chunk_size;
 };
 
 using LinearKVCacheGroupPtr = std::shared_ptr<LinearKVCacheGroup>;
