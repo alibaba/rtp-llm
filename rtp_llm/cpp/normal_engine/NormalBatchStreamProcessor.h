@@ -1,5 +1,6 @@
 #pragma once
 
+#include "autil/LockFreeThreadPool.h"
 #include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "rtp_llm/cpp/config/GptInitParameter.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
@@ -11,7 +12,11 @@ namespace rtp_llm {
 
 class NormalBatchStreamProcessor {
 public:
-    NormalBatchStreamProcessor(const rtp_llm::GptInitParameter& params, const CacheConfig& cache_config, bool warm_up):
+    NormalBatchStreamProcessor(const rtp_llm::GptInitParameter&           params,
+                               const CacheConfig&                         cache_config,
+                               std::shared_ptr<autil::LockFreeThreadPool> thread_pool,
+                               bool                                       warm_up):
+        thread_pool_(std::move(thread_pool)),
         num_layers_(params.num_layers_),
         vocab_size_(params.vocab_size_),
         input_vocab_size_(params.input_vocab_size_),
@@ -48,6 +53,8 @@ protected:
                                            bool                          score_batch = false) const;
 
 protected:
+    std::shared_ptr<autil::LockFreeThreadPool> thread_pool_;
+
     size_t           num_layers_;
     size_t           vocab_size_;
     size_t           input_vocab_size_;

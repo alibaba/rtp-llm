@@ -302,7 +302,7 @@ bool StreamCacheResource::updateKVBlock(const std::vector<int>& block_src_batch,
         // TODO(zhangjianning.zjn): would be better to pass the ref increment directly
         if (batch_blocks.size() > 0) {
             for (int i = 1; i < batch_fork_count[old_batch_idx]; ++i) {
-                resource_context_.cache_manager->incrRefCounter(batch_blocks);
+                resource_context_.cache_manager->incrRefCounterWithLock(batch_blocks);
             }
         }
 

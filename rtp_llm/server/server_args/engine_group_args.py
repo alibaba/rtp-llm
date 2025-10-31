@@ -24,3 +24,10 @@ def init_engine_group_args(parser):
         default=0,
         help="输入输出的最大长度",
     )
+    engine_group.add_argument(
+        "--engine_async_worker_count",
+        env_name="ENGINE_ASYNC_WORKER_COUNT",
+        type=int,
+        default=0,
+        help="引擎推理中用于异步处理的 worker 数量",
+    )

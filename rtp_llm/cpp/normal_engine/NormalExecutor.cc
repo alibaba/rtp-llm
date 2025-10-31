@@ -12,14 +12,16 @@ using namespace std;
 
 namespace rtp_llm {
 
-NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
-                               const std::shared_ptr<CacheManager>&      cache_manager,
-                               rtp_llm::DeviceBase*                      device,
-                               const std::shared_ptr<lora::LoraManager>& lora_manager,
-                               bool                                      warm_up):
+NormalExecutor::NormalExecutor(const EngineInitParams&                    params,
+                               const std::shared_ptr<CacheManager>&       cache_manager,
+                               rtp_llm::DeviceBase*                       device,
+                               std::shared_ptr<autil::LockFreeThreadPool> thread_pool,
+                               const std::shared_ptr<lora::LoraManager>&  lora_manager,
+                               bool                                       warm_up):
     Executor(device),
     cache_manager_(cache_manager),
     lora_manager_(lora_manager),
+    thread_pool_(std::move(thread_pool)),
     warm_up_(warm_up),
     use_all_gather_(params.gpt_init_parameter.use_all_gather_),
     metrics_reporter_(params.metrics_reporter),
@@ -80,7 +82,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
 
     // when warmup, cache manager maybe nullptr
     const auto& cache_config = cache_manager ? cache_manager->cacheConfig() : CacheConfig();
-    batch_stream_processor_.reset(new NormalBatchStreamProcessor(params.gpt_init_parameter, cache_config, warm_up_));
+    batch_stream_processor_.reset(
+        new NormalBatchStreamProcessor(params.gpt_init_parameter, cache_config, thread_pool_, warm_up_));
     PrefixToCandidateTokens::instance()->reloadPrefixDictWithPrefix(
         params.gpt_init_parameter.ckpt_path_, params.gpt_init_parameter.sp_config.tree_decode_config);
     device_->profileStart();
