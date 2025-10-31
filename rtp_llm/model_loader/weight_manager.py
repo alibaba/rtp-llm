@@ -7,7 +7,7 @@ from typing import Any, Mapping
 
 import torch
 
-from rtp_llm.async_decoder_engine.async_model import AsyncModel
+from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 from rtp_llm.model_loader.loader import ModelLoader
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 
@@ -95,22 +95,22 @@ class WeightManager:
     or Pipeline Parallelism (PP)).
     """
 
-    def __init__(self, model: AsyncModel) -> None:
+    def __init__(self, engine: BaseEngine) -> None:
         """
-        Initializes the WeightManager with an AsyncModel instance.
+        Initializes the WeightManager with an BaseEngine instance.
         Args:
-            model: An instance of `AsyncModel` containing the model's structure,
+            model: An instance of `BaseEngine` containing the model's structure,
                    device information, and weight loaders.
         Error Handling:
             This constructor does not explicitly raise errors, but relies on the
-            correct initialization of the `AsyncModel` and its internal components.
+            correct initialization of the `BaseEngine` and its internal components.
             Issues with `model` object structure could lead to `AttributeError`.
         """
-        self._model = model
+        self._engine: BaseEngine = engine
         self._s_helper = SharedMemoryIPCHelper()
-        self._device: torch.device = model.model.device
-        self._weights: ModelWeights = model.model.weight
-        self._weights_loader: ModelLoader = model.model.model_weights_loader
+        self._device: torch.device = engine.model.device
+        self._weights: ModelWeights = engine.model.weight
+        self._weights_loader: ModelLoader = engine.model.model_weights_loader
         self._weight_module = self._weights_loader._model_weights_info
         self._working_stream: torch.cuda.Stream = torch.cuda.Stream(
             device=self._device,

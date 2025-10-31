@@ -4,7 +4,7 @@ import logging
 import os
 import threading
 import time
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Optional, Union
 
 import requests
 import torch
@@ -13,7 +13,7 @@ from fastapi.responses import ORJSONResponse
 from pydantic import BaseModel
 
 from rtp_llm.access_logger.access_logger import AccessLogger
-from rtp_llm.async_decoder_engine.async_model import AsyncModel
+from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 from rtp_llm.config.py_config_modules import PyEnvConfigs, StaticConfig
 from rtp_llm.config.task_type import TaskType
 from rtp_llm.distribute.gang_server import GangServer
@@ -55,15 +55,13 @@ class BackendServer(object):
             os.environ["NCCL_P2P_DISABLE"] = "1"
         self._access_logger = AccessLogger()
         self._gang_server = GangServer(py_env_configs)
-        self._openai_endpoint = None
         self._lora_manager = None
         self.thread_lock_ = threading.Lock()
         self._global_controller = get_global_controller()
         # just rank 0 report metric
         if g_parallel_info.world_rank == 0:
             kmonitor.init()
-        self.model = None
-        self._openai_endpoint = None
+        self.engine: Optional[BaseEngine] = None
         self._embedding_endpoint = None
         self.py_env_configs = py_env_configs
         self.dp_rank = g_parallel_info.dp_rank
@@ -77,45 +75,32 @@ class BackendServer(object):
             # for debug online
             logging.info("DEBUG_START_FAKE_PROCESS is set, start fake backend server")
         else:
-            self.model: AsyncModel = ModelFactory.create_from_env()
-            if (
-                self.model is not None
-                and self.model.task_type != TaskType.LANGUAGE_MODEL
-            ):
-                self._embedding_endpoint = EmbeddingEndpoint(self.model)
+            self.engine = ModelFactory.create_from_env(self._gang_server._gang_info)
+            logging.info(
+                "engine created successfully: self.engine.task_type=%s",
+                self.engine.task_type,
+            )
+            # Initialize endpoints based on task type
+            if self.engine and self.engine.task_type != TaskType.LANGUAGE_MODEL:
+                # For embedding models
+                self._embedding_endpoint = EmbeddingEndpoint(self.engine)
             else:
+                # For language models
                 self.backend_rpc_server_visitor = BackendRPCServerVisitor(
-                    self.model.config
+                    self.engine.config
                 )
-                self._openai_endpoint = OpenaiEndpoint(
-                    self.model.config,
-                    self.model.tokenizer,
-                    self.backend_rpc_server_visitor,
-                )
-                if isinstance(self.model, AsyncModel):
-                    # uply hack :(
-                    self.model.decoder_engine_.rtp_llm_op_.ft_op.start_http_server(
-                        self.model.model.model_weights_loader,
-                        self.model.model.config.lora_infos,
-                        self._gang_server._gang_info,
-                        self._openai_endpoint.tokenizer,
-                        self._openai_endpoint.chat_renderer,
-                    )
-                    self._lora_manager = LoraManager(self.model)
-                    self._weight_manager = WeightManager(self.model)
-
-    def model_runtime_meta(self) -> str:
-        return "unknown" if self.model is None else self.model.model_runtime_meta
+                self._lora_manager = LoraManager(self.engine)
+                self._weight_manager = WeightManager(self.engine)
 
     def stop(self) -> None:
-        if isinstance(self.model, AsyncModel):
+        if isinstance(self.engine, BaseEngine):
             _nfs_manager.unmount_all()
             logging.info("all nfs paths unmounted")
-            self.model.stop()
+            self.engine.stop()
 
     def ready(self):
-        if isinstance(self.model, AsyncModel):
-            return self.model.ready()
+        if isinstance(self.engine, BaseEngine):
+            return self.engine.ready()
         return True
 
     @property
@@ -124,7 +109,7 @@ class BackendServer(object):
 
     @property
     def role_type(self) -> str:
-        return self.model.role_type
+        return self.engine.role_type if self.engine else "unknown"
 
     async def embedding(self, request: Dict[str, Any], raw_request: Request):
         try:
@@ -210,15 +195,15 @@ class BackendServer(object):
     def get_engine_schedule_info(
         self, latest_finished_version: int
     ) -> EngineScheduleInfo:
-        if self.model is None:
+        if self.engine is None:
             return EngineScheduleInfo()
-        return self.model.get_engine_schedule_info(latest_finished_version)
+        return self.engine.get_engine_schedule_info(latest_finished_version)
 
         # get worker status
 
     def get_cache_status(self, latest_cache_version: int) -> KVCacheInfo:
         with Timer() as t:
-            cache_status_info: KVCacheInfo = self.model.get_cache_status_info(
+            cache_status_info: KVCacheInfo = self.engine.get_cache_status_info(
                 latest_cache_version
             )
         kmonitor.report(AccMetrics.CACHE_STATUS_QPS_METRIC, 1)
@@ -227,7 +212,7 @@ class BackendServer(object):
 
     def get_worker_status(self, latest_finished_version: int) -> WorkStatus:
         with Timer() as t:
-            worker_status_info: WorkerStatusInfo = self.model.get_worker_status_info(
+            worker_status_info: WorkerStatusInfo = self.engine.get_worker_status_info(
                 latest_finished_version
             )
             engine_schedule_info = worker_status_info.engine_schedule_info
@@ -326,12 +311,12 @@ class BackendServer(object):
             _ = self._gang_server.request_workers(req, "remove_lora_internal", True)
 
     def update_scheduler_info(self, req: Union[str, Dict[str, str]]):
-        if self.model is None:
+        if self.engine is None:
             return
         if isinstance(req, str):
             req = json.loads(req)
         try:
-            self.model.decoder_engine_.update_scheduler_info(json.dumps(req))
+            self.engine.update_scheduler_info(json.dumps(req))
             if not (g_parallel_info.is_master and g_parallel_info.world_size > 1):
                 return {"status": "ok"}
             ret: List[requests.Response] = self._gang_server.request_workers(
@@ -350,29 +335,29 @@ class BackendServer(object):
             return {"status": "error", "details": str(e)}
 
     def update_eplb_config(self, req: Dict[str, str]) -> bool:
-        if self.model is None:
+        if self.engine is None:
             return False
-        return self.model.decoder_engine_.update_eplb_config(req)
+        return self.engine.update_eplb_config(req)
 
     def pause(self) -> None:
         if g_parallel_info.is_master and g_parallel_info.world_size > 1:
             self._gang_server.request_workers(
                 req={}, uri="internal_pause", is_wait=True
             )
-        self.model.decoder_engine_.pause()
+        self.engine.pause()
 
     def internal_pause(self) -> None:
-        self.model.decoder_engine_.pause()
+        self.engine.pause()
 
     def restart(self) -> None:
         if g_parallel_info.is_master and g_parallel_info.world_size > 1:
             self._gang_server.request_workers(
                 req={}, uri="internal_restart", is_wait=True
             )
-        self.model.decoder_engine_.restart()
+        self.engine.restart()
 
     def internal_restart(self) -> None:
-        self.model.decoder_engine_.restart()
+        self.engine.restart()
 
     def update_weight(self, req: Dict[str, str]):
         """
