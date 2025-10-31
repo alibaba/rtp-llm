@@ -6,19 +6,9 @@ namespace speculative {
 SpeculativeSamplerOutput SpeculativeSampler::forward(const std::list<GenerateStreamPtr>& streams,
                                                      SamplerOutput&                      draft_sampler_output,
                                                      SamplerOutput&                      target_sampler_output) const {
-    // bool contain_topp        = false;
-    // bool force_stream_sample = device_->initParams().sp_config.force_stream_sample;
-    // torch::Device            target_device       = device_->getTorchDevice();
     SpeculativeSamplerOutput sample_output;
-
-    // for (const GenerateStreamPtr& stream : streams) {
-    //     contain_topp |= !stream->generateConfig()->top1();
-    // }
-    // if (!contain_topp || force_stream_sample || target_device != torch::Device(torch::kCUDA)) {
-    //     streamSample(sample_output, streams, draft_sampler_output, target_sampler_output);
-    // } else {
     batchSample(sample_output, streams, draft_sampler_output, target_sampler_output);
-    // }
+
     return sample_output;
 }
 
@@ -26,7 +16,6 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
                                      const std::list<GenerateStreamPtr>& streams,
                                      SamplerOutput&                      draft_sampler_output,
                                      SamplerOutput&                      target_sampler_output) const {
-    // TODO(yinzhi): stream from prefill part should not use batch sample
     torch::Device target_device = device_->getTorchDevice();
     torch::Device host_device   = torch::Device(torch::kCPU);
 
@@ -41,7 +30,6 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     auto draft_token_probs  = draft_sampler_output.all_probs;
     auto target_token_probs = target_sampler_output.all_probs;
 
-    // TODO(yinzhi): should change to device buffer to avoid copy data
     auto draft_token_ids_d  = device_->clone({*draft_token_ids, AllocationType::DEVICE});
     auto target_token_ids_d = device_->clone({*target_token_ids, AllocationType::DEVICE});
 
@@ -82,11 +70,9 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
 
         memcpy(accept_tokens->data(), output_token_ids_h[stream_idx].data_ptr<int32_t>(), sizeof(int32_t) * accept_len);
 
-        if (accept_len == propose_step_ + 1) {
-            *accept_tokens->dataWithOffset<int32_t>(accept_len - 1) =
-                new_all_token_ids[(stream_idx * (propose_step_ + 1) + accept_len - 1) * token_stride + token_stride
-                                  - 1];
-        }
+        // always use target token as the last token
+        *accept_tokens->dataWithOffset<int32_t>(accept_len - 1) =
+            new_all_token_ids[(stream_idx * (propose_step_ + 1) + accept_len - 1) * token_stride + token_stride - 1];
 
         sample_output.accept_tokens.push_back(accept_tokens);
         sample_output.accept_len.push_back(accept_len);

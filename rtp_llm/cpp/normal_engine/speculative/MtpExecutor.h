@@ -42,6 +42,8 @@ public:
 protected:
     bool isTpRank0() const;
 
+    void maybePrintModelInput(const GptModelInputs& model_input, const std::string& prefix) const;
+
     absl::Status prefillStep(const std::list<GenerateStreamPtr>& streams);
 
     absl::Status decodeStep(const std::list<GenerateStreamPtr>& streams);
@@ -77,6 +79,7 @@ private:
     std::shared_ptr<lora::LoraManager>       lora_manager_;
     bool                                     enable_ffn_disaggregate_ = false;
     bool                                     enable_detail_log_       = false;
+    kmonitor::MetricsReporterPtr             metrics_reporter_        = nullptr;
     std::shared_ptr<ExpertBalancer>          expert_balancer_;
     size_t                                   vocab_size_;
 

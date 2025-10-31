@@ -24,6 +24,15 @@ bool MtpExecutor::isTpRank0() const {
     return device_->getDeviceProperties().tp_rank == 0;
 }
 
+void MtpExecutor::maybePrintModelInput(const GptModelInputs& model_input, const std::string& prefix) const {
+    bool force = device_->getDeviceProperties().tp_rank == 0 && enable_detail_log_;
+    if (force) {
+        RTP_LLM_LOG_INFO("%s model_input: %s", prefix.c_str(), model_input.debugString(force).c_str());
+    } else {
+        RTP_LLM_LOG_DEBUG("%s model_input: %s", prefix.c_str(), model_input.debugString(force).c_str());
+    }
+}
+
 MtpExecutor::MtpExecutor(const EngineInitParams&                           params,
                          std::unique_ptr<ProposeModelEngineInitParams>&    propose_params,
                          const std::shared_ptr<CacheManager>&              cache_manager,
@@ -34,6 +43,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                           param
     Executor(device),
     cache_manager_(cache_manager),
     lora_manager_(lora_manager),
+    metrics_reporter_(params.metrics_reporter),
     mtp_cache_managers_(mtp_cache_managers),
     speculative_sampler_(new speculative::SpeculativeSampler(device, propose_params->gen_num_per_circle)),
     warm_up_(warm_up) {
@@ -45,27 +55,26 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                           param
     enable_detail_log_ = gpt_param.profiling_debug_logging_config.enable_detail_log;
     RTP_LLM_LOG_INFO("enable_detail_log_ = %d", enable_detail_log_);
 
-    // if (gpt_param.enable_eplb_ && gpt_param.moe_style_ != 0) {
-    //     // use first moe layer weight as moe weight type
-    //     int  first_moe_layer = gpt_param.moe_layer_index_.front();
-    //     auto moe_weight_type =
-    //     params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->type();
+    if (gpt_param.enable_eplb_ && gpt_param.moe_style_ != 0) {
+        // use first moe layer weight as moe weight type
+        int  first_moe_layer = gpt_param.moe_layer_index_.front();
+        auto moe_weight_type = params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->type();
 
-    //     expert_balancer_ = std::make_shared<ExpertBalancer>(gpt_param.expert_num_,
-    //                                                    gpt_param.phy_exp_num_,
-    //                                                    gpt_param.num_layers_,
-    //                                                    gpt_param.moe_inter_padding_size_,
-    //                                                    gpt_param.hidden_size_,
-    //                                                    gpt_param.eplb_update_time_,
-    //                                                    gpt_param.ep_rank_,
-    //                                                    gpt_param.ep_size_,
-    //                                                    gpt_param.py_eplb_,
-    //                                                    moe_weight_type,
-    //                                                    device_,
-    //                                                    gpt_param.eplb_mode_,
-    //                                                    gpt_param.quant_algo_,
-    //                                                    metrics_reporter_);
-    // }
+        expert_balancer_ = std::make_shared<ExpertBalancer>(gpt_param.expert_num_,
+                                                            gpt_param.phy_exp_num_,
+                                                            gpt_param.num_layers_,
+                                                            gpt_param.moe_inter_padding_size_,
+                                                            gpt_param.hidden_size_,
+                                                            gpt_param.eplb_update_time_,
+                                                            gpt_param.ep_rank_,
+                                                            gpt_param.ep_size_,
+                                                            gpt_param.py_eplb_,
+                                                            moe_weight_type,
+                                                            device_,
+                                                            gpt_param.eplb_mode_,
+                                                            gpt_param.quant_algo_,
+                                                            metrics_reporter_);
+    }
 
     int eos_id = params.gpt_init_parameter.special_tokens_.eos_token_id_;
 
@@ -87,16 +96,6 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                           param
         RTP_LLM_LOG_INFO("using ffn as service");
         enable_ffn_disaggregate_ = true;
     }
-
-    // if (!params.py_model.is_none()) {
-    //     RTP_LLM_LOG_INFO("init executor with python model");
-    //     model_.reset(new PyWrappedModel(model_init_params, params.py_model));
-    // } else if (device_->initParams().hw_kernel_config.enable_native_cuda_graph) {
-    //     RTP_LLM_LOG_INFO("init legacy c++ gpt model with native cuda graph");
-    //     model_.reset(new NativeDeviceGraphModel(model_init_params));
-    // } else {
-    //     RTP_LLM_LOG_INFO("init legacy c++ gpt model");
-    // }
 
     // TODO(yinzhi): support py model for mtp
     model_.reset(new GptModel(model_init_params));
@@ -200,12 +199,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
 
     // target model prefill
     {
-        // bool force = device_->getDeviceProperties().tp_rank == 0 && enable_detail_log_;
-        // if (force) {
-        //     RTP_LLM_LOG_INFO("model_input: %s", model_input.debugString(force).c_str());
-        // } else {
-        //     RTP_LLM_LOG_DEBUG("model_input: %s", model_input.debugString(force).c_str());
-        // }
+        maybePrintModelInput(model_input, "prefill target model");
         model_output = std::move(model_->forward(model_input));
     }
 
@@ -227,6 +221,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     // draft model prefill
     {
         tpSyncModelInputs(model_input, device_);
+        maybePrintModelInput(model_input, "prefill post draft model");
         draft_model_output = std::move(draft_model_->forward(model_input));
     }
 
@@ -359,6 +354,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         // TODO(yinzhi): prepare spec decode input
     }
 
+    maybePrintModelInput(model_input, "decode target model");
     model_output = std::move(model_->forward(model_input));
 
     // trick: update draft sampler output after spec decode to avoid kernel launch overhead
@@ -394,6 +390,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     tpSyncModelInputs(model_input, device_);
 
+    maybePrintModelInput(model_input, "decode post draft model");
     draft_prefill_model_output = std::move(draft_model_->forward(model_input));
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0) {

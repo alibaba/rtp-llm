@@ -6,9 +6,7 @@ absl::Status MtpBatchStreamProcessor::dispatchPrefill(const StreamGroups& stream
                                                       const MergedOutput& prefill_output,
                                                       const MergedOutput& propose_output) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
-    // const auto& model_output         = prefill_output.model_output;
-    const auto& sampler_output = prefill_output.sampler_output;
-    // const auto& draft_model_output   = propose_output.model_output;
+    const auto& sampler_output       = prefill_output.sampler_output;
     const auto& draft_sampler_output = propose_output.sampler_output;
 
     const auto& new_all_token_ids         = sampler_output.token_ids;
@@ -147,23 +145,6 @@ void MtpBatchStreamProcessor::dispatchProposePrefillSingleStream(GenerateStreamP
         }
         device_->copy({sp_output_buffer->all_probs->view(0, 1), *propose_all_probs});
     }
-
-    // const auto&  propose_new_all_token_ids = draft_sampler_output.token_ids;
-    // const size_t token_stride              = propose_new_all_token_ids->shape()[1];
-
-    // get propose token
-    // int propose_token = propose_new_all_token_ids->data<int64_t>()[batch_idx_out * token_stride + token_stride - 1];
-    // int target_token  = new_tokens_all->data<int32_t>()[batch_idx_out];
-
-    // *(sp_output_buffer->tokens->dataWithOffset<int>(0)) = propose_token;
-
-    // std::vector<int> propose_tokens = {target_token, propose_token};
-    // stream->setProposeToken(propose_tokens);
-
-    // if (propose_all_probs) {
-    //     auto probs_host = device_->clone({*sp_output_buffer->all_probs, AllocationType::HOST});
-    //     stream->setProposeProbs(probs_host);
-    // }
 }
 
 absl::StatusOr<GptModelInputs>
