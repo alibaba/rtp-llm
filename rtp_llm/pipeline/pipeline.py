@@ -147,7 +147,7 @@ class Pipeline(object):
         generate_config_json = kwargs.pop("generate_config", {})
         generate_config = self.create_generate_config(
             generate_config_json,
-            self.tokenizer.vocab_size,
+            len(self.tokenizer),
             self.model_config.special_tokens,
             self.tokenizer,
             **kwargs
@@ -215,7 +215,7 @@ class Pipeline(object):
                 if not generate_config.print_stop_words:
                     text = text[:stop_idx]
                 else:
-                    text = text[:stop_idx + stop_len]
+                    text = text[: stop_idx + stop_len]
                 token_buffer = ""
                 generate_output.finished = True
 
@@ -223,7 +223,9 @@ class Pipeline(object):
             return text, token_buffer
 
         if generate_config.return_incremental or not generate_config.print_stop_words:
-            trunc_text = truncate_response_with_stop_words(text, stop_word_str_slices, generate_config.is_streaming, True)
+            trunc_text = truncate_response_with_stop_words(
+                text, stop_word_str_slices, generate_config.is_streaming, True
+            )
             if generate_config.return_incremental:
                 token_buffer = text[len(trunc_text) :]
             text = trunc_text
