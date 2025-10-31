@@ -1,3 +1,4 @@
+import logging
 from typing import Dict, Optional
 
 import torch
@@ -17,6 +18,11 @@ from rtp_llm.models_py.modules.moe.fused_moe_factory import FusedMoeFactory
 from rtp_llm.models_py.modules.norm import RMSNorm
 from rtp_llm.ops import KVCache, PyAttentionInputs, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
+
+try:
+    from librtp_compute_ops.rtp_llm_ops import SelectTopkOp
+except ImportError:
+    logging.info("SelectTopkOp not available")
 
 
 class DeepSeekV2NormalMoeLayer(nn.Module):
@@ -46,6 +52,7 @@ class DeepSeekV2MoeLayer(nn.Module):
         super().__init__()
         self.config = config
         self.top_k = config.moe_k
+        self.select_topk_op = SelectTopkOp(config)
         # Create gate layer
         use_fp8_path = self._should_use_fp8_linear(config, weights)
         if use_fp8_path:
@@ -76,20 +83,21 @@ class DeepSeekV2MoeLayer(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Forward pass for FusedMoE implementation."""
-        from rtp_llm.models_py.modules.ep.topk import select_experts
-
         router_logits = self.gate(hidden_states)
 
-        topk_weights, topk_ids = select_experts(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-            top_k=self.top_k,
-            use_grouped_topk=False,
-            renormalize=True,
+        num_tokens, _ = hidden_states.shape
+        router_logits_fp32 = router_logits.float()
+        topk_weights = torch.zeros(
+            (num_tokens, self.top_k),
+            dtype=torch.float32,
+            device=hidden_states.device,
         )
-
-        # Convert topk_ids to int64 for DeepEP compatibility
-        topk_ids = topk_ids.long()
+        topk_ids = torch.zeros(
+            (num_tokens, self.top_k),
+            dtype=torch.int64,
+            device=hidden_states.device,
+        )
+        self.select_topk_op.forward(router_logits_fp32, topk_ids, topk_weights)
 
         return self.fused_moe(
             hidden_states=hidden_states,
@@ -134,7 +142,7 @@ class DeepSeekV2DecoderLayer(nn.Module):
             self.is_dense_layer = True
         else:
             self.is_dense_layer = False
-            self.moe_mlp = DeepSeekV2NormalMoeLayer(config, weights)
+            self.moe_mlp = DeepSeekV2MoeLayer(config, weights)
         self.add_shared_expert = config.moe_style == 2
 
         if self.add_shared_expert:
@@ -180,7 +188,6 @@ class DeepSeekV2DecoderLayer(nn.Module):
 
 class DeepSeekV2Model(GptModelBase):
     def __init__(self, config: GptInitModelParameters, weights: ModelWeights):
-        config.head_num = config.head_num // config.tp_size
         super().__init__(config, weights)
         self.layer_num = config.layer_num
         self.vocab_size = config.vocab_size

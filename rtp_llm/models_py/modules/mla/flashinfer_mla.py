@@ -143,7 +143,7 @@ class MlaFlashInferPrefillOp(object):
 
         self.prefill_wrapper_ragged.plan(
             fmha_params.qo_indptr,
-            fmha_params.page_indptr,
+            fmha_params.prefill_page_indptr,
             self.num_heads,
             self.num_heads,
             self.qk_rope_head_dim + self.qk_nope_head_dim,
@@ -194,7 +194,7 @@ class MlaFlashInferDecodeOp(object):
         )
 
     def support(self, attention_inputs: PyAttentionInputs):
-        return self.use_mla and not attention_inputs.is_prefill
+        return self.use_mla
 
     def prepare(self, attention_inputs: PyAttentionInputs):
         check_attention_inputs(attention_inputs)
@@ -222,7 +222,7 @@ class MlaFlashInferDecodeOp(object):
 
         self.mla_wrapper.plan(
             fmha_params.qo_indptr,
-            fmha_params.page_indptr,
+            fmha_params.decode_page_indptr,
             fmha_params.page_indice,
             fmha_params.kvlen,
             self.num_heads,
@@ -294,7 +294,7 @@ class TrtV2PrefillAttentionOp(object):
         self.config = config
         self.weights = weights
         self.use_mla = use_mla
-        from libth_transformer.rtp_llm_ops import TRTAttnOp
+        from librtp_compute_ops.rtp_llm_ops import TRTAttnOp
 
         self.fmha_impl = TRTAttnOp(self.config)
 
@@ -316,7 +316,6 @@ class TrtV2PrefillAttentionOp(object):
         fmha_params: Any,
         layer_id: int,
     ) -> torch.Tensor:
-
         k_pe = k_pe.view(-1, 1, self.qk_rope_head_dim)
         self.k_nope_proj = LinearFactory.create_linear_from_weights(
             self.weights[layer_id], W.mla_k_nope_w, W.mla_k_nope_s, None, self.config
