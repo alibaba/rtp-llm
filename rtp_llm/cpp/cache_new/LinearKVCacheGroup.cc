@@ -66,16 +66,14 @@ void LinearKVCacheGroup::alloc(CacheKeysType& cache_keys, BlockIndicesType& bloc
 
     // set blocks to position, not append
     for (int i = 0; i < result.size(); i++) {
-        block_indices.append(result[i])
+        block_indices.push_back(result[i])
     }
 
     // insert new allocate blocks to block cache?
 }
 
 void LinearKVCacheGroup::free(BlockIndicesType& block_indices) {
-    for (int i = 0; i < cache_keys.size(); i++) {
-        block_pool_->free({block_indices[i]});
-    }
+    block_pool_->free(block_indices);
     block_indices.clear();
 }
 
