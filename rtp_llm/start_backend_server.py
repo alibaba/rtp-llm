@@ -21,12 +21,20 @@ sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
 from rtp_llm.distribute.worker_info import g_parallel_info, g_worker_info
 from rtp_llm.server.backend_app import BackendApp
-from rtp_llm.server.vit_rpc_server import vit_start_server
+from rtp_llm.server.vit_app import VitEndpointApp
 from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
     set_global_controller,
 )
 from rtp_llm.utils.util import copy_gemm_config
+
+
+def vit_start_server(global_controller: ConcurrencyController):
+    py_env_configs = PyEnvConfigs()
+    py_env_configs.update_from_env()
+    set_global_controller(global_controller)
+    app = VitEndpointApp(py_env_configs)
+    app.start(g_worker_info)
 
 
 def local_rank_start(global_controller: ConcurrencyController):
@@ -190,7 +198,7 @@ def start_backend_server(global_controller: ConcurrencyController):
     vit_config.update_from_env()
     # TODO(xinfei.sxf) fix this
     if vit_config.vit_separation == 1:
-        return vit_start_server()
+        return vit_start_server(global_controller)
 
     if not torch.cuda.is_available():
         return local_rank_start(global_controller)
