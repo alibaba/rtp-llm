@@ -249,6 +249,15 @@ protected:
     void InvokeROCmDeepGemmWi8Ai8(const GemmParams& params, BufferPtr output);
     // void prepareCommBuffer(const PrepareCommBufferParams& params) override;
 
+    void updateExpertGpuLoads(const MoeConfigs&          moe_conf,
+                              const OptionalExpertStats& expert_stats,
+                              BufferPtr                  expert_ids) override;
+
+    void balanceExperts(BufferPtr                  expert_ids,
+                        const OptionalExpertStats& expert_stats,
+                        const MoeConfigs&          moe_conf,
+                        const FfnLayerWeights&     weights);
+
 public:
     void      setStream(hipStream_t stream) {
         current_stream_ = stream;
