@@ -45,14 +45,30 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
         res: MMEmbeddingRes = self.engine.mm_embedding_rpc(multimodal_inputs)
         return trans_output(res)
 
+    def stop(self):
+        self.engine.stop()
 
-def vit_start_server():
+
+def create_rpc_server():
+    server = grpc.server(
+        futures.ThreadPoolExecutor(max_workers=200),
+        options=[
+            ("grpc.max_send_message_length", 1024 * 1024 * 1024),
+            ("grpc.max_receive_message_length", 1024 * 1024 * 1024),
+            ("grpc.max_concurrent_streams", -1),
+        ],
+    )
+    return server
+
+
+def vit_start_rpc_server():
     model = ModelFactory.create_from_env()
     server = grpc.server(
         futures.ThreadPoolExecutor(max_workers=200),
         options=[
             ("grpc.max_send_message_length", 1024 * 1024 * 1024),
             ("grpc.max_receive_message_length", 1024 * 1024 * 1024),
+            ("grpc.max_concurrent_streams", -1),
         ],
     )
     add_MultimodalRpcServiceServicer_to_server(
@@ -64,4 +80,4 @@ def vit_start_server():
 
 
 if __name__ == "__main__":
-    vit_start_server()
+    vit_start_rpc_server()

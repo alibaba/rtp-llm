@@ -214,7 +214,7 @@ class GptInitModelParameters:
         "add_special_tokens",
         "template_type",
         "build_position_ids",
-        "mm_batch_size",
+        "mm_preprocess_batch_size",
         "phy2log",
         "is_mtp",
         "num_nodes",
@@ -456,7 +456,7 @@ class GptInitModelParameters:
         self.template_type = TemplateType.chat
         self.build_position_ids = False
         self.routed_scaling_factor = 1.0
-        self.mm_batch_size = 1
+        self.mm_preprocess_batch_size = 1
 
         self.is_multimodal = False
         self.model_name = ""
@@ -654,9 +654,7 @@ class GptInitModelParameters:
             rocm_hipblaslt_config=get_env_str(
                 "ROCM_HIPBLASLT_CONFIG", "gemm_config.csv"
             ),
-            use_swizzleA = (
-                get_env_bool("USE_SWIZZLEA", False)
-            ),
+            use_swizzleA=(get_env_bool("USE_SWIZZLEA", False)),
             ft_disable_custom_ar=get_env_bool("FT_DISABLE_CUSTOM_AR", True),
             enable_cuda_graph=get_env_bool("ENABLE_CUDA_GRAPH", False),
             enable_cuda_graph_debug_mode=get_env_bool(
@@ -836,14 +834,20 @@ class GptInitModelParameters:
                     inter_size
                     + (
                         get_pad_size(inter_size, align_size)
-                        if (self.quant_algo.isQuant() or self.gpt_init_params.hw_kernel_config.use_swizzleA)
+                        if (
+                            self.quant_algo.isQuant()
+                            or self.gpt_init_params.hw_kernel_config.use_swizzleA
+                        )
                         else 0
                     )
                 )
             self.layer_inter_padding_size = layer_inter_padding_size
         self.inter_padding_size = self.inter_size + (
             get_pad_size(self.inter_size, align_size)
-            if (self.quant_algo.isQuant() or self.gpt_init_params.hw_kernel_config.use_swizzleA)
+            if (
+                self.quant_algo.isQuant()
+                or self.gpt_init_params.hw_kernel_config.use_swizzleA
+            )
             else 0
         )
         if self.head_num_kv <= 0:

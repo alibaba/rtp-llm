@@ -338,6 +338,8 @@ class ModelRpcClient(object):
         try:
             options = [
                 ("grpc.max_metadata_size", 1024 * 1024 * 1024),
+                ("grpc.max_receive_message_length", 1024 * 1024 * 1024),
+                ("grpc.max_send_message_length", 1024 * 1024 * 1024),
             ]
             async with grpc.aio.insecure_channel(
                 address_list[input_py.request_id % len(address_list)], options=options

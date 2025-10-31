@@ -6,10 +6,10 @@ from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient
 from rtp_llm.frontend.token_processor import TokenProcessor
 from rtp_llm.models.base_model import BaseModel, GenerateInput, GenerateOutputs
+from rtp_llm.models.multimodal.mm_process_engine import MMProcessEngine
 from rtp_llm.models.propose_model.propose_model import ProposeModel
 from rtp_llm.ops import EngineScheduleInfo, KVCacheInfo, WorkerStatusInfo
 from rtp_llm.ops.rtp_llm.rtp_llm_op import RtpLLMOp
-from rtp_llm.models.multimodal.mm_process_engine import MMProcessEngine
 
 
 class RPCEngine(BaseEngine):
@@ -23,7 +23,7 @@ class RPCEngine(BaseEngine):
         self.token_processor = TokenProcessor(
             self.tokenizer, self.model.config.special_tokens
         )
-        if self.model.is_multimodal():
+        if self.model.is_multimodal() and self.model.config.vit_separation != 2:
             self.mm_engine = MMProcessEngine(self.model)
         else:
             self.mm_engine = None
