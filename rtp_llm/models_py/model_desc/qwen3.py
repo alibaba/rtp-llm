@@ -1,3 +1,4 @@
+import logging
 from typing import Dict, Optional
 
 import torch
@@ -68,20 +69,34 @@ class Qwen3Model(GptModelBase):
         )
 
     def forward(self, inputs: PyModelInputs) -> PyModelOutputs:
-        input_ids: torch.Tensor = inputs.input_ids
-        inputs_embeds = self.embed_tokens(input_ids)
-        hidden_states = inputs_embeds
+        try:
+            input_ids: torch.Tensor = inputs.input_ids
+            inputs_embeds = self.embed_tokens(input_ids)
+            hidden_states = inputs_embeds
 
-        attention_inputs: PyAttentionInputs = inputs.attention_inputs
-        fmha_impl = self.get_fmha_impl(attention_inputs)
-        for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
-            hidden_states = decoder_layer(
-                hidden_states,
-                fmha_impl,
-                kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
-            )
-        hidden_states = self.norm(hidden_states)
-        return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
+            attention_inputs: PyAttentionInputs = inputs.attention_inputs
+            fmha_impl = self.get_fmha_impl(attention_inputs)
+            for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
+                hidden_states = decoder_layer(
+                    hidden_states,
+                    fmha_impl,
+                    kv_cache=(
+                        self.kv_cache.get_layer_cache(i) if self.kv_cache else None
+                    ),
+                )
+            hidden_states = self.norm(hidden_states)
+            return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
+        except Exception as e:
+            error_msg = f"Qwen3Model forward failed: {type(e).__name__}: {e}"
+            logging.error(error_msg)
+            logging.info(error_msg)
+            print(error_msg)
+            import traceback
+
+            logging.error(f"Traceback: {traceback.format_exc()}")
+            logging.info(f"Traceback: {traceback.format_exc()}")
+            print(f"Traceback: {traceback.format_exc()}")
+            raise RuntimeError(error_msg) from e
 
 
 __all__ = [
