@@ -5,7 +5,6 @@
 #include <string>
 #include <unordered_map>
 
-#include "rtp_llm/cpp/cache_new/KVCacheSpec.h"
 #include "rtp_llm/cpp/core/Types.h"
 
 namespace rtp_llm {
@@ -17,11 +16,11 @@ enum struct KVCacheType {
 
 struct KVCacheSpec {
     std::vector<int> layer_ids_;
-    KVCacheGroupType type_;
-    uint             block_stride = 1; // record block Every 'block_stride' blocks
+    KVCacheType      type_;
+    uint             block_stride = 1;  // record block Every 'block_stride' blocks
 };
 
-struct MHAKVCacheSpec : public KVCacheSpec {
+struct MHAKVCacheSpec: public KVCacheSpec {
     uint              layer_num;
     uint              block_nums;
     uint              local_head_num_kv;
@@ -30,7 +29,7 @@ struct MHAKVCacheSpec : public KVCacheSpec {
     rtp_llm::DataType dtype;
 };
 
-struct MLAKVCacheSpec : public KVCacheSpec {
+struct MLAKVCacheSpec: public KVCacheSpec {
     uint              layer_num;
     uint              block_nums;
     uint              kv_lora_rank;
@@ -39,8 +38,7 @@ struct MLAKVCacheSpec : public KVCacheSpec {
     rtp_llm::DataType dtype;
 };
 
-
-struct LinearKVCacheSpec : public KVCacheSpec {
+struct LinearKVCacheSpec: public KVCacheSpec {
     uint              conv_state_size;
     uint              temporal_state_size;
     rtp_llm::DataType dtype;

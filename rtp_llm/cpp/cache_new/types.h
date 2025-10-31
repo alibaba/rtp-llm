@@ -9,15 +9,26 @@
 
 namespace rtp_llm {
 
+typedef size_t  CacheKeyType;
+typedef int32_t BlockIdxType;
+
+typedef std::vector<CacheKeyType> CacheKeysType;
+typedef std::vector<BlockIdxType> BlockIndicesType;
+
+const static int32_t NULL_BLOCK_IDX = -1;
+
+inline bool isNullBlockIdx(BlockIdxType block_idx) {
+    return block_idx == NULL_BLOCK_IDX;
+}
+
 struct CacheLayerLayout {
     std::vector<int>       layer_to_groups;
     std::vector<BufferPtr> layers_to_buffer_ptrs;
 };
 
 struct MatchResult {
-    size_t                            reuse_length;
-    std::vector<std::vector<int64_t>> cached_keys;
-    std::vector<std::vector<int>>     block_indices;
+    size_t           reuse_length;
+    BlockIndicesType block_indices;
 };
 
 // is_reuse_cache = true，基于输入的 cache_keys 做 block_cache 匹配，再走 block_pool 分配；
@@ -52,14 +63,5 @@ struct InsertInfo {
 struct InsertResult {
     bool success;
 };
-
-typedef size_t  CacheKeyType;
-typedef int32_t BlockIdxType;
-
-int32_t NULL_BLOCK_IDX = -1;
-
-inline bool isNullBlockIdx(BlockIdxType block_idx) {
-    return block_idx == NULL_BLOCK_IDX;
-}
 
 }  // namespace rtp_llm

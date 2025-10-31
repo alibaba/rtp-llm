@@ -6,13 +6,12 @@
 #include <cstdint>
 #include <unordered_map>
 
-#include "rtp_llm/cpp/cache/BlockRefCounter.h"
+#include "rtp_llm/cpp/cache_new/BlockRefCounter.h"
 #include "rtp_llm/cpp/cache_new/CacheConfig.h"
 #include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/cache_new/types.h"
-
 
 // 结合 BlockCache 作为辅助判断， BlockCache 不持有 Block;
 
@@ -42,11 +41,14 @@ public:
     std::vector<BufferPtr> layerCacheBase() const;
 
     std::vector<int> alloc(int num_blocks);
-    void free(vector<int> block_ids);
-    void reference(vector<int> block_ids);
+    void             free(BlockIndicesType& block_indices);
+    void             reference(const BlockIndicesType& block_indices);
 
-    void regUserMr(size_t model_id);
+    void          regUserMr(size_t model_id);
     BlockAddrInfo convertIndexToAddr(int block_index, int layer_id) const;
+
+    void incrBlockRefCounter(const BlockIndicesType& blocks);
+    void decrBlockRefCounter(const BlockIndicesType& blocks);
 
 private:
     void initKvCacheNormal();
@@ -54,17 +56,14 @@ private:
     void initKvCacheScale();
     void initLinearCache();
 
-    void incrBlockRefCounter(const std::vector<int>& blocks);
-    void decrBlockRefCounter(const std::vector<int>& blocks);
-
 private:
-    CacheConfig config_;
-    std::set<int> free_block_ids;
-    std::unordered_map<int, BufferPtr> kv_addresses;        // global_layer_id -> kv cache addresses
-    KVCacheBuffer kv_cache_;
-    BlockRefCounter block_ref_counter_;
-    rtp_llm::DeviceBase* device_;
-    AllocationType atype_;
+    CacheConfig                        config_;
+    std::set<int>                      free_block_ids;
+    std::unordered_map<int, BufferPtr> kv_addresses;  // global_layer_id -> kv cache addresses
+    KVCacheBuffer                      kv_cache_;
+    BlockRefCounter                    block_ref_counter_;
+    rtp_llm::DeviceBase*               device_;
+    AllocationType                     atype_;
 };
 
 using BlockPoolPtr = std::shared_ptr<BlockPool>;
