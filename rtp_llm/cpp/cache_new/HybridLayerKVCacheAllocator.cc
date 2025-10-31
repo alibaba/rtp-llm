@@ -12,15 +12,13 @@
 // #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 // #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 
-
-
 // namespace rtp_llm {
 
-// HybridLayerKVCacheAllocator::HybridLayerKVCacheAllocator(const CacheConfig& config, 
-//                                                          rtp_llm::DeviceBase* device, 
+// HybridLayerKVCacheAllocator::HybridLayerKVCacheAllocator(const CacheConfig& config,
+//                                                          rtp_llm::DeviceBase* device,
 //                                                          AllocationType atype)
 //     : KVCacheAllocator(config, device, atype), config_(config), device_(device), atype_(atype) {
-//     RTP_LLM_LOG_INFO("Creating HybridLayerKVCacheAllocator with config: full_layer_num=%d, linear_layer_num=%d", 
+//     RTP_LLM_LOG_INFO("Creating HybridLayerKVCacheAllocator with config: full_layer_num=%d, linear_layer_num=%d",
 //                      config_.full_layer_num, config_.linear_layer_num);
 // }
 
@@ -30,7 +28,7 @@
 //         return false;
 //     }
 
-//     RTP_LLM_LOG_INFO("HybridLayerKVCacheAllocator initialized successfully with %zu groups", 
+//     RTP_LLM_LOG_INFO("HybridLayerKVCacheAllocator initialized successfully with %zu groups",
 //                      kv_cache_groups_.size());
 //     return true;
 // }
@@ -65,15 +63,15 @@
 //     //     RTP_LLM_LOG_ERROR("Invalid stream in insert info");
 //     //     return {false};
 //     // }
-    
+
 //     // const auto& kv_cache = stream->streamCacheResource()->kvCache();
-    
+
 //     // // 将已缓存在 block_cache 中的块插入到 block_cache 中
 //     // for (size_t batch_id = 0; batch_id < kv_cache.cache_keys.size(); ++batch_id) {
 //     //     const auto& cache_keys = kv_cache.cache_keys[batch_id];
 //     //     if (batch_id < kv_cache.batch_block_id.size()) {
 //     //         const auto& block_ids = kv_cache.batch_block_id[batch_id];
-            
+
 //     //         if (cache_keys.size() == block_ids.size() && !cache_keys.empty()) {
 //     //             // 为每个 KVCacheGroup 插入缓存
 //     //             for (auto& kv_cache_group : kv_cache_groups_) {
@@ -84,7 +82,7 @@
 //     //         }
 //     //     }
 //     // }
-    
+
 //     // RTP_LLM_LOG_DEBUG("Inserted cache for stream %ld", stream->streamId());
 //     // return {true};
 
@@ -129,13 +127,13 @@
 //     );
 
 //     BlockPoolPtr shared_block_pool = std::make_shared<BlockPool>(pool_config, device_, atype_);
-    
+
 //     if (!shared_block_pool->init()) {
 //         RTP_LLM_LOG_ERROR("Failed to initialize shared block pool");
 //         return nullptr;
 //     }
-    
-//     RTP_LLM_LOG_INFO("Shared block pool initialized: layer_num=%d, block_num=%d, block_size=%d", 
+
+//     RTP_LLM_LOG_INFO("Shared block pool initialized: layer_num=%d, block_num=%d, block_size=%d",
 //                      pool_config.layer_num, pool_config.block_num, pool_config.block_size);
 //     return shared_block_pool;
 // }
@@ -149,7 +147,7 @@
 //         int layer_num = config_.layer_ids[i].size();
 //         layer_type_to_layer_num.push_back(layer_num);
 //     }
-    
+
 //     int layer_num_per_group = *std::min_element(layer_type_to_layer_num.begin(), layer_type_to_layer_num.end());
 //     if (layer_num_per_group <= 0) {
 //         RTP_LLM_LOG_ERROR("Invalid minimum layer count: %d", layer_num_per_group);
@@ -157,20 +155,20 @@
 //     }
 
 //     shared_block_pool = initSharedBlockPool(layer_num_per_group);
-    
+
 //     RTP_LLM_LOG_INFO("Single group size (min layers): %d", layer_num_per_group);
-    
+
 //     std::vector<int> groups_per_type;
-    
+
 //     int group_id = 0;
 //     for (int type_idx = 0; type_idx < config_.layer_type_num; type_idx++) {
-//         int groups_needed = (layer_type_to_layer_num[type_idx] + layer_num_per_group - 1) / layer_num_per_group;  
+//         int groups_needed = (layer_type_to_layer_num[type_idx] + layer_num_per_group - 1) / layer_num_per_group;
 //         groups_per_type.push_back(groups_needed);
 //         RTP_LLM_LOG_INFO("Attention type %d needs %d groups", type_idx, groups_needed);
 
 //         const auto& type_param = config_.layer_type_params[type_idx];
 //         const auto& type_layer_ids = config_.layer_ids[type_idx];
-        
+
 //         KVCacheGroupType cache_type;
 //         switch (type_param.type) {
 //             case rtp_llm::MultiHeadAttention:
@@ -195,13 +193,14 @@
 //             for(auto& layer_id : group_layer_ids) {
 //                 global_layer_to_group_id_[layer_id] = group_id;
 //             }
-            
+
 //             KVCacheSpec group_spec;
 //             group_spec.layer_ids_ = group_layer_ids;
 //             group_spec.type_ = cache_type;
-            
-//             auto block_cache = std::make_shared<BlockCache>(1); // TODO(chanyin): edit after block_cache is implemented
-            
+
+//             auto block_cache = std::make_shared<BlockCache>(1); // TODO(chanyin): edit after block_cache is
+//             implemented
+
 //             KVCacheGroupPtr kv_cache_group;
 //             if (cache_type == rtp_llm::KVCacheGroupType::FULL) {
 //                 kv_cache_group = std::make_shared<FullKVCacheGroup>(
@@ -210,7 +209,6 @@
 //                 kv_cache_group = std::make_shared<LinearKVCacheGroup>(
 //                     group_layer_ids, group_spec, block_cache, shared_block_pool);
 //             }
-        
 
 //             kv_cache_groups_.push_back(kv_cache_group);
 //             RTP_LLM_LOG_INFO("Created KVCacheGroup %d: type=%s, layers=%zu, layer_ids=[%s]",
@@ -225,11 +223,11 @@
 //                                 }
 //                                 return layer_str;
 //                             }().c_str());
-            
+
 //             group_id++;
 //         }
 //     }
-    
+
 //     RTP_LLM_LOG_INFO("Successfully created %zu KVCacheGroups", kv_cache_groups_.size());
 //     return true;
 // }
@@ -248,7 +246,7 @@
 //             auto match_result = kv_cache_groups_[group_id]->match(cache_keys);
 //             if(match_result.reuse_length < reuse_len) {
 //                 reuse_len = match_result.reuse_length;
-//             }    
+//             }
 //         }
 //     }
 
@@ -277,49 +275,43 @@
 
 //     // 2. reference allop
 
-
-
-
-
-
 //     return MallocResult{true};
-
 
 //     // MallocResult malloc_result;
 //     // malloc_result.success = false;
-    
+
 //     // auto stream = malloc_info.stream;
 //     // const auto& cache_keys = stream->streamCacheResource()->kvCache().cache_keys;
-    
+
 //     // if (cache_keys.empty()) {
 //     //     RTP_LLM_LOG_WARNING("No cache keys available for malloc with cache");
 //     //     return mallocSimple(malloc_info);
 //     // }
-    
+
 //     // // 获取第一个批次的缓存键（简化处理）
 //     // const auto& batch_cache_keys = cache_keys[0];
-    
+
 //     // int full_reuse_len = INT_MAX;
 //     // std::vector<MatchResult> match_results;
-    
+
 //     // // 为每个 KVCacheGroup 进行匹配
 //     // for (auto& kv_cache_group : kv_cache_groups_) {
 //     //     auto match_result = kv_cache_group->match(batch_cache_keys);
 //     //     match_results.push_back(match_result);
-        
+
 //     //     // 如果是 FULL 类型的组，更新最小复用长度
-//     //     if (kv_cache_group->type() == rtp_llm::KVCacheGroupType::FULL && 
+//     //     if (kv_cache_group->type() == rtp_llm::KVCacheGroupType::FULL &&
 //     //         static_cast<int>(match_result.reuse_length) < full_reuse_len) {
 //     //         full_reuse_len = static_cast<int>(match_result.reuse_length);
 //     //     }
 //     // }
-    
+
 //     // // 计算实际的复用长度
 //     // int reuse_len = 0;
 //     // for (int i = full_reuse_len - 1; i >= 0; i--) {
 //     //     bool found_in_all = true;
 //     //     for (const auto& match_result : match_results) {
-//     //         if (match_result.cached_keys.empty() || 
+//     //         if (match_result.cached_keys.empty() ||
 //     //             static_cast<size_t>(i) >= match_result.cached_keys[0].size() ||
 //     //             match_result.cached_keys[0][i] != batch_cache_keys[i]) {
 //     //             found_in_all = false;
@@ -331,86 +323,87 @@
 //     //         break;
 //     //     }
 //     // }
-    
+
 //     // // 更新 stream 的 BatchKVCacheResource
 //     // auto& kv_cache = const_cast<BatchKVCacheResource&>(stream->streamCacheResource()->kvCache());
-    
+
 //     // // 为每个 KVCacheGroup 分配块
 //     // for (size_t group_idx = 0; group_idx < kv_cache_groups_.size(); ++group_idx) {
 //     //     auto& kv_cache_group = kv_cache_groups_[group_idx];
-        
+
 //     //     // 计算需要分配的块数量（总数减去复用的块数）
 //     //     int needed_blocks = static_cast<int>(batch_cache_keys.size()) - reuse_len;
-//     //     auto block_indices = kv_cache_group->alloc(needed_blocks);
-        
+//     //     auto block_indices = kv_cache_group->malloc(needed_blocks);
+
 //     //     // 如果有复用的块，需要将它们添加到结果中
-//     //     if (reuse_len > 0 && group_idx < match_results.size() && 
+//     //     if (reuse_len > 0 && group_idx < match_results.size() &&
 //     //         !match_results[group_idx].block_indices.empty()) {
 //     //         const auto& reused_blocks = match_results[group_idx].block_indices[0];
 //     //         // 将复用的块插入到前面
-//     //         block_indices.insert(block_indices.begin(), reused_blocks.begin(), 
-//     //                             reused_blocks.begin() + std::min(reuse_len, static_cast<int>(reused_blocks.size())));
+//     //         block_indices.insert(block_indices.begin(), reused_blocks.begin(),
+//     //                             reused_blocks.begin() + std::min(reuse_len,
+//     static_cast<int>(reused_blocks.size())));
 //     //     }
-        
+
 //     //     // 更新 BatchKVCacheResource
 //     //     updateBatchKVCacheResource(kv_cache, group_idx, block_indices, match_results[group_idx]);
 //     // }
-    
+
 //     // malloc_result.success = true;
 //     // malloc_result.match_result.reuse_length = reuse_len;
-    
-//     // RTP_LLM_LOG_DEBUG("Malloc with cache completed: reuse_len=%d, groups=%zu", 
+
+//     // RTP_LLM_LOG_DEBUG("Malloc with cache completed: reuse_len=%d, groups=%zu",
 //     //                   reuse_len, kv_cache_groups_.size());
-    
+
 //     // return malloc_result;
 // }
 
 // MallocResult HybridLayerKVCacheAllocator::mallocSimple(const MallocInfo& malloc_info) {
 //     // MallocResult malloc_result;
 //     // malloc_result.success = false;
-    
+
 //     // auto stream = malloc_info.stream;
 //     // const auto& cache_keys = stream->streamCacheResource()->kvCache().cache_keys;
-    
+
 //     // if (cache_keys.empty()) {
 //     //     RTP_LLM_LOG_ERROR("No cache keys available for simple malloc");
 //     //     return malloc_result;
 //     // }
-    
+
 //     // // 获取尚未分配块的缓存键
 //     // const auto& batch_cache_keys = cache_keys[0];
-    
+
 //     // auto& kv_cache = const_cast<BatchKVCacheResource&>(stream->streamCacheResource()->kvCache());
-    
+
 //     // for (size_t group_idx = 0; group_idx < kv_cache_groups_.size(); ++group_idx) {
 //     //     auto& kv_cache_group = kv_cache_groups_[group_idx];
-        
+
 //     //     // 简单分配，不使用缓存复用，分配所有需要的块
 //     //     int needed_blocks = static_cast<int>(batch_cache_keys.size());
-//     //     auto block_indices = kv_cache_group->alloc(needed_blocks);
-        
+//     //     auto block_indices = kv_cache_group->malloc(needed_blocks);
+
 //     //     // 更新 BatchKVCacheResource
 //     //     MatchResult empty_match;
 //     //     updateBatchKVCacheResource(kv_cache, group_idx, block_indices, empty_match);
-        
+
 //     //     // 如果是 LINEAR 类型，将之前的块插入到 block_cache 并释放
 //     //     if (kv_cache_group->type() == KVCacheType::LINEAR) {
 //     //         // 获取之前的块
 //     //         if (!kv_cache.batch_block_id.empty() && !kv_cache.batch_block_id[0].empty()) {
-//     //             std::vector<int> previous_blocks(kv_cache.batch_block_id[0].begin(), 
+//     //             std::vector<int> previous_blocks(kv_cache.batch_block_id[0].begin(),
 //     //                                            kv_cache.batch_block_id[0].end());
-                
+
 //     //             // 插入到缓存并释放
 //     //             kv_cache_group->insertIntoCache(batch_cache_keys, previous_blocks);
 //     //             kv_cache_group->free(previous_blocks);
 //     //         }
 //     //     }
 //     // }
-    
+
 //     // malloc_result.success = true;
-    
+
 //     // RTP_LLM_LOG_DEBUG("Simple malloc completed for %zu groups", kv_cache_groups_.size());
-    
+
 //     // return malloc_result;
 // }
 
@@ -422,7 +415,7 @@
 //     if (kv_cache.batch_cache_layer_layouts.size() <= group_idx) {
 //         kv_cache.batch_cache_layer_layouts.resize(group_idx + 1);
 //     }
-    
+
 //     // 确保每个批次都有对应的层布局
 //     for (auto& batch_layouts : kv_cache.batch_cache_layer_layouts) {
 //         if (batch_layouts.size() <= group_idx) {
@@ -432,20 +425,20 @@
 //             batch_layouts[group_idx] = std::make_shared<BlockIds>();
 //         }
 //     }
-    
+
 //     // 更新块索引
-//     if (!kv_cache.batch_cache_layer_layouts.empty() && 
+//     if (!kv_cache.batch_cache_layer_layouts.empty() &&
 //         kv_cache.batch_cache_layer_layouts[0].size() > group_idx) {
 //         kv_cache.batch_cache_layer_layouts[0][group_idx]->block_indices = block_indices;
 //     }
-    
+
 //     // 如果有匹配结果，更新缓存的布局
 //     if (match_result.reuse_length > 0 && !match_result.block_indices.empty()) {
 //         // 确保 batch_cache_layer_cached_layouts 有足够的空间
 //         if (kv_cache.batch_cache_layer_cached_layouts.size() <= group_idx) {
 //             kv_cache.batch_cache_layer_cached_layouts.resize(group_idx + 1);
 //         }
-        
+
 //         for (auto& batch_cached_layouts : kv_cache.batch_cache_layer_cached_layouts) {
 //             if (batch_cached_layouts.size() <= group_idx) {
 //                 batch_cached_layouts.resize(group_idx + 1);
@@ -454,9 +447,9 @@
 //                 batch_cached_layouts[group_idx] = std::make_shared<BlockIds>();
 //             }
 //         }
-        
+
 //         // 更新缓存的块索引
-//         if (!kv_cache.batch_cache_layer_cached_layouts.empty() && 
+//         if (!kv_cache.batch_cache_layer_cached_layouts.empty() &&
 //             kv_cache.batch_cache_layer_cached_layouts[0].size() > group_idx) {
 //             kv_cache.batch_cache_layer_cached_layouts[0][group_idx]->block_indices = match_result.block_indices[0];
 //         }

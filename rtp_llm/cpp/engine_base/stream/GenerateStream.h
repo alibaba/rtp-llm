@@ -123,7 +123,7 @@ public:
     void                        setNeedReleaseResource(bool need_release_resource);
     void                        incrFallbackBlock(int fallback_blocks);
     bool                        hasCacheKeys() const;
-    const std::vector<int64_t>& cacheKeys(int32_t batch_id = 0) const;
+    const std::vector<size_t>&  cacheKeys(int32_t batch_id = 0) const;
 
     std::shared_ptr<GenerateInput>   generateInput() const;
     std::shared_ptr<GenerateConfig>& generateConfig() const;
