@@ -384,7 +384,7 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs&          
     int32_t*  no_repeat_ngram_size = sampler_inputs.no_repeat_ngram_size->data<int32_t>();
     bool*     do_sample            = sampler_inputs.do_sample->data<bool>();
 
-    int  batch_idx       = 0;
+    int batch_idx = 0;
     for (auto& stream : all_streams) {
         int sampler_batch_size;
         if (score_batch) {
@@ -417,7 +417,7 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs&          
                 top_p[batch_idx]       = 1;
                 temperature[batch_idx] = 1;
             }
-            no_repeat_ngram_size[batch_idx] = stream->generateConfig()->no_repeat_ngram_size.value_or(0);
+            no_repeat_ngram_size[batch_idx]     = stream->generateConfig()->no_repeat_ngram_size.value_or(0);
             sampler_inputs.generator[batch_idx] = stream->getGenerator();
             batch_idx += 1;
         }
@@ -453,17 +453,38 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_gro
     bool return_all_probs = stream_groups.needReturnAllProbs();
     auto new_tokens_all   = CACHED_HOST_BUF(TYPE_INT32, {(size_t)total_batch_size_out, (size_t)1});
 
+    std::vector<autil::ThreadPoolBase::Future<void>> futures;
+    if (thread_pool_ != nullptr) {
+        futures.reserve(stream_groups.size());
+    }
+
     for (auto& stream : stream_groups.allStreams()) {
         auto cur_batch_size  = stream->currentBatchSize();
         auto next_batch_size = stream->nextBatchSize();
         auto token_size      = stream->currentExecuteTokenSize();
 
-        dispatchSingleStream(
-            stream, merge_outputs, batch_idx_in, batch_idx_out, token_offset, return_all_probs, new_tokens_all);
+        // TODO(zhangjianning.zjn): the lifetime of captures need more careful thoughts if we go fully async
+        auto task = [&, batch_idx_in, batch_idx_out, token_offset]() {
+            dispatchSingleStream(
+                stream, merge_outputs, batch_idx_in, batch_idx_out, token_offset, return_all_probs, new_tokens_all);
+        };
+
+        if (thread_pool_ != nullptr) {
+            futures.emplace_back(thread_pool_->async(std::move(task)));
+        } else {
+            task();
+        }
 
         batch_idx_in += cur_batch_size;
         batch_idx_out += next_batch_size;
         token_offset += token_size;
+    }
+
+    if (thread_pool_ != nullptr) {
+        // TODO(zhangjianning.zjn): fully async would be better rather than waiting dispatching
+        for (auto& future : futures) {
+            future.wait();
+        }
     }
 
     RTP_LLM_LOG_DEBUG("dispatch done");
