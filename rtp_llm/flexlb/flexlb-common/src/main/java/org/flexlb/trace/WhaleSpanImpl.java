@@ -12,7 +12,7 @@ import io.opentelemetry.context.Context;
 import io.opentelemetry.context.Scope;
 import io.opentelemetry.context.propagation.TextMapGetter;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.commons.collections.MapUtils;
+import org.apache.commons.collections4.MapUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.flexlb.constant.CommonConstants;
 
@@ -32,7 +32,7 @@ import java.util.concurrent.TimeUnit;
  * @date 2025/8/19
  **/
 @Slf4j
-public class WhaleSpanImpl implements WhaleSpan{
+public class WhaleSpanImpl implements WhaleSpan {
     private static final Long MAX_ATTRIBUTE_NUM_OF_EVENT = 128L;
     private static final Tracer TPP_TRACER = GlobalOpenTelemetry.get().getTracer("tpp");
     private static final DateTimeFormatter FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS");
@@ -74,7 +74,7 @@ public class WhaleSpanImpl implements WhaleSpan{
 
     @Override
     public Scope makeCurrent() {
-        return  span.makeCurrent();
+        return span.makeCurrent();
     }
 
     public void endSpan() {

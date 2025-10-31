@@ -1,6 +1,5 @@
 package org.flexlb.transport;
 
-import com.alibaba.fastjson.JSON;
 import io.micrometer.core.instrument.util.NamedThreadFactory;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
@@ -19,7 +18,7 @@ import io.netty.handler.timeout.ReadTimeoutException;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.dao.netty.HttpNettyChannelContext;
 import org.flexlb.enums.StatusEnum;
-import org.flexlb.exception.WhaleException;
+import org.flexlb.exception.FlexLBException;
 import org.flexlb.util.JsonUtils;
 import org.flexlb.util.NettyUtils;
 import org.springframework.stereotype.Component;
@@ -60,16 +59,16 @@ public class GeneralHttpNettyService {
         httpRequestScheduler = Schedulers.fromExecutor(httpRequestExecutor);
     }
 
-    public <Request, Result> Mono<Result> request(Request request, URI uri, String path, Class<?> responseClz) {
+    public <Request, Result> Mono<Result> request(Request request, URI uri, String path, Class<Result> responseClz) {
         return this.doRequest(request, uri, path, null, responseClz);
     }
 
-    public <Request, Result> Mono<Result> request(Request request, URI uri, String path, HttpHeaders headers, Class<?> responseClz) {
+    public <Request, Result> Mono<Result> request(Request request, URI uri, String path, HttpHeaders headers, Class<Result> responseClz) {
 
         return Mono.fromFuture(this.<Request, Result>doRequest(request, uri, path, headers, responseClz).toFuture());
     }
 
-    public <Request, Result> Mono<Result> doRequest(Request request, URI uri, String path, HttpHeaders headers, Class<?> responseClz) {
+    public <Request, Result> Mono<Result> doRequest(Request request, URI uri, String path, HttpHeaders headers, Class<Result> responseClz) {
         return Mono.just(request)
                 .map(ctx -> HttpNettyChannelContext.<Result>builder()
                         .request(request)
@@ -82,7 +81,7 @@ public class GeneralHttpNettyService {
                         .build())
                 .flatMap(nettyCtx -> connectBackend(nettyCtx, uri, path).publishOn(httpRequestScheduler)
                         .flatMap(nettyContext -> executeHttpRequest(nettyContext, uri, path, headers
-                )));
+                        )));
     }
 
     private <Result> Mono<HttpNettyChannelContext<Result>> connectBackend(HttpNettyChannelContext<Result> nettyCtx,
@@ -151,7 +150,7 @@ public class GeneralHttpNettyService {
     }
 
     private <Result> void handleNettyMessage(HttpNettyChannelContext<Result> nettyCtx, HttpObject obj,
-                                             Class<?> responseClz) {
+                                             Class<Result> responseClz) {
         if (nettyCtx.getSink().isCancelled()) {
             NettyUtils.finish(nettyCtx);
             log.error("sink canceled, finish netty");
@@ -171,7 +170,7 @@ public class GeneralHttpNettyService {
     }
 
     private <Result> void handleNettyChunk(HttpNettyChannelContext<Result> nettyCtx, HttpObject obj,
-                                           Class<?> responseClz) {
+                                           Class<Result> responseClz) {
 
         // 校验当前的http的response是否是200，如果是非200，代表是异常情况，直接解析chunk返回错误即可。
         int httpStatusCode = NettyUtils.getHttpStatusCode(nettyCtx);
@@ -207,7 +206,7 @@ public class GeneralHttpNettyService {
 
             Result response;
             try {
-                response = JSON.parseObject(bodyBytes, responseClz);
+                response = JsonUtils.toObject(bodyBytes, responseClz);
             } catch (Throwable e) {
                 throw StatusEnum.INTERNAL_ERROR.toException(e);
             }
@@ -217,7 +216,7 @@ public class GeneralHttpNettyService {
             // 下游netty结束
             NettyUtils.finish(nettyCtx);
 
-        } catch (WhaleException e) {
+        } catch (FlexLBException e) {
             nettyCtx.getSink().error(e);
             NettyUtils.finish(nettyCtx);
         }

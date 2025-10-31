@@ -2,7 +2,8 @@ package org.flexlb.exception;
 
 import org.flexlb.enums.StatusEnum;
 
-public class JsonMapperException extends WhaleException {
+public class JsonMapperException extends FlexLBException {
+
     public JsonMapperException(int code, String name, String message, Throwable cause) {
         super(code, name, message, cause);
     }

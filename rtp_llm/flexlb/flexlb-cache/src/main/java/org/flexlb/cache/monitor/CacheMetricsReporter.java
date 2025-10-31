@@ -1,14 +1,14 @@
 package org.flexlb.cache.monitor;
 
-import javax.annotation.PostConstruct;
-
-import com.taobao.kmonitor.ImmutableMetricTags;
-import com.taobao.kmonitor.KMonitor;
-import com.taobao.kmonitor.MetricType;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.FlexMetricType;
+import org.flexlb.metric.FlexMetricTags;
+import org.flexlb.metric.FlexMonitor;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
+
+import javax.annotation.PostConstruct;
 
 import static org.flexlb.constant.MetricConstant.CACHE_DIFF_ADDED_BLOCKS_SIZE;
 import static org.flexlb.constant.MetricConstant.CACHE_DIFF_REMOVED_BLOCKS_SIZE;
@@ -54,7 +54,7 @@ public class CacheMetricsReporter {
     private static final long LONG_OBJECT_BYTES = 24;
 
     @Autowired
-    private KMonitor kMonitor;
+    private FlexMonitor monitor;
 
     @PostConstruct
     public void init() {
@@ -67,28 +67,28 @@ public class CacheMetricsReporter {
      */
     private void registerCacheMetrics() {
         // 引擎本地缓存指标
-        kMonitor.register(CACHE_ENGINE_LOCAL_COUNT, MetricType.GAUGE);
-        kMonitor.register(CACHE_ENGINE_LOCAL_BYTES, MetricType.GAUGE);
+        monitor.register(CACHE_ENGINE_LOCAL_COUNT, FlexMetricType.GAUGE);
+        monitor.register(CACHE_ENGINE_LOCAL_BYTES, FlexMetricType.GAUGE);
 
         // 全局缓存指标
-        kMonitor.register(CACHE_GLOBAL_TOTAL_COUNT, MetricType.GAUGE);
-        kMonitor.register(CACHE_GLOBAL_BYTES, MetricType.GAUGE);
+        monitor.register(CACHE_GLOBAL_TOTAL_COUNT, FlexMetricType.GAUGE);
+        monitor.register(CACHE_GLOBAL_BYTES, FlexMetricType.GAUGE);
 
         // 缓存命中率指标
-        kMonitor.register(CACHE_HIT_COUNT, MetricType.GAUGE);
-        kMonitor.register(CACHE_HIT_RATIO, MetricType.GAUGE);
-        kMonitor.register(CACHE_REQUEST_TOTAL, MetricType.QPS);
+        monitor.register(CACHE_HIT_COUNT, FlexMetricType.GAUGE);
+        monitor.register(CACHE_HIT_RATIO, FlexMetricType.GAUGE);
+        monitor.register(CACHE_REQUEST_TOTAL, FlexMetricType.QPS);
 
         // 缓存服务响应时间指标
-        kMonitor.register(CACHE_FIND_MATCHING_ENGINES_RT, MetricType.GAUGE);
-        kMonitor.register(CACHE_UPDATE_ENGINE_BLOCK_CACHE_RT, MetricType.GAUGE);
-        
+        monitor.register(CACHE_FIND_MATCHING_ENGINES_RT, FlexMetricType.GAUGE);
+        monitor.register(CACHE_UPDATE_ENGINE_BLOCK_CACHE_RT, FlexMetricType.GAUGE);
+
         // 缓存diff相关指标
-        kMonitor.register(CACHE_DIFF_ADDED_BLOCKS_SIZE, MetricType.GAUGE);
-        kMonitor.register(CACHE_DIFF_REMOVED_BLOCKS_SIZE, MetricType.GAUGE);
-        
+        monitor.register(CACHE_DIFF_ADDED_BLOCKS_SIZE, FlexMetricType.GAUGE);
+        monitor.register(CACHE_DIFF_REMOVED_BLOCKS_SIZE, FlexMetricType.GAUGE);
+
         // 引擎视图Map大小指标
-        kMonitor.register(CACHE_ENGINE_VIEWS_MAP_SIZE, MetricType.GAUGE);
+        monitor.register(CACHE_ENGINE_VIEWS_MAP_SIZE, FlexMetricType.GAUGE);
     }
 
 
@@ -107,13 +107,13 @@ public class CacheMetricsReporter {
         // 计算缓存数量和字节数
         long cacheBytes = calculateEngineCacheBytes(cacheCount);
 
-        ImmutableMetricTags tags = new ImmutableMetricTags(
+        FlexMetricTags tags = FlexMetricTags.of(
                 "engineIp", engineIp,
                 "role", role
         );
 
-        kMonitor.report(CACHE_ENGINE_LOCAL_COUNT, tags, cacheCount);
-        kMonitor.report(CACHE_ENGINE_LOCAL_BYTES, tags, cacheBytes);
+        monitor.report(CACHE_ENGINE_LOCAL_COUNT, tags, cacheCount);
+        monitor.report(CACHE_ENGINE_LOCAL_BYTES, tags, cacheBytes);
     }
 
     /**
@@ -127,8 +127,8 @@ public class CacheMetricsReporter {
         // 使用基于统计数字的估算
         long totalBytes = calculateGlobalCacheBytes(totalBlocks, totalMappings);
 
-        kMonitor.report(CACHE_GLOBAL_TOTAL_COUNT, totalBlocks);
-        kMonitor.report(CACHE_GLOBAL_BYTES, totalBytes);
+        monitor.report(CACHE_GLOBAL_TOTAL_COUNT, totalBlocks);
+        monitor.report(CACHE_GLOBAL_BYTES, totalBytes);
     }
 
     /**
@@ -142,16 +142,16 @@ public class CacheMetricsReporter {
      */
     public void reportCacheHitMetrics(String modelName, RoleType roleType, String engineIp, long hitTokens, double hitRatio) {
 
-        ImmutableMetricTags baseTags = new ImmutableMetricTags(
+        FlexMetricTags baseTags = FlexMetricTags.of(
                 "model", modelName,
                 "role", roleType.name(),
                 "engineIp", engineIp
         );
 
         // 上报命中tokens数量和命中百分比
-        kMonitor.report(CACHE_HIT_COUNT, baseTags, hitTokens);
-        kMonitor.report(CACHE_HIT_RATIO, baseTags, hitRatio);
-        kMonitor.report(CACHE_REQUEST_TOTAL, baseTags, 1.0);
+        monitor.report(CACHE_HIT_COUNT, baseTags, hitTokens);
+        monitor.report(CACHE_HIT_RATIO, baseTags, hitRatio);
+        monitor.report(CACHE_REQUEST_TOTAL, baseTags, 1.0);
     }
 
     /**
@@ -260,13 +260,13 @@ public class CacheMetricsReporter {
      * @param success   是否成功
      */
     public void reportFindMatchingEnginesRT(String modelName, RoleType roleType, long startTime, String success) {
-        ImmutableMetricTags tags = new ImmutableMetricTags(
+        FlexMetricTags tags = FlexMetricTags.of(
                 "model", modelName,
                 "role", roleType.name(),
                 "success", success
         );
 
-        kMonitor.report(CACHE_FIND_MATCHING_ENGINES_RT, tags, System.currentTimeMillis() - startTime);
+        monitor.report(CACHE_FIND_MATCHING_ENGINES_RT, tags, System.currentTimeMillis() - startTime);
     }
 
     /**
@@ -278,13 +278,13 @@ public class CacheMetricsReporter {
      * @param success      是否成功
      */
     public void reportUpdateEngineBlockCacheRT(String engineIpPort, String role, long startTime, String success) {
-        ImmutableMetricTags tags = new ImmutableMetricTags(
+        FlexMetricTags tags = FlexMetricTags.of(
                 "engineIpPort", engineIpPort,
                 "role", role,
                 "success", success
         );
 
-        kMonitor.report(CACHE_UPDATE_ENGINE_BLOCK_CACHE_RT, tags, System.currentTimeMillis() - startTime);
+        monitor.report(CACHE_UPDATE_ENGINE_BLOCK_CACHE_RT, tags, System.currentTimeMillis() - startTime);
     }
 
     /**
@@ -300,13 +300,13 @@ public class CacheMetricsReporter {
             return;
         }
 
-        ImmutableMetricTags tags = new ImmutableMetricTags(
+        FlexMetricTags tags = FlexMetricTags.of(
                 "engineIp", engineIp,
                 "role", role != null ? role : "unknown"
         );
 
-        kMonitor.report(CACHE_DIFF_ADDED_BLOCKS_SIZE, tags, addedBlocksSize);
-        kMonitor.report(CACHE_DIFF_REMOVED_BLOCKS_SIZE, tags, removedBlocksSize);
+        monitor.report(CACHE_DIFF_ADDED_BLOCKS_SIZE, tags, addedBlocksSize);
+        monitor.report(CACHE_DIFF_REMOVED_BLOCKS_SIZE, tags, removedBlocksSize);
     }
 
     /**
@@ -315,6 +315,6 @@ public class CacheMetricsReporter {
      * @param mapSize 引擎视图Map的大小（即当前有多少个引擎）
      */
     public void reportEngineViewsMapSize(int mapSize) {
-        kMonitor.report(CACHE_ENGINE_VIEWS_MAP_SIZE, mapSize);
+        monitor.report(CACHE_ENGINE_VIEWS_MAP_SIZE, mapSize);
     }
 }

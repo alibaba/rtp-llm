@@ -10,6 +10,7 @@ import java.util.concurrent.ScheduledThreadPoolExecutor;
 @Slf4j
 @Configuration
 public class SyncSchedulerConfig {
+
     @Bean(name = "taskMetricScheduler")
     public ScheduledThreadPoolExecutor taskMetricScheduler() {
         return new ScheduledThreadPoolExecutor(1, new NamedThreadFactory("task-metric-scheduler"));

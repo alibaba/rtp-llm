@@ -34,13 +34,13 @@ public class GrpcWorkerStatusRunner implements Runnable {
     private final int grpcPort;
     private final long startTime = System.currentTimeMillis();
     private final String id = IdUtils.fastUuid();
-    private final long syncRequstTimeoutMs;
+    private final long syncRequestTimeoutMs;
 
     public GrpcWorkerStatusRunner(String modelName, String ipPort, String site, String group,
                                   ConcurrentHashMap<String/*ip*/, WorkerStatus> workerStatuses,
                                   EngineHealthReporter engineHealthReporter,
                                   EngineGrpcService engineGrpcService,
-                                  long syncRequstTimeoutMs) {
+                                  long syncRequestTimeoutMs) {
         this.ipPort = ipPort;
         String[] split = ipPort.split(":");
         this.ip = split[0];
@@ -52,7 +52,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
         this.group = group;
         this.engineHealthReporter = engineHealthReporter;
         this.engineGrpcService = engineGrpcService;
-        this.syncRequstTimeoutMs = syncRequstTimeoutMs;
+        this.syncRequestTimeoutMs = syncRequestTimeoutMs;
     }
 
     @Override
@@ -73,7 +73,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
 
     private WorkerStatusResponse launchGrpcStatusCheck(String ip, int grpcPort, long latestFinishedTaskVersion) {
         try {
-            EngineRpcService.WorkerStatusPB workerStatusPB = engineGrpcService.getWorkerStatus(ip, grpcPort, latestFinishedTaskVersion, syncRequstTimeoutMs);
+            EngineRpcService.WorkerStatusPB workerStatusPB = engineGrpcService.getWorkerStatus(ip, grpcPort, latestFinishedTaskVersion, syncRequestTimeoutMs);
             return EngineStatusConverter.convertToWorkerStatusResponse(workerStatusPB);
         } catch (Throwable throwable) {
             handleException(throwable);

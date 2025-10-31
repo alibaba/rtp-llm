@@ -9,14 +9,14 @@ import java.util.ArrayList;
 import java.util.List;
 
 @Data
-@ConfigurationProperties(prefix = "tpp.otel.config")
+@ConfigurationProperties(prefix = "trace.otel.config")
 public class OtelProperties {
 
     private String serviceName;
     /**
      * Instrumentation name to be used to find a Tracer.
      */
-    private String instrumentationName = "tpp";
+    private String instrumentationName = "trace";
 
     /**
      * Instrumentation version to be used to find a Tracer.
