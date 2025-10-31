@@ -519,17 +519,44 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_gro
     bool return_all_probs = stream_groups.needReturnAllProbs();
     auto new_tokens_all   = CACHED_HOST_BUF(TYPE_INT32, {(size_t)total_batch_size_out, (size_t)1});
 
+    std::vector<autil::ThreadPoolBase::Future<void>> futures;
+    if (thread_pool_ != nullptr) {
+        futures.reserve(stream_groups.size());
+    }
+
     for (auto& stream : stream_groups.allStreams()) {
         auto cur_batch_size  = stream->currentBatchSize();
         auto next_batch_size = stream->nextBatchSize();
         auto token_size      = stream->currentExecuteTokenSize();
 
-        dispatchSingleStream(
-            stream, merge_outputs, batch_idx_in, batch_idx_out, token_offset, return_all_probs, new_tokens_all);
+        // 将单个 stream 的 dispatch 逻辑封装为任务，支持线程池并行执行
+        auto task = [this,
+                     stream,
+                     &merge_outputs,
+                     batch_idx_in,
+                     batch_idx_out,
+                     token_offset,
+                     return_all_probs,
+                     &new_tokens_all]() {
+            dispatchSingleStream(
+                stream, merge_outputs, batch_idx_in, batch_idx_out, token_offset, return_all_probs, new_tokens_all);
+        };
+
+        if (thread_pool_ != nullptr) {
+            futures.emplace_back(thread_pool_->async(task));
+        } else {
+            task();
+        }
 
         batch_idx_in += cur_batch_size;
         batch_idx_out += next_batch_size;
         token_offset += token_size;
+    }
+
+    if (thread_pool_ != nullptr) {
+        for (auto& future : futures) {
+            future.wait();
+        }
     }
 
     RTP_LLM_LOG_DEBUG("dispatch done");

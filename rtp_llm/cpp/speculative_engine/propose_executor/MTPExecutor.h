@@ -37,10 +37,10 @@ public:
         for (auto& mtp_params : *propose_model_engine_init_params->mtp_model_params_) {
             RTP_LLM_LOG_INFO("index %d, mtp model_id %d", index, mtp_params->model_id);
             auto executor = std::make_shared<NormalExecutor>(
-                *mtp_params, cache_manager, device_, lora_manager, warm_up, true, index);
+                *mtp_params, cache_manager, device_, nullptr, lora_manager, warm_up, true, index);
 
             auto norm_executor = std::make_shared<NormalExecutor>(
-                *mtp_params, cache_manager, device_, lora_manager, warm_up, true, index);
+                *mtp_params, cache_manager, device_, nullptr, lora_manager, warm_up, true, index);
 
             const CacheConfig& cache_config =
                 cache_manager ? cache_manager->getMTPModuleCacheConfig(index) : CacheConfig();

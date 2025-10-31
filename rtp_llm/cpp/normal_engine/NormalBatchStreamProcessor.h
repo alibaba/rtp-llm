@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include "autil/LockFreeThreadPool.h"
 #include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -13,11 +14,13 @@ namespace rtp_llm {
 
 class NormalBatchStreamProcessor {
 public:
-    NormalBatchStreamProcessor(const ModelConfig&                 model_config,
-                               const PDSepConfig&                 pd_sep_config,
-                               const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
-                               const CacheConfig&                 cache_config,
-                               bool                               warm_up):
+    NormalBatchStreamProcessor(const ModelConfig&                         model_config,
+                               const PDSepConfig&                         pd_sep_config,
+                               const ProfilingDebugLoggingConfig&         profiling_debug_logging_config,
+                               const CacheConfig&                         cache_config,
+                               std::shared_ptr<autil::LockFreeThreadPool> thread_pool,
+                               bool                                       warm_up):
+        thread_pool_(std::move(thread_pool)),
         num_layers_(model_config.num_layers),
         vocab_size_(model_config.vocab_size),
         input_vocab_size_(model_config.input_vocab_size),
@@ -71,6 +74,8 @@ protected:
     }
 
 protected:
+    std::shared_ptr<autil::LockFreeThreadPool> thread_pool_;
+
     size_t                       num_layers_;
     size_t                       vocab_size_;
     size_t                       input_vocab_size_;

@@ -20,6 +20,7 @@ public:
         normal_executor_(*propose_model_engine_init_params->vanilla_model_params,
                          cache_manager,
                          device_,
+                         nullptr,
                          lora_manager,
                          warm_up,
                          true) {
