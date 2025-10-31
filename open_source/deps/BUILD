@@ -56,6 +56,17 @@ compile_pip_requirements(
 )
 
 compile_pip_requirements(
+    name = "requirements_torch_gpu_cuda12_9",
+    src = "requirements_torch_gpu_cuda12_9.txt",
+    extra_args = PIP_EXTRA_ARGS,
+    extra_data = ["//open_source/deps:requirements_base.txt"],
+    requirements_txt = "requirements_lock_torch_gpu_cuda12_9.txt",
+    # gen hash too slow......
+    generate_hashes = False,
+    tags = ["manual"],
+)
+
+compile_pip_requirements(
     name = "requirements_rocm",
     src = "requirements_rocm.txt",
     extra_args = PIP_EXTRA_ARGS,

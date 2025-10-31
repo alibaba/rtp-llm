@@ -65,9 +65,11 @@ build:sm8x --action_env TF_CUDA_COMPUTE_CAPABILITIES="8.0,8.6,8.9"
 build:sm8x --action_env  TF_CUDA_COMPUTE_CAPABILITIES="8.0,8.6,8.9"
 build:sm9x --action_env TF_CUDA_COMPUTE_CAPABILITIES="9.0"
 build:sm9x --action_env  TF_CUDA_COMPUTE_CAPABILITIES="9.0"
+
 build:cuda12 --action_env TF_CUDA_VERSION="12.4"
 build:cuda12 --host_action_env TF_CUDA_VERSION="12.4"
 build:cuda12 --define=using_cuda12=true
+build:cuda12 --define=using_cuda12_9=false
 build:cuda12 --copt="-DUSING_CUDA12=1"
 build:cuda12 --copt="-DUSE_OLD_TRT_FMHA=1"
 build:cuda12 --copt="-DFMHA_SUPPORT_SPLIT=1"
@@ -83,6 +85,16 @@ build:cuda12_6 --config=cuda12
 build:cuda12_6 --action_env TF_CUDA_VERSION="12.6"
 build:cuda12_6 --host_action_env TF_CUDA_VERSION="12.6"
 build:cuda12_6 --copt="-D_GLIBCXX_USE_CXX11_ABI=1"
+
+build:cuda12_9 --config=cuda12
+build:cuda12_9 --define=using_cuda12_9=true
+build:cuda12_9 --copt="-DUSING_CUDA12_9=1"
+build:cuda12_9 --action_env TF_CUDA_VERSION="12.9"
+build:cuda12_9 --host_action_env TF_CUDA_VERSION="12.9"
+build:cuda12_9 --copt="-D_GLIBCXX_USE_CXX11_ABI=1"
+
+build:sm10x --config=cuda12_9
+build:sm10x --action_env  TF_CUDA_COMPUTE_CAPABILITIES="10.0"
 
 build:cpu --copt="-DENABLE_BF16=1"
 build:cpu --define=using_cuda=false --define=using_cuda_nvcc=false --define=using_cpu=true

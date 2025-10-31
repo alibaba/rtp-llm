@@ -12,6 +12,10 @@
 #define TORCH_CUDA_ALLOCATOR_INDEX_DTYPE int
 #endif
 
+#if defined(TORCH_VERSION_MAJOR) && ((TORCH_VERSION_MAJOR == 2) & (TORCH_VERSION_MINOR >= 8))
+#define UNDER_TORCH_2_8
+#endif
+
 namespace rtp_llm {
 
 class TorchCudaAllocator: public c10::cuda::CUDACachingAllocator::CUDAAllocator {
@@ -63,10 +67,18 @@ public:
 
     void setMemoryFraction(double fraction, TORCH_CUDA_ALLOCATOR_INDEX_DTYPE device) override;
 
+#ifdef UNDER_TORCH_2_8
+    void recordHistory(bool                                            enabled,
+                       at::cuda::CUDACachingAllocator::CreateContextFn context_recorder,
+                       size_t                                          alloc_trace_max_entries,
+                       at::cuda::CUDACachingAllocator::RecordContext   when,
+                       bool                                            clearHistory) override;
+#else
     void recordHistory(bool                                            enabled,
                        at::cuda::CUDACachingAllocator::CreateContextFn context_recorder,
                        size_t                                          alloc_trace_max_entries,
                        at::cuda::CUDACachingAllocator::RecordContext   when) override;
+#endif
 
     bool isHistoryEnabled() override;
 
@@ -76,13 +88,21 @@ public:
 
     void attachOutOfMemoryObserver(at::cuda::CUDACachingAllocator::OutOfMemoryObserver observer) override;
 
+#ifdef UNDER_TORCH_2_8
+    void emptyCache(at::cuda::MempoolId_t mempool_id = {0, 0}) override;
+#else
     void emptyCache() override;
+#endif
 
     void* getBaseAllocation(void* ptr, size_t* outSize) override;
 
     void recordStream(const at::DataPtr& ptr, at::cuda::CUDAStream stream) override;
 
+#ifdef UNDER_TORCH_2_8
+    at::cuda::CUDACachingAllocator::SnapshotInfo snapshot(at::cuda::MempoolId_t mempool_id = {0, 0}) override;
+#else
     at::cuda::CUDACachingAllocator::SnapshotInfo snapshot() override;
+#endif
 
     std::shared_ptr<at::cuda::CUDACachingAllocator::AllocatorState>
     getCheckpointState(TORCH_CUDA_ALLOCATOR_INDEX_DTYPE device, at::cuda::MempoolId_t id) override;
