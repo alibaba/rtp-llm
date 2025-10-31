@@ -7,33 +7,28 @@
 
 #include "rtp_llm/cpp/cache_new/KVCacheGroupSpec.h"
 #include "rtp_llm/cpp/cache_new/BlockPool.h"
-#include "rtp_llm/cpp/cache_new/BlockCache.h"
+#include "rtp_llm/cpp/cache_new/BlockCacheV1.h"
 #include "rtp_llm/cpp/core/Buffer.h"
 
 namespace rtp_llm {
 
 class KVCacheGroup {
 public:
-    // add reused blocks' reference count
-    std::vector<int> alloc(vector<int64_t> cache_keys, int reuse_len = 0)
-    MatchResult match(vector<int64_t> cache_keys) const;
-    void free(vector<int> block_indices);
-    void insertIntoCache(vector<int64_t> cache_keys, vector<int> block_indices);
-    
-    std::map<int, BufferPtr> blockBuffer(int block_id, int64_t cache_key);
-    
-    KVCacheType type() const;
-private:
-    // evict first if block_pool's blocks are not enough when alloc 
-    bool evict(int need_evict_len);
+    void                              malloc(CacheKeysType& cache_keys, int reuse_len = 0)                        = 0;
+    MatchResult                       match(CacheKeysType& cache_keys)                                            = 0;
+    void                              free(BlockIndicesType& block_indices)                                       = 0;
+    void                              insertIntoCache(CacheKeysType& cache_keys, BlockIndicesType& block_indices) = 0;
+    std::map<BlockIdxType, BufferPtr> blockBuffer(BlockIdxType block_id, CacheKeyType cache_key)                  = 0;
+    KVCacheType                       type() const                                                                = 0;
+    void                              removeSkippedBlocks(BlockIndicesType& block_indices)                        = 0;
 
-    vector<int> layer_ids_;
-    KVCacheSpec group_spec_;
-    BlockCachePtr block_cache_;
-    BlockPoolPtr block_pool_;
+private:
+    std::vector<int> layer_ids_;
+    KVCacheSpec      group_spec_;
+    BlockCacheV1Ptr  block_cache_;
+    BlockPoolPtr     block_pool_;
 };
 
 using KVCacheGroupPtr = std::shared_ptr<KVCacheGroup>;
 
 }  // namespace rtp_llm
-

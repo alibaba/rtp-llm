@@ -21,7 +21,7 @@ BlockCacheV1::MatchResult BlockCacheV1::match(CacheKeyType cache_key) {
     }
 }
 
-bool BlockCacheV1::isExistKey(CacheKeyType cache_key) {
+bool BlockCacheV1::contains(CacheKeyType cache_key) {
     return lru_cache_.contains(cache_key);
 }
 

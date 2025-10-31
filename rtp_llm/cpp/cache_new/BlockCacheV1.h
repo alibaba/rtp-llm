@@ -37,11 +37,9 @@ public:
     explicit BlockCacheV1(size_t seq_size_per_block):
         seq_size_per_block_(seq_size_per_block), lru_cache_(kCacheMaxCapacity) {}
 
-    // MatchResult match(const std::vector<CacheKeyType>& cache_keys);
-
     MatchResult match(CacheKeyType cache_key);
 
-    bool isExistKey(CacheKeyType cache_key);
+    bool contains(CacheKeyType cache_key);
 
     bool put(CacheItem& cache_item);
 
