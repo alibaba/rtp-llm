@@ -13,16 +13,10 @@ public:
     using CallBack = std::function<void(bool)>;
 
 public:
-    virtual bool init();
-
-    virtual void asyncRead(const BatchKVCacheResourcePtr& resource, const CallBack& callback)                      = 0;
-    // virtual void asyncReadByLayer(const BatchKVCacheResourcePtr& resource, int layer_id, const CallBack& callback) = 0;
-
-    virtual void asyncWrite(const BatchKVCacheResourcePtr& resource, const CallBack& callback)                      = 0;
-    // virtual void asyncWriteByLayer(const BatchKVCacheResourcePtr& resource, int layer_id, const CallBack& callback) = 0;
-
-    // virtual bool match(int64_t key) = 0;
-    // virtual int32_t prefixMatch(const std::vector<int64_t> &keys) = 0;
+    virtual bool   init()                                                                        = 0;
+    virtual void   asyncRead(const BatchKVCacheResourcePtr& resource, const CallBack& callback)  = 0;
+    virtual void   asyncWrite(const BatchKVCacheResourcePtr& resource, const CallBack& callback) = 0;
+    virtual size_t match(const std::vector<int64_t>& keys) const;
 };
 
 }  // namespace rtp_llm
