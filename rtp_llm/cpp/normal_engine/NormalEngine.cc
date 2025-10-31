@@ -98,13 +98,26 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     initCacheManager(warm_up_result);
     RTP_LLM_LOG_INFO("create cache manager done");
 
+    if (params.concurrency_config.engine_async_worker_count > 0) {
+        thread_pool_ = std::make_shared<autil::LockFreeThreadPool>(params.concurrency_config.engine_async_worker_count,
+                                                                   2 * params.concurrency_config.concurrency_limit,
+                                                                   nullptr,
+                                                                   "EngineThreadPool");
+        if (!thread_pool_->start()) {
+            RTP_LLM_LOG_WARNING("failed to start thread pool of engine async worker, fallback to serial processing");
+            thread_pool_ = nullptr;
+        }
+        RTP_LLM_LOG_INFO("create thread pool of engine async worker done");
+    } else {
+        RTP_LLM_LOG_INFO("number of engine async worker <= 0, skip creation for thread pool of engine async worker");
+    }
+
     initExecutor(params, propose_params_);
     if (propose_params_) {
         reserve_step_ = propose_params_->gen_num_per_circle + 1;
     } else {
         reserve_step_ = 0;
     }
-
     RTP_LLM_LOG_INFO("create normal executor done");
 
     // 释放模型加载过程中使用的临时host内存
@@ -121,7 +134,7 @@ void NormalEngine::initExecutor(const EngineInitParams&                        p
         executor_.reset(new MtpExecutor(params, propose_params, resource_context_.cache_manager, exec_init_params_));
     } else {
         executor_.reset(
-            new NormalExecutor(params, resource_context_.cache_manager, false, false, 0, exec_init_params_));
+            new NormalExecutor(params, resource_context_.cache_manager, thread_pool_, false, false, 0, exec_init_params_));
     }
 }
 
@@ -222,7 +235,7 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
     fake_input->generate_config->num_return_sequences = runtime_config.fifo_scheduler_config.max_context_batch_size;
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
     rtp_llm::setTraceMemory(true);
-    executor_.reset(new NormalExecutor(params, nullptr, true, false, 0, exec_init_params_));
+    executor_.reset(new NormalExecutor(params, nullptr, thread_pool_, true, false, 0, exec_init_params_));
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::prefill_warm_up));
     const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
     rtp_llm::setTraceMemory(false);
@@ -254,7 +267,7 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     if (!cache_manager->init()) {
         RTP_LLM_FAIL("init kv cache manager failed in decodeWarmUp");
     }
-    executor_.reset(new NormalExecutor(params, cache_manager, true, false, 0, exec_init_params_));
+    executor_.reset(new NormalExecutor(params, cache_manager, thread_pool_, true, false, 0, exec_init_params_));
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
     const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
     rtp_llm::setTraceMemory(false);
@@ -372,6 +385,11 @@ absl::Status NormalEngine::stop() {
     running_ = false;
     RETURN_IF_STATUS_ERROR(scheduler_->stop());
     loop_thread_->join();
+    if (thread_pool_) {
+        thread_pool_->stop();
+        thread_pool_->waitFinish();
+        thread_pool_.reset();
+    }
     return absl::OkStatus();
 }
 

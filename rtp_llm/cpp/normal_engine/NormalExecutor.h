@@ -3,6 +3,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include "autil/LockFreeThreadPool.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/engine_base/Executor.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
@@ -22,6 +23,7 @@ class NormalExecutor: public Executor {
 public:
     explicit NormalExecutor(const EngineInitParams&                params,
                             const std::shared_ptr<KVCacheManager>& cache_manager,
+                            std::shared_ptr<autil::LockFreeThreadPool> thread_pool,
                             bool                                   warm_up             = false,
                             bool                                   is_propose          = false,
                             int                                    propose_model_index = 0,
@@ -52,6 +54,7 @@ private:
     std::unique_ptr<NormalBatchStreamProcessor>                              batch_stream_processor_;
     std::shared_ptr<KVCacheManager>                                          cache_manager_;
     std::shared_ptr<ExpertBalancer>                                          expert_balancer_;
+    std::shared_ptr<autil::LockFreeThreadPool>                               thread_pool_;
     bool                                                                     warm_up_;
     bool                                                                     use_all_gather_;
     kmonitor::MetricsReporterPtr                                             metrics_reporter_ = nullptr;

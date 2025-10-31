@@ -28,24 +28,45 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
     bool                return_all_probs = stream_groups.needReturnAllProbs();
     auto                new_tokens_all   = torch::empty({(int64_t)total_batch_size_out, 1}, torch::kInt32);
 
+    std::vector<autil::ThreadPoolBase::Future<void>> futures;
+    if (thread_pool_ != nullptr) {
+        futures.reserve(stream_groups.size());
+    }
+
     for (auto& stream : stream_groups.allStreams()) {
         auto cur_batch_size  = stream->currentBatchSize();
         auto next_batch_size = stream->nextBatchSize();
         auto token_size      = stream->currentExecuteTokenSize();
 
-        dispatchSingleStream(stream,
-                             merge_outputs,
-                             batch_idx_in,
-                             batch_idx_out,
-                             token_offset,
-                             return_all_probs,
-                             new_tokens_all,
-                             token_ids_cpu,
-                             success_cpu);
+        auto task = [this,
+                     stream,
+                     &merge_outputs,
+                     batch_idx_in,
+                     batch_idx_out,
+                     token_offset,
+                     return_all_probs,
+                     &new_tokens_all,
+                     &token_ids_cpu,
+                     &success_cpu]() {
+            dispatchSingleStream(
+                stream, merge_outputs, batch_idx_in, batch_idx_out, token_offset, return_all_probs, new_tokens_all, token_ids_cpu, success_cpu);
+        };
+
+        if (thread_pool_ != nullptr) {
+            futures.emplace_back(thread_pool_->async(task));
+        } else {
+            task();
+        }
 
         batch_idx_in += cur_batch_size;
         batch_idx_out += next_batch_size;
         token_offset += token_size;
+    }
+
+    if (thread_pool_ != nullptr) {
+        for (auto& future : futures) {
+            future.wait();
+        }
     }
 
     RTP_LLM_LOG_DEBUG("dispatch done");
