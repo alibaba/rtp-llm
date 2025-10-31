@@ -41,14 +41,14 @@ public:
     std::vector<BufferPtr> layerCacheBase() const;
 
     std::vector<int> alloc(int num_blocks);
-    void             free(vector<int> block_ids);
-    void             reference(vector<int> block_ids);
+    void             free(BlockIndicesType& block_indices);
+    void             reference(BlockIndicesType& block_indices);
 
     void          regUserMr(size_t model_id);
     BlockAddrInfo convertIndexToAddr(int block_index, int layer_id) const;
 
-    void incrBlockRefCounter(const std::vector<int>& blocks);
-    void decrBlockRefCounter(const std::vector<int>& blocks);
+    void incrBlockRefCounter(const BlockIndicesType& blocks);
+    void decrBlockRefCounter(const BlockIndicesType& blocks);
 
 private:
     void initKvCacheNormal();

@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <set>
 
+#include "rtp_llm/cpp/cache_new/types.h"
 #include "rtp_llm/cpp/cache_new/KVCacheSpec.h"
 #include "rtp_llm/cpp/cache_new/BlockPool.h"
 #include "rtp_llm/cpp/cache_new/BlockCacheV1.h"
@@ -12,16 +13,27 @@
 
 namespace rtp_llm {
 
+// first call:
+// match, alloc, insert to cache
+
+// other call:
+// insert to cache, removeSkippedBlocks, alloc
+
+// query finish:
+// free
+
 class KVCacheGroup {
 public:
-    void        alloc(CacheKeysType& cache_keys, BlockIndicesType& block_indices, int token_len) = 0;
-    MatchResult match(CacheKeysType& cache_keys)                                                 = 0;
-    void        free(BlockIndicesType& block_indices)                                            = 0;
+    virtual MatchResult match(CacheKeysType& cache_keys)                                                 = 0;
+    virtual void        alloc(CacheKeysType& cache_keys, BlockIndicesType& block_indices, int token_len) = 0;
+    virtual void        insertIntoCache(CacheKeysType& cache_keys, BlockIndicesType& block_indices)      = 0;
+
+    virtual void removeSkippedBlocks(BlockIndicesType& block_indices) = 0;
+    virtual void free(BlockIndicesType& block_indices)                = 0;
+
     // add loss, is_resident for insertIntoCache
-    void                              insertIntoCache(CacheKeysType& cache_keys, BlockIndicesType& block_indices) = 0;
-    std::map<BlockIdxType, BufferPtr> blockBuffer(BlockIdxType block_id, CacheKeyType cache_key)                  = 0;
-    KVCacheType                       type() const                                                                = 0;
-    void                              removeSkippedBlocks(BlockIndicesType& block_indices)                        = 0;
+    virtual KVCacheType                       type() const                                               = 0;
+    virtual std::map<BlockIdxType, BufferPtr> blockBuffer(BlockIdxType block_id, CacheKeyType cache_key) = 0;
 
 private:
     std::vector<int> layer_ids_;

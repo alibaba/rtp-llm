@@ -16,7 +16,7 @@ enum struct KVCacheType {
 
 struct KVCacheSpec {
     std::vector<int> layer_ids_;
-    KVCacheGroupType type_;
+    KVCacheType      type_;
     uint             block_stride = 1;  // record block Every 'block_stride' blocks
 };
 

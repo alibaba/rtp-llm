@@ -65,7 +65,7 @@ void LinearKVCacheGroup::alloc(CacheKeysType& cache_keys, BlockIndicesType& bloc
 
     // set blocks to position, not append
     for (int i = 0; i < result.size(); i++) {
-        block_indices.append(result[i]);
+        block_indices.append(result[i])
     }
 
     // insert new allocate blocks to block cache?
@@ -84,7 +84,7 @@ void LinearKVCacheGroup::insertIntoCache(CacheKeysType& cache_keys, BlockIndices
                                 + std::to_string(block_indices.size()));
 
     for (int i = 0; i < cache_keys.size(); i++) {
-        CacheItem item{cache_keys[i], block_indices[i], {}, false};
+        BlockCacheV1::CacheItem item{cache_keys[i], block_indices[i], {}, false};
         if (block_cache_->put(item)) {
             block_pool_->incrBlockRefCounter({block_indices[i]});
         }
