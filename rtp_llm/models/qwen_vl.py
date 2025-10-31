@@ -13,21 +13,20 @@ from rtp_llm.models.multimodal.multimodal_mixin import MultiModalMixin
 from rtp_llm.models.qwen import QWen
 from rtp_llm.models.qwen_vl_vit import VisionTransformer as QWen_VL_ViT
 from rtp_llm.models.qwen_vl_weight import QwenVLVitWeight, QWenVLWeightInfo
+from rtp_llm.utils.base_model_datatypes import MMUrlType
 
 
 class QwenVLImageEmbedding(ImageEmbeddingInterface):
     def __init__(self, config: GptInitModelParameters):
         self.vit = QWen_VL_ViT(**config.mm_related_params.config)
-        self.config = config
 
     @property
     def _device(self):
         return self.vit.device
 
-    @torch.no_grad()
-    def image_embedding(self, images: List[Any]) -> torch.Tensor:
-        images = self.vit.encode(images, self._device, self._data_type)
-        return images
+    @torch.inference_mode()
+    def embedding(self, data, mm_type: MMUrlType, **kwargs):
+        return self.vit.encode(data, self._device, self._data_type), None
 
 
 class QWen_VL(QWen, MultiModalMixin):
