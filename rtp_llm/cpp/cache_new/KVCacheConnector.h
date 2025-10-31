@@ -34,8 +34,8 @@ public:
     virtual void asyncGet(const Buffers& buffers, const Meta& meta, const CallBack& callback)       = 0;
     virtual void asyncPrefixGet(const Buffers& buffers, const Meta& meta, const CallBack& callback) = 0;
 
-    virtual bool    match(int64_t key)                            = 0;
-    virtual int32_t prefixMatch(const std::vector<int64_t>& keys) = 0;
+    virtual std::vector<bool> match(const std::vector<int64_t>& keys)       = 0;
+    virtual int32_t           prefixMatch(const std::vector<int64_t>& keys) = 0;
 };
 
 }  // namespace rtp_llm

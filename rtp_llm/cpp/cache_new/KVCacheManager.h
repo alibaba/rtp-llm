@@ -40,23 +40,29 @@ public:
         return allocator_->kvCacheGroups();
     }
 
+    // TODO(LXQ): implement
+    void clearBlockCache();
+    void clearMemoryBlockCache();
+
     // groupInfo groupInfo()
     // TODO: InsertInfo 考虑  hicache distkvcache 的逻辑
 
 private:
     InsertResult insertIntoMemoryCache(const InsertInfo& insert_info);
+    void         readFromMemoryCache(const ReadInfo& read_info) const;
+    void         writeToMemoryCache(const InsertInfo& insert_info) const;
 
 private:
-    CacheConfig config_;
+    CacheConfig          config_;
     rtp_llm::DeviceBase* device_;
-    KVCacheAllocatorPtr allocator_; 
+    KVCacheAllocatorPtr  allocator_;
 
     const kmonitor::MetricsReporterPtr metrics_reporter_;
-    const GptInitParameter& params_;
+    const GptInitParameter&            params_;
 };
 
-    HashUtil hash_util_;
+HashUtil hash_util_;
 
-    std::shared_ptr<KVCacheReaderWriter> mem_reader_writer_;
-    std::shared_ptr<KVCacheReaderWriter> remote_reader_writer_;
-};
+std::shared_ptr<KVCacheReaderWriter> mem_reader_writer_;
+std::shared_ptr<KVCacheReaderWriter> remote_reader_writer_;
+};  // namespace rtp_llm

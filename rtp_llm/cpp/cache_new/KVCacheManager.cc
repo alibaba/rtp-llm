@@ -8,12 +8,12 @@
 
 namespace rtp_llm {
 
-KVCacheManager::KVCacheManager(const CacheConfig&      config,
-                               rtp_llm::DeviceBase*    device,
-                               bool                    warmup,
+KVCacheManager::KVCacheManager(const CacheConfig&                 config,
+                               rtp_llm::DeviceBase*               device,
+                               bool                               warmup,
                                const kmonitor::MetricsReporterPtr metrics_reporter,
-                               const GptInitParameter& params)
-    : config_(config), device_(device), metrics_reporter_(metrics_reporter), params_(params) {}
+                               const GptInitParameter&            params):
+    config_(config), device_(device), metrics_reporter_(metrics_reporter), params_(params) {}
 
 KVCacheManager::~KVCacheManager() {}
 
@@ -48,15 +48,15 @@ bool KVCacheManager::init() {
     }
     return false;
 }
- 
-
 
 size_t KVCacheManager::availableTokenNums() const {
     // TODO(chanyin): implement this
     return 0;
 }
 
-const CacheConfig& KVCacheManager::cacheConfig() const { return config_; }
+const CacheConfig& KVCacheManager::cacheConfig() const {
+    return config_;
+}
 
 CacheLayerLayout KVCacheManager::layerCacheBase() const {
     return allocator_->layerCacheBase();
@@ -75,7 +75,7 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
 
     int seq_size_per_block = config_.seq_size_per_block;
 
-    const int seq_len = malloc_info.complete_token_ids->seqLength();
+    const int seq_len        = malloc_info.complete_token_ids->seqLength();
     const int desired_blocks = seq_len / (int)seq_size_per_block;
 
     for (int i = 0; i < batch_size; ++i) {
@@ -85,14 +85,13 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
         }
 
         int64_t rolling_hash = keys.empty() ? 0 : keys.back();
-        int start_index = (int)keys.size();
+        int     start_index  = (int)keys.size();
         if (start_index < desired_blocks) {
             auto* token_ids = malloc_info.complete_token_ids->data(i);
             for (int index = start_index; index < desired_blocks; ++index) {
                 int pos = index * seq_size_per_block;
-                rolling_hash = rtp_llm::hashInt64Array(rolling_hash,
-                                              token_ids + pos,
-                                              token_ids + pos + (int)seq_size_per_block);
+                rolling_hash =
+                    rtp_llm::hashInt64Array(rolling_hash, token_ids + pos, token_ids + pos + (int)seq_size_per_block);
                 keys.push_back(rolling_hash);
             }
         }
@@ -109,13 +108,35 @@ InsertResult KVCacheManager::insertIntoCache(const InsertInfo& insert_info) {
     return allocator_->insertIntoCache(insert_info);
 }
 
-// 被调用的时机需要考虑: 是全量还是增量, 增量的话是单个block还是一组block
-void KVCacheManager::insertIntoMemoryCache(const InsertInfo& insert_info) {
+void KVCacheManager::readFromMemoryCache(const ReadInfo& read_info) const {
+    const auto& resource   = read_info.batch_kv_cache_resource;
+    const auto& cache_keys = resource->cache_keys[0];
+    const auto& match_len  = mem_reader_writer_->match(cache_keys);
+    if (resource->reuse_cache_key_num >= match_len) {
+        return;
+    }
+
     auto callback = [](bool success) {
         if (!success) {
-            RTP_LLM_LOG_ERROR("insert into memory cache failed");
+            RTP_LLM_LOG_ERROR("read from memory cache failed");
+        }
+    };
+    mem_reader_writer_->asyncRead(resource, callback);
+}
+
+// TODO(LXQ): 被调用的时机需要考虑: 是全量还是增量, 增量的话是单个block还是一组block
+void KVCacheManager::writeToMemoryCache(const InsertInfo& insert_info) const {
+    const auto& resource   = insert_info.batch_kv_cache_resource;
+    const auto& cache_keys = resource->cache_keys[0];
+    const auto& match_len  = mem_reader_writer_->match(cache_keys);
+    if (match_len >= cache_keys.size()) {
+        return;
+    }
+
+    auto callback = [](bool success) {
+        if (!success) {
+            RTP_LLM_LOG_ERROR("write to memory cache failed");
         }
     };
     mem_reader_writer_->asyncWrite(insert_info.batch_kv_cache_resource, callback);
 }
-

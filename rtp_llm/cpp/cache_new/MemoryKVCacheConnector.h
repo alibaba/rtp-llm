@@ -27,8 +27,8 @@ public:
     void asyncGet(const Buffers& buffers, const Meta& meta, const CallBack& callback) override;
     void asyncPrefixGet(const Buffers& buffers, const Meta& meta, const CallBack& callback) override;
 
-    bool    match(int64_t key) override;
-    int32_t prefixMatch(const std::vector<int64_t>& keys) override;
+    std::vector<bool> match(const std::vector<int64_t>& keys) override;
+    int32_t           prefixMatch(const std::vector<int64_t>& keys) override;
 
 private:
     bool copyBufferData(const BufferPtr& dst, const BufferPtr& src);

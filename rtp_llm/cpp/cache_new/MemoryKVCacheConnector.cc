@@ -17,12 +17,11 @@ MemoryKVCacheConnector::~MemoryKVCacheConnector() {
 }
 
 bool MemoryKVCacheConnector::init() {
+    // TODO(LXQ): implement
     return true;
 }
 
-void MemoryKVCacheConnector::asyncPrefixPut(const Buffers& buffers, const Meta& meta, const CallBack& callback) {
-    //
-}
+void MemoryKVCacheConnector::asyncPrefixPut(const Buffers& buffers, const Meta& meta, const CallBack& callback) {}
 
 void MemoryKVCacheConnector::asyncPut(const Buffers& buffers, const Meta& /*meta*/, const CallBack& callback) {
     //
@@ -36,8 +35,8 @@ void MemoryKVCacheConnector::asyncGet(const Buffers& buffers, const Meta& /*meta
     //
 }
 
-bool MemoryKVCacheConnector::match(int64_t key) {
-    //
+std::vector<bool> MemoryKVCacheConnector::match(const std::vector<int64_t>& keys) {
+    return block_cache_->match(cache_keys);
 }
 
 int32_t MemoryKVCacheConnector::prefixMatch(const std::vector<int64_t>& keys) {

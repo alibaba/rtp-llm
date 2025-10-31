@@ -18,22 +18,17 @@ public:
     ~MemoryKVCacheReaderWriter() override = default;
 
 public:
-    bool init() override;
-
-    void asyncRead(const BatchKVCacheResourcePtr& resource, const CallBack& callback) override;
-    // void asyncReadByLayer(const BatchKVCacheResourcePtr& resource, int layer_id, const CallBack& callback) override;
-
-    void asyncWrite(const BatchKVCacheResourcePtr& resource, const CallBack& callback) override;
-    // void asyncWriteByLayer(const BatchKVCacheResourcePtr& resource, int layer_id, const CallBack& callback) override;
+    bool   init() override;
+    void   asyncRead(const BatchKVCacheResourcePtr& resource, const CallBack& callback) override;
+    void   asyncWrite(const BatchKVCacheResourcePtr& resource, const CallBack& callback) override;
+    size_t match(const std::vector<int64_t>& keys) const override;
 
 private:
-    bool match(int64_t key) const;
+    void                      readBuffers(const KVCacheConnector::Buffers& buffers, const CallBack& callback) const;
+    void                      writeBuffers(const KVCacheConnector::Buffers& buffers, const CallBack& callback) const;
     KVCacheConnector::Buffers cacheKeyWiseLayout(int64_t cache_key, const BatchKVCacheResourcePtr& resource) const;
-    void writeBuffers(const KVCacheConnector::Buffers& buffers, const CallBack& callback) const;
-    // void asyncWriteLayer(int64_t cache_key, int32_t layer_idx, const std::shared_ptr<BlockIds>& block_indices_ptr, const CallBack& callback);
-    // void asyncReadLayer(int64_t cache_key, int32_t layer_idx, const std::shared_ptr<BlockIds>& block_indices_ptr, const CallBack& callback);
-    // Buffers layerWiseLayout(const BatchKVCacheResourcePtr& resource) const;
-    // Buffers blockWiseLayout(const BatchKVCacheResourcePtr& resource) const;
+    size_t                    prefixMatch(const std::vector<int64_t>& keys) const;
+    std::vector<bool>         hashMatch(const std::vector<int64_t>& keys) const;
 
 private:
     // group_id->connector, 一个connector对应一个group
@@ -41,18 +36,18 @@ private:
 
     // group_id->group_type, 不同的group使用不同的读写方式, 决定是put还是prefixPut
     enum class KVCacheGroupType {
-        FULL = 0,
-        LINEAR = 1,
+        Full   = 0,
+        Linear = 1
     };
     std::map<int, KVCacheGroupType> group_type_map_;
 
-    // layer_id->connector, 表示该层的cache使用哪个connector读写
-    std::map<int, std::shared_ptr<MemoryKVCacheConnector>> layer_to_connector_;
-
     // layer_id->group_id, 表示这个层属于哪个group
     std::map<int, int> layer_to_group_;
-    
-    std::shared_ptr<KVCacheAllocator>                      allocator_;
+
+    // layer_id->connector, 表示该层的cache使用哪个connector读写
+    // std::map<int, std::shared_ptr<MemoryKVCacheConnector>> layer_to_connector_;
+
+    std::shared_ptr<KVCacheAllocator> allocator_;
 };
 
 }  // namespace rtp_llm
