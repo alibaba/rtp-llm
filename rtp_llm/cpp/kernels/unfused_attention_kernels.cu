@@ -2426,8 +2426,7 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel_v1(T*                
                                                               bool          store_qkv,
                                                               bool          store_q,
                                                               bool          store_kv,
-                                                              bool          store_cache,
-                                                              const float2* cos_sin_cache) {
+                                                              bool          store_cache) {
     // This kernel add bias to QKV, which has shape [batch_size, seq_len, 3,
     // head_num, size_per_head], and QKV split to 3 split buffer q, k, v and
     // transpose them to [batch_size, head_num, seq_len, size_per_head]. For q and
@@ -2528,8 +2527,7 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel_v1(T*                
                                        input_len,
                                        PREFIX_PROMPT,
                                        prefix_prompt_length,
-                                       param.count_length,
-                                       cos_sin_cache);
+                                       param.count_length);
 
     if (use_logn_attn) {
         logn_attention(q, seq_idx, rope_config.max_pos);
@@ -2665,7 +2663,6 @@ void invokeAddFusedQKVBiasTransposePrefillV1(T*                             q_bu
                                              const bool                     store_q,
                                              const bool                     store_kv,
                                              const bool                     store_cache,
-                                             const float2*                  cos_sin_cache,
                                              cudaStream_t                   stream) {
     auto&  param = *param_ptr;
     dim3   block((size_per_head / Vec_t<T>::size + 31) / 32 * 32);
@@ -2697,8 +2694,7 @@ void invokeAddFusedQKVBiasTransposePrefillV1(T*                             q_bu
                                                              store_qkv,
                                                              store_q,
                                                              store_kv,
-                                                             store_cache,
-                                                             cos_sin_cache);
+                                                             store_cache);
                 });
             });
         });
@@ -2726,8 +2722,7 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel(T*                   
                                                            bool          store_qkv,
                                                            bool          store_q,
                                                            bool          store_kv,
-                                                           bool          store_cache,
-                                                           const float2* cos_sin_cache) {
+                                                           bool          store_cache) {
     // This kernel add bias to QKV, which has shape [batch_size, seq_len, 3,
     // head_num, size_per_head], and QKV split to 3 split buffer q, k, v and
     // transpose them to [batch_size, head_num, seq_len, size_per_head]. For q and
@@ -2828,8 +2823,7 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel(T*                   
                                        input_len,
                                        PREFIX_PROMPT,
                                        prefix_prompt_length,
-                                       param.count_length,
-                                       cos_sin_cache);
+                                       param.count_length);
 
     if (use_logn_attn) {
         logn_attention(q, seq_idx, rope_config.max_pos);
@@ -2968,7 +2962,6 @@ void invokeAddFusedQKVBiasTransposePrefill(T*                             q_buf,
                                            const bool                     store_q,
                                            const bool                     store_kv,
                                            const bool                     store_cache,
-                                           const float2*                  cos_sin_cache,
                                            cudaStream_t                   stream) {
     auto&  param = *param_ptr;
     dim3   block((size_per_head / Vec_t<T>::size + 31) / 32 * 32);
@@ -3000,8 +2993,7 @@ void invokeAddFusedQKVBiasTransposePrefill(T*                             q_buf,
                                                              store_qkv,
                                                              store_q,
                                                              store_kv,
-                                                             store_cache,
-                                                             cos_sin_cache);
+                                                             store_cache);
                 });
             });
         });
@@ -4037,7 +4029,6 @@ INSTANTIATEDECODEADDFUSEDQKVBIASTRANSPOSE(__nv_bfloat16);
                                                           const bool                     store_q,                      \
                                                           const bool                     store_kv,                     \
                                                           const bool                     store_cache,                  \
-                                                          const float2*                  cos_sin_cache,                \
                                                           cudaStream_t                   stream)
 INSTANTIATEADDFUSEDQKVBIASTRANSPOSEPREFILLV1(float);
 INSTANTIATEADDFUSEDQKVBIASTRANSPOSEPREFILLV1(half);
@@ -4072,7 +4063,6 @@ INSTANTIATEADDFUSEDQKVBIASTRANSPOSEPREFILLV1(__nv_bfloat16);
                                                         const bool                     store_q,                        \
                                                         const bool                     store_kv,                       \
                                                         const bool                     store_cache,                    \
-                                                        const float2*                  cos_sin_cache,                  \
                                                         cudaStream_t                   stream)
 INSTANTIATEADDFUSEDQKVBIASTRANSPOSEPREFILL(float);
 INSTANTIATEADDFUSEDQKVBIASTRANSPOSEPREFILL(half);

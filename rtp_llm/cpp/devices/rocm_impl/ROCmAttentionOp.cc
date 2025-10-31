@@ -685,16 +685,6 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                                     && !params.configs.fuse_qkv_add_bias);
     RTP_LLM_LOG_DEBUG("skip_add_bias_transpose: %d", skip_add_bias_transpose);
     if (!skip_add_bias_transpose) {
-
-        bool use_rope_cache =
-            params.configs.rope_config.style == RopeStyle::Base;
-        static torch::Tensor rope_cache;
-        std::call_once(rope_cache_flag, [&]() {
-            if (use_rope_cache) {
-                rope_cache = getRopeCache(params.configs.rope_config, init_params_.max_seq_len);
-            }
-        });
-
         if (init_params_.use_aiter_pa) {
             if (init_params_.use_asm_pa) {
                 DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
@@ -729,8 +719,6 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                                              store_q,
                                              store_kv,
                                              store_cache,
-                                             use_rope_cache && rope_cache.defined() ? static_cast<float2*>(rope_cache.data_ptr()) :
-                                                                                      nullptr,
                                              stream_);
             } else {
                 DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
@@ -765,8 +753,6 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                                              store_q,
                                              store_kv,
                                              store_cache,
-                                             use_rope_cache && rope_cache.defined() ? static_cast<float2*>(rope_cache.data_ptr()) :
-                                                                                      nullptr,
                                              stream_);
             }
             check_cuda_error();
