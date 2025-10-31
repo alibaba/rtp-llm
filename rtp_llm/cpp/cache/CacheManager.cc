@@ -161,10 +161,10 @@ size_t CacheManager::availableBlockNums() const {
 }
 
 KVCacheInfo CacheManager::getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const {
-    auto                 snapshot = block_cache_.cacheSnapshot(latest_version);
-    std::vector<int64_t> cachekeys;
+    auto                snapshot = block_cache_.cacheSnapshot(latest_version);
+    std::vector<size_t> cachekeys;
     if (need_cache_keys) {
-        std::unordered_set<int64_t> seen_keys;
+        std::unordered_set<size_t> seen_keys;
         for (const auto& cacheItem : snapshot.values) {
             for (auto& key_part : cacheItem.cache_key) {
                 if (seen_keys.insert(key_part).second) {
@@ -515,7 +515,7 @@ void CacheManager::matchInDistKvCache(const AdvancedMallocInfo& malloc_info, Blo
         return;
     }
 
-    std::vector<int64_t> matched_cache_keys(cache_keys.begin(), cache_keys.begin() + matched_blocks);
+    std::vector<size_t> matched_cache_keys(cache_keys.begin(), cache_keys.begin() + matched_blocks);
     if (!dist_kvcache_->getForAllRank(matched_cache_keys, block_id, local_matched_blocks, request_id, extra_metas)) {
         freeWithoutLock(block_id);
         return;
@@ -524,7 +524,7 @@ void CacheManager::matchInDistKvCache(const AdvancedMallocInfo& malloc_info, Blo
     match_result.block_indices.insert(match_result.block_indices.end(), block_id.begin(), block_id.end());
 }
 
-bool CacheManager::putToDistKvCache(const std::vector<int64_t>& cache_keys,
+bool CacheManager::putToDistKvCache(const std::vector<size_t>&  cache_keys,
                                     const std::vector<int32_t>& block_indices,
                                     size_t                      ignore_block_num,
                                     int64_t                     request_id,
@@ -545,7 +545,7 @@ bool CacheManager::putToDistKvCache(const std::vector<int64_t>& cache_keys,
     return false;
 }
 
-bool CacheManager::getCacheForRank(const std::vector<int64_t>&               cache_keys,
+bool CacheManager::getCacheForRank(const std::vector<size_t>&                cache_keys,
                                    const std::vector<int32_t>&               block_indices,
                                    size_t                                    ignore_block_num,
                                    int64_t                                   request_id,
@@ -556,7 +556,7 @@ bool CacheManager::getCacheForRank(const std::vector<int64_t>&               cac
     return false;
 }
 
-bool CacheManager::putCacheForRank(const std::vector<int64_t>&               cache_keys,
+bool CacheManager::putCacheForRank(const std::vector<size_t>&                cache_keys,
                                    const std::vector<int32_t>&               block_indices,
                                    size_t                                    ignore_block_num,
                                    int64_t                                   request_id,
@@ -619,8 +619,8 @@ void CacheManager::matchInMemoryBlockCache(const AdvancedMallocInfo& malloc_info
         return;
     }
 
-    std::vector<int64_t> need_get_cache_keys(malloc_info.cache_keys.begin() + match_result.block_indices.size(),
-                                             malloc_info.cache_keys.end());
+    std::vector<size_t> need_get_cache_keys(malloc_info.cache_keys.begin() + match_result.block_indices.size(),
+                                            malloc_info.cache_keys.end());
 
     auto [success, block_indices] =
         mallocIndex(KVCacheAllocator::SimpleMallocInfo(malloc_info.request_id, need_get_cache_keys.size(), true));
@@ -650,9 +650,9 @@ void CacheManager::putToMemoryBlockCache(const CacheItem& item, const FreeInfo& 
         return;
     }
 
-    auto                 real_len = std::min(item.block_indices.size(), item.cache_key.size());
-    std::vector<int64_t> cache_keys(item.cache_key.begin(), item.cache_key.begin() + real_len);
-    std::vector<int>     block_indices(item.block_indices.begin(), item.block_indices.begin() + real_len);
+    auto                real_len = std::min(item.block_indices.size(), item.cache_key.size());
+    std::vector<size_t> cache_keys(item.cache_key.begin(), item.cache_key.begin() + real_len);
+    std::vector<int>    block_indices(item.block_indices.begin(), item.block_indices.begin() + real_len);
 
     memory_block_cache_->put(cache_keys, block_indices, item.loss, item.is_resident, free_info.request_id);
 }

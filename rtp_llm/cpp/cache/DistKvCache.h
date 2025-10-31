@@ -42,36 +42,36 @@ public:
 
 public:
     // virtual for mock test
-    virtual int32_t matchForAllRank(const std::vector<int64_t>&        cache_keys,
+    virtual int32_t matchForAllRank(const std::vector<size_t>&         cache_keys,
                                     size_t                             ignore_block_num,
                                     int64_t                            request_id,
                                     std::map<std::string, std::string> extra_metas);
 
-    virtual int32_t match(const std::vector<int64_t>&               cache_keys,
+    virtual int32_t match(const std::vector<size_t>&                cache_keys,
                           size_t                                    ignore_block_num,
                           int64_t                                   request_id,
                           std::map<std::string, std::string>        extra_metas,
                           const std::shared_ptr<std::atomic<bool>>& stop) const;
 
-    virtual bool getForAllRank(const std::vector<int64_t>&        cache_keys,
+    virtual bool getForAllRank(const std::vector<size_t>&         cache_keys,
                                const std::vector<int32_t>&        block_indices,
                                size_t                             ignore_block_num,
                                int64_t                            request_id,
                                std::map<std::string, std::string> extra_metas) const;
 
-    virtual bool get(const std::vector<int64_t>&        cache_keys,
+    virtual bool get(const std::vector<size_t>&         cache_keys,
                      const std::vector<int32_t>&        block_indices,
                      size_t                             ignore_block_num,
                      int64_t                            request_id,
                      std::map<std::string, std::string> extra_metas) const;
 
-    virtual bool putForAllRank(const std::vector<int64_t>&        cache_keys,
+    virtual bool putForAllRank(const std::vector<size_t>&         cache_keys,
                                const std::vector<int32_t>&        block_indices,
                                size_t                             ignore_block_num,
                                int64_t                            request_id,
                                std::map<std::string, std::string> extra_metas) const;
 
-    virtual bool put(const std::vector<int64_t>&        cache_keys,
+    virtual bool put(const std::vector<size_t>&         cache_keys,
                      const std::vector<int32_t>&        block_indices,
                      size_t                             ignore_block_num,
                      int64_t                            request_id,
@@ -84,7 +84,7 @@ private:
         OP_GET = 0,
         OP_PUT = 1
     };
-    bool syncCallAllRank(const std::vector<int64_t>&              cache_keys,
+    bool syncCallAllRank(const std::vector<size_t>&               cache_keys,
                          const std::vector<int32_t>&              block_indices,
                          size_t                                   ignore_block_num,
                          int64_t                                  request_id,

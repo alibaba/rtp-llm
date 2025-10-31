@@ -15,20 +15,17 @@ const size_t kCacheMaxCapacity = 10000000;
 class BlockCacheV1 {
 public:
     struct CacheItem {
-        CacheKeyType       cache_key;
-        BlockIdxType       block_index;
-        std::vector<float> loss;
-        bool               is_resident = false;
+        CacheKeyType cache_key;
+        BlockIdxType block_index;
+        bool         is_resident = false;
     };
 
     struct BatchMatchResult {
         std::vector<BlockIdxType> matched_indices;
-        std::vector<float>        loss;
     };
 
     struct MatchResult {
-        BlockIdxType       matched_index;
-        std::vector<float> loss;
+        BlockIdxType matched_index;
     };
 
     using CacheSnapshot = typename LRUCache<CacheKeyType, CacheItem>::CacheSnapshot;
@@ -37,11 +34,9 @@ public:
     explicit BlockCacheV1(size_t seq_size_per_block):
         seq_size_per_block_(seq_size_per_block), lru_cache_(kCacheMaxCapacity) {}
 
-    // MatchResult match(const std::vector<CacheKeyType>& cache_keys);
-
     MatchResult match(CacheKeyType cache_key);
 
-    bool isExistKey(CacheKeyType cache_key);
+    bool contains(CacheKeyType cache_key);
 
     bool put(CacheItem& cache_item);
 

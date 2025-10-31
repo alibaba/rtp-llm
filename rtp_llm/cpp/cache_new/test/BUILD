@@ -27,3 +27,15 @@ cc_test(
     env = {},
     exec_properties = {'gpu':'A10'},
 )
+
+cc_test(
+    name = "linear_kv_cache_group_test",
+    srcs = [
+        "LinearKVCacheGroupTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps,
+    env = {},
+    exec_properties = {'gpu':'A10'},
+)
