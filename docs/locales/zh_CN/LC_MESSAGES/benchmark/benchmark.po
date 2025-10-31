@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-10-20 10:08+0800\n"
+"POT-Creation-Date: 2025-10-31 10:27+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -130,58 +130,132 @@ msgid ""
 msgstr ""
 
 #: ../../benchmark/benchmark.md:40
+msgid "First part is the experiment name identifier"
+msgstr ""
+
+#: ../../benchmark/benchmark.md:45
+msgid "Second part is the test configuration and retry settings."
+msgstr ""
+
+#: ../../benchmark/benchmark.md:53
+msgid "Third part describe the machine list, user name and port to ssh."
+msgstr ""
+
+#: ../../benchmark/benchmark.md:62
 msgid ""
-"First part is for cloning code to local in ssh machine, and checkout to "
-"the branch you need to test"
+"Fourth part is for cloning code to local in ssh machine, checkout to the "
+"branch you need to test, and compilation options."
 msgstr ""
 
-#: ../../benchmark/benchmark.md:48
-msgid "Second part describe the machine list, user name and port to ssh"
+#: ../../benchmark/benchmark.md:73
+msgid "Fifth part is the common configuration shared across all benchmarks."
 msgstr ""
 
-#: ../../benchmark/benchmark.md:60
+#: ../../benchmark/benchmark.md:87
 msgid ""
-"Third part describe the model info which should be pre-download to local "
-"machine"
+"The sixth part describes the benchmark configuration structure. Each "
+"benchmark consists of four main components:"
 msgstr ""
 
-#: ../../benchmark/benchmark.md:66
+#: ../../benchmark/benchmark.md:89
+msgid "**benchmark_name**: A unique identifier for the benchmark test case."
+msgstr ""
+
+#: ../../benchmark/benchmark.md:91
 msgid ""
-"Fourth part describe the test cases, including prefill/decode, batch_size"
-" and input_len(they will be used as Cartesian product).Specially, tp_size"
-" and dp_size len should be equal as each tuple of them will be started as"
-" a parallel config. For example, in below config, script will start three"
-" server with `TP=1 DP=32`, `TP=2 DP=16`, `TP=4 DP=8` and benchmark"
+"**fixed_config**: Contains static configuration that remain constant "
+"across all test iterations. This includes model paths, model type, and "
+"other fixed settings."
 msgstr ""
 
-#: ../../benchmark/benchmark.md:75
+#: ../../benchmark/benchmark.md:110
 msgid ""
-"bazel_build_args is the flag for bazelisk build, if you want to test in "
-"AMD card, change `--config=rocm`"
+"**iterative_search_config**: Defines configuration that will be tested in"
+" parallel combinations. All configuration in this section must have lists"
+" of equal length, as each index position represents one test "
+"configuration. For example, if `dp_size: [1, 4]` and `tp_size: [8, 8]`, "
+"the script will test two configurations: `(dp_size=1, tp_size=8)` and "
+"`(dp_size=4, tp_size=8)`."
 msgstr ""
 
-#: ../../benchmark/benchmark.md:82
+#: ../../benchmark/benchmark.md:120
 msgid ""
-"last part is the model env config, be careful that all env configs type "
-"should in `[int, float, string, bool]`, or there maybe unexpected error"
+"**recursive_search_config**: Defines configuration that will be tested "
+"using Cartesian product combinations. Each configuration can have "
+"multiple values, and all possible combinations will be tested. For "
+"example, with `enable_comm_overlap: [false, true]` and "
+"`enable_layer_micro_batch: [0, 2]`, four combinations will be tested: "
+"`(false, 0)`, `(false, 2)`, `(true, 0)`, `(true, 2)`."
 msgstr ""
 
-#: ../../benchmark/benchmark.md:104
+#: ../../benchmark/benchmark.md:127
 msgid "Run step"
 msgstr ""
 
-#: ../../benchmark/benchmark.md:116
+#: ../../benchmark/benchmark.md:134
 msgid ""
-"Also, multi-node benchmark dumps profile json in rank0, but currently we "
-"don't scp dir to local yet. So please go to rank0 and get profile data "
-"manually before clean step"
+"Ultimately, multi-node benchmark dumps trace profiles and logs to local "
+"`test_output` directory."
 msgstr ""
 
-#: ../../benchmark/benchmark.md:118
+#: ../../benchmark/benchmark.md:136
 msgid "Result Format"
 msgstr ""
 
-#: ../../benchmark/benchmark.md:119
+#: ../../benchmark/benchmark.md:137
 msgid "Decode result, where batch size stands for per DP Rank"
 msgstr ""
+
+#: ../../benchmark/benchmark.md:155
+msgid "Trace files and logs"
+msgstr ""
+
+#~ msgid ""
+#~ "First part is for cloning code to"
+#~ " local in ssh machine, and checkout"
+#~ " to the branch you need to test"
+#~ msgstr ""
+
+#~ msgid "Second part describe the machine list, user name and port to ssh"
+#~ msgstr ""
+
+#~ msgid ""
+#~ "Third part describe the model info "
+#~ "which should be pre-download to "
+#~ "local machine"
+#~ msgstr ""
+
+#~ msgid ""
+#~ "Fourth part describe the test cases, "
+#~ "including prefill/decode, batch_size and "
+#~ "input_len(they will be used as Cartesian"
+#~ " product).Specially, tp_size and dp_size "
+#~ "len should be equal as each tuple"
+#~ " of them will be started as a"
+#~ " parallel config. For example, in "
+#~ "below config, script will start three"
+#~ " server with `TP=1 DP=32`, `TP=2 "
+#~ "DP=16`, `TP=4 DP=8` and benchmark"
+#~ msgstr ""
+
+#~ msgid ""
+#~ "bazel_build_args is the flag for "
+#~ "bazelisk build, if you want to "
+#~ "test in AMD card, change `--config=rocm`"
+#~ msgstr ""
+
+#~ msgid ""
+#~ "last part is the model env config,"
+#~ " be careful that all env configs "
+#~ "type should in `[int, float, string, "
+#~ "bool]`, or there maybe unexpected error"
+#~ msgstr ""
+
+#~ msgid ""
+#~ "Also, multi-node benchmark dumps profile"
+#~ " json in rank0, but currently we "
+#~ "don't scp dir to local yet. So "
+#~ "please go to rank0 and get profile"
+#~ " data manually before clean step"
+#~ msgstr ""
 

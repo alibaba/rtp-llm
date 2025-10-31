@@ -1,16 +1,15 @@
 # SOME DESCRIPTIVE TITLE.
 # Copyright (C) 2023-2025, RTP-LLM
-# This file is distributed under the same license as the RTP-LLM package.
+# 本文件与 RTP-LLM 软件包使用相同的许可证分发。
 # FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
 #
-#, fuzzy
 msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-10-20 10:08+0800\n"
-"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
-"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"POT-Creation-Date: 2025-09-24 14:39+0800\n"
+"PO-Revision-Date: 2025-09-17 15:30+0800\n"
+"Last-Translator: 来羽 <xj226049@alibaba-inc.com>\n"
 "Language: zh_CN\n"
 "Language-Team: zh_CN <LL@li.org>\n"
 "Plural-Forms: nplurals=1; plural=0;\n"
@@ -21,35 +20,35 @@ msgstr ""
 
 #: ../../index.rst:13
 msgid "Installation"
-msgstr ""
+msgstr "安装"
 
 #: ../../index.rst:20
 msgid "Release Version"
-msgstr ""
+msgstr "发布版本"
 
 #: ../../index.rst:26
 msgid "Basic Usage"
-msgstr ""
+msgstr "基本用法"
 
 #: ../../index.rst:37
 msgid "Backend Tutorial"
-msgstr ""
+msgstr "后端教程"
 
 #: ../../index.rst:46
 msgid "Advanced Backend Configurations"
-msgstr ""
+msgstr "高级后端配置"
 
 #: ../../index.rst:54
 msgid "Supported Models"
-msgstr ""
+msgstr "支持的模型"
 
 #: ../../index.rst:63
 msgid "Advanced Features"
-msgstr ""
+msgstr "高级功能"
 
 #: ../../index.rst:76
 msgid "RTP-LLM Router"
-msgstr ""
+msgstr "RTP-LLM 路由器"
 
 #: ../../index.rst:82
 msgid "Benchmark"
@@ -57,11 +56,11 @@ msgstr ""
 
 #: ../../index.rst:88
 msgid "References"
-msgstr ""
+msgstr "参考文献"
 
 #: ../../index.rst:2
 msgid "RTP-LLM Documentation"
-msgstr ""
+msgstr "RTP-LLM 文档"
 
 #: ../../index.rst:4
 msgid ""
@@ -70,6 +69,8 @@ msgid ""
 "controllable by co-designing the backend runtime and frontend language. "
 "The core features include:"
 msgstr ""
+"RTP-LLM "
+"是一个面向大语言模型和视觉语言模型的高速服务框架。通过后端运行时与前端语言的协同设计，它使您与模型的交互更快速、更可控。其核心功能包括："
 
 #: ../../index.rst:8
 msgid ""
@@ -80,6 +81,9 @@ msgid ""
 "structured outputs, chunked prefill, quantization (FP8/INT4/AWQ/GPTQ), "
 "and multi-lora batching."
 msgstr ""
+"**高速后端运行时**：通过 RadixAttention 实现前缀缓存、零开销 CPU 调度器、prefill-decode "
+"拆分、推测解码、连续批处理、分页注意力、张量并行、流水线并行、专家并行、结构化输出、分块 "
+"prefill、量化（FP8/INT4/AWQ/GPTQ）以及多 LoRA 批处理，提供高效的模型服务。"
 
 #: ../../index.rst:9
 msgid ""
@@ -87,7 +91,7 @@ msgid ""
 "programming LLM applications, including chained generation calls, "
 "advanced prompting, control flow, multi-modal inputs, parallelism, and "
 "external interactions."
-msgstr ""
+msgstr "**灵活的前端语言**：为编程 LLM 应用提供直观的接口，支持生成调用链、高级提示工程、控制流、多模态输入、并行处理以及与外部系统的交互。"
 
 #: ../../index.rst:10
 msgid ""
@@ -96,10 +100,11 @@ msgid ""
 "(e5-mistral, gte, mcdse), with easy extensibility for integrating new "
 "models."
 msgstr ""
+"**广泛的模型支持**：支持多种生成式模型（如 Llama、Gemma、Mistral、Qwen、DeepSeek、LLaVA 等）和嵌入模型（如"
+" e5-mistral、gte、mcdse），并具备良好的可扩展性，便于集成新模型。"
 
 #: ../../index.rst:11
 msgid ""
 "**Active Community**: RTP-LLM is open-source and backed by an active "
 "community with industry adoption."
-msgstr ""
-
+msgstr "**活跃的社区支持**：RTP-LLM 是开源项目，拥有活跃的开发者社区，并已在工业界广泛应用。"
