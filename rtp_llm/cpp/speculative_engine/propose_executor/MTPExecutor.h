@@ -38,10 +38,10 @@ public:
             RTP_LLM_LOG_INFO("index %d, mtp model_id %d", index, mtp_params->model_id);
             auto cache_manager = (index < mtp_cache_managers.size()) ? mtp_cache_managers[index] : nullptr;
             auto executor =
-                std::make_shared<NormalExecutor>(*mtp_params, cache_manager, device_, lora_manager, warm_up);
+                std::make_shared<NormalExecutor>(*mtp_params, cache_manager, device_, nullptr, lora_manager, warm_up);
 
             auto norm_executor =
-                std::make_shared<NormalExecutor>(*mtp_params, cache_manager, device_, lora_manager, warm_up);
+                std::make_shared<NormalExecutor>(*mtp_params, cache_manager, device_, nullptr, lora_manager, warm_up);
             const auto& cache_config = cache_manager ? cache_manager->cacheConfig() : CacheConfig();
             executor->setBatchProcessor(std::move(
                 std::make_unique<MTPBatchStreamProcessor>(mtp_params->gpt_init_parameter, cache_config, warm_up)));
