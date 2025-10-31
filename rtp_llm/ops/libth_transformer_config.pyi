@@ -380,6 +380,7 @@ class DataType:
 class DeviceResourceConfig:
     enable_comm_overlap: bool
     enable_layer_micro_batch: int
+    engine_async_worker_count: int
     m_split: int
     overlap_comm_type: int
     overlap_math_sm_count: int

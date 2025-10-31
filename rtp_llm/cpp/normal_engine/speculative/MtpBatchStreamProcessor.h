@@ -14,7 +14,8 @@ public:
                             const CacheConfig&                 cache_config,
                             const SpeculativeExecutionConfig&  sp_config,
                             bool                               warm_up):
-        NormalBatchStreamProcessor(model_config, pd_sep_config, profiling_debug_logging_config, cache_config, warm_up),
+        NormalBatchStreamProcessor(
+            nullptr, model_config, pd_sep_config, profiling_debug_logging_config, cache_config, warm_up),
         propose_step_(sp_config.gen_num_per_cycle) {}
 
     absl::Status dispatchPrefill(const StreamGroups& stream_groups,

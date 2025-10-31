@@ -6,6 +6,7 @@
 #include <memory>
 #include <thread>
 #include "absl/status/status.h"
+#include "autil/LockFreeThreadPool.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/engine_base/TorchProfiler.h"
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
@@ -69,6 +70,7 @@ private:
 private:
     autil::ThreadPtr                              loop_thread_;
     std::atomic<bool>                             running_{false};
+    std::shared_ptr<autil::LockFreeThreadPool>    thread_pool_;
     std::unique_ptr<Executor>                     executor_;
     ModelConfig                                   model_config_;
     ParallelismConfig                             parallelism_config;

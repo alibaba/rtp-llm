@@ -21,7 +21,8 @@ NormalExecutor::~NormalExecutor() {
     cudaProfilerEnd();
 }
 
-NormalExecutor::NormalExecutor(const EngineInitParams&                params,
+NormalExecutor::NormalExecutor(std::shared_ptr<autil::LockFreeThreadPool> thread_pool,
+                               const EngineInitParams&                params,
                                const std::shared_ptr<KVCacheManager>& cache_manager,
                                bool                                   warm_up,
                                bool                                   is_propose,
@@ -31,6 +32,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                const std::vector<int32_t>&            kv_cache_layer_to_group):
     Executor(),
     cache_manager_(cache_manager),
+    thread_pool_(std::move(thread_pool)),
     warm_up_(warm_up),
     use_all_gather_(params.moe_config.use_all_gather && !params.moe_config.use_deepep_low_latency),
     metrics_reporter_(params.metrics_reporter),
@@ -110,8 +112,12 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                                   cache_manager->cacheConfig()) :
                                    CacheConfig();
 
-    batch_stream_processor_.reset(new NormalBatchStreamProcessor(
-        params.model_config_, params.pd_sep_config, params.profiling_debug_logging_config, cache_config, warm_up_));
+    batch_stream_processor_.reset(new NormalBatchStreamProcessor(thread_pool_,
+                                                                 params.model_config_,
+                                                                 params.pd_sep_config,
+                                                                 params.profiling_debug_logging_config,
+                                                                 cache_config,
+                                                                 warm_up_));
     LogitsProcessorFactory::init(params.model_config_.ckpt_path, params.sp_config.tree_decode_config);
     cudaProfilerBegin();
 }

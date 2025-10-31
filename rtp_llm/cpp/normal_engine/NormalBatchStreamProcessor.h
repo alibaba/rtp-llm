@@ -6,6 +6,7 @@
 #include <torch/all.h>
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "autil/LockFreeThreadPool.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
@@ -18,11 +19,12 @@ namespace rtp_llm {
 
 class NormalBatchStreamProcessor {
 public:
-    NormalBatchStreamProcessor(const ModelConfig&                 model_config,
-                               const PDSepConfig&                 pd_sep_config,
-                               const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
-                               const CacheConfig&                 cache_config,
-                               bool                               warm_up);
+    NormalBatchStreamProcessor(std::shared_ptr<autil::LockFreeThreadPool> thread_pool_,
+                               const ModelConfig&                         model_config,
+                               const PDSepConfig&                         pd_sep_config,
+                               const ProfilingDebugLoggingConfig&         profiling_debug_logging_config,
+                               const CacheConfig&                         cache_config,
+                               bool                                       warm_up);
 
     virtual absl::Status dispatch(const StreamGroups& stream_groups, const MergedOutput& merge_outputs) const;
     virtual absl::StatusOr<GptModelInputs> gatherModelInput(const StreamGroups& stream_groups) const;
@@ -57,6 +59,7 @@ protected:
     std::unique_ptr<NormalModelInputGatherer>   model_input_gatherer_;
     std::unique_ptr<NormalSamplerInputGatherer> sampler_input_gatherer_;
     std::unique_ptr<NormalOutputDispatcher>     output_dispatcher_;
+    std::shared_ptr<autil::LockFreeThreadPool>  thread_pool_;
 };
 
 }  // namespace rtp_llm
