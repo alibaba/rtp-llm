@@ -3,7 +3,7 @@
 
 namespace rtp_llm {
 
-BlockLRUMatchResult BlockLRUCache::match(const std::vector<int64_t>& cache_keys) {
+BlockLRUMatchResult BlockLRUCache::match(const std::vector<size_t>& cache_keys) {
     std::lock_guard<std::mutex> lock(mutex_);
 
     std::vector<int>   matched_block_ids;
@@ -12,7 +12,7 @@ BlockLRUMatchResult BlockLRUCache::match(const std::vector<int64_t>& cache_keys)
 
     // 从前往后检查，找到第一个不匹配的位置
     for (size_t i = 0; i < cache_keys.size(); ++i) {
-        int64_t cache_key               = cache_keys[i];
+        size_t cache_key                = cache_keys[i];
         auto [success, cache_value_ptr] = lru_cache_.get(cache_key);
         if (success) {
             matched_block_ids.push_back(cache_value_ptr->block_id);
@@ -28,10 +28,10 @@ BlockLRUMatchResult BlockLRUCache::match(const std::vector<int64_t>& cache_keys)
     return {matched_len, matched_block_ids, aggregated_losses};
 }
 
-std::vector<int> BlockLRUCache::put(const std::vector<int64_t>& cache_keys,
-                                    const std::vector<int>&     block_ids,
-                                    const std::vector<float>&   losses,
-                                    bool                        is_resident) {
+std::vector<int> BlockLRUCache::put(const std::vector<size_t>& cache_keys,
+                                    const std::vector<int>&    block_ids,
+                                    const std::vector<float>&  losses,
+                                    bool                       is_resident) {
     // 输入参数验证
     // assume block id is valid
     if (cache_keys.empty() || block_ids.empty() || cache_keys.size() != block_ids.size()) {
@@ -46,8 +46,8 @@ std::vector<int> BlockLRUCache::put(const std::vector<int64_t>& cache_keys,
 
     // 逐个处理每个cache_key和block_id
     for (size_t i = 0; i < cache_keys.size(); ++i) {
-        int64_t cache_key = cache_keys[i];
-        int     block_id  = block_ids[i];
+        size_t cache_key = cache_keys[i];
+        int    block_id  = block_ids[i];
 
         auto [exists, existing_value] = lru_cache_.get(cache_key);
         if (exists) {
@@ -88,7 +88,7 @@ std::vector<int> BlockLRUCache::pop(size_t num) {
 
     std::lock_guard<std::mutex> lock(mutex_);
 
-    auto cond = [&](const int64_t& key, const std::shared_ptr<MemoryCacheValue>& value) {
+    auto cond = [&](const size_t& key, const std::shared_ptr<MemoryCacheValue>& value) {
         return !value->is_resident && outer_block_ref_counter_.getRefCounter(value->block_id) == 0
                && inner_block_ref_counter_.getRefCounter(value->block_id) == 0;
     };

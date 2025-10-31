@@ -22,11 +22,10 @@
 // // each of them has 10 layers, each group share the same block indices.
 // // layer_ids should be registered to the given kv cache group.
 
-
 // class HybridLayerKVCacheAllocator: public KVCacheAllocator {
 // public:
-//     HybridLayerKVCacheAllocator(const CacheConfig& config, rtp_llm::DeviceBase* device, AllocationType atype = AllocationType::DEVICE);
-//     bool init() {
+//     HybridLayerKVCacheAllocator(const CacheConfig& config, rtp_llm::DeviceBase* device, AllocationType atype =
+//     AllocationType::DEVICE); bool init() {
 //         // 1. build a hybrid pool for all kv_cache_groups_
 //         // 2. build kv_cache_groups_ by CacheConfig and the hybrid pool
 //     };
@@ -43,11 +42,11 @@
 //         // only consider the scenario of full fallback.
 //     }
 //     InsertResult insertIntoCache(const InsertInfo& insert_info){
-//         // insert blocks in stream that have been cached in block_cache into block_cache   
+//         // insert blocks in stream that have been cached in block_cache into block_cache
 //     };
 
 //     CacheLayerLayout layerCacheBase() const {
-        
+
 //     };
 
 // private:
@@ -57,10 +56,10 @@
 //         // std::vector<MatchResult> match_results;
 //         // auto cache_keys = malloc_info.stream->kvCache().cache_keys;
 
-//         // for (auto& kv_cache_group : kv_cache_groups_) {   
+//         // for (auto& kv_cache_group : kv_cache_groups_) {
 //         //     auto match_result = kv_cache_group->match(cache_keys);
 //         //     match_results.push_back(match_result);
-            
+
 //         //     if (kv_cache_group->type() == KVCacheType::FULL && match_result.reuse_length < full_reuse_len) {
 //         //         full_reuse_len = match_result.reuse_length;
 //         //     }
@@ -73,13 +72,13 @@
 //         //         break;
 //         //     }
 //         // }
-        
+
 //         // for (auto& match_result : match_results) {
 //         //     // update stream's BatchKVCacheResource
 //         // }
 
 //         // for (auto& kv_cache_group : kv_cache_groups_) {
-//         //     auto block_indices = kv_cache_group->alloc(cache_keys, reuse_len);
+//         //     auto block_indices = kv_cache_group->malloc(cache_keys, reuse_len);
 //         //     // update stream's BatchKVCacheResource
 //         // }
 
@@ -89,7 +88,7 @@
 //     MallocResult mallocSimple(const MallocInfo& malloc_info) {
 //         // for(auto& kv_cache_group : kv_cache_groups_) {
 //         //     // cache_keys = cache_keys that are not allocated blocks;
-//         //     auto block_indices = kv_cache_group->alloc(cache_keys, 0);
+//         //     auto block_indices = kv_cache_group->malloc(cache_keys, 0);
 //         //     // update stream's BatchKVCacheResource
 //         //     if (kv_cache_group->type() == KVCacheType::LINEAR) {
 //         //         // insert previous blocks into block_cache and free it
