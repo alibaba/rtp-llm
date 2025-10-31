@@ -13,21 +13,21 @@ namespace rtp_llm {
 
 class LinearKVCacheGroup: public KVCacheGroup {
 public:
-    void                              alloc(CacheKeysType& cache_keys, int reuse_len = 0);
-    MatchResult                       match(CacheKeysType& cache_keys);
-    void                              free(BlockIndicesType& block_indices);
-    void                              insertIntoCache(CacheKeysType& cache_keys, BlockIndicesType& block_indices);
-    std::map<BlockIdxType, BufferPtr> blockBuffer(BlockIdxType block_id, CacheKeyType cache_key);
-    KVCacheType                       type() const;
-    void                              removeSkippedBlocks(BlockIndicesType& block_indices);
+    MatchResult match(CacheKeysType& cache_keys) override;
+    void        alloc(CacheKeysType& cache_keys, BlockIndicesType& block_indices, int seq_len) override;
+    void        insertIntoCache(CacheKeysType& cache_keys, BlockIndicesType& block_indices) override;
+
+    void removeSkippedBlocks(BlockIndicesType& block_indices) override;
+    void free(BlockIndicesType& block_indices) override;
+
+    std::map<BlockIdxType, BufferPtr> blockBuffer(BlockIdxType block_id, CacheKeyType cache_key) override;
+    KVCacheType                       type() const override;
 
 private:
-    vector<int>   layer_ids_;
-    KVCacheSpec   group_spec_;
-    BlockCachePtr block_cache_;
-    BlockPoolPtr  block_pool_;
-    int_t         seq_size_per_block_;
-    int           chunk_size;
+    int newBlocks(int seq_len, int current_blocks) const override;
+
+private:
+    int chunk_size;
 };
 
 using LinearKVCacheGroupPtr = std::shared_ptr<LinearKVCacheGroup>;

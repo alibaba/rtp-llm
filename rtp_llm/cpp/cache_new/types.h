@@ -27,8 +27,8 @@ struct CacheLayerLayout {
 };
 
 struct MatchResult {
-    size_t                                 reuse_length;
-    std::vector<std::vector<BlockIdxType>> block_indices;
+    size_t           reuse_length;
+    BlockIndicesType block_indices;
 };
 
 // is_reuse_cache = true，基于输入的 cache_keys 做 block_cache 匹配，再走 block_pool 分配；

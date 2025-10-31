@@ -24,22 +24,26 @@ namespace rtp_llm {
 
 class KVCacheGroup {
 public:
-    virtual MatchResult match(CacheKeysType& cache_keys)                                                 = 0;
-    virtual void        alloc(CacheKeysType& cache_keys, BlockIndicesType& block_indices, int token_len) = 0;
-    virtual void        insertIntoCache(CacheKeysType& cache_keys, BlockIndicesType& block_indices)      = 0;
+    virtual MatchResult match(CacheKeysType& cache_keys)                                               = 0;
+    virtual void        alloc(CacheKeysType& cache_keys, BlockIndicesType& block_indices, int seq_len) = 0;
+    // add loss, is_resident for insertIntoCache
+    virtual void insertIntoCache(CacheKeysType& cache_keys, BlockIndicesType& block_indices) = 0;
 
     virtual void removeSkippedBlocks(BlockIndicesType& block_indices) = 0;
     virtual void free(BlockIndicesType& block_indices)                = 0;
 
-    // add loss, is_resident for insertIntoCache
     virtual KVCacheType                       type() const                                               = 0;
     virtual std::map<BlockIdxType, BufferPtr> blockBuffer(BlockIdxType block_id, CacheKeyType cache_key) = 0;
 
 private:
+    virtual int newBlocks(int seq_len, int current_blocks) const = 0;
+
+protected:
     std::vector<int> layer_ids_;
     KVCacheSpec      group_spec_;
     BlockCacheV1Ptr  block_cache_;
     BlockPoolPtr     block_pool_;
+    int              seq_size_per_block_;
 };
 
 using KVCacheGroupPtr = std::shared_ptr<KVCacheGroup>;

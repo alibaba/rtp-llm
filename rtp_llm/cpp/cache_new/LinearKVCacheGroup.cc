@@ -13,14 +13,14 @@ using namespace std;
 
 namespace rtp_llm {
 
-MatchResult LinearKVCacheGroup::match(vector<CacheKeyType>& cache_keys) {
+MatchResult LinearKVCacheGroup::match(CacheKeysType& cache_keys) {
     MatchResult match_result;
     match_result.block_indices.resize(1);
     match_result.block_indices[0].resize(cache_keys.size());
 
     int pos = cache_keys.size() - 1;
     for (auto it = cache_keys.rbegin(); it != cache_keys.rend(); ++it) {
-        auto result = block_cache_->match();
+        auto result = block_cache_->match(*it);
         if (isNullBlockIdx(result.matched_index)) {
             continue;
         }
@@ -28,6 +28,7 @@ MatchResult LinearKVCacheGroup::match(vector<CacheKeyType>& cache_keys) {
         match_result.reuse_length          = pos + 1;
         break;
     }
+    return match_result;
 }
 
 // 保留一个有效的block即可。优化下效率，及时退出
@@ -42,7 +43,8 @@ void LinearKVCacheGroup::removeSkippedBlocks(BlockIndicesType& block_indices) {
             if (!found_valid_block) {
                 found_valid_block = true;
             } else {
-                block_pool_->free({block_indices[i]});
+                auto blocks = {block_indices[i]};
+                block_pool_->free(blocks);
             }
         }
     }
