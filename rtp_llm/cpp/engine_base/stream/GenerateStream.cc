@@ -83,6 +83,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     is_context_stream_  = std::make_shared<bool>();
     *is_context_stream_ = true;
     generate_status_    = std::make_shared<GenerateStateMachine>(stream_cache_resource_);
+    sub_generate_status_.reserve(maxBatchSize());
     sub_generate_status_.clear();
     resizeSubGenerateStatus(init_batch_size);
 

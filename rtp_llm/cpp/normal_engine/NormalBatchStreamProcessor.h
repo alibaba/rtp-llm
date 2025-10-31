@@ -6,6 +6,7 @@
 #include <torch/all.h>
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "autil/LockFreeThreadPool.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
@@ -22,6 +23,7 @@ public:
                                const PDSepConfig&                 pd_sep_config,
                                const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
                                const CacheConfig&                 cache_config,
+                               std::shared_ptr<autil::LockFreeThreadPool> thread_pool,
                                bool                               warm_up);
 
     virtual absl::Status dispatch(const StreamGroups& stream_groups, const MergedOutput& merge_outputs) const;
@@ -53,6 +55,7 @@ protected:
                                   bool                          score_batch = false) const;
 
 protected:
+    std::shared_ptr<autil::LockFreeThreadPool> thread_pool_;
     NormalModelInputGathererConfig              model_input_gatherer_config_;
     std::unique_ptr<NormalModelInputGatherer>   model_input_gatherer_;
     std::unique_ptr<NormalSamplerInputGatherer> sampler_input_gatherer_;

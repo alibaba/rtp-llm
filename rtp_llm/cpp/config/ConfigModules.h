@@ -90,8 +90,9 @@ struct ParallelismConfig {
 };
 
 struct ConcurrencyConfig {
-    bool        concurrency_with_block = false;
-    int         concurrency_limit      = 32;
+    bool        concurrency_with_block    = false;
+    int         concurrency_limit         = 32;
+    int64_t     engine_async_worker_count = 0;
     std::string to_string() const;
 };
 
