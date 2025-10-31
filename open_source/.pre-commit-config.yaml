@@ -6,27 +6,25 @@ repos:
       - id: check-merge-conflict
       - id: check-symlinks
       - id: mixed-line-ending
-        exclude: ^3rdparty/
       - id: trailing-whitespace
-        exclude: ^3rdparty/
 
     # Formatters
   - repo: https://github.com/psf/black-pre-commit-mirror
     rev: 24.8.0
     hooks:
       - id: black
-        exclude: ^3rdparty/
 
   - repo: https://github.com/pycqa/isort
     rev: 5.13.2
     hooks:
       - id: isort
         args: ["--profile=black"]
-        exclude: ^3rdparty/
 
   - repo: https://github.com/pre-commit/mirrors-clang-format
     rev: v19.1.1
     hooks:
       - id: clang-format
         types_or: [c++, c, cuda]
-        exclude: ^3rdparty/|^rtp_llm/cpp/cutlass/
+        exclude: ^rtp_llm/cpp/cutlass/
+
+exclude: ^rtp_llm/ops|^3rdparty
