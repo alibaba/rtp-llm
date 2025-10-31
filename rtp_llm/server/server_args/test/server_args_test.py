@@ -227,6 +227,7 @@ class ServerArgsDefaultTest(TestCase):
         self.assertEqual(env.get("WARM_UP"), "1")
         self.assertEqual(env.get("WARM_UP_WITH_LOSS"), "0")
         self.assertEqual(env.get("MAX_SEQ_LEN"), "0")
+        self.assertEqual(env.get("ENGINE_ASYNC_WORKER_COUNT"), "0")
 
         # 24. Embedding Configuration
         self.assertEqual(env.get("EMBEDDING_MODEL"), "0")
@@ -630,6 +631,8 @@ class ServerArgsSetTest(TestCase):
             "0",
             "--warm_up_with_loss",
             "1",
+            "--engine_async_worker_count",
+            "8",
             "--max_seq_len",
             "8192",
             # 24. Embedding Configuration
@@ -926,6 +929,7 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env["WARM_UP"], "0")
         self.assertEqual(env["WARM_UP_WITH_LOSS"], "1")
         self.assertEqual(env["MAX_SEQ_LEN"], "8192")
+        self.assertEqual(env["ENGINE_ASYNC_WORKER_COUNT"], "8")
 
         # 24. Embedding Configuration
         self.assertEqual(env["EMBEDDING_MODEL"], "1")

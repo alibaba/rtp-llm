@@ -410,6 +410,11 @@ void CacheManager::incrRefCounter(const std::vector<int>& indices) {
     incrQueryRefCounter(indices);
 }
 
+void CacheManager::incrRefCounterWithLock(const std::vector<int>& indices) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    incrRefCounter(indices);
+}
+
 void CacheManager::setKVBlockValue(int              block_index,
                                    int              layer_id,
                                    rtp_llm::Buffer& k_buffer,
