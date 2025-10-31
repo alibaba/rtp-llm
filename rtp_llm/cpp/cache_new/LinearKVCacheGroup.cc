@@ -15,8 +15,7 @@ namespace rtp_llm {
 
 MatchResult LinearKVCacheGroup::match(CacheKeysType& cache_keys) {
     MatchResult match_result;
-    match_result.block_indices.resize(1);
-    match_result.block_indices[0].resize(cache_keys.size());
+    match_result.block_indices.resize(cache_keys.size());
 
     int pos = cache_keys.size() - 1;
     for (auto it = cache_keys.rbegin(); it != cache_keys.rend(); ++it) {
@@ -24,8 +23,8 @@ MatchResult LinearKVCacheGroup::match(CacheKeysType& cache_keys) {
         if (isNullBlockIdx(result.matched_index)) {
             continue;
         }
-        match_result.block_indices[0][pos] = result.matched_index;
-        match_result.reuse_length          = pos + 1;
+        match_result.block_indices[pos] = result.matched_index;
+        match_result.reuse_length       = pos + 1;
         break;
     }
     return match_result;
