@@ -302,14 +302,16 @@ protected:
                         kblock = kvCache
                                      .index({torch::indexing::Slice(),
                                              i,
-                                             0,
+                                             torch::indexing::Slice(),
                                              torch::indexing::Slice(block_start, block_end),
                                              torch::indexing::Slice()})
-                                     .reshape({cache_config.seq_size_per_block,
+                                     .reshape({2,
+                                               cache_config.seq_size_per_block,
                                                cache_config.local_head_num_kv,
                                                cache_config.size_per_head})
-                                     .transpose(1, 0)
+                                     .transpose(2, 1)
                                      .contiguous();
+                        // vblock is not used in setKVBlockValue in this case
                         vblock = kvCache
                                      .index({torch::indexing::Slice(),
                                              i,
@@ -324,6 +326,8 @@ protected:
                     }
                     auto kblock_buffer = rtp_llm::torchTensor2Buffer(kblock);
                     auto vblock_buffer = rtp_llm::torchTensor2Buffer(vblock);
+                    // std::cout << "index: " << k << " start: " << block_start << " end: " << block_end << std::endl;
+                    // std::cout << "block index: " << k_indexs[k] << std::endl;
                     cache_manager_->setKVBlockValue(k_indexs[k], *kblock_buffer, *vblock_buffer);
                 }
             }

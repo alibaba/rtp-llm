@@ -73,15 +73,15 @@ void KVCacheAllocator::initKVCacheScale() {
                                                                   (size_t)config_.block_nums,
                                                                   (size_t)config_.local_head_num_kv,
                                                                   (size_t)config_.seq_size_per_block},
-                                              (int8_t*)cache_base_ptr_ + kv_cache_.k_blocks->sizeBytes() * 2);
-        kv_cache_.v_scale = std::make_unique<rtp_llm::Buffer>(
-            rtp_llm::MemoryType::MEMORY_GPU,
-            rtp_llm::DataType::TYPE_FP32,
-            std::vector<size_t>{(size_t)config_.layer_num,
-                                (size_t)config_.block_nums,
-                                (size_t)config_.local_head_num_kv,
-                                (size_t)config_.seq_size_per_block},
-            (int8_t*)cache_base_ptr_ + kv_cache_.k_blocks->sizeBytes() * 2 + kv_cache_.k_scale->sizeBytes());
+                                              (int8_t*)cache_base_ptr_ + kv_cache_.k_blocks->sizeBytes());
+        kv_cache_.v_scale = std::make_unique<rtp_llm::Buffer>(rtp_llm::MemoryType::MEMORY_GPU,
+                                                              rtp_llm::DataType::TYPE_FP32,
+                                                              std::vector<size_t>{(size_t)config_.layer_num,
+                                                                                  (size_t)config_.block_nums,
+                                                                                  (size_t)config_.local_head_num_kv,
+                                                                                  (size_t)config_.seq_size_per_block},
+                                                              (int8_t*)cache_base_ptr_ + kv_cache_.k_blocks->sizeBytes()
+                                                                  + kv_cache_.k_scale->sizeBytes());
     }
 
     else if (config_.dtype == rtp_llm::DataType::TYPE_FP8_E4M3) {
@@ -92,15 +92,15 @@ void KVCacheAllocator::initKVCacheScale() {
                                                                   (size_t)config_.block_nums,
                                                                   (size_t)config_.local_head_num_kv,
                                                                   (size_t)config_.seq_size_per_block},
-                                              (int8_t*)cache_base_ptr_ + kv_cache_.k_blocks->sizeBytes() * 2);
-        kv_cache_.v_scale = std::make_unique<rtp_llm::Buffer>(
-            rtp_llm::MemoryType::MEMORY_GPU,
-            rtp_llm::DataType::TYPE_FP32,
-            std::vector<size_t>{(size_t)config_.layer_num,
-                                (size_t)config_.block_nums,
-                                (size_t)config_.local_head_num_kv,
-                                (size_t)config_.seq_size_per_block},
-            (int8_t*)cache_base_ptr_ + kv_cache_.k_blocks->sizeBytes() * 2 + kv_cache_.k_scale->sizeBytes());
+                                              (int8_t*)cache_base_ptr_ + kv_cache_.k_blocks->sizeBytes());
+        kv_cache_.v_scale = std::make_unique<rtp_llm::Buffer>(rtp_llm::MemoryType::MEMORY_GPU,
+                                                              rtp_llm::DataType::TYPE_FP32,
+                                                              std::vector<size_t>{(size_t)config_.layer_num,
+                                                                                  (size_t)config_.block_nums,
+                                                                                  (size_t)config_.local_head_num_kv,
+                                                                                  (size_t)config_.seq_size_per_block},
+                                                              (int8_t*)cache_base_ptr_ + kv_cache_.k_blocks->sizeBytes()
+                                                                  + kv_cache_.k_scale->sizeBytes());
         Buffer2torchTensor(kv_cache_.k_scale, false).fill_(1.0);
         Buffer2torchTensor(kv_cache_.v_scale, false).fill_(1.0);
     }
@@ -108,22 +108,23 @@ void KVCacheAllocator::initKVCacheScale() {
 
 void KVCacheAllocator::initKvCacheMla() {
     RTP_LLM_LOG_INFO("init mla kv cache");
-    kv_cache_.k_blocks = std::make_unique<rtp_llm::Buffer>(rtp_llm::MemoryType::MEMORY_GPU,
-                                                           config_.dtype,
-                                                           std::vector<size_t>{(size_t)config_.layer_num,
-                                                                               (size_t)config_.block_nums,
-                                                                               (size_t)config_.seq_size_per_block,
-                                                                               (size_t)config_.kv_lora_rank},
-                                                           cache_base_ptr_);
-    kv_cache_.v_blocks = std::make_unique<rtp_llm::Buffer>(rtp_llm::MemoryType::MEMORY_GPU,
-                                                           config_.dtype,
-                                                           std::vector<size_t>{(size_t)config_.layer_num,
-                                                                               (size_t)config_.block_nums,
-                                                                               (size_t)config_.seq_size_per_block,
-                                                                               (size_t)config_.rope_head_dim},
-                                                           (int8_t*)cache_base_ptr_ + kv_cache_.k_blocks->sizeBytes());
-    // memset k_blocks and v_blocks
-#ifdef USING_ROCM
+    kv_cache_.k_blocks =
+        std::make_unique<rtp_llm::Buffer>(rtp_llm::MemoryType::MEMORY_GPU,
+                                          config_.dtype,
+                                          std::vector<size_t>{(size_t)config_.layer_num,
+                                                              (size_t)config_.block_nums,
+                                                              (size_t)config_.seq_size_per_block,
+                                                              (size_t)config_.kv_lora_rank + config_.rope_head_dim},
+                                          cache_base_ptr_);
+    kv_cache_.v_blocks = std::make_unique<rtp_llm::Buffer>(
+        rtp_llm::MemoryType::MEMORY_GPU,
+        config_.dtype,
+        std::vector<size_t>{
+            (size_t)config_.layer_num, (size_t)config_.block_nums, (size_t)config_.seq_size_per_block, (size_t)0},
+        (int8_t*)cache_base_ptr_ + kv_cache_.k_blocks->sizeBytes());
+// memset k_blocks and v_blocks for cuda or rocm
+// since warmup produce nan maybe influence kvcache
+#if defined(USING_ROCM) || defined(USING_CUDA)
     device_->bufMemset(*kv_cache_.k_blocks, 0);
     device_->bufMemset(*kv_cache_.v_blocks, 0);
 #endif
@@ -135,6 +136,7 @@ void KVCacheAllocator::initKvCacheNormal() {
                                                            config_.dtype,
                                                            std::vector<size_t>{(size_t)config_.layer_num,
                                                                                (size_t)config_.block_nums,
+                                                                               (size_t)2,
                                                                                (size_t)config_.local_head_num_kv,
                                                                                (size_t)config_.seq_size_per_block,
                                                                                (size_t)config_.size_per_head},
@@ -145,10 +147,10 @@ void KVCacheAllocator::initKvCacheNormal() {
                                                                                (size_t)config_.block_nums,
                                                                                (size_t)config_.local_head_num_kv,
                                                                                (size_t)config_.seq_size_per_block,
-                                                                               (size_t)config_.size_per_head},
+                                                                               (size_t)0},
                                                            (int8_t*)cache_base_ptr_ + kv_cache_.k_blocks->sizeBytes());
     // memset k_blocks and v_blocks
-#ifdef USING_ROCM
+#if defined(USING_ROCM) || USING_CUDA
     device_->bufMemset(*kv_cache_.k_blocks, 0);
     device_->bufMemset(*kv_cache_.v_blocks, 0);
 #endif
@@ -228,6 +230,9 @@ bool KVCacheAllocator::setKVBlockValue(int              block_index,
     auto v_shape  = config_.getValueShape();
 
     auto copyFunc = [&](rtp_llm::Buffer& src_buffer, rtp_llm::BufferPtr& dst_blocks, size_t offset, size_t shape) {
+        if (shape == 0) {
+            return;
+        }
         auto dst_data   = (char*)dst_blocks->data() + offset;
         auto dst_buffer = Buffer(dst_blocks->where(), src_buffer.type(), {shape}, dst_data);
         device_->copy({dst_buffer, src_buffer});

@@ -157,7 +157,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params): DeviceBase(params) {
         tracker_params.real_allocator     = allocator_ptr;
         tracker_params.target_track_bytes = params.device_reserve_memory_bytes > 0 ?
                                                 params.device_reserve_memory_bytes :
-                                                free_bytes + params.device_reserve_memory_bytes;
+                                                (int64_t)free_bytes + params.device_reserve_memory_bytes;
         tracker_params.align_size         = 128;
         RTP_LLM_LOG_INFO("cuda device %d has %lu bytes free memory, trying to reserve %lu bytes.",
                          device_id_,

@@ -1,4 +1,3 @@
-
 #include <iostream>
 #include <numeric>
 #include "rtp_llm/cpp/devices/OpData.h"
@@ -26,11 +25,10 @@ using namespace rtp_llm;
 namespace rtp_llm {
 
 ParamsPtr CudaDevice::prepareTrtAttn(const AttentionConfigs& configs,
-                                     const BufferPtr&        k_cache,
+                                     const BufferPtr&        layer_cache,
                                      const BufferPtr&        kv_cache_block_id,
                                      int                     batch_size) {
-    return prepareTrtAttn(
-        configs, k_cache ? k_cache->shape()[0] * k_cache->shape()[1] : 0, kv_cache_block_id, batch_size);
+    return prepareTrtAttn(configs, 1, kv_cache_block_id, batch_size);
 }
 
 ParamsPtr CudaDevice::prepareTrtAttn(const AttentionConfigs& configs,
@@ -84,7 +82,6 @@ ParamsPtr CudaDevice::prepareTrtAttn(const AttentionConfigs& configs,
                                         kv_cache_block_id->data<int>(),
                                         batch_size,
                                         max_blocks_per_batch,
-                                        kv_block_offset,
                                         stream_);
     if (is_sm90() && fmha_type_ == FMHAType::PAGED_TRT_V2) {
         trt_attn->kv_cache_offset_h = allocateBuffer(
@@ -377,6 +374,7 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
     auto trt_attn       = ((TRTAttn*)params.common.decode_trt_attn.get());
     auto kv_block_array = trt_attn->kv_block_array;
     TRTAttn::setKvCache(kv_block_array, *params.common.kv_cache);
+    printBufferData(*trt_attn->kv_cache_offset, "kv_cache_offset");
 
     BufferPtr q_output;
     auto      flash_infer    = (FlashInferAttnParams*)params.common.decode_flash_infer_attn.get();

@@ -473,10 +473,9 @@ void FlashInferAttnParams::run(const AttentionModuleParams& params,
                                const BufferPtr&             f16_out,
                                int64_t                      stream) {
     const int size_per_head = params.configs.size_per_head;
-
-    auto q       = Buffer2torchTensor(input_q, false);
-    auto k_cache = Buffer2torchTensor(params.common.kv_cache->k_cache_buffer, false);
-    auto v_cache = Buffer2torchTensor(params.common.kv_cache->v_cache_buffer, false);
+    auto      q             = Buffer2torchTensor(input_q, false);
+    auto      k_cache       = Buffer2torchTensor(params.common.kv_cache->k_cache_buffer, false).select(1, 0);
+    auto      v_cache       = Buffer2torchTensor(params.common.kv_cache->k_cache_buffer, false).select(1, 1);
 
     auto       softmax_scale = (1.0f / sqrtf(size_per_head * 1.0f)) * params.configs.softmax_extra_scale;
     at::Tensor out;

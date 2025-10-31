@@ -32,13 +32,13 @@ void transposeDim12(BufferPtr input, void* output) {
 void getCacheAddrFromIndex(const KvCacheInfo& kv_cache, size_t batch, size_t block_idx, void** k_addr, void** v_addr) {
     const auto& kv_blocks_offset     = *(kv_cache.kv_cache_block_id);
     const auto& k_cache              = *(kv_cache.k_cache_buffer);
-    const auto& v_cache              = *(kv_cache.v_cache_buffer);
+    const auto& v_cache              = *(kv_cache.k_cache_buffer);
     const auto  max_blocks_per_batch = kv_blocks_offset.shape()[1];
     size_t      block_size           = k_cache[0].sizeBytes();
     int*        index                = (int*)kv_blocks_offset.data();
 
     *k_addr = (char*)k_cache.data() + index[batch * max_blocks_per_batch + block_idx] * block_size;
-    *v_addr = (char*)v_cache.data() + index[batch * max_blocks_per_batch + block_idx] * block_size;
+    *v_addr = (char*)v_cache.data() + index[batch * max_blocks_per_batch + block_idx] * block_size + block_size / 2;
 }
 
 void assemCache(const AttentionModuleParams& params, int batch, BufferPtr k_out, BufferPtr v_out) {
@@ -102,7 +102,7 @@ void updateKVCache(const AttentionModuleParams& params, int batch, size_t step, 
         memcpy((uint8_t*)k_block_addr + (step % block_tokens) * kv_head_num * size_per_head * elem_sz,
                k->dataWithOffset(i * block_tokens * kv_head_num * size_per_head),
                elem_sz * len * kv_head_num * size_per_head);
-        memcpy((uint8_t*)v_block_addr + (step % block_tokens) * kv_head_num * size_per_head * elem_sz,
+        memcpy((uint8_t*)k_block_addr + (step % block_tokens) * kv_head_num * size_per_head * elem_sz,
                v->dataWithOffset(i * block_tokens * kv_head_num * size_per_head),
                elem_sz * len * kv_head_num * size_per_head);
 
