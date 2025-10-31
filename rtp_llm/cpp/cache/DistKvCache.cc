@@ -126,7 +126,7 @@ bool DistKvCache::initDefaultMetas() {
     return true;
 }
 
-int32_t DistKvCache::matchForAllRank(const std::vector<int64_t>&        cache_keys,
+int32_t DistKvCache::matchForAllRank(const std::vector<size_t>&         cache_keys,
                                      size_t                             ignore_block_num,
                                      int64_t                            request_id,
                                      std::map<std::string, std::string> extra_metas) {
@@ -206,7 +206,7 @@ int32_t DistKvCache::matchForAllRank(const std::vector<int64_t>&        cache_ke
     return match_len;
 }
 
-int32_t DistKvCache::match(const std::vector<int64_t>&               cache_keys,
+int32_t DistKvCache::match(const std::vector<size_t>&                cache_keys,
                            size_t                                    ignore_block_num,
                            int64_t                                   request_id,
                            std::map<std::string, std::string>        extra_metas,
@@ -282,7 +282,7 @@ int32_t DistKvCache::match(const std::vector<int64_t>&               cache_keys,
     return match_len;
 }
 
-bool DistKvCache::getForAllRank(const std::vector<int64_t>&        cache_keys,
+bool DistKvCache::getForAllRank(const std::vector<size_t>&         cache_keys,
                                 const std::vector<int32_t>&        block_indices,
                                 size_t                             ignore_block_num,
                                 int64_t                            request_id,
@@ -315,7 +315,7 @@ bool DistKvCache::getForAllRank(const std::vector<int64_t>&        cache_keys,
     return result;
 }
 
-bool DistKvCache::get(const std::vector<int64_t>&        cache_keys,
+bool DistKvCache::get(const std::vector<size_t>&         cache_keys,
                       const std::vector<int32_t>&        block_indices,
                       size_t                             ignore_block_num,
                       int64_t                            request_id,
@@ -368,7 +368,7 @@ bool DistKvCache::get(const std::vector<int64_t>&        cache_keys,
     return true;
 }
 
-bool DistKvCache::putForAllRank(const std::vector<int64_t>&        cache_keys,
+bool DistKvCache::putForAllRank(const std::vector<size_t>&         cache_keys,
                                 const std::vector<int32_t>&        block_indices,
                                 size_t                             ignore_block_num,
                                 int64_t                            request_id,
@@ -394,7 +394,7 @@ bool DistKvCache::putForAllRank(const std::vector<int64_t>&        cache_keys,
     return result;
 }
 
-bool DistKvCache::put(const std::vector<int64_t>&        cache_keys,
+bool DistKvCache::put(const std::vector<size_t>&         cache_keys,
                       const std::vector<int32_t>&        block_indices,
                       size_t                             ignore_block_num,
                       int64_t                            request_id,
@@ -451,7 +451,7 @@ struct WorkerRpcContext {
 };
 
 // TODO: sync call all rank 的逻辑用到的地方比较多, 抽一下
-bool DistKvCache::syncCallAllRank(const std::vector<int64_t>&        cache_keys,
+bool DistKvCache::syncCallAllRank(const std::vector<size_t>&         cache_keys,
                                   const std::vector<int32_t>&        block_indices,
                                   size_t                             ignore_block_num,
                                   int64_t                            request_id,
