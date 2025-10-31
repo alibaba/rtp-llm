@@ -1,7 +1,12 @@
+import asyncio
 import concurrent.futures
 import enum
 import gc
-from multiprocessing import Lock
+import logging
+import time
+import uuid
+from abc import ABC, abstractmethod
+from multiprocessing import Lock, Manager, Process
 from queue import Queue
 from typing import Any, List, Optional, Union
 
@@ -24,46 +29,53 @@ from rtp_llm.utils.util import check_with_info
 class MMEmbeddingRes:
     embeddings: List[torch.Tensor] = []
     position_ids: Optional[List[torch.Tensor]] = None
+    deepstack_embeds: Optional[List[torch.Tensor]] = None
 
-    def __init__(self, embeddings, position_ids=None):
+    def __init__(self, embeddings, position_ids=None, deepstack_embeds=None):
         self.embeddings = embeddings
         self.position_ids = position_ids
+        self.deepstack_embeds = deepstack_embeds
 
 
 class MMWorkItemStatus(enum.Enum):
     WAITING = 0
     PREPROCESSING = 1
-    PREPROCESSED = 2
-    RUNNING = 3
-    FINISHED = 4
-    STOPPED = 5
-    ERROR = 6
+    RUNNING = 2
+    FINISHED = 3
+    ERROR = 4
 
 
 class MMWorkItem:
     def __init__(
         self,
         mm_inputs: List[MultimodalInput],
-        lock: Lock = None,
     ):
+        if len(mm_inputs) == 0:
+            raise Exception("No mm_input for work item")
         self.mm_inputs = mm_inputs
-        self.lock = lock
-        self.status = MMWorkItemStatus.WAITING
 
         self.mm_timeout_ms = self.mm_inputs[0].config.mm_timeout_ms
+        self.mm_type = self.mm_inputs[0].mm_type
 
-        self.res = None
+        self.preprocess_result = None
+        self.embedding_result = None
+
+        self.need_check_cache = len(mm_inputs) == 1 and mm_inputs[0].url is not None
+
+        self.work_item_id: str = str(uuid.uuid4())
         self.check_cache()
+
+    @property
+    def id(self):
+        return self.id
 
     def check_cache(self):
         # only cache url, type and config
-        # consider multimodal embedding cases, they
-        if len(self.mm_inputs) == 1 and self.mm_inputs[0].url is not None:
+        if self.need_check_cache:
             mm_input = self.mm_inputs[0]
             cached_res = vit_emb_cache_.check_cache(mm_input.to_string())
             if cached_res is not None:
-                self.status = MMWorkItemStatus.FINISHED
-                self.res = cached_res
+                self.embedding_result = cached_res
 
     @staticmethod
     def download_and_preprocess(
@@ -73,62 +85,58 @@ class MMWorkItem:
     ):
         with Timer() as route_timer:
             res = preprocess_func(mm_inputs, **preprocess_params)
-        kmonitor.report(GaugeMetrics.VIT_PREPROCESS_RT_METRIC, route_timer.cost_ms())
-        return res
+        return res, route_timer.cost_ms()
 
-    def submit_preprocess(
+    def may_submit_preprocess(
         self,
         mm_part: MultiModalEmbeddingInterface = None,
         mm_preprocess_executor: concurrent.futures.ProcessPoolExecutor = None,
     ):
-        if self.status == MMWorkItemStatus.WAITING:
-            self.status = MMWorkItemStatus.PREPROCESSING
-            self.future = mm_preprocess_executor.submit(
-                MMWorkItem.download_and_preprocess,
-                self.mm_inputs,
-                mm_part.get_preprocess_params(),
-                mm_part.preprocess_input,
+        # cached
+        if self.embedding_result is not None:
+            return None
+
+        return mm_preprocess_executor.submit(
+            MMWorkItem.download_and_preprocess,
+            self.mm_inputs,
+            mm_part.get_preprocess_params(),
+            mm_part.preprocess_input,
+        )
+
+    # future cannot be pickled, so it cannot be a member of MMWorkItem
+    def may_get_preprocess_result(self, future):
+        if future == None and self.preprocess_result is not None:
+            return
+        elif future == None and self.preprocess_result is None:
+            raise Exception("Preprocess result and future cannot both be None")
+
+        try:
+            self.preprocess_result, preprocess_time = future.result(
+                timeout=self.mm_timeout_ms / 1000
             )
-            return self.future
+            kmonitor.report(GaugeMetrics.VIT_PREPROCESS_RT_METRIC, preprocess_time)
+        except Exception as e:
+            future.cancel()
+            raise e
 
-    # TODO: should be replaced by embedding engine
-    def run_embedding(self, embedding_func: callable):
-        if self.res != None:
-            return self.res
-        else:
-            # result = self.res
-            try:
-                result = self.future.result(timeout=self.mm_timeout_ms / 1000)
-            except Exception as e:
-                self.future.cancel()
-                raise e
-
+    def get_embedding_result(self, embedding_func):
+        if self.preprocess_result is not None:
             with Timer() as route_timer:
-                with self.lock:
-                    res = embedding_func(result, mm_type=self.mm_inputs[0].mm_type)
+                self.embedding_result = embedding_func(
+                    self.preprocess_result, mm_type=self.mm_type
+                )
             kmonitor.report(GaugeMetrics.VIT_EMBEDDING_RT_METRIC, route_timer.cost_ms())
-            return res
-
-
-# class MMBatchProcessEngine:
-#     def __init__(
-#         self, mm_part: MultiModalEmbeddingInterface = None, max_batch_size: int = 1
-#     ):
-#         self.waiting_queue = Queue(max_batch_size)
-#         self.running_list = []
-#         self.finished_list = []
-#         self.lock = Lock()
-
-#     def submit(self, work_item: MMWorkItem):
-#         with self.lock:
-#             self.waiting_queue.put(work_item)
-
-#     def get_batched_data(self):
-#         while self.waiting_queue.qsize() > 0:
-#             with self.lock:
-#                 work_item = self.waiting_queue.get()
-#             self.running_list.append(work_item)
-#             work_item.submit_preprocess(self.mm_part, self.mm_preprocess_executor)
+            if self.need_check_cache:
+                vit_emb_cache_.insert_cache(
+                    self.mm_inputs[0].to_string(), self.embedding_result
+                )
+            return self.embedding_result
+        elif self.embedding_result is not None:
+            return self.embedding_result
+        else:
+            raise Exception(
+                "Preprocess result and embedding result in work item both be None"
+            )
 
 
 class MMProcessEngine:
@@ -136,15 +144,27 @@ class MMProcessEngine:
         self.model = model
         self.contains_pos: bool = self.model.config.mm_position_ids_style != 0
 
-        self.mm_batch_size: int = self.model.config.mm_batch_size
-
-        self.backend_engine_process = None
-        self.backend_engine_batch_size = None
+        self.mm_preprocess_batch_size: int = self.model.config.mm_preprocess_batch_size
 
         self.mm_preprocess_executor = concurrent.futures.ProcessPoolExecutor(
             max_workers=self.model.config.py_env_configs.vit_config.mm_preprocess_max_workers
         )
-        self.preprocess_lock = Lock()
+
+        self.query_num = 0
+        self.query_num_lock = Lock()
+
+    def inc_query_num(self):
+        with self.query_num_lock:
+            self.query_num += 1
+
+    def dec_query_num(self):
+        with self.query_num_lock:
+            self.query_num -= 1
+
+    # for worker status
+    def get_query_num(self):
+        with self.query_num_lock:
+            return self.query_num
 
     def _maybe_tensor_to_list(self, tensor):
         if tensor == None:
@@ -184,29 +204,45 @@ class MMProcessEngine:
 
     def mm_embedding_impl(self, mm_inputs: List[MultimodalInput]):
         try:
+            kmonitor.report(GaugeMetrics.VIT_QPS_METRIC, 1, {"source": "mm_embedding"})
+            self.inc_query_num()
             work_items = []
+            futures = []
             emb_res = []
             pos_res = []
+            tensor_res = []
 
             # embedding model; gather batches in advance
-            mm_batch_size = (
-                self.mm_batch_size if self.mm_batch_size != -1 else len(mm_inputs)
+            mm_preprocess_batch_size = (
+                self.mm_preprocess_batch_size
+                if self.mm_preprocess_batch_size != -1
+                else len(mm_inputs)
             )
-            for index in range(0, len(mm_inputs), mm_batch_size):
+            for index in range(0, len(mm_inputs), mm_preprocess_batch_size):
                 work_item = MMWorkItem(
-                    mm_inputs[index : index + mm_batch_size],
-                    lock=self.preprocess_lock,
+                    mm_inputs[index : index + mm_preprocess_batch_size]
                 )
-                work_item.submit_preprocess(
+                future = work_item.may_submit_preprocess(
                     self.model.mm_part, self.mm_preprocess_executor
                 )
+                futures.append(future)
                 work_items.append(work_item)
+            for future, work_item in zip(futures, work_items):
+                work_item.may_get_preprocess_result(future)
             for work_item in work_items:
-                emb, pos = work_item.run_embedding(self.model.mm_part.embedding)
-                emb_res.extend(self._maybe_tensor_to_list(emb))
-                pos_res.extend(self._maybe_tensor_to_list(pos))
-            return MMEmbeddingRes(emb_res, pos_res)
+                res = work_item.get_embedding_result(self.model.mm_part.embedding)
+                emb_res.extend(self._maybe_tensor_to_list(res[0]))
+                pos_res.extend(self._maybe_tensor_to_list(res[1]))
+
+            kmonitor.report(GaugeMetrics.VIT_SUCCESS_QPS_METRIC, 1)
+            return MMEmbeddingRes(emb_res, pos_res, tensor_res)
         except Exception as e:
             torch.cuda.empty_cache()
             gc.collect()
+            kmonitor.report(GaugeMetrics.VIT_ERROR_QPS_METRIC, 1)
             raise e
+        finally:
+            self.dec_query_num()
+
+    def stop(self):
+        self.mm_preprocess_executor.shutdown()

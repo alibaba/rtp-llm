@@ -108,10 +108,12 @@ class MultiModalEmbeddingInterface:
         raise NotImplementedError
 
     @torch.inference_mode()
-    def batched_embedding(self, data_list: List[Any], **kwargs):
+    def batched_embedding(
+        self, data_list: List[Any], mm_types: List[MMUrlType], **kwargs
+    ):
         res_list = []
-        for data in data_list:
-            res_list.append(self.embedding(data, **kwargs))
+        for data, mm_type in zip(data_list, mm_types):
+            res_list.append(self.embedding(data, mm_type=mm_type, **kwargs))
         return res_list
 
 

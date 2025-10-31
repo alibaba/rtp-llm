@@ -403,5 +403,7 @@ service RpcService {
 }
 
 service MultimodalRpcService {
+    rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
+    rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
     rpc RemoteMultimodalEmbedding(MultimodalInputsPB) returns (MultimodalOutputsPB);
 }

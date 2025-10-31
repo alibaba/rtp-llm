@@ -24,16 +24,15 @@ namespace rtp_llm {
 
 class RemoteMultimodalProcessor: public MultimodalProcessor {
 public:
-    RemoteMultimodalProcessor(py::object mm_process_engine, rtp_llm::GptInitParameter params):
-        MultimodalProcessor(mm_process_engine, params) {
-    }
+    RemoteMultimodalProcessor(rtp_llm::GptInitParameter params): MultimodalProcessor(py::none(), params) {}
 
 private:
     MultimodalRpcPool pool_;
     std::string       vit_cluster_name_;
 
-    ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs, std::string ip_port = "") {
-        if(ip_port == "") {
+    ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,
+                                                      std::string                                 ip_port = "") {
+        if (ip_port == "") {
             return ErrorInfo(ErrorCode::MM_NOT_SUPPORTED_ERROR, "ip:port is empty in remote multimodal processing");
         }
         auto connection_status = pool_.getConnection(ip_port);
