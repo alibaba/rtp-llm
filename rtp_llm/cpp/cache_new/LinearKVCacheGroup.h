@@ -1,32 +1,35 @@
-// #pragma once
+#pragma once
 
-// #include "rtp_llm/cpp/cache_new/KVCacheGroup.h"
+#include <memory>
+#include <vector>
+#include <cstdint>
+#include <set>
 
-// namespace rtp_llm {
+#include "rtp_llm/cpp/cache_new/KVCacheGroup.h"
+#include "rtp_llm/cpp/cache_new/BlockCacheV1.h"
+#include "rtp_llm/cpp/core/Buffer.h"
 
-// class LinearKVCacheGroup: public KVCacheGroup {
-// public:
-//     LinearKVCacheGroup(const std::vector<int>& layer_ids, 
-//                        const KVCacheSpec& group_spec,
-//                        BlockCachePtr block_cache,
-//                        BlockPoolPtr block_pool)
-//         : KVCacheGroup(layer_ids, group_spec, block_cache, block_pool) {}
-    
-//     // 实现基类的纯虚函数
-//     bool init() override;
-//     std::vector<int> alloc(int needed_blocks) override;
-//     MatchResult match(std::vector<int64_t> cache_keys) const override;
-//     void free(std::vector<int> block_indices) override;
-//     void insertIntoCache(std::vector<int64_t> cache_keys, std::vector<int> block_indices) override;
-//     std::unordered_map<int, torch::Tensor> layerCacheBase() const override;
-//     BufferPtr convertIndexToAddr(int layer_id, int block_id) const override;
-//     KVCacheGroupType type() const override;
-    
-//     // evict first if block_pool's blocks are not enough when alloc 
-//     bool evict(int need_evict_len) override;
-// };
+namespace rtp_llm {
 
-// using KVCacheGroupPtr = std::shared_ptr<KVCacheGroup>;
+class LinearKVCacheGroup: public KVCacheGroup {
+public:
+    LinearKVCacheGroup(const LayerIdsType& layer_ids, std::shared_ptr<KVCacheSpec> group_spec, BlockPoolPtr block_pool):
+        KVCacheGroup(layer_ids, group_spec, block_pool) {}
 
-// }  // namespace rtp_llm
+    MatchResult match(CacheKeysType& cache_keys) override;
+    void        malloc(CacheKeysType& cache_keys, BlockIndicesType& block_indices, int seq_len) override;
+    void        insertIntoCache(CacheKeysType& cache_keys, BlockIndicesType& block_indices, bool is_resident) override;
 
+    void removeSkippedBlocks(BlockIndicesType& block_indices) override;
+    void free(const BlockIndicesType& block_indices) override;
+
+private:
+    int needBlocksNum(int seq_len, int current_blocks) const override;
+
+private:
+    int save_point;
+};
+
+using LinearKVCacheGroupPtr = std::shared_ptr<LinearKVCacheGroup>;
+
+}  // namespace rtp_llm

@@ -1,110 +1,92 @@
-// #include "rtp_llm/cpp/cache_new/LinearKVCacheGroup.h"
-// #include "rtp_llm/cpp/utils/Logger.h"
+#include <cassert>
+#include <iostream>
+#include <string>
+#include <vector>
+#include <set>
 
-// namespace rtp_llm {
+#include "rtp_llm/cpp/cache_new/BlockCacheV1.h"
+#include "rtp_llm/cpp/cache_new/LinearKVCacheGroup.h"
+#include "rtp_llm/cpp/utils/LRUCache.h"
+#include "rtp_llm/cpp/utils/StringUtil.h"
 
-// bool LinearKVCacheGroup::init() {
-//     auto layer_tensors = block_pool_->layerCacheBase();
+using namespace std;
 
-//     for(int i = 0; i < layer_ids_.size(); ++i) {
-//         gloabl_layer_to_kv_tensors[layer_ids_[i]] = layer_tensors[i];
-//         gloabl_layer_to_local_layer[layer_ids_[i]] = i;
-//     }
+namespace rtp_llm {
 
-//     return true;
-// }
+MatchResult LinearKVCacheGroup::match(CacheKeysType& cache_keys) {
+    MatchResult match_result;
+    match_result.block_indices.resize(cache_keys.size());
 
-// std::vector<int> LinearKVCacheGroup::alloc(int needed_blocks) {
-//     if (needed_blocks <= 0) {
-//         RTP_LLM_LOG_DEBUG("No blocks needed for allocation");
-//         return {};
-//     }
+    int pos = cache_keys.size() - 1;
+    for (auto it = cache_keys.rbegin(); it != cache_keys.rend(); ++it) {
+        auto result = block_cache_->match(*it);
+        if (isNullBlockIdx(result.matched_index)) {
+            continue;
+        }
+        match_result.block_indices[pos] = result.matched_index;
+        match_result.reuse_length       = pos + 1;
+        break;
+    }
+    return match_result;
+}
 
-//     auto new_blocks = block_pool_->alloc(needed_blocks);
+// 保留一个有效的block即可。优化下效率，及时退出
+void LinearKVCacheGroup::removeSkippedBlocks(BlockIndicesType& block_indices) {
+    if (block_indices.empty()) {
+        return;
+    }
 
-//     RTP_LLM_LOG_DEBUG("Allocated %zu blocks (requested %d)", 
-//                       new_blocks.size(), needed_blocks);
-//     return new_blocks;
-// }
+    bool found_valid_block = false;
+    for (int i = block_indices.size() - 1; i >= 0; i--) {
+        if (!isNullBlockIdx(block_indices[i])) {
+            if (!found_valid_block) {
+                found_valid_block = true;
+            } else {
+                BlockIndicesType blocks = {block_indices[i]};
+                block_pool_->free(blocks);
+            }
+        }
+    }
+}
 
-// MatchResult LinearKVCacheGroup::match(std::vector<int64_t> cache_keys) const {
-//     MatchResult result;
-//     result.reuse_length = 0;
+// not reuse cache
+// reuse cache
+// prefill
+// decode
+int LinearKVCacheGroup::needBlocksNum(int seq_len, int current_blocks) const {
+    return std::max((seq_len + seq_size_per_block_ - 1) / seq_size_per_block_ - current_blocks, 0);
+}
 
-//     // LinearKVCacheGroup 使用 match
-//     result = block_cache_->match(cache_keys);
-    
-//     return result;
-// }
+void LinearKVCacheGroup::malloc(CacheKeysType& cache_keys, BlockIndicesType& block_indices, int seq_len) {
+    // block_indices
+    int new_blocks = needBlocksNum(seq_len, block_indices.size());
 
-// void LinearKVCacheGroup::free(std::vector<int> block_indices) {
-//     if (!block_pool_) {
-//         RTP_LLM_LOG_ERROR("Block pool is not initialized");
-//         return;
-//     }
-    
-//     if (block_indices.empty()) {
-//         return;
-//     }
-    
-//     block_pool_->free(block_indices);
-//     RTP_LLM_LOG_DEBUG("Freed %zu blocks", block_indices.size());
-// }
+    auto result = block_pool_->malloc(new_blocks);
+    // check aloc error
 
-// void LinearKVCacheGroup::insertIntoCache(std::vector<int64_t> cache_keys, std::vector<int> block_indices) {
-//     if (!block_cache_) {
-//         RTP_LLM_LOG_DEBUG("Block cache is not initialized, skip insertion");
-//         return;
-//     }
-    
-//     if (cache_keys.size() != block_indices.size()) {
-//         RTP_LLM_LOG_ERROR("Cache keys size (%zu) doesn't match block indices size (%zu)", 
-//                           cache_keys.size(), block_indices.size());
-//         return;
-//     }
-    
-//     if (cache_keys.empty()) {
-//         return;
-//     }
-    
-//     block_cache_->put(cache_keys, block_indices);
-//     RTP_LLM_LOG_DEBUG("Inserted %zu blocks into cache", block_indices.size());
-// }
+    // set blocks to position, not append
+    for (int i = 0; i < result.size(); i++) {
+        block_indices.push_back(result[i]);
+    }
 
+    // insert new allocate blocks to block cache?
+}
 
-// KVCacheGroupType LinearKVCacheGroup::type() const {
-//     return KVCacheGroupType::LINEAR;
-// }
+void LinearKVCacheGroup::free(const BlockIndicesType& block_indices) {
+    block_pool_->free(block_indices);
+}
 
-// bool LinearKVCacheGroup::evict(int need_evict_len) {
-//     if (need_evict_len <= 0) {
-//         return true;
-//     }
-    
-//     vector<int> evicted_blocks;
-//     while (static_cast<int>(evicted_blocks.size()) < need_evict_len && !block_cache_->empty()) {
-//         auto evicted_block = block_cache_->pop();
-//         evicted_blocks.push_back(evicted_block);
-//     }
-//     block_pool_->free(evicted_blocks);
-    
-//     int evicted_count = static_cast<int>(evicted_blocks.size());
-//     bool success = (evicted_count >= need_evict_len);
-//     RTP_LLM_LOG_DEBUG("Evicted %d blocks (needed %d): %s", 
-//                       evicted_count, need_evict_len, success ? "success" : "partial");
-    
-//     return success;
-// }
+void LinearKVCacheGroup::insertIntoCache(CacheKeysType& cache_keys, BlockIndicesType& block_indices, bool is_resident) {
+    RTP_LLM_CHECK_WITH_INFO(cache_keys.size() == block_indices.size(),
+                            "cache keys size is " + std::to_string(cache_keys.size()) + ", block indices size is "
+                                + std::to_string(block_indices.size()));
 
+    for (int i = 0; i < cache_keys.size(); i++) {
+        BlockCacheV1::CacheItem item{cache_keys[i], block_indices[i], is_resident};
+        if (block_cache_->put(item)) {
+            block_pool_->incrBlockRefCounter({block_indices[i]});
+        }
+    }
+}
 
-// std::unordered_map<int, torch::Tensor> LinearKVCacheGroup::layerCacheBase() const {
-//     return gloabl_layer_to_kv_tensors;
-// }
-
-
-// BufferPtr LinearKVCacheGroup::convertIndexToAddr(int layer_id, int block_id) const {
-//     int local_layer_id = gloabl_layer_to_local_layer.at(layer_id);
-//     return block_pool_->convertIndexToAddr(local_layer_id, block_id);
-// }
-
-// }  // namespace rtp_llm
+}  // namespace rtp_llm

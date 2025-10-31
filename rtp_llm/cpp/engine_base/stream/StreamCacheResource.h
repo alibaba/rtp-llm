@@ -36,21 +36,21 @@ public:
     ~StreamCacheResource() {
         releaseResource();
     }
-    void                        init(int batch_size);
-    void                        constructCacheKey();
-    void                        reConstructCacheKeys();
-    bool                        hasCacheKeys() const;
-    const std::vector<int64_t>& cacheKeys(int32_t batch_id) const;
-    absl::StatusOr<int>         initKVBlock(int token_capacity, size_t reserve_step = 0);
-    absl::StatusOr<int>         incrKVBlock(int token_capacity, size_t reserve_step = 0);
-    void                        fakeInitKVBlock();
-    int                         tryReleaseKVBlock(size_t nums);
-    absl::Status                releaseSequenceKVCache(size_t total_seq_len, size_t release_seq_len);
-    void                        freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);
-    void                        releaseResource();
-    int                         singleBatchNeedBlocks(int seq_len) const;
-    int                         maxBlockSize() const;
-    int                         mallocFailedTimes() const;
+    void                       init(int batch_size);
+    void                       constructCacheKey();
+    void                       reConstructCacheKeys();
+    bool                       hasCacheKeys() const;
+    const std::vector<size_t>& cacheKeys(int32_t batch_id) const;
+    absl::StatusOr<int>        initKVBlock(int token_capacity, size_t reserve_step = 0);
+    absl::StatusOr<int>        incrKVBlock(int token_capacity, size_t reserve_step = 0);
+    void                       fakeInitKVBlock();
+    int                        tryReleaseKVBlock(size_t nums);
+    absl::Status               releaseSequenceKVCache(size_t total_seq_len, size_t release_seq_len);
+    void                       freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);
+    void                       releaseResource();
+    int                        singleBatchNeedBlocks(int seq_len) const;
+    int                        maxBlockSize() const;
+    int                        mallocFailedTimes() const;
 
     const BatchKVCacheResource& kvCache() const;
     void                        setKVCache(const BatchKVCacheResource& kv_cache_resource);

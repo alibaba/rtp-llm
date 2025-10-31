@@ -315,7 +315,7 @@ bool StreamCacheResource::updateKVBlock(const std::vector<int>& block_src_batch,
     // generate update mapping for block ids
     vector<vector<int32_t>> old_block_ids = std::move(batch_resource_.batch_block_id);
     batch_resource_.batch_block_id.reserve(new_batch_size);
-    vector<vector<int64_t>> old_cache_keys = std::move(batch_resource_.cache_keys);
+    vector<vector<size_t>> old_cache_keys = std::move(batch_resource_.cache_keys);
     batch_resource_.cache_keys.reserve(new_batch_size);
     block_update_mapping_.reserve(num_new_blocks);
     for (int new_batch_idx = 0; new_batch_idx < new_batch_size; ++new_batch_idx) {
@@ -360,11 +360,11 @@ void StreamCacheResource::constructCacheKey() {
     for (size_t i = 0; i < stream_->currentBatchSize(); i++) {
         batch_resource_.cache_keys[i].reserve(singleBatchNeedBlocks(stream_->max_seq_len_));
     }
-    auto    seq_size_per_block = seqSizePerBlock();
-    auto    token_ids          = stream_->generate_input_->input_ids->data<int32_t>();
-    int64_t hash               = 0;
-    last_block_aligned_        = stream_->seqLength() % seq_size_per_block == 0 ? true : false;
-    int32_t end_block_index    = singleBatchNeedBlocks(stream_->seqLength());
+    auto   seq_size_per_block = seqSizePerBlock();
+    auto   token_ids          = stream_->generate_input_->input_ids->data<int32_t>();
+    size_t hash               = 0;
+    last_block_aligned_       = stream_->seqLength() % seq_size_per_block == 0 ? true : false;
+    int32_t end_block_index   = singleBatchNeedBlocks(stream_->seqLength());
     for (int index = 0; index < end_block_index; index++) {
         auto pos = index * seq_size_per_block;
         hash =
@@ -389,8 +389,8 @@ void StreamCacheResource::reConstructCacheKeys() {
         if (!last_block_aligned_ && !batch_resource_.cache_keys[i].empty()) {
             batch_resource_.cache_keys[i].pop_back();
         }
-        auto    token_ids = stream_->complete_token_ids_->data(i);
-        int64_t hash      = batch_resource_.cache_keys[i].empty() ? 0 : batch_resource_.cache_keys[i].back();
+        auto   token_ids = stream_->complete_token_ids_->data(i);
+        size_t hash      = batch_resource_.cache_keys[i].empty() ? 0 : batch_resource_.cache_keys[i].back();
         for (int index = batch_resource_.cache_keys[i].size(); index < total_blocks; index++) {
             auto pos = index * seq_size_per_block;
             hash     = hashInt64Array(hash, token_ids + pos, token_ids + pos + seq_size_per_block);
@@ -405,7 +405,7 @@ bool StreamCacheResource::hasCacheKeys() const {
     return !batch_resource_.cache_keys.empty();
 }
 
-const std::vector<int64_t>& StreamCacheResource::cacheKeys(int32_t batch_id) const {
+const std::vector<size_t>& StreamCacheResource::cacheKeys(int32_t batch_id) const {
     RTP_LLM_CHECK_WITH_INFO(batch_resource_.cache_keys.size() > batch_id, "cache_keys size is <= batch_id");
     return batch_resource_.cache_keys[batch_id];
 }

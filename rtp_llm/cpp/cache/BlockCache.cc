@@ -18,7 +18,7 @@ std::size_t hashVector(const std::vector<int>& vec) {
     return hasher(vecString);
 }
 
-size_t BlockCache::prefixLength(const std::vector<int64_t>& left, const std::vector<int64_t>& right) {
+size_t BlockCache::prefixLength(const std::vector<size_t>& left, const std::vector<size_t>& right) {
     size_t max_common_length = std::min(left.size(), right.size());
     for (size_t index = 0; index < max_common_length; ++index) {
         if (left[index] != right[index]) {
@@ -28,7 +28,7 @@ size_t BlockCache::prefixLength(const std::vector<int64_t>& left, const std::vec
     return max_common_length;
 }
 
-BlockCache::MatchResult BlockCache::match(const std::vector<int64_t>& cache_key) {
+BlockCache::MatchResult BlockCache::match(const std::vector<size_t>& cache_key) {
     std::lock_guard<std::mutex> lock(mutex_);
 
     CacheItem matched_item;

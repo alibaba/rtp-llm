@@ -15,7 +15,7 @@ namespace rtp_llm {
 struct CacheItem {
     std::vector<int32_t> token_list;
     std::vector<int32_t> block_indices;
-    std::vector<int64_t> cache_key;
+    std::vector<size_t>  cache_key;
     std::vector<float>   loss;
     bool                 is_resident = false;
     size_t               item_key;
@@ -35,9 +35,10 @@ public:
     explicit BlockCache(size_t seq_size_per_block):
         lru_cache_(kCacheMaxCapacity), seq_size_per_block_(seq_size_per_block) {}
 
-    static size_t prefixLength(const std::vector<int64_t>& left, const std::vector<int64_t>& right);
+    static size_t prefixLength(const std::vector<size_t>& left, const std::vector<size_t>& right);
 
-    MatchResult match(const std::vector<int64_t>& cache_key);
+    // TODO, 提供选项，match的时候，不需要增加热度，最后再增加。
+    MatchResult match(const std::vector<size_t>& cache_key);
 
     std::vector<int> put(CacheItem& item);
 

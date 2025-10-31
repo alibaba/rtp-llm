@@ -15,8 +15,7 @@ DefaultDistKvCachePlanner::DefaultDistKvCachePlanner(CacheManager*              
     init_params_3fs_(init_params_3fs),
     metrics_reporter_(metrics_reporter) {}
 
-
-std::vector<DistStorage::Item> DefaultDistKvCachePlanner::layout(const std::vector<int64_t>& cache_keys,
+std::vector<DistStorage::Item> DefaultDistKvCachePlanner::layout(const std::vector<size_t>&  cache_keys,
                                                                  const std::vector<int32_t>& block_indices,
                                                                  size_t                      ignore_block_num,
                                                                  const std::map<std::string, std::string>& metas) {
@@ -33,18 +32,18 @@ std::vector<DistStorage::Item> DefaultDistKvCachePlanner::layout(const std::vect
             ignore_block_num);
         return {};
     }
-    
+
     const auto& cache_config = cache_manager_->cacheConfig();
     const auto  k_block_len  = cache_config.k_block_stride;
     const auto  v_block_len  = cache_config.v_block_stride;
 
     std::shared_ptr<DistStorage::Item> item;
     uint32_t                           item_block_count = 0;
-    std::vector<int64_t>               item_keys;
+    std::vector<size_t>                item_keys;
     std::vector<DistStorage::Item>     items;
 
     for (int i = 0; i < total_len; i++) {
-        bool ignore   = i < ignore_block_num;
+        bool ignore = i < ignore_block_num;
         if (item == nullptr) {
             item             = std::make_shared<DistStorage::Item>();
             item->type       = DistStorage::ST_3FS;
@@ -64,14 +63,10 @@ std::vector<DistStorage::Item> DefaultDistKvCachePlanner::layout(const std::vect
                     if (!block_addrs.k_addr || !block_addrs.v_addr) {
                         return {};
                     }
-                    item->iovs.push_back(DistStorage::Iov{std::shared_ptr<void>(block_addrs.k_addr, [](void* p) {}),
-                                                        k_block_len,
-                                                        true,
-                                                        ignore});
-                    item->iovs.push_back(DistStorage::Iov{std::shared_ptr<void>(block_addrs.v_addr, [](void* p) {}),
-                                                        v_block_len,
-                                                        true,
-                                                        ignore});
+                    item->iovs.push_back(DistStorage::Iov{
+                        std::shared_ptr<void>(block_addrs.k_addr, [](void* p) {}), k_block_len, true, ignore});
+                    item->iovs.push_back(DistStorage::Iov{
+                        std::shared_ptr<void>(block_addrs.v_addr, [](void* p) {}), v_block_len, true, ignore});
                 }
             }
         }
@@ -80,7 +75,7 @@ std::vector<DistStorage::Item> DefaultDistKvCachePlanner::layout(const std::vect
         item_keys.push_back(cache_keys[i]);
 
         if (item_block_count >= gpt_init_params_.kv_cache_config.max_block_size_per_item && item_keys.size() > 0) {
-            item->key = std::to_string(item_keys.front()) + "_" + std::to_string(item_keys.back());
+            item->key               = std::to_string(item_keys.front()) + "_" + std::to_string(item_keys.back());
             item->metas["ITEM_KEY"] = item->key;
             RTP_LLM_LOG_DEBUG("push item: %s", item->key.c_str());
             items.push_back(*item);
@@ -89,7 +84,7 @@ std::vector<DistStorage::Item> DefaultDistKvCachePlanner::layout(const std::vect
     }
 
     if (item != nullptr && item_keys.size() > 0) {
-        item->key = std::to_string(item_keys.front()) + "_" + std::to_string(item_keys.back());
+        item->key               = std::to_string(item_keys.front()) + "_" + std::to_string(item_keys.back());
         item->metas["ITEM_KEY"] = item->key;
         RTP_LLM_LOG_DEBUG("push item: %s", item->key.c_str());
         items.push_back(*item);
@@ -98,7 +93,7 @@ std::vector<DistStorage::Item> DefaultDistKvCachePlanner::layout(const std::vect
 }
 
 bool DefaultDistKvCachePlanner::verify(const std::vector<DistStorage::Item>&     items,
-                                       const std::vector<int64_t>&               cache_keys,
+                                       const std::vector<size_t>&                cache_keys,
                                        const std::vector<int32_t>&               block_indices,
                                        const std::map<std::string, std::string>& metas) {
     // TODO: need verify?

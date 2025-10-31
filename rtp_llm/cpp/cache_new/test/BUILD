@@ -29,6 +29,20 @@ block_cache_test_deps = [
     "@local_config_cuda//cuda:cudart",
 ] + torch_deps()
 
+
+cc_library(
+    name = "block_pool_test_helper",
+    hdrs = [
+        "BlockPoolTestHelper.h"
+    ],
+    srcs = [
+    ],
+    copts = test_copts,
+    deps = test_deps,
+    alwayslink = 1,
+    visibility = ["//visibility:public"],
+)
+
 cc_test(
     name = "block_cache_test",
     srcs = [
@@ -48,7 +62,9 @@ cc_test(
     ],
     data = [],
     copts = test_copts,
-    deps = test_deps,
+    deps = test_deps + [
+        ":block_pool_test_helper",
+    ],
     env = {},
     exec_properties = {'gpu':'A10'},
 )
@@ -61,6 +77,34 @@ cc_test(
     data = [],
     copts = test_copts,
     deps = test_deps,
+    env = {},
+    exec_properties = {'gpu':'A10'},
+)
+
+cc_test(
+    name = "full_kv_cache_group_test",
+    srcs = [
+        "FullKVCacheGroupTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps + [
+        ":block_pool_test_helper",
+    ],
+    env = {},
+    exec_properties = {'gpu':'A10'},
+)
+
+cc_test(
+    name = "linear_kv_cache_group_test",
+    srcs = [
+        "LinearKVCacheGroupTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps + [
+        ":block_pool_test_helper",
+    ],
     env = {},
     exec_properties = {'gpu':'A10'},
 )

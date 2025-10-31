@@ -117,7 +117,7 @@ bool GenerateStream::hasCacheKeys() const {
     return stream_cache_resource_->hasCacheKeys();
 }
 
-const std::vector<int64_t>& GenerateStream::cacheKeys(int32_t batch_id) const {
+const std::vector<size_t>& GenerateStream::cacheKeys(int32_t batch_id) const {
     return stream_cache_resource_->cacheKeys(batch_id);
 }
 

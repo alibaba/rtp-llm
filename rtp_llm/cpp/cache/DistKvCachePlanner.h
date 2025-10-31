@@ -8,13 +8,13 @@ namespace rtp_llm {
 
 class DistKvCachePlanner {
 public:
-    virtual std::vector<DistStorage::Item> layout(const std::vector<int64_t>&               cache_keys,
+    virtual std::vector<DistStorage::Item> layout(const std::vector<size_t>&                cache_keys,
                                                   const std::vector<int32_t>&               block_indices,
                                                   size_t                                    ignore_block_num,
                                                   const std::map<std::string, std::string>& metas) = 0;
 
     virtual bool verify(const std::vector<DistStorage::Item>&     buffers,
-                        const std::vector<int64_t>&               cache_keys,
+                        const std::vector<size_t>&                cache_keys,
                         const std::vector<int32_t>&               block_indices,
                         const std::map<std::string, std::string>& metas) = 0;
 };
@@ -30,13 +30,13 @@ public:
                               const kmonitor::MetricsReporterPtr& metrics_reporter);
 
 public:
-    std::vector<DistStorage::Item> layout(const std::vector<int64_t>&               cache_keys,
+    std::vector<DistStorage::Item> layout(const std::vector<size_t>&                cache_keys,
                                           const std::vector<int32_t>&               block_indices,
                                           size_t                                    ignore_block_num,
                                           const std::map<std::string, std::string>& metas) override;
 
     bool verify(const std::vector<DistStorage::Item>&     buffers,
-                const std::vector<int64_t>&               cache_keys,
+                const std::vector<size_t>&                cache_keys,
                 const std::vector<int32_t>&               block_indices,
                 const std::map<std::string, std::string>& metas) override;
 
