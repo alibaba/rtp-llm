@@ -9,44 +9,51 @@
 
 #include <torch/torch.h>
 
-#include "rtp_llm/cpp/cache/BlockRefCounter.h"
+#include "rtp_llm/cpp/cache_new/BlockRefCounter.h"
 #include "rtp_llm/cpp/cache_new/CacheConfig.h"
 #include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/cache_new/types.h"
+#include "rtp_llm/cpp/cache_new/BlockCacheV1.h"
 #include "rtp_llm/cpp/cache_new/MemoryLayoutStrategy.h"
-
 
 namespace rtp_llm {
 
+// TODO, 0 号block不能算作free
 class BlockPool {
 public:
     struct KVCacheBuffer {
-        torch::Tensor      kv_blocks;
+        torch::Tensor kv_blocks;
     };
 
-    BlockPool(const BlockPoolConfig& config, rtp_llm::DeviceBase* device, AllocationType atype = AllocationType::DEVICE);
+    BlockPool(const BlockPoolConfig& config,
+              rtp_llm::DeviceBase*   device,
+              AllocationType         atype = AllocationType::DEVICE);
     ~BlockPool();
 
     bool init();
+
+    BlockCacheV1Ptr blockCache();
 
     // size_t totalBlocks() const;
     size_t freeBlockNums() const;
 
     std::vector<torch::Tensor> layerCacheBase() const;
 
-    std::vector<BlockIdxType> alloc(int num_blocks);
-    void free(const std::vector<BlockIdxType>& block_ids);
-    void reference(const std::vector<BlockIdxType>& block_ids);
+    std::vector<BlockIdxType> malloc(int num_blocks);
+    void                      free(const BlockIndicesType& block_indices);
+    void                      reference(const BlockIndicesType& block_indices);
 
-    void regUserMr(size_t model_id);
-    BlockAddrInfo convertIndexToAddr(int layer_id, int block_id) const;
+    void            regUserMr(size_t model_id);
+    BlockAddrInfo   convertIndexToAddr(int layer_id, int block_id) const;
     BlockBufferInfo convertIndexToBuffer(int layer_id, int block_id) const;
-    
 
     void* getKCacheAddr(int layer_id, int block_id) const;
     void* getVCacheAddr(int layer_id, int block_id) const;
+
+    void incrBlockRefCounter(const BlockIndicesType& blocks) {}
+    void decrBlockRefCounter(const BlockIndicesType& blocks) {}
 
 private:
     void initFreeBlocks();
@@ -61,19 +68,21 @@ private:
     // void decrBlockRefCounter(const std::vector<int>& blocks);
 
 private:
-    BlockPoolConfig config_;
-    std::set<BlockIdxType> free_block_ids;
-    std::unordered_map<int, torch::Tensor> layer_kv_tensors_;        // global_layer_id -> kv cache addresses
-    KVCacheBuffer kv_cache_;
-    BlockRefCounter block_ref_counter_;
-    rtp_llm::DeviceBase* device_;
-    AllocationType atype_;
-    
+    BlockPoolConfig                        config_;
+    std::set<BlockIdxType>                 free_block_ids_;
+    std::unordered_map<int, torch::Tensor> layer_kv_tensors_;  // global_layer_id -> kv cache addresses
+    KVCacheBuffer                          kv_cache_;
+    BlockRefCounter                        block_ref_counter_;
+    rtp_llm::DeviceBase*                   device_;
+    AllocationType                         atype_;
+
+    BlockCacheV1Ptr block_cache_;
+
     rtp_llm::BufferPtr cache_aligned_buffer_;
-    void*              cache_base_ptr_ = nullptr;
-    bool               kvcache_reg_mr_ = false;
+    void*              cache_base_ptr_  = nullptr;
+    bool               kvcache_reg_mr_  = false;
     int64_t            mr_cost_time_ms_ = 0;
-    
+
     // 新增：布局策略
     std::unique_ptr<MemoryLayoutStrategy> layout_strategy_;
 };
