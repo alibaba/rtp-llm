@@ -21,10 +21,6 @@ using SamplerT = float;
 GreedyOutput ROCmDevice::sampleGreedy(const GreedyParams& params) {
     const auto& logits     = params.logits;
     const auto  batch_size = logits.shape()[0];
-    RUNTIME_ASSERT_OP_ARG(batch_size < init_params_.max_batch_size,
-                          "batch_size exceeded device limit %d: %d",
-                          init_params_.max_batch_size,
-                          batch_size);
     const auto vocab_size_padded = logits.shape()[1];
     const auto step              = params.step;
     RUNTIME_ASSERT_OP_ARG(batch_size == params.token_ids.shape()[0],
@@ -205,22 +201,6 @@ GreedyOutput ROCmDevice::sampleGreedy(const GreedyParams& params) {
                 // NOTE: here step is max_len - 1
             }
         }
-    }
-
-    if (params.min_lengths && params.eos_ids) {
-        auto min_lengths_buf = clone({params.min_lengths.value().get()});
-        // move this to NormalExecutor
-        auto sequence_lengths = clone({params.sequence_lengths});
-        auto input_lengths    = clone({params.input_lengths});
-        invokeMinLengthPenaltyNew(logits.data<float>(),
-                                  min_lengths_buf->data<int32_t>(),
-                                  params.eos_ids.value().get().data<int32_t>(),
-                                  sequence_lengths->data<int32_t>(),
-                                  input_lengths->data<int32_t>(),
-                                  decoder_batch_size,
-                                  batch_size,
-                                  vocab_size_padded,
-                                  stream_);
     }
 
     // fast path for topk = 1

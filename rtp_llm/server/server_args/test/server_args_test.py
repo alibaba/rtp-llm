@@ -97,10 +97,6 @@ class ServerArgsDefaultTest(TestCase):
         self.assertEqual(env.get("ENABLE_NATIVE_CUDA_GRAPH"), "0")
         self.assertEqual(env.get("NUM_NATIVE_CUDA_GRAPH"), "200")
 
-        # 7. 采样
-        self.assertEqual(env.get("MAX_BATCH_SIZE"), "0")
-        self.assertEqual(env.get("ENABLE_FLASHINFER_SAMPLE_KERNEL"), "1")
-
         # 8. 设备和资源管理
         self.assertEqual(env.get("DEVICE_RESERVE_MEMORY_BYTES"), "0")
         self.assertEqual(env.get("HOST_RESERVE_MEMORY_BYTES"), "4294967296")
@@ -423,11 +419,6 @@ class ServerArgsSetTest(TestCase):
             "True",
             "--num_native_cuda_graph",
             "100",
-            # 7. 采样
-            "--max_batch_size",
-            "128",
-            "--enable_flashinfer_sample_kernel",
-            "False",
             # 8. 设备和资源管理
             "--device_reserve_memory_bytes",
             "4096000",
@@ -793,10 +784,6 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env.get("USE_ASM_PA"), "0")
         self.assertEqual(env.get("ENABLE_NATIVE_CUDA_GRAPH"), "1")
         self.assertEqual(env.get("NUM_NATIVE_CUDA_GRAPH"), "100")
-
-        # 7. 采样
-        self.assertEqual(env["MAX_BATCH_SIZE"], "128")
-        self.assertEqual(env["ENABLE_FLASHINFER_SAMPLE_KERNEL"], "0")
 
         # 8. 设备和资源管理
         self.assertEqual(env["DEVICE_RESERVE_MEMORY_BYTES"], "4096000")
