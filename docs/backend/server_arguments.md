@@ -185,3 +185,9 @@ This page lists server arguments used to configure the behavior and performance 
 |-----------|-------------|----------|
 | `--gen-timeline-sync` | Collects Timeline analysis data | False |
 | `--torch-cuda-profiler-dir` | Torch Profiler output directory | "" |
+
+## Load Config
+
+| Arguments | Description | Defaults |
+|-----------|-------------|----------|
+| `--load_method` | Specify the weight loading method.<br>Options: auto, fastsafetensors, scratch | auto |
