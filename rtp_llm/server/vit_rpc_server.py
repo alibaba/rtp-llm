@@ -3,10 +3,14 @@ from concurrent import futures
 import grpc
 
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+    CacheStatusPB,
+    CacheVersionPB,
     MMPreprocessConfigPB,
     MultimodalInputsPB,
     MultimodalOutputPB,
     MultimodalOutputsPB,
+    StatusVersionPB,
+    WorkerStatusPB,
 )
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
     MultimodalRpcServiceServicer,
@@ -45,14 +49,46 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
         res: MMEmbeddingRes = self.engine.mm_embedding_rpc(multimodal_inputs)
         return trans_output(res)
 
+    def GetWorkerStatus(self, request: StatusVersionPB, context):
+        worker_status = WorkerStatusPB()
+        worker_status.role = "VIT"
+        worker_status.status_version = 1
+        worker_status.alive = True
+        return worker_status
+        # return self.engine.get_worker_status(request.latest_finished_version)
 
-def vit_start_server():
+    def GetCacheStatus(self, request: CacheVersionPB, context):
+        return CacheStatusPB()
+        # return self.engine.get_cache_status(request.latest_cache_version)
+
+    def stop(self):
+        self.engine.stop()
+
+
+def create_rpc_server():
+    server = grpc.server(
+        futures.ThreadPoolExecutor(max_workers=200),
+        options=[
+            ("grpc.max_send_message_length", 1024 * 1024 * 1024),
+            ("grpc.max_receive_message_length", 1024 * 1024 * 1024),
+            ("grpc.max_concurrent_streams", -1),
+            ("grpc.http2.min_ping_interval_without_data_ms", 1000),
+            ("grpc.http2.max_ping_strikes", 1000),
+        ],
+    )
+    return server
+
+
+def vit_start_rpc_server():
     model = ModelFactory.create_from_env()
     server = grpc.server(
         futures.ThreadPoolExecutor(max_workers=200),
         options=[
             ("grpc.max_send_message_length", 1024 * 1024 * 1024),
             ("grpc.max_receive_message_length", 1024 * 1024 * 1024),
+            ("grpc.max_concurrent_streams", -1),
+            ("grpc.http2.min_ping_interval_without_data_ms", 1000),
+            ("grpc.http2.max_ping_strikes", 1000),
         ],
     )
     add_MultimodalRpcServiceServicer_to_server(
@@ -64,4 +100,4 @@ def vit_start_server():
 
 
 if __name__ == "__main__":
-    vit_start_server()
+    vit_start_rpc_server()
