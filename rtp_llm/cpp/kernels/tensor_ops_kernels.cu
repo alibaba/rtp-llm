@@ -90,7 +90,7 @@ __global__ void transposeAxis01(T* out, T* in, const int* in_skipping_dim1, cons
 template<typename T>
 void invokeTransposeAxis01(T* out, T* in, const size_t dim0, const size_t dim1, cudaStream_t stream) {
     dim3 block(512);
-    dim3 grid(ceil_div<size_t>(dim0 * dim1, 512));
+    dim3 grid(ceil_div<size_t>(dim0 * dim1, 512ul));
     transposeAxis01<<<grid, block, 0, stream>>>(out, in, nullptr, dim0, dim1);
 #if USING_CUDA
     check_cuda_value(cudaPeekAtLastError());
@@ -243,14 +243,14 @@ INSTANTIATE_INVOKE_LOOKUP_HIDDEN_OF_LAST(__nv_bfloat16);
 INSTANTIATE_INVOKE_LOOKUP_HIDDEN_OF_LAST(__nv_fp8_e4m3);
 #endif
 
-template<typename T, size_t vec_size = 8>
-__global__ void checkNANKernel(T* input, int64_t nums, int circle) {
-    int64_t            index = ((int64_t)blockIdx.x * blockDim.x + threadIdx.x) * vec_size * circle;
+template<typename T, size_t vec_size>
+__global__ void checkNANKernel(T* input, size_t nums, size_t circle) {
+    size_t             index = ((int64_t)blockIdx.x * blockDim.x + threadIdx.x) * vec_size * circle;
     vec_t<T, vec_size> inputs;
-    int64_t            max_index = min(index + vec_size * circle, nums - vec_size);
-    for (int64_t i = index; i < max_index; i += vec_size) {
+    size_t             max_index = min(index + vec_size * circle, nums - vec_size);
+    for (size_t i = index; i < max_index; i += vec_size) {
         inputs.load(input + i);
-        for (int j = 0; j < vec_size; ++j)
+        for (size_t j = 0; j < vec_size; ++j)
             if (isnan(float(inputs[j]))) {
                 // 触发非法内存访问以生成core dump
                 volatile int* ptr = nullptr;
@@ -262,10 +262,10 @@ __global__ void checkNANKernel(T* input, int64_t nums, int circle) {
 
 template<typename T>
 void invokeCheckNAN(T* input, size_t nums, cudaStream_t stream) {
-    const int vec_size = 8;
-    int       circle   = nums / 512 / 65536 + 1;
-    dim3      grid(nums / circle / 512);
-    dim3      block(512);
+    constexpr size_t vec_size = 16 / sizeof(T);
+    size_t           circle   = nums / 512 / 65536 + 1;
+    dim3             grid(nums / circle / 512);
+    dim3             block(512);
     checkNANKernel<T, vec_size><<<grid, block, 0, stream>>>(input, nums, circle);
 }
 
