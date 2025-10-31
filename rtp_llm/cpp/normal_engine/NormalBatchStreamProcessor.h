@@ -1,5 +1,6 @@
 #pragma once
 
+#include "autil/LockFreeThreadPool.h"
 #include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
@@ -61,6 +62,8 @@ protected:
                               const BufferPtr&    new_tokens_all) const;
 
 protected:
+    std::shared_ptr<autil::LockFreeThreadPool> thread_pool_;
+
     size_t           num_layers_;
     size_t           vocab_size_;
     size_t           input_vocab_size_;

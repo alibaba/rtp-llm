@@ -179,7 +179,7 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
     fake_input->generate_config->num_return_sequences = runtime_config.fifo_scheduler_config.max_context_batch_size;
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
     device_->setTraceMemory(true);
-    executor_.reset(new NormalExecutor(params, nullptr, device_, nullptr, true));
+    executor_.reset(new NormalExecutor(params, nullptr, device_, thread_pool_, nullptr, true));
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::prefill_warm_up));
     const auto device_status = device_->getDeviceStatus();
     device_->setTraceMemory(false);
@@ -293,6 +293,11 @@ absl::Status NormalEngine::stop() {
     running_ = false;
     RETURN_IF_STATUS_ERROR(scheduler_->stop());
     loop_thread_->join();
+    if (thread_pool_) {
+        thread_pool_->stop();
+        thread_pool_->waitFinish();
+        thread_pool_.reset();
+    }
     return absl::OkStatus();
 }
 

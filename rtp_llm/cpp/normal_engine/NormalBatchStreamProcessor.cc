@@ -453,6 +453,11 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_gro
     bool return_all_probs = stream_groups.needReturnAllProbs();
     auto new_tokens_all   = CACHED_HOST_BUF(TYPE_INT32, {(size_t)total_batch_size_out, (size_t)1});
 
+    std::vector<autil::ThreadPoolBase::Future<void>> futures;
+    if (thread_pool_ != nullptr) {
+        futures.reserve(stream_groups.size());
+    }
+
     for (auto& stream : stream_groups.allStreams()) {
         auto cur_batch_size  = stream->currentBatchSize();
         auto next_batch_size = stream->nextBatchSize();
@@ -464,6 +469,12 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_gro
         batch_idx_in += cur_batch_size;
         batch_idx_out += next_batch_size;
         token_offset += token_size;
+    }
+
+    if (thread_pool_ != nullptr) {
+        for (auto& future : futures) {
+            future.wait();
+        }
     }
 
     RTP_LLM_LOG_DEBUG("dispatch done");

@@ -6,6 +6,7 @@
 #include <memory>
 #include <thread>
 #include "absl/status/status.h"
+#include "autil/LockFreeThreadPool.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
 #include "rtp_llm/cpp/engine_base/TorchProfiler.h"
@@ -65,25 +66,15 @@ private:
     bool isEagle() override;
 
 private:
-    autil::ThreadPtr                              loop_thread_;
-    std::atomic<bool>                             running_{false};
-    std::unique_ptr<Executor>                     executor_;
-    ModelConfig                                   model_config_;
-    ParallelismConfig                             parallelism_config;
-    RuntimeConfig                                 runtime_config;
-    EPLBConfig                                    eplb_config;
-    PDSepConfig                                   pd_sep_config;
-    ProfilingDebugLoggingConfig                   profiling_debug_logging_config;
-    KVCacheConfig                                 kv_cache_config;
-    FfnDisAggregateConfig                         ffn_disaggregate_config;
-    ModelSpecificConfig                           model_specific_config;
-    SpeculativeExecutionConfig                    sp_config;
-    kmonitor::MetricsReporterPtr                  metrics_reporter_;
-    std::unique_ptr<ProposeModelEngineInitParams> propose_params_;
-    std::shared_ptr<CudaProfiler>                 profiler_;
-    int                                           profiler_step_     = 0;
-    bool                                          gen_timeline_sync_ = false;
-    int                                           reserve_step_      = 0;
+    autil::ThreadPtr                           loop_thread_;
+    std::atomic<bool>                          running_{false};
+    std::unique_ptr<Executor>                  executor_;
+    std::shared_ptr<autil::LockFreeThreadPool> thread_pool_;
+    const rtp_llm::GptInitParameter            params_;
+    kmonitor::MetricsReporterPtr               metrics_reporter_;
+    std::shared_ptr<CudaProfiler>              profiler_;
+    int                                        profiler_step_     = 0;
+    bool                                       gen_timeline_sync_ = false;
 };
 
 }  // namespace rtp_llm

@@ -15,7 +15,8 @@ Buffer::Buffer(const MemoryType                   where,
     where_(where), type_(type), shape_(shape), data_(const_cast<void*>(data)), deleter_(deleter), view_count_(0) {}
 
 Buffer::~Buffer() {
-    RTP_LLM_CHECK_WITH_INFO(view_count_ == 0, "Buffer::~Buffer: view_count_ != 0: " + std::to_string(view_count_));
+    auto view_count = view_count_.load(std::memory_order_relaxed);
+    RTP_LLM_CHECK_WITH_INFO(view_count == 0, "Buffer::~Buffer: view_count_ != 0: " + std::to_string(view_count));
     if (deleter_) {
         deleter_(this);
     }
@@ -89,12 +90,12 @@ void Buffer::updateTypeAndShape(DataType type, const std::vector<size_t>& shape)
 }
 
 Buffer::DeleterFuncType Buffer::getSubBufferDeleter() const {
-    this->view_count_++;
+    this->view_count_.fetch_add(1, std::memory_order_relaxed);
     return [this](Buffer* buffer) -> void {
-        if (this->view_count_ == 0) {
+        auto view_count = this->view_count_.fetch_sub(1, std::memory_order_relaxed);
+        if (view_count == 0) {
             throw std::runtime_error("Buffer::getSubBufferDeleter: view_count_ == 0");
         }
-        this->view_count_--;
     };
 }
 
