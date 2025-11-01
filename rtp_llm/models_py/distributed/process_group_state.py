@@ -12,7 +12,7 @@ import torch.distributed
 from torch.distributed import Backend, ProcessGroup
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.ops import DeviceType, get_device
+from rtp_llm.ops.compute_ops import DeviceType, get_device
 
 __all__ = [
     "ProcessGroupState",

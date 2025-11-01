@@ -5,7 +5,6 @@ import math
 from typing import Any, Dict, Optional
 
 import torch
-from librtp_compute_ops.rtp_llm_ops import trt_fp8_quantize_128
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.models_py.modules.ep.kernels import (
@@ -28,6 +27,7 @@ from rtp_llm.models_py.modules.quantization.deepgemm_wrapper import (
 )
 from rtp_llm.models_py.modules.utils import ceil_div, dispose_tensor
 from rtp_llm.models_py.triton_kernels.common.activation import silu_and_mul
+from rtp_llm.ops.compute_ops import trt_fp8_quantize_128
 from rtp_llm.utils.model_weight import W
 
 BLOCK_SIZE = 128

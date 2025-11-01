@@ -15,7 +15,12 @@ from rtp_llm.models_py.modules.mlp import FusedSiluActDenseMLP
 from rtp_llm.models_py.modules.moe import FusedMoe
 from rtp_llm.models_py.modules.moe.fused_moe_factory import FusedMoeFactory
 from rtp_llm.models_py.modules.norm import RMSNorm
-from rtp_llm.ops import KVCache, PyAttentionInputs, PyModelInputs, PyModelOutputs
+from rtp_llm.ops.compute_ops import (
+    KVCache,
+    PyAttentionInputs,
+    PyModelInputs,
+    PyModelOutputs,
+)
 from rtp_llm.utils.model_weight import W
 
 

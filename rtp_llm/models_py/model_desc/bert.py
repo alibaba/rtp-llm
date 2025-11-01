@@ -12,7 +12,12 @@ from rtp_llm.models_py.modules.embedding import EmbeddingBert
 from rtp_llm.models_py.modules.fmha import FMHAImplBase
 from rtp_llm.models_py.modules.mlp import BertGeluActDenseMLP
 from rtp_llm.models_py.modules.norm import LayerNorm
-from rtp_llm.ops import KVCache, PyAttentionInputs, PyModelInputs, PyModelOutputs
+from rtp_llm.ops.compute_ops import (
+    KVCache,
+    PyAttentionInputs,
+    PyModelInputs,
+    PyModelOutputs,
+)
 from rtp_llm.utils.model_weight import W
 
 
