@@ -10,7 +10,7 @@ class CLISubcommand:
     name: str
 
     @staticmethod
-    def cmd(args: argparse.Namespace) -> None:
+    def cmd(parser: EnvArgumentParser) -> None:
         raise NotImplementedError("Subclasses should implement this method")
 
     def validate(self, args: argparse.Namespace) -> None:
