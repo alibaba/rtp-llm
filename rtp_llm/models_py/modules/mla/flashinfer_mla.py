@@ -42,7 +42,7 @@ from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.models_py.modules.linear_factory import LinearFactory
 
 # from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.ops import KVCache, PyAttentionInputs, rtp_llm_ops
+from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
 from rtp_llm.utils.model_weight import W
 
 
@@ -294,7 +294,7 @@ class TrtV2PrefillAttentionOp(object):
         self.config = config
         self.weights = weights
         self.use_mla = use_mla
-        from libth_transformer.rtp_llm_ops import TRTAttnOp
+        from rtp_llm.ops.compute_ops import TRTAttnOp
 
         self.fmha_impl = TRTAttnOp(self.config)
 
@@ -408,7 +408,7 @@ class TrtV2PrefillAttention(nn.Module):
         value_states = value_states.view(-1, self.num_heads, self.qk_nope_head_dim)
         pad_len = self.qk_rope_head_dim
         value_states = F.pad(value_states, (0, pad_len))
-        from libth_transformer.rtp_llm_ops import TRTAttnOp
+        from rtp_llm.ops.compute_ops import TRTAttnOp
         self.fmha_impl = TRTAttnOp(self.config)
         self.support_: bool = self.fmha_impl.support(attention_inputs)
         if self.support_:

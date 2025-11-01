@@ -3,7 +3,7 @@ import unittest
 
 import torch
 
-from rtp_llm.ops import rtp_llm_ops
+from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
 def random_tensor(shape, dtype, device, mean=0, std=1):

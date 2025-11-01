@@ -5,12 +5,14 @@ from typing import Dict, Optional, Union
 import torch
 
 import rtp_llm.models_py.modules.utils as utils
+import rtp_llm.ops.compute_ops as compute_ops
 from rtp_llm.config.quant_config import (
     Fp8DynamicPerTensorQuantConfig,
     QuantizationConfig,
 )
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, MoeAtomicWeight
 from rtp_llm.model_loader.load_config import LoadConfig
+from rtp_llm.model_loader.tensor_source import TensorSource
 from rtp_llm.model_loader.w8a8_weight import W8A8Fp8AtomicWeight, create_w8a8_fp8_weight
 from rtp_llm.model_loader.weight_module import (
     AtomicWeight,
@@ -18,16 +20,7 @@ from rtp_llm.model_loader.weight_module import (
     QuantWeight,
     WeightModule,
 )
-from rtp_llm.model_loader.tensor_source import TensorSource
 from rtp_llm.utils.model_weight import W, WeightStyle
-
-if utils.is_cuda():
-    try:
-        from libth_transformer.rtp_llm_ops import per_tensor_quant_fp8  # isort:skip
-    except ImportError:
-        per_tensor_quant_fp8 = None
-else:
-    per_tensor_quant_fp8 = None
 
 
 def to_float32_tensor(x, device) -> torch.Tensor:
@@ -41,9 +34,9 @@ def quantize_weight_to_fp8(ts: torch.Tensor, output: Optional[torch.Tensor] = No
         assert output.dtype == torch.float8_e4m3fn
         assert output.device == ts.device
 
-    if per_tensor_quant_fp8 is not None and ts.device.type != "cpu":
+    if utils.is_cuda() and ts.device.type != "cpu":
         scale = torch.zeros(1, device=ts.device, dtype=torch.float32)
-        per_tensor_quant_fp8(ts, output, scale, False)
+        compute_ops.per_tensor_quant_fp8(ts, output, scale, False)
         return output, scale
     else:
         device = ts.device
@@ -164,7 +157,9 @@ class LoadQuantDynamicPerTensorFp8Weight(CompositeWeight, QuantWeight):
         device: str,
         load_config: LoadConfig,
     ):
-        kernel = self.kernel._load_raw_tensor(tensor_source, layer_id, device, load_config)
+        kernel = self.kernel._load_raw_tensor(
+            tensor_source, layer_id, device, load_config
+        )
         if self.kernel.name in [W.moe_w1, W.moe_w2]:
             # per expert quant moe w13 and w2 to fp8
             kernel_tensor = kernel[self.kernel.name]

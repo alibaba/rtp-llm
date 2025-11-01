@@ -22,7 +22,7 @@ from rtp_llm.models_py.modules.fmha import (
 )
 from rtp_llm.models_py.modules.mla import DeepSeekV2Attention
 from rtp_llm.models_py.modules.mla.mla_attention_ref import DeepseekV2AttentionRef
-from rtp_llm.ops import KVCache, PyAttentionInputs
+from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs
 from rtp_llm.utils.model_weight import W
 
 

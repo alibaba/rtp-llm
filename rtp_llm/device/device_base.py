@@ -3,7 +3,7 @@ import logging
 import torch
 
 from rtp_llm.config.py_config_modules import PyEnvConfigs
-from rtp_llm.ops import DeviceExporter, DeviceType
+from rtp_llm.ops.compute_ops import DeviceExporter, DeviceType
 
 
 class MemInfo:

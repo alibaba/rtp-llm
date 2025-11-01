@@ -8,7 +8,7 @@ from deep_ep import Config as DeepEPConfig
 from torch.distributed import ProcessGroup
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.ops import DeviceType, get_device
+from rtp_llm.ops.compute_ops import DeviceType, get_device
 
 __all__ = [
     "DeepEPBuffer",
