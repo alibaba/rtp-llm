@@ -4,25 +4,17 @@ from typing import Any, Dict, List, Optional
 import torch
 import torch.nn.functional as F
 
+from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.models_py.modules.kvcache_store import WriteCacheStoreOp
 from rtp_llm.models_py.modules.mla import (
     MlaFlashInferDecodeOp,
     MlaFlashInferPrefillOp,
     MlaRotaryEmbeddingOp,
     TrtV2PrefillAttentionOp,
 )
+from rtp_llm.ops import FMHAType
+from rtp_llm.ops.compute_ops import KVCache, ParamsBase, PyAttentionInputs
 from rtp_llm.utils.model_weight import W
-
-try:
-    from librtp_compute_ops.rtp_llm_ops import (
-        FusedRopeKVCacheDecodeOp,
-        FusedRopeKVCachePrefillOp,
-    )
-except ImportError:
-    logging.info("rope kv cache not available, skipped.")
-
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.models_py.modules.kvcache_store import WriteCacheStoreOp
-from rtp_llm.ops import FMHAType, KVCache, ParamsBase, PyAttentionInputs
 
 
 class FMHAImplBase(object):
@@ -119,7 +111,7 @@ PREFILL_MLA_IMPS: List[type[FMHAPrefillImplBase]] = []
 DECODE_MLA_IMPS: List[type[FMHADecodeImplBase]] = []
 
 try:
-    from librtp_compute_ops.rtp_llm_ops import FlashInferPrefillOp
+    from rtp_llm.ops.compute_ops import FlashInferPrefillOp, FusedRopeKVCachePrefillOp
 
     class FlashInferPrefillImpl(FMHAPrefillImplBase):
 
@@ -221,7 +213,7 @@ except ImportError:
 
 
 try:
-    from librtp_compute_ops.rtp_llm_ops import FlashInferDecodeOp
+    from rtp_llm.ops.compute_ops import FlashInferDecodeOp, FusedRopeKVCacheDecodeOp
 
     class FlashInferDecodeImpl(FMHADecodeImplBase):
 
@@ -316,7 +308,7 @@ except ImportError:
     logging.info("FlashInferDecodeOp not available, skipped.")
 
 try:
-    from librtp_compute_ops.rtp_llm_ops import TRTAttnOp
+    from rtp_llm.ops.compute_ops import TRTAttnOp
 
     class TRTMHAImpl(FMHAPrefillImplBase):
 
@@ -344,7 +336,7 @@ except ImportError:
 
 
 try:
-    from librtp_compute_ops.rtp_llm_ops import XQAAttnOp
+    from rtp_llm.ops.compute_ops import FusedRopeKVCacheDecodeOp, XQAAttnOp
 
     class XQAImpl(FMHADecodeImplBase):
 

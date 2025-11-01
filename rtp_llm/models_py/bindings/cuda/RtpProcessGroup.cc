@@ -32,13 +32,13 @@ RtpProcessGroup::RtpProcessGroup(RtpProcessGroupType type) {
     }
 }
 
-void RtpProcessGroup::broadcast(std::vector<torch::Tensor>& input, const c10d::BroadcastOptions& opts) {
+void RtpProcessGroup::broadcast(std::vector<torch::Tensor>& input, int rootRank) {
     std::vector<BufferPtr> buffers;
     for (auto& tensor : input) {
         buffers.push_back(torchTensor2Buffer(tensor));
     }
 
-    device_->broadcast({buffers, opts.rootRank, mode_, false});
+    device_->broadcast({buffers, rootRank, mode_, false});
     check_cuda_error();
 }
 

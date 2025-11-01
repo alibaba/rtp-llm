@@ -9,7 +9,7 @@ from typing import List
 import torch
 from test_util import MlaOpsType, compare_tensor_diff_with_ratio
 
-from rtp_llm.ops import rtp_llm_ops
+from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 os.environ["DEVICE_RESERVE_MEMORY_BYTES"] = "256000000"
 

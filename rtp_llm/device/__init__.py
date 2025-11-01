@@ -1,9 +1,9 @@
 import logging
 from typing import Optional, Type
 
-from rtp_llm.device.device_base import DeviceBase, DeviceType
+from rtp_llm.device.device_base import DeviceBase
 from rtp_llm.device.device_impl import ArmCpuImpl, CpuImpl, CudaImpl, PpuImpl, RocmImpl
-from rtp_llm.ops import DeviceExporter, DeviceType, get_device
+from rtp_llm.ops.compute_ops import DeviceExporter, DeviceType, get_device
 
 _current_device: Optional[DeviceBase] = None
 

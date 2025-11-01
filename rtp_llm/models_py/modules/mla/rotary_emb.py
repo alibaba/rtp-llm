@@ -7,7 +7,7 @@ from rtp_llm.models_py.modules.mla.flashinfer_mla import (
     check_attention_inputs,
     flashinfer_python,
 )
-from rtp_llm.ops import KVCache, PyAttentionInputs, rtp_llm_ops
+from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
 
 
 class MlaRotaryEmbeddingOp(object):

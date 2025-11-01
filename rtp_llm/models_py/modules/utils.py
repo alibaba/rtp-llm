@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from rtp_llm.ops import DeviceType, get_device
+from rtp_llm.ops.compute_ops import DeviceType, get_device
 
 
 def ceil_div(x: int, y: int) -> int:

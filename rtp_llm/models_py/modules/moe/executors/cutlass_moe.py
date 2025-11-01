@@ -13,7 +13,7 @@ from rtp_llm.models_py.modules.moe.utils import (
     resize_cache,
 )
 
-from librtp_compute_ops.rtp_llm_ops import (  # isort:skip
+from rtp_llm.ops.compute_ops import (  # isort:skip
     cutlass_moe_mm,
     get_cutlass_batched_moe_mm_data,
     get_cutlass_moe_mm_without_permute_info,

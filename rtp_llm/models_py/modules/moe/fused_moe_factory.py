@@ -16,7 +16,7 @@ from rtp_llm.utils.model_weight import W
 # TODO@miji move it to model init process?
 initialized = False
 
-from rtp_llm.ops import DeviceType, get_device
+from rtp_llm.ops.compute_ops import DeviceType, get_device
 
 
 def init_deepep_env_once(config: GptInitModelParameters):

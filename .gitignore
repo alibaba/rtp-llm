@@ -57,7 +57,6 @@ core-*
 # Debug and build output files
 out
 err
-*.sh
 test_out
 test_err
 errcp

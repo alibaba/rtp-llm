@@ -7,7 +7,7 @@ from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.modules import DECODE_MHA_IMPS, PREFILL_MHA_IMPS, FMHAImplBase
 from rtp_llm.models_py.modules.fmha import DECODE_MLA_IMPS, PREFILL_MLA_IMPS
-from rtp_llm.ops import (
+from rtp_llm.ops.compute_ops import (
     DeviceType,
     KVCache,
     PyAttentionInputs,

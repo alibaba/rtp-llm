@@ -5,14 +5,16 @@ from typing import Any, List, Optional
 import aiter
 import torch
 from aiter import dtypes
-from librtp_compute_ops.rtp_llm_ops import (
-    FusedRopeKVCacheDecodeOp,
-    FusedRopeKVCachePrefillOp,
-)
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.models_py.modules.fmha import FMHAImplBase
-from rtp_llm.ops import FMHAType, KVCache, PyAttentionInputs
+from rtp_llm.ops import FMHAType
+from rtp_llm.ops.compute_ops import (
+    FusedRopeKVCacheDecodeOp,
+    FusedRopeKVCachePrefillOp,
+    KVCache,
+    PyAttentionInputs,
+)
 
 
 # Simple data structure for fmha_params
@@ -213,11 +215,13 @@ class AiterDecodeAttnOp:
         )
         max_num_blocks = block_tables_id_device.shape[1]
 
-        # for now not support fp8 
+        # for now not support fp8
         if self.use_asm_pa:
             x = 16 // value_cache.element_size()
             num_blocks, num_kv_heads, block_size, head_size = value_cache.shape
-            value_cache = value_cache.view(num_blocks, num_kv_heads, head_size, block_size // x, x)
+            value_cache = value_cache.view(
+                num_blocks, num_kv_heads, head_size, block_size // x, x
+            )
             value_cache = value_cache.permute(0, 1, 3, 2, 4).contiguous()
 
             output = aiter.pa_fwd_asm(

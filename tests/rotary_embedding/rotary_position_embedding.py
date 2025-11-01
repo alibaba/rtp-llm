@@ -16,7 +16,7 @@ from transformers.models.gpt_neox.modeling_gpt_neox import (
 from transformers.models.llama.modeling_llama import LlamaConfig, LlamaRotaryEmbedding
 from yarn_rotary_embedding import FlashYaRNRotaryEmbedding
 
-from rtp_llm.ops import rtp_llm_ops
+from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
 class QWenRotaryEmbedding(torch.nn.Module):

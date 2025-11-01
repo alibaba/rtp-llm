@@ -170,26 +170,9 @@ class EmptyClass:
 frontend_mode = os.environ.get("ROLE_TYPE") == "FRONTEND"
 
 try:
-    from librtp_compute_ops import (
-        DeviceExporter,
-        DeviceType,
-        KVCache,
-        ParamsBase,
-        PyAttentionInputs,
-        PyCacheStoreInputs,
-        PyModelInitResources,
-        PyModelInputs,
-        PyModelOutputs,
-        get_device,
-        rtp_llm_ops,
-    )
-
+    import librtp_compute_ops
 except BaseException as e:
-    if frontend_mode:
-        PyModelInputs = PyModelOutputs = PyAttentionInputs = PyModelInitResources = (
-            rtp_llm_ops
-        ) = EmptyClass
-    else:
+    if not frontend_mode:
         logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
         raise e
 
@@ -206,4 +189,6 @@ except BaseException as e:
     )
     RtpEmbeddingOp = RtpLLMOp = EmptyClass
 
-    logging.info("libth_transformer not imported, you may under python standalone mode or frontend mode now.")
+    logging.info(
+        "libth_transformer not imported, you may under python standalone mode or frontend mode now."
+    )

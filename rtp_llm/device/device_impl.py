@@ -5,9 +5,10 @@ import psutil
 import torch
 
 from rtp_llm.device.device_base import DeviceBase, MemInfo
-from rtp_llm.ops import DeviceExporter
+from rtp_llm.ops.compute_ops import DeviceExporter
 from rtp_llm.utils.model_weight import W
 from rtp_llm.utils.swizzle_utils import swizzle_tensor
+
 
 class CpuImpl(DeviceBase):
     def __init__(self, exported_device: DeviceExporter):

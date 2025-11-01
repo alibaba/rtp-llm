@@ -4,7 +4,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from rtp_llm.ops import rtp_llm_ops
+from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
 class Linear(nn.Module):

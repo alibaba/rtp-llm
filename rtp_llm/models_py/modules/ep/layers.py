@@ -10,21 +10,12 @@ import torch
 from torch.nn import Module
 
 import rtp_llm.models_py.modules.utils as utils
-
-if utils.is_cuda():
-    from librtp_compute_ops.rtp_llm_ops import trt_fp8_quantize_128
-else:
-    rtp_llm_ops = None
-    trt_fp8_quantize_128 = None
-
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.modules.utils import ceil_div, dispose_tensor
 from rtp_llm.utils.model_weight import W
 
 if utils.is_cuda():
-    from librtp_compute_ops.rtp_llm_ops import FusedMoEOp, SelectTopkOp
-
     from rtp_llm.models_py.modules.ep.kernels import (
         ep_gather,
         ep_scatter,
@@ -37,6 +28,7 @@ if utils.is_cuda():
         silu_and_mul_triton_kernel,
         tma_align_input_scale,
     )
+    from rtp_llm.ops.compute_ops import FusedMoEOp, SelectTopkOp
 
 else:
     logging.info("can't import from rtp_llm_ops and ep.kernels, only support cuda!")

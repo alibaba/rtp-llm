@@ -10,7 +10,7 @@ from torch.profiler import ProfilerActivity, profile
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.models_py.modules.linear import Linear
 
-from librtp_compute_ops.rtp_llm_ops import FusedMoEOp  # isort:skip
+from rtp_llm.ops.compute_ops import FusedMoEOp  # isort:skip
 
 
 class FusedMoEOpTest(TestCase):

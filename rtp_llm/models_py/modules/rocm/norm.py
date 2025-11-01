@@ -7,7 +7,7 @@ from aiter import rmsnorm2d_fwd as rms_norm
 from torch import nn
 
 from rtp_llm.models_py.modules.norm import BaseNorm
-from rtp_llm.ops import rtp_llm_ops
+from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
 class BaseLayerNorm(torch.nn.Module):
