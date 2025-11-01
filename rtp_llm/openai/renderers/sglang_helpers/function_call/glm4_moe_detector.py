@@ -30,29 +30,21 @@ def get_argument_type(func_name: str, arg_key: str, defined_tools: list):
 
 
 def parse_arguments(json_value):
-    # Try parsing as-is first (handles normal JSON)
     try:
         parsed_value = json.loads(json_value)
         return parsed_value, True
     except:
-        pass
-
-    # Try unescaping quotes only (handles escaped JSON from raw strings)
-    try:
-        unescaped = json_value.replace('\\"', '"')
-        parsed_value = json.loads(unescaped)
-        return parsed_value, True
-    except:
-        pass
-
-    # Try ast.literal_eval as final fallback
-    try:
-        parsed_value = ast.literal_eval(json_value)
-        return parsed_value, True
-    except:
-        pass
-
-    return json_value, False
+        try:
+            # If parsing fails, try unescaping JSON characters
+            unescaped = json_value.encode("utf-8").decode("unicode_escape")
+            parsed_value = json.loads(unescaped)
+            return parsed_value, True
+        except:
+            try:
+                parsed_value = ast.literal_eval(json_value)
+                return parsed_value, True
+            except:
+                return json_value, False
 
 
 class Glm4MoeDetector(BaseFormatDetector):
