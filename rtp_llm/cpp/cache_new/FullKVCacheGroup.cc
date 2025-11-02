@@ -6,6 +6,7 @@ namespace rtp_llm {
 bool FullKVCacheGroup::init() {
     auto layer_tensors = block_pool_->layerCacheBase();
 
+    // TODO(chanyin): layer_ids might not be set in sequence
     for(int i = 0; i < layer_ids_.size(); ++i) {
         gloabl_layer_to_kv_tensors[layer_ids_[i]] = layer_tensors[i];
         gloabl_layer_to_local_layer[layer_ids_[i]] = i;
@@ -56,15 +57,11 @@ void FullKVCacheGroup::free(std::vector<BlockIdxType> block_indices) {
     RTP_LLM_LOG_DEBUG("Freed %zu blocks", block_indices.size());
 }
 
-void FullKVCacheGroup::insertIntoCache(std::vector<CacheKeyType> cache_keys, std::vector<BlockIdxType> block_indices) {
+void FullKVCacheGroup::insertIntoCache(std::vector<CacheKeyType> cache_keys,
+                                       std::vector<BlockIdxType> block_indices,
+                                       std::vector<std::vector<float>> loss) {
     if (!block_cache_) {
         RTP_LLM_LOG_DEBUG("Block cache is not initialized, skip insertion");
-        return;
-    }
-    
-    if (cache_keys.size() != block_indices.size()) {
-        RTP_LLM_LOG_ERROR("Cache keys size (%zu) doesn't match block indices size (%zu)", 
-                          cache_keys.size(), block_indices.size());
         return;
     }
     
@@ -72,11 +69,17 @@ void FullKVCacheGroup::insertIntoCache(std::vector<CacheKeyType> cache_keys, std
         return;
     }
 
+    if (cache_keys.size() != block_indices.size() || cache_keys.size() != loss.size()) {
+        RTP_LLM_LOG_ERROR("Cache keys size (%zu) doesn't match block indices size (%zu)", 
+                          cache_keys.size(), block_indices.size());
+        return;
+    }
+
     for (size_t i = 0; i < cache_keys.size(); ++i) {
         BlockCacheV1::CacheItem item;
         item.cache_key = cache_keys[i];
         item.block_index = block_indices[i];
-        item.loss = {};
+        item.loss = loss[i];
         item.is_resident = false;
         block_cache_->put(item);
     }
@@ -84,15 +87,12 @@ void FullKVCacheGroup::insertIntoCache(std::vector<CacheKeyType> cache_keys, std
     RTP_LLM_LOG_DEBUG("Inserted %zu blocks into cache", block_indices.size());
 }
 
-KVCacheGroupType FullKVCacheGroup::type() const {
-    return KVCacheGroupType::FULL;
-}
 
 size_t FullKVCacheGroup::freeBlockNums() const {
     return block_pool_->freeBlockNums();
 }
 
-int FullKVCacheGroup::seqSizePerBlock() const { return static_cast<int>(group_spec_.seq_size_per_block); }
+int FullKVCacheGroup::seqSizePerBlock() const { return static_cast<int>(group_spec_->seq_size_per_block); }
 
 bool FullKVCacheGroup::evict(int need_evict_len) {
     if (need_evict_len <= 0) {

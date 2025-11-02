@@ -176,7 +176,7 @@
 //             case rtp_llm::MultiHeadAttention:
 //                 cache_type = rtp_llm::KVCacheGroupType::FULL;
 //                 break;
-//             case rtp_llm::MultiLayerAttention:
+//             case rtp_llm::MultiHeadLatentAttention:
 //                 cache_type = rtp_llm::KVCacheGroupType::FULL;
 //                 break;
 //             case rtp_llm::LinearAttention:

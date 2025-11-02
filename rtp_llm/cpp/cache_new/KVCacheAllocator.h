@@ -34,7 +34,7 @@ protected:
     CacheConfig config_;
     rtp_llm::DeviceBase* device_;
     AllocationType atype_;
-    std::vector<std::shared_ptr<KVCacheGroup>> kv_cache_groups_;
+    // std::vector<std::shared_ptr<KVCacheGroup>> kv_cache_groups_;
 };
 
 using KVCacheAllocatorPtr = std::shared_ptr<KVCacheAllocator>;

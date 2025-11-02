@@ -33,8 +33,8 @@ bool KVCacheManager::init() {
         return false;
     }
 
-    auto type = config_.layer_type_params[0].type;
-    if (type != rtp_llm::KVCacheType::LinearAttention) {
+    auto& spec = config_.layer_type_params[0];
+    if (spec->type == rtp_llm::KVCacheType::MultiHeadAttention || spec->type == rtp_llm::KVCacheType::MultiHeadLatentAttention) {
         allocator_ = std::make_shared<rtp_llm::SingleTypeKVCacheAllocator>(config_, device_, AllocationType::DEVICE);
         if (!allocator_->init()) {
             RTP_LLM_LOG_ERROR("SingleTypeKVCacheAllocator init failed");
@@ -48,7 +48,6 @@ bool KVCacheManager::init() {
     }
     return false;
 }
- 
 
 
 size_t KVCacheManager::availableTokenNums() const {
@@ -68,16 +67,13 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
         return {false, 0};
     }
 
+
     int batch_size = malloc_info.batch_kv_cache_resource->batchSize();
-    if ((int)malloc_info.batch_kv_cache_resource->cache_keys.size() < batch_size) {
-        malloc_info.batch_kv_cache_resource->cache_keys.resize(batch_size);
-    }
-
     int seq_size_per_block = config_.seq_size_per_block;
+    int seq_len = malloc_info.complete_token_ids->seqLength();
+    int desired_blocks = seq_len / (int)seq_size_per_block;
 
-    const int seq_len = malloc_info.complete_token_ids->seqLength();
-    const int desired_blocks = seq_len / (int)seq_size_per_block;
-
+    // append cache_keys for eache batch
     for (int i = 0; i < batch_size; ++i) {
         auto& keys = malloc_info.batch_kv_cache_resource->cache_keys[i];
         if ((int)keys.size() > desired_blocks) {
@@ -91,8 +87,8 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
             for (int index = start_index; index < desired_blocks; ++index) {
                 int pos = index * seq_size_per_block;
                 rolling_hash = rtp_llm::hashInt64Array(rolling_hash,
-                                              token_ids + pos,
-                                              token_ids + pos + (int)seq_size_per_block);
+                                                token_ids + pos,
+                                                token_ids + pos + (int)seq_size_per_block);
                 keys.push_back(rolling_hash);
             }
         }

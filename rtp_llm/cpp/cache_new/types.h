@@ -35,7 +35,7 @@ struct CacheLayerLayout {
     std::vector<torch::Tensor> layers_to_buffer_ptrs;
 };
 
-typedef size_t  CacheKeyType;
+typedef int64_t CacheKeyType;
 typedef int32_t BlockIdxType;
 
 struct MatchResult {
@@ -50,11 +50,13 @@ struct MallocInfo {
 
     BatchKVCacheResourcePtr batch_kv_cache_resource;
     CompleteTokenIdsPtr complete_token_ids;
+    BufferPtr loss = nullptr;
 };
 
 struct MallocResult {
     bool    success;
     int     reuse_len;
+    std::vector<float> loss; // TODO(chanyin): remove this in future
 };
 
 // fallback 
@@ -70,10 +72,11 @@ struct FreeResult {
 };
 
 struct InsertInfo {
-    InsertInfo(BatchKVCacheResourcePtr batch_kv_cache_resource, CompleteTokenIdsPtr complete_token_ids):
-        batch_kv_cache_resource(batch_kv_cache_resource), complete_token_ids(complete_token_ids) {}
+    InsertInfo(BatchKVCacheResourcePtr batch_kv_cache_resource, CompleteTokenIdsPtr complete_token_ids, std::vector<float> loss):
+        batch_kv_cache_resource(batch_kv_cache_resource), complete_token_ids(complete_token_ids), loss(loss) {}
     BatchKVCacheResourcePtr batch_kv_cache_resource;
     CompleteTokenIdsPtr complete_token_ids;
+    std::vector<float> loss;
 };
 
 struct InsertResult {

@@ -4,12 +4,15 @@
 #include "rtp_llm/cpp/cache_new/types.h"
 #include <sstream>
 #include <string>
+#include <memory>
+#include <vector>
+#include <unordered_map>
 
 namespace rtp_llm {
 
 enum KVCacheType {
     MultiHeadAttention,
-    MultiLayerAttention,
+    MultiHeadLatentAttention,
     LinearAttention,
 };
 
@@ -18,42 +21,96 @@ enum MemoryLayout {
     KV_FIRST,         // [2, layer_num, num_blocks, kv_block_size] -> full attention
 };
 
-struct KVCacheParam {    
+
+struct KVCacheSpec {
+    std::vector<int> layer_ids_;
+    uint             seq_size_per_block = 1;
+    
     KVCacheType       type;
     rtp_llm::DataType dtype;
+
+    virtual size_t block_size() const = 0;
+    virtual size_t k_block_size() const = 0;
+    virtual size_t v_block_size() const = 0;
+    
+    virtual ~KVCacheSpec() = default;
 };
 
-struct MHACacheParam: public KVCacheParam {
+struct MHAKVCacheSpec : public KVCacheSpec {
     uint              layer_num;
-    uint              block_num;
+    uint              block_nums;
     uint              local_head_num_kv;
     uint              size_per_head;
-    uint              scale_size;
+    uint              scale_size = 0;
+    
+    size_t block_size() const override {
+        auto dtype_size = rtp_llm::getTypeSize(dtype);   
+        return local_head_num_kv * size_per_head * seq_size_per_block * dtype_size * 2;
+    }   
+    size_t k_block_size() const override {
+        auto dtype_size = rtp_llm::getTypeSize(dtype);
+        return local_head_num_kv * size_per_head * seq_size_per_block * dtype_size;
+    }
+    size_t v_block_size() const override {
+        auto dtype_size = rtp_llm::getTypeSize(dtype);
+        return local_head_num_kv * size_per_head * seq_size_per_block * dtype_size;
+    }
 };
 
-struct MLACacheParam: public KVCacheParam {
+struct MLAKVCacheSpec : public KVCacheSpec {
     uint              layer_num;
     uint              block_nums;
     uint              kv_lora_rank;
     uint              rope_head_dim;
+    uint              local_head_num_kv = 1;  // MLA typically uses 1
+    
+    size_t block_size() const override {
+        auto dtype_size = rtp_llm::getTypeSize(dtype);
+        return local_head_num_kv * (kv_lora_rank + rope_head_dim) * seq_size_per_block * dtype_size;
+    }
+    size_t k_block_size() const override {
+        auto dtype_size = rtp_llm::getTypeSize(dtype);
+        return local_head_num_kv * kv_lora_rank * seq_size_per_block * dtype_size;
+    }
+    size_t v_block_size() const override {
+        auto dtype_size = rtp_llm::getTypeSize(dtype);
+        return local_head_num_kv * rope_head_dim * seq_size_per_block * dtype_size;
+    }
 };
 
-struct LinearCacheParam: public KVCacheParam{
+
+struct LinearKVCacheSpec : public KVCacheSpec {
     uint              conv_state_size;
     uint              temporal_state_size;
+    
+    size_t block_size() const override {
+        auto dtype_size = rtp_llm::getTypeSize(dtype);
+        return (conv_state_size + temporal_state_size) * seq_size_per_block * dtype_size;
+    }
+    size_t k_block_size() const override {
+        return conv_state_size * seq_size_per_block * rtp_llm::getTypeSize(dtype);
+    }
+    size_t v_block_size() const override {
+        return temporal_state_size * seq_size_per_block * rtp_llm::getTypeSize(dtype);
+    }
 };
 
 struct CacheConfig {
-    uint32_t                      layer_type_num; 
-    std::vector<KVCacheParam>     layer_type_params;
-    std::vector<std::vector<int>> layer_ids;
+    uint32_t                                       layer_type_num; 
+    std::vector<std::shared_ptr<KVCacheSpec>>      layer_type_params;
+    std::vector<std::vector<int>>                  layer_ids;
 
     bool                          enable_independent_pool = true;
 
     int                           layer_num;
     int                           block_num;   
     int                           block_size;
-    size_t                        seq_size_per_block = 1;
+    size_t                        seq_size_per_block = 1; // for cache_keys generation
+
+    // for adpation to MLA
+    bool                          use_mla = false;
+
+    CacheConfig() {}
 };
 
 
@@ -66,6 +123,7 @@ struct BlockPoolConfig {
     
     size_t total_size;
 
+    // for kv first layout only, delete these fields in future
     size_t k_block_size;
     size_t v_block_size;
     
