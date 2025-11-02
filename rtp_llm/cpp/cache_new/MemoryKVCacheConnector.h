@@ -31,12 +31,16 @@ public:
     int32_t           prefixMatch(const std::vector<int64_t>& keys) override;
 
 private:
-    bool copyBufferData(const BufferPtr& dst, const BufferPtr& src);
+    Buffer getBuffer(const BlockIdxType& block_index);
+    void   copyBuffer(const Buffer& dst, const Buffer& src);
+    void   copyBuffers(const Buffers& dst, const Buffers& src);
 
 private:
     BlockPoolPtr         block_pool_;
     BlockCachePtr        block_cache_;
     rtp_llm::DeviceBase* device_;
+    std::vector<int>     layer_ids_;
+    int                  group_id_;
 };
 
 }  // namespace rtp_llm

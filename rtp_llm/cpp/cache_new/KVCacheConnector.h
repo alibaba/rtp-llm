@@ -12,8 +12,9 @@ public:
 public:
     // 远端cache是一个kkv的结构
     struct Buffer {
-        int64_t              key1;  // group id
-        int32_t              key2;  // cache key
+        int32_t              key1;       // group id
+        int64_t              key2;       // cache key
+        int32_t              layer_idx;  // for get buffer from memory pool
         BufferPtr            buffer;
         std::optional<float> loss;
     };
