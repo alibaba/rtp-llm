@@ -801,6 +801,8 @@ class GptInitModelParameters:
             memory_block_cache_sync_timeout_ms=get_env_int(
                 "MEMORY_BLOCK_CACHE_SYNC_TIMEOUT_MS", 10000
             ),
+            enable_remote_cache=get_env_bool("ENABLE_REMOTE_CACHE", False),
+            enable_device_cache=get_env_bool("ENABLE_DEVICE_CACHE", True),
         )
 
         enable_detail_log = get_env_bool("ENABLE_DETAIL_LOG", False)

@@ -81,19 +81,50 @@ struct MallocResult {
 };
 
 struct FreeInfo {
+    FreeInfo(BatchKVCacheResourcePtr batch_kv_cache_resource,
+             CompleteTokenIdsPtr     complete_token_ids,
+             bool                    reuse_cache         = false,
+             bool                    enable_memory_cache = false,
+             bool                    enable_remote_cache = false,
+             bool                    enable_device_cache = true):
+        batch_kv_cache_resource(batch_kv_cache_resource),
+        complete_token_ids(complete_token_ids),
+        reuse_cache(reuse_cache),
+        enable_memory_cache(enable_memory_cache),
+        enable_remote_cache(enable_remote_cache),
+        enable_device_cache(enable_device_cache) {}
     BatchKVCacheResourcePtr batch_kv_cache_resource;
     CompleteTokenIdsPtr     complete_token_ids;
     int64_t                 request_id{0};
     bool                    reuse_cache{false};
     bool                    enable_memory_cache{false};
+    bool                    enable_remote_cache{false};
+    bool                    enable_device_cache{true};
 };
 
 struct InsertInfo {
+    InsertInfo(int64_t                 request_id,
+               BatchKVCacheResourcePtr batch_kv_cache_resource,
+               CompleteTokenIdsPtr     complete_token_ids,
+               bool                    is_resident,
+               bool                    enable_device_cache = true,
+               bool                    enable_memory_cache = false,
+               bool                    enable_remote_cache = false):
+        request_id(request_id),
+        batch_kv_cache_resource(batch_kv_cache_resource),
+        complete_token_ids(complete_token_ids),
+        is_resident(is_resident),
+        enable_device_cache(enable_device_cache),
+        enable_memory_cache(enable_memory_cache),
+        enable_remote_cache(enable_remote_cache) {}
+
+    int64_t                 request_id;
     BatchKVCacheResourcePtr batch_kv_cache_resource;
     CompleteTokenIdsPtr     complete_token_ids;
-    bool                    is_resident{false};
-    bool                    reuse_cache{true};
+    bool                    is_resident;
+    bool                    enable_device_cache{true};
     bool                    enable_memory_cache{false};
+    bool                    enable_remote_cache{false};
 };
 
 }  // namespace rtp_llm

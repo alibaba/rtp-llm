@@ -110,6 +110,8 @@ void KVCacheConfig::update_from_env_for_test() {
     threefs_write_iov_size             = autil::EnvUtil::getEnv("THREEFS_WRITE_IOV_SIZE", 1LL << 32);  // 4GB
     memory_block_cache_size_mb         = autil::EnvUtil::getEnv("MEMORY_BLOCK_CACHE_SIZE_MB", 0);
     memory_block_cache_sync_timeout_ms = autil::EnvUtil::getEnv("MEMORY_BLOCK_CACHE_SYNC_TIMEOUT_MS", 10000);
+    enable_remote_cache                = bool_from_env_for_test("ENABLE_REMOTE_CACHE", false);
+    enable_device_cache                = bool_from_env_for_test("ENABLE_DEVICE_CACHE", true);
 }
 
 std::string KVCacheConfig::to_string() const {
@@ -127,7 +129,9 @@ std::string KVCacheConfig::to_string() const {
         << "threefs_read_iov_size: " << threefs_read_iov_size << "\n"
         << "threefs_write_iov_size: " << threefs_write_iov_size << "\n"
         << "memory_block_cache_size_mb: " << memory_block_cache_size_mb << "\n"
-        << "memory_block_cache_sync_timeout_ms: " << memory_block_cache_sync_timeout_ms;
+        << "memory_block_cache_sync_timeout_ms: " << memory_block_cache_sync_timeout_ms << "\n"
+        << "enable_remote_cache: " << enable_remote_cache << "\n"
+        << "enable_device_cache: " << enable_device_cache;
     return oss.str();
 }
 

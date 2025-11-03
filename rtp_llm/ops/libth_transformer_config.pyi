@@ -472,7 +472,10 @@ class KVCacheConfig:
     threefs_read_timeout_ms: int
     threefs_write_iov_size: int
     threefs_write_timeout_ms: int
-    def __init__(self, reuse_cache: bool = False, multi_task_prompt: str = '', multi_task_prompt_str: str = '', enable_3fs: bool = False, match_timeout_ms: int = 1000, rpc_get_cache_timeout_ms: int = 2000, rpc_put_cache_timeout_ms: int = 2000, threefs_read_timeout_ms: int = 1000, threefs_write_timeout_ms: int = 2000, max_block_size_per_item: int = 16, threefs_read_iov_size: int = 4294967296, threefs_write_iov_size: int = 4294967296, memory_block_cache_size_mb: int = 0, memory_block_cache_sync_timeout_ms: int = 10000) -> None:
+    enable_remote_cache: bool
+    enable_device_cache: bool
+
+    def __init__(self, reuse_cache: bool = False, multi_task_prompt: str = '', multi_task_prompt_str: str = '', enable_3fs: bool = False, match_timeout_ms: int = 1000, rpc_get_cache_timeout_ms: int = 2000, rpc_put_cache_timeout_ms: int = 2000, threefs_read_timeout_ms: int = 1000, threefs_write_timeout_ms: int = 2000, max_block_size_per_item: int = 16, threefs_read_iov_size: int = 4294967296, threefs_write_iov_size: int = 4294967296, memory_block_cache_size_mb: int = 0, memory_block_cache_sync_timeout_ms: int = 10000, enable_remote_cache: bool = False, enable_device_cache: bool = True) -> None:
         ...
     def to_string(self) -> str:
         ...

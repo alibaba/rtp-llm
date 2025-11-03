@@ -149,7 +149,7 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     auto cache_config               = rtp_llm::CacheConfigCreator::createBasicConfig(params_);
     cache_config.seq_size_per_block = params_.seq_size_per_block_;
     cache_config.block_num          = 5;
-    auto cache_manager              = make_shared<KVCacheManager>(cache_config, device_, false, nullptr, params_);
+    auto cache_manager = make_shared<KVCacheManager>(cache_config, device_, false, metrics_reporter_, params_);
     if (!cache_manager->init()) {
         RTP_LLM_FAIL("init kv cache manager failed in decodeWarmUp");
     }
@@ -178,7 +178,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
     auto result = rtp_llm::CacheConfigCreator::createConfig(params_, warm_up_result);
     RTP_LLM_LOG_INFO(
         "create kv cache manager with block nums %d, block size %ld KB", result.block_num, result.block_size / 1024);
-    resource_context_.cache_manager = make_shared<KVCacheManager>(result, device_, false, nullptr, params_);
+    resource_context_.cache_manager = make_shared<KVCacheManager>(result, device_, false, metrics_reporter_, params_);
     if (!resource_context_.cache_manager->init()) {
         RTP_LLM_FAIL("init kv cache manager failed");
     }
@@ -188,6 +188,8 @@ absl::Status NormalEngine::initSystemPrompt() {
     resource_context_.reuse_cache               = params_.reuse_cache_;
     resource_context_.enable_3fs                = params_.kv_cache_config.enable_3fs;
     resource_context_.enable_memory_block_cache = params_.kv_cache_config.memory_block_cache_size_mb > 0;
+    resource_context_.enable_remote_cache       = params_.kv_cache_config.enable_remote_cache;
+    resource_context_.enable_device_cache       = params_.kv_cache_config.enable_device_cache;
 
     if (!params_.multi_task_prompt_tokens_.empty()) {
         resource_context_.reuse_cache = true;

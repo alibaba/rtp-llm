@@ -136,8 +136,22 @@ void register_fmha_config(pybind11::module& m) {
 // KVCacheConfig
 void register_kvcache_config(pybind11::module& m) {
     pybind11::class_<KVCacheConfig>(m, "KVCacheConfig")
-        .def(pybind11::
-                 init<bool, std::string, std::string, bool, int, int, int, int, int, int, int64_t, int64_t, int, int>(),
+        .def(pybind11::init<bool,
+                            std::string,
+                            std::string,
+                            bool,
+                            int,
+                            int,
+                            int,
+                            int,
+                            int,
+                            int,
+                            int64_t,
+                            int64_t,
+                            int,
+                            int,
+                            bool,
+                            bool>(),
              pybind11::arg("reuse_cache")                        = false,
              pybind11::arg("multi_task_prompt")                  = "",
              pybind11::arg("multi_task_prompt_str")              = "",
@@ -151,7 +165,9 @@ void register_kvcache_config(pybind11::module& m) {
              pybind11::arg("threefs_read_iov_size")              = 1LL << 32,
              pybind11::arg("threefs_write_iov_size")             = 1LL << 32,
              pybind11::arg("memory_block_cache_size_mb")         = 0,
-             pybind11::arg("memory_block_cache_sync_timeout_ms") = 10000)
+             pybind11::arg("memory_block_cache_sync_timeout_ms") = 10000,
+             pybind11::arg("enable_remote_cache")                = false,
+             pybind11::arg("enable_device_cache")                = true)
         .def("to_string", &KVCacheConfig::to_string)
         .def("update_from_env", &KVCacheConfig::update_from_env_for_test)
         .def_readwrite("reuse_cache", &KVCacheConfig::reuse_cache)
@@ -167,7 +183,9 @@ void register_kvcache_config(pybind11::module& m) {
         .def_readwrite("threefs_read_iov_size", &KVCacheConfig::threefs_read_iov_size)
         .def_readwrite("threefs_write_iov_size", &KVCacheConfig::threefs_write_iov_size)
         .def_readwrite("memory_block_cache_size_mb", &KVCacheConfig::memory_block_cache_size_mb)
-        .def_readwrite("memory_block_cache_sync_timeout_ms", &KVCacheConfig::memory_block_cache_sync_timeout_ms);
+        .def_readwrite("memory_block_cache_sync_timeout_ms", &KVCacheConfig::memory_block_cache_sync_timeout_ms)
+        .def_readwrite("enable_remote_cache", &KVCacheConfig::enable_remote_cache)
+        .def_readwrite("enable_device_cache", &KVCacheConfig::enable_device_cache);
 }
 
 // ProfilingDebugLoggingConfig
