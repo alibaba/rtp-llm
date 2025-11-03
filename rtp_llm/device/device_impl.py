@@ -517,7 +517,7 @@ class RocmImpl(GpuImpl):
         is_gate = name in [W.moe_w1, W.moe_s1]
         do_shuffle = name in [W.moe_w1, W.moe_w2]
         if x.dim() == 2:
-             x = x.unsqueeze(-1)
+            x = x.unsqueeze(-1)
         x_ = (
             self.cat_0([x[:, x.shape[1] // 2 :, :], x[:, : x.shape[1] // 2, :]], dim=1)
             if is_gate
