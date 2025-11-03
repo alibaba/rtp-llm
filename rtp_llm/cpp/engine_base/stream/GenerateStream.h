@@ -499,12 +499,12 @@ public:
         return generate_input_->generate_config->reuse_cache;
     }
 
-    bool enable3FS() const {
-        return generate_input_->generate_config->enable_3fs;
-    }
-
     bool enableMemoryBlockCache() const {
         return generate_input_->generate_config->enable_memory_block_cache;
+    }
+
+    bool enableRemoteCache() const {
+        return generate_input_->generate_config->enable_remote_cache;
     }
 
     bool enableDeviceCache() const {
@@ -513,6 +513,10 @@ public:
 
     bool enableMemoryCache() const {
         return generate_input_->generate_config->enable_memory_cache;
+    }
+
+    bool syncWaitWrite() const {
+        return generate_input_->generate_config->sync_wait_write;
     }
 
     bool asyncLoadCache();

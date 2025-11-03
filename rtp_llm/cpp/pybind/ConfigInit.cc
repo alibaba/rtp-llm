@@ -259,18 +259,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     py::class_<KVCacheConfig>(m, "KVCacheConfig")
         .def(py::init<>())
         .def_readwrite("reuse_cache", &KVCacheConfig::reuse_cache)
+        .def_readwrite("enable_remote_cache", &KVCacheConfig::enable_remote_cache)
+        .def_readwrite("enable_device_cache", &KVCacheConfig::enable_device_cache)
+        .def_readwrite("sync_wait_write", &KVCacheConfig::sync_wait_write)
         .def_readwrite("multi_task_prompt", &KVCacheConfig::multi_task_prompt)
         .def_readwrite("multi_task_prompt_str", &KVCacheConfig::multi_task_prompt_str)
         .def_readwrite("multi_task_prompt_tokens", &KVCacheConfig::multi_task_prompt_tokens)
-        .def_readwrite("enable_3fs", &KVCacheConfig::enable_3fs)
-        .def_readwrite("match_timeout_ms", &KVCacheConfig::match_timeout_ms)
-        .def_readwrite("rpc_get_cache_timeout_ms", &KVCacheConfig::rpc_get_cache_timeout_ms)
-        .def_readwrite("rpc_put_cache_timeout_ms", &KVCacheConfig::rpc_put_cache_timeout_ms)
-        .def_readwrite("threefs_read_timeout_ms", &KVCacheConfig::threefs_read_timeout_ms)
-        .def_readwrite("threefs_write_timeout_ms", &KVCacheConfig::threefs_write_timeout_ms)
         .def_readwrite("max_block_size_per_item", &KVCacheConfig::max_block_size_per_item)
-        .def_readwrite("threefs_read_iov_size", &KVCacheConfig::threefs_read_iov_size)
-        .def_readwrite("threefs_write_iov_size", &KVCacheConfig::threefs_write_iov_size)
         .def_readwrite("memory_cache_size_mb", &KVCacheConfig::memory_cache_size_mb)
         .def_readwrite("memory_cache_sync_timeout_ms", &KVCacheConfig::memory_cache_sync_timeout_ms)
         .def_readwrite("int8_kv_cache", &KVCacheConfig::int8_kv_cache)
@@ -286,18 +281,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(self.reuse_cache,
+                                      self.enable_remote_cache,
+                                      self.enable_device_cache,
+                                      self.sync_wait_write,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
                                       self.multi_task_prompt_tokens,
-                                      self.enable_3fs,
-                                      self.match_timeout_ms,
-                                      self.rpc_get_cache_timeout_ms,
-                                      self.rpc_put_cache_timeout_ms,
-                                      self.threefs_read_timeout_ms,
-                                      self.threefs_write_timeout_ms,
                                       self.max_block_size_per_item,
-                                      self.threefs_read_iov_size,
-                                      self.threefs_write_iov_size,
                                       self.memory_cache_size_mb,
                                       self.memory_cache_sync_timeout_ms,
                                       self.int8_kv_cache,
@@ -310,33 +300,27 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.enable_memory_cache);
             },
             [](py::tuple t) {
-                if (t.size() != 22)
+                if (t.size() != 17)
                     throw std::runtime_error("Invalid state!");
                 KVCacheConfig c;
                 try {
                     c.reuse_cache                  = t[0].cast<bool>();
-                    c.multi_task_prompt            = t[1].cast<std::string>();
-                    c.multi_task_prompt_str        = t[2].cast<std::string>();
-                    c.multi_task_prompt_tokens     = t[3].cast<std::map<std::string, std::vector<int>>>();
-                    c.enable_3fs                   = t[4].cast<bool>();
-                    c.match_timeout_ms             = t[5].cast<int>();
-                    c.rpc_get_cache_timeout_ms     = t[6].cast<int>();
-                    c.rpc_put_cache_timeout_ms     = t[7].cast<int>();
-                    c.threefs_read_timeout_ms      = t[8].cast<int>();
-                    c.threefs_write_timeout_ms     = t[9].cast<int>();
-                    c.max_block_size_per_item      = t[10].cast<int>();
-                    c.threefs_read_iov_size        = t[11].cast<int64_t>();
-                    c.threefs_write_iov_size       = t[12].cast<int64_t>();
-                    c.memory_cache_size_mb         = t[13].cast<int64_t>();
-                    c.memory_cache_sync_timeout_ms = t[14].cast<int64_t>();
-                    c.int8_kv_cache                = t[15].cast<int>();
-                    c.fp8_kv_cache                 = t[16].cast<int>();
-                    c.kv_cache_mem_mb              = t[17].cast<int64_t>();
-                    c.seq_size_per_block           = t[18].cast<int>();
-                    c.test_block_num               = t[19].cast<int>();
-                    c.use_block_cache              = t[20].cast<int>();
-                    c.enable_device_cache          = t[21].cast<bool>();
-                    c.enable_memory_cache          = t[22].cast<bool>();
+                    c.enable_remote_cache          = t[1].cast<bool>();
+                    c.enable_device_cache          = t[2].cast<bool>();
+                    c.enable_memory_cache          = t[3].cast<bool>();
+                    c.sync_wait_write              = t[4].cast<bool>();
+                    c.multi_task_prompt            = t[5].cast<std::string>();
+                    c.multi_task_prompt_str        = t[6].cast<std::string>();
+                    c.multi_task_prompt_tokens     = t[7].cast<std::map<std::string, std::vector<int>>>();
+                    c.max_block_size_per_item      = t[8].cast<int>();
+                    c.memory_cache_size_mb         = t[9].cast<int64_t>();
+                    c.memory_cache_sync_timeout_ms = t[10].cast<int64_t>();
+                    c.int8_kv_cache                = t[11].cast<int>();
+                    c.fp8_kv_cache                 = t[12].cast<int>();
+                    c.kv_cache_mem_mb              = t[13].cast<int64_t>();
+                    c.seq_size_per_block           = t[14].cast<int>();
+                    c.test_block_num               = t[15].cast<int>();
+                    c.use_block_cache              = t[16].cast<int>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());
                 }

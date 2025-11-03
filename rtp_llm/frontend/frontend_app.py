@@ -100,9 +100,7 @@ class FrontendApp(object):
             timeout_keep_alive=timeout_keep_alive,
             h11_max_incomplete_event_size=MAX_INCOMPLETE_EVENT_SIZE,
         )
-        logging.info(
-            f"Starting Uvicorn server on port {g_worker_info.server_port} with timeout_keep_alive={timeout_keep_alive}"
-        )
+
         try:
             server = GracefulShutdownServer(config)
             server.set_server(self.frontend_server)

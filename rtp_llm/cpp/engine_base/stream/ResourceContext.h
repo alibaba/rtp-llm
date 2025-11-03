@@ -15,10 +15,11 @@ struct ResourceContext {
     std::shared_ptr<SystemPrompt>   system_prompt;
 
     bool reuse_cache{false};
-    bool enable_3fs{false};
     bool enable_memory_block_cache{false};
     bool enable_device_cache{true};
     bool enable_memory_cache{false};
+    bool enable_remote_cache{false};
+    bool sync_wait_write{false};
 };
 
 }  // namespace rtp_llm

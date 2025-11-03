@@ -18,6 +18,7 @@ namespace rtp_llm {
 class DeviceBase;
 class KVCacheAllocator;
 class KVCacheMemoryConnector;
+class RemoteConnector;
 class KVCacheConnectorReadWriteContext;
 
 class KVCacheConnectorCoordinator: public std::enable_shared_from_this<KVCacheConnectorCoordinator> {
@@ -25,6 +26,8 @@ public:
     KVCacheConnectorCoordinator(const CacheConfig&                       cache_config,
                                 const KVCacheConfig&                     kv_cache_config,
                                 const RuntimeConfig&                     runtime_config,
+                                const ParallelismConfig&                 parallelism_config,
+                                const SpeculativeExecutionConfig&        sp_config,
                                 const std::shared_ptr<KVCacheAllocator>& allocator,
                                 rtp_llm::DeviceBase*                     device,
                                 const kmonitor::MetricsReporterPtr&      metrics_reporter = nullptr);
@@ -50,6 +53,7 @@ public:
 
 private:
     bool initMemoryConnector();
+    bool initRemoteConnector();
     bool initUpdateThread();
     void updateOnce();
     void processReadContexts();
@@ -60,12 +64,14 @@ private:
     const CacheConfig                 cache_config_;
     const KVCacheConfig               kv_cache_config_;
     const RuntimeConfig               runtime_config_;
+    const ParallelismConfig           parallelism_config_;
+    const SpeculativeExecutionConfig  sp_config_;
     std::shared_ptr<KVCacheAllocator> allocator_;
     rtp_llm::DeviceBase*              device_{nullptr};
     kmonitor::MetricsReporterPtr      metrics_reporter_;
 
     std::shared_ptr<KVCacheMemoryConnector> memory_connector_;
-    std::shared_ptr<KVCacheConnector>       remote_connector_;
+    std::shared_ptr<RemoteConnector>        remote_connector_;
     std::shared_ptr<KVCacheConnector>       p2p_connector_;
 
     std::map<KVCacheConnector::ConnectorType, std::shared_ptr<KVCacheConnector>> connectors_;
