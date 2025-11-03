@@ -18,8 +18,10 @@ struct ResourceContext {
 
     std::shared_ptr<SystemPrompt>                system_prompt = nullptr;
     bool                                         reuse_cache{false};
-    bool                                         enable_3fs{false};
+    bool                                         enable_3fs{false};  // TODO : delete this
     bool                                         enable_memory_block_cache{false};
+    bool                                         enable_remote_cache{false};
+    bool                                         enable_device_cache{true};
     bool                                         use_cache_store{false};
     std::vector<std::shared_ptr<KVCacheManager>> mtp_cache_managers;
 };
@@ -107,8 +109,10 @@ public:
     }
 
     bool reuseCache() const;
-    bool enable3FS() const;
+    bool enable3FS() const;  // TODO : delete this
     bool enableMemoryBlockCache() const;
+    bool enableRemoteCache() const;
+    bool enableDeviceCache() const;
 
     bool asyncLoadCache();
     bool loadCacheDone();
