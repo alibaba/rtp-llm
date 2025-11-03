@@ -30,7 +30,8 @@ public:
     virtual std::vector<BlockInfo>
     convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const = 0;
     virtual std::shared_ptr<KVCacheResource> incrKVCacheRef(const KVCacheResource& kvcache_resource,
-                                                            const CacheKeysType&   cache_keys)      = 0;
+                                                            const CacheKeysType&   cache_keys,
+                                                            bool                   is_connector = false)            = 0;
 
     virtual CacheLayerLayout allLayerCacheBase() const                                                           = 0;
     virtual bool             updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
@@ -64,6 +65,8 @@ public:
     int64_t       getMrCostTimeMs() const;
     size_t        freeBlocksNum() const;
     size_t        availableBlocksNum() const;
+    size_t        requestRefBlocksNum() const;
+    size_t        connectorRefBlocksNum() const;
     size_t        availableTokensNum() const;
     size_t        totalBlocksNum() const;
     size_t        maxAvailableTokensNum() const;
@@ -72,10 +75,10 @@ public:
 
 protected:
     MallocResult         initMalloc(const MallocInfo& malloc_info);
-    virtual MallocResult incrMalloc(const MallocInfo& malloc_info)             = 0;
-    virtual MallocResult initMallocForCommonLen(const MallocInfo& malloc_info) = 0;
-    virtual int          getNeedBlocks(const MallocInfo& malloc_info) const    = 0;
-    virtual void         decrKVCacheRef(const KVCacheResource& kvcache_resource) = 0;
+    virtual MallocResult incrMalloc(const MallocInfo& malloc_info)                                          = 0;
+    virtual MallocResult initMallocForCommonLen(const MallocInfo& malloc_info)                              = 0;
+    virtual int          getNeedBlocks(const MallocInfo& malloc_info) const                                 = 0;
+    virtual void         decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) = 0;
 
     CacheConfig                        config_;
     rtp_llm::DeviceBase*               device_;

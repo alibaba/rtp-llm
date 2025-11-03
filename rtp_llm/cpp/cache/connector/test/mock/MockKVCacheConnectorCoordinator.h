@@ -15,7 +15,7 @@ public:
                                     rtp_llm::DeviceBase*                     device,
                                     const kmonitor::MetricsReporterPtr&      metrics_reporter = nullptr):
         KVCacheConnectorCoordinator(
-            cache_config, kv_cache_config, runtime_config, allocator, device, metrics_reporter) {}
+            cache_config, kv_cache_config, runtime_config, {}, {}, allocator, device, metrics_reporter) {}
     ~MockKVCacheConnectorCoordinator() override = default;
 
 public:

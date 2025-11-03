@@ -74,7 +74,7 @@ void FullKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
         return;
     }
 
-    for (size_t i = 0; i < cache_keys.size(); ++i) {
+    for (int i = cache_keys.size() - 1; i >= 0; --i) {
         BlockCache::CacheItem item;
         item.cache_key   = cache_keys[i];
         item.group_id    = group_id_;
