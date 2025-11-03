@@ -41,6 +41,7 @@ def start_frontend_server(
     py_env_configs.server_config.frontend_server_id = server_id
     py_env_configs.server_config.rank_id = rank_id
     setproctitle(f"rtp_llm_frontend_server_rank_{rank_id}_server_{server_id}")
+    app = None
     g_frontend_server_info = FrontendServerInfo(
         py_env_configs.server_config.frontend_server_id
     )
